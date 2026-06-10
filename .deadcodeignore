@@ -1,0 +1,7 @@
+# Deadcode ignore patterns
+# Patterns to exclude from deadcode analysis
+# See: https://pkg.go.dev/github.com/joeycumines/simple-command-output-filter
+
+# DO NOT ADD IGNORES TO THIS FILE WITH THE INTENT OF "WIRING THEM UP LATER"
+
+internal/tui/tuitest/helper.go:*
