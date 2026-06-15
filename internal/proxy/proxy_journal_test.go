@@ -46,14 +46,17 @@ func TestProxy_JournalRecordsLimitedRequest(t *testing.T) {
 	}
 
 	j := journal.New(512, 1<<20)
-	p := New(Config{
-		Upstream:     upstreamURL,
-		Matcher:      route.NewMatcher(patterns),
-		Limiter:      queue.NewLimiter(4),
-		Metrics:      metrics.NewCollector(),
-		QueueTimeout: 30 * time.Second,
-		Journal:      j,
-	})
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(patterns)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+		WithJournal(j),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	req := httptest.NewRequest("POST", "/v1/messages", nil)
 	req.Header.Set("Content-Type", "application/json")
@@ -109,14 +112,17 @@ func TestProxy_JournalRecordsPassthroughRequest(t *testing.T) {
 	}
 
 	j := journal.New(512, 1<<20)
-	p := New(Config{
-		Upstream:     upstreamURL,
-		Matcher:      route.NewMatcher(patterns),
-		Limiter:      queue.NewLimiter(4),
-		Metrics:      metrics.NewCollector(),
-		QueueTimeout: 30 * time.Second,
-		Journal:      j,
-	})
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(patterns)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+		WithJournal(j),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	// GET /health is not a limited route → passthrough.
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -170,14 +176,16 @@ func TestProxy_JournalNilSafe(t *testing.T) {
 	upstreamURL, _ := url.Parse(upstream.URL)
 
 	// No journal configured.
-	p := New(Config{
-		Upstream:     upstreamURL,
-		Matcher:      route.NewMatcher(nil),
-		Limiter:      queue.NewLimiter(4),
-		Metrics:      metrics.NewCollector(),
-		QueueTimeout: 30 * time.Second,
-		Journal:      nil,
-	})
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	rec := httptest.NewRecorder()
@@ -202,15 +210,18 @@ func TestProxy_JournalCapturesRequestBody(t *testing.T) {
 	}
 
 	j := journal.New(512, 1<<20)
-	p := New(Config{
-		Upstream:     upstreamURL,
-		Matcher:      route.NewMatcher(patterns),
-		Limiter:      queue.NewLimiter(4),
-		Metrics:      metrics.NewCollector(),
-		QueueTimeout: 30 * time.Second,
-		Journal:      j,
-		MaxRetries:   2,
-	})
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(patterns)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+		WithJournal(j),
+		WithMaxRetries(2),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"hello":"world"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -255,15 +266,18 @@ func TestProxy_JournalNoDuplicateRetryEntries(t *testing.T) {
 	}
 
 	j := journal.New(512, 1<<20)
-	p := New(Config{
-		Upstream:     upstreamURL,
-		Matcher:      route.NewMatcher(patterns),
-		Limiter:      queue.NewLimiter(4),
-		Metrics:      metrics.NewCollector(),
-		QueueTimeout: 30 * time.Second,
-		Journal:      j,
-		MaxRetries:   3,
-	})
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(patterns)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+		WithJournal(j),
+		WithMaxRetries(3),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	req := httptest.NewRequest("POST", "/v1/messages", nil)
 	rec := httptest.NewRecorder()
@@ -289,14 +303,17 @@ func TestProxy_JournalImplicit200Status(t *testing.T) {
 
 	upstreamURL, _ := url.Parse(upstream.URL)
 	j := journal.New(512, 1<<20)
-	p := New(Config{
-		Upstream:     upstreamURL,
-		Matcher:      route.NewMatcher(nil),
-		Limiter:      queue.NewLimiter(4),
-		Metrics:      metrics.NewCollector(),
-		QueueTimeout: 30 * time.Second,
-		Journal:      j,
-	})
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+		WithJournal(j),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	rec := httptest.NewRecorder()
@@ -363,15 +380,18 @@ func TestProxy_QueueEndAfterGlobalLimiter(t *testing.T) {
 	}
 
 	j := journal.New(512, 1<<20)
-	p := New(Config{
-		Upstream:      upstreamURL,
-		Matcher:       route.NewMatcher(patterns),
-		Limiter:       queue.NewLimiter(2), // per-route limit = 2 (not the bottleneck)
-		Metrics:       metrics.NewCollector(),
-		QueueTimeout:  30 * time.Second,
-		GlobalLimiter: queue.NewLimiter(1), // global limit = 1 (the bottleneck)
-		Journal:       j,
-	})
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(patterns)),
+		WithLimiter(queue.NewLimiterWithCooldown(2, 0)), // per-route limit = 2 (not the bottleneck)
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+		WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)), // global limit = 1 (the bottleneck)
+		WithJournal(j),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	// First request holds the global slot for ~150ms.
 	go func() {
@@ -430,16 +450,19 @@ func TestProxy_RetryWithNonEmptyBody(t *testing.T) {
 	}
 
 	j := journal.New(512, 1<<20)
-	p := New(Config{
-		Upstream:     upstreamURL,
-		Matcher:      route.NewMatcher(patterns),
-		Limiter:      queue.NewLimiter(4),
-		Metrics:      metrics.NewCollector(),
-		QueueTimeout: 30 * time.Second,
-		Journal:      j,
-		MaxRetries:   3,
-		MaxBodyBytes: 1 << 20,
-	})
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(patterns)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+		WithJournal(j),
+		WithMaxRetries(3),
+		WithMaxBodyBytes(1<<20),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"hello":"world"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -484,14 +507,17 @@ func TestProxy_ChunkedResponseSizeAccurate(t *testing.T) {
 
 	upstreamURL, _ := url.Parse(upstream.URL)
 	j := journal.New(512, captureLimit) // very small capture limit
-	p := New(Config{
-		Upstream:     upstreamURL,
-		Matcher:      route.NewMatcher(nil),
-		Limiter:      queue.NewLimiter(4),
-		Metrics:      metrics.NewCollector(),
-		QueueTimeout: 30 * time.Second,
-		Journal:      j,
-	})
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+		WithJournal(j),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	rec := httptest.NewRecorder()
@@ -532,14 +558,17 @@ func TestProxy_QueueDurationOnTimeout(t *testing.T) {
 	pat, _ := route.Parse("POST /v1/messages")
 
 	j := journal.New(512, 1<<20)
-	p := New(Config{
-		Upstream:     slowURL,
-		Matcher:      route.NewMatcher([]route.Pattern{pat}),
-		Limiter:      queue.NewLimiter(1), // concurrency 1 — slot held by first request
-		Metrics:      metrics.NewCollector(),
-		QueueTimeout: 100 * time.Millisecond,
-		Journal:      j,
-	})
+	p, err := New(
+		WithUpstream(slowURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)), // concurrency 1 — slot held by first request
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(100*time.Millisecond),
+		WithJournal(j),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	// First request holds the slot for 2s.
 	go func() {
@@ -590,15 +619,18 @@ func TestProxy_QueueDurationOnGlobalLimiterTimeout(t *testing.T) {
 	pat, _ := route.Parse("POST /v1/messages")
 
 	j := journal.New(512, 1<<20)
-	p := New(Config{
-		Upstream:      slowURL,
-		Matcher:       route.NewMatcher([]route.Pattern{pat}),
-		Limiter:       queue.NewLimiter(2), // per-route limit = 2 (not the bottleneck)
-		Metrics:       metrics.NewCollector(),
-		QueueTimeout:  100 * time.Millisecond,
-		GlobalLimiter: queue.NewLimiter(1), // global limit = 1 (the bottleneck)
-		Journal:       j,
-	})
+	p, err := New(
+		WithUpstream(slowURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(2, 0)), // per-route limit = 2 (not the bottleneck)
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(100*time.Millisecond),
+		WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)), // global limit = 1 (the bottleneck)
+		WithJournal(j),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	// First request holds the global slot for 2s.
 	go func() {
@@ -651,15 +683,18 @@ func TestProxy_QueueDurationOnPassthroughCancel(t *testing.T) {
 	}
 
 	j := journal.New(512, 1<<20)
-	p := New(Config{
-		Upstream:      slowURL,
-		Matcher:       route.NewMatcher(patterns),
-		Limiter:       queue.NewLimiter(4),
-		Metrics:       metrics.NewCollector(),
-		QueueTimeout:  0, // no queue timeout — we cancel manually
-		GlobalLimiter: queue.NewLimiter(1),
-		Journal:       j,
-	})
+	p, err := New(
+		WithUpstream(slowURL),
+		WithMatcher(route.NewMatcher(patterns)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(0), // no queue timeout — we cancel manually
+		WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithJournal(j),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	// First passthrough request holds the global slot.
 	// Give it a cancellable context so we can clean up the goroutine.

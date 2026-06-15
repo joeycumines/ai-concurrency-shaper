@@ -44,12 +44,12 @@ type Pattern struct {
 //	"POST /v1/messages:@anthropic"  - shares "anthropic" pool, default limit
 func Parse(s string) (Pattern, error) {
 	s = strings.TrimSpace(s)
-	space := strings.Index(s, " ")
-	if space < 0 {
+	before, after, ok := strings.Cut(s, " ")
+	if !ok {
 		return Pattern{}, fmt.Errorf("route: invalid pattern %q", s)
 	}
-	method := strings.ToUpper(s[:space])
-	rest := strings.TrimSpace(s[space+1:])
+	method := strings.ToUpper(before)
+	rest := strings.TrimSpace(after)
 	if method == "" {
 		return Pattern{}, fmt.Errorf("route: empty method in %q", s)
 	}
@@ -103,11 +103,11 @@ func (p Pattern) String() string { return p.Raw }
 
 func splitSegments(path string) []string {
 	var out []string
-	for _, seg := range strings.Split(path, "/") {
+	for seg := range strings.SplitSeq(path, "/") {
 		if seg != "" {
 			// Split on colon for Gemini-style endpoints like
 			// /v1/models/gemini-pro:generateContent
-			for _, sub := range strings.Split(seg, ":") {
+			for sub := range strings.SplitSeq(seg, ":") {
 				if sub != "" {
 					out = append(out, sub)
 				}

@@ -29,7 +29,7 @@ func TestPTY_DashboardSections(t *testing.T) {
 
 	// Inject some requests to populate the dashboard
 	proxyURL := h.ProxyURL()
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		sendRequest(t, t.Context(), proxyURL+"/v1/messages")
 		time.Sleep(100 * time.Millisecond)
 	}

@@ -107,17 +107,15 @@ func TestCollector_Concurrent(t *testing.T) {
 	const g = 50
 
 	var wg sync.WaitGroup
-	for i := 0; i < g; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < n; j++ {
+	for range g {
+		wg.Go(func() {
+			for range n {
 				c.IncActive()
 				c.IncProxied()
 				c.RecordStatus(200)
 				c.DecActive()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -164,7 +162,7 @@ func TestCollector_RingBufferWrap(t *testing.T) {
 	c := NewCollector()
 
 	// Overflow the ring buffer.
-	for i := 0; i < maxLogEntries+100; i++ {
+	for range maxLogEntries + 100 {
 		c.RecordRequest("GET", "/test", 200, time.Millisecond, false)
 	}
 
@@ -207,7 +205,7 @@ func TestCollector_Throughput(t *testing.T) {
 	c := NewCollector()
 
 	// Record some requests.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		c.RecordRequest("POST", "/v1/messages", 200, 10*time.Millisecond, true)
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -220,6 +218,220 @@ func TestCollector_Throughput(t *testing.T) {
 	spark := c.ThroughputSparkline(20)
 	if len(spark) != 20 {
 		t.Errorf("sparkline length: got %d, want 20", len(spark))
+	}
+}
+
+func TestCollector_ThroughputAccuracy(t *testing.T) {
+	// R33-02 regression test: Verify that Throughput() returns approximately
+	// correct RPS — not 100-200x inflated. Before the fix, Throughput()
+	// divided the total count across all 100 ring buffer slots by
+	// time.Since(tpLastTick), where tpLastTick was updated every ~100ms
+	// during buffer advancement. This divided a 10-second window's total by
+	// a fraction of a second, producing ~100-200x inflated RPS.
+	c := NewCollector()
+
+	// Record 10 requests with ~10ms spacing, so total elapsed ~100ms.
+	// Expected RPS ≈ 10 / 0.1 ≈ 100 (order of magnitude).
+	for range 10 {
+		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	rps := c.Throughput()
+
+	// The RPS should be in a plausible range: between 20 and 500.
+	// Before the fix, it would be ~2000+ (100 requests / 0.05s).
+	if rps < 20 {
+		t.Errorf("throughput too low: %f RPS (expected ~100)", rps)
+	}
+	if rps > 500 {
+		t.Errorf("throughput too high: %f RPS — likely still using tpLastTick as denominator (expected ~100)", rps)
+	}
+}
+
+func TestCollector_ThroughputRampUp(t *testing.T) {
+	// Verify that throughput is non-zero during the first window duration
+	// (before the ring buffer is fully filled). The tpStart field ensures
+	// we divide by actual elapsed time, not by the full window.
+	c := NewCollector()
+
+	c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+	// Immediately query — should be > 0 (1 request / ~0s ≈ large, but at least > 0).
+	rps := c.Throughput()
+	if rps <= 0 {
+		t.Errorf("throughput during ramp-up should be > 0, got %f", rps)
+	}
+}
+
+func TestCollector_ThroughputAfterReset(t *testing.T) {
+	// Verify that after Reset(), throughput starts fresh from 0.
+	c := NewCollector()
+
+	// Record some requests to establish a baseline.
+	for range 5 {
+		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+	}
+
+	before := c.Throughput()
+	if before <= 0 {
+		t.Fatalf("throughput before reset should be > 0, got %f", before)
+	}
+
+	c.Reset()
+
+	// Immediately after reset, there are no requests in the window.
+	after := c.Throughput()
+	if after != 0 {
+		t.Errorf("throughput immediately after Reset() should be 0, got %f", after)
+	}
+
+	// Record new requests — throughput should ramp up from 0.
+	c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+	afterNew := c.Throughput()
+	if afterNew <= 0 {
+		t.Errorf("throughput after Reset() + new request should be > 0, got %f", afterNew)
+	}
+}
+
+func TestCollector_ThroughputSteadyState(t *testing.T) {
+	// Verify that after the window is fully filled (>10s of traffic),
+	// throughput is stable and accurate. We simulate this by recording
+	// enough requests to fill the ring buffer and then checking the value.
+	c := NewCollector()
+
+	// Record 20 requests with 50ms spacing = ~1s total elapsed.
+	// Expected RPS ≈ 20 / 1.0 ≈ 20.
+	for range 20 {
+		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	rps := c.Throughput()
+
+	// Should be roughly 20 RPS, allow wide margin (5-80) for CI timing jitter.
+	if rps < 5 {
+		t.Errorf("steady-state throughput too low: %f RPS (expected ~20)", rps)
+	}
+	if rps > 80 {
+		t.Errorf("steady-state throughput too high: %f RPS (expected ~20)", rps)
+	}
+}
+
+func TestCollector_ThroughputDecaysAfterTrafficStops(t *testing.T) {
+	// R34-04 regression test: Verify that Throughput() drops toward zero after
+	// traffic stops. Before the fix, Throughput() and ThroughputSparkline()
+	// did not advance the ring buffer window at read time, so stale non-zero
+	// RPS was reported indefinitely after the last request.
+	// Use a short window (1s / 10 slots at 100ms) for fast test execution.
+	c := NewCollector()
+	c.tpSlots = 10
+	c.tpGran = 100 * time.Millisecond
+	c.tpCounts = make([]int, 10)
+	c.tpHead = 0
+	now := time.Now()
+	c.tpLastTick = now
+	c.tpStart = now
+
+	// Record some requests to populate the window.
+	for range 5 {
+		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	rpsDuringTraffic := c.Throughput()
+	if rpsDuringTraffic <= 0 {
+		t.Fatalf("expected positive throughput during traffic, got %f", rpsDuringTraffic)
+	}
+
+	// Wait for the window to fully expire (>1s for our 1s window).
+	time.Sleep(1200 * time.Millisecond)
+
+	rpsAfterStop := c.Throughput()
+	if rpsAfterStop > 5 {
+		t.Errorf("after traffic stopped and window expired, throughput should be ~0, got %f (frozen metrics bug)", rpsAfterStop)
+	}
+}
+
+func TestCollector_ThroughputSparklineDecaysAfterTrafficStops(t *testing.T) {
+	// R34-04 regression test: Same as TestCollector_ThroughputDecaysAfterTrafficStops
+	// but for the sparkline path.
+	c := NewCollector()
+	c.tpSlots = 10
+	c.tpGran = 100 * time.Millisecond
+	c.tpCounts = make([]int, 10)
+	c.tpHead = 0
+	now := time.Now()
+	c.tpLastTick = now
+	c.tpStart = now
+
+	for range 5 {
+		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	sparkDuring := c.ThroughputSparkline(5)
+	totalDuring := 0
+	for _, v := range sparkDuring {
+		totalDuring += v
+	}
+	if totalDuring <= 0 {
+		t.Fatalf("expected non-zero sparkline during traffic, got total=%d", totalDuring)
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+
+	sparkAfter := c.ThroughputSparkline(5)
+	totalAfter := 0
+	for _, v := range sparkAfter {
+		totalAfter += v
+	}
+	if totalAfter > 0 {
+		t.Errorf("after traffic stopped and window expired, sparkline should be all zeros, got total=%d (frozen metrics bug)", totalAfter)
+	}
+}
+
+func TestCollector_ThroughputNoDriftOverTime(t *testing.T) {
+	// R34-05 regression test: Verify that additive tpLastTick advancement
+	// prevents cumulative drift. Before the fix, tpLastTick = now discarded
+	// the fractional remainder on each advancement (e.g., 190ms elapsed with
+	// 100ms granules → adv=1, 90ms lost). Over many iterations this caused
+	// the ring buffer's internal clock to lag behind real time, trapping
+	// old requests in the window and inflating RPS.
+	// With additive advancement (tpLastTick.Add(duration(adv)*tpGran)), the
+	// remainder carries forward, keeping tpLastTick synchronized with real time.
+	c := NewCollector()
+
+	// Record ~50 requests with ~10ms spacing = ~500ms of traffic.
+	// Expected RPS ≈ 50 / 0.5 ≈ 100.
+	for range 50 {
+		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	rps := c.Throughput()
+
+	// With additive advancement, RPS should be in a plausible range.
+	// With the old tpLastTick = now drift, RPS would be inflated because
+	// old counts linger in the window longer than they should.
+	// Allow generous margin (10-300) for CI timing jitter.
+	if rps < 10 {
+		t.Errorf("throughput too low after sustained traffic: %f RPS", rps)
+	}
+	if rps > 300 {
+		t.Errorf("throughput too high after sustained traffic: %f RPS — possible tpLastTick drift (expected ~100)", rps)
+	}
+
+	// Verify tpLastTick hasn't drifted far from real time.
+	// After ~500ms of traffic with 100ms granules, tpLastTick should be
+	// within a few granules of now.
+	c.tpMu.Lock()
+	drift := time.Since(c.tpLastTick)
+	c.tpMu.Unlock()
+
+	// The drift should be less than 2 granules (200ms). With the old
+	// tpLastTick = now bug, drift would accumulate to many granules.
+	if drift > 2*c.tpGran {
+		t.Errorf("tpLastTick drift = %v, expected < %v — additive advancement may not be working", drift, 2*c.tpGran)
 	}
 }
 
@@ -251,6 +463,9 @@ func TestCollector_Reset(t *testing.T) {
 	if s.TotalCancelled != 0 {
 		t.Errorf("TotalCancelled: got %d, want 0", s.TotalCancelled)
 	}
+	if s.TotalCircuitRejected != 0 {
+		t.Errorf("TotalCircuitRejected: got %d, want 0", s.TotalCircuitRejected)
+	}
 	if len(s.LogEntries) != 0 {
 		t.Errorf("LogEntries: got %d, want 0", len(s.LogEntries))
 	}
@@ -259,6 +474,26 @@ func TestCollector_Reset(t *testing.T) {
 	}
 	if len(s.InFlight) != 0 {
 		t.Errorf("InFlight: got %d, want 0", len(s.InFlight))
+	}
+}
+
+func TestCollector_ResetDoesNotZeroRetriesInFlight(t *testing.T) {
+	// Verify that Reset() does NOT zero retriesInFlight. Like active and queued,
+	// retriesInFlight is a runtime-derived value shared with the live retry
+	// transport. Zeroing it mid-retry causes the defer's Add(-1) to drive the
+	// counter negative.
+	c := NewCollector()
+
+	c.IncRetryInFlight()
+	c.IncRetryInFlight()
+	if got := c.Snapshot().RetriesInFlight; got != 2 {
+		t.Fatalf("before Reset: RetriesInFlight = %d, want 2", got)
+	}
+
+	c.Reset()
+
+	if got := c.Snapshot().RetriesInFlight; got != 2 {
+		t.Errorf("after Reset: RetriesInFlight = %d, want 2 (not reset — runtime-derived value)", got)
 	}
 }
 
@@ -348,19 +583,17 @@ func TestCollector_ResetConcurrent(t *testing.T) {
 	c := NewCollector()
 
 	const inFlight = 100
-	for i := 0; i < inFlight; i++ {
+	for range inFlight {
 		c.IncActive()
 	}
 
 	var wg sync.WaitGroup
 	// Start goroutines that will DecActive after a tiny delay.
-	for i := 0; i < inFlight; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range inFlight {
+		wg.Go(func() {
 			time.Sleep(time.Millisecond)
 			c.DecActive()
-		}()
+		})
 	}
 
 	// Reset while DecActive calls are in-flight.

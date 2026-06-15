@@ -33,20 +33,18 @@ func TestPTY_ConcurrencyInFlight(t *testing.T) {
 
 	// Fire 2 concurrent requests (limited routes)
 	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 2 {
+		wg.Go(func() {
 			sendRequest(t, t.Context(), h.ProxyURL()+"/v1/messages")
-		}()
+		})
 	}
 
 	// Give requests time to reach upstream but not complete
 	time.Sleep(500 * time.Millisecond)
 
-	// Switch to Concurrency tab
-	if _, err := h.Console().WriteString("4"); err != nil {
-		t.Fatalf("WriteString 3: %v", err)
+	// Switch to Concurrency tab (key 5).
+	if _, err := h.Console().WriteString("5"); err != nil {
+		t.Fatalf("WriteString 5: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond)
 
@@ -60,9 +58,9 @@ func TestPTY_ConcurrencyInFlight(t *testing.T) {
 	wg.Wait()
 	time.Sleep(1 * time.Second)
 
-	// Switch to Concurrency tab again
-	if _, err := h.Console().WriteString("4"); err != nil {
-		t.Fatalf("WriteString 3: %v", err)
+	// Switch to Concurrency tab again (key 5).
+	if _, err := h.Console().WriteString("5"); err != nil {
+		t.Fatalf("WriteString 5: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond)
 }

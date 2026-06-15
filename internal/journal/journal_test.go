@@ -59,7 +59,7 @@ func TestJournal_BasicRecordAndEntries(t *testing.T) {
 func TestJournal_Eviction(t *testing.T) {
 	j := New(3, 1024)
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		j.Record(&Entry{Method: "GET", URL: mustURL("/" + string(rune('a'+i)))})
 	}
 
@@ -129,10 +129,10 @@ func TestJournal_Concurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for g := 0; g < goroutines; g++ {
+	for g := range goroutines {
 		go func(id int) {
 			defer wg.Done()
-			for i := 0; i < perGoroutine; i++ {
+			for range perGoroutine {
 				j.Record(&Entry{Method: "GET", URL: mustURL("/x")})
 			}
 		}(g)

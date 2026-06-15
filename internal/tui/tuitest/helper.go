@@ -146,7 +146,15 @@ func Launch(t *testing.T, opts ...HarnessOption) *TUIHarness {
 	time.Sleep(50 * time.Millisecond)
 
 	console, err := termtest.NewConsole(ctx,
-		termtest.WithCommand(binPath, "-tui", "-upstream", upstream.URL, "-bind", "127.0.0.1:"+port),
+		termtest.WithCommand(binPath,
+			"-tui",
+			"-upstream", upstream.URL,
+			"-bind", "127.0.0.1:"+port,
+			"-release-cooldown", "0",
+			"-cancel-cooldown", "0",
+			"-failure-hold", "0",
+			"-retry-min-delay", "0",
+		),
 		termtest.WithSize(cfg.rows, cfg.cols),
 		termtest.WithDefaultTimeout(15*time.Second),
 		termtest.WithEnv([]string{"TERM=xterm-256color"}),

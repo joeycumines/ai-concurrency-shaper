@@ -28,21 +28,21 @@ func TestPTY_RoutesSorted(t *testing.T) {
 	defer h.Close()
 
 	proxyURL := h.ProxyURL()
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		sendRequest(t, t.Context(), proxyURL+"/v1/messages")
 	}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		sendRequest(t, t.Context(), proxyURL+"/v1/chat/completions")
 	}
 	sendRequest(t, t.Context(), proxyURL+"/embeddings")
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		sendRequest(t, t.Context(), proxyURL+"/audio/speech")
 	}
 
 	time.Sleep(2 * time.Second)
 
-	if _, err := h.Console().WriteString("5"); err != nil {
-		t.Fatalf("WriteString 4: %v", err)
+	if _, err := h.Console().WriteString("6"); err != nil {
+		t.Fatalf("WriteString 6: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond)
 

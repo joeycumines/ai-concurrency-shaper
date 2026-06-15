@@ -16,13 +16,18 @@
 package tui
 
 import (
+	"fmt"
+	"image/color"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/toast"
 )
 
 // helper: apply a message and return the updated model (type-asserted).
@@ -51,33 +56,6 @@ func special(k string) tea.Msg {
 	return tea.KeyPressMsg{Text: k}
 }
 
-// helper: strip ANSI escape sequences from a string for reliable assertions.
-func stripANSI(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c == '\x1b' {
-			// Skip ESC sequences
-			if i+1 < len(s) && s[i+1] == '[' {
-				i += 2
-				for i < len(s) {
-					ch := s[i]
-					if ch >= 0x40 && ch <= 0x7E {
-						break
-					}
-					i++
-				}
-			} else if i+1 < len(s) {
-				i++ // skip 2-byte ESC sequence
-			}
-			continue
-		}
-		b.WriteByte(c)
-	}
-	return b.String()
-}
-
 func TestViewRenders(t *testing.T) {
 	m := NewModel(10)
 	m.width = 80
@@ -96,7 +74,7 @@ func TestViewContainsAllTabs(t *testing.T) {
 	m.width = 80
 	m.height = 24
 	v := m.View()
-	for _, tab := range []string{"1 Overview", "2 Requests", "3 Network", "4 Concurrency", "5 Routes"} {
+	for _, tab := range []string{"1 Overview", "2 Requests", "3 Network", "4 Logs", "5 Concurrency", "6 Routes"} {
 		if !strings.Contains(v.Content, tab) {
 			t.Errorf("View missing tab %q", tab)
 		}
@@ -146,11 +124,16 @@ func TestTabSwitching(t *testing.T) {
 	}
 
 	m = update(m, key('4'))
+	if m.tab != tabLogs {
+		t.Errorf("tab = %d, want tabLogs", m.tab)
+	}
+
+	m = update(m, key('5'))
 	if m.tab != tabConcurrency {
 		t.Errorf("tab = %d, want tabConcurrency", m.tab)
 	}
 
-	m = update(m, key('5'))
+	m = update(m, key('6'))
 	if m.tab != tabRoutes {
 		t.Errorf("tab = %d, want tabRoutes", m.tab)
 	}
@@ -167,14 +150,14 @@ func TestScrollDown(t *testing.T) {
 	m.height = 24
 	m.tab = tabRequests
 
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		m.snap.LogEntries = append(m.snap.LogEntries, metrics.RequestLogEntry{
 			Method: "POST", Path: "/v1/messages", Status: 200,
 			Duration: time.Millisecond,
 		})
 	}
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		m = update(m, key('j'))
 	}
 	if m.cursor != 5 {
@@ -431,6 +414,70 @@ func TestRenderGaugeBarEmpty(t *testing.T) {
 	}
 }
 
+func hexString(c color.Color) string {
+	r, g, b, _ := c.RGBA()
+	return fmt.Sprintf("#%02X%02X%02X", r>>8, g>>8, b>>8)
+}
+
+func TestGaugeFillStyleSeverity(t *testing.T) {
+	cases := []struct {
+		name     string
+		pct      int
+		wantHex  string
+		wantBold bool
+	}{
+		{"blue at 59", 59, "#58A6FF", true},
+		{"amber at 60", 60, "#D29922", true},
+		{"amber at 89", 89, "#D29922", true},
+		{"red at 90", 90, "#F85149", true},
+		{"red at 95", 95, "#F85149", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			style := gaugeFillStyle(c.pct)
+			gotHex := hexString(style.GetForeground())
+			if gotHex != c.wantHex {
+				t.Errorf("gaugeFillStyle(%d) foreground = %s, want %s", c.pct, gotHex, c.wantHex)
+			}
+			if gotBold := style.GetBold(); gotBold != c.wantBold {
+				t.Errorf("gaugeFillStyle(%d) bold = %v, want %v", c.pct, gotBold, c.wantBold)
+			}
+		})
+	}
+}
+
+func TestQueueFillStyleSeverity(t *testing.T) {
+	cases := []struct {
+		name     string
+		value    int
+		max      int
+		wantHex  string
+		wantBold bool
+	}{
+		{"empty at zero", 0, 16, "#21262D", false},
+		{"fractional visible", 1, 300, "#39D353", true},
+		{"vivid green below half", 7, 16, "#39D353", true},
+		{"orange at 50% bound", 8, 16, "#F0883E", true},
+		{"orange at 89%", 14, 16, "#F0883E", true},
+		{"red at 90%", 15, 16, "#F85149", true},
+		{"red at full", 16, 16, "#F85149", true},
+		{"invalid max zero", 0, 0, "#21262D", false},
+		{"invalid max with value", 1, 0, "#21262D", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			style := queueFillStyle(c.value, c.max)
+			gotHex := hexString(style.GetForeground())
+			if gotHex != c.wantHex {
+				t.Errorf("queueFillStyle(%d, %d) foreground = %s, want %s", c.value, c.max, gotHex, c.wantHex)
+			}
+			if gotBold := style.GetBold(); gotBold != c.wantBold {
+				t.Errorf("queueFillStyle(%d, %d) bold = %v, want %v", c.value, c.max, gotBold, c.wantBold)
+			}
+		})
+	}
+}
+
 func TestAltScreenEnabled(t *testing.T) {
 	m := NewModel(4)
 	m.width = 80
@@ -475,7 +522,7 @@ func TestRoutesTabSortedByTotal(t *testing.T) {
 
 func TestRoutesTabDeterministicSort(t *testing.T) {
 	// Three routes with the same total — must sort alphabetically every time.
-	for iter := 0; iter < 10; iter++ {
+	for iter := range 10 {
 		m := NewModel(4)
 		m.width = 80
 		m.height = 24
@@ -531,6 +578,39 @@ func TestDashboardShowsSparkline(t *testing.T) {
 	v := m.View()
 	if !strings.Contains(v.Content, "Throughput") {
 		t.Error("Dashboard should contain throughput sparkline section")
+	}
+}
+
+func TestSparklineFillStyleSeverity(t *testing.T) {
+	cases := []struct {
+		name string
+		last int
+		want string
+	}{
+		{"blue at 50%", 5, "#58A6FF"},
+		{"amber at 70%", 7, "#D29922"},
+		{"red at window max", 10, "#F85149"},
+		{"blue at zero value", 0, "#58A6FF"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := hexString(sparklineFillStyle(c.last, 10).GetForeground())
+			if got != c.want {
+				t.Errorf("sparklineFillStyle(%d, 10) foreground = %s, want %s", c.last, got, c.want)
+			}
+		})
+	}
+}
+
+func TestSparklineEmptyState(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabDashboard
+	m.snap.Sparkline = nil
+	v := m.View()
+	if !strings.Contains(v.Content, dimStyle2.Render("  —")) {
+		t.Errorf("Empty sparkline should render a dim em dash, got: %s", v.Content)
 	}
 }
 
@@ -593,6 +673,7 @@ func TestDashboardSummary(t *testing.T) {
 	m.snap.TotalPassThrough = 50
 	m.snap.TotalTimeout = 3
 	m.snap.TotalCancelled = 1
+	m.snap.TotalCircuitRejected = 2
 	m.snap.StatusCounts = [6]int64{0, 0, 90, 5, 8, 3}
 
 	v := m.View()
@@ -601,6 +682,17 @@ func TestDashboardSummary(t *testing.T) {
 	}
 	if !strings.Contains(v.Content, "Proxied: 100") {
 		t.Error("Dashboard should show proxied count")
+	}
+}
+
+func TestConcurrencyTabInFlightEmptyIsDim(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabConcurrency
+	s := m.renderConcurrency()
+	if !strings.Contains(s, dimStyle2.Render("  No requests in flight.\n")) {
+		t.Errorf("Concurrency tab should show a dim empty in-flight message, got: %s", s)
 	}
 }
 
@@ -1030,5 +1122,1543 @@ func TestFilterModeArrowKeysIgnored(t *testing.T) {
 	m = update(m, tea.KeyPressMsg{Code: tea.KeyHome})
 	if m.filterText != "a" {
 		t.Errorf("after Home: filterText = %q, want %q (Home should not corrupt filter)", m.filterText, "a")
+	}
+}
+
+func TestAddToast_DefaultDuration(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	tt := &toast.Toast{Message: "test"}
+	m.AddToast(tt)
+	if tt.Duration != defaultToastDuration {
+		t.Errorf("Duration = %v, want %v", tt.Duration, defaultToastDuration)
+	}
+}
+
+func TestAddToast_AppendsToSlice(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.AddToast(&toast.Toast{Message: "first"})
+	m.AddToast(&toast.Toast{Message: "second"})
+	if len(m.toasts) != 2 {
+		t.Fatalf("len(toasts) = %d, want 2", len(m.toasts))
+	}
+	if m.toasts[0].Message != "first" {
+		t.Errorf("toasts[0].Message = %q, want %q", m.toasts[0].Message, "first")
+	}
+}
+
+func TestToastExpired_PurgedInUpdate(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	tt := &toast.Toast{Message: "expires", Duration: 1 * time.Millisecond}
+	m.AddToast(tt)
+	time.Sleep(10 * time.Millisecond)
+	m = update(m, metrics.Snapshot{})
+	if len(m.toasts) != 0 {
+		t.Errorf("len(toasts) = %d after expired toast purged, want 0", len(m.toasts))
+	}
+}
+
+func TestToastNotExpired_KeptInUpdate(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	tt := &toast.Toast{Message: "alive", Duration: 5 * time.Second}
+	m.AddToast(tt)
+	m = update(m, metrics.Snapshot{})
+	if len(m.toasts) != 1 {
+		t.Errorf("len(toasts) = %d, want 1 (non-expired toast should be kept)", len(m.toasts))
+	}
+}
+
+func TestToastStacking_ShowsMultipleToasts(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.AddToast(&toast.Toast{Message: "first", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "second", Duration: 5 * time.Second})
+	v := m.View()
+	content := stripANSI(v.Content)
+	if !strings.Contains(content, "first") {
+		t.Error("View should contain 'first' toast")
+	}
+	if !strings.Contains(content, "second") {
+		t.Error("View should contain 'second' toast")
+	}
+}
+
+func TestToastStacking_LimitsToThree(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.AddToast(&toast.Toast{Message: "t1", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "t2", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "t3", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "t4", Duration: 5 * time.Second})
+	v := m.View()
+	content := stripANSI(v.Content)
+	if strings.Contains(content, "t1") {
+		t.Error("View should NOT contain oldest toast 't1' (max 3 visible)")
+	}
+	for _, msg := range []string{"t2", "t3", "t4"} {
+		if !strings.Contains(content, msg) {
+			t.Errorf("View should contain toast %q", msg)
+		}
+	}
+}
+
+func TestToastStacking_MostRecentAtBottom(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.AddToast(&toast.Toast{Message: "older", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "newer", Duration: 5 * time.Second})
+	v := m.View()
+	content := stripANSI(v.Content)
+	olderIdx := strings.Index(content, "older")
+	newerIdx := strings.Index(content, "newer")
+	if olderIdx < 0 || newerIdx < 0 {
+		t.Fatal("both toasts should be visible")
+	}
+	if olderIdx >= newerIdx {
+		t.Error("older toast should appear before (above) newer toast")
+	}
+}
+
+func TestToastStacking_NoToastsRendersNothing(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	v := m.View()
+	content := stripANSI(v.Content)
+	if content == "" {
+		t.Fatal("View should render even without toasts")
+	}
+}
+
+func TestToastNotShownInDetailMode(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = []metrics.RequestLogEntry{{Method: "POST", Path: "/v1/messages", Status: 200}}
+	m.AddToast(&toast.Toast{Message: "test", Duration: 5 * time.Second})
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("should be in detail mode")
+	}
+	v := m.View()
+	content := stripANSI(v.Content)
+	if strings.Contains(content, "test") {
+		t.Error("toast should not render in detail mode")
+	}
+}
+
+// ─── TUI-06: Scroll / Viewport Behavior ───
+
+func TestVisibleRows_NormalTab(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	v := m.visibleRows()
+	if v != 16 {
+		t.Errorf("visibleRows = %d, want 16 (24-8)", v)
+	}
+}
+
+func TestVisibleRows_ConcurrencyTab(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabConcurrency
+	v := m.visibleRows()
+	if v != 10 {
+		t.Errorf("visibleRows = %d, want 10 (24-8-6)", v)
+	}
+}
+
+func TestVisibleRows_MinOne(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 8
+	m.tab = tabRequests
+	v := m.visibleRows()
+	if v < 1 {
+		t.Errorf("visibleRows = %d, want at least 1", v)
+	}
+}
+
+func TestMaxCursor_Dashboard(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabDashboard
+	if m.maxCursor() != 0 {
+		t.Errorf("maxCursor on dashboard = %d, want 0", m.maxCursor())
+	}
+}
+
+func TestMaxCursor_Requests(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 5)
+	if m.maxCursor() != 4 {
+		t.Errorf("maxCursor = %d, want 4", m.maxCursor())
+	}
+}
+
+func TestMaxCursor_Logs(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("line1\nline2\nline3\n"))
+	if m.maxCursor() != 2 {
+		t.Errorf("maxCursor = %d, want 2", m.maxCursor())
+	}
+}
+
+func TestMaxCursor_Concurrency(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabConcurrency
+	m.snap.InFlight = make([]metrics.InFlightEntry, 3)
+	if m.maxCursor() != 2 {
+		t.Errorf("maxCursor = %d, want 2", m.maxCursor())
+	}
+}
+
+func TestMaxCursor_Routes(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRoutes
+	m.snap.RouteStats = map[string]metrics.RouteStat{
+		"POST /a": {Total: 1},
+		"POST /b": {Total: 2},
+	}
+	if m.maxCursor() != 1 {
+		t.Errorf("maxCursor = %d, want 1", m.maxCursor())
+	}
+}
+
+func TestMaxScroll(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	ms := m.maxScroll()
+	if ms < 0 {
+		t.Errorf("maxScroll = %d, want >= 0", ms)
+	}
+}
+
+func TestAdjustViewport_ScrollFollowsCursor(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m.cursor = 30
+	m.scroll = 0
+	m.adjustViewport()
+	if m.scroll == 0 {
+		t.Error("scroll should have moved to follow cursor")
+	}
+}
+
+func TestAdjustViewport_CursorClampedToMax(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 3)
+	m.cursor = 100
+	m.adjustViewport()
+	if m.cursor > m.maxCursor() {
+		t.Errorf("cursor = %d, want <= %d", m.cursor, m.maxCursor())
+	}
+}
+
+func TestAdjustViewport_ScrollClampedToMax(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 3)
+	m.scroll = 100
+	m.adjustViewport()
+	if m.scroll > m.maxScroll() {
+		t.Errorf("scroll = %d, want <= %d", m.scroll, m.maxScroll())
+	}
+}
+
+func TestMoveCursor_ClampsAtZero(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.moveCursor(-5)
+	if m.cursor != 0 {
+		t.Errorf("cursor = %d, want 0", m.cursor)
+	}
+}
+
+func TestMoveCursor_ClampsAtMax(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 3)
+	m.moveCursor(100)
+	if m.cursor != m.maxCursor() {
+		t.Errorf("cursor = %d, want %d", m.cursor, m.maxCursor())
+	}
+}
+
+func TestSwitchTab_ResetsCursorAndScroll(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.cursor = 10
+	m.scroll = 5
+	m.switchTab(tabLogs)
+	if m.cursor != 0 {
+		t.Errorf("cursor = %d, want 0 after switchTab", m.cursor)
+	}
+	if m.scroll != 0 {
+		t.Errorf("scroll = %d, want 0 after switchTab", m.scroll)
+	}
+}
+
+func TestPageDown_TUI06(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if m.cursor == 0 {
+		t.Error("PageDown should move cursor")
+	}
+}
+
+func TestPageUp_TUI06(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m.cursor = 20
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyPgUp})
+	if m.cursor >= 20 {
+		t.Error("PageUp should decrease cursor")
+	}
+}
+
+func TestHomeKey_TUI06(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m.cursor = 30
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyHome})
+	if m.cursor != 0 {
+		t.Errorf("Home: cursor = %d, want 0", m.cursor)
+	}
+}
+
+func TestEndKey_TUI06(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyEnd})
+	if m.cursor != m.maxCursor() {
+		t.Errorf("End: cursor = %d, want %d", m.cursor, m.maxCursor())
+	}
+}
+
+func TestCtrlU_TUI06(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m.cursor = 20
+	m = update(m, tea.KeyPressMsg{Text: "ctrl+u"})
+	if m.cursor >= 20 {
+		t.Error("Ctrl-U should decrease cursor")
+	}
+}
+
+func TestCtrlD_TUI06(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m = update(m, tea.KeyPressMsg{Text: "ctrl+d"})
+	if m.cursor == 0 {
+		t.Error("Ctrl-D should increase cursor")
+	}
+}
+
+// ─── TUI-07: logRing / logWriter ───
+
+func TestLogRing_WriteSingleLine(t *testing.T) {
+	r := newLogRing(10)
+	r.Write([]byte("hello"))
+	snap := r.snapshot()
+	if len(snap) != 1 || snap[0] != "hello" {
+		t.Errorf("snapshot = %v, want [hello]", snap)
+	}
+}
+
+func TestLogRing_WriteMultipleLines(t *testing.T) {
+	r := newLogRing(10)
+	r.Write([]byte("line1\nline2\nline3\n"))
+	snap := r.snapshot()
+	if len(snap) != 3 {
+		t.Errorf("len(snapshot) = %d, want 3", len(snap))
+	}
+	if snap[0] != "line1" || snap[1] != "line2" || snap[2] != "line3" {
+		t.Errorf("snapshot = %v, want [line1 line2 line3]", snap)
+	}
+}
+
+func TestLogRing_WriteEmptyLinesSkipped(t *testing.T) {
+	r := newLogRing(10)
+	r.Write([]byte("\n\nhello\n\n"))
+	snap := r.snapshot()
+	if len(snap) != 1 || snap[0] != "hello" {
+		t.Errorf("snapshot = %v, want [hello]", snap)
+	}
+}
+
+func TestLogRing_SnapshotEmpty(t *testing.T) {
+	r := newLogRing(10)
+	snap := r.snapshot()
+	if snap != nil {
+		t.Errorf("snapshot = %v, want nil", snap)
+	}
+}
+
+func TestLogRing_CapacityOverflow(t *testing.T) {
+	r := newLogRing(3)
+	r.Write([]byte("a\n"))
+	r.Write([]byte("b\n"))
+	r.Write([]byte("c\n"))
+	r.Write([]byte("d\n"))
+	snap := r.snapshot()
+	if len(snap) != 3 {
+		t.Fatalf("len(snapshot) = %d, want 3", len(snap))
+	}
+	if snap[0] != "b" || snap[1] != "c" || snap[2] != "d" {
+		t.Errorf("snapshot = %v, want [b c d] (oldest evicted)", snap)
+	}
+}
+
+func TestLogWriter_DelegatesToRing(t *testing.T) {
+	r := newLogRing(10)
+	w := &logWriter{ring: r}
+	n, err := w.Write([]byte("via writer\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 11 {
+		t.Errorf("n = %d, want 11", n)
+	}
+	snap := r.snapshot()
+	if len(snap) != 1 || snap[0] != "via writer" {
+		t.Errorf("snapshot = %v, want [via writer]", snap)
+	}
+}
+
+func TestLogRing_ConcurrentWrite(t *testing.T) {
+	r := newLogRing(100)
+	done := make(chan struct{})
+	for i := range 10 {
+		go func(i int) {
+			defer func() { done <- struct{}{} }()
+			for j := range 100 {
+				r.Write(fmt.Appendf(nil, "g%d-line%d\n", i, j))
+			}
+		}(i)
+	}
+	for range 10 {
+		<-done
+	}
+	snap := r.snapshot()
+	if len(snap) == 0 {
+		t.Error("expected some log lines after concurrent writes")
+	}
+}
+
+// ─── TUI-08: visibleLogLines / renderLogs ───
+
+func TestVisibleLogLines_NoFilter(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("alpha\nbeta\ngamma\n"))
+	lines := m.visibleLogLines()
+	if len(lines) != 3 {
+		t.Errorf("len = %d, want 3", len(lines))
+	}
+}
+
+func TestVisibleLogLines_WithFilter(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("alpha\nbeta\ngamma\n"))
+	m.filterText = "alpha"
+	lines := m.visibleLogLines()
+	if len(lines) != 1 {
+		t.Errorf("len = %d, want 1", len(lines))
+	}
+	if lines[0] != "alpha" {
+		t.Errorf("lines[0] = %q, want alpha", lines[0])
+	}
+}
+
+func TestVisibleLogLines_EmptyRing(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	lines := m.visibleLogLines()
+	if lines != nil {
+		t.Errorf("lines = %v, want nil", lines)
+	}
+}
+
+func TestRenderLogs_NoOutput(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	s := m.renderLogs()
+	if !strings.Contains(s, "No log output") {
+		t.Errorf("renderLogs should mention 'No log output', got: %s", s)
+	}
+}
+
+func TestRenderLogs_WithOutput(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("hello world\n"))
+	s := m.renderLogs()
+	if !strings.Contains(s, "hello world") {
+		t.Errorf("renderLogs should contain 'hello world', got: %s", s)
+	}
+}
+
+func TestRenderLogs_WithFilter(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("alpha\nbeta\n"))
+	m.filterText = "alpha"
+	s := m.renderLogs()
+	if !strings.Contains(s, "Filter:") {
+		t.Errorf("renderLogs should show filter indicator, got: %s", s)
+	}
+}
+
+// ─── TUI-09: Network Filtering / Rendering ───
+
+func mustParseURL(s string) *url.URL {
+	u, err := url.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+	return u
+}
+
+func TestNetworkFilterType_Cycle(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	if m.networkFilterType != networkFilterAll {
+		t.Errorf("initial type = %d, want all", m.networkFilterType)
+	}
+	m = update(m, key('t'))
+	if m.networkFilterType != networkFilterJSON {
+		t.Errorf("after one 't': type = %d, want json", m.networkFilterType)
+	}
+	for i := 1; i < 5; i++ {
+		m = update(m, key('t'))
+	}
+	if m.networkFilterType != networkFilterAll {
+		t.Errorf("after cycling: type = %d, want all", m.networkFilterType)
+	}
+}
+
+func TestNetworkFilterStatus_Cycle(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	if m.networkFilterStatus != networkStatusAll {
+		t.Errorf("initial status = %d, want all", m.networkFilterStatus)
+	}
+	m = update(m, key('s'))
+	if m.networkFilterStatus != networkStatus2xx {
+		t.Errorf("after one 's': status = %d, want 2xx", m.networkFilterStatus)
+	}
+	for i := 1; i < 4; i++ {
+		m = update(m, key('s'))
+	}
+	if m.networkFilterStatus != networkStatusAll {
+		t.Errorf("after cycling: status = %d, want all", m.networkFilterStatus)
+	}
+}
+
+func TestComputeVisibleNetworkEntries_NoJournal(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	entries := m.computeVisibleNetworkEntries()
+	if entries != nil {
+		t.Errorf("entries = %v, want nil with no journal", entries)
+	}
+}
+
+func TestComputeVisibleNetworkEntries_WithTypeFilter(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	j := journal.New(100, 1<<20)
+	j.Record(&journal.Entry{Method: "POST", URL: mustParseURL("/v1/messages"), StatusCode: 200, ContentType: "application/json"})
+	j.Record(&journal.Entry{Method: "GET", URL: mustParseURL("/health"), StatusCode: 200, ContentType: "text/html"})
+	m.journal = j
+	m.networkFilterType = networkFilterJSON
+	entries := m.computeVisibleNetworkEntries()
+	if len(entries) != 1 {
+		t.Errorf("len(entries) = %d, want 1 (json only)", len(entries))
+	}
+}
+
+func TestComputeVisibleNetworkEntries_WithStatusFilter(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	j := journal.New(100, 1<<20)
+	j.Record(&journal.Entry{Method: "POST", URL: mustParseURL("/v1/messages"), StatusCode: 200, ContentType: "application/json"})
+	j.Record(&journal.Entry{Method: "POST", URL: mustParseURL("/v1/messages"), StatusCode: 429, ContentType: "application/json"})
+	m.journal = j
+	m.networkFilterStatus = networkStatus4xx
+	entries := m.computeVisibleNetworkEntries()
+	if len(entries) != 1 {
+		t.Errorf("len(entries) = %d, want 1 (4xx only)", len(entries))
+	}
+}
+
+func TestComputeVisibleNetworkEntries_WithTextFilter(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	j := journal.New(100, 1<<20)
+	j.Record(&journal.Entry{Method: "POST", URL: mustParseURL("/v1/messages"), StatusCode: 200, ContentType: "application/json"})
+	j.Record(&journal.Entry{Method: "GET", URL: mustParseURL("/health"), StatusCode: 200, ContentType: "text/html"})
+	m.journal = j
+	m.filterText = "messages"
+	entries := m.computeVisibleNetworkEntries()
+	if len(entries) != 1 {
+		t.Errorf("len(entries) = %d, want 1 (text filter)", len(entries))
+	}
+}
+
+func TestRenderNetwork_EmptyEntries(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	s := m.renderNetwork()
+	if !strings.Contains(s, "No network entries") {
+		t.Errorf("should mention 'No network entries', got: %s", s)
+	}
+}
+
+func TestRenderNetwork_WithFilterIndicators(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	m.networkFilterType = networkFilterJSON
+	m.networkFilterStatus = networkStatus2xx
+	s := m.renderNetwork()
+	if !strings.Contains(s, "type:json") {
+		t.Errorf("should show type filter indicator, got: %s", s)
+	}
+	if !strings.Contains(s, "status:2xx") {
+		t.Errorf("should show status filter indicator, got: %s", s)
+	}
+}
+
+// ─── TUI-10: Scrollbar, Status Bar, canInspect, Overlays ───
+
+func TestRenderContentWithScrollbar_ContainsScrollbarChars(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m.updateScrollbars()
+	s := m.renderContentWithScrollbar()
+	stripped := stripANSI(s)
+	if !strings.Contains(stripped, "█") && !strings.Contains(stripped, "│") {
+		t.Error("renderContentWithScrollbar should contain scrollbar chars (█ or │)")
+	}
+}
+
+func TestRenderStatusBar_NoResponses(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	s := m.renderStatusBar()
+	if !strings.Contains(s, "No responses yet") {
+		t.Errorf("should mention 'No responses yet', got: %s", s)
+	}
+}
+
+func TestRenderStatusBar_WithResponses(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.snap.StatusCounts = [6]int64{0, 0, 90, 5, 8, 3}
+	s := m.renderStatusBar()
+	if !strings.Contains(s, "2xx:90") {
+		t.Errorf("should show 2xx:90, got: %s", s)
+	}
+}
+
+func TestRenderStatusBar_ColoredLabels(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.snap.StatusCounts = [6]int64{0, 1, 20, 3, 4, 5}
+	s := m.renderStatusBar()
+	for _, label := range []string{"1xx:1", "2xx:20", "3xx:3", "4xx:4", "5xx:5"} {
+		if !strings.Contains(s, label) {
+			t.Errorf("should show %s, got: %s", label, s)
+		}
+	}
+	// Verify the styles emitted correspond to the token colors by checking
+	// that the styled text contains an ANSI sequence for the expected hex.
+	wantSeq := map[string]string{
+		"1xx": "38;2;139;148;158",
+		"2xx": "38;2;63;185;80",
+		"3xx": "38;2;88;166;255",
+		"4xx": "38;2;240;136;62",
+		"5xx": "38;2;248;81;73",
+	}
+	for _, seq := range wantSeq {
+		if !strings.Contains(s, seq) {
+			t.Errorf("status labels missing %q ANSI sequence, got: %s", seq, s)
+		}
+	}
+}
+
+func TestRenderStatusBar_NoResponsesDim(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	s := m.renderStatusBar()
+	if !strings.Contains(s, "No responses yet") {
+		t.Errorf("should mention 'No responses yet', got: %s", s)
+	}
+	if hexString(dimStyle2.GetForeground()) != "#6E7681" {
+		t.Fatalf("dimStyle2 foreground = %s, want #6E7681", hexString(dimStyle2.GetForeground()))
+	}
+	if !strings.Contains(s, "38;2;110;118;129") {
+		t.Errorf("'No responses yet' should be dim, got: %s", s)
+	}
+}
+
+func TestRenderDashboard_CircuitBreakerColors(t *testing.T) {
+	for _, state := range []string{"CLOSED", "OPEN", "HALF_OPEN"} {
+		t.Run(state, func(t *testing.T) {
+			m := NewModel(4)
+			m.width = 80
+			m.height = 24
+			m.snap.CircuitBreaker = &metrics.CBStats{State: state}
+			s := m.renderDashboard()
+			if !strings.Contains(s, state) {
+				t.Errorf("should show state %q, got: %s", state, s)
+			}
+		})
+	}
+
+	// Color assertions: CLOSED green, OPEN red, HALF_OPEN amber.
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.snap.CircuitBreaker = &metrics.CBStats{State: "CLOSED"}
+	closed := m.renderDashboard()
+	if !strings.Contains(closed, "38;2;63;185;80") {
+		t.Errorf("CLOSED should render green, got: %s", closed)
+	}
+
+	m.snap.CircuitBreaker = &metrics.CBStats{State: "OPEN"}
+	open := m.renderDashboard()
+	if !strings.Contains(open, "38;2;248;81;73") {
+		t.Errorf("OPEN should render red, got: %s", open)
+	}
+
+	m.snap.CircuitBreaker = &metrics.CBStats{State: "HALF_OPEN"}
+	half := m.renderDashboard()
+	if !strings.Contains(half, "38;2;240;136;62") {
+		t.Errorf("HALF_OPEN should render amber, got: %s", half)
+	}
+}
+
+func TestRenderDashboard_CircuitBreakerSingleLine(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.snap.CircuitBreaker = &metrics.CBStats{
+		State:               "OPEN",
+		Failures:            5,
+		ConsecutiveFailures: 3,
+		CurrentPenalty:      2 * time.Second,
+		NextRetry:           time.Now().Add(time.Hour),
+	}
+	s := m.renderDashboard()
+	if strings.Contains(s, "\n  |  Failures") {
+		t.Errorf("circuit breaker summary should be one line, got standalone field line in: %s", s)
+	}
+	if strings.Count(s, "\n  State:") != 1 {
+		t.Errorf("expected exactly one State line, got: %s", s)
+	}
+}
+
+func TestCanInspect_Dashboard(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabDashboard
+	if m.canInspect() {
+		t.Error("canInspect should be false for dashboard")
+	}
+}
+
+func TestCanInspect_Requests(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = []metrics.RequestLogEntry{{Method: "POST", Path: "/v1/messages", Status: 200}}
+	if !m.canInspect() {
+		t.Error("canInspect should be true when cursor < len(entries)")
+	}
+}
+
+func TestCanInspect_Logs(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("hello\n"))
+	if !m.canInspect() {
+		t.Error("canInspect should be true when cursor < len(lines)")
+	}
+}
+
+func TestCanInspect_Concurrency(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabConcurrency
+	m.snap.InFlight = []metrics.InFlightEntry{{ID: 1, Method: "POST", Path: "/v1/messages"}}
+	if !m.canInspect() {
+		t.Error("canInspect should be true when cursor < len(inflight)")
+	}
+}
+
+func TestCanInspect_Default(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRoutes
+	if m.canInspect() {
+		t.Error("canInspect should be false for routes tab")
+	}
+}
+
+func TestRenderConfirmOverlay_ContainsPrompt(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	s := m.renderConfirmOverlay()
+	text := stripANSI(s)
+	if !strings.Contains(text, "Clear all cumulative counters") {
+		t.Errorf("confirm overlay should contain prompt text, got: %s", text)
+	}
+}
+
+func TestRenderHelpOverlay_ContainsKeybindings(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	s := m.renderHelpOverlay()
+	text := stripANSI(s)
+	for _, kw := range []string{"Switch tab", "scroll", "filter", "Quit"} {
+		if !strings.Contains(text, kw) {
+			t.Errorf("help overlay should contain %q", kw)
+		}
+	}
+}
+
+func TestSwitchTab_SetsModeBrowse(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.mode = modeHelp
+	m.switchTab(tabLogs)
+	if m.mode != modeBrowse {
+		t.Errorf("mode = %d, want modeBrowse after switchTab", m.mode)
+	}
+}
+
+func TestPerRouteRate_TUI10(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.snap.LogEntries = []metrics.RequestLogEntry{
+		{Method: "POST", Path: "/v1/messages", Status: 200, Time: time.Now()},
+		{Method: "POST", Path: "/v1/messages", Status: 200, Time: time.Now()},
+		{Method: "GET", Path: "/health", Status: 200, Time: time.Now()},
+	}
+	rates := m.perRouteRate()
+	if len(rates) == 0 {
+		t.Error("perRouteRate should return non-empty map")
+	}
+	msgRate, ok := rates["POST /v1/messages"]
+	if !ok {
+		t.Error("perRouteRate should have entry for POST /v1/messages")
+	}
+	if msgRate <= 0 {
+		t.Errorf("rate for POST /v1/messages = %f, want > 0", msgRate)
+	}
+}
+
+func TestMouseClickContentArea_SetsCursor(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: 5})
+	if m2.cursor != 2 {
+		t.Errorf("cursor = %d, want 2 (row 5 - contentStartRow 3 + scroll 0)", m2.cursor)
+	}
+}
+
+func TestMouseClickContentArea_ClampsToMaxCursor(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 5)
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: 20})
+	if m2.cursor > m2.maxCursor() {
+		t.Errorf("cursor = %d, should be clamped to maxCursor = %d", m2.cursor, m2.maxCursor())
+	}
+}
+
+func TestMouseClickContentArea_IgnoresDashboardTab(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabDashboard
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: 5})
+	if m2.cursor != 0 {
+		t.Errorf("cursor = %d, want 0 (dashboard ignores content clicks)", m2.cursor)
+	}
+}
+
+func TestScrollbarClick_SetsDragging(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: 10})
+	if !m2.dragging {
+		t.Error("scrollbar click should set dragging = true")
+	}
+}
+
+func TestScrollbarClick_JumpsScroll(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: 18})
+	if m2.scroll == 0 {
+		t.Error("scrollbar click near bottom should set scroll > 0")
+	}
+}
+
+func TestMouseDrag_MotionUpdatesScroll(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+	m.dragging = true
+	m2 := update(m, tea.MouseMotionMsg{X: 79, Y: 18})
+	if m2.scroll == 0 {
+		t.Error("mouse motion while dragging should update scroll")
+	}
+}
+
+func TestMouseDrag_MotionWithoutDragIgnored(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m2 := update(m, tea.MouseMotionMsg{X: 79, Y: 18})
+	if m2.dragging {
+		t.Error("mouse motion without prior click should not set dragging")
+	}
+	if m2.scroll != 0 {
+		t.Error("mouse motion without dragging should not change scroll")
+	}
+}
+
+func TestMouseRelease_ClearsDragging(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m.dragging = true
+	m2 := update(m, tea.MouseReleaseMsg{})
+	if m2.dragging {
+		t.Error("mouse release should clear dragging")
+	}
+}
+
+// ─── Viewport: Terminal Size Adaptation ───
+
+func TestView_NarrowTerminal(t *testing.T) {
+	// View should render without panic at various narrow widths.
+	for w := 1; w <= 80; w++ {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		m.tab = tabRequests
+		m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+		v := m.View()
+		if v.Content == "" && w >= 4 {
+			t.Errorf("width=%d: View returned empty content", w)
+		}
+	}
+}
+
+func TestView_TinyTerminal(t *testing.T) {
+	// Very small terminal: 10x5.
+	m := NewModel(4)
+	m.width = 10
+	m.height = 5
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 20)
+	v := m.View()
+	if v.Content == "" {
+		t.Error("View should render something even at 10x5")
+	}
+}
+
+func TestView_Height4Minimum(t *testing.T) {
+	// Minimum viable terminal: header(1) + tabbar(1) + separator(1) + footer(1) = 4.
+	m := NewModel(4)
+	m.width = 40
+	m.height = 4
+	m.tab = tabDashboard
+	v := m.View()
+	if v.Content == "" {
+		t.Error("View should render at height 4")
+	}
+}
+
+func TestView_Height3TooSmall(t *testing.T) {
+	// Height 3 is below minimum — should return empty.
+	m := NewModel(4)
+	m.width = 40
+	m.height = 3
+	v := m.View()
+	if v.Content != "" {
+		t.Error("View should return empty for height < 4")
+	}
+}
+
+func TestView_ZeroSize(t *testing.T) {
+	m := NewModel(4)
+	v := m.View()
+	if v.Content != "" {
+		t.Error("View should return empty for zero size")
+	}
+}
+
+// ─── Viewport: Scrollbar at Various Sizes ───
+
+func TestScrollbar_NarrowTerminal(t *testing.T) {
+	// Scrollbar should render at narrow widths.
+	for w := 5; w <= 40; w++ {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		m.tab = tabRequests
+		m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+		v := m.View()
+		// Should contain scrollbar characters.
+		if !strings.Contains(v.Content, "│") && !strings.Contains(v.Content, "█") {
+			t.Errorf("width=%d: View missing scrollbar chars", w)
+		}
+	}
+}
+
+func TestScrollbar_VariousHeights(t *testing.T) {
+	// Scrollbar should work at various terminal heights.
+	for h := 4; h <= 40; h++ {
+		m := NewModel(4)
+		m.width = 80
+		m.height = h
+		m.tab = tabRequests
+		m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+		v := m.View()
+		if v.Content == "" {
+			t.Errorf("height=%d: View returned empty", h)
+		}
+	}
+}
+
+// ─── Viewport: Mouse Click Precision ───
+
+func TestMouseClickScrollbar_TopJumpsToTop(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+	m.scroll = 50
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
+	if m2.scroll != 0 {
+		t.Errorf("click at top of scrollbar: scroll = %d, want 0", m2.scroll)
+	}
+}
+
+func TestMouseClickScrollbar_BottomJumpsNearBottom(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow + m.visibleRows() - 1})
+	if m2.scroll < 70 {
+		t.Errorf("click at bottom of scrollbar: scroll = %d, want >= 70", m2.scroll)
+	}
+}
+
+func TestMouseClickScrollbar_MiddleJumpsNearMiddle(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow + m.visibleRows()/2})
+	// Click at viewport center maps to ~67% in thumb-space (12/18), which is ~51 of 76.
+	if m2.scroll < 46 || m2.scroll > 56 {
+		t.Errorf("click at middle of scrollbar: scroll = %d, want [46, 56]", m2.scroll)
+	}
+}
+
+func TestMouseClickContentArea_CursorFollowsClick(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m.scroll = 10
+	// Click on the 3rd visible row (Y = contentStartRow + 2).
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow + 2})
+	if m2.cursor != 12 {
+		t.Errorf("cursor = %d, want 12 (scroll 10 + relative row 2)", m2.cursor)
+	}
+}
+
+func TestMouseClickContentArea_ClampedAtEnd(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 5)
+	m.scroll = 0
+	// Click way past the end.
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow + 100})
+	if m2.cursor > m2.maxCursor() {
+		t.Errorf("cursor = %d, should be clamped to %d", m2.cursor, m2.maxCursor())
+	}
+}
+
+// ─── Viewport: Mouse Drag Precision ───
+
+func TestMouseDrag_TopToBottom(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+	// Start drag at top.
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
+	if m2.scroll != 0 {
+		t.Errorf("initial drag at top: scroll = %d, want 0", m2.scroll)
+	}
+	// Drag to bottom.
+	m3 := update(m2, tea.MouseMotionMsg{X: 79, Y: contentStartRow + m.visibleRows() - 1})
+	if m3.scroll < 70 {
+		t.Errorf("drag to bottom: scroll = %d, want >= 70", m3.scroll)
+	}
+}
+
+func TestMouseDrag_Monotonic(t *testing.T) {
+	// Dragging from top to bottom should produce monotonically increasing scroll.
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
+	prev := -1
+	for y := contentStartRow; y < contentStartRow+m.visibleRows(); y++ {
+		m3 := update(m2, tea.MouseMotionMsg{X: 79, Y: y})
+		if m3.scroll < prev {
+			t.Errorf("drag not monotonic: scroll at y=%d is %d, was %d", y, m3.scroll, prev)
+		}
+		prev = m3.scroll
+	}
+}
+
+func TestMouseDrag_Proportional(t *testing.T) {
+	// Dragging to 25%, 50%, 75% of track should produce proportional scroll.
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+
+	quarter := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
+	quarter = update(quarter, tea.MouseMotionMsg{X: 79, Y: contentStartRow + m.visibleRows()/4})
+
+	half := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
+	half = update(half, tea.MouseMotionMsg{X: 79, Y: contentStartRow + m.visibleRows()/2})
+
+	threeQ := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
+	threeQ = update(threeQ, tea.MouseMotionMsg{X: 79, Y: contentStartRow + 3*m.visibleRows()/4})
+
+	// Quarter should be roughly 25% of max scroll.
+	if quarter.scroll < 10 || quarter.scroll > 25 {
+		t.Errorf("quarter drag: scroll = %d, want [10, 25]", quarter.scroll)
+	}
+	// Half should be roughly 50%.
+	if half.scroll < 30 || half.scroll > 46 {
+		t.Errorf("half drag: scroll = %d, want [30, 46]", half.scroll)
+	}
+	// 3/4: relativeY=12, adjusted=11, scroll=(11*84+6)/13=71.
+	if threeQ.scroll < 60 || threeQ.scroll > 76 {
+		t.Errorf("three-quarter drag: scroll = %d, want [58, 68]", threeQ.scroll)
+	}
+}
+
+// ─── Viewport: Keyboard Navigation at Various Sizes ───
+
+func TestKeyboardScroll_NarrowTerminal(t *testing.T) {
+	for w := 10; w <= 80; w += 10 {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		m.tab = tabRequests
+		m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+		m2 := update(m, key('j'))
+		if m2.cursor != 1 {
+			t.Errorf("width=%d: cursor = %d, want 1 after j", w, m2.cursor)
+		}
+	}
+}
+
+func TestKeyboardScroll_TinyTerminal(t *testing.T) {
+	m := NewModel(4)
+	m.width = 10
+	m.height = 6
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 20)
+	// Should not panic.
+	for range 5 {
+		m = update(m, key('j'))
+	}
+	if m.cursor < 0 || m.cursor > m.maxCursor() {
+		t.Errorf("cursor = %d, out of bounds [0, %d]", m.cursor, m.maxCursor())
+	}
+}
+
+func TestGoToTop_NarrowTerminal(t *testing.T) {
+	m := NewModel(4)
+	m.width = 15
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m.cursor = 30
+	m.scroll = 20
+	m2 := update(m, key('g'))
+	if m2.cursor != 0 || m2.scroll != 0 {
+		t.Errorf("cursor=%d scroll=%d, want 0,0", m2.cursor, m2.scroll)
+	}
+}
+
+func TestGoToBottom_NarrowTerminal(t *testing.T) {
+	m := NewModel(4)
+	m.width = 15
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+	m2 := update(m, key('G'))
+	if m2.cursor != m2.maxCursor() {
+		t.Errorf("cursor = %d, want %d", m2.cursor, m2.maxCursor())
+	}
+}
+
+// ─── Viewport: Content Rendering at Various Sizes ───
+
+func TestRenderContent_NarrowWidth(t *testing.T) {
+	for w := 5; w <= 80; w++ {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		m.tab = tabRequests
+		m.snap.LogEntries = []metrics.RequestLogEntry{
+			{Method: "POST", Path: "/v1/messages", Status: 200, Duration: time.Millisecond},
+		}
+		s := m.renderRequests()
+		if !strings.Contains(s, "POST") {
+			t.Errorf("width=%d: renderRequests missing POST", w)
+		}
+	}
+}
+
+func TestRenderDashboard_NarrowWidth(t *testing.T) {
+	for w := 10; w <= 80; w += 5 {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		m.tab = tabDashboard
+		s := m.renderDashboard()
+		if !strings.Contains(s, "Throughput") && w >= 15 {
+			t.Errorf("width=%d: renderDashboard missing Throughput", w)
+		}
+	}
+}
+
+func TestRenderNetwork_NarrowWidth(t *testing.T) {
+	for w := 10; w <= 80; w += 5 {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		m.tab = tabNetwork
+		s := m.renderNetwork()
+		// Should not panic at any width.
+		_ = s
+	}
+}
+
+func TestRenderLogs_NarrowWidth(t *testing.T) {
+	for w := 10; w <= 80; w += 5 {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		m.tab = tabLogs
+		m.logRing.Write([]byte("test log line\n"))
+		s := m.renderLogs()
+		if !strings.Contains(s, "test log line") {
+			t.Errorf("width=%d: renderLogs missing content", w)
+		}
+	}
+}
+
+func TestRenderConcurrency_NarrowWidth(t *testing.T) {
+	for w := 10; w <= 80; w += 5 {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		m.tab = tabConcurrency
+		m.snap.InFlight = []metrics.InFlightEntry{
+			{ID: 1, Method: "POST", Path: "/v1/messages", Limited: true},
+		}
+		s := m.renderConcurrency()
+		if !strings.Contains(s, "POST") && w >= 15 {
+			t.Errorf("width=%d: renderConcurrency missing POST", w)
+		}
+	}
+}
+
+func TestRenderRoutes_NarrowWidth(t *testing.T) {
+	for w := 10; w <= 80; w += 5 {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		m.tab = tabRoutes
+		m.snap.RouteStats = map[string]metrics.RouteStat{
+			"POST /v1/messages": {Total: 10},
+		}
+		s := m.renderRoutes()
+		if !strings.Contains(s, "POST") && w >= 15 {
+			t.Errorf("width=%d: renderRoutes missing POST", w)
+		}
+	}
+}
+
+// ─── Viewport: Scrollbar Model Integration ───
+
+func TestUpdateScrollbars_AtVariousSizes(t *testing.T) {
+	for w := 5; w <= 120; w += 5 {
+		for h := 4; h <= 40; h += 4 {
+			m := NewModel(4)
+			m.width = w
+			m.height = h
+			m.tab = tabRequests
+			m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+			m.scroll = 50
+			m.updateScrollbars()
+			sb := m.scrollbars[m.tab]
+			if sb.ContentHeight != 100 {
+				t.Errorf("w=%d h=%d: ContentHeight = %d, want 100", w, h, sb.ContentHeight)
+			}
+			if sb.ViewportHeight != m.visibleRows() {
+				t.Errorf("w=%d h=%d: ViewportHeight = %d, want %d", w, h, sb.ViewportHeight, m.visibleRows())
+			}
+		}
+	}
+}
+
+func TestRenderContentWithScrollbar_NarrowWidth(t *testing.T) {
+	for w := 5; w <= 80; w++ {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		m.tab = tabRequests
+		m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+		s := m.renderContentWithScrollbar()
+		if s == "" && w >= 5 {
+			t.Errorf("width=%d: renderContentWithScrollbar returned empty", w)
+		}
+	}
+}
+
+// ─── Viewport: Edge Cases ───
+
+func TestViewport_SingleRow(t *testing.T) {
+	// Content has exactly 1 row.
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 1)
+	m2 := update(m, key('j'))
+	if m2.cursor != 0 {
+		t.Errorf("cursor = %d, want 0 (single row)", m2.cursor)
+	}
+}
+
+func TestViewport_ExactFit(t *testing.T) {
+	// Content exactly fits the visible area.
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	visible := m.visibleRows()
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, visible)
+	m2 := update(m, key('G'))
+	if m2.cursor != visible-1 {
+		t.Errorf("cursor = %d, want %d", m2.cursor, visible-1)
+	}
+	if m2.scroll != 0 {
+		t.Errorf("scroll = %d, want 0 (exact fit)", m2.scroll)
+	}
+}
+
+func TestViewport_OnePastFit(t *testing.T) {
+	// Content is exactly one more than visible area.
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	visible := m.visibleRows()
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, visible+1)
+	m2 := update(m, key('G'))
+	if m2.cursor != visible {
+		t.Errorf("cursor = %d, want %d", m2.cursor, visible)
+	}
+	if m2.scroll != 1 {
+		t.Errorf("scroll = %d, want 1 (one past fit)", m2.scroll)
+	}
+}
+
+func TestViewport_EmptyAfterFilter(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = []metrics.RequestLogEntry{
+		{Method: "POST", Path: "/v1/messages", Status: 200},
+	}
+	m.filterText = "nonexistent"
+	m2 := update(m, key('j'))
+	if m2.cursor != 0 {
+		t.Errorf("cursor = %d, want 0 (empty after filter)", m2.cursor)
+	}
+}
+
+func TestViewport_CursorPreservedOnScroll(t *testing.T) {
+	// After scrolling, cursor should stay at same content position.
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+	m.cursor = 50
+	m.scroll = 40
+	// Page up.
+	m2 := update(m, tea.KeyPressMsg{Code: tea.KeyPgUp})
+	// Cursor should have moved up by visible rows.
+	expected := 50 - m.visibleRows()
+	if m2.cursor != expected {
+		t.Errorf("cursor = %d, want %d after PgUp", m2.cursor, expected)
 	}
 }

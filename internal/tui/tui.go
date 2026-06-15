@@ -15,12 +15,13 @@
 
 // Package tui provides a Bubble Tea v2 terminal dashboard for the proxy.
 //
-// It renders a full-screen, interactive dashboard with five tabs:
+// It renders a full-screen, interactive dashboard with six tabs:
 //   - Overview: throughput sparkline, concurrency gauge, status distribution,
 //     queue depth, in-flight requests, summary
 //   - Requests: scrollable, inspectable log with search/filter
 //   - Network: Chrome DevTools-equivalent network panel with request/response
 //     inspection, waterfall timing, content-type detection, and filtering
+//   - Logs: captured application log output (replaces stderr printing)
 //   - Concurrency: live gauge, per-route bars, oldest queued age
 //   - Routes: sorted per-route stats table
 //
@@ -31,12 +32,14 @@ package tui
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -44,6 +47,9 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/scrollbar"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/toast"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/viewport"
 )
 
 type uiMode int
@@ -62,6 +68,7 @@ const (
 	tabDashboard tabID = iota
 	tabRequests
 	tabNetwork
+	tabLogs
 	tabConcurrency
 	tabRoutes
 	numTabs
@@ -88,6 +95,75 @@ const (
 	networkStatus5xx
 )
 
+const (
+	logRingCapacity      = 2048
+	defaultToastDuration = 5 * time.Second
+	contentStartRow      = 3
+)
+
+// logRing is a thread-safe ring buffer of log lines.
+type logRing struct {
+	mu       sync.Mutex
+	lines    []string
+	head     int
+	count    int
+	capacity int
+}
+
+func newLogRing(capacity int) *logRing {
+	return &logRing{lines: make([]string, capacity), capacity: capacity}
+}
+
+func (r *logRing) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	text := string(p)
+	for text != "" {
+		idx := strings.IndexByte(text, '\n')
+		if idx < 0 {
+			if r.count < r.capacity {
+				r.lines[(r.head+r.count)%r.capacity] = text
+				r.count++
+			} else {
+				r.lines[r.head] = text
+				r.head = (r.head + 1) % r.capacity
+			}
+			break
+		}
+		line := text[:idx]
+		text = text[idx+1:]
+		if line == "" {
+			continue
+		}
+		if r.count < r.capacity {
+			r.lines[(r.head+r.count)%r.capacity] = line
+			r.count++
+		} else {
+			r.lines[r.head] = line
+			r.head = (r.head + 1) % r.capacity
+		}
+	}
+	return len(p), nil
+}
+
+func (r *logRing) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.count == 0 {
+		return nil
+	}
+	out := make([]string, r.count)
+	for i := 0; i < r.count; i++ {
+		out[i] = r.lines[(r.head+i)%r.capacity]
+	}
+	return out
+}
+
+// logWriter wraps a logRing as an io.Writer.
+type logWriter struct{ ring *logRing }
+
+func (w *logWriter) Write(p []byte) (int, error) { return w.ring.Write(p) }
+
 type Model struct {
 	width, height int
 	tab           tabID
@@ -110,14 +186,35 @@ type Model struct {
 	// so the heavy filter work runs once per Update cycle instead of
 	// multiple times per View frame.
 	networkFiltered []*journal.Entry
+
+	logRing    *logRing
+	toasts     []*toast.Toast
+	scrollbars [numTabs]scrollbar.Model
+
+	dragging bool
 }
 
 func NewModel(conc int) Model {
-	return Model{
+	m := Model{
 		conc:      conc,
 		startTime: time.Now(),
 		resetCh:   make(chan struct{}, 1),
+		logRing:   newLogRing(logRingCapacity),
 	}
+	for i := range m.scrollbars {
+		m.scrollbars[i] = *scrollbar.New()
+	}
+	return m
+}
+
+func (m *Model) LogWriter() io.Writer { return &logWriter{ring: m.logRing} }
+
+func (m *Model) AddToast(t *toast.Toast) {
+	if t.Duration == 0 {
+		t.Duration = defaultToastDuration
+	}
+	t.Show()
+	m.toasts = append(m.toasts, t)
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -141,9 +238,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m, cmd = m.handleMouseClick(msg)
 	case tea.MouseWheelMsg:
 		m, cmd = m.handleMouseWheel(msg)
+	case tea.MouseMotionMsg:
+		m, cmd = m.handleMouseMotion(msg)
+	case tea.MouseReleaseMsg:
+		m, cmd = m.handleMouseRelease(msg)
 	}
 	m.networkFiltered = m.computeVisibleNetworkEntries()
 	m.adjustViewport()
+	m.toasts = toast.VisibleToasts(m.toasts)
 	return m, cmd
 }
 
@@ -250,8 +352,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "3":
 		m.switchTab(tabNetwork)
 	case "4":
-		m.switchTab(tabConcurrency)
+		m.switchTab(tabLogs)
 	case "5":
+		m.switchTab(tabConcurrency)
+	case "6":
 		m.switchTab(tabRoutes)
 
 	case "j", "down":
@@ -282,7 +386,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 
 	case "/":
-		if m.tab == tabRequests || m.tab == tabNetwork {
+		if m.tab == tabRequests || m.tab == tabNetwork || m.tab == tabLogs {
 			m.mode = modeFilter
 			m.filterText = ""
 		}
@@ -356,12 +460,20 @@ func (m *Model) visibleRows() int {
 	return max(v, 1)
 }
 
+// viewportWidth returns the width available for scrollable content,
+// excluding the scrollbar column and separator.
+func (m *Model) viewportWidth() int {
+	return max(m.width-1, 1)
+}
+
 func (m *Model) maxCursor() int {
 	switch m.tab {
 	case tabRequests:
 		return max(len(m.visibleEntries())-1, 0)
 	case tabNetwork:
 		return max(len(m.visibleNetworkEntries())-1, 0)
+	case tabLogs:
+		return max(len(m.visibleLogLines())-1, 0)
 	case tabConcurrency:
 		return max(len(m.snap.InFlight)-1, 0)
 	case tabRoutes:
@@ -396,6 +508,103 @@ func (m *Model) visibleEntries() []metrics.RequestLogEntry {
 // refreshed once per Update cycle to avoid redundant allocations.
 func (m Model) visibleNetworkEntries() []*journal.Entry {
 	return m.networkFiltered
+}
+
+// visibleLogLines returns log lines for the Logs tab, respecting filter.
+func (m *Model) visibleLogLines() []string {
+	all := m.logRing.snapshot()
+	if all == nil {
+		return nil
+	}
+	if m.filterText == "" {
+		return all
+	}
+	var filtered []string
+	lower := strings.ToLower(m.filterText)
+	for _, line := range all {
+		if strings.Contains(strings.ToLower(line), lower) {
+			filtered = append(filtered, line)
+		}
+	}
+	return filtered
+}
+
+func (m *Model) updateScrollbars() {
+	contentHeight := m.maxCursor() + 1
+	viewportHeight := m.visibleRows()
+	for i := range m.scrollbars {
+		m.scrollbars[i].ContentHeight = contentHeight
+		m.scrollbars[i].ViewportHeight = viewportHeight
+		m.scrollbars[i].YOffset = m.scroll
+	}
+}
+
+// stripANSI removes ANSI escape sequences from a string.
+func stripANSI(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\x1b' {
+			if i+1 < len(s) && s[i+1] == '[' {
+				i += 2
+				for i < len(s) {
+					ch := s[i]
+					if ch >= 0x40 && ch <= 0x7E {
+						break
+					}
+					i++
+				}
+			} else if i+1 < len(s) {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// renderContentWithScrollbar wraps the active tab's content with a scrollbar
+// column in the rightmost position. ANSI-aware width calculation.
+func (m Model) renderContentWithScrollbar() string {
+	content := m.renderContent()
+	if content == "" {
+		return ""
+	}
+	sb := m.scrollbars[m.tab]
+	scrollbarCol := sb.View()
+	sbLines := strings.Split(scrollbarCol, "\n")
+
+	lines := strings.Split(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	contentWidth := m.viewportWidth()
+
+	var b strings.Builder
+	maxLines := max(len(lines), len(sbLines))
+	for i := range maxLines {
+		if i < len(lines) {
+			line := lines[i]
+			stripped := stripANSI(line)
+			visibleRunes := []rune(stripped)
+			if len(visibleRunes) > contentWidth {
+				b.WriteString(string(visibleRunes[:contentWidth]))
+			} else {
+				b.WriteString(line)
+				b.WriteString(strings.Repeat(" ", contentWidth-len(visibleRunes)))
+			}
+		} else {
+			b.WriteString(strings.Repeat(" ", contentWidth))
+		}
+		if i < len(sbLines) {
+			b.WriteString(sbLines[i])
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // computeVisibleNetworkEntries performs the actual filter logic used to
@@ -474,6 +683,8 @@ func (m *Model) canInspect() bool {
 		return m.cursor < len(m.visibleEntries())
 	case tabNetwork:
 		return m.cursor < len(m.visibleNetworkEntries())
+	case tabLogs:
+		return m.cursor < len(m.visibleLogLines())
 	case tabConcurrency:
 		return m.cursor < len(m.snap.InFlight)
 	default:
@@ -484,13 +695,44 @@ func (m *Model) canInspect() bool {
 func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 	mx := msg.Mouse().X
 	my := msg.Mouse().Y
+
+	// Tab bar (row 1).
 	if my == 1 {
 		tabWidth := m.width / int(numTabs)
 		clickedTab := mx / tabWidth
 		if int(clickedTab) < int(numTabs) {
 			m.switchTab(tabID(clickedTab))
 		}
+		return m, nil
 	}
+
+	// Content area starts at row 3 (header=0, tabbar=1, separator=2).
+	contentEndRow := contentStartRow + m.visibleRows()
+	if my < contentStartRow || my >= contentEndRow {
+		return m, nil
+	}
+
+	// Scrollbar column (rightmost): jump scroll and begin drag.
+	if mx == m.width-1 {
+		contentHeight := m.maxCursor() + 1
+		trackHeight := m.visibleRows()
+		relativeY := max(my-contentStartRow, 0)
+		if relativeY >= trackHeight {
+			relativeY = trackHeight - 1
+		}
+		m.scroll = viewport.ScrollFromThumb(relativeY, contentHeight, trackHeight)
+		m.cursor = viewport.ClampCursor(
+			m.scroll+min(m.visibleRows()/2, m.maxCursor()-m.scroll),
+			contentHeight)
+		m.dragging = true
+		return m, nil
+	}
+
+	if m.tab == tabDashboard {
+		return m, nil
+	}
+	relativeRow := my - contentStartRow
+	m.cursor = viewport.CursorFromClick(relativeRow, m.scroll, m.maxCursor()+1)
 	return m, nil
 }
 
@@ -504,6 +746,37 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (Model, tea.Cmd) {
+	if !m.dragging {
+		return m, nil
+	}
+	my := msg.Mouse().Y
+	contentHeight := m.maxCursor() + 1
+	trackHeight := m.visibleRows()
+	sm := viewport.ScrollMax(contentHeight, trackHeight)
+	if sm <= 0 {
+		return m, nil
+	}
+	relativeY := max(my-contentStartRow, 0)
+	if relativeY >= trackHeight {
+		relativeY = trackHeight - 1
+	}
+	// Use DragYOffset from the scrollbar model for precise drag tracking.
+	sb := &m.scrollbars[m.tab]
+	sb.ContentHeight = contentHeight
+	sb.ViewportHeight = trackHeight
+	m.scroll = sb.DragYOffset(relativeY)
+	m.cursor = viewport.ClampCursor(
+		m.scroll+min(trackHeight/2, contentHeight-1-m.scroll),
+		contentHeight)
+	return m, nil
+}
+
+func (m Model) handleMouseRelease(msg tea.MouseReleaseMsg) (Model, tea.Cmd) {
+	m.dragging = false
+	return m, nil
+}
+
 func (m Model) View() tea.View {
 	var v tea.View
 	v.AltScreen = true
@@ -514,10 +787,12 @@ func (m Model) View() tea.View {
 		return v
 	}
 
-	if m.width < 60 {
-		v.SetContent(fmt.Sprintf(" Terminal too narrow (%d cols, min 60) ─ resize to continue", m.width))
+	if m.width < 1 || m.height < 4 {
+		v.SetContent("")
 		return v
 	}
+
+	m.updateScrollbars()
 
 	var b strings.Builder
 
@@ -545,13 +820,13 @@ func (m Model) View() tea.View {
 		clLines := strings.Count(confirm, "\n") + 1
 		m.padLines(&b, clLines)
 	default:
-		content := m.renderContent()
+		content := m.renderContentWithScrollbar()
 		b.WriteString(content)
 		lines := strings.Count(content, "\n") + 1
 		m.padLines(&b, lines)
 	}
 
-	if m.mode == modeFilter && (m.tab == tabRequests || m.tab == tabNetwork) {
+	if m.mode == modeFilter && (m.tab == tabRequests || m.tab == tabNetwork || m.tab == tabLogs) {
 		b.WriteByte('\n')
 		b.WriteString(filterPromptStyle.Render(fmt.Sprintf(" Filter: %s█", m.filterText)))
 	} else {
@@ -559,6 +834,22 @@ func (m Model) View() tea.View {
 	}
 
 	b.WriteString(m.renderFooter())
+
+	visible := toast.VisibleToasts(m.toasts)
+	if len(visible) > 0 && m.mode == modeBrowse {
+		// Show up to 3 most recent toasts, oldest at top, newest at bottom.
+		start := 0
+		if len(visible) > 3 {
+			start = len(visible) - 3
+		}
+		for i := start; i < len(visible); i++ {
+			if toastStr := visible[i].Render(m.width, 1); toastStr != "" {
+				b.WriteByte('\n')
+				b.WriteString(toastStr)
+			}
+		}
+	}
+
 	v.SetContent(b.String())
 	return v
 }
@@ -580,7 +871,7 @@ func (m Model) renderHeader() string {
 }
 
 func (m Model) renderTabBar() string {
-	names := []string{"1 Overview", "2 Requests", "3 Network", "4 Concurrency", "5 Routes"}
+	names := []string{"1 Overview", "2 Requests", "3 Network", "4 Logs", "5 Concurrency", "6 Routes"}
 	parts := make([]string, len(names))
 	for i, name := range names {
 		if tabID(i) == m.tab {
@@ -600,6 +891,8 @@ func (m Model) renderContent() string {
 		return m.renderRequests()
 	case tabNetwork:
 		return m.renderNetwork()
+	case tabLogs:
+		return m.renderLogs()
 	case tabConcurrency:
 		return m.renderConcurrency()
 	case tabRoutes:
@@ -609,72 +902,14 @@ func (m Model) renderContent() string {
 }
 
 func (m Model) renderDashboard() string {
-	var b strings.Builder
-
-	b.WriteString(sectionStyle.Render(" Throughput (10s) "))
-	b.WriteByte('\n')
-	b.WriteString(m.renderSparkline())
-	b.WriteByte('\n')
-
-	b.WriteByte('\n')
-	b.WriteString(sectionStyle.Render(" Concurrency "))
-	b.WriteByte('\n')
-	b.WriteString(m.renderGaugeBar(int(m.snap.Active), m.conc, m.width-4))
-	b.WriteByte('\n')
-	fmt.Fprintf(&b, "  %d / %d active slots\n", m.snap.Active, m.conc)
-
-	b.WriteByte('\n')
-	b.WriteString(sectionStyle.Render(" Queue Depth "))
-	b.WriteByte('\n')
-	queueMax := m.conc * 4
-	if queueMax == 0 {
-		queueMax = 1
-	}
-	b.WriteString(m.renderHBar(int(m.snap.Queued), queueMax, m.width-4, queueColor))
-	b.WriteByte('\n')
-	if m.snap.Queued == 0 {
-		b.WriteString("  Queue: empty\n")
-	} else {
-		fmt.Fprintf(&b, "  %d waiting\n", m.snap.Queued)
-	}
-
-	b.WriteByte('\n')
-	b.WriteString(sectionStyle.Render(" Status Distribution "))
-	b.WriteByte('\n')
-	b.WriteString(m.renderStatusBar())
-	b.WriteByte('\n')
-
-	b.WriteByte('\n')
-	b.WriteString(sectionStyle.Render(" In-Flight Requests "))
-	b.WriteByte('\n')
-	flights := m.snap.InFlight
-	fmt.Fprintf(&b, "  %d in-flight (%d limited, %d passthrough)\n",
-		len(flights), m.snap.InFlightLimited, m.snap.InFlightPassthrough)
-	show := min(len(flights), 6)
-	for i := 0; i < show; i++ {
-		r := flights[i]
-		age := r.Age().Truncate(time.Millisecond)
-		tag := limitedTag
-		if !r.Limited {
-			tag = passTag
-		}
-		fmt.Fprintf(&b, "  %s %-6s %-35s %s\n", tag, r.Method, r.Path, age)
-	}
-	if len(flights) > show {
-		fmt.Fprintf(&b, "  … and %d more\n", len(flights)-show)
-	}
-
-	b.WriteByte('\n')
-	b.WriteString(sectionStyle.Render(" Summary "))
-	b.WriteByte('\n')
-	fmt.Fprintf(&b, "  Proxied: %d  │  Passthrough: %d  │  Timeouts: %d  │  Cancelled: %d\n",
-		m.snap.TotalProxied, m.snap.TotalPassThrough, m.snap.TotalTimeout, m.snap.TotalCancelled)
-
-	return b.String()
+	return strings.Join(m.dashboardLines(), "\n") + "\n"
 }
 
 func (m Model) renderSparkline() string {
 	spark := m.snap.Sparkline
+	if len(spark) == 0 {
+		return dimStyle2.Render("  —")
+	}
 	maxVal := 0
 	for _, v := range spark {
 		if v > maxVal {
@@ -685,30 +920,41 @@ func (m Model) renderSparkline() string {
 		maxVal = 1
 	}
 	chars := []string{"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
-	line := "  "
+	var line strings.Builder
+	line.WriteString("  ")
 	for _, v := range spark {
-		idx := int(float64(v) / float64(maxVal) * float64(len(chars)-1))
-		if idx < 0 {
-			idx = 0
-		}
+		idx := max(int(float64(v)/float64(maxVal)*float64(len(chars)-1)), 0)
 		if idx >= len(chars) {
 			idx = len(chars) - 1
 		}
-		line += chars[idx]
+		line.WriteString(chars[idx])
 	}
-	return line
+	style := sparklineFillStyle(spark[len(spark)-1], maxVal)
+	return style.Render(line.String())
+}
+
+func sparklineFillStyle(last, max int) lipgloss.Style {
+	if max <= 0 {
+		return sparklineStyle
+	}
+	pct := min(int(math.Round(float64(last)/float64(max)*100)), 100)
+	switch {
+	case pct >= 90:
+		return gaugeCriticalStyle
+	case pct >= 60:
+		return gaugeWarnStyle
+	default:
+		return sparklineStyle
+	}
 }
 
 func (m Model) renderStatusBar() string {
 	counts := m.snap.StatusCounts
 	total := counts[1] + counts[2] + counts[3] + counts[4] + counts[5]
 	if total == 0 {
-		return "  No responses yet\n"
+		return dimStyle2.Render("  No responses yet\n")
 	}
-	width := m.width - 4
-	if width < 10 {
-		width = 10
-	}
+	width := max(m.width-4, 10)
 
 	labels := []string{"1xx", "2xx", "3xx", "4xx", "5xx"}
 	cvalues := []int64{counts[1], counts[2], counts[3], counts[4], counts[5]}
@@ -736,9 +982,102 @@ func (m Model) renderStatusBar() string {
 	}
 	b.WriteString("]")
 	for i, v := range cvalues {
-		fmt.Fprintf(&b, " %s:%d", labels[i], v)
+		b.WriteString(" ")
+		b.WriteString(colors[i].Render(fmt.Sprintf("%s:%d", labels[i], v)))
 	}
 	return b.String()
+}
+
+// dashboardLines builds the full list of rendered lines for the Dashboard tab.
+// It always renders all content (including up to six in-flight requests);
+// renderDashboard joins the lines with newlines.
+func (m Model) dashboardLines() []string {
+	var lines []string
+
+	lines = append(lines, sectionStyle.Render(" Throughput (10s) "))
+	lines = append(lines, m.renderSparkline())
+	lines = append(lines, "")
+
+	lines = append(lines, sectionStyle.Render(" Concurrency "))
+	lines = append(lines, m.renderGaugeBar(int(m.snap.Active), m.conc, m.width-4))
+	lines = append(lines, fmt.Sprintf("  %d / %d active slots", m.snap.Active, m.conc))
+
+	lines = append(lines, "")
+	lines = append(lines, sectionStyle.Render(" Queue Depth "))
+	queueMax := m.conc * 4
+	if queueMax == 0 {
+		queueMax = 1
+	}
+	lines = append(lines, m.renderHBar(int(m.snap.Queued), queueMax, m.width-4, queueFillStyle(int(m.snap.Queued), queueMax)))
+	if m.snap.Queued == 0 {
+		lines = append(lines, dimStyle2.Render("  Queue: empty"))
+	} else {
+		lines = append(lines, fmt.Sprintf("  %d waiting", m.snap.Queued))
+	}
+	if m.snap.RetriesInFlight > 0 {
+		lines = append(lines, fmt.Sprintf("  %d active retries", m.snap.RetriesInFlight))
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, sectionStyle.Render(" Status Distribution "))
+	lines = append(lines, m.renderStatusBar())
+
+	lines = append(lines, "")
+	lines = append(lines, sectionStyle.Render(" In-Flight Requests "))
+	flights := m.snap.InFlight
+	lines = append(lines, fmt.Sprintf("  %d in-flight (%d limited, %d passthrough)",
+		len(flights), m.snap.InFlightLimited, m.snap.InFlightPassthrough))
+	show := min(len(flights), 6)
+	for i := range show {
+		r := flights[i]
+		age := r.Age().Truncate(time.Millisecond)
+		tag := limitedTag
+		if !r.Limited {
+			tag = passTag
+		}
+		lines = append(lines, fmt.Sprintf("  %s %-6s %-35s %s", tag, r.Method, r.Path, age))
+	}
+	if len(flights) > show {
+		lines = append(lines, fmt.Sprintf("  … and %d more", len(flights)-show))
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, sectionStyle.Render(" Summary "))
+	lines = append(lines, fmt.Sprintf("  Proxied: %d  \u2502  Passthrough: %d  \u2502  Timeouts: %d  \u2502  Cancelled: %d  \u2502  Circuit rejects: %d",
+		m.snap.TotalProxied, m.snap.TotalPassThrough, m.snap.TotalTimeout, m.snap.TotalCancelled, m.snap.TotalCircuitRejected))
+
+	if cb := m.snap.CircuitBreaker; cb != nil {
+		lines = append(lines, "")
+		lines = append(lines, sectionStyle.Render(" Circuit Breaker "))
+		var stateStyle lipgloss.Style
+		switch cb.State {
+		case "CLOSED":
+			stateStyle = circuitClosedStyle
+		case "OPEN":
+			stateStyle = circuitOpenStyle
+		case "HALF_OPEN":
+			stateStyle = circuitHalfOpenStyle
+		default:
+			stateStyle = lipgloss.NewStyle()
+		}
+		var summary strings.Builder
+		fmt.Fprintf(&summary, "  State: %s", stateStyle.Render(cb.State))
+		fmt.Fprintf(&summary, "  |  Failures: %d  |  Consecutive: %d",
+			cb.Failures, cb.ConsecutiveFailures)
+		if cb.CurrentPenalty > 0 {
+			fmt.Fprintf(&summary, "  |  Penalty: %s", cb.CurrentPenalty.Truncate(time.Millisecond))
+		}
+		if !cb.NextRetry.IsZero() {
+			until := time.Until(cb.NextRetry).Truncate(time.Millisecond)
+			if until > 0 {
+				fmt.Fprintf(&summary, "  |  Next probe: %s", until)
+			}
+		}
+		lines = append(lines, summary.String())
+		lines = append(lines, "") // trailing blank before windowing
+	}
+
+	return lines
 }
 
 func (m Model) renderRequests() string {
@@ -855,6 +1194,43 @@ func (m Model) renderNetwork() string {
 	return b.String()
 }
 
+// renderLogs renders the dedicated Logs tab showing captured log output.
+func (m Model) renderLogs() string {
+	var b strings.Builder
+	lines := m.visibleLogLines()
+
+	if len(lines) == 0 {
+		if m.filterText != "" {
+			fmt.Fprintf(&b, "  No log lines matching %q\n", m.filterText)
+		} else {
+			b.WriteString("  No log output yet.\n")
+		}
+		return b.String()
+	}
+
+	if m.filterText != "" {
+		fmt.Fprintf(&b, "  Filter: %q  (%d / %d lines)\n", m.filterText, len(lines), m.logRing.count)
+	}
+
+	visible := m.visibleRows()
+	start := m.scroll
+	end := min(start+visible, len(lines))
+
+	for i := start; i < end; i++ {
+		style := rowStyle
+		if i == m.cursor {
+			style = rowSelectedStyle
+		}
+		b.WriteString(style.Render(fmt.Sprintf("  %6d  ", i+1) + lines[i]))
+		b.WriteByte('\n')
+	}
+
+	if len(lines) > visible {
+		fmt.Fprintf(&b, "  %d-%d / %d lines\n", start+1, end, len(lines))
+	}
+	return b.String()
+}
+
 // renderWaterfall renders a mini timing bar for a single entry.
 // The bar shows: [queue|ttfb|download] as colored segments.
 func (m Model) renderWaterfall(e *journal.Entry) string {
@@ -872,18 +1248,12 @@ func (m Model) renderWaterfall(e *journal.Entry) string {
 	queue := e.Timing.QueueDuration()
 	ttfb := e.Timing.TTFB()
 
-	queueSeg := int(math.Round(float64(queue) / float64(total) * float64(barWidth)))
-	if queueSeg > barWidth {
-		queueSeg = barWidth
-	}
+	queueSeg := min(int(math.Round(float64(queue)/float64(total)*float64(barWidth))), barWidth)
 	ttfbSeg := int(math.Round(float64(ttfb) / float64(total) * float64(barWidth)))
 	if queueSeg+ttfbSeg > barWidth {
 		ttfbSeg = barWidth - queueSeg
 	}
-	downloadSeg := barWidth - queueSeg - ttfbSeg
-	if downloadSeg < 0 {
-		downloadSeg = 0
-	}
+	downloadSeg := max(barWidth-queueSeg-ttfbSeg, 0)
 
 	var b strings.Builder
 	if queueSeg > 0 {
@@ -937,10 +1307,10 @@ func (m Model) renderConcurrency() string {
 	if queueMax == 0 {
 		queueMax = 1
 	}
-	b.WriteString(m.renderHBar(int(m.snap.Queued), queueMax, m.width-4, queueColor))
+	b.WriteString(m.renderHBar(int(m.snap.Queued), queueMax, m.width-4, queueFillStyle(int(m.snap.Queued), queueMax)))
 	b.WriteByte('\n')
 	if m.snap.Queued == 0 {
-		b.WriteString("  Queue: empty\n")
+		b.WriteString(dimStyle2.Render("  Queue: empty\n"))
 	} else {
 		fmt.Fprintf(&b, "  %d waiting\n", m.snap.Queued)
 	}
@@ -950,7 +1320,7 @@ func (m Model) renderConcurrency() string {
 	b.WriteByte('\n')
 	flights := m.snap.InFlight
 	if len(flights) == 0 {
-		b.WriteString("  No requests in flight.\n")
+		b.WriteString(dimStyle2.Render("  No requests in flight.\n"))
 		return b.String()
 	}
 
@@ -1148,10 +1518,9 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 	// Available content height = terminal - chrome (header, tabbar, separator,
 	// footer, filter/blank line). Overlay border + padding consume 4 more.
 	// We target the overlay content to fit within the visible area.
-	budget := m.height - 12
-	if budget < 10 {
-		budget = 10 // minimum usable detail view
-	}
+	budget := max(m.height-12,
+		// minimum usable detail view
+		10)
 
 	// Count fixed lines that are always emitted (minimum 17):
 	//   Request heading, Method, URL, [blank],
@@ -1161,10 +1530,9 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 	const fixedLines = 17
 
 	// Remaining budget for variable sections: headers and body previews.
-	varBudget := budget - fixedLines
-	if varBudget < 4 {
-		varBudget = 4 // at least 2 lines each for req/resp headers
-	}
+	varBudget := max(budget-fixedLines,
+		// at least 2 lines each for req/resp headers
+		4)
 
 	// Split the variable budget: half for request, half for response.
 	reqBudget := varBudget / 2
@@ -1181,11 +1549,10 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 	if len(e.RequestHeaders) > 0 && usedReq < reqBudget {
 		keys := sortedHeaderKeys(e.RequestHeaders)
 		b.WriteString(" Headers:\n")
-		usedReq++                                 // "Headers:" line
-		maxHeaderLines := reqBudget - usedReq - 1 // -1 for potential body line
-		if maxHeaderLines < 1 {
-			maxHeaderLines = 1
-		}
+		usedReq++ // "Headers:" line
+		maxHeaderLines := max(
+			// -1 for potential body line
+			reqBudget-usedReq-1, 1)
 		shown := 0
 		for _, k := range keys {
 			if shown >= maxHeaderLines {
@@ -1216,10 +1583,7 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 		keys := sortedHeaderKeys(e.ResponseHeaders)
 		b.WriteString(" Headers:\n")
 		usedResp++
-		maxHeaderLines := respBudget - usedResp - 1
-		if maxHeaderLines < 1 {
-			maxHeaderLines = 1
-		}
+		maxHeaderLines := max(respBudget-usedResp-1, 1)
 		shown := 0
 		for _, k := range keys {
 			if shown >= maxHeaderLines {
@@ -1250,10 +1614,7 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 		fmt.Fprintf(&b, " Total:    %s\n", e.Timing.Duration().Truncate(time.Millisecond))
 	}
 
-	barWidth := m.width - 10
-	if barWidth > 60 {
-		barWidth = 60
-	}
+	barWidth := max(min(m.width-10, 60), 0)
 	fmt.Fprintf(&b, " %s\n", m.renderDetailWaterfall(e, barWidth))
 
 	b.WriteString("\n [Esc/Enter] close ")
@@ -1261,6 +1622,9 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 }
 
 func (m Model) renderDetailWaterfall(e *journal.Entry, width int) string {
+	if width <= 0 {
+		return ""
+	}
 	total := e.Timing.Duration()
 	if total <= 0 {
 		return strings.Repeat("─", width)
@@ -1269,18 +1633,12 @@ func (m Model) renderDetailWaterfall(e *journal.Entry, width int) string {
 	queue := e.Timing.QueueDuration()
 	ttfb := e.Timing.TTFB()
 
-	queueSeg := int(math.Round(float64(queue) / float64(total) * float64(width)))
-	if queueSeg > width {
-		queueSeg = width
-	}
+	queueSeg := min(int(math.Round(float64(queue)/float64(total)*float64(width))), width)
 	ttfbSeg := int(math.Round(float64(ttfb) / float64(total) * float64(width)))
 	if queueSeg+ttfbSeg > width {
 		ttfbSeg = width - queueSeg
 	}
-	downloadSeg := width - queueSeg - ttfbSeg
-	if downloadSeg < 0 {
-		downloadSeg = 0
-	}
+	downloadSeg := max(width-queueSeg-ttfbSeg, 0)
 
 	var b strings.Builder
 	if queueSeg > 0 {
@@ -1297,14 +1655,14 @@ func (m Model) renderDetailWaterfall(e *journal.Entry, width int) string {
 
 func (m Model) renderHelpOverlay() string {
 	return overlayStyle.Render(" Keybindings \n\n" +
-		" 1-5          Switch tab (Overview/Requests/Network/Concurrency/Routes)\n" +
+		" 1-6          Switch tab (Overview/Requests/Network/Logs/Concurrency/Routes)\n" +
 		" j/k or ↑/↓   Scroll down/up\n" +
 		" PgUp/PgDn     Page up / Page down\n" +
 		" Home/End      Jump to first / last item\n" +
 		" Ctrl-U / Ctrl-D  Half-page scroll\n" +
 		" g             Jump to top    G      Jump to bottom\n" +
 		" Enter/Space   Inspect selected entry\n" +
-		" /             Filter entries (Requests/Network tabs)\n" +
+		" /             Filter entries (Requests/Network/Logs tabs)\n" +
 		" t             Cycle type filter (Network tab)\n" +
 		" s             Cycle status filter (Network tab)\n" +
 		" Esc           Close overlay / Clear filter\n" +
@@ -1315,29 +1673,23 @@ func (m Model) renderHelpOverlay() string {
 }
 
 func (m Model) renderFooter() string {
-	keys := " 1-5:tab │ j/k:scroll │ PgUp/PgDn │ Home/End │ Ctrl-U/D │ /:filter │ t:type │ s:status │ ?:help │ q:quit "
+	keys := " 1-6:tab │ j/k:scroll │ PgUp/PgDn │ Home/End │ Ctrl-U/D │ /:filter │ t:type │ s:status │ ?:help │ q:quit "
 	return footerStyle.Render(keys)
 }
 
 func (m Model) renderGaugeBar(active, max, width int) string {
 	if max <= 0 || width <= 0 {
-		return "  [ empty ]"
+		return dimStyle2.Render("  [ empty ]")
 	}
-	pct := int(math.Round(float64(active) / float64(max) * 100))
-	if pct > 100 {
-		pct = 100
-	}
-	filled := int(math.Round(float64(pct) / 100.0 * float64(width)))
-	if filled > width {
-		filled = width
-	}
+	pct := min(int(math.Round(float64(active)/float64(max)*100)), 100)
+	filled := min(int(math.Round(float64(pct)/100.0*float64(width))), width)
 	if filled < 0 {
 		filled = 0
 	}
 	empty := width - filled
 
 	bar := "  ["
-	bar += gaugeActiveStyle.Render(strings.Repeat("█", filled))
+	bar += gaugeFillStyle(pct).Render(strings.Repeat("█", filled))
 	if empty > 0 {
 		bar += gaugeEmptyStyle.Render(strings.Repeat("░", empty))
 	}
@@ -1345,17 +1697,22 @@ func (m Model) renderGaugeBar(active, max, width int) string {
 	return bar
 }
 
+func gaugeFillStyle(pct int) lipgloss.Style {
+	switch {
+	case pct >= 90:
+		return gaugeCriticalStyle
+	case pct >= 60:
+		return gaugeWarnStyle
+	default:
+		return gaugeNormalStyle
+	}
+}
+
 func (m Model) renderHBar(value, valueMax, width int, color lipgloss.Style) string {
 	if valueMax <= 0 || width <= 0 {
-		return "  [ empty ]"
+		return dimStyle2.Render("  [ empty ]")
 	}
-	filled := int(math.Round(float64(value) / float64(valueMax) * float64(width)))
-	if filled > width {
-		filled = width
-	}
-	if filled < 0 {
-		filled = 0
-	}
+	filled := max(min(int(math.Round(float64(value)/float64(valueMax)*float64(width))), width), 0)
 	empty := width - filled
 
 	bar := "  ["
@@ -1367,6 +1724,23 @@ func (m Model) renderHBar(value, valueMax, width int, color lipgloss.Style) stri
 	}
 	bar += "]"
 	return bar
+}
+
+func queueFillStyle(value, valueMax int) lipgloss.Style {
+	if valueMax <= 0 {
+		return gaugeEmptyStyle
+	}
+	pct := min(int(math.Round(float64(value)/float64(valueMax)*100)), 100)
+	switch {
+	case pct >= 90:
+		return gaugeCriticalStyle
+	case pct >= 50:
+		return queueWarnStyle
+	case value > 0:
+		return queueFillDefaultStyle
+	default:
+		return gaugeEmptyStyle
+	}
 }
 
 func statusStyle(code int) lipgloss.Style {
@@ -1488,8 +1862,20 @@ var (
 				Foreground(lipgloss.Color("#0D1117")).
 				Background(lipgloss.Color("#388BFD"))
 
-	gaugeActiveStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#3FB950"))
+	gaugeNormalStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#58A6FF")).Bold(true)
+
+	gaugeWarnStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#D29922")).Bold(true)
+
+	gaugeCriticalStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F85149")).Bold(true)
+
+	queueWarnStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#F0883E")).Bold(true)
+
+	sparklineStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#58A6FF"))
 
 	gaugeEmptyStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#21262D"))
@@ -1529,8 +1915,18 @@ var (
 			Foreground(lipgloss.Color("#8B949E")).
 			Background(lipgloss.Color("#0D1117"))
 
-	queueColor = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D29922"))
+	circuitClosedStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#3FB950"))
+
+	circuitOpenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F85149")).
+				Bold(true)
+
+	circuitHalfOpenStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#F0883E"))
+
+	queueFillDefaultStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#39D353")).Bold(true)
 
 	waterfallQueueStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("#D29922"))

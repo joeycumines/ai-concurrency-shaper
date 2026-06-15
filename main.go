@@ -32,6 +32,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
@@ -61,6 +62,33 @@ func run() error {
 		retryMax          int
 		retryMaxBodyMB    int64
 		showVersion       bool
+
+		// Circuit breaker flags.
+		cbEnabled     bool
+		cbThreshold   int
+		cbWindow      time.Duration
+		cbOpenTimeout time.Duration
+		cbMaxOpen     time.Duration
+		cbPenalty     time.Duration
+		cbMaxPenalty  time.Duration
+
+		// Enhanced retry flags.
+		retryWaitMin   time.Duration
+		retryWaitMax   time.Duration
+		retryMinDelay  time.Duration
+		retrySkipOn429 bool
+
+		// Concurrency protection flags.
+		releaseCooldown time.Duration
+		cancelCooldown  time.Duration
+		failureHold     time.Duration
+
+		// Adaptive headroom.
+		adaptiveHeadroom       bool
+		adaptiveHeadroomWindow time.Duration
+
+		// Transport tuning.
+		upstreamDisableKeepAlives bool
 	)
 
 	flag.StringVar(&bindAddr, "bind", ":8080", "listen address")
@@ -73,6 +101,27 @@ func run() error {
 	flag.Int64Var(&retryMaxBodyMB, "retry-max-body-mb", 5, "max request body size (MB) eligible for retry")
 	flag.BoolVar(&useTUI, "tui", false, "enable terminal dashboard")
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
+
+	// Circuit breaker.
+	flag.BoolVar(&cbEnabled, "circuit-breaker", true, "enable circuit breaker (default: true)")
+	flag.IntVar(&cbThreshold, "cb-threshold", 5, "failures within window to trip circuit breaker")
+	flag.DurationVar(&cbWindow, "cb-window", 30*time.Second, "circuit breaker failure counting window")
+	flag.DurationVar(&cbOpenTimeout, "cb-open-timeout", 10*time.Second, "time before circuit breaker probes (half-open)")
+	flag.DurationVar(&cbMaxOpen, "cb-max-open-timeout", 120*time.Second, "max circuit breaker open timeout after backoff")
+	flag.DurationVar(&cbPenalty, "cb-penalty", 2*time.Second, "base phantom concurrency hold time")
+	flag.DurationVar(&cbMaxPenalty, "cb-max-penalty", 60*time.Second, "max phantom concurrency hold time")
+
+	// Enhanced retry.
+	flag.DurationVar(&retryWaitMin, "retry-wait-min", 500*time.Millisecond, "minimum retry wait")
+	flag.DurationVar(&retryWaitMax, "retry-wait-max", 30*time.Second, "maximum retry wait")
+	flag.DurationVar(&retryMinDelay, "retry-min-delay", 1*time.Second, "minimum delay before retrying (0 = use backoff only)")
+	flag.BoolVar(&retrySkipOn429, "retry-skip-429", true, "skip retrying 429 responses to prevent concurrency amplification")
+	flag.DurationVar(&releaseCooldown, "release-cooldown", 200*time.Millisecond, "delay after slot release before re-admission (0 = immediate)")
+	flag.DurationVar(&cancelCooldown, "cancel-cooldown", 200*time.Millisecond, "hold slot after client cancel that reached upstream (0 = immediate)")
+	flag.DurationVar(&failureHold, "failure-hold", 2*time.Second, "hold slot after upstream failure even without circuit breaker (0 = disabled)")
+	flag.BoolVar(&adaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
+	flag.DurationVar(&adaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")
+	flag.BoolVar(&upstreamDisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream; avoids provider-side connection-count concurrency violations")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "ai-concurrency-shaper %s\n\n", version)
@@ -112,11 +161,16 @@ func run() error {
 			if p.Limit > 0 {
 				if p.Group != "" {
 					// Routes in the same @group share one limiter.
-					if _, exists := routeLimiters[p.Group]; !exists {
-						routeLimiters[p.Group] = queue.NewLimiter(p.Limit)
+					if existing, exists := routeLimiters[p.Group]; exists {
+						if existing.Limit() != p.Limit {
+							log.Printf("WARNING: route %q specifies group %q with limit %d, but group already has limit %d. Using %d.",
+								p.Raw, p.Group, p.Limit, existing.Limit(), existing.Limit())
+						}
+					} else {
+						routeLimiters[p.Group] = queue.NewLimiterWithCooldown(p.Limit, releaseCooldown)
 					}
 				} else {
-					routeLimiters[p.Raw] = queue.NewLimiter(p.Limit)
+					routeLimiters[p.Raw] = queue.NewLimiterWithCooldown(p.Limit, releaseCooldown)
 				}
 			}
 		}
@@ -126,11 +180,11 @@ func run() error {
 	matcher := route.NewMatcher(patterns)
 
 	met := metrics.NewCollector()
-	limiter := queue.NewLimiter(concurrency)
+	limiter := queue.NewLimiterWithCooldown(concurrency, releaseCooldown)
 
 	var globalLimiter *queue.Limiter
 	if globalConcurrency > 0 {
-		globalLimiter = queue.NewLimiter(globalConcurrency)
+		globalLimiter = queue.NewLimiterWithCooldown(globalConcurrency, releaseCooldown)
 	}
 
 	// Create the shared request journal. This is the single source of truth
@@ -150,23 +204,56 @@ func run() error {
 	}
 	j := journal.New(journalCap, maxBody)
 
-	p := proxy.New(proxy.Config{
-		Upstream:      upstream,
-		Matcher:       matcher,
-		Limiter:       limiter,
-		Metrics:       met,
-		QueueTimeout:  queueTimeout,
-		GlobalLimiter: globalLimiter,
-		RouteLimiters: routeLimiters,
-		MaxRetries:    retryMax,
-		MaxBodyBytes:  int64(retryMaxBodyMB) << 20,
-		Transport: &http.Transport{
-			MaxIdleConns:        200,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     120 * time.Second,
-		},
-		Journal: j,
-	})
+	// Create the circuit breaker when enabled.
+	var breaker *circuitbreaker.Breaker
+	if cbEnabled {
+		var err error
+		breaker, err = circuitbreaker.New(
+			circuitbreaker.WithFailureThreshold(cbThreshold),
+			circuitbreaker.WithWindow(cbWindow),
+			circuitbreaker.WithOpenTimeout(cbOpenTimeout),
+			circuitbreaker.WithMaxOpenTimeout(cbMaxOpen),
+			circuitbreaker.WithBasePenalty(cbPenalty),
+			circuitbreaker.WithMaxPenalty(cbMaxPenalty),
+		)
+		if err != nil {
+			return fmt.Errorf("circuit breaker config: %w", err)
+		}
+	}
+
+	effectiveMaxConcurrency := upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency, patterns, routeLimiters)
+	transport := &http.Transport{
+		MaxIdleConns:        200,
+		MaxIdleConnsPerHost: effectiveMaxConcurrency,
+		IdleConnTimeout:     120 * time.Second,
+		DisableKeepAlives:   upstreamDisableKeepAlives,
+	}
+
+	p, err := proxy.New(
+		proxy.WithUpstream(upstream),
+		proxy.WithMatcher(matcher),
+		proxy.WithLimiter(limiter),
+		proxy.WithMetrics(met),
+		proxy.WithQueueTimeout(queueTimeout),
+		proxy.WithGlobalLimiter(globalLimiter),
+		proxy.WithRouteLimiters(routeLimiters),
+		proxy.WithMaxRetries(retryMax),
+		proxy.WithMaxBodyBytes(int64(retryMaxBodyMB)<<20),
+		proxy.WithRetryWaitMin(retryWaitMin),
+		proxy.WithRetryWaitMax(retryWaitMax),
+		proxy.WithRetryMinDelay(retryMinDelay),
+		proxy.WithRetrySkipOn429(retrySkipOn429),
+		proxy.WithCancelCooldown(cancelCooldown),
+		proxy.WithFailureHold(failureHold),
+		proxy.WithAdaptiveHeadroom(adaptiveHeadroom),
+		proxy.WithAdaptiveHeadroomWindow(adaptiveHeadroomWindow),
+		proxy.WithTransport(transport),
+		proxy.WithJournal(j),
+		proxy.WithBreaker(breaker),
+	)
+	if err != nil {
+		return fmt.Errorf("proxy config: %w", err)
+	}
 
 	if len(limitList) > 0 {
 		var parts []string
@@ -184,10 +271,32 @@ func run() error {
 	}
 	if retryMax != 0 {
 		if retryMax < 0 {
-			log.Printf("retry: unlimited (backoff capped at 30s)")
+			log.Printf("retry: unlimited (backoff %s–%s)", retryWaitMin, retryWaitMax)
 		} else {
-			log.Printf("retry: max %d attempts", retryMax)
+			log.Printf("retry: max %d attempts (backoff %s–%s)", retryMax, retryWaitMin, retryWaitMax)
 		}
+	}
+	if breaker != nil {
+		log.Printf("circuit breaker: threshold=%d window=%s open-timeout=%s penalty=%s max-penalty=%s",
+			cbThreshold, cbWindow, cbOpenTimeout, cbPenalty, cbMaxPenalty)
+	}
+	if retryMinDelay > 0 {
+		log.Printf("retry min delay: %s", retryMinDelay)
+	}
+	if retrySkipOn429 {
+		log.Printf("retry skip 429: enabled")
+	}
+	if releaseCooldown > 0 {
+		log.Printf("release cooldown: %s", releaseCooldown)
+	}
+	if cancelCooldown > 0 {
+		log.Printf("cancel cooldown: %s", cancelCooldown)
+	}
+	if failureHold > 0 {
+		log.Printf("failure hold: %s", failureHold)
+	}
+	if adaptiveHeadroom {
+		log.Printf("adaptive headroom: enabled (window %s)", adaptiveHeadroomWindow)
 	}
 
 	srv := &http.Server{Addr: bindAddr, Handler: p}
@@ -222,7 +331,24 @@ func run() error {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					snapCh <- met.Snapshot()
+					snap := met.Snapshot()
+					if breaker != nil {
+						s := breaker.Stats()
+						snap.CircuitBreaker = &metrics.CBStats{
+							State:               s.State.String(),
+							Failures:            s.Failures,
+							ConsecutiveFailures: s.ConsecutiveFailures,
+							TotalFailures:       s.TotalFailures,
+							TotalSuccesses:      s.TotalSuccesses,
+							CurrentPenalty:      s.CurrentPenalty,
+							NextRetry:           s.NextRetry,
+						}
+					}
+					select {
+					case snapCh <- snap:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}()
@@ -249,6 +375,45 @@ func run() error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// upstreamMaxIdleConnsPerHost returns the minimum number of idle connections
+// the upstream transport should keep open per host. It is derived from the
+// configured route/global concurrency limiters so that multi-route or grouped
+// configurations do not thrash TCP connections after bursts, while still
+// honoring the global concurrency cap and a safe default floor.
+func upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency int, patterns []route.Pattern, routeLimiters map[string]*queue.Limiter) int {
+	routePoolMax := 0
+	for _, lim := range routeLimiters {
+		routePoolMax += lim.Limit()
+	}
+
+	defaultPoolUsed := false
+	for _, p := range patterns {
+		key := p.Group
+		if key == "" {
+			key = p.Raw
+		}
+		if p.Limit == 0 {
+			if p.Group == "" {
+				defaultPoolUsed = true
+				continue
+			}
+			if _, ok := routeLimiters[key]; !ok {
+				defaultPoolUsed = true
+			}
+		}
+	}
+	if defaultPoolUsed {
+		routePoolMax += concurrency
+	}
+	if globalConcurrency > 0 && routePoolMax > globalConcurrency {
+		routePoolMax = globalConcurrency
+	}
+	if routePoolMax < 20 {
+		return 20
+	}
+	return routePoolMax
 }
 
 // limitFlags implements flag.Value for repeatable -limit flags.

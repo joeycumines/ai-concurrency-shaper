@@ -29,7 +29,7 @@ func TestPTY_PageKeys(t *testing.T) {
 
 	// Generate enough requests to make scrolling meaningful
 	proxyURL := h.ProxyURL()
-	for i := 0; i < 15; i++ {
+	for i := range 15 {
 		path := "/v1/messages"
 		if i%2 == 1 {
 			path = "/v1/chat/completions"
@@ -89,7 +89,7 @@ func TestPTY_HomeEndKeys(t *testing.T) {
 
 	// Inject some requests
 	proxyURL := h.ProxyURL()
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		sendRequest(t, t.Context(), proxyURL+"/v1/messages")
 	}
 	time.Sleep(2 * time.Second)
