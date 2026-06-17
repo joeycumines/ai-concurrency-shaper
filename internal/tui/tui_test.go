@@ -28,6 +28,8 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/toast"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/viewport"
+	"github.com/rivo/uniseg"
 )
 
 // helper: apply a message and return the updated model (type-asserted).
@@ -55,6 +57,11 @@ func key(r rune) tea.Msg {
 func special(k string) tea.Msg {
 	return tea.KeyPressMsg{Text: k}
 }
+
+// scrollbarTop returns the first terminal row that belongs to the scrollbar
+// track for the current tab. It is offset past the fixed header rows so that
+// the scrollbar aligns with the scrollable data area.
+func scrollbarTop(m Model) int { return contentStartRow + m.contentHeaderRows() }
 
 func TestViewRenders(t *testing.T) {
 	m := NewModel(10)
@@ -667,7 +674,7 @@ func TestConcurrencyTabInFlight(t *testing.T) {
 func TestDashboardSummary(t *testing.T) {
 	m := NewModel(4)
 	m.width = 80
-	m.height = 24
+	m.height = 40
 	m.tab = tabDashboard
 	m.snap.TotalProxied = 100
 	m.snap.TotalPassThrough = 50
@@ -1000,7 +1007,7 @@ func TestAdjustViewportClampsOnFilterShrink(t *testing.T) {
 
 	// Ensure a render would show rows (not a blank screen).
 	entries := m.visibleEntries()
-	visible := m.visibleRows()
+	visible := m.dataRows()
 	start := m.scroll
 	end := min(start+visible, len(entries))
 	if start >= end {
@@ -1266,8 +1273,34 @@ func TestVisibleRows_NormalTab(t *testing.T) {
 	m.height = 24
 	m.tab = tabRequests
 	v := m.visibleRows()
-	if v != 16 {
-		t.Errorf("visibleRows = %d, want 16 (24-8)", v)
+	if v != 20 {
+		t.Errorf("visibleRows = %d, want 20 (24-4)", v)
+	}
+}
+
+func TestVisibleRows_FilterTab(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.mode = modeFilter
+	m.filterText = "x"
+	v := m.visibleRows()
+	if v != 19 {
+		t.Errorf("visibleRows = %d, want 19 (24-4-1)", v)
+	}
+}
+
+func TestVisibleRows_ToastOverlay(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.AddToast(&toast.Toast{Message: "a", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "b", Duration: 5 * time.Second})
+	v := m.visibleRows()
+	if v != 18 {
+		t.Errorf("visibleRows = %d, want 18 (24-4-2)", v)
 	}
 }
 
@@ -1277,8 +1310,44 @@ func TestVisibleRows_ConcurrencyTab(t *testing.T) {
 	m.height = 24
 	m.tab = tabConcurrency
 	v := m.visibleRows()
-	if v != 10 {
-		t.Errorf("visibleRows = %d, want 10 (24-8-6)", v)
+	if v != 20 {
+		t.Errorf("visibleRows = %d, want 20 (24-4)", v)
+	}
+}
+
+func TestDataRows_PerTab(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+
+	m.tab = tabRequests
+	if got, want := m.dataRows(), 18; got != want {
+		t.Errorf("requests dataRows = %d, want %d (header+count)", got, want)
+	}
+
+	m.tab = tabNetwork
+	if got, want := m.dataRows(), 18; got != want {
+		t.Errorf("network dataRows = %d, want %d (header+count)", got, want)
+	}
+
+	m.tab = tabLogs
+	if got, want := m.dataRows(), 20; got != want {
+		t.Errorf("logs dataRows = %d, want %d (no header row)", got, want)
+	}
+
+	m.tab = tabRoutes
+	if got, want := m.dataRows(), 18; got != want {
+		t.Errorf("routes dataRows = %d, want %d (header+count)", got, want)
+	}
+
+	m.tab = tabConcurrency
+	if got, want := m.dataRows(), 10; got != want {
+		t.Errorf("concurrency dataRows = %d, want %d (10 fixed rows)", got, want)
+	}
+
+	m.tab = tabDashboard
+	if got, want := m.dataRows(), 20; got != want {
+		t.Errorf("dashboard dataRows = %d, want %d", got, want)
 	}
 }
 
@@ -1298,8 +1367,10 @@ func TestMaxCursor_Dashboard(t *testing.T) {
 	m.width = 80
 	m.height = 24
 	m.tab = tabDashboard
-	if m.maxCursor() != 0 {
-		t.Errorf("maxCursor on dashboard = %d, want 0", m.maxCursor())
+	// The dashboard is now scrollable when its content exceeds the viewport.
+	got := m.maxCursor()
+	if got <= 0 {
+		t.Errorf("maxCursor on dashboard = %d, want > 0 in the default 24-line terminal", got)
 	}
 }
 
@@ -1905,9 +1976,9 @@ func TestRenderDashboard_CircuitBreakerColors(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			m := NewModel(4)
 			m.width = 80
-			m.height = 24
+			m.height = 40
 			m.snap.CircuitBreaker = &metrics.CBStats{State: state}
-			s := m.renderDashboard()
+			s := m.renderDashboardContent()
 			if !strings.Contains(s, state) {
 				t.Errorf("should show state %q, got: %s", state, s)
 			}
@@ -1917,21 +1988,21 @@ func TestRenderDashboard_CircuitBreakerColors(t *testing.T) {
 	// Color assertions: CLOSED green, OPEN red, HALF_OPEN amber.
 	m := NewModel(4)
 	m.width = 80
-	m.height = 24
+	m.height = 40
 	m.snap.CircuitBreaker = &metrics.CBStats{State: "CLOSED"}
-	closed := m.renderDashboard()
+	closed := m.renderDashboardContent()
 	if !strings.Contains(closed, "38;2;63;185;80") {
 		t.Errorf("CLOSED should render green, got: %s", closed)
 	}
 
 	m.snap.CircuitBreaker = &metrics.CBStats{State: "OPEN"}
-	open := m.renderDashboard()
+	open := m.renderDashboardContent()
 	if !strings.Contains(open, "38;2;248;81;73") {
 		t.Errorf("OPEN should render red, got: %s", open)
 	}
 
 	m.snap.CircuitBreaker = &metrics.CBStats{State: "HALF_OPEN"}
-	half := m.renderDashboard()
+	half := m.renderDashboardContent()
 	if !strings.Contains(half, "38;2;240;136;62") {
 		t.Errorf("HALF_OPEN should render amber, got: %s", half)
 	}
@@ -1940,7 +2011,7 @@ func TestRenderDashboard_CircuitBreakerColors(t *testing.T) {
 func TestRenderDashboard_CircuitBreakerSingleLine(t *testing.T) {
 	m := NewModel(4)
 	m.width = 80
-	m.height = 24
+	m.height = 40
 	m.snap.CircuitBreaker = &metrics.CBStats{
 		State:               "OPEN",
 		Failures:            5,
@@ -1948,7 +2019,7 @@ func TestRenderDashboard_CircuitBreakerSingleLine(t *testing.T) {
 		CurrentPenalty:      2 * time.Second,
 		NextRetry:           time.Now().Add(time.Hour),
 	}
-	s := m.renderDashboard()
+	s := m.renderDashboardContent()
 	if strings.Contains(s, "\n  |  Failures") {
 		t.Errorf("circuit breaker summary should be one line, got standalone field line in: %s", s)
 	}
@@ -2074,8 +2145,9 @@ func TestMouseClickContentArea_SetsCursor(t *testing.T) {
 	m.tab = tabRequests
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
 	m2 := update(m, tea.MouseClickMsg{X: 10, Y: 5})
-	if m2.cursor != 2 {
-		t.Errorf("cursor = %d, want 2 (row 5 - contentStartRow 3 + scroll 0)", m2.cursor)
+	// Row 5 skips the table header on row 3, so it maps to data row 1.
+	if m2.cursor != 1 {
+		t.Errorf("cursor = %d, want 1 (row 5 - contentStartRow 3 - header 1)", m2.cursor)
 	}
 }
 
@@ -2091,14 +2163,36 @@ func TestMouseClickContentArea_ClampsToMaxCursor(t *testing.T) {
 	}
 }
 
-func TestMouseClickContentArea_IgnoresDashboardTab(t *testing.T) {
+func TestMouseClickContentArea_DashboardSetsCursor(t *testing.T) {
 	m := NewModel(4)
 	m.width = 80
 	m.height = 24
 	m.tab = tabDashboard
 	m2 := update(m, tea.MouseClickMsg{X: 10, Y: 5})
+	// Dashboard is scrollable, so a content click sets the cursor/scroll position.
+	if m2.cursor != 2 {
+		t.Errorf("cursor = %d, want 2 (row 5 - contentStartRow 3 + scroll 0)", m2.cursor)
+	}
+}
+
+func TestMouseClickContentArea_LogsTabNoHeader(t *testing.T) {
+	// The Logs tab has no header row (line numbers are embedded in data rows),
+	// so clicking the first content row should set cursor=0, not be ignored.
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("line1\nline2\nline3\n"))
+	// contentHeaderRows for Logs without filter is 0, so clicking
+	// contentStartRow (row 3) maps to cursor 0.
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow})
 	if m2.cursor != 0 {
-		t.Errorf("cursor = %d, want 0 (dashboard ignores content clicks)", m2.cursor)
+		t.Errorf("Logs first-row click: cursor = %d, want 0 (no header offset)", m2.cursor)
+	}
+	// Second row should map to cursor 1.
+	m3 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow + 1})
+	if m3.cursor != 1 {
+		t.Errorf("Logs second-row click: cursor = %d, want 1", m3.cursor)
 	}
 }
 
@@ -2270,7 +2364,7 @@ func TestMouseClickScrollbar_TopJumpsToTop(t *testing.T) {
 	m.tab = tabRequests
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
 	m.scroll = 50
-	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: scrollbarTop(m)})
 	if m2.scroll != 0 {
 		t.Errorf("click at top of scrollbar: scroll = %d, want 0", m2.scroll)
 	}
@@ -2282,7 +2376,7 @@ func TestMouseClickScrollbar_BottomJumpsNearBottom(t *testing.T) {
 	m.height = 24
 	m.tab = tabRequests
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
-	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow + m.visibleRows() - 1})
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: scrollbarTop(m) + m.dataRows() - 1})
 	if m2.scroll < 70 {
 		t.Errorf("click at bottom of scrollbar: scroll = %d, want >= 70", m2.scroll)
 	}
@@ -2294,10 +2388,10 @@ func TestMouseClickScrollbar_MiddleJumpsNearMiddle(t *testing.T) {
 	m.height = 24
 	m.tab = tabRequests
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
-	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow + m.visibleRows()/2})
-	// Click at viewport center maps to ~67% in thumb-space (12/18), which is ~51 of 76.
-	if m2.scroll < 46 || m2.scroll > 56 {
-		t.Errorf("click at middle of scrollbar: scroll = %d, want [46, 56]", m2.scroll)
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: scrollbarTop(m) + m.dataRows()/2})
+	// Track height is dataRows (18), so the center maps to ~49 of maxScroll (82).
+	if m2.scroll < 45 || m2.scroll > 55 {
+		t.Errorf("click at middle of scrollbar: scroll = %d, want [45, 55]", m2.scroll)
 	}
 }
 
@@ -2308,10 +2402,10 @@ func TestMouseClickContentArea_CursorFollowsClick(t *testing.T) {
 	m.tab = tabRequests
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
 	m.scroll = 10
-	// Click on the 3rd visible row (Y = contentStartRow + 2).
-	m2 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow + 2})
-	if m2.cursor != 12 {
-		t.Errorf("cursor = %d, want 12 (scroll 10 + relative row 2)", m2.cursor)
+	// Click on the 2nd visible data row (past the table header).
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow + m.contentHeaderRows() + 1})
+	if m2.cursor != 11 {
+		t.Errorf("cursor = %d, want 11 (scroll 10 + relative data row 1)", m2.cursor)
 	}
 }
 
@@ -2337,15 +2431,17 @@ func TestMouseDrag_TopToBottom(t *testing.T) {
 	m.height = 24
 	m.tab = tabRequests
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
-	// Start drag at top.
-	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
+	// Start drag at top of the scrollbar track.
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: scrollbarTop(m)})
 	if m2.scroll != 0 {
 		t.Errorf("initial drag at top: scroll = %d, want 0", m2.scroll)
 	}
-	// Drag to bottom.
-	m3 := update(m2, tea.MouseMotionMsg{X: 79, Y: contentStartRow + m.visibleRows() - 1})
-	if m3.scroll < 70 {
-		t.Errorf("drag to bottom: scroll = %d, want >= 70", m3.scroll)
+	// Drag to bottom. With the corrected geometry (dragRange = trackHeight - thumbHeight)
+	// the user can reach scrollMax.
+	m3 := update(m2, tea.MouseMotionMsg{X: 79, Y: scrollbarTop(m) + m.dataRows() - 1})
+	sm := m.maxScroll()
+	if sm > 0 && m3.scroll < sm-3 {
+		t.Errorf("drag to bottom: scroll = %d, want >= %d (scrollMax=%d)", m3.scroll, sm-3, sm)
 	}
 }
 
@@ -2356,9 +2452,10 @@ func TestMouseDrag_Monotonic(t *testing.T) {
 	m.height = 24
 	m.tab = tabRequests
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
-	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: scrollbarTop(m)})
 	prev := -1
-	for y := contentStartRow; y < contentStartRow+m.visibleRows(); y++ {
+	for dy := 0; dy < m.dataRows(); dy++ {
+		y := scrollbarTop(m) + dy
 		m3 := update(m2, tea.MouseMotionMsg{X: 79, Y: y})
 		if m3.scroll < prev {
 			t.Errorf("drag not monotonic: scroll at y=%d is %d, was %d", y, m3.scroll, prev)
@@ -2375,26 +2472,45 @@ func TestMouseDrag_Proportional(t *testing.T) {
 	m.tab = tabRequests
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
 
-	quarter := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
-	quarter = update(quarter, tea.MouseMotionMsg{X: 79, Y: contentStartRow + m.visibleRows()/4})
+	trackTop := scrollbarTop(m)
 
-	half := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
-	half = update(half, tea.MouseMotionMsg{X: 79, Y: contentStartRow + m.visibleRows()/2})
+	quarter := update(m, tea.MouseClickMsg{X: 79, Y: trackTop})
+	quarter = update(quarter, tea.MouseMotionMsg{X: 79, Y: trackTop + m.dataRows()/4})
 
-	threeQ := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow})
-	threeQ = update(threeQ, tea.MouseMotionMsg{X: 79, Y: contentStartRow + 3*m.visibleRows()/4})
+	half := update(m, tea.MouseClickMsg{X: 79, Y: trackTop})
+	half = update(half, tea.MouseMotionMsg{X: 79, Y: trackTop + m.dataRows()/2})
+
+	threeQ := update(m, tea.MouseClickMsg{X: 79, Y: trackTop})
+	threeQ = update(threeQ, tea.MouseMotionMsg{X: 79, Y: trackTop + 3*m.dataRows()/4})
 
 	// Quarter should be roughly 25% of max scroll.
-	if quarter.scroll < 10 || quarter.scroll > 25 {
-		t.Errorf("quarter drag: scroll = %d, want [10, 25]", quarter.scroll)
+	if quarter.scroll < 18 || quarter.scroll > 25 {
+		t.Errorf("quarter drag: scroll = %d, want [18, 25]", quarter.scroll)
 	}
 	// Half should be roughly 50%.
-	if half.scroll < 30 || half.scroll > 46 {
-		t.Errorf("half drag: scroll = %d, want [30, 46]", half.scroll)
+	if half.scroll < 40 || half.scroll > 55 {
+		t.Errorf("half drag: scroll = %d, want [40, 55]", half.scroll)
 	}
-	// 3/4: relativeY=12, adjusted=11, scroll=(11*84+6)/13=71.
-	if threeQ.scroll < 60 || threeQ.scroll > 76 {
-		t.Errorf("three-quarter drag: scroll = %d, want [58, 68]", threeQ.scroll)
+	// 3/4 should be roughly 75%.
+	if threeQ.scroll < 65 || threeQ.scroll > 81 {
+		t.Errorf("three-quarter drag: scroll = %d, want [65, 81]", threeQ.scroll)
+	}
+}
+
+func TestMouseDrag_ReachBottom(t *testing.T) {
+	// Dragging from the very top to the very bottom of the scrollbar track
+	// must reach scrollMax, proving the user can scroll to the last line.
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+	trackTop := scrollbarTop(m)
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: trackTop})
+	m3 := update(m2, tea.MouseMotionMsg{X: 79, Y: trackTop + m.dataRows() - 1})
+	sm := m.maxScroll()
+	if sm > 0 && m3.scroll < sm {
+		t.Errorf("full drag: scroll = %d, want %d (scrollMax)", m3.scroll, sm)
 	}
 }
 
@@ -2479,7 +2595,7 @@ func TestRenderDashboard_NarrowWidth(t *testing.T) {
 		m.width = w
 		m.height = 24
 		m.tab = tabDashboard
-		s := m.renderDashboard()
+		s := m.renderDashboardContent()
 		if !strings.Contains(s, "Throughput") && w >= 15 {
 			t.Errorf("width=%d: renderDashboard missing Throughput", w)
 		}
@@ -2560,8 +2676,9 @@ func TestUpdateScrollbars_AtVariousSizes(t *testing.T) {
 			if sb.ContentHeight != 100 {
 				t.Errorf("w=%d h=%d: ContentHeight = %d, want 100", w, h, sb.ContentHeight)
 			}
-			if sb.ViewportHeight != m.visibleRows() {
-				t.Errorf("w=%d h=%d: ViewportHeight = %d, want %d", w, h, sb.ViewportHeight, m.visibleRows())
+			want := m.dataRows()
+			if sb.ViewportHeight != want {
+				t.Errorf("w=%d h=%d: ViewportHeight = %d, want %d", w, h, sb.ViewportHeight, want)
 			}
 		}
 	}
@@ -2597,12 +2714,12 @@ func TestViewport_SingleRow(t *testing.T) {
 }
 
 func TestViewport_ExactFit(t *testing.T) {
-	// Content exactly fits the visible area.
+	// Content exactly fits the data row area.
 	m := NewModel(4)
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
-	visible := m.visibleRows()
+	visible := m.dataRows()
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, visible)
 	m2 := update(m, key('G'))
 	if m2.cursor != visible-1 {
@@ -2614,12 +2731,12 @@ func TestViewport_ExactFit(t *testing.T) {
 }
 
 func TestViewport_OnePastFit(t *testing.T) {
-	// Content is exactly one more than visible area.
+	// Content is exactly one more than the data row area.
 	m := NewModel(4)
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
-	visible := m.visibleRows()
+	visible := m.dataRows()
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, visible+1)
 	m2 := update(m, key('G'))
 	if m2.cursor != visible {
@@ -2656,9 +2773,631 @@ func TestViewport_CursorPreservedOnScroll(t *testing.T) {
 	m.scroll = 40
 	// Page up.
 	m2 := update(m, tea.KeyPressMsg{Code: tea.KeyPgUp})
-	// Cursor should have moved up by visible rows.
-	expected := 50 - m.visibleRows()
+	// Cursor should have moved up by data rows.
+	expected := 50 - m.dataRows()
 	if m2.cursor != expected {
 		t.Errorf("cursor = %d, want %d after PgUp", m2.cursor, expected)
 	}
+}
+
+func TestFooter_AnchoredAtBottom(t *testing.T) {
+	for _, tab := range []tabID{tabDashboard, tabRequests, tabNetwork, tabLogs, tabConcurrency, tabRoutes} {
+		m := NewModel(4)
+		m.width = 80
+		m.height = 24
+		m.tab = tab
+
+		// Give each tab enough content that it is non-empty.
+		switch tab {
+		case tabDashboard:
+			m.snap.CircuitBreaker = &metrics.CBStats{State: "CLOSED"}
+		case tabRequests:
+			m.snap.LogEntries = []metrics.RequestLogEntry{}
+			for i := range 25 {
+				m.snap.LogEntries = append(m.snap.LogEntries, metrics.RequestLogEntry{
+					Method: "POST", Path: "/v1/messages", Status: 200,
+					Time: time.Now().Add(-time.Duration(i) * time.Second),
+				})
+			}
+		case tabNetwork:
+			// journal is nil in the test model; keep empty to avoid panic.
+		case tabLogs:
+			m.logRing.Write([]byte("first log line\nsecond log line\n"))
+		case tabConcurrency:
+			for i := range 15 {
+				m.snap.InFlight = append(m.snap.InFlight, metrics.InFlightEntry{
+					ID: uint64(i), Method: "POST", Path: "/v1/messages", Limited: true,
+				})
+			}
+		case tabRoutes:
+			m.snap.RouteStats = map[string]metrics.RouteStat{
+				"POST /v1/messages": {Total: 1},
+			}
+		}
+
+		v := m.View()
+		lines := strings.Split(v.Content, "\n")
+
+		// The view must produce exactly one line per terminal row.
+		if len(lines) != m.height {
+			t.Errorf("tab=%d: view has %d lines, want %d", tab, len(lines), m.height)
+			continue
+		}
+
+		// The footer must be the very last line.
+		last := lines[len(lines)-1]
+		if !strings.Contains(last, "1-6:tab") {
+			t.Errorf("tab=%d: last line should be footer, got %q", tab, last)
+		}
+	}
+}
+
+func TestFooter_FilterPromptOnOwnLine(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.mode = modeFilter
+	m.filterText = "hello"
+	v := m.View()
+	lines := strings.Split(v.Content, "\n")
+	var footerIdx, filterIdx int
+	for i, line := range lines {
+		if strings.Contains(line, "1-6:tab") {
+			footerIdx = i
+		}
+		if strings.Contains(line, "Filter: hello") {
+			filterIdx = i
+		}
+	}
+	if filterIdx == 0 {
+		t.Fatal("filter prompt not found in view")
+	}
+	if footerIdx == 0 {
+		t.Fatal("footer not found in view")
+	}
+	if footerIdx-filterIdx != 1 {
+		t.Errorf("footer line = %d, filter line = %d, want filter immediately above footer", footerIdx, filterIdx)
+	}
+}
+
+func TestDashboardScrollsWithKeyboard(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabDashboard
+	// Add enough dashboard state that the content exceeds visibleRows.
+	m.snap.CircuitBreaker = &metrics.CBStats{State: "CLOSED"}
+	for i := range 10 {
+		m.snap.InFlight = append(m.snap.InFlight, metrics.InFlightEntry{
+			ID:     uint64(i),
+			Method: "POST",
+			Path:   "/v1/messages",
+		})
+	}
+
+	maxC := m.maxCursor()
+	if maxC <= m.visibleRows() {
+		t.Fatalf("dashboard content too small: maxCursor=%d, visible=%d", maxC, m.visibleRows())
+	}
+
+	// Jump to bottom and verify the dashboard scrolls.
+	m2 := update(m, key('G'))
+	if m2.scroll <= 0 {
+		t.Errorf("dashboard scroll = %d, want > 0 after G", m2.scroll)
+	}
+
+	// Jump back to top.
+	m3 := update(m2, key('g'))
+	if m3.scroll != 0 {
+		t.Errorf("dashboard scroll = %d, want 0 after g", m3.scroll)
+	}
+}
+
+func TestDashboardScrollbarNotFullWhenOverflow(t *testing.T) {
+	// Force dashboard overflow by shrinking the terminal so dashboard lines
+	// exceed visibleRows. A 15-row terminal gives visibleRows=11 (height-4),
+	// which is smaller than the default dashboard line count (~18).
+	m := NewModel(4)
+	m.width = 80
+	m.height = 15
+	m.tab = tabDashboard
+	m.dashboardLinesCache = m.dashboardLines()
+	v := m.View()
+	// The scrollbar must contain both track (│) and thumb (█) characters
+	// in the rightmost column when content overflows.
+	if m.maxCursor()+1 <= m.visibleRows() {
+		t.Skipf("dashboard not overflowing: lines=%d visibleRows=%d", m.maxCursor()+1, m.visibleRows())
+	}
+	if !strings.Contains(v.Content, "│") {
+		t.Error("dashboard overflow should render scrollbar track (│)")
+	}
+	if !strings.Contains(v.Content, "█") {
+		t.Error("dashboard overflow should render scrollbar thumb (█)")
+	}
+}
+
+func TestUpdateScrollbars_PerTab(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 10)
+	m.updateScrollbars()
+	if m.scrollbars[tabRequests].ContentHeight != 10 {
+		t.Errorf("requests ContentHeight = %d, want 10", m.scrollbars[tabRequests].ContentHeight)
+	}
+	if m.scrollbars[tabRoutes].ContentHeight != 0 {
+		t.Errorf("routes ContentHeight = %d, want 0 before visiting", m.scrollbars[tabRoutes].ContentHeight)
+	}
+
+	m.snap.RouteStats = map[string]metrics.RouteStat{
+		"POST /a": {Total: 1},
+		"POST /b": {Total: 2},
+	}
+	m.tab = tabRoutes
+	m.updateScrollbars()
+	if m.scrollbars[tabRoutes].ContentHeight != 2 {
+		t.Errorf("routes ContentHeight = %d, want 2", m.scrollbars[tabRoutes].ContentHeight)
+	}
+}
+
+func TestScrollbarDrag_GrabOffsetNoJump(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 100)
+	m.scroll = 42
+
+	// Compute where the thumb is and grab its bottom edge.
+	contentHeight := m.maxCursor() + 1
+	trackHeight := m.dataRows()
+	trackTop := scrollbarTop(m)
+	thumbTop := viewport.ThumbTop(m.scroll, contentHeight, trackHeight)
+	thumbHeight := viewport.ThumbHeight(contentHeight, trackHeight)
+	grabY := trackTop + thumbTop + thumbHeight - 1
+
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: grabY})
+	if m2.scroll != 42 {
+		t.Fatalf("click on thumb should not jump: scroll = %d, want 42", m2.scroll)
+	}
+
+	// Drag one row down: scroll should change by a small proportional amount,
+	// not by a large absolute jump.
+	m3 := update(m2, tea.MouseMotionMsg{X: 79, Y: grabY + 1})
+	delta := m3.scroll - 42
+	if delta < 1 || delta > 10 {
+		t.Errorf("drag one row: scroll delta = %d, want [1, 10]", delta)
+	}
+}
+
+// ─── TUI-REVIEW-01: scratch/review-01.md fixes ───
+
+func dashboardWithOverflow(conc, height, flights int) Model {
+	m := NewModel(conc)
+	m.width = 80
+	m.height = height
+	m.tab = tabDashboard
+	m.snap.CircuitBreaker = &metrics.CBStats{State: "CLOSED"}
+	for i := range flights {
+		m.snap.InFlight = append(m.snap.InFlight, metrics.InFlightEntry{
+			ID: uint64(i), Method: "POST", Path: "/v1/messages", Limited: true,
+		})
+	}
+	return m
+}
+
+func TestDashboardScrollByLine(t *testing.T) {
+	m := dashboardWithOverflow(4, 12, 20)
+	if m.maxScroll() <= 0 {
+		t.Fatalf("need overflowing dashboard: maxScroll=%d visible=%d", m.maxScroll(), m.visibleRows())
+	}
+
+	m2 := update(m, key('j'))
+	if m2.scroll != 1 || m2.cursor != 1 {
+		t.Errorf("after j: scroll=%d cursor=%d, want 1,1", m2.scroll, m2.cursor)
+	}
+
+	m3 := update(m2, key('k'))
+	if m3.scroll != 0 || m3.cursor != 0 {
+		t.Errorf("after k: scroll=%d cursor=%d, want 0,0", m3.scroll, m3.cursor)
+	}
+}
+
+func TestDashboardScrollArrowKeys(t *testing.T) {
+	m := dashboardWithOverflow(4, 12, 20)
+	if m.maxScroll() <= 0 {
+		t.Fatalf("need overflowing dashboard: maxScroll=%d visible=%d", m.maxScroll(), m.visibleRows())
+	}
+
+	m2 := update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	if m2.scroll != 1 {
+		t.Errorf("after Down: scroll=%d, want 1", m2.scroll)
+	}
+
+	m3 := update(m2, tea.KeyPressMsg{Code: tea.KeyUp})
+	if m3.scroll != 0 {
+		t.Errorf("after Up: scroll=%d, want 0", m3.scroll)
+	}
+}
+
+func TestDashboardScrollPageAndEndKeys(t *testing.T) {
+	m := dashboardWithOverflow(4, 12, 30)
+	if m.maxScroll() <= 0 {
+		t.Fatalf("need overflowing dashboard: maxScroll=%d visible=%d", m.maxScroll(), m.visibleRows())
+	}
+
+	m2 := update(m, tea.KeyPressMsg{Code: tea.KeyPgDown})
+	if m2.scroll <= 0 {
+		t.Errorf("after PgDown: scroll=%d, want > 0", m2.scroll)
+	}
+	if m2.scroll > m2.maxScroll() {
+		t.Errorf("after PgDown: scroll=%d exceeds maxScroll=%d", m2.scroll, m2.maxScroll())
+	}
+
+	m3 := update(m2, tea.KeyPressMsg{Code: tea.KeyEnd})
+	if m3.scroll != m3.maxScroll() {
+		t.Errorf("after End: scroll=%d, want %d", m3.scroll, m3.maxScroll())
+	}
+
+	m4 := update(m3, tea.KeyPressMsg{Code: tea.KeyHome})
+	if m4.scroll != 0 || m4.cursor != 0 {
+		t.Errorf("after Home: scroll=%d cursor=%d, want 0,0", m4.scroll, m4.cursor)
+	}
+
+	m5 := update(m, tea.KeyPressMsg{Text: "ctrl+d"})
+	if m5.scroll <= 0 {
+		t.Errorf("after Ctrl-D: scroll=%d, want > 0", m5.scroll)
+	}
+
+	m6 := update(m5, tea.KeyPressMsg{Text: "ctrl+u"})
+	if m6.scroll >= m5.scroll {
+		t.Errorf("after Ctrl-U: scroll=%d, want < previous %d", m6.scroll, m5.scroll)
+	}
+}
+
+func TestDashboardScrollGKeys(t *testing.T) {
+	m := dashboardWithOverflow(4, 12, 30)
+	if m.maxScroll() <= 0 {
+		t.Fatalf("need overflowing dashboard: maxScroll=%d visible=%d", m.maxScroll(), m.visibleRows())
+	}
+
+	m2 := update(m, key('G'))
+	if m2.scroll != m2.maxScroll() {
+		t.Errorf("after G: scroll=%d, want %d", m2.scroll, m2.maxScroll())
+	}
+
+	m3 := update(m2, key('g'))
+	if m3.scroll != 0 || m3.cursor != 0 {
+		t.Errorf("after g: scroll=%d cursor=%d, want 0,0", m3.scroll, m3.cursor)
+	}
+}
+
+func TestDashboardScrollDoesNotAffectRequestsTab(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
+
+	m2 := update(m, key('j'))
+	if m2.cursor != 1 {
+		t.Errorf("requests tab cursor=%d, want 1", m2.cursor)
+	}
+	if m2.scroll != 0 {
+		t.Errorf("requests tab scroll=%d, want 0", m2.scroll)
+	}
+}
+
+func TestDashboardCacheLazyEvaluation(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = make([]metrics.RequestLogEntry, 5)
+
+	m2 := update(m, metrics.Snapshot{})
+	if m2.dashboardLinesCache != nil {
+		t.Errorf("dashboardLinesCache should remain nil on non-Dashboard tab, got %d entries", len(m2.dashboardLinesCache))
+	}
+
+	m2.tab = tabDashboard
+	_ = m2.cachedDashboardLines()
+	if len(m2.dashboardLinesCache) == 0 {
+		t.Error("cachedDashboardLines should build cache lazily when accessed on Dashboard")
+	}
+}
+
+func TestDashboardCacheInvalidation(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabDashboard
+	for i := range 20 {
+		m.snap.InFlight = append(m.snap.InFlight, metrics.InFlightEntry{
+			ID: uint64(i), Method: "POST", Path: "/v1/messages", Limited: true,
+		})
+	}
+
+	m = update(m, metrics.Snapshot{})
+	if len(m.dashboardLinesCache) == 0 {
+		t.Fatal("expected dashboardLinesCache to be populated after snapshot")
+	}
+	firstCache := m.dashboardLinesCache
+
+	// Non-mutating input messages should reuse the cached lines.
+	m2 := update(m, tea.MouseMotionMsg{X: 10, Y: 10})
+	if m2.dashboardLinesCache == nil {
+		t.Error("MouseMotionMsg should not clear dashboardLinesCache")
+	}
+	m2 = update(m2, key('j'))
+	if m2.dashboardLinesCache == nil {
+		t.Error("KeyPressMsg should not clear dashboardLinesCache")
+	}
+	m2 = update(m2, tea.MouseWheelMsg{Button: tea.MouseWheelDown})
+	if m2.dashboardLinesCache == nil {
+		t.Error("MouseWheelMsg should not clear dashboardLinesCache")
+	}
+	m2 = update(m2, tea.MouseClickMsg{X: 1, Y: contentStartRow})
+	if m2.dashboardLinesCache == nil {
+		t.Error("MouseClickMsg should not clear dashboardLinesCache")
+	}
+	if &m2.dashboardLinesCache[0] != &firstCache[0] || len(m2.dashboardLinesCache) != len(firstCache) {
+		t.Errorf("cache should be reused for non-mutating messages")
+	}
+
+	// A new snapshot mutates the underlying data and invalidates the cache;
+	// adjustViewport rebuilds it, so we assert the content actually changed.
+	snap := m2.snap
+	snap.InFlight = append(snap.InFlight, metrics.InFlightEntry{ID: 999, Method: "GET", Path: "/extra", Limited: true})
+	m3 := update(m2, snap)
+	if m3.dashboardLinesCache == nil {
+		t.Fatal("expected dashboardLinesCache to be rebuilt after snapshot")
+	}
+	if len(m3.dashboardLinesCache) <= len(firstCache) {
+		t.Errorf("snapshot should produce new content: got %d lines, want more than %d", len(m3.dashboardLinesCache), len(firstCache))
+	}
+
+	// A terminal resize also invalidates the cache; the Dashboard tab rebuilds
+	// it in the same Update cycle. Use a sentinel to detect rebuild without
+	// relying on slice backing-array identity.
+	m3.dashboardLinesCache = []string{"SENTINEL"}
+	m4 := update(m3, tea.WindowSizeMsg{Width: 80, Height: 24})
+	if m4.dashboardLinesCache == nil {
+		t.Fatal("expected dashboardLinesCache to be rebuilt after resize")
+	}
+	if len(m4.dashboardLinesCache) == 1 && m4.dashboardLinesCache[0] == "SENTINEL" {
+		t.Error("WindowSizeMsg should invalidate and rebuild dashboardLinesCache")
+	}
+
+	// Switching tabs discards the old tab's cached content. On the Requests tab
+	// adjustViewport never calls cachedDashboardLines, so the cache stays nil.
+	m5 := update(m4, key('2'))
+	if m5.dashboardLinesCache != nil {
+		t.Error("switching tabs should clear dashboardLinesCache")
+	}
+}
+
+func TestTruncateANSI(t *testing.T) {
+	tests := []struct {
+		name        string
+		line        string
+		width       int
+		wantVisible int // 0 means use the natural width bound
+	}{
+		{"short unchanged", statusOkStyle.Render("ok"), 10, 0},
+		{"ascii truncation", statusOkStyle.Render(strings.Repeat("x", 50)), 10, 0},
+		{"cjk truncation", statusOkStyle.Render("日本語説明文"), 4, 0},
+		{"cjk full width", statusOkStyle.Render("日本語説明文"), 10, 0},
+		{"emoji zwj", statusOkStyle.Render("🏳️‍🌈🏳️‍🌈🏳️‍🌈"), 4, 0},
+		{"zero width", "hello", 0, 0},
+		// Odd boundary: the third CJK grapheme would cross the 5-cell mark,
+		// so truncation stops at the first two graphemes (4 cells). This is
+		// the multi-cell underflow condition that renderContentWithScrollbar
+		// must pad away.
+		{"cjk odd boundary underflow", statusOkStyle.Render("日本語"), 5, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateANSI(tt.line, tt.width)
+			visible := uniseg.StringWidth(stripANSI(got))
+			want := tt.wantVisible
+			if want == 0 {
+				want = min(uniseg.StringWidth(stripANSI(tt.line)), tt.width)
+			}
+			if visible != want {
+				t.Errorf("visible cells = %d, want %d; got %q", visible, want, got)
+			}
+			if want > 0 {
+				// The result must still begin with the original ANSI sequences.
+				if !strings.Contains(got, "\x1b[") {
+					t.Errorf("truncated styled content missing ANSI sequences: %q", got)
+				}
+			}
+			if tt.width > 0 && uniseg.StringWidth(stripANSI(tt.line)) > tt.width {
+				if !strings.Contains(got, "\x1b[0m") {
+					t.Errorf("truncation should append reset, got %q", got)
+				}
+			}
+		})
+	}
+}
+
+func TestRenderContentWithScrollbar_RespectsCellWidth(t *testing.T) {
+	m := NewModel(4)
+	m.width = 40
+	m.height = 24
+	m.tab = tabRequests
+	// CJK characters occupy two cells each; a path with several of them will
+	// exceed the 39-cell content area unless truncateANSI uses visual width.
+	m.snap.LogEntries = []metrics.RequestLogEntry{
+		{Method: "POST", Path: "/api/日本語説明文/tests", Status: 200, Duration: time.Millisecond},
+	}
+
+	m.updateScrollbars()
+	contentWidth := m.viewportWidth()
+	s := m.renderContentWithScrollbar()
+	lines := strings.SplitSeq(s, "\n")
+	for line := range lines {
+		if line == "" {
+			continue
+		}
+		stripped := stripANSI(line)
+		cells := uniseg.StringWidth(stripped)
+		// Data rows have a one-cell scrollbar column appended; header rows do
+		// not. Either way the line must never exceed contentWidth+1.
+		if cells > contentWidth+1 {
+			t.Errorf("rendered line overflows %d content cells (got %d): %q", contentWidth, cells, line)
+		}
+		if !strings.Contains(line, "│") && !strings.Contains(line, "█") && cells > contentWidth {
+			t.Errorf("header/empty line overflows %d content cells (got %d): %q", contentWidth, cells, line)
+		}
+	}
+}
+
+func TestScrollbar_AlignedWithDataRows(t *testing.T) {
+	// The Concurrency tab has 10 fixed header rows and 10 data rows. The
+	// scrollbar should appear alongside the data rows, not the header rows.
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	m.tab = tabConcurrency
+	for i := range 15 {
+		m.snap.InFlight = append(m.snap.InFlight, metrics.InFlightEntry{
+			ID: uint64(i), Method: "POST", Path: "/v1/messages", Limited: true,
+		})
+	}
+	m.updateScrollbars()
+
+	s := m.renderContentWithScrollbar()
+	lines := strings.Split(s, "\n")
+	headerRows := 10
+	// The first header row should have content but no scrollbar column.
+	if len(lines) <= headerRows {
+		t.Fatalf("expected at least %d lines, got %d", headerRows+1, len(lines))
+	}
+	firstDataRow := lines[headerRows]
+	lastHeaderRow := lines[headerRows-1]
+	if !strings.Contains(firstDataRow, "│") && !strings.Contains(firstDataRow, "█") {
+		t.Errorf("first data row should contain scrollbar chars, got: %q", firstDataRow)
+	}
+	if strings.Contains(lastHeaderRow, "│") || strings.Contains(lastHeaderRow, "█") {
+		t.Errorf("last header row should not contain scrollbar chars, got: %q", lastHeaderRow)
+	}
+
+	// Clicking inside the header area should not interact with the scrollbar.
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow + headerRows - 1})
+	if m2.scroll != 0 {
+		t.Errorf("click in header area should not scroll: scroll = %d, want 0", m2.scroll)
+	}
+	// Clicking at the top of the track should start a drag.
+	m3 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow + headerRows})
+	if !m3.dragging {
+		t.Error("click at top of data area should set dragging = true")
+	}
+}
+
+func TestRenderContentWithScrollbar_PreservesANSIWhenTruncated(t *testing.T) {
+	m := NewModel(4)
+	// contentWidth is max(width-1, 1) = 37. The row is longer than that, so
+	// truncation occurs in the path. The visible portion still contains the
+	// green 2xx status style from the row, proving the row's own styling
+	// survived ANSI-aware truncation and was not replaced by raw runes.
+	m.width = 38
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = []metrics.RequestLogEntry{
+		{Method: "POST", Path: "/this/request/path/is/far/longer/than/thirty/seven/characters", Status: 200, Duration: time.Millisecond},
+	}
+
+	s := m.renderContentWithScrollbar()
+	if !strings.Contains(s, "\x1b[") {
+		t.Errorf("rendered content should contain ANSI sequences after truncation, got: %q", s)
+	}
+	// statusOkStyle foreground is #3FB950 -> "38;2;63;185;80".
+	if !strings.Contains(s, "38;2;63;185;80") {
+		t.Errorf("row style should survive truncation; expected green status ANSI sequence in: %q", s)
+	}
+}
+
+func TestRenderContentWithScrollbar_NoCellUnderflow(t *testing.T) {
+	m := NewModel(4)
+	// contentWidth is max(width-1, 1) = 36. A request row has a fixed ASCII
+	// prefix of 35 visible cells (two leading spaces + time/method/status/
+	// duration/double-space), so appending a single CJK character makes the
+	// row 37 cells wide. Truncation at 36 drops the CJK grapheme to stay
+	// within the boundary, leaving a 35-cell visible string. Without padding,
+	// the scrollbar column would collapse one cell leftward on that row.
+	m.width = 37
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = []metrics.RequestLogEntry{
+		{Method: "POST", Path: "日", Status: 200, Duration: time.Millisecond},
+	}
+
+	m.updateScrollbars()
+	contentWidth := m.viewportWidth()
+	if contentWidth != 36 {
+		t.Fatalf("test assumption broken: contentWidth = %d, want 36", contentWidth)
+	}
+
+	var rowFound bool
+	s := m.renderContentWithScrollbar()
+	for line := range strings.SplitSeq(s, "\n") {
+		if line == "" {
+			continue
+		}
+		// Only inspect the actual request data row; the header and count rows
+		// do not exercise the CJK boundary.
+		if !strings.Contains(line, "POST") || !strings.Contains(line, "200") {
+			continue
+		}
+		rowFound = true
+		stripped := stripANSI(line)
+		cells := uniseg.StringWidth(stripped)
+		// Data rows carry the scrollbar column and must therefore occupy
+		// exactly contentWidth+1 visible cells when padded correctly.
+		if cells != contentWidth+1 {
+			t.Errorf("CJK data row width = %d, want %d; line = %q", cells, contentWidth+1, line)
+		}
+		// Split the visible line at the contentWidth boundary so we can assert
+		// that the content area itself is padded to contentWidth and the final
+		// cell is the scrollbar column. This pins down the exact padding
+		// behavior that prevents the scrollbar from collapsing leftward on odd
+		// CJK boundaries.
+		split, gotContentWidth := splitAtCells(stripped, contentWidth)
+		if gotContentWidth != contentWidth {
+			t.Errorf("CJK data row content width = %d, want %d (padding missing); line = %q", gotContentWidth, contentWidth, line)
+		}
+		if uniseg.StringWidth(stripped[split:]) != 1 {
+			t.Errorf("expected final visible cell to be the scrollbar column; got %q", stripped[split:])
+		}
+	}
+	if !rowFound {
+		t.Error("rendered output did not contain the POST/200 request row")
+	}
+}
+
+// splitAtCells returns the byte index in s after exactly width visible cells,
+// and the number of visible cells accumulated up to that index. If width is
+// larger than the width of s, it returns len(s) and the actual width. The
+// input is assumed to contain no ANSI escape sequences.
+func splitAtCells(s string, width int) (int, int) {
+	var (
+		split int
+		seen  int
+		state = -1
+	)
+	for i := 0; i < len(s); {
+		cluster, _, w, newState := uniseg.FirstGraphemeClusterInString(s[i:], state)
+		if seen+w > width {
+			return split, seen
+		}
+		seen += w
+		split = i + len(cluster)
+		i += len(cluster)
+		state = newState
+	}
+	return split, seen
 }

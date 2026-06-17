@@ -50,6 +50,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/scrollbar"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/toast"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/viewport"
+	"github.com/rivo/uniseg"
 )
 
 type uiMode int
@@ -187,11 +188,19 @@ type Model struct {
 	// multiple times per View frame.
 	networkFiltered []*journal.Entry
 
+	// dashboardLinesCache stores the rendered dashboard lines so
+	// dashboardLines() is called at most once per Update cycle instead of
+	// once per maxCursor() call (up to 4 times per frame). It is invalidated
+	// only when the underlying snapshot, terminal size, or active tab changes.
+	dashboardLinesCache []string
+
 	logRing    *logRing
 	toasts     []*toast.Toast
 	scrollbars [numTabs]scrollbar.Model
 
-	dragging bool
+	dragging        bool
+	dragStartY      int
+	dragStartScroll int
 }
 
 func NewModel(conc int) Model {
@@ -229,9 +238,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case metrics.Snapshot:
 		m.snap = msg
+		m.dashboardLinesCache = nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.dashboardLinesCache = nil
 	case tea.KeyPressMsg:
 		m, cmd = m.handleKey(msg)
 	case tea.MouseClickMsg:
@@ -244,8 +255,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m, cmd = m.handleMouseRelease(msg)
 	}
 	m.networkFiltered = m.computeVisibleNetworkEntries()
-	m.adjustViewport()
 	m.toasts = toast.VisibleToasts(m.toasts)
+	m.adjustViewport()
 	return m, cmd
 }
 
@@ -316,29 +327,47 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	keyCode := msg.Key().Code
 	if keyCode == tea.KeyPgUp {
-		m.cursor -= m.visibleRows()
-		if m.cursor < 0 {
-			m.cursor = 0
+		if m.tab == tabDashboard {
+			m.scrollDashboard(-m.dataRows())
+		} else {
+			m.cursor -= m.dataRows()
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
+			m.adjustViewport()
 		}
-		m.adjustViewport()
 		return m, nil
 	}
 	if keyCode == tea.KeyPgDown {
-		m.cursor += m.visibleRows()
-		if m.cursor > m.maxCursor() {
-			m.cursor = m.maxCursor()
+		if m.tab == tabDashboard {
+			m.scrollDashboard(m.dataRows())
+		} else {
+			m.cursor += m.dataRows()
+			if m.cursor > m.maxCursor() {
+				m.cursor = m.maxCursor()
+			}
+			m.adjustViewport()
 		}
-		m.adjustViewport()
 		return m, nil
 	}
 	if keyCode == tea.KeyHome {
-		m.cursor = 0
-		m.adjustViewport()
+		if m.tab == tabDashboard {
+			m.scroll = 0
+			m.cursor = 0
+		} else {
+			m.cursor = 0
+			m.adjustViewport()
+		}
 		return m, nil
 	}
 	if keyCode == tea.KeyEnd {
-		m.cursor = m.maxCursor()
-		m.adjustViewport()
+		if m.tab == tabDashboard {
+			m.scroll = m.maxScroll()
+			m.cursor = m.scroll
+		} else {
+			m.cursor = m.maxCursor()
+			m.adjustViewport()
+		}
 		return m, nil
 	}
 
@@ -365,20 +394,33 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "g":
 		m.cursor, m.scroll = 0, 0
 	case "G":
-		m.cursor, m.scroll = m.maxCursor(), m.maxScroll()
+		if m.tab == tabDashboard {
+			m.scroll = m.maxScroll()
+			m.cursor = m.scroll
+		} else {
+			m.cursor, m.scroll = m.maxCursor(), m.maxScroll()
+		}
 
 	case "ctrl+u":
-		m.cursor -= m.visibleRows() / 2
-		if m.cursor < 0 {
-			m.cursor = 0
+		if m.tab == tabDashboard {
+			m.scrollDashboard(-m.dataRows() / 2)
+		} else {
+			m.cursor -= m.dataRows() / 2
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
+			m.adjustViewport()
 		}
-		m.adjustViewport()
 	case "ctrl+d":
-		m.cursor += m.visibleRows() / 2
-		if m.cursor > m.maxCursor() {
-			m.cursor = m.maxCursor()
+		if m.tab == tabDashboard {
+			m.scrollDashboard(m.dataRows() / 2)
+		} else {
+			m.cursor += m.dataRows() / 2
+			if m.cursor > m.maxCursor() {
+				m.cursor = m.maxCursor()
+			}
+			m.adjustViewport()
 		}
-		m.adjustViewport()
 
 	case "enter", " ", "space":
 		if m.canInspect() {
@@ -417,9 +459,14 @@ func (m *Model) switchTab(t tabID) {
 	m.cursor = 0
 	m.scroll = 0
 	m.mode = modeBrowse
+	m.dashboardLinesCache = nil
 }
 
 func (m *Model) moveCursor(delta int) {
+	if m.tab == tabDashboard {
+		m.scrollDashboard(delta)
+		return
+	}
 	m.cursor += delta
 	if m.cursor < 0 {
 		m.cursor = 0
@@ -431,17 +478,33 @@ func (m *Model) moveCursor(delta int) {
 	m.adjustViewport()
 }
 
+// scrollDashboard adjusts m.scroll directly by delta for the Dashboard tab,
+// clamping to the content bounds. m.cursor is pinned to the scroll position
+// because the Dashboard has no visible cursor; this keeps the scrollbar model
+// consistent with the rest of the viewport code.
+func (m *Model) scrollDashboard(delta int) {
+	m.scroll += delta
+	if m.scroll < 0 {
+		m.scroll = 0
+	}
+	max := m.maxScroll()
+	if m.scroll > max {
+		m.scroll = max
+	}
+	m.cursor = m.scroll
+}
+
 func (m *Model) adjustViewport() {
 	maxC := m.maxCursor()
 	if m.cursor > maxC {
 		m.cursor = maxC
 	}
-	visible := m.visibleRows()
+	rows := m.dataRows()
 	if m.cursor < m.scroll {
 		m.scroll = m.cursor
 	}
-	if m.cursor >= m.scroll+visible {
-		m.scroll = m.cursor - visible + 1
+	if m.cursor >= m.scroll+rows {
+		m.scroll = m.cursor - rows + 1
 	}
 	maxScroll := m.maxScroll()
 	if m.scroll > maxScroll {
@@ -453,11 +516,90 @@ func (m *Model) adjustViewport() {
 }
 
 func (m *Model) visibleRows() int {
-	v := m.height - 8
-	if m.tab == tabConcurrency {
-		v -= 6
+	// Reserve only the chrome (header, tabbar, separator, footer). Filter input
+	// and active toasts are overlays above the footer; they reduce the
+	// scrollable content area only while they are present, so no space is
+	// wasted when they are absent.
+	v := m.height - 4
+	if m.mode == modeFilter && (m.tab == tabRequests || m.tab == tabNetwork || m.tab == tabLogs) {
+		v--
+	}
+	if m.mode == modeBrowse {
+		if n := len(m.toasts); n > 0 {
+			v -= min(n, 3)
+		}
 	}
 	return max(v, 1)
+}
+
+// dataRows returns the number of data rows displayed for the active tab,
+// after reserving fixed header, filter summary, and count lines. For the
+// dashboard the entire content area is scrollable, so dataRows == visibleRows.
+func (m *Model) dataRows() int {
+	switch m.tab {
+	case tabRequests:
+		fixed := 2 // table header + count line
+		if m.filterText != "" {
+			fixed++ // filter summary
+		}
+		return max(m.visibleRows()-fixed, 1)
+	case tabNetwork:
+		fixed := 2 // table header + count line
+		if m.networkFilterType != networkFilterAll || m.networkFilterStatus != networkStatusAll {
+			fixed++ // type/status filter summary
+		}
+		if m.filterText != "" {
+			fixed++ // text filter summary
+		}
+		return max(m.visibleRows()-fixed, 1)
+	case tabLogs:
+		fixed := 0 // no header row; line numbers are embedded in data rows
+		if m.filterText != "" {
+			fixed++ // filter summary
+		}
+		return max(m.visibleRows()-fixed, 1)
+	case tabRoutes:
+		return max(m.visibleRows()-2, 1) // header + count line
+	case tabConcurrency:
+		// Section headers/gauges for Concurrency Gauge, Queue Depth, and the
+		// In-Flight Requests title occupy the first 10 rows of the content area.
+		return max(m.visibleRows()-10, 1)
+	case tabDashboard:
+		return m.visibleRows()
+	}
+	return m.visibleRows()
+}
+
+// contentHeaderRows returns the number of fixed rows at the top of the
+// scrollable area before the first data row. Clicks inside these rows should
+// not move the cursor.
+func (m Model) contentHeaderRows() int {
+	switch m.tab {
+	case tabRequests:
+		if m.filterText != "" {
+			return 2
+		}
+		return 1
+	case tabNetwork:
+		n := 1
+		if m.networkFilterType != networkFilterAll || m.networkFilterStatus != networkStatusAll {
+			n++
+		}
+		if m.filterText != "" {
+			n++
+		}
+		return n
+	case tabLogs:
+		if m.filterText != "" {
+			return 1 // filter summary only
+		}
+		return 0 // no header; line numbers are embedded in data rows
+	case tabRoutes:
+		return 1
+	case tabConcurrency:
+		return 10
+	}
+	return 0
 }
 
 // viewportWidth returns the width available for scrollable content,
@@ -468,6 +610,8 @@ func (m *Model) viewportWidth() int {
 
 func (m *Model) maxCursor() int {
 	switch m.tab {
+	case tabDashboard:
+		return max(len(m.cachedDashboardLines())-1, 0)
 	case tabRequests:
 		return max(len(m.visibleEntries())-1, 0)
 	case tabNetwork:
@@ -484,7 +628,7 @@ func (m *Model) maxCursor() int {
 }
 
 func (m *Model) maxScroll() int {
-	return max(m.maxCursor()-m.visibleRows()+1, 0)
+	return max(m.maxCursor()-m.dataRows()+1, 0)
 }
 
 // visibleEntries returns the currently visible request entries, respecting filter.
@@ -531,12 +675,61 @@ func (m *Model) visibleLogLines() []string {
 
 func (m *Model) updateScrollbars() {
 	contentHeight := m.maxCursor() + 1
-	viewportHeight := m.visibleRows()
-	for i := range m.scrollbars {
-		m.scrollbars[i].ContentHeight = contentHeight
-		m.scrollbars[i].ViewportHeight = viewportHeight
-		m.scrollbars[i].YOffset = m.scroll
+	viewportHeight := m.dataRows()
+	sb := &m.scrollbars[m.tab]
+	sb.ContentHeight = contentHeight
+	sb.ViewportHeight = viewportHeight
+	sb.YOffset = m.scroll
+}
+
+// truncateANSI truncates line to at most width terminal cells, preserving the
+// CSI/SGR escape sequences produced by lipgloss. It appends a reset sequence
+// (ESC[0m) if truncation occurs so that active styles do not leak into the
+// trailing padding. It intentionally does not handle OSC/DCS/APC/SOS
+// sequences because the TUI only emits SGR styling.
+func truncateANSI(line string, width int) string {
+	if width <= 0 {
+		return ""
 	}
+	var b strings.Builder
+	cells := 0
+	truncated := false
+	state := -1
+	for i := 0; i < len(line); {
+		if line[i] == '\x1b' {
+			j := i + 1
+			if j < len(line) && line[j] == '[' {
+				j++
+				for j < len(line) && !(line[j] >= 0x40 && line[j] <= 0x7E) {
+					j++
+				}
+				if j < len(line) {
+					j++
+				}
+			} else if j < len(line) {
+				j++
+			}
+			b.WriteString(line[i:j])
+			i = j
+			// ANSI sequences are non-printing separators; they must not carry
+			// grapheme-cluster state across to the following visible text.
+			state = -1
+			continue
+		}
+		cluster, _, w, newState := uniseg.FirstGraphemeClusterInString(line[i:], state)
+		if cells+w > width {
+			truncated = true
+			break
+		}
+		b.WriteString(cluster)
+		cells += w
+		i += len(cluster)
+		state = newState
+	}
+	if truncated {
+		b.WriteString("\x1b[0m")
+	}
+	return b.String()
 }
 
 // stripANSI removes ANSI escape sequences from a string.
@@ -566,7 +759,9 @@ func stripANSI(s string) string {
 }
 
 // renderContentWithScrollbar wraps the active tab's content with a scrollbar
-// column in the rightmost position. ANSI-aware width calculation.
+// column in the rightmost position. ANSI-aware width calculation. The
+// scrollbar is aligned with the scrollable data rows, below the fixed header
+// rows returned by contentHeaderRows().
 func (m Model) renderContentWithScrollbar() string {
 	content := m.renderContent()
 	if content == "" {
@@ -582,25 +777,34 @@ func (m Model) renderContentWithScrollbar() string {
 	}
 
 	contentWidth := m.viewportWidth()
+	headerRows := m.contentHeaderRows()
+	visibleRows := m.visibleRows()
 
 	var b strings.Builder
-	maxLines := max(len(lines), len(sbLines))
+	maxLines := max(len(lines), visibleRows)
 	for i := range maxLines {
 		if i < len(lines) {
 			line := lines[i]
 			stripped := stripANSI(line)
-			visibleRunes := []rune(stripped)
-			if len(visibleRunes) > contentWidth {
-				b.WriteString(string(visibleRunes[:contentWidth]))
+			visibleCells := uniseg.StringWidth(stripped)
+			if visibleCells > contentWidth {
+				truncated := truncateANSI(line, contentWidth)
+				b.WriteString(truncated)
+				actualWidth := uniseg.StringWidth(stripANSI(truncated))
+				if actualWidth < contentWidth {
+					b.WriteString(strings.Repeat(" ", contentWidth-actualWidth))
+				}
 			} else {
 				b.WriteString(line)
-				b.WriteString(strings.Repeat(" ", contentWidth-len(visibleRunes)))
+				b.WriteString(strings.Repeat(" ", contentWidth-visibleCells))
 			}
 		} else {
 			b.WriteString(strings.Repeat(" ", contentWidth))
 		}
-		if i < len(sbLines) {
-			b.WriteString(sbLines[i])
+		if i >= headerRows {
+			if sbIdx := i - headerRows; sbIdx < len(sbLines) {
+				b.WriteString(sbLines[sbIdx])
+			}
 		}
 		b.WriteByte('\n')
 	}
@@ -712,26 +916,44 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Scrollbar column (rightmost): jump scroll and begin drag.
+	// Scrollbar column (rightmost): jump scroll and begin drag. The scrollbar
+	// track is aligned with the scrollable data rows, below the fixed header
+	// rows returned by contentHeaderRows().
 	if mx == m.width-1 {
 		contentHeight := m.maxCursor() + 1
-		trackHeight := m.visibleRows()
-		relativeY := max(my-contentStartRow, 0)
+		trackHeight := m.dataRows()
+		headerRows := m.contentHeaderRows()
+		trackStartRow := contentStartRow + headerRows
+		if my < trackStartRow {
+			return m, nil
+		}
+		relativeY := max(my-trackStartRow, 0)
 		if relativeY >= trackHeight {
 			relativeY = trackHeight - 1
 		}
-		m.scroll = viewport.ScrollFromThumb(relativeY, contentHeight, trackHeight)
+		// Clicking directly on the thumb should not jump; only track clicks
+		// move the thumb to that proportional position. If the content fits the
+		// viewport there is nothing to scroll, so don't start a drag.
+		if sm := viewport.ScrollMax(contentHeight, trackHeight); sm > 0 {
+			thumbTop := viewport.ThumbTop(m.scroll, contentHeight, trackHeight)
+			thumbHeight := viewport.ThumbHeight(contentHeight, trackHeight)
+			if relativeY < thumbTop || relativeY >= thumbTop+thumbHeight {
+				m.scroll = viewport.ScrollFromThumb(relativeY, contentHeight, trackHeight)
+			}
+			m.dragging = true
+		}
+		m.dragStartY = relativeY
+		m.dragStartScroll = m.scroll
 		m.cursor = viewport.ClampCursor(
-			m.scroll+min(m.visibleRows()/2, m.maxCursor()-m.scroll),
+			m.scroll+min(trackHeight/2, m.maxCursor()-m.scroll),
 			contentHeight)
-		m.dragging = true
 		return m, nil
 	}
 
-	if m.tab == tabDashboard {
+	relativeRow := my - contentStartRow - m.contentHeaderRows()
+	if relativeRow < 0 {
 		return m, nil
 	}
-	relativeRow := my - contentStartRow
 	m.cursor = viewport.CursorFromClick(relativeRow, m.scroll, m.maxCursor()+1)
 	return m, nil
 }
@@ -752,20 +974,33 @@ func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (Model, tea.Cmd) {
 	}
 	my := msg.Mouse().Y
 	contentHeight := m.maxCursor() + 1
-	trackHeight := m.visibleRows()
-	sm := viewport.ScrollMax(contentHeight, trackHeight)
-	if sm <= 0 {
+	trackHeight := m.dataRows()
+	if viewport.ScrollMax(contentHeight, trackHeight) <= 0 {
 		return m, nil
 	}
-	relativeY := max(my-contentStartRow, 0)
+	trackStartRow := contentStartRow + m.contentHeaderRows()
+	if my < trackStartRow {
+		my = trackStartRow
+	}
+	relativeY := max(my-trackStartRow, 0)
 	if relativeY >= trackHeight {
 		relativeY = trackHeight - 1
 	}
-	// Use DragYOffset from the scrollbar model for precise drag tracking.
-	sb := &m.scrollbars[m.tab]
-	sb.ContentHeight = contentHeight
-	sb.ViewportHeight = trackHeight
-	m.scroll = sb.DragYOffset(relativeY)
+	// Drag by delta from the grab point. The thumb occupies thumbHeight rows
+	// so it can only travel (trackHeight - thumbHeight) rows. Dividing by this
+	// dragRange ensures the scroll maps 1:1 to the thumb position, keeping the
+	// thumb under the cursor and allowing the user to reach scrollMax.
+	// Use int64 arithmetic to prevent overflow on large content heights
+	// (matching the viewport package's approach).
+	delta := relativeY - m.dragStartY
+	sm := viewport.ScrollMax(contentHeight, trackHeight)
+	thumbH := viewport.ThumbHeight(contentHeight, trackHeight)
+	dragRange := trackHeight - thumbH
+	if dragRange <= 0 {
+		dragRange = trackHeight
+	}
+	scroll := m.dragStartScroll + int(int64(delta)*int64(sm)/int64(dragRange))
+	m.scroll = viewport.ClampScroll(scroll, contentHeight, trackHeight)
 	m.cursor = viewport.ClampCursor(
 		m.scroll+min(trackHeight/2, contentHeight-1-m.scroll),
 		contentHeight)
@@ -774,6 +1009,8 @@ func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (Model, tea.Cmd) {
 
 func (m Model) handleMouseRelease(msg tea.MouseReleaseMsg) (Model, tea.Cmd) {
 	m.dragging = false
+	m.dragStartY = 0
+	m.dragStartScroll = 0
 	return m, nil
 }
 
@@ -807,58 +1044,95 @@ func (m Model) View() tea.View {
 	case modeDetail:
 		overlay := m.renderDetailOverlay()
 		b.WriteString(overlay)
-		olLines := strings.Count(overlay, "\n") + 1
-		m.padLines(&b, olLines)
+		m.padLines(&b, countContentLines(overlay))
 	case modeHelp:
 		help := m.renderHelpOverlay()
 		b.WriteString(help)
-		hlLines := strings.Count(help, "\n") + 1
-		m.padLines(&b, hlLines)
+		m.padLines(&b, countContentLines(help))
 	case modeConfirm:
 		confirm := m.renderConfirmOverlay()
 		b.WriteString(confirm)
-		clLines := strings.Count(confirm, "\n") + 1
-		m.padLines(&b, clLines)
+		m.padLines(&b, countContentLines(confirm))
 	default:
 		content := m.renderContentWithScrollbar()
 		b.WriteString(content)
-		lines := strings.Count(content, "\n") + 1
-		m.padLines(&b, lines)
+		m.padLines(&b, countContentLines(content))
 	}
 
 	if m.mode == modeFilter && (m.tab == tabRequests || m.tab == tabNetwork || m.tab == tabLogs) {
-		b.WriteByte('\n')
 		b.WriteString(filterPromptStyle.Render(fmt.Sprintf(" Filter: %s█", m.filterText)))
-	} else {
+	}
+
+	// Place the footer on the next row without inserting a wasted blank row.
+	// When the content/overlay/prompt already ends with a newline, no extra
+	// newline is needed; otherwise add exactly one.
+	if !builderEndsWithNewline(&b) {
 		b.WriteByte('\n')
 	}
 
-	b.WriteString(m.renderFooter())
-
 	visible := toast.VisibleToasts(m.toasts)
 	if len(visible) > 0 && m.mode == modeBrowse {
-		// Show up to 3 most recent toasts, oldest at top, newest at bottom.
+		// Toasts are ephemeral overlays; draw them just above the footer so
+		// they temporarily cover the bottom of the scrollable pane instead of
+		// permanently reserving a block of empty space below the footer.
 		start := 0
 		if len(visible) > 3 {
 			start = len(visible) - 3
 		}
 		for i := start; i < len(visible); i++ {
 			if toastStr := visible[i].Render(m.width, 1); toastStr != "" {
-				b.WriteByte('\n')
+				if !builderEndsWithNewline(&b) {
+					b.WriteByte('\n')
+				}
 				b.WriteString(toastStr)
 			}
 		}
 	}
+
+	// Footer is always the very last row, anchored to the terminal bottom.
+	if !builderEndsWithNewline(&b) {
+		b.WriteByte('\n')
+	}
+	b.WriteString(m.renderFooter())
 
 	v.SetContent(b.String())
 	return v
 }
 
 func (m *Model) padLines(b *strings.Builder, lines int) {
-	visible := m.height - 8
+	visible := m.visibleRows()
 	for i := lines; i < visible; i++ {
 		b.WriteByte('\n')
 	}
+}
+
+// countContentLines returns the number of row-separating newlines in s. A
+// trailing newline does not introduce an extra row; it separates the last
+// content line from whatever follows (e.g. the footer).
+func countContentLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	n := strings.Count(s, "\n")
+	if strings.HasSuffix(s, "\n") {
+		return n
+	}
+	return n + 1
+}
+
+// builderEndsWithNewline reports whether the builder is non-empty and its
+// last byte is '\n'. This centralizes the check so there is a single point
+// of change if a more efficient approach (e.g. tracking the last byte
+// written) is needed later. strings.Builder.String() returns a zero-copy
+// view of the underlying buffer via unsafe.String, so the lookup is both
+// O(1) and allocation-free.
+func builderEndsWithNewline(b *strings.Builder) bool {
+	if b.Len() == 0 {
+		return false
+	}
+	// This builder is only ever written to with valid UTF-8 strings and
+	// single '\n' bytes, so reading the last byte to check for '\n' is safe.
+	return b.String()[b.Len()-1] == '\n'
 }
 
 func (m Model) renderHeader() string {
@@ -886,7 +1160,7 @@ func (m Model) renderTabBar() string {
 func (m Model) renderContent() string {
 	switch m.tab {
 	case tabDashboard:
-		return m.renderDashboard()
+		return m.renderDashboardContent()
 	case tabRequests:
 		return m.renderRequests()
 	case tabNetwork:
@@ -901,8 +1175,17 @@ func (m Model) renderContent() string {
 	return ""
 }
 
-func (m Model) renderDashboard() string {
-	return strings.Join(m.dashboardLines(), "\n") + "\n"
+// renderDashboardContent returns the portion of the dashboard that is visible
+// in the current viewport, using m.scroll as the top offset.
+func (m Model) renderDashboardContent() string {
+	lines := m.cachedDashboardLines()
+	visible := m.visibleRows()
+	start := max(min(m.scroll, len(lines)), 0)
+	end := min(start+visible, len(lines))
+	if start >= end {
+		return ""
+	}
+	return strings.Join(lines[start:end], "\n") + "\n"
 }
 
 func (m Model) renderSparkline() string {
@@ -952,7 +1235,7 @@ func (m Model) renderStatusBar() string {
 	counts := m.snap.StatusCounts
 	total := counts[1] + counts[2] + counts[3] + counts[4] + counts[5]
 	if total == 0 {
-		return dimStyle2.Render("  No responses yet\n")
+		return dimStyle2.Render("  No responses yet")
 	}
 	width := max(m.width-4, 10)
 
@@ -990,7 +1273,7 @@ func (m Model) renderStatusBar() string {
 
 // dashboardLines builds the full list of rendered lines for the Dashboard tab.
 // It always renders all content (including up to six in-flight requests);
-// renderDashboard joins the lines with newlines.
+// renderDashboardContent() windows these lines by m.scroll and m.visibleRows().
 func (m Model) dashboardLines() []string {
 	var lines []string
 
@@ -1080,6 +1363,19 @@ func (m Model) dashboardLines() []string {
 	return lines
 }
 
+// cachedDashboardLines returns the dashboard lines for the current Update
+// cycle, building them lazily on first access. The cache is reset only by
+// data-mutating messages (metrics.Snapshot), terminal resizes
+// (tea.WindowSizeMsg), and tab switches, so the expensive formatting work is
+// skipped for high-frequency input messages such as mouse motion.
+func (m *Model) cachedDashboardLines() []string {
+	if m.dashboardLinesCache != nil {
+		return m.dashboardLinesCache
+	}
+	m.dashboardLinesCache = m.dashboardLines()
+	return m.dashboardLinesCache
+}
+
 func (m Model) renderRequests() string {
 	var b strings.Builder
 	entries := m.visibleEntries()
@@ -1102,7 +1398,7 @@ func (m Model) renderRequests() string {
 		fmt.Sprintf("%-8s %-6s %4s  %9s  %s", "Time", "Method", "St", "Duration", "Path")))
 	b.WriteByte('\n')
 
-	visible := m.visibleRows()
+	visible := m.dataRows()
 	start := m.scroll
 	end := min(start+visible, len(entries))
 
@@ -1120,9 +1416,9 @@ func (m Model) renderRequests() string {
 		b.WriteByte('\n')
 	}
 
-	if len(entries) > visible {
-		fmt.Fprintf(&b, "  %d-%d / %d entries\n", start+1, end, len(entries))
-	}
+	// Count line is always emitted for the non-empty state; it is part of the
+	// fixed rows reserved by dataRows().
+	fmt.Fprintf(&b, "  %d-%d / %d entries\n", start+1, end, len(entries))
 	return b.String()
 }
 
@@ -1164,7 +1460,7 @@ func (m Model) renderNetwork() string {
 		fmt.Fprintf(&b, "  Filter: %q  (%d / %d entries)\n", m.filterText, len(entries), m.journal.Len())
 	}
 
-	visible := m.visibleRows()
+	visible := m.dataRows()
 	start := m.scroll
 	end := min(start+visible, len(entries))
 
@@ -1188,9 +1484,9 @@ func (m Model) renderNetwork() string {
 		b.WriteByte('\n')
 	}
 
-	if len(entries) > visible {
-		fmt.Fprintf(&b, "  %d-%d / %d entries\n", start+1, end, len(entries))
-	}
+	// Count line always emitted for the non-empty state; it is part of the
+	// fixed rows reserved by dataRows().
+	fmt.Fprintf(&b, "  %d-%d / %d entries\n", start+1, end, len(entries))
 	return b.String()
 }
 
@@ -1212,7 +1508,7 @@ func (m Model) renderLogs() string {
 		fmt.Fprintf(&b, "  Filter: %q  (%d / %d lines)\n", m.filterText, len(lines), m.logRing.count)
 	}
 
-	visible := m.visibleRows()
+	visible := m.dataRows()
 	start := m.scroll
 	end := min(start+visible, len(lines))
 
@@ -1223,10 +1519,6 @@ func (m Model) renderLogs() string {
 		}
 		b.WriteString(style.Render(fmt.Sprintf("  %6d  ", i+1) + lines[i]))
 		b.WriteByte('\n')
-	}
-
-	if len(lines) > visible {
-		fmt.Fprintf(&b, "  %d-%d / %d lines\n", start+1, end, len(lines))
 	}
 	return b.String()
 }
@@ -1324,7 +1616,7 @@ func (m Model) renderConcurrency() string {
 		return b.String()
 	}
 
-	visible := m.visibleRows()
+	visible := m.dataRows()
 	start := m.scroll
 	end := min(start+visible, len(flights))
 
@@ -1344,9 +1636,6 @@ func (m Model) renderConcurrency() string {
 			tag, r.Method, r.Path, age, totalAge)
 		b.WriteString(style.Render(line))
 		b.WriteByte('\n')
-	}
-	if len(flights) > visible {
-		fmt.Fprintf(&b, "  %d-%d / %d in-flight\n", start+1, end, len(flights))
 	}
 	return b.String()
 }
@@ -1418,7 +1707,7 @@ func (m Model) renderRoutes() string {
 		fmt.Sprintf("%-32s %5s %5s %5s %5s %5s %7s", "Route", "Total", "2xx", "4xx", "5xx", "✗ TO", "req/s")))
 	b.WriteByte('\n')
 
-	visible := m.visibleRows()
+	visible := m.dataRows()
 	start := m.scroll
 	end := min(start+visible, len(pairs))
 
@@ -1435,9 +1724,10 @@ func (m Model) renderRoutes() string {
 		b.WriteString(style.Render("  " + line))
 		b.WriteByte('\n')
 	}
-	if len(pairs) > visible {
-		fmt.Fprintf(&b, "  %d-%d / %d routes\n", start+1, end, len(pairs))
-	}
+
+	// Count line always emitted for the non-empty state; it is part of the
+	// fixed rows reserved by dataRows().
+	fmt.Fprintf(&b, "  %d-%d / %d routes\n", start+1, end, len(pairs))
 	return b.String()
 }
 
@@ -1515,12 +1805,9 @@ func (m Model) renderDetailOverlay() string {
 
 func (m Model) renderNetworkDetail(e *journal.Entry) string {
 	// Compute a line budget so the overlay fits within the terminal.
-	// Available content height = terminal - chrome (header, tabbar, separator,
-	// footer, filter/blank line). Overlay border + padding consume 4 more.
-	// We target the overlay content to fit within the visible area.
-	budget := max(m.height-12,
-		// minimum usable detail view
-		10)
+	// The overlay is drawn inside the scrollable content area; its border and
+	// padding consume 4 rows. Reserve at least a minimum usable detail view.
+	budget := max(m.visibleRows()-4, 10)
 
 	// Count fixed lines that are always emitted (minimum 17):
 	//   Request heading, Method, URL, [blank],

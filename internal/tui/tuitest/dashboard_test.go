@@ -72,3 +72,41 @@ func TestPTY_DashboardSections(t *testing.T) {
 		t.Log("Note: sparkline may be flat (all zeros) if no throughput data yet")
 	}
 }
+
+func TestPTY_DashboardScrollsDown(t *testing.T) {
+	// Use a short terminal so the dashboard content overflows.
+	h := Launch(t, WithTermSize(20, 80))
+	defer h.Close()
+
+	proxyURL := h.ProxyURL()
+	for range 5 {
+		sendRequest(t, t.Context(), proxyURL+"/v1/messages")
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// Ensure we are on the Overview tab.
+	if _, err := h.Console().WriteString("1"); err != nil {
+		t.Fatalf("WriteString 1: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	before := h.Console().String()
+	if strings.Contains(before, "Summary") {
+		t.Fatal("Summary should not be visible before scrolling; terminal is too tall for this regression")
+	}
+
+	// Scroll down until the Summary section is visible.
+	for range 4 {
+		if _, err := h.Console().WriteString(string([]byte{0x04})); err != nil {
+			t.Fatalf("WriteString ctrl-d: %v", err)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	after := h.Console().String()
+	if !strings.Contains(after, "Summary") {
+		t.Error("Dashboard should scroll down far enough to reveal the Summary section")
+	}
+}

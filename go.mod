@@ -7,6 +7,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.3
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/joeycumines/go-prompt v0.0.0-20260429212922-e8b9e8f9d754
+	github.com/rivo/uniseg v0.4.7
 )
 
 require (
@@ -27,7 +28,6 @@ require (
 	github.com/mattn/go-tty v0.0.8 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/exp v0.0.0-20260603202125-055de637280b // indirect
 	golang.org/x/exp/typeparams v0.0.0-20260603202125-055de637280b // indirect

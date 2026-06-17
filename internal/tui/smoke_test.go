@@ -16,7 +16,6 @@
 package tui
 
 import (
-	"fmt"
 	"testing"
 )
 
@@ -25,10 +24,6 @@ func TestSmokeView(t *testing.T) {
 	m.width = 80
 	m.height = 24
 	v := m.View()
-	fmt.Printf("View content length: %d\n", len(v.Content))
-	fmt.Println("=== VIEW START ===")
-	fmt.Print(v.Content)
-	fmt.Println("=== VIEW END ===")
 	if v.Content == "" {
 		t.Fatal("smoke: View returned empty")
 	}
