@@ -608,6 +608,26 @@ func (m *Model) viewportWidth() int {
 	return max(m.width-1, 1)
 }
 
+// gaugeBarWidth returns the inner block count for renderGaugeBar so the full
+// rendered bar ("  [" + blocks + "]  ") matches the queue bar width and fits
+// within the viewport width with a symmetrical two-cell left and right margin
+// before the scrollbar column.
+func (m *Model) gaugeBarWidth() int {
+	// Full bar visual width: 3 + blocks + 1 + 2 = blocks + 6.
+	// Must fit within viewportWidth.
+	return max(m.viewportWidth()-6, 0)
+}
+
+// hBarWidth returns the inner block count for renderHBar and the status bar's
+// segment width so the full bar ("  [" + blocks + "]  ") fits within the
+// viewport width with a symmetrical two-cell left and right margin before the
+// scrollbar column.
+func (m *Model) hBarWidth() int {
+	// Full bar visual width: 3 + blocks + 1 + 2 = blocks + 6.
+	// Must fit within viewportWidth.
+	return max(m.viewportWidth()-6, 0)
+}
+
 func (m *Model) maxCursor() int {
 	switch m.tab {
 	case tabDashboard:
@@ -1235,13 +1255,18 @@ func (m Model) renderStatusBar() string {
 	counts := m.snap.StatusCounts
 	total := counts[1] + counts[2] + counts[3] + counts[4] + counts[5]
 	if total == 0 {
-		return dimStyle2.Render("  No responses yet")
+		width := m.hBarWidth()
+		return "  [" + gaugeEmptyStyle.Render(strings.Repeat("░", width)) + "]  "
 	}
-	width := max(m.width-4, 10)
-
 	labels := []string{"1xx", "2xx", "3xx", "4xx", "5xx"}
 	cvalues := []int64{counts[1], counts[2], counts[3], counts[4], counts[5]}
 	colors := []lipgloss.Style{statusInfoStyle, statusOkStyle, statusRedirectStyle, statusClientErrStyle, statusServerErrStyle}
+
+	var labelsWidth int
+	for i, v := range cvalues {
+		labelsWidth += uniseg.StringWidth(fmt.Sprintf(" %s:%d", labels[i], v))
+	}
+	width := max(m.hBarWidth()-labelsWidth, 0)
 
 	var b strings.Builder
 	b.WriteString("  [")
@@ -1268,6 +1293,7 @@ func (m Model) renderStatusBar() string {
 		b.WriteString(" ")
 		b.WriteString(colors[i].Render(fmt.Sprintf("%s:%d", labels[i], v)))
 	}
+	b.WriteString("  ")
 	return b.String()
 }
 
@@ -1282,7 +1308,7 @@ func (m Model) dashboardLines() []string {
 	lines = append(lines, "")
 
 	lines = append(lines, sectionStyle.Render(" Concurrency "))
-	lines = append(lines, m.renderGaugeBar(int(m.snap.Active), m.conc, m.width-4))
+	lines = append(lines, m.renderGaugeBar(int(m.snap.Active), m.conc, m.gaugeBarWidth()))
 	lines = append(lines, fmt.Sprintf("  %d / %d active slots", m.snap.Active, m.conc))
 
 	lines = append(lines, "")
@@ -1291,7 +1317,7 @@ func (m Model) dashboardLines() []string {
 	if queueMax == 0 {
 		queueMax = 1
 	}
-	lines = append(lines, m.renderHBar(int(m.snap.Queued), queueMax, m.width-4, queueFillStyle(int(m.snap.Queued), queueMax)))
+	lines = append(lines, m.renderHBar(int(m.snap.Queued), queueMax, m.hBarWidth(), queueFillStyle(int(m.snap.Queued), queueMax)))
 	if m.snap.Queued == 0 {
 		lines = append(lines, dimStyle2.Render("  Queue: empty"))
 	} else {
@@ -1580,7 +1606,7 @@ func (m Model) renderConcurrency() string {
 
 	b.WriteString(sectionStyle.Render(" Concurrency Gauge "))
 	b.WriteByte('\n')
-	b.WriteString(m.renderGaugeBar(int(m.snap.Active), m.conc, m.width-4))
+	b.WriteString(m.renderGaugeBar(int(m.snap.Active), m.conc, m.gaugeBarWidth()))
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, "  %d / %d active  │  %d queued  │  %.1f req/s\n",
 		m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput)
@@ -1599,7 +1625,7 @@ func (m Model) renderConcurrency() string {
 	if queueMax == 0 {
 		queueMax = 1
 	}
-	b.WriteString(m.renderHBar(int(m.snap.Queued), queueMax, m.width-4, queueFillStyle(int(m.snap.Queued), queueMax)))
+	b.WriteString(m.renderHBar(int(m.snap.Queued), queueMax, m.hBarWidth(), queueFillStyle(int(m.snap.Queued), queueMax)))
 	b.WriteByte('\n')
 	if m.snap.Queued == 0 {
 		b.WriteString(dimStyle2.Render("  Queue: empty\n"))
@@ -1980,7 +2006,7 @@ func (m Model) renderGaugeBar(active, max, width int) string {
 	if empty > 0 {
 		bar += gaugeEmptyStyle.Render(strings.Repeat("░", empty))
 	}
-	bar += fmt.Sprintf("]  %d%%", pct)
+	bar += "]  "
 	return bar
 }
 
@@ -2009,7 +2035,7 @@ func (m Model) renderHBar(value, valueMax, width int, color lipgloss.Style) stri
 	if empty > 0 {
 		bar += gaugeEmptyStyle.Render(strings.Repeat("░", empty))
 	}
-	bar += "]"
+	bar += "]  "
 	return bar
 }
 

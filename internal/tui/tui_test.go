@@ -398,8 +398,15 @@ func TestRenderGaugeBar(t *testing.T) {
 	if !strings.Contains(g, "█") {
 		t.Error("gauge should contain filled blocks")
 	}
-	if !strings.Contains(g, "50%") {
-		t.Errorf("gauge should show 50%%, got: %s", g)
+	if strings.Contains(g, "%") {
+		t.Errorf("gauge should not contain a percentage, got: %s", g)
+	}
+	stripped := stripANSI(g)
+	if got, want := uniseg.StringWidth(stripped), 3+20+1+2; got != want {
+		t.Errorf("gauge visible width = %d, want %d; got: %q", got, want, stripped)
+	}
+	if !strings.HasSuffix(stripped, "]  ") {
+		t.Errorf("gauge should have two-cell right padding, got: %q", stripped)
 	}
 }
 
@@ -407,8 +414,15 @@ func TestRenderGaugeBarOverflow(t *testing.T) {
 	m := NewModel(10)
 	m.width = 80
 	g := m.renderGaugeBar(100, 10, 20)
-	if !strings.Contains(g, "100%") {
-		t.Errorf("gauge should show 100%%, got: %s", g)
+	if strings.Contains(g, "%") {
+		t.Errorf("gauge should not contain a percentage, got: %s", g)
+	}
+	stripped := stripANSI(g)
+	if got, want := uniseg.StringWidth(stripped), 3+20+1+2; got != want {
+		t.Errorf("gauge visible width = %d, want %d; got: %q", got, want, stripped)
+	}
+	if !strings.HasSuffix(stripped, "]  ") {
+		t.Errorf("gauge should have two-cell right padding, got: %q", stripped)
 	}
 }
 
@@ -418,6 +432,25 @@ func TestRenderGaugeBarEmpty(t *testing.T) {
 	g := m.renderGaugeBar(0, 10, 20)
 	if strings.Contains(g, "█") && !strings.Contains(g, "░") {
 		t.Error("empty gauge should not contain filled blocks")
+	}
+	stripped := stripANSI(g)
+	if !strings.HasSuffix(stripped, "]  ") {
+		t.Errorf("empty gauge should have two-cell right padding, got: %q", stripped)
+	}
+}
+
+func TestRenderHBar_Padding(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	g := stripANSI(m.renderHBar(5, 10, 20, queueFillStyle(5, 10)))
+	if !strings.HasPrefix(g, "  [") {
+		t.Errorf("hbar should have two-cell left margin, got: %q", g)
+	}
+	if !strings.HasSuffix(g, "]  ") {
+		t.Errorf("hbar should have two-cell right padding, got: %q", g)
+	}
+	if got, want := uniseg.StringWidth(g), 3+20+1+2; got != want {
+		t.Errorf("hbar visible width = %d, want %d; got: %q", got, want, g)
 	}
 }
 
@@ -482,6 +515,15 @@ func TestQueueFillStyleSeverity(t *testing.T) {
 				t.Errorf("queueFillStyle(%d, %d) bold = %v, want %v", c.value, c.max, gotBold, c.wantBold)
 			}
 		})
+	}
+}
+
+func TestGaugeBarWidth(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	if got, want := m.gaugeBarWidth(), m.hBarWidth(); got != want {
+		t.Errorf("gaugeBarWidth() = %d, want hBarWidth() = %d", got, want)
 	}
 }
 
@@ -1912,8 +1954,15 @@ func TestRenderStatusBar_NoResponses(t *testing.T) {
 	m.width = 80
 	m.height = 24
 	s := m.renderStatusBar()
-	if !strings.Contains(s, "No responses yet") {
-		t.Errorf("should mention 'No responses yet', got: %s", s)
+	stripped := stripANSI(s)
+	if strings.Contains(stripped, "No responses yet") {
+		t.Errorf("empty status bar should not render text, got: %s", stripped)
+	}
+	if !strings.Contains(stripped, "░") {
+		t.Errorf("empty status bar should render an empty track, got: %s", stripped)
+	}
+	if got, want := uniseg.StringWidth(stripped), m.viewportWidth(); got != want {
+		t.Errorf("empty status bar width = %d, want %d; got: %q", got, want, stripped)
 	}
 }
 
@@ -1928,15 +1977,26 @@ func TestRenderStatusBar_WithResponses(t *testing.T) {
 	}
 }
 
+func TestRenderStatusBar_EmptyBarWidth(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	s := stripANSI(m.renderStatusBar())
+	if got, want := uniseg.StringWidth(s), m.viewportWidth(); got != want {
+		t.Errorf("empty status bar width = %d, want %d; got: %q", got, want, s)
+	}
+}
+
 func TestRenderStatusBar_ColoredLabels(t *testing.T) {
 	m := NewModel(4)
 	m.width = 80
 	m.height = 24
 	m.snap.StatusCounts = [6]int64{0, 1, 20, 3, 4, 5}
 	s := m.renderStatusBar()
+	stripped := stripANSI(s)
 	for _, label := range []string{"1xx:1", "2xx:20", "3xx:3", "4xx:4", "5xx:5"} {
-		if !strings.Contains(s, label) {
-			t.Errorf("should show %s, got: %s", label, s)
+		if !strings.Contains(stripped, label) {
+			t.Errorf("should show %s, got: %s", label, stripped)
 		}
 	}
 	// Verify the styles emitted correspond to the token colors by checking
@@ -1955,19 +2015,29 @@ func TestRenderStatusBar_ColoredLabels(t *testing.T) {
 	}
 }
 
-func TestRenderStatusBar_NoResponsesDim(t *testing.T) {
+func TestRenderStatusBar_FitsViewport(t *testing.T) {
 	m := NewModel(4)
 	m.width = 80
 	m.height = 24
-	s := m.renderStatusBar()
-	if !strings.Contains(s, "No responses yet") {
-		t.Errorf("should mention 'No responses yet', got: %s", s)
+	m.snap.StatusCounts = [6]int64{0, 1, 20, 3, 4, 5}
+	s := stripANSI(m.renderStatusBar())
+	got := uniseg.StringWidth(s)
+	want := m.viewportWidth()
+	if got != want {
+		t.Errorf("status bar visible width = %d, want %d; line = %q", got, want, s)
 	}
-	if hexString(dimStyle2.GetForeground()) != "#6E7681" {
-		t.Fatalf("dimStyle2 foreground = %s, want #6E7681", hexString(dimStyle2.GetForeground()))
-	}
-	if !strings.Contains(s, "38;2;110;118;129") {
-		t.Errorf("'No responses yet' should be dim, got: %s", s)
+}
+
+func TestRenderStatusBar_FitsNarrowViewport(t *testing.T) {
+	m := NewModel(4)
+	m.width = 40
+	m.height = 24
+	m.snap.StatusCounts = [6]int64{0, 1, 20, 3, 4, 5}
+	s := stripANSI(m.renderStatusBar())
+	got := uniseg.StringWidth(s)
+	want := m.viewportWidth()
+	if got != want {
+		t.Errorf("status bar visible width = %d, want %d; line = %q", got, want, s)
 	}
 }
 
