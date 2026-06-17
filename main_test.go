@@ -675,29 +675,35 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 		t.Fatalf("build failed: %v\n%s", err, out)
 	}
 
+	const concurrency = 4
+
+	// Count handler entries rather than ConnState transitions: StateNew can run
+	// before the previous connection's StateClosed callback, so ConnState is a
+	// flaky proxy-admission signal for this assertion. The limiter bounds active
+	// upstream requests; verify that deterministically.
 	var (
-		currentOpen atomic.Int64
-		peakOpen    atomic.Int64
+		activeRequests          atomic.Int64
+		peakActiveRequests      atomic.Int64
+		connectionCloseFailures atomic.Int64
 	)
 
 	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !r.Close {
+			connectionCloseFailures.Add(1)
+		}
+
+		n := activeRequests.Add(1)
+		for {
+			old := peakActiveRequests.Load()
+			if n <= old || peakActiveRequests.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		defer activeRequests.Add(-1)
+
 		time.Sleep(200 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 	}))
-	upstream.Config.ConnState = func(conn net.Conn, state http.ConnState) {
-		switch state {
-		case http.StateNew:
-			n := currentOpen.Add(1)
-			for {
-				old := peakOpen.Load()
-				if n <= old || peakOpen.CompareAndSwap(old, n) {
-					break
-				}
-			}
-		case http.StateClosed, http.StateHijacked:
-			currentOpen.Add(-1)
-		}
-	}
 	upstream.Start()
 	t.Cleanup(upstream.Close)
 
@@ -761,10 +767,15 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 
 	proxyURL := "http://" + proxyAddr + "/v1/messages"
 	const n = 8
+	start := make(chan struct{})
+	var ready sync.WaitGroup
 	var wg sync.WaitGroup
 	client := &http.Client{Timeout: 30 * time.Second}
 	for range n {
+		ready.Add(1)
 		wg.Go(func() {
+			ready.Done() // signal ready BEFORE waiting for the start barrier
+			<-start
 			resp, err := client.Post(proxyURL, "application/json", strings.NewReader(`{}`))
 			if err != nil {
 				t.Errorf("request failed: %v", err)
@@ -777,6 +788,8 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 			}
 		})
 	}
+	ready.Wait()
+	close(start)
 	wg.Wait()
 
 	_ = cmd.Process.Signal(syscall.SIGTERM)
@@ -792,8 +805,11 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
 	}
 
-	if got := peakOpen.Load(); got > 4 {
-		t.Errorf("peak upstream connections = %d, want <= 4", got)
+	if got := peakActiveRequests.Load(); got > concurrency {
+		t.Errorf("peak active upstream requests = %d, want <= %d", got, concurrency)
+	}
+	if got := connectionCloseFailures.Load(); got != 0 {
+		t.Errorf("upstream requests without Connection: close = %d", got)
 	}
 }
 
