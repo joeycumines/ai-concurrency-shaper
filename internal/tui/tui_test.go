@@ -16,10 +16,12 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"image/color"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -56,6 +58,23 @@ func key(r rune) tea.Msg {
 // directly (see TestFilterModeArrowKeysIgnored).
 func special(k string) tea.Msg {
 	return tea.KeyPressMsg{Text: k}
+}
+
+type safeBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.String()
 }
 
 // scrollbarTop returns the first terminal row that belongs to the scrollbar
@@ -674,6 +693,146 @@ func TestQuit(t *testing.T) {
 	if _, ok := msg.(tea.QuitMsg); !ok {
 		t.Errorf("expected QuitMsg, got %T", msg)
 	}
+}
+
+func TestInitStartsResyncLoop(t *testing.T) {
+	if cmd := NewModel(4).Init(); cmd == nil {
+		t.Fatal("Init should start the periodic resync loop")
+	}
+}
+
+func TestUpdateResyncTickSchedulesClearThenDraw(t *testing.T) {
+	m := NewModel(4)
+	updated, cmd := m.Update(resyncTickMsg{})
+	if cmd == nil {
+		t.Fatal("resync tick should schedule clear-then-draw")
+	}
+	got := updated.(Model)
+	if got.redrawEpoch != 0 {
+		t.Fatalf("resync tick changed redrawEpoch = %d, want 0", got.redrawEpoch)
+	}
+}
+
+func TestUpdateResyncDrawTogglesInvisibleMarker(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+	before := m.View()
+
+	updated, cmd := m.Update(resyncDrawMsg{})
+	if cmd == nil {
+		t.Fatal("resync draw should schedule the next tick")
+	}
+	got := updated.(Model)
+	after := got.View()
+
+	if got.redrawEpoch != 1 {
+		t.Fatalf("redrawEpoch = %d, want 1", got.redrawEpoch)
+	}
+	if before.Content == after.Content {
+		t.Fatal("resync draw did not change raw View.Content")
+	}
+	if got, want := stripANSI(before.Content), stripANSI(after.Content); got != want {
+		t.Fatalf("resync marker changed visible content: before %q after %q", got, want)
+	}
+}
+
+func TestResyncDoesNotInvalidateDashboardCache(t *testing.T) {
+	m := NewModel(4)
+	m.tab = tabDashboard
+	m.dashboardLinesCache = []string{"cached"}
+
+	m = update(m, resyncTickMsg{})
+	if len(m.dashboardLinesCache) != 1 || m.dashboardLinesCache[0] != "cached" {
+		t.Fatalf("resync tick invalidated dashboard cache: %#v", m.dashboardLinesCache)
+	}
+
+	m = update(m, resyncDrawMsg{})
+	if len(m.dashboardLinesCache) != 1 || m.dashboardLinesCache[0] != "cached" {
+		t.Fatalf("resync draw invalidated dashboard cache: %#v", m.dashboardLinesCache)
+	}
+}
+
+func TestProgramResyncClearsThenRedraws(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+
+	var in bytes.Buffer
+	out := &safeBuffer{}
+	p := tea.NewProgram(
+		m,
+		tea.WithWindowSize(80, 24),
+		tea.WithInput(&in),
+		tea.WithOutput(out),
+		tea.WithoutSignals(),
+		tea.WithEnvironment([]string{"TERM=xterm-256color"}),
+	)
+
+	errs := make(chan error, 1)
+	go func() {
+		_, err := p.Run()
+		errs <- err
+	}()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		if strings.Contains(out.String(), "shaper") {
+			break
+		}
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("program failed: %v", err)
+			}
+			t.Fatal("program exited before initial render")
+		case <-deadline:
+			t.Fatalf("timed out waiting for initial render; output=%q", out.String())
+		default:
+		}
+	}
+
+	p.Send(resyncTickMsg{})
+	resyncDeadline := time.After(2 * time.Second)
+	for {
+		output := out.String()
+		if secondClearIdx, ok := secondClearIndex(output); ok && strings.LastIndex(output, "shaper") > secondClearIdx {
+			break
+		}
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("program failed: %v", err)
+			}
+			t.Fatal("program exited before resync render")
+		case <-resyncDeadline:
+			t.Fatalf("timed out waiting for resync redraw; output=%q", out.String())
+		default:
+		}
+	}
+	p.Quit()
+
+	exitDeadline := time.After(2 * time.Second)
+	select {
+	case err := <-errs:
+		if err != nil {
+			t.Fatalf("program failed: %v", err)
+		}
+	case <-exitDeadline:
+		t.Fatal("timed out waiting for program exit")
+	}
+}
+
+func secondClearIndex(output string) (int, bool) {
+	clearIdx := strings.Index(output, "\x1b[2J")
+	if clearIdx < 0 {
+		return 0, false
+	}
+	secondClearIdx := strings.Index(output[clearIdx+len("\x1b[2J"):], "\x1b[2J")
+	if secondClearIdx < 0 {
+		return 0, false
+	}
+	return clearIdx + len("\x1b[2J") + secondClearIdx, true
 }
 
 func TestArrowKeyScrolling(t *testing.T) {

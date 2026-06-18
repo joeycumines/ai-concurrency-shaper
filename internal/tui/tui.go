@@ -100,6 +100,7 @@ const (
 	logRingCapacity      = 2048
 	defaultToastDuration = 5 * time.Second
 	contentStartRow      = 3
+	redrawInterval       = 10 * time.Second
 )
 
 // logRing is a thread-safe ring buffer of log lines.
@@ -201,6 +202,11 @@ type Model struct {
 	dragging        bool
 	dragStartY      int
 	dragStartScroll int
+
+	// redrawEpoch makes View.Content differ on resync frames without changing
+	// visible text. It is paired with ClearScreen so Bubble Tea's renderer
+	// cannot skip the repaint after tmux or terminal state changes.
+	redrawEpoch int
 }
 
 func NewModel(conc int) Model {
@@ -218,6 +224,32 @@ func NewModel(conc int) Model {
 
 func (m *Model) LogWriter() io.Writer { return &logWriter{ring: m.logRing} }
 
+type resyncTickMsg struct{}
+type resyncDrawMsg struct{}
+
+func (m Model) resyncTickCmd() tea.Cmd {
+	return tea.Tick(redrawInterval, func(time.Time) tea.Msg {
+		return resyncTickMsg{}
+	})
+}
+
+func immediateResyncDrawCmd() tea.Cmd {
+	return func() tea.Msg {
+		return resyncDrawMsg{}
+	}
+}
+
+func resyncRedrawSequence() tea.Cmd {
+	return tea.Sequence(tea.ClearScreen, immediateResyncDrawCmd())
+}
+
+func redrawMarker(epoch int) string {
+	if epoch%2 == 0 {
+		return "\x1b[0m"
+	}
+	return "\x1b[00m"
+}
+
 func (m *Model) AddToast(t *toast.Toast) {
 	if t.Duration == 0 {
 		t.Duration = defaultToastDuration
@@ -226,7 +258,7 @@ func (m *Model) AddToast(t *toast.Toast) {
 	m.toasts = append(m.toasts, t)
 }
 
-func (m Model) Init() tea.Cmd { return nil }
+func (m Model) Init() tea.Cmd { return m.resyncTickCmd() }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -236,6 +268,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.resetCh <- struct{}{}:
 		default:
 		}
+	case resyncTickMsg:
+		return m, resyncRedrawSequence()
+	case resyncDrawMsg:
+		m.redrawEpoch++
+		return m, m.resyncTickCmd()
 	case metrics.Snapshot:
 		m.snap = msg
 		m.dashboardLinesCache = nil
@@ -1114,6 +1151,7 @@ func (m Model) View() tea.View {
 		b.WriteByte('\n')
 	}
 	b.WriteString(m.renderFooter())
+	b.WriteString(redrawMarker(m.redrawEpoch))
 
 	v.SetContent(b.String())
 	return v
