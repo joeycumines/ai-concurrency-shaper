@@ -566,7 +566,10 @@ func (m *Model) visibleRows() int {
 			v -= min(n, 3)
 		}
 	}
-	return max(v, 1)
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 // dataRows returns the number of data rows displayed for the active tab,
@@ -838,9 +841,12 @@ func (m Model) renderContentWithScrollbar() string {
 	visibleRows := m.visibleRows()
 
 	var b strings.Builder
-	maxLines := max(len(lines), visibleRows)
-	for i := range maxLines {
-		if i < len(lines) {
+	// Clamp the rendered content to the allocated viewport. Individual tab
+	// renderers are expected to stay within visibleRows, but this guard
+	// prevents any overflow from pushing chrome or footer off-screen.
+	contentLimit := min(len(lines), visibleRows)
+	for i := range visibleRows {
+		if i < contentLimit {
 			line := lines[i]
 			stripped := stripANSI(line)
 			visibleCells := uniseg.StringWidth(stripped)
@@ -1804,19 +1810,15 @@ func (m Model) resetCmd() tea.Cmd {
 type resetMsg struct{}
 
 func (m Model) renderConfirmOverlay() string {
-	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString(overlayStyle.Render(
-		fmt.Sprintf(" Reset Stats \n\n" +
-			" Clear all cumulative counters?\n" +
-			" (Proxied, Passthrough, Timeouts, etc.)\n\n" +
-			" y = yes    n/Esc = no")))
-	return b.String()
+	return overlayStyle.Render(
+		fmt.Sprintf(" Reset Stats \n\n"+
+			" Clear all cumulative counters?\n"+
+			" (Proxied, Passthrough, Timeouts, etc.)\n\n"+
+			" y = yes    n/Esc = no")) + "\n"
 }
 
 func (m Model) renderDetailOverlay() string {
 	var b strings.Builder
-	b.WriteString("\n")
 
 	switch m.tab {
 	case tabRequests:
@@ -1864,6 +1866,9 @@ func (m Model) renderDetailOverlay() string {
 				r.TotalAge().Truncate(time.Millisecond))))
 	}
 
+	if !builderEndsWithNewline(&b) {
+		b.WriteByte('\n')
+	}
 	return b.String()
 }
 
@@ -2005,22 +2010,22 @@ func (m Model) renderDetailWaterfall(e *journal.Entry, width int) string {
 }
 
 func (m Model) renderHelpOverlay() string {
-	return overlayStyle.Render(" Keybindings \n\n" +
-		" 1-6          Switch tab (Overview/Requests/Network/Logs/Concurrency/Routes)\n" +
-		" j/k or ↑/↓   Scroll down/up\n" +
-		" PgUp/PgDn     Page up / Page down\n" +
-		" Home/End      Jump to first / last item\n" +
-		" Ctrl-U / Ctrl-D  Half-page scroll\n" +
-		" g             Jump to top    G      Jump to bottom\n" +
-		" Enter/Space   Inspect selected entry\n" +
-		" /             Filter entries (Requests/Network/Logs tabs)\n" +
-		" t             Cycle type filter (Network tab)\n" +
-		" s             Cycle status filter (Network tab)\n" +
-		" Esc           Close overlay / Clear filter\n" +
-		" ?             Show this help\n" +
-		" q / Ctrl+C    Quit\n\n" +
-		" Mouse: wheel scroll, click tabs to switch\n\n" +
-		" [Any key] close ")
+	return overlayStyle.Render(" Keybindings \n\n"+
+		" 1-6          Switch tab (Overview/Requests/Network/Logs/Concurrency/Routes)\n"+
+		" j/k or ↑/↓   Scroll down/up\n"+
+		" PgUp/PgDn     Page up / Page down\n"+
+		" Home/End      Jump to first / last item\n"+
+		" Ctrl-U / Ctrl-D  Half-page scroll\n"+
+		" g             Jump to top    G      Jump to bottom\n"+
+		" Enter/Space   Inspect selected entry\n"+
+		" /             Filter entries (Requests/Network/Logs tabs)\n"+
+		" t             Cycle type filter (Network tab)\n"+
+		" s             Cycle status filter (Network tab)\n"+
+		" Esc           Close overlay / Clear filter\n"+
+		" ?             Show this help\n"+
+		" q / Ctrl+C    Quit\n\n"+
+		" Mouse: wheel scroll, click tabs to switch\n\n"+
+		" [Any key] close ") + "\n"
 }
 
 func (m Model) renderFooter() string {

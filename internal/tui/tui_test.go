@@ -1552,14 +1552,18 @@ func TestDataRows_PerTab(t *testing.T) {
 	}
 }
 
-func TestVisibleRows_MinOne(t *testing.T) {
+func TestVisibleRows_MatchesHeightLessChrome(t *testing.T) {
+	// visibleRows is the space between chrome and footer; it may be zero at
+	// the documented minimum height of 4.
 	m := NewModel(4)
 	m.width = 80
+	m.height = 4
+	if got, want := m.visibleRows(), 0; got != want {
+		t.Errorf("height=4: visibleRows = %d, want %d", got, want)
+	}
 	m.height = 8
-	m.tab = tabRequests
-	v := m.visibleRows()
-	if v < 1 {
-		t.Errorf("visibleRows = %d, want at least 1", v)
+	if got, want := m.visibleRows(), 4; got != want {
+		t.Errorf("height=8: visibleRows = %d, want %d", got, want)
 	}
 }
 
@@ -3057,6 +3061,53 @@ func TestFooter_AnchoredAtBottom(t *testing.T) {
 		last := lines[len(lines)-1]
 		if !strings.Contains(last, "1-6:tab") {
 			t.Errorf("tab=%d: last line should be footer, got %q", tab, last)
+		}
+	}
+}
+
+func TestView_ViewportClampsOverflow(t *testing.T) {
+	// When a tab's fixed chrome plus data exceeds the allocated visibleRows,
+	// renderContentWithScrollbar must clip to exactly visibleRows lines instead
+	// of expanding. Without this guard the output grows taller than the
+	// terminal, pushing the chrome and scrollable content upward out of sight
+	// while the footer stays anchored at the bottom.
+	for _, tab := range []tabID{tabDashboard, tabRequests, tabNetwork, tabLogs, tabConcurrency, tabRoutes} {
+		for _, h := range []int{8, 14, 50} {
+			m := NewModel(4)
+			m.width = 80
+			m.height = h
+			m = update(m, tea.WindowSizeMsg{Width: 80, Height: h})
+			m.tab = tab
+			// Populate enough state that each tab has some fixed content to emit.
+			switch tab {
+			case tabRequests:
+				m.snap.LogEntries = make([]metrics.RequestLogEntry, 5)
+			case tabNetwork:
+				// journal entries are exercised by network detail PTY tests;
+				// browse state here relies on visibleEntries which is nil.
+			case tabLogs:
+				m.logRing.Write([]byte("first log line\nsecond log line\n"))
+			case tabConcurrency:
+				m.snap.InFlight = make([]metrics.InFlightEntry, 5)
+			case tabRoutes:
+				m.snap.RouteStats = map[string]metrics.RouteStat{
+					"POST /v1/messages": {Total: 1},
+				}
+			}
+			v := m.View()
+			lines := strings.Split(v.Content, "\n")
+			if len(lines) != h {
+				t.Errorf("tab=%d height=%d: view has %d lines, want %d", tab, h, len(lines), h)
+				continue
+			}
+			first := stripANSI(lines[0])
+			if !strings.Contains(first, "shaper") {
+				t.Errorf("tab=%d height=%d: header scrolled out of sight, got %q", tab, h, first)
+			}
+			last := lines[len(lines)-1]
+			if !strings.Contains(last, "1-6:tab") {
+				t.Errorf("tab=%d height=%d: footer not anchored at bottom, got %q", tab, h, last)
+			}
 		}
 	}
 }
