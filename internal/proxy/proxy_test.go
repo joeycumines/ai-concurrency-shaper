@@ -4980,3 +4980,238 @@ func TestProxy_403SlowDripExpiredRetryAfterNotTemporaryBan(t *testing.T) {
 		t.Fatalf("TotalFailures = %d, want 0 (expired Retry-After must not count)", b.Stats().TotalFailures)
 	}
 }
+
+// ErrAbortHandler is the sentinel panic value that httputil.ReverseProxy uses
+// when a client disconnects mid-stream. The proxy must distinguish it from real
+// (local) panics so that the cancel-cooldown logic fires correctly instead of
+// being short-circuited by the localPanic guard.
+//
+// See: https://pkg.go.dev/net/http#hdr-Server
+// "If a handler panics with ErrAbortHandler, the server does not log a stack trace."
+
+// TestProxy_ErrAbortHandler_AppliesCancelCooldown verifies that when the
+// reverse proxy panics with http.ErrAbortHandler (client disconnect mid-stream),
+// the cancelCooldown IS applied — the slot is held for the configured duration.
+// This is the key regression: before the fix, the inner recover set localPanic=true,
+// which caused the slot-release defer to skip the cancelCooldown branch and
+// release immediately.
+func TestProxy_ErrAbortHandler_AppliesCancelCooldown(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	lim := queue.NewLimiterWithCooldown(1, 0) // single slot for easy observation
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(lim),
+		WithMetrics(met),
+		WithCancelCooldown(200*time.Millisecond),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			cancel()
+			panic(http.ErrAbortHandler)
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	// The slot should be in cooldown — not immediately available.
+	// With localPanic=true (the bug), the slot is released instantly,
+	// so a second request would acquire it immediately. With the fix,
+	// cancelCooldown holds it for 200ms.
+	start := time.Now()
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	elapsed := time.Since(start)
+
+	// If cancelCooldown was skipped (localPanic bug), the second request
+	// acquires the slot immediately (elapsed < 50ms). If cancelCooldown
+	// fired correctly, the second request waits ~200ms for the slot.
+	if elapsed < 100*time.Millisecond {
+		t.Errorf("second request acquired slot in %v — cancelCooldown was NOT applied (localPanic bug: ErrAbortHandler treated as local panic)", elapsed)
+	}
+
+	// After cooldown, the slot should be released.
+	time.Sleep(200 * time.Millisecond)
+	stats := lim.Stats()
+	if stats.Active != 0 {
+		t.Errorf("after cooldown, Active = %d, want 0 (slot should be released)", stats.Active)
+	}
+}
+
+// TestProxy_ErrAbortHandler_NoSpurious502 verifies that when the reverse
+// proxy panics with http.ErrAbortHandler, no spurious 502 is recorded in
+// metrics. The client disconnected — writing a 502 to a dead connection is
+// wasteful and inflates error counts.
+func TestProxy_ErrAbortHandler_NoSpurious502(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			cancel()
+			panic(http.ErrAbortHandler)
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	p.ServeHTTP(rec, req)
+
+	// ErrAbortHandler should NOT produce a 502 in metrics.
+	// Before the fix, the inner recover wrote http.Error(rec, "internal error", 502)
+	// which inflated StatusCounts[5].
+	snap := met.Snapshot()
+	if snap.StatusCounts[5] != 0 {
+		t.Errorf("StatusCounts[5] = %d, want 0 (ErrAbortHandler should not produce a 502 — client already disconnected)", snap.StatusCounts[5])
+	}
+}
+
+// TestProxy_ErrAbortHandler_Passthrough_AppliesCancelCooldown mirrors
+// TestProxy_ErrAbortHandler_AppliesCancelCooldown but for passthrough routes
+// (servePassthrough instead of serveLimited).
+func TestProxy_ErrAbortHandler_Passthrough_AppliesCancelCooldown(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	routeLim := queue.NewLimiterWithCooldown(1, 0)
+	globalLim := queue.NewLimiterWithCooldown(1, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(routeLim),
+		WithGlobalLimiter(globalLim),
+		WithMetrics(met),
+		WithCancelCooldown(200*time.Millisecond),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			cancel()
+			panic(http.ErrAbortHandler)
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	// GET /health is a passthrough route (not limited).
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	// Second request should wait for cancelCooldown on the global limiter.
+	start := time.Now()
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	elapsed := time.Since(start)
+
+	if elapsed < 100*time.Millisecond {
+		t.Errorf("second request acquired slot in %v — cancelCooldown was NOT applied for passthrough ErrAbortHandler (localPanic bug)", elapsed)
+	}
+}
+
+// TestProxy_ErrAbortHandler_NoBreakerFailure verifies that ErrAbortHandler
+// (client disconnect) is NOT reported as a circuit breaker failure.
+// This mirrors TestProxy_PanicRecovery_NoBreakerFailureForLocalPanic but
+// specifically for the ErrAbortHandler sentinel. Real local panics SHOULD be
+// excluded from the breaker (they're proxy bugs, not upstream failures), and
+// client disconnects SHOULD also be excluded (they're not upstream failures
+// either — the isClientCancel guard handles this in the slot-release defer).
+func TestProxy_ErrAbortHandler_NoBreakerFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+
+	b, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(100),
+		circuitbreaker.WithBasePenalty(200*time.Millisecond),
+		circuitbreaker.WithMaxPenalty(200*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			cancel()
+			panic(http.ErrAbortHandler)
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	p.ServeHTTP(rec, req)
+
+	// Give the cancelCooldown time to release.
+	time.Sleep(100 * time.Millisecond)
+
+	stats := b.Stats()
+	if stats.TotalFailures != 0 {
+		t.Errorf("breaker TotalFailures = %d, want 0 (ErrAbortHandler is a client disconnect, not an upstream failure)", stats.TotalFailures)
+	}
+	if stats.ConsecutiveFailures != 0 {
+		t.Errorf("breaker ConsecutiveFailures = %d, want 0", stats.ConsecutiveFailures)
+	}
+}
