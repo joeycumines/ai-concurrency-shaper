@@ -592,6 +592,13 @@ func New(opts ...Option) (*Proxy, error) {
 			req.Header.Del("X-Forwarded-Proto")
 		},
 		Transport: p,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("proxy transport error: %v", err)
+			if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
+				http.Error(rec, "bad gateway", http.StatusBadGateway)
+			}
+		},
+		FlushInterval: -1,
 	}
 	p.inner = rp
 	p.transport = transport
@@ -628,6 +635,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var metRecorded bool // set to true when normal-flow RecordStatus runs
 	defer func() {
 		if rv := recover(); rv != nil {
+			if rv == http.ErrAbortHandler {
+				return
+			}
 			log.Printf("proxy panic: %v", rv)
 			if recPtr != nil {
 				http.Error(recPtr, "internal error", http.StatusBadGateway)
@@ -877,6 +887,9 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 	func() {
 		defer func() {
 			if rv := recover(); rv != nil {
+				if rv == http.ErrAbortHandler {
+					return
+				}
 				log.Printf("proxy panic in servePassthrough: %v", rv)
 				if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
 					http.Error(rec, "internal error", http.StatusBadGateway)
@@ -1144,6 +1157,9 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	func() {
 		defer func() {
 			if rv := recover(); rv != nil {
+				if rv == http.ErrAbortHandler {
+					return
+				}
 				log.Printf("proxy panic in serveLimited: %v", rv)
 				if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
 					http.Error(rec, "internal error", http.StatusBadGateway)
