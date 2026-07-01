@@ -342,6 +342,27 @@ func (b *Breaker) Allow() (uint64, error) {
 	}
 }
 
+// CancelProbe releases a HALF_OPEN probe admitted by Allow when the caller
+// discovers that the probe was inconclusive rather than a breaker success or
+// failure. Examples include no upstream attempt, downstream write/flush failure,
+// local upgrade capability failure, and suppressed client aborts after response
+// headers. It is intentionally a no-op for CLOSED requests (epoch 0), stale
+// epochs, and probes that have already resolved through RecordSuccess or
+// RecordFailure. A matching cancellation also advances the epoch so any late
+// result carrying the canceled epoch is treated as stale by
+// RecordSuccess/RecordFailure.
+func (b *Breaker) CancelProbe(epoch uint64) {
+	if epoch == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.state == HalfOpen && b.probeInFlight && b.probeEpoch == epoch {
+		b.probeInFlight = false
+		b.probeEpoch++
+	}
+}
+
 // RecordFailure records a qualifying failure (5xx, 429, transport error, or
 // rate-limit-signaled 403).
 // statusCode is 0 for transport errors where no response was received.

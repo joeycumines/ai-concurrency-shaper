@@ -43,6 +43,62 @@ func body(s string) io.ReadCloser {
 	return io.NopCloser(bytes.NewBufferString(s))
 }
 
+type blockingEOFBody struct {
+	started chan<- struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingEOFBody) Read([]byte) (int, error) {
+	b.once.Do(func() {
+		if b.started != nil {
+			close(b.started)
+		}
+	})
+	<-b.release
+	return 0, io.EOF
+}
+
+func (b *blockingEOFBody) Close() error { return nil }
+
+type closeTrackingBody struct {
+	reader io.Reader
+	closed atomic.Bool
+}
+
+func (b *closeTrackingBody) Read(p []byte) (int, error) {
+	if b.reader == nil {
+		return 0, io.EOF
+	}
+	return b.reader.Read(p)
+}
+
+func (b *closeTrackingBody) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+type blockingCloseBody struct {
+	closed     chan struct{}
+	closeOnce  sync.Once
+	closedFlag atomic.Bool
+}
+
+func newBlockingCloseBody() *blockingCloseBody {
+	return &blockingCloseBody{closed: make(chan struct{})}
+}
+
+func (b *blockingCloseBody) Read([]byte) (int, error) {
+	<-b.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (b *blockingCloseBody) Close() error {
+	b.closedFlag.Store(true)
+	b.closeOnce.Do(func() { close(b.closed) })
+	return nil
+}
+
 func TestRetryOn5xx(t *testing.T) {
 	calls := 0
 	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
@@ -299,6 +355,416 @@ func TestContextCancel(t *testing.T) {
 	_, _ = tr.RoundTrip(req)
 }
 
+func TestRetry_CancelDuringBackoffReleasesHalfOpenProbe(t *testing.T) {
+	b, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(10*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	drainStarted := make(chan struct{})
+	releaseDrain := make(chan struct{})
+	var calls atomic.Int64
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		call := calls.Add(1)
+		if call != 1 {
+			return &http.Response{StatusCode: http.StatusOK, Body: body("unexpected"), Header: make(http.Header), Request: req}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Status:     "500 Internal Server Error",
+			Header:     make(http.Header),
+			Body:       &blockingEOFBody{started: drainStarted, release: releaseDrain},
+			Request:    req,
+		}, nil
+	})
+	tr := &Transport{
+		Inner:      inner,
+		MaxRetries: 1,
+		WaitMin:    time.Hour,
+		WaitMax:    time.Hour,
+		Breaker:    b,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "http://x/", nil).WithContext(ctx)
+	done := make(chan error, 1)
+	go func() {
+		_, err := tr.RoundTrip(req)
+		done <- err
+	}()
+
+	select {
+	case <-drainStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first retry response body was not drained")
+	}
+	time.Sleep(20 * time.Millisecond) // let the breaker OPEN timeout elapse before the retry Allow
+	cancel()
+	close(releaseDrain)
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RoundTrip error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RoundTrip did not return after request cancellation")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("inner RoundTrip calls = %d, want 1", calls.Load())
+	}
+	if epoch, err := b.Allow(); err != nil {
+		t.Fatalf("Allow() after canceled retry backoff = epoch %d, err %v; want released HALF_OPEN probe", epoch, err)
+	}
+}
+
+func TestRetry_RequestContextCancellationDoesNotRetryHalfOpenProbe(t *testing.T) {
+	tests := []struct {
+		name    string
+		makeCtx func(t *testing.T) (context.Context, context.CancelFunc, error)
+	}{
+		{
+			name: "canceled",
+			makeCtx: func(t *testing.T) (context.Context, context.CancelFunc, error) {
+				t.Helper()
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}, context.Canceled
+			},
+		},
+		{
+			name: "deadline exceeded",
+			makeCtx: func(t *testing.T) (context.Context, context.CancelFunc, error) {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+				<-ctx.Done()
+				return ctx, cancel, context.DeadlineExceeded
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := circuitbreaker.New(
+				circuitbreaker.WithFailureThreshold(1),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithOpenTimeout(10*time.Millisecond),
+				circuitbreaker.WithMaxOpenTimeout(10*time.Millisecond),
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+			time.Sleep(20 * time.Millisecond)
+			epoch, allowErr := b.Allow()
+			if allowErr != nil {
+				t.Fatalf("Allow() opening half-open probe: %v", allowErr)
+			}
+			if epoch == 0 {
+				t.Fatal("half-open Allow returned epoch 0, want non-zero probe epoch")
+			}
+
+			ctx, cleanup, wantErr := tt.makeCtx(t)
+			defer cleanup()
+			var calls atomic.Int64
+			inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+				calls.Add(1)
+				if got := req.Context().Err(); !errors.Is(got, wantErr) {
+					t.Fatalf("request context error = %v, want %v", got, wantErr)
+				}
+				return nil, wantErr
+			})
+			tr := &Transport{
+				Inner:      inner,
+				MaxRetries: 3,
+				WaitMin:    time.Millisecond,
+				WaitMax:    time.Millisecond,
+				Breaker:    b,
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "http://x/", nil)
+			req = req.WithContext(context.WithValue(ctx, BreakerEpochKey, epoch))
+			resp, err := tr.RoundTrip(req)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("RoundTrip error = %v, want %v", err, wantErr)
+			}
+			if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
+				t.Fatalf("RoundTrip converted request cancellation into ErrCircuitOpen: %v", err)
+			}
+			if resp != nil {
+				t.Fatalf("response = %#v, want nil", resp)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("inner RoundTrip calls = %d, want exactly 1 (no retry after request cancellation)", calls.Load())
+			}
+
+			stats := b.Stats()
+			if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want only seeded failure and no cancellation accounting", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if state := b.State(); state != circuitbreaker.HalfOpen {
+				t.Fatalf("breaker state = %s, want HALF_OPEN with cancellation not recorded as failure", state)
+			}
+			nextEpoch, allowErr := b.Allow()
+			if allowErr != nil {
+				t.Fatalf("Allow() after request-context cancellation = epoch %d, err %v; want released HALF_OPEN probe", nextEpoch, allowErr)
+			}
+			if nextEpoch == 0 {
+				t.Fatal("Allow() after request-context cancellation returned epoch 0, want new HALF_OPEN probe epoch")
+			}
+			b.CancelProbe(nextEpoch)
+		})
+	}
+}
+
+func TestRetry_RequestContextCancellationAfterRetryableStatusDoesNotRetryHalfOpenProbe(t *testing.T) {
+	b, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(10*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	time.Sleep(20 * time.Millisecond)
+	epoch, allowErr := b.Allow()
+	if allowErr != nil {
+		t.Fatalf("Allow() opening half-open probe: %v", allowErr)
+	}
+	if epoch == 0 {
+		t.Fatal("half-open Allow returned epoch 0, want non-zero probe epoch")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls atomic.Int64
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		cancel()
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Status:     "500 Internal Server Error",
+			Header:     make(http.Header),
+			Body:       body("retryable failure"),
+			Request:    req,
+		}, nil
+	})
+	tr := &Transport{
+		Inner:      inner,
+		MaxRetries: 3,
+		WaitMin:    time.Millisecond,
+		WaitMax:    time.Millisecond,
+		Breaker:    b,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://x/", nil)
+	req = req.WithContext(context.WithValue(ctx, BreakerEpochKey, epoch))
+	resp, err := tr.RoundTrip(req)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RoundTrip error = %v, want context.Canceled", err)
+	}
+	if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
+		t.Fatalf("RoundTrip converted post-status cancellation into ErrCircuitOpen: %v", err)
+	}
+	if resp != nil {
+		t.Fatalf("response = %#v, want nil because caller context was canceled before retry", resp)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("inner RoundTrip calls = %d, want exactly 1 (no retry after request cancellation)", calls.Load())
+	}
+
+	stats := b.Stats()
+	if stats.TotalFailures != 2 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want seeded failure plus upstream 500 and no cancellation success", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	if state := b.State(); state != circuitbreaker.Open {
+		t.Fatalf("breaker state = %s, want OPEN after definitive upstream 500", state)
+	}
+}
+
+func TestRetry_RequestContextCancellationWithResponseClosesBodyAndReleasesHalfOpenProbe(t *testing.T) {
+	b, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(10*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	time.Sleep(20 * time.Millisecond)
+	epoch, allowErr := b.Allow()
+	if allowErr != nil {
+		t.Fatalf("Allow() opening half-open probe: %v", allowErr)
+	}
+	if epoch == 0 {
+		t.Fatal("half-open Allow returned epoch 0, want non-zero probe epoch")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	tracked := &closeTrackingBody{reader: strings.NewReader("ignored response")}
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header:     make(http.Header),
+			Body:       tracked,
+			Request:    req,
+		}, context.Canceled
+	})
+	tr := &Transport{
+		Inner:        inner,
+		MaxRetries:   3,
+		MaxBodyBytes: 1024,
+		WaitMin:      time.Millisecond,
+		WaitMax:      time.Millisecond,
+		Breaker:      b,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://x/", strings.NewReader("buffered request"))
+	req = req.WithContext(context.WithValue(ctx, BreakerEpochKey, epoch))
+	resp, err := tr.RoundTrip(req)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RoundTrip error = %v, want context.Canceled", err)
+	}
+	if resp != nil {
+		t.Fatalf("response = %#v, want nil for terminal request cancellation", resp)
+	}
+	if !tracked.closed.Load() {
+		t.Fatal("response body returned with context cancellation was not closed")
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want only seeded failure and no cancellation success", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	nextEpoch, allowErr := b.Allow()
+	if allowErr != nil {
+		t.Fatalf("Allow() after resp+cancel cleanup = epoch %d, err %v; want released HALF_OPEN probe", nextEpoch, allowErr)
+	}
+	b.CancelProbe(nextEpoch)
+}
+
+func TestRetry_BodyTooLargeRequestContextCancellationReleasesHalfOpenProbe(t *testing.T) {
+	b, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(10*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(10*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	time.Sleep(20 * time.Millisecond)
+	epoch, allowErr := b.Allow()
+	if allowErr != nil {
+		t.Fatalf("Allow() opening half-open probe: %v", allowErr)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var calls atomic.Int64
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, context.Canceled
+	})
+	tr := &Transport{
+		Inner:        inner,
+		MaxRetries:   3,
+		MaxBodyBytes: 1,
+		Breaker:      b,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://x/", strings.NewReader("oversized"))
+	req = req.WithContext(context.WithValue(ctx, BreakerEpochKey, epoch))
+	resp, err := tr.RoundTrip(req)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RoundTrip error = %v, want context.Canceled", err)
+	}
+	if resp != nil {
+		t.Fatalf("response = %#v, want nil", resp)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("inner RoundTrip calls = %d, want 1 body-too-large attempt", calls.Load())
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want only seeded failure and no cancellation accounting", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	nextEpoch, allowErr := b.Allow()
+	if allowErr != nil {
+		t.Fatalf("Allow() after body-too-large cancellation = epoch %d, err %v; want released HALF_OPEN probe", nextEpoch, allowErr)
+	}
+	b.CancelProbe(nextEpoch)
+}
+
+func TestRetry_RequestContextCancellationAfterRetryableStatusSkipsDrain(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	blockedBody := newBlockingCloseBody()
+	var calls atomic.Int64
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		cancel()
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Status:     "500 Internal Server Error",
+			Header:     make(http.Header),
+			Body:       blockedBody,
+			Request:    req,
+		}, nil
+	})
+	tr := &Transport{
+		Inner:      inner,
+		MaxRetries: 3,
+		WaitMin:    time.Millisecond,
+		WaitMax:    time.Millisecond,
+	}
+
+	type result struct {
+		resp *http.Response
+		err  error
+	}
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		resp, err := tr.RoundTrip(httptest.NewRequest(http.MethodGet, "http://x/", nil).WithContext(ctx))
+		done <- result{resp: resp, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if !errors.Is(got.err, context.Canceled) {
+			t.Fatalf("RoundTrip error = %v, want context.Canceled", got.err)
+		}
+		if got.resp != nil {
+			t.Fatalf("response = %#v, want nil after cancellation before retry", got.resp)
+		}
+	case <-time.After(300 * time.Millisecond):
+		_ = blockedBody.Close()
+		<-done
+		t.Fatal("RoundTrip attempted to drain retryable response after request cancellation")
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("RoundTrip elapsed = %v, want cancellation to skip retry-drain latency", elapsed)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("inner RoundTrip calls = %d, want exactly 1", calls.Load())
+	}
+	if !blockedBody.closedFlag.Load() {
+		t.Fatal("retryable response body was not closed after cancellation")
+	}
+}
+
 func TestRetry_WithCircuitBreaker_AbortsWhenOpen(t *testing.T) {
 	calls := 0
 	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
@@ -411,6 +877,454 @@ func TestRetry_WithCircuitBreaker_RecordsSuccess(t *testing.T) {
 	}
 	if s.TotalSuccesses != 1 {
 		t.Errorf("TotalSuccesses = %d, want 1", s.TotalSuccesses)
+	}
+}
+
+func TestRetry_WithDeferredBreakerSuccessSkipsHeaderLevelSuccess(t *testing.T) {
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Body: body("ok"), Header: make(http.Header)}, nil
+	})
+
+	b, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(10),
+		circuitbreaker.WithWindow(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tr := &Transport{
+		Inner:      inner,
+		MaxRetries: 3,
+		WaitMin:    time.Millisecond,
+		WaitMax:    time.Millisecond,
+		Breaker:    b,
+	}
+
+	req := httptest.NewRequest("GET", "http://x/", nil)
+	req = req.WithContext(WithDeferredBreakerSuccess(req.Context()))
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	s := b.Stats()
+	if s.TotalSuccesses != 0 {
+		t.Fatalf("TotalSuccesses = %d, want 0 (success must be deferred until caller consumes body)", s.TotalSuccesses)
+	}
+	if s.TotalFailures != 0 {
+		t.Fatalf("TotalFailures = %d, want 0", s.TotalFailures)
+	}
+}
+
+func TestRetry_WithDeferredBreakerSuccessRecordsReturnedAttemptMetadata(t *testing.T) {
+	calls := 0
+	var secondAttemptEntered time.Time
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if calls == 1 {
+			return &http.Response{StatusCode: 500, Body: body("err"), Header: make(http.Header)}, nil
+		}
+		secondAttemptEntered = time.Now()
+		return &http.Response{StatusCode: 200, Body: body("ok"), Header: make(http.Header)}, nil
+	})
+
+	b, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(10),
+		circuitbreaker.WithWindow(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tr := &Transport{
+		Inner:      inner,
+		MaxRetries: 1,
+		WaitMin:    time.Millisecond,
+		WaitMax:    time.Millisecond,
+		Breaker:    b,
+	}
+
+	attempt := &BreakerAttempt{}
+	req := httptest.NewRequest("GET", "http://x/", nil)
+	ctx := WithDeferredBreakerSuccess(req.Context())
+	ctx = WithBreakerAttempt(ctx, attempt)
+	req = req.WithContext(ctx)
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2", calls)
+	}
+	if attempt.StartedAt.IsZero() {
+		t.Fatal("attempt StartedAt was not recorded")
+	}
+	if attempt.StartedAt.After(secondAttemptEntered) {
+		t.Fatalf("attempt StartedAt = %v, want no later than second attempt entry %v", attempt.StartedAt, secondAttemptEntered)
+	}
+	if attempt.Epoch != 0 {
+		t.Fatalf("attempt Epoch = %d, want 0 while breaker remains CLOSED", attempt.Epoch)
+	}
+	if attempt.HeaderFailureRecorded {
+		t.Fatal("attempt HeaderFailureRecorded = true, want false for returned 2xx attempt")
+	}
+	if attempt.FailureRecorded {
+		t.Fatal("attempt FailureRecorded = true, want false for returned 2xx attempt")
+	}
+	if !attempt.AnyFailureRecorded {
+		t.Fatal("attempt AnyFailureRecorded = false, want true because an earlier retry attempt returned 500")
+	}
+	if !attempt.AnyHeaderFailureRecorded {
+		t.Fatal("attempt AnyHeaderFailureRecorded = false, want true because an earlier retry attempt returned 500 headers")
+	}
+}
+
+func TestRetry_WithBreakerAttemptRecordsReturnedHeaderFailureOutcome(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		header  http.Header
+		wantHit bool
+	}{
+		{name: "500", status: http.StatusInternalServerError, header: make(http.Header), wantHit: true},
+		{name: "temporary 403", status: http.StatusForbidden, header: http.Header{"Retry-After": []string{"30"}}, wantHit: true},
+		{name: "bare 403", status: http.StatusForbidden, header: make(http.Header), wantHit: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: tt.status, Body: body("body"), Header: tt.header.Clone()}, nil
+			})
+
+			b, err := circuitbreaker.New(
+				circuitbreaker.WithFailureThreshold(10),
+				circuitbreaker.WithWindow(10*time.Second),
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			tr := &Transport{Inner: inner, MaxRetries: 0, Breaker: b}
+			attempt := &BreakerAttempt{}
+			req := httptest.NewRequest("GET", "http://x/", nil)
+			req = req.WithContext(WithBreakerAttempt(req.Context(), attempt))
+			resp, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("RoundTrip error: %v", err)
+			}
+			if resp.StatusCode != tt.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.status)
+			}
+			if attempt.StartedAt.IsZero() {
+				t.Fatal("attempt StartedAt was not recorded")
+			}
+			if attempt.HeaderFailureRecorded != tt.wantHit {
+				t.Fatalf("HeaderFailureRecorded = %v, want %v", attempt.HeaderFailureRecorded, tt.wantHit)
+			}
+			if attempt.FailureRecorded != tt.wantHit {
+				t.Fatalf("FailureRecorded = %v, want %v", attempt.FailureRecorded, tt.wantHit)
+			}
+			if attempt.AnyHeaderFailureRecorded != tt.wantHit {
+				t.Fatalf("AnyHeaderFailureRecorded = %v, want %v", attempt.AnyHeaderFailureRecorded, tt.wantHit)
+			}
+			if attempt.AnyFailureRecorded != tt.wantHit {
+				t.Fatalf("AnyFailureRecorded = %v, want %v", attempt.AnyFailureRecorded, tt.wantHit)
+			}
+		})
+	}
+}
+
+func TestRetry_WithBreakerAttemptRecordsReturnedTransportFailureOutcome(t *testing.T) {
+	errTransport := errors.New("transport failed")
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errTransport
+	})
+	b, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(10),
+		circuitbreaker.WithWindow(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tr := &Transport{Inner: inner, MaxRetries: 0, Breaker: b}
+	attempt := &BreakerAttempt{}
+	req := httptest.NewRequest("GET", "http://x/", nil)
+	req = req.WithContext(WithBreakerAttempt(req.Context(), attempt))
+	resp, err := tr.RoundTrip(req)
+	if !errors.Is(err, errTransport) {
+		t.Fatalf("RoundTrip error = %v, want %v", err, errTransport)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %#v, want nil", resp)
+	}
+	if !attempt.FailureRecorded {
+		t.Fatal("FailureRecorded = false, want true for returned transport failure")
+	}
+	if attempt.HeaderFailureRecorded {
+		t.Fatal("HeaderFailureRecorded = true, want false for transport failure")
+	}
+	if !attempt.AnyFailureRecorded {
+		t.Fatal("AnyFailureRecorded = false, want true for returned transport failure")
+	}
+	if attempt.AnyHeaderFailureRecorded {
+		t.Fatal("AnyHeaderFailureRecorded = true, want false for transport failure")
+	}
+}
+
+func TestRetry_ContextCanceledErrorWithoutRequestCancelRecordsFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "canceled", err: context.Canceled},
+		{name: "deadline", err: context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Context().Err() != nil {
+					t.Fatalf("request context unexpectedly canceled: %v", req.Context().Err())
+				}
+				return nil, tt.err
+			})
+
+			b, err := circuitbreaker.New(
+				circuitbreaker.WithFailureThreshold(10),
+				circuitbreaker.WithWindow(10*time.Second),
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			tr := &Transport{
+				Inner:      inner,
+				MaxRetries: 0,
+				Breaker:    b,
+			}
+
+			_, _ = tr.RoundTrip(httptest.NewRequest("GET", "http://x/", nil))
+
+			s := b.Stats()
+			if s.TotalFailures != 1 {
+				t.Fatalf("TotalFailures = %d, want 1 (context-shaped error without request cancellation is a transport failure)", s.TotalFailures)
+			}
+			if s.TotalSuccesses != 0 {
+				t.Fatalf("TotalSuccesses = %d, want 0", s.TotalSuccesses)
+			}
+		})
+	}
+}
+
+func TestRetry_RequestCancelWithNonContextTransportErrorRecordsFailure(t *testing.T) {
+	transportErr := errors.New("retry test connection reset")
+	ctx, cancel := context.WithCancel(context.Background())
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		cancel()
+		return nil, transportErr
+	})
+
+	b, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(10),
+		circuitbreaker.WithWindow(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tr := &Transport{
+		Inner:      inner,
+		MaxRetries: 0,
+		Breaker:    b,
+	}
+
+	req := httptest.NewRequest("GET", "http://x/", nil).WithContext(ctx)
+	_, _ = tr.RoundTrip(req)
+
+	s := b.Stats()
+	if s.TotalFailures != 1 {
+		t.Fatalf("TotalFailures = %d, want 1 (request cancellation must not hide unrelated transport errors)", s.TotalFailures)
+	}
+	if s.TotalSuccesses != 0 {
+		t.Fatalf("TotalSuccesses = %d, want 0", s.TotalSuccesses)
+	}
+}
+
+func TestRetry_BodyTooLargeRequestCancelWithNonContextTransportErrorRecordsFailure(t *testing.T) {
+	transportErr := errors.New("retry test body-too-large connection reset")
+	ctx, cancel := context.WithCancel(context.Background())
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		cancel()
+		return nil, transportErr
+	})
+
+	b, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(10),
+		circuitbreaker.WithWindow(10*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tr := &Transport{
+		Inner:        inner,
+		MaxRetries:   0,
+		MaxBodyBytes: 1,
+		Breaker:      b,
+	}
+
+	req := httptest.NewRequest("POST", "http://x/", strings.NewReader("oversized"))
+	req = req.WithContext(ctx)
+	_, _ = tr.RoundTrip(req)
+
+	s := b.Stats()
+	if s.TotalFailures != 1 {
+		t.Fatalf("TotalFailures = %d, want 1 in body-too-large path", s.TotalFailures)
+	}
+	if s.TotalSuccesses != 0 {
+		t.Fatalf("TotalSuccesses = %d, want 0", s.TotalSuccesses)
+	}
+}
+
+func TestRetry_RequestCancelWithDefinitiveFailureResponseRecordsFailure(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		headers http.Header
+	}{
+		{name: "500", status: http.StatusInternalServerError, headers: make(http.Header)},
+		{name: "429", status: http.StatusTooManyRequests, headers: make(http.Header)},
+		{name: "temporary 403", status: http.StatusForbidden, headers: http.Header{"Retry-After": []string{"30"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+				cancel()
+				return &http.Response{StatusCode: tt.status, Body: body("failure"), Header: tt.headers.Clone()}, nil
+			})
+
+			b, err := circuitbreaker.New(
+				circuitbreaker.WithFailureThreshold(10),
+				circuitbreaker.WithWindow(10*time.Second),
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			tr := &Transport{
+				Inner:      inner,
+				MaxRetries: 0,
+				Breaker:    b,
+			}
+
+			req := httptest.NewRequest("GET", "http://x/", nil).WithContext(ctx)
+			resp, _ := tr.RoundTrip(req)
+			if resp == nil || resp.StatusCode != tt.status {
+				t.Fatalf("response status = %v, want %d", resp, tt.status)
+			}
+
+			s := b.Stats()
+			if s.TotalFailures != 1 {
+				t.Fatalf("TotalFailures = %d, want 1 (definitive upstream failure must be recorded despite request cancellation)", s.TotalFailures)
+			}
+			if s.TotalSuccesses != 0 {
+				t.Fatalf("TotalSuccesses = %d, want 0", s.TotalSuccesses)
+			}
+		})
+	}
+}
+
+func TestRetry_RequestContextCancellationPreservesTerminalResponses(t *testing.T) {
+	tests := []struct {
+		name          string
+		status        int
+		maxRetries    int
+		requestBody   io.Reader
+		wantFailures  int64
+		wantSuccesses int64
+	}{
+		{
+			name:         "retry limit exhausted returns definitive failure response",
+			status:       http.StatusInternalServerError,
+			maxRetries:   0,
+			wantFailures: 1,
+		},
+		{
+			name:         "unreplayable request body returns definitive failure response",
+			status:       http.StatusInternalServerError,
+			maxRetries:   3,
+			requestBody:  strings.NewReader("unbuffered request body"),
+			wantFailures: 1,
+		},
+		{
+			name:          "non retryable clean response is returned",
+			status:        http.StatusNoContent,
+			maxRetries:    3,
+			wantSuccesses: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			returnedBody := &closeTrackingBody{reader: strings.NewReader("terminal response body")}
+			var calls atomic.Int64
+			inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+				calls.Add(1)
+				cancel()
+				return &http.Response{
+					StatusCode: tt.status,
+					Status:     fmt.Sprintf("%d %s", tt.status, http.StatusText(tt.status)),
+					Header:     make(http.Header),
+					Body:       returnedBody,
+					Request:    req,
+				}, nil
+			})
+
+			b, err := circuitbreaker.New(
+				circuitbreaker.WithFailureThreshold(10),
+				circuitbreaker.WithWindow(10*time.Second),
+			)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			tr := &Transport{
+				Inner:      inner,
+				MaxRetries: tt.maxRetries,
+				WaitMin:    time.Millisecond,
+				WaitMax:    time.Millisecond,
+				Breaker:    b,
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "http://x/", tt.requestBody).WithContext(ctx)
+			resp, err := tr.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("RoundTrip error = %v, want nil because terminal response is returned despite request cancellation", err)
+			}
+			if resp == nil || resp.StatusCode != tt.status {
+				t.Fatalf("response = %#v, want status %d", resp, tt.status)
+			}
+			if returnedBody.closed.Load() {
+				t.Fatal("terminal response body was closed before being returned to caller")
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("inner RoundTrip calls = %d, want 1 terminal attempt", calls.Load())
+			}
+
+			s := b.Stats()
+			if s.TotalFailures != tt.wantFailures || s.TotalSuccesses != tt.wantSuccesses {
+				t.Fatalf("breaker failures=%d successes=%d, want failures=%d successes=%d", s.TotalFailures, s.TotalSuccesses, tt.wantFailures, tt.wantSuccesses)
+			}
+		})
 	}
 }
 
@@ -1771,6 +2685,78 @@ func TestPooledBody_ResponsePathBufRecycled(t *testing.T) {
 	recovered := bufPool.Get().(*bytes.Buffer)
 	recovered.Reset()
 	defer bufPool.Put(recovered)
+}
+
+type testReadWriteCloseWriter struct {
+	read       *bytes.Buffer
+	written    bytes.Buffer
+	closed     atomic.Int64
+	closeWrite atomic.Int64
+}
+
+func (b *testReadWriteCloseWriter) Read(p []byte) (int, error) {
+	return b.read.Read(p)
+}
+
+func (b *testReadWriteCloseWriter) Write(p []byte) (int, error) {
+	return b.written.Write(p)
+}
+
+func (b *testReadWriteCloseWriter) Close() error {
+	b.closed.Add(1)
+	return nil
+}
+
+func (b *testReadWriteCloseWriter) CloseWrite() error {
+	b.closeWrite.Add(1)
+	return nil
+}
+
+func TestWrapBufferedResponseBody_PreservesSwitchingProtocolsReadWriteCloseWrite(t *testing.T) {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.WriteString("buffered request body")
+	underlying := &testReadWriteCloseWriter{read: bytes.NewBufferString("upgrade-read")}
+	resp := &http.Response{StatusCode: http.StatusSwitchingProtocols, Body: underlying}
+
+	wrapped := wrapBufferedResponseBody(resp, buf)
+	rwc, ok := wrapped.(io.ReadWriteCloser)
+	if !ok {
+		t.Fatalf("wrapped body type %T does not implement io.ReadWriteCloser", wrapped)
+	}
+	cw, ok := wrapped.(closeWriter)
+	if !ok {
+		t.Fatalf("wrapped body type %T does not implement CloseWrite", wrapped)
+	}
+
+	got, err := io.ReadAll(rwc)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "upgrade-read" {
+		t.Fatalf("ReadAll = %q, want upgrade-read", string(got))
+	}
+	if _, err := rwc.Write([]byte("upgrade-write")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if underlying.written.String() != "upgrade-write" {
+		t.Fatalf("underlying written = %q, want upgrade-write", underlying.written.String())
+	}
+	if err := cw.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+	if underlying.closeWrite.Load() != 1 {
+		t.Fatalf("underlying CloseWrite calls = %d, want 1", underlying.closeWrite.Load())
+	}
+	if err := rwc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := rwc.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if underlying.closed.Load() != 1 {
+		t.Fatalf("underlying Close calls = %d, want 1", underlying.closed.Load())
+	}
 }
 
 func TestRetry_InFlightRetriesCounter_MultiAttempt(t *testing.T) {

@@ -16,6 +16,8 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,7 +25,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +38,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/retry"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 )
 
@@ -524,6 +529,17 @@ func (m *mockFlusherWriter) Flush() {
 	m.flushed = true
 }
 
+type flushErrorWriter struct {
+	http.ResponseWriter
+	err     error
+	flushed bool
+}
+
+func (m *flushErrorWriter) FlushError() error {
+	m.flushed = true
+	return m.err
+}
+
 // nonFlusherWriter is an http.ResponseWriter that does NOT implement http.Flusher.
 type nonFlusherWriter struct{ http.ResponseWriter }
 
@@ -553,6 +569,75 @@ func TestStatusRecorderUnwrap(t *testing.T) {
 	if err := http.NewResponseController(recNoFlush).Flush(); !errors.Is(err, http.ErrNotSupported) {
 		t.Errorf("expected ErrNotSupported for non-flushing writer, got %v", err)
 	}
+	if recNoFlush.downstreamWriteFailed() {
+		t.Fatalf("ErrNotSupported flush marked downstream failure: %v", recNoFlush.writeErr)
+	}
+	if _, ok := any(recNoFlush).(http.Flusher); ok {
+		t.Fatal("statusRecorder advertises http.Flusher even though only FlushError/Unwrap should expose supported flushing")
+	}
+}
+
+func TestStatusRecorderFlushErrorTracksRealFailure(t *testing.T) {
+	inner := httptest.NewRecorder()
+	mock := &flushErrorWriter{ResponseWriter: inner, err: errProxyTestDownstreamFlush}
+	rec := &statusRecorder{ResponseWriter: mock, status: http.StatusOK}
+
+	err := rec.FlushError()
+	if !errors.Is(err, errProxyTestDownstreamFlush) {
+		t.Fatalf("FlushError error = %v, want %v", err, errProxyTestDownstreamFlush)
+	}
+	if !mock.flushed {
+		t.Fatal("underlying FlushError was not called")
+	}
+	if !rec.downstreamWriteFailed() {
+		t.Fatal("downstreamWriteFailed = false, want true after real flush error")
+	}
+	if !errors.Is(rec.writeErr, errProxyTestDownstreamFlush) {
+		t.Fatalf("rec.writeErr = %v, want %v", rec.writeErr, errProxyTestDownstreamFlush)
+	}
+}
+
+func TestStatusRecorderFlushErrorImplicitOK(t *testing.T) {
+	t.Run("supported flush records implicit ok", func(t *testing.T) {
+		inner := httptest.NewRecorder()
+		inner.Header().Set("X-Test", "flush")
+		entry := &journal.Entry{}
+		rec := &statusRecorder{ResponseWriter: inner, entry: entry, status: 0}
+
+		if err := rec.FlushError(); err != nil {
+			t.Fatalf("FlushError: %v", err)
+		}
+		if inner.Code != http.StatusOK {
+			t.Fatalf("inner status = %d, want implicit 200", inner.Code)
+		}
+		if rec.status != http.StatusOK || !rec.terminalWritten {
+			t.Fatalf("rec status=%d terminalWritten=%v, want implicit 200 terminal", rec.status, rec.terminalWritten)
+		}
+		if entry.StatusCode != http.StatusOK || entry.ResponseHeaders.Get("X-Test") != "flush" || entry.Timing.ResponseHeaders.IsZero() {
+			t.Fatalf("journal entry after flush = %+v, want implicit 200 headers/timing", entry)
+		}
+		if entry.ContentType != "" {
+			t.Fatalf("entry ContentType = %q, want empty because flush-before-body has no bytes to sniff", entry.ContentType)
+		}
+	})
+
+	t.Run("unsupported flush does not fabricate status", func(t *testing.T) {
+		entry := &journal.Entry{}
+		rec := &statusRecorder{ResponseWriter: nonFlusherWriter{httptest.NewRecorder()}, entry: entry, status: 0}
+
+		if err := rec.FlushError(); !errors.Is(err, http.ErrNotSupported) {
+			t.Fatalf("FlushError error = %v, want ErrNotSupported", err)
+		}
+		if rec.status != 0 || rec.terminalWritten {
+			t.Fatalf("rec status=%d terminalWritten=%v, want unchanged after unsupported flush", rec.status, rec.terminalWritten)
+		}
+		if entry.StatusCode != 0 || !entry.Timing.ResponseHeaders.IsZero() {
+			t.Fatalf("journal entry after unsupported flush = %+v, want unchanged", entry)
+		}
+		if rec.downstreamWriteFailed() {
+			t.Fatalf("unsupported flush marked downstream failure: %v", rec.writeErr)
+		}
+	})
 }
 
 func TestStatusRecorderHijack(t *testing.T) {
@@ -564,11 +649,52 @@ func TestStatusRecorderHijack(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for non-Hijackable writer, got nil")
 	}
-	if err != http.ErrNotSupported {
+	if !errors.Is(err, http.ErrNotSupported) {
 		t.Errorf("expected http.ErrNotSupported, got %v", err)
 	}
 	if rec.hijacked {
 		t.Error("hijacked flag should NOT be set when Hijack fails")
+	}
+}
+
+func TestStatusRecorderHijackUnwrapsUnderlyingHijacker(t *testing.T) {
+	inner := newSuccessfulUpgradeHandshakeResponseWriter()
+	wrapped := &unwrapResponseWriter{ResponseWriter: inner}
+	entry := &journal.Entry{}
+	rec := &statusRecorder{ResponseWriter: wrapped, entry: entry}
+
+	conn, brw, err := rec.Hijack()
+	if err != nil {
+		t.Fatalf("Hijack through Unwrap returned error: %v", err)
+	}
+	if conn == nil || brw == nil {
+		t.Fatalf("Hijack returned conn=%v brw=%v, want both non-nil", conn, brw)
+	}
+	if closeErr := conn.Close(); closeErr != nil {
+		t.Fatalf("Close hijacked conn: %v", closeErr)
+	}
+	if !rec.hijacked {
+		t.Fatal("hijacked flag = false, want true after successful unwrap-hidden hijack")
+	}
+	if rec.status != http.StatusSwitchingProtocols || !rec.terminalWritten {
+		t.Fatalf("rec status=%d terminalWritten=%v, want implicit 101 terminal", rec.status, rec.terminalWritten)
+	}
+	if entry.StatusCode != http.StatusSwitchingProtocols || entry.Timing.ResponseHeaders.IsZero() {
+		t.Fatalf("journal entry after hijack = %+v, want captured 101 headers/timing", entry)
+	}
+}
+
+func TestResponseWriterCanHijackUnwrapsAndIgnoresRecorderItself(t *testing.T) {
+	inner := newSuccessfulUpgradeHandshakeResponseWriter()
+	wrapped := &unwrapResponseWriter{ResponseWriter: inner}
+	if !responseWriterCanHijack(wrapped) {
+		t.Fatal("responseWriterCanHijack = false for unwrap-hidden hijacker, want true")
+	}
+	if responseWriterCanHijack(&statusRecorder{ResponseWriter: httptest.NewRecorder()}) {
+		t.Fatal("responseWriterCanHijack treated statusRecorder.Hijack as downstream support despite non-hijacker underlying writer")
+	}
+	if !responseWriterCanHijack(&statusRecorder{ResponseWriter: wrapped}) {
+		t.Fatal("responseWriterCanHijack failed to skip statusRecorder and unwrap to underlying hijacker")
 	}
 }
 
@@ -757,16 +883,16 @@ func (s *shortWriteWriter) Write(b []byte) (int, error) {
 }
 
 func TestStatusRecorderShortWriteBytesWritten(t *testing.T) {
-	// Verify that bytesWritten tracks the ACTUAL bytes written (n from
-	// Write), not the attempted bytes (len(b)). On a short write caused
-	// by client disconnect, the recorder must report only what was
-	// delivered, not what we tried to send.
+	// Verify that bytesWritten tracks the byte count accepted by Write (n),
+	// not the attempted bytes (len(b)). On a short write caused by client
+	// disconnect, the recorder must report only what was accepted by Write,
+	// not what we tried to send.
 	inner := httptest.NewRecorder()
 	mock := &shortWriteWriter{ResponseWriter: inner, n: 3}
 	entry := &journal.Entry{}
 	rec := &statusRecorder{ResponseWriter: mock, entry: entry, status: 0, captureMax: 1 << 20}
 
-	// Write 10 bytes, but the underlying writer only delivers 3.
+	// Write 10 bytes, but the underlying writer accepts only 3.
 	n, err := rec.Write([]byte("0123456789"))
 	if n != 3 {
 		t.Errorf("Write returned n=%d, want 3", n)
@@ -775,17 +901,17 @@ func TestStatusRecorderShortWriteBytesWritten(t *testing.T) {
 		t.Errorf("Write returned err=%v, want io.ErrUnexpectedEOF", err)
 	}
 
-	// bytesWritten must be 3 (actual delivered), not 10 (attempted).
+	// bytesWritten must be 3 (accepted by Write), not 10 (attempted).
 	if rec.bytesWritten != 3 {
-		t.Errorf("bytesWritten = %d, want 3 (actual bytes written, not attempted)", rec.bytesWritten)
+		t.Errorf("bytesWritten = %d, want 3 (bytes accepted by Write, not attempted)", rec.bytesWritten)
 	}
 }
 
 func TestStatusRecorderShortWriteWithContentLength(t *testing.T) {
 	// Verify that when a response has a Content-Length header (e.g., 1000)
-	// but the actual Write only delivers a subset of those bytes due to a
+	// but Write accepts only a subset of those bytes due to a
 	// client disconnect (short write), the journal entry's ResponseSize
-	// reflects the ACTUAL delivered bytes (from bytesWritten), not the
+	// reflects the bytes accepted by Write (from bytesWritten), not the
 	// Content-Length value. This is the critical bug identified by
 	// review-01 and review-02: the old finalizer checked
 	// entry.ResponseSize == 0, which was always false when Content-Length
@@ -799,7 +925,7 @@ func TestStatusRecorderShortWriteWithContentLength(t *testing.T) {
 	inner.Header().Set("Content-Length", "1000")
 	rec.WriteHeader(http.StatusOK)
 
-	// Write 10 bytes, but the underlying writer only delivers 3.
+	// Write 10 bytes, but the underlying writer accepts only 3.
 	n, err := rec.Write([]byte("0123456789"))
 	if n != 3 {
 		t.Errorf("Write returned n=%d, want 3", n)
@@ -808,14 +934,14 @@ func TestStatusRecorderShortWriteWithContentLength(t *testing.T) {
 		t.Errorf("Write returned err=%v, want io.ErrUnexpectedEOF", err)
 	}
 
-	// bytesWritten must be 3 (actual delivered), not 10 (attempted).
+	// bytesWritten must be 3 (accepted by Write), not 10 (attempted).
 	if rec.bytesWritten != 3 {
 		t.Errorf("bytesWritten = %d, want 3", rec.bytesWritten)
 	}
 
 	// ResponseSize was set to 1000 from Content-Length during WriteHeader.
 	// The ServeHTTP finalizer must override this with bytesWritten (3)
-	// because bytesWritten > 0 is the ground truth of actual delivery.
+	// because bytesWritten > 0 is the recorder's observed accepted-byte count.
 	// Simulate the finalizer logic directly. NOTE: This tests the
 	// logic inline rather than exercising the actual ServeHTTP
 	// finalizer path, to keep the test unit-scoped. The ServeHTTP
@@ -830,27 +956,27 @@ func TestStatusRecorderShortWriteWithContentLength(t *testing.T) {
 }
 
 func TestStatusRecorderShortWriteCapturedBody(t *testing.T) {
-	// Verify that capturedBody contains only the bytes actually delivered
+	// Verify that capturedBody contains only the bytes accepted by Write
 	// (b[:n]) on a short write, not the full input slice. This is the
 	// structural fix from review-02: moving body capture after Write
 	// allows using b[:n] instead of b, so the journal's ResponseBody
-	// matches the actual delivered payload.
+	// matches the recorder's accepted payload.
 	inner := httptest.NewRecorder()
 	mock := &shortWriteWriter{ResponseWriter: inner, n: 3}
 	entry := &journal.Entry{}
 	rec := &statusRecorder{ResponseWriter: mock, entry: entry, status: 0, captureMax: 1 << 20}
 
-	// Write 10 bytes, but only 3 are delivered.
+	// Write 10 bytes, but only 3 are accepted by the writer.
 	n, err := rec.Write([]byte("0123456789"))
 	if n != 3 {
 		t.Errorf("Write returned n=%d, want 3", n)
 	}
 	_ = err // expected short-write error
 
-	// capturedBody must contain exactly the 3 delivered bytes "012",
+	// capturedBody must contain exactly the 3 accepted bytes "012",
 	// not the full 10-byte input "0123456789".
 	if string(rec.capturedBody) != "012" {
-		t.Errorf("capturedBody = %q, want %q (only delivered bytes)", string(rec.capturedBody), "012")
+		t.Errorf("capturedBody = %q, want %q (only accepted bytes)", string(rec.capturedBody), "012")
 	}
 }
 
@@ -1518,6 +1644,184 @@ func mustBreaker(t *testing.T, opts ...circuitbreaker.Option) *circuitbreaker.Br
 	return b
 }
 
+type unwrapRoundTripper struct {
+	inner http.RoundTripper
+}
+
+func (w *unwrapRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return w.inner.RoundTrip(req)
+}
+
+func (w *unwrapRoundTripper) Unwrap() http.RoundTripper { return w.inner }
+
+type breakerExposingWrapper struct {
+	inner   http.RoundTripper
+	breaker *circuitbreaker.Breaker
+}
+
+func (w *breakerExposingWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return w.inner.RoundTrip(req)
+}
+
+func (w *breakerExposingWrapper) Unwrap() http.RoundTripper { return w.inner }
+
+func (w *breakerExposingWrapper) RetryBreaker() *circuitbreaker.Breaker { return w.breaker }
+
+func (w *breakerExposingWrapper) SetInFlightRetries(*atomic.Int64) {}
+
+func TestProxy_NewRejectsMismatchedRetryTransportBreaker(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	baseOpts := func() []Option {
+		return []Option{
+			WithUpstream(upstreamURL),
+			WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+			WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+			WithMetrics(metrics.NewCollector()),
+		}
+	}
+
+	owner := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+	other := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	tests := []struct {
+		name    string
+		breaker *circuitbreaker.Breaker
+		inner   *retry.Transport
+		retries int
+		wantErr string
+	}{
+		{
+			name:    "nil WithBreaker rejects retry transport breaker",
+			breaker: nil,
+			inner:   &retry.Transport{Inner: http.DefaultTransport, Breaker: owner},
+			wantErr: "WithBreaker is nil",
+		},
+		{
+			name:    "different breaker rejected",
+			breaker: owner,
+			inner:   &retry.Transport{Inner: http.DefaultTransport, Breaker: other},
+			wantErr: "must match WithBreaker",
+		},
+		{
+			name:    "same breaker cannot be wrapped by proxy retries",
+			breaker: owner,
+			inner:   &retry.Transport{Inner: http.DefaultTransport, Breaker: owner},
+			retries: 1,
+			wantErr: "cannot be wrapped by WithMaxRetries",
+		},
+		{
+			name:    "same breaker allowed when proxy retries disabled",
+			breaker: owner,
+			inner:   &retry.Transport{Inner: http.DefaultTransport, Breaker: owner},
+		},
+		{
+			name:    "nil transport breaker allowed as inner retry transport",
+			breaker: owner,
+			inner:   &retry.Transport{Inner: http.DefaultTransport},
+			retries: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := baseOpts()
+			opts = append(opts, WithTransport(tt.inner), WithMaxRetries(tt.retries))
+			if tt.breaker != nil {
+				opts = append(opts, WithBreaker(tt.breaker))
+			}
+			_, err := New(opts...)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("proxy.New error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("proxy.New error = nil, want containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("proxy.New error = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestProxy_DetectsUnwrappedRetryTransportBreakerOwnership(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	owner := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+	other := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	_, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(owner),
+		WithMaxRetries(0),
+		WithTransport(&unwrapRoundTripper{inner: &retry.Transport{Inner: http.DefaultTransport, Breaker: other}}),
+	)
+	if err == nil || !strings.Contains(err.Error(), "must match WithBreaker") {
+		t.Fatalf("proxy.New mismatch error = %v, want must match WithBreaker", err)
+	}
+
+	_, err = New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(owner),
+		WithMaxRetries(0),
+		WithTransport(&breakerExposingWrapper{
+			breaker: owner,
+			inner:   &retry.Transport{Inner: http.DefaultTransport, Breaker: other},
+		}),
+	)
+	if err == nil || !strings.Contains(err.Error(), "conflicting breakers") {
+		t.Fatalf("proxy.New conflicting wrapper error = %v, want conflicting breakers", err)
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(owner),
+		WithMaxRetries(0),
+		WithTransport(&unwrapRoundTripper{inner: &retry.Transport{
+			Inner: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return responseWithReadErrorAfterChunk(req, "wrapped-retry-partial"), nil
+			}),
+			Breaker: owner,
+		}}),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New same-breaker wrapper error = %v", err)
+	}
+
+	req := withPanicOnCopyErrorContext(httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+	rec := httptest.NewRecorder()
+	serveExpectErrAbortHandler(t, p, rec, req)
+
+	stats := owner.Stats()
+	if stats.TotalSuccesses != 0 || stats.TotalFailures != 1 {
+		t.Fatalf("wrapped retry breaker successes=%d failures=%d, want deferred success=0 and body-copy failure=1", stats.TotalSuccesses, stats.TotalFailures)
+	}
+}
+
 func TestProxy_PhantomPenaltyNotAppliedOnCircuitRejection(t *testing.T) {
 	// Verify that a circuit-open rejection (503) does NOT trigger the
 	// phantom concurrency penalty. The penalty is for UPSTREAM failures --
@@ -1553,8 +1857,8 @@ func TestProxy_PhantomPenaltyNotAppliedOnCircuitRejection(t *testing.T) {
 	}
 
 	// Send a request that will be rejected by the circuit breaker.
-	// The phantom penalty should NOT be applied because the request
-	// never reached upstream (reachedUpstream=false).
+	// The phantom penalty should NOT be applied because no upstream transport
+	// attempt started.
 	start := time.Now()
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`)))
@@ -1572,9 +1876,133 @@ func TestProxy_PhantomPenaltyNotAppliedOnCircuitRejection(t *testing.T) {
 	}
 }
 
+func TestProxy_RetryTransportErrCircuitOpenNotUpstreamFailure(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name   string
+		method string
+		path   string
+		global bool
+	}{
+		{name: "limited route limiter", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough global limiter", method: http.MethodGet, path: "/health", global: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(1),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+				circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+				circuitbreaker.WithBasePenalty(500*time.Millisecond),
+				circuitbreaker.WithMaxPenalty(500*time.Millisecond),
+			)
+			var calls atomic.Int64
+			var externalOpened atomic.Bool
+
+			rt := &retry.Transport{
+				Inner: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					call := calls.Add(1)
+					if call == 1 {
+						return &http.Response{
+							StatusCode: http.StatusNotFound,
+							Status:     "404 Not Found",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("breaker-neutral retry trigger")),
+							Request:    req,
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("ok")),
+						Request:    req,
+					}, nil
+				}),
+				Breaker:    b,
+				MaxRetries: 1,
+				WaitMin:    time.Millisecond,
+				WaitMax:    time.Millisecond,
+				CheckRetry: func(resp *http.Response, err error) bool {
+					if resp != nil && resp.StatusCode == http.StatusNotFound && externalOpened.CompareAndSwap(false, true) {
+						b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+						return true
+					}
+					return false
+				},
+			}
+
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithQueueTimeout(200 * time.Millisecond),
+				WithTransport(rt),
+			}
+			if tt.global {
+				opts = append(opts, WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			firstRec := httptest.NewRecorder()
+			p.ServeHTTP(firstRec, httptest.NewRequest(tt.method, tt.path, nil))
+			if firstRec.Code != http.StatusBadGateway {
+				t.Fatalf("first response status = %d body=%q, want proxy-generated 502 from retry-side ErrCircuitOpen", firstRec.Code, firstRec.Body.String())
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("transport calls after first request = %d, want only breaker-neutral 404 before retry Allow rejected", got)
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 1 {
+				t.Fatalf("breaker TotalFailures after retry-side ErrCircuitOpen = %d, want only the external breaker-opening failure", stats.TotalFailures)
+			}
+
+			deadline := time.Now().Add(time.Second)
+			for b.WaitDuration() > 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			epoch, allowErr := b.Allow()
+			if allowErr != nil {
+				t.Fatalf("Allow() while closing externally opened breaker = epoch %d err %v", epoch, allowErr)
+			}
+			if epoch == 0 {
+				t.Fatal("Allow() while closing externally opened breaker returned epoch 0, want HALF_OPEN probe epoch")
+			}
+			b.RecordSuccess(time.Now(), epoch)
+
+			start := time.Now()
+			secondRec := httptest.NewRecorder()
+			p.ServeHTTP(secondRec, httptest.NewRequest(tt.method, tt.path, nil))
+			elapsed := time.Since(start)
+			if secondRec.Code != http.StatusOK {
+				t.Fatalf("second request status = %d body=%q after %v, want 200; retry-side ErrCircuitOpen must not hold the slot as upstream failure", secondRec.Code, secondRec.Body.String(), elapsed)
+			}
+			if elapsed > 250*time.Millisecond {
+				t.Fatalf("second request completed after %v, want no phantom penalty/failure hold from retry-side ErrCircuitOpen", elapsed)
+			}
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("transport calls = %d, want first 404 plus second 200", got)
+			}
+			if failures := b.Stats().TotalFailures; failures != 1 {
+				t.Fatalf("breaker TotalFailures after second request = %d, want no retry-side ErrCircuitOpen failure beyond external seed", failures)
+			}
+		})
+	}
+}
+
 func TestProxy_PhantomPenaltyNotAppliedOnQueueTimeout(t *testing.T) {
 	// Verify that a queue timeout (504) does NOT trigger the phantom
-	// concurrency penalty. The request never reached upstream.
+	// concurrency penalty. No upstream transport attempt starts.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, `ok`)
@@ -1756,8 +2184,8 @@ func TestProxy_PassthroughBreakerIgnoresClientCancel(t *testing.T) {
 }
 
 func TestProxy_PhantomPenaltyIgnoresClientCancel(t *testing.T) {
-	// Verify that the phantom concurrency penalty is NOT applied when a
-	// client cancels their request after it has reached upstream. When a
+	// Verify that the phantom concurrency penalty is NOT applied when a client
+	// cancels after an upstream transport attempt has started. When a
 	// client disconnects, httputil.ReverseProxy's error handler writes a
 	// 502 status. Since IsFailureStatus(502)==true, the phantom penalty
 	// would fire erroneously without the isClientCancel guard — allowing
@@ -1817,7 +2245,7 @@ func TestProxy_PhantomPenaltyIgnoresClientCancel(t *testing.T) {
 	}
 
 	// Send a request with a short timeout that cancels while the upstream
-	// is still processing. The request reaches upstream (reachedUpstream=true)
+	// is still processing. An upstream transport attempt has started,
 	// but the client context deadline expires, causing a 502 from
 	// ReverseProxy.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -1833,7 +2261,7 @@ func TestProxy_PhantomPenaltyIgnoresClientCancel(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for the first request to start reaching upstream.
+	// Wait for the first request to start its upstream attempt.
 	select {
 	case <-started:
 	case <-time.After(2 * time.Second):
@@ -2420,7 +2848,7 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestProxy_CancelCooldownDelaysRelease(t *testing.T) {
-	// Verify that when a client cancels after the request reached upstream,
+	// Verify that when a client cancels after an upstream transport attempt starts,
 	// the slot is held for the configured cancelCooldown duration before
 	// being returned to the limiter (KILL-04 mitigation).
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3569,7 +3997,7 @@ func TestProxy_PassthroughBreakerCheckBeforeGlobalLimiter(t *testing.T) {
 
 func TestProxy_PassthroughCancelCooldownWithGlobalLimiter(t *testing.T) {
 	// Verify that cancel-cooldown is applied to passthrough global-limiter slots
-	// when a client disconnects after the request reached upstream. This mirrors
+	// when a client disconnects after an upstream transport attempt starts. This mirrors
 	// serveLimited's cancel-cooldown behavior and was missing test coverage after
 	// the servePassthrough rewrite.
 	const cancelCooldown = 200 * time.Millisecond
@@ -3597,14 +4025,14 @@ func TestProxy_PassthroughCancelCooldownWithGlobalLimiter(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// Send a passthrough request and cancel it after upstream receipt.
+	// Send a passthrough request and cancel it after the upstream attempt starts.
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 
 	// Start the request — it will complete quickly since upstream returns 200.
-	// Cancel after a brief delay (simulating client disconnect after upstream receipt).
+	// Cancel after a brief delay (simulating client disconnect after attempt start).
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		cancel()
@@ -4989,6 +5417,5053 @@ func TestProxy_403SlowDripExpiredRetryAfterNotTemporaryBan(t *testing.T) {
 // See: https://pkg.go.dev/net/http#hdr-Server
 // "If a handler panics with ErrAbortHandler, the server does not log a stack trace."
 
+var (
+	errProxyTestUpstreamRead    = errors.New("proxy test upstream body read failure")
+	errProxyTestDownstreamWrite = errors.New("proxy test downstream write failure")
+	errProxyTestDownstreamFlush = errors.New("proxy test downstream flush failure")
+	errProxyTestTransport       = errors.New("proxy test transport error before response")
+)
+
+type readErrorAfterChunkBody struct {
+	chunk []byte
+	err   error
+	sent  bool
+}
+
+func (b *readErrorAfterChunkBody) Read(p []byte) (int, error) {
+	if !b.sent {
+		b.sent = true
+		return copy(p, b.chunk), nil
+	}
+	return 0, b.err
+}
+
+func (b *readErrorAfterChunkBody) Close() error { return nil }
+
+type readErrorBody struct {
+	err error
+}
+
+func (b *readErrorBody) Read([]byte) (int, error) {
+	return 0, b.err
+}
+
+func (b *readErrorBody) Close() error { return nil }
+
+type closeTrackingReadCloser struct {
+	io.Reader
+	closed atomic.Bool
+}
+
+func (b *closeTrackingReadCloser) Close() error {
+	b.closed.Store(true)
+	return nil
+}
+
+type readChunkWithErrorBody struct {
+	chunk []byte
+	err   error
+	sent  bool
+}
+
+func (b *readChunkWithErrorBody) Read(p []byte) (int, error) {
+	if b.sent {
+		return 0, io.EOF
+	}
+	b.sent = true
+	return copy(p, b.chunk), b.err
+}
+
+func (b *readChunkWithErrorBody) Close() error { return nil }
+
+type observedReadWriteCloser struct {
+	io.ReadWriteCloser
+	readCalled       atomic.Bool
+	closeWriteCalled chan<- struct{}
+}
+
+func (c *observedReadWriteCloser) Read(p []byte) (int, error) {
+	c.readCalled.Store(true)
+	return c.ReadWriteCloser.Read(p)
+}
+
+func (c *observedReadWriteCloser) CloseWrite() error {
+	if c.closeWriteCalled != nil {
+		select {
+		case c.closeWriteCalled <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+type noopReadWriteCloser struct{}
+
+func (noopReadWriteCloser) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (noopReadWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+
+func (noopReadWriteCloser) Close() error { return nil }
+
+type closeTrackingReadWriteCloser struct {
+	closed atomic.Bool
+}
+
+func (c *closeTrackingReadWriteCloser) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (c *closeTrackingReadWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+
+func (c *closeTrackingReadWriteCloser) Close() error {
+	c.closed.Store(true)
+	return nil
+}
+
+func emitEarlyHintsFromTrace(t *testing.T, req *http.Request) {
+	t.Helper()
+	trace := httptrace.ContextClientTrace(req.Context())
+	if trace == nil || trace.Got1xxResponse == nil {
+		t.Fatal("reverse proxy request context did not install Got1xxResponse trace")
+	}
+	if err := trace.Got1xxResponse(http.StatusEarlyHints, nil); err != nil {
+		t.Fatalf("Got1xxResponse(103): %v", err)
+	}
+}
+
+type testAddr string
+
+func (a testAddr) Network() string { return string(a) }
+
+func (a testAddr) String() string { return string(a) }
+
+type noopConn struct{}
+
+func (noopConn) Read([]byte) (int, error) { return 0, io.EOF }
+
+func (noopConn) Write(p []byte) (int, error) { return len(p), nil }
+
+func (noopConn) Close() error { return nil }
+
+func (noopConn) LocalAddr() net.Addr { return testAddr("local") }
+
+func (noopConn) RemoteAddr() net.Addr { return testAddr("remote") }
+
+func (noopConn) SetDeadline(time.Time) error { return nil }
+
+func (noopConn) SetReadDeadline(time.Time) error { return nil }
+
+func (noopConn) SetWriteDeadline(time.Time) error { return nil }
+
+type alwaysErrorWriter struct{ err error }
+
+func (w alwaysErrorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+type failedUpgradeHandshakeResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func newFailedUpgradeHandshakeResponseWriter() *failedUpgradeHandshakeResponseWriter {
+	return &failedUpgradeHandshakeResponseWriter{header: make(http.Header)}
+}
+
+func (w *failedUpgradeHandshakeResponseWriter) Header() http.Header { return w.header }
+
+func (w *failedUpgradeHandshakeResponseWriter) WriteHeader(code int) { w.status = code }
+
+func (w *failedUpgradeHandshakeResponseWriter) Write(b []byte) (int, error) { return len(b), nil }
+
+func (w *failedUpgradeHandshakeResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	brw := bufio.NewReadWriter(
+		bufio.NewReader(strings.NewReader("")),
+		bufio.NewWriter(alwaysErrorWriter{err: errProxyTestDownstreamWrite}),
+	)
+	return noopConn{}, brw, nil
+}
+
+type successfulUpgradeHandshakeResponseWriter struct {
+	header    http.Header
+	status    int
+	handshake bytes.Buffer
+}
+
+func newSuccessfulUpgradeHandshakeResponseWriter() *successfulUpgradeHandshakeResponseWriter {
+	return &successfulUpgradeHandshakeResponseWriter{header: make(http.Header)}
+}
+
+func (w *successfulUpgradeHandshakeResponseWriter) Header() http.Header { return w.header }
+
+func (w *successfulUpgradeHandshakeResponseWriter) WriteHeader(code int) { w.status = code }
+
+func (w *successfulUpgradeHandshakeResponseWriter) Write(b []byte) (int, error) {
+	return w.handshake.Write(b)
+}
+
+func (w *successfulUpgradeHandshakeResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	brw := bufio.NewReadWriter(
+		bufio.NewReader(strings.NewReader("")),
+		bufio.NewWriter(&w.handshake),
+	)
+	return noopConn{}, brw, nil
+}
+
+type unwrapResponseWriter struct {
+	http.ResponseWriter
+}
+
+func (w *unwrapResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+type failedHijackResponseWriter struct {
+	*httptest.ResponseRecorder
+	err error
+}
+
+func (w *failedHijackResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return nil, nil, w.err
+}
+
+type delayedReadErrorAfterChunkBody struct {
+	chunk []byte
+	err   error
+	delay time.Duration
+	sent  bool
+}
+
+func (b *delayedReadErrorAfterChunkBody) Read(p []byte) (int, error) {
+	if !b.sent {
+		b.sent = true
+		return copy(p, b.chunk), nil
+	}
+	time.Sleep(b.delay)
+	return 0, b.err
+}
+
+func (b *delayedReadErrorAfterChunkBody) Close() error { return nil }
+
+func TestStatusRecorder_CapturePreallocCappedForLargeContentLength(t *testing.T) {
+	entry := &journal.Entry{ResponseSize: 1 << 20}
+	rec := &statusRecorder{
+		ResponseWriter: httptest.NewRecorder(),
+		entry:          entry,
+		captureMax:     2 << 20,
+	}
+
+	n, err := rec.Write([]byte("x"))
+	if err != nil || n != 1 {
+		t.Fatalf("Write = (%d, %v), want (1, nil)", n, err)
+	}
+	if string(rec.capturedBody) != "x" {
+		t.Fatalf("capturedBody = %q, want x", string(rec.capturedBody))
+	}
+	if cap(rec.capturedBody) > maxResponseCapturePrealloc {
+		t.Fatalf("capturedBody cap = %d, want <= %d despite large declared Content-Length", cap(rec.capturedBody), maxResponseCapturePrealloc)
+	}
+}
+
+func TestProxy_SwitchingProtocolsPreservesReadWriteCloserBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	j := journal.New(8, 1024)
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+	readObserved := make(chan struct{}, 1)
+	closeWriteObserved := make(chan struct{}, 1)
+	stopObserve := make(chan struct{})
+	t.Cleanup(func() { close(stopObserve) })
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithJournal(j),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			proxySide, testSide := net.Pipe()
+			body := &observedReadWriteCloser{ReadWriteCloser: proxySide, closeWriteCalled: closeWriteObserved}
+			go func() {
+				defer testSide.Close()
+				_, _ = testSide.Write([]byte("upgrade-ok"))
+			}()
+			go func() {
+				for {
+					if body.readCalled.Load() {
+						select {
+						case readObserved <- struct{}{}:
+						default:
+						}
+						return
+					}
+					select {
+					case <-stopObserve:
+						return
+					case <-time.After(time.Millisecond):
+					}
+				}
+			}()
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          body,
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	conn, err := net.Dial("tcp", proxyServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, proxyServer.URL+"/health", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+	if err := req.Write(conn); err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101; body wrapper likely stripped io.ReadWriteCloser", resp.StatusCode)
+	}
+	payload := make([]byte, len("upgrade-ok"))
+	if _, err := io.ReadFull(br, payload); err != nil {
+		t.Fatalf("read upgraded payload: %v", err)
+	}
+	if string(payload) != "upgrade-ok" {
+		t.Fatalf("upgraded payload = %q, want upgrade-ok", string(payload))
+	}
+	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+		if err := cw.CloseWrite(); err != nil {
+			t.Fatalf("CloseWrite client side: %v", err)
+		}
+	} else {
+		t.Fatalf("client conn %T does not support CloseWrite", conn)
+	}
+	select {
+	case <-readObserved:
+	case <-time.After(time.Second):
+		t.Fatal("wrapped upgrade body Read was not observed")
+	}
+	select {
+	case <-closeWriteObserved:
+	case <-time.After(time.Second):
+		t.Fatal("backend CloseWrite was not propagated through upgrade wrapper")
+	}
+	conn.Close()
+	var snap metrics.Snapshot
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		snap = met.Snapshot()
+		if snap.TotalPassThrough == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if snap.TotalPassThrough != 1 {
+		t.Fatalf("TotalPassThrough = %d, want 1 after clean upgrade", snap.TotalPassThrough)
+	}
+	if snap.StatusCounts[5] != 0 || snap.StatusCounts[0] != 0 || snap.StatusCounts[1] != 1 {
+		t.Fatalf("status buckets = %+v, want one 1xx and no status-0/5xx failure for upgrade", snap.StatusCounts)
+	}
+	if len(snap.LogEntries) != 1 || snap.LogEntries[0].Status != http.StatusSwitchingProtocols || snap.LogEntries[0].Aborted {
+		t.Fatalf("metrics log = %+v, want one clean 101 entry", snap.LogEntries)
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want no mutation for 101 upgrade", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 || entries[0].StatusCode != http.StatusSwitchingProtocols || entries[0].Aborted {
+		t.Fatalf("journal entries = %+v, want one clean 101 entry", entries)
+	}
+}
+
+func TestProxy_SwitchingProtocolsCleanHandshakeResolvesHalfOpenProbe(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t,
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(10*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(10*time.Millisecond),
+	)
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	if b.State() != circuitbreaker.Open {
+		t.Fatalf("breaker state after seed failure = %v, want OPEN", b.State())
+	}
+	time.Sleep(20 * time.Millisecond)
+	releaseUpgrade := make(chan struct{})
+	var releaseUpgradeOnce sync.Once
+	release := func() { releaseUpgradeOnce.Do(func() { close(releaseUpgrade) }) }
+	t.Cleanup(release)
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Header.Get("Upgrade") == "" {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("ok")),
+					Request:    req,
+				}, nil
+			}
+			proxySide, testSide := net.Pipe()
+			go func() {
+				defer testSide.Close()
+				_, _ = testSide.Write([]byte("upgrade-ok"))
+				<-releaseUpgrade
+			}()
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          proxySide,
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+	conn, err := net.Dial("tcp", proxyServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, proxyServer.URL+"/health", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+	if err := req.Write(conn); err != nil {
+		conn.Close()
+		t.Fatalf("write upgrade request: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		conn.Close()
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+	payload := make([]byte, len("upgrade-ok"))
+	if _, err := io.ReadFull(br, payload); err != nil {
+		conn.Close()
+		t.Fatalf("read upgraded payload: %v", err)
+	}
+	if string(payload) != "upgrade-ok" {
+		conn.Close()
+		t.Fatalf("upgraded payload = %q, want upgrade-ok", string(payload))
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if b.State() == circuitbreaker.Closed {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if b.State() != circuitbreaker.Closed {
+		t.Fatalf("breaker state after clean 101 half-open probe = %v, want CLOSED", b.State())
+	}
+	stats := b.Stats()
+	if stats.TotalSuccesses != 1 {
+		t.Fatalf("breaker TotalSuccesses = %d, want 1 for clean half-open 101 handshake", stats.TotalSuccesses)
+	}
+
+	normalReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	normalRec := httptest.NewRecorder()
+	p.ServeHTTP(normalRec, normalReq)
+	if normalRec.Code != http.StatusOK {
+		conn.Close()
+		t.Fatalf("normal request after clean 101 probe status = %d, want 200", normalRec.Code)
+	}
+	conn.Close()
+	release()
+}
+
+func TestProxy_SwitchingProtocolsEarlyHintsThenCleanHandshakeRecordsFinal101Once(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	j := journal.New(8, 1024)
+	b := mustBreaker(t,
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(10*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(10*time.Millisecond),
+	)
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	if b.State() != circuitbreaker.Open {
+		t.Fatalf("breaker state after seed failure = %v, want OPEN", b.State())
+	}
+	deadline := time.Now().Add(time.Second)
+	for b.WaitDuration() > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if wait := b.WaitDuration(); wait > 0 {
+		t.Fatalf("breaker still waiting after deadline: %v", wait)
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithJournal(j),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			emitEarlyHintsFromTrace(t, req)
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          noopReadWriteCloser{},
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+	rw := newSuccessfulUpgradeHandshakeResponseWriter()
+	p.ServeHTTP(rw, req)
+
+	if !strings.Contains(rw.handshake.String(), "101 Switching Protocols") {
+		t.Fatalf("captured hijack handshake = %q, want final 101 after early hints", rw.handshake.String())
+	}
+	if b.State() != circuitbreaker.Closed {
+		t.Fatalf("breaker state after 103 then clean 101 probe = %v, want CLOSED", b.State())
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 1 || stats.TotalSuccesses != 1 {
+		t.Fatalf("breaker failures=%d successes=%d, want seeded failure plus exactly one clean 101 probe success", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	snap := met.Snapshot()
+	if snap.TotalAborted != 0 || snap.TotalPassThrough != 1 || snap.TotalProxied != 0 {
+		t.Fatalf("metrics TotalAborted=%d TotalPassThrough=%d TotalProxied=%d, want one clean passthrough upgrade", snap.TotalAborted, snap.TotalPassThrough, snap.TotalProxied)
+	}
+	if snap.StatusCounts[1] != 1 || snap.StatusCounts[5] != 0 || snap.StatusCounts[0] != 0 {
+		t.Fatalf("status buckets = %+v, want one final 101 bucket and no status-0/5xx", snap.StatusCounts)
+	}
+	if len(snap.LogEntries) != 1 || snap.LogEntries[0].Status != http.StatusSwitchingProtocols || snap.LogEntries[0].Aborted {
+		t.Fatalf("metrics log = %+v, want one clean final 101 entry, not stale 103", snap.LogEntries)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 || entries[0].StatusCode != http.StatusSwitchingProtocols || entries[0].Aborted {
+		t.Fatalf("journal entries = %+v, want clean final 101 entry", entries)
+	}
+}
+
+func TestProxy_SwitchingProtocolsEarlyHintsThenFailedHandshakeMarkedAborted101(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	j := journal.New(8, 1024)
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithJournal(j),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			emitEarlyHintsFromTrace(t, req)
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          noopReadWriteCloser{},
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+	p.ServeHTTP(newFailedUpgradeHandshakeResponseWriter(), req)
+
+	snap := met.Snapshot()
+	if snap.TotalAborted != 1 || snap.TotalPassThrough != 0 || snap.TotalProxied != 0 {
+		t.Fatalf("metrics TotalAborted=%d TotalPassThrough=%d TotalProxied=%d, want aborted failed 101 handshake with no clean completion", snap.TotalAborted, snap.TotalPassThrough, snap.TotalProxied)
+	}
+	if snap.StatusCounts[1] != 1 || snap.StatusCounts[5] != 0 || snap.StatusCounts[0] != 0 {
+		t.Fatalf("status buckets = %+v, want one aborted final 101 bucket and no stale/proxy-generated 5xx", snap.StatusCounts)
+	}
+	if len(snap.LogEntries) != 1 || snap.LogEntries[0].Status != http.StatusSwitchingProtocols || !snap.LogEntries[0].Aborted {
+		t.Fatalf("metrics log = %+v, want one aborted final 101 entry, not stale 103", snap.LogEntries)
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want no upstream breaker mutation for downstream 101 handshake failure", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 || entries[0].StatusCode != http.StatusSwitchingProtocols || !entries[0].Aborted || !entries[0].Timing.ResponseComplete.IsZero() {
+		t.Fatalf("journal entries = %+v, want aborted final 101 without ResponseComplete", entries)
+	}
+}
+
+func TestProxy_SwitchingProtocolsRoundTripUsesOutboundRequestForValidation(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name            string
+		responseRequest func(*http.Request) *http.Request
+	}{
+		{
+			name: "nil response request",
+			responseRequest: func(*http.Request) *http.Request {
+				return nil
+			},
+		},
+		{
+			name: "wrong request without downstream context",
+			responseRequest: func(*http.Request) *http.Request {
+				wrong := httptest.NewRequest(http.MethodGet, "http://wrong.invalid/elsewhere", nil)
+				wrong.Header.Set("Connection", "Upgrade")
+				wrong.Header.Set("Upgrade", "testproto")
+				return wrong
+			},
+		},
+		{
+			name: "wrong request with mismatched upgrade header",
+			responseRequest: func(*http.Request) *http.Request {
+				wrong := httptest.NewRequest(http.MethodGet, "http://wrong.invalid/elsewhere", nil)
+				wrong.Header.Set("Connection", "Upgrade")
+				wrong.Header.Set("Upgrade", "otherproto")
+				return wrong
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithMaxRetries(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusSwitchingProtocols,
+						Status:     "101 Switching Protocols",
+						Header: http.Header{
+							"Connection": []string{"Upgrade"},
+							"Upgrade":    []string{"testproto"},
+						},
+						Body:          noopReadWriteCloser{},
+						ContentLength: -1,
+						Request:       tt.responseRequest(req),
+					}, nil
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "testproto")
+			rw := newSuccessfulUpgradeHandshakeResponseWriter()
+			p.ServeHTTP(rw, req)
+
+			if !strings.Contains(rw.handshake.String(), "101 Switching Protocols") {
+				t.Fatalf("captured hijack handshake = %q, want valid 101 using proxy outbound request", rw.handshake.String())
+			}
+			snap := met.Snapshot()
+			if snap.TotalAborted != 0 || snap.TotalPassThrough != 1 || snap.TotalProxied != 0 {
+				t.Fatalf("metrics TotalAborted=%d TotalPassThrough=%d TotalProxied=%d, want one clean passthrough upgrade", snap.TotalAborted, snap.TotalPassThrough, snap.TotalProxied)
+			}
+			if len(snap.LogEntries) != 1 || snap.LogEntries[0].Status != http.StatusSwitchingProtocols || snap.LogEntries[0].Aborted {
+				t.Fatalf("metrics log = %+v, want one clean 101 entry", snap.LogEntries)
+			}
+		})
+	}
+}
+
+func TestProxy_SwitchingProtocolsUnwrapOnlyHijackerSucceeds(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          noopReadWriteCloser{},
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	inner := newSuccessfulUpgradeHandshakeResponseWriter()
+	rw := &unwrapResponseWriter{ResponseWriter: inner}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+	p.ServeHTTP(rw, req)
+
+	if !strings.Contains(inner.handshake.String(), "101 Switching Protocols") {
+		t.Fatalf("captured hijack handshake = %q, want 101 response written to unwrap-hidden hijacker", inner.handshake.String())
+	}
+	snap := met.Snapshot()
+	if snap.TotalAborted != 0 || snap.TotalProxied != 1 || snap.TotalPassThrough != 0 {
+		t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want one clean proxied upgrade", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+	}
+	if snap.StatusCounts[1] != 1 || snap.StatusCounts[5] != 0 || snap.StatusCounts[0] != 0 {
+		t.Fatalf("status buckets = %+v, want one clean 1xx upgrade", snap.StatusCounts)
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want no mutation for closed-state clean 101", stats.TotalFailures, stats.TotalSuccesses)
+	}
+}
+
+func TestProxy_SwitchingProtocolsPreservesReadWriteCloserBody_WithRetryBuffering(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	j := journal.New(8, 1024)
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+	readObserved := make(chan struct{}, 1)
+	closeWriteObserved := make(chan struct{}, 1)
+	bodySeen := make(chan string, 1)
+	stopObserve := make(chan struct{})
+	t.Cleanup(func() { close(stopObserve) })
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithJournal(j),
+		WithBreaker(b),
+		WithMaxRetries(1),
+		WithMaxBodyBytes(1024),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			got, readErr := io.ReadAll(req.Body)
+			closeErr := req.Body.Close()
+			if readErr != nil {
+				return nil, readErr
+			}
+			if closeErr != nil {
+				return nil, closeErr
+			}
+			bodySeen <- string(got)
+
+			proxySide, testSide := net.Pipe()
+			body := &observedReadWriteCloser{ReadWriteCloser: proxySide, closeWriteCalled: closeWriteObserved}
+			go func() {
+				defer testSide.Close()
+				_, _ = testSide.Write([]byte("upgrade-ok"))
+			}()
+			go func() {
+				for {
+					if body.readCalled.Load() {
+						select {
+						case readObserved <- struct{}{}:
+						default:
+						}
+						return
+					}
+					select {
+					case <-stopObserve:
+						return
+					case <-time.After(time.Millisecond):
+					}
+				}
+			}()
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          body,
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	conn, err := net.Dial("tcp", proxyServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, proxyServer.URL+"/health", strings.NewReader("retry-upgrade-body"))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+	if err := req.Write(conn); err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
+	select {
+	case got := <-bodySeen:
+		if got != "retry-upgrade-body" {
+			t.Fatalf("upstream request body = %q, want retry-upgrade-body", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream did not receive buffered request body")
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101; retry pooled response body likely stripped io.ReadWriteCloser", resp.StatusCode)
+	}
+	payload := make([]byte, len("upgrade-ok"))
+	if _, err := io.ReadFull(br, payload); err != nil {
+		t.Fatalf("read upgraded payload: %v", err)
+	}
+	if string(payload) != "upgrade-ok" {
+		t.Fatalf("upgraded payload = %q, want upgrade-ok", string(payload))
+	}
+	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+		if err := cw.CloseWrite(); err != nil {
+			t.Fatalf("CloseWrite client side: %v", err)
+		}
+	} else {
+		t.Fatalf("client conn %T does not support CloseWrite", conn)
+	}
+	select {
+	case <-readObserved:
+	case <-time.After(time.Second):
+		t.Fatal("retry-buffered upgrade body Read was not observed")
+	}
+	select {
+	case <-closeWriteObserved:
+	case <-time.After(time.Second):
+		t.Fatal("backend CloseWrite was not propagated through retry pooled upgrade wrapper")
+	}
+	conn.Close()
+	var snap metrics.Snapshot
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		snap = met.Snapshot()
+		if snap.TotalPassThrough == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if snap.TotalPassThrough != 1 {
+		t.Fatalf("TotalPassThrough = %d, want 1 after clean retry-buffered upgrade", snap.TotalPassThrough)
+	}
+	if snap.StatusCounts[5] != 0 || snap.StatusCounts[0] != 0 || snap.StatusCounts[1] != 1 {
+		t.Fatalf("status buckets = %+v, want one 1xx and no status-0/5xx failure for retry-buffered upgrade", snap.StatusCounts)
+	}
+	if len(snap.LogEntries) != 1 || snap.LogEntries[0].Status != http.StatusSwitchingProtocols || snap.LogEntries[0].Aborted {
+		t.Fatalf("metrics log = %+v, want one clean 101 entry", snap.LogEntries)
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want no mutation for retry-buffered 101 upgrade", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 || entries[0].StatusCode != http.StatusSwitchingProtocols || entries[0].Aborted {
+		t.Fatalf("journal entries = %+v, want one clean retry-buffered 101 entry", entries)
+	}
+}
+
+func TestProxy_SwitchingProtocolsNonReadWriteCloserBodyIsProxyGeneratedFailure(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		maxRetries int
+	}{
+		{name: "limited no retries", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough no retries", method: http.MethodGet, path: "/health"},
+		{name: "limited retry-owned breaker", method: http.MethodPost, path: "/v1/messages", maxRetries: 1},
+		{name: "passthrough retry-owned breaker", method: http.MethodGet, path: "/health", maxRetries: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			j := journal.New(8, 1024)
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+			var transportCalls atomic.Int64
+			bodyCh := make(chan *closeTrackingReadCloser, 1)
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithJournal(j),
+				WithBreaker(b),
+				WithMaxRetries(tt.maxRetries),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					transportCalls.Add(1)
+					malformedBody := &closeTrackingReadCloser{Reader: strings.NewReader("not a bidirectional stream")}
+					bodyCh <- malformedBody
+					return &http.Response{
+						StatusCode: http.StatusSwitchingProtocols,
+						Status:     "101 Switching Protocols",
+						Header: http.Header{
+							"Connection": []string{"Upgrade"},
+							"Upgrade":    []string{"testproto"},
+						},
+						Body:          malformedBody,
+						ContentLength: -1,
+						Request:       req,
+					}, nil
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			proxyServer := httptest.NewServer(p)
+			t.Cleanup(proxyServer.Close)
+
+			conn, err := net.Dial("tcp", proxyServer.Listener.Addr().String())
+			if err != nil {
+				t.Fatalf("dial proxy: %v", err)
+			}
+			defer conn.Close()
+			if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+				t.Fatalf("SetDeadline: %v", err)
+			}
+			req, err := http.NewRequest(tt.method, proxyServer.URL+tt.path, nil)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "testproto")
+			if err := req.Write(conn); err != nil {
+				t.Fatalf("write upgrade request: %v", err)
+			}
+
+			resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+			if err != nil {
+				t.Fatalf("ReadResponse: %v", err)
+			}
+			body, readErr := io.ReadAll(resp.Body)
+			closeErr := resp.Body.Close()
+			if readErr != nil {
+				t.Fatalf("read response body: %v", readErr)
+			}
+			if closeErr != nil {
+				t.Fatalf("close response body: %v", closeErr)
+			}
+			if resp.StatusCode != http.StatusBadGateway {
+				t.Fatalf("status = %d body=%q, want proxy-generated 502 for non-ReadWriteCloser 101 body", resp.StatusCode, string(body))
+			}
+			if !strings.Contains(string(body), "bad gateway") {
+				t.Fatalf("body = %q, want proxy-generated bad gateway body", string(body))
+			}
+			if got := transportCalls.Load(); got != 1 {
+				t.Fatalf("transport calls = %d, want 1 upstream attempt before invalid 101 body was rejected", got)
+			}
+			var malformedBody *closeTrackingReadCloser
+			select {
+			case malformedBody = <-bodyCh:
+			default:
+				t.Fatal("transport did not publish malformed 101 body for close assertion")
+			}
+			if !malformedBody.closed.Load() {
+				t.Fatal("malformed 101 response body was not closed after proxy rejection")
+			}
+
+			var snap metrics.Snapshot
+			deadline := time.Now().Add(time.Second)
+			for time.Now().Before(deadline) {
+				snap = met.Snapshot()
+				if snap.StatusCounts[5] == 1 && len(j.Entries()) == 1 {
+					break
+				}
+				time.Sleep(time.Millisecond)
+			}
+			if snap.StatusCounts[5] != 1 || snap.StatusCounts[1] != 0 || snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics StatusCounts=%+v TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted local 502 with no clean 101 upgrade", snap.StatusCounts, snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want malformed 101 body classified as local upgrade failure", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			entries := j.Entries()
+			if len(entries) != 1 || entries[0].StatusCode != http.StatusBadGateway || !entries[0].Aborted || !entries[0].Timing.ResponseComplete.IsZero() {
+				t.Fatalf("journal entries = %+v, want aborted local 502 entry, not clean 101 upgrade", entries)
+			}
+		})
+	}
+}
+
+func TestProxy_SwitchingProtocolsNonHijackerClosesUpstreamBodyAsLocalFailure(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	j := journal.New(8, 1024)
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+	upstreamBody := &closeTrackingReadWriteCloser{}
+	var transportCalls atomic.Int64
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithJournal(j),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			transportCalls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          upstreamBody,
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%q, want local 502 for non-hijacker downstream", rec.Code, rec.Body.String())
+	}
+	if got := transportCalls.Load(); got != 1 {
+		t.Fatalf("transport calls = %d, want exactly one upstream 101 before local handoff failure", got)
+	}
+	if !upstreamBody.closed.Load() {
+		t.Fatal("upstream 101 body was not closed by ModifyResponse local handoff failure")
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want no upstream breaker mutation for local non-hijacker handoff failure", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	snap := met.Snapshot()
+	if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 || snap.StatusCounts[5] != 1 {
+		t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d StatusCounts=%+v, want aborted local 502 with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough, snap.StatusCounts)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 || entries[0].StatusCode != http.StatusBadGateway || !entries[0].Aborted || !entries[0].Timing.ResponseComplete.IsZero() {
+		t.Fatalf("journal entries = %+v, want aborted local 502 without ResponseComplete", entries)
+	}
+}
+
+func TestProxy_SwitchingProtocolsNilBodyIsLocalFailureWithoutPanic(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	j := journal.New(8, 1024)
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+	var transportCalls atomic.Int64
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithJournal(j),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			transportCalls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          nil,
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%q, want local 502 for nil 101 body", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "bad gateway") || strings.Contains(rec.Body.String(), "internal error") {
+		t.Fatalf("body = %q, want ErrorHandler bad gateway and no local panic recovery", rec.Body.String())
+	}
+	if got := transportCalls.Load(); got != 1 {
+		t.Fatalf("transport calls = %d, want exactly one upstream 101 before nil body rejection", got)
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want nil 101 body classified as local upgrade failure", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	snap := met.Snapshot()
+	if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 || snap.StatusCounts[5] != 1 {
+		t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d StatusCounts=%+v, want aborted local 502 with no panic-clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough, snap.StatusCounts)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 || entries[0].StatusCode != http.StatusBadGateway || !entries[0].Aborted || !entries[0].Timing.ResponseComplete.IsZero() {
+		t.Fatalf("journal entries = %+v, want aborted local 502 without ResponseComplete", entries)
+	}
+}
+
+func TestProxy_SwitchingProtocolsProtocolViolationPreemptsLocalDownstreamFailure(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name          string
+		requestProto  string
+		responseProto string
+	}{
+		{name: "bare 101 without request upgrade", responseProto: ""},
+		{name: "response upgrade without request upgrade", responseProto: "testproto"},
+		{name: "response upgrade mismatch", requestProto: "testproto", responseProto: "otherproto"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			j := journal.New(8, 1024)
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+			upstreamBody := &closeTrackingReadWriteCloser{}
+			var transportCalls atomic.Int64
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithJournal(j),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					transportCalls.Add(1)
+					return &http.Response{
+						StatusCode: http.StatusSwitchingProtocols,
+						Status:     "101 Switching Protocols",
+						Header: http.Header{
+							"Connection": []string{"Upgrade"},
+							"Upgrade":    []string{tt.responseProto},
+						},
+						Body:          upstreamBody,
+						ContentLength: -1,
+						Request:       req,
+					}, nil
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			if tt.requestProto != "" {
+				req.Header.Set("Connection", "Upgrade")
+				req.Header.Set("Upgrade", tt.requestProto)
+			}
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d body=%q, want 502 for upstream protocol violation", rec.Code, rec.Body.String())
+			}
+			if got := transportCalls.Load(); got != 1 {
+				t.Fatalf("transport calls = %d, want exactly one upstream 101 before protocol rejection", got)
+			}
+			if !upstreamBody.closed.Load() {
+				t.Fatal("upstream 101 body was not closed after protocol violation")
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want upstream protocol violation recorded as upstream failure", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			snap := met.Snapshot()
+			if snap.TotalAborted != 0 || snap.TotalProxied != 1 || snap.TotalPassThrough != 0 || snap.StatusCounts[5] != 1 {
+				t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d StatusCounts=%+v, want completed proxy-generated 502 upstream failure", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough, snap.StatusCounts)
+			}
+			entries := j.Entries()
+			if len(entries) != 1 || entries[0].StatusCode != http.StatusBadGateway || entries[0].Aborted || entries[0].Timing.ResponseComplete.IsZero() {
+				t.Fatalf("journal entries = %+v, want completed 502 upstream protocol violation entry", entries)
+			}
+		})
+	}
+}
+
+func TestIsLocalSwitchingProtocolsFailurePinsReverseProxyUpgradeErrorStrings(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+
+	for _, msg := range []string{
+		"httputil: ReverseProxy: can't switch protocols using non-Hijacker",
+		"httputil: ReverseProxy: Hijack failed on protocol switch: downstream write failed",
+	} {
+		t.Run(msg, func(t *testing.T) {
+			if !isLocalSwitchingProtocolsFailure(req, errors.New(msg)) {
+				t.Fatalf("isLocalSwitchingProtocolsFailure(%q) = false, want true", msg)
+			}
+			withoutUpgrade := httptest.NewRequest(http.MethodGet, "/health", nil)
+			if isLocalSwitchingProtocolsFailure(withoutUpgrade, errors.New(msg)) {
+				t.Fatalf("isLocalSwitchingProtocolsFailure(%q) = true without requested Upgrade, want false", msg)
+			}
+		})
+	}
+}
+
+func TestProxy_SwitchingProtocolsHijackerErrNotSupportedClosesUpstreamBodyAsLocalFailure(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	j := journal.New(8, 1024)
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+	upstreamBody := &closeTrackingReadWriteCloser{}
+	var transportCalls atomic.Int64
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithJournal(j),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			transportCalls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          upstreamBody,
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+	rw := &failedHijackResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: http.ErrNotSupported}
+	p.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%q, want local 502 for apparent hijacker that returns ErrNotSupported", rw.Code, rw.Body.String())
+	}
+	if got := transportCalls.Load(); got != 1 {
+		t.Fatalf("transport calls = %d, want exactly one upstream 101 before local hijack rejection", got)
+	}
+	if !upstreamBody.closed.Load() {
+		t.Fatal("upstream 101 body was not closed after apparent hijacker returned ErrNotSupported")
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want ErrNotSupported hijack classified as local upgrade failure", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	snap := met.Snapshot()
+	if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 || snap.StatusCounts[5] != 1 {
+		t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d StatusCounts=%+v, want aborted local 502 with closed upstream body", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough, snap.StatusCounts)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 || entries[0].StatusCode != http.StatusBadGateway || !entries[0].Aborted || !entries[0].Timing.ResponseComplete.IsZero() {
+		t.Fatalf("journal entries = %+v, want aborted local 502 without ResponseComplete", entries)
+	}
+}
+
+func TestProxy_SwitchingProtocolsNonReadWriteCloserBodyWithRetryReleasesHalfOpenProbe(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t,
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+	)
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	deadline := time.Now().Add(time.Second)
+	for b.WaitDuration() > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if wait := b.WaitDuration(); wait > 0 {
+		t.Fatalf("breaker still waiting after deadline: %v", wait)
+	}
+
+	var transportCalls atomic.Int64
+	malformedBody := &closeTrackingReadCloser{Reader: strings.NewReader("not a bidirectional stream")}
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(1),
+		WithRetryWaitMin(time.Millisecond),
+		WithRetryWaitMax(time.Millisecond),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			transportCalls.Add(1)
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          malformedBody,
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	conn, err := net.Dial("tcp", proxyServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, proxyServer.URL+"/health", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "testproto")
+	if err := req.Write(conn); err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	closeErr := resp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read response body: %v", readErr)
+	}
+	if closeErr != nil {
+		t.Fatalf("close response body: %v", closeErr)
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d body=%q, want proxy-generated 502 for retry-owned malformed 101", resp.StatusCode, string(body))
+	}
+	if got := transportCalls.Load(); got != 1 {
+		t.Fatalf("transport calls = %d, want 1; malformed 101 must not be retried", got)
+	}
+	if !malformedBody.closed.Load() {
+		t.Fatal("malformed 101 response body was not closed after local upgrade validation failure")
+	}
+
+	stats := b.Stats()
+	if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want only seeded failure and no malformed-101 breaker mutation", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	if state := b.State(); state != circuitbreaker.HalfOpen {
+		t.Fatalf("breaker state = %s, want HALF_OPEN after local malformed-101 failure releases probe", state)
+	}
+	nextEpoch, allowErr := b.Allow()
+	if allowErr != nil {
+		t.Fatalf("Allow() after local malformed-101 failure = epoch %d err %v; want released HALF_OPEN probe", nextEpoch, allowErr)
+	}
+	if nextEpoch == 0 {
+		t.Fatal("Allow() after local malformed-101 failure returned epoch 0, want new HALF_OPEN probe epoch")
+	}
+	b.CancelProbe(nextEpoch)
+	snap := met.Snapshot()
+	if snap.StatusCounts[5] != 1 || snap.StatusCounts[1] != 0 || snap.TotalAborted != 1 || snap.TotalPassThrough != 0 || snap.TotalProxied != 0 {
+		t.Fatalf("metrics StatusCounts=%+v TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted local 502 with no clean 101 upgrade", snap.StatusCounts, snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+	}
+}
+
+func TestProxy_SwitchingProtocolsFailedHandshakeMarkedAborted(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		global bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough", method: http.MethodGet, path: "/health", global: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			j := journal.New(8, 1024)
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			activeLimiter := lim
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithJournal(j),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithCancelCooldown(100 * time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Header.Get("Upgrade") == "" {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Status:     "200 OK",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("ok")),
+							Request:    req,
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusSwitchingProtocols,
+						Status:     "101 Switching Protocols",
+						Header: http.Header{
+							"Connection": []string{"Upgrade"},
+							"Upgrade":    []string{"testproto"},
+						},
+						Body:          noopReadWriteCloser{},
+						ContentLength: -1,
+						Request:       req,
+					}, nil
+				})),
+			}
+			if tt.global {
+				globalLimiter := queue.NewLimiterWithCooldown(1, 0)
+				activeLimiter = globalLimiter
+				opts = append(opts, WithGlobalLimiter(globalLimiter))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "testproto")
+			rw := newFailedUpgradeHandshakeResponseWriter()
+			p.ServeHTTP(rw, req)
+
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted failed 101 handshake with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if snap.StatusCounts[1] != 1 || snap.StatusCounts[5] != 0 || snap.StatusCounts[0] != 0 {
+				t.Fatalf("status buckets = %+v, want one status-1xx aborted handshake and no 5xx/status-0", snap.StatusCounts)
+			}
+			if len(snap.LogEntries) != 1 || snap.LogEntries[0].Status != http.StatusSwitchingProtocols || !snap.LogEntries[0].Aborted {
+				t.Fatalf("metrics log = %+v, want aborted 101", snap.LogEntries)
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want no mutation for failed 101 handshake", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			entries := j.Entries()
+			if len(entries) != 1 || entries[0].StatusCode != http.StatusSwitchingProtocols || !entries[0].Aborted || !entries[0].Timing.ResponseComplete.IsZero() {
+				t.Fatalf("journal entries = %+v, want aborted 101 without ResponseComplete", entries)
+			}
+			if active := activeLimiter.Stats().Active; active != 1 {
+				t.Fatalf("limiter active slots after failed upgrade handshake = %d, want 1 while cancelCooldown protects upstream accounting", active)
+			}
+
+			done := make(chan int, 1)
+			start := time.Now()
+			go func() {
+				secondReq := httptest.NewRequest(tt.method, tt.path, nil)
+				secondRec := httptest.NewRecorder()
+				p.ServeHTTP(secondRec, secondReq)
+				done <- secondRec.Code
+			}()
+			select {
+			case code := <-done:
+				t.Fatalf("second request completed with status %d before cancelCooldown elapsed", code)
+			case <-time.After(50 * time.Millisecond):
+			}
+			select {
+			case code := <-done:
+				if code != http.StatusOK {
+					t.Fatalf("second request status = %d, want 200 after cancelCooldown", code)
+				}
+				if elapsed := time.Since(start); elapsed < 80*time.Millisecond {
+					t.Fatalf("second request completed after %v, want cancelCooldown delay", elapsed)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("second request did not complete after cancelCooldown")
+			}
+		})
+	}
+}
+
+func TestProxy_SwitchingProtocolsFailedHandshakeReleasesHalfOpenProbe(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t,
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(10*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(10*time.Millisecond),
+	)
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	time.Sleep(20 * time.Millisecond)
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Header.Get("Upgrade") == "" {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Status:     "200 OK",
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader("ok")),
+					Request:    req,
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusSwitchingProtocols,
+				Status:     "101 Switching Protocols",
+				Header: http.Header{
+					"Connection": []string{"Upgrade"},
+					"Upgrade":    []string{"testproto"},
+				},
+				Body:          noopReadWriteCloser{},
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	upgradeReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	upgradeReq.Header.Set("Connection", "Upgrade")
+	upgradeReq.Header.Set("Upgrade", "testproto")
+	p.ServeHTTP(newFailedUpgradeHandshakeResponseWriter(), upgradeReq)
+	if b.State() != circuitbreaker.HalfOpen {
+		t.Fatalf("breaker state after failed 101 handshake = %v, want HALF_OPEN with probe released", b.State())
+	}
+	if stats := b.Stats(); stats.TotalSuccesses != 0 || stats.TotalFailures != 1 {
+		t.Fatalf("breaker stats after failed 101 handshake successes=%d failures=%d, want no new mutation", stats.TotalSuccesses, stats.TotalFailures)
+	}
+
+	normalReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	normalRec := httptest.NewRecorder()
+	p.ServeHTTP(normalRec, normalReq)
+	if normalRec.Code != http.StatusOK {
+		t.Fatalf("normal request after failed 101 handshake status = %d, want 200; half-open probe was not released", normalRec.Code)
+	}
+	if b.State() != circuitbreaker.Closed {
+		t.Fatalf("breaker state after normal probe = %v, want CLOSED", b.State())
+	}
+}
+
+func TestProxy_SwitchingProtocolsLocalUpgradeFailureWithRetryReleasesHalfOpenProbe(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name            string
+		makeWriter      func() http.ResponseWriter
+		wantStatusClass int
+	}{
+		{
+			name: "non hijacker downstream writer generated 502 is aborted local upgrade failure",
+			makeWriter: func() http.ResponseWriter {
+				return httptest.NewRecorder()
+			},
+			wantStatusClass: 5,
+		},
+		{
+			name: "failed hijack generated 502 is aborted local upgrade failure",
+			makeWriter: func() http.ResponseWriter {
+				return &failedHijackResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			},
+			wantStatusClass: 5,
+		},
+		{
+			name: "post hijack downstream handshake failure is aborted local upgrade failure",
+			makeWriter: func() http.ResponseWriter {
+				return newFailedUpgradeHandshakeResponseWriter()
+			},
+			wantStatusClass: 1,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(1),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+				circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+			)
+			b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+			time.Sleep(30 * time.Millisecond)
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(1),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Header.Get("Upgrade") == "" {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Status:     "200 OK",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("ok")),
+							Request:    req,
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusSwitchingProtocols,
+						Status:     "101 Switching Protocols",
+						Header: http.Header{
+							"Connection": []string{"Upgrade"},
+							"Upgrade":    []string{"testproto"},
+						},
+						Body:          noopReadWriteCloser{},
+						ContentLength: -1,
+						Request:       req,
+					}, nil
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			upgradeReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+			upgradeReq.Header.Set("Connection", "Upgrade")
+			upgradeReq.Header.Set("Upgrade", "testproto")
+			p.ServeHTTP(tt.makeWriter(), upgradeReq)
+
+			stats := b.Stats()
+			if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want only seeded failure and no local/downstream upgrade failure accounting", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if state := b.State(); state != circuitbreaker.HalfOpen {
+				t.Fatalf("breaker state after local/downstream upgrade failure = %v, want HALF_OPEN with probe released", state)
+			}
+			nextEpoch, allowErr := b.Allow()
+			if allowErr != nil {
+				t.Fatalf("Allow() after local/downstream upgrade failure = epoch %d, err %v; want released HALF_OPEN probe", nextEpoch, allowErr)
+			}
+			if nextEpoch == 0 {
+				t.Fatal("Allow() after local/downstream upgrade failure returned epoch 0, want new HALF_OPEN probe epoch")
+			}
+			b.CancelProbe(nextEpoch)
+
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted local/downstream upgrade failure with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if snap.StatusCounts[tt.wantStatusClass] != 1 {
+				t.Fatalf("status buckets = %+v, want one class-%d local/downstream upgrade failure", snap.StatusCounts, tt.wantStatusClass)
+			}
+		})
+	}
+}
+
+type cancelingReadErrorAfterChunkBody struct {
+	chunk  []byte
+	err    error
+	cancel context.CancelFunc
+	sent   bool
+}
+
+func (b *cancelingReadErrorAfterChunkBody) Read(p []byte) (int, error) {
+	if !b.sent {
+		b.sent = true
+		return copy(p, b.chunk), nil
+	}
+	if b.cancel != nil {
+		b.cancel()
+	}
+	return 0, b.err
+}
+
+func (b *cancelingReadErrorAfterChunkBody) Close() error { return nil }
+
+func responseWithReadErrorAfterChunk(req *http.Request, chunk string) *http.Response {
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Status:        "200 OK",
+		Header:        make(http.Header),
+		Body:          &readErrorAfterChunkBody{chunk: []byte(chunk), err: errProxyTestUpstreamRead},
+		ContentLength: -1,
+		Request:       req,
+	}
+}
+
+func responseWithImmediateReadError(req *http.Request, contentLength int64) *http.Response {
+	h := make(http.Header)
+	h.Set("Content-Length", strconv.FormatInt(contentLength, 10))
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Status:        "200 OK",
+		Header:        h,
+		Body:          &readErrorBody{err: errProxyTestUpstreamRead},
+		ContentLength: contentLength,
+		Request:       req,
+	}
+}
+
+func responseWithDelayedReadErrorAfterChunk(req *http.Request, status int, h http.Header, chunk string, delay time.Duration) *http.Response {
+	return &http.Response{
+		StatusCode:    status,
+		Status:        fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		Header:        h,
+		Body:          &delayedReadErrorAfterChunkBody{chunk: []byte(chunk), err: errProxyTestUpstreamRead, delay: delay},
+		ContentLength: -1,
+		Request:       req,
+	}
+}
+
+func withPanicOnCopyErrorContext(req *http.Request) *http.Request {
+	ctx := context.WithValue(req.Context(), http.ServerContextKey, &http.Server{})
+	return req.WithContext(ctx)
+}
+
+func serveExpectErrAbortHandler(t *testing.T, p *Proxy, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	defer func() {
+		if rv := recover(); rv != http.ErrAbortHandler {
+			t.Fatalf("recovered panic = %v, want http.ErrAbortHandler", rv)
+		}
+	}()
+	p.ServeHTTP(w, r)
+}
+
+type cancelingErrorResponseWriter struct {
+	*httptest.ResponseRecorder
+	cancel   context.CancelFunc
+	err      error
+	canceled bool
+}
+
+func (w *cancelingErrorResponseWriter) Write(p []byte) (int, error) {
+	if !w.canceled {
+		w.canceled = true
+		w.cancel()
+	}
+	return 0, w.err
+}
+
+type errorResponseWriter struct {
+	*httptest.ResponseRecorder
+	err error
+}
+
+func (w *errorResponseWriter) Write(p []byte) (int, error) {
+	return 0, w.err
+}
+
+type flushFailResponseWriter struct {
+	*httptest.ResponseRecorder
+	err     error
+	flushes atomic.Int64
+}
+
+func (w *flushFailResponseWriter) FlushError() error {
+	w.flushes.Add(1)
+	return w.err
+}
+
+func TestProxy_ErrAbortHandler_UpstreamReadFailure_NoBreakerSuccess_Limited(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return responseWithReadErrorAfterChunk(req, "partial"), nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := withPanicOnCopyErrorContext(httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+	rec := httptest.NewRecorder()
+
+	serveExpectErrAbortHandler(t, p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want committed upstream 200", rec.Code)
+	}
+	if rec.Body.String() != "partial" {
+		t.Fatalf("body = %q, want partial body committed before read failure", rec.Body.String())
+	}
+	stats := b.Stats()
+	if stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker TotalSuccesses = %d, want 0 (truncated upstream 2xx body must not heal breaker)", stats.TotalSuccesses)
+	}
+	if stats.TotalFailures != 1 {
+		t.Fatalf("breaker TotalFailures = %d, want 1 (upstream body read failure must be reported as an unclean upstream transfer)", stats.TotalFailures)
+	}
+}
+
+func TestProxy_ErrAbortHandler_UpstreamReadFailure_NoBreakerSuccess_Passthrough(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithGlobalLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return responseWithReadErrorAfterChunk(req, "passthrough-partial"), nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := withPanicOnCopyErrorContext(httptest.NewRequest(http.MethodGet, "/health", nil))
+	rec := httptest.NewRecorder()
+
+	serveExpectErrAbortHandler(t, p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want committed upstream 200", rec.Code)
+	}
+	if rec.Body.String() != "passthrough-partial" {
+		t.Fatalf("body = %q, want partial body committed before read failure", rec.Body.String())
+	}
+	stats := b.Stats()
+	if stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker TotalSuccesses = %d, want 0 (truncated passthrough 2xx body must not heal breaker)", stats.TotalSuccesses)
+	}
+	if stats.TotalFailures != 1 {
+		t.Fatalf("breaker TotalFailures = %d, want 1 (passthrough upstream body read failure must be reported)", stats.TotalFailures)
+	}
+}
+
+func TestProxy_ErrAbortHandler_ImmediateUpstreamReadFailure_ContentLengthJournalsZeroDeliveredBytes(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		wantLimited bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages", wantLimited: true},
+		{name: "passthrough", method: http.MethodGet, path: "/health", wantLimited: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			j := journal.New(8, 1024)
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithJournal(j),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					return responseWithImmediateReadError(req, 123), nil
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			rec := httptest.NewRecorder()
+			req := withPanicOnCopyErrorContext(httptest.NewRequest(tt.method, tt.path, nil))
+			serveExpectErrAbortHandler(t, p, rec, req)
+
+			entries := j.Entries()
+			if len(entries) != 1 {
+				t.Fatalf("journal entries = %d, want 1", len(entries))
+			}
+			entry := entries[0]
+			if entry.StatusCode != http.StatusOK || !entry.Aborted || entry.Limited != tt.wantLimited {
+				t.Fatalf("journal entry status=%d aborted=%v limited=%v, want status=200 aborted=true limited=%v", entry.StatusCode, entry.Aborted, entry.Limited, tt.wantLimited)
+			}
+			if entry.ResponseSize != 0 {
+				t.Fatalf("journal ResponseSize = %d, want 0 bytes accepted by Write despite Content-Length", entry.ResponseSize)
+			}
+			if len(entry.ResponseBody) != 0 {
+				t.Fatalf("journal ResponseBody = %q, want empty", string(entry.ResponseBody))
+			}
+			if !entry.Timing.ResponseComplete.IsZero() {
+				t.Fatalf("journal ResponseComplete = %v, want zero for aborted exchange", entry.Timing.ResponseComplete)
+			}
+
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted=1 clean=0", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			stats := b.Stats()
+			if stats.TotalSuccesses != 0 || stats.TotalFailures != 1 {
+				t.Fatalf("breaker successes=%d failures=%d, want successes=0 failures=1 for upstream body read failure", stats.TotalSuccesses, stats.TotalFailures)
+			}
+		})
+	}
+}
+
+func TestProxy_DirectServeHTTP_UpstreamReadFailureWithoutServerContext_IsAbortedNotSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return responseWithReadErrorAfterChunk(req, "direct-partial"), nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want committed upstream 200", rec.Code)
+	}
+	if rec.Body.String() != "direct-partial" {
+		t.Fatalf("body = %q, want partial body", rec.Body.String())
+	}
+	stats := b.Stats()
+	if stats.TotalSuccesses != 0 || stats.TotalFailures != 1 {
+		t.Fatalf("breaker successes=%d failures=%d, want successes=0 failures=1", stats.TotalSuccesses, stats.TotalFailures)
+	}
+	if snap := met.Snapshot(); snap.TotalAborted != 1 || snap.TotalProxied != 0 {
+		t.Fatalf("metrics TotalAborted=%d TotalProxied=%d, want aborted=1 clean proxied=0", snap.TotalAborted, snap.TotalProxied)
+	}
+}
+
+func TestProxy_DirectServeHTTP_DownstreamWriteFailureWithoutServerContext_IsAbortedNotSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "response body")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+	p.ServeHTTP(rec, req)
+
+	stats := b.Stats()
+	if stats.TotalSuccesses != 0 || stats.TotalFailures != 0 {
+		t.Fatalf("breaker successes=%d failures=%d, want no mutation for downstream-only write failure", stats.TotalSuccesses, stats.TotalFailures)
+	}
+	if snap := met.Snapshot(); snap.TotalAborted != 1 || snap.TotalProxied != 0 {
+		t.Fatalf("metrics TotalAborted=%d TotalProxied=%d, want aborted=1 clean proxied=0", snap.TotalAborted, snap.TotalProxied)
+	}
+}
+
+func TestProxy_DirectServeHTTP_DownstreamFlushFailureWithoutWriteFailure_IsAbortedNotSuccess(t *testing.T) {
+	const responseBody = "response body"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, responseBody)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		wantLimited bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages", wantLimited: true},
+		{name: "passthrough", method: http.MethodGet, path: "/health", wantLimited: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			j := journal.New(8, 1024)
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithJournal(j),
+				WithBreaker(b),
+				WithMaxRetries(0),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := &flushFailResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamFlush}
+			p.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want committed upstream 200", rec.Code)
+			}
+			if rec.Body.String() != responseBody {
+				t.Fatalf("body = %q, want %q", rec.Body.String(), responseBody)
+			}
+			if rec.flushes.Load() == 0 {
+				t.Fatal("downstream FlushError was not called; test did not exercise flush-only failure path")
+			}
+
+			stats := b.Stats()
+			if stats.TotalSuccesses != 0 || stats.TotalFailures != 0 {
+				t.Fatalf("breaker successes=%d failures=%d, want no mutation for downstream-only flush failure", stats.TotalSuccesses, stats.TotalFailures)
+			}
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted=1 clean=0", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if snap.StatusCounts[2] != 1 || snap.StatusCounts[5] != 0 {
+				t.Fatalf("status buckets = %+v, want one observed 2xx and no 5xx for flush-only abort", snap.StatusCounts)
+			}
+			if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != http.StatusOK || snap.LogEntries[0].Limited != tt.wantLimited {
+				t.Fatalf("metrics log = %+v, want one aborted 200 entry limited=%v", snap.LogEntries, tt.wantLimited)
+			}
+
+			entries := j.Entries()
+			if len(entries) != 1 {
+				t.Fatalf("journal entries = %d, want 1", len(entries))
+			}
+			entry := entries[0]
+			if entry.StatusCode != http.StatusOK || !entry.Aborted || entry.Limited != tt.wantLimited {
+				t.Fatalf("journal entry status=%d aborted=%v limited=%v, want aborted 200 limited=%v", entry.StatusCode, entry.Aborted, entry.Limited, tt.wantLimited)
+			}
+			if !entry.Timing.ResponseComplete.IsZero() {
+				t.Fatalf("journal ResponseComplete = %v, want zero for flush-aborted response", entry.Timing.ResponseComplete)
+			}
+			if entry.ResponseSize != int64(len(responseBody)) {
+				t.Fatalf("journal ResponseSize = %d, want Write-accepted byte count %d", entry.ResponseSize, len(responseBody))
+			}
+		})
+	}
+}
+
+func TestProxy_DownstreamAbortReleasesHalfOpenProbe(t *testing.T) {
+	const responseBody = "response body"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, responseBody)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		makeWriter  func() http.ResponseWriter
+		wantLimited bool
+	}{
+		{
+			name:   "limited write failure",
+			method: http.MethodPost,
+			path:   "/v1/messages",
+			makeWriter: func() http.ResponseWriter {
+				return &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			},
+			wantLimited: true,
+		},
+		{
+			name:   "passthrough write failure",
+			method: http.MethodGet,
+			path:   "/health",
+			makeWriter: func() http.ResponseWriter {
+				return &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			},
+			wantLimited: false,
+		},
+		{
+			name:   "limited flush failure",
+			method: http.MethodPost,
+			path:   "/v1/messages",
+			makeWriter: func() http.ResponseWriter {
+				return &flushFailResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamFlush}
+			},
+			wantLimited: true,
+		},
+		{
+			name:   "passthrough flush failure",
+			method: http.MethodGet,
+			path:   "/health",
+			makeWriter: func() http.ResponseWriter {
+				return &flushFailResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamFlush}
+			},
+			wantLimited: false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(2),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+				circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+			)
+			waitForHalfOpenProbeWindow(t, b)
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			p.ServeHTTP(tt.makeWriter(), req)
+
+			stats := b.Stats()
+			if stats.TotalFailures != 2 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want only seeded failures and no downstream-abort accounting", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if state := b.State(); state != circuitbreaker.HalfOpen {
+				t.Fatalf("breaker state = %s, want HALF_OPEN after downstream-only abort", state)
+			}
+			nextEpoch, allowErr := b.Allow()
+			if allowErr != nil {
+				t.Fatalf("Allow() after downstream-only abort = epoch %d, err %v; want released HALF_OPEN probe", nextEpoch, allowErr)
+			}
+			if nextEpoch == 0 {
+				t.Fatal("Allow() after downstream-only abort returned epoch 0, want new HALF_OPEN probe epoch")
+			}
+			b.CancelProbe(nextEpoch)
+
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted downstream-only exchange with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != http.StatusOK || snap.LogEntries[0].Limited != tt.wantLimited {
+				t.Fatalf("metrics log = %+v, want one aborted 200 entry limited=%v", snap.LogEntries, tt.wantLimited)
+			}
+		})
+	}
+}
+
+func TestProxy_ErrAbortHandler_DownstreamAbortReleasesHalfOpenProbe(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		wantLimited bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages", wantLimited: true},
+		{name: "passthrough", method: http.MethodGet, path: "/health", wantLimited: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(2),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+				circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+			)
+			waitForHalfOpenProbeWindow(t, b)
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode:    http.StatusOK,
+						Status:        "200 OK",
+						Header:        make(http.Header),
+						Body:          io.NopCloser(strings.NewReader("panic-path downstream body")),
+						ContentLength: int64(len("panic-path downstream body")),
+						Request:       req,
+					}, nil
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			rec := &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			req := withPanicOnCopyErrorContext(httptest.NewRequest(tt.method, tt.path, nil))
+			serveExpectErrAbortHandler(t, p, rec, req)
+
+			stats := b.Stats()
+			if stats.TotalFailures != 2 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want only seeded failures and no downstream panic-path accounting", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if state := b.State(); state != circuitbreaker.HalfOpen {
+				t.Fatalf("breaker state = %s, want HALF_OPEN after downstream-only ErrAbortHandler", state)
+			}
+			nextEpoch, allowErr := b.Allow()
+			if allowErr != nil {
+				t.Fatalf("Allow() after downstream-only ErrAbortHandler = epoch %d, err %v; want released HALF_OPEN probe", nextEpoch, allowErr)
+			}
+			if nextEpoch == 0 {
+				t.Fatal("Allow() after downstream-only ErrAbortHandler returned epoch 0, want new HALF_OPEN probe epoch")
+			}
+			b.CancelProbe(nextEpoch)
+
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted downstream-only panic path with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != http.StatusOK || snap.LogEntries[0].Limited != tt.wantLimited {
+				t.Fatalf("metrics log = %+v, want one aborted 200 ErrAbortHandler entry limited=%v", snap.LogEntries, tt.wantLimited)
+			}
+		})
+	}
+}
+
+func TestProxy_ErrAbortHandler_RealServerClientDisconnectReleasesHalfOpenProbe(t *testing.T) {
+	firstChunk := []byte("first half-open chunk\n")
+	firstFlushed := make(chan struct{})
+	upstreamDone := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(upstreamDone)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(firstChunk); err != nil {
+			return
+		}
+		flusher.Flush()
+		close(firstFlushed)
+
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; ; i++ {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				if _, err := fmt.Fprintf(w, "tail-%d\n", i); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t,
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(250*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(250*time.Millisecond),
+	)
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	deadline := time.Now().Add(time.Second)
+	for b.WaitDuration() > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if wait := b.WaitDuration(); wait > 0 {
+		t.Fatalf("breaker still waiting after deadline: %v", wait)
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	conn, err := net.Dial("tcp", proxyServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		conn.Close()
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/v1/messages", nil)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if err := req.Write(conn); err != nil {
+		conn.Close()
+		t.Fatalf("write request: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		conn.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	got := make([]byte, len(firstChunk))
+	if _, err := io.ReadFull(resp.Body, got); err != nil {
+		conn.Close()
+		t.Fatalf("read first response chunk: %v", err)
+	}
+	if string(got) != string(firstChunk) {
+		conn.Close()
+		t.Fatalf("first response chunk = %q, want %q", string(got), string(firstChunk))
+	}
+	select {
+	case <-firstFlushed:
+	default:
+		conn.Close()
+		t.Fatal("upstream first chunk was read before firstFlushed signal")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close client connection: %v", err)
+	}
+
+	select {
+	case <-upstreamDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream handler did not observe downstream disconnect")
+	}
+
+	var snap metrics.Snapshot
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap = met.Snapshot()
+		if snap.TotalAborted == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+		t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted real-server disconnect with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker failures=%d successes=%d, want only seeded failure and no client-disconnect accounting", stats.TotalFailures, stats.TotalSuccesses)
+	}
+	if state := b.State(); state != circuitbreaker.HalfOpen {
+		t.Fatalf("breaker state = %s, want HALF_OPEN after real client disconnect", state)
+	}
+	nextEpoch, allowErr := b.Allow()
+	if allowErr != nil {
+		t.Fatalf("Allow() after real client disconnect = epoch %d, err %v; want ErrAbortHandler path to release HALF_OPEN probe immediately", nextEpoch, allowErr)
+	}
+	if nextEpoch == 0 {
+		t.Fatal("Allow() after real client disconnect returned epoch 0, want new HALF_OPEN probe epoch")
+	}
+	b.CancelProbe(nextEpoch)
+}
+
+func TestProxy_ErrAbortHandler_UpstreamReadFailure_RealServerAbortsClientStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	j := journal.New(8, 1024)
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithGlobalLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithJournal(j),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return responseWithReadErrorAfterChunk(req, "wire-partial"), nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	resp, err := proxyServer.Client().Get(proxyServer.URL + "/health")
+	if err != nil {
+		t.Fatalf("client Get: %v", err)
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want committed upstream 200", resp.StatusCode)
+	}
+	if string(body) != "wire-partial" {
+		t.Fatalf("body = %q, want partial bytes before abort", string(body))
+	}
+	if readErr == nil {
+		t.Fatal("ReadAll error = nil, want aborted chunked stream error")
+	}
+
+	stats := b.Stats()
+	if stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker TotalSuccesses = %d, want 0", stats.TotalSuccesses)
+	}
+	if stats.TotalFailures != 1 {
+		t.Fatalf("breaker TotalFailures = %d, want 1", stats.TotalFailures)
+	}
+	snap := met.Snapshot()
+	if snap.TotalAborted != 1 {
+		t.Fatalf("TotalAborted = %d, want 1", snap.TotalAborted)
+	}
+	if snap.TotalPassThrough != 0 {
+		t.Fatalf("TotalPassThrough = %d, want 0 (aborted passthrough is not a clean completion)", snap.TotalPassThrough)
+	}
+	if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != http.StatusOK {
+		t.Fatalf("metrics log = %+v, want one aborted 200 entry", snap.LogEntries)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(entries))
+	}
+	if !entries[0].Aborted {
+		t.Fatal("journal entry Aborted = false, want true")
+	}
+	if !entries[0].Timing.ResponseComplete.IsZero() {
+		t.Fatalf("journal ResponseComplete = %v, want zero for aborted response", entries[0].Timing.ResponseComplete)
+	}
+	if entries[0].ResponseSize != int64(len("wire-partial")) {
+		t.Fatalf("journal ResponseSize = %d, want Write-accepted partial byte count", entries[0].ResponseSize)
+	}
+}
+
+func TestProxy_ClientDisconnectDuringRealUpstreamStream_DoesNotPoisonBreaker(t *testing.T) {
+	firstChunk := []byte("first-chunk\n")
+	firstFlushed := make(chan struct{})
+	upstreamDone := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(upstreamDone)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(firstChunk); err != nil {
+			return
+		}
+		flusher.Flush()
+		close(firstFlushed)
+
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; ; i++ {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				if _, err := fmt.Fprintf(w, "more-%d\n", i); err != nil {
+					return
+				}
+				flusher.Flush()
+			}
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	j := journal.New(8, 1024)
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+	lim := queue.NewLimiterWithCooldown(1, 0)
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(lim),
+		WithMetrics(met),
+		WithJournal(j),
+		WithBreaker(b),
+		WithCancelCooldown(5*time.Second),
+		WithMaxRetries(0),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	proxyServer := httptest.NewServer(p)
+	t.Cleanup(proxyServer.Close)
+
+	conn, err := net.Dial("tcp", proxyServer.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		conn.Close()
+		t.Fatalf("SetDeadline: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, proxyServer.URL+"/v1/messages", nil)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if err := req.Write(conn); err != nil {
+		conn.Close()
+		t.Fatalf("write request: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		conn.Close()
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		conn.Close()
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	got := make([]byte, len(firstChunk))
+	if _, err := io.ReadFull(resp.Body, got); err != nil {
+		conn.Close()
+		t.Fatalf("read first response chunk: %v", err)
+	}
+	if string(got) != string(firstChunk) {
+		conn.Close()
+		t.Fatalf("first response chunk = %q, want %q", string(got), string(firstChunk))
+	}
+	select {
+	case <-firstFlushed:
+	default:
+		conn.Close()
+		t.Fatal("upstream first chunk was read before firstFlushed signal")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close client connection: %v", err)
+	}
+
+	select {
+	case <-upstreamDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream handler did not observe downstream disconnect")
+	}
+
+	var snap metrics.Snapshot
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap = met.Snapshot()
+		if snap.TotalAborted == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if snap.TotalAborted != 1 {
+		t.Fatalf("TotalAborted = %d, want 1; metrics=%+v breaker=%+v", snap.TotalAborted, snap, b.Stats())
+	}
+	if snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+		t.Fatalf("TotalProxied=%d TotalPassThrough=%d, want no clean completion", snap.TotalProxied, snap.TotalPassThrough)
+	}
+	if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != http.StatusOK {
+		t.Fatalf("metrics log = %+v, want one aborted 200 entry", snap.LogEntries)
+	}
+	stats := b.Stats()
+	if stats.TotalSuccesses != 0 || stats.TotalFailures != 0 {
+		t.Fatalf("breaker successes=%d failures=%d, want no mutation for real client disconnect", stats.TotalSuccesses, stats.TotalFailures)
+	}
+	limStats := lim.Stats()
+	if limStats.TotalAcq != 1 || limStats.TotalRel != 0 || limStats.Active != 1 {
+		t.Fatalf("limiter stats after abort = %+v, want acquired slot held by cancel cooldown", limStats)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(entries))
+	}
+	if entries[0].StatusCode != http.StatusOK || !entries[0].Aborted || !entries[0].Timing.ResponseComplete.IsZero() {
+		t.Fatalf("journal entry status=%d aborted=%v complete=%v, want aborted 200 with zero ResponseComplete", entries[0].StatusCode, entries[0].Aborted, entries[0].Timing.ResponseComplete)
+	}
+	if entries[0].ResponseSize < int64(len(firstChunk)) {
+		t.Fatalf("journal ResponseSize = %d, want at least first Write-accepted chunk %d", entries[0].ResponseSize, len(firstChunk))
+	}
+}
+
+func waitForHalfOpenProbeWindow(t *testing.T, b *circuitbreaker.Breaker) {
+	t.Helper()
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	if state := b.State(); state != circuitbreaker.Open {
+		t.Fatalf("breaker state after forced failures = %s, want OPEN", state)
+	}
+	time.Sleep(30 * time.Millisecond)
+}
+
+func TestProxy_RetryRequestContextCancellationDoesNotBecomeClean502(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		wantLimited bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages", wantLimited: true},
+		{name: "passthrough", method: http.MethodGet, path: "/health", wantLimited: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(1),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+				circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+			)
+			b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+			deadline := time.Now().Add(time.Second)
+			for b.WaitDuration() > 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if wait := b.WaitDuration(); wait > 0 {
+				t.Fatalf("breaker still waiting after deadline: %v", wait)
+			}
+
+			var cancel context.CancelFunc
+			var calls atomic.Int64
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(1),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					calls.Add(1)
+					cancel()
+					return nil, context.Canceled
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			ctx, cancelFn := context.WithCancel(context.Background())
+			cancel = cancelFn
+			req := httptest.NewRequest(tt.method, tt.path, nil).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			if calls.Load() != 1 {
+				t.Fatalf("transport calls = %d, want 1; request-context cancellation must not be retried", calls.Load())
+			}
+			if rec.Code == http.StatusBadGateway {
+				t.Fatalf("response status = 502; request-context cancellation was converted into a proxy-generated bad gateway")
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want only seeded failure and no cancellation accounting", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if state := b.State(); state != circuitbreaker.HalfOpen {
+				t.Fatalf("breaker state = %s, want HALF_OPEN because client cancellation is not an upstream failure", state)
+			}
+			nextEpoch, allowErr := b.Allow()
+			if allowErr != nil {
+				t.Fatalf("Allow() after retry-owned request cancellation = epoch %d, err %v; want released HALF_OPEN probe", nextEpoch, allowErr)
+			}
+			if nextEpoch == 0 {
+				t.Fatal("Allow() after retry-owned request cancellation returned epoch 0, want new HALF_OPEN probe epoch")
+			}
+			b.CancelProbe(nextEpoch)
+
+			snap := met.Snapshot()
+			if snap.StatusCounts[5] != 0 {
+				t.Fatalf("StatusCounts[5] = %d, want 0 (no clean/proxy-generated 502)", snap.StatusCounts[5])
+			}
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted cancellation with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != 0 || snap.LogEntries[0].Limited != tt.wantLimited {
+				t.Fatalf("metrics log = %+v, want one aborted status-0 entry limited=%v", snap.LogEntries, tt.wantLimited)
+			}
+		})
+	}
+}
+
+func TestProxy_RetryRequestContextCancellationAfterRetryableStatusDoesNotBecomeClean502(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		wantLimited bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages", wantLimited: true},
+		{name: "passthrough", method: http.MethodGet, path: "/health", wantLimited: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(1),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+				circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+			)
+			b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+			deadline := time.Now().Add(time.Second)
+			for b.WaitDuration() > 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if wait := b.WaitDuration(); wait > 0 {
+				t.Fatalf("breaker still waiting after deadline: %v", wait)
+			}
+
+			var cancel context.CancelFunc
+			var calls atomic.Int64
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(1),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					calls.Add(1)
+					cancel()
+					return &http.Response{
+						StatusCode: http.StatusInternalServerError,
+						Status:     "500 Internal Server Error",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("retryable failure")),
+						Request:    req,
+					}, nil
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			ctx, cancelFn := context.WithCancel(context.Background())
+			cancel = cancelFn
+			req := httptest.NewRequest(tt.method, tt.path, nil).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			if calls.Load() != 1 {
+				t.Fatalf("transport calls = %d, want 1; cancellation after retryable status must not be retried", calls.Load())
+			}
+			if rec.Code == http.StatusBadGateway || strings.Contains(rec.Body.String(), "bad gateway") {
+				t.Fatalf("response status=%d body=%q; post-status cancellation was converted into a proxy-generated bad gateway", rec.Code, rec.Body.String())
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 2 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want seeded failure plus upstream 500 and no cancellation success", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if state := b.State(); state != circuitbreaker.Open {
+				t.Fatalf("breaker state = %s, want OPEN after definitive upstream 500", state)
+			}
+
+			snap := met.Snapshot()
+			if snap.StatusCounts[5] != 0 {
+				t.Fatalf("StatusCounts=%+v, want aborted status-0 with no proxy-generated 5xx", snap.StatusCounts)
+			}
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted cancellation with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != 0 || snap.LogEntries[0].Limited != tt.wantLimited {
+				t.Fatalf("metrics log = %+v, want one aborted status-0 entry limited=%v", snap.LogEntries, tt.wantLimited)
+			}
+		})
+	}
+}
+
+func TestProxy_RetryRecordedFailureHoldsSlotDespiteRequestCancellation(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		global      bool
+		wantLimited bool
+	}{
+		{name: "limited route limiter", method: http.MethodPost, path: "/v1/messages", wantLimited: true},
+		{name: "passthrough global limiter", method: http.MethodGet, path: "/health", global: true, wantLimited: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(100),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithBasePenalty(150*time.Millisecond),
+				circuitbreaker.WithMaxPenalty(150*time.Millisecond),
+			)
+			var cancel context.CancelFunc
+			var calls atomic.Int64
+
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(1),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithCancelCooldown(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					call := calls.Add(1)
+					if call == 1 {
+						cancel()
+						return &http.Response{
+							StatusCode: http.StatusInternalServerError,
+							Status:     "500 Internal Server Error",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("retry-recorded failure")),
+							Request:    req,
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("ok")),
+						Request:    req,
+					}, nil
+				})),
+			}
+			if tt.global {
+				opts = append(opts, WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			ctx, cancelFn := context.WithCancel(context.Background())
+			cancel = cancelFn
+			firstReq := httptest.NewRequest(tt.method, tt.path, nil).WithContext(ctx)
+			firstRec := httptest.NewRecorder()
+			p.ServeHTTP(firstRec, firstReq)
+
+			stats := b.Stats()
+			if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want retry transport to record the upstream 500 despite cancellation", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("after first request metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted cancellation with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != 0 || snap.LogEntries[0].Limited != tt.wantLimited {
+				t.Fatalf("metrics log = %+v, want one aborted status-0 entry limited=%v", snap.LogEntries, tt.wantLimited)
+			}
+
+			start := time.Now()
+			secondReq := httptest.NewRequest(tt.method, tt.path, nil)
+			secondRec := httptest.NewRecorder()
+			p.ServeHTTP(secondRec, secondReq)
+			elapsed := time.Since(start)
+			if secondRec.Code != http.StatusOK {
+				t.Fatalf("second request status = %d body=%q, want 200 after upstream-failure slot hold", secondRec.Code, secondRec.Body.String())
+			}
+			if elapsed < 100*time.Millisecond {
+				t.Fatalf("second request acquired slot in %v, want retry-recorded upstream failure to hold slot despite client cancellation", elapsed)
+			}
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("transport calls = %d, want first failure plus second success", got)
+			}
+		})
+	}
+}
+
+func TestProxy_RetryRecordedEarlierFailureHoldsSlotAfterLaterCancellation(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		global      bool
+		wantLimited bool
+	}{
+		{name: "limited route limiter", method: http.MethodPost, path: "/v1/messages", wantLimited: true},
+		{name: "passthrough global limiter", method: http.MethodGet, path: "/health", global: true, wantLimited: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(100),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithBasePenalty(150*time.Millisecond),
+				circuitbreaker.WithMaxPenalty(150*time.Millisecond),
+			)
+			var cancel context.CancelFunc
+			var calls atomic.Int64
+
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(2),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithCancelCooldown(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					call := calls.Add(1)
+					switch call {
+					case 1:
+						return &http.Response{
+							StatusCode: http.StatusInternalServerError,
+							Status:     "500 Internal Server Error",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("first attempt upstream failure")),
+							Request:    req,
+						}, nil
+					case 2:
+						cancel()
+						return nil, context.Canceled
+					default:
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Status:     "200 OK",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("ok")),
+							Request:    req,
+						}, nil
+					}
+				})),
+			}
+			if tt.global {
+				opts = append(opts, WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			ctx, cancelFn := context.WithCancel(context.Background())
+			cancel = cancelFn
+			firstReq := httptest.NewRequest(tt.method, tt.path, nil).WithContext(ctx)
+			firstRec := httptest.NewRecorder()
+			p.ServeHTTP(firstRec, firstReq)
+
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("transport calls after canceled first exchange = %d, want first failure plus canceled retry attempt", got)
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want retry transport to remember attempt-0 upstream failure despite attempt-1 cancellation", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("after first request metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted cancellation with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != 0 || snap.LogEntries[0].Limited != tt.wantLimited {
+				t.Fatalf("metrics log = %+v, want one aborted status-0 entry limited=%v", snap.LogEntries, tt.wantLimited)
+			}
+
+			start := time.Now()
+			secondReq := httptest.NewRequest(tt.method, tt.path, nil)
+			secondRec := httptest.NewRecorder()
+			p.ServeHTTP(secondRec, secondReq)
+			elapsed := time.Since(start)
+			if secondRec.Code != http.StatusOK {
+				t.Fatalf("second request status = %d body=%q, want 200 after earlier-failure slot hold", secondRec.Code, secondRec.Body.String())
+			}
+			if elapsed < 100*time.Millisecond {
+				t.Fatalf("second request acquired slot in %v, want earlier retry-recorded upstream failure to hold slot despite later attempt cancellation", elapsed)
+			}
+			if got := calls.Load(); got != 3 {
+				t.Fatalf("transport calls = %d, want first failure, canceled retry, and second success", got)
+			}
+		})
+	}
+}
+
+func TestProxy_RetryRecordedEarlierFailureHoldsSlotAfterLaterCancellationWithoutBreaker(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		global      bool
+		wantLimited bool
+	}{
+		{name: "limited route limiter", method: http.MethodPost, path: "/v1/messages", wantLimited: true},
+		{name: "passthrough global limiter", method: http.MethodGet, path: "/health", global: true, wantLimited: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			var cancel context.CancelFunc
+			var calls atomic.Int64
+
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(nil),
+				WithMaxRetries(2),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithCancelCooldown(0),
+				WithFailureHold(150 * time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					call := calls.Add(1)
+					switch call {
+					case 1:
+						return &http.Response{
+							StatusCode: http.StatusInternalServerError,
+							Status:     "500 Internal Server Error",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("first attempt upstream failure")),
+							Request:    req,
+						}, nil
+					case 2:
+						cancel()
+						return nil, context.Canceled
+					default:
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Status:     "200 OK",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("ok")),
+							Request:    req,
+						}, nil
+					}
+				})),
+			}
+			if tt.global {
+				opts = append(opts, WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			ctx, cancelFn := context.WithCancel(context.Background())
+			cancel = cancelFn
+			firstReq := httptest.NewRequest(tt.method, tt.path, nil).WithContext(ctx)
+			firstRec := httptest.NewRecorder()
+			p.ServeHTTP(firstRec, firstReq)
+
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("transport calls after canceled first exchange = %d, want first failure plus canceled retry attempt", got)
+			}
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("after first request metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted cancellation with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != 0 || snap.LogEntries[0].Limited != tt.wantLimited {
+				t.Fatalf("metrics log = %+v, want one aborted status-0 entry limited=%v", snap.LogEntries, tt.wantLimited)
+			}
+
+			start := time.Now()
+			secondReq := httptest.NewRequest(tt.method, tt.path, nil)
+			secondRec := httptest.NewRecorder()
+			p.ServeHTTP(secondRec, secondReq)
+			elapsed := time.Since(start)
+			if secondRec.Code != http.StatusOK {
+				t.Fatalf("second request status = %d body=%q, want 200 after breaker-disabled failure-hold", secondRec.Code, secondRec.Body.String())
+			}
+			if elapsed < 100*time.Millisecond {
+				t.Fatalf("second request acquired slot in %v, want earlier retry-recorded upstream failure to drive failure-hold without breaker", elapsed)
+			}
+			if got := calls.Load(); got != 3 {
+				t.Fatalf("transport calls = %d, want first failure, canceled retry, and second success", got)
+			}
+		})
+	}
+}
+
+func TestProxy_RetryRecordedEarlierFailureUsesCancelCooldownAfterSuccessfulRetryAbort(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		global      bool
+		wantLimited bool
+	}{
+		{name: "limited route limiter", method: http.MethodPost, path: "/v1/messages", wantLimited: true},
+		{name: "passthrough global limiter", method: http.MethodGet, path: "/health", global: true, wantLimited: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(100),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithBasePenalty(500*time.Millisecond),
+				circuitbreaker.WithMaxPenalty(500*time.Millisecond),
+			)
+			var calls atomic.Int64
+
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(1),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithCancelCooldown(20 * time.Millisecond),
+				WithQueueTimeout(200 * time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					call := calls.Add(1)
+					if call == 1 {
+						return &http.Response{
+							StatusCode: http.StatusInternalServerError,
+							Status:     "500 Internal Server Error",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("first attempt upstream failure")),
+							Request:    req,
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("successful current retry attempt")),
+						Request:    req,
+					}, nil
+				})),
+			}
+			if tt.global {
+				opts = append(opts, WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			firstReq := httptest.NewRequest(tt.method, tt.path, nil)
+			firstRec := &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			p.ServeHTTP(firstRec, firstReq)
+
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("transport calls after aborted first exchange = %d, want first failure plus successful retry attempt", got)
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want only the earlier upstream failure and no deferred success after downstream abort", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("after first request metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted downstream/client exchange with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != http.StatusOK || snap.LogEntries[0].Limited != tt.wantLimited {
+				t.Fatalf("metrics log = %+v, want one aborted 200 entry limited=%v", snap.LogEntries, tt.wantLimited)
+			}
+
+			start := time.Now()
+			secondReq := httptest.NewRequest(tt.method, tt.path, nil)
+			secondRec := httptest.NewRecorder()
+			p.ServeHTTP(secondRec, secondReq)
+			elapsed := time.Since(start)
+			if secondRec.Code != http.StatusOK {
+				t.Fatalf("second request status = %d body=%q after %v, want 200 after cancel-cooldown rather than queue timeout from phantom penalty", secondRec.Code, secondRec.Body.String(), elapsed)
+			}
+			if elapsed > 250*time.Millisecond {
+				t.Fatalf("second request completed after %v, want no breaker phantom penalty/failure hold after successful current retry attempt was aborted by downstream", elapsed)
+			}
+			if got := calls.Load(); got != 3 {
+				t.Fatalf("transport calls = %d, want first failure, successful aborted retry, and second success", got)
+			}
+		})
+	}
+}
+
+func TestProxy_RetryRecordedEarlierFailureDoesNotBlockCurrentHalfOpenProbeCancellation(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name        string
+		method      string
+		path        string
+		wantLimited bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages", wantLimited: true},
+		{name: "passthrough", method: http.MethodGet, path: "/health", wantLimited: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(1),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+				circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+			)
+			var calls atomic.Int64
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(1),
+				WithRetryWaitMin(0),
+				WithRetryWaitMax(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					call := calls.Add(1)
+					if call == 1 {
+						return &http.Response{
+							StatusCode: http.StatusInternalServerError,
+							Status:     "500 Internal Server Error",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("first attempt upstream failure")),
+							Request:    req,
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("current half-open probe response")),
+						Request:    req,
+					}, nil
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			retryTransport := p.transport.(*retry.Transport)
+			oldCheckRetry := retryTransport.CheckRetry
+			if oldCheckRetry == nil {
+				oldCheckRetry = retry.DefaultCheckRetry
+			}
+			retryTransport.CheckRetry = func(resp *http.Response, err error) bool {
+				if resp != nil && resp.StatusCode == http.StatusInternalServerError {
+					deadline := time.Now().Add(time.Second)
+					for b.WaitDuration() > 0 && time.Now().Before(deadline) {
+						time.Sleep(time.Millisecond)
+					}
+				}
+				return oldCheckRetry(resp, err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			p.ServeHTTP(rec, req)
+
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("transport calls = %d, want first failure plus current HALF_OPEN retry probe", got)
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 1 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want only first attempt failure and no success after downstream abort", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if state := b.State(); state != circuitbreaker.HalfOpen {
+				t.Fatalf("breaker state after current probe downstream abort = %s, want HALF_OPEN with probe canceled", state)
+			}
+			nextEpoch, allowErr := b.Allow()
+			if allowErr != nil {
+				t.Fatalf("Allow() after current probe downstream abort = epoch %d err %v; historical AnyFailureRecorded blocked CancelProbe", nextEpoch, allowErr)
+			}
+			if nextEpoch == 0 {
+				t.Fatal("Allow() after current probe downstream abort returned epoch 0, want new HALF_OPEN probe epoch")
+			}
+			b.CancelProbe(nextEpoch)
+
+			snap := met.Snapshot()
+			if snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted current-probe exchange with no clean completion", snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			if len(snap.LogEntries) != 1 || !snap.LogEntries[0].Aborted || snap.LogEntries[0].Status != http.StatusOK || snap.LogEntries[0].Limited != tt.wantLimited {
+				t.Fatalf("metrics log = %+v, want one aborted 200 entry limited=%v", snap.LogEntries, tt.wantLimited)
+			}
+		})
+	}
+}
+
+func TestProxy_RetryRecordedEarlierFailureDoesNotHoldSlotAfterCleanRetrySuccess(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name   string
+		method string
+		path   string
+		global bool
+	}{
+		{name: "limited route limiter", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough global limiter", method: http.MethodGet, path: "/health", global: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(100),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithBasePenalty(300*time.Millisecond),
+				circuitbreaker.WithMaxPenalty(300*time.Millisecond),
+			)
+			var calls atomic.Int64
+
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(1),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithQueueTimeout(50 * time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					call := calls.Add(1)
+					if call == 1 {
+						return &http.Response{
+							StatusCode: http.StatusInternalServerError,
+							Status:     "500 Internal Server Error",
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader("retryable upstream failure")),
+							Request:    req,
+						}, nil
+					}
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("ok")),
+						Request:    req,
+					}, nil
+				})),
+			}
+			if tt.global {
+				opts = append(opts, WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			firstReq := httptest.NewRequest(tt.method, tt.path, nil)
+			firstRec := httptest.NewRecorder()
+			p.ServeHTTP(firstRec, firstReq)
+			if firstRec.Code != http.StatusOK {
+				t.Fatalf("first request status = %d body=%q, want retry success 200", firstRec.Code, firstRec.Body.String())
+			}
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("transport calls after first request = %d, want one retryable failure plus clean retry success", got)
+			}
+
+			start := time.Now()
+			secondReq := httptest.NewRequest(tt.method, tt.path, nil)
+			secondRec := httptest.NewRecorder()
+			p.ServeHTTP(secondRec, secondReq)
+			elapsed := time.Since(start)
+			if secondRec.Code != http.StatusOK {
+				t.Fatalf("second request status = %d body=%q, want 200; clean retry success must not leave slot in failure hold", secondRec.Code, secondRec.Body.String())
+			}
+			if elapsed > 150*time.Millisecond {
+				t.Fatalf("second request acquired slot after %v, want immediate release after clean retry success despite earlier failure", elapsed)
+			}
+			if got := calls.Load(); got != 3 {
+				t.Fatalf("transport calls = %d, want first failure, clean retry success, and second success", got)
+			}
+		})
+	}
+}
+
+func TestProxy_RetryBreakerDeferredSuccessClosesHalfOpenAfterFullBodyCopy(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t,
+		circuitbreaker.WithFailureThreshold(2),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+	)
+	waitForHalfOpenProbeWindow(t, b)
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(1),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        make(http.Header),
+				Body:          io.NopCloser(strings.NewReader("ok")),
+				ContentLength: 2,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if rec.Body.String() != "ok" {
+		t.Fatalf("body = %q, want ok", rec.Body.String())
+	}
+	if state := b.State(); state != circuitbreaker.Closed {
+		t.Fatalf("breaker state = %s, want CLOSED after fully copied 2xx probe", state)
+	}
+	if successes := b.Stats().TotalSuccesses; successes != 1 {
+		t.Fatalf("TotalSuccesses = %d, want 1 after full body copy", successes)
+	}
+}
+
+func TestProxy_ErrAbortHandler_RetryBreakerDeferredSuccessKeepsHalfOpenOpenOnBodyFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t,
+		circuitbreaker.WithFailureThreshold(2),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+	)
+	waitForHalfOpenProbeWindow(t, b)
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(1),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return responseWithReadErrorAfterChunk(req, "retry-partial"), nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := withPanicOnCopyErrorContext(httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+	rec := httptest.NewRecorder()
+	serveExpectErrAbortHandler(t, p, rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want committed upstream 200", rec.Code)
+	}
+	if rec.Body.String() != "retry-partial" {
+		t.Fatalf("body = %q, want partial body committed before retry-enabled read failure", rec.Body.String())
+	}
+	stats := b.Stats()
+	if stats.TotalSuccesses != 0 {
+		t.Fatalf("TotalSuccesses = %d, want 0 (header-level retry success must be deferred)", stats.TotalSuccesses)
+	}
+	if stats.TotalFailures != 3 {
+		t.Fatalf("TotalFailures = %d, want 3 (two setup failures plus failed half-open body copy)", stats.TotalFailures)
+	}
+	if state := b.State(); state != circuitbreaker.Open {
+		t.Fatalf("breaker state = %s, want OPEN after failed half-open body copy", state)
+	}
+}
+
+func TestProxy_ErrAbortHandler_RetryTemporaryBanBodyFailureDoesNotDoubleCountAfterRetryAfterExpiry(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t,
+		circuitbreaker.WithFailureThreshold(2),
+		circuitbreaker.WithWindow(10*time.Second),
+	)
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(1),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return responseWithDelayedReadErrorAfterChunk(
+				req,
+				http.StatusForbidden,
+				http.Header{"Retry-After": []string{"1"}},
+				"temporary-ban-partial",
+				1100*time.Millisecond,
+			), nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := withPanicOnCopyErrorContext(httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+	rec := httptest.NewRecorder()
+	serveExpectErrAbortHandler(t, p, rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want committed upstream 403", rec.Code)
+	}
+	if rec.Body.String() != "temporary-ban-partial" {
+		t.Fatalf("body = %q, want partial body committed before read failure", rec.Body.String())
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 1 {
+		t.Fatalf("TotalFailures = %d, want 1 (retry transport header failure must not be double counted after Retry-After expiry)", stats.TotalFailures)
+	}
+	if state := b.State(); state != circuitbreaker.Closed {
+		t.Fatalf("breaker state = %s, want CLOSED with threshold 2 after a single upstream attempt failure", state)
+	}
+}
+
+func TestProxy_ErrAbortHandler_RetryBare403BodyFailureRecordsProxyAbortFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(1),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return responseWithDelayedReadErrorAfterChunk(
+				req,
+				http.StatusForbidden,
+				make(http.Header),
+				"bare-forbidden-partial",
+				0,
+			), nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := withPanicOnCopyErrorContext(httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+	rec := httptest.NewRecorder()
+	serveExpectErrAbortHandler(t, p, rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want committed upstream 403", rec.Code)
+	}
+	if stats := b.Stats(); stats.TotalFailures != 1 {
+		t.Fatalf("TotalFailures = %d, want 1 (retry transport did not record bare 403 header; proxy must record body abort)", stats.TotalFailures)
+	}
+}
+
+func TestProxy_ErrAbortHandler_DownstreamWriteCancel_AppliesCooldownWithoutBreakerMutation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "response body")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	lim := queue.NewLimiterWithCooldown(1, 0)
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(lim),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithCancelCooldown(200*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	base := context.WithValue(context.Background(), http.ServerContextKey, &http.Server{})
+	ctx, cancel := context.WithCancel(base)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+	rec := &cancelingErrorResponseWriter{
+		ResponseRecorder: httptest.NewRecorder(),
+		cancel:           cancel,
+		err:              errProxyTestDownstreamWrite,
+	}
+
+	serveExpectErrAbortHandler(t, p, rec, req)
+
+	stats := b.Stats()
+	if stats.TotalFailures != 0 {
+		t.Fatalf("breaker TotalFailures = %d, want 0 (client disconnect write failure is not upstream failure)", stats.TotalFailures)
+	}
+	if stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker TotalSuccesses = %d, want 0 (aborted downstream copy must not heal breaker)", stats.TotalSuccesses)
+	}
+	if snap := met.Snapshot(); snap.StatusCounts[5] != 0 {
+		t.Fatalf("StatusCounts[5] = %d, want 0 (client disconnect must not synthesize 502)", snap.StatusCounts[5])
+	}
+
+	start := time.Now()
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Fatalf("second request acquired slot in %v, want cancelCooldown to hold the slot", elapsed)
+	}
+}
+
+func TestProxy_ErrAbortHandler_DownstreamWriteErrorWithoutRequestCancel_DoesNotPoisonBreaker(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "response body")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	lim := queue.NewLimiterWithCooldown(1, 0)
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(lim),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithCancelCooldown(200*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := withPanicOnCopyErrorContext(httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+	rec := &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+
+	serveExpectErrAbortHandler(t, p, rec, req)
+
+	if err := req.Context().Err(); err != nil {
+		t.Fatalf("request context was canceled by test writer: %v", err)
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 0 {
+		t.Fatalf("breaker TotalFailures = %d, want 0 (downstream write error without context cancel is still client-side)", stats.TotalFailures)
+	}
+	if stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker TotalSuccesses = %d, want 0", stats.TotalSuccesses)
+	}
+	if snap := met.Snapshot(); snap.TotalAborted != 1 || snap.TotalProxied != 0 {
+		t.Fatalf("metrics snapshot TotalAborted=%d TotalProxied=%d, want aborted=1 clean proxied=0", snap.TotalAborted, snap.TotalProxied)
+	}
+
+	start := time.Now()
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+		t.Fatalf("second request acquired slot in %v, want downstream write failure to apply cancelCooldown", elapsed)
+	}
+}
+
+func TestProxy_ErrAbortHandler_UpstreamReadFailureDespiteRequestCancel_RecordsBreakerFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+	base := context.WithValue(context.Background(), http.ServerContextKey, &http.Server{})
+	ctx, cancel := context.WithCancel(base)
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        make(http.Header),
+				Body:          &cancelingReadErrorAfterChunkBody{chunk: []byte("partial"), err: errProxyTestUpstreamRead, cancel: cancel},
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	serveExpectErrAbortHandler(t, p, rec, req)
+
+	if ctx.Err() == nil {
+		t.Fatal("request context was not canceled by upstream body")
+	}
+	stats := b.Stats()
+	if stats.TotalFailures != 1 {
+		t.Fatalf("breaker TotalFailures = %d, want 1 (non-context upstream read error must not be hidden by request cancellation)", stats.TotalFailures)
+	}
+	if stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker TotalSuccesses = %d, want 0", stats.TotalSuccesses)
+	}
+}
+
+func TestProxy_ErrAbortHandler_UpstreamReadErrorWithSameReadBytesBeatsDownstreamWriteError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Status:        "200 OK",
+				Header:        make(http.Header),
+				Body:          &readChunkWithErrorBody{chunk: []byte("partial"), err: errProxyTestUpstreamRead},
+				ContentLength: -1,
+				Request:       req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := withPanicOnCopyErrorContext(httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+	rec := &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+	serveExpectErrAbortHandler(t, p, rec, req)
+
+	stats := b.Stats()
+	if stats.TotalFailures != 1 {
+		t.Fatalf("breaker TotalFailures = %d, want 1 (non-context upstream read error must win over downstream write error)", stats.TotalFailures)
+	}
+	if stats.TotalSuccesses != 0 {
+		t.Fatalf("breaker TotalSuccesses = %d, want 0", stats.TotalSuccesses)
+	}
+}
+
+func TestProxy_ErrAbortHandler_DownstreamWriteCancelAfterUpstreamFailure_RecordsBreakerFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, "upstream failure body")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough", method: http.MethodGet, path: "/health"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			base := context.WithValue(context.Background(), http.ServerContextKey, &http.Server{})
+			ctx, cancel := context.WithCancel(base)
+			req := httptest.NewRequest(tt.method, tt.path, nil).WithContext(ctx)
+			rec := &cancelingErrorResponseWriter{
+				ResponseRecorder: httptest.NewRecorder(),
+				cancel:           cancel,
+				err:              errProxyTestDownstreamWrite,
+			}
+
+			serveExpectErrAbortHandler(t, p, rec, req)
+
+			stats := b.Stats()
+			if stats.TotalFailures != 1 {
+				t.Fatalf("breaker TotalFailures = %d, want 1 (definitive upstream 500 must be recorded despite client disconnect)", stats.TotalFailures)
+			}
+			if stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker TotalSuccesses = %d, want 0", stats.TotalSuccesses)
+			}
+		})
+	}
+}
+
+func TestProxy_ErrAbortHandler_DownstreamWriteCancelAfterUpstream502_RecordsBreakerFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		fmt.Fprint(w, "provider bad gateway")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough", method: http.MethodGet, path: "/health"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			base := context.WithValue(context.Background(), http.ServerContextKey, &http.Server{})
+			ctx, cancel := context.WithCancel(base)
+			req := httptest.NewRequest(tt.method, tt.path, nil).WithContext(ctx)
+			rec := &cancelingErrorResponseWriter{
+				ResponseRecorder: httptest.NewRecorder(),
+				cancel:           cancel,
+				err:              errProxyTestDownstreamWrite,
+			}
+
+			serveExpectErrAbortHandler(t, p, rec, req)
+
+			stats := b.Stats()
+			if stats.TotalFailures != 1 {
+				t.Fatalf("breaker TotalFailures = %d, want 1 (upstream 502 must not be confused with proxy-generated 502)", stats.TotalFailures)
+			}
+			if stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker TotalSuccesses = %d, want 0", stats.TotalSuccesses)
+			}
+		})
+	}
+}
+
+func TestProxy_ErrorHandler_ClientCancelBeforeResponse_NoSpurious502(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough", method: http.MethodGet, path: "/health"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+			ctx, cancel := context.WithCancel(context.Background())
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					cancel()
+					return nil, context.Canceled
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			if body := rec.Body.String(); body != "" {
+				t.Fatalf("body = %q, want no proxy-generated error body for client cancellation", body)
+			}
+			if snap := met.Snapshot(); snap.StatusCounts[5] != 0 || snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics StatusCounts[5]=%d TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want no 5xx, one aborted incomplete exchange, and no clean completion", snap.StatusCounts[5], snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 0 {
+				t.Fatalf("breaker TotalFailures = %d, want 0 (pre-response client cancel is not upstream failure)", stats.TotalFailures)
+			}
+			if stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker TotalSuccesses = %d, want 0 (no response was received)", stats.TotalSuccesses)
+			}
+		})
+	}
+}
+
+func TestProxy_LocalReverseProxyErrorBeforeRoundTrip_NotUpstreamFailure(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		global bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough", method: http.MethodGet, path: "/health", global: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			activeLimiter := lim
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(100),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithBasePenalty(200*time.Millisecond),
+				circuitbreaker.WithMaxPenalty(200*time.Millisecond),
+			)
+			var transportCalled atomic.Bool
+
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithFailureHold(200 * time.Millisecond),
+				WithCancelCooldown(200 * time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					transportCalled.Store(true)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("unexpected")),
+						Request:    req,
+					}, nil
+				})),
+			}
+			if tt.global {
+				globalLimiter := queue.NewLimiterWithCooldown(1, 0)
+				activeLimiter = globalLimiter
+				opts = append(opts, WithGlobalLimiter(globalLimiter))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", string([]byte{0x7f}))
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			if transportCalled.Load() {
+				t.Fatal("transport RoundTrip was called for invalid client upgrade before local ReverseProxy validation failed")
+			}
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 for local invalid-upgrade proxy error", rec.Code)
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want no upstream accounting before RoundTrip", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if active := activeLimiter.Stats().Active; active != 0 {
+				t.Fatalf("limiter active slots = %d, want 0 because no upstream attempt occurred", active)
+			}
+			snap := met.Snapshot()
+			if snap.StatusCounts[5] != 1 || snap.TotalAborted != 0 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics StatusCounts[5]=%d TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want completed local 502 with no clean upstream completion", snap.StatusCounts[5], snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+		})
+	}
+}
+
+func TestProxy_LocalReverseProxyErrorBeforeRoundTrip_WriteFailureDoesNotRecordBreaker(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		global bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough", method: http.MethodGet, path: "/health", global: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			activeLimiter := lim
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(100),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithBasePenalty(200*time.Millisecond),
+				circuitbreaker.WithMaxPenalty(200*time.Millisecond),
+			)
+			var transportCalled atomic.Bool
+
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithFailureHold(200 * time.Millisecond),
+				WithCancelCooldown(200 * time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					transportCalled.Store(true)
+					return nil, errProxyTestTransport
+				})),
+			}
+			if tt.global {
+				globalLimiter := queue.NewLimiterWithCooldown(1, 0)
+				activeLimiter = globalLimiter
+				opts = append(opts, WithGlobalLimiter(globalLimiter))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", string([]byte{0x7f}))
+			rec := &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			p.ServeHTTP(rec, req)
+
+			if transportCalled.Load() {
+				t.Fatal("transport RoundTrip was called for invalid client upgrade before local ReverseProxy validation failed")
+			}
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 for local invalid-upgrade proxy error", rec.Code)
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want no upstream accounting before RoundTrip despite generated-502 write failure", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if active := activeLimiter.Stats().Active; active != 0 {
+				t.Fatalf("limiter active slots = %d, want 0 because no upstream attempt occurred", active)
+			}
+			snap := met.Snapshot()
+			if snap.StatusCounts[5] != 1 || snap.TotalAborted != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics StatusCounts[5]=%d TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want aborted local 502 with no clean upstream completion", snap.StatusCounts[5], snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough)
+			}
+		})
+	}
+}
+
+func TestProxy_LocalReverseProxyErrorBeforeRoundTrip_ReleasesHalfOpenProbe(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		global bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough", method: http.MethodGet, path: "/health", global: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(1),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithOpenTimeout(10*time.Millisecond),
+				circuitbreaker.WithMaxOpenTimeout(10*time.Millisecond),
+			)
+			b.RecordFailure(http.StatusInternalServerError, 0, time.Now(), 0)
+			if state := b.State(); state != circuitbreaker.Open {
+				t.Fatalf("breaker state after seed failure = %v, want OPEN", state)
+			}
+			deadline := time.Now().Add(time.Second)
+			for b.WaitDuration() > 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if wait := b.WaitDuration(); wait > 0 {
+				t.Fatalf("breaker still waiting after deadline: %v", wait)
+			}
+
+			var transportCalls atomic.Int64
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					transportCalls.Add(1)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("ok")),
+						Request:    req,
+					}, nil
+				})),
+			}
+			if tt.global {
+				opts = append(opts, WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			badReq := httptest.NewRequest(tt.method, tt.path, nil)
+			badReq.Header.Set("Connection", "Upgrade")
+			badReq.Header.Set("Upgrade", string([]byte{0x7f}))
+			badRec := httptest.NewRecorder()
+			p.ServeHTTP(badRec, badReq)
+			if badRec.Code != http.StatusBadGateway {
+				t.Fatalf("bad request status = %d, want local 502", badRec.Code)
+			}
+			if got := transportCalls.Load(); got != 0 {
+				t.Fatalf("transport calls after local validation error = %d, want 0", got)
+			}
+
+			goodReq := httptest.NewRequest(tt.method, tt.path, nil)
+			goodRec := httptest.NewRecorder()
+			p.ServeHTTP(goodRec, goodReq)
+			if goodRec.Code != http.StatusOK {
+				t.Fatalf("good request status = %d, want 200; local error consumed HALF_OPEN probe", goodRec.Code)
+			}
+			if got := transportCalls.Load(); got != 1 {
+				t.Fatalf("transport calls after good request = %d, want 1", got)
+			}
+			if state := b.State(); state != circuitbreaker.Closed {
+				t.Fatalf("breaker state after good probe = %v, want CLOSED", state)
+			}
+		})
+	}
+}
+
+func TestProxy_RetryRequestBodyBufferingErrorBeforeRoundTrip_NotUpstreamFailure(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		global    bool
+		writeFail bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "limited generated 502 write failure", method: http.MethodPost, path: "/v1/messages", writeFail: true},
+		{name: "passthrough", method: http.MethodGet, path: "/health", global: true},
+		{name: "passthrough generated 502 write failure", method: http.MethodGet, path: "/health", global: true, writeFail: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			activeLimiter := lim
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(100),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithBasePenalty(200*time.Millisecond),
+				circuitbreaker.WithMaxPenalty(200*time.Millisecond),
+			)
+			var innerCalled atomic.Bool
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(1),
+				WithMaxBodyBytes(1024),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithFailureHold(200 * time.Millisecond),
+				WithCancelCooldown(200 * time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					innerCalled.Store(true)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("unexpected")),
+						Request:    req,
+					}, nil
+				})),
+			}
+			if tt.global {
+				globalLimiter := queue.NewLimiterWithCooldown(1, 0)
+				activeLimiter = globalLimiter
+				opts = append(opts, WithGlobalLimiter(globalLimiter))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, &readErrorBody{err: errProxyTestTransport})
+			var rw http.ResponseWriter = httptest.NewRecorder()
+			if tt.writeFail {
+				rw = &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			}
+			p.ServeHTTP(rw, req)
+
+			if innerCalled.Load() {
+				t.Fatal("inner upstream RoundTrip was called even though retry request-body buffering failed")
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want no upstream accounting for local retry body-buffering failure", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if active := activeLimiter.Stats().Active; active != 0 {
+				t.Fatalf("limiter active slots = %d, want 0 because no upstream attempt occurred", active)
+			}
+			snap := met.Snapshot()
+			wantAborted := int64(0)
+			if tt.writeFail {
+				wantAborted = 1
+			}
+			if snap.StatusCounts[5] != 1 || snap.TotalAborted != wantAborted || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics StatusCounts[5]=%d TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want local 502 with aborted=%d and no clean upstream completion", snap.StatusCounts[5], snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough, wantAborted)
+			}
+		})
+	}
+}
+
+func TestProxy_NestedUnwrappedRetryRequestBodyBufferingErrorBeforeRoundTrip_NotUpstreamFailure(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		global    bool
+		writeFail bool
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "limited generated 502 write failure", method: http.MethodPost, path: "/v1/messages", writeFail: true},
+		{name: "passthrough", method: http.MethodGet, path: "/health", global: true},
+		{name: "passthrough generated 502 write failure", method: http.MethodGet, path: "/health", global: true, writeFail: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			activeLimiter := lim
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(100),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithBasePenalty(200*time.Millisecond),
+				circuitbreaker.WithMaxPenalty(200*time.Millisecond),
+			)
+			var innerCalled atomic.Bool
+			nestedRetry := &unwrapRoundTripper{inner: &unwrapRoundTripper{inner: &retry.Transport{
+				Inner: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					innerCalled.Store(true)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("unexpected")),
+						Request:    req,
+					}, nil
+				}),
+				Breaker:      b,
+				MaxBodyBytes: 1024,
+			}}}
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithFailureHold(200 * time.Millisecond),
+				WithCancelCooldown(200 * time.Millisecond),
+				WithTransport(nestedRetry),
+			}
+			if tt.global {
+				globalLimiter := queue.NewLimiterWithCooldown(1, 0)
+				activeLimiter = globalLimiter
+				opts = append(opts, WithGlobalLimiter(globalLimiter))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, &readErrorBody{err: errProxyTestTransport})
+			var rw http.ResponseWriter = httptest.NewRecorder()
+			if tt.writeFail {
+				rw = &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			}
+			p.ServeHTTP(rw, req)
+
+			if innerCalled.Load() {
+				t.Fatal("nested retry inner upstream RoundTrip was called even though request-body buffering failed")
+			}
+			stats := b.Stats()
+			if stats.TotalFailures != 0 || stats.TotalSuccesses != 0 {
+				t.Fatalf("breaker failures=%d successes=%d, want no upstream accounting for nested retry local body-buffering failure", stats.TotalFailures, stats.TotalSuccesses)
+			}
+			if active := activeLimiter.Stats().Active; active != 0 {
+				t.Fatalf("limiter active slots = %d, want 0 because nested retry never started an upstream attempt", active)
+			}
+			snap := met.Snapshot()
+			wantAborted := int64(0)
+			if tt.writeFail {
+				wantAborted = 1
+			}
+			if snap.StatusCounts[5] != 1 || snap.TotalAborted != wantAborted || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics StatusCounts[5]=%d TotalAborted=%d TotalProxied=%d TotalPassThrough=%d, want local 502 with aborted=%d and no clean upstream completion", snap.StatusCounts[5], snap.TotalAborted, snap.TotalProxied, snap.TotalPassThrough, wantAborted)
+			}
+		})
+	}
+}
+
+func TestProxy_QueueFailureBeforeRoundTrip_ReleasesHalfOpenProbe(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		global     bool
+		wantStatus int
+	}{
+		{name: "limited queue timeout", method: http.MethodPost, path: "/v1/messages", wantStatus: http.StatusGatewayTimeout},
+		{name: "passthrough global queue cancel", method: http.MethodGet, path: "/health", global: true, wantStatus: http.StatusServiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+			blockingLimiter := lim
+			b := mustBreaker(t,
+				circuitbreaker.WithFailureThreshold(1),
+				circuitbreaker.WithWindow(10*time.Second),
+				circuitbreaker.WithOpenTimeout(10*time.Millisecond),
+				circuitbreaker.WithMaxOpenTimeout(10*time.Millisecond),
+			)
+			b.RecordFailure(http.StatusInternalServerError, 0, time.Now(), 0)
+			deadline := time.Now().Add(time.Second)
+			for b.WaitDuration() > 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if wait := b.WaitDuration(); wait > 0 {
+				t.Fatalf("breaker still waiting after deadline: %v", wait)
+			}
+
+			var transportCalls atomic.Int64
+			opts := []Option{
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithQueueTimeout(10 * time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					transportCalls.Add(1)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Status:     "200 OK",
+						Header:     make(http.Header),
+						Body:       io.NopCloser(strings.NewReader("ok")),
+						Request:    req,
+					}, nil
+				})),
+			}
+			if tt.global {
+				globalLimiter := queue.NewLimiterWithCooldown(1, 0)
+				blockingLimiter = globalLimiter
+				opts = append(opts, WithGlobalLimiter(globalLimiter))
+			}
+			p, err := New(opts...)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+			release, err := blockingLimiter.Acquire(context.Background())
+			if err != nil {
+				t.Fatalf("pre-acquire limiter: %v", err)
+			}
+
+			blockedReq := httptest.NewRequest(tt.method, tt.path, nil)
+			blockedRec := httptest.NewRecorder()
+			p.ServeHTTP(blockedRec, blockedReq)
+			if blockedRec.Code != tt.wantStatus {
+				t.Fatalf("blocked request status = %d, want %d", blockedRec.Code, tt.wantStatus)
+			}
+			if got := transportCalls.Load(); got != 0 {
+				t.Fatalf("transport calls while limiter blocked = %d, want 0", got)
+			}
+			release()
+
+			goodReq := httptest.NewRequest(tt.method, tt.path, nil)
+			goodRec := httptest.NewRecorder()
+			p.ServeHTTP(goodRec, goodReq)
+			if goodRec.Code != http.StatusOK {
+				t.Fatalf("good request status = %d, want 200; queue failure consumed HALF_OPEN probe", goodRec.Code)
+			}
+			if got := transportCalls.Load(); got != 1 {
+				t.Fatalf("transport calls after good request = %d, want 1", got)
+			}
+			if state := b.State(); state != circuitbreaker.Closed {
+				t.Fatalf("breaker state after good probe = %v, want CLOSED", state)
+			}
+		})
+	}
+}
+
+func TestProxy_ErrorHandler_TransportErrorBeforeResponse_Records502(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough", method: http.MethodGet, path: "/health"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					return nil, errProxyTestTransport
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 for real pre-response transport error", rec.Code)
+			}
+			if snap := met.Snapshot(); snap.StatusCounts[5] != 1 {
+				t.Fatalf("StatusCounts[5] = %d, want 1 for real pre-response transport error", snap.StatusCounts[5])
+			}
+			if stats := b.Stats(); stats.TotalFailures != 1 {
+				t.Fatalf("breaker TotalFailures = %d, want 1 for real pre-response transport error", stats.TotalFailures)
+			}
+		})
+	}
+}
+
+func TestProxy_ErrorHandler_RequestCancelWithNonContextTransportError_Records502AndBreakerFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "limited", method: http.MethodPost, path: "/v1/messages"},
+		{name: "passthrough", method: http.MethodGet, path: "/health"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+			ctx, cancel := context.WithCancel(context.Background())
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(0),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					cancel()
+					return nil, errProxyTestTransport
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 for non-context transport error racing with request cancel", rec.Code)
+			}
+			if snap := met.Snapshot(); snap.StatusCounts[5] != 1 || snap.TotalAborted != 0 {
+				t.Fatalf("metrics StatusCounts[5]=%d TotalAborted=%d, want one 5xx completed proxy error and no abort", snap.StatusCounts[5], snap.TotalAborted)
+			}
+			if stats := b.Stats(); stats.TotalFailures != 1 {
+				t.Fatalf("breaker TotalFailures = %d, want 1 (non-context transport error must not be masked by request cancel)", stats.TotalFailures)
+			}
+		})
+	}
+}
+
+func TestProxy_ErrorHandler_RealTransportErrorWithGenerated502WriteFailure_RecordsBreakerFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name         string
+		method       string
+		path         string
+		maxRetries   int
+		transportErr error
+		wantFails    int64
+	}{
+		{name: "limited non-context no retries", method: http.MethodPost, path: "/v1/messages", maxRetries: 0, transportErr: errProxyTestTransport, wantFails: 1},
+		{name: "passthrough non-context no retries", method: http.MethodGet, path: "/health", maxRetries: 0, transportErr: errProxyTestTransport, wantFails: 1},
+		{name: "limited context-canceled active request no retries", method: http.MethodPost, path: "/v1/messages", maxRetries: 0, transportErr: context.Canceled, wantFails: 1},
+		{name: "passthrough context-canceled active request no retries", method: http.MethodGet, path: "/health", maxRetries: 0, transportErr: context.Canceled, wantFails: 1},
+		{name: "limited deadline-exceeded active request no retries", method: http.MethodPost, path: "/v1/messages", maxRetries: 0, transportErr: context.DeadlineExceeded, wantFails: 1},
+		{name: "passthrough deadline-exceeded active request no retries", method: http.MethodGet, path: "/health", maxRetries: 0, transportErr: context.DeadlineExceeded, wantFails: 1},
+		{name: "limited retry transport no double count", method: http.MethodPost, path: "/v1/messages", maxRetries: 1, transportErr: errProxyTestTransport, wantFails: 2},
+		{name: "limited retry context-canceled active request no double count", method: http.MethodPost, path: "/v1/messages", maxRetries: 1, transportErr: context.Canceled, wantFails: 2},
+		{name: "limited retry deadline-exceeded active request no double count", method: http.MethodPost, path: "/v1/messages", maxRetries: 1, transportErr: context.DeadlineExceeded, wantFails: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(tt.maxRetries),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Context().Err() != nil {
+						t.Fatalf("request context unexpectedly canceled before transport returned: %v", req.Context().Err())
+					}
+					return nil, tt.transportErr
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			p.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 committed before write failure", rec.Code)
+			}
+			if stats := b.Stats(); stats.TotalFailures != tt.wantFails {
+				t.Fatalf("breaker TotalFailures = %d, want %d (real transport error must survive generated 502 write failure)", stats.TotalFailures, tt.wantFails)
+			}
+			if snap := met.Snapshot(); snap.TotalAborted != 1 || snap.StatusCounts[5] != 1 || snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+				t.Fatalf("metrics TotalAborted=%d StatusCounts[5]=%d TotalProxied=%d TotalPassThrough=%d, want aborted proxy 502 with no clean completion", snap.TotalAborted, snap.StatusCounts[5], snap.TotalProxied, snap.TotalPassThrough)
+			}
+		})
+	}
+}
+
+func TestProxy_ErrorHandler_RealTransportErrorWithGenerated502WriteFailure_AppliesFailureHold(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+
+	for _, tt := range []struct {
+		name         string
+		transportErr error
+	}{
+		{name: "non-context", transportErr: errProxyTestTransport},
+		{name: "context-canceled active request", transportErr: context.Canceled},
+		{name: "deadline-exceeded active request", transportErr: context.DeadlineExceeded},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			lim := queue.NewLimiterWithCooldown(1, 0)
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(lim),
+				WithMetrics(met),
+				WithMaxRetries(0),
+				WithFailureHold(200*time.Millisecond),
+				WithCancelCooldown(10*time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Context().Err() != nil {
+						t.Fatalf("request context unexpectedly canceled before transport returned: %v", req.Context().Err())
+					}
+					return nil, tt.transportErr
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			rec := &errorResponseWriter{ResponseRecorder: httptest.NewRecorder(), err: errProxyTestDownstreamWrite}
+			p.ServeHTTP(rec, req)
+
+			start := time.Now()
+			req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			rec2 := httptest.NewRecorder()
+			p.ServeHTTP(rec2, req2)
+			if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+				t.Fatalf("second request acquired slot in %v, want failureHold to beat downstream-write cancelCooldown for real transport failure", elapsed)
+			}
+		})
+	}
+}
+
+func TestProxy_ErrorHandler_ContextCanceledErrorWithoutClientCancel_Records502(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+
+	tests := []struct {
+		name       string
+		maxRetries int
+		wantFails  int64
+	}{
+		{name: "no retries", maxRetries: 0, wantFails: 1},
+		{name: "with retries", maxRetries: 1, wantFails: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			met := metrics.NewCollector()
+			b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(met),
+				WithBreaker(b),
+				WithMaxRetries(tt.maxRetries),
+				WithRetryWaitMin(time.Millisecond),
+				WithRetryWaitMax(time.Millisecond),
+				WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+					if req.Context().Err() != nil {
+						t.Fatalf("request context unexpectedly canceled before transport returned: %v", req.Context().Err())
+					}
+					return nil, context.Canceled
+				})),
+			)
+			if err != nil {
+				t.Fatalf("proxy.New: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502 when transport returns context.Canceled without request cancellation", rec.Code)
+			}
+			if snap := met.Snapshot(); snap.StatusCounts[5] != 1 {
+				t.Fatalf("StatusCounts[5] = %d, want 1 when request context is still active", snap.StatusCounts[5])
+			}
+			if stats := b.Stats(); stats.TotalFailures != tt.wantFails {
+				t.Fatalf("breaker TotalFailures = %d, want %d when request context is still active", stats.TotalFailures, tt.wantFails)
+			}
+		})
+	}
+}
+
+func TestProxy_RetryBreakerRecordsTemporaryBanDespiteRequestCancel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	b := mustBreaker(t, circuitbreaker.WithFailureThreshold(100), circuitbreaker.WithWindow(10*time.Second))
+	ctx, cancel := context.WithCancel(context.Background())
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithBreaker(b),
+		WithMaxRetries(1),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			cancel()
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Status:     "403 Forbidden",
+				Header:     http.Header{"Retry-After": []string{"30"}},
+				Body:       io.NopCloser(strings.NewReader("temporary ban")),
+				Request:    req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want committed upstream 403", rec.Code)
+	}
+	if stats := b.Stats(); stats.TotalFailures != 1 {
+		t.Fatalf("breaker TotalFailures = %d, want 1 (temporary ban must be recorded despite request cancellation)", stats.TotalFailures)
+	}
+}
+
 // TestProxy_ErrAbortHandler_AppliesCancelCooldown verifies that when the
 // reverse proxy panics with http.ErrAbortHandler (client disconnect mid-stream),
 // the cancelCooldown IS applied — the slot is held for the configured duration.
@@ -5028,7 +10503,7 @@ func TestProxy_ErrAbortHandler_AppliesCancelCooldown(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, req)
+	serveExpectErrAbortHandler(t, p, rec, req)
 
 	// The slot should be in cooldown — not immediately available.
 	// With localPanic=true (the bug), the slot is released instantly,
@@ -5037,7 +10512,7 @@ func TestProxy_ErrAbortHandler_AppliesCancelCooldown(t *testing.T) {
 	start := time.Now()
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	rec2 := httptest.NewRecorder()
-	p.ServeHTTP(rec2, req2)
+	serveExpectErrAbortHandler(t, p, rec2, req2)
 	elapsed := time.Since(start)
 
 	// If cancelCooldown was skipped (localPanic bug), the second request
@@ -5090,7 +10565,7 @@ func TestProxy_ErrAbortHandler_NoSpurious502(t *testing.T) {
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 
-	p.ServeHTTP(rec, req)
+	serveExpectErrAbortHandler(t, p, rec, req)
 
 	// ErrAbortHandler should NOT produce a 502 in metrics.
 	// Before the fix, the inner recover wrote http.Error(rec, "internal error", 502)
@@ -5140,13 +10615,13 @@ func TestProxy_ErrAbortHandler_Passthrough_AppliesCancelCooldown(t *testing.T) {
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, req)
+	serveExpectErrAbortHandler(t, p, rec, req)
 
 	// Second request should wait for cancelCooldown on the global limiter.
 	start := time.Now()
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	rec2 := httptest.NewRecorder()
-	p.ServeHTTP(rec2, req2)
+	serveExpectErrAbortHandler(t, p, rec2, req2)
 	elapsed := time.Since(start)
 
 	if elapsed < 100*time.Millisecond {
@@ -5202,7 +10677,7 @@ func TestProxy_ErrAbortHandler_NoBreakerFailure(t *testing.T) {
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 
-	p.ServeHTTP(rec, req)
+	serveExpectErrAbortHandler(t, p, rec, req)
 
 	// Give the cancelCooldown time to release.
 	time.Sleep(100 * time.Millisecond)

@@ -79,6 +79,68 @@ func TestBreaker_TransitionsToHalfOpen(t *testing.T) {
 	}
 }
 
+func TestBreaker_CancelProbeReleasesHalfOpenAdmission(t *testing.T) {
+	b, err := New(WithFailureThreshold(1), WithWindow(10*time.Second), WithOpenTimeout(10*time.Millisecond), WithMaxOpenTimeout(10*time.Millisecond))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	if b.State() != Open {
+		t.Fatalf("expected OPEN after seed failure, got %v", b.State())
+	}
+	time.Sleep(20 * time.Millisecond)
+	epoch, err := b.Allow()
+	if err != nil {
+		t.Fatalf("Allow() after open timeout: %v", err)
+	}
+	if epoch == 0 {
+		t.Fatal("Allow() returned epoch 0 for HALF_OPEN probe")
+	}
+	if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("second Allow() before CancelProbe = %v, want ErrCircuitOpen", err)
+	}
+	b.CancelProbe(epoch + 1)
+	if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("Allow() after stale CancelProbe = %v, want ErrCircuitOpen", err)
+	}
+	b.CancelProbe(epoch)
+	epoch2, err := b.Allow()
+	if err != nil {
+		t.Fatalf("Allow() after CancelProbe: %v", err)
+	}
+	if epoch2 == 0 || epoch2 == epoch {
+		t.Fatalf("Allow() after CancelProbe epoch = %d, want new non-zero epoch different from %d", epoch2, epoch)
+	}
+}
+
+func TestBreaker_CancelProbeInvalidatesLateProbeResult(t *testing.T) {
+	b, err := New(WithFailureThreshold(1), WithWindow(10*time.Second), WithOpenTimeout(10*time.Millisecond), WithMaxOpenTimeout(10*time.Millisecond))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+	time.Sleep(20 * time.Millisecond)
+	epoch, err := b.Allow()
+	if err != nil {
+		t.Fatalf("Allow() after open timeout: %v", err)
+	}
+	b.CancelProbe(epoch)
+
+	// A future misuse of CancelProbe could race with a late result from the
+	// canceled probe. That result must be stale: it cannot close HALF_OPEN or
+	// otherwise mutate breaker counters after the probe was canceled.
+	b.RecordSuccess(time.Now(), epoch)
+	if b.State() != HalfOpen {
+		t.Fatalf("state after late success for canceled probe = %v, want HALF_OPEN", b.State())
+	}
+	if stats := b.Stats(); stats.TotalSuccesses != 0 {
+		t.Fatalf("TotalSuccesses after late canceled-probe success = %d, want 0", stats.TotalSuccesses)
+	}
+	if _, err := b.Allow(); err != nil {
+		t.Fatalf("Allow() after canceled stale success: %v", err)
+	}
+}
+
 func TestBreaker_HalfOpenSuccess_ClosesCircuit(t *testing.T) {
 	b, err := New(WithFailureThreshold(2), WithWindow(10*time.Second), WithOpenTimeout(50*time.Millisecond))
 	if err != nil {
