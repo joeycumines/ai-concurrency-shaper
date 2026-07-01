@@ -1300,7 +1300,11 @@ func (m Model) renderStatusBar() string {
 	total := counts[1] + counts[2] + counts[3] + counts[4] + counts[5]
 	if total == 0 {
 		width := m.hBarWidth()
-		return "  [" + gaugeEmptyStyle.Render(strings.Repeat("░", width)) + "]  "
+		out := "  [" + gaugeEmptyStyle.Render(strings.Repeat("░", width)) + "]"
+		if m.snap.TotalAborted > 0 {
+			out += " " + gaugeWarnStyle.Render(fmt.Sprintf("Aborted:%d", m.snap.TotalAborted))
+		}
+		return out + "  "
 	}
 	labels := []string{"1xx", "2xx", "3xx", "4xx", "5xx"}
 	cvalues := []int64{counts[1], counts[2], counts[3], counts[4], counts[5]}
@@ -1309,6 +1313,9 @@ func (m Model) renderStatusBar() string {
 	var labelsWidth int
 	for i, v := range cvalues {
 		labelsWidth += uniseg.StringWidth(fmt.Sprintf(" %s:%d", labels[i], v))
+	}
+	if m.snap.TotalAborted > 0 {
+		labelsWidth += uniseg.StringWidth(fmt.Sprintf(" Aborted:%d", m.snap.TotalAborted))
 	}
 	width := max(m.hBarWidth()-labelsWidth, 0)
 
@@ -1336,6 +1343,10 @@ func (m Model) renderStatusBar() string {
 	for i, v := range cvalues {
 		b.WriteString(" ")
 		b.WriteString(colors[i].Render(fmt.Sprintf("%s:%d", labels[i], v)))
+	}
+	if m.snap.TotalAborted > 0 {
+		b.WriteString(" ")
+		b.WriteString(gaugeWarnStyle.Render(fmt.Sprintf("Aborted:%d", m.snap.TotalAborted)))
 	}
 	b.WriteString("  ")
 	return b.String()
@@ -1396,8 +1407,8 @@ func (m Model) dashboardLines() []string {
 
 	lines = append(lines, "")
 	lines = append(lines, sectionStyle.Render(" Summary "))
-	lines = append(lines, fmt.Sprintf("  Proxied: %d  \u2502  Passthrough: %d  \u2502  Timeouts: %d  \u2502  Cancelled: %d  \u2502  Circuit rejects: %d",
-		m.snap.TotalProxied, m.snap.TotalPassThrough, m.snap.TotalTimeout, m.snap.TotalCancelled, m.snap.TotalCircuitRejected))
+	lines = append(lines, fmt.Sprintf("  Clean proxied: %d  \u2502  Clean passthrough: %d  \u2502  Aborted: %d  \u2502  Timeouts: %d  \u2502  Cancelled: %d  \u2502  Circuit rejects: %d",
+		m.snap.TotalProxied, m.snap.TotalPassThrough, m.snap.TotalAborted, m.snap.TotalTimeout, m.snap.TotalCancelled, m.snap.TotalCircuitRejected))
 
 	if cb := m.snap.CircuitBreaker; cb != nil {
 		lines = append(lines, "")
@@ -1479,9 +1490,13 @@ func (m Model) renderRequests() string {
 			style = rowSelectedStyle
 		}
 		stStr := statusStyle(e.Status).Render(fmt.Sprintf("%4d", e.Status))
+		path := e.Path
+		if e.Aborted {
+			path += " [aborted]"
+		}
 		line := fmt.Sprintf("%-8s %-6s %s  %9s  %s",
 			e.Time.Format("15:04:05"), e.Method, stStr,
-			e.Duration.Truncate(time.Millisecond), e.Path)
+			e.Duration.Truncate(time.Millisecond), path)
 		b.WriteString(style.Render("  " + line))
 		b.WriteByte('\n')
 	}
@@ -1544,6 +1559,9 @@ func (m Model) renderNetwork() string {
 		name := truncate(e.Name(), 22)
 		stStr := networkStatusStyle(e.StatusCode).Render(fmt.Sprintf("%4d", e.StatusCode))
 		typeStr := e.Type()
+		if e.Aborted {
+			typeStr = "abort"
+		}
 		sizeStr := e.SizeLabel()
 		timeStr := e.Timing.Duration().Truncate(time.Millisecond).String()
 		waterfall := m.renderWaterfall(e)
@@ -1931,9 +1949,15 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 	b.WriteString(sectionStyle.Render(" Response "))
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, " Status:   %d\n", e.StatusCode)
+	if e.Aborted {
+		b.WriteString(" Outcome:  aborted\n")
+	}
 	fmt.Fprintf(&b, " Type:     %s\n", e.Type())
 	fmt.Fprintf(&b, " Size:     %s\n", e.SizeLabel())
 	usedResp := 4 // heading + status + type + size
+	if e.Aborted {
+		usedResp++
+	}
 
 	if len(e.ResponseHeaders) > 0 && usedResp < respBudget {
 		keys := sortedHeaderKeys(e.ResponseHeaders)

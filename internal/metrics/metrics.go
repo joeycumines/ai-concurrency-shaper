@@ -79,6 +79,7 @@ type RequestLogEntry struct {
 	Status   int
 	Duration time.Duration
 	Limited  bool
+	Aborted  bool
 }
 
 // routeStats tracks per-route aggregate counters.
@@ -97,6 +98,7 @@ type Collector struct {
 	totalTimeout       atomic.Int64
 	totalCancelled     atomic.Int64
 	totalCircuitReject atomic.Int64
+	totalAborted       atomic.Int64
 
 	retriesInFlight atomic.Int64
 
@@ -153,10 +155,15 @@ func (c *Collector) IncQueued() { c.queued.Add(1) }
 // DecQueued decrements the queued/waiters counter.
 func (c *Collector) DecQueued() { c.queued.Add(-1) }
 
-// IncProxied increments the total-proxied-through-limiter counter.
+// IncProxied increments the clean-completed proxied-through-limiter counter.
+// Aborted or otherwise incomplete exchanges are reported through TotalAborted
+// and the request log instead of this counter so operators can distinguish
+// completed responses from incomplete streams.
 func (c *Collector) IncProxied() { c.totalProxied.Add(1) }
 
-// IncPassThrough increments the total-passed-through-directly counter.
+// IncPassThrough increments the clean-completed pass-through counter. Aborted
+// or otherwise incomplete pass-through exchanges are reported through
+// TotalAborted and the request log instead of this counter.
 func (c *Collector) IncPassThrough() { c.totalPass.Add(1) }
 
 // IncTimeout increments the total-timeout counter (queue deadline exceeded).
@@ -265,6 +272,20 @@ func (c *Collector) InFlightCount() int {
 // RecordRequest records a completed request in the ring buffer and updates
 // per-route stats and the throughput window.
 func (c *Collector) RecordRequest(method, path string, status int, duration time.Duration, limited bool) {
+	c.recordRequest(method, path, status, duration, limited, false)
+}
+
+// RecordAbortedRequest records a request whose handler aborted after reaching
+// the response path (for example httputil.ReverseProxy panicking
+// http.ErrAbortHandler after a streaming copy error). It is intentionally kept
+// separate from RecordRequest so the TUI/log consumers can distinguish a
+// committed status from a cleanly completed exchange.
+func (c *Collector) RecordAbortedRequest(method, path string, status int, duration time.Duration, limited bool) {
+	c.totalAborted.Add(1)
+	c.recordRequest(method, path, status, duration, limited, true)
+}
+
+func (c *Collector) recordRequest(method, path string, status int, duration time.Duration, limited bool, aborted bool) {
 	key := method + " " + path
 
 	// Update per-route stats.
@@ -296,6 +317,7 @@ func (c *Collector) RecordRequest(method, path string, status int, duration time
 		Status:   status,
 		Duration: duration,
 		Limited:  limited,
+		Aborted:  aborted,
 	}
 	c.logMu.Lock()
 	c.logBuf[c.logHead] = entry
@@ -328,6 +350,7 @@ func (c *Collector) advanceThroughputWindow() {
 	if adv <= 0 {
 		return
 	}
+	actualAdv := adv
 	if adv > c.tpSlots {
 		adv = c.tpSlots
 	}
@@ -341,7 +364,7 @@ func (c *Collector) advanceThroughputWindow() {
 	// internal clock to drift slower than real time and inflating RPS.
 	// By advancing by the exact discrete multiple, the remainder carries
 	// forward to the next call.
-	c.tpLastTick = c.tpLastTick.Add(time.Duration(adv) * c.tpGran)
+	c.tpLastTick = c.tpLastTick.Add(time.Duration(actualAdv) * c.tpGran)
 }
 
 // LogEntries returns recent log entries in chronological order (oldest first).
@@ -465,6 +488,7 @@ func (c *Collector) Reset() {
 	c.totalTimeout.Store(0)
 	c.totalCancelled.Store(0)
 	c.totalCircuitReject.Store(0)
+	c.totalAborted.Store(0)
 	for i := range c.statusCounts {
 		c.statusCounts[i].Store(0)
 	}
@@ -499,6 +523,7 @@ func (c *Collector) Snapshot() Snapshot {
 	s.TotalTimeout = c.totalTimeout.Load()
 	s.TotalCancelled = c.totalCancelled.Load()
 	s.TotalCircuitRejected = c.totalCircuitReject.Load()
+	s.TotalAborted = c.totalAborted.Load()
 	for i := range c.statusCounts {
 		s.StatusCounts[i] = c.statusCounts[i].Load()
 	}
@@ -535,13 +560,18 @@ func (c *Collector) Snapshot() Snapshot {
 
 // Snapshot is a serialised view of Collector at a point in time.
 type Snapshot struct {
-	Active               int64
-	Queued               int64
+	Active int64
+	Queued int64
+	// TotalProxied and TotalPassThrough are clean completion counters. Incomplete
+	// exchanges increment TotalAborted and carry Aborted=true in LogEntries so the
+	// dashboard can show them separately. Status buckets may still include the
+	// committed status of an aborted exchange.
 	TotalProxied         int64
 	TotalPassThrough     int64
 	TotalTimeout         int64
 	TotalCancelled       int64
 	TotalCircuitRejected int64
+	TotalAborted         int64
 	StatusCounts         [6]int64
 	LogEntries           []RequestLogEntry
 	Throughput           float64

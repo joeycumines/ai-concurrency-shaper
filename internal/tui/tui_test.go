@@ -888,8 +888,47 @@ func TestDashboardSummary(t *testing.T) {
 	if !strings.Contains(v.Content, "Summary") {
 		t.Error("Dashboard should have a Summary section")
 	}
-	if !strings.Contains(v.Content, "Proxied: 100") {
-		t.Error("Dashboard should show proxied count")
+	if !strings.Contains(v.Content, "Clean proxied: 100") {
+		t.Error("Dashboard should show clean proxied count")
+	}
+	if !strings.Contains(v.Content, "Clean passthrough: 50") {
+		t.Error("Dashboard should show clean passthrough count")
+	}
+}
+
+func TestDashboardSummaryShowsAborted(t *testing.T) {
+	m := NewModel(4)
+	m.width = 100
+	m.height = 40
+	m.tab = tabDashboard
+	m.snap.TotalProxied = 10
+	m.snap.TotalPassThrough = 5
+	m.snap.TotalAborted = 2
+	m.snap.StatusCounts = [6]int64{0, 0, 12, 0, 0, 0}
+
+	v := m.View()
+	content := stripANSI(v.Content)
+	if !strings.Contains(content, "Aborted: 2") {
+		t.Fatalf("Dashboard should show aborted count, got: %s", content)
+	}
+	bar := stripANSI(m.renderStatusBar())
+	if !strings.Contains(bar, "Aborted:2") {
+		t.Fatalf("status bar should label aborted committed statuses, got: %s", bar)
+	}
+}
+
+func TestRenderStatusBarShowsAbortedWhenNoStatusCommitted(t *testing.T) {
+	m := NewModel(4)
+	m.width = 100
+	m.height = 24
+	m.snap.TotalAborted = 3
+
+	bar := stripANSI(m.renderStatusBar())
+	if !strings.Contains(bar, "Aborted:3") {
+		t.Fatalf("status bar should label status-0 aborted exchanges, got: %s", bar)
+	}
+	if strings.Contains(bar, "2xx:") || strings.Contains(bar, "5xx:") {
+		t.Fatalf("status bar with no committed statuses should keep empty distribution, got: %s", bar)
 	}
 }
 
@@ -1463,6 +1502,21 @@ func TestToastNotShownInDetailMode(t *testing.T) {
 	content := stripANSI(v.Content)
 	if strings.Contains(content, "test") {
 		t.Error("toast should not render in detail mode")
+	}
+}
+
+func TestRequestsTabMarksAbortedRows(t *testing.T) {
+	m := NewModel(4)
+	m.width = 100
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = []metrics.RequestLogEntry{
+		{Time: time.Now(), Method: "POST", Path: "/v1/messages", Status: 200, Aborted: true},
+	}
+
+	s := stripANSI(m.renderRequests())
+	if !strings.Contains(s, "/v1/messages [aborted]") {
+		t.Fatalf("Requests tab should mark aborted rows, got: %s", s)
 	}
 }
 
@@ -2077,6 +2131,27 @@ func TestRenderNetwork_EmptyEntries(t *testing.T) {
 	s := m.renderNetwork()
 	if !strings.Contains(s, "No network entries") {
 		t.Errorf("should mention 'No network entries', got: %s", s)
+	}
+}
+
+func TestRenderNetworkMarksAbortedEntries(t *testing.T) {
+	m := NewModel(4)
+	m.width = 100
+	m.height = 24
+	m.tab = tabNetwork
+	j := journal.New(100, 1<<20)
+	e := &journal.Entry{Method: "POST", URL: mustParseURL("/v1/messages"), StatusCode: 200, ContentType: "application/json", Aborted: true}
+	j.Record(e)
+	m.journal = j
+	m.networkFiltered = m.computeVisibleNetworkEntries()
+
+	s := stripANSI(m.renderNetwork())
+	if !strings.Contains(s, "abort") {
+		t.Fatalf("Network tab should mark aborted entries, got: %s", s)
+	}
+	detail := stripANSI(m.renderNetworkDetail(e))
+	if !strings.Contains(detail, "Outcome:  aborted") {
+		t.Fatalf("Network detail should show aborted outcome, got: %s", detail)
 	}
 }
 

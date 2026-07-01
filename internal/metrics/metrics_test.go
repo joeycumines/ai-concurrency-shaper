@@ -390,6 +390,34 @@ func TestCollector_ThroughputSparklineDecaysAfterTrafficStops(t *testing.T) {
 	}
 }
 
+func TestCollector_ThroughputNoIdleTimeDebtAfterLongPause(t *testing.T) {
+	c := NewCollector()
+	c.tpMu.Lock()
+	c.tpSlots = 4
+	c.tpGran = 10 * time.Millisecond
+	c.tpCounts = make([]int, c.tpSlots)
+	c.tpHead = 0
+	longAgo := time.Now().Add(-time.Hour)
+	c.tpLastTick = longAgo
+	c.tpStart = longAgo
+	c.tpMu.Unlock()
+
+	c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+
+	spark := c.ThroughputSparkline(4)
+	total := 0
+	for _, v := range spark {
+		total += v
+	}
+	if total != 2 {
+		t.Fatalf("sparkline total after resumed traffic = %d, want 2 (idle time debt should not wipe each new request)", total)
+	}
+	if rps := c.Throughput(); rps <= 0 {
+		t.Fatalf("throughput after resumed traffic = %f, want positive", rps)
+	}
+}
+
 func TestCollector_ThroughputNoDriftOverTime(t *testing.T) {
 	// R34-05 regression test: Verify that additive tpLastTick advancement
 	// prevents cumulative drift. Before the fix, tpLastTick = now discarded

@@ -117,7 +117,7 @@ func run() error {
 	flag.DurationVar(&retryMinDelay, "retry-min-delay", 1*time.Second, "minimum delay before retrying (0 = use backoff only)")
 	flag.BoolVar(&retrySkipOn429, "retry-skip-429", true, "skip retrying 429 responses to prevent concurrency amplification")
 	flag.DurationVar(&releaseCooldown, "release-cooldown", 200*time.Millisecond, "delay after slot release before re-admission (0 = immediate)")
-	flag.DurationVar(&cancelCooldown, "cancel-cooldown", 200*time.Millisecond, "hold slot after client cancel that reached upstream (0 = immediate)")
+	flag.DurationVar(&cancelCooldown, "cancel-cooldown", 200*time.Millisecond, "hold slot after client cancel once an upstream attempt started (0 = immediate)")
 	flag.DurationVar(&failureHold, "failure-hold", 2*time.Second, "hold slot after upstream failure even without circuit breaker (0 = disabled)")
 	flag.BoolVar(&adaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
 	flag.DurationVar(&adaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")

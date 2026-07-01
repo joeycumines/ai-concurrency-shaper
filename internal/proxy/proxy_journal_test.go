@@ -17,6 +17,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -345,7 +346,7 @@ func TestProxy_JournalHijackedResponseComplete(t *testing.T) {
 	sr := &statusRecorder{ResponseWriter: rec, entry: entry}
 
 	_, _, err := sr.Hijack()
-	if err != http.ErrNotSupported {
+	if !errors.Is(err, http.ErrNotSupported) {
 		t.Fatalf("expected ErrNotSupported, got %v", err)
 	}
 	// Failed hijack must NOT set the flag — the connection is still
@@ -491,9 +492,9 @@ func TestProxy_RetryWithNonEmptyBody(t *testing.T) {
 }
 
 func TestProxy_ChunkedResponseSizeAccurate(t *testing.T) {
-	// Verify that a chunked response (no Content-Length) larger than
-	// captureMax records the true total bytes written, not the truncated
-	// capture buffer size.
+	// Verify that a chunked response (no Content-Length) larger than captureMax
+	// records the recorder-observed total bytes accepted by Write, not the
+	// truncated capture buffer size.
 	const totalSize = 2 * 1024 // 2 KiB response
 	const captureLimit = 256   // tiny capture limit
 
@@ -533,9 +534,9 @@ func TestProxy_ChunkedResponseSizeAccurate(t *testing.T) {
 	}
 
 	e := entries[0]
-	// ResponseSize must reflect the true total, not the capture limit.
+	// ResponseSize must reflect the recorder-observed total, not the capture limit.
 	if e.ResponseSize != totalSize {
-		t.Errorf("ResponseSize = %d, want %d (true total, not capture limit %d)", e.ResponseSize, totalSize, captureLimit)
+		t.Errorf("ResponseSize = %d, want %d (recorder-observed total, not capture limit %d)", e.ResponseSize, totalSize, captureLimit)
 	}
 	// The captured body should be at most captureLimit bytes.
 	if len(e.ResponseBody) > captureLimit {

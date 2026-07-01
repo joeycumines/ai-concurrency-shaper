@@ -88,6 +88,90 @@ type breakerEpochKeyType struct{}
 
 var BreakerEpochKey = breakerEpochKeyType{}
 
+type deferBreakerSuccessKeyType struct{}
+
+var deferBreakerSuccessKey = deferBreakerSuccessKeyType{}
+
+type breakerAttemptKeyType struct{}
+
+var breakerAttemptKey = breakerAttemptKeyType{}
+
+// BreakerAttempt records breaker metadata for the transport attempt that
+// produced the response returned to the caller, plus cumulative request-level
+// failure facts observed by earlier attempts in the same logical RoundTrip.
+type BreakerAttempt struct {
+	StartedAt             time.Time
+	Epoch                 uint64
+	FailureRecorded       bool
+	HeaderFailureRecorded bool
+	// AnyFailureRecorded and AnyHeaderFailureRecorded are intentionally
+	// cumulative metadata. recordBreakerAttempt resets only current-attempt
+	// fields before each attempt, while these fields let trusted callers
+	// distinguish "the returned attempt failed" from "some earlier attempt in
+	// this logical request already recorded breaker failure" for slot-release
+	// policy and diagnostics.
+	AnyFailureRecorded       bool
+	AnyHeaderFailureRecorded bool
+}
+
+// WithDeferredBreakerSuccess marks a request whose final 2xx breaker success
+// must be recorded by the caller after the response body is fully consumed.
+// The retry transport still records failures immediately; only header-level
+// 2xx success is deferred because a reverse proxy can discover body-copy
+// failures after RoundTrip has already returned a successful response.
+func WithDeferredBreakerSuccess(ctx context.Context) context.Context {
+	return context.WithValue(ctx, deferBreakerSuccessKey, true)
+}
+
+// WithBreakerAttempt stores a mutable attempt recorder in the request context.
+// It is used with WithDeferredBreakerSuccess so the caller can report a final
+// body-copy success/failure with the exact startedAt/epoch of the retry attempt
+// that produced the returned response.
+func WithBreakerAttempt(ctx context.Context, attempt *BreakerAttempt) context.Context {
+	return context.WithValue(ctx, breakerAttemptKey, attempt)
+}
+
+func deferBreakerSuccess(req *http.Request) bool {
+	deferSuccess, _ := req.Context().Value(deferBreakerSuccessKey).(bool)
+	return deferSuccess
+}
+
+func recordBreakerAttempt(req *http.Request, startedAt time.Time, epoch uint64) {
+	attempt, _ := req.Context().Value(breakerAttemptKey).(*BreakerAttempt)
+	if attempt == nil {
+		return
+	}
+	attempt.StartedAt = startedAt
+	attempt.Epoch = epoch
+	attempt.FailureRecorded = false
+	attempt.HeaderFailureRecorded = false
+}
+
+func markBreakerAttemptFailure(req *http.Request, headerFailure bool) {
+	attempt, _ := req.Context().Value(breakerAttemptKey).(*BreakerAttempt)
+	if attempt == nil {
+		return
+	}
+	attempt.FailureRecorded = true
+	attempt.AnyFailureRecorded = true
+	if headerFailure {
+		attempt.HeaderFailureRecorded = true
+		attempt.AnyHeaderFailureRecorded = true
+	}
+}
+
+func isContextCancellation(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func isRequestContextCancellation(req *http.Request) bool {
+	return isContextCancellation(req.Context().Err())
+}
+
+func suppressBreakerFailureForError(req *http.Request, err error) bool {
+	return isRequestContextCancellation(req) && isContextCancellation(err)
+}
+
 // Transport is an http.RoundTripper that retries transient failures.
 type Transport struct {
 	Inner        http.RoundTripper
@@ -120,6 +204,30 @@ type Transport struct {
 	Breaker *circuitbreaker.Breaker
 }
 
+// RetryBreaker exposes the breaker owned by this retry transport. Wrappers may
+// expose the same method as a trusted compatibility SPI; doing so promises they
+// honor WithDeferredBreakerSuccess and WithBreakerAttempt with retry.Transport
+// semantics, not merely that they can return a breaker pointer. Opaque wrappers
+// that expose neither this SPI nor Unwrap cannot be detected by the proxy and
+// are treated as ordinary transports.
+func (t *Transport) RetryBreaker() *circuitbreaker.Breaker {
+	if t == nil {
+		return nil
+	}
+	return t.Breaker
+}
+
+// SetInFlightRetries wires the retry in-flight counter used by proxy metrics.
+// Wrapper implementations are trusted to delegate to retry-compatible retry
+// execution, matching the RetryBreaker SPI contract above. They must not claim
+// compatibility while hiding a different breaker-bearing retry transport.
+func (t *Transport) SetInFlightRetries(counter *atomic.Int64) {
+	if t == nil {
+		return
+	}
+	t.InFlightRetries = counter
+}
+
 // RoundTrip implements http.RoundTripper.
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	inner := t.Inner
@@ -139,6 +247,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if v, ok := req.Context().Value(BreakerEpochKey).(uint64); ok {
 		breakerEpoch = v
 	}
+
+	deferSuccess := deferBreakerSuccess(req)
 
 	var bodyBuf *bytes.Buffer
 	if req.Body != nil && t.MaxBodyBytes > 0 {
@@ -167,6 +277,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			// breaker entirely. Without this, an attacker could bypass the
 			// circuit by sending payloads exceeding MaxBodyBytes.
 			attemptStart := time.Now()
+			recordBreakerAttempt(req, attemptStart, breakerEpoch)
 			resp, err := inner.RoundTrip(req)
 			receivedAt := time.Now()
 			// Do NOT recycle buf back to the pool here. The http.RoundTripper
@@ -188,30 +299,35 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			if resp == nil && err == nil {
 				err = errors.New("nil response without error from inner transport")
 			}
-			if t.Breaker != nil {
-				// Client-initiated context cancellation and deadline
-				// expiry are NOT upstream failures — do not feed them to
-				// the breaker. The transport does not set its own per-
-				// attempt deadlines (context.WithTimeout is never called),
-				// so all DeadlineExceeded errors originate from the client
-				// context or the proxy's queue timeout. An attacker could
-				// otherwise trip the breaker by sending requests with tight
-				// client deadlines that expire before the upstream responds.
-				isClientCancel := err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
-				// Capture a single evaluation anchor so classification and
-				// Retry-After extraction cannot disagree due to GC pauses or
-				// scheduling jitter between time.Now() calls. Use the explicit
-				// receivedAt so the intent is self-documenting.
-				now := time.Now()
-				if !isClientCancel && (err != nil || circuitbreaker.IsFailureStatusWithHeaders(statusCode(resp, err), resp.Header, receivedAt, now)) {
+			// Client-initiated context cancellation and deadline expiry are NOT
+			// upstream failures. The transport does not set its own per-attempt
+			// deadlines (context.WithTimeout is never called), so all
+			// DeadlineExceeded errors originate from the client context or the
+			// proxy's queue timeout. Capture a single evaluation anchor so
+			// classification and Retry-After extraction cannot disagree due to GC
+			// pauses or scheduling jitter between time.Now() calls. Use the
+			// explicit receivedAt so the intent is self-documenting.
+			now := time.Now()
+			statusFailure := resp != nil && circuitbreaker.IsFailureStatusWithHeaders(resp.StatusCode, resp.Header, receivedAt, now)
+			errorFailure := err != nil && !suppressBreakerFailureForError(req, err)
+			if statusFailure || errorFailure {
+				markBreakerAttemptFailure(req, statusFailure)
+				if t.Breaker != nil {
 					var ra time.Duration
 					if resp != nil {
 						ra = circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, now)
 					}
-					t.Breaker.RecordFailure(statusCode(resp, err), ra, attemptStart, breakerEpoch)
-				} else if resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-					t.Breaker.RecordSuccess(attemptStart, breakerEpoch)
+					code := statusCode(resp, err)
+					if statusFailure {
+						code = resp.StatusCode
+					}
+					t.Breaker.RecordFailure(code, ra, attemptStart, breakerEpoch)
 				}
+			} else if t.Breaker != nil && err == nil && !deferSuccess && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				t.Breaker.RecordSuccess(attemptStart, breakerEpoch)
+			}
+			if err != nil && suppressBreakerFailureForError(req, err) {
+				return t.finishRequestCancellation(req, resp, nil, breakerEpoch)
 			}
 			return resp, err
 		}
@@ -239,6 +355,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	for attempt := 0; ; attempt++ {
+		// A cancellation that happens after a retryable response but before the
+		// next attempt is just as terminal as a cancellation returned by
+		// RoundTrip. Check before Breaker.Allow so a HALF_OPEN failure from the
+		// previous response cannot turn an abandoned request into ErrCircuitOpen.
+		if attempt > 0 && isRequestContextCancellation(req) {
+			return t.finishRequestCancellation(req, nil, bodyBuf, breakerEpoch)
+		}
+
 		// Enter retry mode on the first retry attempt (attempt == 1).
 		// Only increment once — the counter represents "how many RoundTrip
 		// calls are currently in retry mode", not "how many retry attempts
@@ -295,15 +419,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			select {
 			case <-req.Context().Done():
 				timer.Stop()
-				if bodyBuf != nil {
-					releaseBuf(bodyBuf)
-				}
-				return nil, req.Context().Err()
+				return t.finishRequestCancellation(req, nil, bodyBuf, breakerEpoch)
 			case <-timer.C:
 			}
 		}
 
 		attemptStart = time.Now()
+		recordBreakerAttempt(req, attemptStart, breakerEpoch)
 		resp, err := inner.RoundTrip(req)
 		// Capture when the response headers arrived. This anchors the
 		// receipt time for ParseRetryAfter so body-drain latency is
@@ -323,36 +445,53 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			err = errors.New("nil response without error from inner transport")
 		}
 
-		mustRetry := shouldRetry(resp, err)
-		atLimit := t.MaxRetries >= 0 && attempt >= t.MaxRetries
-
-		// Report the outcome to the circuit breaker.
-		if t.Breaker != nil {
-			// Client-initiated context cancellation and deadline
-			// expiry are NOT upstream failures — do not feed them to
-			// the breaker. The transport does not set its own per-
-			// attempt deadlines (context.WithTimeout is never called),
-			// so all DeadlineExceeded errors originate from the client
-			// context or the proxy's queue timeout. An attacker could
-			// otherwise trip the breaker by sending requests with tight
-			// client deadlines that expire before the upstream responds.
-			isClientCancel := err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
-			// Capture a single evaluation anchor so classification and
-			// Retry-After extraction cannot disagree due to GC pauses or
-			// scheduling jitter between time.Now() calls. Use the explicit
-			// receivedAt (from when RoundTrip returned) so the intent is
-			// self-documenting and any scheduling delay is handled correctly.
-			now := time.Now()
-			if !isClientCancel && (err != nil || circuitbreaker.IsFailureStatusWithHeaders(statusCode(resp, err), resp.Header, receivedAt, now)) {
+		// Report the outcome to the circuit breaker when present, and always mark
+		// retry-attempt metadata when the caller installed a BreakerAttempt. The
+		// metadata is used for slot-release policy even when breaker reporting is
+		// disabled.
+		// Client-initiated context cancellation and deadline expiry are NOT upstream
+		// failures. The transport does not set its own per-attempt deadlines
+		// (context.WithTimeout is never called), so all DeadlineExceeded errors
+		// originate from the client context or the proxy's queue timeout. Capture a
+		// single evaluation anchor so classification and Retry-After extraction
+		// cannot disagree due to GC pauses or scheduling jitter between time.Now()
+		// calls. Use the explicit receivedAt (from when RoundTrip returned) so the
+		// intent is self-documenting and any scheduling delay is handled correctly.
+		now := time.Now()
+		statusFailure := resp != nil && circuitbreaker.IsFailureStatusWithHeaders(resp.StatusCode, resp.Header, receivedAt, now)
+		errorFailure := err != nil && !suppressBreakerFailureForError(req, err)
+		if statusFailure || errorFailure {
+			markBreakerAttemptFailure(req, statusFailure)
+			if t.Breaker != nil {
 				var ra time.Duration
 				if resp != nil {
 					ra = circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, now)
 				}
-				t.Breaker.RecordFailure(statusCode(resp, err), ra, attemptStart, breakerEpoch)
-			} else if resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				t.Breaker.RecordSuccess(attemptStart, breakerEpoch)
+				code := statusCode(resp, err)
+				if statusFailure {
+					code = resp.StatusCode
+				}
+				t.Breaker.RecordFailure(code, ra, attemptStart, breakerEpoch)
 			}
+		} else if t.Breaker != nil && err == nil && !deferSuccess && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			t.Breaker.RecordSuccess(attemptStart, breakerEpoch)
 		}
+
+		// A request-context cancellation error from RoundTrip is terminal for this
+		// RoundTrip. The retry policy intentionally treats generic transport errors as
+		// retryable, but a cancellation/deadline from req.Context() means the caller
+		// has abandoned the request. Retrying it can convert a clean client abort into
+		// ErrCircuitOpen in HALF_OPEN because the original probe remains in flight
+		// while attempt > 0 calls Breaker.Allow(). The breaker accounting above
+		// already suppresses the cancellation as a non-upstream failure while still
+		// preserving definitive response-status failures, so return the context error
+		// without entering the retry path.
+		if err != nil && suppressBreakerFailureForError(req, err) {
+			return t.finishRequestCancellation(req, resp, bodyBuf, breakerEpoch)
+		}
+
+		mustRetry := shouldRetry(resp, err)
+		atLimit := t.MaxRetries >= 0 && attempt >= t.MaxRetries
 
 		// When a request has a body but MaxBodyBytes <= 0, the body
 		// was not buffered (bodyBuf is nil). After the first attempt
@@ -365,14 +504,18 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// that the body is either absent or buffered before retrying.
 		canRetry := req.Body == nil || req.Body == http.NoBody || bodyBuf != nil
 		if !mustRetry || atLimit || !canRetry {
-			if bodyBuf != nil {
-				if resp != nil && resp.Body != nil {
-					resp.Body = &pooledBody{ReadCloser: resp.Body, buf: bodyBuf}
-				} else {
-					releaseBuf(bodyBuf)
-				}
-			}
+			// Preserve terminal responses even if req.Context() was canceled before
+			// RoundTrip returned. At this point the response will not be retried: it is
+			// either non-retryable, the retry limit is exhausted, or the request body is
+			// not replayable. Returning the definitive response lets the caller observe
+			// the upstream outcome after breaker accounting has already recorded any
+			// failure/success. Retryable responses still check cancellation before
+			// draining below so an abandoned request never waits on connection reuse.
+			finalizeBufferedResponseBody(resp, bodyBuf)
 			return resp, err
+		}
+		if isRequestContextCancellation(req) {
+			return t.finishRequestCancellation(req, resp, bodyBuf, breakerEpoch)
 		}
 
 		// Drain the body so the connection can be reused. Bound the
@@ -388,6 +531,38 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		lastResp = resp
 		lastReceivedAt = receivedAt
 	}
+}
+
+func (t *Transport) finishRequestCancellation(req *http.Request, resp *http.Response, buf *bytes.Buffer, breakerEpoch uint64) (*http.Response, error) {
+	if t != nil && t.Breaker != nil {
+		t.Breaker.CancelProbe(breakerEpoch)
+	}
+	closeResponseAndReleaseBuffer(resp, buf)
+	err := req.Context().Err()
+	if err == nil {
+		err = context.Canceled
+	}
+	return nil, err
+}
+
+func closeResponseAndReleaseBuffer(resp *http.Response, buf *bytes.Buffer) {
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	if buf != nil {
+		releaseBuf(buf)
+	}
+}
+
+func finalizeBufferedResponseBody(resp *http.Response, buf *bytes.Buffer) {
+	if buf == nil {
+		return
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body = wrapBufferedResponseBody(resp, buf)
+		return
+	}
+	releaseBuf(buf)
 }
 
 // statusCode extracts the HTTP status code from a response/error pair.
@@ -466,6 +641,61 @@ type pooledBody struct {
 	buf       *bytes.Buffer
 	origBody  io.ReadCloser // original body to close on Close (nil unless body-too-large path)
 	closeOnce sync.Once
+}
+
+type closeWriter interface {
+	CloseWrite() error
+}
+
+func wrapBufferedResponseBody(resp *http.Response, buf *bytes.Buffer) io.ReadCloser {
+	if resp != nil && resp.StatusCode == http.StatusSwitchingProtocols {
+		if rwc, ok := resp.Body.(io.ReadWriteCloser); ok {
+			if cw, ok := resp.Body.(closeWriter); ok {
+				return &pooledReadWriteCloseWriter{ReadWriteCloser: rwc, closeWriter: cw, buf: buf}
+			}
+			return &pooledReadWriteBody{ReadWriteCloser: rwc, buf: buf}
+		}
+	}
+	return &pooledBody{ReadCloser: resp.Body, buf: buf}
+}
+
+type pooledReadWriteBody struct {
+	io.ReadWriteCloser
+	buf       *bytes.Buffer
+	closeOnce sync.Once
+}
+
+func (p *pooledReadWriteBody) Close() error {
+	var err error
+	p.closeOnce.Do(func() {
+		if p.ReadWriteCloser != nil {
+			err = p.ReadWriteCloser.Close()
+		}
+		if p.buf != nil {
+			releaseBuf(p.buf)
+		}
+	})
+	return err
+}
+
+type pooledReadWriteCloseWriter struct {
+	io.ReadWriteCloser
+	closeWriter
+	buf       *bytes.Buffer
+	closeOnce sync.Once
+}
+
+func (p *pooledReadWriteCloseWriter) Close() error {
+	var err error
+	p.closeOnce.Do(func() {
+		if p.ReadWriteCloser != nil {
+			err = p.ReadWriteCloser.Close()
+		}
+		if p.buf != nil {
+			releaseBuf(p.buf)
+		}
+	})
+	return err
 }
 
 func (p *pooledBody) Read(b []byte) (int, error) {

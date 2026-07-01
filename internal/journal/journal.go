@@ -101,6 +101,7 @@ type Entry struct {
 	ResponseBody    []byte
 	Timing          Timing
 	Limited         bool
+	Aborted         bool
 	Attempt         int
 	ContentType     string
 	ResponseSize    int64
