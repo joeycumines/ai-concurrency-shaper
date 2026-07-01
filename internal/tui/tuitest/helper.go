@@ -204,7 +204,26 @@ func (h *TUIHarness) ProxyURL() string {
 }
 
 // Close terminates the TUI and cleans up.
+//
+// It first sends a "q" keypress to trigger bubbletea's graceful Quit path,
+// which lets p.Run() return cleanly and call p.shutdown() before the
+// process is killed. This avoids a shutdown race where the deferred
+// tuiProgram.Kill() in main.go fires concurrently with p.Run()'s internal
+// shutdown, which can corrupt sync.Once inside bubbletea's stopRenderer
+// and produce a "sync: unlock of unlocked mutex" panic.
 func (h *TUIHarness) Close() {
+	// Try to send "q" to trigger a graceful TUI exit. Ignore errors
+	// (e.g. PTY already closed) — the force-kill below is the fallback.
+	_, _ = h.console.WriteString("q")
+
+	// Give the TUI a brief window to process the quit and exit gracefully.
+	// The binary's main.go also waits for tuiDone (up to 3s) before calling
+	// Kill(), so this aligns with that timeout.
+	exitCtx, exitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer exitCancel()
+	_, _ = h.console.WaitExit(exitCtx)
+
+	// Now cancel the context and close everything.
 	h.ctx()
 	h.console.Close()
 	h.upstream.Close()

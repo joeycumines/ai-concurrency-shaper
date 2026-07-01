@@ -312,6 +312,7 @@ func run() error {
 	defer stop()
 
 	var tuiProgram *tea.Program
+	tuiDone := make(chan struct{})
 
 	if useTUI {
 		log.Println("TUI dashboard enabled")
@@ -319,6 +320,7 @@ func run() error {
 		progCh := make(chan *tea.Program, 1)
 		go func() {
 			tui.Run(snapCh, concurrency, j, progCh)
+			close(tuiDone)
 			stop() // trigger graceful shutdown when TUI exits
 		}()
 		tuiProgram = <-progCh
@@ -359,8 +361,22 @@ func run() error {
 	// former terminal state internally, so no separate restore call is
 	// needed. Without this deferred cleanup a server-startup failure
 	// would leave the terminal in raw + alt-screen mode.
+	//
+	// We wait for the TUI's Run() to return before calling Kill() to avoid
+	// a shutdown race: p.Run() calls p.shutdown() internally on return, and
+	// Kill() also calls p.shutdown(). If both fire concurrently, the
+	// renderer's sync.Once can be corrupted, producing
+	// "sync: unlock of unlocked mutex". By waiting for Run() to complete
+	// first, Kill() becomes a safe no-op (shutdownOnce absorbs it).
 	defer func() {
 		if tuiProgram != nil {
+			// Give the TUI goroutine a moment to finish its own shutdown.
+			// If it hasn't exited after 3 seconds, force-kill to avoid
+			// hanging on a stuck TUI.
+			select {
+			case <-tuiDone:
+			case <-time.After(3 * time.Second):
+			}
 			tuiProgram.Kill()
 		}
 	}()

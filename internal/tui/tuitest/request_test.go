@@ -30,7 +30,7 @@ import (
 func TestPTY_RequestLogPopulates(t *testing.T) {
 	h := Launch(t)
 	defer h.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
 	proxyURL := h.ProxyURL()
@@ -39,9 +39,16 @@ func TestPTY_RequestLogPopulates(t *testing.T) {
 		sendRequest(t, ctx, proxyURL+path)
 	}
 
-	// Wait for metrics to propagate and TUI to render
-	time.Sleep(2 * time.Second)
+	// Wait for the TUI to be actively rendering by looking for
+	// TUI-rendered content (not startup logs). The dashboard's
+	// "Throughput" section is rendered by the alt-screen renderer.
+	dashSnap := h.Console().Snapshot()
+	if err := h.Console().Expect(ctx, dashSnap, termtest.Contains("Throughput"),
+		"dashboard initial render"); err != nil {
+		t.Fatalf("TUI not rendering: %v\nFull output: %s", err, h.Console().String())
+	}
 
+	// Switch to the Requests tab.
 	snap := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("2"); err != nil {
 		t.Fatalf("WriteString 2: %v", err)
