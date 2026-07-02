@@ -357,22 +357,24 @@ func run() error {
 	}
 
 	// Ensure the TUI exits cleanly and the terminal is restored, even on
-	// fatal error paths (e.g. bind address in use). Kill restores the
-	// former terminal state internally, so no separate restore call is
-	// needed. Without this deferred cleanup a server-startup failure
-	// would leave the terminal in raw + alt-screen mode.
+	// fatal error paths (e.g. bind address in use). Kill() restores the
+	// terminal internally, so no separate restore call is needed.
 	//
-	// We wait for the TUI's Run() to return before calling Kill() to avoid
-	// a shutdown race: p.Run() calls p.shutdown() internally on return, and
-	// Kill() also calls p.shutdown(). If both fire concurrently, the
-	// renderer's sync.Once can be corrupted, producing
-	// "sync: unlock of unlocked mutex". By waiting for Run() to complete
-	// first, Kill() becomes a safe no-op (shutdownOnce absorbs it).
+	// On the error path the TUI is still running and nothing has told it to
+	// quit, so we proactively stop() the context and send Quit(). Quit() is
+	// fire-and-forget because it blocks on bubbletea's unbuffered message
+	// channel; a synchronous call could deadlock if the event loop is
+	// wedged, making the Kill() fallback below unreachable.
+	//
+	// We wait for tuiDone before Kill() to serialize the two teardown paths:
+	// p.Run() performs its own shutdown() on return, and Kill() calls it
+	// again. Both are guarded by sync.Once, so the second is a no-op, but
+	// ordering them avoids any concurrent-teardown race. The 3-second
+	// timeout is a last resort for a genuinely stuck program.
 	defer func() {
 		if tuiProgram != nil {
-			// Give the TUI goroutine a moment to finish its own shutdown.
-			// If it hasn't exited after 3 seconds, force-kill to avoid
-			// hanging on a stuck TUI.
+			stop()
+			go tuiProgram.Quit()
 			select {
 			case <-tuiDone:
 			case <-time.After(3 * time.Second):

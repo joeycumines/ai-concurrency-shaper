@@ -108,6 +108,19 @@ func freePort() (string, error) {
 	return fmt.Sprintf("%d", addr.Port), nil
 }
 
+// buildBinary compiles the ai-concurrency-shaper binary into a per-test temp
+// directory and returns its path.
+func buildBinary(t *testing.T) string {
+	t.Helper()
+	binPath := filepath.Join(t.TempDir(), "test-shaper")
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	buildCmd.Dir = projectRoot(t)
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build failed: %s\n%s", err, out)
+	}
+	return binPath
+}
+
 // Launch builds the ai-concurrency-shaper binary, starts it with -tui in a PTY,
 // and waits for the initial render.
 func Launch(t *testing.T, opts ...HarnessOption) *TUIHarness {
@@ -123,19 +136,12 @@ func Launch(t *testing.T, opts ...HarnessOption) *TUIHarness {
 		t.Fatalf("freePort: %v", err)
 	}
 
+	// Build before allocating any test resources so a compile failure leaves
+	// nothing to clean up.
+	binPath := buildBinary(t)
+
 	ctrl := newControllableUpstream()
 	upstream := httptest.NewServer(ctrl)
-
-	tmpDir := t.TempDir()
-	binPath := filepath.Join(tmpDir, "test-shaper")
-
-	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
-	buildCmd.Dir = projectRoot(t)
-	out, err := buildCmd.CombinedOutput()
-	if err != nil {
-		upstream.Close()
-		t.Fatalf("go build failed: %s\n%s", err, out)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -205,21 +211,19 @@ func (h *TUIHarness) ProxyURL() string {
 
 // Close terminates the TUI and cleans up.
 //
-// It first sends a "q" keypress to trigger bubbletea's graceful Quit path,
-// which lets p.Run() return cleanly and call p.shutdown() before the
-// process is killed. This avoids a shutdown race where the deferred
-// tuiProgram.Kill() in main.go fires concurrently with p.Run()'s internal
-// shutdown, which can corrupt sync.Once inside bubbletea's stopRenderer
-// and produce a "sync: unlock of unlocked mutex" panic.
+// It sends Ctrl+C to trigger a graceful TUI exit, then waits for the process
+// to exit. Ctrl+C is preferred over "q" because it cannot be swallowed by a
+// focused text input. The 8-second budget clears the binary's 5-second
+// graceful shutdown drain, avoiding a force-kill that would skip terminal
+// restoration.
 func (h *TUIHarness) Close() {
-	// Try to send "q" to trigger a graceful TUI exit. Ignore errors
-	// (e.g. PTY already closed) — the force-kill below is the fallback.
-	_, _ = h.console.WriteString("q")
+	// Send Ctrl+C to trigger a graceful TUI exit. Ignore errors (e.g. PTY
+	// already closed) — the force-kill below is the fallback.
+	_, _ = h.console.WriteString("\x03")
 
-	// Give the TUI a brief window to process the quit and exit gracefully.
-	// The binary's main.go also waits for tuiDone (up to 3s) before calling
-	// Kill(), so this aligns with that timeout.
-	exitCtx, exitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// The binary's graceful shutdown can take up to 5s (srv.Shutdown drain),
+	// so wait longer than that before force-killing.
+	exitCtx, exitCancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer exitCancel()
 	_, _ = h.console.WaitExit(exitCtx)
 

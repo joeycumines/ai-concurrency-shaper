@@ -39,9 +39,10 @@ func TestPTY_RequestLogPopulates(t *testing.T) {
 		sendRequest(t, ctx, proxyURL+path)
 	}
 
-	// Wait for the TUI to be actively rendering by looking for
-	// TUI-rendered content (not startup logs). The dashboard's
-	// "Throughput" section is rendered by the alt-screen renderer.
+	// Wait for the TUI to render the dashboard. bubbletea's diff renderer only
+	// repaints changed cells, so a static label like "Throughput" is re-emitted
+	// by the periodic full redraw (every 10s via tea.ClearScreen), not on every
+	// frame. The 30s timeout spans multiple redraw cycles.
 	dashSnap := h.Console().Snapshot()
 	if err := h.Console().Expect(ctx, dashSnap, termtest.Contains("Throughput"),
 		"dashboard initial render"); err != nil {
