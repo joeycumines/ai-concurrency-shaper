@@ -1,0 +1,16 @@
+.git/
+.github/
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.test
+*.out
+coverage/
+.coverage
+tmp/
+*.tmp
+config.mk
