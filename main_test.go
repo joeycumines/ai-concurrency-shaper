@@ -1285,26 +1285,35 @@ func TestCLI_MetricsEndpoint(t *testing.T) {
 		if err := cmd2.Start(); err != nil {
 			t.Fatalf("start proxy2: %v\n%s", err, out2.String())
 		}
-		t.Cleanup(func() {
-			if cmd2.Process == nil {
-				return
-			}
+
+		// stop2 signals SIGTERM and waits for the process to exit. os/exec
+		// runs an io.Copy goroutine writing to out2 for the process's
+		// lifetime; Wait joins it. Reading out2 before Wait is a data race
+		// (concurrent strings.Builder write and read). Every out2 read goes
+		// through stop2 so the snapshot is always taken after the writer
+		// goroutine has exited.
+		stop2 := func() string {
 			_ = cmd2.Process.Signal(syscall.SIGTERM)
 			_ = cmd2.Wait()
+			return out2.String()
+		}
+		t.Cleanup(func() {
+			if cmd2.Process != nil {
+				_ = cmd2.Process.Signal(syscall.SIGTERM)
+				_ = cmd2.Wait()
+			}
 		})
 
 		if err := waitTCPReady(pa, 5*time.Second); err != nil {
-			t.Fatalf("proxy2 not ready: %v\n%s", err, out2.String())
+			t.Fatalf("proxy2 not ready: %v\n%s", err, stop2())
 		}
+
 		// Assert via log output, not a freed-port dial: main.go only logs
 		// "metrics endpoint:" when metricsBind != "", so its absence directly
 		// verifies the disabled code path. Dialing a freed port is a TOCTOU
 		// false positive if another process grabs it.
-		if strings.Contains(out2.String(), "metrics endpoint:") {
-			t.Errorf("metrics endpoint should not be logged when -metrics-bind is empty\n%s", out2.String())
+		if logOut := stop2(); strings.Contains(logOut, "metrics endpoint:") {
+			t.Errorf("metrics endpoint should not be logged when -metrics-bind is empty\n%s", logOut)
 		}
-
-		_ = cmd2.Process.Signal(syscall.SIGTERM)
-		_ = cmd2.Wait()
 	})
 }
