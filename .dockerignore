@@ -1,5 +1,7 @@
 .git/
 .github/
+.env*
+!.env.example
 .idea/
 .vscode/
 *.swp

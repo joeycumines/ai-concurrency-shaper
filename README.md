@@ -35,7 +35,7 @@ ai-concurrency-shaper -upstream https://api.anthropic.com
 | `-global-concurrency` | `0` | Global concurrency limit (0 = disabled) |
 | `-queue-timeout` | `30s` | Max wait for a concurrency slot |
 | `-upstream-disable-keep-alives` | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
-|`-metrics-bind`|`127.0.0.1:9090`|Address for the Prometheus /metrics endpoint (empty disables; default loopback-only)|
+| `-metrics-bind` | `127.0.0.1:9090` | Address for the Prometheus /metrics endpoint (empty disables; default loopback-only) |
 | `-retry` | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
 | `-retry-max-body-mb` | `5` | Max request body size (MB) eligible for retry |
 | `-tui` | `false` | Enable terminal dashboard |

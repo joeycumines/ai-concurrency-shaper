@@ -100,10 +100,10 @@ func TestExporter_BasicProxyMetrics(t *testing.T) {
 	met.IncQueued()
 	met.IncProxied()
 	met.IncProxied()
-	met.RecordStatus(200)  // bucket 2 (2xx)
-	met.RecordStatus(503)  // bucket 5 (5xx)
-	met.RecordStatus(600)  // bucket 0 (other — >=600 overflow)
-	met.RecordStatus(0)    // dropped entirely, must NOT increment any bucket
+	met.RecordStatus(200)                                          // bucket 2 (2xx)
+	met.RecordStatus(503)                                          // bucket 5 (5xx)
+	met.RecordStatus(600)                                          // bucket 0 (other — >=600 overflow)
+	met.RecordStatus(0)                                            // dropped entirely, must NOT increment any bucket
 	met.RecordAbortedRequest("POST", "/v1/messages", 502, 0, true) // aborted exchange
 
 	reg := prometheus.NewRegistry()
@@ -430,8 +430,8 @@ func TestExporter_HTTPHandler(t *testing.T) {
 	for _, want := range []string{
 		"ai_concurrency_shaper_build_info",
 		"ai_concurrency_shaper_active_requests",
-		"# HELP",  // HELP line present
-		"# TYPE",  // TYPE line present
+		"# HELP", // HELP line present
+		"# TYPE", // TYPE line present
 	} {
 		if !strings.Contains(bs, want) {
 			t.Errorf("body missing %q", want)

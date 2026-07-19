@@ -51,40 +51,40 @@ type Exporter struct {
 	version       string
 
 	// Proxy-level descriptors.
-	descActiveRequests          *prometheus.Desc
-	descQueuedRequests          *prometheus.Desc
-	descProxiedRequestsTotal    *prometheus.Desc
+	descActiveRequests           *prometheus.Desc
+	descQueuedRequests           *prometheus.Desc
+	descProxiedRequestsTotal     *prometheus.Desc
 	descPassthroughRequestsTotal *prometheus.Desc
-	descQueueTimeoutsTotal      *prometheus.Desc
-	descCancelledRequestsTotal  *prometheus.Desc
-	descCircuitRejectedTotal    *prometheus.Desc
-	descAbortedRequestsTotal    *prometheus.Desc
-	descRetriesInFlight         *prometheus.Desc
-	descThroughputRPS           *prometheus.Desc
-	descStatusResponsesTotal    *prometheus.Desc
+	descQueueTimeoutsTotal       *prometheus.Desc
+	descCancelledRequestsTotal   *prometheus.Desc
+	descCircuitRejectedTotal     *prometheus.Desc
+	descAbortedRequestsTotal     *prometheus.Desc
+	descRetriesInFlight          *prometheus.Desc
+	descThroughputRPS            *prometheus.Desc
+	descStatusResponsesTotal     *prometheus.Desc
 	descInFlightLimited          *prometheus.Desc
-	descInFlightPassthrough     *prometheus.Desc
-	descOldestQueuedAgeSeconds  *prometheus.Desc
+	descInFlightPassthrough      *prometheus.Desc
+	descOldestQueuedAgeSeconds   *prometheus.Desc
 	descBuildInfo                *prometheus.Desc
 
 	// Limiter-level descriptors (labels: limiter, route).
-	descLimiterActive          *prometheus.Desc
-	descLimiterWaiters         *prometheus.Desc
-	descLimiterAcquiredTotal   *prometheus.Desc
-	descLimiterReleasedTotal   *prometheus.Desc
-	descLimiterTimeoutsTotal   *prometheus.Desc
-	descLimiterWithheld        *prometheus.Desc
-	descLimiterLimit           *prometheus.Desc
-	descLimiterEffectiveLimit  *prometheus.Desc
+	descLimiterActive         *prometheus.Desc
+	descLimiterWaiters        *prometheus.Desc
+	descLimiterAcquiredTotal  *prometheus.Desc
+	descLimiterReleasedTotal  *prometheus.Desc
+	descLimiterTimeoutsTotal  *prometheus.Desc
+	descLimiterWithheld       *prometheus.Desc
+	descLimiterLimit          *prometheus.Desc
+	descLimiterEffectiveLimit *prometheus.Desc
 
 	// Circuit-breaker-level descriptors.
-	descCBState                  *prometheus.Desc
-	descCBFailures               *prometheus.Desc
+	descCBState                 *prometheus.Desc
+	descCBFailures              *prometheus.Desc
 	descCBConsecutiveFailures   *prometheus.Desc
 	descCBTotalFailuresTotal    *prometheus.Desc
 	descCBTotalSuccessesTotal   *prometheus.Desc
-	descCBCurrentPenaltySeconds  *prometheus.Desc
-	descCBNextRetryTimestamp     *prometheus.Desc
+	descCBCurrentPenaltySeconds *prometheus.Desc
+	descCBNextRetryTimestamp    *prometheus.Desc
 }
 
 // New constructs an Exporter and pre-builds every *prometheus.Desc.
