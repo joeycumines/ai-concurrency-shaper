@@ -36,9 +36,12 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/prommetrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // version is set via ldflags at build time (e.g. -ldflags -X main.version=1.2.3).
@@ -89,6 +92,9 @@ func run() error {
 
 		// Transport tuning.
 		upstreamDisableKeepAlives bool
+
+		// Metrics endpoint.
+		metricsBind string
 	)
 
 	flag.StringVar(&bindAddr, "bind", ":8080", "listen address")
@@ -122,6 +128,7 @@ func run() error {
 	flag.BoolVar(&adaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
 	flag.DurationVar(&adaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")
 	flag.BoolVar(&upstreamDisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream; avoids provider-side connection-count concurrency violations")
+	flag.StringVar(&metricsBind, "metrics-bind", "127.0.0.1:9090", "address for the Prometheus /metrics endpoint (empty disables; default loopback-only to preserve stealth posture)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "ai-concurrency-shaper %s\n\n", version)
@@ -302,6 +309,28 @@ func run() error {
 	srv := &http.Server{Addr: bindAddr, Handler: p}
 
 	errCh := make(chan error, 1)
+
+	// Prometheus /metrics endpoint. The exporter reads point-in-time snapshots
+	// from the same collectors that power the TUI — no double bookkeeping.
+	// metricsBind == "" disables the server entirely (and skips registration,
+	// so the default registry stays clean). The metrics server is auxiliary
+	// observability: a bind failure is logged but NOT fatal, so a port
+	// collision on :9090 cannot take down the proxy's core traffic path.
+	var metricsSrv *http.Server
+	if metricsBind != "" {
+		exp := prommetrics.New(met, limiter, globalLimiter, routeLimiters, breaker, version)
+		prometheus.MustRegister(exp)
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.HandlerFor(prometheus.DefaultGatherer, promhttp.HandlerOpts{}))
+		metricsSrv = &http.Server{Addr: metricsBind, Handler: mux}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("metrics server failed (continuing without metrics): %v", err)
+			}
+		}()
+		log.Printf("metrics endpoint: http://%s/metrics", metricsBind)
+	}
+
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
@@ -389,6 +418,9 @@ func run() error {
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		srv.Shutdown(sctx)
+		if metricsSrv != nil {
+			metricsSrv.Shutdown(sctx)
+		}
 		return nil
 	case err := <-errCh:
 		return err

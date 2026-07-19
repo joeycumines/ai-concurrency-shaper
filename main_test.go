@@ -25,6 +25,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -513,6 +515,7 @@ func TestTUIExitsOnBindFailure(t *testing.T) {
 		"-bind", addr,
 		"-upstream", "http://127.0.0.1:1",
 		"-tui",
+		"-metrics-bind", "",
 	)
 	// Prevent the child process from corrupting the parent's terminal
 	// flags. Without isolation, bubbletea's tea.Program.Run() enters raw
@@ -726,6 +729,7 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 		"-cancel-cooldown", "0",
 		"-retry", "0",
 		"-circuit-breaker=false",
+		"-metrics-bind", "",
 	)
 
 	stdinR, err := os.Open(os.DevNull)
@@ -867,6 +871,7 @@ func TestCLI_AdaptiveHeadroom(t *testing.T) {
 		"-circuit-breaker=false",
 		"-adaptive-headroom",
 		"-adaptive-headroom-window", "200ms",
+		"-metrics-bind", "",
 	)
 
 	stdinR, err := os.Open(os.DevNull)
@@ -1071,6 +1076,7 @@ func TestSubprocessTerminalIsolation(t *testing.T) {
 		"-bind", addr,
 		"-upstream", "http://127.0.0.1:1",
 		"-tui",
+		"-metrics-bind", "",
 	)
 	// Apply the same isolation as TestTUIExitsOnBindFailure:
 	// /dev/null stdin + new session to prevent terminal access.
@@ -1097,4 +1103,217 @@ func TestSubprocessTerminalIsolation(t *testing.T) {
 			t.Errorf("failed to restore terminal state: %v", err)
 		}
 	}
+}
+
+// TestCLI_MetricsEndpoint verifies the Prometheus /metrics endpoint is served
+// on -metrics-bind, reflects proxy activity, shuts down cleanly on SIGTERM,
+// and is disabled entirely by -metrics-bind "".
+func TestCLI_MetricsEndpoint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	// Pick two free ports by ephemeral listen.
+	// Port selection via listen-close-rebind is a TOCTOU race: after Close()
+	// the port returns to the OS free pool and another process could grab it
+	// before the subprocess rebinds. This matches the convention used by the
+	// other CLI tests. Under heavy parallel test load it can produce sporadic
+	// bind failures; retry would be the robust fix but is out of scope here.
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy port: %v", err)
+	}
+	proxyAddr := proxyLn.Addr().String()
+	proxyLn.Close()
+
+	metricsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen metrics port: %v", err)
+	}
+	metricsAddr := metricsLn.Addr().String()
+	metricsLn.Close()
+
+	var out strings.Builder
+	cmd := exec.Command(bin,
+		"-upstream", upstream.URL,
+		"-limit", "POST /v1/messages",
+		"-concurrency", "2",
+		"-bind", proxyAddr,
+		"-metrics-bind", metricsAddr,
+		"-release-cooldown", "0",
+		"-cancel-cooldown", "0",
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	stdinR, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer stdinR.Close()
+	cmd.Stdin = stdinR
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v\n%s", err, out.String())
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- cmd.Wait() }()
+
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+
+	// Wait for both ports.
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		t.Fatalf("proxy not ready: %v\n%s", err, out.String())
+	}
+	if err := waitTCPReady(metricsAddr, 5*time.Second); err != nil {
+		t.Fatalf("metrics not ready: %v\n%s", err, out.String())
+	}
+
+	// /metrics responds 200 with Prometheus text and our prefix.
+	getMetrics := func() string {
+		t.Helper()
+		resp, err := http.Get("http://" + metricsAddr + "/metrics")
+		if err != nil {
+			t.Fatalf("GET /metrics: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("metrics status: want 200, got %d", resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read metrics body: %v", err)
+		}
+		return string(body)
+	}
+
+	first := getMetrics()
+	if !strings.Contains(first, "ai_concurrency_shaper_build_info") {
+		t.Errorf("metrics body missing build_info:\n%s", first)
+	}
+	if !strings.Contains(first, "ai_concurrency_shaper_active_requests") {
+		t.Errorf("metrics body missing active_requests:\n%s", first)
+	}
+	if !strings.Contains(first, "# HELP") || !strings.Contains(first, "# TYPE") {
+		t.Errorf("metrics body missing HELP/TYPE lines:\n%s", first)
+	}
+
+	// Drive one proxied request to bump counters.
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post("http://"+proxyAddr+"/v1/messages", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("proxied POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("proxied POST status: want 200, got %d", resp.StatusCode)
+	}
+
+	// Re-scrape and confirm the proxied counter incremented to >= 1.
+	// Parse the value rather than just checking the name appears — the
+	// exporter emits the metric unconditionally (even at 0), so a name-only
+	// check would pass even if IncProxied were never called.
+	second := getMetrics()
+	proxiedRe := regexp.MustCompile(`ai_concurrency_shaper_proxied_requests_total\s+(\d+)`)
+	m := proxiedRe.FindStringSubmatch(second)
+	if m == nil {
+		t.Fatalf("metrics body missing proxied_requests_total:\n%s", second)
+	}
+	proxiedTotal, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		t.Fatalf("parse proxied_requests_total value %q: %v", m[1], err)
+	}
+	if proxiedTotal < 1 {
+		t.Errorf("proxied_requests_total: want >= 1 after proxied POST, got %d\n%s", proxiedTotal, second)
+	}
+
+	// Clean shutdown on SIGTERM.
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("proxy exited with error: %v\n%s", err, out.String())
+		}
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-runErr
+		t.Fatalf("proxy did not exit after SIGTERM\n%s", out.String())
+	}
+
+	// Disable path: -metrics-bind "" skips the metrics server while the proxy serves.
+	t.Run("disabled", func(t *testing.T) {
+		proxyLn2, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen proxy port: %v", err)
+		}
+		pa := proxyLn2.Addr().String()
+		proxyLn2.Close()
+
+		var out2 strings.Builder
+		cmd2 := exec.Command(bin,
+			"-upstream", upstream.URL,
+			"-bind", pa,
+			"-metrics-bind", "",
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+		stdinR2, _ := os.Open(os.DevNull)
+		defer stdinR2.Close()
+		cmd2.Stdin = stdinR2
+		cmd2.Stdout = &out2
+		cmd2.Stderr = &out2
+		if err := cmd2.Start(); err != nil {
+			t.Fatalf("start proxy2: %v\n%s", err, out2.String())
+		}
+
+		// stop2 signals SIGTERM and waits for the process to exit. os/exec
+		// runs an io.Copy goroutine writing to out2 for the process's
+		// lifetime; Wait joins it. Reading out2 before Wait is a data race
+		// (concurrent strings.Builder write and read). Every out2 read goes
+		// through stop2 so the snapshot is always taken after the writer
+		// goroutine has exited.
+		stop2 := func() string {
+			_ = cmd2.Process.Signal(syscall.SIGTERM)
+			_ = cmd2.Wait()
+			return out2.String()
+		}
+		t.Cleanup(func() {
+			if cmd2.Process != nil {
+				_ = cmd2.Process.Signal(syscall.SIGTERM)
+				_ = cmd2.Wait()
+			}
+		})
+
+		if err := waitTCPReady(pa, 5*time.Second); err != nil {
+			t.Fatalf("proxy2 not ready: %v\n%s", err, stop2())
+		}
+
+		// Assert via log output, not a freed-port dial: main.go only logs
+		// "metrics endpoint:" when metricsBind != "", so its absence directly
+		// verifies the disabled code path. Dialing a freed port is a TOCTOU
+		// false positive if another process grabs it.
+		if logOut := stop2(); strings.Contains(logOut, "metrics endpoint:") {
+			t.Errorf("metrics endpoint should not be logged when -metrics-bind is empty\n%s", logOut)
+		}
+	})
 }

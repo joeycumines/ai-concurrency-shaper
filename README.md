@@ -35,6 +35,7 @@ ai-concurrency-shaper -upstream https://api.anthropic.com
 | `-global-concurrency` | `0` | Global concurrency limit (0 = disabled) |
 | `-queue-timeout` | `30s` | Max wait for a concurrency slot |
 | `-upstream-disable-keep-alives` | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
+| `-metrics-bind` | `127.0.0.1:9090` | Address for the Prometheus /metrics endpoint (empty disables; default loopback-only) |
 | `-retry` | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
 | `-retry-max-body-mb` | `5` | Max request body size (MB) eligible for retry |
 | `-tui` | `false` | Enable terminal dashboard |
@@ -189,6 +190,28 @@ make test           # run tests
 make lint           # vet + staticcheck + deadcode
 make all            # build, then lint + test
 ```
+
+## Metrics
+
+A Prometheus-format `/metrics` endpoint is served on `-metrics-bind` (default `127.0.0.1:9090`, loopback-only). Scrape it with Prometheus, Grafana Agent, VictoriaMetrics, or `curl`:
+
+```sh
+curl http://127.0.0.1:9090/metrics
+```
+
+All metrics are prefixed `ai_concurrency_shaper_`. The endpoint reads point-in-time snapshots from the same in-process collectors that power the TUI — no double bookkeeping. Disable with `-metrics-bind ""`.
+
+> **Security:** the default binds to loopback only to preserve the proxy's stealth posture — `/metrics` exposes operational telemetry (active requests, throughput, circuit-breaker state, build version) and is unauthenticated. Bind to a non-loopback address only behind a trusted network or an authenticating reverse proxy.
+
+### Docker
+
+```sh
+docker build -t ai-concurrency-shaper .
+# -metrics-bind :9090 overrides the loopback default so the port is reachable via -p.
+docker run -p 8080:8080 -p 9090:9090 ai-concurrency-shaper -upstream https://api.anthropic.com -metrics-bind :9090
+```
+
+The image is distroless and runs as a non-root user. Both the proxy (`:8080`) and metrics (`:9090`) ports are EXPOSEd. The metrics endpoint defaults to loopback; the example above binds it to all interfaces inside the container so the host port mapping works — only do this on a trusted network.
 
 ## License
 
