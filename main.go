@@ -93,7 +93,7 @@ func run() error {
 
 	flag.StringVar(&bindAddr, "bind", ":8080", "listen address")
 	flag.StringVar(&upstreamURL, "upstream", "", "upstream base URL (required)")
-	flag.Var(&limitList, "limit", "route pattern to limit (repeatable)")
+	flag.Var(&limitList, "limit", "route pattern to limit, matched by trailing path segments (repeatable)")
 	flag.IntVar(&concurrency, "concurrency", 4, "max concurrent limited requests")
 	flag.IntVar(&globalConcurrency, "global-concurrency", 0, "global concurrency limit (0 = disabled)")
 	flag.DurationVar(&queueTimeout, "queue-timeout", 30*time.Second, "max wait for a concurrency slot (0 = use request context)")

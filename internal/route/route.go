@@ -14,9 +14,11 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 // Package route provides fuzzy HTTP route pattern matching for concurrency-limited
-// LLM API endpoints. Patterns match by consecutive path segments, so
+// LLM API endpoints. Patterns match by trailing consecutive path segments, so
 // "POST /chat/completions" matches /v1/chat/completions, /api/v2/chat/completions,
-// /openai/deployments/my-dep/chat/completions, etc.
+// /openai/deployments/my-dep/chat/completions, etc. The final segments of the
+// pattern must be the final segments of the request path; sub-resources need their
+// own pattern (e.g. "POST /messages/batches") or pass through unlimited.
 package route
 
 import (
@@ -70,13 +72,13 @@ func Parse(s string) (Pattern, error) {
 }
 
 func parsePathLimitGroup(s string) (path string, limit int, group string) {
-	if at := strings.LastIndex(s, "@"); at >= 0 {
+	if at := strings.LastIndex(s, "@"); at >= 0 && !strings.Contains(s[at:], "/") {
 		group = s[at+1:]
 		s = s[:at]
 	}
 	if idx := strings.LastIndex(s, ":"); idx >= 0 {
 		candidate := s[idx+1:]
-		if n, err := strconv.Atoi(candidate); err == nil && n > 0 {
+		if n, err := strconv.Atoi(candidate); err == nil && n >= 0 {
 			limit = n
 			s = s[:idx]
 		}
@@ -86,54 +88,78 @@ func parsePathLimitGroup(s string) (path string, limit int, group string) {
 }
 
 // Match returns true if the request method+path matches this pattern.
-// Matching is fuzzy: the pattern segments must appear consecutively anywhere
-// in the request path, regardless of prefix. This means "POST /chat/completions"
-// matches /v1/chat/completions, /api/v2/chat/completions, etc.
+// Matching is fuzzy: the pattern segments must appear as a consecutive
+// suffix of the request path segments, regardless of prefix. This means
+// "POST /chat/completions" matches /v1/chat/completions, /api/v2/chat/completions,
+// etc. but does NOT match sub-paths like /v1/chat/completions/123.
+// Sub-resources of a limited endpoint need their own pattern.
 func (p Pattern) Match(method, path string) bool {
 	if !strings.EqualFold(method, p.Method) {
 		return false
 	}
 	if len(p.Segments) == 0 {
-		return true
+		return len(splitSegments(path)) == 0
 	}
-	return containsConsecutive(splitSegments(path), p.Segments)
+	return matchesSuffixSegments(splitSegments(path), p.Segments)
 }
 
 func (p Pattern) String() string { return p.Raw }
 
 func splitSegments(path string) []string {
-	var out []string
+	// 1. Resolve path traversal strictly on /-separated segments before any
+	// colon tokenization. This keeps the proxy's normalization homomorphic
+	// with standard HTTP path resolution and prevents attackers from using
+	// characters like ':' to break the semantics of '..'.
+	var resolved []string
 	for seg := range strings.SplitSeq(path, "/") {
-		if seg != "" {
-			// Split on colon for Gemini-style endpoints like
-			// /v1/models/gemini-pro:generateContent
-			for sub := range strings.SplitSeq(seg, ":") {
-				if sub != "" {
-					out = append(out, sub)
-				}
+		if seg == "" || seg == "." {
+			continue
+		}
+		if seg == ".." {
+			if len(resolved) > 0 {
+				resolved = resolved[:len(resolved)-1]
 			}
+			continue
+		}
+		resolved = append(resolved, seg)
+	}
+
+	// 2. Split on colon for Gemini-style endpoints like
+	// /v1/models/gemini-pro:generateContent. Colon splitting happens only
+	// after traversal is resolved, so a literal ':' segment cannot be used
+	// to desynchronize the proxy from the upstream.
+	var out []string
+	for _, seg := range resolved {
+		for sub := range strings.SplitSeq(seg, ":") {
+			if sub == "" {
+				continue
+			}
+			out = append(out, sub)
 		}
 	}
 	return out
 }
 
-func containsConsecutive(haystack, needle []string) bool {
+// matchesSuffixSegments reports whether needle matches the trailing
+// segments of haystack. Anchoring to the end means a pattern like
+// "POST /messages" matches /v1/messages but not sub-resources such as
+// /v1/messages/count_tokens or /v1/messages/batches/{id}/cancel.
+// Note this is strictly narrower than a substring match: any endpoint
+// whose real path has trailing segments needs its own pattern.
+func matchesSuffixSegments(haystack, needle []string) bool {
 	if len(needle) == 0 {
 		return true
 	}
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		match := true
-		for j, v := range needle {
-			if !strings.EqualFold(haystack[i+j], v) {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
+	start := len(haystack) - len(needle)
+	if start < 0 {
+		return false
+	}
+	for j, v := range needle {
+		if !strings.EqualFold(haystack[start+j], v) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // Matcher holds a collection of patterns.
@@ -193,7 +219,8 @@ func DefaultPatterns() []Pattern {
 		// OpenAI Responses API
 		"POST /responses",
 
-		// OpenAI Embeddings
+		// OpenAI Embeddings and APIEmbeddings (more specific first to avoid shadowing)
+		"POST /api/embeddings",
 		"POST /embeddings",
 
 		// OpenAI Images
@@ -212,8 +239,10 @@ func DefaultPatterns() []Pattern {
 		// OpenAI Assistants/Threads/Runs
 		"POST /runs",
 		"POST /threads",
+		"POST /submit_tool_outputs", // /threads/{id}/runs/{id}/submit_tool_outputs streams model output
 
-		// OpenAI Batches
+		// OpenAI Batches (messages/batches must precede /batches to avoid shadowing)
+		"POST /messages/batches",
 		"POST /batches",
 
 		// OpenAI Realtime Sessions
@@ -223,15 +252,9 @@ func DefaultPatterns() []Pattern {
 		// Anthropic Messages
 		"POST /messages",
 
-		// Anthropic Batches (also matches OpenAI /v1/messages/batches)
-		// This is intentionally separate from the "POST /batches" pattern
-		// because "messages/batches" is a distinct 2-segment match.
-		"POST /messages/batches",
-
 		// Ollama
 		"POST /api/generate",
 		"POST /api/chat",
-		"POST /api/embeddings",
 
 		// Google Gemini-style (generateContent, streamGenerateContent as suffixes)
 		"POST /generateContent",

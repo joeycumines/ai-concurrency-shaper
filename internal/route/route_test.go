@@ -27,7 +27,7 @@ func TestParse(t *testing.T) {
 	}{
 		{"POST /v1/messages", false, 0},
 		{"POST /v1/messages:4", false, 4},
-		{"POST /v1/messages:0", false, 0}, // :0 treated as no limit
+		{"POST /v1/messages:0", false, 0}, // explicit zero limit
 		{"  POST   /v1/messages  ", false, 0},
 		{"/onlypath", true, 0},
 		{"POST", true, 0},
@@ -70,6 +70,50 @@ func TestParseWithLimit(t *testing.T) {
 	}
 }
 
+func TestParse_AtInPath(t *testing.T) {
+	p, err := Parse("POST /users/@me/profile:3")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Limit != 3 {
+		t.Errorf("Limit = %d, want 3", p.Limit)
+	}
+	if p.Group != "" {
+		t.Errorf("Group = %q, want empty", p.Group)
+	}
+	wantSegments := []string{"users", "@me", "profile"}
+	if len(p.Segments) != len(wantSegments) {
+		t.Fatalf("Segments = %v, want %v", p.Segments, wantSegments)
+	}
+	for i, s := range wantSegments {
+		if p.Segments[i] != s {
+			t.Errorf("Segments[%d] = %q, want %q", i, p.Segments[i], s)
+		}
+	}
+	if !p.Match("POST", "/api/users/@me/profile") {
+		t.Error("should match /api/users/@me/profile")
+	}
+	if p.Match("POST", "/users/me/profile") {
+		t.Error("should not match /users/me/profile")
+	}
+}
+
+func TestParse_AtGroup(t *testing.T) {
+	p, err := Parse("POST /users/me:3@users")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Limit != 3 {
+		t.Errorf("Limit = %d, want 3", p.Limit)
+	}
+	if p.Group != "users" {
+		t.Errorf("Group = %q, want users", p.Group)
+	}
+	if len(p.Segments) != 2 || p.Segments[0] != "users" || p.Segments[1] != "me" {
+		t.Errorf("Segments = %v, want [users me]", p.Segments)
+	}
+}
+
 func TestParse_ZeroLimit(t *testing.T) {
 	p, err := Parse("POST /v1/chat/completions:0")
 	if err != nil {
@@ -87,6 +131,10 @@ func TestPattern_Match(t *testing.T) {
 	}
 	if p.Match("GET", "/v1/messages") {
 		t.Error("should not match different method")
+	}
+	// Suffix semantics: a sub-resource of the matched path is not limited.
+	if p.Match("POST", "/v1/messages/count_tokens") {
+		t.Error("should not match sub-resource")
 	}
 }
 
@@ -132,16 +180,6 @@ func TestParse_Invalid(t *testing.T) {
 		if err == nil {
 			t.Errorf("expected error for %q", input)
 		}
-	}
-}
-
-func TestParse_NegativeLimit(t *testing.T) {
-	p, err := Parse("POST /v1/messages:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.Limit != 0 {
-		t.Errorf("Limit = %d, want 0", p.Limit)
 	}
 }
 
@@ -213,6 +251,10 @@ func TestFuzzy_AllProviders(t *testing.T) {
 		{"POST", "/v1/messages", "Anthropic messages"},
 		{"POST", "/v1/messages/batches", "Anthropic message batches"},
 
+		// OpenAI / Azure Assistants
+		{"POST", "/v1/threads/thread_1/runs/run_1/submit_tool_outputs", "OpenAI submit tool outputs"},
+		{"POST", "/api/threads/thread_1/runs/run_1/submit_tool_outputs", "Azure submit tool outputs"},
+
 		// Ollama
 		{"POST", "/api/generate", "Ollama generate"},
 		{"POST", "/api/chat", "Ollama chat"},
@@ -260,6 +302,14 @@ func TestFuzzy_LightweightNotLimited(t *testing.T) {
 		{"GET", "/v1/threads/thread_123/messages", "list thread messages"},
 		{"HEAD", "/v1/models", "HEAD models"},
 		{"OPTIONS", "/v1/chat/completions", "CORS preflight"},
+		// Sub-paths of limited endpoints are now unlimited unless they
+		// have their own default pattern.
+		{"POST", "/v1/messages/count_tokens", "Anthropic count_tokens"},
+		{"POST", "/v1/batches/batch_1/cancel", "OpenAI batch cancel"},
+		{"POST", "/v1/messages/batches/mb_1/cancel", "Anthropic batch cancel"},
+		{"POST", "/v1/responses/resp_1/cancel", "OpenAI response cancel"},
+		{"POST", "/v1/threads/thread_1/runs/run_1/cancel", "OpenAI run cancel"},
+		{"POST", "/v1/chat/completions/cmpl_1", "OpenAI chat completion sub-resource"},
 	}
 
 	for _, tc := range passthrough {
@@ -291,6 +341,9 @@ func TestMatcher_FindMatch(t *testing.T) {
 	if pat.Method != "POST" {
 		t.Errorf("method = %q, want POST", pat.Method)
 	}
+	if pat.Raw != "POST /chat/completions" {
+		t.Errorf("raw = %q, want POST /chat/completions", pat.Raw)
+	}
 
 	pat = m.FindMatch("GET", "/v1/models")
 	if pat != nil {
@@ -300,6 +353,98 @@ func TestMatcher_FindMatch(t *testing.T) {
 	pat = m.FindMatch("POST", "/openai/deployments/gpt4/chat/completions")
 	if pat == nil {
 		t.Error("expected to find match for Azure-style path")
+	}
+
+	// /v1/messages/batches now matches the more specific POST /messages/batches
+	// pattern because longer patterns are placed before shorter ones in DefaultPatterns.
+	pat = m.FindMatch("POST", "/v1/messages/batches")
+	if pat == nil {
+		t.Fatal("expected to find match for /v1/messages/batches")
+	}
+	if pat.Raw != "POST /messages/batches" {
+		t.Errorf("expected specific pattern POST /messages/batches, got %q", pat.Raw)
+	}
+}
+
+func TestFuzzy_ColonDesyncBypass(t *testing.T) {
+	m := NewMatcher(DefaultPatterns())
+
+	cases := []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		// A ':' segment should not enable '..' to pop a real segment, so these
+		// remain limited (proxy and upstream agree on the normalized path).
+		{"POST", "/v1/messages/:/..", true},
+		{"POST", "/v1/messages/batches/:/..", true},
+
+		// A literal ':' segment is still just a directory name upstream; the
+		// proxy must resolve it the same way before matching.
+		{"POST", "/v1/messages/:foo/..", true},
+
+		// Without enough preceding real segments, '..' resolves to a shorter
+		// path and the request should NOT match the protected endpoint.
+		{"POST", "/messages/..", false},
+		{"POST", "/v1/messages/../../", false},
+
+		// DoS vector: upstream treats '..:..' as a literal segment and returns
+		// 404, but the old proxy code normalized it and consumed a token.
+		{"POST", "/v1/messages/batches/fake1/fake2/..:..", false},
+		{"POST", "/v1/messages/batches/fake1/fake2/..:..:..", false},
+		{"POST", "/v1/messages/foo/..:..", false},
+
+		// Gemini-style colon suffixes must still match after the structural fix.
+		{"POST", "/v1/models/gemini-pro:generateContent", true},
+		{"POST", "/v1/models/gemini-pro:streamGenerateContent", true},
+	}
+
+	for _, tc := range cases {
+		got := m.IsLimited(tc.method, tc.path)
+		if got != tc.want {
+			t.Errorf("IsLimited(%q, %q) = %v, want %v", tc.method, tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestFuzzy_SuffixSemantics(t *testing.T) {
+	p := MustParse("POST /v1/chat")
+	if p.Match("POST", "/v1/chat/completions") {
+		t.Error("prefix pattern should not match sub-resource")
+	}
+
+	m := NewMatcher(DefaultPatterns())
+	cases := []struct {
+		method string
+		path   string
+		want   bool
+	}{
+		// Still limited (anchoring must not break these).
+		{"POST", "/v1/messages/", true},                                       // trailing slash
+		{"POST", "/v1//messages", true},                                       // empty segment
+		{"POST", "/v1/threads/thread_1/runs", true},                           // sub-resource that IS the endpoint
+		{"POST", "/v1/threads/thread_1/runs/run_1/submit_tool_outputs", true}, // after fix
+
+		// Newly unlimited (lock in intended narrowing).
+		{"POST", "/v1/batches/batch_1/cancel", false},
+		{"POST", "/v1/chat/completions/cmpl_1", false},
+		{"POST", "/v1/messages/batches/mb_1/cancel", false},
+
+		// Degenerate.
+		{"POST", "", false},
+		{"POST", "/", false},
+
+		// Dot-segment normalization: should behave like /v1/messages and remain limited,
+		// and count_tokens should stay unlimited.
+		{"POST", "/v1/messages/.", true},
+		{"POST", "/v1/messages/foo/../count_tokens", false},
+	}
+
+	for _, tc := range cases {
+		got := m.IsLimited(tc.method, tc.path)
+		if got != tc.want {
+			t.Errorf("IsLimited(%q, %q) = %v, want %v", tc.method, tc.path, got, tc.want)
+		}
 	}
 }
 
@@ -318,14 +463,14 @@ func TestDefaultPatterns_AllParse(t *testing.T) {
 	}
 }
 
-func TestContainsConsecutive(t *testing.T) {
+func TestMatchesSuffixSegments(t *testing.T) {
 	tests := []struct {
 		haystack []string
 		needle   []string
 		want     bool
 	}{
 		{[]string{"v1", "chat", "completions"}, []string{"chat", "completions"}, true},
-		{[]string{"v1", "chat", "completions"}, []string{"v1", "chat"}, true},
+		{[]string{"v1", "chat", "completions"}, []string{"v1", "chat"}, false}, // only suffix matches
 		{[]string{"v1", "chat", "completions"}, []string{"v1", "completions"}, false},
 		{[]string{"v1", "messages"}, []string{"messages"}, true},
 		{[]string{"api", "v1", "messages"}, []string{"messages"}, true},
@@ -336,9 +481,9 @@ func TestContainsConsecutive(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := containsConsecutive(tt.haystack, tt.needle)
+		got := matchesSuffixSegments(tt.haystack, tt.needle)
 		if got != tt.want {
-			t.Errorf("containsConsecutive(%v, %v) = %v, want %v", tt.haystack, tt.needle, got, tt.want)
+			t.Errorf("matchesSuffixSegments(%v, %v) = %v, want %v", tt.haystack, tt.needle, got, tt.want)
 		}
 	}
 }

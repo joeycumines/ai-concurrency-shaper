@@ -30,7 +30,7 @@ ai-concurrency-shaper -upstream https://api.anthropic.com
 |------|---------|-------------|
 | `-upstream` | _(required)_ | Upstream base URL |
 | `-bind` | `:8080` | Listen address |
-| `-limit` | _(repeatable)_ | Route pattern to limit (defaults to common AI endpoints) |
+| `-limit` | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
 | `-concurrency` | `4` | Max concurrent limited requests |
 | `-global-concurrency` | `0` | Global concurrency limit (0 = disabled) |
 | `-queue-timeout` | `30s` | Max wait for a concurrency slot |
@@ -91,13 +91,14 @@ Proxy with default limits and TUI:
 ai-concurrency-shaper -upstream https://api.anthropic.com -tui
 ```
 
-Custom concurrency with per-route limits:
+`-limit` patterns are **end-anchored suffix matches**: only the trailing path segments matter, and the path may have any prefix. This means `-limit "POST /chat/completions"` matches `/v1/chat/completions` and `/api/v2/chat/completions`, but it does **not** match `/v1/chat/completions/123`. A sub-resource needs its own `-limit` pattern or it passes through unlimited.
 
 ```sh
+# matches /v1/chat/completions and /openai/deployments/x/chat/completions
 ai-concurrency-shaper \
   -upstream https://api.openai.com \
-  -limit "POST /v1/chat/completions:2" \
-  -limit "POST /v1/embeddings:4" \
+  -limit "POST /chat/completions:2" \
+  -limit "POST /embeddings:4" \
   -global-concurrency 10
 ```
 
@@ -106,8 +107,8 @@ Grouped routes sharing a limiter:
 ```sh
 ai-concurrency-shaper \
   -upstream https://api.anthropic.com \
-  -limit "POST /v1/messages@messages:3" \
-  -limit "POST /v1/messages/batches@messages:3"
+  -limit "POST /messages:3@messages" \
+  -limit "POST /messages/batches:3@messages"
 ```
 
 Maximum throughput (disable all protections; only safe if the upstream has no accounting lag):
