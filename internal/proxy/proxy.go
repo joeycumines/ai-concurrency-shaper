@@ -35,8 +35,10 @@ import (
 	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/client"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/policy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/retry"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
@@ -52,26 +54,29 @@ type Option interface {
 // --- Unexported Config Struct ---
 
 type proxyConfig struct {
-	upstream               *url.URL
-	matcher                *route.Matcher
-	limiter                *queue.Limiter
-	metrics                *metrics.Collector
-	queueTimeout           time.Duration
-	globalLimiter          *queue.Limiter
-	routeLimiters          map[string]*queue.Limiter
-	maxRetries             int
-	maxBodyBytes           int64
-	retryWaitMin           time.Duration
-	retryWaitMax           time.Duration
-	retryMinDelay          time.Duration
-	retrySkipOn429         bool
-	cancelCooldown         time.Duration
-	failureHold            time.Duration
-	transport              http.RoundTripper
-	journal                *journal.Journal
-	breaker                *circuitbreaker.Breaker
-	adaptiveHeadroom       bool
-	adaptiveHeadroomWindow time.Duration
+	upstream                 *url.URL
+	matcher                  *route.Matcher
+	limiter                  *queue.Limiter
+	metrics                  *metrics.Collector
+	queueTimeout             time.Duration
+	globalLimiter            *queue.Limiter
+	routeLimiters            map[string]*queue.Limiter
+	maxRetries               int
+	maxBodyBytes             int64
+	retryWaitMin             time.Duration
+	retryWaitMax             time.Duration
+	retryMinDelay            time.Duration
+	retrySkipOn429           bool
+	cancelCooldown           time.Duration
+	failureHold              time.Duration
+	transport                http.RoundTripper
+	journal                  *journal.Journal
+	breaker                  *circuitbreaker.Breaker
+	adaptiveHeadroom         bool
+	adaptiveHeadroomWindow   time.Duration
+	clientRecognitionEnabled bool
+	policyEngine             *policy.PolicyEngine
+	clientTracker            *client.ClientTracker
 }
 
 // --- Concrete Options ---
@@ -479,7 +484,66 @@ var (
 	_ Option = (*FailureHoldOption)(nil)
 	_ Option = (*AdaptiveHeadroomOption)(nil)
 	_ Option = (*AdaptiveHeadroomWindowOption)(nil)
+
+	_ Option = (*ClientRecognitionEnabledOption)(nil)
+	_ Option = (*PolicyEngineOption)(nil)
+	_ Option = (*ClientTrackerOption)(nil)
 )
+
+// ClientRecognitionEnabledOption enables client recognition for
+// originator-aware failure handling. When enabled, the proxy
+// identifies the originator of each request, tracks per-client
+// failures, and applies CEL policies to determine retry behavior.
+type ClientRecognitionEnabledOption struct {
+	value bool
+}
+
+// WithClientRecognitionEnabled returns an option that enables
+// client recognition. Disabled by default.
+func WithClientRecognitionEnabled(enabled bool) *ClientRecognitionEnabledOption {
+	return &ClientRecognitionEnabledOption{value: enabled}
+}
+
+func (o *ClientRecognitionEnabledOption) applyProxyOption(cfg *proxyConfig) error {
+	cfg.clientRecognitionEnabled = o.value
+	return nil
+}
+
+// PolicyEngineOption sets the CEL policy engine for client-aware
+// failure handling. Required when client recognition is enabled.
+type PolicyEngineOption struct {
+	value *policy.PolicyEngine
+}
+
+// WithPolicyEngine returns an option that sets the policy engine.
+// Nil disables policy-based behavior even when client recognition
+// is enabled.
+func WithPolicyEngine(e *policy.PolicyEngine) *PolicyEngineOption {
+	return &PolicyEngineOption{value: e}
+}
+
+func (o *PolicyEngineOption) applyProxyOption(cfg *proxyConfig) error {
+	cfg.policyEngine = o.value
+	return nil
+}
+
+// ClientTrackerOption sets the client tracker for per-client
+// failure tracking. Required when client recognition is enabled.
+type ClientTrackerOption struct {
+	value *client.ClientTracker
+}
+
+// WithClientTracker returns an option that sets the client tracker.
+// Nil disables client failure tracking even when client recognition
+// is enabled.
+func WithClientTracker(t *client.ClientTracker) *ClientTrackerOption {
+	return &ClientTrackerOption{value: t}
+}
+
+func (o *ClientTrackerOption) applyProxyOption(cfg *proxyConfig) error {
+	cfg.clientTracker = o.value
+	return nil
+}
 
 // --- Factory ---
 
@@ -517,6 +581,16 @@ type Proxy struct {
 
 	// adaptiveHeadroomWindow is how long the one-slot reduction lasts.
 	adaptiveHeadroomWindow time.Duration
+
+	// Client recognition fields.
+	clientRecognitionEnabled bool
+	policyEngine             *policy.PolicyEngine
+	clientTracker            *client.ClientTracker
+
+	// lastPruneRaw stores the last Prune() time as Unix nanoseconds.
+	// Prune is throttled to at most once per second to avoid
+	// lock contention on high-throughput routes. Accessed atomically.
+	lastPruneRaw int64
 }
 
 // New creates a Proxy from the given options.
@@ -548,22 +622,61 @@ func New(opts ...Option) (*Proxy, error) {
 
 	// Build retry transport when retries are enabled.
 	var transport http.RoundTripper = cfg.transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
 	if cfg.maxRetries != 0 {
 		var checkRetry retry.CheckRetry
 		if cfg.retrySkipOn429 {
-			checkRetry = func(resp *http.Response, err error) bool {
+			checkRetry = func(req *http.Request, resp *http.Response, err error) bool {
 				if err != nil {
 					return true
 				}
 				if resp == nil {
 					return false
 				}
-				// Skip 429 — retrying rate-limited responses amplifies
-				// the concurrency issue that caused the 429.
+				// Apply originator-aware policy behavior if enabled.
+				// A behavior that returns true adds a retry. A behavior
+				// that returns false or does not apply to the current
+				// client state defers to the default retry policy
+				// (does not suppress it). CrushedClientBehavior only
+				// applies when the client is actually crushed.
+				if cfg.clientRecognitionEnabled && cfg.policyEngine != nil && cfg.clientTracker != nil {
+					originator, _ := req.Context().Value(originatorKey).(client.Originator)
+					clientState, ok := cfg.clientTracker.GetState(originator)
+					if !ok {
+						clientState = &client.ClientState{}
+					}
+					behavior := cfg.policyEngine.EvaluateWithResponse(req, originator, clientState, resp.StatusCode)
+					if behavior != nil && behavior.AppliesTo(clientState) && behavior.CheckRetry(req, resp, err) {
+						return true
+					}
+					// Behavior returned false or does not apply — fall
+					// through to the default retry policy below.
+				}
+				// Default retry policy. Skip 429 — retrying rate-limited
+				// responses amplifies the concurrency issue that caused
+				// the 429.
 				return resp.StatusCode >= 500
+			}
+		} else if cfg.clientRecognitionEnabled && cfg.policyEngine != nil && cfg.clientTracker != nil {
+			checkRetry = func(req *http.Request, resp *http.Response, err error) bool {
+				if err != nil {
+					return true
+				}
+				if resp == nil {
+					return false
+				}
+				originator, _ := req.Context().Value(originatorKey).(client.Originator)
+				clientState, ok := cfg.clientTracker.GetState(originator)
+				if !ok {
+					clientState = &client.ClientState{}
+				}
+				behavior := cfg.policyEngine.EvaluateWithResponse(req, originator, clientState, resp.StatusCode)
+				if behavior != nil && behavior.AppliesTo(clientState) && behavior.CheckRetry(req, resp, err) {
+					return true
+				}
+				// Behavior returned false or does not apply — fall
+				// through to the default policy.
+				// Default retry policy for non-limited routes.
+				return resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 			}
 		}
 		transport = &retry.Transport{
@@ -599,20 +712,23 @@ func New(opts ...Option) (*Proxy, error) {
 	}
 
 	p := &Proxy{
-		matcher:                cfg.matcher,
-		limiter:                cfg.limiter,
-		m:                      cfg.metrics,
-		timeout:                cfg.queueTimeout,
-		globalLimiter:          cfg.globalLimiter,
-		routeLimiters:          cfg.routeLimiters,
-		journal:                cfg.journal,
-		breaker:                cfg.breaker,
-		cancelCooldown:         cfg.cancelCooldown,
-		failureHold:            cfg.failureHold,
-		retryHandlesBreaker:    retryHandlesBreaker,
-		retryTracksAttempts:    retryTracksAttempts,
-		adaptiveHeadroom:       cfg.adaptiveHeadroom,
-		adaptiveHeadroomWindow: cfg.adaptiveHeadroomWindow,
+		matcher:                  cfg.matcher,
+		limiter:                  cfg.limiter,
+		m:                        cfg.metrics,
+		timeout:                  cfg.queueTimeout,
+		globalLimiter:            cfg.globalLimiter,
+		routeLimiters:            cfg.routeLimiters,
+		journal:                  cfg.journal,
+		breaker:                  cfg.breaker,
+		cancelCooldown:           cfg.cancelCooldown,
+		failureHold:              cfg.failureHold,
+		retryHandlesBreaker:      retryHandlesBreaker,
+		retryTracksAttempts:      retryTracksAttempts,
+		adaptiveHeadroom:         cfg.adaptiveHeadroom,
+		adaptiveHeadroomWindow:   cfg.adaptiveHeadroomWindow,
+		clientRecognitionEnabled: cfg.clientRecognitionEnabled,
+		policyEngine:             cfg.policyEngine,
+		clientTracker:            cfg.clientTracker,
 	}
 
 	rp := &httputil.ReverseProxy{
@@ -818,6 +934,12 @@ func (p *Proxy) Journal() *journal.Journal {
 
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.clientRecognitionEnabled {
+		originator := client.ExtractOriginator(r)
+		ctx := context.WithValue(r.Context(), originatorKey, originator)
+		r = r.WithContext(ctx)
+	}
+
 	limited := p.matcher.IsLimited(r.Method, r.URL.Path)
 
 	flightID := p.m.RegisterInFlight(r.Method, r.URL.Path, limited)
@@ -847,6 +969,28 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			status = recPtr.status
 		}
 		p.m.RecordStatus(status)
+		// Record client failure/success for originator-aware
+		// failure handling. Only recording for limited routes
+		// (where concurrency slots are the scarce resource) and
+		// only when client recognition is enabled.
+		if p.clientRecognitionEnabled && p.clientTracker != nil && p.policyEngine != nil && limited {
+			originator, _ := r.Context().Value(originatorKey).(client.Originator)
+			if status >= 500 || status == http.StatusTooManyRequests || status == http.StatusForbidden {
+				p.clientTracker.RecordFailure(originator)
+			} else if status >= 200 && status < 300 {
+				p.clientTracker.RecordSuccess(originator)
+			}
+			// Throttle Prune to at most once per second to avoid
+			// lock contention under high throughput.
+			// Use atomic load/store to avoid data races on lastPrune
+			// (multiple goroutines serve concurrent requests).
+			lastPrune := time.Unix(0, atomic.LoadInt64(&p.lastPruneRaw))
+			if time.Since(lastPrune) > time.Second {
+				p.clientTracker.Prune()
+				atomic.StoreInt64(&p.lastPruneRaw, time.Now().UnixNano())
+			}
+		}
+
 		if aborted {
 			p.m.RecordAbortedRequest(r.Method, r.URL.Path, status, time.Since(start), limited)
 		} else {
@@ -1801,6 +1945,10 @@ func isLocalSwitchingProtocolsNonHijackerFailure(err error) bool {
 type copyErrorStateKeyType struct{}
 
 var copyErrorStateKey = copyErrorStateKeyType{}
+
+type originatorKeyType struct{}
+
+var originatorKey = originatorKeyType{}
 
 type upstreamAttemptStateKeyType struct{}
 

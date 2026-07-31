@@ -32,10 +32,13 @@ import (
 )
 
 // CheckRetry decides whether a failed attempt should be retried.
-type CheckRetry func(resp *http.Response, err error) bool
+// The req argument is the original HTTP request, enabling
+// originator-aware retry decisions (e.g., retrying 403 for
+// specific clients as configured by policy).
+type CheckRetry func(req *http.Request, resp *http.Response, err error) bool
 
 // DefaultCheckRetry retries on 5xx, 429, and transport errors.
-var DefaultCheckRetry CheckRetry = func(resp *http.Response, err error) bool {
+var DefaultCheckRetry CheckRetry = func(req *http.Request, resp *http.Response, err error) bool {
 	if err != nil {
 		return true
 	}
@@ -177,9 +180,11 @@ type Transport struct {
 	Inner        http.RoundTripper
 	MaxRetries   int
 	MaxBodyBytes int64
-	CheckRetry   CheckRetry
-	WaitMin      time.Duration
-	WaitMax      time.Duration
+	// CheckRetry decides whether a failed attempt should be retried.
+	// The req argument enables originator-aware retry decisions.
+	CheckRetry CheckRetry
+	WaitMin    time.Duration
+	WaitMax    time.Duration
 
 	// MinRetryDelay is a floor for the retry wait duration. When > 0, the
 	// wait before each retry attempt is max(calcWait, MinRetryDelay). This
@@ -490,7 +495,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return t.finishRequestCancellation(req, resp, bodyBuf, breakerEpoch)
 		}
 
-		mustRetry := shouldRetry(resp, err)
+		mustRetry := shouldRetry(req, resp, err)
 		atLimit := t.MaxRetries >= 0 && attempt >= t.MaxRetries
 
 		// When a request has a body but MaxBodyBytes <= 0, the body

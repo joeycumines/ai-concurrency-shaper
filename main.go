@@ -33,8 +33,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/client"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/policy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
@@ -87,6 +89,12 @@ func run() error {
 		adaptiveHeadroom       bool
 		adaptiveHeadroomWindow time.Duration
 
+		// Client recognition and policy-based failure handling.
+		clientRecognition bool
+		policyList        policyFlags
+		failureThreshold  int
+		failureWindow     time.Duration
+
 		// Transport tuning.
 		upstreamDisableKeepAlives bool
 	)
@@ -122,6 +130,12 @@ func run() error {
 	flag.BoolVar(&adaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
 	flag.DurationVar(&adaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")
 	flag.BoolVar(&upstreamDisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream; avoids provider-side connection-count concurrency violations")
+
+	// Client recognition and policy-based failure handling.
+	flag.BoolVar(&clientRecognition, "client-recognition", false, "enable client recognition for originator-aware failure handling")
+	flag.Var(&policyList, "policy", "CEL policy definition: name:expression:behavior:enabled (repeatable)")
+	flag.IntVar(&failureThreshold, "client-failure-threshold", 10, "number of failures within the failure window to mark a client as crushed")
+	flag.DurationVar(&failureWindow, "client-failure-window", 30*time.Second, "time window for client failure tracking")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "ai-concurrency-shaper %s\n\n", version)
@@ -221,6 +235,28 @@ func run() error {
 		}
 	}
 
+	// Set up client recognition and policy engine if enabled.
+	var polEngine *policy.PolicyEngine
+	var clientTrack *client.ClientTracker
+	if clientRecognition {
+		clientTrack = client.NewClientTracker(failureThreshold, failureWindow)
+		polEngine = policy.NewPolicyEngine()
+		defs, err := policyList.Definitions()
+		if err != nil {
+			return fmt.Errorf("failed to parse policy definition: %w", err)
+		}
+		for _, def := range defs {
+			behavior := policy.ResolveBehavior(def.Behavior)
+			if behavior == nil {
+				return fmt.Errorf("unknown behavior %q in policy %q", def.Behavior, def.Name)
+			}
+			if err := polEngine.AddPolicy(def.Name, def.Expr, behavior, def.Enabled); err != nil {
+				return fmt.Errorf("policy %q: %w", def.Name, err)
+			}
+		}
+		log.Printf("client recognition: enabled (%d policies)", polEngine.ActivePolicyCount())
+	}
+
 	effectiveMaxConcurrency := upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency, patterns, routeLimiters)
 	transport := &http.Transport{
 		MaxIdleConns:        200,
@@ -250,6 +286,9 @@ func run() error {
 		proxy.WithTransport(transport),
 		proxy.WithJournal(j),
 		proxy.WithBreaker(breaker),
+		proxy.WithClientRecognitionEnabled(clientRecognition),
+		proxy.WithPolicyEngine(polEngine),
+		proxy.WithClientTracker(clientTrack),
 	)
 	if err != nil {
 		return fmt.Errorf("proxy config: %w", err)
@@ -297,6 +336,9 @@ func run() error {
 	}
 	if adaptiveHeadroom {
 		log.Printf("adaptive headroom: enabled (window %s)", adaptiveHeadroomWindow)
+	}
+	if clientRecognition {
+		log.Printf("client recognition: enabled (threshold=%d window=%s policies=%d)", failureThreshold, failureWindow, polEngine.ActivePolicyCount())
 	}
 
 	srv := &http.Server{Addr: bindAddr, Handler: p}
@@ -441,4 +483,27 @@ func (f limitFlags) String() string { return strings.Join(f, ", ") }
 func (f *limitFlags) Set(v string) error {
 	*f = append(*f, v)
 	return nil
+}
+
+// policyFlags implements flag.Value for repeatable --policy flags.
+type policyFlags []string
+
+func (f policyFlags) String() string { return strings.Join(f, ", ") }
+func (f *policyFlags) Set(v string) error {
+	*f = append(*f, v)
+	return nil
+}
+
+// Definitions returns the parsed policy definitions from the flag values.
+// Returns an error if any policy definition string is malformed.
+func (f policyFlags) Definitions() ([]*policy.PolicyDefinition, error) {
+	defs := make([]*policy.PolicyDefinition, 0, len(f))
+	for _, s := range f {
+		def, err := policy.ParsePolicyDefinition(s)
+		if err != nil {
+			return nil, err
+		}
+		defs = append(defs, def)
+	}
+	return defs, nil
 }

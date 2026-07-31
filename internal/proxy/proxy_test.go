@@ -1927,7 +1927,7 @@ func TestProxy_RetryTransportErrCircuitOpenNotUpstreamFailure(t *testing.T) {
 				MaxRetries: 1,
 				WaitMin:    time.Millisecond,
 				WaitMax:    time.Millisecond,
-				CheckRetry: func(resp *http.Response, err error) bool {
+				CheckRetry: func(req *http.Request, resp *http.Response, err error) bool {
 					if resp != nil && resp.StatusCode == http.StatusNotFound && externalOpened.CompareAndSwap(false, true) {
 						b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
 						return true
@@ -8860,14 +8860,14 @@ func TestProxy_RetryRecordedEarlierFailureDoesNotBlockCurrentHalfOpenProbeCancel
 			if oldCheckRetry == nil {
 				oldCheckRetry = retry.DefaultCheckRetry
 			}
-			retryTransport.CheckRetry = func(resp *http.Response, err error) bool {
+			retryTransport.CheckRetry = func(req *http.Request, resp *http.Response, err error) bool {
 				if resp != nil && resp.StatusCode == http.StatusInternalServerError {
 					deadline := time.Now().Add(time.Second)
 					for b.WaitDuration() > 0 && time.Now().Before(deadline) {
 						time.Sleep(time.Millisecond)
 					}
 				}
-				return oldCheckRetry(resp, err)
+				return oldCheckRetry(req, resp, err)
 			}
 
 			req := httptest.NewRequest(tt.method, tt.path, nil)
