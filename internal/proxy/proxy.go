@@ -72,6 +72,7 @@ type proxyConfig struct {
 	breaker                *circuitbreaker.Breaker
 	adaptiveHeadroom       bool
 	adaptiveHeadroomWindow time.Duration
+	limitAll               bool
 }
 
 // --- Concrete Options ---
@@ -456,6 +457,26 @@ func (o *AdaptiveHeadroomWindowOption) applyProxyOption(cfg *proxyConfig) error 
 	return nil
 }
 
+// LimitAllOption makes the default limiter bound every request, not just the
+// requests that match a limited route.
+type LimitAllOption struct {
+	value bool
+}
+
+// WithLimitAll returns an option that, when enabled, routes every request
+// through the default concurrency limiter (the same one set by WithLimiter).
+// Requests that would otherwise pass through are treated as limited: they
+// acquire a slot from the default limiter, count as proxied, and are subject to
+// the queue timeout. Off by default.
+func WithLimitAll(enabled bool) *LimitAllOption {
+	return &LimitAllOption{value: enabled}
+}
+
+func (o *LimitAllOption) applyProxyOption(cfg *proxyConfig) error {
+	cfg.limitAll = o.value
+	return nil
+}
+
 // --- Compile-Time Compliance Checks ---
 
 var (
@@ -479,6 +500,7 @@ var (
 	_ Option = (*FailureHoldOption)(nil)
 	_ Option = (*AdaptiveHeadroomOption)(nil)
 	_ Option = (*AdaptiveHeadroomWindowOption)(nil)
+	_ Option = (*LimitAllOption)(nil)
 )
 
 // --- Factory ---
@@ -517,6 +539,10 @@ type Proxy struct {
 
 	// adaptiveHeadroomWindow is how long the one-slot reduction lasts.
 	adaptiveHeadroomWindow time.Duration
+
+	// limitAll routes every request through the default limiter, not just
+	// requests matching a limited route.
+	limitAll bool
 }
 
 // New creates a Proxy from the given options.
@@ -613,6 +639,7 @@ func New(opts ...Option) (*Proxy, error) {
 		retryTracksAttempts:    retryTracksAttempts,
 		adaptiveHeadroom:       cfg.adaptiveHeadroom,
 		adaptiveHeadroomWindow: cfg.adaptiveHeadroomWindow,
+		limitAll:               cfg.limitAll,
 	}
 
 	rp := &httputil.ReverseProxy{
@@ -818,7 +845,7 @@ func (p *Proxy) Journal() *journal.Journal {
 
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	limited := p.matcher.IsLimited(r.Method, r.URL.Path)
+	limited := p.limitAll || p.matcher.IsLimited(r.Method, r.URL.Path)
 
 	flightID := p.m.RegisterInFlight(r.Method, r.URL.Path, limited)
 	defer p.m.DeregisterInFlight(flightID)

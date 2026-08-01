@@ -190,6 +190,191 @@ func TestProxy_MixedRoutes(t *testing.T) {
 	wg.Wait()
 }
 
+// trackPeakUpstream returns an httptest.Server whose handler tracks the peak
+// observed upstream concurrency via atomic CAS, holding each request for hold
+// so concurrent fan-out is observable. The returned *atomic.Int64 holds the peak.
+func trackPeakUpstream(t *testing.T, hold time.Duration) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var current atomic.Int64
+	var peak atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := current.Add(1)
+		for {
+			old := peak.Load()
+			if n <= old || peak.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		time.Sleep(hold)
+		current.Add(-1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream, &peak
+}
+
+// TestProxy_LimitAll_BoundsAllRequests verifies that WithLimitAll routes
+// otherwise-passthrough requests through the default limiter, so upstream
+// concurrency is bounded and the requests are classified as proxied.
+func TestProxy_LimitAll_BoundsAllRequests(t *testing.T) {
+	const concurrency = 2
+	upstream, peak := trackPeakUpstream(t, 25*time.Millisecond)
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	pat, err := route.Parse("POST /v1/messages")
+	if err != nil {
+		t.Fatalf("parse pattern: %v", err)
+	}
+	proxy, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(concurrency, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(0),
+		WithLimitAll(true),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	// GET /health does not match the limited route; without WithLimitAll it
+	// would pass through unbounded. Fan out well past the concurrency cap.
+	const n = 20
+	var wg sync.WaitGroup
+	results := make(chan int, n)
+	for range n {
+		wg.Go(func() {
+			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			rec := httptest.NewRecorder()
+			proxy.ServeHTTP(rec, req)
+			results <- rec.Code
+		})
+	}
+	wg.Wait()
+	close(results)
+
+	i := 0
+	for code := range results {
+		if code != http.StatusOK {
+			t.Errorf("request %d: expected 200, got %d", i, code)
+		}
+		i++
+	}
+
+	if got := peak.Load(); got > int64(concurrency) {
+		t.Errorf("upstream peak concurrency: got %d, want <= %d", got, concurrency)
+	}
+
+	snap := proxy.Metrics().Snapshot()
+	if snap.TotalProxied != n {
+		t.Errorf("TotalProxied: got %d, want %d (blanket traffic should be proxied)", snap.TotalProxied, n)
+	}
+	if snap.TotalPassThrough != 0 {
+		t.Errorf("TotalPassThrough: got %d, want 0", snap.TotalPassThrough)
+	}
+}
+
+// TestProxy_LimitAll_OffByDefault confirms that without WithLimitAll,
+// non-matching requests are unbounded passthrough (peak exceeds the cap).
+func TestProxy_LimitAll_OffByDefault(t *testing.T) {
+	const concurrency = 2
+	upstream, peak := trackPeakUpstream(t, 25*time.Millisecond)
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	pat, err := route.Parse("POST /v1/messages")
+	if err != nil {
+		t.Fatalf("parse pattern: %v", err)
+	}
+	proxy, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(concurrency, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(0),
+		// No WithLimitAll: default is off.
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	const n = 20
+	var wg sync.WaitGroup
+	for range n {
+		wg.Go(func() {
+			req := httptest.NewRequest(http.MethodGet, "/health", nil)
+			rec := httptest.NewRecorder()
+			proxy.ServeHTTP(rec, req)
+		})
+	}
+	wg.Wait()
+
+	if got := peak.Load(); got <= int64(concurrency) {
+		t.Errorf("expected unbounded passthrough (peak > %d), got peak %d", concurrency, got)
+	}
+
+	snap := proxy.Metrics().Snapshot()
+	if snap.TotalPassThrough != n {
+		t.Errorf("TotalPassThrough: got %d, want %d", snap.TotalPassThrough, n)
+	}
+	if snap.TotalProxied != 0 {
+		t.Errorf("TotalProxied: got %d, want 0", snap.TotalProxied)
+	}
+}
+
+// TestProxy_LimitAll_RespectsQueueTimeout confirms that blanket-limited
+// traffic uses the limited-path queue-timeout semantics (504, not 503).
+func TestProxy_LimitAll_RespectsQueueTimeout(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(slow.Close)
+
+	slowURL, _ := url.Parse(slow.URL)
+	pat, err := route.Parse("POST /v1/messages")
+	if err != nil {
+		t.Fatalf("parse pattern: %v", err)
+	}
+	proxy, err := New(
+		WithUpstream(slowURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(50*time.Millisecond),
+		WithLimitAll(true),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	// First (non-matching) request holds the single slot for 2s.
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/health", nil)
+		rec := httptest.NewRecorder()
+		proxy.ServeHTTP(rec, req)
+	}()
+	time.Sleep(10 * time.Millisecond) // let the first request acquire the slot
+
+	start := time.Now()
+	req2 := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec2 := httptest.NewRecorder()
+	proxy.ServeHTTP(rec2, req2)
+	elapsed := time.Since(start)
+
+	if rec2.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504 (limited queue timeout), got %d: %s", rec2.Code, rec2.Body.String())
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Errorf("expected to fail fast (~50ms queue timeout), took %v", elapsed)
+	}
+}
+
 func TestProxy_Metrics(t *testing.T) {
 	proxy, _ := setup(t, 2, 0, "POST /v1/messages")
 

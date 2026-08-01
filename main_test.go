@@ -578,6 +578,7 @@ func TestUpstreamMaxIdleConnsPerHost(t *testing.T) {
 		concurrency     int
 		patterns        []route.Pattern
 		routeLimiters   map[string]*queue.Limiter
+		limitAll        bool
 		wantIdlePerHost int
 	}{
 		{
@@ -628,11 +629,32 @@ func TestUpstreamMaxIdleConnsPerHost(t *testing.T) {
 			patterns:        route.DefaultPatterns(),
 			wantIdlePerHost: 20,
 		},
+		{
+			// limitAll routes every non-matching request through the default
+			// limiter, so the default pool's capacity must be counted even when
+			// every configured pattern carries an explicit route limit.
+			name:            "limit-all counts default pool when all routes have explicit limits",
+			concurrency:     100,
+			patterns:        parsePatterns(t, "POST /v1/messages:5"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/messages:5": queue.NewLimiterWithCooldown(5, 0)},
+			limitAll:        true,
+			wantIdlePerHost: 105,
+		},
+		{
+			// Without limitAll the default pool is NOT used (the only pattern
+			// has its own limiter), so concurrency does not contribute.
+			name:            "without limit-all default pool is unused when routes have explicit limits",
+			concurrency:     100,
+			patterns:        parsePatterns(t, "POST /v1/messages:5"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/messages:5": queue.NewLimiterWithCooldown(5, 0)},
+			limitAll:        false,
+			wantIdlePerHost: 20,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := upstreamMaxIdleConnsPerHost(tt.global, tt.concurrency, tt.patterns, tt.routeLimiters)
+			got := upstreamMaxIdleConnsPerHost(tt.global, tt.concurrency, tt.patterns, tt.routeLimiters, tt.limitAll)
 			if got != tt.wantIdlePerHost {
 				t.Fatalf("upstreamMaxIdleConnsPerHost() = %d, want %d", got, tt.wantIdlePerHost)
 			}

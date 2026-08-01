@@ -57,6 +57,7 @@ func run() error {
 		limitList         limitFlags
 		concurrency       int
 		globalConcurrency int
+		limitAll          bool
 		queueTimeout      time.Duration
 		useTUI            bool
 		retryMax          int
@@ -96,6 +97,7 @@ func run() error {
 	flag.Var(&limitList, "limit", "route pattern to limit, matched by trailing path segments (repeatable)")
 	flag.IntVar(&concurrency, "concurrency", 4, "max concurrent limited requests")
 	flag.IntVar(&globalConcurrency, "global-concurrency", 0, "global concurrency limit (0 = disabled)")
+	flag.BoolVar(&limitAll, "limit-all", false, "bound every request with the default limiter, not just matching limited routes")
 	flag.DurationVar(&queueTimeout, "queue-timeout", 30*time.Second, "max wait for a concurrency slot (0 = use request context)")
 	flag.IntVar(&retryMax, "retry", -1, "max retry attempts (-1 = unlimited, 0 = disabled)")
 	flag.Int64Var(&retryMaxBodyMB, "retry-max-body-mb", 5, "max request body size (MB) eligible for retry")
@@ -221,7 +223,7 @@ func run() error {
 		}
 	}
 
-	effectiveMaxConcurrency := upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency, patterns, routeLimiters)
+	effectiveMaxConcurrency := upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency, patterns, routeLimiters, limitAll)
 	transport := &http.Transport{
 		MaxIdleConns:        200,
 		MaxIdleConnsPerHost: effectiveMaxConcurrency,
@@ -247,6 +249,7 @@ func run() error {
 		proxy.WithFailureHold(failureHold),
 		proxy.WithAdaptiveHeadroom(adaptiveHeadroom),
 		proxy.WithAdaptiveHeadroomWindow(adaptiveHeadroomWindow),
+		proxy.WithLimitAll(limitAll),
 		proxy.WithTransport(transport),
 		proxy.WithJournal(j),
 		proxy.WithBreaker(breaker),
@@ -400,13 +403,19 @@ func run() error {
 // configured route/global concurrency limiters so that multi-route or grouped
 // configurations do not thrash TCP connections after bursts, while still
 // honoring the global concurrency cap and a safe default floor.
-func upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency int, patterns []route.Pattern, routeLimiters map[string]*queue.Limiter) int {
+//
+// limitAll indicates that every non-matching request is routed through the
+// default limiter (the same one set by WithLimiter/-concurrency). In that mode
+// the default pool always gates non-matching traffic, so its capacity must be
+// counted toward the idle-connection pool regardless of whether any pattern
+// itself falls through to it.
+func upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency int, patterns []route.Pattern, routeLimiters map[string]*queue.Limiter, limitAll bool) int {
 	routePoolMax := 0
 	for _, lim := range routeLimiters {
 		routePoolMax += lim.Limit()
 	}
 
-	defaultPoolUsed := false
+	defaultPoolUsed := limitAll
 	for _, p := range patterns {
 		key := p.Group
 		if key == "" {
