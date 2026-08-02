@@ -33,6 +33,7 @@ ai-concurrency-shaper -upstream https://api.anthropic.com
 | `-limit` | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
 | `-concurrency` | `4` | Max concurrent limited requests |
 | `-global-concurrency` | `0` | Global concurrency limit (0 = disabled) |
+| `-limit-all` | `false` | Bound *every* request with the default limiter, not just matching limited routes. Turns the proxy into a blanket rate limiter: non-matching requests acquire a slot from the same default limiter and are subject to `-queue-timeout`. Off by default, so non-matching routes pass through unmodified. |
 | `-queue-timeout` | `30s` | Max wait for a concurrency slot |
 | `-upstream-disable-keep-alives` | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
 | `-retry` | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
@@ -51,10 +52,27 @@ The proxy's internal semaphore limits how many tokens are held concurrently. Wha
 | `-failure-hold` | `2s` | Hold the slot after an upstream failure (5xx, 429, or rate-limit-signaled 403) when the circuit breaker is disabled or its penalty is zero. When the breaker is enabled with a non-zero penalty, the phantom penalty takes precedence instead. |
 | `-retry-min-delay` | `1s` | Minimum delay before retrying. Reduces the chance the retry arrives before the downstream has finished accounting. |
 | `-retry-skip-429` | `true` | Do not retry 429 responses. Avoids the feedback loop where retries amplify concurrency at the downstream. |
-| `-adaptive-headroom` | `false` | Reduce effective concurrency by one slot after a 429, restoring after a quiet window. Use when the provider can see N+1 concurrent requests due to connection teardown or CDN accounting lag. |
+| `-adaptive-headroom` | `false` | Reduce effective concurrency by one slot after a 429, restoring after a quiet window. Use when the provider can see N+1 concurrent requests due to connection teardown or CDN accounting lag. For dynamic, self-tuning limits use `-autoscale` instead (the two are mutually exclusive). |
 | `-adaptive-headroom-window` | `30s` | How long the one-slot 429 headroom is held. Each new 429 resets this window. |
 
 The upstream HTTP transport sizes `MaxIdleConnsPerHost` to the sum of configured route/global concurrency caps, with a per-host minimum floor of 20 applied after the global cap. This avoids closing a large burst of healthy keep-alive connections when multiple route limiters or groups share the same upstream host. Use `-upstream-disable-keep-alives` only when the upstream counts idle/open connections as concurrent.
+
+#### Dynamic Concurrency (AIMD Autoscaling)
+
+Instead of a fixed `-concurrency` cap, the proxy can adjust the default limiter's capacity automatically using an AIMD (Additive Increase, Multiplicative Decrease) controller. On each clean upstream success it adds a fixed step; on each upstream failure (429 by default, optionally 5xx) it multiplies the target down by a ratio. This finds the upstream's real concurrency ceiling without guessing it.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-autoscale` | `false` | Enable AIMD dynamic concurrency scaling. Mutually exclusive with `-adaptive-headroom` (enabling both disables headroom; autoscaling subsumes it). |
+| `-autoscale-min` | `1` | Minimum concurrency limit (floor for decreases) |
+| `-autoscale-max` | `0` | Maximum concurrency limit (ceiling for increases); 0 = use `-concurrency` |
+| `-autoscale-initial` | `0` | Initial concurrency limit; 0 = use `-autoscale-max` (start at full capacity) |
+| `-autoscale-step` | `1` | Additive increase applied on each success |
+| `-autoscale-ratio` | `0.5` | Multiplicative decrease ratio on failure (0 < r ≤ 1) |
+| `-autoscale-increase-cooldown` | `5s` | Minimum duration between successive increases |
+| `-autoscale-5xx` | `false` | Decrease on 5xx status codes (default: only 429s) |
+
+When autoscaling is on, the limiter is created at `-autoscale-max` and the controller withholds slots down to `-autoscale-initial`. Only the default limiter (the one set by `-concurrency`) is autoscaled; per-route limiters keep their static limits. Queue timeouts, client cancels, and proxy-internal panics are **not** treated as upstream signals and never move the target. By default decreases fire on 429s only; enable `-autoscale-5xx` to also react to 5xx responses. The decrease magnitude is governed by `-autoscale-ratio` (not `Retry-After`).
 
 #### Circuit Breaker
 

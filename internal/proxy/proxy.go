@@ -34,6 +34,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/autoscale"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
@@ -72,6 +73,7 @@ type proxyConfig struct {
 	breaker                *circuitbreaker.Breaker
 	adaptiveHeadroom       bool
 	adaptiveHeadroomWindow time.Duration
+	autoscaler             *autoscale.Autoscaler
 	limitAll               bool
 }
 
@@ -457,6 +459,25 @@ func (o *AdaptiveHeadroomWindowOption) applyProxyOption(cfg *proxyConfig) error 
 	return nil
 }
 
+// AutoscalerOption sets the AIMD dynamic concurrency controller. When non-nil,
+// the proxy feeds upstream success/failure signals to the autoscaler, which
+// adjusts the limiter's effective capacity. This is mutually exclusive with
+// adaptive headroom — the caller (main.go) must ensure only one is active.
+type AutoscalerOption struct {
+	value *autoscale.Autoscaler
+}
+
+// WithAutoscaler returns an option that wires the AIMD autoscaler. Nil disables
+// autoscaling.
+func WithAutoscaler(a *autoscale.Autoscaler) *AutoscalerOption {
+	return &AutoscalerOption{value: a}
+}
+
+func (o *AutoscalerOption) applyProxyOption(cfg *proxyConfig) error {
+	cfg.autoscaler = o.value
+	return nil
+}
+
 // LimitAllOption makes the default limiter bound every request, not just the
 // requests that match a limited route.
 type LimitAllOption struct {
@@ -500,6 +521,7 @@ var (
 	_ Option = (*FailureHoldOption)(nil)
 	_ Option = (*AdaptiveHeadroomOption)(nil)
 	_ Option = (*AdaptiveHeadroomWindowOption)(nil)
+	_ Option = (*AutoscalerOption)(nil)
 	_ Option = (*LimitAllOption)(nil)
 )
 
@@ -540,6 +562,10 @@ type Proxy struct {
 	// adaptiveHeadroomWindow is how long the one-slot reduction lasts.
 	adaptiveHeadroomWindow time.Duration
 
+	// autoscaler is the optional AIMD dynamic concurrency controller. When
+	// non-nil, the proxy feeds upstream success/failure signals to it.
+	autoscaler *autoscale.Autoscaler
+
 	// limitAll routes every request through the default limiter, not just
 	// requests matching a limited route.
 	limitAll bool
@@ -573,7 +599,7 @@ func New(opts ...Option) (*Proxy, error) {
 	}
 
 	// Build retry transport when retries are enabled.
-	var transport http.RoundTripper = cfg.transport
+	var transport = cfg.transport
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
@@ -639,6 +665,7 @@ func New(opts ...Option) (*Proxy, error) {
 		retryTracksAttempts:    retryTracksAttempts,
 		adaptiveHeadroom:       cfg.adaptiveHeadroom,
 		adaptiveHeadroomWindow: cfg.adaptiveHeadroomWindow,
+		autoscaler:             cfg.autoscaler,
 		limitAll:               cfg.limitAll,
 	}
 
@@ -1366,6 +1393,31 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		reachedUpstream = attemptState.started.Load()
 		if p.adaptiveHeadroom && recOK && reachedUpstream && slotLimiter != nil && rec.status == http.StatusTooManyRequests {
 			slotLimiter.AdaptiveReduce(p.adaptiveHeadroomWindow)
+		}
+
+		// Autoscaler (AIMD): feed upstream success/failure signals to the
+		// dynamic concurrency controller. This is orthogonal to the
+		// slot-release mechanisms below — it adjusts the limiter's
+		// effective capacity, not when this specific slot is returned.
+		//
+		// Guards:
+		//   - p.autoscaler != nil: only when autoscaling is configured.
+		//   - reachedUpstream: queue timeouts and pre-upstream errors are
+		//     not upstream signals and must not influence the target.
+		//   - slotLimiter == p.limiter: only the default limiter is
+		//     autoscaled. Per-route limiters have their own static limits.
+		//   - !localPanic: proxy-internal panics are not upstream signals.
+		//   - !suppressFailureForClientAbort: client cancels with ambiguous
+		//     status are not upstream failures.
+		if p.autoscaler != nil && reachedUpstream && slotLimiter == p.limiter && !localPanic {
+			if recOK {
+				now := time.Now()
+				if isUpstreamFailureStatus(rec, now) {
+					p.autoscaler.OnFailure(rec.status, parseRetryAfterFromRecorder(rec, now))
+				} else if isBreakerSuccessStatus(rec, now, 0) {
+					p.autoscaler.OnSuccess()
+				}
+			}
 		}
 
 		ctxErr := r.Context().Err()

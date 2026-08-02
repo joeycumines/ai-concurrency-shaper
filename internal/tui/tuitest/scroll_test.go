@@ -126,9 +126,10 @@ func TestPTY_ScrollLargeDataset(t *testing.T) {
 	proxyURL := h.ProxyURL()
 	for i := range 50 {
 		path := "/v1/messages"
-		if i%3 == 1 {
+		switch i % 3 {
+		case 1:
 			path = "/v1/chat/completions"
-		} else if i%3 == 2 {
+		case 2:
 			path = "/embeddings"
 		}
 		sendRequest(t, t.Context(), proxyURL+path)
@@ -220,14 +221,8 @@ func TestPTY_PageUpDown(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Page down twice.
-	for range 2 {
-		if _, err := h.Console().WriteString(string(rune(0x7f))); err != nil {
-			// We need to send the actual PgDn key.
-		}
-	}
-
-	// Use Ctrl-D for half-page down instead (simpler key).
+	// Scroll down using Ctrl-D (half-page down). A PgDn key sequence is harder
+	// to emit reliably over the PTY, so Ctrl-D is used instead.
 	for range 4 {
 		// Send Ctrl-D
 		h.Console().Write([]byte{4}) // Ctrl-D = \x04

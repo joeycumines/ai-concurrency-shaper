@@ -458,16 +458,16 @@ func TestLimiter_AdaptiveStatsPendingAbsorbReportsActualActive(t *testing.T) {
 	if !l.AdaptiveReduce(time.Minute) {
 		t.Fatal("AdaptiveReduce should succeed")
 	}
-	if !l.absorbNext {
-		t.Fatal("expected pending absorption while all slots are held")
+	if l.pendingAbsorbs != 1 {
+		t.Fatalf("expected 1 pending absorption while all slots are held, got %d", l.pendingAbsorbs)
 	}
 	if got := l.Stats().Active; got != 4 {
-		t.Fatalf("Active while absorbNext is pending = %d, want 4", got)
+		t.Fatalf("Active while pendingAbsorbs is pending = %d, want 4", got)
 	}
 
 	rels[0]()
-	if l.absorbNext {
-		t.Fatal("expected first release to be absorbed")
+	if l.pendingAbsorbs != 0 {
+		t.Fatalf("expected first release to be absorbed, pendingAbsorbs = %d", l.pendingAbsorbs)
 	}
 	if got := l.Stats().Active; got != 3 {
 		t.Fatalf("Active after one absorbed release = %d, want 3", got)
@@ -494,8 +494,8 @@ func TestLimiter_AdaptiveStatsDrainedIdleReportsActualActive(t *testing.T) {
 	if !l.AdaptiveReduce(time.Minute) {
 		t.Fatal("AdaptiveReduce should succeed")
 	}
-	if l.absorbNext {
-		t.Fatal("idle token should be drained immediately")
+	if l.pendingAbsorbs != 0 {
+		t.Fatalf("idle token should be drained immediately, pendingAbsorbs = %d", l.pendingAbsorbs)
 	}
 	if got := l.Stats().Active; got != 3 {
 		t.Fatalf("Active after draining idle token = %d, want 3", got)
@@ -599,5 +599,340 @@ func TestLimiter_AdaptiveReduceWithCooldownDrainsIdle(t *testing.T) {
 	}
 	if l.EffectiveLimit() != 2 {
 		t.Fatalf("expected effective limit 2 after recovery, got %d", l.EffectiveLimit())
+	}
+}
+
+func TestLimiter_SetMaxWithheld_DefaultsToOne(t *testing.T) {
+	l := NewLimiterWithCooldown(4, 0)
+	if got := l.MaxWithheld(); got != 1 {
+		t.Fatalf("expected default MaxWithheld=1, got %d", got)
+	}
+}
+
+func TestLimiter_SetMaxWithheld_Configurable(t *testing.T) {
+	l := NewLimiterWithCooldown(8, 0)
+	l.SetMaxWithheld(4)
+	if got := l.MaxWithheld(); got != 4 {
+		t.Fatalf("expected MaxWithheld=4, got %d", got)
+	}
+}
+
+func TestLimiter_WithholdSlotReducesEffectiveLimit(t *testing.T) {
+	l := NewLimiterWithCooldown(4, 0)
+	l.SetMaxWithheld(3)
+
+	if !l.WithholdSlot() {
+		t.Fatal("WithholdSlot should succeed")
+	}
+	if l.EffectiveLimit() != 3 {
+		t.Fatalf("expected effective limit 3, got %d", l.EffectiveLimit())
+	}
+	if l.Withheld() != 1 {
+		t.Fatalf("expected Withheld=1, got %d", l.Withheld())
+	}
+
+	if !l.WithholdSlot() {
+		t.Fatal("second WithholdSlot should succeed")
+	}
+	if l.EffectiveLimit() != 2 {
+		t.Fatalf("expected effective limit 2, got %d", l.EffectiveLimit())
+	}
+}
+
+func TestLimiter_WithholdSlotRespectsMaxWithheld(t *testing.T) {
+	l := NewLimiterWithCooldown(4, 0)
+	l.SetMaxWithheld(2)
+
+	if !l.WithholdSlot() {
+		t.Fatal("first WithholdSlot should succeed")
+	}
+	if !l.WithholdSlot() {
+		t.Fatal("second WithholdSlot should succeed")
+	}
+	// At maxWithheld=2, third should fail.
+	if l.WithholdSlot() {
+		t.Fatal("third WithholdSlot should fail at maxWithheld=2")
+	}
+	if l.EffectiveLimit() != 2 {
+		t.Fatalf("expected effective limit 2, got %d", l.EffectiveLimit())
+	}
+}
+
+func TestLimiter_WithholdSlotRespectsMinimum(t *testing.T) {
+	l := NewLimiterWithCooldown(2, 0)
+	l.SetMaxWithheld(2)
+
+	// Withhold one (effective limit drops to 1).
+	if !l.WithholdSlot() {
+		t.Fatal("first WithholdSlot should succeed")
+	}
+	// Withholding a second would reduce effective limit to 0 — must refuse.
+	if l.WithholdSlot() {
+		t.Fatal("WithholdSlot should refuse to reduce effective limit below 1")
+	}
+	if l.EffectiveLimit() != 1 {
+		t.Fatalf("expected effective limit 1, got %d", l.EffectiveLimit())
+	}
+}
+
+func TestLimiter_WithholdSlotDefaultMaxIsOne(t *testing.T) {
+	l := NewLimiterWithCooldown(4, 0)
+	// Default maxWithheld is 1.
+	if !l.WithholdSlot() {
+		t.Fatal("first WithholdSlot should succeed")
+	}
+	if l.WithholdSlot() {
+		t.Fatal("second WithholdSlot should fail with default maxWithheld=1")
+	}
+}
+
+func TestLimiter_RestoreSlotIncreasesEffectiveLimit(t *testing.T) {
+	l := NewLimiterWithCooldown(4, 0)
+	l.SetMaxWithheld(3)
+
+	// Withhold 2 slots.
+	l.WithholdSlot()
+	l.WithholdSlot()
+	if l.EffectiveLimit() != 2 {
+		t.Fatalf("expected effective limit 2, got %d", l.EffectiveLimit())
+	}
+
+	// Restore one.
+	l.RestoreSlot()
+	if l.EffectiveLimit() != 3 {
+		t.Fatalf("expected effective limit 3 after restore, got %d", l.EffectiveLimit())
+	}
+	if l.Withheld() != 1 {
+		t.Fatalf("expected Withheld=1 after restore, got %d", l.Withheld())
+	}
+
+	// Restore another.
+	l.RestoreSlot()
+	if l.EffectiveLimit() != 4 {
+		t.Fatalf("expected effective limit 4 after second restore, got %d", l.EffectiveLimit())
+	}
+	if l.Withheld() != 0 {
+		t.Fatalf("expected Withheld=0, got %d", l.Withheld())
+	}
+}
+
+func TestLimiter_RestoreSlotNoopWhenNothingWithheld(t *testing.T) {
+	l := NewLimiterWithCooldown(4, 0)
+	// Restoring when nothing is withheld should be a no-op.
+	l.RestoreSlot()
+	if l.EffectiveLimit() != 4 {
+		t.Fatalf("expected effective limit 4, got %d", l.EffectiveLimit())
+	}
+	if l.Withheld() != 0 {
+		t.Fatalf("expected Withheld=0, got %d", l.Withheld())
+	}
+}
+
+func TestLimiter_RestoreSlotClearsPendingAbsorb(t *testing.T) {
+	ctx := context.Background()
+	l := NewLimiterWithCooldown(4, 0)
+	l.SetMaxWithheld(3)
+
+	// Acquire all 4 slots so there are no idle tokens.
+	rels := make([]func(), 4)
+	for i := range 4 {
+		rel, err := l.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("Acquire %d: %v", i, err)
+		}
+		rels[i] = rel
+	}
+
+	// WithholdSlot when all slots are held: pendingAbsorbs is set, no token drained.
+	if !l.WithholdSlot() {
+		t.Fatal("WithholdSlot should succeed")
+	}
+	if l.pendingAbsorbs != 1 {
+		t.Fatalf("expected pendingAbsorbs=1 when all slots held, got %d", l.pendingAbsorbs)
+	}
+	if l.EffectiveLimit() != 3 {
+		t.Fatalf("expected effective limit 3, got %d", l.EffectiveLimit())
+	}
+
+	// RestoreSlot: should clear the pending absorb without inserting a token.
+	l.RestoreSlot()
+	if l.pendingAbsorbs != 0 {
+		t.Fatalf("pendingAbsorbs should be 0 after RestoreSlot, got %d", l.pendingAbsorbs)
+	}
+	if l.EffectiveLimit() != 4 {
+		t.Fatalf("expected effective limit 4, got %d", l.EffectiveLimit())
+	}
+	if l.Withheld() != 0 {
+		t.Fatalf("expected Withheld=0, got %d", l.Withheld())
+	}
+
+	// Release all slots — all 4 should be available.
+	for _, rel := range rels {
+		rel()
+	}
+	for i := range 4 {
+		rel, err := l.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("re-acquire %d after restore: %v", i, err)
+		}
+		rel()
+	}
+}
+
+func TestLimiter_WithholdThenRestoreRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	l := NewLimiterWithCooldown(6, 0)
+	l.SetMaxWithheld(5)
+
+	// Withhold 3 slots.
+	for range 3 {
+		if !l.WithholdSlot() {
+			t.Fatal("WithholdSlot should succeed")
+		}
+	}
+	if l.EffectiveLimit() != 3 {
+		t.Fatalf("expected effective limit 3, got %d", l.EffectiveLimit())
+	}
+
+	// Verify we can acquire exactly 3 and no more.
+	rels := make([]func(), 3)
+	for i := range 3 {
+		rel, err := l.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("Acquire %d: %v", i, err)
+		}
+		rels[i] = rel
+	}
+
+	// 4th acquire should block.
+	done := make(chan error)
+	go func() {
+		_, err := l.Acquire(ctx)
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if l.Stats().Waiters != 1 {
+		t.Fatalf("expected 1 waiter, got %d", l.Stats().Waiters)
+	}
+
+	// Restore 1 slot → effective limit becomes 4. The blocked acquire should
+	// now proceed.
+	l.RestoreSlot()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("blocked acquire after restore: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked acquire did not proceed after restore")
+	}
+
+	if l.EffectiveLimit() != 4 {
+		t.Fatalf("expected effective limit 4, got %d", l.EffectiveLimit())
+	}
+
+	// Restore the remaining 2 withholds.
+	l.RestoreSlot()
+	l.RestoreSlot()
+	if l.EffectiveLimit() != 6 {
+		t.Fatalf("expected effective limit 6, got %d", l.EffectiveLimit())
+	}
+}
+
+// TestLimiter_WithholdMultipleWhileAllHeld is a regression test for a deadlock
+// that occurred when WithholdSlot was called several times while every slot was
+// in use. The old single-boolean absorb flag could only track ONE pending
+// absorb, so only one in-flight release was swallowed; the others leaked tokens
+// back into the channel, inflating len(slots) past the effective limit. A later
+// RestoreSlot then blocked forever on a full channel. The fix tracks pending
+// absorbs with a counter, so each virtual withhold independently consumes a
+// future release.
+func TestLimiter_WithholdMultipleWhileAllHeld(t *testing.T) {
+	ctx := context.Background()
+	const limit = 8
+	l := NewLimiterWithCooldown(limit, 0)
+	l.SetMaxWithheld(limit - 1)
+
+	// Acquire all slots so there are no idle tokens to drain.
+	rels := make([]func(), limit)
+	for i := range limit {
+		rel, err := l.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("Acquire %d: %v", i, err)
+		}
+		rels[i] = rel
+	}
+
+	// Withhold 4 slots while all are held. Each withhold registers a pending
+	// absorb that must consume a future release.
+	const withholds = 4
+	for i := range withholds {
+		if !l.WithholdSlot() {
+			t.Fatalf("WithholdSlot %d should succeed", i)
+		}
+	}
+	if l.pendingAbsorbs != withholds {
+		t.Fatalf("pendingAbsorbs = %d, want %d", l.pendingAbsorbs, withholds)
+	}
+	if eff := l.EffectiveLimit(); eff != limit-withholds {
+		t.Fatalf("EffectiveLimit = %d, want %d", eff, limit-withholds)
+	}
+
+	// Release slots one at a time. The first `withholds` releases must be
+	// swallowed (absorbed) — they must NOT return tokens to the channel,
+	// otherwise len(slots) would exceed the effective limit.
+	for i := range withholds {
+		rels[i]()
+		if l.pendingAbsorbs != withholds-(i+1) {
+			t.Fatalf("after release %d: pendingAbsorbs = %d, want %d", i, l.pendingAbsorbs, withholds-(i+1))
+		}
+		// The channel should still be empty: no tokens returned yet.
+		if got := len(l.slots); got != 0 {
+			t.Fatalf("after absorbed release %d: channel len = %d, want 0 (token leaked)", i, got)
+		}
+	}
+
+	// Remaining releases (withholds..limit) should return tokens normally.
+	for i := withholds; i < limit; i++ {
+		rels[i]()
+	}
+	if got := len(l.slots); got != limit-withholds {
+		t.Fatalf("after all releases: channel len = %d, want %d", got, limit-withholds)
+	}
+
+	// Now restore the withheld slots one at a time. Each RestoreSlot must
+	// insert a real token. This is the step that DEADLOCKED before the fix:
+	// the channel was over-full so the send blocked forever.
+	for range withholds {
+		done := make(chan struct{})
+		go func() {
+			l.RestoreSlot()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("RestoreSlot deadlocked (regression: multi-withhold while all slots held)")
+		}
+	}
+
+	if l.Withheld() != 0 {
+		t.Fatalf("Withheld = %d, want 0 after full restore", l.Withheld())
+	}
+	if eff := l.EffectiveLimit(); eff != limit {
+		t.Fatalf("EffectiveLimit = %d, want %d", eff, limit)
+	}
+	// Channel must be exactly full now.
+	if got := len(l.slots); got != limit {
+		t.Fatalf("after full restore: channel len = %d, want %d", got, limit)
+	}
+
+	// All slots must be acquirable again.
+	for range limit {
+		rel, err := l.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("re-acquire after full restore: %v", err)
+		}
+		rel()
 	}
 }

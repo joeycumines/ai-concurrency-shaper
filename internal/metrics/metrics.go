@@ -583,6 +583,7 @@ type Snapshot struct {
 	RetriesInFlight      int64
 	OldestQueuedAge      time.Duration
 	CircuitBreaker       *CBStats
+	Autoscale            *AutoscaleStats
 }
 
 // CBStats is a snapshot of circuit breaker state for the TUI.
@@ -594,4 +595,22 @@ type CBStats struct {
 	TotalSuccesses      int64
 	CurrentPenalty      time.Duration
 	NextRetry           time.Time
+}
+
+// AutoscaleStats is a snapshot of the dynamic concurrency controller (AIMD
+// autoscaler) state for the TUI. It is nil when autoscaling is disabled.
+type AutoscaleStats struct {
+	Target           int
+	Min              int
+	Max              int
+	IncreaseStep     int
+	DecreaseRatio    float64
+	IncreaseCooldown time.Duration
+	DecreaseOn5xx    bool
+	TotalSuccesses   int64
+	Total429s        int64
+	Total5xxs        int64
+	Total403Bans     int64
+	TotalIncreases   int64
+	TotalDecreases   int64
 }

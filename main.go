@@ -32,6 +32,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/autoscale"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
@@ -88,6 +89,16 @@ func run() error {
 		adaptiveHeadroom       bool
 		adaptiveHeadroomWindow time.Duration
 
+		// AIMD autoscaler.
+		autoscaleEnabled       bool
+		autoscaleMin           int
+		autoscaleMax           int
+		autoscaleInitial       int
+		autoscaleStep          int
+		autoscaleRatio         float64
+		autoscaleIncreaseCooldown time.Duration
+		autoscale5xx           bool
+
 		// Transport tuning.
 		upstreamDisableKeepAlives bool
 	)
@@ -123,6 +134,17 @@ func run() error {
 	flag.DurationVar(&failureHold, "failure-hold", 2*time.Second, "hold slot after upstream failure even without circuit breaker (0 = disabled)")
 	flag.BoolVar(&adaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
 	flag.DurationVar(&adaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")
+
+	// AIMD autoscaler.
+	flag.BoolVar(&autoscaleEnabled, "autoscale", false, "enable AIMD dynamic concurrency scaling (mutually exclusive with adaptive-headroom)")
+	flag.IntVar(&autoscaleMin, "autoscale-min", 1, "minimum concurrency limit (floor for decreases)")
+	flag.IntVar(&autoscaleMax, "autoscale-max", 0, "maximum concurrency limit (ceiling for increases); 0 = use -concurrency")
+	flag.IntVar(&autoscaleInitial, "autoscale-initial", 0, "initial concurrency limit; 0 = use -autoscale-max or -concurrency")
+	flag.IntVar(&autoscaleStep, "autoscale-step", 1, "additive increase step applied on each success")
+	flag.Float64Var(&autoscaleRatio, "autoscale-ratio", 0.5, "multiplicative decrease ratio (0 < r <= 1)")
+	flag.DurationVar(&autoscaleIncreaseCooldown, "autoscale-increase-cooldown", 5*time.Second, "minimum duration between successive increases")
+	flag.BoolVar(&autoscale5xx, "autoscale-5xx", false, "decrease on 5xx status codes (default false)")
+
 	flag.BoolVar(&upstreamDisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream; avoids provider-side connection-count concurrency violations")
 
 	flag.Usage = func() {
@@ -182,7 +204,47 @@ func run() error {
 	matcher := route.NewMatcher(patterns)
 
 	met := metrics.NewCollector()
-	limiter := queue.NewLimiterWithCooldown(concurrency, releaseCooldown)
+
+	// Resolve autoscaler configuration. When autoscaling is enabled, the
+	// limiter is created at the maximum capacity and the autoscaler withholds
+	// slots down to the initial target. This is mutually exclusive with
+	// adaptive headroom — autoscaling subsumes it.
+	var (
+		limiter    *queue.Limiter
+		autoscaler *autoscale.Autoscaler
+	)
+	if autoscaleEnabled {
+		if adaptiveHeadroom {
+			log.Printf("WARNING: -autoscale and -adaptive-headroom are mutually exclusive; disabling adaptive headroom")
+			adaptiveHeadroom = false
+		}
+
+		asMax := autoscaleMax
+		if asMax == 0 {
+			asMax = concurrency
+		}
+		asInitial := autoscaleInitial
+		if asInitial == 0 {
+			asInitial = asMax
+		}
+
+		limiter = queue.NewLimiterWithCooldown(asMax, releaseCooldown)
+		autoscaler, err = autoscale.New(
+			autoscale.WithLimiter(limiter),
+			autoscale.WithMin(autoscaleMin),
+			autoscale.WithMax(asMax),
+			autoscale.WithInitial(asInitial),
+			autoscale.WithIncreaseStep(autoscaleStep),
+			autoscale.WithDecreaseRatio(autoscaleRatio),
+			autoscale.WithIncreaseCooldown(autoscaleIncreaseCooldown),
+			autoscale.WithDecreaseOn5xx(autoscale5xx),
+		)
+		if err != nil {
+			return fmt.Errorf("autoscale config: %w", err)
+		}
+	} else {
+		limiter = queue.NewLimiterWithCooldown(concurrency, releaseCooldown)
+	}
 
 	var globalLimiter *queue.Limiter
 	if globalConcurrency > 0 {
@@ -249,6 +311,7 @@ func run() error {
 		proxy.WithFailureHold(failureHold),
 		proxy.WithAdaptiveHeadroom(adaptiveHeadroom),
 		proxy.WithAdaptiveHeadroomWindow(adaptiveHeadroomWindow),
+		proxy.WithAutoscaler(autoscaler),
 		proxy.WithLimitAll(limitAll),
 		proxy.WithTransport(transport),
 		proxy.WithJournal(j),
@@ -301,6 +364,19 @@ func run() error {
 	if adaptiveHeadroom {
 		log.Printf("adaptive headroom: enabled (window %s)", adaptiveHeadroomWindow)
 	}
+	if autoscaleEnabled {
+		// Resolve effective values for logging (defaults may be 0 in flag vars).
+		logMax := autoscaleMax
+		if logMax == 0 {
+			logMax = concurrency
+		}
+		logInitial := autoscaleInitial
+		if logInitial == 0 {
+			logInitial = logMax
+		}
+		log.Printf("autoscale: enabled (initial=%d min=%d max=%d step=%d ratio=%.2f cooldown=%s 5xx=%v)",
+			logInitial, autoscaleMin, logMax, autoscaleStep, autoscaleRatio, autoscaleIncreaseCooldown, autoscale5xx)
+	}
 
 	srv := &http.Server{Addr: bindAddr, Handler: p}
 
@@ -347,6 +423,24 @@ func run() error {
 							TotalSuccesses:      s.TotalSuccesses,
 							CurrentPenalty:      s.CurrentPenalty,
 							NextRetry:           s.NextRetry,
+						}
+					}
+					if autoscaler != nil {
+						s := autoscaler.Stats()
+						snap.Autoscale = &metrics.AutoscaleStats{
+							Target:           s.Target,
+							Min:              s.Min,
+							Max:              s.Max,
+							IncreaseStep:     s.IncreaseStep,
+							DecreaseRatio:    s.DecreaseRatio,
+							IncreaseCooldown: s.IncreaseCooldown,
+							DecreaseOn5xx:    s.DecreaseOn5xx,
+							TotalSuccesses:   s.TotalSuccesses,
+							Total429s:        s.Total429s,
+							Total5xxs:        s.Total5xxs,
+							Total403Bans:     s.Total403Bans,
+							TotalIncreases:   s.TotalIncreases,
+							TotalDecreases:   s.TotalDecreases,
 						}
 					}
 					select {

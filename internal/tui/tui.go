@@ -1201,6 +1201,13 @@ func builderEndsWithNewline(b *strings.Builder) bool {
 
 func (m Model) renderHeader() string {
 	uptime := time.Since(m.startTime).Truncate(time.Second)
+	if as := m.snap.Autoscale; as != nil {
+		return headerStyle.Render(
+			fmt.Sprintf(" ⚡ shaper │ %d/%d active (max %d) │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
+				m.snap.Active, as.Target, as.Max, m.snap.Queued, m.snap.Throughput,
+				m.snap.TotalTimeout, uptime),
+		)
+	}
 	return headerStyle.Render(
 		fmt.Sprintf(" ⚡ shaper │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
 			m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput,
@@ -1363,8 +1370,13 @@ func (m Model) dashboardLines() []string {
 	lines = append(lines, "")
 
 	lines = append(lines, sectionStyle.Render(" Concurrency "))
-	lines = append(lines, m.renderGaugeBar(int(m.snap.Active), m.conc, m.gaugeBarWidth()))
-	lines = append(lines, fmt.Sprintf("  %d / %d active slots", m.snap.Active, m.conc))
+	if as := m.snap.Autoscale; as != nil {
+		lines = append(lines, m.renderGaugeBar(int(m.snap.Active), as.Target, m.gaugeBarWidth()))
+		lines = append(lines, fmt.Sprintf("  %d / %d active slots (max %d)", m.snap.Active, as.Target, as.Max))
+	} else {
+		lines = append(lines, m.renderGaugeBar(int(m.snap.Active), m.conc, m.gaugeBarWidth()))
+		lines = append(lines, fmt.Sprintf("  %d / %d active slots", m.snap.Active, m.conc))
+	}
 
 	lines = append(lines, "")
 	lines = append(lines, sectionStyle.Render(" Queue Depth "))
@@ -1438,6 +1450,25 @@ func (m Model) dashboardLines() []string {
 			}
 		}
 		lines = append(lines, summary.String())
+		lines = append(lines, "") // trailing blank before windowing
+	}
+
+	if as := m.snap.Autoscale; as != nil {
+		lines = append(lines, sectionStyle.Render(" Autoscaler (AIMD) "))
+		var asSummary strings.Builder
+		fmt.Fprintf(&asSummary, "  Target: %d  |  Min: %d  |  Max: %d", as.Target, as.Min, as.Max)
+		fmt.Fprintf(&asSummary, "  |  Step: %d  |  Ratio: %.2f", as.IncreaseStep, as.DecreaseRatio)
+		if as.IncreaseCooldown > 0 {
+			fmt.Fprintf(&asSummary, "  |  Cooldown: %s", as.IncreaseCooldown.Truncate(time.Millisecond))
+		}
+		lines = append(lines, asSummary.String())
+		var asStats strings.Builder
+		fmt.Fprintf(&asStats, "  Increases: %d  |  Decreases: %d", as.TotalIncreases, as.TotalDecreases)
+		fmt.Fprintf(&asStats, "  |  429s: %d  |  403 bans: %d", as.Total429s, as.Total403Bans)
+		if as.DecreaseOn5xx {
+			fmt.Fprintf(&asStats, "  |  5xx: %d", as.Total5xxs)
+		}
+		lines = append(lines, asStats.String())
 		lines = append(lines, "") // trailing blank before windowing
 	}
 
@@ -1668,10 +1699,20 @@ func (m Model) renderConcurrency() string {
 
 	b.WriteString(sectionStyle.Render(" Concurrency Gauge "))
 	b.WriteByte('\n')
-	b.WriteString(m.renderGaugeBar(int(m.snap.Active), m.conc, m.gaugeBarWidth()))
-	b.WriteByte('\n')
-	fmt.Fprintf(&b, "  %d / %d active  │  %d queued  │  %.1f req/s\n",
-		m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput)
+	// When autoscaling is active, the gauge is relative to the dynamic
+	// target rather than the static ceiling, and we annotate the label
+	// with the configured maximum.
+	if as := m.snap.Autoscale; as != nil {
+		b.WriteString(m.renderGaugeBar(int(m.snap.Active), as.Target, m.gaugeBarWidth()))
+		b.WriteByte('\n')
+		fmt.Fprintf(&b, "  %d / %d active (max %d)  │  %d queued  │  %.1f req/s\n",
+			m.snap.Active, as.Target, as.Max, m.snap.Queued, m.snap.Throughput)
+	} else {
+		b.WriteString(m.renderGaugeBar(int(m.snap.Active), m.conc, m.gaugeBarWidth()))
+		b.WriteByte('\n')
+		fmt.Fprintf(&b, "  %d / %d active  │  %d queued  │  %.1f req/s\n",
+			m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput)
+	}
 
 	oldestAge := m.oldestQueuedAge()
 	if m.snap.Queued > 0 {

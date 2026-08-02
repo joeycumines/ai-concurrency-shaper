@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/autoscale"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
@@ -884,7 +885,10 @@ func TestResponseWriterCanHijackUnwrapsAndIgnoresRecorderItself(t *testing.T) {
 }
 
 func TestStatusRecorderDefaultStatusZero(t *testing.T) {
-	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+	// A freshly allocated statusRecorder must report status 0. No ResponseWriter
+	// is needed because this test only asserts the zero value of the status
+	// field; supplying one would be an unused write.
+	rec := &statusRecorder{}
 	if rec.status != 0 {
 		t.Errorf("default status = %d, want 0", rec.status)
 	}
@@ -10873,5 +10877,450 @@ func TestProxy_ErrAbortHandler_NoBreakerFailure(t *testing.T) {
 	}
 	if stats.ConsecutiveFailures != 0 {
 		t.Errorf("breaker ConsecutiveFailures = %d, want 0", stats.ConsecutiveFailures)
+	}
+}
+
+// --- Autoscaler Integration Tests ---
+
+// setupAutoscaleTest creates a proxy with an autoscaler wired to the default
+// limiter. The upstream handler controls the response status code. It returns
+// the proxy, the autoscaler, and the limiter so tests can inspect state.
+func setupAutoscaleTest(t *testing.T, upstreamHandler http.HandlerFunc, asMin, asMax, asInitial int) (*Proxy, *autoscale.Autoscaler, *queue.Limiter) {
+	t.Helper()
+	upstream := httptest.NewServer(upstreamHandler)
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	lim := queue.NewLimiterWithCooldown(asMax, 0)
+
+	as, err := autoscale.New(
+		autoscale.WithLimiter(lim),
+		autoscale.WithMin(asMin),
+		autoscale.WithMax(asMax),
+		autoscale.WithInitial(asInitial),
+		autoscale.WithIncreaseStep(1),
+		autoscale.WithDecreaseRatio(0.5),
+		autoscale.WithIncreaseCooldown(0),
+	)
+	if err != nil {
+		t.Fatalf("autoscale.New: %v", err)
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(lim),
+		WithMetrics(met),
+		WithAutoscaler(as),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	return p, as, lim
+}
+
+func TestProxy_AutoscalerOn429Decreases(t *testing.T) {
+	p, as, lim := setupAutoscaleTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}, 1, 8, 8)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d", rec.Code)
+	}
+
+	stats := as.Stats()
+	if stats.Total429s != 1 {
+		t.Errorf("Total429s = %d, want 1", stats.Total429s)
+	}
+	if stats.TotalDecreases != 1 {
+		t.Errorf("TotalDecreases = %d, want 1", stats.TotalDecreases)
+	}
+	// 8 * 0.5 = 4
+	if stats.Target != 4 {
+		t.Errorf("Target = %d, want 4", stats.Target)
+	}
+	if eff := lim.EffectiveLimit(); eff != 4 {
+		t.Errorf("EffectiveLimit = %d, want 4", eff)
+	}
+}
+
+func TestProxy_AutoscalerOnSuccessIncreases(t *testing.T) {
+	p, as, lim := setupAutoscaleTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `ok`)
+	}, 1, 8, 2)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	stats := as.Stats()
+	if stats.TotalSuccesses != 1 {
+		t.Errorf("TotalSuccesses = %d, want 1", stats.TotalSuccesses)
+	}
+	if stats.TotalIncreases != 1 {
+		t.Errorf("TotalIncreases = %d, want 1", stats.TotalIncreases)
+	}
+	// 2 + 1 = 3
+	if stats.Target != 3 {
+		t.Errorf("Target = %d, want 3", stats.Target)
+	}
+	if eff := lim.EffectiveLimit(); eff != 3 {
+		t.Errorf("EffectiveLimit = %d, want 3", eff)
+	}
+}
+
+func TestProxy_AutoscalerNotOnQueueTimeout(t *testing.T) {
+	// Upstream is slow; queue timeout fires before reaching upstream.
+	// Use capacity 1 so the second request actually times out waiting.
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(slow.Close)
+
+	upstreamURL, _ := url.Parse(slow.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	lim := queue.NewLimiterWithCooldown(1, 0)
+
+	// min==max==1: no room to adjust, but the autoscaler is still wired
+	// and its OnSuccess/OnFailure must not fire on a queue timeout.
+	as, err := autoscale.New(
+		autoscale.WithLimiter(lim),
+		autoscale.WithMin(1),
+		autoscale.WithMax(1),
+		autoscale.WithInitial(1),
+	)
+	if err != nil {
+		t.Fatalf("autoscale.New: %v", err)
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(lim),
+		WithMetrics(met),
+		WithQueueTimeout(50*time.Millisecond),
+		WithAutoscaler(as),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	// First request holds the only slot for 2s.
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+	}()
+	time.Sleep(10 * time.Millisecond)
+
+	// Second request times out waiting for a slot.
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504, got %d", rec2.Code)
+	}
+
+	stats := as.Stats()
+	if stats.TotalSuccesses != 0 {
+		t.Errorf("TotalSuccesses = %d, want 0 (queue timeout must not feed autoscaler)", stats.TotalSuccesses)
+	}
+	if stats.TotalDecreases != 0 {
+		t.Errorf("TotalDecreases = %d, want 0 (queue timeout must not feed autoscaler)", stats.TotalDecreases)
+	}
+}
+
+func TestProxy_AutoscalerNotOnClientCancel(t *testing.T) {
+	// Upstream blocks until client cancels.
+	block := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-block
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	t.Cleanup(func() { close(block) })
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	lim := queue.NewLimiterWithCooldown(8, 0)
+
+	as, err := autoscale.New(
+		autoscale.WithLimiter(lim),
+		autoscale.WithMin(1),
+		autoscale.WithMax(8),
+		autoscale.WithInitial(4),
+	)
+	if err != nil {
+		t.Fatalf("autoscale.New: %v", err)
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(lim),
+		WithMetrics(met),
+		WithAutoscaler(as),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	stats := as.Stats()
+	if stats.TotalDecreases != 0 {
+		t.Errorf("TotalDecreases = %d, want 0 (client cancel must not feed autoscaler)", stats.TotalDecreases)
+	}
+	if stats.TotalSuccesses != 0 {
+		t.Errorf("TotalSuccesses = %d, want 0 (client cancel must not feed autoscaler)", stats.TotalSuccesses)
+	}
+}
+
+func TestProxy_AutoscalerSkipsRouteLimiters(t *testing.T) {
+	// Per-route limiter should NOT trigger the autoscaler (wired to default limiter).
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages=2")
+	met := metrics.NewCollector()
+	defaultLimiter := queue.NewLimiterWithCooldown(8, 0)
+	routeLimiter := queue.NewLimiterWithCooldown(2, 0)
+
+	as, err := autoscale.New(
+		autoscale.WithLimiter(defaultLimiter),
+		autoscale.WithMin(1),
+		autoscale.WithMax(8),
+		autoscale.WithInitial(8),
+	)
+	if err != nil {
+		t.Fatalf("autoscale.New: %v", err)
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(defaultLimiter),
+		WithMetrics(met),
+		WithRouteLimiters(map[string]*queue.Limiter{pat.Raw: routeLimiter}),
+		WithAutoscaler(as),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	stats := as.Stats()
+	if stats.Total429s != 0 {
+		t.Errorf("Total429s = %d, want 0 (per-route limiter must not feed autoscaler)", stats.Total429s)
+	}
+	if stats.TotalDecreases != 0 {
+		t.Errorf("TotalDecreases = %d, want 0 (per-route limiter must not feed autoscaler)", stats.TotalDecreases)
+	}
+}
+
+func TestProxy_AutoscalerConverges(t *testing.T) {
+	// Upstream returns 429 when concurrent > 3, 200 when <= 3.
+	var concurrent atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cur := concurrent.Add(1)
+		defer concurrent.Add(-1)
+		if cur > 3 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	lim := queue.NewLimiterWithCooldown(8, 0)
+
+	as, err := autoscale.New(
+		autoscale.WithLimiter(lim),
+		autoscale.WithMin(1),
+		autoscale.WithMax(8),
+		autoscale.WithInitial(8),
+		autoscale.WithIncreaseStep(1),
+		autoscale.WithDecreaseRatio(0.5),
+		autoscale.WithIncreaseCooldown(5*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("autoscale.New: %v", err)
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(lim),
+		WithMetrics(met),
+		WithAutoscaler(as),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	// Fire concurrent requests. After enough 429s, the target should drop.
+	// After enough 200s, it should climb back up. Keep volume modest so the
+	// test completes quickly.
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 8 {
+				req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+				rec := httptest.NewRecorder()
+				p.ServeHTTP(rec, req)
+			}
+		})
+	}
+	wg.Wait()
+
+	stats := as.Stats()
+	// We started at 8. Some 429s should have occurred (upstream rejects > 3).
+	// The target should have decreased at least once.
+	if stats.Total429s == 0 {
+		t.Errorf("expected some 429s, got 0")
+	}
+	if stats.TotalDecreases == 0 {
+		t.Errorf("expected at least 1 decrease, got 0")
+	}
+	// The target must be within [1, 8].
+	if stats.Target < 1 || stats.Target > 8 {
+		t.Errorf("Target = %d, must be in [1, 8]", stats.Target)
+	}
+	// The effective limit must match the target.
+	if eff := lim.EffectiveLimit(); eff != stats.Target {
+		t.Errorf("EffectiveLimit = %d, want %d (must match target)", eff, stats.Target)
+	}
+}
+
+// TestProxy_AutoscalerWithLimitAll_FeedsFromBlanketLimited verifies the
+// cross-feature interaction introduced by merging -limit-all with the AIMD
+// autoscaler. With WithLimitAll(true), a request that does NOT match any
+// limited route is still routed through the default limiter (p.limiter). Since
+// the autoscaler is wired to that same default limiter, the guard
+// `slotLimiter == p.limiter` holds and the upstream 429 must feed
+// autoscaler.OnFailure, decreasing the target. A 200 on a matching route must
+// still increase it. This guards against the merged routing path silently
+// skipping autoscaler feedback for blanket-limited traffic.
+func TestProxy_AutoscalerWithLimitAll_FeedsFromBlanketLimited(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /health is the non-matching (blanket-limited) route; it 429s.
+		// /v1/messages matches the limited route; it 200s.
+		if r.URL.Path == "/health" {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	lim := queue.NewLimiterWithCooldown(8, 0)
+
+	as, err := autoscale.New(
+		autoscale.WithLimiter(lim),
+		autoscale.WithMin(1),
+		autoscale.WithMax(8),
+		autoscale.WithInitial(8),
+		autoscale.WithIncreaseStep(1),
+		autoscale.WithDecreaseRatio(0.5),
+		autoscale.WithIncreaseCooldown(0),
+	)
+	if err != nil {
+		t.Fatalf("autoscale.New: %v", err)
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(lim),
+		WithMetrics(met),
+		WithAutoscaler(as),
+		WithLimitAll(true), // blanket-limit: non-matching routes use p.limiter
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	// 1) Non-matching /health request, blanket-limited through p.limiter,
+	//    returns 429 -> autoscaler must observe a failure and decrease.
+	healthReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	healthRec := httptest.NewRecorder()
+	p.ServeHTTP(healthRec, healthReq)
+	if healthRec.Code != http.StatusTooManyRequests {
+		t.Fatalf("health: expected 429 from upstream, got %d", healthRec.Code)
+	}
+
+	stats := as.Stats()
+	if stats.Total429s != 1 {
+		t.Errorf("after /health 429: Total429s = %d, want 1 (blanket-limited traffic must feed autoscaler)", stats.Total429s)
+	}
+	if stats.TotalDecreases != 1 {
+		t.Errorf("after /health 429: TotalDecreases = %d, want 1", stats.TotalDecreases)
+	}
+	// 8 * 0.5 = 4
+	if stats.Target != 4 {
+		t.Errorf("after /health 429: Target = %d, want 4", stats.Target)
+	}
+	if eff := lim.EffectiveLimit(); eff != 4 {
+		t.Errorf("after /health 429: EffectiveLimit = %d, want 4", eff)
+	}
+
+	// 2) Matching /v1/messages request returns 200 -> autoscaler must
+	//    observe a success and increase back toward 5.
+	msgReq := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	msgRec := httptest.NewRecorder()
+	p.ServeHTTP(msgRec, msgReq)
+	if msgRec.Code != http.StatusOK {
+		t.Fatalf("messages: expected 200 from upstream, got %d", msgRec.Code)
+	}
+
+	stats = as.Stats()
+	if stats.TotalSuccesses != 1 {
+		t.Errorf("after /v1/messages 200: TotalSuccesses = %d, want 1", stats.TotalSuccesses)
+	}
+	if stats.TotalIncreases != 1 {
+		t.Errorf("after /v1/messages 200: TotalIncreases = %d, want 1", stats.TotalIncreases)
+	}
+	// 4 + 1 = 5
+	if stats.Target != 5 {
+		t.Errorf("after /v1/messages 200: Target = %d, want 5", stats.Target)
 	}
 }

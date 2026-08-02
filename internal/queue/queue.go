@@ -33,11 +33,13 @@ import (
 	"time"
 )
 
-// maxAdaptiveSlots is the maximum number of slots that can be withheld by
-// adaptive headroom. The mitigation is intentionally bounded to a single slot:
-// providers that temp-ban for "more than N" concurrent requests typically only
-// need one extra connection of headroom to absorb teardown/accounting races.
-const maxAdaptiveSlots = 1
+// defaultMaxWithheld is the default maximum number of slots that can be
+// withheld by adaptive headroom. The mitigation is intentionally bounded to a
+// single slot: providers that temp-ban for "more than N" concurrent requests
+// typically only need one extra connection of headroom to absorb
+// teardown/accounting races. Callers that need a larger headroom range (e.g.
+// the AIMD autoscaler) can raise it via SetMaxWithheld.
+const defaultMaxWithheld = 1
 
 // Limiter is a concurrency-bounded blocking queue.
 type Limiter struct {
@@ -66,12 +68,22 @@ type Limiter struct {
 	// adaptiveMu guards all adaptive-headroom fields.
 	adaptiveMu sync.Mutex
 	// withheld is the number of slots temporarily removed from circulation.
-	// It is bounded by maxAdaptiveSlots.
+	// It is bounded by maxWithheld.
 	withheld int
-	// absorbNext is true when AdaptiveReduce was unable to remove an idle
-	// token and is instead waiting to absorb the next slot release. It is
-	// cleared when that release is absorbed.
-	absorbNext bool
+	// maxWithheld is the ceiling on how many slots may be withheld at once.
+	// It defaults to defaultMaxWithheld (1) and can be raised via
+	// SetMaxWithheld to support dynamic concurrency controllers that need a
+	// wider adjustment range.
+	maxWithheld int
+	// pendingAbsorbs counts how many withholds were unable to remove an idle
+	// token up front and are instead waiting to absorb future slot releases.
+	// Each Acquire release checks this counter: if positive, the release is
+	// swallowed (the token never returns to the channel) and the counter
+	// decrements. Unlike a single boolean, a counter correctly tracks multiple
+	// simultaneous pending withholds (e.g. an AIMD multiplicative decrease that
+	// removes several slots at once while all slots are in use). It is always
+	// <= withheld.
+	pendingAbsorbs int
 	// adaptiveTimer schedules restoration of a withheld slot. It is reset
 	// (stopped and restarted) on every successful reduction so that a stream
 	// of 429s keeps the headroom active.
@@ -95,8 +107,9 @@ func NewLimiterWithCooldown(limit int, cooldown time.Duration) *Limiter {
 		panic("queue: cooldown must be >= 0")
 	}
 	l := &Limiter{
-		slots:    make(chan struct{}, limit),
-		cooldown: cooldown,
+		slots:       make(chan struct{}, limit),
+		cooldown:    cooldown,
+		maxWithheld: defaultMaxWithheld,
 	}
 	// Pre-fill so the channel already contains `limit` tokens.
 	for range limit {
@@ -146,17 +159,17 @@ func (l *Limiter) Acquire(ctx context.Context) (release func(), err error) {
 	}
 }
 
-// absorbNextRelease consumes the next slot release for adaptive headroom when
-// AdaptiveReduce was unable to remove an idle token up front. It returns true
-// only once per reduction; after the first absorbed release, subsequent
-// releases flow normally until the slot is restored by the timer.
+// absorbNextRelease consumes the next slot release for a pending withhold when
+// the withhold was unable to remove an idle token up front. It returns true
+// once per pending absorb; after all pending absorbs are consumed, releases
+// flow normally until a slot is restored by the timer or RestoreSlot.
 func (l *Limiter) absorbNextRelease() bool {
 	l.adaptiveMu.Lock()
 	defer l.adaptiveMu.Unlock()
-	if !l.absorbNext {
+	if l.pendingAbsorbs <= 0 {
 		return false
 	}
-	l.absorbNext = false
+	l.pendingAbsorbs--
 	return true
 }
 
@@ -168,7 +181,7 @@ func (l *Limiter) absorbNextRelease() bool {
 // It returns false and does nothing if window <= 0 or if the configured
 // limit is already 1 (cannot reduce below one slot). It returns true while
 // a reduction is active or is being refreshed, even when the limiter was
-// already reduced by maxAdaptiveSlots.
+// already reduced by maxWithheld.
 func (l *Limiter) AdaptiveReduce(window time.Duration) bool {
 	if window <= 0 {
 		return false
@@ -180,7 +193,7 @@ func (l *Limiter) AdaptiveReduce(window time.Duration) bool {
 
 	// Refresh an existing reduction first, before the effective-limit guard
 	// would otherwise refuse because limit-withheld == 1.
-	if l.withheld >= maxAdaptiveSlots {
+	if l.withheld >= l.maxWithheld {
 		l.timerEpoch++
 		epoch := l.timerEpoch
 		l.stopAdaptiveTimerLocked()
@@ -194,7 +207,7 @@ func (l *Limiter) AdaptiveReduce(window time.Duration) bool {
 	}
 
 	l.withheld++
-	l.absorbNext = true
+	l.pendingAbsorbs++
 	l.timerEpoch++
 	epoch := l.timerEpoch
 	l.stopAdaptiveTimerLocked()
@@ -203,7 +216,7 @@ func (l *Limiter) AdaptiveReduce(window time.Duration) bool {
 	// the reduction takes effect even before the next release.
 	select {
 	case <-l.slots:
-		l.absorbNext = false
+		l.pendingAbsorbs--
 	default:
 	}
 	return true
@@ -228,18 +241,18 @@ func (l *Limiter) restoreAdaptiveSlot(epoch uint64) {
 	}
 	if l.withheld <= 0 {
 		// No token was actually removed from circulation yet, so there is
-		// nothing to restore. Clear the pending-absorb flag so the next
-		// release flows normally.
-		l.absorbNext = false
+		// nothing to restore. Clear any pending absorbs so future releases
+		// flow normally.
+		l.pendingAbsorbs = 0
 		l.adaptiveMu.Unlock()
 		return
 	}
 	l.withheld--
-	if l.absorbNext {
+	if l.pendingAbsorbs > 0 {
 		// The reduction was pending on a future release that never arrived
-		// within the window. Clear the absorb flag and do not insert a token
-		// because no slot was ever taken out of circulation.
-		l.absorbNext = false
+		// within the window. Clear one pending absorb and do not insert a
+		// token because no slot was ever taken out of circulation.
+		l.pendingAbsorbs--
 		l.adaptiveMu.Unlock()
 		return
 	}
@@ -255,7 +268,7 @@ func (l *Limiter) restoreAdaptiveSlot(epoch uint64) {
 func (l *Limiter) AdaptiveActive() bool {
 	l.adaptiveMu.Lock()
 	defer l.adaptiveMu.Unlock()
-	return l.withheld > 0 || l.absorbNext
+	return l.withheld > 0 || l.pendingAbsorbs > 0
 }
 
 // Withheld returns the number of slots currently withheld from circulation.
@@ -265,20 +278,109 @@ func (l *Limiter) Withheld() int {
 	return l.withheld
 }
 
+// SetMaxWithheld sets the maximum number of slots that may be withheld from
+// circulation simultaneously by WithholdSlot, AdaptiveReduce, and RestoreSlot.
+// The default is 1 (sufficient for the single-slot adaptive headroom
+// mitigation). Dynamic concurrency controllers that need a wider adjustment
+// range (e.g. an AIMD autoscaler) should call this before withholding slots.
+// Setting a value lower than the current withheld count does not retroactively
+// restore slots; it only prevents new withholds until the count drops below the
+// new ceiling.
+func (l *Limiter) SetMaxWithheld(n int) {
+	l.adaptiveMu.Lock()
+	defer l.adaptiveMu.Unlock()
+	if n < 0 {
+		n = 0
+	}
+	l.maxWithheld = n
+}
+
+// MaxWithheld returns the maximum number of slots that may be withheld from
+// circulation at once.
+func (l *Limiter) MaxWithheld() int {
+	l.adaptiveMu.Lock()
+	defer l.adaptiveMu.Unlock()
+	return l.maxWithheld
+}
+
+// WithholdSlot removes one slot from circulation without a timer. It is the
+// non-timer-based counterpart to AdaptiveReduce, designed for dynamic
+// concurrency controllers that manage their own adjustment schedule (e.g. an
+// AIMD autoscaler).
+//
+// If an idle token is available in the channel it is drained immediately. If
+// all slots are currently held, the next release is absorbed instead (via
+// pendingAbsorbs). The effective limit decreases by one on success.
+//
+// It returns false if the limiter is already at its maxWithheld ceiling or if
+// reducing would bring the effective limit below 1. It returns true (even when
+// the reduction is pending on a future release) if the withhold was accepted.
+func (l *Limiter) WithholdSlot() bool {
+	l.adaptiveMu.Lock()
+	defer l.adaptiveMu.Unlock()
+
+	if l.withheld >= l.maxWithheld {
+		return false
+	}
+	if cap(l.slots)-l.withheld <= 1 {
+		return false
+	}
+
+	l.withheld++
+	l.pendingAbsorbs++
+	// If a token is currently idle, remove it from circulation immediately so
+	// the reduction takes effect even before the next release.
+	select {
+	case <-l.slots:
+		l.pendingAbsorbs--
+	default:
+	}
+	return true
+}
+
+// RestoreSlot returns one withheld slot to circulation. It is the counterpart
+// to WithholdSlot. If a withhold is still pending (no token was ever removed
+// from circulation), the pending absorb is cleared instead of inserting a
+// token — no slot was ever taken out, so nothing needs to go back in.
+//
+// If the limiter has no withheld slots, RestoreSlot is a no-op.
+func (l *Limiter) RestoreSlot() {
+	l.adaptiveMu.Lock()
+	if l.withheld <= 0 {
+		// No slot was actually removed from circulation. Clear any stale
+		// pending absorbs so future releases flow normally.
+		l.pendingAbsorbs = 0
+		l.adaptiveMu.Unlock()
+		return
+	}
+	l.withheld--
+	if l.pendingAbsorbs > 0 {
+		// The reduction was pending on a future release that never arrived.
+		// Clear one pending absorb and do not insert a token because no slot
+		// was ever taken out of circulation.
+		l.pendingAbsorbs--
+		l.adaptiveMu.Unlock()
+		return
+	}
+	l.adaptiveMu.Unlock()
+
+	l.slots <- struct{}{}
+	l.totalReleased.Add(1)
+}
+
 // Stats returns a snapshot of the limiter's current state.
 func (l *Limiter) Stats() LimiterStats {
 	l.adaptiveMu.Lock()
 	withheld := int64(l.withheld)
-	absorbPending := l.absorbNext
+	pendingAbsorbs := int64(l.pendingAbsorbs)
 	l.adaptiveMu.Unlock()
 
-	active := int64(cap(l.slots)) - int64(len(l.slots)) - withheld
-	if absorbPending {
-		active++
-	}
-	if active < 0 {
-		active = 0
-	}
+	// active = capacity - idle tokens - withheld + pendingAbsorbs.
+	// pendingAbsorbs counts withholds that have NOT yet removed a token from
+	// the channel, so for each one there is a token that is currently in use
+	// (counts against len(slots) as non-idle) but whose eventual release will
+	// be swallowed. Adding them back corrects the active count.
+	active := max(int64(cap(l.slots))-int64(len(l.slots))-withheld+pendingAbsorbs, 0)
 	return LimiterStats{
 		Active:       active,
 		Waiters:      l.waiters.Load(),
@@ -308,9 +410,9 @@ func (l *Limiter) Limit() int {
 
 // EffectiveLimit returns the configured limit minus any slots currently
 // withheld by adaptive headroom. It represents how many slots may be in use
-// or available at this moment, but note that when absorbNext is true the
-// next release will also be absorbed, so the value may briefly over-report
-// active capacity until that release occurs.
+// or available at this moment, but note that when pendingAbsorbs is nonzero
+// the next releases will also be absorbed, so the value may briefly over-report
+// active capacity until those releases occur.
 func (l *Limiter) EffectiveLimit() int {
 	l.adaptiveMu.Lock()
 	defer l.adaptiveMu.Unlock()
