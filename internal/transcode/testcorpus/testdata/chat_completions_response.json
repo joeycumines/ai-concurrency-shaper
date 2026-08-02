@@ -1,0 +1,36 @@
+{
+  "id": "chatcmpl_8xyz",
+  "object": "chat.completion",
+  "created": 1710000000,
+  "model": "gpt-4.1",
+  "system_fingerprint": "fp_44709d6fcb",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "The weather in Tokyo is 21°C and sunny.",
+        "reasoning": "The user asked about Tokyo weather; I called the weather tool and received temperature 21, conditions sunny.",
+        "reasoning_details": [
+          {
+            "type": "reasoning.text",
+            "text": "The user asked about Tokyo weather; I called the weather tool and received temperature 21, conditions sunny.",
+            "index": 0
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 42,
+    "completion_tokens": 18,
+    "total_tokens": 60,
+    "prompt_tokens_details": {
+      "cached_tokens": 5
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 12
+    }
+  }
+}
