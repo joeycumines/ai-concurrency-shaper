@@ -36,7 +36,6 @@ import (
 const (
 	statusBuckets    = 6
 	maxLogEntries    = 512
-	maxInFlight      = 256
 	throughputWindow = 10 * time.Second
 	throughputSlots  = 100
 )
