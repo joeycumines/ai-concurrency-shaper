@@ -71,49 +71,6 @@ func ConvertResponsesRequestChatRequest(req *ResponsesRequest) *ChatRequest {
 	return out
 }
 
-// ConvertChatRequestResponsesRequest converts a chat completions request to a
-// responses API request. System and developer messages stay in the input as
-// message items; assistant reasoning becomes reasoning items; assistant tool
-// calls become function call items; tool messages become function call output
-// items.
-func ConvertChatRequestResponsesRequest(req *ChatRequest) *ResponsesRequest {
-	if req == nil {
-		return &ResponsesRequest{}
-	}
-	// max_completion_tokens is the modern field; fall back to the legacy
-	// max_tokens when it is absent so client limits are never silently
-	// discarded.
-	maxOutputTokens := req.MaxCompletionTokens
-	if maxOutputTokens == nil {
-		maxOutputTokens = req.MaxTokens
-	}
-	out := &ResponsesRequest{
-		Model:             req.Model,
-		MaxOutputTokens:   maxOutputTokens,
-		Temperature:       req.Temperature,
-		TopP:              req.TopP,
-		Stream:            req.Stream,
-		ParallelToolCalls: req.ParallelToolCalls,
-		Metadata:          req.Metadata,
-		User:              req.User,
-		Store:             req.Store,
-	}
-	if req.StreamOptions != nil {
-		out.StreamOptions = &ResponsesStreamOptions{IncludeUsage: req.StreamOptions.IncludeUsage}
-	}
-	out.Input = chatMessagesResponsesMessages(req.Messages)
-	if req.Reasoning != nil {
-		out.Reasoning = &ResponsesReasoningConfig{Effort: req.Reasoning.Effort}
-	}
-	for i := range req.Tools {
-		if tool := chatToolResponsesTool(&req.Tools[i]); tool != nil {
-			out.Tools = append(out.Tools, *tool)
-		}
-	}
-	out.ToolChoice = chatToolChoiceResponsesToolChoice(req.ToolChoice)
-	return out
-}
-
 // responsesMessagesChatMessages converts input/output items into chat
 // messages. Reasoning is buffered and attached to the next assistant message;
 // consecutive function call items merge into one assistant message carrying
@@ -510,20 +467,6 @@ func responsesToolChatTool(tool *ResponsesTool) *ChatTool {
 	}
 }
 
-// chatToolResponsesTool converts a chat function tool to a responses tool.
-func chatToolResponsesTool(tool *ChatTool) *ResponsesTool {
-	if tool == nil || tool.Type != ChatToolTypeFunction || tool.Function == nil || strings.TrimSpace(tool.Function.Name) == "" {
-		return nil
-	}
-	return &ResponsesTool{
-		Type:        ResponsesToolTypeFunction,
-		Name:        new(tool.Function.Name),
-		Description: tool.Function.Description,
-		Parameters:  tool.Function.Parameters,
-		Strict:      tool.Function.Strict,
-	}
-}
-
 // responsesToolChoiceChatToolChoice converts a responses tool choice to a
 // chat tool choice. String forms pass through; a function-named struct form
 // becomes a chat function choice; anything else is dropped.
@@ -538,25 +481,6 @@ func responsesToolChoiceChatToolChoice(choice *ResponsesToolChoice) *ChatToolCho
 		return &ChatToolChoice{Struct: &ChatToolChoiceStruct{
 			Type:     "function",
 			Function: &ChatToolChoiceFunction{Name: *choice.Struct.Name},
-		}}
-	}
-	return nil
-}
-
-// chatToolChoiceResponsesToolChoice converts a chat tool choice to a
-// responses tool choice. String forms pass through; a function choice becomes
-// a function-named struct form.
-func chatToolChoiceResponsesToolChoice(choice *ChatToolChoice) *ResponsesToolChoice {
-	if choice == nil {
-		return nil
-	}
-	if choice.Str != nil {
-		return &ResponsesToolChoice{Str: choice.Str}
-	}
-	if choice.Struct != nil && choice.Struct.Function != nil && choice.Struct.Function.Name != "" {
-		return &ResponsesToolChoice{Struct: &ResponsesToolChoiceStruct{
-			Type: "function",
-			Name: new(choice.Struct.Function.Name),
 		}}
 	}
 	return nil
@@ -610,49 +534,6 @@ func ConvertChatResponseResponsesResponse(resp *ChatResponse) *ResponsesResponse
 	return out
 }
 
-// ConvertResponsesResponseChatResponse converts a responses API response to a
-// chat completions response. Output items aggregate into chat messages
-// (reasoning attached to assistant messages, tool calls collected); each
-// message becomes one choice. The status drives the finish reason of every
-// choice.
-func ConvertResponsesResponseChatResponse(resp *ResponsesResponse) *ChatResponse {
-	if resp == nil {
-		return &ChatResponse{}
-	}
-	out := &ChatResponse{
-		ID:      resp.ID,
-		Object:  "chat.completion",
-		Created: resp.CreatedAt,
-		Model:   resp.Model,
-	}
-	messages := responsesMessagesChatMessages(resp.Output)
-	if len(messages) > 0 {
-		var finishReason *string
-		if resp.Status != nil {
-			switch *resp.Status {
-			case "completed":
-				if responsesOutputHasFunctionCall(resp.Output) {
-					finishReason = new("tool_calls")
-				} else {
-					finishReason = new("stop")
-				}
-			case "incomplete":
-				finishReason = new("length")
-			case "failed":
-				finishReason = new("content_filter")
-			}
-		}
-		out.Choices = make([]ChatChoice, len(messages))
-		for i := range messages {
-			out.Choices[i] = ChatChoice{Index: i, FinishReason: finishReason, Message: &messages[i]}
-		}
-	}
-	if resp.Usage != nil {
-		out.Usage = responsesUsageChatLLMUsage(resp.Usage)
-	}
-	return out
-}
-
 // chatLLMUsageResponsesUsage maps chat usage to responses usage.
 func chatLLMUsageResponsesUsage(usage *ChatLLMUsage) *ResponsesResponseUsage {
 	out := &ResponsesResponseUsage{
@@ -667,31 +548,4 @@ func chatLLMUsageResponsesUsage(usage *ChatLLMUsage) *ResponsesResponseUsage {
 		out.OutputTokensDetails = &ResponsesResponseOutputTokens{ReasoningTokens: usage.CompletionTokensDetails.ReasoningTokens}
 	}
 	return out
-}
-
-// responsesUsageChatLLMUsage maps responses usage to chat usage.
-func responsesUsageChatLLMUsage(usage *ResponsesResponseUsage) *ChatLLMUsage {
-	out := &ChatLLMUsage{
-		PromptTokens:     usage.InputTokens,
-		CompletionTokens: usage.OutputTokens,
-		TotalTokens:      usage.TotalTokens,
-	}
-	if usage.InputTokensDetails != nil {
-		out.PromptTokensDetails = &ChatPromptTokensDetails{CachedTokens: usage.InputTokensDetails.CachedTokens}
-	}
-	if usage.OutputTokensDetails != nil {
-		out.CompletionTokensDetails = &ChatCompletionTokensDetails{ReasoningTokens: usage.OutputTokensDetails.ReasoningTokens}
-	}
-	return out
-}
-
-// responsesOutputHasFunctionCall reports whether any output item is a
-// function call.
-func responsesOutputHasFunctionCall(output []ResponsesMessage) bool {
-	for i := range output {
-		if output[i].Type != nil && *output[i].Type == ResponsesMessageTypeFunctionCall {
-			return true
-		}
-	}
-	return false
 }

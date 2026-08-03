@@ -144,22 +144,8 @@ func TestConvertResponsesResponseAnthropicResponse(t *testing.T) {
 // event sequence, including reasoning and text item lifecycles, the terminal
 // event, and usage mapping.
 func TestConversionRoundTripConversions(t *testing.T) {
-	chat := mustChatCompletions(t)
 	responses := mustResponses(t)
 	anthropic := mustAnthropic(t)
-
-	// Responses request -> chat request -> responses request.
-	chatReq := transcode.ConvertResponsesRequestChatRequest(&responses.Request)
-	back := transcode.ConvertChatRequestResponsesRequest(chatReq)
-	if back.Model != responses.Request.Model || back.Temperature == nil || *back.Temperature != 0.7 ||
-		back.ToolChoice == nil || back.ToolChoice.Str == nil || *back.ToolChoice.Str != "auto" ||
-		back.Reasoning == nil || back.Reasoning.Effort == nil || *back.Reasoning.Effort != "medium" {
-		t.Errorf("responses round trip = %+v", back)
-	}
-	if len(back.Input) != 2 || back.Input[0].Role == nil || *back.Input[0].Role != transcode.ResponsesMessageRoleSystem ||
-		back.Input[1].Role == nil || *back.Input[1].Role != transcode.ResponsesMessageRoleUser {
-		t.Errorf("responses round trip input = %+v", back.Input)
-	}
 
 	// Anthropic request -> responses request -> anthropic request.
 	responsesReq := transcode.ConvertAnthropicRequestResponsesRequest(&anthropic.Request)
@@ -169,19 +155,6 @@ func TestConversionRoundTripConversions(t *testing.T) {
 	}
 	if len(backAnthropic.Messages) < 2 || backAnthropic.Messages[0].Role != transcode.ChatMessageRoleSystem {
 		t.Errorf("anthropic round trip messages = %+v", backAnthropic.Messages)
-	}
-
-	// Chat response -> responses response -> chat response.
-	responsesResp := transcode.ConvertChatResponseResponsesResponse(&chat.Response)
-	backChat := transcode.ConvertResponsesResponseChatResponse(responsesResp)
-	if backChat.ID != chat.Response.ID || backChat.Model != chat.Response.Model {
-		t.Errorf("chat response round trip envelope = %+v", backChat)
-	}
-	if len(backChat.Choices) != 1 || backChat.Choices[0].Message == nil || backChat.Choices[0].Message.Reasoning == nil {
-		t.Errorf("chat response round trip choices = %+v", backChat.Choices)
-	}
-	if backChat.Usage == nil || backChat.Usage.PromptTokens != 42 || backChat.Usage.CompletionTokens != 18 {
-		t.Errorf("chat response round trip usage = %+v", backChat.Usage)
 	}
 
 	// Responses response -> anthropic response -> responses response.
@@ -354,10 +327,6 @@ func TestConvertRemainingBranches(t *testing.T) {
 	chatReq := transcode.ConvertResponsesRequestChatRequest(&responsesReq)
 	if chatReq.Stream == nil || !*chatReq.Stream || chatReq.StreamOptions == nil || chatReq.StreamOptions.IncludeUsage == nil || !*chatReq.StreamOptions.IncludeUsage {
 		t.Errorf("stream options = %+v", chatReq.StreamOptions)
-	}
-	back := transcode.ConvertChatRequestResponsesRequest(chatReq)
-	if back.StreamOptions == nil || back.StreamOptions.IncludeUsage == nil || !*back.StreamOptions.IncludeUsage {
-		t.Errorf("stream options round trip = %+v", back.StreamOptions)
 	}
 }
 

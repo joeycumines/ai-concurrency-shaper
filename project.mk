@@ -31,4 +31,6 @@ GO_MODULE_SLUGS_NO_BETTERALIGN ?= $(GO_MODULE_SLUGS)
 GO_MODULE_SLUGS_USE_DEADCODE ?= $(GO_MODULE_SLUGS)
 
 # Use .deadcodeignore file for deadcode false-positive filtering
-DEADCODE_IGNORE_PATTERNS_FILE ?= .deadcodeignore
+# N.B. relative to the go module it applies to
+DEADCODE_IGNORE_PATTERNS_FILE = .deadcodeignore
+DEADCODE_ERROR_ON_UNIGNORED = true

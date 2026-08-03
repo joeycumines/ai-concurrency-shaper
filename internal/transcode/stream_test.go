@@ -386,14 +386,8 @@ func TestConvertStreamEventEdgeCases(t *testing.T) {
 	if out := transcode.ConvertResponsesRequestChatRequest(nil); out.Model != "" || out.Messages != nil {
 		t.Errorf("nil responses request = %+v", out)
 	}
-	if out := transcode.ConvertChatRequestResponsesRequest(nil); out.Model != "" {
-		t.Errorf("nil chat request = %+v", out)
-	}
 	if out := transcode.ConvertChatResponseResponsesResponse(nil); out.Object != "" {
 		t.Errorf("nil chat response = %+v", out)
-	}
-	if out := transcode.ConvertResponsesResponseChatResponse(nil); out.Object != "" {
-		t.Errorf("nil responses response = %+v", out)
 	}
 	if out := transcode.ConvertAnthropicRequestResponsesRequest(nil); out.Model != "" {
 		t.Errorf("nil anthropic request = %+v", out)
@@ -487,27 +481,6 @@ func TestConvertStreamTerminalVariants(t *testing.T) {
 	argsDone := toolEvents[len(toolEvents)-3]
 	if argsDone.Type != transcode.ResponsesStreamResponseTypeFunctionCallArgumentsDone || argsDone.Arguments == nil || *argsDone.Arguments != `{"a":1}` {
 		t.Errorf("arguments done = %+v, want accumulated {\"a\":1}", argsDone)
-	}
-}
-
-// TestConvertResponsesResponseChatResponseFailedStatus pins the failed status
-// mapping to the content_filter finish reason.
-func TestConvertResponsesResponseChatResponseFailedStatus(t *testing.T) {
-	resp := transcode.ResponsesResponse{
-		ID:     "resp_1",
-		Object: "response",
-		Model:  "gpt-4.1",
-		Status: new("failed"),
-		Output: []transcode.ResponsesMessage{{
-			ID:      new("msg_1"),
-			Type:    new(transcode.ResponsesMessageTypeMessage),
-			Role:    new(transcode.ResponsesMessageRoleAssistant),
-			Content: &transcode.ResponsesMessageContent{ContentStr: new("")},
-		}},
-	}
-	out := transcode.ConvertResponsesResponseChatResponse(&resp)
-	if len(out.Choices) != 1 || out.Choices[0].FinishReason == nil || *out.Choices[0].FinishReason != "content_filter" {
-		t.Errorf("finish_reason = %+v, want content_filter", out.Choices)
 	}
 }
 
