@@ -147,14 +147,14 @@ func TestConversionRoundTripConversions(t *testing.T) {
 	responses := mustResponses(t)
 	anthropic := mustAnthropic(t)
 
-	// Anthropic request -> responses request -> anthropic request.
+	// Anthropic request -> responses request -> chat request.
 	responsesReq := transcode.ConvertAnthropicRequestResponsesRequest(&anthropic.Request)
-	backAnthropic := transcode.ConvertResponsesRequestChatRequest(responsesReq)
-	if backAnthropic.Model != anthropic.Request.Model {
-		t.Errorf("anthropic round trip model = %q, want %q", backAnthropic.Model, anthropic.Request.Model)
+	backChat := transcode.ConvertResponsesRequestChatRequest(responsesReq)
+	if backChat.Model != anthropic.Request.Model {
+		t.Errorf("chat round trip model = %q, want %q", backChat.Model, anthropic.Request.Model)
 	}
-	if len(backAnthropic.Messages) < 2 || backAnthropic.Messages[0].Role != transcode.ChatMessageRoleSystem {
-		t.Errorf("anthropic round trip messages = %+v", backAnthropic.Messages)
+	if len(backChat.Messages) < 2 || backChat.Messages[0].Role != transcode.ChatMessageRoleSystem {
+		t.Errorf("chat round trip messages = %+v", backChat.Messages)
 	}
 
 	// Responses response -> anthropic response -> responses response.
@@ -310,12 +310,12 @@ func TestConvertRemainingBranches(t *testing.T) {
 		t.Errorf("redacted thinking = %+v", redacted.Input)
 	}
 
-	// An unknown finish reason leaves the status unset.
+	// An unmapped finish reason leaves the status unset.
 	resp := mustChatCompletions(t).Response
-	resp.Choices[0].FinishReason = new("content_filter")
+	resp.Choices[0].FinishReason = new("unknown_reason")
 	unknown := transcode.ConvertChatResponseResponsesResponse(&resp)
 	if unknown.Status != nil {
-		t.Errorf("status = %v, want nil for unknown finish reason", unknown.Status)
+		t.Errorf("status = %v, want nil for unmapped finish reason", unknown.Status)
 	}
 
 	// Stream options pass through both request directions.

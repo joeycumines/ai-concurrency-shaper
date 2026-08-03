@@ -487,12 +487,15 @@ func responsesToolChoiceChatToolChoice(choice *ResponsesToolChoice) *ChatToolCho
 }
 
 // =============================================================================
-// Responses response <-> Chat response
+// Chat response -> Responses response
 // =============================================================================
 
 // ConvertChatResponseResponsesResponse converts a chat completions response
 // to a responses API response. Each choice's message contributes output
-// items; the finish reason of the first choice drives the status.
+// items; the finish reasons of all choices are inspected and incomplete
+// status wins over completed. Unmapped finish reasons are ignored.
+// The non-streaming content_filter mapping mirrors the streaming behavior
+// established by ConvertChatResponseResponsesStreamResponse.
 func ConvertChatResponseResponsesResponse(resp *ChatResponse) *ResponsesResponse {
 	if resp == nil {
 		return &ResponsesResponse{}
@@ -504,24 +507,31 @@ func ConvertChatResponseResponsesResponse(resp *ChatResponse) *ResponsesResponse
 		Model:     resp.Model,
 	}
 	var sawCompleted, sawIncomplete bool
+	var sawContentFilter bool
 	for i := range resp.Choices {
 		choice := &resp.Choices[i]
+		if choice.FinishReason != nil {
+			switch *choice.FinishReason {
+			case "stop", "tool_calls", "function_call":
+				sawCompleted = true
+			case "length":
+				sawIncomplete = true
+			case "content_filter":
+				sawIncomplete = true
+				sawContentFilter = true
+			}
+		}
 		if choice.Message == nil {
 			continue
 		}
 		out.Output = append(out.Output, chatMessagesResponsesMessages([]ChatMessage{*choice.Message})...)
-		if choice.FinishReason != nil {
-			switch *choice.FinishReason {
-			case "stop", "tool_calls":
-				sawCompleted = true
-			case "length":
-				sawIncomplete = true
-			}
-		}
 	}
 	// The incomplete status wins over completed; unmapped finish reasons are
 	// ignored, mirroring the reference behavior.
 	switch {
+	case sawContentFilter:
+		out.Status = new("incomplete")
+		out.IncompleteDetails = json.RawMessage(`{"reason":"content_filter"}`)
 	case sawIncomplete:
 		out.Status = new("incomplete")
 		out.IncompleteDetails = json.RawMessage(`{"reason":"max_output_tokens"}`)

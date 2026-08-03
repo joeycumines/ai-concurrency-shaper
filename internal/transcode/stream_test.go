@@ -405,11 +405,6 @@ func TestConvertStreamEventEdgeCases(t *testing.T) {
 	}
 }
 
-// TestConvertContentOnlyAssistantMessage verifies that a plain assistant
-// message carrying only content survives conversion in both request and
-// response directions (regression: the embedded assistant payload used to be
-// required, silently dropping the most common message shape).
-
 // TestConvertStreamTerminalVariants pins the boundary behaviors of the chat
 // stream conversion: a length terminal carries incomplete details, reasoning
 // deltas after text has opened are ignored, and tool call chunks referencing
