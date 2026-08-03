@@ -90,6 +90,12 @@ func run() error {
 
 		// Transport tuning.
 		upstreamDisableKeepAlives bool
+
+		// Transcoding flags.
+		transcodeRoutes            transcodeRouteFlags
+		transcodeResponsesChat     bool
+		transcodeMessagesChat      bool
+		transcodeMessagesResponses bool
 	)
 
 	flag.StringVar(&bindAddr, "bind", ":8080", "listen address")
@@ -124,6 +130,10 @@ func run() error {
 	flag.BoolVar(&adaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
 	flag.DurationVar(&adaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")
 	flag.BoolVar(&upstreamDisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream; avoids provider-side connection-count concurrency violations")
+	flag.Var(&transcodeRoutes, "transcode-route", "transcode route mapping clientPath=upstreamPath:clientFormat:upstreamFormat (repeatable); formats: responses, chat-completions, messages")
+	flag.BoolVar(&transcodeResponsesChat, "transcode-responses-chat", false, "transcode /v1/responses to /v1/chat/completions (responses <-> chat completions)")
+	flag.BoolVar(&transcodeMessagesChat, "transcode-messages-chat", false, "transcode /v1/messages to /v1/chat/completions (messages <-> chat completions)")
+	flag.BoolVar(&transcodeMessagesResponses, "transcode-messages-responses", false, "transcode /v1/messages to /v1/responses (messages <-> responses)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "ai-concurrency-shaper %s\n\n", version)
@@ -231,7 +241,11 @@ func run() error {
 		DisableKeepAlives:   upstreamDisableKeepAlives,
 	}
 
-	p, err := proxy.New(
+	// Wire transcoding mappings: repeatable -transcode-route values plus the
+	// three preset flags.
+	mappings := buildTranscodeMappings(transcodeRoutes, transcodeResponsesChat, transcodeMessagesChat, transcodeMessagesResponses)
+
+	proxyOpts := []proxy.Option{
 		proxy.WithUpstream(upstream),
 		proxy.WithMatcher(matcher),
 		proxy.WithLimiter(limiter),
@@ -240,7 +254,7 @@ func run() error {
 		proxy.WithGlobalLimiter(globalLimiter),
 		proxy.WithRouteLimiters(routeLimiters),
 		proxy.WithMaxRetries(retryMax),
-		proxy.WithMaxBodyBytes(int64(retryMaxBodyMB)<<20),
+		proxy.WithMaxBodyBytes(int64(retryMaxBodyMB) << 20),
 		proxy.WithRetryWaitMin(retryWaitMin),
 		proxy.WithRetryWaitMax(retryWaitMax),
 		proxy.WithRetryMinDelay(retryMinDelay),
@@ -253,7 +267,15 @@ func run() error {
 		proxy.WithTransport(transport),
 		proxy.WithJournal(j),
 		proxy.WithBreaker(breaker),
-	)
+	}
+	if len(mappings) > 0 {
+		proxyOpts = append(proxyOpts, proxy.WithTranscodeMapping(mappings...))
+		for _, m := range mappings {
+			log.Printf("transcoding %s (%s) -> %s (%s)", m.ClientPath, m.ClientFormat, m.UpstreamPath, m.UpstreamFormat)
+		}
+	}
+
+	p, err := proxy.New(proxyOpts...)
 	if err != nil {
 		return fmt.Errorf("proxy config: %w", err)
 	}

@@ -164,7 +164,7 @@ func AnthropicMessagesFixtures() (AnthropicMessagesFixtureSet, error) {
 func ParseSSEFrames(data []byte) []string {
 	var frames []string
 	var current []byte
-	for _, line := range bytes.Split(data, []byte("\n")) {
+	for line := range bytes.SplitSeq(data, []byte("\n")) {
 		trimmed := bytes.TrimRight(line, "\r")
 		switch {
 		case len(trimmed) == 0:

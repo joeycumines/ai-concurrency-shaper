@@ -15,6 +15,12 @@
 
 # project.mk - project-specific configuration for the Makefile
 
+# Prune the generated scratch/gomod dependency copies from module discovery:
+# they are ephemeral working state (gitignored), and third-party library
+# modules cannot satisfy this project's lint targets (e.g. deadcode requires
+# a main package).
+GO_MODULE_PATHS_EXCLUDE_PATTERNS ?= %/scratch/gomod
+
 # Exclude betteralign and grit from the default tools
 GO_TOOLS ?= $(filter-out $(GO_PKG_BETTERALIGN) $(GO_PKG_GRIT),$(GO_TOOLS_DEFAULT))
 

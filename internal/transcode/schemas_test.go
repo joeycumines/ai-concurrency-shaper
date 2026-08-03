@@ -10,6 +10,8 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/testcorpus"
 )
 
+// Schema, fixture, and SSE parser tests (Task 1).
+
 // mustChatCompletions loads the chat completions fixture set, failing the test
 // on any load error.
 func mustChatCompletions(t *testing.T) testcorpus.ChatCompletionsFixtureSet {
@@ -473,7 +475,7 @@ func TestChatMessageContentUnion(t *testing.T) {
 	}
 
 	// Both forms set must fail to marshal.
-	bad := transcode.ChatMessageContent{ContentStr: strptr("x"), ContentBlocks: []transcode.ChatContentBlock{{Type: transcode.ChatContentBlockTypeText}}}
+	bad := transcode.ChatMessageContent{ContentStr: new("x"), ContentBlocks: []transcode.ChatContentBlock{{Type: transcode.ChatContentBlockTypeText}}}
 	if _, err := json.Marshal(bad); err == nil {
 		t.Error("marshal with both forms set: want error")
 	}
@@ -539,11 +541,11 @@ func TestResponsesContentUnions(t *testing.T) {
 	if !strings.Contains(string(out), `"output_text"`) {
 		t.Errorf("blocks output marshaled as %s", out)
 	}
-	badOutput := transcode.ResponsesToolMessageOutput{Str: strptr("x"), Blocks: []transcode.ResponsesMessageContentBlock{{Type: transcode.ResponsesMessageContentBlockTypeOutputText}}}
+	badOutput := transcode.ResponsesToolMessageOutput{Str: new("x"), Blocks: []transcode.ResponsesMessageContentBlock{{Type: transcode.ResponsesMessageContentBlockTypeOutputText}}}
 	if _, err := json.Marshal(badOutput); err == nil {
 		t.Error("marshal tool output with both forms set: want error")
 	}
-	badContent := transcode.ResponsesMessageContent{ContentStr: strptr("x"), ContentBlocks: []transcode.ResponsesMessageContentBlock{{Type: transcode.ResponsesMessageContentBlockTypeOutputText}}}
+	badContent := transcode.ResponsesMessageContent{ContentStr: new("x"), ContentBlocks: []transcode.ResponsesMessageContentBlock{{Type: transcode.ResponsesMessageContentBlockTypeOutputText}}}
 	if _, err := json.Marshal(badContent); err == nil {
 		t.Error("marshal content with both forms set: want error")
 	}
@@ -568,7 +570,7 @@ func TestResponsesContentUnions(t *testing.T) {
 	if !strings.Contains(string(out), `"name":"get_weather"`) {
 		t.Errorf("struct tool choice marshaled as %s", out)
 	}
-	bad := transcode.ResponsesToolChoice{Str: strptr("auto"), Struct: &transcode.ResponsesToolChoiceStruct{Type: "function"}}
+	bad := transcode.ResponsesToolChoice{Str: new("auto"), Struct: &transcode.ResponsesToolChoiceStruct{Type: "function"}}
 	if _, err := json.Marshal(bad); err == nil {
 		t.Error("marshal with both forms set: want error")
 	}
@@ -605,7 +607,7 @@ func TestChatToolChoiceUnion(t *testing.T) {
 	}
 
 	// Both forms set must fail to marshal.
-	bad := transcode.ChatToolChoice{Str: strptr("required"), Struct: &transcode.ChatToolChoiceStruct{Type: "function", Function: &transcode.ChatToolChoiceFunction{Name: "f"}}}
+	bad := transcode.ChatToolChoice{Str: new("required"), Struct: &transcode.ChatToolChoiceStruct{Type: "function", Function: &transcode.ChatToolChoiceFunction{Name: "f"}}}
 	if _, err := json.Marshal(bad); err == nil {
 		t.Error("marshal with both forms set: want error")
 	}
@@ -650,7 +652,7 @@ func TestAnthropicContentUnion(t *testing.T) {
 	if content.ContentStr != nil || len(content.ContentBlocks) != 1 || content.ContentBlocks[0].Type != transcode.AnthropicContentBlockTypeText {
 		t.Errorf("blocks content decoded as %+v", content)
 	}
-	bad := transcode.AnthropicContent{ContentStr: strptr("x"), ContentBlocks: []transcode.AnthropicContentBlock{{Type: transcode.AnthropicContentBlockTypeText}}}
+	bad := transcode.AnthropicContent{ContentStr: new("x"), ContentBlocks: []transcode.AnthropicContentBlock{{Type: transcode.AnthropicContentBlockTypeText}}}
 	if _, err := json.Marshal(bad); err == nil {
 		t.Error("marshal with both forms set: want error")
 	}
@@ -743,4 +745,63 @@ func TestParseSSEFrames(t *testing.T) {
 	}
 }
 
-func strptr(s string) *string { return &s }
+// Shared test helpers used by all transcode test files.
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// TestConvertStreamEventEdgeCases verifies the skip and passthrough branches
+// of the anthropic stream event conversion: ping and error events pass
+// through, lifecycle events with missing payloads are skipped, unknown event
+// types are skipped, and duplicate terminal events are dropped.
+
+// TestUnionUnmarshalNull verifies that JSON null decodes to the nil form for
+// every custom union unmarshaler (a null that became an empty string would
+// marshal upstream as "" and be rejected).
+func TestUnionUnmarshalNull(t *testing.T) {
+	unmarshalNull := func(v any) error { return json.Unmarshal([]byte(`null`), v) }
+
+	var anthropicContent transcode.AnthropicContent
+	if err := unmarshalNull(&anthropicContent); err != nil {
+		t.Fatalf("anthropic content null: %v", err)
+	}
+	if anthropicContent.ContentStr != nil || anthropicContent.ContentBlocks != nil {
+		t.Errorf("anthropic content null decoded as %+v", anthropicContent)
+	}
+
+	var chatChoice transcode.ChatToolChoice
+	if err := unmarshalNull(&chatChoice); err != nil {
+		t.Fatalf("chat tool choice null: %v", err)
+	}
+	if chatChoice.Str != nil || chatChoice.Struct != nil {
+		t.Errorf("chat tool choice null decoded as %+v", chatChoice)
+	}
+
+	var responsesContent transcode.ResponsesMessageContent
+	if err := unmarshalNull(&responsesContent); err != nil {
+		t.Fatalf("responses content null: %v", err)
+	}
+	if responsesContent.ContentStr != nil || responsesContent.ContentBlocks != nil {
+		t.Errorf("responses content null decoded as %+v", responsesContent)
+	}
+
+	var output transcode.ResponsesToolMessageOutput
+	if err := unmarshalNull(&output); err != nil {
+		t.Fatalf("tool output null: %v", err)
+	}
+	if output.Str != nil || output.Blocks != nil {
+		t.Errorf("tool output null decoded as %+v", output)
+	}
+
+	var responsesChoice transcode.ResponsesToolChoice
+	if err := unmarshalNull(&responsesChoice); err != nil {
+		t.Fatalf("responses tool choice null: %v", err)
+	}
+	if responsesChoice.Str != nil || responsesChoice.Struct != nil {
+		t.Errorf("responses tool choice null decoded as %+v", responsesChoice)
+	}
+}

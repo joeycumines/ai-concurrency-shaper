@@ -40,6 +40,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/retry"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
 // --- Option Interface ---
@@ -73,7 +74,48 @@ type proxyConfig struct {
 	adaptiveHeadroom       bool
 	adaptiveHeadroomWindow time.Duration
 	limitAll               bool
+	transcodeMappings      []TranscodeMapping
 }
+
+// TranscodeMapping maps a client route to an upstream route with wire format
+// conversion between the two.
+type TranscodeMapping struct {
+	// ClientPath is the client-facing route path, e.g. "/v1/responses".
+	ClientPath string
+	// UpstreamPath is the upstream route path, e.g. "/v1/chat/completions".
+	UpstreamPath string
+	// ClientFormat is the wire format of client payloads.
+	ClientFormat transcode.Format
+	// UpstreamFormat is the wire format of upstream payloads.
+	UpstreamFormat transcode.Format
+}
+
+// TranscodeOption configures transcoding route mappings.
+type TranscodeOption struct {
+	mappings []TranscodeMapping
+}
+
+// WithTranscodeMapping returns an option that registers transcoding route
+// mappings. Unsupported format pairs are rejected.
+func WithTranscodeMapping(mappings ...TranscodeMapping) *TranscodeOption {
+	return &TranscodeOption{mappings: mappings}
+}
+
+func (o *TranscodeOption) applyProxyOption(cfg *proxyConfig) error {
+	for i := range o.mappings {
+		m := &o.mappings[i]
+		if m.ClientPath == "" || m.UpstreamPath == "" {
+			return errors.New("proxy: transcode mapping paths must not be empty")
+		}
+		if !transcode.SupportedFormatPair(m.ClientFormat, m.UpstreamFormat) {
+			return fmt.Errorf("proxy: unsupported transcode format pair %q -> %q", m.ClientFormat, m.UpstreamFormat)
+		}
+	}
+	cfg.transcodeMappings = append(cfg.transcodeMappings, o.mappings...)
+	return nil
+}
+
+var _ Option = (*TranscodeOption)(nil)
 
 // --- Concrete Options ---
 
@@ -543,6 +585,9 @@ type Proxy struct {
 	// limitAll routes every request through the default limiter, not just
 	// requests matching a limited route.
 	limitAll bool
+
+	// transcodeHandlers serves transcoded routes, one per mapping.
+	transcodeHandlers []*transcode.TranscodeHandler
 }
 
 // New creates a Proxy from the given options.
@@ -570,6 +615,17 @@ func New(opts ...Option) (*Proxy, error) {
 	}
 	if err := validateRetryTransportBreaker(cfg.transport, cfg.breaker, cfg.maxRetries); err != nil {
 		return nil, err
+	}
+
+	// Reject duplicate transcode client paths: the first matching handler
+	// would silently win.
+	seenTranscodePaths := make(map[string]struct{}, len(cfg.transcodeMappings))
+	for i := range cfg.transcodeMappings {
+		clientPath := cfg.transcodeMappings[i].ClientPath
+		if _, dup := seenTranscodePaths[clientPath]; dup {
+			return nil, fmt.Errorf("proxy: duplicate transcode client path %q", clientPath)
+		}
+		seenTranscodePaths[clientPath] = struct{}{}
 	}
 
 	// Build retry transport when retries are enabled.
@@ -640,6 +696,23 @@ func New(opts ...Option) (*Proxy, error) {
 		adaptiveHeadroom:       cfg.adaptiveHeadroom,
 		adaptiveHeadroomWindow: cfg.adaptiveHeadroomWindow,
 		limitAll:               cfg.limitAll,
+	}
+
+	// Build one transcode handler per mapping, each forwarding through the
+	// proxy engine (the retry/breaker-aware transport).
+	for i := range cfg.transcodeMappings {
+		m := &cfg.transcodeMappings[i]
+		p.transcodeHandlers = append(p.transcodeHandlers, transcode.NewTranscodeHandler(
+			transcode.HandlerConfig{
+				ClientPath:     m.ClientPath,
+				UpstreamPath:   m.UpstreamPath,
+				ClientFormat:   m.ClientFormat,
+				UpstreamFormat: m.UpstreamFormat,
+				Upstream:       cfg.upstream,
+				MaxBodyBytes:   cfg.maxBodyBytes,
+			},
+			p.RoundTrip,
+		))
 	}
 
 	rp := &httputil.ReverseProxy{
@@ -994,6 +1067,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = reqBodyReader
 	}
 
+	// Dispatch to the admission paths. Transcoded routes are dispatched
+	// inside serveLimited/servePassthrough (via lookupTranscodeHandler) so they
+	// are bounded exactly like ordinary requests: limited routes acquire the
+	// per-route and global limiter slots, and passthrough routes honor the
+	// global limiter.
 	if limited {
 		p.serveLimited(rec, r, flightID)
 	} else {
@@ -1001,6 +1079,17 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	finalize(recPtr != nil && recPtr.aborted)
+}
+
+// lookupTranscodeHandler returns the transcode handler mapped to the request
+// path, or nil when the route is not transcoded.
+func (p *Proxy) lookupTranscodeHandler(r *http.Request) http.Handler {
+	for i := range p.transcodeHandlers {
+		if r.URL.Path == p.transcodeHandlers[i].ClientPath() {
+			return p.transcodeHandlers[i]
+		}
+	}
+	return nil
 }
 
 func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightID uint64) {
@@ -1179,7 +1268,11 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 				localPanic = true
 			}
 		}()
-		p.inner.ServeHTTP(w, r)
+		if handler := p.lookupTranscodeHandler(r); handler != nil {
+			handler.ServeHTTP(w, r)
+		} else {
+			p.inner.ServeHTTP(w, r)
+		}
 	}()
 	if p.handleSuppressedAbort(w, r, attemptState.started.Load(), retryAttempt, proxyStart, breakerEpoch) {
 		upstreamAbortFailure = true
@@ -1496,7 +1589,11 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 				localPanic = true
 			}
 		}()
-		p.inner.ServeHTTP(w, r)
+		if handler := p.lookupTranscodeHandler(r); handler != nil {
+			handler.ServeHTTP(w, r)
+		} else {
+			p.inner.ServeHTTP(w, r)
+		}
 	}()
 	if p.handleSuppressedAbort(w, r, attemptState.started.Load(), retryAttempt, proxyStart, breakerEpoch) {
 		upstreamAbortFailure = true
