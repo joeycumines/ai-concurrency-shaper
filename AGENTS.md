@@ -57,7 +57,3 @@ All streaming request/response proxying inside `TranscodeHandler` uses `stream.P
 The handler translates SSE incrementally: it parses upstream `data:` frames, converts each event structure through a stateful accumulator (`ChatResponsesStreamState` / `AnthropicResponsesStreamState`), writes the translated frame as `data: {...}\n\n`, and flushes immediately via `http.Flusher`. Terminal events (`[DONE]`, `message_stop`) are flushed on upstream EOF before the stream closes. Malformed SSE lines are skipped safely without dropping the connection.
 
 `stream.Proxy` aborts and returns as soon as the passed context is cancelled; it does not itself close the remote side in that case. The handler therefore cancels the upstream request context on `r.Context().Done()`, which releases the upstream connection.
-
-### Naming conventions
-
-Preposition-free naming is mandatory for all Go exported/unexported identifiers and CLI flags — no prepositions (`to`, `from`, `in`, `on`, `for`, `with`, `by`, `of`, `at`) in symbol names. Canonical examples: `ConvertResponsesRequestChatRequest`, `ConvertChatResponseResponsesResponse`, `ConvertAnthropicRequestResponsesRequest`, `ChatResponsesStreamState`, `AnthropicResponsesStreamState`, `WithTranscodeMapping`, `-transcode-responses-chat`. Exemptions: JSON wire tags, and identifiers that mirror upstream API field or event names (`CreatedAt` for `created_at`, `ResponsesStreamResponseTypeInProgress` for `response.in_progress`) or that the plan mandates verbatim (`WithTranscodeMapping`).
