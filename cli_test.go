@@ -62,7 +62,7 @@ func (b *lockedBuffer) String() string {
 // from the buffer, splitting by newlines to avoid capturing trailing
 // log output or TUI artifacts into the address.
 func parseListeningAddr(buf *lockedBuffer) string {
-	for _, line := range strings.Split(buf.String(), "\n") {
+	for line := range strings.SplitSeq(buf.String(), "\n") {
 		if _, after, ok := strings.Cut(line, "listening on "); ok {
 			return strings.TrimSpace(after)
 		}
