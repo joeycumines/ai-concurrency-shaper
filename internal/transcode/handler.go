@@ -260,8 +260,10 @@ type convertingReader struct {
 	br   *bufio.Reader
 	conv frameConverter
 
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	readErr error // cached read error; prevents redundant fill() calls after EOF
+	eof     bool  // latches EOF to prevent repeated fill() calls after stream end
 }
 
 // Read returns the next converted bytes.
@@ -269,9 +271,19 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.buf.Len() == 0 {
+		if r.readErr != nil {
+			return 0, r.readErr
+		}
+		if r.eof {
+			return 0, io.EOF
+		}
 		err := r.fill()
 		if r.buf.Len() == 0 && err != nil {
+			r.readErr = err
 			return 0, err
+		}
+		if err == io.EOF {
+			r.eof = true
 		}
 	}
 	return r.buf.Read(p)
@@ -309,19 +321,17 @@ func (r *convertingReader) fill() error {
 	return nil
 }
 
-// writeSSEFrame writes one SSE event: an event line carrying the payload's
-// type (when present) followed by the data line and the blank-line terminator.
-func writeSSEFrame(buf *bytes.Buffer, frame []byte) {
-	var envelope struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(frame, &envelope) == nil && envelope.Type != "" {
+// writeSSEFrame writes one SSE event from a frameEvent: an event line
+// carrying the frame's Type (when present) followed by the data line and
+// the blank-line terminator.
+func writeSSEFrame(buf *bytes.Buffer, f frameEvent) {
+	if f.Type != "" {
 		buf.WriteString("event: ")
-		buf.WriteString(envelope.Type)
+		buf.WriteString(f.Type)
 		buf.WriteString("\n")
 	}
 	buf.WriteString("data: ")
-	buf.Write(frame)
+	buf.Write(f.Data)
 	buf.WriteString("\n\n")
 }
 
@@ -365,11 +375,16 @@ func (s *upstreamStream) Write(p []byte) (int, error) { return len(p), nil }
 func (s *upstreamStream) Close() error { return nil }
 
 // frameConverter converts upstream data frames to client data frames.
+type frameEvent struct {
+	Type string
+	Data []byte
+}
+
 type frameConverter interface {
-	Convert(frame []byte) ([][]byte, error)
+	Convert(frame []byte) ([]frameEvent, error)
 	// Terminal returns any final frames to emit when the upstream stream
 	// ends without a further data frame. May return nil.
-	Terminal() [][]byte
+	Terminal() []frameEvent
 }
 
 // newFrameConverter returns the converter for the upstream-to-client format
@@ -395,7 +410,7 @@ type chatResponsesFrameConverter struct {
 	state ChatResponsesStreamState
 }
 
-func (c *chatResponsesFrameConverter) Convert(frame []byte) ([][]byte, error) {
+func (c *chatResponsesFrameConverter) Convert(frame []byte) ([]frameEvent, error) {
 	if string(frame) == "[DONE]" {
 		// [DONE] is the explicit terminal marker: release the held-back
 		// terminal event now rather than waiting for the connection to close
@@ -411,7 +426,7 @@ func (c *chatResponsesFrameConverter) Convert(frame []byte) ([][]byte, error) {
 }
 
 // Terminal emits the terminal event held back for a trailing usage chunk.
-func (c *chatResponsesFrameConverter) Terminal() [][]byte {
+func (c *chatResponsesFrameConverter) Terminal() []frameEvent {
 	return marshalResponsesEvents(c.state.Terminal())
 }
 
@@ -421,7 +436,7 @@ type responsesAnthropicFrameConverter struct {
 	state AnthropicResponsesStreamState
 }
 
-func (c *responsesAnthropicFrameConverter) Convert(frame []byte) ([][]byte, error) {
+func (c *responsesAnthropicFrameConverter) Convert(frame []byte) ([]frameEvent, error) {
 	var event ResponsesStreamResponse
 	if err := json.Unmarshal(frame, &event); err != nil {
 		return nil, nil
@@ -429,7 +444,7 @@ func (c *responsesAnthropicFrameConverter) Convert(frame []byte) ([][]byte, erro
 	return marshalAnthropicEvents(c.state.ConvertResponsesStreamResponseAnthropicStreamEvent(&event)), nil
 }
 
-func (c *responsesAnthropicFrameConverter) Terminal() [][]byte { return nil }
+func (c *responsesAnthropicFrameConverter) Terminal() []frameEvent { return nil }
 
 // chatAnthropicFrameConverter composes the chat-to-responses and
 // responses-to-anthropic converters.
@@ -438,14 +453,14 @@ type chatAnthropicFrameConverter struct {
 	anthropic *responsesAnthropicFrameConverter
 }
 
-func (c *chatAnthropicFrameConverter) Convert(frame []byte) ([][]byte, error) {
+func (c *chatAnthropicFrameConverter) Convert(frame []byte) ([]frameEvent, error) {
 	responsesFrames, err := c.chat.Convert(frame)
 	if err != nil || len(responsesFrames) == 0 {
 		return nil, err
 	}
-	var out [][]byte
+	var out []frameEvent
 	for _, rf := range responsesFrames {
-		anthropicFrames, err := c.anthropic.Convert(rf)
+		anthropicFrames, err := c.anthropic.Convert(rf.Data)
 		if err != nil {
 			return nil, err
 		}
@@ -456,37 +471,37 @@ func (c *chatAnthropicFrameConverter) Convert(frame []byte) ([][]byte, error) {
 
 // Terminal forwards the terminal responses events through the anthropic
 // converter.
-func (c *chatAnthropicFrameConverter) Terminal() [][]byte {
+func (c *chatAnthropicFrameConverter) Terminal() []frameEvent {
 	responsesFrames := c.chat.Terminal()
-	if len(responsesFrames) == 0 {
-		return nil
-	}
-	var out [][]byte
+
+	var out []frameEvent
 	for _, rf := range responsesFrames {
-		anthropicFrames, err := c.anthropic.Convert(rf)
+		anthropicFrames, err := c.anthropic.Convert(rf.Data)
 		if err != nil {
-			continue
+			return out
 		}
 		out = append(out, anthropicFrames...)
 	}
+	// Append any intrinsic anthropic terminal events (e.g. message_stop).
+	out = append(out, c.anthropic.Terminal()...)
 	return out
 }
 
-func marshalResponsesEvents(events []ResponsesStreamResponse) [][]byte {
-	out := make([][]byte, 0, len(events))
+func marshalResponsesEvents(events []ResponsesStreamResponse) []frameEvent {
+	out := make([]frameEvent, 0, len(events))
 	for i := range events {
 		if b, err := json.Marshal(&events[i]); err == nil {
-			out = append(out, b)
+			out = append(out, frameEvent{Type: string(events[i].Type), Data: b})
 		}
 	}
 	return out
 }
 
-func marshalAnthropicEvents(events []AnthropicStreamEvent) [][]byte {
-	out := make([][]byte, 0, len(events))
+func marshalAnthropicEvents(events []AnthropicStreamEvent) []frameEvent {
+	out := make([]frameEvent, 0, len(events))
 	for i := range events {
 		if b, err := json.Marshal(&events[i]); err == nil {
-			out = append(out, b)
+			out = append(out, frameEvent{Type: string(events[i].Type), Data: b})
 		}
 	}
 	return out

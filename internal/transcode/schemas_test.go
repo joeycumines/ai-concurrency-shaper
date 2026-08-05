@@ -754,11 +754,6 @@ func derefStr(s *string) string {
 	return *s
 }
 
-// TestConvertStreamEventEdgeCases verifies the skip and passthrough branches
-// of the anthropic stream event conversion: ping and error events pass
-// through, lifecycle events with missing payloads are skipped, unknown event
-// types are skipped, and duplicate terminal events are dropped.
-
 // TestUnionUnmarshalNull verifies that JSON null decodes to the nil form for
 // every custom union unmarshaler (a null that became an empty string would
 // marshal upstream as "" and be rejected).

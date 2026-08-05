@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -326,9 +327,16 @@ func run() error {
 
 	srv := &http.Server{Addr: bindAddr, Handler: p}
 
+	ln, err := net.Listen("tcp", bindAddr)
+	if err != nil {
+		return fmt.Errorf("bind %s: %w", bindAddr, err)
+	}
+	defer ln.Close()
+	log.Printf("listening on %s", ln.Addr().String())
+
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()

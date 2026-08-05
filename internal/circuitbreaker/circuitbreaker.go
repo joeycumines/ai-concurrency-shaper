@@ -748,10 +748,10 @@ func (b *Breaker) currentPenaltyLocked() time.Duration {
 	// longer than the configured maximum.
 	//
 	// Cap consecutive before multiplication to prevent int64 overflow.
-	// Without this, basePenalty * Duration(1+consecutive) overflows when
+	// Without this, basePenalty * Duration(consecutive) overflows when
 	// consecutive is extremely large (~4.6B), producing a negative Duration
 	// that min() treats as 0 — violating the guarantee that the penalty is
-	// always at least basePenalty. The cap ensures the scaled value can
+	// never negative. The cap ensures the scaled value can
 	// never exceed maxPenalty through legitimate scaling.
 	c := b.consecutive
 	if c > 0 {
@@ -760,7 +760,7 @@ func (b *Breaker) currentPenaltyLocked() time.Duration {
 			c = maxConsecutive
 		}
 	}
-	scaled := b.cfg.basePenalty * time.Duration(1+c)
+	scaled := b.cfg.basePenalty * time.Duration(c)
 	penalty := min(max(b.lastRetryAfter, scaled), b.cfg.maxPenalty)
 	return penalty
 }

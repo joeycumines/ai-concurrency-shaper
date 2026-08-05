@@ -590,10 +590,10 @@ func TestConvertResponsesStreamResponseAnthropicStreamEventUnsupportedItem(t *te
 		Type:     transcode.ResponsesStreamResponseTypeCreated,
 		Response: &transcode.ResponsesResponse{ID: "resp_1", Model: "gpt-4.1"},
 	})
-	// An unsupported item type (e.g. refusal item) must produce no events.
+	// An unsupported item type (e.g. item_reference) must produce no events.
 	if events := state.ConvertResponsesStreamResponseAnthropicStreamEvent(&transcode.ResponsesStreamResponse{
 		Type: transcode.ResponsesStreamResponseTypeOutputItemAdded,
-		Item: &transcode.ResponsesMessage{ID: new("ref_1"), Type: new(transcode.ResponsesMessageTypeRefusal)},
+		Item: &transcode.ResponsesMessage{ID: new("ref_1"), Type: new(transcode.ResponsesMessageTypeItemReference)},
 	}); events != nil {
 		t.Errorf("unsupported item events = %+v, want none", events)
 	}

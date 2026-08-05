@@ -68,6 +68,14 @@ func (s *AnthropicResponsesStreamState) ConvertResponsesStreamResponseAnthropicS
 			return nil
 		}
 		switch *event.Item.Type {
+		case ResponsesMessageTypeRefusal:
+			// Refusal items stream as text deltas through the open
+			// text block; the refusal text is the content.
+			index := s.nextBlock
+			s.nextBlock++
+			s.blockIndex[*event.Item.ID] = index
+			block := AnthropicContentBlock{Type: AnthropicContentBlockTypeText, Text: new("")}
+			return []AnthropicStreamEvent{{Type: AnthropicStreamEventTypeContentBlockStart, Index: new(index), ContentBlock: &block}}
 		case ResponsesMessageTypeMessage:
 			index := s.nextBlock
 			s.nextBlock++

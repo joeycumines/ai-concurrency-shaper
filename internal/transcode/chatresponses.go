@@ -228,6 +228,15 @@ func responsesMessagesChatMessages(items []ResponsesMessage) []ChatMessage {
 		}
 	}
 	flushToolCalls()
+	if pendingReasoning != nil || len(pendingDetails) > 0 {
+		msg := ChatMessage{
+			Role:                 ChatMessageRoleAssistant,
+			ChatAssistantMessage: &ChatAssistantMessage{},
+		}
+		msg.Reasoning = trimmedReasoning(pendingReasoning)
+		msg.ReasoningDetails = pendingDetails
+		messages = append(messages, msg)
+	}
 	return messages
 }
 

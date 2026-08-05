@@ -21,7 +21,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"syscall"
 	"testing"
 	"time"
 
@@ -87,14 +86,15 @@ func TestSubprocessTerminalIsolation(t *testing.T) {
 		"-tui",
 	)
 	// Apply the same isolation as TestTUIExitsOnBindFailure:
-	// /dev/null stdin + new session to prevent terminal access.
+	// /dev/null stdin + isolateSubprocess to prevent terminal access.
+	// On Unix this creates a new session (Setsid); on Windows it is a no-op.
 	stdinR, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatalf("open /dev/null: %v", err)
 	}
 	defer stdinR.Close()
 	cmd.Stdin = stdinR
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	isolateSubprocess(cmd)
 
 	_, _ = cmd.CombinedOutput()
 

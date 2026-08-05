@@ -11,7 +11,7 @@ var nextItemID atomic.Uint64
 
 // newItemID returns a fresh synthetic item identifier with the given prefix,
 // e.g. "msg_1". Identifiers are unique per process and stable per conversion
-// order, which keeps generated payloads deterministic in tests.
+// order (atomic counter; tests needing exact ids must control order or reset).
 func newItemID(prefix string) string {
 	return prefix + strconv.FormatUint(nextItemID.Add(1), 10)
 }
@@ -49,13 +49,17 @@ func responsesRoleChatRole(role *ResponsesMessageRoleType) ChatMessageRole {
 func chatRoleResponsesRole(role ChatMessageRole) *ResponsesMessageRoleType {
 	switch role {
 	case ChatMessageRoleAssistant:
-		return new(ResponsesMessageRoleAssistant)
+		v := ResponsesMessageRoleAssistant
+		return &v
 	case ChatMessageRoleSystem:
-		return new(ResponsesMessageRoleSystem)
+		v := ResponsesMessageRoleSystem
+		return &v
 	case ChatMessageRoleDeveloper:
-		return new(ResponsesMessageRoleDeveloper)
+		v := ResponsesMessageRoleDeveloper
+		return &v
 	default:
-		return new(ResponsesMessageRoleUser)
+		v := ResponsesMessageRoleUser
+		return &v
 	}
 }
 
@@ -83,13 +87,13 @@ func derefStr(s *string) string {
 	return *s
 }
 
-// trimmedReasoning returns s with trailing newlines removed, or nil when s is
-// nil or empty after trimming.
+// trimmedReasoning returns s with trailing newlines and carriage
+// returns removed, or nil when s is nil or empty after trimming.
 func trimmedReasoning(s *string) *string {
 	if s == nil {
 		return nil
 	}
-	trimmed := strings.TrimRight(*s, "\n")
+	trimmed := strings.TrimRight(*s, "\r\n")
 	if trimmed == "" {
 		return nil
 	}

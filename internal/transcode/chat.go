@@ -278,6 +278,9 @@ type ChatCompletionTokensDetails struct {
 }
 
 // ChatLLMUsage is the token usage of a chat completion.
+// PromptTokens and CompletionTokens are omitted when zero;
+// the always-on-wire fields are the sub-fields
+// (CachedTokens/ReasoningTokens).
 type ChatLLMUsage struct {
 	PromptTokens            int                          `json:"prompt_tokens,omitempty"`
 	CompletionTokens        int                          `json:"completion_tokens,omitempty"`

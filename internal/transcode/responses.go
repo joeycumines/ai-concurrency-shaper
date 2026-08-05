@@ -63,6 +63,12 @@ type ResponsesMessageContentBlock struct {
 	ImageURL *string `json:"image_url,omitempty"`
 	// ImageData is the raw image_data payload of an input_image block.
 	ImageData json.RawMessage `json:"image_data,omitempty"`
+	// FileID is the ID of an input_file block.
+	FileID *string `json:"file_id,omitempty"`
+	// Filename is the filename of an input_file block.
+	Filename *string `json:"filename,omitempty"`
+	// FileData is the base64-encoded file_data payload of an input_file block.
+	FileData json.RawMessage `json:"file_data,omitempty"`
 }
 
 // ResponsesMessageContent is the content of a responses message item: either
@@ -334,17 +340,20 @@ type ResponsesResponseError struct {
 
 // ResponsesResponse is a responses API response.
 type ResponsesResponse struct {
-	ID                 string                    `json:"id"`
-	Object             string                    `json:"object"`
-	CreatedAt          int64                     `json:"created_at"`
-	Status             *string                   `json:"status,omitempty"`
-	Error              json.RawMessage           `json:"error,omitempty"`
-	IncompleteDetails  json.RawMessage           `json:"incomplete_details,omitempty"`
-	Instructions       *string                   `json:"instructions,omitempty"`
-	MaxOutputTokens    *int                      `json:"max_output_tokens,omitempty"`
-	Model              string                    `json:"model"`
-	Output             []ResponsesMessage        `json:"output,omitempty"`
-	ParallelToolCalls  *bool                     `json:"parallel_tool_calls,omitempty"`
+	ID                string             `json:"id"`
+	Object            string             `json:"object"`
+	CreatedAt         int64              `json:"created_at"`
+	Status            *string            `json:"status,omitempty"`
+	Error             json.RawMessage    `json:"error,omitempty"`
+	IncompleteDetails json.RawMessage    `json:"incomplete_details,omitempty"`
+	Instructions      *string            `json:"instructions,omitempty"`
+	MaxOutputTokens   *int               `json:"max_output_tokens,omitempty"`
+	Model             string             `json:"model"`
+	Output            []ResponsesMessage `json:"output,omitempty"`
+	ParallelToolCalls *bool              `json:"parallel_tool_calls,omitempty"`
+	// PreviousResponseID is always emitted on the wire, mirroring
+	// the Bifrost reference implementation. omitempty is omitted
+	// intentionally so the field is present even when null.
 	PreviousResponseID *string                   `json:"previous_response_id"`
 	Reasoning          *ResponsesReasoningConfig `json:"reasoning,omitempty"`
 	Store              *bool                     `json:"store,omitempty"`

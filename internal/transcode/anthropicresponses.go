@@ -311,6 +311,32 @@ func ConvertResponsesResponseAnthropicResponse(resp *ResponsesResponse) *Anthrop
 			continue
 		}
 		switch *item.Type {
+		case ResponsesMessageTypeRefusal:
+			// Refusal items become text blocks; the response stop
+			// reason is refusal with stop_details passthrough.
+			if item.Content != nil {
+				if item.Content.ContentStr != nil {
+					out.Content = append(out.Content, AnthropicContentBlock{Type: AnthropicContentBlockTypeText, Text: item.Content.ContentStr})
+				} else {
+					for j := range item.Content.ContentBlocks {
+						block := &item.Content.ContentBlocks[j]
+						if block.Type == ResponsesMessageContentBlockTypeRefusal && block.Text != nil {
+							out.Content = append(out.Content, AnthropicContentBlock{Type: AnthropicContentBlockTypeText, Text: block.Text})
+						}
+						// output_text blocks inside a refusal item are
+						// also mapped to text blocks.
+						if block.Type == ResponsesMessageContentBlockTypeOutputText && block.Text != nil {
+							out.Content = append(out.Content, AnthropicContentBlock{Type: AnthropicContentBlockTypeText, Text: block.Text})
+						}
+					}
+				}
+			}
+			if item.Status != nil && *item.Status == "incomplete" {
+				out.StopReason = AnthropicStopReasonMaxTokens
+			} else {
+				out.StopReason = AnthropicStopReasonRefusal
+			}
+
 		case ResponsesMessageTypeMessage:
 			// A message item may carry several content blocks (multi-part
 			// text, refusal); every output_text block becomes a text block.
@@ -355,7 +381,8 @@ func ConvertResponsesResponseAnthropicResponse(resp *ResponsesResponse) *Anthrop
 					Type:     AnthropicContentBlockTypeThinking,
 					Thinking: new(strings.TrimRight(b.String(), "\n")),
 				})
-			} else if len(out.Content) == appended && item.ResponsesReasoning != nil && item.EncryptedContent != nil {
+			}
+			if item.ResponsesReasoning != nil && item.EncryptedContent != nil {
 				out.Content = append(out.Content, AnthropicContentBlock{
 					Type: AnthropicContentBlockTypeRedactedThinking,
 					Data: item.EncryptedContent,
@@ -398,6 +425,14 @@ func ConvertResponsesResponseAnthropicResponse(resp *ResponsesResponse) *Anthrop
 	}
 	if resp.Usage != nil {
 		out.Usage = responsesUsageAnthropicUsage(resp.Usage)
+	}
+	if resp.StopDetails != nil {
+		out.StopDetails = &AnthropicStopDetails{
+			Type:             resp.StopDetails.Type,
+			Category:         resp.StopDetails.Category,
+			Explanation:      resp.StopDetails.Explanation,
+			RecommendedModel: resp.StopDetails.RecommendedModel,
+		}
 	}
 	return out
 }

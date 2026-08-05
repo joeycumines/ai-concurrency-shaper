@@ -173,7 +173,10 @@ func ParseSSEFrames(data []byte) []string {
 				current = nil
 			}
 		case bytes.HasPrefix(trimmed, []byte("data:")):
-			payload := bytes.TrimSpace(trimmed[len("data:"):])
+			payload := trimmed[len("data:"):]
+			if len(payload) > 0 && payload[0] == ' ' {
+				payload = payload[1:]
+			}
 			if len(current) > 0 {
 				current = append(current, '\n')
 			}

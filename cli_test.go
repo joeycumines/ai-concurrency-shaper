@@ -16,6 +16,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -38,6 +39,37 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 )
 
+// lockedBuffer is a thread-safe buffer for concurrent writes from
+// subprocess goroutines and reads from the test goroutine.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+// parseListeningAddr extracts the first "listening on <addr>" line
+// from the buffer, splitting by newlines to avoid capturing trailing
+// log output or TUI artifacts into the address.
+func parseListeningAddr(buf *lockedBuffer) string {
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if _, after, ok := strings.Cut(line, "listening on "); ok {
+			return strings.TrimSpace(after)
+		}
+	}
+	return ""
+}
+
 func TestTUIExitsOnBindFailure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -51,18 +83,20 @@ func TestTUIExitsOnBindFailure(t *testing.T) {
 		t.Fatalf("build failed: %v\n%s", err, out)
 	}
 
+	// Hold a listener open on an ephemeral port so the proxy
+	// cannot bind to it. This guarantees a bind failure.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	addr := ln.Addr().String()
 	defer ln.Close()
+	bindAddr := ln.Addr().String()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, bin,
-		"-bind", addr,
+		"-bind", bindAddr,
 		"-upstream", "http://127.0.0.1:1",
 		"-tui",
 	)
@@ -76,11 +110,12 @@ func TestTUIExitsOnBindFailure(t *testing.T) {
 	// We use two layers of isolation:
 	//   1. Stdin: pipe /dev/null so os.Stdin is not a terminal FD,
 	//      preventing bubbletea from entering raw mode on stdin.
-	//   2. Setsid: create a new session so the child has no controlling
-	//      terminal, preventing bubbletea's OpenTTY() fallback from
-	//      opening /dev/tty (the parent's terminal).
+	//   2. isolateSubprocess: creates a new session on Unix (Setsid)
+	//      so the child has no controlling terminal, preventing
+	//      bubbletea's OpenTTY() fallback from opening /dev/tty
+	//      (the parent's terminal). On Windows this is a no-op.
 	//
-	// With Setsid, bubbletea cannot start (OpenTTY fails), so the TUI
+	// With isolation, bubbletea cannot start (OpenTTY fails), so the TUI
 	// goroutine exits early and triggers a clean shutdown via stop().
 	// The process exits with code 0 — which is correct behavior since
 	// the TUI initiated the shutdown, not the bind failure. The test
@@ -92,22 +127,48 @@ func TestTUIExitsOnBindFailure(t *testing.T) {
 	}
 	defer stdinR.Close()
 	cmd.Stdin = stdinR
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	isolateSubprocess(cmd)
 
-	out, err := cmd.CombinedOutput()
+	var out lockedBuffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 
-	// With Setsid, the child may exit cleanly (TUI OpenTTY failure
-	// triggers graceful shutdown) or with an error (bind failure
-	// arrives first). Either outcome is acceptable — the test
-	// verifies the process doesn't hang.
-	if err != nil {
-		// Non-zero exit: likely the bind error arrived first.
-		output := string(out)
-		if !strings.Contains(output, "bind") && !strings.Contains(output, "address") {
-			t.Logf("output: %s", output)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- cmd.Run()
+	}()
+
+	// Poll the subprocess log output for the listening address.
+	// The proxy fails to bind, so proxyAddr should remain empty.
+	deadline := time.Now().Add(5 * time.Second)
+	var proxyAddr string
+	for time.Now().Before(deadline) {
+		proxyAddr = parseListeningAddr(&out)
+		if proxyAddr != "" {
+			break
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	// err == nil is also acceptable: TUI failure triggered clean shutdown.
+
+	// The proxy must have failed to bind and exited with a non-zero
+	// status. If proxyAddr is non-empty the bind somehow succeeded
+	// (flaky environment) — that is also a failure for this test.
+	if proxyAddr != "" {
+		_ = cmd.Process.Kill()
+		<-runErr
+		t.Fatalf("proxy unexpectedly bound to %s (bind should have failed)", proxyAddr)
+	}
+
+	select {
+	case err := <-runErr:
+		if err == nil {
+			t.Fatal("process exited cleanly; expected bind failure")
+		}
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-runErr
+		t.Fatal("process did not exit after bind failure")
+	}
 }
 
 func TestUpstreamMaxIdleConnsPerHost(t *testing.T) {
@@ -281,20 +342,13 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 	upstream.Start()
 	t.Cleanup(upstream.Close)
 
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	proxyAddr := proxyLn.Addr().String()
-	proxyLn.Close()
-
-	var out strings.Builder
+	var out lockedBuffer
 	cmd := exec.Command(bin,
 		"-upstream", upstream.URL,
 		"-limit", "POST /v1/messages",
 		"-concurrency", "4",
 		"-queue-timeout", "30s",
-		"-bind", proxyAddr,
+		"-bind", "127.0.0.1:0",
 		"-upstream-disable-keep-alives",
 		"-release-cooldown", "0",
 		"-cancel-cooldown", "0",
@@ -328,7 +382,18 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 		runErr <- cmd.Wait()
 	}()
 
-	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+	// Poll the subprocess log output for the listening address.
+	deadline := time.Now().Add(5 * time.Second)
+	var proxyAddr string
+	for time.Now().Before(deadline) {
+		proxyAddr = parseListeningAddr(&out)
+		if proxyAddr != "" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if proxyAddr == "" {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-runErr:
@@ -336,7 +401,7 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 			_ = cmd.Process.Kill()
 			<-runErr
 		}
-		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+		t.Fatalf("proxy did not report a listening address")
 	}
 
 	proxyURL := "http://" + proxyAddr + "/v1/messages"
@@ -387,19 +452,6 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 	}
 }
 
-func waitTCPReady(addr string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	return fmt.Errorf("address %s did not become reachable", addr)
-}
-
 func TestCLI_AdaptiveHeadroom(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -423,20 +475,13 @@ func TestCLI_AdaptiveHeadroom(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	proxyAddr := proxyLn.Addr().String()
-	proxyLn.Close()
-
-	var out strings.Builder
+	var out lockedBuffer
 	cmd := exec.Command(bin,
 		"-upstream", upstream.URL,
 		"-limit", "POST /v1/messages",
 		"-concurrency", "4",
 		"-queue-timeout", "30s",
-		"-bind", proxyAddr,
+		"-bind", "127.0.0.1:0",
 		"-retry", "0",
 		"-circuit-breaker=false",
 		"-adaptive-headroom",
@@ -469,7 +514,18 @@ func TestCLI_AdaptiveHeadroom(t *testing.T) {
 		runErr <- cmd.Wait()
 	}()
 
-	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+	// Poll the subprocess log output for the listening address.
+	deadline := time.Now().Add(5 * time.Second)
+	var proxyAddr string
+	for time.Now().Before(deadline) {
+		proxyAddr = parseListeningAddr(&out)
+		if proxyAddr != "" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if proxyAddr == "" {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-runErr:
@@ -477,7 +533,7 @@ func TestCLI_AdaptiveHeadroom(t *testing.T) {
 			_ = cmd.Process.Kill()
 			<-runErr
 		}
-		t.Fatalf("proxy not ready: %v", err)
+		t.Fatalf("proxy did not report a listening address")
 	}
 
 	proxyURL := "http://" + proxyAddr + "/v1/messages"

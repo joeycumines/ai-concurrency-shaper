@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
@@ -483,7 +484,8 @@ func TestProxyTranscodeMessagesChatNonStreaming(t *testing.T) {
 // TestProxyTranscodeClientDisconnect verifies that cancelling the client
 // context mid-stream through the full pipeline aborts the stream proxy,
 // releases the upstream connection (the upstream sees its request context
-// cancelled), and the proxy request returns promptly.
+// cancelled), and the proxy request returns promptly without tripping
+// the circuit breaker or recording phantom failures.
 func TestProxyTranscodeClientDisconnect(t *testing.T) {
 	upstreamStarted := make(chan struct{})
 	upstreamCancelled := make(chan struct{})
@@ -500,12 +502,31 @@ func TestProxyTranscodeClientDisconnect(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	p := newTranscodeProxyUpstream(t, upstream, TranscodeMapping{
-		ClientPath:     "/v1/responses",
-		UpstreamPath:   "/v1/chat/completions",
-		ClientFormat:   transcode.FormatResponses,
-		UpstreamFormat: transcode.FormatChatCompletions,
-	})
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	breaker, err := circuitbreaker.New()
+	if err != nil {
+		t.Fatalf("breaker.New: %v", err)
+	}
+	met := metrics.NewCollector()
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+		WithMetrics(met),
+		WithBreaker(breaker),
+		WithTranscodeMapping(TranscodeMapping{
+			ClientPath:     "/v1/responses",
+			UpstreamPath:   "/v1/chat/completions",
+			ClientFormat:   transcode.FormatResponses,
+			UpstreamFormat: transcode.FormatChatCompletions,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(testcorpus.ResponsesRequestJSON()))).WithContext(ctx)
@@ -536,6 +557,19 @@ func TestProxyTranscodeClientDisconnect(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Error("proxy request did not return after cancellation")
+	}
+	// The circuit breaker must remain clean: no phantom trip, no recorded
+	// failure/penalty from the client cancel (which is a suppressible abort,
+	// not an upstream failure).
+	stats := breaker.Stats()
+	if stats.Failures != 0 {
+		t.Errorf("breaker failures after client disconnect = %d, want 0", stats.Failures)
+	}
+	if stats.ConsecutiveFailures != 0 {
+		t.Errorf("breaker consecutive failures after client disconnect = %d, want 0", stats.ConsecutiveFailures)
+	}
+	if stats.CurrentPenalty > 0 {
+		t.Errorf("breaker penalty after client disconnect = %v, want 0", stats.CurrentPenalty)
 	}
 }
 

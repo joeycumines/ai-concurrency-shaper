@@ -27,11 +27,12 @@ type ChatResponsesStreamState struct {
 	started    bool
 	finished   bool
 
-	reasoningOpen   bool
-	reasoningClosed bool
-	reasoningID     string
-	reasoningOutput int
-	reasoning       strings.Builder
+	reasoningOpen    bool
+	reasoningClosed  bool
+	reasoningID      string
+	reasoningOutput  int
+	reasoning        strings.Builder
+	reasoningDetails []ChatReasoningDetails
 
 	textOpen   bool
 	textID     string
@@ -112,7 +113,9 @@ func (s *ChatResponsesStreamState) ConvertChatResponseResponsesStreamResponse(ch
 		)
 	}
 
-	if delta.Reasoning != nil && *delta.Reasoning != "" && !s.reasoningClosed && !s.textOpen {
+	hasReasoning := delta.Reasoning != nil && *delta.Reasoning != ""
+	hasReasoningDetails := len(delta.ReasoningDetails) > 0
+	if (hasReasoning || hasReasoningDetails) && !s.reasoningClosed && !s.textOpen {
 		if !s.reasoningOpen {
 			s.reasoningID = newItemID("rs_")
 			s.reasoningOutput = s.nextOutput
@@ -136,18 +139,28 @@ func (s *ChatResponsesStreamState) ConvertChatResponseResponsesStreamResponse(ch
 			s.nextOutput++
 			s.reasoningOpen = true
 		}
-		events = append(events, s.responseEvent(ResponsesStreamResponseTypeReasoningSummaryTextDelta, ResponsesStreamResponse{
-			ItemID:       new(s.reasoningID),
-			OutputIndex:  new(s.reasoningOutput),
-			SummaryIndex: new(0),
-			Delta:        delta.Reasoning,
-		}))
-		s.reasoning.WriteString(*delta.Reasoning)
+		if hasReasoning {
+			events = append(events, s.responseEvent(ResponsesStreamResponseTypeReasoningSummaryTextDelta, ResponsesStreamResponse{
+				ItemID:       new(s.reasoningID),
+				OutputIndex:  new(s.reasoningOutput),
+				SummaryIndex: new(0),
+				Delta:        delta.Reasoning,
+			}))
+			s.reasoning.WriteString(*delta.Reasoning)
+		}
+		if hasReasoningDetails {
+			s.reasoningDetails = append(s.reasoningDetails, delta.ReasoningDetails...)
+		}
 	}
 
+	// An image delta branch is structurally impossible: ChatStreamDelta.Content
+	// is *string, so image data cannot appear as a content delta.
 	if delta.Content != nil && *delta.Content != "" {
 		if s.reasoningOpen {
-			events = append(events, s.closeReasoning()...)
+			events = append(events, s.closeReasoning("completed")...)
+		}
+		if s.refusalOpen {
+			events = append(events, s.closeRefusal("completed")...)
 		}
 		if !s.textOpen {
 			s.textID = newItemID("msg_")
@@ -205,10 +218,13 @@ func (s *ChatResponsesStreamState) ConvertChatResponseResponsesStreamResponse(ch
 		}
 		if tracked == nil {
 			if s.reasoningOpen {
-				events = append(events, s.closeReasoning()...)
+				events = append(events, s.closeReasoning("completed")...)
 			}
 			if s.textOpen {
 				events = append(events, s.closeText("completed")...)
+			}
+			if s.refusalOpen {
+				events = append(events, s.closeRefusal("completed")...)
 			}
 			tracked = &chatStreamToolCall{id: newItemID("fc_"), output: s.nextOutput}
 			if call.Index != nil {
@@ -259,9 +275,11 @@ func (s *ChatResponsesStreamState) ConvertChatResponseResponsesStreamResponse(ch
 	// Refusal text streams as a message item with a refusal content part;
 	// the item lifecycle (output_item.added + content_part.added) must
 	// precede the refusal.delta events, mirroring the text path.
+	// Only Choices[0] is streamed because the Responses API has no
+	// multi-choice concept.
 	if delta.Refusal != nil && *delta.Refusal != "" {
 		if s.reasoningOpen {
-			events = append(events, s.closeReasoning()...)
+			events = append(events, s.closeReasoning("completed")...)
 		}
 		if s.textOpen {
 			events = append(events, s.closeText("completed")...)
@@ -271,7 +289,7 @@ func (s *ChatResponsesStreamState) ConvertChatResponseResponsesStreamResponse(ch
 			s.refusalOutput = s.nextOutput
 			item := ResponsesMessage{
 				ID:      new(s.refusalID),
-				Type:    new(ResponsesMessageTypeMessage),
+				Type:    new(ResponsesMessageTypeRefusal),
 				Role:    new(ResponsesMessageRoleAssistant),
 				Status:  new("in_progress"),
 				Content: &ResponsesMessageContent{ContentBlocks: []ResponsesMessageContentBlock{}},
@@ -317,7 +335,7 @@ func (s *ChatResponsesStreamState) ConvertChatResponseResponsesStreamResponse(ch
 			reason = "content_filter"
 		}
 		if s.reasoningOpen {
-			events = append(events, s.closeReasoning()...)
+			events = append(events, s.closeReasoning(status)...)
 		}
 		if s.textOpen {
 			events = append(events, s.closeText(status)...)
@@ -431,19 +449,59 @@ func (s *ChatResponsesStreamState) responseEvent(eventType ResponsesStreamRespon
 
 // closeReasoning emits the terminal events of the open reasoning item: the
 // summary text done and summary part done events, then the item done.
-func (s *ChatResponsesStreamState) closeReasoning() []ResponsesStreamResponse {
+// The status parameter (completed/incomplete) is threaded from the
+// finish-reason and transition call sites, matching closeText and closeRefusal.
+func (s *ChatResponsesStreamState) closeReasoning(status string) []ResponsesStreamResponse {
 	reasoning := s.reasoning.String()
 	item := ResponsesMessage{
-		ID:      new(s.reasoningID),
-		Type:    new(ResponsesMessageTypeReasoning),
-		Role:    new(ResponsesMessageRoleAssistant),
-		Content: &ResponsesMessageContent{ContentBlocks: []ResponsesMessageContentBlock{{Type: ResponsesMessageContentBlockTypeReasoning, Text: new(reasoning)}}},
+		ID:     new(s.reasoningID),
+		Type:   new(ResponsesMessageTypeReasoning),
+		Role:   new(ResponsesMessageRoleAssistant),
+		Status: new(status),
 	}
-	index := s.reasoningOutputIndex()
+
+	var summary []ResponsesReasoningSummary
+	var blocks []ResponsesMessageContentBlock
+	var encryptedContent *string
+
+	// Collect all reasoning details in a single pass.
+	// Use summary-type details if present; otherwise fall back to
+	// the accumulated reasoning text to avoid duplicate summaries.
+	for j := range s.reasoningDetails {
+		d := &s.reasoningDetails[j]
+		switch d.Type {
+		case ChatReasoningDetailsTypeSummary:
+			if d.Summary != nil {
+				summary = append(summary, ResponsesReasoningSummary{Type: "summary_text", Text: *d.Summary})
+			}
+		case ChatReasoningDetailsTypeEncrypted:
+			encryptedContent = d.Data
+		default:
+			if d.Text != nil {
+				blocks = append(blocks, ResponsesMessageContentBlock{Type: ResponsesMessageContentBlockTypeReasoning, Text: d.Text, Signature: d.Signature})
+			}
+		}
+	}
+
+	// If no summary-type details were found, use the accumulated reasoning text.
+	if len(summary) == 0 && reasoning != "" {
+		summary = append(summary, ResponsesReasoningSummary{Type: "summary_text", Text: reasoning})
+	}
+
+	if len(summary) > 0 || encryptedContent != nil {
+		item.ResponsesReasoning = &ResponsesReasoning{Summary: summary, EncryptedContent: encryptedContent}
+	}
+	if len(blocks) > 0 {
+		item.Content = &ResponsesMessageContent{ContentBlocks: blocks}
+	}
+
+	index := s.reasoningOutput
 	s.reasoningOpen = false
 	s.reasoningClosed = true
 	s.reasoning.Reset()
+	s.reasoningDetails = nil
 	s.items = append(s.items, item)
+
 	return []ResponsesStreamResponse{
 		s.responseEvent(ResponsesStreamResponseTypeReasoningSummaryTextDone, ResponsesStreamResponse{
 			ItemID:       new(s.reasoningID),
@@ -463,10 +521,9 @@ func (s *ChatResponsesStreamState) closeReasoning() []ResponsesStreamResponse {
 	}
 }
 
-// reasoningOutputIndex returns the output index of the open reasoning item.
-func (s *ChatResponsesStreamState) reasoningOutputIndex() int {
-	return s.nextOutput - 1
-}
+// reasoningOutputIndex is removed: closeReasoning now uses s.reasoningOutput
+// directly, which is set when the reasoning item is opened and is always
+// correct at close time.
 
 // closeRefusal emits the terminal events of the open refusal item. There is
 // no refusal.done event in the responses stream schema (mirroring Bifrost),
@@ -476,7 +533,7 @@ func (s *ChatResponsesStreamState) closeRefusal(status string) []ResponsesStream
 	output := s.refusalOutput
 	item := ResponsesMessage{
 		ID:     new(s.refusalID),
-		Type:   new(ResponsesMessageTypeMessage),
+		Type:   new(ResponsesMessageTypeRefusal),
 		Role:   new(ResponsesMessageRoleAssistant),
 		Status: new(status),
 		Content: &ResponsesMessageContent{ContentBlocks: []ResponsesMessageContentBlock{{

@@ -582,15 +582,6 @@ func TestConvertChatResponseResponsesStreamResponseMultiToolCall(t *testing.T) {
 	// The arguments done events carry the complete argument strings. The
 	// item ids are distinct from the chat call ids (the item/call id fix),
 	// so resolve the arguments by the terminal items' call ids.
-	argDone := map[string]string{}
-	for _, e := range events {
-		if e.Type == transcode.ResponsesStreamResponseTypeFunctionCallArgumentsDone && e.Arguments != nil {
-			argDone[*e.ItemID] = *e.Arguments
-		}
-	}
-	if len(argDone) != 2 {
-		t.Errorf("arguments done = %v, want 2", argDone)
-	}
 	// The terminal envelope contains both completed function call items.
 	terminal := events[len(events)-1]
 	if terminal.Response == nil || len(terminal.Response.Output) != 2 {
@@ -599,6 +590,28 @@ func TestConvertChatResponseResponsesStreamResponseMultiToolCall(t *testing.T) {
 	if terminal.Response.Output[0].CallID == nil || *terminal.Response.Output[0].CallID != "call_1" ||
 		terminal.Response.Output[1].CallID == nil || *terminal.Response.Output[1].CallID != "call_2" {
 		t.Errorf("terminal items = %+v", terminal.Response.Output)
+	}
+	// Build a mapping from call id to item id using the terminal envelope.
+	callIDToItemID := map[string]string{}
+	for _, item := range terminal.Response.Output {
+		if item.CallID != nil && item.ID != nil {
+			callIDToItemID[*item.CallID] = *item.ID
+		}
+	}
+	argDone := map[string]string{}
+	for _, e := range events {
+		if e.Type == transcode.ResponsesStreamResponseTypeFunctionCallArgumentsDone && e.Arguments != nil && e.ItemID != nil {
+			argDone[*e.ItemID] = *e.Arguments
+		}
+	}
+	if len(argDone) != 2 {
+		t.Errorf("arguments done = %v, want 2", argDone)
+	}
+	if argDone[callIDToItemID["call_1"]] != `{"location":"Tokyo"}` {
+		t.Errorf("call_1 arguments = %v, want {\"location\":\"Tokyo\"}", argDone[callIDToItemID["call_1"]])
+	}
+	if argDone[callIDToItemID["call_2"]] != `{"city":"Tokyo"}` {
+		t.Errorf("call_2 arguments = %v, want {\"city\":\"Tokyo\"}", argDone[callIDToItemID["call_2"]])
 	}
 	// The item ids differ from the call ids, and each item's arguments match.
 	seen := map[string]bool{}
