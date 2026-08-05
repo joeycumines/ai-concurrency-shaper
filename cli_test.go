@@ -115,12 +115,13 @@ func TestTUIExitsOnBindFailure(t *testing.T) {
 	//      bubbletea's OpenTTY() fallback from opening /dev/tty
 	//      (the parent's terminal). On Windows this is a no-op.
 	//
-	// With isolation, bubbletea cannot start (OpenTTY fails), so the TUI
-	// goroutine exits early and triggers a clean shutdown via stop().
-	// The process exits with code 0 — which is correct behavior since
-	// the TUI initiated the shutdown, not the bind failure. The test
-	// verifies the process doesn't hang or crash regardless of which
-	// error path is hit first.
+	// The bind failure is hit in run() before the TUI goroutine starts:
+	// net.Listen returns an error, run() returns it, and main() exits with
+	// a non-zero status via log.Fatalf — the TUI never initializes. The
+	// isolation above is still defense-in-depth for the (flaky)
+	// alternative where the bind unexpectedly succeeds: it keeps bubbletea
+	// from taking control of the parent's terminal before the test's
+	// timeout kills the process.
 	stdinR, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatalf("open /dev/null: %v", err)
