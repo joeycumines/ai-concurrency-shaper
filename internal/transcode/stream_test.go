@@ -861,3 +861,94 @@ func TestConvertChatResponseResponsesStreamResponseToolCallIndexAnchored(t *test
 		t.Errorf("arguments by call = %v", callArgs)
 	}
 }
+
+// TestConvertChatResponseResponsesStreamResponseReasoningDetailsOnly verifies
+// the reviewed accumulation branch: a chat stream delta that carries ONLY
+// reasoning_details (a reasoning.encrypted block, no reasoning text) still
+// opens the reasoning item, and the encrypted content is carried through to
+// the terminal item instead of being dropped. Regression for the pre-fix
+// behavior where such deltas fell through as plain content.
+func TestConvertChatResponseResponsesStreamResponseReasoningDetailsOnly(t *testing.T) {
+	var state transcode.ChatResponsesStreamState
+	feed := func(delta *transcode.ChatStreamDelta, finish *string) []transcode.ResponsesStreamResponse {
+		return state.ConvertChatResponseResponsesStreamResponse(&transcode.ChatStreamResponse{
+			ID:      "chatcmpl-1",
+			Model:   "gpt-4.1",
+			Created: 1710000000,
+			Choices: []transcode.ChatChoice{{Index: 0, Delta: delta, FinishReason: finish}},
+		})
+	}
+	var events []transcode.ResponsesStreamResponse
+	// A chunk whose only signal is reasoning_details: no reasoning string.
+	events = append(events, feed(&transcode.ChatStreamDelta{
+		ReasoningDetails: []transcode.ChatReasoningDetails{
+			{Type: transcode.ChatReasoningDetailsTypeEncrypted, Data: new("enc:abc123")},
+		},
+	}, nil)...)
+	// A content delta closes the reasoning item and opens the message item.
+	events = append(events, feed(&transcode.ChatStreamDelta{Content: new("Hello")}, nil)...)
+	events = append(events, feed(&transcode.ChatStreamDelta{}, new("stop"))...)
+	events = append(events, state.Terminal()...)
+
+	wantTypes := []transcode.ResponsesStreamResponseType{
+		transcode.ResponsesStreamResponseTypeCreated,
+		transcode.ResponsesStreamResponseTypeInProgress,
+		transcode.ResponsesStreamResponseTypeOutputItemAdded,           // reasoning
+		transcode.ResponsesStreamResponseTypeReasoningSummaryPartAdded, // summary part
+		transcode.ResponsesStreamResponseTypeReasoningSummaryTextDone,  // no delta, only done
+		transcode.ResponsesStreamResponseTypeReasoningSummaryPartDone,
+		transcode.ResponsesStreamResponseTypeOutputItemDone,  // reasoning
+		transcode.ResponsesStreamResponseTypeOutputItemAdded, // message
+		transcode.ResponsesStreamResponseTypeContentPartAdded,
+		transcode.ResponsesStreamResponseTypeOutputTextDelta,
+		transcode.ResponsesStreamResponseTypeOutputTextDone,
+		transcode.ResponsesStreamResponseTypeContentPartDone,
+		transcode.ResponsesStreamResponseTypeOutputItemDone, // message
+		transcode.ResponsesStreamResponseTypeCompleted,
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("events = %d, want %d: %+v", len(events), len(wantTypes), events)
+	}
+	for i, want := range wantTypes {
+		if events[i].Type != want {
+			t.Errorf("event %d type = %q, want %q", i, events[i].Type, want)
+		}
+	}
+
+	// No reasoning.summary_text.delta may ever be emitted for a
+	// reasoning_details-only input: the details are not plaintext.
+	for i := range events {
+		if events[i].Type == transcode.ResponsesStreamResponseTypeReasoningSummaryTextDelta {
+			t.Errorf("unexpected reasoning.summary_text.delta event: %+v", events[i])
+		}
+	}
+
+	// The terminal envelope carries the reasoning item with the encrypted
+	// content and the message item after it.
+	terminal := events[len(events)-1]
+	if terminal.Response == nil || len(terminal.Response.Output) != 2 {
+		t.Fatalf("terminal output = %+v", terminal.Response)
+	}
+	reasoning := terminal.Response.Output[0]
+	if reasoning.Type == nil || *reasoning.Type != transcode.ResponsesMessageTypeReasoning {
+		t.Fatalf("terminal output[0] = %+v, want reasoning", reasoning)
+	}
+	if reasoning.Status == nil || *reasoning.Status != "completed" {
+		t.Errorf("reasoning status = %v, want completed", reasoning.Status)
+	}
+	if reasoning.ResponsesReasoning == nil ||
+		reasoning.ResponsesReasoning.EncryptedContent == nil ||
+		*reasoning.ResponsesReasoning.EncryptedContent != "enc:abc123" {
+		t.Errorf("reasoning encrypted content = %+v, want enc:abc123", reasoning.ResponsesReasoning)
+	}
+	if len(reasoning.ResponsesReasoning.Summary) != 0 {
+		t.Errorf("reasoning summary = %+v, want none", reasoning.ResponsesReasoning.Summary)
+	}
+	message := terminal.Response.Output[1]
+	if message.Type == nil || *message.Type != transcode.ResponsesMessageTypeMessage ||
+		message.Content == nil || len(message.Content.ContentBlocks) != 1 ||
+		message.Content.ContentBlocks[0].Text == nil ||
+		*message.Content.ContentBlocks[0].Text != "Hello" {
+		t.Errorf("terminal output[1] = %+v", message)
+	}
+}
