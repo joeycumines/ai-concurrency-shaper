@@ -26,13 +26,13 @@ event: response.content_part.added
 data: {"type":"response.content_part.added","sequence_number":8,"item_id":"msg_1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}
 
 event: response.output_text.delta
-data: {"type":"response.output_text.delta","sequence_number":9,"item_id":"msg_1","output_index":1,"content_index":0,"delta":"The weather in Tokyo is "}
+data: {"type":"response.output_text.delta","sequence_number":9,"item_id":"msg_1","output_index":1,"content_index":0,"delta":"The weather in Tokyo is ","logprobs":[]}
 
 event: response.output_text.delta
-data: {"type":"response.output_text.delta","sequence_number":10,"item_id":"msg_1","output_index":1,"content_index":0,"delta":"21°C and sunny."}
+data: {"type":"response.output_text.delta","sequence_number":10,"item_id":"msg_1","output_index":1,"content_index":0,"delta":"21\u00b0C and sunny.","logprobs":[]}
 
 event: response.output_text.done
-data: {"type":"response.output_text.done","sequence_number":11,"item_id":"msg_1","output_index":1,"content_index":0,"text":"The weather in Tokyo is 21°C and sunny.","annotations":[]}
+data: {"type":"response.output_text.done","sequence_number":11,"item_id":"msg_1","output_index":1,"content_index":0,"text":"The weather in Tokyo is 21\u00b0C and sunny.","logprobs":[]}
 
 event: response.content_part.done
 data: {"type":"response.content_part.done","sequence_number":12,"item_id":"msg_1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"The weather in Tokyo is 21°C and sunny.","annotations":[]}}

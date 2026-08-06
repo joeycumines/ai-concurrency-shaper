@@ -1,606 +1,847 @@
 package transcode
 
 import (
-	"bufio"
-	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
-
-	"github.com/joeycumines/sesame/stream"
+	"time"
 )
 
-// Format identifies an API wire format supported by the transcode engine.
-type Format string
-
-// Supported wire formats.
-const (
-	// FormatResponses is the OpenAI Responses API.
-	FormatResponses Format = "responses"
-	// FormatChatCompletions is the OpenAI Chat Completions API.
-	FormatChatCompletions Format = "chat-completions"
-	// FormatMessages is the Anthropic Messages API.
-	FormatMessages Format = "messages"
-)
-
-// SupportedFormatPair reports whether the client-to-upstream format pair has
-// complete request, response, and streaming conversions. Unsupported pairs
-// are rejected at configuration time.
-func SupportedFormatPair(clientFormat, upstreamFormat Format) bool {
-	switch clientFormat {
-	case FormatResponses:
-		return upstreamFormat == FormatChatCompletions
-	case FormatMessages:
-		return upstreamFormat == FormatResponses || upstreamFormat == FormatChatCompletions
-	}
-	return false
-}
-
-// HandlerConfig configures a TranscodeHandler.
+// HandlerConfig configures one transcoded route.
 type HandlerConfig struct {
-	// ClientPath is the route path clients use, e.g. "/v1/responses".
-	ClientPath string
-	// UpstreamPath is the route path the upstream expects.
-	UpstreamPath string
-	// ClientFormat is the wire format of client payloads.
-	ClientFormat Format
-	// UpstreamFormat is the wire format of upstream payloads.
-	UpstreamFormat Format
+	// Mapping is the validated route mapping.
+	Mapping Mapping
+
 	// Upstream is the upstream base URL.
 	Upstream *url.URL
-	// MaxBodyBytes bounds the client request body read; zero means no limit.
-	// The body must be buffered for conversion, so an unbounded read would be
-	// an OOM vector for oversized payloads.
-	MaxBodyBytes int64
+
+	// BodyLimits are the independent request/response body limits.
+	BodyLimits BodyLimits
+
+	// AuthPolicy authenticates the upstream request.
+	AuthPolicy AuthPolicy
+
+	// ModelMap resolves client model identifiers.
+	ModelMap ModelMap
+
+	// LossPolicy decides whether non-portable features may be dropped.
+	LossPolicy LossPolicy
+
+	// ChatCapabilities gates provider-extension fields for the Chat
+	// upstream.
+	ChatCapabilities ChatCapabilities
+
+	// AllowedClientQuery is the set of client query parameters permitted on
+	// the transcoded route. Unknown client query parameters are rejected.
+	AllowedClientQuery map[string]struct{}
 }
 
 // RoundTrip executes an outbound HTTP request through the proxy engine.
 type RoundTrip func(*http.Request) (*http.Response, error)
 
+// ExchangeProvenance is the explicit outcome provenance recorded for breaker
+// accounting. Breaker health is derived from provenance, never from the final
+// status code alone.
+//
+// https://platform.openai.com/docs/guides/error-codes/api-errors
+type ExchangeProvenance uint8
+
+// ExchangeProvenance values.
+const (
+	ProvenanceUpstreamHTTP ExchangeProvenance = iota
+	ProvenanceUpstreamTransportError
+	ProvenanceUpstreamBodyError
+	ProvenanceClientAbort
+	ProvenanceDownstreamWriteError
+	ProvenanceLocalRequestConversionError
+	ProvenanceLocalResponseConversionError
+	ProvenanceLocalStreamValidationError
+)
+
+func (p ExchangeProvenance) String() string {
+	switch p {
+	case ProvenanceUpstreamHTTP:
+		return "upstream_http"
+	case ProvenanceUpstreamTransportError:
+		return "upstream_transport_error"
+	case ProvenanceUpstreamBodyError:
+		return "upstream_body_error"
+	case ProvenanceClientAbort:
+		return "client_abort"
+	case ProvenanceDownstreamWriteError:
+		return "downstream_write_error"
+	case ProvenanceLocalRequestConversionError:
+		return "local_request_conversion_error"
+	case ProvenanceLocalResponseConversionError:
+		return "local_response_conversion_error"
+	case ProvenanceLocalStreamValidationError:
+		return "local_stream_validation_error"
+	default:
+		return "unknown"
+	}
+}
+
+// Outcome is the recorded result of one transcoded exchange.
+type Outcome struct {
+	Status     int
+	Provenance ExchangeProvenance
+
+	// UpstreamFailure is true when the outcome is a definitive upstream
+	// failure (transport error or upstream HTTP >= 500).
+	UpstreamFailure bool
+
+	// StreamOutcome is the stream classification for streaming exchanges.
+	StreamOutcome streamOutcome
+}
+
+// OutcomeFunc receives the exchange outcome. The proxy wires this to breaker
+// accounting. It must be safe to call at most once per exchange, after the
+// handler has stopped mutating the recorder.
+type OutcomeFunc func(Outcome)
+
+// outcomeContextKey carries the recorded Outcome through the request context
+// so the proxy can read explicit provenance after ServeHTTP returns. This is
+// per-request state and is race-free.
+type outcomeContextKey struct{}
+
+// WithOutcomeSink attaches a buffered outcome sink to the request context.
+// The handler records the outcome here in addition to invoking OutcomeFunc.
+// The sink is buffered so the handler never blocks.
+func WithOutcomeSink(ctx context.Context) (context.Context, chan Outcome) {
+	sink := make(chan Outcome, 1)
+	return context.WithValue(ctx, outcomeContextKey{}, sink), sink
+}
+
 // TranscodeHandler intercepts requests for a transcoded route, converts the
 // payload to the upstream schema, forwards through the proxy engine, and
 // converts the response back to the client schema. Streaming responses are
-// translated incrementally through the stateful accumulators; the
-// asymmetrical half-close lifecycle is managed by stream.Proxy.
+// translated incrementally through the state machines.
+//
+// The stream path uses stream.Proxy as the mandated bidirectional copy and
+// cancellation boundary. The converted HTTP request body has already been
+// submitted by RoundTrip; stream.Proxy's local EOF triggers the configured
+// adapter soft-close; the handler owns downstream sealing and body closure;
+// the tests verify translated-stream continuation and cancellation, not a new
+// transport-level request-body half-close mechanism.
 type TranscodeHandler struct {
 	cfg       HandlerConfig
 	roundTrip RoundTrip
+	outcomeFn OutcomeFunc
 }
 
-// NewTranscodeHandler returns a handler for the given configuration. The
-// client-to-upstream format pair must be supported (see SupportedFormatPair).
-func NewTranscodeHandler(cfg HandlerConfig, roundTrip RoundTrip) *TranscodeHandler {
-	return &TranscodeHandler{cfg: cfg, roundTrip: roundTrip}
+// NewTranscodeHandler returns a handler for the given configuration.
+func NewTranscodeHandler(
+	cfg HandlerConfig,
+	roundTrip RoundTrip,
+	outcomeFn OutcomeFunc,
+) *TranscodeHandler {
+	return &TranscodeHandler{
+		cfg:       cfg,
+		roundTrip: roundTrip,
+		outcomeFn: outcomeFn,
+	}
 }
 
 // ClientPath returns the client-facing route path of the handler.
-func (h *TranscodeHandler) ClientPath() string { return h.cfg.ClientPath }
+func (h *TranscodeHandler) ClientPath() string {
+	return h.cfg.Mapping.ClientRoute.Path
+}
 
 // ServeHTTP implements http.Handler.
 func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// The request body must be buffered for conversion; bound the read so an
-	// oversized payload cannot exhaust memory (the journal's capture limit
-	// only bounds the journal slice, not the stream).
-	bodyReader := io.Reader(r.Body)
-	if h.cfg.MaxBodyBytes > 0 {
-		bodyReader = io.LimitReader(r.Body, h.cfg.MaxBodyBytes+1)
+	// Reject Upgrade requests on transcoded routes: a 101 Switching
+	// Protocols response cannot be meaningfully schema-transcoded.
+	if isUpgradeRequest(r) {
+		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+			http.StatusBadRequest, "upgrade requests are not supported on transcoded routes",
+			ProvenanceLocalRequestConversionError)
+		return
 	}
-	body, err := io.ReadAll(bodyReader)
+
+	// Reject non-identity request Content-Encoding with a dialect-correct
+	// 415. JSON-decoding compressed bytes as plain input is not adequate.
+	if r.Header.Get("Content-Encoding") != "" {
+		apiErr := CanonicalAPIError{
+			Status:  http.StatusUnsupportedMediaType,
+			Type:    "invalid_request_error",
+			Code:    "unsupported_content_encoding",
+			Message: "content-encoding is not supported on transcoded routes",
+		}
+		h.writeDialectHTTPError(r, w, apiErr, ProvenanceLocalRequestConversionError)
+		return
+	}
+
+	body, err := h.readRequestBody(r)
 	if err != nil {
 		if r.Context().Err() != nil {
-			// The client is gone: abort rather than write an error the proxy
-			// machinery would classify as a failure.
+			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
 			panic(http.ErrAbortHandler)
 		}
-		http.Error(w, "read request body: "+err.Error(), http.StatusBadRequest)
+		if errors.Is(err, errRequestBodyTooLarge) {
+			h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+				http.StatusRequestEntityTooLarge, "request body too large",
+				ProvenanceLocalRequestConversionError)
+			return
+		}
+		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+			http.StatusBadRequest, "read request body: "+err.Error(),
+			ProvenanceLocalRequestConversionError)
 		return
 	}
-	if h.cfg.MaxBodyBytes > 0 && int64(len(body)) > h.cfg.MaxBodyBytes {
-		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-		return
-	}
-	upstreamBody, err := convertRequest(h.cfg.ClientFormat, h.cfg.UpstreamFormat, body)
+
+	// Decode the source request into the canonical IR and render the target
+	// request, resolving the model through the map.
+	upstreamBody, context, err := h.convertRequest(r, body)
 	if err != nil {
-		http.Error(w, "convert request: "+err.Error(), http.StatusBadRequest)
+		if r.Context().Err() != nil {
+			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
+			panic(http.ErrAbortHandler)
+		}
+		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+			http.StatusBadRequest, "convert request: "+err.Error(),
+			ProvenanceLocalRequestConversionError)
 		return
 	}
-	outReq, err := h.upstreamRequest(r, upstreamBody)
+
+	outReq, err := h.buildUpstreamRequest(r, upstreamBody)
 	if err != nil {
-		http.Error(w, "build upstream request: "+err.Error(), http.StatusInternalServerError)
+		// An unallowed client query parameter is a client fault (400); other
+		// request-construction failures are internal (500).
+		status := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "client query parameter") {
+			status = http.StatusBadRequest
+		}
+		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+			status, "build upstream request: "+err.Error(),
+			ProvenanceLocalRequestConversionError)
 		return
 	}
+
 	resp, err := h.roundTrip(outReq)
 	if err != nil {
 		// A RoundTripper may return a non-nil response alongside an error;
-		// release its body so the connection is not leaked.
+		// release its body so the connection is not leaked (sound behavior).
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
 		}
-		// A cancelled client context means the exchange is already over: abort
-		// without a response. Aborting (http.ErrAbortHandler) also lets the
-		// proxy classify this as a client cancel instead of an upstream
-		// failure — a 502 here would trip the breaker and phantom penalty
-		// for a failure that never happened (the passthrough path suppresses
-		// the same case via its transport-error guards).
+		// A cancelled client context means the exchange is already over.
 		if r.Context().Err() != nil {
+			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
 			panic(http.ErrAbortHandler)
 		}
-		http.Error(w, "upstream request: "+err.Error(), http.StatusBadGateway)
+		h.writeDialectHTTPError(r, w, CanonicalAPIError{
+			Status:  http.StatusBadGateway,
+			Type:    "api_error",
+			Code:    "upstream_transport_error",
+			Message: "upstream request failed: " + err.Error(),
+		}, ProvenanceUpstreamTransportError)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Non-success responses pass through unchanged: provider error payloads
-	// do not follow the API response schemas and must not be transcoded.
+	// A 101 Switching Protocols response on a transcoded JSON/SSE create
+	// route is an upstream protocol error; it cannot be schema-transcoded.
+	// It is rejected before the generic non-2xx handling because 101 cannot
+	// carry an error body.
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		h.writeDialectHTTPError(r, w, CanonicalAPIError{
+			Status:  http.StatusBadGateway,
+			Type:    "api_error",
+			Code:    "upstream_protocol_error",
+			Message: "upstream switched protocols on a transcoded route",
+		}, ProvenanceUpstreamBodyError)
+		return
+	}
+
+	// A non-2xx upstream response is parsed and rendered before any
+	// downstream status is committed (operational rule).
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		copyResponse(w, resp)
+		apiErr, readErr := ReadCanonicalUpstreamError(resp, h.cfg.Mapping.UpstreamProtocol)
+		if readErr != nil {
+			h.writeDialectHTTPError(r, w, CanonicalAPIError{
+				Status:  resp.StatusCode,
+				Type:    "api_error",
+				Code:    codeForStatus(resp.StatusCode),
+				Message: "read upstream error body: " + readErr.Error(),
+			}, ProvenanceUpstreamBodyError)
+			return
+		}
+		h.writeDialectHTTPError(r, w, apiErr, ProvenanceUpstreamHTTP)
 		return
 	}
 
 	switch {
 	case isEventStream(resp):
-		h.streamResponse(w, r, resp)
+		h.streamResponse(w, r, resp, context)
 	case isJSON(resp):
-		h.jsonResponse(w, r, resp)
+		h.jsonResponse(w, r, resp, context)
 	default:
-		// Non-JSON responses (e.g. provider error pages) pass through
-		// unchanged.
-		copyResponse(w, resp)
+		// A 2xx non-JSON non-SSE response is a stream-intent mismatch.
+		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+			http.StatusBadGateway,
+			"upstream returned an unrecognized response content type",
+			ProvenanceLocalStreamValidationError)
 	}
 }
 
-// upstreamRequest builds the outbound request: the client headers, the
-// rewritten upstream path, the converted body, and a recomputed
-// Content-Length. The client context is carried so downstream cancellation
-// aborts the upstream request.
-func (h *TranscodeHandler) upstreamRequest(r *http.Request, body []byte) (*http.Request, error) {
-	u := *r.URL
-	u.Scheme = h.cfg.Upstream.Scheme
-	u.Host = h.cfg.Upstream.Host
-	// Join the configured upstream base path (e.g. "/api") with the mapped
-	// route path, mirroring the reverse proxy's path concatenation. The error
-	// is unreachable: the upstream URL was parsed at configuration time, so
-	// its path cannot contain invalid escapes.
-	u.Path, _ = url.JoinPath(h.cfg.Upstream.Path, h.cfg.UpstreamPath)
-	u.RawPath = ""
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, u.String(), bytes.NewReader(body))
+// readRequestBody reads and bounds the client request body.
+var errRequestBodyTooLarge = errors.New("request body too large")
+
+func (h *TranscodeHandler) readRequestBody(r *http.Request) ([]byte, error) {
+	limit := h.cfg.BodyLimits.AcceptedRequestBytes
+	if limit <= 0 {
+		limit = 32 << 20
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	outReq.Header = r.Header.Clone()
-	outReq.Header.Set("Content-Type", "application/json")
-	outReq.ContentLength = int64(len(body))
-	// Sanitize the cloned client headers: hop-by-hop and connection-level
-	// headers must not reach the upstream (mirroring the reverse proxy's
-	// Director), and a client-requested Accept-Encoding would make the
-	// upstream compress the response — the transport does not transparently
-	// decode it when the request explicitly asks for it, which would break
-	// JSON/SSE conversion. Content-Length is recomputed below, and forwarded
-	// headers are stripped like the passthrough path.
-	for _, h := range []string{
-		"Accept-Encoding",
-		"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
-		"Te", "Trailer", "Transfer-Encoding", "Upgrade", "Content-Length",
-		"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
-	} {
-		outReq.Header.Del(h)
+	if int64(len(body)) > limit {
+		return nil, errRequestBodyTooLarge
 	}
+	return body, nil
+}
+
+// convertRequest decodes the source request into the canonical IR and renders
+// the target request body, building the exchange context.
+func (h *TranscodeHandler) convertRequest(
+	r *http.Request,
+	body []byte,
+) ([]byte, *ExchangeContext, error) {
+	policy := h.cfg.LossPolicy
+	mapping := h.cfg.Mapping
+
+	context := &ExchangeContext{
+		IDs:        NewExchangeIDs(),
+		LossPolicy: policy,
+		StreamIntent: strings.EqualFold(
+			strings.TrimSpace(r.Header.Get("Accept")),
+			"text/event-stream",
+		),
+	}
+
+	// Resolve the client model through the mapping once the decoded request
+	// reveals it. The client-facing alias is returned in the response; the
+	// upstream model is used on the outbound request.
+	resolveModel := func(clientModel string) error {
+		mappingModel, err := h.cfg.ModelMap.Resolve(clientModel)
+		if err != nil {
+			return err
+		}
+		context.RequestedClientModel = mappingModel.ClientResponseModel
+		context.UpstreamModel = mappingModel.UpstreamModel
+		return nil
+	}
+
+	switch mapping.ClientProtocol {
+	case ClientResponses:
+		result, echo, err := DecodeResponsesRequest(body, policy)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := resolveModel(result.Request.ClientModel); err != nil {
+			return nil, nil, err
+		}
+		context.OriginalResponsesRequest = echo
+		result.Request.ClientModel = context.UpstreamModel
+
+		var rendered []byte
+		var report ConversionReport
+		switch mapping.UpstreamProtocol {
+		case UpstreamChatCompletions:
+			rendered, report, err = RenderChatRequest(
+				result.Request,
+				context,
+				h.cfg.ChatCapabilities,
+			)
+		case UpstreamResponses:
+			rendered, report, err = RenderResponsesRequest(result.Request, context)
+		default:
+			return nil, nil, fmt.Errorf(
+				"unsupported upstream protocol %q for responses client",
+				mapping.UpstreamProtocol,
+			)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		logConversionReport(report, r)
+		return rendered, context, nil
+
+	case ClientMessages:
+		result, err := DecodeMessagesRequest(body, policy)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := resolveModel(result.Request.ClientModel); err != nil {
+			return nil, nil, err
+		}
+		context.OriginalMessagesRequest = &MessagesRequestContext{
+			MaxTokens: derefInt(result.Request.MaxOutputTokens),
+			Metadata:  result.Request.Metadata,
+		}
+		result.Request.ClientModel = context.UpstreamModel
+
+		var rendered []byte
+		var report ConversionReport
+		switch mapping.UpstreamProtocol {
+		case UpstreamResponses:
+			rendered, report, err = RenderResponsesRequest(result.Request, context)
+		case UpstreamChatCompletions:
+			rendered, report, err = RenderChatRequest(
+				result.Request,
+				context,
+				h.cfg.ChatCapabilities,
+			)
+		default:
+			return nil, nil, fmt.Errorf(
+				"unsupported upstream protocol %q for messages client",
+				mapping.UpstreamProtocol,
+			)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		logConversionReport(report, r)
+		return rendered, context, nil
+
+	default:
+		return nil, nil, fmt.Errorf("unknown client protocol %q", mapping.ClientProtocol)
+	}
+}
+
+// buildUpstreamRequest builds the outbound request: hop-by-hop sanitization,
+// source auth stripping, target auth application, recomputed Content-Length,
+// and the client context carried so downstream cancellation aborts upstream.
+func (h *TranscodeHandler) buildUpstreamRequest(
+	r *http.Request,
+	body []byte,
+) (*http.Request, error) {
+	targetURL, err := BuildMappedURL(
+		h.cfg.Upstream,
+		h.cfg.Mapping.UpstreamPath,
+		r.URL.Query(),
+		h.cfg.AllowedClientQuery,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	headers := r.Header.Clone()
+	// Sound behavior: remove the client's Accept-Encoding so the upstream
+	// does not compress the response, which would break JSON/SSE conversion.
+	headers.Del("Accept-Encoding")
+	// Sound behavior: remove forwarded headers like the passthrough path.
+	headers.Del("X-Forwarded-For")
+	headers.Del("X-Forwarded-Host")
+	headers.Del("X-Forwarded-Proto")
+
+	RemoveHopByHopHeaders(headers)
+	headers.Set("Content-Type", "application/json")
+
+	outReq, err := BuildConvertedRequest(r.Context(), r.Method, targetURL.String(), body, headers)
+	if err != nil {
+		return nil, err
+	}
+
+	// Sound behavior: preserve the request context on the upstream request.
+	outReq = outReq.WithContext(r.Context())
+
+	// Extract the inbound credential, then strip and re-apply per policy.
+	inbound, err := ExtractInboundCredential(headers)
+	if err != nil {
+		return nil, err
+	}
+	if err := ApplyTargetAuthentication(
+		r.Context(),
+		outReq,
+		h.cfg.Mapping.UpstreamProtocol,
+		h.cfg.AuthPolicy,
+		inbound,
+	); err != nil {
+		return nil, err
+	}
+
 	return outReq, nil
 }
 
 // jsonResponse converts a non-streaming upstream response back to the client
 // schema and writes it downstream.
-func (h *TranscodeHandler) jsonResponse(w http.ResponseWriter, r *http.Request, resp *http.Response) {
-	body, err := io.ReadAll(resp.Body)
+func (h *TranscodeHandler) jsonResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	resp *http.Response,
+	context *ExchangeContext,
+) {
+	limit := h.cfg.BodyLimits.SuccessfulResponseBytes
+	if limit <= 0 {
+		limit = 32 << 20
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		if r.Context().Err() != nil {
-			// The client is gone: abort rather than write a 502 the proxy
-			// machinery would classify as an upstream failure.
+			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
 			panic(http.ErrAbortHandler)
 		}
-		http.Error(w, "read upstream response: "+err.Error(), http.StatusBadGateway)
+		h.writeDialectHTTPError(r, w, CanonicalAPIError{
+			Status:  http.StatusBadGateway,
+			Type:    "api_error",
+			Code:    "upstream_body_error",
+			Message: "read upstream response: " + err.Error(),
+		}, ProvenanceUpstreamBodyError)
 		return
 	}
-	converted, err := convertResponse(h.cfg.ClientFormat, h.cfg.UpstreamFormat, body)
+	if int64(len(body)) > limit {
+		h.writeDialectHTTPError(r, w, CanonicalAPIError{
+			Status:  http.StatusBadGateway,
+			Type:    "api_error",
+			Code:    "upstream_response_too_large",
+			Message: "upstream response body exceeds the configured limit",
+		}, ProvenanceUpstreamBodyError)
+		return
+	}
+
+	converted, provenance, err := h.convertResponse(r, resp, body, context)
 	if err != nil {
-		http.Error(w, "convert response: "+err.Error(), http.StatusBadGateway)
+		// A local response conversion failure before headers is a
+		// client-dialect 502 and is reported via the outcome hook so the
+		// proxy never classifies it as an upstream failure.
+		h.writeDialectHTTPError(r, w, CanonicalAPIError{
+			Status:  http.StatusBadGateway,
+			Type:    "api_error",
+			Code:    "response_conversion_error",
+			Message: "convert response: " + err.Error(),
+		}, provenance)
 		return
 	}
-	copyResponseHeaders(w.Header(), resp.Header)
+
+	// Sound behavior: recompute Content-Length after conversion.
+	h.copyResponseHeaders(w.Header(), resp.Header)
+	RemoveTransformedRepresentationHeaders(w.Header())
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(converted)))
 	w.WriteHeader(resp.StatusCode)
-	// A failed write is surfaced by the writer's flush/abort tracking; the
-	// client is already gone in that case.
+	// A failed write is surfaced by the writer's flush/abort tracking.
 	_, _ = w.Write(converted)
+
+	h.recordOutcome(r, Outcome{
+		Status:     resp.StatusCode,
+		Provenance: ProvenanceUpstreamHTTP,
+	})
+}
+
+// convertResponse decodes the upstream JSON response into the canonical IR
+// and renders the client response envelope.
+func (h *TranscodeHandler) convertResponse(
+	r *http.Request,
+	resp *http.Response,
+	body []byte,
+	context *ExchangeContext,
+) ([]byte, ExchangeProvenance, error) {
+	switch h.cfg.Mapping.UpstreamProtocol {
+	case UpstreamChatCompletions:
+		response, err := DecodeChatResponse(body, h.cfg.ChatCapabilities)
+		if err != nil {
+			return nil, ProvenanceLocalResponseConversionError, err
+		}
+		converted, err := RenderResponsesResponse(response, context)
+		if err != nil {
+			return nil, ProvenanceLocalResponseConversionError, err
+		}
+		return converted, ProvenanceLocalResponseConversionError, nil
+
+	case UpstreamResponses:
+		response, err := DecodeResponsesResponse(body)
+		if err != nil {
+			return nil, ProvenanceLocalResponseConversionError, err
+		}
+		converted, err := RenderMessagesResponse(response, context)
+		if err != nil {
+			return nil, ProvenanceLocalResponseConversionError, err
+		}
+		return converted, ProvenanceLocalResponseConversionError, nil
+
+	default:
+		return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
+			"unsupported upstream protocol %q",
+			h.cfg.Mapping.UpstreamProtocol,
+		)
+	}
 }
 
 // streamResponse translates an upstream SSE stream into client SSE events,
-// delegating stream copying and asymmetrical half-close propagation to
-// stream.Proxy, and flushing every event chunk immediately.
-//
-// stream.Proxy blocks until the response copy completes (the client request
-// side reaches EOF instantly here, soft-closing the upstream write side while
-// the response keeps flowing) or the context is cancelled, so when it returns
-// the response delivery is finished; the upstream body is then closed to
-// release the connection and unblock any in-flight read.
-func (h *TranscodeHandler) streamResponse(w http.ResponseWriter, r *http.Request, resp *http.Response) {
-	converter := newFrameConverter(h.cfg.UpstreamFormat, h.cfg.ClientFormat)
-	if converter == nil {
-		http.Error(w, "unsupported stream conversion", http.StatusInternalServerError)
+// delegating copy and cancellation to stream.Proxy and sealing downstream
+// writes before returning.
+func (h *TranscodeHandler) streamResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	resp *http.Response,
+	context *ExchangeContext,
+) {
+	converter, err := h.newFrameConverter(context)
+	if err != nil {
+		h.recordOutcome(r, Outcome{
+			Status:     http.StatusInternalServerError,
+			Provenance: ProvenanceLocalRequestConversionError,
+		})
+		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+			http.StatusInternalServerError, "build stream converter: "+err.Error(),
+			ProvenanceLocalRequestConversionError)
 		return
 	}
-	// Preserve upstream entity headers (CORS, tracking metadata); the SSE
-	// headers below intentionally override the copied content-type.
-	copyResponseHeaders(w.Header(), resp.Header)
+
+	// Copy entity headers without Connection (the SSE writer must not
+	// reintroduce a hop-by-hop header, which is invalid for HTTP/2).
+	h.copyResponseHeaders(w.Header(), resp.Header)
+	RemoveHopByHopHeaders(w.Header())
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(resp.StatusCode)
 
-	reader := &convertingReader{br: bufio.NewReader(resp.Body), conv: converter}
-	local := &clientStream{body: r.Body, w: w}
-	remote := &upstreamStream{read: reader}
+	reader := newConvertingReader(NewSSEReader(resp.Body), converter)
+	observation := runTranslatedStream(r.Context(), w, resp.Body, reader)
 
-	_ = stream.Proxy(r.Context(), local, remote)
-	// Release the upstream connection; this also unblocks the converter's
-	// in-flight read after a client-side cancellation.
-	resp.Body.Close()
-}
-
-// convertingReader reads the upstream SSE stream, converts each data frame to
-// client-format SSE frames, and serves them as a byte stream. It is read by a
-// single goroutine (the stream proxy's response copy).
-type convertingReader struct {
-	br   *bufio.Reader
-	conv frameConverter
-
-	mu      sync.Mutex
-	buf     bytes.Buffer
-	readErr error // cached read error; prevents redundant fill() calls after EOF
-	eof     bool  // latches EOF to prevent repeated fill() calls after stream end
-}
-
-// Read returns the next converted bytes.
-func (r *convertingReader) Read(p []byte) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.buf.Len() == 0 {
-		if r.readErr != nil {
-			return 0, r.readErr
+	// Classify the outcome from explicit provenance.
+	var outcome Outcome
+	switch classifyStreamObservation(observation) {
+	case streamOutcomeSuccess:
+		outcome = Outcome{
+			Status:     resp.StatusCode,
+			Provenance: ProvenanceUpstreamHTTP,
 		}
-		if r.eof {
-			return 0, io.EOF
+	case streamOutcomeClientAbort:
+		outcome = Outcome{
+			Provenance: ProvenanceClientAbort,
 		}
-		err := r.fill()
-		if r.buf.Len() == 0 && err != nil {
-			r.readErr = err
-			return 0, err
+	case streamOutcomeUpstreamFailure:
+		outcome = Outcome{
+			Status:          resp.StatusCode,
+			Provenance:      ProvenanceUpstreamBodyError,
+			UpstreamFailure: true,
 		}
-		if err == io.EOF {
-			r.eof = true
+	case streamOutcomeLocalConversionFailure:
+		outcome = Outcome{
+			Status:     http.StatusBadGateway,
+			Provenance: ProvenanceLocalResponseConversionError,
+		}
+	case streamOutcomeDownstreamFailure:
+		outcome = Outcome{
+			Provenance: ProvenanceDownstreamWriteError,
+		}
+	default:
+		outcome = Outcome{
+			Status:     resp.StatusCode,
+			Provenance: ProvenanceUpstreamHTTP,
 		}
 	}
-	return r.buf.Read(p)
+	h.recordOutcome(r, outcome)
 }
 
-// fill converts upstream frames into the buffer until it holds data or the
-// upstream stream ends. Malformed frames are skipped without terminating the
-// stream. Every frame is written with an SSE event line so clients that
-// dispatch on the event name (both the responses and anthropic SDKs do) can
-// route frames correctly.
-func (r *convertingReader) fill() error {
-	for r.buf.Len() == 0 {
-		frame, err := readSSEFrame(r.br)
-		if err != nil {
-			if err == io.EOF {
-				// Flush any terminal frames the converter holds back until EOF.
-				if terminal := r.conv.Terminal(); terminal != nil {
-					for _, f := range terminal {
-						writeSSEFrame(&r.buf, f)
-					}
-				}
+// newFrameConverter builds the direction-specific stream converter.
+func (h *TranscodeHandler) newFrameConverter(
+	context *ExchangeContext,
+) (frameConverter, error) {
+	client := h.cfg.Mapping.ClientProtocol
+	upstream := h.cfg.Mapping.UpstreamProtocol
+
+	responseID := context.IDs.New("resp_")
+	createdAt := nowUnix()
+	model := context.RequestedClientModel
+
+	switch {
+	case client == ClientResponses && upstream == UpstreamChatCompletions:
+		state := newChatResponsesStreamState(
+			context,
+			h.cfg.LossPolicy,
+			responseID,
+			model,
+			createdAt,
+			context.OriginalResponsesRequest,
+		)
+		return newChatToResponsesConverter(state), nil
+
+	case client == ClientMessages && upstream == UpstreamResponses:
+		state := newAnthropicResponsesStreamState(
+			context,
+			context.IDs.New("msg_"),
+			model,
+			createdAt,
+		)
+		return newResponsesToAnthropicConverter(state), nil
+
+	case client == ClientMessages && upstream == UpstreamChatCompletions:
+		chat := newChatResponsesStreamState(
+			context,
+			h.cfg.LossPolicy,
+			responseID,
+			model,
+			createdAt,
+			nil, // Responses envelope is internal to the composition
+		)
+		anthropic := newAnthropicResponsesStreamState(
+			context,
+			context.IDs.New("msg_"),
+			model,
+			createdAt,
+		)
+		return newChatToAnthropicConverter(chat, anthropic), nil
+
+	default:
+		return nil, fmt.Errorf(
+			"unsupported stream direction %q -> %q",
+			client,
+			upstream,
+		)
+	}
+}
+
+// writeLocalError writes a plain-text local error. Dialect-correct rendering
+// is used for API errors; local infrastructure errors are plain text because
+// they are not provider API errors.
+func (h *TranscodeHandler) writeLocalError(
+	r *http.Request,
+	w http.ResponseWriter,
+	client ClientProtocol,
+	status int,
+	message string,
+	provenance ExchangeProvenance,
+) {
+	apiErr := CanonicalAPIError{
+		Status:  status,
+		Type:    typeForStatus(status),
+		Code:    codeForStatus(status),
+		Message: message,
+	}
+	h.writeDialectHTTPError(r, w, apiErr, provenance)
+}
+
+// writeDialectHTTPError renders a canonical error in the client dialect and
+// records the outcome. UpstreamFailure is derived from explicit provenance:
+// only definitive upstream outcomes (transport errors and upstream HTTP >=
+// 500) are upstream failures; local conversion errors are not.
+func (h *TranscodeHandler) writeDialectHTTPError(
+	r *http.Request,
+	w http.ResponseWriter,
+	apiErr CanonicalAPIError,
+	provenance ExchangeProvenance,
+) {
+	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
+	if err := WriteDialectHTTPError(w, client, apiErr); err != nil {
+		log.Printf("transcode: write dialect error: %v", err)
+	}
+	upstreamFailure := false
+	switch provenance {
+	case ProvenanceUpstreamTransportError:
+		upstreamFailure = true
+	case ProvenanceUpstreamHTTP, ProvenanceUpstreamBodyError:
+		upstreamFailure = apiErr.Status >= 500
+	}
+	h.recordOutcome(r, Outcome{
+		Status:          apiErr.Status,
+		Provenance:      provenance,
+		UpstreamFailure: upstreamFailure,
+	})
+}
+
+// recordOutcome forwards the outcome to the proxy breaker hook and, when an
+// outcome sink is present on the request context, to the proxy's per-request
+// provenance reader.
+func (h *TranscodeHandler) recordOutcome(r *http.Request, outcome Outcome) {
+	if r != nil {
+		if sink, _ := r.Context().Value(outcomeContextKey{}).(chan Outcome); sink != nil {
+			select {
+			case sink <- outcome:
+			default:
 			}
-			return err
 		}
-		frames, err := r.conv.Convert(frame)
-		if err != nil {
-			// Conversion failures are treated as malformed frames: skip them
-			// without dropping the stream.
+	}
+	if h.outcomeFn != nil {
+		h.outcomeFn(outcome)
+	}
+}
+
+// copyResponseHeaders copies upstream entity headers to the downstream
+// writer, skipping hop-by-hop and content-identity headers handled elsewhere.
+func (h *TranscodeHandler) copyResponseHeaders(dst, src http.Header) {
+	for name, values := range src {
+		if isHopByHopName(name) {
 			continue
 		}
-		for _, f := range frames {
-			writeSSEFrame(&r.buf, f)
+		if strings.EqualFold(name, "Connection") {
+			continue
+		}
+		for _, value := range values {
+			dst.Add(name, value)
 		}
 	}
-	return nil
 }
 
-// writeSSEFrame writes one SSE event from a frameEvent: an event line
-// carrying the frame's Type (when present) followed by the data line and
-// the blank-line terminator.
-func writeSSEFrame(buf *bytes.Buffer, f frameEvent) {
-	if f.Type != "" {
-		buf.WriteString("event: ")
-		buf.WriteString(f.Type)
-		buf.WriteString("\n")
+// isHopByHopName reports whether the header is a fixed hop-by-hop name.
+func isHopByHopName(name string) bool {
+	switch strings.ToLower(name) {
+	case "connection", "proxy-connection", "keep-alive", "proxy-authenticate",
+		"proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
+		return true
+	default:
+		return false
 	}
-	buf.WriteString("data: ")
-	buf.Write(f.Data)
-	buf.WriteString("\n\n")
-}
-
-// clientStream is the downstream side of the stream proxy: it reads the
-// client request body (consumed by the conversion; immediately at EOF) and
-// writes converted SSE frames to the response writer, flushing after every
-// write.
-type clientStream struct {
-	body io.Reader
-	w    http.ResponseWriter
-}
-
-func (s *clientStream) Read(p []byte) (int, error) { return s.body.Read(p) }
-
-func (s *clientStream) Write(p []byte) (int, error) {
-	n, err := s.w.Write(p)
-	if err == nil {
-		if err := http.NewResponseController(s.w).Flush(); err != nil && !errors.Is(err, http.ErrNotSupported) {
-			return n, err
-		}
-	}
-	return n, err
-}
-
-// upstreamStream is the upstream side of the stream proxy: it serves the
-// converted SSE frames and treats Close as the request-side half-close. The
-// converted request body was already fully sent upstream, so closing the
-// write side is a no-op that leaves the response stream open.
-type upstreamStream struct {
-	read io.Reader
-}
-
-func (s *upstreamStream) Read(p []byte) (int, error) { return s.read.Read(p) }
-
-// Write is unused: the converted request body is fully sent before the
-// response phase begins.
-func (s *upstreamStream) Write(p []byte) (int, error) { return len(p), nil }
-
-// Close implements the asymmetrical half-close: the request write side closes
-// without interrupting the response read side.
-func (s *upstreamStream) Close() error { return nil }
-
-// frameConverter converts upstream data frames to client data frames.
-type frameEvent struct {
-	Type string
-	Data []byte
-}
-
-type frameConverter interface {
-	Convert(frame []byte) ([]frameEvent, error)
-	// Terminal returns any final frames to emit when the upstream stream
-	// ends without a further data frame. May return nil.
-	Terminal() []frameEvent
-}
-
-// newFrameConverter returns the converter for the upstream-to-client format
-// direction, composing chained converters where no direct conversion exists.
-func newFrameConverter(upstreamFormat, clientFormat Format) frameConverter {
-	switch {
-	case upstreamFormat == FormatChatCompletions && clientFormat == FormatResponses:
-		return &chatResponsesFrameConverter{}
-	case upstreamFormat == FormatResponses && clientFormat == FormatMessages:
-		return &responsesAnthropicFrameConverter{}
-	case upstreamFormat == FormatChatCompletions && clientFormat == FormatMessages:
-		return &chatAnthropicFrameConverter{
-			chat:      &chatResponsesFrameConverter{},
-			anthropic: &responsesAnthropicFrameConverter{},
-		}
-	}
-	return nil
-}
-
-// chatResponsesFrameConverter converts chat completions chunks into responses
-// events.
-type chatResponsesFrameConverter struct {
-	state ChatResponsesStreamState
-}
-
-func (c *chatResponsesFrameConverter) Convert(frame []byte) ([]frameEvent, error) {
-	if string(frame) == "[DONE]" {
-		// [DONE] is the explicit terminal marker: release the held-back
-		// terminal event now rather than waiting for the connection to close
-		// (an upstream that keeps the connection open after [DONE] would
-		// otherwise never deliver the final event).
-		return c.Terminal(), nil
-	}
-	var chunk ChatStreamResponse
-	if err := json.Unmarshal(frame, &chunk); err != nil {
-		return nil, nil // malformed frames are skipped
-	}
-	return marshalResponsesEvents(c.state.ConvertChatResponseResponsesStreamResponse(&chunk)), nil
-}
-
-// Terminal emits the terminal event held back for a trailing usage chunk.
-func (c *chatResponsesFrameConverter) Terminal() []frameEvent {
-	return marshalResponsesEvents(c.state.Terminal())
-}
-
-// responsesAnthropicFrameConverter converts responses events into anthropic
-// events.
-type responsesAnthropicFrameConverter struct {
-	state AnthropicResponsesStreamState
-}
-
-func (c *responsesAnthropicFrameConverter) Convert(frame []byte) ([]frameEvent, error) {
-	var event ResponsesStreamResponse
-	if err := json.Unmarshal(frame, &event); err != nil {
-		return nil, nil
-	}
-	return marshalAnthropicEvents(c.state.ConvertResponsesStreamResponseAnthropicStreamEvent(&event)), nil
-}
-
-func (c *responsesAnthropicFrameConverter) Terminal() []frameEvent { return nil }
-
-// chatAnthropicFrameConverter composes the chat-to-responses and
-// responses-to-anthropic converters.
-type chatAnthropicFrameConverter struct {
-	chat      *chatResponsesFrameConverter
-	anthropic *responsesAnthropicFrameConverter
-}
-
-func (c *chatAnthropicFrameConverter) Convert(frame []byte) ([]frameEvent, error) {
-	responsesFrames, err := c.chat.Convert(frame)
-	if err != nil || len(responsesFrames) == 0 {
-		return nil, err
-	}
-	var out []frameEvent
-	for _, rf := range responsesFrames {
-		anthropicFrames, err := c.anthropic.Convert(rf.Data)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, anthropicFrames...)
-	}
-	return out, nil
-}
-
-// Terminal forwards the terminal responses events through the anthropic
-// converter.
-func (c *chatAnthropicFrameConverter) Terminal() []frameEvent {
-	responsesFrames := c.chat.Terminal()
-
-	var out []frameEvent
-	for _, rf := range responsesFrames {
-		anthropicFrames, err := c.anthropic.Convert(rf.Data)
-		if err != nil {
-			return out
-		}
-		out = append(out, anthropicFrames...)
-	}
-	// Append any intrinsic anthropic terminal events (e.g. message_stop).
-	out = append(out, c.anthropic.Terminal()...)
-	return out
-}
-
-func marshalResponsesEvents(events []ResponsesStreamResponse) []frameEvent {
-	out := make([]frameEvent, 0, len(events))
-	for i := range events {
-		if b, err := json.Marshal(&events[i]); err == nil {
-			out = append(out, frameEvent{Type: string(events[i].Type), Data: b})
-		}
-	}
-	return out
-}
-
-func marshalAnthropicEvents(events []AnthropicStreamEvent) []frameEvent {
-	out := make([]frameEvent, 0, len(events))
-	for i := range events {
-		if b, err := json.Marshal(&events[i]); err == nil {
-			out = append(out, frameEvent{Type: string(events[i].Type), Data: b})
-		}
-	}
-	return out
-}
-
-// convertRequest converts a client-format request body to the upstream
-// format, composing conversions where no direct conversion exists.
-func convertRequest(clientFormat, upstreamFormat Format, body []byte) ([]byte, error) {
-	switch {
-	case clientFormat == FormatResponses && upstreamFormat == FormatChatCompletions:
-		var req ResponsesRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			return nil, err
-		}
-		return json.Marshal(ConvertResponsesRequestChatRequest(&req))
-	case clientFormat == FormatMessages && upstreamFormat == FormatResponses:
-		var req AnthropicMessageRequest
-		if err := json.Unmarshal(body, &req); err != nil {
-			return nil, err
-		}
-		return json.Marshal(ConvertAnthropicRequestResponsesRequest(&req))
-	case clientFormat == FormatMessages && upstreamFormat == FormatChatCompletions:
-		responsesBody, err := convertRequest(FormatMessages, FormatResponses, body)
-		if err != nil {
-			return nil, err
-		}
-		return convertRequest(FormatResponses, FormatChatCompletions, responsesBody)
-	}
-	return nil, fmt.Errorf("unsupported request conversion %s -> %s", clientFormat, upstreamFormat)
-}
-
-// convertResponse converts an upstream-format response body to the client
-// format, composing conversions where no direct conversion exists.
-func convertResponse(clientFormat, upstreamFormat Format, body []byte) ([]byte, error) {
-	switch {
-	case clientFormat == FormatResponses && upstreamFormat == FormatChatCompletions:
-		var resp ChatResponse
-		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, err
-		}
-		return json.Marshal(ConvertChatResponseResponsesResponse(&resp))
-	case clientFormat == FormatMessages && upstreamFormat == FormatResponses:
-		var resp ResponsesResponse
-		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, err
-		}
-		return json.Marshal(ConvertResponsesResponseAnthropicResponse(&resp))
-	case clientFormat == FormatMessages && upstreamFormat == FormatChatCompletions:
-		responsesBody, err := convertResponse(FormatResponses, FormatChatCompletions, body)
-		if err != nil {
-			return nil, err
-		}
-		return convertResponse(FormatMessages, FormatResponses, responsesBody)
-	}
-	return nil, fmt.Errorf("unsupported response conversion %s -> %s", clientFormat, upstreamFormat)
 }
 
 // isEventStream reports whether the response is an SSE stream.
 func isEventStream(resp *http.Response) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type"))), "text/event-stream")
+	contentType := resp.Header.Get("Content-Type")
+	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
 }
 
-// isJSON reports whether the response body is JSON.
+// isJSON reports whether the response is JSON.
 func isJSON(resp *http.Response) bool {
-	ct := strings.ToLower(resp.Header.Get("Content-Type"))
-	return ct == "" || strings.Contains(ct, "json")
+	contentType := resp.Header.Get("Content-Type")
+	return strings.Contains(strings.ToLower(contentType), "json")
 }
 
-// copyResponseHeaders copies upstream response headers, dropping hop-by-hop
-// and entity headers recomputed downstream. Content-Encoding and entity
-// validators are dropped because the transcoded body is a new entity: the
-// upstream encoding/validators describe the upstream body, not the converted
-// one.
-func copyResponseHeaders(dst, src http.Header) {
-	for k, vs := range src {
-		switch http.CanonicalHeaderKey(k) {
-		case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade", "Content-Length", "Content-Type", "Content-Encoding", "Content-Md5", "Etag":
-			continue
-		}
-		for _, v := range vs {
-			dst.Add(k, v)
+// isUpgradeRequest reports whether the request carries an Upgrade token.
+func isUpgradeRequest(r *http.Request) bool {
+	if len(r.Header.Values("Upgrade")) > 0 {
+		return true
+	}
+	for _, value := range r.Header.Values("Connection") {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
+				return true
+			}
 		}
 	}
+	return false
 }
 
-// copyResponse passes a non-JSON or non-success upstream response through
-// unchanged, preserving entity headers such as Content-Type.
-func copyResponse(w http.ResponseWriter, resp *http.Response) {
-	for k, vs := range resp.Header {
-		switch http.CanonicalHeaderKey(k) {
-		case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Te", "Trailer", "Transfer-Encoding", "Upgrade", "Content-Length":
-			continue
-		}
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
+// nowUnix returns the current unix time in seconds.
+func nowUnix() int64 {
+	return time.Now().Unix()
+}
+
+// derefInt returns the value of v, or 0 when v is nil.
+func derefInt(v *int) int {
+	if v == nil {
+		return 0
 	}
-	w.WriteHeader(resp.StatusCode)
-	// A failed copy is surfaced by the writer's abort tracking; the client
-	// is already gone in that case.
-	_, _ = io.Copy(w, resp.Body)
+	return *v
+}
+
+// logConversionReport logs approved losses for observability.
+func logConversionReport(report ConversionReport, r *http.Request) {
+	for _, loss := range report.Losses {
+		log.Printf(
+			"transcode: %s %s: approved loss %s at %s: %s",
+			r.Method,
+			r.URL.Path,
+			loss.Feature,
+			loss.Path,
+			loss.Detail,
+		)
+	}
 }

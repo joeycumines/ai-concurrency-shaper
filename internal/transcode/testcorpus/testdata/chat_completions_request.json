@@ -47,7 +47,9 @@
               "description": "City name"
             }
           },
-          "required": ["location"],
+          "required": [
+            "location"
+          ],
           "additionalProperties": false
         }
       }
@@ -55,10 +57,8 @@
   ],
   "tool_choice": "auto",
   "parallel_tool_calls": true,
-  "reasoning": {
-    "effort": "medium"
-  },
   "metadata": {
     "session_id": "sess_123"
-  }
+  },
+  "reasoning_effort": "medium"
 }

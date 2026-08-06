@@ -39,6 +39,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
 )
 
@@ -93,10 +94,17 @@ func run() error {
 		upstreamDisableKeepAlives bool
 
 		// Transcoding flags.
-		transcodeRoutes            transcodeRouteFlags
-		transcodeResponsesChat     bool
-		transcodeMessagesChat      bool
-		transcodeMessagesResponses bool
+		transcodeRoutes              transcodeRouteFlags
+		transcodeResponsesChat       bool
+		transcodeMessagesChat        bool
+		transcodeMessagesResponses   bool
+		transcodeAuth              string
+		transcodeAuthSource        string
+		transcodeAuthHeader        string
+		transcodeAnthropicVersion  string
+		transcodeModels            transcodeModelFlags
+		transcodeMaxRequestMB      int64
+		transcodeMaxResponseMB     int64
 	)
 
 	flag.StringVar(&bindAddr, "bind", ":8080", "listen address")
@@ -131,10 +139,17 @@ func run() error {
 	flag.BoolVar(&adaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
 	flag.DurationVar(&adaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")
 	flag.BoolVar(&upstreamDisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream; avoids provider-side connection-count concurrency violations")
-	flag.Var(&transcodeRoutes, "transcode-route", "transcode route mapping clientPath=upstreamPath:clientFormat:upstreamFormat (repeatable); formats: responses, chat-completions, messages")
-	flag.BoolVar(&transcodeResponsesChat, "transcode-responses-chat", false, "transcode /v1/responses to /v1/chat/completions (responses <-> chat completions)")
-	flag.BoolVar(&transcodeMessagesChat, "transcode-messages-chat", false, "transcode /v1/messages to /v1/chat/completions (messages <-> chat completions)")
-	flag.BoolVar(&transcodeMessagesResponses, "transcode-messages-responses", false, "transcode /v1/messages to /v1/responses (messages <-> responses)")
+	flag.Var(&transcodeRoutes, "transcode-route", "transcode route mapping clientProtocol@clientPath=upstreamProtocol@upstreamPath (repeatable); client protocols: responses, messages; upstream protocols: responses, messages, chat-completions")
+	flag.BoolVar(&transcodeResponsesChat, "transcode-responses-chat", false, "transcode /v1/responses to /v1/chat/completions (responses client, chat upstream)")
+	flag.BoolVar(&transcodeMessagesChat, "transcode-messages-chat", false, "transcode /v1/messages to /v1/chat/completions (messages client, chat upstream)")
+	flag.BoolVar(&transcodeMessagesResponses, "transcode-messages-responses", false, "transcode /v1/messages to /v1/responses (messages client, responses upstream)")
+	flag.StringVar(&transcodeAuth, "transcode-auth", "auto", "upstream authentication mode: auto, none, bearer, x-api-key, api-key, header, external-signer")
+	flag.StringVar(&transcodeAuthSource, "transcode-auth-source", "inbound", "upstream secret source: inbound, env:NAME, file:PATH")
+	flag.StringVar(&transcodeAuthHeader, "transcode-auth-header", "", "custom authentication header name (with -transcode-auth header)")
+	flag.StringVar(&transcodeAnthropicVersion, "transcode-anthropic-version", "2023-06-01", "Anthropic-Version header value for Messages upstreams")
+	flag.Var(&transcodeModels, "transcode-model", "client-model=upstream-model mapping (repeatable)")
+	flag.Int64Var(&transcodeMaxRequestMB, "transcode-max-request-mb", 32, "max transcoded request body size (MB)")
+	flag.Int64Var(&transcodeMaxResponseMB, "transcode-max-response-mb", 32, "max transcoded response body size (MB)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "ai-concurrency-shaper %s\n\n", version)
@@ -243,8 +258,34 @@ func run() error {
 	}
 
 	// Wire transcoding mappings: repeatable -transcode-route values plus the
-	// three preset flags.
-	mappings := buildTranscodeMappings(transcodeRoutes, transcodeResponsesChat, transcodeMessagesChat, transcodeMessagesResponses)
+	// preset flags. Both Messages presets conflict and are rejected before
+	// proxy.New runs.
+	mappings, err := buildTranscodeMappings(transcodeRoutes, transcodeResponsesChat, transcodeMessagesChat, transcodeMessagesResponses)
+	if err != nil {
+		return err
+	}
+	transcodeModelMap, err := parseTranscodeModelMap(transcodeModels)
+	if err != nil {
+		return err
+	}
+	transcodeAuthPolicy, err := parseTranscodeAuth(
+		transcodeAuth,
+		transcodeAuthSource,
+		transcodeAuthHeader,
+		transcodeAnthropicVersion,
+	)
+	if err != nil {
+		return err
+	}
+	for i := range mappings {
+		mappings[i].ModelMap = transcodeModelMap
+		mappings[i].Auth = transcodeAuthPolicy
+		mappings[i].BodyLimits = transcode.BodyLimits{
+			AcceptedRequestBytes:    transcodeMaxRequestMB << 20,
+			SuccessfulResponseBytes: transcodeMaxResponseMB << 20,
+			RetryReplayBytes:        int64(retryMaxBodyMB) << 20,
+		}
+	}
 
 	proxyOpts := []proxy.Option{
 		proxy.WithUpstream(upstream),
@@ -272,7 +313,14 @@ func run() error {
 	if len(mappings) > 0 {
 		proxyOpts = append(proxyOpts, proxy.WithTranscodeMapping(mappings...))
 		for _, m := range mappings {
-			log.Printf("transcoding %s (%s) -> %s (%s)", m.ClientPath, m.ClientFormat, m.UpstreamPath, m.UpstreamFormat)
+			log.Printf(
+				"transcoding %s %s (%s) -> %s (%s)",
+				m.ClientRoute.Method,
+				m.ClientRoute.Path,
+				m.ClientProtocol,
+				m.UpstreamPath,
+				m.UpstreamProtocol,
+			)
 		}
 	}
 

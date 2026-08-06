@@ -43,7 +43,8 @@
       "content": [
         {
           "type": "output_text",
-          "text": "The weather in Tokyo is 21°C and sunny."
+          "text": "The weather in Tokyo is 21\u00b0C and sunny.",
+          "annotations": []
         }
       ]
     }
@@ -75,7 +76,9 @@
             "description": "City name"
           }
         },
-        "required": ["location"],
+        "required": [
+          "location"
+        ],
         "additionalProperties": false
       }
     }

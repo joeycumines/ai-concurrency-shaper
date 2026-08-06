@@ -10,15 +10,7 @@
       "finish_reason": "stop",
       "message": {
         "role": "assistant",
-        "content": "The weather in Tokyo is 21°C and sunny.",
-        "reasoning": "The user asked about Tokyo weather; I called the weather tool and received temperature 21, conditions sunny.",
-        "reasoning_details": [
-          {
-            "type": "reasoning.text",
-            "text": "The user asked about Tokyo weather; I called the weather tool and received temperature 21, conditions sunny.",
-            "index": 0
-          }
-        ]
+        "content": "The weather in Tokyo is 21\u00b0C and sunny."
       }
     }
   ],

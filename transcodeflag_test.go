@@ -16,31 +16,36 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
-// TestParseTranscodeRoute verifies the -transcode-route value parsing.
+// TestParseTranscodeRoute verifies the -transcode-route value parsing with
+// the clientProtocol@clientPath=upstreamProtocol@upstreamPath format.
 func TestParseTranscodeRoute(t *testing.T) {
-	m, err := parseTranscodeRoute("/v1/responses=/v1/chat/completions:responses:chat-completions")
+	m, err := parseTranscodeRoute("responses@/v1/responses=chat-completions@/v1/chat/completions")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if m.ClientPath != "/v1/responses" || m.UpstreamPath != "/v1/chat/completions" ||
-		m.ClientFormat != transcode.FormatResponses || m.UpstreamFormat != transcode.FormatChatCompletions {
+	if m.ClientRoute.Path != "/v1/responses" || m.UpstreamPath != "/v1/chat/completions" ||
+		m.ClientProtocol != transcode.ClientResponses || m.UpstreamProtocol != transcode.UpstreamChatCompletions {
 		t.Errorf("mapping = %+v", m)
+	}
+	if m.ClientRoute.Method != "POST" {
+		t.Errorf("client route method = %q, want POST", m.ClientRoute.Method)
 	}
 
 	for _, bad := range []string{
 		"",
-		"/v1/responses",
-		"/v1/responses=/v1/chat/completions",
-		"/v1/responses=/v1/chat/completions:responses",
-		"=/v1/chat/completions:responses:chat-completions",
-		"/v1/responses=:responses:chat-completions",
-		"/v1/responses=/v1/chat/completions:responses:chat-completions:extra",
+		"responses@/v1/responses",
+		"responses@/v1/responses=chat-completions",
+		"@/v1/responses=chat-completions@/v1/chat/completions",
+		"responses@=chat-completions@/v1/chat/completions",
+		"responses@v1/responses=chat-completions@/v1/chat/completions",
+		"responses@/v1/responses=chat-completions@v1/chat/completions",
 	} {
 		if _, err := parseTranscodeRoute(bad); err == nil {
 			t.Errorf("parseTranscodeRoute(%q): want error", bad)
@@ -48,27 +53,54 @@ func TestParseTranscodeRoute(t *testing.T) {
 	}
 }
 
+// TestParseTranscodeRouteChatClientRejected verifies chat-completions is
+// rejected as a client protocol at parse time (chat is upstream-only).
+func TestParseTranscodeRouteChatClientRejected(t *testing.T) {
+	_, err := parseTranscodeRoute("chat-completions@/v1/chat/completions=responses@/v1/responses")
+	if err == nil {
+		t.Fatal("expected chat-completions client rejection")
+	}
+	if !strings.Contains(err.Error(), "upstream-only") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestParseTranscodeRouteAtInPath verifies paths containing '@' parse
+// correctly (the first '@' separates the protocol).
+func TestParseTranscodeRouteAtInPath(t *testing.T) {
+	m, err := parseTranscodeRoute("responses@/v1/models=chat-completions@/v1/models@predict")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if m.UpstreamPath != "/v1/models@predict" {
+		t.Errorf("upstream path = %q, want /v1/models@predict", m.UpstreamPath)
+	}
+}
+
 // TestTranscodeRouteFlagsSet verifies the flag.Value behavior of the
 // repeatable -transcode-route flag.
 func TestTranscodeRouteFlagsSet(t *testing.T) {
 	var routes transcodeRouteFlags
-	if err := routes.Set("/v1/messages=/v1/responses:messages:responses"); err != nil {
+	if err := routes.Set("messages@/v1/messages=responses@/v1/responses"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	if err := routes.Set("/v1/messages=/v1/chat/completions:messages:chat-completions"); err != nil {
+	if err := routes.Set("messages@/v1/messages=chat-completions@/v1/chat/completions"); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 	if len(routes) != 2 {
 		t.Fatalf("routes = %d, want 2", len(routes))
 	}
-	if routes[0].ClientPath != "/v1/messages" || routes[0].UpstreamFormat != transcode.FormatResponses {
+	if routes[0].ClientRoute.Path != "/v1/messages" || routes[0].UpstreamProtocol != transcode.UpstreamResponses {
 		t.Errorf("routes[0] = %+v", routes[0])
 	}
-	if routes[1].UpstreamFormat != transcode.FormatChatCompletions {
+	if routes[1].UpstreamProtocol != transcode.UpstreamChatCompletions {
 		t.Errorf("routes[1] = %+v", routes[1])
 	}
 	if err := routes.Set("garbage"); err == nil {
 		t.Error("Set(garbage): want error")
+	}
+	if err := routes.Set("chat-completions@/x=responses@/y"); err == nil {
+		t.Error("Set(chat client): want error")
 	}
 	if routes.String() == "" {
 		t.Error("String() = empty")
@@ -78,53 +110,142 @@ func TestTranscodeRouteFlagsSet(t *testing.T) {
 // TestBuildTranscodeMappings verifies the preset flags expand to the correct
 // route mappings, appended after any explicit -transcode-route values.
 func TestBuildTranscodeMappings(t *testing.T) {
-	explicit := proxy.TranscodeMapping{
-		ClientPath:     "/v1/custom",
-		UpstreamPath:   "/v1/upstream",
-		ClientFormat:   transcode.FormatResponses,
-		UpstreamFormat: transcode.FormatChatCompletions,
-	}
+	explicit := proxy.TranscodeMapping{Mapping: transcode.Mapping{
+		ClientRoute:      mustRouteKey("POST", "/v1/custom"),
+		ClientProtocol:   transcode.ClientResponses,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/upstream",
+	}}
 
-	none := buildTranscodeMappings(nil, false, false, false)
+	none, err := buildTranscodeMappings(nil, false, false, false)
+	if err != nil {
+		t.Fatalf("no flags: %v", err)
+	}
 	if len(none) != 0 {
 		t.Errorf("no flags: mappings = %+v, want none", none)
 	}
 
-	all := buildTranscodeMappings([]proxy.TranscodeMapping{explicit}, true, true, true)
-	if len(all) != 4 {
-		t.Fatalf("all flags: mappings = %d, want 4", len(all))
+	all, err := buildTranscodeMappings([]proxy.TranscodeMapping{explicit}, true, false, true)
+	if err != nil {
+		t.Fatalf("all flags: %v", err)
 	}
-	if all[0] != explicit {
+	if len(all) != 3 {
+		t.Fatalf("all flags: mappings = %d, want 3", len(all))
+	}
+	if all[0].ClientRoute != explicit.ClientRoute {
 		t.Errorf("mappings[0] = %+v, want explicit route", all[0])
 	}
-	wantPresets := []proxy.TranscodeMapping{
-		{ClientPath: "/v1/responses", UpstreamPath: "/v1/chat/completions", ClientFormat: transcode.FormatResponses, UpstreamFormat: transcode.FormatChatCompletions},
-		{ClientPath: "/v1/messages", UpstreamPath: "/v1/chat/completions", ClientFormat: transcode.FormatMessages, UpstreamFormat: transcode.FormatChatCompletions},
-		{ClientPath: "/v1/messages", UpstreamPath: "/v1/responses", ClientFormat: transcode.FormatMessages, UpstreamFormat: transcode.FormatResponses},
+	wantPresets := []struct {
+		path     string
+		client   transcode.ClientProtocol
+		upstream transcode.UpstreamProtocol
+	}{
+		{"/v1/responses", transcode.ClientResponses, transcode.UpstreamChatCompletions},
+		{"/v1/messages", transcode.ClientMessages, transcode.UpstreamResponses},
 	}
 	for i, want := range wantPresets {
-		if all[i+1] != want {
-			t.Errorf("preset %d = %+v, want %+v", i, all[i+1], want)
+		got := all[i+1]
+		if got.ClientRoute.Path != want.path || got.ClientProtocol != want.client || got.UpstreamProtocol != want.upstream {
+			t.Errorf("preset %d = %+v, want %s %s->%s", i, got, want.path, want.client, want.upstream)
+		}
+		if got.ClientRoute.Method != "POST" {
+			t.Errorf("preset %d method = %q, want POST", i, got.ClientRoute.Method)
 		}
 	}
 
-	single := buildTranscodeMappings(nil, true, false, false)
-	if len(single) != 1 || single[0].ClientPath != "/v1/responses" {
+	// The messages->chat preset maps the same client route as messages->
+	// responses, so they are mutually exclusive; messages-chat alone works.
+	withChat, err := buildTranscodeMappings(nil, false, true, false)
+	if err != nil {
+		t.Fatalf("messages-chat: %v", err)
+	}
+	if len(withChat) != 1 || withChat[0].ClientRoute.Path != "/v1/messages" ||
+		withChat[0].UpstreamProtocol != transcode.UpstreamChatCompletions {
+		t.Errorf("messages-chat = %+v", withChat)
+	}
+
+	single, err := buildTranscodeMappings(nil, true, false, false)
+	if err != nil {
+		t.Fatalf("responses-chat: %v", err)
+	}
+	if len(single) != 1 || single[0].ClientRoute.Path != "/v1/responses" {
 		t.Errorf("responses-chat = %+v", single)
 	}
 }
 
-// TestParseTranscodeRouteColonPath verifies upstream paths containing colons
-// parse correctly (e.g. /v1/models:predict).
-func TestParseTranscodeRouteColonPath(t *testing.T) {
-	m, err := parseTranscodeRoute("/v1/models=/v1/models:predict:responses:chat-completions")
+// TestBuildTranscodeMappingsConflict verifies enabling both Messages presets
+// fails before proxy.New runs.
+func TestBuildTranscodeMappingsConflict(t *testing.T) {
+	_, err := buildTranscodeMappings(nil, false, true, true)
+	if err == nil {
+		t.Fatal("expected both-messages-preset conflict")
+	}
+	if !strings.Contains(err.Error(), "both map /v1/messages") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestParseTranscodeModelMap verifies the -transcode-model parsing.
+func TestParseTranscodeModelMap(t *testing.T) {
+	empty, err := parseTranscodeModelMap(nil)
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		t.Fatal(err)
 	}
-	if m.ClientPath != "/v1/models" || m.UpstreamPath != "/v1/models:predict" {
-		t.Errorf("mapping = %+v, want upstream path with colon", m)
+	if empty.AllowIdentity != true {
+		t.Fatal("empty map must allow identity")
 	}
-	if m.ClientFormat != transcode.FormatResponses || m.UpstreamFormat != transcode.FormatChatCompletions {
-		t.Errorf("formats = %q -> %q", m.ClientFormat, m.UpstreamFormat)
+
+	models, err := parseTranscodeModelMap([]string{
+		"claude-3=claude-3",
+		"gpt-4o=gpt-4o-mini",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping, err := models.Resolve("claude-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapping.UpstreamModel != "claude-3" || mapping.ClientResponseModel != "claude-3" {
+		t.Fatalf("mapping = %+v", mapping)
+	}
+	mapping, err = models.Resolve("gpt-4o")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapping.UpstreamModel != "gpt-4o-mini" {
+		t.Fatalf("upstream model = %q", mapping.UpstreamModel)
+	}
+
+	for _, bad := range []string{"no-equals", "=x", "x="} {
+		if _, err := parseTranscodeModelMap([]string{bad}); err == nil {
+			t.Errorf("parseTranscodeModelMap(%q): want error", bad)
+		}
+	}
+}
+
+// TestParseTranscodeAuth verifies the auth CLI contract.
+func TestParseTranscodeAuth(t *testing.T) {
+	policy, err := parseTranscodeAuth("auto", "inbound", "", "2023-06-01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Mode != transcode.AuthAuto || !policy.Inbound || policy.AnthropicVersion != "2023-06-01" {
+		t.Fatalf("policy = %+v", policy)
+	}
+
+	policy, err = parseTranscodeAuth("header", "env:UPSTREAM_KEY", "X-Upstream-Key", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Mode != transcode.AuthCustomHeader || policy.Inbound || policy.CustomHeader != "X-Upstream-Key" {
+		t.Fatalf("policy = %+v", policy)
+	}
+	if policy.Secret == nil {
+		t.Fatal("secret source missing")
+	}
+
+	if _, err := parseTranscodeAuth("auto", "bogus", "", ""); err == nil {
+		t.Fatal("expected invalid source rejection")
 	}
 }

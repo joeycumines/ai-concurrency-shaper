@@ -3,12 +3,16 @@ package transcode
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
 // =============================================================================
 // Anthropic Messages API
 // =============================================================================
+//
+// https://platform.claude.com/docs/en/api/messages
+// https://platform.claude.com/docs/en/build-with-claude/streaming
 
 // AnthropicMessageRole is the role of an Anthropic message.
 type AnthropicMessageRole string
@@ -33,12 +37,41 @@ const (
 	AnthropicContentBlockTypeRedactedThinking AnthropicContentBlockType = "redacted_thinking"
 )
 
+// AnthropicSourceType is the type of an image or document source.
+type AnthropicSourceType string
+
+// AnthropicSourceType values.
+const (
+	AnthropicSourceTypeBase64 AnthropicSourceType = "base64"
+	AnthropicSourceTypeURL    AnthropicSourceType = "url"
+)
+
 // AnthropicSource is the source of an image or document block.
 type AnthropicSource struct {
-	Type      string  `json:"type"`
-	MediaType *string `json:"media_type,omitempty"`
-	Data      *string `json:"data,omitempty"`
-	URL       *string `json:"url,omitempty"`
+	Type      AnthropicSourceType `json:"type"`
+	MediaType string              `json:"media_type"`
+	Data      string              `json:"data,omitempty"`
+	URL       string              `json:"url,omitempty"`
+}
+
+// Validate checks the source shape.
+func (s AnthropicSource) Validate() error {
+	switch s.Type {
+	case AnthropicSourceTypeBase64:
+		if s.Data == "" {
+			return errors.New("base64 source has no data")
+		}
+	case AnthropicSourceTypeURL:
+		if s.URL == "" {
+			return errors.New("url source has no url")
+		}
+	default:
+		return fmt.Errorf("unknown anthropic source type %q", s.Type)
+	}
+	if s.MediaType == "" {
+		return errors.New("anthropic source has no media_type")
+	}
+	return nil
 }
 
 // AnthropicContentBlock is one content block of an Anthropic message.
@@ -58,6 +91,58 @@ type AnthropicContentBlock struct {
 	Source    *AnthropicSource  `json:"source,omitempty"`
 }
 
+// Validate checks the block shape.
+func (b AnthropicContentBlock) Validate() error {
+	switch b.Type {
+	case AnthropicContentBlockTypeText:
+		if b.Text == nil {
+			return errors.New("text block has no text")
+		}
+	case AnthropicContentBlockTypeImage:
+		if b.Source == nil {
+			return errors.New("image block has no source")
+		}
+		return b.Source.Validate()
+	case AnthropicContentBlockTypeDocument:
+		if b.Source == nil {
+			return errors.New("document block has no source")
+		}
+		return b.Source.Validate()
+	case AnthropicContentBlockTypeToolUse:
+		if b.ID == nil || *b.ID == "" {
+			return errors.New("tool_use block has no id")
+		}
+		if b.Name == nil || *b.Name == "" {
+			return errors.New("tool_use block has no name")
+		}
+		if len(b.Input) == 0 {
+			return errors.New("tool_use block has no input")
+		}
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(b.Input, &probe); err != nil {
+			return errors.New("tool_use input is not a JSON object")
+		}
+	case AnthropicContentBlockTypeToolResult:
+		if b.ToolUseID == nil || *b.ToolUseID == "" {
+			return errors.New("tool_result block has no tool_use_id")
+		}
+		if b.Content == nil {
+			return errors.New("tool_result block has no content")
+		}
+	case AnthropicContentBlockTypeThinking:
+		if b.Thinking == nil || b.Signature == nil {
+			return errors.New("thinking block requires thinking and signature")
+		}
+	case AnthropicContentBlockTypeRedactedThinking:
+		if b.Data == nil {
+			return errors.New("redacted_thinking block has no data")
+		}
+	default:
+		return fmt.Errorf("unknown anthropic content block type %q", b.Type)
+	}
+	return nil
+}
+
 // AnthropicContent is the content of an Anthropic message: either a plain
 // string or an array of content blocks. Exactly one form is set.
 type AnthropicContent struct {
@@ -65,42 +150,55 @@ type AnthropicContent struct {
 	ContentBlocks []AnthropicContentBlock
 }
 
-// MarshalJSON emits the active form directly, without a wrapper object.
-func (c AnthropicContent) MarshalJSON() ([]byte, error) {
+// Validate checks the union invariants and each block.
+func (c AnthropicContent) Validate() error {
 	if c.ContentStr != nil && c.ContentBlocks != nil {
-		return nil, fmt.Errorf("both ContentStr and ContentBlocks are set; only one should be non-nil")
+		return errors.New("anthropic content has both string and block variants")
+	}
+	if c.ContentStr == nil && c.ContentBlocks == nil {
+		return errors.New("anthropic content has no selected variant")
+	}
+	for i, block := range c.ContentBlocks {
+		if err := block.Validate(); err != nil {
+			return fmt.Errorf("anthropic content block %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// MarshalJSON emits the active form, without a wrapper object.
+func (c AnthropicContent) MarshalJSON() ([]byte, error) {
+	if err := c.Validate(); err != nil {
+		return nil, err
 	}
 	if c.ContentStr != nil {
 		return json.Marshal(*c.ContentStr)
 	}
-	if c.ContentBlocks != nil {
-		return json.Marshal(c.ContentBlocks)
-	}
-	// Anthropic requires content to be an array, never null.
-	return []byte("[]"), nil
+	return json.Marshal(c.ContentBlocks)
 }
 
 // UnmarshalJSON decodes a string or an array of content blocks.
 func (c *AnthropicContent) UnmarshalJSON(data []byte) error {
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		c.ContentStr = nil
-		c.ContentBlocks = nil
-		return nil
+	data = trimJSONSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return errors.New("anthropic content is null")
 	}
-	var str string
-	if err := json.Unmarshal(data, &str); err == nil {
+	if data[0] == '"' {
+		var str string
+		if err := strictDecode(data, &str); err != nil {
+			return err
+		}
 		c.ContentStr = &str
 		c.ContentBlocks = nil
 		return nil
 	}
 	var blocks []AnthropicContentBlock
-	if err := json.Unmarshal(data, &blocks); err == nil {
-		c.ContentBlocks = blocks
-		c.ContentStr = nil
-		return nil
+	if err := strictDecode(data, &blocks); err != nil {
+		return err
 	}
-	return fmt.Errorf("content field is neither a string nor an array of content blocks")
+	c.ContentBlocks = blocks
+	c.ContentStr = nil
+	return nil
 }
 
 // AnthropicMessage is a message in an Anthropic conversation.
@@ -109,11 +207,32 @@ type AnthropicMessage struct {
 	Content AnthropicContent     `json:"content"`
 }
 
+// Validate checks the message shape.
+func (m AnthropicMessage) Validate() error {
+	switch m.Role {
+	case AnthropicMessageRoleUser, AnthropicMessageRoleAssistant:
+	default:
+		return fmt.Errorf("unknown anthropic message role %q", m.Role)
+	}
+	return m.Content.Validate()
+}
+
 // AnthropicTool is a tool definition in an Anthropic request.
 type AnthropicTool struct {
 	Name        string         `json:"name"`
 	Description *string        `json:"description,omitempty"`
 	InputSchema map[string]any `json:"input_schema,omitempty"`
+}
+
+// Validate checks the tool shape.
+func (t AnthropicTool) Validate() error {
+	if t.Name == "" {
+		return errors.New("anthropic tool name is empty")
+	}
+	if t.InputSchema == nil {
+		return errors.New("anthropic tool has no input_schema")
+	}
+	return nil
 }
 
 // AnthropicToolChoice configures tool selection.
@@ -227,6 +346,15 @@ type AnthropicStreamDelta struct {
 	StopSequence *string                  `json:"stop_sequence,omitempty"`
 }
 
+// AnthropicStreamError is the nested error object of an Anthropic error
+// event. The official stream error contract requires it.
+//
+// https://platform.claude.com/docs/en/build-with-claude/streaming#error-events
+type AnthropicStreamError struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
 // AnthropicStreamEvent is one SSE event of an Anthropic messages stream.
 type AnthropicStreamEvent struct {
 	Type         AnthropicStreamEventType  `json:"type"`
@@ -235,4 +363,5 @@ type AnthropicStreamEvent struct {
 	ContentBlock *AnthropicContentBlock    `json:"content_block,omitempty"`
 	Delta        *AnthropicStreamDelta     `json:"delta,omitempty"`
 	Usage        *AnthropicUsage           `json:"usage,omitempty"`
+	Error        *AnthropicStreamError     `json:"error,omitempty"`
 }

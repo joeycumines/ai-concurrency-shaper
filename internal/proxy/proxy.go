@@ -77,17 +77,18 @@ type proxyConfig struct {
 	transcodeMappings      []TranscodeMapping
 }
 
-// TranscodeMapping maps a client route to an upstream route with wire format
-// conversion between the two.
+// TranscodeMapping configures one transcoded route. The embedded
+// transcode.Mapping is validated by WithTranscodeMapping and proxy.New.
 type TranscodeMapping struct {
-	// ClientPath is the client-facing route path, e.g. "/v1/responses".
-	ClientPath string
-	// UpstreamPath is the upstream route path, e.g. "/v1/chat/completions".
-	UpstreamPath string
-	// ClientFormat is the wire format of client payloads.
-	ClientFormat transcode.Format
-	// UpstreamFormat is the wire format of upstream payloads.
-	UpstreamFormat transcode.Format
+	transcode.Mapping
+
+	// BodyLimits bounds request/response bodies on this route. Zero values
+	// fall back to the proxy defaults.
+	BodyLimits transcode.BodyLimits
+
+	// AllowedClientQuery lists client query parameters permitted on the
+	// transcoded route. Unknown client query parameters are rejected.
+	AllowedClientQuery map[string]struct{}
 }
 
 // TranscodeOption configures transcoding route mappings.
@@ -104,11 +105,8 @@ func WithTranscodeMapping(mappings ...TranscodeMapping) *TranscodeOption {
 func (o *TranscodeOption) applyProxyOption(cfg *proxyConfig) error {
 	for i := range o.mappings {
 		m := &o.mappings[i]
-		if m.ClientPath == "" || m.UpstreamPath == "" {
-			return errors.New("proxy: transcode mapping paths must not be empty")
-		}
-		if !transcode.SupportedFormatPair(m.ClientFormat, m.UpstreamFormat) {
-			return fmt.Errorf("proxy: unsupported transcode format pair %q -> %q", m.ClientFormat, m.UpstreamFormat)
+		if err := m.Mapping.Validate(); err != nil {
+			return fmt.Errorf("proxy: invalid transcode mapping: %w", err)
 		}
 	}
 	cfg.transcodeMappings = append(cfg.transcodeMappings, o.mappings...)
@@ -589,9 +587,9 @@ type Proxy struct {
 	// transcodeHandlers serves transcoded routes, one per mapping.
 	transcodeHandlers []*transcode.TranscodeHandler
 
-	// transcodeHandlerMap provides O(1) lookup of transcode handlers
-	// by client path, built once at construction.
-	transcodeHandlerMap map[string]http.Handler
+	// transcodeHandlerMap provides O(1) lookup of transcode handlers by
+	// method+path route key, built once at construction.
+	transcodeHandlerMap map[transcode.RouteKey]http.Handler
 }
 
 // New creates a Proxy from the given options.
@@ -621,15 +619,15 @@ func New(opts ...Option) (*Proxy, error) {
 		return nil, err
 	}
 
-	// Reject duplicate transcode client paths: the first matching handler
-	// would silently win.
-	seenTranscodePaths := make(map[string]struct{}, len(cfg.transcodeMappings))
+	// Reject duplicate transcode client routes: the first matching handler
+	// would silently win. The key is method+path.
+	seenTranscodeRoutes := make(map[transcode.RouteKey]struct{}, len(cfg.transcodeMappings))
 	for i := range cfg.transcodeMappings {
-		clientPath := cfg.transcodeMappings[i].ClientPath
-		if _, dup := seenTranscodePaths[clientPath]; dup {
-			return nil, fmt.Errorf("proxy: duplicate transcode client path %q", clientPath)
+		routeKey := cfg.transcodeMappings[i].Mapping.ClientRoute
+		if _, dup := seenTranscodeRoutes[routeKey]; dup {
+			return nil, fmt.Errorf("proxy: duplicate transcode client route %s %s", routeKey.Method, routeKey.Path)
 		}
-		seenTranscodePaths[clientPath] = struct{}{}
+		seenTranscodeRoutes[routeKey] = struct{}{}
 	}
 
 	// Build retry transport when retries are enabled.
@@ -704,24 +702,27 @@ func New(opts ...Option) (*Proxy, error) {
 
 	// Build one transcode handler per mapping, each forwarding through the
 	// proxy engine (the retry/breaker-aware transport).
-	p.transcodeHandlerMap = make(map[string]http.Handler, len(cfg.transcodeMappings))
+	p.transcodeHandlerMap = make(map[transcode.RouteKey]http.Handler, len(cfg.transcodeMappings))
 	for i := range cfg.transcodeMappings {
 		m := &cfg.transcodeMappings[i]
 		h := transcode.NewTranscodeHandler(
 			transcode.HandlerConfig{
-				ClientPath:     m.ClientPath,
-				UpstreamPath:   m.UpstreamPath,
-				ClientFormat:   m.ClientFormat,
-				UpstreamFormat: m.UpstreamFormat,
-				Upstream:       cfg.upstream,
-				MaxBodyBytes:   cfg.maxBodyBytes,
+				Mapping:            m.Mapping,
+				Upstream:           cfg.upstream,
+				BodyLimits:         m.BodyLimits,
+				AuthPolicy:         m.Auth,
+				ModelMap:           m.ModelMap,
+				LossPolicy:         m.LossPolicy,
+				ChatCapabilities:   m.ChatCapabilities,
+				AllowedClientQuery: m.AllowedClientQuery,
 			},
 			p.RoundTrip,
+			nil,
 		)
 		p.transcodeHandlers = append(p.transcodeHandlers, h)
-		// First-match wins for duplicate ClientPath values.
-		if _, exists := p.transcodeHandlerMap[m.ClientPath]; !exists {
-			p.transcodeHandlerMap[m.ClientPath] = h
+		// First-match wins for duplicate route keys.
+		if _, exists := p.transcodeHandlerMap[m.ClientRoute]; !exists {
+			p.transcodeHandlerMap[m.ClientRoute] = h
 		}
 	}
 
@@ -1091,10 +1092,33 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	finalize(recPtr != nil && recPtr.aborted)
 }
 
+// serveTranscodeHandler runs a transcode handler with the per-request outcome
+// sink wired. After the handler returns, the recorded outcome provenance is
+// attached to the statusRecorder so breaker accounting can use it instead of
+// status-code guessing.
+func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, handler http.Handler) {
+	ctx, sink := transcode.WithOutcomeSink(r.Context())
+	handler.ServeHTTP(w, r.WithContext(ctx))
+	select {
+	case outcome := <-sink:
+		if rec, ok := w.(*statusRecorder); ok {
+			outcomeCopy := outcome
+			rec.transcodeOutcome = &outcomeCopy
+		}
+	default:
+	}
+}
+
 // lookupTranscodeHandler returns the transcode handler mapped to the request
-// path, or nil when the route is not transcoded. Uses O(1) map lookup.
+// method and path, or nil when the route is not transcoded. Dispatch is
+// method-scoped: OPTIONS/GET/HEAD/DELETE on a mapped path pass through
+// transparently.
 func (p *Proxy) lookupTranscodeHandler(r *http.Request) http.Handler {
-	return p.transcodeHandlerMap[r.URL.Path]
+	key, err := transcode.NewRouteKey(r.Method, r.URL.Path)
+	if err != nil {
+		return nil
+	}
+	return p.transcodeHandlerMap[key]
 }
 
 func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightID uint64) {
@@ -1274,7 +1298,7 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 			}
 		}()
 		if handler := p.lookupTranscodeHandler(r); handler != nil {
-			handler.ServeHTTP(w, r)
+			p.serveTranscodeHandler(w, r, handler)
 		} else {
 			p.inner.ServeHTTP(w, r)
 		}
@@ -1323,6 +1347,15 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 			// error directly, the proxy uses r.Context().Err() because
 			// httputil.ReverseProxy.ServeHTTP writes to the
 			// ResponseWriter instead of returning a Go error.
+			// A transcoded exchange records explicit outcome provenance.
+			// Use it for breaker accounting: a client-aborted 2xx stream is
+			// neither success nor failure; a local conversion failure is not
+			// an upstream failure.
+			if rec.transcodeOutcome != nil {
+				p.recordTranscodeBreakerOutcome(rec, r, retryAttempt, proxyStart, breakerEpoch, rec.transcodeOutcome)
+				p.m.IncPassThrough()
+				return
+			}
 			ctxErr := r.Context().Err()
 			// Only skip recording for transport errors (status 0) and
 			// proxy-generated 502 errors when the client cancelled. The
@@ -1602,7 +1635,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			}
 		}()
 		if handler := p.lookupTranscodeHandler(r); handler != nil {
-			handler.ServeHTTP(w, r)
+			p.serveTranscodeHandler(w, r, handler)
 		} else {
 			p.inner.ServeHTTP(w, r)
 		}
@@ -1651,6 +1684,15 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			// error directly, the proxy uses r.Context().Err() because
 			// httputil.ReverseProxy.ServeHTTP writes to the
 			// ResponseWriter instead of returning a Go error.
+			// A transcoded exchange records explicit outcome provenance.
+			// Use it for breaker accounting: a client-aborted 2xx stream is
+			// neither success nor failure; a local conversion failure is not
+			// an upstream failure.
+			if rec.transcodeOutcome != nil {
+				p.recordTranscodeBreakerOutcome(rec, r, retryAttempt, proxyStart, breakerEpoch, rec.transcodeOutcome)
+				p.m.IncProxied()
+				return
+			}
 			ctxErr := r.Context().Err()
 			// Both Canceled (explicit disconnect) and DeadlineExceeded
 			// (client-imposed timeout) are client-initiated. The retry
@@ -1707,6 +1749,67 @@ func isUpstreamFailureStatus(rec *statusRecorder, now time.Time, ctxErr error) b
 		return false
 	}
 	return circuitbreaker.IsFailureStatusWithHeaders(rec.status, responseHeaders(rec), rec.responseAt, now)
+}
+
+// recordTranscodeBreakerOutcome feeds the explicit outcome provenance of a
+// transcoded exchange into the circuit breaker. Only definitive upstream
+// outcomes mutate breaker health:
+//
+//   - upstream HTTP >= 500, transport errors, and body errors are failures;
+//   - upstream HTTP 2xx (including completed streams) are successes;
+//   - a client-aborted 2xx stream is neither success nor failure and must not
+//     reset an existing failure streak;
+//   - local conversion failures are neither success nor failure — they are
+//     not upstream 502s.
+func (p *Proxy) recordTranscodeBreakerOutcome(
+	rec *statusRecorder,
+	r *http.Request,
+	retryAttempt *retry.BreakerAttempt,
+	proxyStart time.Time,
+	breakerEpoch uint64,
+	outcome *transcode.Outcome,
+) {
+	if outcome == nil || p.breaker == nil {
+		return
+	}
+	now := time.Now()
+	attemptStart, attemptEpoch := retryAttemptOrDefault(retryAttempt, proxyStart, breakerEpoch)
+
+	switch outcome.Provenance {
+	case transcode.ProvenanceUpstreamHTTP:
+		if outcome.UpstreamFailure {
+			p.breaker.RecordFailure(outcome.Status, parseRetryAfterFromRecorder(rec, now), attemptStart, attemptEpoch)
+		} else if outcome.Status >= 200 && outcome.Status < 300 {
+			p.breaker.RecordSuccess(attemptStart, attemptEpoch)
+		} else if attemptEpoch != 0 && outcome.Status > 0 {
+			// A HALF_OPEN probe must be resolved by every definitive
+			// upstream response; non-failure statuses prove the upstream
+			// answered.
+			p.breaker.RecordSuccess(attemptStart, attemptEpoch)
+		}
+
+	case transcode.ProvenanceUpstreamTransportError,
+		transcode.ProvenanceUpstreamBodyError:
+		p.breaker.RecordFailure(outcome.Status, parseRetryAfterFromRecorder(rec, now), attemptStart, attemptEpoch)
+
+	case transcode.ProvenanceClientAbort:
+		// Neither success nor failure: a cancelled 2xx stream must not reset
+		// a failure streak, and a cancelled request must not trip the
+		// breaker. A HALF_OPEN probe stays unresolved and is cancelled by the
+		// caller.
+		p.breaker.CancelProbe(attemptEpoch)
+
+	case transcode.ProvenanceDownstreamWriteError,
+		transcode.ProvenanceLocalRequestConversionError,
+		transcode.ProvenanceLocalResponseConversionError,
+		transcode.ProvenanceLocalStreamValidationError:
+		// Local failures are not upstream health input. A HALF_OPEN probe is
+		// cancelled rather than resolved.
+		p.breaker.CancelProbe(attemptEpoch)
+
+	default:
+		p.breaker.CancelProbe(attemptEpoch)
+	}
 }
 
 func isBreakerSuccessStatus(rec *statusRecorder, now time.Time, epoch uint64, ctxErr error) bool {
@@ -2282,6 +2385,11 @@ type statusRecorder struct {
 	switchingProtocolsProbeResolved      atomic.Bool
 	onSwitchingProtocolsHandshakeSuccess func()
 	onSwitchingProtocolsHandshakeFailure func()
+
+	// transcodeOutcome is the explicit outcome provenance recorded by a
+	// transcoded exchange. When set, breaker accounting uses it instead of
+	// status-code guessing.
+	transcodeOutcome *transcode.Outcome
 }
 
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }

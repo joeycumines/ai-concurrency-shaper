@@ -70,6 +70,105 @@ func parseListeningAddr(buf *lockedBuffer) string {
 	return ""
 }
 
+// proxySubprocess owns exactly one cmd.Wait: the goroutine started by
+// startProxyCmd. done is closed when Wait returns, and waitErr is assigned
+// before done is closed, so reading it after <-done is race-free. wait() is
+// non-destructive: any number of callers may wait on the same process.
+type proxySubprocess struct {
+	cmd     *exec.Cmd
+	done    chan struct{}
+	waitErr error
+}
+
+// wait blocks until the process exits (returning its Wait error, or nil) or
+// the timeout elapses. Multiple callers may call it concurrently; the first
+// to observe the exit reaps the result for all of them.
+func (s *proxySubprocess) wait(t *testing.T, timeout time.Duration) error {
+	t.Helper()
+	select {
+	case <-s.done:
+		if s.waitErr != nil {
+			return fmt.Errorf("proxy exited with error: %v", s.waitErr)
+		}
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("proxy did not exit within %s", timeout)
+	}
+}
+
+// startProxyCmd builds the proxy binary and starts it, owning exactly one
+// cmd.Wait via a goroutine. The returned cleanup (via t.Cleanup) terminates
+// the process and reaps the result; it never calls cmd.Wait again (Go
+// rejects a second wait).
+func startProxyCmd(t *testing.T, args ...string) (*proxySubprocess, *lockedBuffer) {
+	t.Helper()
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	var out lockedBuffer
+	cmd := exec.Command(bin, args...)
+	stdinR, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	t.Cleanup(func() { stdinR.Close() })
+	cmd.Stdin = stdinR
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v\n%s", err, out.String())
+	}
+
+	sub := &proxySubprocess{
+		cmd:  cmd,
+		done: make(chan struct{}),
+	}
+	go func() {
+		sub.waitErr = cmd.Wait()
+		close(sub.done)
+	}()
+
+	t.Cleanup(func() {
+		if sub.cmd.Process == nil {
+			return
+		}
+		_ = sub.cmd.Process.Signal(syscall.SIGTERM)
+		if err := sub.wait(t, 5*time.Second); err != nil {
+			_ = sub.cmd.Process.Kill()
+			// Best effort: a descendant may still hold the stdio pipes.
+			// The test is over; do not block forever on the reap.
+			_ = sub.wait(t, 5*time.Second)
+		}
+	})
+
+	return sub, &out
+}
+
+// waitForListeningAddr polls the subprocess output for the listening address.
+func (s *proxySubprocess) waitForListeningAddr(t *testing.T, out *lockedBuffer) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		addr := parseListeningAddr(out)
+		if addr != "" {
+			return addr
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_ = s.cmd.Process.Signal(syscall.SIGTERM)
+	// Reap if the signal sufficed; the cleanup force-kills otherwise.
+	_ = s.wait(t, 5*time.Second)
+	t.Fatalf("proxy did not report a listening address")
+	return ""
+}
+
+
 func TestTUIExitsOnBindFailure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -304,13 +403,6 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	bin := t.TempDir() + "/test-shaper"
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-
 	const concurrency = 4
 
 	// Count handler entries rather than ConnState transitions: StateNew can run
@@ -343,8 +435,7 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 	upstream.Start()
 	t.Cleanup(upstream.Close)
 
-	var out lockedBuffer
-	cmd := exec.Command(bin,
+	sub, out := startProxyCmd(t,
 		"-upstream", upstream.URL,
 		"-limit", "POST /v1/messages",
 		"-concurrency", "4",
@@ -357,53 +448,7 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 		"-circuit-breaker=false",
 	)
 
-	stdinR, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open /dev/null: %v", err)
-	}
-	defer stdinR.Close()
-	cmd.Stdin = stdinR
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start proxy: %v\n%s", err, out.String())
-	}
-
-	t.Cleanup(func() {
-		if cmd.Process == nil {
-			return
-		}
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
-	})
-
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- cmd.Wait()
-	}()
-
-	// Poll the subprocess log output for the listening address.
-	deadline := time.Now().Add(5 * time.Second)
-	var proxyAddr string
-	for time.Now().Before(deadline) {
-		proxyAddr = parseListeningAddr(&out)
-		if proxyAddr != "" {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	if proxyAddr == "" {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case <-runErr:
-		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Kill()
-			<-runErr
-		}
-		t.Fatalf("proxy did not report a listening address")
-	}
+	proxyAddr := sub.waitForListeningAddr(t, out)
 
 	proxyURL := "http://" + proxyAddr + "/v1/messages"
 	const n = 8
@@ -432,17 +477,14 @@ func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	_ = sub.cmd.Process.Signal(syscall.SIGTERM)
 
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("proxy exited with error: %v\noutput:\n%s", err, out.String())
+	if err := sub.wait(t, 5*time.Second); err != nil {
+		_ = sub.cmd.Process.Kill()
+		if kerr := sub.wait(t, 5*time.Second); kerr != nil {
+			t.Fatalf("proxy did not exit even after SIGKILL (%v)\noutput:\n%s", kerr, out.String())
 		}
-	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
-		<-runErr
-		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
+		t.Fatalf("proxy did not exit after SIGTERM (%v)\noutput:\n%s", err, out.String())
 	}
 
 	if got := peakActiveRequests.Load(); got > concurrency {
@@ -458,13 +500,6 @@ func TestCLI_AdaptiveHeadroom(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	bin := t.TempDir() + "/test-shaper"
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-
 	var requestCount atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if requestCount.Add(1) == 1 {
@@ -476,8 +511,7 @@ func TestCLI_AdaptiveHeadroom(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	var out lockedBuffer
-	cmd := exec.Command(bin,
+	sub, out := startProxyCmd(t,
 		"-upstream", upstream.URL,
 		"-limit", "POST /v1/messages",
 		"-concurrency", "4",
@@ -489,53 +523,7 @@ func TestCLI_AdaptiveHeadroom(t *testing.T) {
 		"-adaptive-headroom-window", "200ms",
 	)
 
-	stdinR, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open /dev/null: %v", err)
-	}
-	defer stdinR.Close()
-	cmd.Stdin = stdinR
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start proxy: %v\n%s", err, out.String())
-	}
-
-	t.Cleanup(func() {
-		if cmd.Process == nil {
-			return
-		}
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
-	})
-
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- cmd.Wait()
-	}()
-
-	// Poll the subprocess log output for the listening address.
-	deadline := time.Now().Add(5 * time.Second)
-	var proxyAddr string
-	for time.Now().Before(deadline) {
-		proxyAddr = parseListeningAddr(&out)
-		if proxyAddr != "" {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	if proxyAddr == "" {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case <-runErr:
-		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Kill()
-			<-runErr
-		}
-		t.Fatalf("proxy did not report a listening address")
-	}
+	proxyAddr := sub.waitForListeningAddr(t, out)
 
 	proxyURL := "http://" + proxyAddr + "/v1/messages"
 
@@ -563,17 +551,14 @@ func TestCLI_AdaptiveHeadroom(t *testing.T) {
 		}
 	}
 
-	_ = cmd.Process.Signal(syscall.SIGTERM)
+	_ = sub.cmd.Process.Signal(syscall.SIGTERM)
 
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("proxy exited with error: %v\noutput:\n%s", err, out.String())
+	if err := sub.wait(t, 5*time.Second); err != nil {
+		_ = sub.cmd.Process.Kill()
+		if kerr := sub.wait(t, 5*time.Second); kerr != nil {
+			t.Fatalf("proxy did not exit even after SIGKILL (%v)\noutput:\n%s", kerr, out.String())
 		}
-	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
-		<-runErr
-		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
+		t.Fatalf("proxy did not exit after SIGTERM (%v)\noutput:\n%s", err, out.String())
 	}
 
 	if !strings.Contains(out.String(), "adaptive headroom: enabled") {
@@ -620,10 +605,57 @@ func TestGroupLimiterSharing(t *testing.T) {
 	}
 
 	matcher := route.NewMatcher(patterns)
+
+	// The upstream tracks concurrent requests so the shared limiter's cap of
+	// 3 is observable: with 4 concurrent requests across the two routes, the
+	// fourth must block until one of the first three completes. The message
+	// handlers sleep briefly so admitted requests overlap deterministically;
+	// without the sleep, instantaneous handlers can serialize at the
+	// scheduler level under -race and the observed peak never reaches the
+	// limiter cap even though the limiter admitted them concurrently.
+	var (
+		mu           sync.Mutex
+		active       int
+		peakActive   int
+		releaseFirst = make(chan struct{})
+		started      = make(chan struct{})
+		startedOnce  sync.Once
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		active++
+		if active > peakActive {
+			peakActive = active
+		}
+		startedOnce.Do(func() { close(started) })
+		mu.Unlock()
+
+		// The first request holds the slot until released; the others hold
+		// it long enough to be observed overlapping.
+		if r.URL.Path == "/v1/chat/completions" {
+			<-releaseFirst
+		} else {
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, `{"ok":true}`)
+
+		mu.Lock()
+		active--
+		mu.Unlock()
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	met := metrics.NewCollector()
 	limiter := queue.NewLimiterWithCooldown(10, 0)
 	p, err := proxy.New(
-		proxy.WithUpstream(mustParseURL("http://127.0.0.1:1")),
+		proxy.WithUpstream(upstreamURL),
 		proxy.WithMatcher(matcher),
 		proxy.WithLimiter(limiter),
 		proxy.WithMetrics(met),
@@ -633,14 +665,73 @@ func TestGroupLimiterSharing(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// Both routes should hit the group limiter, not the global one.
-	_ = p // The acquireSlot method is internal; we verify via route/key mapping.
-}
-
-func mustParseURL(s string) *url.URL {
-	u, err := url.Parse(s)
-	if err != nil {
-		panic(err)
+	// The first request acquires a slot through the shared group limiter and
+	// holds it at the upstream.
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request did not reach the upstream")
 	}
-	return u
+
+	// Two more requests can acquire the remaining two slots, but a fourth
+	// must wait for the first to release.
+	done := make(chan struct{})
+	for range 3 {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+		}()
+	}
+
+	// With the first holding a slot, at most 3 requests are active upstream
+	// at once; the fourth waits. Poll until exactly 3 are active (they must
+	// all be admitted through the shared group limiter), then assert the cap
+	// held. A fixed sleep here would be flaky under -race, and failing with
+	// the upstream handler still blocked would deadlock the server close.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	defer release() // never leave the upstream handler blocked
+
+	deadline := time.Now().Add(5 * time.Second)
+	var peak int
+	for {
+		mu.Lock()
+		peak = peakActive
+		mu.Unlock()
+		if peak == 3 {
+			break
+		}
+		if peak > 3 {
+			release()
+			t.Fatalf("peak active upstream requests = %d, want <= 3 (group limiter cap)", peak)
+		}
+		if time.Now().After(deadline) {
+			release()
+			t.Fatalf("peak active upstream requests = %d, want 3 (group limiter shared)", peak)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	release()
+	<-firstDone
+	for range 3 {
+		<-done
+	}
+
+	// Both routes used the shared group limiter: the peak of exactly 3
+	// across the two routes proves the group cap applied.
+	mu.Lock()
+	defer mu.Unlock()
+	if peakActive != 3 {
+		t.Fatalf("peakActive = %d, want 3", peakActive)
+	}
 }

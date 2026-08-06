@@ -3,12 +3,20 @@ package transcode
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
 // =============================================================================
-// OpenAI Chat Completions API
+// OpenAI Chat Completions API (upstream-only, official subset)
 // =============================================================================
+//
+// Chat Completions is deliberately upstream-only. The schema models the
+// official OpenAI Chat Completions wire contract; provider extensions are
+// opt-in capabilities and never masquerade as official fields.
+//
+// https://platform.openai.com/docs/api-reference/chat
+// https://github.com/openai/openai-go/blob/main/chatcompletion.go
 
 // ChatMessageRole is the role of a chat message.
 type ChatMessageRole string
@@ -27,9 +35,8 @@ type ChatContentBlockType string
 
 // ChatContentBlockType values.
 const (
-	ChatContentBlockTypeText    ChatContentBlockType = "text"
-	ChatContentBlockTypeRefusal ChatContentBlockType = "refusal"
-	ChatContentBlockTypeImage   ChatContentBlockType = "image_url"
+	ChatContentBlockTypeText  ChatContentBlockType = "text"
+	ChatContentBlockTypeImage ChatContentBlockType = "image_url"
 )
 
 // ChatInputImage is the image_url payload of an image content block.
@@ -42,8 +49,24 @@ type ChatInputImage struct {
 type ChatContentBlock struct {
 	Type     ChatContentBlockType `json:"type"`
 	Text     *string              `json:"text,omitempty"`
-	Refusal  *string              `json:"refusal,omitempty"`
 	ImageURL *ChatInputImage      `json:"image_url,omitempty"`
+}
+
+// Validate checks the block shape.
+func (b ChatContentBlock) Validate() error {
+	switch b.Type {
+	case ChatContentBlockTypeText:
+		if b.Text == nil {
+			return errors.New("text content block has no text")
+		}
+	case ChatContentBlockTypeImage:
+		if b.ImageURL == nil || b.ImageURL.URL == "" {
+			return errors.New("image content block has no image_url")
+		}
+	default:
+		return fmt.Errorf("unknown chat content block type %q", b.Type)
+	}
+	return nil
 }
 
 // ChatMessageContent is the content of a chat message: either a plain string
@@ -53,54 +76,57 @@ type ChatMessageContent struct {
 	ContentBlocks []ChatContentBlock
 }
 
+// Validate checks the union invariants and each block.
+func (c ChatMessageContent) Validate() error {
+	if c.ContentStr != nil && c.ContentBlocks != nil {
+		return errors.New("chat message content has both string and block variants")
+	}
+	if c.ContentStr == nil && c.ContentBlocks == nil {
+		return errors.New("chat message content has no selected variant")
+	}
+	for i, block := range c.ContentBlocks {
+		if err := block.Validate(); err != nil {
+			return fmt.Errorf("chat content block %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
 // MarshalJSON emits the active form directly, without a wrapper object.
 func (c ChatMessageContent) MarshalJSON() ([]byte, error) {
-	if c.ContentStr != nil && c.ContentBlocks != nil {
-		return nil, fmt.Errorf("both ContentStr and ContentBlocks are set; only one should be non-nil")
+	if err := c.Validate(); err != nil {
+		return nil, err
 	}
 	if c.ContentStr != nil {
 		return json.Marshal(*c.ContentStr)
 	}
-	if c.ContentBlocks != nil {
-		return json.Marshal(c.ContentBlocks)
-	}
-	return []byte("null"), nil
+	return json.Marshal(c.ContentBlocks)
 }
 
 // UnmarshalJSON decodes a string or an array of content blocks.
 func (c *ChatMessageContent) UnmarshalJSON(data []byte) error {
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+	data = trimJSONSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
 		c.ContentStr = nil
 		c.ContentBlocks = nil
-		return nil
+		return errors.New("chat message content is null")
 	}
-	var str string
-	if err := json.Unmarshal(data, &str); err == nil {
+	if data[0] == '"' {
+		var str string
+		if err := strictDecode(data, &str); err != nil {
+			return err
+		}
 		c.ContentStr = &str
 		c.ContentBlocks = nil
 		return nil
 	}
 	var blocks []ChatContentBlock
-	if err := json.Unmarshal(data, &blocks); err == nil {
-		c.ContentBlocks = blocks
-		c.ContentStr = nil
-		return nil
+	if err := strictDecode(data, &blocks); err != nil {
+		return err
 	}
-	return fmt.Errorf("content field is neither a string nor an array of content blocks")
-}
-
-// ChatReasoning configures reasoning output for chat completions.
-type ChatReasoning struct {
-	Enabled   *bool   `json:"enabled,omitempty"`
-	Effort    *string `json:"effort,omitempty"`
-	MaxTokens *int    `json:"max_tokens,omitempty"`
-	Display   *string `json:"display,omitempty"`
-}
-
-// ChatStreamOptions configures chat completion streaming.
-type ChatStreamOptions struct {
-	IncludeUsage *bool `json:"include_usage,omitempty"`
+	c.ContentBlocks = blocks
+	c.ContentStr = nil
+	return nil
 }
 
 // ChatToolType is the type of a chat tool.
@@ -109,7 +135,6 @@ type ChatToolType string
 // ChatToolType values.
 const (
 	ChatToolTypeFunction ChatToolType = "function"
-	ChatToolTypeCustom   ChatToolType = "custom"
 )
 
 // ChatToolFunction is the function definition of a function tool.
@@ -124,6 +149,20 @@ type ChatToolFunction struct {
 type ChatTool struct {
 	Type     ChatToolType      `json:"type"`
 	Function *ChatToolFunction `json:"function,omitempty"`
+}
+
+// Validate checks the tool shape.
+func (t ChatTool) Validate() error {
+	if t.Type != ChatToolTypeFunction {
+		return fmt.Errorf("unknown chat tool type %q", t.Type)
+	}
+	if t.Function == nil {
+		return errors.New("chat function tool has no function")
+	}
+	if t.Function.Name == "" {
+		return errors.New("chat function tool name is empty")
+	}
+	return nil
 }
 
 // ChatToolChoiceFunction names a specific function for a tool choice.
@@ -144,67 +183,69 @@ type ChatToolChoice struct {
 	Struct *ChatToolChoiceStruct
 }
 
+// Validate checks the union invariants.
+func (c ChatToolChoice) Validate() error {
+	if c.Str != nil && c.Struct != nil {
+		return errors.New("chat tool choice has both string and struct variants")
+	}
+	if c.Struct != nil {
+		if c.Struct.Type != "function" {
+			return fmt.Errorf("chat tool choice type = %q", c.Struct.Type)
+		}
+		if c.Struct.Function == nil || c.Struct.Function.Name == "" {
+			return errors.New("named chat tool choice has no function name")
+		}
+		return nil
+	}
+	if c.Str != nil {
+		switch *c.Str {
+		case "none", "auto", "required":
+			return nil
+		default:
+			return fmt.Errorf("invalid chat tool choice %q", *c.Str)
+		}
+	}
+	return errors.New("chat tool choice has no selected variant")
+}
+
 // MarshalJSON emits the active form directly.
 func (c ChatToolChoice) MarshalJSON() ([]byte, error) {
-	if c.Str != nil && c.Struct != nil {
-		return nil, fmt.Errorf("both Str and Struct are set; only one should be non-nil")
+	if err := c.Validate(); err != nil {
+		return nil, err
 	}
 	if c.Str != nil {
 		return json.Marshal(*c.Str)
 	}
-	if c.Struct != nil {
-		return json.Marshal(c.Struct)
-	}
-	return []byte("null"), nil
+	return json.Marshal(c.Struct)
 }
 
 // UnmarshalJSON decodes a string or an object.
 func (c *ChatToolChoice) UnmarshalJSON(data []byte) error {
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		c.Str = nil
-		c.Struct = nil
-		return nil
+	data = trimJSONSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return errors.New("chat tool choice is null")
 	}
-	var str string
-	if err := json.Unmarshal(data, &str); err == nil {
+	if data[0] == '"' {
+		var str string
+		if err := strictDecode(data, &str); err != nil {
+			return err
+		}
 		c.Str = &str
 		c.Struct = nil
 		return nil
 	}
 	var s ChatToolChoiceStruct
-	if err := json.Unmarshal(data, &s); err == nil {
-		c.Struct = &s
-		c.Str = nil
-		return nil
+	if err := strictDecode(data, &s); err != nil {
+		return err
 	}
-	return fmt.Errorf("tool_choice field is neither a string nor a tool choice object")
+	c.Struct = &s
+	c.Str = nil
+	return nil
 }
 
 // ChatToolMessage carries the tool_call_id of a tool-role message.
 type ChatToolMessage struct {
 	ToolCallID *string `json:"tool_call_id,omitempty"`
-}
-
-// ChatReasoningDetailsType is the type of a reasoning details block.
-type ChatReasoningDetailsType string
-
-// ChatReasoningDetailsType values.
-const (
-	ChatReasoningDetailsTypeSummary       ChatReasoningDetailsType = "reasoning.summary"
-	ChatReasoningDetailsTypeEncrypted     ChatReasoningDetailsType = "reasoning.encrypted"
-	ChatReasoningDetailsTypeText          ChatReasoningDetailsType = "reasoning.text"
-	ChatReasoningDetailsTypeContentBlocks ChatReasoningDetailsType = "reasoning.content_blocks"
-)
-
-// ChatReasoningDetails is a reasoning block attached to an assistant message.
-type ChatReasoningDetails struct {
-	Index     int                      `json:"index"`
-	Type      ChatReasoningDetailsType `json:"type"`
-	Summary   *string                  `json:"summary,omitempty"`
-	Text      *string                  `json:"text,omitempty"`
-	Signature *string                  `json:"signature,omitempty"`
-	Data      *string                  `json:"data,omitempty"`
 }
 
 // ChatAssistantMessageToolCallFunction is the function payload of a tool call.
@@ -223,14 +264,17 @@ type ChatAssistantMessageToolCall struct {
 
 // ChatAssistantMessage carries the assistant-only fields of a chat message.
 type ChatAssistantMessage struct {
-	Refusal          *string                        `json:"refusal,omitempty"`
-	Reasoning        *string                        `json:"reasoning,omitempty"`
-	ReasoningDetails []ChatReasoningDetails         `json:"reasoning_details,omitempty"`
-	ToolCalls        []ChatAssistantMessageToolCall `json:"tool_calls,omitempty"`
+	Refusal   *string                        `json:"refusal,omitempty"`
+	ToolCalls []ChatAssistantMessageToolCall `json:"tool_calls,omitempty"`
+	// Reasoning is a provider extension: an explicitly configured plaintext
+	// reasoning response field. It is only read when
+	// ChatCapabilities.ProviderReasoningText is enabled and may map only to
+	// ordinary text, an approved loss, or a rejection.
+	Reasoning *string `json:"reasoning,omitempty"`
 }
 
 // ChatMessage is a message in a chat conversation. Assistant messages flatten
-// tool_calls and reasoning fields; tool messages flatten tool_call_id.
+// tool_calls and refusal fields; tool messages flatten tool_call_id.
 type ChatMessage struct {
 	Name    *string             `json:"name,omitempty"`
 	Role    ChatMessageRole     `json:"role,omitempty"`
@@ -240,28 +284,140 @@ type ChatMessage struct {
 	*ChatAssistantMessage
 }
 
-// ChatRequest is a chat completions request.
+// Validate checks the message shape.
+func (m ChatMessage) Validate() error {
+	if m.Role == "" {
+		return errors.New("chat message role is empty")
+	}
+	if m.Content != nil {
+		if err := m.Content.Validate(); err != nil {
+			return err
+		}
+	}
+	if m.Role == ChatMessageRoleTool && (m.ToolCallID == nil || *m.ToolCallID == "") {
+		return errors.New("tool message has no tool_call_id")
+	}
+	if m.ChatAssistantMessage != nil {
+		for i, call := range m.ToolCalls {
+			if call.ID == nil || *call.ID == "" {
+				return fmt.Errorf("tool call %d has no id", i)
+			}
+		}
+	}
+	return nil
+}
+
+// ChatResponseFormatType is the response_format type tag.
+type ChatResponseFormatType string
+
+// ChatResponseFormatType values.
+const (
+	ChatResponseFormatText       ChatResponseFormatType = "text"
+	ChatResponseFormatJSONObject ChatResponseFormatType = "json_object"
+	ChatResponseFormatJSONSchema ChatResponseFormatType = "json_schema"
+)
+
+// ChatJSONSchemaFormat is the json_schema arm payload of response_format.
+type ChatJSONSchemaFormat struct {
+	Name        string         `json:"name"`
+	Description *string        `json:"description,omitempty"`
+	Schema      map[string]any `json:"schema,omitempty"`
+	Strict      *bool          `json:"strict,omitempty"`
+}
+
+// ChatResponseFormat is the response_format union of the official Chat
+// contract: text, json_object, or json_schema.
+type ChatResponseFormat struct {
+	Type       ChatResponseFormatType `json:"type"`
+	JSONSchema *ChatJSONSchemaFormat  `json:"json_schema,omitempty"`
+}
+
+// ChatStreamOptions configures chat completion streaming.
+type ChatStreamOptions struct {
+	IncludeUsage *bool `json:"include_usage,omitempty"`
+}
+
+// ChatStop is the stop union: a single string or an array of up to four
+// sequences. The official contract permits both forms.
+type ChatStop struct {
+	Str  *string
+	Strs []string
+}
+
+// Validate checks the union invariants.
+func (s ChatStop) Validate() error {
+	if s.Str != nil && s.Strs != nil {
+		return errors.New("chat stop has both string and array variants")
+	}
+	if s.Str == nil && s.Strs == nil {
+		return errors.New("chat stop has no selected variant")
+	}
+	if len(s.Strs) > 4 {
+		return errors.New("chat stop array exceeds 4 sequences")
+	}
+	return nil
+}
+
+// MarshalJSON emits the active form.
+func (s ChatStop) MarshalJSON() ([]byte, error) {
+	if err := s.Validate(); err != nil {
+		return nil, err
+	}
+	if s.Str != nil {
+		return json.Marshal(*s.Str)
+	}
+	return json.Marshal(s.Strs)
+}
+
+// UnmarshalJSON decodes a string or an array.
+func (s *ChatStop) UnmarshalJSON(data []byte) error {
+	data = trimJSONSpace(data)
+	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
+		return errors.New("chat stop is null")
+	}
+	if data[0] == '"' {
+		var str string
+		if err := strictDecode(data, &str); err != nil {
+			return err
+		}
+		s.Str = &str
+		s.Strs = nil
+		return nil
+	}
+	var strs []string
+	if err := strictDecode(data, &strs); err != nil {
+		return err
+	}
+	s.Strs = strs
+	s.Str = nil
+	return nil
+}
+
+// ChatRequest is a chat completions request. The official subset covers the
+// fields that transcode actually maps; unsupported fields are rejected by
+// strict decoding.
 type ChatRequest struct {
-	Model               string             `json:"model"`
-	Messages            []ChatMessage      `json:"messages"`
-	MaxCompletionTokens *int               `json:"max_completion_tokens,omitempty"`
-	MaxTokens           *int               `json:"max_tokens,omitempty"`
-	Temperature         *float64           `json:"temperature,omitempty"`
-	TopP                *float64           `json:"top_p,omitempty"`
-	Stop                []string           `json:"stop,omitempty"`
-	Stream              *bool              `json:"stream,omitempty"`
-	StreamOptions       *ChatStreamOptions `json:"stream_options,omitempty"`
-	Tools               []ChatTool         `json:"tools,omitempty"`
-	ToolChoice          *ChatToolChoice    `json:"tool_choice,omitempty"`
-	ParallelToolCalls   *bool              `json:"parallel_tool_calls,omitempty"`
-	Reasoning           *ChatReasoning     `json:"reasoning,omitempty"`
-	Metadata            map[string]any     `json:"metadata,omitempty"`
-	User                *string            `json:"user,omitempty"`
-	Store               *bool              `json:"store,omitempty"`
-	FrequencyPenalty    *float64           `json:"frequency_penalty,omitempty"`
-	PresencePenalty     *float64           `json:"presence_penalty,omitempty"`
-	Seed                *int               `json:"seed,omitempty"`
-	N                   *int               `json:"n,omitempty"`
+	Model               string              `json:"model"`
+	Messages            []ChatMessage       `json:"messages"`
+	MaxCompletionTokens *int                `json:"max_completion_tokens,omitempty"`
+	MaxTokens           *int                `json:"max_tokens,omitempty"`
+	Temperature         *float64            `json:"temperature,omitempty"`
+	TopP                *float64            `json:"top_p,omitempty"`
+	Stop                *ChatStop           `json:"stop,omitempty"`
+	Stream              *bool               `json:"stream,omitempty"`
+	StreamOptions       *ChatStreamOptions  `json:"stream_options,omitempty"`
+	Tools               []ChatTool          `json:"tools,omitempty"`
+	ToolChoice          *ChatToolChoice     `json:"tool_choice,omitempty"`
+	ParallelToolCalls   *bool               `json:"parallel_tool_calls,omitempty"`
+	ReasoningEffort     *string             `json:"reasoning_effort,omitempty"`
+	ResponseFormat      *ChatResponseFormat `json:"response_format,omitempty"`
+	Metadata            map[string]any      `json:"metadata,omitempty"`
+	User                *string             `json:"user,omitempty"`
+	Store               *bool               `json:"store,omitempty"`
+	FrequencyPenalty    *float64            `json:"frequency_penalty,omitempty"`
+	PresencePenalty     *float64            `json:"presence_penalty,omitempty"`
+	Seed                *int                `json:"seed,omitempty"`
+	N                   *int                `json:"n,omitempty"`
 }
 
 // ChatPromptTokensDetails breaks down prompt tokens. The cached token field is
@@ -291,12 +447,11 @@ type ChatLLMUsage struct {
 
 // ChatStreamDelta is the delta payload of a streaming chat completion chunk.
 type ChatStreamDelta struct {
-	Role             *string                        `json:"role,omitempty"`
-	Content          *string                        `json:"content,omitempty"`
-	Refusal          *string                        `json:"refusal,omitempty"`
-	Reasoning        *string                        `json:"reasoning,omitempty"`
-	ReasoningDetails []ChatReasoningDetails         `json:"reasoning_details,omitempty"`
-	ToolCalls        []ChatAssistantMessageToolCall `json:"tool_calls,omitempty"`
+	Role      *string                        `json:"role,omitempty"`
+	Content   *string                        `json:"content,omitempty"`
+	Refusal   *string                        `json:"refusal,omitempty"`
+	Reasoning *string                        `json:"reasoning,omitempty"`
+	ToolCalls []ChatAssistantMessageToolCall `json:"tool_calls,omitempty"`
 }
 
 // ChatChoice is one choice of a chat completion response, in either the

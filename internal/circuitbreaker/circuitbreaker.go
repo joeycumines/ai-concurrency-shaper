@@ -499,7 +499,8 @@ func (b *Breaker) WaitDuration() time.Duration {
 }
 
 // PenaltyDuration returns the phantom concurrency slot hold time.
-// The penalty grows with consecutive failures: BasePenalty * (1 + consecutive).
+// The penalty grows with consecutive failures: BasePenalty * consecutive
+// (zero before the first failure, one base unit after the first failure).
 // It is also raised to match any observed Retry-After header.
 // The result is capped at MaxPenalty.
 func (b *Breaker) PenaltyDuration() time.Duration {
