@@ -679,10 +679,8 @@ func (h *TranscodeHandler) streamResponse(
 ) {
 	converter, err := h.newFrameConverter(context)
 	if err != nil {
-		h.recordOutcome(r, Outcome{
-			Status:     http.StatusInternalServerError,
-			Provenance: ProvenanceLocalRequestConversionError,
-		})
+		// writeLocalError -> writeDialectHTTPError records the outcome
+		// exactly once.
 		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
 			http.StatusInternalServerError, "build stream converter: "+err.Error(),
 			ProvenanceLocalRequestConversionError)

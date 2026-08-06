@@ -248,15 +248,6 @@ func canonicalToolChoiceToChat(
 	}
 }
 
-// canonicalTurnToAnthropicMessage renders a canonical user or assistant turn
-// into an Anthropic message, preserving all content blocks in order.
-// canonicalPartsToAnthropicContent renders canonical parts into an Anthropic
-// content union (string or blocks). A single text part renders as the string
-// arm.
-// canonicalImageToAnthropicSource renders a canonical image into an Anthropic
-// image source.
-// canonicalDocumentToAnthropicSource renders a canonical document into an
-// Anthropic document source.
 // canonicalTextTurnToChatMessage renders a system or developer turn into a
 // Chat message with the given role. Only text content is portable to a Chat
 // system/developer message.

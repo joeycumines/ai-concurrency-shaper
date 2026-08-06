@@ -63,6 +63,7 @@ func DecodeChatResponse(
 	case "length":
 		response.StopReason = CanonicalStopMaxTokens
 		response.Status = CanonicalResponseIncomplete
+		response.IncompleteReason = "max_output_tokens"
 	case "tool_calls", "function_call":
 		response.StopReason = CanonicalStopToolUse
 	case "content_filter":

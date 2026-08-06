@@ -907,3 +907,68 @@ func TestProxyTranscodeBreakerOutcomeWithRetries(t *testing.T) {
 		)
 	}
 }
+
+// TestProxyTranscodeBreakerFailureCountedOnce verifies that a failed
+// transcoded exchange under the default retry configuration records exactly
+// one breaker failure: the retry transport reports the HTTP-level failure
+// and the explicit transcode outcome must not record it a second time.
+func TestProxyTranscodeBreakerFailureCountedOnce(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("x-request-id", "req_1")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"boom","type":"server_error","code":"boom"}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker, err := circuitbreaker.New(circuitbreaker.WithFailureThreshold(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := breaker.Stats()
+
+	u, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(breaker),
+		WithMaxRetries(1),
+		WithTranscodeMapping(transcodeMapping(testResponsesMapping(t))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d", rec.Code)
+	}
+
+	after := breaker.Stats()
+	if after.TotalFailures != before.TotalFailures+1 {
+		t.Fatalf(
+			"TotalFailures = %d, want exactly one more than before (%d)",
+			after.TotalFailures,
+			before.TotalFailures,
+		)
+	}
+	if after.ConsecutiveFailures != before.ConsecutiveFailures+1 {
+		t.Fatalf(
+			"ConsecutiveFailures = %d, want exactly one more than before (%d)",
+			after.ConsecutiveFailures,
+			before.ConsecutiveFailures,
+		)
+	}
+}

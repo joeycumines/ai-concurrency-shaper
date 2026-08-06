@@ -7,8 +7,13 @@ package transcode
 //
 // https://platform.claude.com/docs/en/api/overview
 type BodyLimits struct {
-	AcceptedRequestBytes    int64
-	DecodedRequestBytes     int64
+	AcceptedRequestBytes int64
+	DecodedRequestBytes  int64
+	// RetryReplayBytes bounds the request bodies the proxy's retry transport
+	// may buffer for replay. The handler does not enforce it: the retry
+	// transport's own MaxBodyBytes (configured from the same value) governs
+	// replay eligibility, keeping the replay cap separate from the
+	// accepted-request cap that gates inbound payloads.
 	RetryReplayBytes        int64
 	SuccessfulResponseBytes int64
 	ErrorResponseBytes      int64

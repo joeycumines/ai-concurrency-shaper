@@ -506,8 +506,12 @@ func (s *chatResponsesStreamState) finish(
 	envelope := s.baseEnvelope(status)
 	envelope.Output = s.finalOutputItems()
 	envelope.Usage = s.usage
-
 	if status == "incomplete" {
+		// Match the non-streaming renderer: the incomplete reason is part of
+		// the official envelope contract.
+		envelope.IncompleteDetails = &ResponsesIncompleteDetails{
+			Reason: "max_output_tokens",
+		}
 		events = append(events, s.builder.Incomplete(envelope))
 	} else {
 		events = append(events, s.builder.Completed(envelope))

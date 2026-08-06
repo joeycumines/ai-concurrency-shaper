@@ -1799,9 +1799,22 @@ func (p *Proxy) recordTranscodeBreakerOutcome(
 	now := time.Now()
 	attemptStart, attemptEpoch := retryAttemptOrDefault(retryAttempt, proxyStart, breakerEpoch)
 
+	// failureAlreadyRecorded reports whether the retry transport already
+	// counted this exchange as a failure at the HTTP level. With the default
+	// retry configuration the transport records non-2xx statuses and
+	// transport errors immediately (attempt.FailureRecorded), so the
+	// outcome path must not record the same failure a second time. Streaming
+	// failures (the headers round trip succeeded) are never pre-recorded.
+	failureAlreadyRecorded := func() bool {
+		return retryAttempt != nil && retryAttempt.FailureRecorded
+	}
+
 	switch outcome.Provenance {
 	case transcode.ProvenanceUpstreamHTTP:
 		if outcome.UpstreamFailure {
+			if failureAlreadyRecorded() {
+				return
+			}
 			p.breaker.RecordFailure(outcome.Status, parseRetryAfterFromRecorder(rec, now), attemptStart, attemptEpoch)
 		} else if outcome.Status >= 200 && outcome.Status < 300 {
 			p.breaker.RecordSuccess(attemptStart, attemptEpoch)
@@ -1814,6 +1827,9 @@ func (p *Proxy) recordTranscodeBreakerOutcome(
 
 	case transcode.ProvenanceUpstreamTransportError,
 		transcode.ProvenanceUpstreamBodyError:
+		if failureAlreadyRecorded() {
+			return
+		}
 		p.breaker.RecordFailure(outcome.Status, parseRetryAfterFromRecorder(rec, now), attemptStart, attemptEpoch)
 
 	case transcode.ProvenanceClientAbort:
