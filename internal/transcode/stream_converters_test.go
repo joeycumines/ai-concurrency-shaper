@@ -924,3 +924,108 @@ func eventTypes(events []ResponsesSSEEvent) string {
 	}
 	return strings.Join(parts, ",")
 }
+
+// TestChatToAnthropicInterleavedContentAndRefusal verifies that interleaved
+// text and refusal deltas in the composed chat->anthropic direction target
+// their own content blocks. The chat state machine keeps both parts open
+// until finish, so deltas must resolve their block by part index, never by
+// the lowest open block.
+func TestChatToAnthropicInterleavedContentAndRefusal(t *testing.T) {
+	converter := newChatToAnthropicConverter(
+		newChatResponsesStreamState(
+			testStreamContext(),
+			StrictLossPolicy(),
+			"resp_1",
+			"m",
+			1,
+			nil,
+		),
+		newAnthropicResponsesStreamState(testStreamContext(), "resp_1", "m", 1),
+	)
+
+	feed := func(deltaJSON string) []AnthropicStreamEvent {
+		t.Helper()
+		batch, err := converter.Convert(SSEEvent{Data: []byte(
+			`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":` + deltaJSON + `,"finish_reason":null}]}`,
+		)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var events []AnthropicStreamEvent
+		for _, frame := range batch.Events {
+			var event AnthropicStreamEvent
+			if err := json.Unmarshal(frame.Data, &event); err != nil {
+				t.Fatal(err)
+			}
+			events = append(events, event)
+		}
+		return events
+	}
+
+	// Text part opens, then refusal part opens, then both receive deltas.
+	events := feed(`{"content":"hello"}`)
+	events = append(events, feed(`{"refusal":"no way"}`)...)
+	events = append(events, feed(`{"content":" world"}`)...)
+	events = append(events, feed(`{"refusal":"!"}`)...)
+
+	// Collect per-block text. Each contiguous text/refusal run opens its own
+	// content part (the Responses protocol has no part reuse), so every
+	// delta must land in the block its part opened — never merged into the
+	// lowest open block.
+	blockText := map[int]string{}
+	for _, event := range events {
+		if event.Type == AnthropicStreamEventTypeContentBlockDelta &&
+			event.Delta != nil && event.Delta.Text != nil && event.Index != nil {
+			blockText[*event.Index] += *event.Delta.Text
+		}
+	}
+	want := map[int]string{
+		0: "hello",
+		1: "no way",
+		2: " world",
+		3: "!",
+	}
+	if len(blockText) != len(want) {
+		t.Fatalf("blocks with text = %v, want %v", blockText, want)
+	}
+	for index, text := range want {
+		if blockText[index] != text {
+			t.Fatalf("block %d text = %q, want %q (deltas misrouted)", index, blockText[index], text)
+		}
+	}
+
+	// The finish must close both blocks and emit the terminal.
+	batch, err := converter.Convert(SSEEvent{Data: []byte(
+		`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch.Events) != 0 {
+		t.Fatalf("finish events = %d", len(batch.Events))
+	}
+	batch, err = converter.Convert(SSEEvent{Data: []byte("[DONE]")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !batch.Terminal {
+		t.Fatal("batch not terminal")
+	}
+	var stops []AnthropicStreamEvent
+	for _, frame := range batch.Events {
+		var event AnthropicStreamEvent
+		if err := json.Unmarshal(frame.Data, &event); err != nil {
+			t.Fatal(err)
+		}
+		stops = append(stops, event)
+	}
+	blockStops := 0
+	for _, event := range stops {
+		if event.Type == AnthropicStreamEventTypeContentBlockStop {
+			blockStops++
+		}
+	}
+	if blockStops != 4 {
+		t.Fatalf("content block stops = %d, want 4", blockStops)
+	}
+}

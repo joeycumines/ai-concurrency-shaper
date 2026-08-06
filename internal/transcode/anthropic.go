@@ -245,22 +245,6 @@ type AnthropicToolChoice struct {
 	DisableParallelToolUse *bool  `json:"disable_parallel_tool_use,omitempty"`
 }
 
-// AnthropicMessageRequest is an Anthropic messages API request.
-type AnthropicMessageRequest struct {
-	Model         string               `json:"model"`
-	MaxTokens     int                  `json:"max_tokens"`
-	Messages      []AnthropicMessage   `json:"messages"`
-	System        *AnthropicContent    `json:"system,omitempty"`
-	Temperature   *float64             `json:"temperature,omitempty"`
-	TopP          *float64             `json:"top_p,omitempty"`
-	TopK          *int                 `json:"top_k,omitempty"`
-	StopSequences []string             `json:"stop_sequences,omitempty"`
-	Stream        *bool                `json:"stream,omitempty"`
-	Tools         []AnthropicTool      `json:"tools,omitempty"`
-	ToolChoice    *AnthropicToolChoice `json:"tool_choice,omitempty"`
-	Metadata      map[string]any       `json:"metadata,omitempty"`
-}
-
 // AnthropicStopReason is the reason the model stopped generating.
 type AnthropicStopReason string
 

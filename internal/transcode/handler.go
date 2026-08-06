@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 )
 
 // HandlerConfig configures one transcoded route.
@@ -281,15 +283,15 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.cfg.BodyLimits.ErrorResponseBytes,
 		)
 		if readErr != nil {
-			h.writeDialectHTTPError(r, w, CanonicalAPIError{
+			h.writeUpstreamHTTPError(r, w, resp, CanonicalAPIError{
 				Status:  resp.StatusCode,
 				Type:    "api_error",
 				Code:    codeForStatus(resp.StatusCode),
 				Message: "read upstream error body: " + readErr.Error(),
-			}, ProvenanceUpstreamBodyError)
+			})
 			return
 		}
-		h.writeDialectHTTPError(r, w, apiErr, ProvenanceUpstreamHTTP)
+		h.writeUpstreamHTTPError(r, w, resp, apiErr)
 		return
 	}
 
@@ -818,6 +820,35 @@ func (h *TranscodeHandler) writeLocalError(
 		Message: message,
 	}
 	h.writeDialectHTTPError(r, w, apiErr, provenance)
+}
+
+// writeUpstreamHTTPError renders a non-2xx upstream response in the client
+// dialect. The failure classification uses the response-aware breaker
+// semantics (IsFailureStatusWithHeaders) so 429, 5xx, and 403 with
+// rate-limit signals (Retry-After or x-ratelimit-* headers) are upstream
+// failures — matching the native passthrough path exactly.
+func (h *TranscodeHandler) writeUpstreamHTTPError(
+	r *http.Request,
+	w http.ResponseWriter,
+	resp *http.Response,
+	apiErr CanonicalAPIError,
+) {
+	now := time.Now()
+	upstreamFailure := circuitbreaker.IsFailureStatusWithHeaders(
+		apiErr.Status,
+		resp.Header,
+		now,
+		now,
+	)
+	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
+	if err := WriteDialectHTTPError(w, client, apiErr); err != nil {
+		log.Printf("transcode: write dialect error: %v", err)
+	}
+	h.recordOutcome(r, Outcome{
+		Status:          apiErr.Status,
+		Provenance:      ProvenanceUpstreamHTTP,
+		UpstreamFailure: upstreamFailure,
+	})
 }
 
 // writeDialectHTTPError renders a canonical error in the client dialect and

@@ -677,7 +677,6 @@ type anthropicResponsesStreamState struct {
 
 	messageSent bool
 	blockIndex  int64
-	openBlocks  map[int64]bool
 
 	// tool blocks buffered until call identity is complete.
 	pendingToolStart map[string]*pendingToolBlock // keyed by item_id
@@ -721,7 +720,6 @@ func newAnthropicResponsesStreamState(
 		responseID:       responseID,
 		model:            model,
 		createdAt:        createdAt,
-		openBlocks:       make(map[int64]bool),
 		pendingToolStart: make(map[string]*pendingToolBlock),
 		partBlocks:       make(map[int64]int64),
 	}
@@ -873,7 +871,6 @@ func (s *anthropicResponsesStreamState) maybeStartToolBlock(
 	pending.started = true
 	callID := pending.callID
 	name := pending.name
-	s.openBlocks[pending.blockIndex] = true
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockStart,
 		Index: intPtr(int(pending.blockIndex)),
@@ -924,7 +921,6 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		return nil, fmt.Errorf("tool block for item %q: %w", call.ID, err)
 	}
 
-	delete(s.openBlocks, pending.blockIndex)
 	events = append(events, AnthropicStreamEvent{
 		Type:  AnthropicStreamEventTypeContentBlockStop,
 		Index: intPtr(int(pending.blockIndex)),
@@ -959,7 +955,6 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 			},
 		})
 		s.partBlocks[event.ContentIndex] = s.blockIndex
-		s.openBlocks[s.blockIndex] = true
 		s.blockIndex++
 	default:
 		return nil, &UnsupportedFeatureError{
@@ -996,7 +991,6 @@ func (s *anthropicResponsesStreamState) contentPartDone(
 	if !ok {
 		return nil, errors.New("content part done with no open block")
 	}
-	delete(s.openBlocks, index)
 	delete(s.partBlocks, event.ContentIndex)
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockStop,
