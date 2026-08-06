@@ -1020,4 +1020,3 @@ func MarshalResponsesEvent(event ResponsesSSEEvent) ([]byte, error) {
 	}
 	return json.Marshal(event)
 }
-

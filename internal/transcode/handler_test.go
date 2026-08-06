@@ -1253,10 +1253,10 @@ func TestHandlerHopByHopHeadersStrippedJSON(t *testing.T) {
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header: http.Header{
-				"Content-Type":  []string{"application/json"},
-				"Connection":    []string{"X-Internal-Secret"},
+				"Content-Type":      []string{"application/json"},
+				"Connection":        []string{"X-Internal-Secret"},
 				"X-Internal-Secret": []string{"s3cr3t"},
-				"X-Keep":        []string{"visible"},
+				"X-Keep":            []string{"visible"},
 			},
 			Body: io.NopCloser(bytes.NewReader(testcorpus.ChatCompletionsResponseJSON())),
 		}, nil
@@ -1288,14 +1288,21 @@ func TestHandlerConversationStateRejectedChat(t *testing.T) {
 		t.Fatal("round trip must not be called")
 		return nil, nil
 	})
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/v1/responses",
-		strings.NewReader(`{"model":"m","input":"x","previous_response_id":"resp_prev"}`),
-	)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+	for _, body := range []string{
+		`{"model":"m","input":"x","previous_response_id":"resp_prev"}`,
+		`{"model":"m","input":"x","truncation":"auto"}`,
+		`{"model":"m","input":"x","top_logprobs":3}`,
+		`{"model":"m","input":"x","service_tier":"auto"}`,
+	} {
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/responses",
+			strings.NewReader(body),
+		)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: status = %d, want 400", body, rec.Code)
+		}
 	}
 }

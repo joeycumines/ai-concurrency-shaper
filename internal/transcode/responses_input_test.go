@@ -386,3 +386,17 @@ func TestUnsupportedRequestFieldRejected(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestResponsesInputImageDetailOptional(t *testing.T) {
+	// detail is optional on the wire (the official SDKs omit it; the API
+	// defaults to auto). An input_image without detail must decode.
+	var content ResponsesInputMessageContent
+	if err := json.Unmarshal([]byte(
+		`[{"type":"input_image","image_url":"https://example.com/a.png"}]`,
+	), &content); err != nil {
+		t.Fatalf("decode without detail: %v", err)
+	}
+	if err := content.Validate(); err != nil {
+		t.Fatalf("validate without detail: %v", err)
+	}
+}

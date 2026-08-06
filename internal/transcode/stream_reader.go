@@ -19,9 +19,9 @@ import (
 // SSEReader parses one SSE event at a time from an upstream stream, applying
 // configurable line and frame bounds (the package defaults when unset).
 type SSEReader struct {
-	br        *bufio.Reader
-	lineMax   int
-	frameMax  int
+	br       *bufio.Reader
+	lineMax  int
+	frameMax int
 }
 
 // NewSSEReaderWithLimits wraps r with explicit line and frame bounds. Zero

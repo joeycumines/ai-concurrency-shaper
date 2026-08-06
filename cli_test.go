@@ -168,7 +168,6 @@ func (s *proxySubprocess) waitForListeningAddr(t *testing.T, out *lockedBuffer) 
 	return ""
 }
 
-
 func TestTUIExitsOnBindFailure(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")

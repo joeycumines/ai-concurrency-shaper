@@ -89,6 +89,10 @@ func readSSEEventLimited(r *bufio.Reader, lineMax, frameMax int) (SSEEvent, erro
 				event.Data = data
 				return event, nil
 			}
+			// A blank line with no data discards any accumulated event name
+			// (e.g. "event: x" followed immediately by the frame boundary)
+			// so the next frame cannot inherit a stale name.
+			event.Event = ""
 			continue
 		}
 

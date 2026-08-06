@@ -402,10 +402,14 @@ func (s *chatResponsesStreamState) finish(
 	var events []ResponsesSSEEvent
 
 	// Close every pending tool call: arguments done (name + arguments,
-	// "{}" for empty) then output_item.done.
+	// "{}" for empty) then output_item.done. A fragment that never received
+	// an identity (id or name) is malformed upstream data: silently dropping
+	// it would hide the corruption behind a successful completion.
 	for _, pending := range s.pendingCalls {
 		if !pending.started {
-			continue
+			return nil, errors.New(
+				"chat tool call fragment ended without an id and name",
+			)
 		}
 		arguments := pending.complete.String()
 		if arguments == "" {
@@ -926,16 +930,9 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		Index: intPtr(int(pending.blockIndex)),
 	})
 
-	// Record the completed tool use in the message envelope.
-	input := json.RawMessage(arguments)
-	callID := pending.callID
-	name := pending.name
-	s.message.Content = append(s.message.Content, AnthropicContentBlock{
-		Type:  AnthropicContentBlockTypeToolUse,
-		ID:    &callID,
-		Name:  &name,
-		Input: input,
-	})
+	// The message envelope's content stays empty: content blocks arrive via
+	// content_block_start events (the official contract); message_start is
+	// already marshaled with an empty content array.
 	return events, nil
 }
 

@@ -230,3 +230,18 @@ func (r *fixedChunkReader) Read(p []byte) (int, error) {
 	r.consumed += n
 	return n, nil
 }
+
+func TestReadSSEEventStaleNameReset(t *testing.T) {
+	// An event name discarded with its frame must not leak onto the next
+	// frame: "event: X" with no data, then a valid name-less data frame.
+	events, err := readAllEvents(t, "event: response.created\n\ndata: {\"type\":\"response.created\"}\n\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d", len(events))
+	}
+	if events[0].Event != "" {
+		t.Fatalf("stale event name leaked: %q", events[0].Event)
+	}
+}

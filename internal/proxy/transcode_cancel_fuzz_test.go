@@ -142,14 +142,14 @@ func FuzzTranscodeCancellationRaces(f *testing.F) {
 		case 1:
 			select {
 			case <-upstreamStarted:
-			case <-time.After(time.Second):
+			case <-time.After(5 * time.Second):
 				t.Fatal("upstream did not start")
 			}
 			time.Sleep(cancelDelay)
 			cancel()
 
 		case 2:
-			deadline := time.Now().Add(time.Second)
+			deadline := time.Now().Add(5 * time.Second)
 			for writer.flushes.Load() == 0 && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 			}

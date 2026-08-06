@@ -882,9 +882,9 @@ func TestRenderChatImageInputCapability(t *testing.T) {
 		t.Fatal(err)
 	}
 	var withImage = struct {
-		Model    string `json:"model"`
+		Model     string `json:"model"`
 		MaxTokens int    `json:"max_tokens"`
-		Messages []struct {
+		Messages  []struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
