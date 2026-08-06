@@ -393,7 +393,12 @@ func RenderResponsesResponse(
 					Refusal: value.Text,
 				})
 			case CanonicalFunctionCall:
-				envelope.Output = append(envelope.Output, message)
+				// Only emit the message when it actually carries content; a
+				// turn that starts with a tool call must not produce a
+				// phantom empty message item before it.
+				if len(message.Content) > 0 {
+					envelope.Output = append(envelope.Output, message)
+				}
 				message = nil
 				envelope.Output = append(envelope.Output, &ResponsesFunctionCallOutputItem{
 					ID:        context.IDs.New("fc_"),

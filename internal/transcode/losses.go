@@ -25,7 +25,6 @@ const (
 	FeatureReasoningSummary      Feature = "reasoning_summary"
 	FeatureProviderReasoning     Feature = "provider_reasoning"
 	FeatureAuthenticatedThinking Feature = "authenticated_thinking"
-	FeatureUnsupportedTool       Feature = "unsupported_tool"
 	FeatureTopK                  Feature = "top_k"
 )
 

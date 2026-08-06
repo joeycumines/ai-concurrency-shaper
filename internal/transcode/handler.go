@@ -839,7 +839,12 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 	case ProvenanceUpstreamTransportError:
 		upstreamFailure = true
 	case ProvenanceUpstreamHTTP, ProvenanceUpstreamBodyError:
-		upstreamFailure = apiErr.Status >= 500
+		// Match the proxy's breaker classification (IsFailureStatus /
+		// IsFailureStatusWithHeaders): 429 and 5xx are failures, and 403 is
+		// a failure only when it carries a rate-limit signal (Retry-After).
+		upstreamFailure = apiErr.Status == http.StatusTooManyRequests ||
+			(apiErr.Status >= 500 && apiErr.Status < 600) ||
+			(apiErr.Status == http.StatusForbidden && apiErr.RetryAfter != "")
 	}
 	h.recordOutcome(r, Outcome{
 		Status:          apiErr.Status,

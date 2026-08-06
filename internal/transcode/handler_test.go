@@ -1192,3 +1192,55 @@ func (w *lateOpGuardWriter) flushCount() int {
 	defer w.unlock()
 	return w.flushes
 }
+
+// TestHandlerMessagesFailedUpstreamNotSuccess verifies merge gate 10 for the
+// non-streaming path: a 2xx Responses body with status "failed" must surface
+// as a client-dialect error, never as a successful Messages completion.
+func TestHandlerMessagesFailedUpstreamNotSuccess(t *testing.T) {
+	mapping := messagesMapping(t, UpstreamResponses)
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+			ModelMap: ModelMap{AllowIdentity: true},
+			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
+				FeatureTopK:              {},
+				FeatureReasoningSummary:  {},
+				FeatureConversationState: {},
+			}},
+			AuthPolicy:         AuthPolicy{Mode: AuthNone},
+			AllowedClientQuery: map[string]struct{}{},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"id":"resp_f","object":"response","created_at":1710000000,"status":"failed","model":"gpt-4.1","error":{"code":"api_error","message":"upstream exploded"},"output":[],"parallel_tool_calls":true,"tools":[],"tool_choice":"auto"}`,
+				)),
+			}, nil
+		},
+		nil,
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		bytes.NewReader(testcorpus.AnthropicMessagesRequestJSON()),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	var message AnthropicMessageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &message); err == nil && message.Type == "message" {
+		t.Fatalf("failed upstream rendered as a successful message: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "upstream exploded") {
+		t.Fatalf("error body does not carry the upstream failure: %s", rec.Body.String())
+	}
+}

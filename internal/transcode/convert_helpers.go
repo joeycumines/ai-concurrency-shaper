@@ -285,6 +285,9 @@ func canonicalTextTurnToChatMessage(
 // becomes one user message. Image input requires the configured capability.
 func canonicalUserTurnToChatMessages(
 	turn CanonicalTurn,
+	capabilities ChatCapabilities,
+	report *ConversionReport,
+	policy LossPolicy,
 ) ([]ChatMessage, error) {
 	var contentParts []CanonicalPart
 	var messages []ChatMessage
@@ -292,14 +295,24 @@ func canonicalUserTurnToChatMessages(
 		switch value := part.(type) {
 		case CanonicalFunctionResult:
 			if len(contentParts) > 0 {
-				message, err := canonicalContentPartsToChatUserMessage(contentParts)
+				message, err := canonicalContentPartsToChatUserMessage(
+					contentParts,
+					capabilities,
+					report,
+					policy,
+				)
 				if err != nil {
 					return nil, err
 				}
 				messages = append(messages, message)
 				contentParts = nil
 			}
-			content, err := canonicalPartsToChatMessageContent(value.Parts)
+			content, err := canonicalPartsToChatMessageContent(
+				value.Parts,
+				capabilities,
+				report,
+				policy,
+			)
 			if err != nil {
 				return nil, err
 			}
@@ -315,7 +328,12 @@ func canonicalUserTurnToChatMessages(
 		}
 	}
 	if len(contentParts) > 0 {
-		message, err := canonicalContentPartsToChatUserMessage(contentParts)
+		message, err := canonicalContentPartsToChatUserMessage(
+			contentParts,
+			capabilities,
+			report,
+			policy,
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -325,9 +343,13 @@ func canonicalUserTurnToChatMessages(
 }
 
 // canonicalContentPartsToChatUserMessage renders text and image parts into a
-// user message. Image input is rendered as image_url blocks.
+// user message. Image input is rendered as image_url blocks and requires the
+// configured capability.
 func canonicalContentPartsToChatUserMessage(
 	parts []CanonicalPart,
+	capabilities ChatCapabilities,
+	report *ConversionReport,
+	policy LossPolicy,
 ) (ChatMessage, error) {
 	var blocks []ChatContentBlock
 	for i, part := range parts {
@@ -340,6 +362,17 @@ func canonicalContentPartsToChatUserMessage(
 			})
 
 		case CanonicalImage:
+			if !capabilities.ImageInput {
+				if err := report.Lose(
+					policy,
+					FeatureImageInput,
+					"messages[].content",
+					"image input is not supported by the configured chat provider",
+				); err != nil {
+					return ChatMessage{}, err
+				}
+				continue
+			}
 			url := value.URL
 			if url == "" {
 				var err error
@@ -361,7 +394,7 @@ func canonicalContentPartsToChatUserMessage(
 			return ChatMessage{}, &UnsupportedFeatureError{
 				Protocol: "chat",
 				Path:     "messages[].content",
-				Feature:  "document input",
+				Feature:  string(FeatureDocumentInput),
 			}
 
 		case CanonicalRefusal:
@@ -389,13 +422,21 @@ func canonicalContentPartsToChatUserMessage(
 // message content union, collapsing a single text part into the string arm.
 func canonicalPartsToChatMessageContent(
 	parts []CanonicalPart,
+	capabilities ChatCapabilities,
+	report *ConversionReport,
+	policy LossPolicy,
 ) (ChatMessageContent, error) {
 	if len(parts) == 1 {
 		if text, ok := parts[0].(CanonicalText); ok {
 			return ChatMessageContent{ContentStr: &text.Text}, nil
 		}
 	}
-	message, err := canonicalContentPartsToChatUserMessage(parts)
+	message, err := canonicalContentPartsToChatUserMessage(
+		parts,
+		capabilities,
+		report,
+		policy,
+	)
 	if err != nil {
 		return ChatMessageContent{}, err
 	}

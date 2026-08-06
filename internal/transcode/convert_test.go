@@ -861,3 +861,69 @@ func TestUnsupportedFeatureErrorFormat(t *testing.T) {
 		t.Fatalf("message = %q", msg)
 	}
 }
+
+func TestRenderChatImageInputCapability(t *testing.T) {
+	body := testcorpus.AnthropicMessagesRequestJSON()
+	// Image content is not in the stock fixture; build a request with one.
+	var envelope struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content []struct {
+				Type   string `json:"type"`
+				Source *struct {
+					Type      string `json:"type"`
+					MediaType string `json:"media_type"`
+					URL       string `json:"url"`
+				} `json:"source"`
+			} `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	var withImage = struct {
+		Model    string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}{Model: "m", MaxTokens: 10}
+	withImage.Messages = append(withImage.Messages,
+		struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}{Role: "user", Content: json.RawMessage(`[{"type":"image","source":{"type":"url","url":"https://example.com/a.png"}}]`)},
+	)
+	raw, err := json.Marshal(withImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := DecodeMessagesRequest(raw, StrictLossPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Without the capability the image is rejected (strict policy).
+	if _, _, err := RenderChatRequest(
+		result.Request,
+		testExchangeContext(),
+		ChatCapabilities{ParallelToolCalls: true},
+	); err == nil {
+		t.Fatal("image input accepted without the capability")
+	}
+
+	// With the capability the image renders as an image_url block.
+	rendered, _, err := RenderChatRequest(
+		result.Request,
+		testExchangeContext(),
+		ChatCapabilities{ParallelToolCalls: true, ImageInput: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rendered), "image_url") {
+		t.Fatalf("rendered chat request lacks image_url: %s", rendered)
+	}
+}

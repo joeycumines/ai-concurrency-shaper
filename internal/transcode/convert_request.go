@@ -1101,7 +1101,12 @@ func RenderChatRequest(
 			out.Messages = append(out.Messages, message)
 
 		case CanonicalUser:
-			messages, err := canonicalUserTurnToChatMessages(turn)
+			messages, err := canonicalUserTurnToChatMessages(
+				turn,
+				capabilities,
+				&report,
+				context.lossPolicy(),
+			)
 			if err != nil {
 				return nil, report, err
 			}

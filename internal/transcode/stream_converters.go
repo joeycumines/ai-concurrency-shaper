@@ -682,6 +682,12 @@ type anthropicResponsesStreamState struct {
 	// tool blocks buffered until call identity is complete.
 	pendingToolStart map[string]*pendingToolBlock // keyed by item_id
 
+	// partBlocks maps the Responses content part index to the Anthropic
+	// block index it opened. The composed chat->anthropic direction keeps
+	// text and refusal parts open simultaneously, so deltas must target
+	// their own block, never the lowest open one.
+	partBlocks map[int64]int64
+
 	responseID string
 	model      string
 	createdAt  int64
@@ -717,6 +723,7 @@ func newAnthropicResponsesStreamState(
 		createdAt:        createdAt,
 		openBlocks:       make(map[int64]bool),
 		pendingToolStart: make(map[string]*pendingToolBlock),
+		partBlocks:       make(map[int64]int64),
 	}
 }
 
@@ -951,6 +958,7 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 				Text: stringPtr(""),
 			},
 		})
+		s.partBlocks[event.ContentIndex] = s.blockIndex
 		s.openBlocks[s.blockIndex] = true
 		s.blockIndex++
 	default:
@@ -966,7 +974,7 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 func (s *anthropicResponsesStreamState) textDelta(
 	event ResponseTextDeltaEvent,
 ) ([]AnthropicStreamEvent, error) {
-	index, ok := s.openBlockIndex()
+	index, ok := s.partBlocks[event.ContentIndex]
 	if !ok {
 		return nil, errors.New("text delta with no open content block")
 	}
@@ -984,11 +992,12 @@ func (s *anthropicResponsesStreamState) textDelta(
 func (s *anthropicResponsesStreamState) contentPartDone(
 	event ResponseContentPartDoneEvent,
 ) ([]AnthropicStreamEvent, error) {
-	index, ok := s.openBlockIndex()
+	index, ok := s.partBlocks[event.ContentIndex]
 	if !ok {
 		return nil, errors.New("content part done with no open block")
 	}
 	delete(s.openBlocks, index)
+	delete(s.partBlocks, event.ContentIndex)
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockStop,
 		Index: intPtr(int(index)),
@@ -1041,7 +1050,7 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 func (s *anthropicResponsesStreamState) refusalDelta(
 	event ResponseRefusalDeltaEvent,
 ) ([]AnthropicStreamEvent, error) {
-	index, ok := s.openBlockIndex()
+	index, ok := s.partBlocks[event.ContentIndex]
 	if !ok {
 		return nil, errors.New("refusal delta with no open content block")
 	}
@@ -1170,17 +1179,6 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 		// the upstream did not provide one.
 		s.usage = &AnthropicUsage{}
 	}
-}
-
-// openBlockIndex returns the lowest open block index.
-func (s *anthropicResponsesStreamState) openBlockIndex() (int64, bool) {
-	lowest := int64(-1)
-	for index := range s.openBlocks {
-		if lowest < 0 || index < lowest {
-			lowest = index
-		}
-	}
-	return lowest, lowest >= 0
 }
 
 // FinalizeEOF reports a truncation error when the stream ended without a
