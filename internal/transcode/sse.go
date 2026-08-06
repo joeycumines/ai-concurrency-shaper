@@ -57,11 +57,12 @@ func readSSEEventLimited(r *bufio.Reader, lineMax, frameMax int) (SSEEvent, erro
 		line, err := readSSELine(r, lineMax)
 		if errors.Is(err, errSSELineOversized) {
 			// The active frame contained an oversized line: discard it
-			// entirely and drain to the next genuine blank line so the
-			// following event is parsed intact.
-			if len(data) > 0 {
-				data = nil
-			}
+			// entirely — both the accumulated data and any event name — and
+			// drain to the next genuine blank line so the following event is
+			// parsed intact (a stale name would fail name/type validation on
+			// an otherwise valid frame).
+			data = nil
+			event.Event = ""
 			drained, drainErr := drainOversizedFrame(r, lineMax)
 			if drainErr != nil {
 				return SSEEvent{}, drainErr

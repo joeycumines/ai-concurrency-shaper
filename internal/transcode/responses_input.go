@@ -178,10 +178,14 @@ func (p ResponsesInputImage) Validate() error {
 	if p.Type != "input_image" {
 		return fmt.Errorf("input image type = %q, want input_image", p.Type)
 	}
-	switch p.Detail {
-	case "auto", "low", "high", "original":
-	default:
-		return fmt.Errorf("invalid input image detail %q", p.Detail)
+	// detail is optional on the wire; the official SDKs omit it and the API
+	// defaults to auto. Empty is accepted and defaulted at render time.
+	if p.Detail != "" {
+		switch p.Detail {
+		case "auto", "low", "high", "original":
+		default:
+			return fmt.Errorf("invalid input image detail %q", p.Detail)
+		}
 	}
 	if (p.ImageURL == "") == (p.FileID == "") {
 		return errors.New("input image requires exactly one of image_url or file_id")

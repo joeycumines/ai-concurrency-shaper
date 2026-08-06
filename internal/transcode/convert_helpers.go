@@ -382,6 +382,11 @@ func canonicalContentPartsToChatUserMessage(
 				}
 			}
 			detail := value.Detail
+			if detail == "" {
+				// The official Chat image detail defaults to auto; an empty
+				// value is not part of the wire enum.
+				detail = "auto"
+			}
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeImage,
 				ImageURL: &ChatInputImage{

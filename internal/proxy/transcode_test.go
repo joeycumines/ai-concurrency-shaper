@@ -972,3 +972,84 @@ func TestProxyTranscodeBreakerFailureCountedOnce(t *testing.T) {
 		)
 	}
 }
+
+// TestProxyTranscodeRateLimitClassification verifies the response-aware
+// failure classification parity with the native path (round-4 fix): a 403
+// carrying x-ratelimit-* headers is an upstream failure, and Retry-After: 0
+// is not.
+func TestProxyTranscodeRateLimitClassification(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		status  int
+		headers map[string]string
+		want    int64 // failures before -> after delta
+	}{
+		{
+			name:    "429 is a failure",
+			status:  http.StatusTooManyRequests,
+			headers: map[string]string{"x-request-id": "req_1"},
+			want:    1,
+		},
+		{
+			name:    "403 with x-ratelimit headers is a failure",
+			status:  http.StatusForbidden,
+			headers: map[string]string{"x-ratelimit-remaining": "0", "x-ratelimit-reset": "60"},
+			want:    1,
+		},
+		{
+			name:    "403 with Retry-After: 0 is not a failure",
+			status:  http.StatusForbidden,
+			headers: map[string]string{"Retry-After": "0"},
+			want:    0,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				for k, v := range tt.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(`{"error":{"message":"boom","type":"api_error","code":"boom"}}`))
+			}))
+			t.Cleanup(upstream.Close)
+
+			breaker, err := circuitbreaker.New(circuitbreaker.WithFailureThreshold(100))
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := breaker.Stats()
+
+			u, err := url.Parse(upstream.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := New(
+				WithUpstream(u),
+				WithMatcher(route.NewMatcher(nil)),
+				WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+				WithMetrics(metrics.NewCollector()),
+				WithBreaker(breaker),
+				// No retries: the outcome path is the only recorder.
+				WithTranscodeMapping(transcodeMapping(testResponsesMapping(t))),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/v1/responses",
+				strings.NewReader(`{"model":"m","input":"x"}`),
+			)
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			after := breaker.Stats()
+			if got := after.TotalFailures - before.TotalFailures; got != tt.want {
+				t.Fatalf("failure delta = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

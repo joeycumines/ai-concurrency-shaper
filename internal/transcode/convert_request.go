@@ -1060,6 +1060,24 @@ func RenderChatRequest(
 		N:                   intPtr(1),
 	}
 
+	// Responses request fields that Chat can express are rendered; the rest
+	// must be rejected or approved as losses, never silently dropped (the
+	// strict-subset invariant).
+	if echo := context.OriginalResponsesRequest; echo != nil {
+		out.User = echo.User
+		out.Store = echo.Store
+		if echo.PreviousResponseID != nil || echo.TopLogprobs != nil || echo.ServiceTier != nil {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureConversationState,
+				"request",
+				"responses conversation-state and request-tuning fields are not portable to a chat upstream",
+			); err != nil {
+				return nil, report, err
+			}
+		}
+	}
+
 	// Developer role: preserved when supported, otherwise an approved loss.
 	for _, turn := range request.Turns {
 		if turn.Role != CanonicalDeveloper {

@@ -573,8 +573,11 @@ func (h *TranscodeHandler) jsonResponse(
 		return
 	}
 
-	// Sound behavior: recompute Content-Length after conversion.
+	// Sound behavior: recompute Content-Length after conversion, and strip
+	// hop-by-hop headers (both the fixed list and Connection-nominated
+	// tokens) so they cannot leak downstream.
 	h.copyResponseHeaders(w.Header(), resp.Header)
+	RemoveHopByHopHeaders(w.Header())
 	RemoveTransformedRepresentationHeaders(w.Header())
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(converted)))
