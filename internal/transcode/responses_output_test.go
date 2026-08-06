@@ -223,9 +223,8 @@ func TestResponsesToolChoice(t *testing.T) {
 	if choice.Named == nil || choice.Named.Name != "f" {
 		t.Fatalf("choice = %+v", choice)
 	}
-	// Invalid string values are rejected.
-	decodeJSON(t, `"always"`, &choice)
-	if err := choice.Validate(); err == nil {
+	// Invalid string values are rejected at decode time.
+	if err := json.Unmarshal([]byte(`"always"`), &choice); err == nil {
 		t.Fatal("expected error for invalid tool choice string")
 	}
 	// Round trip.

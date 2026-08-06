@@ -38,7 +38,8 @@ type SSEEvent struct {
 // blank line; consecutive data: lines are joined with a newline. The event
 // name, id:, retry:, and comment lines are captured but do not terminate the
 // stream. Malformed frames are drained and skipped. EOF with a pending frame
-// returns that frame.
+// returns that frame together with io.EOF (the data+EOF convention), so a
+// successful read always consumes input.
 //
 // Bounds: every line is capped at maxSSELineBytes and every frame payload at
 // maxSSEFrameBytes; exceeding either discards the active frame and drains to
@@ -64,11 +65,13 @@ func readSSEEvent(r *bufio.Reader) (SSEEvent, error) {
 			}
 		}
 		if line == "" && err != nil {
-			// EOF (or read error) after the last line: flush the pending frame.
+			// EOF (or read error) after the last line: flush the pending
+			// frame together with the error, never as a no-progress nil
+			// return.
 			if errors.Is(err, io.EOF) {
 				if len(data) > 0 {
 					event.Data = data
-					return event, nil
+					return event, io.EOF
 				}
 				return SSEEvent{}, io.EOF
 			}

@@ -70,6 +70,11 @@ type streamObservation struct {
 	ClientContextErr error
 	SawTerminal      bool
 	SawErrorEvent    bool
+
+	// SawUpstreamErrorFrame reports whether the error event originated from
+	// real upstream data (a converted upstream error frame) rather than a
+	// local truncation or conversion error.
+	SawUpstreamErrorFrame bool
 }
 
 // runTranslatedStream runs the mandated stream.Proxy copy boundary exactly
@@ -107,14 +112,15 @@ func runTranslatedStream(
 	sealErr := writer.Seal()
 
 	return streamObservation{
-		ReaderErr:        convertedReader.Err(),
-		WriterErr:        writer.firstErr,
-		CopyErr:          copyErr,
-		SealErr:          sealErr,
-		CloseErr:         closeErr,
-		ClientContextErr: parent.Err(),
-		SawTerminal:      convertedReader.SawTerminal(),
-		SawErrorEvent:    convertedReader.SawErrorEvent(),
+		ReaderErr:             convertedReader.Err(),
+		WriterErr:             writer.firstErr,
+		CopyErr:               copyErr,
+		SealErr:               sealErr,
+		CloseErr:              closeErr,
+		ClientContextErr:      parent.Err(),
+		SawTerminal:           convertedReader.SawTerminal(),
+		SawErrorEvent:         convertedReader.SawErrorEvent(),
+		SawUpstreamErrorFrame: convertedReader.SawUpstreamErrorFrame(),
 	}
 }
 
@@ -150,8 +156,27 @@ func (o streamOutcome) String() string {
 // classifyStreamObservation maps the observation to an outcome using explicit
 // provenance, never status-code guessing. A client abort is neither success
 // nor failure; a local conversion failure is not an upstream failure.
+//
+// A client cancellation that interrupts an incomplete exchange (upstream
+// body cut off, local truncation error event, downstream write failure, or
+// copy abort) is a client abort, not an upstream failure: the client's
+// disconnect caused the interruption. Only a genuine upstream error frame —
+// real upstream data — is a definitive upstream failure regardless of a
+// concurrent cancellation.
 func classifyStreamObservation(o streamObservation) streamOutcome {
+	// A genuine upstream error event (converted upstream data) is a
+	// definitive upstream outcome, independent of any concurrent client
+	// cancellation.
+	if o.SawUpstreamErrorFrame {
+		return streamOutcomeUpstreamFailure
+	}
+	// A locally generated error event (truncation or conversion error) is
+	// an upstream failure only when the client did not cancel; an aborted
+	// exchange must not trip or reset breaker health.
 	if o.SawErrorEvent {
+		if o.ClientContextErr != nil {
+			return streamOutcomeClientAbort
+		}
 		return streamOutcomeUpstreamFailure
 	}
 	if o.WriterErr != nil || o.SealErr != nil {
@@ -161,6 +186,9 @@ func classifyStreamObservation(o streamObservation) streamOutcome {
 		return streamOutcomeDownstreamFailure
 	}
 	if o.ReaderErr != nil && !errors.Is(o.ReaderErr, io.EOF) {
+		if o.ClientContextErr != nil {
+			return streamOutcomeClientAbort
+		}
 		return streamOutcomeUpstreamFailure
 	}
 	if o.CopyErr != nil {

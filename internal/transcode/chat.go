@@ -103,7 +103,8 @@ func (c ChatMessageContent) MarshalJSON() ([]byte, error) {
 	return json.Marshal(c.ContentBlocks)
 }
 
-// UnmarshalJSON decodes a string or an array of content blocks.
+// UnmarshalJSON decodes a string or an array of content blocks, rejecting
+// invalid blocks at decode time so a decode-accepted value always validates.
 func (c *ChatMessageContent) UnmarshalJSON(data []byte) error {
 	data = trimJSONSpace(data)
 	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
@@ -118,7 +119,7 @@ func (c *ChatMessageContent) UnmarshalJSON(data []byte) error {
 		}
 		c.ContentStr = &str
 		c.ContentBlocks = nil
-		return nil
+		return c.Validate()
 	}
 	var blocks []ChatContentBlock
 	if err := strictDecode(data, &blocks); err != nil {
@@ -126,7 +127,7 @@ func (c *ChatMessageContent) UnmarshalJSON(data []byte) error {
 	}
 	c.ContentBlocks = blocks
 	c.ContentStr = nil
-	return nil
+	return c.Validate()
 }
 
 // ChatToolType is the type of a chat tool.
@@ -219,7 +220,8 @@ func (c ChatToolChoice) MarshalJSON() ([]byte, error) {
 	return json.Marshal(c.Struct)
 }
 
-// UnmarshalJSON decodes a string or an object.
+// UnmarshalJSON decodes a string or an object, rejecting unknown variants at
+// decode time so a decode-accepted value always validates.
 func (c *ChatToolChoice) UnmarshalJSON(data []byte) error {
 	data = trimJSONSpace(data)
 	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
@@ -232,15 +234,15 @@ func (c *ChatToolChoice) UnmarshalJSON(data []byte) error {
 		}
 		c.Str = &str
 		c.Struct = nil
-		return nil
+	} else {
+		var s ChatToolChoiceStruct
+		if err := strictDecode(data, &s); err != nil {
+			return err
+		}
+		c.Struct = &s
+		c.Str = nil
 	}
-	var s ChatToolChoiceStruct
-	if err := strictDecode(data, &s); err != nil {
-		return err
-	}
-	c.Struct = &s
-	c.Str = nil
-	return nil
+	return c.Validate()
 }
 
 // ChatToolMessage carries the tool_call_id of a tool-role message.

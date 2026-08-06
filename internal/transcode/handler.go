@@ -180,7 +180,11 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if r.Context().Err() != nil {
 			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
-			panic(http.ErrAbortHandler)
+			// A cancelled client context means the exchange is already over.
+			// Return normally: the proxy classifies the abort from the
+			// recorded outcome, and the net/http server tolerates a handler
+			// that returns without writing to a dead connection.
+			return
 		}
 		if errors.Is(err, errRequestBodyTooLarge) {
 			h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
@@ -200,7 +204,11 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if r.Context().Err() != nil {
 			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
-			panic(http.ErrAbortHandler)
+			// A cancelled client context means the exchange is already over.
+			// Return normally: the proxy classifies the abort from the
+			// recorded outcome, and the net/http server tolerates a handler
+			// that returns without writing to a dead connection.
+			return
 		}
 		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
 			http.StatusBadRequest, "convert request: "+err.Error(),
@@ -232,7 +240,11 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A cancelled client context means the exchange is already over.
 		if r.Context().Err() != nil {
 			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
-			panic(http.ErrAbortHandler)
+			// A cancelled client context means the exchange is already over.
+			// Return normally: the proxy classifies the abort from the
+			// recorded outcome, and the net/http server tolerates a handler
+			// that returns without writing to a dead connection.
+			return
 		}
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadGateway,
@@ -486,7 +498,11 @@ func (h *TranscodeHandler) jsonResponse(
 	if err != nil {
 		if r.Context().Err() != nil {
 			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
-			panic(http.ErrAbortHandler)
+			// A cancelled client context means the exchange is already over.
+			// Return normally: the proxy classifies the abort from the
+			// recorded outcome, and the net/http server tolerates a handler
+			// that returns without writing to a dead connection.
+			return
 		}
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadGateway,

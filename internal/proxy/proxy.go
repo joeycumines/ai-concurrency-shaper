@@ -2253,6 +2253,15 @@ func (p *Proxy) handleSuppressedAbort(w http.ResponseWriter, r *http.Request, re
 	if rec == nil {
 		return false
 	}
+	if rec.transcodeOutcome != nil {
+		// A transcoded exchange records explicit outcome provenance after the
+		// handler returns. Its upstream-body reads are tracked in the shared
+		// copy error state, so a client cancellation that interrupts the
+		// stream would look like a copy failure here. The explicit outcome
+		// (ClientAbort, upstream failure, success) is authoritative; the
+		// legacy copy-error abort accounting must not override it.
+		return false
+	}
 	copyFailed := copyErrorStateFromContext(r.Context()).upstreamError() != nil || rec.downstreamWriteFailed()
 	transportCanceled := rec.transportErr != nil && isContextCancellation(r.Context().Err()) && isContextCancellation(rec.transportErr)
 	if !copyFailed && !transportCanceled {

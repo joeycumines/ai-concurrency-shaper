@@ -51,18 +51,13 @@ func (c *chatToResponsesConverter) Convert(
 // stream that ended without a terminal condition is never reported as
 // success.
 func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
-	if held, ok := c.state.releaseTerminal(); ok {
-		batch, err := marshalResponsesEvents(held)
-		batch.Terminal = true
-		return batch, err
+	events, err := c.state.FinalizeEOF()
+	if err != nil {
+		return convertedBatch{}, err
 	}
-	if c.state.sawFinish {
-		// The finish chunk was consumed and released; nothing more to emit.
-		return convertedBatch{Terminal: true}, nil
-	}
-	return convertedBatch{}, errors.New(
-		"chat stream ended before a terminal condition",
-	)
+	batch, err := marshalResponsesEvents(events)
+	batch.Terminal = true
+	return batch, err
 }
 
 // marshalResponsesEvents validates and marshals typed Responses events into
@@ -137,18 +132,13 @@ func (c *responsesToAnthropicConverter) Convert(
 
 // FinalizeEOF releases a held terminal or reports a truncation error.
 func (c *responsesToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
-	if held, ok := c.state.releaseTerminal(); ok {
-		batch, err := marshalAnthropicEvents(held)
-		batch.Terminal = true
-		return batch, err
+	events, err := c.state.FinalizeEOF()
+	if err != nil {
+		return convertedBatch{}, err
 	}
-	if c.state.sawTerminal {
-		// The terminal was consumed (error event) and released.
-		return convertedBatch{Terminal: true}, nil
-	}
-	return convertedBatch{}, errors.New(
-		"responses stream ended before a terminal condition",
-	)
+	batch, err := marshalAnthropicEvents(events)
+	batch.Terminal = true
+	return batch, err
 }
 
 // marshalAnthropicEvents marshals typed Anthropic events into frames. The

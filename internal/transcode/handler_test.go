@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -881,11 +882,35 @@ func (b *closeTrackingBody) Close() error {
 	return nil
 }
 
-func TestHandlerClientAbortPanics(t *testing.T) {
+func TestHandlerClientAbortReturns(t *testing.T) {
 	mapping := responsesMapping(t)
-	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
-		return nil, context.Canceled
-	})
+	var (
+		gotOutcome Outcome
+		outcomeMu  sync.Mutex
+	)
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+			ModelMap:           ModelMap{AllowIdentity: true},
+			LossPolicy:         StrictLossPolicy(),
+			AuthPolicy:         AuthPolicy{Mode: AuthNone},
+			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
+			AllowedClientQuery: map[string]struct{}{},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			return nil, context.Canceled
+		},
+		func(outcome Outcome) {
+			outcomeMu.Lock()
+			gotOutcome = outcome
+			outcomeMu.Unlock()
+		},
+	)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	req := httptest.NewRequest(
@@ -894,12 +919,13 @@ func TestHandlerClientAbortPanics(t *testing.T) {
 		strings.NewReader(`{"model":"m","input":"x"}`),
 	).WithContext(ctx)
 	rec := httptest.NewRecorder()
-	defer func() {
-		if r := recover(); r != http.ErrAbortHandler {
-			t.Fatalf("recover = %v, want http.ErrAbortHandler", r)
-		}
-	}()
 	handler.ServeHTTP(rec, req)
+
+	outcomeMu.Lock()
+	defer outcomeMu.Unlock()
+	if gotOutcome.Provenance != ProvenanceClientAbort {
+		t.Fatalf("outcome provenance = %v, want client abort", gotOutcome.Provenance)
+	}
 }
 
 func TestHandlerUpstream100SwitchProtocolsRejected(t *testing.T) {

@@ -49,9 +49,10 @@ func TestChatToResponsesTextStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// response.created + response.in_progress + content_part.added + text delta
-	if len(events) != 4 {
-		t.Fatalf("events = %d: %T %T %T %T", len(events), events[0], events[1], events[2], events[3])
+	// response.created + response.in_progress + output_item.added +
+	// content_part.added + text delta
+	if len(events) != 5 {
+		t.Fatalf("events = %d: %T %T %T %T %T", len(events), events[0], events[1], events[2], events[3], events[4])
 	}
 	if _, ok := events[0].(ResponseCreatedEvent); !ok {
 		t.Fatalf("event 0 = %T", events[0])
@@ -59,18 +60,21 @@ func TestChatToResponsesTextStream(t *testing.T) {
 	if _, ok := events[1].(ResponseInProgressEvent); !ok {
 		t.Fatalf("event 1 = %T", events[1])
 	}
-	if _, ok := events[2].(ResponseContentPartAddedEvent); !ok {
-		t.Fatalf("event 2 = %T", events[2])
+	if _, ok := events[2].(ResponseOutputItemAddedEvent); !ok {
+		t.Fatalf("event 2 = %T (want output_item.added)", events[2])
 	}
-	delta, ok := events[3].(ResponseTextDeltaEvent)
-	if !ok {
+	if _, ok := events[3].(ResponseContentPartAddedEvent); !ok {
 		t.Fatalf("event 3 = %T", events[3])
+	}
+	delta, ok := events[4].(ResponseTextDeltaEvent)
+	if !ok {
+		t.Fatalf("event 4 = %T", events[4])
 	}
 	if delta.Delta != "Hello" || delta.Logprobs == nil {
 		t.Fatalf("delta = %+v", delta)
 	}
-	if delta.SequenceNumber != 3 {
-		t.Fatalf("sequence = %d, want 3", delta.SequenceNumber)
+	if delta.SequenceNumber != 4 {
+		t.Fatalf("sequence = %d, want 4", delta.SequenceNumber)
 	}
 
 	// Second content delta.
@@ -400,8 +404,8 @@ func TestChatToResponsesProviderReasoningDropped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 4 {
-		t.Fatalf("events = %d (created, in_progress, content added, text delta)", len(events))
+	if len(events) != 5 {
+		t.Fatalf("events = %d (created, in_progress, output_item.added, content added, text delta)", len(events))
 	}
 	for _, event := range events {
 		if _, ok := event.(ResponseReasoningSummaryPartAddedEvent); ok {
@@ -423,15 +427,19 @@ func TestChatToResponsesRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// created + in_progress + content_part.added + refusal.delta
-	if len(events) != 4 {
+	// created + in_progress + output_item.added + content_part.added +
+	// refusal.delta
+	if len(events) != 5 {
 		t.Fatalf("events = %d: %s", len(events), eventTypes(events))
 	}
-	if _, ok := events[2].(ResponseContentPartAddedEvent); !ok {
-		t.Fatalf("event 2 = %T", events[2])
+	if _, ok := events[2].(ResponseOutputItemAddedEvent); !ok {
+		t.Fatalf("event 2 = %T (want output_item.added)", events[2])
 	}
-	if _, ok := events[3].(ResponseRefusalDeltaEvent); !ok {
+	if _, ok := events[3].(ResponseContentPartAddedEvent); !ok {
 		t.Fatalf("event 3 = %T", events[3])
+	}
+	if _, ok := events[4].(ResponseRefusalDeltaEvent); !ok {
+		t.Fatalf("event 4 = %T", events[4])
 	}
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("stop"))); err != nil {
 		t.Fatal(err)

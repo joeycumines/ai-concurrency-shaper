@@ -79,6 +79,12 @@ type convertingReader struct {
 	err            error
 	sawTerminal    bool
 	sawErrorEvent  bool
+
+	// sawUpstreamErrorFrame is set when the error frame came from real
+	// upstream data (converted), not from a local truncation/conversion
+	// error. Genuine upstream error frames are definitive upstream outcomes
+	// even when the client cancels concurrently.
+	sawUpstreamErrorFrame bool
 }
 
 // newConvertingReader wraps the source reader and converter.
@@ -101,14 +107,31 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 		}
 
 		sourceEvent, err := r.source.Next()
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
+		if err != nil && !errors.Is(err, io.EOF) {
+			r.appendErrorEvent(err)
+			r.err = err
+			// Drain the appended error frame before surfacing the error.
+			continue
+		}
+
+		// The parser delivers a pending frame at end of stream together with
+		// io.EOF (data+EOF convention). Convert it before finalizing so the
+		// final upstream event is never dropped.
+		if sourceEvent.Data != nil {
+			batch, err := r.conv.Convert(sourceEvent)
+			if err != nil {
 				r.appendErrorEvent(err)
 				r.err = err
 				// Drain the appended error frame before surfacing the error.
 				continue
 			}
+			r.appendBatch(batch)
+			if batch.Terminal {
+				r.stopAfterDrain = true
+			}
+		}
 
+		if errors.Is(err, io.EOF) {
 			batch, finalErr := r.conv.FinalizeEOF()
 			if finalErr != nil {
 				r.appendErrorEvent(finalErr)
@@ -119,18 +142,6 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 			r.appendBatch(batch)
 			r.stopAfterDrain = true
 			continue
-		}
-
-		batch, err := r.conv.Convert(sourceEvent)
-		if err != nil {
-			r.appendErrorEvent(err)
-			r.err = err
-			// Drain the appended error frame before surfacing the error.
-			continue
-		}
-		r.appendBatch(batch)
-		if batch.Terminal {
-			r.stopAfterDrain = true
 		}
 	}
 
@@ -155,6 +166,9 @@ func (r *convertingReader) appendBatch(batch convertedBatch) {
 		writeFrameBytes(&r.buf, event)
 		if event.Type == "error" {
 			r.sawErrorEvent = true
+			// A frame emitted by the converter is real upstream data; a
+			// locally generated truncation error event is not.
+			r.sawUpstreamErrorFrame = true
 		}
 	}
 	if batch.Terminal {
@@ -183,4 +197,12 @@ func (r *convertingReader) SawErrorEvent() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.sawErrorEvent
+}
+
+// SawUpstreamErrorFrame reports whether the error event originated from real
+// upstream data rather than a local truncation or conversion error.
+func (r *convertingReader) SawUpstreamErrorFrame() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sawUpstreamErrorFrame
 }

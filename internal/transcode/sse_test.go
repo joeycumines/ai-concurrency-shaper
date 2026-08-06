@@ -15,13 +15,17 @@ func readAllEvents(t *testing.T, input string) ([]SSEEvent, error) {
 	var events []SSEEvent
 	for {
 		event, err := readSSEEvent(reader)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return events, err
+		}
+		// The parser delivers a pending frame at end of stream together
+		// with io.EOF; consume it before honoring EOF.
+		if event.Data != nil {
+			events = append(events, event)
+		}
 		if errors.Is(err, io.EOF) {
 			return events, nil
 		}
-		if err != nil {
-			return events, err
-		}
-		events = append(events, event)
 	}
 }
 

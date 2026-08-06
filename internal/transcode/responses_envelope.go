@@ -88,7 +88,8 @@ func (c ResponsesToolChoice) Validate() error {
 	return errors.New("tool choice has no selected variant")
 }
 
-// UnmarshalJSON decodes the string or object arm.
+// UnmarshalJSON decodes the string or object arm, rejecting unknown variants
+// at decode time so a decode-accepted value always validates.
 func (c *ResponsesToolChoice) UnmarshalJSON(data []byte) error {
 	data = trimJSONSpace(data)
 	if len(data) == 0 {
@@ -101,15 +102,15 @@ func (c *ResponsesToolChoice) UnmarshalJSON(data []byte) error {
 		}
 		c.Str = &str
 		c.Named = nil
-		return nil
+	} else {
+		var named ResponsesToolChoiceNamed
+		if err := strictDecode(data, &named); err != nil {
+			return err
+		}
+		c.Str = nil
+		c.Named = &named
 	}
-	var named ResponsesToolChoiceNamed
-	if err := strictDecode(data, &named); err != nil {
-		return err
-	}
-	c.Str = nil
-	c.Named = &named
-	return nil
+	return c.Validate()
 }
 
 // MarshalJSON emits the selected arm.

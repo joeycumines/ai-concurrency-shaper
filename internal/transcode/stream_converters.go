@@ -218,19 +218,32 @@ func (s *chatResponsesStreamState) convertDelta(
 }
 
 // openMessageItemForPart returns the open message item, opening a new item or
-// a new content part as needed. The returned events are the content_part.added
-// events that must be emitted before the delta. The open part index on the
-// returned item is the index the delta must target: the existing part when
-// the type matches, otherwise a freshly added part.
+// a new content part as needed. The returned events are the output_item.added
+// and content_part.added events that must be emitted before the delta. The
+// open part index on the returned item is the index the delta must target:
+// the existing part when the type matches, otherwise a freshly added part.
 func (s *chatResponsesStreamState) openMessageItemForPart(
 	partType string,
 ) (*openResponsesItem, []ResponsesSSEEvent, error) {
 	// Open a new message item when the last item is not a message.
 	if len(s.items) == 0 || !s.items[len(s.items)-1].isMessage() {
-		if err := s.openMessageItem(); err != nil {
+		added, err := s.openMessageItem()
+		if err != nil {
 			return nil, nil, err
 		}
+		// The output_item.added event is returned through the caller so it
+		// is emitted before the content_part.added of the first part.
+		return s.openMessageItemForPartWithEvents(partType, added)
 	}
+	return s.openMessageItemForPartWithEvents(partType, nil)
+}
+
+// openMessageItemForPartWithEvents continues the item/part bookkeeping,
+// prepending any pre-existing added events to the returned batch.
+func (s *chatResponsesStreamState) openMessageItemForPartWithEvents(
+	partType string,
+	prefix []ResponsesSSEEvent,
+) (*openResponsesItem, []ResponsesSSEEvent, error) {
 	item := &s.items[len(s.items)-1]
 	message := item.item.(*ResponsesOutputMessage)
 
@@ -244,7 +257,7 @@ func (s *chatResponsesStreamState) openMessageItemForPart(
 			existingType = "refusal"
 		}
 		if existingType == partType {
-			return item, nil, nil
+			return item, prefix, nil
 		}
 	}
 
@@ -258,7 +271,7 @@ func (s *chatResponsesStreamState) openMessageItemForPart(
 			Text:        "",
 			Annotations: []ResponsesAnnotation{},
 		})
-		return item, []ResponsesSSEEvent{s.builder.ContentPartAdded(
+		return item, append(prefix, s.builder.ContentPartAdded(
 			message.ID,
 			item.outputIndex,
 			contentIndex,
@@ -267,18 +280,18 @@ func (s *chatResponsesStreamState) openMessageItemForPart(
 				Text:        "",
 				Annotations: []ResponsesAnnotation{},
 			},
-		)}, nil
+		)), nil
 	case "refusal":
 		message.Content = append(message.Content, &ResponsesOutputRefusal{
 			Type:    "refusal",
 			Refusal: "",
 		})
-		return item, []ResponsesSSEEvent{s.builder.ContentPartAdded(
+		return item, append(prefix, s.builder.ContentPartAdded(
 			message.ID,
 			item.outputIndex,
 			contentIndex,
 			&ResponsesStreamRefusalPart{Type: "refusal", Refusal: ""},
-		)}, nil
+		)), nil
 	default:
 		return nil, nil, fmt.Errorf("unknown content part type %q", partType)
 	}
@@ -358,7 +371,9 @@ func (s *chatResponsesStreamState) convertToolCall(
 }
 
 // openMessageItem opens a new message output item.
-func (s *chatResponsesStreamState) openMessageItem() error {
+// openMessageItem opens a new message output item and returns the
+// output_item.added event that must be emitted before any part event.
+func (s *chatResponsesStreamState) openMessageItem() ([]ResponsesSSEEvent, error) {
 	item := openResponsesItem{
 		outputIndex:   s.itemIndex,
 		openPartIndex: -1,
@@ -372,7 +387,12 @@ func (s *chatResponsesStreamState) openMessageItem() error {
 	}
 	s.itemIndex++
 	s.items = append(s.items, item)
-	return nil
+	return []ResponsesSSEEvent{
+		s.builder.OutputItemAdded(
+			item.outputIndex,
+			item.item,
+		),
+	}, nil
 }
 
 // finish closes open items and builds the terminal event batch.
@@ -390,6 +410,15 @@ func (s *chatResponsesStreamState) finish(
 		arguments := pending.complete.String()
 		if arguments == "" {
 			arguments = "{}"
+		}
+		// A done event must never carry truncated or malformed arguments:
+		// emitting invalid JSON would poison the client's tool call.
+		if !json.Valid([]byte(arguments)) {
+			return nil, fmt.Errorf(
+				"tool call %q arguments are not valid JSON: %q",
+				pending.callID,
+				arguments,
+			)
 		}
 		events = append(events,
 			s.builder.FunctionArgumentsDone(
@@ -572,6 +601,22 @@ func (s *chatResponsesStreamState) releaseTerminal() ([]ResponsesSSEEvent, bool)
 	held := s.heldTerminal
 	s.heldTerminal = nil
 	return held, true
+}
+
+// FinalizeEOF releases the held terminal or reports a truncation error. A
+// stream that ended without a terminal condition is never reported as
+// success.
+func (s *chatResponsesStreamState) FinalizeEOF() ([]ResponsesSSEEvent, error) {
+	if held, ok := s.releaseTerminal(); ok {
+		return held, nil
+	}
+	if s.sawFinish {
+		// The finish chunk was consumed and released; nothing more to emit.
+		return nil, nil
+	}
+	return nil, errors.New(
+		"chat stream ended before a terminal condition",
+	)
 }
 
 // isMessage reports whether the open item is a message item.
@@ -1140,6 +1185,22 @@ func (s *anthropicResponsesStreamState) releaseTerminal() ([]AnthropicStreamEven
 	held := s.heldTerminal
 	s.heldTerminal = nil
 	return held, true
+}
+
+// FinalizeEOF releases the held terminal or reports a truncation error. A
+// stream that ended without a terminal condition is never reported as
+// success.
+func (s *anthropicResponsesStreamState) FinalizeEOF() ([]AnthropicStreamEvent, error) {
+	if held, ok := s.releaseTerminal(); ok {
+		return held, nil
+	}
+	if s.sawTerminal {
+		// The terminal was consumed (error event) and released.
+		return nil, nil
+	}
+	return nil, errors.New(
+		"responses stream ended before a terminal condition",
+	)
 }
 
 func responsesUsageToAnthropicUsage(usage *ResponsesUsage) *AnthropicUsage {

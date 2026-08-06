@@ -177,7 +177,8 @@ func (c AnthropicContent) MarshalJSON() ([]byte, error) {
 	return json.Marshal(c.ContentBlocks)
 }
 
-// UnmarshalJSON decodes a string or an array of content blocks.
+// UnmarshalJSON decodes a string or an array of content blocks, rejecting
+// invalid blocks at decode time so a decode-accepted value always validates.
 func (c *AnthropicContent) UnmarshalJSON(data []byte) error {
 	data = trimJSONSpace(data)
 	if len(data) == 0 || bytes.Equal(data, []byte("null")) {
@@ -190,7 +191,7 @@ func (c *AnthropicContent) UnmarshalJSON(data []byte) error {
 		}
 		c.ContentStr = &str
 		c.ContentBlocks = nil
-		return nil
+		return c.Validate()
 	}
 	var blocks []AnthropicContentBlock
 	if err := strictDecode(data, &blocks); err != nil {
@@ -198,7 +199,7 @@ func (c *AnthropicContent) UnmarshalJSON(data []byte) error {
 	}
 	c.ContentBlocks = blocks
 	c.ContentStr = nil
-	return nil
+	return c.Validate()
 }
 
 // AnthropicMessage is a message in an Anthropic conversation.
