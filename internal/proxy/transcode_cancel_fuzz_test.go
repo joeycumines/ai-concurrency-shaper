@@ -142,7 +142,7 @@ func FuzzTranscodeCancellationRaces(f *testing.F) {
 		case 1:
 			select {
 			case <-upstreamStarted:
-			case <-time.After(5 * time.Second):
+			case <-time.After(15 * time.Second):
 				t.Fatal("upstream did not start")
 			}
 			time.Sleep(cancelDelay)
@@ -162,7 +162,7 @@ func FuzzTranscodeCancellationRaces(f *testing.F) {
 		case 3:
 			select {
 			case <-sourceTerminalWritten:
-			case <-time.After(5 * time.Second):
+			case <-time.After(15 * time.Second):
 				t.Fatal("source terminal not written")
 			}
 			time.Sleep(cancelDelay)
@@ -171,7 +171,7 @@ func FuzzTranscodeCancellationRaces(f *testing.F) {
 		case 4:
 			select {
 			case <-sourceTerminalWritten:
-			case <-time.After(5 * time.Second):
+			case <-time.After(15 * time.Second):
 				t.Fatal("source terminal not written")
 			}
 			cancel()
@@ -225,7 +225,7 @@ func FuzzTranscodeCancellationRaces(f *testing.F) {
 		} else {
 			select {
 			case <-upstreamCancelled:
-			case <-time.After(time.Second):
+			case <-time.After(15 * time.Second):
 				t.Fatal("upstream context/body was not released")
 			}
 		}

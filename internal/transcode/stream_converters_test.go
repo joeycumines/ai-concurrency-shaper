@@ -1029,3 +1029,64 @@ func TestChatToAnthropicInterleavedContentAndRefusal(t *testing.T) {
 		t.Fatalf("content block stops = %d, want 4", blockStops)
 	}
 }
+
+// TestChatToResponsesUnstartedToolCallRejected verifies that a tool-call
+// fragment which never receives an id or name makes the finish fail with a
+// conversion error instead of being silently dropped behind a successful
+// completion.
+func TestChatToResponsesUnstartedToolCallRejected(t *testing.T) {
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		"resp_1",
+		"m",
+		1,
+		nil,
+	)
+	// A fragment with only arguments (no index attribution, no id/name).
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
+		ToolCalls: []ChatAssistantMessageToolCall{{
+			Function: ChatAssistantMessageToolCallFunction{Arguments: `{"x":1}`},
+		}},
+	}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("tool_calls")))
+	if err == nil {
+		t.Fatal("finish accepted an unstarted tool call")
+	}
+
+	// Two index-less fragments with different ids must not merge.
+	state2 := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		"resp_1",
+		"m",
+		1,
+		nil,
+	)
+	chunk := ChatStreamResponse{
+		ID: "c", Model: "m", Created: 1,
+		Choices: []ChatChoice{{Index: 0, Delta: &ChatStreamDelta{
+			ToolCalls: []ChatAssistantMessageToolCall{
+				{ID: str("call_a"), Function: ChatAssistantMessageToolCallFunction{Name: str("f_a"), Arguments: `{}`}},
+				{ID: str("call_b"), Function: ChatAssistantMessageToolCallFunction{Name: str("f_b"), Arguments: `{}`}},
+			},
+		}}},
+	}
+	events, err := state2.Convert(chunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var callIDs []string
+	for _, event := range events {
+		if added, ok := event.(ResponseOutputItemAddedEvent); ok {
+			if fc, ok := added.Item.(*ResponsesFunctionCallOutputItem); ok {
+				callIDs = append(callIDs, fc.CallID)
+			}
+		}
+	}
+	if len(callIDs) != 2 || callIDs[0] == callIDs[1] {
+		t.Fatalf("index-less parallel calls merged: %v", callIDs)
+	}
+}

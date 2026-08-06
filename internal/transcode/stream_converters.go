@@ -305,14 +305,11 @@ func (s *chatResponsesStreamState) convertToolCall(
 ) ([]ResponsesSSEEvent, error) {
 	var events []ResponsesSSEEvent
 
-	index := 0
-	if call.Index != nil {
-		index = *call.Index
-	}
-
-	// Resolve the pending call: by id alias first, then by index.
-	pending, ok := s.pendingCalls[index]
-	if !ok && call.ID != nil && *call.ID != "" {
+	// Resolve the pending call: by id alias first (an id makes the fragment
+	// attributable even without an index), then by fragment index.
+	var pending *pendingToolCall
+	ok := false
+	if call.ID != nil && *call.ID != "" {
 		for _, existing := range s.pendingCalls {
 			if existing.callID == *call.ID {
 				pending = existing
@@ -321,7 +318,43 @@ func (s *chatResponsesStreamState) convertToolCall(
 			}
 		}
 	}
+	if !ok && call.Index != nil {
+		pending, ok = s.pendingCalls[*call.Index]
+	}
+	if !ok && call.Index == nil && call.ID == nil {
+		// An index-less, id-less continuation fragment is attributable only
+		// when exactly one pending call exists; with several, the fragment
+		// is ambiguous and must not merge into an unrelated call.
+		switch len(s.pendingCalls) {
+		case 0:
+			// First fragment: create below.
+		case 1:
+			for _, existing := range s.pendingCalls {
+				pending = existing
+			}
+			ok = true
+		default:
+			return nil, errors.New(
+				"chat tool call fragment without index or id is ambiguous",
+			)
+		}
+	}
 	if !ok {
+		// New pending call. An index-less fragment that arrives alongside
+		// existing calls gets a synthetic negative key so it cannot collide
+		// with a real fragment index.
+		index := 0
+		if call.Index != nil {
+			index = *call.Index
+		} else {
+			index = -1
+			for {
+				if _, taken := s.pendingCalls[index]; !taken {
+					break
+				}
+				index--
+			}
+		}
 		pending = &pendingToolCall{
 			outputIndex: s.itemIndex,
 		}

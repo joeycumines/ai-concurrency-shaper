@@ -926,4 +926,7 @@ func TestRenderChatImageInputCapability(t *testing.T) {
 	if !strings.Contains(string(rendered), "image_url") {
 		t.Fatalf("rendered chat request lacks image_url: %s", rendered)
 	}
+	if !strings.Contains(string(rendered), `"detail":"auto"`) {
+		t.Fatalf("rendered chat image lacks the auto detail default: %s", rendered)
+	}
 }
