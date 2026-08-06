@@ -116,6 +116,7 @@ func readSSEEventLimited(r *bufio.Reader, lineMax, frameMax int) (SSEEvent, erro
 					return SSEEvent{}, drainErr
 				}
 				data = nil
+				event.Event = ""
 				continue
 			}
 

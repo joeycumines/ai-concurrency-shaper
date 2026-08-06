@@ -1066,7 +1066,8 @@ func RenderChatRequest(
 	if echo := context.OriginalResponsesRequest; echo != nil {
 		out.User = echo.User
 		out.Store = echo.Store
-		if echo.PreviousResponseID != nil || echo.TopLogprobs != nil || echo.ServiceTier != nil {
+		if echo.PreviousResponseID != nil || echo.TopLogprobs != nil ||
+			echo.ServiceTier != nil || echo.Truncation != nil {
 			if err := report.Lose(
 				context.lossPolicy(),
 				FeatureConversationState,

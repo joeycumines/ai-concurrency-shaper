@@ -573,11 +573,12 @@ func (h *TranscodeHandler) jsonResponse(
 		return
 	}
 
-	// Sound behavior: recompute Content-Length after conversion, and strip
-	// hop-by-hop headers (both the fixed list and Connection-nominated
-	// tokens) so they cannot leak downstream.
+	// Sound behavior: strip hop-by-hop headers from the upstream response
+	// BEFORE copying (copyResponseHeaders skips the Connection header, so
+	// Connection-nominated tokens can only be resolved from the source),
+	// then recompute Content-Length after conversion.
+	RemoveHopByHopHeaders(resp.Header)
 	h.copyResponseHeaders(w.Header(), resp.Header)
-	RemoveHopByHopHeaders(w.Header())
 	RemoveTransformedRepresentationHeaders(w.Header())
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(converted)))
@@ -697,8 +698,10 @@ func (h *TranscodeHandler) streamResponse(
 	// without transformed-representation headers: the translated stream is
 	// a different representation than the upstream body, so Content-Length,
 	// ETag, and Digest from the upstream would be stale and corrupting.
+	// Connection-nominated tokens are resolved from the upstream source
+	// before the copy (the copy itself skips the Connection header).
+	RemoveHopByHopHeaders(resp.Header)
 	h.copyResponseHeaders(w.Header(), resp.Header)
-	RemoveHopByHopHeaders(w.Header())
 	RemoveTransformedRepresentationHeaders(w.Header())
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

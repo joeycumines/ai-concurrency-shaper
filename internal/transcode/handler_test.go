@@ -1244,3 +1244,58 @@ func TestHandlerMessagesFailedUpstreamNotSuccess(t *testing.T) {
 		t.Fatalf("error body does not carry the upstream failure: %s", rec.Body.String())
 	}
 }
+
+// TestHandlerHopByHopHeadersStrippedJSON verifies Connection-nominated
+// hop-by-hop headers do not leak on the non-streaming success path.
+func TestHandlerHopByHopHeadersStrippedJSON(t *testing.T) {
+	mapping := responsesMapping(t)
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type":  []string{"application/json"},
+				"Connection":    []string{"X-Internal-Secret"},
+				"X-Internal-Secret": []string{"s3cr3t"},
+				"X-Keep":        []string{"visible"},
+			},
+			Body: io.NopCloser(bytes.NewReader(testcorpus.ChatCompletionsResponseJSON())),
+		}, nil
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := rec.Header().Get("X-Internal-Secret"); got != "" {
+		t.Fatalf("Connection-nominated header leaked: %q", got)
+	}
+	if got := rec.Header().Get("X-Keep"); got != "visible" {
+		t.Fatalf("ordinary entity header dropped: %q", got)
+	}
+}
+
+// TestHandlerConversationStateRejectedChat verifies that Responses request
+// fields not portable to a Chat upstream are rejected (strict policy)
+// rather than silently dropped while echoed as honored.
+func TestHandlerConversationStateRejectedChat(t *testing.T) {
+	mapping := responsesMapping(t)
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		t.Fatal("round trip must not be called")
+		return nil, nil
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x","previous_response_id":"resp_prev"}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}

@@ -66,7 +66,6 @@ type ChatCapabilities struct {
 	ParallelToolCalls bool
 	StopSequences     bool
 	ReasoningEffort   bool
-	StreamUsageChunk  bool
 
 	// ProviderReasoningText permits an explicitly configured provider extension
 	// such as a plaintext "reasoning" response field. It may be mapped only to
