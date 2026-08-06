@@ -505,6 +505,16 @@ func RenderMessagesResponse(
 	if err := ValidateCanonicalResponse(response); err != nil {
 		return nil, err
 	}
+	// A failed exchange must never be reported as a successful Messages
+	// completion (merge gate 10). The upstream failure surfaces as a
+	// client-dialect error, never as a message with a success stop reason.
+	if response.Status == CanonicalResponseFailed {
+		message := response.ErrorMessage
+		if message == "" {
+			message = "upstream response failed"
+		}
+		return nil, fmt.Errorf("upstream response failed: %s", message)
+	}
 	if context == nil || context.IDs == nil {
 		return nil, errors.New("render messages response requires an exchange context")
 	}

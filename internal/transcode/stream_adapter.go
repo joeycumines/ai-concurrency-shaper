@@ -98,13 +98,16 @@ func (c *responsesToAnthropicConverter) Convert(
 ) (convertedBatch, error) {
 	data := trimJSONSpace(frame.Data)
 	if isResponsesDoneSentinel(data) {
-		held, ok := c.state.releaseTerminal()
-		if !ok {
-			return convertedBatch{}, nil
+		// The Responses protocol has no [DONE] sentinel; this is defensive
+		// tolerance for a chat-style upstream. The terminal was already
+		// emitted at response.completed; a [DONE] before any terminal is a
+		// truncation and must not end the stream cleanly.
+		if c.state.sawTerminal {
+			return convertedBatch{Terminal: true}, nil
 		}
-		batch, err := marshalAnthropicEvents(held)
-		batch.Terminal = true
-		return batch, err
+		return convertedBatch{}, errors.New(
+			"responses stream [DONE] before a terminal condition",
+		)
 	}
 
 	event, err := decodeResponsesSSEEvent(data)
@@ -220,10 +223,9 @@ func (c *chatToAnthropicConverter) convertResponsesEvents(
 	return batch, nil
 }
 
-// releaseTerminals releases held terminals from both state machines. The
-// Chat terminal releases first, flowing through the Anthropic state machine,
-// which holds its own terminal (message_delta + message_stop) until [DONE] or
-// EOF; both must be released for the batch to be terminal.
+// releaseTerminals releases the held terminal from the Chat state machine,
+// flowing it through the Anthropic state machine (which emits message_delta +
+// message_stop immediately at response.completed).
 func (c *chatToAnthropicConverter) releaseTerminals() (convertedBatch, error) {
 	var batch convertedBatch
 	if held, ok := c.chat.releaseTerminal(); ok {
@@ -233,14 +235,6 @@ func (c *chatToAnthropicConverter) releaseTerminals() (convertedBatch, error) {
 		}
 		batch.Events = append(batch.Events, converted.Events...)
 		batch.Terminal = converted.Terminal
-	}
-	if held, ok := c.anthropic.releaseTerminal(); ok {
-		converted, err := marshalAnthropicEvents(held)
-		if err != nil {
-			return convertedBatch{}, err
-		}
-		batch.Events = append(batch.Events, converted.Events...)
-		batch.Terminal = true
 	}
 	return batch, nil
 }

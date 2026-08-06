@@ -805,3 +805,105 @@ func (w *returnGuardWriter) flushCount() int64 {
 func (w *returnGuardWriter) lateOps() int64 {
 	return w.late.Load()
 }
+
+// TestProxyTranscodeBreakerOutcomeWithRetries verifies gate 20 under the
+// default CLI-like configuration: a retry-aware transport owns breaker
+// reporting (retryHandlesBreaker), yet a cancelled transcode stream must
+// still be classified from the explicit transcode outcome — never recorded
+// as a success, and never as a failure.
+func TestProxyTranscodeBreakerOutcomeWithRetries(t *testing.T) {
+	upstreamStarted := make(chan struct{})
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(upstreamStarted)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(
+			w,
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n",
+		)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker, err := circuitbreaker.New(circuitbreaker.WithFailureThreshold(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	breaker.RecordFailure(500, 0, time.Time{}, 0)
+	before := breaker.Stats()
+
+	u, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(breaker),
+		WithMaxRetries(1),
+		WithTranscodeMapping(transcodeMapping(testResponsesMapping(t))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x","stream":true}`),
+	).WithContext(ctx)
+
+	writer := newReturnGuardWriter()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.ServeHTTP(writer, req)
+		writer.returned.Store(true)
+	}()
+
+	select {
+	case <-upstreamStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream did not start")
+	}
+
+	// Wait for the first downstream flush, then cancel mid-stream.
+	deadline := time.Now().Add(5 * time.Second)
+	for writer.flushes.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if writer.flushes.Load() == 0 {
+		t.Fatal("no downstream flush observed")
+	}
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not return after cancellation")
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	after := breaker.Stats()
+	if after.TotalSuccesses != before.TotalSuccesses {
+		t.Fatalf(
+			"client abort recorded success with retry-owned breaker: before=%d after=%d",
+			before.TotalSuccesses,
+			after.TotalSuccesses,
+		)
+	}
+	if after.ConsecutiveFailures != before.ConsecutiveFailures {
+		t.Fatalf(
+			"client abort reset failure streak with retry-owned breaker: before=%d after=%d",
+			before.ConsecutiveFailures,
+			after.ConsecutiveFailures,
+		)
+	}
+}

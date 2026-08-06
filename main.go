@@ -94,10 +94,10 @@ func run() error {
 		upstreamDisableKeepAlives bool
 
 		// Transcoding flags.
-		transcodeRoutes              transcodeRouteFlags
-		transcodeResponsesChat       bool
-		transcodeMessagesChat        bool
-		transcodeMessagesResponses   bool
+		transcodeRoutes            transcodeRouteFlags
+		transcodeResponsesChat     bool
+		transcodeMessagesChat      bool
+		transcodeMessagesResponses bool
 		transcodeAuth              string
 		transcodeAuthSource        string
 		transcodeAuthHeader        string
@@ -281,9 +281,16 @@ func run() error {
 		mappings[i].ModelMap = transcodeModelMap
 		mappings[i].Auth = transcodeAuthPolicy
 		mappings[i].BodyLimits = transcode.BodyLimits{
-			AcceptedRequestBytes:    transcodeMaxRequestMB << 20,
+			AcceptedRequestBytes: transcodeMaxRequestMB << 20,
+			// The decoded limit is separate from the accepted raw-body limit
+			// (merge gate 19): it bounds the rendered upstream request, with
+			// headroom for decode amplification.
+			DecodedRequestBytes:     transcodeMaxRequestMB << 22,
 			SuccessfulResponseBytes: transcodeMaxResponseMB << 20,
 			RetryReplayBytes:        int64(retryMaxBodyMB) << 20,
+			ErrorResponseBytes:      1 << 20,
+			SSELineBytes:            1 << 20,
+			SSEFrameBytes:           1 << 20,
 		}
 	}
 

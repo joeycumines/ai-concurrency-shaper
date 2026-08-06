@@ -244,22 +244,22 @@ func TestBreaker_PenaltyDuration(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// No failures — penalty is zero.
-	if p := b.PenaltyDuration(); p != 0 {
-		t.Errorf("penalty with 0 failures = %v, want 0", p)
+	// No failures — penalty is just base.
+	if p := b.PenaltyDuration(); p != 1*time.Second {
+		t.Errorf("penalty with 0 failures = %v, want 1s", p)
 	}
 
-	// After 2 consecutive failures: base * 2 = 2s.
+	// After 2 consecutive failures: base * (1 + 2) = 3s.
 	b.RecordFailure(500, 0, time.Time{}, 0)
 	b.RecordFailure(500, 0, time.Time{}, 0)
-	if p := b.PenaltyDuration(); p != 2*time.Second {
-		t.Errorf("penalty with 2 failures = %v, want 2s", p)
+	if p := b.PenaltyDuration(); p != 3*time.Second {
+		t.Errorf("penalty with 2 failures = %v, want 3s", p)
 	}
 
 	// After success, consecutive resets.
 	b.RecordSuccess(time.Time{}, 0)
-	if p := b.PenaltyDuration(); p != 0 {
-		t.Errorf("penalty after success = %v, want 0", p)
+	if p := b.PenaltyDuration(); p != 1*time.Second {
+		t.Errorf("penalty after success = %v, want 1s", p)
 	}
 }
 
@@ -396,8 +396,8 @@ func TestBreaker_DefaultConfig(t *testing.T) {
 		t.Errorf("expected CLOSED, got %v", s.State)
 	}
 	// Verify defaults are applied by checking penalty behavior.
-	if p := b.PenaltyDuration(); p != 0 {
-		t.Errorf("default BasePenalty should yield 0 penalty with no failures, got %v", p)
+	if p := b.PenaltyDuration(); p != 2*time.Second {
+		t.Errorf("default BasePenalty should be 2s, got penalty %v", p)
 	}
 }
 
@@ -1071,10 +1071,10 @@ func TestBreaker_RetryAfterResetOnSuccess(t *testing.T) {
 		t.Errorf("penalty after Retry-After = %v, want 30s", p)
 	}
 
-	// A success must reset lastRetryAfter so the penalty returns to zero.
+	// A success must reset lastRetryAfter so the penalty returns to base.
 	b.RecordSuccess(time.Time{}, 0)
-	if p := b.PenaltyDuration(); p != 0 {
-		t.Errorf("penalty after success = %v, want 0 (base, Retry-After reset)", p)
+	if p := b.PenaltyDuration(); p != 1*time.Second {
+		t.Errorf("penalty after success = %v, want 1s (base, Retry-After reset)", p)
 	}
 }
 
@@ -1559,15 +1559,15 @@ func TestBreaker_PenaltyOverflowSafe(t *testing.T) {
 		t.Errorf("penalty = %v, want > 0 (overflow must not zero the penalty)", penalty)
 	}
 
-	// Verify that the penalty is zero when there are no consecutive failures.
+	// Verify that the penalty is at least basePenalty for any consecutive value.
 	b.consecutive = 0
-	if p := b.PenaltyDuration(); p != 0 {
-		t.Errorf("penalty with consecutive=0 = %v, want 0 (no failures)", p)
+	if p := b.PenaltyDuration(); p != b.cfg.basePenalty {
+		t.Errorf("penalty with consecutive=0 = %v, want %v (basePenalty)", p, b.cfg.basePenalty)
 	}
 
 	b.consecutive = 1
-	if p := b.PenaltyDuration(); p != b.cfg.basePenalty {
-		t.Errorf("penalty with consecutive=1 = %v, want %v (basePenalty)", p, b.cfg.basePenalty)
+	if p := b.PenaltyDuration(); p != b.cfg.basePenalty*2 {
+		t.Errorf("penalty with consecutive=1 = %v, want %v (2*basePenalty)", p, b.cfg.basePenalty*2)
 	}
 }
 

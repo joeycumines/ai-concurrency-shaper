@@ -218,10 +218,12 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	outReq, err := h.buildUpstreamRequest(r, upstreamBody)
 	if err != nil {
-		// An unallowed client query parameter is a client fault (400); other
-		// request-construction failures are internal (500).
+		// An unallowed client query parameter or an invalid inbound
+		// credential is a client fault (400); other request-construction
+		// failures are internal (500).
 		status := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "client query parameter") {
+		if strings.Contains(err.Error(), "client query parameter") ||
+			errors.Is(err, errAuthInboundCredential) {
 			status = http.StatusBadRequest
 		}
 		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
@@ -273,7 +275,11 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A non-2xx upstream response is parsed and rendered before any
 	// downstream status is committed (operational rule).
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		apiErr, readErr := ReadCanonicalUpstreamError(resp, h.cfg.Mapping.UpstreamProtocol)
+		apiErr, readErr := ReadCanonicalUpstreamError(
+			resp,
+			h.cfg.Mapping.UpstreamProtocol,
+			h.cfg.BodyLimits.ErrorResponseBytes,
+		)
 		if readErr != nil {
 			h.writeDialectHTTPError(r, w, CanonicalAPIError{
 				Status:  resp.StatusCode,
@@ -287,10 +293,27 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The response media type must agree with the client's stream intent
+	// (merge gate 17): a streaming request cannot be answered with JSON and
+	// a non-streaming request cannot be answered with an SSE stream.
 	switch {
 	case isEventStream(resp):
+		if !context.StreamIntent {
+			h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+				http.StatusBadGateway,
+				"upstream returned a stream for a non-streaming request",
+				ProvenanceLocalStreamValidationError)
+			return
+		}
 		h.streamResponse(w, r, resp, context)
 	case isJSON(resp):
+		if context.StreamIntent {
+			h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+				http.StatusBadGateway,
+				"upstream returned a non-streaming response for a streaming request",
+				ProvenanceLocalStreamValidationError)
+			return
+		}
 		h.jsonResponse(w, r, resp, context)
 	default:
 		// A 2xx non-JSON non-SSE response is a stream-intent mismatch.
@@ -331,6 +354,10 @@ func (h *TranscodeHandler) convertRequest(
 	context := &ExchangeContext{
 		IDs:        NewExchangeIDs(),
 		LossPolicy: policy,
+		// Stream intent is expressed either by the client Accept header (the
+		// Messages dialect signals streaming only this way) or by the
+		// request body's stream flag (Responses). Both are merged after
+		// decode below; the response media type must agree (merge gate 17).
 		StreamIntent: strings.EqualFold(
 			strings.TrimSpace(r.Header.Get("Accept")),
 			"text/event-stream",
@@ -356,6 +383,7 @@ func (h *TranscodeHandler) convertRequest(
 		if err != nil {
 			return nil, nil, err
 		}
+		context.StreamIntent = context.StreamIntent || result.Request.Stream
 		if err := resolveModel(result.Request.ClientModel); err != nil {
 			return nil, nil, err
 		}
@@ -382,6 +410,9 @@ func (h *TranscodeHandler) convertRequest(
 		if err != nil {
 			return nil, nil, err
 		}
+		if err := h.checkDecodedRequestSize(rendered); err != nil {
+			return nil, nil, err
+		}
 		logConversionReport(report, r)
 		return rendered, context, nil
 
@@ -390,6 +421,7 @@ func (h *TranscodeHandler) convertRequest(
 		if err != nil {
 			return nil, nil, err
 		}
+		context.StreamIntent = context.StreamIntent || result.Request.Stream
 		if err := resolveModel(result.Request.ClientModel); err != nil {
 			return nil, nil, err
 		}
@@ -417,6 +449,9 @@ func (h *TranscodeHandler) convertRequest(
 			)
 		}
 		if err != nil {
+			return nil, nil, err
+		}
+		if err := h.checkDecodedRequestSize(rendered); err != nil {
 			return nil, nil, err
 		}
 		logConversionReport(report, r)
@@ -551,6 +586,20 @@ func (h *TranscodeHandler) jsonResponse(
 	})
 }
 
+// checkDecodedRequestSize rejects decoded requests that amplify beyond the
+// decoded-request body limit (merge gate 19: the decoded limit is separate
+// from the accepted raw-body limit).
+func (h *TranscodeHandler) checkDecodedRequestSize(rendered []byte) error {
+	limit := h.cfg.BodyLimits.DecodedRequestBytes
+	if limit <= 0 {
+		return nil
+	}
+	if int64(len(rendered)) > limit {
+		return errRequestBodyTooLarge
+	}
+	return nil
+}
+
 // convertResponse decodes the upstream JSON response into the canonical IR
 // and renders the client response envelope. The output dialect is determined
 // by the CLIENT protocol, never by the upstream protocol.
@@ -641,14 +690,22 @@ func (h *TranscodeHandler) streamResponse(
 	}
 
 	// Copy entity headers without Connection (the SSE writer must not
-	// reintroduce a hop-by-hop header, which is invalid for HTTP/2).
+	// reintroduce a hop-by-hop header, which is invalid for HTTP/2) and
+	// without transformed-representation headers: the translated stream is
+	// a different representation than the upstream body, so Content-Length,
+	// ETag, and Digest from the upstream would be stale and corrupting.
 	h.copyResponseHeaders(w.Header(), resp.Header)
 	RemoveHopByHopHeaders(w.Header())
+	RemoveTransformedRepresentationHeaders(w.Header())
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(resp.StatusCode)
 
-	reader := newConvertingReader(NewSSEReader(resp.Body), converter)
+	reader := newConvertingReader(NewSSEReaderWithLimits(
+		resp.Body,
+		h.cfg.BodyLimits.SSELineBytes,
+		h.cfg.BodyLimits.SSEFrameBytes,
+	), converter)
 	observation := runTranslatedStream(r.Context(), w, resp.Body, reader)
 
 	// Classify the outcome from explicit provenance.

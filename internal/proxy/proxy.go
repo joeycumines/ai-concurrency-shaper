@@ -1328,6 +1328,18 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 		rec, recOK := w.(*statusRecorder)
 		if recOK {
 			now := time.Now()
+			// A transcoded exchange records explicit outcome provenance after
+			// the handler returns. It is authoritative regardless of whether
+			// the retry transport owns breaker reporting: the legacy
+			// retryHandlesBreaker path would otherwise record a cancelled
+			// 2xx stream as a success and an abort-caused truncation as a
+			// failure (gate 20).
+			if rec.transcodeOutcome != nil {
+				attemptStart, attemptEpoch := retryAttemptOrDefault(retryAttempt, proxyStart, breakerEpoch)
+				p.recordTranscodeBreakerOutcome(rec, r, retryAttempt, attemptStart, attemptEpoch, rec.transcodeOutcome)
+				p.m.IncPassThrough()
+				return
+			}
 			if p.retryHandlesBreaker {
 				attemptStart, attemptEpoch := retryAttemptOrDefault(retryAttempt, proxyStart, breakerEpoch)
 				p.recordRetryOwnedProxyTransportFailure(w, r, retryAttempt, attemptStart, attemptEpoch, now)
@@ -1665,6 +1677,18 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		rec, recOK := w.(*statusRecorder)
 		if recOK {
 			now := time.Now()
+			// A transcoded exchange records explicit outcome provenance after
+			// the handler returns. It is authoritative regardless of whether
+			// the retry transport owns breaker reporting: the legacy
+			// retryHandlesBreaker path would otherwise record a cancelled
+			// 2xx stream as a success and an abort-caused truncation as a
+			// failure (gate 20).
+			if rec.transcodeOutcome != nil {
+				attemptStart, attemptEpoch := retryAttemptOrDefault(retryAttempt, proxyStart, breakerEpoch)
+				p.recordTranscodeBreakerOutcome(rec, r, retryAttempt, attemptStart, attemptEpoch, rec.transcodeOutcome)
+				p.m.IncProxied()
+				return
+			}
 			if p.retryHandlesBreaker {
 				attemptStart, attemptEpoch := retryAttemptOrDefault(retryAttempt, proxyStart, breakerEpoch)
 				p.recordRetryOwnedProxyTransportFailure(w, r, retryAttempt, attemptStart, attemptEpoch, now)

@@ -499,8 +499,8 @@ func (b *Breaker) WaitDuration() time.Duration {
 }
 
 // PenaltyDuration returns the phantom concurrency slot hold time.
-// The penalty grows with consecutive failures: BasePenalty * consecutive
-// (zero before the first failure, one base unit after the first failure).
+// The penalty grows with consecutive failures: BasePenalty * (1 + consecutive),
+// so the first failure already holds one base unit.
 // It is also raised to match any observed Retry-After header.
 // The result is capped at MaxPenalty.
 func (b *Breaker) PenaltyDuration() time.Duration {
@@ -749,10 +749,10 @@ func (b *Breaker) currentPenaltyLocked() time.Duration {
 	// longer than the configured maximum.
 	//
 	// Cap consecutive before multiplication to prevent int64 overflow.
-	// Without this, basePenalty * Duration(consecutive) overflows when
+	// Without this, basePenalty * Duration(1+consecutive) overflows when
 	// consecutive is extremely large (~4.6B), producing a negative Duration
 	// that min() treats as 0 — violating the guarantee that the penalty is
-	// never negative. The cap ensures the scaled value can
+	// always at least basePenalty. The cap ensures the scaled value can
 	// never exceed maxPenalty through legitimate scaling.
 	c := b.consecutive
 	if c > 0 {
@@ -761,7 +761,7 @@ func (b *Breaker) currentPenaltyLocked() time.Duration {
 			c = maxConsecutive
 		}
 	}
-	scaled := b.cfg.basePenalty * time.Duration(c)
+	scaled := b.cfg.basePenalty * time.Duration(1+c)
 	penalty := min(max(b.lastRetryAfter, scaled), b.cfg.maxPenalty)
 	return penalty
 }

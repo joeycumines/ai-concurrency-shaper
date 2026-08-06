@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 )
@@ -16,20 +17,38 @@ import (
 // https://platform.openai.com/docs/api-reference/responses-streaming
 
 // SSEReader parses one SSE event at a time from an upstream stream, applying
-// the line and frame bounds from the parser.
+// configurable line and frame bounds (the package defaults when unset).
 type SSEReader struct {
-	br *bufio.Reader
+	br        *bufio.Reader
+	lineMax   int
+	frameMax  int
 }
 
-// NewSSEReader wraps r in a bounded SSE event reader.
-func NewSSEReader(r io.Reader) *SSEReader {
-	return &SSEReader{br: bufio.NewReader(r)}
+// NewSSEReaderWithLimits wraps r with explicit line and frame bounds. Zero
+// values select the package defaults.
+func NewSSEReaderWithLimits(r io.Reader, lineMax, frameMax int) *SSEReader {
+	if lineMax <= 0 {
+		lineMax = maxSSELineBytes
+	}
+	if frameMax <= 0 {
+		frameMax = maxSSEFrameBytes
+	}
+	return &SSEReader{br: bufio.NewReader(r), lineMax: lineMax, frameMax: frameMax}
 }
 
 // Next returns the next SSE event, or io.EOF at the end of the stream.
 func (r *SSEReader) Next() (SSEEvent, error) {
-	return readSSEEvent(r.br)
+	if r.lineMax == 0 {
+		return readSSEEvent(r.br)
+	}
+	return readSSEEventLimited(r.br, r.lineMax, r.frameMax)
 }
+
+// errStreamTruncated marks a stream that ended before a terminal condition.
+// It distinguishes an upstream that stopped sending (an upstream failure)
+// from a local conversion error on a live stream (neither success nor
+// failure).
+var errStreamTruncated = errors.New("upstream stream ended before a terminal condition")
 
 // convertedBatch is one conversion output: the frames to write downstream and
 // whether the source stream reached its terminal condition.
@@ -134,6 +153,7 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 		if errors.Is(err, io.EOF) {
 			batch, finalErr := r.conv.FinalizeEOF()
 			if finalErr != nil {
+				finalErr = fmt.Errorf("%w: %v", errStreamTruncated, finalErr)
 				r.appendErrorEvent(finalErr)
 				r.err = finalErr
 				// Drain the appended error frame before surfacing the error.

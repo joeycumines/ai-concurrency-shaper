@@ -170,14 +170,18 @@ func classifyStreamObservation(o streamObservation) streamOutcome {
 	if o.SawUpstreamErrorFrame {
 		return streamOutcomeUpstreamFailure
 	}
-	// A locally generated error event (truncation or conversion error) is
-	// an upstream failure only when the client did not cancel; an aborted
-	// exchange must not trip or reset breaker health.
+	// A locally generated error event is a truncation (the upstream stopped
+	// sending — an upstream body failure) or a conversion error on a live
+	// stream (neither success nor failure, matching the non-streaming path).
+	// An aborted exchange is never a failure.
 	if o.SawErrorEvent {
 		if o.ClientContextErr != nil {
 			return streamOutcomeClientAbort
 		}
-		return streamOutcomeUpstreamFailure
+		if errors.Is(o.ReaderErr, errStreamTruncated) {
+			return streamOutcomeUpstreamFailure
+		}
+		return streamOutcomeLocalConversionFailure
 	}
 	if o.WriterErr != nil || o.SealErr != nil {
 		if o.ClientContextErr != nil {

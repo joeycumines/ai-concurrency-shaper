@@ -188,9 +188,6 @@ type ResponsesSummaryTextPart struct {
 	Text string `json:"text"`
 }
 
-// NewEmptySummaryTextPart returns a valid empty summary_text part.
-// ResponseReasoningSummaryPartAddedEvent is emitted when a reasoning summary
-// part is added.
 type ResponseReasoningSummaryPartAddedEvent struct {
 	responsesEventBase
 	ItemID       string                   `json:"item_id"`
@@ -1024,5 +1021,3 @@ func MarshalResponsesEvent(event ResponsesSSEEvent) ([]byte, error) {
 	return json.Marshal(event)
 }
 
-// WriteResponsesSSEEvent guarantees that the SSE event name and JSON type are
-// identical and flushes exactly one complete event.

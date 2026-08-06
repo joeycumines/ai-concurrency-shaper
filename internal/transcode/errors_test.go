@@ -34,7 +34,7 @@ func TestReadCanonicalUpstreamErrorOpenAI(t *testing.T) {
 		"X-Request-Id": []string{"req_123"},
 		"Retry-After":  []string{"5"},
 	})
-	apiErr, err := ReadCanonicalUpstreamError(resp, UpstreamResponses)
+	apiErr, err := ReadCanonicalUpstreamError(resp, UpstreamResponses, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestReadCanonicalUpstreamErrorAnthropic(t *testing.T) {
 		"error":{"type":"overloaded_error","message":"Overloaded"},
 		"request_id":"req_xyz"
 	}`, http.Header{})
-	apiErr, err := ReadCanonicalUpstreamError(resp, UpstreamMessages)
+	apiErr, err := ReadCanonicalUpstreamError(resp, UpstreamMessages, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestReadCanonicalUpstreamErrorHTMLSanitized(t *testing.T) {
 	// Raw provider HTML must not be forwarded verbatim; the message is
 	// whitespace-normalized and bounded.
 	resp := responseWithBody(502, "text/html", "<html><body>\n  Bad Gateway with a very long message\n</body></html>", http.Header{})
-	apiErr, err := ReadCanonicalUpstreamError(resp, UpstreamResponses)
+	apiErr, err := ReadCanonicalUpstreamError(resp, UpstreamResponses, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestReadCanonicalUpstreamErrorHTMLSanitized(t *testing.T) {
 
 func TestReadCanonicalUpstreamErrorEmptyBody(t *testing.T) {
 	resp := responseWithBody(500, "", "", http.Header{})
-	apiErr, err := ReadCanonicalUpstreamError(resp, UpstreamMessages)
+	apiErr, err := ReadCanonicalUpstreamError(resp, UpstreamMessages, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,9 +98,21 @@ func TestReadCanonicalUpstreamErrorEmptyBody(t *testing.T) {
 }
 
 func TestReadCanonicalUpstreamErrorBounded(t *testing.T) {
+	// An oversized error body is rejected rather than parsed.
 	huge := strings.Repeat("x", int(maxUpstreamErrorBodyBytes)+1024)
 	resp := responseWithBody(500, "text/plain", huge, http.Header{})
-	apiErr, err := ReadCanonicalUpstreamError(resp, UpstreamResponses)
+	if _, err := ReadCanonicalUpstreamError(resp, UpstreamResponses, 0); err == nil {
+		t.Fatal("oversized error body accepted")
+	}
+
+	// A custom limit is honored.
+	resp2 := responseWithBody(500, "text/plain", strings.Repeat("x", 4096), http.Header{})
+	if _, err := ReadCanonicalUpstreamError(resp2, UpstreamResponses, 1024); err == nil {
+		t.Fatal("error body exceeding the configured limit accepted")
+	}
+
+	// Within the limit, the parse succeeds.
+	apiErr, err := ReadCanonicalUpstreamError(resp, UpstreamResponses, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -63,23 +63,28 @@ type anthropicErrorEnvelope struct {
 // ReadCanonicalUpstreamError parses a non-2xx upstream response into the
 // canonical error form, preserving status, request ID, and Retry-After. Raw
 // provider HTML error pages are never forwarded; only a bounded,
-// whitespace-normalized message is retained.
+// whitespace-normalized message is retained. maxBytes bounds the error body
+// read (0 selects the package default).
 func ReadCanonicalUpstreamError(
 	resp *http.Response,
 	upstream UpstreamProtocol,
+	maxBytes int64,
 ) (CanonicalAPIError, error) {
+	if maxBytes <= 0 {
+		maxBytes = maxUpstreamErrorBodyBytes
+	}
 	if resp == nil {
 		return CanonicalAPIError{}, errors.New("nil upstream response")
 	}
 
 	body, err := io.ReadAll(
-		io.LimitReader(resp.Body, maxUpstreamErrorBodyBytes+1),
+		io.LimitReader(resp.Body, maxBytes+1),
 	)
 	if err != nil {
 		return CanonicalAPIError{}, err
 	}
-	if int64(len(body)) > maxUpstreamErrorBodyBytes {
-		body = body[:maxUpstreamErrorBodyBytes]
+	if int64(len(body)) > maxBytes {
+		return CanonicalAPIError{}, errors.New("upstream error body exceeds the configured limit")
 	}
 
 	result := CanonicalAPIError{
@@ -259,11 +264,6 @@ func WriteDialectHTTPError(
 	}
 }
 
-// WriteDialectStreamError renders a canonical error as an SSE error event in
-// the client dialect. After an error event the stream must terminate; no
-// success terminal may follow.
-// anthropicErrorType maps a canonical error to the Anthropic error type
-// vocabulary.
 func anthropicErrorType(e CanonicalAPIError) string {
 	switch e.Status {
 	case 400, 422:

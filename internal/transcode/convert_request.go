@@ -1027,15 +1027,6 @@ func RenderResponsesRequest(
 	return body, report, nil
 }
 
-// RenderMessagesRequest renders the canonical IR into an Anthropic Messages
-// request body. System and developer turns become the system field; user and
-// assistant turns become messages; tool calls and results become their own
-// content blocks within the adjacent turn.
-// RenderChatRequest renders the canonical IR into a Chat Completions request
-// body. Capabilities gate provider-extension fields: developer messages,
-// image input, structured output, stop sequences, parallel tool calls, and
-// reasoning effort are only emitted when the corresponding capability is
-// enabled; otherwise they are approved losses or rejections. n is forced to 1.
 func RenderChatRequest(
 	request CanonicalRequest,
 	context *ExchangeContext,

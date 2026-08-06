@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -38,7 +39,7 @@ func (c *fixedConverter) ErrorEvent(err error) (frameEvent, bool) {
 }
 
 func TestConvertingReaderDrainsTerminal(t *testing.T) {
-	source := NewSSEReader(strings.NewReader("data: {\"x\":1}\n\n"))
+	source := NewSSEReaderWithLimits(strings.NewReader("data: {\"x\":1}\n\n"), 0, 0)
 	converter := &fixedConverter{terminal: true}
 	reader := newConvertingReader(source, converter)
 
@@ -65,7 +66,7 @@ func TestConvertingReaderStopAfterDrainEvenWithOpenUpstream(t *testing.T) {
 	// After the terminal batch drains, the reader returns EOF even when the
 	// upstream keeps the connection open (an endless stream of bytes).
 	reader := newConvertingReader(
-		NewSSEReader(&thenHangReader{data: []byte("data: {}\n\n")}),
+		NewSSEReaderWithLimits(&thenHangReader{data: []byte("data: {}\n\n")}, 0, 0),
 		&fixedConverter{terminal: true},
 	)
 	buf := make([]byte, 4096)
@@ -94,7 +95,7 @@ func (r *thenHangReader) Read(p []byte) (int, error) {
 }
 
 func TestConvertingReaderConversionError(t *testing.T) {
-	source := NewSSEReader(strings.NewReader("data: {}\n\n"))
+	source := NewSSEReaderWithLimits(strings.NewReader("data: {}\n\n"), 0, 0)
 	converter := &fixedConverter{err: errors.New("convert failed")}
 	reader := newConvertingReader(source, converter)
 	var output bytes.Buffer
@@ -131,7 +132,7 @@ func TestConvertingReaderMalformedFrame(t *testing.T) {
 		nil,
 	))
 	reader := newConvertingReader(
-		NewSSEReader(strings.NewReader("data: not-json\n\n")),
+		NewSSEReaderWithLimits(strings.NewReader("data: not-json\n\n"), 0, 0),
 		converter,
 	)
 	var output bytes.Buffer
@@ -171,7 +172,7 @@ func TestConvertingReaderEOFWithoutTerminal(t *testing.T) {
 	)
 	converter := newChatToResponsesConverter(state)
 	reader := newConvertingReader(
-		NewSSEReader(strings.NewReader("data: {\"id\":\"x\",\"choices\":[]}\n\n")),
+		NewSSEReaderWithLimits(strings.NewReader("data: {\"id\":\"x\",\"choices\":[]}\n\n"), 0, 0),
 		converter,
 	)
 	var output bytes.Buffer
@@ -219,7 +220,7 @@ func TestConvertingReaderDoneReleasesTerminal(t *testing.T) {
 	input := "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
 		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	reader := newConvertingReader(NewSSEReader(strings.NewReader(input)), converter)
+	reader := newConvertingReader(NewSSEReaderWithLimits(strings.NewReader(input), 0, 0), converter)
 
 	var output bytes.Buffer
 	// The upstream never EOFs (simulated by the [DONE] frame terminating the
@@ -359,7 +360,7 @@ func TestRunTranslatedStreamNoLateOps(t *testing.T) {
 	// The upstream body keeps the connection open after [DONE]; the reader
 	// terminates on the terminal batch and the handler closes the body.
 	upstream := &heldOpenBody{reader: strings.NewReader(input)}
-	reader := newConvertingReader(NewSSEReader(upstream), converter)
+	reader := newConvertingReader(NewSSEReaderWithLimits(upstream, 0, 0), converter)
 
 	var w guardResponseWriter
 	observation := runTranslatedStream(context.Background(), &w, upstream, reader)
@@ -418,9 +419,14 @@ func TestClassifyStreamObservation(t *testing.T) {
 			want: streamOutcomeLocalConversionFailure,
 		},
 		{
-			name: "error event is upstream failure",
-			obs:  streamObservation{SawErrorEvent: true, SawTerminal: true},
+			name: "error event from truncation is upstream failure",
+			obs:  streamObservation{SawErrorEvent: true, ReaderErr: fmt.Errorf("%w: boom", errStreamTruncated), SawTerminal: true},
 			want: streamOutcomeUpstreamFailure,
+		},
+		{
+			name: "error event from local conversion is local failure",
+			obs:  streamObservation{SawErrorEvent: true, ReaderErr: errors.New("convert: boom"), SawTerminal: true},
+			want: streamOutcomeLocalConversionFailure,
 		},
 		{
 			name: "reader error is upstream failure",
@@ -478,7 +484,7 @@ func TestRunTranslatedStreamClientAbortReleases(t *testing.T) {
 	upstream := &heldOpenBody{reader: strings.NewReader(
 		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
 	)}
-	reader := newConvertingReader(NewSSEReader(upstream), converter)
+	reader := newConvertingReader(NewSSEReaderWithLimits(upstream, 0, 0), converter)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var w guardResponseWriter
@@ -548,7 +554,7 @@ func TestFixtureChatStreamToResponsesFrames(t *testing.T) {
 	)
 	converter := newChatToResponsesConverter(state)
 	reader := newConvertingReader(
-		NewSSEReader(bytes.NewReader(testcorpus.ChatCompletionsStreamSSE())),
+		NewSSEReaderWithLimits(bytes.NewReader(testcorpus.ChatCompletionsStreamSSE()), 0, 0),
 		converter,
 	)
 	var output bytes.Buffer
@@ -589,7 +595,7 @@ func TestWriteDialectEventNameMatchesType(t *testing.T) {
 	)
 	converter := newChatToResponsesConverter(state)
 	reader := newConvertingReader(
-		NewSSEReader(bytes.NewReader(testcorpus.ChatCompletionsStreamSSE())),
+		NewSSEReaderWithLimits(bytes.NewReader(testcorpus.ChatCompletionsStreamSSE()), 0, 0),
 		converter,
 	)
 	var output bytes.Buffer
@@ -632,7 +638,7 @@ func TestFixtureResponsesStreamToAnthropicFrames(t *testing.T) {
 	)
 	converter := newResponsesToAnthropicConverter(state)
 	reader := newConvertingReader(
-		NewSSEReader(bytes.NewReader(testcorpus.ResponsesStreamSSE())),
+		NewSSEReaderWithLimits(bytes.NewReader(testcorpus.ResponsesStreamSSE()), 0, 0),
 		converter,
 	)
 	var output bytes.Buffer

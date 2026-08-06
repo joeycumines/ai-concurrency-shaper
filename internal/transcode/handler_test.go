@@ -654,6 +654,8 @@ func TestHandlerTruncatedStreamErrorEvent(t *testing.T) {
 func TestHandlerStreamIntentMismatch(t *testing.T) {
 	// A JSON response for a streaming request is an upstream protocol
 	// mismatch: the client requested SSE and the upstream returned JSON.
+	// Merge gate 17 requires the response media type to agree with the
+	// stream intent; the exchange is rejected with a dialect-correct error.
 	mapping := responsesMapping(t)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -669,10 +671,27 @@ func TestHandlerStreamIntentMismatch(t *testing.T) {
 	)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	// The handler decodes the JSON response regardless; the stream intent is
-	// validated at admission in the proxy. The JSON path succeeds.
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The reverse mismatch: an SSE response for a non-streaming request.
+	handler2 := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(bytes.NewReader(testcorpus.ChatCompletionsStreamSSE())),
+		}, nil
+	})
+	req2 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec2 := httptest.NewRecorder()
+	handler2.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d: %s", rec2.Code, rec2.Body.String())
 	}
 }
 

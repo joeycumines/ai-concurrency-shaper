@@ -34,21 +34,27 @@ type SSEEvent struct {
 	Data  []byte
 }
 
-// readSSEEvent reads the next SSE event from r. A frame is terminated by a
-// blank line; consecutive data: lines are joined with a newline. The event
-// name, id:, retry:, and comment lines are captured but do not terminate the
-// stream. Malformed frames are drained and skipped. EOF with a pending frame
-// returns that frame together with io.EOF (the data+EOF convention), so a
-// successful read always consumes input.
-//
-// Bounds: every line is capped at maxSSELineBytes and every frame payload at
-// maxSSEFrameBytes; exceeding either discards the active frame and drains to
-// the next blank line.
+// readSSEEvent reads the next SSE event from r with the package default
+// bounds.
 func readSSEEvent(r *bufio.Reader) (SSEEvent, error) {
+	return readSSEEventLimited(r, maxSSELineBytes, maxSSEFrameBytes)
+}
+
+// readSSEEventLimited reads the next SSE event from r. A frame is terminated
+// by a blank line; consecutive data: lines are joined with a newline. The
+// event name, id:, retry:, and comment lines are captured but do not
+// terminate the stream. Malformed frames are drained and skipped. EOF with a
+// pending frame returns that frame together with io.EOF (the data+EOF
+// convention), so a successful read always consumes input.
+//
+// Bounds: every line is capped at lineMax and every frame payload at
+// frameMax; exceeding either discards the active frame and drains to the
+// next blank line.
+func readSSEEventLimited(r *bufio.Reader, lineMax, frameMax int) (SSEEvent, error) {
 	var event SSEEvent
 	var data []byte
 	for {
-		line, err := readSSELine(r)
+		line, err := readSSELine(r, lineMax)
 		if errors.Is(err, errSSELineOversized) {
 			// The active frame contained an oversized line: discard it
 			// entirely and drain to the next genuine blank line so the
@@ -56,7 +62,7 @@ func readSSEEvent(r *bufio.Reader) (SSEEvent, error) {
 			if len(data) > 0 {
 				data = nil
 			}
-			drained, drainErr := drainOversizedFrame(r)
+			drained, drainErr := drainOversizedFrame(r, lineMax)
 			if drainErr != nil {
 				return SSEEvent{}, drainErr
 			}
@@ -88,7 +94,7 @@ func readSSEEvent(r *bufio.Reader) (SSEEvent, error) {
 		switch {
 		case strings.HasPrefix(line, "event:"):
 			event.Event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			if len(event.Event) > maxSSELineBytes {
+			if len(event.Event) > lineMax {
 				return SSEEvent{}, errSSELineOversized
 			}
 
@@ -99,12 +105,12 @@ func readSSEEvent(r *bufio.Reader) (SSEEvent, error) {
 				data = append(data, '\n')
 			}
 			data = append(data, payload...)
-			if len(data) > maxSSEFrameBytes {
+			if len(data) > frameMax {
 				// Oversized frame: drain it and skip, then resume with the
 				// next event. The drain consumes through the terminating
 				// blank line (or to EOF); the loop continues reading the
 				// following frame.
-				_, drainErr := drainOversizedFrame(r)
+				_, drainErr := drainOversizedFrame(r, lineMax)
 				if drainErr != nil {
 					return SSEEvent{}, drainErr
 				}
@@ -121,9 +127,9 @@ func readSSEEvent(r *bufio.Reader) (SSEEvent, error) {
 // drainOversizedFrame consumes the remainder of an oversized line or frame up
 // to the next genuine blank line. It reports whether a blank line was found
 // (true) or the stream ended (false, with io.EOF or an error).
-func drainOversizedFrame(r *bufio.Reader) (bool, error) {
+func drainOversizedFrame(r *bufio.Reader, lineMax int) (bool, error) {
 	for {
-		line, err := readSSELine(r)
+		line, err := readSSELine(r, lineMax)
 		if errors.Is(err, errSSELineOversized) {
 			continue
 		}
@@ -143,14 +149,14 @@ func drainOversizedFrame(r *bufio.Reader) (bool, error) {
 // past maxSSELineBytes: oversized lines are consumed and reported as
 // errSSELineOversized so the frame parser can discard the active frame and
 // drain to the next genuine blank line.
-func readSSELine(r *bufio.Reader) (string, error) {
+func readSSELine(r *bufio.Reader, lineMax int) (string, error) {
 	var line []byte
 	for {
 		frag, err := r.ReadSlice('\n')
 		// Check the bound BEFORE appending so the buffer never exceeds
 		// maxSSELineBytes + a small overshoot from the reader's internal
 		// buffer.
-		if len(line)+len(frag) > maxSSELineBytes {
+		if len(line)+len(frag) > lineMax {
 			// Consume the rest of the oversized line, then report the
 			// sentinel error.
 			for err == bufio.ErrBufferFull {

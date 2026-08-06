@@ -39,6 +39,10 @@ type Credential struct {
 	Value string
 }
 
+// errAuthInboundCredential marks client-fault authentication errors: the
+// request is rejected (4xx) rather than treated as an internal failure.
+var errAuthInboundCredential = errors.New("invalid inbound credential")
+
 // ExtractInboundCredential extracts exactly one unambiguous credential from
 // the client headers. Multiple different credentials are an error; equal
 // duplicate representations collapse to one.
@@ -49,8 +53,9 @@ func ExtractInboundCredential(h http.Header) (Credential, error) {
 		scheme, token, ok := strings.Cut(strings.TrimSpace(value), " ")
 		if !ok || !strings.EqualFold(scheme, "Bearer") ||
 			strings.TrimSpace(token) == "" {
-			return Credential{}, errors.New(
-				"authorization must use a non-empty Bearer credential",
+			return Credential{}, fmt.Errorf(
+				"%w: authorization must use a non-empty Bearer credential",
+				errAuthInboundCredential,
 			)
 		}
 		credentials = append(credentials, Credential{
@@ -84,8 +89,9 @@ func ExtractInboundCredential(h http.Header) (Credential, error) {
 	first := credentials[0]
 	for _, credential := range credentials[1:] {
 		if credential.Value != first.Value {
-			return Credential{}, errors.New(
-				"multiple different inbound credentials were supplied",
+			return Credential{}, fmt.Errorf(
+				"%w: multiple different inbound credentials were supplied",
+				errAuthInboundCredential,
 			)
 		}
 	}
@@ -240,7 +246,10 @@ func resolveSecret(
 ) (string, error) {
 	if policy.Inbound {
 		if inbound.Value == "" {
-			return "", errors.New("no inbound credential was supplied")
+			return "", fmt.Errorf(
+				"%w: no inbound credential was supplied",
+				errAuthInboundCredential,
+			)
 		}
 		return inbound.Value, nil
 	}

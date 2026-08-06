@@ -223,10 +223,6 @@ func canonicalToolChoiceToResponses(
 	}
 }
 
-// canonicalToolChoiceToAnthropic renders the canonical tool choice into the
-// Anthropic union.
-// canonicalToolChoiceToChat renders the canonical tool choice into the Chat
-// union.
 func canonicalToolChoiceToChat(
 	choice CanonicalToolChoice,
 ) (ChatToolChoice, error) {

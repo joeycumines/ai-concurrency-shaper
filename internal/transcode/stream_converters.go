@@ -687,10 +687,6 @@ type anthropicResponsesStreamState struct {
 
 	usage *AnthropicUsage
 
-	// Held terminal (message_delta + message_stop) released by [DONE] or
-	// FinalizeEOF.
-	heldTerminal []AnthropicStreamEvent
-
 	// Accumulated content blocks for the final message envelope.
 	message AnthropicMessageResponse
 }
@@ -1183,25 +1179,13 @@ func (s *anthropicResponsesStreamState) openBlockIndex() (int64, bool) {
 	return lowest, lowest >= 0
 }
 
-// releaseTerminal returns the held terminal batch and whether it exists.
-func (s *anthropicResponsesStreamState) releaseTerminal() ([]AnthropicStreamEvent, bool) {
-	if s.heldTerminal == nil {
-		return nil, false
-	}
-	held := s.heldTerminal
-	s.heldTerminal = nil
-	return held, true
-}
-
-// FinalizeEOF releases the held terminal or reports a truncation error. A
-// stream that ended without a terminal condition is never reported as
-// success.
+// FinalizeEOF reports a truncation error when the stream ended without a
+// terminal condition. A stream that ended without a terminal condition is
+// never reported as success.
 func (s *anthropicResponsesStreamState) FinalizeEOF() ([]AnthropicStreamEvent, error) {
-	if held, ok := s.releaseTerminal(); ok {
-		return held, nil
-	}
 	if s.sawTerminal {
-		// The terminal was consumed (error event) and released.
+		// The terminal was emitted at response.completed (or as an error
+		// event); nothing more to emit.
 		return nil, nil
 	}
 	return nil, errors.New(
