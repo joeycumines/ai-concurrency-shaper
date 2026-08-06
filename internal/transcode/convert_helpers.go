@@ -116,14 +116,19 @@ func canonicalPartsToResponsesContent(
 
 // canonicalImageToResponsesInputImage renders a canonical image into an
 // input_image content part, using image_url with a base64 data URL when the
-// image is inline.
+// image is inline. Detail defaults to auto (the API default) when the source
+// dialect did not specify one.
 func canonicalImageToResponsesInputImage(
 	image CanonicalImage,
 ) (*ResponsesInputImage, error) {
+	detail := image.Detail
+	if detail == "" {
+		detail = "auto"
+	}
 	if image.URL != "" {
 		return &ResponsesInputImage{
 			Type:     "input_image",
-			Detail:   image.Detail,
+			Detail:   detail,
 			ImageURL: image.URL,
 		}, nil
 	}
@@ -134,7 +139,7 @@ func canonicalImageToResponsesInputImage(
 		}
 		return &ResponsesInputImage{
 			Type:     "input_image",
-			Detail:   image.Detail,
+			Detail:   detail,
 			ImageURL: url,
 		}, nil
 	}
@@ -280,8 +285,12 @@ func canonicalTextTurnToChatMessage(
 			}
 		}
 	}
-	content := ChatMessageContent{ContentBlocks: blocks}
-	return ChatMessage{Role: role, Content: &content}, nil
+	// A system/developer turn is text-only; omit content when there are no
+	// parts rather than emitting an invalid empty union.
+	if len(blocks) == 0 {
+		return ChatMessage{}, errors.New("empty system or developer turn")
+	}
+	return ChatMessage{Role: role, Content: &ChatMessageContent{ContentBlocks: blocks}}, nil
 }
 
 // canonicalUserTurnToChatMessages renders a user turn into Chat messages:
@@ -383,8 +392,10 @@ func canonicalContentPartsToChatUserMessage(
 			)
 		}
 	}
-	content := ChatMessageContent{ContentBlocks: blocks}
-	return ChatMessage{Role: ChatMessageRoleUser, Content: &content}, nil
+	if len(blocks) == 0 {
+		return ChatMessage{}, errors.New("user turn has no portable content")
+	}
+	return ChatMessage{Role: ChatMessageRoleUser, Content: &ChatMessageContent{ContentBlocks: blocks}}, nil
 }
 
 // canonicalPartsToChatMessageContent renders canonical parts into a Chat
@@ -456,8 +467,12 @@ func canonicalAssistantTurnToChatMessage(
 	}
 	content := ChatMessageContent{ContentBlocks: blocks}
 	message := ChatMessage{
-		Role:    ChatMessageRoleAssistant,
-		Content: &content,
+		Role: ChatMessageRoleAssistant,
+	}
+	// Content is omitted when the turn carries only tool calls or a refusal
+	// (the official Chat shape for tool-call messages).
+	if len(blocks) > 0 {
+		message.Content = &content
 	}
 	if len(toolCalls) > 0 || refusal != nil {
 		message.ChatAssistantMessage = &ChatAssistantMessage{

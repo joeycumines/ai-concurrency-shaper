@@ -1068,14 +1068,16 @@ func (s *anthropicResponsesStreamState) completed(
 ) ([]AnthropicStreamEvent, error) {
 	s.finalizeMessage(CanonicalStopEndTurn, envelope.Usage)
 	s.sawTerminal = true
-	// Hold the terminal; [DONE] or FinalizeEOF releases it.
-	s.heldTerminal = []AnthropicStreamEvent{
+	// The Responses protocol has no [DONE] sentinel: response.completed IS
+	// the terminal. Release message_delta + message_stop immediately so the
+	// stream stops and the upstream connection is released even when the
+	// upstream keeps it open after the terminal.
+	return []AnthropicStreamEvent{
 		{Type: AnthropicStreamEventTypeMessageDelta, Delta: &AnthropicStreamDelta{
 			StopReason: anthropicStopReasonPtr(AnthropicStopReasonEndTurn),
 		}, Usage: s.usage},
 		{Type: AnthropicStreamEventTypeMessageStop},
-	}
-	return nil, nil
+	}, nil
 }
 
 func (s *anthropicResponsesStreamState) incomplete(
@@ -1083,13 +1085,12 @@ func (s *anthropicResponsesStreamState) incomplete(
 ) ([]AnthropicStreamEvent, error) {
 	s.finalizeMessage(CanonicalStopMaxTokens, envelope.Usage)
 	s.sawTerminal = true
-	s.heldTerminal = []AnthropicStreamEvent{
+	return []AnthropicStreamEvent{
 		{Type: AnthropicStreamEventTypeMessageDelta, Delta: &AnthropicStreamDelta{
 			StopReason: anthropicStopReasonPtr(AnthropicStopReasonMaxTokens),
 		}, Usage: s.usage},
 		{Type: AnthropicStreamEventTypeMessageStop},
-	}
-	return nil, nil
+	}, nil
 }
 
 func (s *anthropicResponsesStreamState) failed(
@@ -1163,6 +1164,11 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 	if usage != nil {
 		s.message.Usage = responsesUsageToAnthropicUsage(usage)
 		s.usage = s.message.Usage
+	}
+	if s.usage == nil {
+		// message_delta.usage is required on the wire; emit a zero usage when
+		// the upstream did not provide one.
+		s.usage = &AnthropicUsage{}
 	}
 }
 

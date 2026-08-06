@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Response-direction conversions. Each upstream response decodes exactly once
@@ -150,14 +151,20 @@ func chatMessageToCanonicalParts(
 			if call.Function.Name != nil {
 				name = *call.Function.Name
 			}
-			arguments, err := decodeJSONObject(call.Function.Arguments)
+			arguments := call.Function.Arguments
+			if strings.TrimSpace(arguments) == "" {
+				// Empty arguments are valid on the wire and represent the
+				// empty object (the Responses form of an empty argument set).
+				arguments = "{}"
+			}
+			decoded, err := decodeJSONObject(arguments)
 			if err != nil {
 				return nil, fmt.Errorf("chat tool call %d arguments: %w", i, err)
 			}
 			parts = append(parts, CanonicalFunctionCall{
 				CallID:    *call.ID,
 				Name:      name,
-				Arguments: mustRawMessage(arguments),
+				Arguments: mustRawMessage(decoded),
 			})
 		}
 	}

@@ -481,6 +481,74 @@ func TestHandlerMessagesToResponsesJSON(t *testing.T) {
 	}
 }
 
+// TestHandlerMessagesToChatJSON verifies the non-stream response dialect for
+// a messages client with a chat upstream: the chat response must render as an
+// Anthropic message envelope, not as a Responses envelope.
+func TestHandlerMessagesToChatJSON(t *testing.T) {
+	mapping := messagesMapping(t, UpstreamChatCompletions)
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+			ModelMap: ModelMap{AllowIdentity: true},
+			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
+				FeatureTopK:              {},
+				FeatureReasoningSummary:  {},
+				FeatureConversationState: {},
+			}},
+			AuthPolicy:         AuthPolicy{Mode: AuthNone},
+			AllowedClientQuery: map[string]struct{}{},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			// The upstream request is a Chat request.
+			body, _ := io.ReadAll(req.Body)
+			var chat ChatRequest
+			if err := strictDecode(body, &chat); err != nil {
+				t.Fatalf("upstream request: %v\n%s", err, body)
+			}
+			if len(chat.Messages) == 0 {
+				t.Fatal("chat messages missing")
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewReader(testcorpus.ChatCompletionsResponseJSON())),
+			}, nil
+		},
+		nil,
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		bytes.NewReader(testcorpus.AnthropicMessagesRequestJSON()),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var message AnthropicMessageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &message); err != nil {
+		t.Fatal(err)
+	}
+	if message.Type != "message" || message.Role != "assistant" {
+		t.Fatalf("message = %+v", message)
+	}
+	var text string
+	for _, block := range message.Content {
+		if block.Type == AnthropicContentBlockTypeText && block.Text != nil {
+			text += *block.Text
+		}
+	}
+	if !strings.Contains(text, "weather") {
+		t.Fatalf("message text %q does not contain the upstream content", text)
+	}
+}
+
 func TestHandlerStreamingResponsesToChat(t *testing.T) {
 	mapping := responsesMapping(t)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {

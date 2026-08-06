@@ -124,9 +124,10 @@ func (c *responsesToAnthropicConverter) Convert(
 	if err != nil {
 		return convertedBatch{}, err
 	}
-	// A failure terminal (error event) stops the reader immediately; the
-	// success terminal is held until [DONE] or EOF.
-	batch.Terminal = c.state.sawErrorEvent && c.state.sawTerminal
+	// Any terminal condition stops the reader immediately: the Responses
+	// protocol has no [DONE] sentinel, so the success terminal (message_delta
+	// + message_stop) is emitted at response.completed, not held until EOF.
+	batch.Terminal = c.state.sawTerminal
 	return batch, nil
 }
 
@@ -215,7 +216,7 @@ func (c *chatToAnthropicConverter) convertResponsesEvents(
 	if err != nil {
 		return convertedBatch{}, err
 	}
-	batch.Terminal = c.anthropic.sawErrorEvent && c.anthropic.sawTerminal
+	batch.Terminal = c.anthropic.sawTerminal
 	return batch, nil
 }
 

@@ -582,7 +582,9 @@ func TestResponsesToAnthropicBasic(t *testing.T) {
 		t.Fatalf("block stop = %+v", blockStop)
 	}
 
-	// Terminal is held on completed.
+	// The terminal is emitted immediately on completed: the Responses
+	// protocol has no [DONE] sentinel, so holding it would block the stream
+	// when the upstream keeps the connection open.
 	completedEnvelope := ResponseEnvelope{
 		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "completed", Model: "m",
 		Output: []ResponsesOutputItem{messageItem},
@@ -591,28 +593,20 @@ func TestResponsesToAnthropicBasic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 0 {
-		t.Fatalf("completed events = %d (held)", len(events))
+	if len(events) != 2 {
+		t.Fatalf("completed events = %d, want message_delta + message_stop", len(events))
+	}
+	if events[0].Type != AnthropicStreamEventTypeMessageDelta {
+		t.Fatalf("events[0] = %+v", events[0])
+	}
+	if events[0].Delta == nil || events[0].Delta.StopReason == nil || *events[0].Delta.StopReason != AnthropicStopReasonEndTurn {
+		t.Fatalf("delta = %+v", events[0].Delta)
+	}
+	if events[1].Type != AnthropicStreamEventTypeMessageStop {
+		t.Fatalf("events[1] = %+v", events[1])
 	}
 	if !state.sawTerminal {
 		t.Fatal("terminal not seen")
-	}
-	held, ok := state.releaseTerminal()
-	if !ok {
-		t.Fatal("no held terminal")
-	}
-	// message_delta + message_stop
-	if len(held) != 2 {
-		t.Fatalf("held = %d", len(held))
-	}
-	if held[0].Type != AnthropicStreamEventTypeMessageDelta {
-		t.Fatalf("held[0] = %+v", held[0])
-	}
-	if held[0].Delta == nil || held[0].Delta.StopReason == nil || *held[0].Delta.StopReason != AnthropicStopReasonEndTurn {
-		t.Fatalf("delta = %+v", held[0].Delta)
-	}
-	if held[1].Type != AnthropicStreamEventTypeMessageStop {
-		t.Fatalf("held[1] = %+v", held[1])
 	}
 }
 

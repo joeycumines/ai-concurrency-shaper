@@ -54,12 +54,17 @@ type AnthropicSource struct {
 	URL       string              `json:"url,omitempty"`
 }
 
-// Validate checks the source shape.
+// Validate checks the source shape. media_type is required for base64
+// sources; URL sources may omit it (the API derives it, e.g. application/pdf
+// for documents), matching the official SDKs' URL source params.
 func (s AnthropicSource) Validate() error {
 	switch s.Type {
 	case AnthropicSourceTypeBase64:
 		if s.Data == "" {
 			return errors.New("base64 source has no data")
+		}
+		if s.MediaType == "" {
+			return errors.New("base64 source has no media_type")
 		}
 	case AnthropicSourceTypeURL:
 		if s.URL == "" {
@@ -67,9 +72,6 @@ func (s AnthropicSource) Validate() error {
 		}
 	default:
 		return fmt.Errorf("unknown anthropic source type %q", s.Type)
-	}
-	if s.MediaType == "" {
-		return errors.New("anthropic source has no media_type")
 	}
 	return nil
 }

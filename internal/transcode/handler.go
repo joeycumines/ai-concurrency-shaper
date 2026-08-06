@@ -552,40 +552,69 @@ func (h *TranscodeHandler) jsonResponse(
 }
 
 // convertResponse decodes the upstream JSON response into the canonical IR
-// and renders the client response envelope.
+// and renders the client response envelope. The output dialect is determined
+// by the CLIENT protocol, never by the upstream protocol.
 func (h *TranscodeHandler) convertResponse(
 	r *http.Request,
 	resp *http.Response,
 	body []byte,
 	context *ExchangeContext,
 ) ([]byte, ExchangeProvenance, error) {
-	switch h.cfg.Mapping.UpstreamProtocol {
-	case UpstreamChatCompletions:
-		response, err := DecodeChatResponse(body, h.cfg.ChatCapabilities)
-		if err != nil {
-			return nil, ProvenanceLocalResponseConversionError, err
+	switch h.cfg.Mapping.ClientProtocol {
+	case ClientResponses:
+		switch h.cfg.Mapping.UpstreamProtocol {
+		case UpstreamChatCompletions:
+			response, err := DecodeChatResponse(body, h.cfg.ChatCapabilities)
+			if err != nil {
+				return nil, ProvenanceLocalResponseConversionError, err
+			}
+			converted, err := RenderResponsesResponse(response, context)
+			if err != nil {
+				return nil, ProvenanceLocalResponseConversionError, err
+			}
+			return converted, ProvenanceLocalResponseConversionError, nil
+		default:
+			return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
+				"unsupported upstream protocol %q for responses client",
+				h.cfg.Mapping.UpstreamProtocol,
+			)
 		}
-		converted, err := RenderResponsesResponse(response, context)
-		if err != nil {
-			return nil, ProvenanceLocalResponseConversionError, err
-		}
-		return converted, ProvenanceLocalResponseConversionError, nil
 
-	case UpstreamResponses:
-		response, err := DecodeResponsesResponse(body)
-		if err != nil {
-			return nil, ProvenanceLocalResponseConversionError, err
+	case ClientMessages:
+		switch h.cfg.Mapping.UpstreamProtocol {
+		case UpstreamChatCompletions:
+			response, err := DecodeChatResponse(body, h.cfg.ChatCapabilities)
+			if err != nil {
+				return nil, ProvenanceLocalResponseConversionError, err
+			}
+			converted, err := RenderMessagesResponse(response, context)
+			if err != nil {
+				return nil, ProvenanceLocalResponseConversionError, err
+			}
+			return converted, ProvenanceLocalResponseConversionError, nil
+
+		case UpstreamResponses:
+			response, err := DecodeResponsesResponse(body)
+			if err != nil {
+				return nil, ProvenanceLocalResponseConversionError, err
+			}
+			converted, err := RenderMessagesResponse(response, context)
+			if err != nil {
+				return nil, ProvenanceLocalResponseConversionError, err
+			}
+			return converted, ProvenanceLocalResponseConversionError, nil
+
+		default:
+			return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
+				"unsupported upstream protocol %q for messages client",
+				h.cfg.Mapping.UpstreamProtocol,
+			)
 		}
-		converted, err := RenderMessagesResponse(response, context)
-		if err != nil {
-			return nil, ProvenanceLocalResponseConversionError, err
-		}
-		return converted, ProvenanceLocalResponseConversionError, nil
 
 	default:
 		return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
-			"unsupported upstream protocol %q",
-			h.cfg.Mapping.UpstreamProtocol,
+			"unsupported client protocol %q",
+			h.cfg.Mapping.ClientProtocol,
 		)
 	}
 }
