@@ -930,3 +930,16 @@ func TestRenderChatImageInputCapability(t *testing.T) {
 		t.Fatalf("rendered chat image lacks the auto detail default: %s", rendered)
 	}
 }
+
+func TestRenderResponsesRequestImageDetailDefaultsAuto(t *testing.T) {
+	// A canonical image without a detail must render with the API default
+	// (auto) on the Responses wire.
+	image := CanonicalImage{MediaType: "image/png", URL: "https://example.com/a.png"}
+	rendered, err := canonicalImageToResponsesInputImage(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rendered.Detail != "auto" {
+		t.Fatalf("detail = %q, want auto", rendered.Detail)
+	}
+}

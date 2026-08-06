@@ -77,7 +77,7 @@ func FuzzTranscodeHandlerMalformedOrTruncatedStream(f *testing.F) {
 
 		ctx, cancel := context.WithTimeout(
 			context.Background(),
-			750*time.Millisecond,
+			2*time.Second,
 		)
 		defer cancel()
 

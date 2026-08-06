@@ -1090,3 +1090,36 @@ func TestChatToResponsesUnstartedToolCallRejected(t *testing.T) {
 		t.Fatalf("index-less parallel calls merged: %v", callIDs)
 	}
 }
+
+// TestChatToResponsesToolCallIndexCollision verifies that a fragment whose
+// index resolves to a pending call with a different id is rejected instead of
+// silently merging identities.
+func TestChatToResponsesToolCallIndexCollision(t *testing.T) {
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		"resp_1",
+		"m",
+		1,
+		nil,
+	)
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
+		ToolCalls: []ChatAssistantMessageToolCall{{
+			Index:    intPtr(0),
+			ID:       str("call_a"),
+			Function: ChatAssistantMessageToolCallFunction{Name: str("f_a"), Arguments: `{}`},
+		}},
+	}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := state.Convert(chatChunk(t, ChatStreamDelta{
+		ToolCalls: []ChatAssistantMessageToolCall{{
+			Index:    intPtr(0),
+			ID:       str("call_b"),
+			Function: ChatAssistantMessageToolCallFunction{Name: str("f_b"), Arguments: `{}`},
+		}},
+	}, nil))
+	if err == nil {
+		t.Fatal("conflicting index/id fragment accepted")
+	}
+}

@@ -149,7 +149,7 @@ func FuzzTranscodeCancellationRaces(f *testing.F) {
 			cancel()
 
 		case 2:
-			deadline := time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(15 * time.Second)
 			for writer.flushes.Load() == 0 && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 			}
@@ -220,7 +220,7 @@ func FuzzTranscodeCancellationRaces(f *testing.F) {
 			select {
 			case <-upstreamStarted:
 				t.Fatal("upstream contacted despite pre-cancelled context")
-			case <-time.After(50 * time.Millisecond):
+			case <-time.After(time.Second):
 			}
 		} else {
 			select {

@@ -320,6 +320,15 @@ func (s *chatResponsesStreamState) convertToolCall(
 	}
 	if !ok && call.Index != nil {
 		pending, ok = s.pendingCalls[*call.Index]
+		if ok && call.ID != nil && *call.ID != "" &&
+			pending.callID != "" && pending.callID != *call.ID {
+			return nil, fmt.Errorf(
+				"chat tool call fragment index %d carries id %q but the pending call is %q",
+				*call.Index,
+				*call.ID,
+				pending.callID,
+			)
+		}
 	}
 	if !ok && call.Index == nil && call.ID == nil {
 		// An index-less, id-less continuation fragment is attributable only
