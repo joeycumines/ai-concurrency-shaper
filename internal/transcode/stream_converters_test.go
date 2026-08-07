@@ -1239,3 +1239,56 @@ func TestChatStreamUnknownFinishReasonRejected(t *testing.T) {
 		t.Fatal("unknown finish reason accepted")
 	}
 }
+
+// TestAnthropicStreamToolTerminalSingleStop verifies a conformant tool-call
+// stream emits exactly one content_block_stop per tool block: the stop from
+// output_item.done, and the terminal must not stop the block again.
+func TestAnthropicStreamToolTerminalSingleStop(t *testing.T) {
+	state := newAnthropicResponsesStreamState(testStreamContext(), "resp_1", "m", 1)
+	builder := &ResponsesEventBuilder{}
+	parallel := true
+
+	var all []AnthropicStreamEvent
+	feed := func(event ResponsesSSEEvent) {
+		t.Helper()
+		batch, err := state.Convert(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, batch...)
+	}
+
+	feed(builder.Created(ResponseEnvelope{
+		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
+		Output: []ResponsesOutputItem{}, ParallelToolCalls: &parallel,
+	}))
+	feed(builder.OutputItemAdded(0, &ResponsesFunctionCallOutputItem{
+		ID: "fc_1", Type: "function_call", Status: "in_progress", CallID: "call_1", Name: "f", Arguments: "",
+	}))
+	feed(builder.FunctionArgumentsDelta("fc_1", 0, `{"x":1}`))
+	feed(builder.FunctionArgumentsDone("fc_1", 0, "f", `{"x":1}`))
+	feed(builder.OutputItemDone(0, &ResponsesFunctionCallOutputItem{
+		ID: "fc_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "f", Arguments: `{"x":1}`,
+	}))
+	feed(builder.Completed(ResponseEnvelope{
+		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "completed", Model: "m",
+		Output: []ResponsesOutputItem{}, ParallelToolCalls: &parallel,
+	}))
+
+	stops := 0
+	var sawMessageStop bool
+	for _, e := range all {
+		if e.Type == AnthropicStreamEventTypeContentBlockStop {
+			stops++
+		}
+		if e.Type == AnthropicStreamEventTypeMessageStop {
+			sawMessageStop = true
+		}
+	}
+	if stops != 1 {
+		t.Fatalf("content block stops = %d, want exactly 1", stops)
+	}
+	if !sawMessageStop {
+		t.Fatal("no message_stop")
+	}
+}

@@ -1005,6 +1005,8 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		Type:  AnthropicStreamEventTypeContentBlockStop,
 		Index: intPtr(int(pending.blockIndex)),
 	})
+	// The block is now closed; the terminal must not stop it again.
+	delete(s.pendingToolStart, call.ID)
 
 	// The message envelope's content stays empty: content blocks arrive via
 	// content_block_start events (the official contract); message_start is
@@ -1178,6 +1180,8 @@ func (s *anthropicResponsesStreamState) terminalEvents(
 	stop CanonicalStopReason,
 ) ([]AnthropicStreamEvent, error) {
 	var events []AnthropicStreamEvent
+	// Close any tool block left open by a non-conformant upstream
+	// (output_item.done omitted).
 	for _, pending := range s.pendingToolStart {
 		if !pending.started {
 			continue
@@ -1187,6 +1191,15 @@ func (s *anthropicResponsesStreamState) terminalEvents(
 			Index: intPtr(int(pending.blockIndex)),
 		})
 		delete(s.pendingToolStart, pending.itemID)
+	}
+	// Close any text/refusal block left open by a non-conformant upstream
+	// (content_part.done omitted).
+	for contentIndex, blockIndex := range s.partBlocks {
+		events = append(events, AnthropicStreamEvent{
+			Type:  AnthropicStreamEventTypeContentBlockStop,
+			Index: intPtr(int(blockIndex)),
+		})
+		delete(s.partBlocks, contentIndex)
 	}
 	events = append(events,
 		AnthropicStreamEvent{
