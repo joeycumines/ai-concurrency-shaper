@@ -250,24 +250,37 @@ type ChatToolMessage struct {
 	ToolCallID *string `json:"tool_call_id,omitempty"`
 }
 
-// ChatAssistantMessageToolCallFunction is the function payload of a tool call.
-type ChatAssistantMessageToolCallFunction struct {
+// ChatToolCallFunction is the function payload of a tool call. The
+// non-stream shape carries complete arguments; streaming deltas carry
+// partial fragments.
+type ChatToolCallFunction struct {
 	Name      *string `json:"name"`
 	Arguments string  `json:"arguments"` // stringified JSON, may be partial while streaming
 }
 
-// ChatAssistantMessageToolCall is a tool call emitted by the assistant.
-type ChatAssistantMessageToolCall struct {
-	Index    *int                                 `json:"index,omitempty"`
-	Type     *string                              `json:"type,omitempty"`
-	ID       *string                              `json:"id,omitempty"`
-	Function ChatAssistantMessageToolCallFunction `json:"function"`
+// ChatMessageToolCall is a non-stream tool call on an assistant message: the
+// official request/response shape carries id, function, and type and NO index
+// (review-j finding 5). Index belongs to the streaming delta type.
+type ChatMessageToolCall struct {
+	Type     *string              `json:"type,omitempty"`
+	ID       *string              `json:"id,omitempty"`
+	Function ChatToolCallFunction `json:"function"`
+}
+
+// ChatToolCallDelta is a streaming tool-call fragment: the official chunk
+// delta shape carries index (required on the wire), id, function, and type.
+// It is used only by ChatStreamDelta.ToolCalls.
+type ChatToolCallDelta struct {
+	Index    *int                 `json:"index,omitempty"`
+	Type     *string              `json:"type,omitempty"`
+	ID       *string              `json:"id,omitempty"`
+	Function ChatToolCallFunction `json:"function"`
 }
 
 // ChatAssistantMessage carries the assistant-only fields of a chat message.
 type ChatAssistantMessage struct {
-	Refusal   *string                        `json:"refusal,omitempty"`
-	ToolCalls []ChatAssistantMessageToolCall `json:"tool_calls,omitempty"`
+	Refusal   *string               `json:"refusal,omitempty"`
+	ToolCalls []ChatMessageToolCall `json:"tool_calls,omitempty"`
 	// Reasoning is a provider extension: an explicitly configured plaintext
 	// reasoning response field. It is only read when
 	// ChatCapabilities.ProviderReasoningText is enabled and may map only to
@@ -422,17 +435,21 @@ type ChatRequest struct {
 	N                   *int                `json:"n,omitempty"`
 }
 
-// ChatPromptTokensDetails breaks down prompt tokens. The cached token field is
-// always present on the wire (zero when unused), matching the real API.
+// ChatPromptTokensDetails breaks down prompt tokens. The cached token field
+// is always present on the wire (zero when unused), matching the real API.
 type ChatPromptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
+	AudioTokens  int `json:"audio_tokens"`
 }
 
 // ChatCompletionTokensDetails breaks down completion tokens. The reasoning
 // token field is always present on the wire (zero when unused), matching the
 // real API.
 type ChatCompletionTokensDetails struct {
-	ReasoningTokens int `json:"reasoning_tokens"`
+	AcceptedPredictionTokens int `json:"accepted_prediction_tokens"`
+	AudioTokens              int `json:"audio_tokens"`
+	ReasoningTokens          int `json:"reasoning_tokens"`
+	RejectedPredictionTokens int `json:"rejected_prediction_tokens"`
 }
 
 // ChatLLMUsage is the token usage of a chat completion.
@@ -449,20 +466,45 @@ type ChatLLMUsage struct {
 
 // ChatStreamDelta is the delta payload of a streaming chat completion chunk.
 type ChatStreamDelta struct {
-	Role      *string                        `json:"role,omitempty"`
-	Content   *string                        `json:"content,omitempty"`
-	Refusal   *string                        `json:"refusal,omitempty"`
-	Reasoning *string                        `json:"reasoning,omitempty"`
-	ToolCalls []ChatAssistantMessageToolCall `json:"tool_calls,omitempty"`
+	Role      *string             `json:"role,omitempty"`
+	Content   *string             `json:"content,omitempty"`
+	Refusal   *string             `json:"refusal,omitempty"`
+	Reasoning *string             `json:"reasoning,omitempty"`
+	ToolCalls []ChatToolCallDelta `json:"tool_calls,omitempty"`
+}
+
+// ChatTopLogprob is one alternative token of a token log-probability entry.
+type ChatTopLogprob struct {
+	Token   string  `json:"token"`
+	Bytes   []int64 `json:"bytes"`
+	Logprob float64 `json:"logprob"`
+}
+
+// ChatTokenLogprob is one token log-probability entry of a chat response.
+type ChatTokenLogprob struct {
+	Token       string           `json:"token"`
+	Bytes       []int64          `json:"bytes"`
+	Logprob     float64          `json:"logprob"`
+	TopLogprobs []ChatTopLogprob `json:"top_logprobs"`
+}
+
+// ChatChoiceLogprobs is the logprobs payload of a chat choice: token
+// log-probabilities for content and refusal tokens. It is required on the
+// wire (null when not requested); the transcoder never requests logprobs, so
+// it is decode-only and its presence enters the explicit loss/reject decision.
+type ChatChoiceLogprobs struct {
+	Content []ChatTokenLogprob `json:"content"`
+	Refusal []ChatTokenLogprob `json:"refusal"`
 }
 
 // ChatChoice is one choice of a chat completion response, in either the
 // non-streaming (Message) or streaming (Delta) form.
 type ChatChoice struct {
-	Index        int              `json:"index"`
-	FinishReason *string          `json:"finish_reason,omitempty"`
-	Message      *ChatMessage     `json:"message,omitempty"`
-	Delta        *ChatStreamDelta `json:"delta,omitempty"`
+	Index        int                 `json:"index"`
+	FinishReason *string             `json:"finish_reason,omitempty"`
+	LogProbs     *ChatChoiceLogprobs `json:"logprobs"`
+	Message      *ChatMessage        `json:"message,omitempty"`
+	Delta        *ChatStreamDelta    `json:"delta,omitempty"`
 }
 
 // ChatResponse is a chat completions response.
@@ -471,6 +513,7 @@ type ChatResponse struct {
 	Object            string        `json:"object"`
 	Created           int64         `json:"created"`
 	Model             string        `json:"model"`
+	ServiceTier       *string       `json:"service_tier,omitempty"`
 	SystemFingerprint string        `json:"system_fingerprint,omitempty"`
 	Choices           []ChatChoice  `json:"choices"`
 	Usage             *ChatLLMUsage `json:"usage,omitempty"`
@@ -484,6 +527,7 @@ type ChatStreamResponse struct {
 	Object            string        `json:"object"`
 	Created           int64         `json:"created"`
 	Model             string        `json:"model"`
+	ServiceTier       *string       `json:"service_tier,omitempty"`
 	SystemFingerprint string        `json:"system_fingerprint,omitempty"`
 	Choices           []ChatChoice  `json:"choices"`
 	Usage             *ChatLLMUsage `json:"usage,omitempty"`

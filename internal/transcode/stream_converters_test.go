@@ -176,10 +176,10 @@ func TestChatToResponsesFunctionCallStream(t *testing.T) {
 
 	// First fragment: index + id + name. The first chunk also carries
 	// response.created + response.in_progress.
-	events, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatAssistantMessageToolCall{{
+	events, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
 		Index: intPtr(0),
 		ID:    str("call_1"),
-		Function: ChatAssistantMessageToolCallFunction{
+		Function: ChatToolCallFunction{
 			Name:      str("get_weather"),
 			Arguments: `{"loc`,
 		},
@@ -214,9 +214,9 @@ func TestChatToResponsesFunctionCallStream(t *testing.T) {
 	}
 
 	// Second fragment: arguments continuation only.
-	events, err = state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatAssistantMessageToolCall{{
+	events, err = state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
 		Index: intPtr(0),
-		Function: ChatAssistantMessageToolCallFunction{
+		Function: ChatToolCallFunction{
 			Arguments: `ation":"Tokyo"}`,
 		},
 	}}}, nil))
@@ -279,10 +279,10 @@ func TestChatToResponsesEmptyToolArguments(t *testing.T) {
 		nil,
 	)
 	// Tool call with no arguments at all.
-	_, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatAssistantMessageToolCall{{
+	_, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
 		Index:    intPtr(0),
 		ID:       str("call_1"),
-		Function: ChatAssistantMessageToolCallFunction{Name: str("f")},
+		Function: ChatToolCallFunction{Name: str("f")},
 	}}}, nil))
 	if err != nil {
 		t.Fatal(err)
@@ -311,9 +311,9 @@ func TestChatToResponsesBufferedToolStartUntilIdentity(t *testing.T) {
 	)
 	// Name arrives first, id later: output_item.added must be withheld. The
 	// first chunk still carries response.created + response.in_progress.
-	events, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatAssistantMessageToolCall{{
+	events, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
 		Index:    intPtr(0),
-		Function: ChatAssistantMessageToolCallFunction{Name: str("f"), Arguments: `{"x":`},
+		Function: ChatToolCallFunction{Name: str("f"), Arguments: `{"x":`},
 	}}}, nil))
 	if err != nil {
 		t.Fatal(err)
@@ -328,10 +328,10 @@ func TestChatToResponsesBufferedToolStartUntilIdentity(t *testing.T) {
 		t.Fatalf("event 1 = %T", events[1])
 	}
 	// id arrives now. The buffered arguments replay as one delta.
-	events, err = state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatAssistantMessageToolCall{{
+	events, err = state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
 		Index: intPtr(0),
 		ID:    str("call_1"),
-		Function: ChatAssistantMessageToolCallFunction{
+		Function: ChatToolCallFunction{
 			Arguments: `1}`,
 		},
 	}}}, nil))
@@ -1045,8 +1045,8 @@ func TestChatToResponsesUnstartedToolCallRejected(t *testing.T) {
 	)
 	// A fragment with only arguments (no index attribution, no id/name).
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
-		ToolCalls: []ChatAssistantMessageToolCall{{
-			Function: ChatAssistantMessageToolCallFunction{Arguments: `{"x":1}`},
+		ToolCalls: []ChatToolCallDelta{{
+			Function: ChatToolCallFunction{Arguments: `{"x":1}`},
 		}},
 	}, nil)); err != nil {
 		t.Fatal(err)
@@ -1068,9 +1068,9 @@ func TestChatToResponsesUnstartedToolCallRejected(t *testing.T) {
 	chunk := ChatStreamResponse{
 		ID: "c", Model: "m", Created: 1,
 		Choices: []ChatChoice{{Index: 0, Delta: &ChatStreamDelta{
-			ToolCalls: []ChatAssistantMessageToolCall{
-				{ID: str("call_a"), Function: ChatAssistantMessageToolCallFunction{Name: str("f_a"), Arguments: `{}`}},
-				{ID: str("call_b"), Function: ChatAssistantMessageToolCallFunction{Name: str("f_b"), Arguments: `{}`}},
+			ToolCalls: []ChatToolCallDelta{
+				{ID: str("call_a"), Function: ChatToolCallFunction{Name: str("f_a"), Arguments: `{}`}},
+				{ID: str("call_b"), Function: ChatToolCallFunction{Name: str("f_b"), Arguments: `{}`}},
 			},
 		}}},
 	}
@@ -1104,19 +1104,19 @@ func TestChatToResponsesToolCallIndexCollision(t *testing.T) {
 		nil,
 	)
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
-		ToolCalls: []ChatAssistantMessageToolCall{{
+		ToolCalls: []ChatToolCallDelta{{
 			Index:    intPtr(0),
 			ID:       str("call_a"),
-			Function: ChatAssistantMessageToolCallFunction{Name: str("f_a"), Arguments: `{}`},
+			Function: ChatToolCallFunction{Name: str("f_a"), Arguments: `{}`},
 		}},
 	}, nil)); err != nil {
 		t.Fatal(err)
 	}
 	_, err := state.Convert(chatChunk(t, ChatStreamDelta{
-		ToolCalls: []ChatAssistantMessageToolCall{{
+		ToolCalls: []ChatToolCallDelta{{
 			Index:    intPtr(0),
 			ID:       str("call_b"),
-			Function: ChatAssistantMessageToolCallFunction{Name: str("f_b"), Arguments: `{}`},
+			Function: ChatToolCallFunction{Name: str("f_b"), Arguments: `{}`},
 		}},
 	}, nil))
 	if err == nil {
@@ -1138,27 +1138,27 @@ func TestChatToResponsesAmbiguousFragmentRejected(t *testing.T) {
 	)
 	// Two identified calls at distinct indexes.
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
-		ToolCalls: []ChatAssistantMessageToolCall{{
+		ToolCalls: []ChatToolCallDelta{{
 			Index:    intPtr(0),
 			ID:       str("call_a"),
-			Function: ChatAssistantMessageToolCallFunction{Name: str("f_a"), Arguments: `{}`},
+			Function: ChatToolCallFunction{Name: str("f_a"), Arguments: `{}`},
 		}},
 	}, nil)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
-		ToolCalls: []ChatAssistantMessageToolCall{{
+		ToolCalls: []ChatToolCallDelta{{
 			Index:    intPtr(1),
 			ID:       str("call_b"),
-			Function: ChatAssistantMessageToolCallFunction{Name: str("f_b"), Arguments: `{}`},
+			Function: ChatToolCallFunction{Name: str("f_b"), Arguments: `{}`},
 		}},
 	}, nil)); err != nil {
 		t.Fatal(err)
 	}
 	// An index-less, id-less fragment cannot be attributed to either.
 	_, err := state.Convert(chatChunk(t, ChatStreamDelta{
-		ToolCalls: []ChatAssistantMessageToolCall{{
-			Function: ChatAssistantMessageToolCallFunction{Arguments: `{"x":1}`},
+		ToolCalls: []ChatToolCallDelta{{
+			Function: ChatToolCallFunction{Arguments: `{"x":1}`},
 		}},
 	}, nil))
 	if err == nil {

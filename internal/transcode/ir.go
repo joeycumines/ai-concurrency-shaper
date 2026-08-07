@@ -291,6 +291,18 @@ type CanonicalResponse struct {
 	// artifacts. They may pass through unchanged only to a Responses target;
 	// crossing protocols is a loss or a rejection.
 	ReasoningItems []json.RawMessage
+
+	// ChatLogProbs reports that the upstream chat response carried token log
+	// probabilities. The client dialects cannot reproduce them; the fact is
+	// carried so rendering enters the explicit loss/reject decision instead
+	// of silently dropping it.
+	ChatLogProbs bool
+
+	// ChatServiceTier is the upstream chat response's service tier (empty
+	// when absent). The client dialects cannot represent the tier actually
+	// served; a non-empty value enters the explicit loss/reject decision at
+	// render time.
+	ChatServiceTier string
 }
 
 // ValidateCanonicalResponse checks the response IR invariants.

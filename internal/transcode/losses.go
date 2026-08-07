@@ -26,6 +26,14 @@ const (
 	FeatureProviderReasoning     Feature = "provider_reasoning"
 	FeatureAuthenticatedThinking Feature = "authenticated_thinking"
 	FeatureTopK                  Feature = "top_k"
+	// FeatureLogprobs covers chat response token log-probabilities: the
+	// client dialects cannot reproduce them, so their presence is a
+	// loss/reject decision.
+	FeatureLogprobs Feature = "logprobs"
+	// FeatureServiceTier covers an upstream chat response's service tier:
+	// the client dialects cannot represent the tier actually served, so its
+	// presence is a loss/reject decision.
+	FeatureServiceTier Feature = "service_tier"
 )
 
 // LossPolicy decides whether a non-portable feature may be dropped during a

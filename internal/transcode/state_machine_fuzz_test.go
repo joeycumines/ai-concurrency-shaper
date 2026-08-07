@@ -82,10 +82,10 @@ func fuzzChatChunk(operation byte, index int) ChatStreamResponse {
 
 	case 6:
 		callIndex := index % 3
-		delta.ToolCalls = []ChatAssistantMessageToolCall{{
+		delta.ToolCalls = []ChatToolCallDelta{{
 			Index: intPtr(callIndex),
 			ID:    stringPtr(fmt.Sprintf("call-%d", callIndex)),
-			Function: ChatAssistantMessageToolCallFunction{
+			Function: ChatToolCallFunction{
 				Name:      stringPtr(fmt.Sprintf("tool_%d", callIndex)),
 				Arguments: `{"x":`,
 			},
@@ -93,9 +93,9 @@ func fuzzChatChunk(operation byte, index int) ChatStreamResponse {
 
 	case 7:
 		callIndex := index % 3
-		delta.ToolCalls = []ChatAssistantMessageToolCall{{
+		delta.ToolCalls = []ChatToolCallDelta{{
 			Index: intPtr(callIndex),
-			Function: ChatAssistantMessageToolCallFunction{
+			Function: ChatToolCallFunction{
 				Arguments: fmt.Sprintf("%d}", index),
 			},
 		}}

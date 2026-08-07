@@ -457,7 +457,7 @@ func canonicalAssistantTurnToChatMessage(
 	turn CanonicalTurn,
 ) (ChatMessage, error) {
 	var blocks []ChatContentBlock
-	var toolCalls []ChatAssistantMessageToolCall
+	var toolCalls []ChatMessageToolCall
 	var refusal *string
 	for i, part := range turn.Parts {
 		switch value := part.(type) {
@@ -473,18 +473,19 @@ func canonicalAssistantTurnToChatMessage(
 			refusal = &value.Text
 
 		case CanonicalFunctionCall:
-			index := i
 			callID := value.CallID
 			name := value.Name
 			arguments := string(value.Arguments)
 			if arguments == "" {
 				arguments = "{}"
 			}
-			toolCalls = append(toolCalls, ChatAssistantMessageToolCall{
-				Index: &index,
-				Type:  stringPtr("function"),
-				ID:    &callID,
-				Function: ChatAssistantMessageToolCallFunction{
+			// The official non-stream assistant tool-call shape carries id,
+			// function, and type with NO index (review-j finding 5): the
+			// position-as-index bug is dropped, and the elidable type field
+			// is omitted (the wire default is "function").
+			toolCalls = append(toolCalls, ChatMessageToolCall{
+				ID: &callID,
+				Function: ChatToolCallFunction{
 					Name:      &name,
 					Arguments: arguments,
 				},

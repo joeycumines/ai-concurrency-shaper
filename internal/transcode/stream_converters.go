@@ -123,12 +123,37 @@ func (s *chatResponsesStreamState) Convert(
 		s.usage = chatUsageToResponsesUsage(chunk.Usage)
 	}
 
+	// The chunk envelope's service tier and per-choice token log
+	// probabilities cannot be reproduced in the client dialect: their
+	// presence enters the explicit loss/reject decision instead of being
+	// silently dropped (review-j finding 4).
+	if chunk.ServiceTier != nil {
+		if err := s.report.Lose(
+			s.policy,
+			FeatureServiceTier,
+			"service_tier",
+			"the upstream chat service tier cannot be reproduced in the client dialect",
+		); err != nil {
+			return nil, err
+		}
+	}
+
 	// n=1: a chunk with more than one choice is an upstream protocol error.
 	if len(chunk.Choices) > 1 {
 		return nil, errors.New("chat stream chunk has more than one choice; n=1 required")
 	}
 
 	for _, choice := range chunk.Choices {
+		if choice.LogProbs != nil {
+			if err := s.report.Lose(
+				s.policy,
+				FeatureLogprobs,
+				"choices[].logprobs",
+				"chat response logprobs cannot be reproduced in the client dialect",
+			); err != nil {
+				return nil, err
+			}
+		}
 		if choice.Delta != nil {
 			deltaEvents, err := s.convertDelta(choice.Delta)
 			if err != nil {
@@ -301,7 +326,7 @@ func (s *chatResponsesStreamState) openMessageItemForPartWithEvents(
 // keyed by their Chat index; when the id arrives, an id alias is registered
 // so later id-addressed fragments resolve to the same pending call.
 func (s *chatResponsesStreamState) convertToolCall(
-	call ChatAssistantMessageToolCall,
+	call ChatToolCallDelta,
 ) ([]ResponsesSSEEvent, error) {
 	var events []ResponsesSSEEvent
 

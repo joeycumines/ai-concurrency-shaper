@@ -50,6 +50,12 @@ func DecodeChatResponse(
 		CreatedAt: wire.Created,
 		Status:    CanonicalResponseCompleted,
 	}
+	if wire.ServiceTier != nil {
+		response.ChatServiceTier = *wire.ServiceTier
+	}
+	if choice.LogProbs != nil {
+		response.ChatLogProbs = true
+	}
 	if wire.Usage != nil {
 		response.Usage = CanonicalUsage{
 			InputTokens:  int64(wire.Usage.PromptTokens),
@@ -369,6 +375,31 @@ func RenderResponsesResponse(
 	if context == nil || context.IDs == nil {
 		return nil, errors.New("render responses response requires an exchange context")
 	}
+	// Chat response attributes the Responses envelope cannot reproduce
+	// (token log-probabilities and the tier actually served) are a loss or a
+	// rejection per the exchange policy — never a silent drop (review-j
+	// finding 4).
+	var report ConversionReport
+	if response.ChatLogProbs {
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeatureLogprobs,
+			"choices[].logprobs",
+			"chat response logprobs cannot be reproduced in a Responses response",
+		); err != nil {
+			return nil, err
+		}
+	}
+	if response.ChatServiceTier != "" {
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeatureServiceTier,
+			"service_tier",
+			"the upstream chat service tier cannot be reproduced in a Responses response",
+		); err != nil {
+			return nil, err
+		}
+	}
 
 	envelope := ResponseEnvelope{
 		ID:        context.IDs.New("resp_"),
@@ -538,6 +569,32 @@ func RenderMessagesResponse(
 	}
 	if context == nil || context.IDs == nil {
 		return nil, errors.New("render messages response requires an exchange context")
+	}
+	// Chat response attributes the Messages response cannot reproduce
+	// (token log-probabilities and the tier actually served) are a loss or a
+	// rejection per the exchange policy — never a silent drop (review-j
+	// finding 4).
+	if response.ChatLogProbs {
+		var report ConversionReport
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeatureLogprobs,
+			"choices[].logprobs",
+			"chat response logprobs cannot be reproduced in a Messages response",
+		); err != nil {
+			return nil, err
+		}
+	}
+	if response.ChatServiceTier != "" {
+		var report ConversionReport
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeatureServiceTier,
+			"service_tier",
+			"the upstream chat service tier cannot be reproduced in a Messages response",
+		); err != nil {
+			return nil, err
+		}
 	}
 	if len(response.ReasoningItems) > 0 {
 		var report ConversionReport
