@@ -1006,3 +1006,23 @@ func TestChatStreamErrorFrameSurfaced(t *testing.T) {
 		t.Fatal("chat error frame accepted")
 	}
 }
+
+func TestDecodeResponsesResponseContentFilterRefusal(t *testing.T) {
+	// The Responses-source non-streaming decode must render content_filter
+	// as a refusal stop reason (parity with the streaming and Chat-source
+	// paths), never clobbered back to max_tokens.
+	body := `{"id":"resp_f","object":"response","created_at":1,"status":"incomplete","model":"m","incomplete_details":{"reason":"content_filter"},"output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"filtered","annotations":[]}]}],"parallel_tool_calls":true,"tools":[],"tool_choice":"auto"}`
+	response, err := DecodeResponsesResponse([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != CanonicalResponseIncomplete {
+		t.Fatalf("status = %v", response.Status)
+	}
+	if response.IncompleteReason != "content_filter" {
+		t.Fatalf("incomplete reason = %q", response.IncompleteReason)
+	}
+	if response.StopReason != CanonicalStopRefusal {
+		t.Fatalf("stop reason = %v, want refusal", response.StopReason)
+	}
+}

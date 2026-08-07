@@ -341,7 +341,11 @@ func DecodeResponsesResponse(
 			response.StopReason = CanonicalStopEndTurn
 		}
 	case CanonicalResponseIncomplete:
-		response.StopReason = CanonicalStopMaxTokens
+		// The decode already recorded the reason-specific stop reason
+		// (content_filter -> refusal, anything else max_tokens); keep it.
+		if response.StopReason == "" {
+			response.StopReason = CanonicalStopMaxTokens
+		}
 	case CanonicalResponseFailed:
 		response.StopReason = CanonicalStopEndTurn
 	}

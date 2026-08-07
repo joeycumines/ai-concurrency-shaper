@@ -583,13 +583,22 @@ func (h *TranscodeHandler) jsonResponse(
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(converted)))
 	w.WriteHeader(resp.StatusCode)
-	// A failed write is surfaced by the writer's flush/abort tracking.
-	_, _ = w.Write(converted)
-
-	h.recordOutcome(r, Outcome{
-		Status:     resp.StatusCode,
-		Provenance: ProvenanceUpstreamHTTP,
-	})
+	// A failed write after a client abort must not be recorded as a
+	// successful completion (the streaming path classifies the abort the
+	// same way); a write failure without a client cancel is a downstream
+	// error.
+	_, writeErr := w.Write(converted)
+	switch {
+	case writeErr != nil && r.Context().Err() != nil:
+		h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
+	case writeErr != nil:
+		h.recordOutcome(r, Outcome{Provenance: ProvenanceDownstreamWriteError})
+	default:
+		h.recordOutcome(r, Outcome{
+			Status:     resp.StatusCode,
+			Provenance: ProvenanceUpstreamHTTP,
+		})
+	}
 }
 
 // checkDecodedRequestSize rejects decoded requests that amplify beyond the
