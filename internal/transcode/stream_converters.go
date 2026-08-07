@@ -771,6 +771,7 @@ type anthropicResponsesStreamState struct {
 
 	sawTerminal   bool
 	sawErrorEvent bool
+	sawToolUse    bool
 
 	usage *AnthropicUsage
 
@@ -947,6 +948,7 @@ func (s *anthropicResponsesStreamState) maybeStartToolBlock(
 		return nil, nil
 	}
 	pending.started = true
+	s.sawToolUse = true
 	callID := pending.callID
 	name := pending.name
 	return []AnthropicStreamEvent{{
@@ -1141,9 +1143,11 @@ func (s *anthropicResponsesStreamState) completed(
 	envelope ResponseEnvelope,
 ) ([]AnthropicStreamEvent, error) {
 	// The stop reason mirrors the non-streaming render: a completed
-	// response whose output carries function calls ends with tool_use.
+	// response whose output carries function calls ends with tool_use. The
+	// state's own knowledge covers upstreams whose completed envelope omits
+	// the output items.
 	stop := CanonicalStopEndTurn
-	if outputHasFunctionCalls(envelope.Output) {
+	if outputHasFunctionCalls(envelope.Output) || s.sawToolUse {
 		stop = CanonicalStopToolUse
 	}
 	s.finalizeMessage(stop, envelope.Usage)

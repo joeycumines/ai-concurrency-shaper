@@ -575,8 +575,13 @@ func (e ResponseFunctionCallArgumentsDoneEvent) Validate() error {
 	); err != nil {
 		return err
 	}
-	if e.ItemID == "" || e.Name == "" {
-		return errors.New("function arguments done requires item_id and name")
+	if e.ItemID == "" {
+		return errors.New("function arguments done requires item_id")
+	}
+	// name is optional on the wire: the official done event carries no name
+	// (the converter falls back to the pending call's identity).
+	if !json.Valid([]byte(e.Arguments)) {
+		return errors.New("final function arguments are invalid JSON")
 	}
 	if !json.Valid([]byte(e.Arguments)) {
 		return errors.New("final function arguments are invalid JSON")

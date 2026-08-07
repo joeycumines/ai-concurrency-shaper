@@ -221,13 +221,17 @@ func (c *ResponsesFunctionCallOutputItem) Validate() error {
 	if c.Type != "function_call" {
 		return fmt.Errorf("output function call type = %q", c.Type)
 	}
-	if !validStatus(c.Status) {
+	// status is optional on the wire: the official function-call output
+	// events omit it while the call is in progress.
+	if c.Status != "" && !validStatus(c.Status) {
 		return fmt.Errorf("invalid output function call status %q", c.Status)
 	}
 	if c.CallID == "" || c.Name == "" {
 		return errors.New("output function call requires call_id and name")
 	}
-	if !json.Valid([]byte(c.Arguments)) {
+	// arguments may be empty on the wire: the official added event carries
+	// an empty arguments string, with the payload arriving via deltas.
+	if c.Arguments != "" && !json.Valid([]byte(c.Arguments)) {
 		return errors.New("output function call arguments are invalid JSON")
 	}
 	return nil

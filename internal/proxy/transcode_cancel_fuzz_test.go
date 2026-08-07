@@ -129,6 +129,13 @@ func FuzzTranscodeCancellationRaces(f *testing.F) {
 		writer := newReturnGuardWriter()
 		handlerDone := make(chan struct{})
 
+		// Phase 0 cancels BEFORE ServeHTTP is ever invoked: the exchange
+		// must never contact the upstream. Cancelling after the goroutine
+		// spawn races the proxy's start and can let the request through.
+		if phase == 0 {
+			cancel()
+		}
+
 		go func() {
 			defer close(handlerDone)
 			proxy.ServeHTTP(writer, request)
@@ -137,7 +144,7 @@ func FuzzTranscodeCancellationRaces(f *testing.F) {
 
 		switch phase {
 		case 0:
-			cancel()
+			// Already cancelled before the spawn.
 
 		case 1:
 			select {

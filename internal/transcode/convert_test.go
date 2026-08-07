@@ -946,3 +946,63 @@ func TestRenderResponsesRequestImageDetailDefaultsAuto(t *testing.T) {
 		t.Fatalf("detail = %q, want auto", rendered.Detail)
 	}
 }
+
+func TestDecodeMessagesRequestStrictness(t *testing.T) {
+	// disable_parallel_tool_use: true is rejected under the strict policy.
+	_, err := DecodeMessagesRequest(
+		[]byte(`{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],"tool_choice":{"type":"auto","disable_parallel_tool_use":true}}`),
+		StrictLossPolicy(),
+	)
+	if err == nil {
+		t.Fatal("disable_parallel_tool_use accepted under the strict policy")
+	}
+
+	// Non-string metadata values are rejected, not dropped.
+	_, err = DecodeMessagesRequest(
+		[]byte(`{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],"metadata":{"when":123}}`),
+		StrictLossPolicy(),
+	)
+	if err == nil {
+		t.Fatal("non-string metadata accepted")
+	}
+}
+
+func TestDecodeChatResponseContentFilterIncomplete(t *testing.T) {
+	// The non-streaming chat decode records content_filter as an incomplete
+	// response with the official reason, plus the refusal stop reason.
+	response, err := DecodeChatResponse(
+		[]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"x"},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`),
+		ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Status != CanonicalResponseIncomplete {
+		t.Fatalf("status = %v, want incomplete", response.Status)
+	}
+	if response.IncompleteReason != "content_filter" {
+		t.Fatalf("incomplete reason = %q", response.IncompleteReason)
+	}
+	if response.StopReason != CanonicalStopRefusal {
+		t.Fatalf("stop reason = %v, want refusal", response.StopReason)
+	}
+}
+
+func TestChatStreamErrorFrameSurfaced(t *testing.T) {
+	// An in-band chat error frame must be surfaced as a conversion error,
+	// never ignored while the stream continues.
+	converter := newChatToResponsesConverter(newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		"resp_1",
+		"m",
+		1,
+		nil,
+	))
+	_, err := converter.Convert(SSEEvent{Data: []byte(
+		`{"error":{"message":"upstream exploded"}}`,
+	)})
+	if err == nil {
+		t.Fatal("chat error frame accepted")
+	}
+}
