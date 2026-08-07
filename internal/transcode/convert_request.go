@@ -1074,6 +1074,14 @@ func RenderChatRequest(
 		Metadata:            anyMap(request.Metadata),
 		N:                   intPtr(1),
 	}
+	// The official stream protocol sends a final usage-only chunk before
+	// [DONE] when include_usage is requested; the state machine consumes it
+	// into the terminal envelope's usage (review-j finding 6). It is
+	// requested whenever the exchange streams, so Messages clients receive
+	// real totals instead of fabricated zero usage.
+	if request.Stream {
+		out.StreamOptions = &ChatStreamOptions{IncludeUsage: boolPtr(true)}
+	}
 
 	// Responses request fields that Chat can express are rendered; the rest
 	// must be rejected or approved as losses, never silently dropped (the

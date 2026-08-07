@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -395,10 +396,7 @@ func (h *TranscodeHandler) convertRequest(
 		// Messages dialect signals streaming only this way) or by the
 		// request body's stream flag (Responses). Both are merged after
 		// decode below; the response media type must agree (merge gate 17).
-		StreamIntent: strings.EqualFold(
-			strings.TrimSpace(r.Header.Get("Accept")),
-			"text/event-stream",
-		),
+		StreamIntent: acceptIsEventStream(r.Header.Get("Accept")),
 	}
 
 	// Resolve the client model through the mapping once the decoded request
@@ -421,6 +419,11 @@ func (h *TranscodeHandler) convertRequest(
 			return nil, nil, err
 		}
 		context.StreamIntent = context.StreamIntent || result.Request.Stream
+		// Write the merged intent back into the canonical request so the
+		// upstream renderer emits stream:true (review-j finding 6): an
+		// Accept-only stream request must not ask the upstream for JSON
+		// while the handler expects SSE.
+		result.Request.Stream = context.StreamIntent
 		if err := resolveModel(result.Request.ClientModel); err != nil {
 			return nil, nil, err
 		}
@@ -459,6 +462,9 @@ func (h *TranscodeHandler) convertRequest(
 			return nil, nil, err
 		}
 		context.StreamIntent = context.StreamIntent || result.Request.Stream
+		// Write the merged intent back into the canonical request so the
+		// upstream renderer emits stream:true (review-j finding 6).
+		result.Request.Stream = context.StreamIntent
 		if err := resolveModel(result.Request.ClientModel); err != nil {
 			return nil, nil, err
 		}
@@ -1023,6 +1029,21 @@ func isHopByHopName(name string) bool {
 	default:
 		return false
 	}
+}
+
+// acceptIsEventStream reports whether the Accept header selects the
+// text/event-stream media type. The header is parsed as media ranges (the
+// first parseable range decides), never compared as one exact string
+// (review-j finding 6).
+func acceptIsEventStream(accept string) bool {
+	for _, part := range strings.Split(accept, ",") {
+		mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(part))
+		if err != nil {
+			continue
+		}
+		return mediaType == "text/event-stream"
+	}
+	return false
 }
 
 // isEventStream reports whether the response is an SSE stream.

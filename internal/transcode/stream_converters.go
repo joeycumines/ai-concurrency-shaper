@@ -65,6 +65,17 @@ type chatResponsesStreamState struct {
 	started   bool
 	sawFinish bool
 
+	// chunkID and chunkModel pin the chunk identity from the first chunk;
+	// later chunks with a different id or model are an upstream protocol
+	// error (review-j finding 6).
+	chunkID    string
+	chunkModel string
+
+	// finishReason is recorded when the finish chunk arrives; the terminal
+	// envelope is built lazily at release so the optional usage tail is
+	// reflected in its usage (review-j finding 6).
+	finishReason string
+
 	items        []openResponsesItem
 	itemIndex    int64
 	pendingCalls map[int]*pendingToolCall // keyed by chat tool fragment index
@@ -73,8 +84,9 @@ type chatResponsesStreamState struct {
 
 	report ConversionReport
 
-	// heldTerminal is the terminal batch built on finish_reason and released
-	// by the [DONE] frame or FinalizeEOF.
+	// heldTerminal holds the item-closing events built on finish_reason; the
+	// terminal envelope is appended at release by the [DONE] frame or
+	// FinalizeEOF.
 	heldTerminal []ResponsesSSEEvent
 }
 
@@ -98,24 +110,89 @@ func newChatResponsesStreamState(
 }
 
 // Convert processes one Chat stream chunk into Responses events.
+//
+// The stream lifecycle has explicit phases (review-j finding 6):
+//
+//  1. normal chunks — content, tool-call fragments, and the finish chunk;
+//  2. after the finish reason — the optional usage-only tail chunk
+//     (choices: []/empty, usage present) that the official protocol sends
+//     before [DONE] when include_usage is requested;
+//  3. terminal — built at release (the [DONE] frame or EOF) with the final
+//     usage.
 func (s *chatResponsesStreamState) Convert(
 	chunk ChatStreamResponse,
 ) ([]ResponsesSSEEvent, error) {
 	if s.sawFinish {
+		// Phase 2: accept only the usage-only tail chunk and fold its totals
+		// into the terminal envelope's usage. The tail is still part of the
+		// stream: chunk identity must remain stable, and a service tier on
+		// the tail enters the same loss/reject decision as on any other
+		// chunk.
+		if chunk.Usage != nil && len(chunk.Choices) == 0 {
+			if chunk.ID != "" && s.chunkID != "" && chunk.ID != s.chunkID {
+				return nil, fmt.Errorf(
+					"chat stream chunk id %q does not match the first chunk id %q",
+					chunk.ID,
+					s.chunkID,
+				)
+			}
+			if chunk.Model != "" && s.chunkModel != "" && chunk.Model != s.chunkModel {
+				return nil, fmt.Errorf(
+					"chat stream chunk model %q does not match the first chunk model %q",
+					chunk.Model,
+					s.chunkModel,
+				)
+			}
+			if chunk.ServiceTier != nil {
+				if err := s.report.Lose(
+					s.policy,
+					FeatureServiceTier,
+					"service_tier",
+					"the upstream chat service tier cannot be reproduced in the client dialect",
+				); err != nil {
+					return nil, err
+				}
+			}
+			s.usage = chatUsageToResponsesUsage(chunk.Usage)
+			return nil, nil
+		}
 		return nil, errors.New("chat stream chunk after finish_reason")
 	}
 
 	var events []ResponsesSSEEvent
 
 	if !s.started {
+		// Pin the chunk identity and apply the upstream creation time BEFORE
+		// building the created/in_progress envelopes, so response.created,
+		// response.in_progress, and the terminal envelope share one
+		// created_at.
+		if chunk.Created != 0 {
+			s.createdAt = chunk.Created
+		}
+		s.chunkID = chunk.ID
+		s.chunkModel = chunk.Model
 		envelope := s.baseEnvelope("in_progress")
 		events = append(events,
 			s.builder.Created(envelope),
 			s.builder.InProgress(envelope),
 		)
 		s.started = true
-		if chunk.Created != 0 {
-			s.createdAt = chunk.Created
+	} else {
+		// Stable chunk identity across the stream: a mismatched id or model
+		// is an upstream protocol error (review-j finding 6).
+		if chunk.ID != "" && s.chunkID != "" && chunk.ID != s.chunkID {
+			return nil, fmt.Errorf(
+				"chat stream chunk id %q does not match the first chunk id %q",
+				chunk.ID,
+				s.chunkID,
+			)
+		}
+		if chunk.Model != "" && s.chunkModel != "" && chunk.Model != s.chunkModel {
+			return nil, fmt.Errorf(
+				"chat stream chunk model %q does not match the first chunk model %q",
+				chunk.Model,
+				s.chunkModel,
+			)
 		}
 	}
 
@@ -144,6 +221,13 @@ func (s *chatResponsesStreamState) Convert(
 	}
 
 	for _, choice := range chunk.Choices {
+		// n=1: the single choice must be index 0 (review-j finding 6).
+		if choice.Index != 0 {
+			return nil, fmt.Errorf(
+				"chat stream chunk choice index = %d; n=1 requires index 0",
+				choice.Index,
+			)
+		}
 		if choice.LogProbs != nil {
 			if err := s.report.Lose(
 				s.policy,
@@ -166,7 +250,9 @@ func (s *chatResponsesStreamState) Convert(
 			if err != nil {
 				return nil, err
 			}
-			// Hold the terminal batch; it is released by [DONE] or EOF.
+			// Hold the item-closing events; the terminal envelope is built
+			// at release so the optional usage tail is reflected in its
+			// usage. Released by [DONE] or EOF.
 			s.heldTerminal = terminal
 			s.sawFinish = true
 		}
@@ -408,7 +494,10 @@ func (s *chatResponsesStreamState) convertToolCall(
 	}
 
 	// Emit the output_item.added only once identity (call ID + name) is
-	// complete, then replay buffered argument fragments.
+	// complete, then replay buffered argument fragments. The added event
+	// carries an EMPTY argument string — never an invented complete object
+	// (review-j finding 6): the arguments arrive through deltas and the done
+	// event.
 	if !pending.started && pending.callID != "" && pending.name != "" {
 		pending.itemID = s.ctx.IDs.New("fc_")
 		pending.started = true
@@ -420,7 +509,7 @@ func (s *chatResponsesStreamState) convertToolCall(
 				Status:    ResponsesItemInProgress,
 				CallID:    pending.callID,
 				Name:      pending.name,
-				Arguments: "{}",
+				Arguments: "",
 			},
 		))
 	}
@@ -567,26 +656,38 @@ func (s *chatResponsesStreamState) finish(
 		))
 	}
 
-	// Final envelope: all output items (message items and function calls)
-	// ordered by output index. Unknown finish reasons are rejected, matching
-	// the non-streaming decode: they must never silently become a successful
-	// completion.
-	status := "completed"
-	reason := ""
+	// The terminal envelope is NOT built here: the optional usage tail may
+	// still arrive and must be reflected in the terminal's usage. The
+	// finish reason is recorded and the envelope is built at release.
+	// Unknown finish reasons are rejected, matching the non-streaming
+	// decode: they must never silently become a successful completion.
 	switch finishReason {
-	case "length", "max_tokens":
-		status = "incomplete"
-		reason = "max_output_tokens"
-	case "content_filter":
-		status = "incomplete"
-		reason = "content_filter"
-	case "stop", "tool_calls", "function_call":
+	case "length", "max_tokens", "content_filter", "stop", "tool_calls", "function_call":
+		s.finishReason = finishReason
 	default:
 		return nil, &UnsupportedFeatureError{
 			Protocol: "chat",
 			Path:     "choices[].finish_reason",
 			Feature:  finishReason,
 		}
+	}
+
+	return events, nil
+}
+
+// terminalEnvelope builds the terminal envelope with the final usage (which
+// the optional usage tail may have updated). The finish reason was validated
+// at finish(); the switch is total over the six valid reasons.
+func (s *chatResponsesStreamState) terminalEnvelope() ResponsesSSEEvent {
+	status := "completed"
+	reason := ""
+	switch s.finishReason {
+	case "length", "max_tokens":
+		status = "incomplete"
+		reason = "max_output_tokens"
+	case "content_filter":
+		status = "incomplete"
+		reason = "content_filter"
 	}
 	envelope := s.baseEnvelope(status)
 	envelope.Output = s.finalOutputItems()
@@ -596,12 +697,9 @@ func (s *chatResponsesStreamState) finish(
 		envelope.IncompleteDetails = &ResponsesIncompleteDetails{
 			Reason: reason,
 		}
-		events = append(events, s.builder.Incomplete(envelope))
-	} else {
-		events = append(events, s.builder.Completed(envelope))
+		return s.builder.Incomplete(envelope)
 	}
-
-	return events, nil
+	return s.builder.Completed(envelope)
 }
 
 // finalOutputItems returns every completed output item ordered by output
@@ -681,14 +779,17 @@ func (s *chatResponsesStreamState) baseEnvelope(status string) ResponseEnvelope 
 	return envelope
 }
 
-// releaseTerminal returns the held terminal batch and whether it exists.
+// releaseTerminal returns the held terminal batch — the item-closing events
+// plus the terminal envelope — and whether it exists. The envelope is built
+// at release time so the optional usage tail is reflected in its usage
+// (review-j finding 6).
 func (s *chatResponsesStreamState) releaseTerminal() ([]ResponsesSSEEvent, bool) {
 	if s.heldTerminal == nil {
 		return nil, false
 	}
 	held := s.heldTerminal
 	s.heldTerminal = nil
-	return held, true
+	return append(held, s.terminalEnvelope()), true
 }
 
 // FinalizeEOF releases the held terminal or reports a truncation error. A

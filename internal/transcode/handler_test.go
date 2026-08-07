@@ -658,6 +658,66 @@ func TestHandlerStreamingResponsesToChat(t *testing.T) {
 	}
 }
 
+// TestHandlerStreamingResponsesToChatAcceptOnly proves the Accept-derived
+// stream intent is written back into the rendered upstream request: a client
+// that signals streaming ONLY via Accept: text/event-stream must produce an
+// upstream request with stream:true + stream_options.include_usage:true, and
+// the SSE response must be accepted — never the JSON-vs-SSE 502 mismatch
+// (review-j finding 6).
+func TestHandlerStreamingResponsesToChatAcceptOnly(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		gotBody []byte
+	)
+	mapping := responsesMapping(t)
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		mu.Lock()
+		gotBody = body
+		mu.Unlock()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"text/event-stream"},
+			},
+			Body: io.NopCloser(bytes.NewReader(
+				testcorpus.ChatCompletionsStreamSSE(),
+			)),
+		}, nil
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "response.completed") {
+		t.Fatalf("missing terminal: %q", rec.Body.String())
+	}
+	var probe struct {
+		Stream        *bool `json:"stream"`
+		StreamOptions *struct {
+			IncludeUsage *bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if err := json.Unmarshal(gotBody, &probe); err != nil {
+		t.Fatal(err)
+	}
+	if probe.Stream == nil || !*probe.Stream {
+		t.Fatalf("upstream request stream = %v, want true: %s", probe.Stream, gotBody)
+	}
+	if probe.StreamOptions == nil || probe.StreamOptions.IncludeUsage == nil || !*probe.StreamOptions.IncludeUsage {
+		t.Fatalf("upstream request include_usage = %v, want true: %s", probe.StreamOptions, gotBody)
+	}
+}
+
 func TestHandlerStreamingMessagesToResponses(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
