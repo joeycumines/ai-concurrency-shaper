@@ -583,9 +583,6 @@ func (e ResponseFunctionCallArgumentsDoneEvent) Validate() error {
 	if !json.Valid([]byte(e.Arguments)) {
 		return errors.New("final function arguments are invalid JSON")
 	}
-	if !json.Valid([]byte(e.Arguments)) {
-		return errors.New("final function arguments are invalid JSON")
-	}
 	return nil
 }
 

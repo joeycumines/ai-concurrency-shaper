@@ -202,7 +202,13 @@ func DecodeResponsesResponse(
 		if envelope.IncompleteDetails != nil {
 			response.IncompleteReason = envelope.IncompleteDetails.Reason
 		}
-		response.StopReason = CanonicalStopMaxTokens
+		// Match the streaming path: content_filter renders a refusal stop
+		// reason, anything else max_tokens.
+		if response.IncompleteReason == "content_filter" {
+			response.StopReason = CanonicalStopRefusal
+		} else {
+			response.StopReason = CanonicalStopMaxTokens
+		}
 	case "failed":
 		response.Status = CanonicalResponseFailed
 		if envelope.Error != nil {

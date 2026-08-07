@@ -1152,16 +1152,7 @@ func (s *anthropicResponsesStreamState) completed(
 	}
 	s.finalizeMessage(stop, envelope.Usage)
 	s.sawTerminal = true
-	// The Responses protocol has no [DONE] sentinel: response.completed IS
-	// the terminal. Release message_delta + message_stop immediately so the
-	// stream stops and the upstream connection is released even when the
-	// upstream keeps it open after the terminal.
-	return []AnthropicStreamEvent{
-		{Type: AnthropicStreamEventTypeMessageDelta, Delta: &AnthropicStreamDelta{
-			StopReason: anthropicStopReasonPtr(stopReasonToAnthropic(stop)),
-		}, Usage: s.usage},
-		{Type: AnthropicStreamEventTypeMessageStop},
-	}, nil
+	return s.terminalEvents(stop)
 }
 
 func (s *anthropicResponsesStreamState) incomplete(
@@ -1176,12 +1167,38 @@ func (s *anthropicResponsesStreamState) incomplete(
 	}
 	s.finalizeMessage(stop, envelope.Usage)
 	s.sawTerminal = true
-	return []AnthropicStreamEvent{
-		{Type: AnthropicStreamEventTypeMessageDelta, Delta: &AnthropicStreamDelta{
-			StopReason: anthropicStopReasonPtr(stopReasonToAnthropic(stop)),
-		}, Usage: s.usage},
-		{Type: AnthropicStreamEventTypeMessageStop},
-	}, nil
+	return s.terminalEvents(stop)
+}
+
+// terminalEvents emits content_block_stop for any tool block left open by a
+// non-conformant upstream (output_item.done omitted), then the terminal
+// message_delta + message_stop. The stream trace invariant requires every
+// opened block to stop before message_delta.
+func (s *anthropicResponsesStreamState) terminalEvents(
+	stop CanonicalStopReason,
+) ([]AnthropicStreamEvent, error) {
+	var events []AnthropicStreamEvent
+	for _, pending := range s.pendingToolStart {
+		if !pending.started {
+			continue
+		}
+		events = append(events, AnthropicStreamEvent{
+			Type:  AnthropicStreamEventTypeContentBlockStop,
+			Index: intPtr(int(pending.blockIndex)),
+		})
+		delete(s.pendingToolStart, pending.itemID)
+	}
+	events = append(events,
+		AnthropicStreamEvent{
+			Type: AnthropicStreamEventTypeMessageDelta,
+			Delta: &AnthropicStreamDelta{
+				StopReason: anthropicStopReasonPtr(stopReasonToAnthropic(stop)),
+			},
+			Usage: s.usage,
+		},
+		AnthropicStreamEvent{Type: AnthropicStreamEventTypeMessageStop},
+	)
+	return events, nil
 }
 
 // outputHasFunctionCalls reports whether the response output contains
