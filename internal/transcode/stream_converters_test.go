@@ -1165,3 +1165,77 @@ func TestChatToResponsesAmbiguousFragmentRejected(t *testing.T) {
 		t.Fatal("ambiguous tool call fragment accepted")
 	}
 }
+
+// TestAnthropicStreamStopReasons verifies the streaming Messages stop
+// reasons mirror the non-streaming render: tool-call terminals end with
+// tool_use, content_filter with refusal, and unknown finish reasons are
+// rejected.
+func TestAnthropicStreamStopReasons(t *testing.T) {
+	// Tool-call terminal -> stop_reason tool_use.
+	state := newAnthropicResponsesStreamState(testStreamContext(), "resp_1", "m", 1)
+	builder := &ResponsesEventBuilder{}
+	parallel := true
+	envelope := ResponseEnvelope{
+		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "completed", Model: "m",
+		Output: []ResponsesOutputItem{&ResponsesFunctionCallOutputItem{
+			ID: "fc_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "f", Arguments: `{}`,
+		}},
+		ParallelToolCalls: &parallel,
+	}
+	events, err := state.Convert(builder.Completed(envelope))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Delta == nil || events[0].Delta.StopReason == nil ||
+		*events[0].Delta.StopReason != AnthropicStopReasonToolUse {
+		t.Fatalf("tool terminal events = %+v", events)
+	}
+
+	// content_filter -> refusal stop.
+	state = newAnthropicResponsesStreamState(testStreamContext(), "resp_1", "m", 1)
+	builder = &ResponsesEventBuilder{}
+	incomplete := ResponseEnvelope{
+		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "incomplete", Model: "m",
+		Output:            []ResponsesOutputItem{},
+		ParallelToolCalls: &parallel,
+		IncompleteDetails: &ResponsesIncompleteDetails{Reason: "content_filter"},
+	}
+	events, err = state.Convert(builder.Incomplete(incomplete))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Delta == nil || events[0].Delta.StopReason == nil ||
+		*events[0].Delta.StopReason != AnthropicStopReasonRefusal {
+		t.Fatalf("content_filter terminal events = %+v", events)
+	}
+
+	// max_output_tokens -> max_tokens stop.
+	state = newAnthropicResponsesStreamState(testStreamContext(), "resp_1", "m", 1)
+	builder = &ResponsesEventBuilder{}
+	incomplete.IncompleteDetails = &ResponsesIncompleteDetails{Reason: "max_output_tokens"}
+	events, err = state.Convert(builder.Incomplete(incomplete))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Delta == nil || events[0].Delta.StopReason == nil ||
+		*events[0].Delta.StopReason != AnthropicStopReasonMaxTokens {
+		t.Fatalf("max_tokens terminal events = %+v", events)
+	}
+}
+
+// TestChatStreamUnknownFinishReasonRejected verifies an unknown chat finish
+// reason is rejected in the stream direction.
+func TestChatStreamUnknownFinishReasonRejected(t *testing.T) {
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		"resp_1",
+		"m",
+		1,
+		nil,
+	)
+	_, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("mystery_reason")))
+	if err == nil {
+		t.Fatal("unknown finish reason accepted")
+	}
+}

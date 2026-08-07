@@ -713,11 +713,30 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) *ResponsesUsage {
 }
 
 // chatStreamChunkFromSSE parses one upstream SSE frame into a Chat stream
-// chunk, reporting the [DONE] sentinel via errChatStreamDone.
+// chunk, reporting the [DONE] sentinel via errChatStreamDone. An in-band
+// error frame is surfaced as an error: it must never be silently ignored
+// while the stream continues (and potentially ends as clean success).
 func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 	data := bytes.TrimSpace(frame.Data)
 	if bytes.Equal(data, []byte("[DONE]")) {
 		return ChatStreamResponse{}, errChatStreamDone
+	}
+	var probe struct {
+		Error *json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return ChatStreamResponse{}, fmt.Errorf("chat stream chunk: %w", err)
+	}
+	if probe.Error != nil {
+		var detail struct {
+			Message string `json:"message"`
+		}
+		_ = json.Unmarshal(*probe.Error, &detail)
+		message := detail.Message
+		if message == "" {
+			message = "chat stream error frame"
+		}
+		return ChatStreamResponse{}, fmt.Errorf("chat stream chunk: %s", message)
 	}
 	var chunk ChatStreamResponse
 	if err := json.Unmarshal(data, &chunk); err != nil {
@@ -1121,7 +1140,13 @@ func (s *anthropicResponsesStreamState) refusalDone(
 func (s *anthropicResponsesStreamState) completed(
 	envelope ResponseEnvelope,
 ) ([]AnthropicStreamEvent, error) {
-	s.finalizeMessage(CanonicalStopEndTurn, envelope.Usage)
+	// The stop reason mirrors the non-streaming render: a completed
+	// response whose output carries function calls ends with tool_use.
+	stop := CanonicalStopEndTurn
+	if outputHasFunctionCalls(envelope.Output) {
+		stop = CanonicalStopToolUse
+	}
+	s.finalizeMessage(stop, envelope.Usage)
 	s.sawTerminal = true
 	// The Responses protocol has no [DONE] sentinel: response.completed IS
 	// the terminal. Release message_delta + message_stop immediately so the
@@ -1129,7 +1154,7 @@ func (s *anthropicResponsesStreamState) completed(
 	// upstream keeps it open after the terminal.
 	return []AnthropicStreamEvent{
 		{Type: AnthropicStreamEventTypeMessageDelta, Delta: &AnthropicStreamDelta{
-			StopReason: anthropicStopReasonPtr(AnthropicStopReasonEndTurn),
+			StopReason: anthropicStopReasonPtr(stopReasonToAnthropic(stop)),
 		}, Usage: s.usage},
 		{Type: AnthropicStreamEventTypeMessageStop},
 	}, nil
@@ -1138,14 +1163,32 @@ func (s *anthropicResponsesStreamState) completed(
 func (s *anthropicResponsesStreamState) incomplete(
 	envelope ResponseEnvelope,
 ) ([]AnthropicStreamEvent, error) {
-	s.finalizeMessage(CanonicalStopMaxTokens, envelope.Usage)
+	// The incomplete reason drives the stop reason, matching the
+	// non-streaming render: content_filter becomes a refusal stop, anything
+	// else max_tokens.
+	stop := CanonicalStopMaxTokens
+	if envelope.IncompleteDetails != nil && envelope.IncompleteDetails.Reason == "content_filter" {
+		stop = CanonicalStopRefusal
+	}
+	s.finalizeMessage(stop, envelope.Usage)
 	s.sawTerminal = true
 	return []AnthropicStreamEvent{
 		{Type: AnthropicStreamEventTypeMessageDelta, Delta: &AnthropicStreamDelta{
-			StopReason: anthropicStopReasonPtr(AnthropicStopReasonMaxTokens),
+			StopReason: anthropicStopReasonPtr(stopReasonToAnthropic(stop)),
 		}, Usage: s.usage},
 		{Type: AnthropicStreamEventTypeMessageStop},
 	}, nil
+}
+
+// outputHasFunctionCalls reports whether the response output contains
+// function call items (the driver of the tool_use stop reason).
+func outputHasFunctionCalls(output []ResponsesOutputItem) bool {
+	for _, item := range output {
+		if _, ok := item.(*ResponsesFunctionCallOutputItem); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *anthropicResponsesStreamState) failed(

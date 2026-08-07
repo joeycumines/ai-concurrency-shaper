@@ -598,7 +598,11 @@ func DecodeMessagesRequest(
 	result.Request.Temperature = envelope.Temperature
 	result.Request.TopP = envelope.TopP
 	result.Request.StopSequences = envelope.StopSequences
-	result.Request.Metadata = strMap(envelope.Metadata)
+	metadata, err := strMap(envelope.Metadata)
+	if err != nil {
+		return DecodeResult{}, err
+	}
+	result.Request.Metadata = metadata
 	if envelope.Stream != nil {
 		result.Request.Stream = *envelope.Stream
 	}
@@ -670,7 +674,11 @@ func DecodeMessagesRequest(
 
 	// Tool choice: Anthropic "auto"/"none"/"any"/named tool.
 	if envelope.ToolChoice != nil {
-		choice, err := canonicalizeAnthropicToolChoice(*envelope.ToolChoice)
+		choice, err := canonicalizeAnthropicToolChoice(
+			*envelope.ToolChoice,
+			&result.Report,
+			policy,
+		)
 		if err != nil {
 			return DecodeResult{}, err
 		}
@@ -681,10 +689,23 @@ func DecodeMessagesRequest(
 }
 
 // canonicalizeAnthropicToolChoice maps the Anthropic tool_choice union to the
-// canonical form.
+// canonical form. disable_parallel_tool_use is not portable to the target
+// providers and is rejected or approved as a parallel-tool-calls loss.
 func canonicalizeAnthropicToolChoice(
 	choice AnthropicToolChoice,
+	report *ConversionReport,
+	policy LossPolicy,
 ) (*CanonicalToolChoice, error) {
+	if choice.DisableParallelToolUse != nil && *choice.DisableParallelToolUse {
+		if err := report.Lose(
+			policy,
+			FeatureParallelToolCalls,
+			"tool_choice.disable_parallel_tool_use",
+			"disable_parallel_tool_use is not portable to the target provider",
+		); err != nil {
+			return nil, err
+		}
+	}
 	switch choice.Type {
 	case "auto":
 		return &CanonicalToolChoice{Mode: "auto"}, nil
@@ -795,19 +816,22 @@ func anthropicContentToCanonical(
 	return parts, nil
 }
 
-// strMap converts a map with any value type to a string map, dropping
-// non-string values. Messages metadata values are strings on the wire.
-func strMap(m map[string]any) map[string]string {
+// strMap converts a map with any value type to a string map. Messages
+// metadata values are strings on the wire; any other value is an error
+// (never silently dropped).
+func strMap(m map[string]any) (map[string]string, error) {
 	if m == nil {
-		return nil
+		return nil, nil
 	}
 	out := make(map[string]string, len(m))
 	for key, value := range m {
-		if s, ok := value.(string); ok {
-			out[key] = s
+		s, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("metadata field %q must be a string", key)
 		}
+		out[key] = s
 	}
-	return out
+	return out, nil
 }
 
 // RenderResponsesRequest renders the canonical IR into a Responses request
