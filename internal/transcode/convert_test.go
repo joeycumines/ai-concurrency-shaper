@@ -123,15 +123,18 @@ func TestDecodeResponsesRequestRejectsUnsupported(t *testing.T) {
 	}
 }
 
-func TestDecodeResponsesRequestToolChoiceRequiredRejected(t *testing.T) {
-	// Responses tool_choice "required" is not representable; the strict
-	// contract rejects it rather than silently weakening to auto.
-	_, _, err := DecodeResponsesRequest(
+func TestDecodeResponsesRequestToolChoiceRequired(t *testing.T) {
+	// "required" is part of the official Responses tool_choice contract and
+	// renders natively into Chat; it must decode, not be rejected.
+	result, _, err := DecodeResponsesRequest(
 		[]byte(`{"model":"m","input":"x","tool_choice":"required"}`),
 		StrictLossPolicy(),
 	)
-	if err == nil {
-		t.Fatal("expected rejection of required tool_choice")
+	if err != nil {
+		t.Fatalf("required tool_choice rejected: %v", err)
+	}
+	if result.Request.ToolChoice == nil || result.Request.ToolChoice.Mode != "required" {
+		t.Fatalf("tool choice = %+v", result.Request.ToolChoice)
 	}
 }
 

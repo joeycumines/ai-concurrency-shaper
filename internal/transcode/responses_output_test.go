@@ -271,10 +271,14 @@ func TestCanonicalizeResponsesToolChoice(t *testing.T) {
 	if out.Mode != "named" || out.Name != "f" {
 		t.Fatalf("out = %+v", out)
 	}
-	// Responses has no "required"; it must be rejected rather than weakened.
+	// "required" is part of the official contract and canonicalizes as-is.
 	choice = ResponsesToolChoice{Str: stringPtr("required")}
-	if _, err := canonicalizeResponsesToolChoice(choice); err == nil {
-		t.Fatal("expected rejection of required tool choice")
+	requiredOut, err := canonicalizeResponsesToolChoice(choice)
+	if err != nil {
+		t.Fatalf("required tool choice rejected: %v", err)
+	}
+	if requiredOut.Mode != "required" {
+		t.Fatalf("mode = %q, want required", requiredOut.Mode)
 	}
 }
 

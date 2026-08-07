@@ -543,20 +543,33 @@ func (s *chatResponsesStreamState) finish(
 	}
 
 	// Final envelope: all output items (message items and function calls)
-	// ordered by output index.
+	// ordered by output index. Unknown finish reasons are rejected, matching
+	// the non-streaming decode: they must never silently become a successful
+	// completion.
 	status := "completed"
+	reason := ""
 	switch finishReason {
 	case "length", "max_tokens":
 		status = "incomplete"
+		reason = "max_output_tokens"
+	case "content_filter":
+		status = "incomplete"
+		reason = "content_filter"
+	case "stop", "tool_calls", "function_call":
+	default:
+		return nil, &UnsupportedFeatureError{
+			Protocol: "chat",
+			Path:     "choices[].finish_reason",
+			Feature:  finishReason,
+		}
 	}
 	envelope := s.baseEnvelope(status)
 	envelope.Output = s.finalOutputItems()
 	envelope.Usage = s.usage
 	if status == "incomplete" {
-		// Match the non-streaming renderer: the incomplete reason is part of
-		// the official envelope contract.
+		// The incomplete reason is part of the official envelope contract.
 		envelope.IncompleteDetails = &ResponsesIncompleteDetails{
-			Reason: "max_output_tokens",
+			Reason: reason,
 		}
 		events = append(events, s.builder.Incomplete(envelope))
 	} else {

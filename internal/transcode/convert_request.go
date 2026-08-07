@@ -543,18 +543,9 @@ func canonicalizeResponsesToolChoice(
 			Name: choice.Named.Name,
 		}, nil
 	}
-	mode := *choice.Str
-	if mode == "required" {
-		// Responses has no "required"; the closest portable semantics is
-		// auto. The strict contract rejects it instead of weakening caller
-		// intent.
-		return nil, &UnsupportedFeatureError{
-			Protocol: "responses",
-			Path:     "tool_choice",
-			Feature:  mode,
-		}
-	}
-	return &CanonicalToolChoice{Mode: mode}, nil
+	// "required" is part of the official Responses contract (and the Chat
+	// dialect renders it natively), so it is portable as-is.
+	return &CanonicalToolChoice{Mode: *choice.Str}, nil
 }
 
 // mustRawMessage marshals a map into a raw JSON object. The map is already

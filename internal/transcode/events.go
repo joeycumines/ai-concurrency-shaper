@@ -722,6 +722,13 @@ func (b *ResponsesEventBuilder) base(eventType string) responsesEventBase {
 	return base
 }
 
+// NextSequenceNumber returns the sequence number the next event will
+// receive. Error frames generated outside the builder (stream abort paths)
+// use it so the error terminal keeps the stream's sequence monotonic.
+func (b *ResponsesEventBuilder) NextSequenceNumber() int64 {
+	return b.nextSequence
+}
+
 // Created builds a response.created event.
 func (b *ResponsesEventBuilder) Created(
 	response ResponseEnvelope,

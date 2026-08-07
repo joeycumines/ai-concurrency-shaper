@@ -378,9 +378,11 @@ func isResponsesDoneSentinel(data []byte) bool {
 	return string(data) == "[DONE]"
 }
 
-// ErrorEvent builds a client-dialect Responses error event frame.
+// ErrorEvent builds a client-dialect Responses error event frame. The
+// sequence number continues from the builder so a mid-stream error terminal
+// never collides with response.created's zero.
 func (c *chatToResponsesConverter) ErrorEvent(err error) (frameEvent, bool) {
-	return responsesErrorFrame(err)
+	return responsesErrorFrame(err, c.state.builder.NextSequenceNumber())
 }
 
 // ErrorEvent builds a client-dialect Anthropic error event frame.
@@ -395,11 +397,11 @@ func (c *chatToAnthropicConverter) ErrorEvent(err error) (frameEvent, bool) {
 }
 
 // responsesErrorFrame marshals a Responses error event.
-func responsesErrorFrame(err error) (frameEvent, bool) {
+func responsesErrorFrame(err error, sequence int64) (frameEvent, bool) {
 	event := ResponseErrorEvent{
 		responsesEventBase: responsesEventBase{
 			Type:           "error",
-			SequenceNumber: 0,
+			SequenceNumber: sequence,
 		},
 		Code:    "conversion_error",
 		Message: err.Error(),

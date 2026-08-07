@@ -67,7 +67,12 @@ func DecodeChatResponse(
 	case "tool_calls", "function_call":
 		response.StopReason = CanonicalStopToolUse
 	case "content_filter":
+		// The official Responses contract represents a filtered response as
+		// status incomplete with reason content_filter; the Anthropic
+		// dialect renders the refusal stop reason.
 		response.StopReason = CanonicalStopRefusal
+		response.Status = CanonicalResponseIncomplete
+		response.IncompleteReason = "content_filter"
 	default:
 		return CanonicalResponse{}, &UnsupportedFeatureError{
 			Protocol: "chat",

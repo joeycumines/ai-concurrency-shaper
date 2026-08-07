@@ -1123,3 +1123,45 @@ func TestChatToResponsesToolCallIndexCollision(t *testing.T) {
 		t.Fatal("conflicting index/id fragment accepted")
 	}
 }
+
+// TestChatToResponsesAmbiguousFragmentRejected verifies that an index-less,
+// id-less continuation fragment is rejected when several pending tool calls
+// make the attribution ambiguous.
+func TestChatToResponsesAmbiguousFragmentRejected(t *testing.T) {
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		"resp_1",
+		"m",
+		1,
+		nil,
+	)
+	// Two identified calls at distinct indexes.
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
+		ToolCalls: []ChatAssistantMessageToolCall{{
+			Index:    intPtr(0),
+			ID:       str("call_a"),
+			Function: ChatAssistantMessageToolCallFunction{Name: str("f_a"), Arguments: `{}`},
+		}},
+	}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
+		ToolCalls: []ChatAssistantMessageToolCall{{
+			Index:    intPtr(1),
+			ID:       str("call_b"),
+			Function: ChatAssistantMessageToolCallFunction{Name: str("f_b"), Arguments: `{}`},
+		}},
+	}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	// An index-less, id-less fragment cannot be attributed to either.
+	_, err := state.Convert(chatChunk(t, ChatStreamDelta{
+		ToolCalls: []ChatAssistantMessageToolCall{{
+			Function: ChatAssistantMessageToolCallFunction{Arguments: `{"x":1}`},
+		}},
+	}, nil))
+	if err == nil {
+		t.Fatal("ambiguous tool call fragment accepted")
+	}
+}

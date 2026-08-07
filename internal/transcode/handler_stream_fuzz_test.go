@@ -117,6 +117,16 @@ func FuzzTranscodeHandlerMalformedOrTruncatedStream(f *testing.F) {
 			return
 		}
 
+		// When the exchange was aborted by the client deadline, the
+		// interrupted stream legitimately ends without a terminal: the
+		// abort itself is the terminal condition (the proxy classifies it
+		// as a client abort and emits an error event when it can). Only
+		// streams that ended while the client was still waiting must carry
+		// an explicit terminal or error event.
+		if ctx.Err() != nil {
+			return
+		}
+
 		events, trailing, err := parseCompleteSSE(
 			recorder.Body.Bytes(),
 		)
