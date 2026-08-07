@@ -88,14 +88,36 @@ func (p ExchangeProvenance) String() string {
 	}
 }
 
-// Outcome is the recorded result of one transcoded exchange.
+// Outcome is the recorded result of one transcoded exchange. Upstream
+// provenance and downstream completion are separate facts: the upstream may
+// have returned a definitive failure while the client disconnected before
+// the translated error was fully written, and both must be recorded.
 type Outcome struct {
 	Status     int
 	Provenance ExchangeProvenance
 
 	// UpstreamFailure is true when the outcome is a definitive upstream
-	// failure (transport error or upstream HTTP >= 500).
+	// failure: a transport error, an upstream HTTP >= 500, a 429, or a
+	// rate-signalled 403. Local conversion errors are never upstream
+	// failures.
 	UpstreamFailure bool
+
+	// ClientAborted is true when the client disconnected before the exchange
+	// completed (the request context was cancelled). It is recorded only
+	// when the abort is observable at outcome time; a context cancelled
+	// after successful delivery is not an abort.
+	ClientAborted bool
+
+	// DownstreamComplete is true when the translated response was fully
+	// written downstream. It is false for aborted exchanges and failed
+	// writes: such exchanges are never clean completions.
+	DownstreamComplete bool
+
+	// RetryAfter is the Retry-After duration signaled by the ORIGINAL
+	// upstream response (0 when absent). It is recorded so rate-signalled
+	// failures keep their hold signal even when the rendered client error
+	// cannot carry it.
+	RetryAfter time.Duration
 
 	// StreamOutcome is the stream classification for streaming exchanges.
 	StreamOutcome streamOutcome
@@ -181,7 +203,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, err := h.readRequestBody(r)
 	if err != nil {
 		if r.Context().Err() != nil {
-			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
+			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 			// A cancelled client context means the exchange is already over.
 			// Return normally: the proxy classifies the abort from the
 			// recorded outcome, and the net/http server tolerates a handler
@@ -205,7 +227,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	upstreamBody, context, err := h.convertRequest(r, body)
 	if err != nil {
 		if r.Context().Err() != nil {
-			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
+			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 			// A cancelled client context means the exchange is already over.
 			// Return normally: the proxy classifies the abort from the
 			// recorded outcome, and the net/http server tolerates a handler
@@ -243,7 +265,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// A cancelled client context means the exchange is already over.
 		if r.Context().Err() != nil {
-			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
+			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 			// A cancelled client context means the exchange is already over.
 			// Return normally: the proxy classifies the abort from the
 			// recorded outcome, and the net/http server tolerates a handler
@@ -534,7 +556,7 @@ func (h *TranscodeHandler) jsonResponse(
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		if r.Context().Err() != nil {
-			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
+			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 			// A cancelled client context means the exchange is already over.
 			// Return normally: the proxy classifies the abort from the
 			// recorded outcome, and the net/http server tolerates a handler
@@ -590,13 +612,14 @@ func (h *TranscodeHandler) jsonResponse(
 	_, writeErr := w.Write(converted)
 	switch {
 	case writeErr != nil && r.Context().Err() != nil:
-		h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort})
+		h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 	case writeErr != nil:
 		h.recordOutcome(r, Outcome{Provenance: ProvenanceDownstreamWriteError})
 	default:
 		h.recordOutcome(r, Outcome{
-			Status:     resp.StatusCode,
-			Provenance: ProvenanceUpstreamHTTP,
+			Status:             resp.StatusCode,
+			Provenance:         ProvenanceUpstreamHTTP,
+			DownstreamComplete: true,
 		})
 	}
 }
@@ -723,28 +746,38 @@ func (h *TranscodeHandler) streamResponse(
 	), converter)
 	observation := runTranslatedStream(r.Context(), w, resp.Body, reader)
 
+	// DownstreamComplete reflects the actual write state, not the
+	// classification bucket: a converted upstream error frame whose
+	// downstream write failed was never delivered, and the exchange must
+	// not be recorded as a clean completion.
+	downstreamComplete := observation.WriterErr == nil && observation.SealErr == nil
+
 	// Classify the outcome from explicit provenance.
 	var outcome Outcome
 	switch classifyStreamObservation(observation) {
 	case streamOutcomeSuccess:
 		outcome = Outcome{
-			Status:     resp.StatusCode,
-			Provenance: ProvenanceUpstreamHTTP,
+			Status:             resp.StatusCode,
+			Provenance:         ProvenanceUpstreamHTTP,
+			DownstreamComplete: downstreamComplete,
 		}
 	case streamOutcomeClientAbort:
 		outcome = Outcome{
-			Provenance: ProvenanceClientAbort,
+			Provenance:    ProvenanceClientAbort,
+			ClientAborted: true,
 		}
 	case streamOutcomeUpstreamFailure:
 		outcome = Outcome{
-			Status:          resp.StatusCode,
-			Provenance:      ProvenanceUpstreamBodyError,
-			UpstreamFailure: true,
+			Status:             resp.StatusCode,
+			Provenance:         ProvenanceUpstreamBodyError,
+			UpstreamFailure:    true,
+			DownstreamComplete: downstreamComplete,
 		}
 	case streamOutcomeLocalConversionFailure:
 		outcome = Outcome{
-			Status:     http.StatusBadGateway,
-			Provenance: ProvenanceLocalResponseConversionError,
+			Status:             http.StatusBadGateway,
+			Provenance:         ProvenanceLocalResponseConversionError,
+			DownstreamComplete: downstreamComplete,
 		}
 	case streamOutcomeDownstreamFailure:
 		outcome = Outcome{
@@ -752,8 +785,9 @@ func (h *TranscodeHandler) streamResponse(
 		}
 	default:
 		outcome = Outcome{
-			Status:     resp.StatusCode,
-			Provenance: ProvenanceUpstreamHTTP,
+			Status:             resp.StatusCode,
+			Provenance:         ProvenanceUpstreamHTTP,
+			DownstreamComplete: downstreamComplete,
 		}
 	}
 	h.recordOutcome(r, outcome)
@@ -841,7 +875,10 @@ func (h *TranscodeHandler) writeLocalError(
 // dialect. The failure classification uses the response-aware breaker
 // semantics (IsFailureStatusWithHeaders) so 429, 5xx, and 403 with
 // rate-limit signals (Retry-After or x-ratelimit-* headers) are upstream
-// failures — matching the native passthrough path exactly.
+// failures — matching the native passthrough path exactly. The Retry-After
+// from the ORIGINAL upstream response is recorded on the outcome so a
+// rate-signalled 403 keeps its hold signal even when the rendered client
+// error cannot carry the upstream rate-limit headers.
 func (h *TranscodeHandler) writeUpstreamHTTPError(
 	r *http.Request,
 	w http.ResponseWriter,
@@ -855,21 +892,39 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 		now,
 		now,
 	)
-	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
-	if err := WriteDialectHTTPError(w, client, apiErr); err != nil {
-		log.Printf("transcode: write dialect error: %v", err)
-	}
-	h.recordOutcome(r, Outcome{
+	outcome := Outcome{
 		Status:          apiErr.Status,
 		Provenance:      ProvenanceUpstreamHTTP,
 		UpstreamFailure: upstreamFailure,
-	})
+		RetryAfter:      circuitbreaker.ParseRetryAfter(resp.Header, now, now),
+	}
+	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
+	if err := WriteDialectHTTPError(w, client, apiErr); err != nil {
+		// A failed downstream write is a fact about the exchange, not a
+		// log line: the translated error was never delivered. The recorded
+		// provenance changes to the downstream failure (or a client abort
+		// when the context is cancelled) while the upstream facts (status,
+		// failure, retry-after) are retained so the breaker still sees a
+		// definitive upstream failure.
+		if r.Context().Err() != nil {
+			outcome.Provenance = ProvenanceClientAbort
+			outcome.ClientAborted = true
+		} else {
+			outcome.Provenance = ProvenanceDownstreamWriteError
+		}
+	} else {
+		outcome.DownstreamComplete = true
+	}
+	h.recordOutcome(r, outcome)
 }
 
 // writeDialectHTTPError renders a canonical error in the client dialect and
 // records the outcome. UpstreamFailure is derived from explicit provenance:
 // only definitive upstream outcomes (transport errors and upstream HTTP >=
-// 500) are upstream failures; local conversion errors are not.
+// 500) are upstream failures; local conversion errors are not. A failed
+// downstream write changes the recorded provenance to the downstream failure
+// (or a client abort when the context is cancelled) instead of being logged
+// and ignored.
 func (h *TranscodeHandler) writeDialectHTTPError(
 	r *http.Request,
 	w http.ResponseWriter,
@@ -877,9 +932,7 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 	provenance ExchangeProvenance,
 ) {
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
-	if err := WriteDialectHTTPError(w, client, apiErr); err != nil {
-		log.Printf("transcode: write dialect error: %v", err)
-	}
+	writeErr := WriteDialectHTTPError(w, client, apiErr)
 	upstreamFailure := false
 	switch provenance {
 	case ProvenanceUpstreamTransportError:
@@ -892,11 +945,26 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 			(apiErr.Status >= 500 && apiErr.Status < 600) ||
 			(apiErr.Status == http.StatusForbidden && apiErr.RetryAfter != "")
 	}
-	h.recordOutcome(r, Outcome{
+	outcome := Outcome{
 		Status:          apiErr.Status,
 		Provenance:      provenance,
 		UpstreamFailure: upstreamFailure,
-	})
+	}
+	if writeErr != nil {
+		// The translated error was never delivered: the exchange did not
+		// complete cleanly. Change the provenance to the downstream failure
+		// (or a client abort when the context is cancelled); retained
+		// upstream facts (status, failure) still classify the exchange.
+		if r.Context().Err() != nil {
+			outcome.Provenance = ProvenanceClientAbort
+			outcome.ClientAborted = true
+		} else {
+			outcome.Provenance = ProvenanceDownstreamWriteError
+		}
+	} else {
+		outcome.DownstreamComplete = true
+	}
+	h.recordOutcome(r, outcome)
 }
 
 // recordOutcome forwards the outcome to the proxy breaker hook and, when an
