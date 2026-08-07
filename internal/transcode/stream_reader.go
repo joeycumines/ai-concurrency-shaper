@@ -82,9 +82,9 @@ type frameConverter interface {
 //   - a converter-declared terminal batch drains completely, then the reader
 //     returns io.EOF immediately (stopAfterDrain) even when the upstream
 //     keeps the connection open after [DONE];
-//   - malformed upstream frames are skipped only while the remaining stream
-//     can still produce a valid lifecycle; a conversion error is surfaced
-//     through Read, never silently turned into success;
+//   - malformed or oversized upstream frames surface through Read as errors
+//     (with a client-dialect error event appended); they are never silently
+//     skipped or turned into success;
 //   - Err, SawTerminal, and SawErrorEvent expose the conversion state to the
 //     outcome classifier.
 type convertingReader struct {

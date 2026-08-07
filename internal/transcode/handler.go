@@ -188,8 +188,10 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reject non-identity request Content-Encoding with a dialect-correct
-	// 415. JSON-decoding compressed bytes as plain input is not adequate.
-	if r.Header.Get("Content-Encoding") != "" {
+	// 415. JSON-decoding compressed bytes as plain input is not adequate;
+	// the identity encoding is the no-op and is accepted.
+	if enc := r.Header.Get("Content-Encoding"); enc != "" &&
+		!strings.EqualFold(strings.TrimSpace(enc), "identity") {
 		apiErr := CanonicalAPIError{
 			Status:  http.StatusUnsupportedMediaType,
 			Type:    "invalid_request_error",
@@ -234,8 +236,14 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// that returns without writing to a dead connection.
 			return
 		}
+		// A decoded/rendered request that amplifies beyond the decoded-request
+		// body limit is a 413, not a generic conversion 400.
+		status := http.StatusBadRequest
+		if errors.Is(err, errDecodedRequestTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
 		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
-			http.StatusBadRequest, "convert request: "+err.Error(),
+			status, "convert request: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
 		return
 	}
@@ -350,6 +358,11 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // readRequestBody reads and bounds the client request body.
 var errRequestBodyTooLarge = errors.New("request body too large")
+
+// errDecodedRequestTooLarge marks a decoded/rendered request that amplified
+// beyond the decoded-request body limit. It renders as 413 RequestEntityTooLarge
+// in the client dialect, not the generic conversion 400 (review-j finding 15).
+var errDecodedRequestTooLarge = errors.New("decoded request exceeds the decoded-request body limit")
 
 func (h *TranscodeHandler) readRequestBody(r *http.Request) ([]byte, error) {
 	limit := h.cfg.BodyLimits.AcceptedRequestBytes
@@ -626,14 +639,15 @@ func (h *TranscodeHandler) jsonResponse(
 
 // checkDecodedRequestSize rejects decoded requests that amplify beyond the
 // decoded-request body limit (merge gate 19: the decoded limit is separate
-// from the accepted raw-body limit).
+// from the accepted raw-body limit). The typed error renders as 413 in the
+// client dialect, never the generic conversion 400.
 func (h *TranscodeHandler) checkDecodedRequestSize(rendered []byte) error {
 	limit := h.cfg.BodyLimits.DecodedRequestBytes
 	if limit <= 0 {
 		return nil
 	}
 	if int64(len(rendered)) > limit {
-		return errRequestBodyTooLarge
+		return errDecodedRequestTooLarge
 	}
 	return nil
 }

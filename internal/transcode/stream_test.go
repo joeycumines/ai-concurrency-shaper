@@ -424,6 +424,16 @@ func TestClassifyStreamObservation(t *testing.T) {
 			want: streamOutcomeUpstreamFailure,
 		},
 		{
+			name: "error event from oversized line is upstream failure",
+			obs:  streamObservation{SawErrorEvent: true, ReaderErr: &SSEBoundError{Line: true, Bound: 1024}, SawTerminal: true},
+			want: streamOutcomeUpstreamFailure,
+		},
+		{
+			name: "error event from oversized frame is upstream failure",
+			obs:  streamObservation{SawErrorEvent: true, ReaderErr: &SSEBoundError{Line: false, Bound: 1024}, SawTerminal: true},
+			want: streamOutcomeUpstreamFailure,
+		},
+		{
 			name: "error event from local conversion is local failure",
 			obs:  streamObservation{SawErrorEvent: true, ReaderErr: errors.New("convert: boom"), SawTerminal: true},
 			want: streamOutcomeLocalConversionFailure,

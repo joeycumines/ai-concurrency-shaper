@@ -299,6 +299,77 @@ func TestHandlerContentEncoding415(t *testing.T) {
 	}
 }
 
+func TestHandlerContentEncodingIdentityAccepted(t *testing.T) {
+	// The identity content encoding is the no-op and must be accepted
+	// (review-j finding 15); only non-identity encodings are unsupported.
+	mapping := responsesMapping(t)
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`,
+			)),
+		}, nil
+	})
+	for _, encoding := range []string{"identity", "Identity", " IDENTITY "} {
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/responses",
+			strings.NewReader(`{"model":"m","input":"x"}`),
+		)
+		req.Header.Set("Content-Encoding", encoding)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Content-Encoding %q: status = %d, want 200", encoding, rec.Code)
+		}
+	}
+}
+
+func TestHandlerDecodedRequestAmplification413(t *testing.T) {
+	// A decoded/rendered request that amplifies beyond the decoded-request
+	// body limit is a 413 in the client dialect, not the generic conversion
+	// 400 (review-j finding 15).
+	mapping := responsesMapping(t)
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				DecodedRequestBytes:     16,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+			ModelMap:           ModelMap{AllowIdentity: true},
+			LossPolicy:         StrictLossPolicy(),
+			AuthPolicy:         AuthPolicy{Mode: AuthNone},
+			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
+			AllowedClientQuery: map[string]struct{}{},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			t.Fatal("round trip must not be called")
+			return nil, nil
+		},
+		nil,
+	)
+	// The accepted request is small; the rendered chat request is larger
+	// than the 16-byte decoded limit.
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "decoded request") {
+		t.Fatalf("body does not explain the decoded-request limit: %s", rec.Body.String())
+	}
+}
+
 func TestHandlerUpstreamErrorDialect(t *testing.T) {
 	mapping := responsesMapping(t)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {

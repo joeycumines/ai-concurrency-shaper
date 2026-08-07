@@ -124,6 +124,15 @@ func runTranslatedStream(
 	}
 }
 
+// isSSEBoundError reports whether the error is a typed SSE line or frame
+// bound violation. An upstream that sends a line or frame beyond the
+// configured bounds has a corrupt body: the exchange is an upstream
+// body/protocol failure, never a local conversion failure.
+func isSSEBoundError(err error) bool {
+	var boundErr *SSEBoundError
+	return errors.As(err, &boundErr)
+}
+
 // streamOutcome classifies the stream into one of the outcome buckets the
 // breaker and metrics rely on.
 type streamOutcome uint8
@@ -171,14 +180,16 @@ func classifyStreamObservation(o streamObservation) streamOutcome {
 		return streamOutcomeUpstreamFailure
 	}
 	// A locally generated error event is a truncation (the upstream stopped
-	// sending — an upstream body failure) or a conversion error on a live
-	// stream (neither success nor failure, matching the non-streaming path).
+	// sending — an upstream body failure), a size violation (the upstream
+	// sent a line or frame beyond the configured bounds — an upstream
+	// body/protocol failure), or a conversion error on a live stream
+	// (neither success nor failure, matching the non-streaming path).
 	// An aborted exchange is never a failure.
 	if o.SawErrorEvent {
 		if o.ClientContextErr != nil {
 			return streamOutcomeClientAbort
 		}
-		if errors.Is(o.ReaderErr, errStreamTruncated) {
+		if errors.Is(o.ReaderErr, errStreamTruncated) || isSSEBoundError(o.ReaderErr) {
 			return streamOutcomeUpstreamFailure
 		}
 		return streamOutcomeLocalConversionFailure

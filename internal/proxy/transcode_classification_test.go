@@ -369,6 +369,96 @@ func TestClassifyTranscodeExchangeSuppressibleAbort(t *testing.T) {
 	}
 }
 
+// TestProxyTranscodeOversizedSSEFatalNotShortenedSuccess proves that an
+// oversized SSE frame (part of a tool call) followed by a valid terminal
+// frame terminates the exchange with a client-dialect error event classified
+// as an upstream body/protocol failure: breaker failure recorded, phantom
+// hold applied, and the terminal frame can never turn the stream into a
+// shortened success (review-j finding 3).
+func TestProxyTranscodeOversizedSSEFatalNotShortenedSuccess(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Part of a tool call in a data line beyond the configured line
+		// bound, followed by a valid terminal chunk and [DONE].
+		_, _ = io.WriteString(
+			w,
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"f\",\"arguments\":\""+
+				strings.Repeat("x", 4096)+
+				"\"}}]}}]}\n\n"+
+				"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"+
+				"data: [DONE]\n\n",
+		)
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker := j2Breaker(t)
+	before := breaker.Stats()
+
+	pattern, err := route.Parse("POST /v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(upstream.URL)
+	mapping := testResponsesMapping(t)
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(breaker),
+		WithTranscodeMapping(TranscodeMapping{
+			Mapping: mapping,
+			BodyLimits: transcode.BodyLimits{
+				SSELineBytes:  1024,
+				SSEFrameBytes: 1024,
+			},
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req1 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x","stream":true}`),
+	)
+	rec1 := httptest.NewRecorder()
+	p.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("request 1 status = %d, want 200", rec1.Code)
+	}
+	body1 := rec1.Body.String()
+	if !strings.Contains(body1, `"type":"error"`) {
+		t.Fatalf("downstream stream has no error event: %q", body1)
+	}
+	if !strings.Contains(body1, "SSE line exceeds") {
+		t.Fatalf("error event does not report the size violation: %q", body1)
+	}
+	if strings.Contains(body1, "response.completed") {
+		t.Fatalf("oversized frame was skipped and the stream ended as a shortened success: %q", body1)
+	}
+	if got := breaker.Stats().TotalFailures; got != before.TotalFailures+1 {
+		t.Fatalf("size violation not recorded as upstream failure: before=%d after=%d", before.TotalFailures, got)
+	}
+
+	// The upstream body/protocol failure holds the slot (phantom hold).
+	start := time.Now()
+	req2 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"y","stream":true}`),
+	)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	wait := time.Since(start)
+	t.Logf("second request wait after SSE size violation: %v", wait)
+	if wait < 400*time.Millisecond {
+		t.Fatalf("phantom hold not applied to SSE size violation: wait %v", wait)
+	}
+}
+
 // TestProxyTranscodeAbortNotCleanCompletion proves that a client-aborted
 // transcode exchange is never counted as a clean completion: IncProxied does
 // not fire, the journal marks the entry aborted without ResponseComplete, and

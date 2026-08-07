@@ -128,19 +128,52 @@ func TestReadSSEEventEOFWithPendingFrame(t *testing.T) {
 	}
 }
 
-func TestReadSSEEventOversizedLineSkipped(t *testing.T) {
-	// A line exceeding maxSSELineBytes drains the frame; the following valid
-	// frame still parses.
+func TestReadSSEEventOversizedLineFatal(t *testing.T) {
+	// A line exceeding maxSSELineBytes is fatal for the exchange: the typed
+	// size error is returned and a following valid frame is never parsed
+	// (review-j finding 3: a valid terminal event must not turn a size
+	// violation into a shortened successful stream).
 	var builder strings.Builder
 	builder.WriteString("data: ")
 	builder.WriteString(strings.Repeat("x", maxSSELineBytes))
 	builder.WriteString("\ndata: extra\n\ndata: ok\n\n")
-	events, err := readAllEvents(t, builder.String())
-	if err != nil {
-		t.Fatal(err)
+	reader := bufio.NewReader(strings.NewReader(builder.String()))
+	_, err := readSSEEvent(reader)
+	if err == nil {
+		t.Fatal("oversized line did not fail the read")
 	}
-	if len(events) != 1 || string(events[0].Data) != "ok" {
-		t.Fatalf("events = %+v", events)
+	var boundErr *SSEBoundError
+	if !errors.As(err, &boundErr) {
+		t.Fatalf("error = %T %v, want *SSEBoundError", err, err)
+	}
+	if !boundErr.Line || boundErr.Bound != maxSSELineBytes {
+		t.Fatalf("bound error = %+v, want line bound %d", boundErr, maxSSELineBytes)
+	}
+}
+
+func TestReadSSEEventOversizedFrameFatal(t *testing.T) {
+	// A frame payload exceeding maxSSEFrameBytes is fatal: the typed size
+	// error is returned immediately and a following valid terminal frame is
+	// never parsed. Each data line fits the line bound; the joined payload
+	// exceeds the frame bound.
+	const perLine = maxSSEFrameBytes * 3 / 4 // 768 KiB: fits the line bound
+	var builder strings.Builder
+	builder.WriteString("data: ")
+	builder.WriteString(strings.Repeat("x", perLine))
+	builder.WriteString("\ndata: ")
+	builder.WriteString(strings.Repeat("y", perLine))
+	builder.WriteString("\n\ndata: ok\n\n")
+	reader := bufio.NewReader(strings.NewReader(builder.String()))
+	_, err := readSSEEvent(reader)
+	if err == nil {
+		t.Fatal("oversized frame did not fail the read")
+	}
+	var boundErr *SSEBoundError
+	if !errors.As(err, &boundErr) {
+		t.Fatalf("error = %T %v, want *SSEBoundError", err, err)
+	}
+	if boundErr.Line || boundErr.Bound != maxSSEFrameBytes {
+		t.Fatalf("bound error = %+v, want frame bound %d", boundErr, maxSSEFrameBytes)
 	}
 }
 
