@@ -18,6 +18,19 @@ import (
 // errChatStreamDone marks the [DONE] sentinel of a Chat stream.
 var errChatStreamDone = errors.New("chat stream [DONE] sentinel")
 
+// errChatDoneBeforeTerminal builds the typed upstream error returned when
+// the [DONE] sentinel arrives before any terminal condition. The sentinel
+// itself decides the result: the exchange is an upstream body failure and
+// the reader must stop immediately rather than wait on an upstream that
+// keeps the connection open after [DONE] (review-k finding 1).
+func errChatDoneBeforeTerminal() error {
+	return &StreamConversionError{
+		Cause:      errors.New("chat stream [DONE] before a terminal condition"),
+		Provenance: ProvenanceUpstreamBodyError,
+		Status:     http.StatusOK,
+	}
+}
+
 // pendingToolCall buffers Chat tool-call fragments until call ID and function
 // name are both known, per the review: do not emit an incomplete
 // function_call output_item.added and hope a later delta supplies identity.
@@ -527,6 +540,11 @@ func (s *chatResponsesStreamState) convertToolCall(
 	// carries an EMPTY argument string — never an invented complete object
 	// (review-j finding 6): the arguments arrive through deltas and the done
 	// event.
+	//
+	// The emitted item is a fresh value constructed here, never the pending
+	// call: later fragments mutate only the pendingToolCall (callID, name,
+	// builders), so the added event is already a detached snapshot and needs
+	// no copy (review-k finding 1, function-call arm).
 	if !pending.started && pending.callID != "" && pending.name != "" {
 		pending.itemID = s.ctx.IDs.New("fc_")
 		pending.started = true
@@ -555,27 +573,38 @@ func (s *chatResponsesStreamState) convertToolCall(
 	return events, nil
 }
 
-// openMessageItem opens a new message output item.
 // openMessageItem opens a new message output item and returns the
-// output_item.added event that must be emitted before any part event.
+// output_item.added event that must be emitted before any part event. The
+// event carries a DETACHED snapshot of the message as it exists at creation:
+// the live item accumulates content and status through later deltas, and
+// sharing the pointer would leak that mutation into the already-emitted
+// output_item.added frame (review-k finding 1).
 func (s *chatResponsesStreamState) openMessageItem() ([]ResponsesSSEEvent, error) {
+	message := &ResponsesOutputMessage{
+		ID:      s.ctx.IDs.New("msg_"),
+		Type:    "message",
+		Role:    "assistant",
+		Status:  ResponsesItemInProgress,
+		Content: ResponsesOutputContentParts{},
+	}
 	item := openResponsesItem{
 		outputIndex:   s.itemIndex,
 		openPartIndex: -1,
-		item: &ResponsesOutputMessage{
-			ID:      s.ctx.IDs.New("msg_"),
-			Type:    "message",
-			Role:    "assistant",
-			Status:  ResponsesItemInProgress,
-			Content: ResponsesOutputContentParts{},
-		},
+		item:          message,
 	}
 	s.itemIndex++
 	s.items = append(s.items, item)
+
+	// The snapshot must never alias the live content slice: the live item's
+	// Content is appended to by openMessageItemForPartWithEvents before the
+	// batch is marshaled. The remaining scalar fields were copied by the
+	// struct assignment above and never change for the lifetime of the item.
+	snapshot := *message
+	snapshot.Content = ResponsesOutputContentParts{}
 	return []ResponsesSSEEvent{
 		s.builder.OutputItemAdded(
 			item.outputIndex,
-			item.item,
+			&snapshot,
 		),
 	}, nil
 }

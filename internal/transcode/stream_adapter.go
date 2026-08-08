@@ -27,10 +27,16 @@ func (c *chatToResponsesConverter) Convert(
 ) (convertedBatch, error) {
 	chunk, err := chatStreamChunkFromSSE(frame)
 	if errors.Is(err, errChatStreamDone) {
-		// [DONE] releases the held terminal batch and stops the reader.
+		// [DONE] is the protocol terminal: release the held terminal batch
+		// and stop the reader. A [DONE] before any terminal condition is a
+		// truncation the sentinel itself decides: the typed error is
+		// returned so the exchange classifies as an upstream body failure
+		// and the reader stops immediately — never an empty successful
+		// batch that would wait on an upstream keeping the connection open
+		// after [DONE] (review-k finding 1).
 		held, ok := c.state.releaseTerminal()
 		if !ok {
-			return convertedBatch{}, nil
+			return convertedBatch{}, errChatDoneBeforeTerminal()
 		}
 		batch, err := marshalResponsesEvents(held)
 		batch.Terminal = true
@@ -189,7 +195,22 @@ func (c *chatToAnthropicConverter) Convert(
 ) (convertedBatch, error) {
 	chunk, err := chatStreamChunkFromSSE(frame)
 	if errors.Is(err, errChatStreamDone) {
-		return c.releaseTerminals()
+		// [DONE] is the protocol terminal: release the held terminal (which
+		// flows through the Anthropic state machine) or fail immediately. A
+		// [DONE] before any terminal condition is a truncation the sentinel
+		// itself decides: the typed error is returned so the exchange
+		// classifies as an upstream body failure and the reader stops
+		// immediately — never an empty non-terminal batch that would wait
+		// on an upstream keeping the connection open after [DONE] (review-k
+		// finding 1).
+		batch, releaseErr := c.releaseTerminals()
+		if releaseErr != nil {
+			return convertedBatch{}, releaseErr
+		}
+		if batch.Terminal || len(batch.Events) > 0 {
+			return batch, nil
+		}
+		return convertedBatch{}, errChatDoneBeforeTerminal()
 	}
 	if err != nil {
 		return convertedBatch{}, err
