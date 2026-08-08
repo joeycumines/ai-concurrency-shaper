@@ -1785,3 +1785,43 @@ func TestBreaker_RetryAfterHTTPDate(t *testing.T) {
 		t.Errorf("penalty with Retry-After=3600s and MaxPenalty=5s = %v, want 5s", p)
 	}
 }
+
+// TestBreaker_PenaltyDurationFormula pins the exact implemented formula with
+// a table over consecutive failure counts: BasePenalty * (1 + consecutive),
+// so zero consecutive failures already yields one base unit and the first
+// recorded failure yields two (review-j finding 16).
+func TestBreaker_PenaltyDurationFormula(t *testing.T) {
+	const base = 2 * time.Second
+	const maxPenalty = 7 * time.Second
+
+	tests := []struct {
+		name     string
+		failures int
+		want     time.Duration
+	}{
+		{"zero consecutive", 0, base},
+		{"first failure", 1, 2 * base},
+		{"second consecutive", 2, 3 * base},
+		// Cap: base * (1 + 4) = 10s exceeds maxPenalty.
+		{"cap at four consecutive", 4, maxPenalty},
+		{"far beyond the cap", 20, maxPenalty},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := New(WithBasePenalty(base), WithMaxPenalty(maxPenalty))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range tt.failures {
+				b.RecordFailure(500, 0, time.Time{}, 0)
+			}
+			if got := b.PenaltyDuration(); got != tt.want {
+				t.Fatalf("PenaltyDuration after %d failures = %v, want %v", tt.failures, got, tt.want)
+			}
+			stats := b.Stats()
+			if stats.ConsecutiveFailures != int64(tt.failures) {
+				t.Fatalf("consecutive = %d, want %d", stats.ConsecutiveFailures, tt.failures)
+			}
+		})
+	}
+}
