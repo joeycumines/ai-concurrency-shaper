@@ -118,7 +118,7 @@ func TestBuildTranscodeMappings(t *testing.T) {
 		UpstreamPath:     "/v1/upstream",
 	}}
 
-	none, err := buildTranscodeMappings(nil, false, false, false)
+	none, err := buildTranscodeMappings(nil, false, false, false, transcode.StrictLossPolicy())
 	if err != nil {
 		t.Fatalf("no flags: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestBuildTranscodeMappings(t *testing.T) {
 		t.Errorf("no flags: mappings = %+v, want none", none)
 	}
 
-	all, err := buildTranscodeMappings([]proxy.TranscodeMapping{explicit}, true, false, true)
+	all, err := buildTranscodeMappings([]proxy.TranscodeMapping{explicit}, true, false, true, transcode.StrictLossPolicy())
 	if err != nil {
 		t.Fatalf("all flags: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestBuildTranscodeMappings(t *testing.T) {
 
 	// The messages->chat preset maps the same client route as messages->
 	// responses, so they are mutually exclusive; messages-chat alone works.
-	withChat, err := buildTranscodeMappings(nil, false, true, false)
+	withChat, err := buildTranscodeMappings(nil, false, true, false, transcode.StrictLossPolicy())
 	if err != nil {
 		t.Fatalf("messages-chat: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestBuildTranscodeMappings(t *testing.T) {
 		t.Errorf("messages-chat = %+v", withChat)
 	}
 
-	single, err := buildTranscodeMappings(nil, true, false, false)
+	single, err := buildTranscodeMappings(nil, true, false, false, transcode.StrictLossPolicy())
 	if err != nil {
 		t.Fatalf("responses-chat: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestBuildTranscodeMappings(t *testing.T) {
 // TestBuildTranscodeMappingsConflict verifies enabling both Messages presets
 // fails before proxy.New runs.
 func TestBuildTranscodeMappingsConflict(t *testing.T) {
-	_, err := buildTranscodeMappings(nil, false, true, true)
+	_, err := buildTranscodeMappings(nil, false, true, true, transcode.StrictLossPolicy())
 	if err == nil {
 		t.Fatal("expected both-messages-preset conflict")
 	}
@@ -288,5 +288,27 @@ func TestParseTranscodeAuthExternalSignerRejectedAtStartup(t *testing.T) {
 		t.Fatal("expected external-signer rejection without a signer")
 	} else if !strings.Contains(err.Error(), "requires a signer") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestBuildTranscodeMappingsAppliesLossPolicy proves the CLI loss policy is
+// applied to every mapping, so messages-client streaming can approve
+// usage_timing (review-j finding 14 / J15 gate).
+func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
+	policy := transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+		transcode.FeatureUsageTiming: {},
+	}}
+	mappings, err := buildTranscodeMappings(nil, false, true, false, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d", len(mappings))
+	}
+	if !mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureUsageTiming) {
+		t.Fatal("loss policy not applied to the mapping")
+	}
+	if mappings[0].Mapping.LossPolicy.Allows(transcode.FeaturePhase) {
+		t.Fatal("loss policy leaks unapproved features")
 	}
 }

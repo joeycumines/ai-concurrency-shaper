@@ -77,6 +77,37 @@ func StrictLossPolicy() LossPolicy {
 	return LossPolicy{Allowed: make(map[Feature]struct{})}
 }
 
+// ParseLossFeatures parses comma- or space-separated feature names into a
+// map for a LossPolicy, rejecting unknown names (review-j finding 14: a
+// misconfigured loss policy fails at startup, never on the first request).
+func ParseLossFeatures(names ...string) (map[Feature]struct{}, error) {
+	known := map[Feature]struct{}{}
+	for _, feature := range []Feature{
+		FeatureDeveloperRole, FeatureStructuredOutput, FeatureParallelToolCalls,
+		FeatureStopSequences, FeatureImageInput, FeatureDocumentInput,
+		FeatureConversationState, FeatureReasoningSummary,
+		FeatureProviderReasoning, FeatureAuthenticatedThinking, FeatureTopK,
+		FeatureLogprobs, FeatureServiceTier, FeatureUsageTiming,
+		FeatureToolResultError, FeaturePhase, FeatureReasoningSummaryRequest,
+		FeatureResponsesControls,
+	} {
+		known[feature] = struct{}{}
+	}
+	allowed := make(map[Feature]struct{})
+	for _, name := range names {
+		for _, part := range strings.FieldsFunc(name, func(r rune) bool {
+			return r == ',' || r == ' '
+		}) {
+			feature := Feature(part)
+			if _, ok := known[feature]; !ok {
+				return nil, fmt.Errorf("unknown loss feature %q", part)
+			}
+			allowed[feature] = struct{}{}
+		}
+	}
+	return allowed, nil
+}
+
 // Allows reports whether the policy permits losing the feature.
 func (p LossPolicy) Allows(feature Feature) bool {
 	_, ok := p.Allowed[feature]

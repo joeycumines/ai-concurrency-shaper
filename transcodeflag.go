@@ -129,10 +129,13 @@ const httpMethodPost = "POST"
 
 // buildTranscodeMappings combines the repeatable -transcode-route values with
 // the preset flags, in that order. Enabling both Messages presets is a
-// conflict because they register the same client route.
+// conflict because they register the same client route. lossPolicy is
+// applied to every mapping (the default strict policy rejects any
+// non-portable feature).
 func buildTranscodeMappings(
 	routes []proxy.TranscodeMapping,
 	responsesChat, messagesChat, messagesResponses bool,
+	lossPolicy transcode.LossPolicy,
 ) ([]proxy.TranscodeMapping, error) {
 	if messagesChat && messagesResponses {
 		return nil, fmt.Errorf(
@@ -140,37 +143,45 @@ func buildTranscodeMappings(
 		)
 	}
 
+	lossMapping := func(m transcode.Mapping) proxy.TranscodeMapping {
+		m.LossPolicy = lossPolicy
+		return proxy.TranscodeMapping{Mapping: m}
+	}
+
 	var mappings []proxy.TranscodeMapping
-	mappings = append(mappings, routes...)
+	for _, route := range routes {
+		route.Mapping.LossPolicy = lossPolicy
+		mappings = append(mappings, route)
+	}
 	if responsesChat {
-		mappings = append(mappings, proxy.TranscodeMapping{Mapping: transcode.Mapping{
+		mappings = append(mappings, lossMapping(transcode.Mapping{
 			ClientRoute:      mustRouteKey(httpMethodPost, "/v1/responses"),
 			ClientProtocol:   transcode.ClientResponses,
 			UpstreamProtocol: transcode.UpstreamChatCompletions,
 			UpstreamPath:     "/v1/chat/completions",
 			ModelMap:         transcode.ModelMap{AllowIdentity: true},
 			Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
-		}})
+		}))
 	}
 	if messagesChat {
-		mappings = append(mappings, proxy.TranscodeMapping{Mapping: transcode.Mapping{
+		mappings = append(mappings, lossMapping(transcode.Mapping{
 			ClientRoute:      mustRouteKey(httpMethodPost, "/v1/messages"),
 			ClientProtocol:   transcode.ClientMessages,
 			UpstreamProtocol: transcode.UpstreamChatCompletions,
 			UpstreamPath:     "/v1/chat/completions",
 			ModelMap:         transcode.ModelMap{AllowIdentity: true},
 			Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
-		}})
+		}))
 	}
 	if messagesResponses {
-		mappings = append(mappings, proxy.TranscodeMapping{Mapping: transcode.Mapping{
+		mappings = append(mappings, lossMapping(transcode.Mapping{
 			ClientRoute:      mustRouteKey(httpMethodPost, "/v1/messages"),
 			ClientProtocol:   transcode.ClientMessages,
 			UpstreamProtocol: transcode.UpstreamResponses,
 			UpstreamPath:     "/v1/responses",
 			ModelMap:         transcode.ModelMap{AllowIdentity: true},
 			Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
-		}})
+		}))
 	}
 	return mappings, nil
 }
@@ -273,4 +284,16 @@ func secretSource(source string) (transcode.SecretSource, error) {
 			source,
 		)
 	}
+}
+
+// transcodeLossFlags accumulates repeatable -transcode-allow-loss values.
+type transcodeLossFlags []string
+
+func (f transcodeLossFlags) String() string {
+	return strings.Join(f, ",")
+}
+
+func (f *transcodeLossFlags) Set(v string) error {
+	*f = append(*f, v)
+	return nil
 }

@@ -121,6 +121,7 @@ func run() error {
 		transcodeModels            transcodeModelFlags
 		transcodeMaxRequestMB      int64
 		transcodeMaxResponseMB     int64
+		transcodeAllowLoss         transcodeLossFlags
 	)
 
 	flag.StringVar(&bindAddr, "bind", ":8080", "listen address")
@@ -164,6 +165,7 @@ func run() error {
 	// finding 14). The programmatic AuthExternalSigner mode remains for API
 	// users who can provide one.
 	flag.StringVar(&transcodeAuth, "transcode-auth", "auto", "upstream authentication mode: auto, none, bearer, x-api-key, api-key, header")
+	flag.Var(&transcodeAllowLoss, "transcode-allow-loss", "loss features the transcoder may drop (repeatable, comma/space separated); the default strict policy rejects every non-portable feature, so e.g. messages-client streaming requires usage_timing")
 	flag.StringVar(&transcodeAuthSource, "transcode-auth-source", "inbound", "upstream secret source: inbound, env:NAME, file:PATH")
 	flag.StringVar(&transcodeAuthHeader, "transcode-auth-header", "", "custom authentication header name (with -transcode-auth header)")
 	flag.StringVar(&transcodeAnthropicVersion, "transcode-anthropic-version", "2023-06-01", "Anthropic-Version header value for Messages upstreams")
@@ -296,7 +298,12 @@ func run() error {
 	// Wire transcoding mappings: repeatable -transcode-route values plus the
 	// preset flags. Both Messages presets conflict and are rejected before
 	// proxy.New runs.
-	mappings, err := buildTranscodeMappings(transcodeRoutes, transcodeResponsesChat, transcodeMessagesChat, transcodeMessagesResponses)
+	lossAllowed, err := transcode.ParseLossFeatures(transcodeAllowLoss...)
+	if err != nil {
+		log.Fatalf("invalid -transcode-allow-loss: %v", err)
+	}
+	lossPolicy := transcode.LossPolicy{Allowed: lossAllowed}
+	mappings, err := buildTranscodeMappings(transcodeRoutes, transcodeResponsesChat, transcodeMessagesChat, transcodeMessagesResponses, lossPolicy)
 	if err != nil {
 		return err
 	}
