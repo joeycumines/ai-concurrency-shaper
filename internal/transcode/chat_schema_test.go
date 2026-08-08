@@ -44,19 +44,34 @@ func TestChatResponseCurrentShapeStrictDecodes(t *testing.T) {
 // (logprobs null, service tier absent), and that the presence of the pinned
 // attributes enters the explicit loss/reject decision under both policies.
 func TestChatResponseCurrentShapeConverts(t *testing.T) {
-	// The normal transcoded case: no service tier, no logprobs — strict
-	// conversion succeeds.
+	// The normal transcoded case: no service tier, no logprobs. The
+	// Responses render requires the usage breakdown detail objects (pinned
+	// contract) and the Messages render additionally requires the
+	// cache-creation component — the source provided neither, so both
+	// renders enter the usage-timing loss decision: strict rejects, an
+	// approved usage_timing loss converts (review-k finding 6).
 	response, err := DecodeChatResponse([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`), ChatCapabilities{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	context := testExchangeContext()
 	context.RequestedClientModel = "m"
-	if _, _, err := RenderResponsesResponse(response, context); err != nil {
-		t.Fatalf("responses render with absent attributes: %v", err)
+	if _, _, err := RenderResponsesResponse(response, context); err == nil {
+		t.Fatal("strict policy accepted a Responses render with unknown usage breakdowns")
 	}
-	if _, _, err := RenderMessagesResponse(response, context); err != nil {
-		t.Fatalf("messages render with absent attributes: %v", err)
+	if _, _, err := RenderMessagesResponse(response, context); err == nil {
+		t.Fatal("strict policy accepted a Messages render with unknown usage breakdowns")
+	}
+	usagePermissive := testExchangeContext()
+	usagePermissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageTiming: {},
+	}}
+	usagePermissive.RequestedClientModel = "m"
+	if _, _, err := RenderResponsesResponse(response, usagePermissive); err != nil {
+		t.Fatalf("responses render with approved usage loss: %v", err)
+	}
+	if _, _, err := RenderMessagesResponse(response, usagePermissive); err != nil {
+		t.Fatalf("messages render with approved usage loss: %v", err)
 	}
 
 	// service_tier present: strict policy rejects, permissive policy
@@ -74,6 +89,7 @@ func TestChatResponseCurrentShapeConverts(t *testing.T) {
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
 		FeatureServiceTier: {},
+		FeatureUsageTiming: {},
 	}}
 	permissive.RequestedClientModel = "m"
 	if _, _, err := RenderResponsesResponse(response, permissive); err != nil {
@@ -104,7 +120,8 @@ func TestChatResponseTypedLogprobsLossDecision(t *testing.T) {
 	}
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureLogprobs: {},
+		FeatureLogprobs:    {},
+		FeatureUsageTiming: {},
 	}}
 	permissive.RequestedClientModel = "m"
 	if _, _, err := RenderMessagesResponse(response, permissive); err != nil {

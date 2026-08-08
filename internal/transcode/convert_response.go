@@ -227,21 +227,37 @@ func DecodeChatResponse(
 	if choice.LogProbs != nil {
 		response.ChatLogProbs = true
 	}
-	if wire.Usage != nil {
+	// Usage. The Known flags reflect the shadow's explicit presence: the
+	// Chat usage totals are modeled omitempty (defensively — the pinned
+	// contract marks them required, so a conforming upstream always sends
+	// them, but presence is distinguishable only through the probe;
+	// review-k finding 6). Cache-write tokens are not part of the pinned
+	// Chat contract, so CacheWriteKnown stays false: a Messages render must
+	// loss-gate the required cache-creation component instead of silently
+	// emitting zero.
+	if shadow.Usage != nil {
 		response.Usage = CanonicalUsage{
-			InputTokens:     int64(wire.Usage.PromptTokens),
-			OutputTokens:    int64(wire.Usage.CompletionTokens),
-			InputKnown:      true,
-			OutputKnown:     true,
-			CacheReadKnown:  wire.Usage.PromptTokensDetails != nil,
-			ReasoningKnown:  wire.Usage.CompletionTokensDetails != nil,
-			CacheWriteKnown: false, // cache-write tokens are not part of the pinned Chat contract
+			CacheReadKnown:  shadow.Usage.PromptTokensDetails != nil,
+			ReasoningKnown:  shadow.Usage.CompletionTokensDetails != nil,
+			CacheWriteKnown: false,
 		}
-		if wire.Usage.PromptTokensDetails != nil {
-			response.Usage.CacheReadTokens = int64(wire.Usage.PromptTokensDetails.CachedTokens)
+		if shadow.Usage.PromptTokens != nil {
+			response.Usage.InputTokens = int64(*shadow.Usage.PromptTokens)
+			response.Usage.InputKnown = true
 		}
-		if wire.Usage.CompletionTokensDetails != nil {
-			response.Usage.ReasoningTokens = int64(wire.Usage.CompletionTokensDetails.ReasoningTokens)
+		if shadow.Usage.CompletionTokens != nil {
+			response.Usage.OutputTokens = int64(*shadow.Usage.CompletionTokens)
+			response.Usage.OutputKnown = true
+		}
+		if shadow.Usage.TotalTokens != nil {
+			response.Usage.TotalTokens = int64(*shadow.Usage.TotalTokens)
+			response.Usage.TotalKnown = true
+		}
+		if shadow.Usage.PromptTokensDetails != nil {
+			response.Usage.CacheReadTokens = int64(shadow.Usage.PromptTokensDetails.CachedTokens)
+		}
+		if shadow.Usage.CompletionTokensDetails != nil {
+			response.Usage.ReasoningTokens = int64(shadow.Usage.CompletionTokensDetails.ReasoningTokens)
 		}
 	}
 
@@ -471,8 +487,10 @@ func DecodeResponsesResponse(
 		response.Usage = CanonicalUsage{
 			InputTokens:     envelope.Usage.InputTokens,
 			OutputTokens:    envelope.Usage.OutputTokens,
+			TotalTokens:     envelope.Usage.TotalTokens,
 			InputKnown:      true,
 			OutputKnown:     true,
+			TotalKnown:      true,
 			CacheReadKnown:  envelope.Usage.InputTokensDetails != nil,
 			ReasoningKnown:  envelope.Usage.OutputTokensDetails != nil,
 			CacheWriteKnown: false, // cache-write tokens are not part of the pinned Responses contract
@@ -740,19 +758,48 @@ func RenderResponsesResponse(
 
 	// Usage.
 	// Usage is emitted only when the source provided it: unknown usage is
-	// never fabricated as zero facts (review-j finding 9). The cached and
-	// reasoning breakdowns are mapped from the canonical fields.
+	// never fabricated as zero facts (review-j finding 9). The pinned
+	// Responses contract requires the breakdown detail objects on the usage
+	// object (openai-go v1.12.0 response.go): a component the source did not
+	// provide is a usage-timing loss (approved or rejected per the exchange
+	// policy), never a silent zero — omitting the required field would just
+	// move the fabricated zero into the client's defaulting (review-k
+	// finding 6). The total is the source's own when provided, otherwise
+	// derived from the parts.
 	if !response.Usage.Unknown() {
 		envelope.Usage = &ResponsesUsage{
 			InputTokens:  response.Usage.InputTokens,
 			OutputTokens: response.Usage.OutputTokens,
 			TotalTokens:  response.Usage.InputTokens + response.Usage.OutputTokens,
-			InputTokensDetails: &UsageInputTokensDetails{
-				CachedTokens: response.Usage.CacheReadTokens,
-			},
-			OutputTokensDetails: &UsageOutputTokensDetails{
-				ReasoningTokens: response.Usage.ReasoningTokens,
-			},
+		}
+		if response.Usage.TotalKnown {
+			envelope.Usage.TotalTokens = response.Usage.TotalTokens
+		}
+		var unknown []string
+		if !response.Usage.CacheReadKnown {
+			unknown = append(unknown, "input_tokens_details.cached_tokens")
+		}
+		if !response.Usage.ReasoningKnown {
+			unknown = append(unknown, "output_tokens_details.reasoning_tokens")
+		}
+		if !response.Usage.InputKnown || !response.Usage.OutputKnown {
+			unknown = append(unknown, "input_tokens or output_tokens")
+		}
+		if len(unknown) > 0 {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureUsageTiming,
+				"usage",
+				"the upstream response did not provide "+strings.Join(unknown, ", ")+"; the required Responses usage cannot be reproduced",
+			); err != nil {
+				return nil, report, err
+			}
+		}
+		envelope.Usage.InputTokensDetails = &UsageInputTokensDetails{
+			CachedTokens: response.Usage.CacheReadTokens,
+		}
+		envelope.Usage.OutputTokensDetails = &UsageOutputTokensDetails{
+			ReasoningTokens: response.Usage.ReasoningTokens,
 		}
 	}
 
@@ -1000,11 +1047,47 @@ func RenderMessagesResponse(
 		); err != nil {
 			return nil, report, err
 		}
-		// The Messages wire contract requires the usage object; under an
-		// approved loss the zeros are a documented approximation, never a
-		// silent fabrication.
-		out.Usage = &AnthropicUsage{}
+		// The Messages wire contract requires the usage object AND its
+		// output_tokens_details; under an approved loss the zeros are a
+		// documented approximation, never a silent fabrication.
+		out.Usage = &AnthropicUsage{
+			OutputTokensDetails: &AnthropicOutputTokensDetails{},
+		}
 	} else {
+		// The Messages wire requires cache_creation_input_tokens,
+		// cache_read_input_tokens, and output_tokens_details.thinking_tokens
+		// on the usage object: every component the source did not provide is
+		// a usage-timing loss (approved or rejected per the exchange policy),
+		// never a silent zero (review-k finding 6). Cache-write tokens are
+		// not part of the pinned Chat/Responses contract, so CacheWriteKnown
+		// stays false and the cache-creation component always enters this
+		// decision.
+		var unknown []string
+		if !response.Usage.InputKnown {
+			unknown = append(unknown, "input_tokens")
+		}
+		if !response.Usage.CacheReadKnown {
+			unknown = append(unknown, "cache_read_input_tokens")
+		}
+		if !response.Usage.CacheWriteKnown {
+			unknown = append(unknown, "cache_creation_input_tokens")
+		}
+		if !response.Usage.OutputKnown {
+			unknown = append(unknown, "output_tokens")
+		}
+		if !response.Usage.ReasoningKnown {
+			unknown = append(unknown, "output_tokens_details.thinking_tokens")
+		}
+		if len(unknown) > 0 {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureUsageTiming,
+				"usage",
+				"the upstream response did not provide "+strings.Join(unknown, ", ")+"; the required Messages usage cannot be reproduced",
+			); err != nil {
+				return nil, report, err
+			}
+		}
 		inputTokens := response.Usage.InputTokens
 		cached := response.Usage.CacheReadTokens + response.Usage.CacheWriteTokens
 		if inputTokens < 0 || cached < 0 || inputTokens-cached < 0 {
@@ -1013,7 +1096,7 @@ func RenderMessagesResponse(
 			)
 		}
 		// output_tokens_details is required on the wire for known usage; the
-		// thinking breakdown is zero when the source did not provide it,
+		// thinking breakdown is zero only after the loss decision above,
 		// matching the stream path.
 		out.Usage = &AnthropicUsage{
 			InputTokens:              int(inputTokens - cached),

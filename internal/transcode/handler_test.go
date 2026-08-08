@@ -619,6 +619,7 @@ func TestHandlerMessagesToResponsesJSON(t *testing.T) {
 				FeatureTopK:              {},
 				FeatureReasoningSummary:  {},
 				FeatureConversationState: {},
+				FeatureUsageTiming:       {},
 			}},
 			AuthPolicy:         AuthPolicy{Mode: AuthNone},
 			AllowedClientQuery: map[string]struct{}{},
@@ -678,6 +679,7 @@ func TestHandlerMessagesToChatJSON(t *testing.T) {
 				FeatureTopK:              {},
 				FeatureReasoningSummary:  {},
 				FeatureConversationState: {},
+				FeatureUsageTiming:       {},
 			}},
 			AuthPolicy:         AuthPolicy{Mode: AuthNone},
 			AllowedClientQuery: map[string]struct{}{},
@@ -1073,6 +1075,7 @@ func TestHandlerAuthApplied(t *testing.T) {
 			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
 				FeatureReasoningSummary:  {},
 				FeatureConversationState: {},
+				FeatureUsageTiming:       {},
 			}},
 			AuthPolicy: AuthPolicy{
 				Mode:             AuthBearer,

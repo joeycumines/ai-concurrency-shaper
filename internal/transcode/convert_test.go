@@ -590,6 +590,7 @@ func TestRenderMessagesResponseReasoningLoss(t *testing.T) {
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
 		FeatureReasoningSummary:  {},
 		FeatureConversationState: {},
+		FeatureUsageTiming:       {},
 	}}
 	if _, _, err := RenderMessagesResponse(response, context); err != nil {
 		t.Fatalf("render with approved loss: %v", err)
@@ -608,6 +609,7 @@ func TestRenderMessagesResponseFromResponses(t *testing.T) {
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
 		FeatureReasoningSummary:  {},
 		FeatureConversationState: {},
+		FeatureUsageTiming:       {},
 	}}
 	rendered, _, err := RenderMessagesResponse(response, context)
 	if err != nil {

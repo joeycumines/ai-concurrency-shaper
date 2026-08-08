@@ -55,8 +55,15 @@ func testResponsesMapping(t *testing.T) transcode.Mapping {
 		ClientProtocol:   transcode.ClientResponses,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
-		ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
+		// The pinned Responses usage requires the breakdown detail objects
+		// the Chat source may not provide (review-k finding 6): the test
+		// fixtures' usage lacks them, so the shared mapping permits the
+		// usage-timing loss.
+		LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+			transcode.FeatureUsageTiming: {},
+		}},
+		ModelMap: transcode.ModelMap{AllowIdentity: true},
+		Auth:     transcode.AuthPolicy{Mode: transcode.AuthNone},
 	}
 }
 

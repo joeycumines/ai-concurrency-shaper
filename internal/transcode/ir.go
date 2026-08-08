@@ -252,25 +252,29 @@ const (
 // CanonicalUsage is the token usage of a canonical response. Breakdown
 // fields are zero when the source did not provide them; the Known flags
 // distinguish a real zero from an unknown value, so a renderer never
-// fabricates zeros as fact (review-j finding 9).
+// fabricates zeros as fact (review-j finding 9). TotalTokens carries the
+// source's own total when provided (TotalKnown); renderers derive the total
+// from the parts only when the source total is unknown (review-k finding 6).
 type CanonicalUsage struct {
 	InputTokens      int64
 	CacheReadTokens  int64
 	CacheWriteTokens int64
 	OutputTokens     int64
 	ReasoningTokens  int64
+	TotalTokens      int64
 
 	InputKnown      bool
 	CacheReadKnown  bool
 	CacheWriteKnown bool
 	OutputKnown     bool
 	ReasoningKnown  bool
+	TotalKnown      bool
 }
 
 // Unknown reports whether no usage value was provided by the source at all.
 func (u CanonicalUsage) Unknown() bool {
 	return !u.InputKnown && !u.OutputKnown &&
-		!u.CacheReadKnown && !u.CacheWriteKnown && !u.ReasoningKnown
+		!u.CacheReadKnown && !u.CacheWriteKnown && !u.ReasoningKnown && !u.TotalKnown
 }
 
 // CanonicalResponseStatus is the lifecycle status of a canonical response.

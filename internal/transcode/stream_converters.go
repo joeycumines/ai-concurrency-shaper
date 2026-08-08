@@ -104,6 +104,12 @@ type chatResponsesStreamState struct {
 	// terminal envelope is appended at release by the [DONE] frame or
 	// FinalizeEOF.
 	heldTerminal []ResponsesSSEEvent
+
+	// usageComponentsLossRecorded gates the required-usage-component loss
+	// (review-k finding 6): the pinned Responses usage requires the breakdown
+	// detail objects the Chat source may not provide, and the decision is
+	// recorded exactly once per stream.
+	usageComponentsLossRecorded bool
 }
 
 // wireError marks a conversion error as corrupt upstream Chat wire data: the
@@ -139,6 +145,34 @@ func newChatResponsesStreamState(
 		echo:         echo,
 		pendingCalls: make(map[int]*pendingToolCall),
 	}
+}
+
+// loseUnknownUsageComponentsOnce records the usage-timing loss exactly once
+// per stream when a wire-required Responses usage component is unknown on
+// the Chat source: the pinned Responses usage requires the breakdown detail
+// objects, and they are unknown when the chunk omits them. Zeros are never
+// emitted silently (review-k finding 6).
+func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLMUsage) error {
+	if s.usageComponentsLossRecorded || usage == nil {
+		return nil
+	}
+	var unknown []string
+	if usage.PromptTokensDetails == nil {
+		unknown = append(unknown, "input_tokens_details.cached_tokens")
+	}
+	if usage.CompletionTokensDetails == nil {
+		unknown = append(unknown, "output_tokens_details.reasoning_tokens")
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	s.usageComponentsLossRecorded = true
+	return s.report.Lose(
+		s.policy,
+		FeatureUsageTiming,
+		"usage",
+		"the upstream response did not provide "+strings.Join(unknown, ", ")+"; the required Responses usage breakdown cannot be reproduced",
+	)
 }
 
 // Convert processes one Chat stream chunk into Responses events.
@@ -185,6 +219,9 @@ func (s *chatResponsesStreamState) Convert(
 					return nil, err
 				}
 			}
+			if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
+				return nil, err
+			}
 			s.usage = chatUsageToResponsesUsage(chunk.Usage)
 			return nil, nil
 		}
@@ -229,6 +266,9 @@ func (s *chatResponsesStreamState) Convert(
 	}
 
 	if chunk.Usage != nil {
+		if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
+			return nil, err
+		}
 		s.usage = chatUsageToResponsesUsage(chunk.Usage)
 	}
 
@@ -886,6 +926,11 @@ func (o *openResponsesItem) isMessage() bool {
 	return ok
 }
 
+// chatUsageToResponsesUsage converts a Chat chunk usage into the Responses
+// form. The pinned Responses contract requires the breakdown detail objects;
+// the call sites gate the unknown components through
+// loseUnknownUsageComponentsOnce before this runs, so the zeros below are
+// emitted only after the explicit usage-timing loss (review-k finding 6).
 func chatUsageToResponsesUsage(usage *ChatLLMUsage) *ResponsesUsage {
 	if usage == nil {
 		return nil
@@ -1006,6 +1051,12 @@ type anthropicResponsesStreamState struct {
 	// reasoningLossRecorded ensures the reasoning loss is recorded exactly
 	// once per stream (review-j finding 7).
 	reasoningLossRecorded bool
+
+	// usageComponentsLossRecorded gates the required-usage-component loss
+	// (review-k finding 6): the Messages wire requires breakdown fields the
+	// Responses source never provides, and the decision is recorded exactly
+	// once per stream.
+	usageComponentsLossRecorded bool
 
 	// phaseGated tracks the output items whose phase already entered the
 	// loss decision, so a phase-bearing item seen both in output_item.added
@@ -1143,6 +1194,36 @@ func (s *anthropicResponsesStreamState) Convert(
 	}
 }
 
+// loseUnknownUsageComponentsOnce records the usage-timing loss exactly once
+// per stream when a wire-required Messages usage component is unknown on the
+// source: cache_creation_input_tokens is never part of the pinned Responses
+// contract, and cache_read_input_tokens / thinking_tokens are unknown when
+// their detail objects are absent. Zeros are never emitted silently
+// (review-k finding 6).
+func (s *anthropicResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ResponsesUsage) error {
+	if s.usageComponentsLossRecorded || usage == nil {
+		return nil
+	}
+	var unknown []string
+	if usage.InputTokensDetails == nil {
+		unknown = append(unknown, "cache_read_input_tokens")
+	}
+	unknown = append(unknown, "cache_creation_input_tokens")
+	if usage.OutputTokensDetails == nil {
+		unknown = append(unknown, "output_tokens_details.thinking_tokens")
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	s.usageComponentsLossRecorded = true
+	return s.report.Lose(
+		s.policy,
+		FeatureUsageTiming,
+		"usage",
+		"the upstream response did not provide "+strings.Join(unknown, ", ")+"; the required Messages usage breakdown cannot be reproduced",
+	)
+}
+
 func (s *anthropicResponsesStreamState) messageStart(
 	envelope ResponseEnvelope,
 ) ([]AnthropicStreamEvent, error) {
@@ -1168,6 +1249,12 @@ func (s *anthropicResponsesStreamState) messageStart(
 		return nil, err
 	}
 	if usage != nil {
+		// The required Messages breakdown components the source did not
+		// provide enter the loss decision before the zeros are emitted
+		// (review-k finding 6).
+		if err := s.loseUnknownUsageComponentsOnce(envelope.Usage); err != nil {
+			return nil, err
+		}
 		s.message.Usage = usage
 		s.usage = usage
 	} else {
@@ -1183,7 +1270,12 @@ func (s *anthropicResponsesStreamState) messageStart(
 		); err != nil {
 			return nil, err
 		}
-		s.message.Usage = &AnthropicUsage{}
+		// The Messages wire requires output_tokens_details on the usage
+		// object: the zeros are emitted only after the approved loss above
+		// (review-k finding 6).
+		s.message.Usage = &AnthropicUsage{
+			OutputTokensDetails: &AnthropicOutputTokensDetails{},
+		}
 	}
 	return []AnthropicStreamEvent{{
 		Type:    AnthropicStreamEventTypeMessageStart,
@@ -1682,6 +1774,12 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 		return err
 	}
 	if converted != nil {
+		// The required Messages breakdown components the source did not
+		// provide enter the loss decision before the zeros are emitted
+		// (review-k finding 6); gated once per stream.
+		if err := s.loseUnknownUsageComponentsOnce(usage); err != nil {
+			return err
+		}
 		s.message.Usage = converted
 		s.usage = converted
 	}
@@ -1697,7 +1795,12 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 		); err != nil {
 			return err
 		}
-		s.usage = &AnthropicUsage{}
+		// The Messages wire requires output_tokens_details on the usage
+		// object: the zeros are emitted only after the approved loss above
+		// (review-k finding 6).
+		s.usage = &AnthropicUsage{
+			OutputTokensDetails: &AnthropicOutputTokensDetails{},
+		}
 	}
 	return nil
 }

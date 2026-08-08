@@ -66,10 +66,18 @@ func TestResponsesEnvelopeControlsAbsentNoLoss(t *testing.T) {
 	if len(response.ResponsesControls) != 0 {
 		t.Fatalf("controls = %v, want none", response.ResponsesControls)
 	}
-	strict := testExchangeContext()
-	strict.RequestedClientModel = "m"
-	if _, _, err := RenderMessagesResponse(response, strict); err != nil {
-		t.Fatalf("strict render with no controls: %v", err)
+	// The usage breakdown is fully known (both detail objects present), but
+	// cache-creation is never part of the pinned Responses contract: the
+	// Messages render enters the usage-timing loss decision (review-k
+	// finding 6). The controls are absent — that is the property under
+	// test.
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageTiming: {},
+	}}
+	context.RequestedClientModel = "m"
+	if _, _, err := RenderMessagesResponse(response, context); err != nil {
+		t.Fatalf("render with no controls: %v", err)
 	}
 }
 
@@ -134,6 +142,12 @@ func TestResponsesEchoInstructionsStringArm(t *testing.T) {
 		t.Fatal(err)
 	}
 	context := testExchangeContext()
+	// The pinned Responses usage requires the breakdown detail objects the
+	// source did not provide: the render enters the usage-timing loss
+	// decision (review-k finding 6).
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageTiming: {},
+	}}
 	context.OriginalResponsesRequest = echo
 	context.RequestedClientModel = "m"
 	rendered, _, err := RenderResponsesResponse(CanonicalResponse{
@@ -332,10 +346,15 @@ func int64Ptr(v int64) *int64 { return &v }
 // once — the gate must not latch on a control-free first envelope
 // (review-j finding 13).
 func TestStreamingEnvelopeControlsLateAppearance(t *testing.T) {
-	// Strict: the late controls must reject the stream.
+	// Strict for controls: the usage-timing loss (the required
+	// cache-creation breakdown the Responses source never provides,
+	// review-k finding 6) must be allowed so the created envelope passes and
+	// the late controls are the only rejection.
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		StrictLossPolicy(),
+		LossPolicy{Allowed: map[Feature]struct{}{
+			FeatureUsageTiming: {},
+		}},
 		"msg_1",
 		"claude-x",
 		1,
