@@ -229,11 +229,14 @@ func (m AnthropicMessage) Validate() error {
 	return m.Content.Validate()
 }
 
-// AnthropicTool is a tool definition in an Anthropic request.
+// AnthropicTool is a tool definition in an Anthropic request. InputSchema is
+// the raw schema JSON: it is validated as exactly one JSON object at the
+// canonical-IR boundary and passed through byte-exact, so numbers are never
+// decoded and remarshaled through a map (review-k finding 2).
 type AnthropicTool struct {
-	Name        string         `json:"name"`
-	Description *string        `json:"description,omitempty"`
-	InputSchema map[string]any `json:"input_schema,omitempty"`
+	Name        string          `json:"name"`
+	Description *string         `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema,omitempty"`
 }
 
 // Validate checks the tool shape.

@@ -138,12 +138,15 @@ const (
 	ChatToolTypeFunction ChatToolType = "function"
 )
 
-// ChatToolFunction is the function definition of a function tool.
+// ChatToolFunction is the function definition of a function tool. Parameters
+// is the raw schema JSON: it is validated as exactly one JSON object at the
+// canonical-IR boundary and passed through byte-exact, so numbers are never
+// decoded and remarshaled through a map (review-k finding 2).
 type ChatToolFunction struct {
-	Name        string         `json:"name"`
-	Description *string        `json:"description,omitempty"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
-	Strict      *bool          `json:"strict,omitempty"`
+	Name        string          `json:"name"`
+	Description *string         `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
 // ChatTool is a tool definition in a chat completion request.
@@ -333,11 +336,14 @@ const (
 )
 
 // ChatJSONSchemaFormat is the json_schema arm payload of response_format.
+// Schema is the raw schema JSON: it is validated as exactly one JSON object
+// at the canonical-IR boundary and passed through byte-exact, so numbers are
+// never decoded and remarshaled through a map (review-k finding 2).
 type ChatJSONSchemaFormat struct {
-	Name        string         `json:"name"`
-	Description *string        `json:"description,omitempty"`
-	Schema      map[string]any `json:"schema,omitempty"`
-	Strict      *bool          `json:"strict,omitempty"`
+	Name        string          `json:"name"`
+	Description *string         `json:"description,omitempty"`
+	Schema      json.RawMessage `json:"schema,omitempty"`
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
 // ChatResponseFormat is the response_format union of the official Chat

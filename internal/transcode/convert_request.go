@@ -119,10 +119,22 @@ func DecodeResponsesRequest(
 	result.Request.Metadata = envelope.Metadata
 
 	// Tools. Only function tools are supported; built-in tools are a typed
-	// unsupported feature.
+	// unsupported feature. The raw parameters schema is validated as exactly
+	// one JSON object at this boundary; its bytes are preserved, never
+	// decoded and remarshaled through a map, so large integers, decimals,
+	// and exponents survive byte-exact (review-k finding 2).
 	for i, tool := range envelope.Tools {
 		if err := tool.Validate(); err != nil {
 			return DecodeResult{}, nil, fmt.Errorf("responses tools[%d]: %w", i, err)
+		}
+		if len(tool.Parameters) > 0 {
+			if _, err := decodeJSONObject(string(tool.Parameters)); err != nil {
+				return DecodeResult{}, nil, fmt.Errorf(
+					"responses tools[%d] parameters: %w",
+					i,
+					err,
+				)
+			}
 		}
 		result.Request.Tools = append(result.Request.Tools, CanonicalTool{
 			Name:        tool.Name,
@@ -151,6 +163,12 @@ func DecodeResponsesRequest(
 			if len(format.Schema) == 0 {
 				return DecodeResult{}, nil, errors.New(
 					"responses text.format json_schema has no schema",
+				)
+			}
+			if _, err := decodeJSONObject(string(format.Schema)); err != nil {
+				return DecodeResult{}, nil, fmt.Errorf(
+					"responses text.format schema: %w",
+					err,
 				)
 			}
 			strict := format.Strict != nil && *format.Strict
@@ -642,14 +660,20 @@ func DecodeMessagesRequest(
 		})
 	}
 
-	// Tools.
+	// Tools. The input_schema raw bytes are preserved — validated as exactly
+	// one JSON object at this boundary, never decoded and remarshaled through
+	// a map, so large integers, decimals, and exponents survive byte-exact
+	// (review-k finding 2).
 	for i, tool := range envelope.Tools {
 		if err := tool.Validate(); err != nil {
 			return DecodeResult{}, fmt.Errorf("messages tools[%d]: %w", i, err)
 		}
-		schema, err := json.Marshal(tool.InputSchema)
-		if err != nil {
-			return DecodeResult{}, fmt.Errorf("messages tools[%d]: %w", i, err)
+		if _, err := decodeJSONObject(string(tool.InputSchema)); err != nil {
+			return DecodeResult{}, fmt.Errorf(
+				"messages tools[%d] input_schema: %w",
+				i,
+				err,
+			)
 		}
 		description := ""
 		if tool.Description != nil {
@@ -658,7 +682,7 @@ func DecodeMessagesRequest(
 		result.Request.Tools = append(result.Request.Tools, CanonicalTool{
 			Name:        tool.Name,
 			Description: description,
-			JSONSchema:  schema,
+			JSONSchema:  tool.InputSchema,
 		})
 	}
 
@@ -1185,21 +1209,19 @@ func RenderChatRequest(
 		}
 	}
 
-	// Tools.
+	// Tools. The canonical schema is passed through byte-exact: it was
+	// validated as exactly one JSON object at decode, so no
+	// decode-and-remarshal round trip can corrupt its numbers (review-k
+	// finding 2). An absent schema is omitted, matching the source's
+	// presence.
 	for _, tool := range request.Tools {
-		var parameters map[string]any
-		if len(tool.JSONSchema) > 0 {
-			if err := json.Unmarshal(tool.JSONSchema, &parameters); err != nil {
-				return nil, report, fmt.Errorf("tool %q parameters: %w", tool.Name, err)
-			}
-		}
 		description := tool.Description
 		out.Tools = append(out.Tools, ChatTool{
 			Type: ChatToolTypeFunction,
 			Function: &ChatToolFunction{
 				Name:        tool.Name,
 				Description: &description,
-				Parameters:  parameters,
+				Parameters:  tool.JSONSchema,
 				Strict:      tool.Strict,
 			},
 		})
@@ -1258,19 +1280,14 @@ func RenderChatRequest(
 				return nil, report, err
 			}
 		} else {
-			schema := request.StructuredOutput.Schema
-			var schemaMap map[string]any
-			if len(schema) > 0 {
-				if err := json.Unmarshal(schema, &schemaMap); err != nil {
-					return nil, report, fmt.Errorf("structured output schema: %w", err)
-				}
-			}
+			// The canonical schema is passed through byte-exact (validated
+			// as exactly one JSON object at decode; review-k finding 2).
 			out.ResponseFormat = &ChatResponseFormat{
 				Type: ChatResponseFormatJSONSchema,
 				JSONSchema: &ChatJSONSchemaFormat{
 					Name:        request.StructuredOutput.Name,
 					Description: &request.StructuredOutput.Description,
-					Schema:      schemaMap,
+					Schema:      request.StructuredOutput.Schema,
 					Strict:      boolPtr(request.StructuredOutput.Strict),
 				},
 			}
