@@ -325,6 +325,47 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+// UpstreamWireError is returned when the SOURCE wire is malformed or
+// self-contradictory — corrupt upstream protocol data: invalid JSON, an
+// envelope violating the protocol contract, mismatched stream identity,
+// illegal lifecycle transitions, or malformed tool arguments. Such an
+// exchange is an upstream failure (breaker penalty and slot protection).
+// Valid source features this transcoder does not support remain
+// UnsupportedFeatureError — a local conversion result — and are never
+// wrapped in this type (review-k finding 3).
+type UpstreamWireError struct {
+	// Protocol is the upstream protocol whose wire data is corrupt.
+	Protocol UpstreamProtocol
+	// Status is the upstream HTTP response status when known (streams
+	// always carry 200; non-streaming decodes leave it zero and the handler
+	// records the actual response status).
+	Status int
+	// Cause is the underlying decode or state-validation failure.
+	Cause error
+}
+
+func (e *UpstreamWireError) Error() string {
+	if e.Cause == nil {
+		return "upstream wire error"
+	}
+	return e.Cause.Error()
+}
+
+func (e *UpstreamWireError) Unwrap() error { return e.Cause }
+
+// upstreamWireError wraps cause as corrupt upstream wire data. A cause that
+// is or carries an UnsupportedFeatureError is NEVER wrapped: a valid source
+// feature this transcoder knows but does not support is a local conversion
+// result, and the typed error is passed through untouched so no classification
+// point can mistake it for corrupt wire (review-k finding 3).
+func upstreamWireError(protocol UpstreamProtocol, status int, cause error) error {
+	var unsupported *UnsupportedFeatureError
+	if errors.As(cause, &unsupported) {
+		return cause
+	}
+	return &UpstreamWireError{Protocol: protocol, Status: status, Cause: cause}
+}
+
 // StreamConversionError is a typed conversion error carrying provenance and
 // the upstream response status, so the exchange classification never relies
 // on error-string matching (review-j finding 11).

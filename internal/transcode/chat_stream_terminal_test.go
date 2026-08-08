@@ -231,15 +231,18 @@ func assertPrematureDoneResult(
 	if readErr == nil || errors.Is(readErr, io.EOF) {
 		t.Fatalf("read err = %v, want the premature-[DONE] typed error", readErr)
 	}
-	var convErr *StreamConversionError
-	if !errors.As(readErr, &convErr) {
-		t.Fatalf("read err = %T %v, want *StreamConversionError", readErr, readErr)
+	var wireErr *UpstreamWireError
+	if !errors.As(readErr, &wireErr) {
+		t.Fatalf("read err = %T %v, want *UpstreamWireError", readErr, readErr)
 	}
-	if convErr.Provenance != ProvenanceUpstreamBodyError {
-		t.Fatalf("provenance = %v, want upstream_body_error", convErr.Provenance)
+	if wireErr.Protocol != UpstreamChatCompletions {
+		t.Fatalf("protocol = %v, want chat completions", wireErr.Protocol)
 	}
-	if convErr.Status != http.StatusOK {
-		t.Fatalf("status = %d, want 200", convErr.Status)
+	if wireErr.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", wireErr.Status)
+	}
+	if !strings.Contains(wireErr.Error(), "chat stream [DONE] before a terminal condition") {
+		t.Fatalf("error = %q", wireErr.Error())
 	}
 	if !reader.SawUpstreamErrorFrame() {
 		t.Fatal("premature [DONE] not marked as an upstream error frame")
@@ -334,12 +337,12 @@ func TestChatStreamComposedPrematureDone(t *testing.T) {
 	if _, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")}); err == nil {
 		t.Fatal("[DONE] before a terminal condition accepted")
 	} else {
-		var convErr *StreamConversionError
-		if !errors.As(err, &convErr) {
-			t.Fatalf("err = %T %v, want *StreamConversionError", err, err)
+		var wireErr *UpstreamWireError
+		if !errors.As(err, &wireErr) {
+			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
-		if convErr.Provenance != ProvenanceUpstreamBodyError {
-			t.Fatalf("provenance = %v, want upstream_body_error", convErr.Provenance)
+		if wireErr.Protocol != UpstreamChatCompletions {
+			t.Fatalf("protocol = %v, want chat completions", wireErr.Protocol)
 		}
 	}
 
@@ -374,9 +377,9 @@ func TestChatStreamComposedPrematureDone(t *testing.T) {
 	if readErr == nil || errors.Is(readErr, io.EOF) {
 		t.Fatalf("read err = %v, want the premature-[DONE] typed error", readErr)
 	}
-	var convErr *StreamConversionError
-	if !errors.As(readErr, &convErr) || convErr.Provenance != ProvenanceUpstreamBodyError {
-		t.Fatalf("read err = %T %v, want the typed upstream truncation error", readErr, readErr)
+	var wireErr *UpstreamWireError
+	if !errors.As(readErr, &wireErr) || wireErr.Protocol != UpstreamChatCompletions {
+		t.Fatalf("read err = %T %v, want the typed upstream wire error", readErr, readErr)
 	}
 	if !reader.SawUpstreamErrorFrame() {
 		t.Fatal("premature [DONE] not marked as an upstream error frame")

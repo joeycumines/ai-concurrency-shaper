@@ -688,6 +688,19 @@ func (h *TranscodeHandler) checkDecodedRequestSize(rendered []byte) error {
 	return nil
 }
 
+// conversionProvenance classifies a response-conversion error: corrupt
+// upstream wire data (UpstreamWireError) is an upstream body failure; valid
+// source features the transcoder does not support (UnsupportedFeatureError),
+// loss-policy rejections, and target-render failures stay local (review-k
+// finding 3).
+func conversionProvenance(err error) ExchangeProvenance {
+	var wireErr *UpstreamWireError
+	if errors.As(err, &wireErr) {
+		return ProvenanceUpstreamBodyError
+	}
+	return ProvenanceLocalResponseConversionError
+}
+
 // convertResponse decodes the upstream JSON response into the canonical IR
 // and renders the client response envelope. The output dialect is determined
 // by the CLIENT protocol, never by the upstream protocol.
@@ -703,11 +716,11 @@ func (h *TranscodeHandler) convertResponse(
 		case UpstreamChatCompletions:
 			response, err := DecodeChatResponse(body, h.cfg.ChatCapabilities)
 			if err != nil {
-				return nil, ProvenanceLocalResponseConversionError, err
+				return nil, conversionProvenance(err), err
 			}
 			converted, report, err := RenderResponsesResponse(response, context)
 			if err != nil {
-				return nil, ProvenanceLocalResponseConversionError, err
+				return nil, conversionProvenance(err), err
 			}
 			logConversionReport(report, r)
 			return converted, ProvenanceLocalResponseConversionError, nil
@@ -723,11 +736,11 @@ func (h *TranscodeHandler) convertResponse(
 		case UpstreamChatCompletions:
 			response, err := DecodeChatResponse(body, h.cfg.ChatCapabilities)
 			if err != nil {
-				return nil, ProvenanceLocalResponseConversionError, err
+				return nil, conversionProvenance(err), err
 			}
 			converted, report, err := RenderMessagesResponse(response, context)
 			if err != nil {
-				return nil, ProvenanceLocalResponseConversionError, err
+				return nil, conversionProvenance(err), err
 			}
 			logConversionReport(report, r)
 			return converted, ProvenanceLocalResponseConversionError, nil
@@ -735,11 +748,11 @@ func (h *TranscodeHandler) convertResponse(
 		case UpstreamResponses:
 			response, err := DecodeResponsesResponse(body)
 			if err != nil {
-				return nil, ProvenanceLocalResponseConversionError, err
+				return nil, conversionProvenance(err), err
 			}
 			converted, report, err := RenderMessagesResponse(response, context)
 			if err != nil {
-				return nil, ProvenanceLocalResponseConversionError, err
+				return nil, conversionProvenance(err), err
 			}
 			logConversionReport(report, r)
 			return converted, ProvenanceLocalResponseConversionError, nil

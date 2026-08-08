@@ -463,12 +463,16 @@ func TestHandlerLocalConversion502NotUpstreamFailure(t *testing.T) {
 			AuthPolicy: AuthPolicy{Mode: AuthNone},
 		},
 		func(req *http.Request) (*http.Response, error) {
-			// Upstream returns a 200 with malformed JSON for the client
-			// dialect.
+			// Upstream returns a 200 with a VALID Chat response whose
+			// finish_reason is outside the supported subset: a
+			// known-but-unsupported feature is a local conversion failure,
+			// never an upstream failure (review-k finding 3).
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body:       io.NopCloser(strings.NewReader(`{"not":"chat"}`)),
+				Body: io.NopCloser(strings.NewReader(
+					`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"weird","message":{"role":"assistant","content":"x"}}]}`,
+				)),
 			}, nil
 		},
 		func(o Outcome) { outcomes = append(outcomes, o) },
@@ -493,6 +497,58 @@ func TestHandlerLocalConversion502NotUpstreamFailure(t *testing.T) {
 	}
 	if outcomes[0].UpstreamFailure {
 		t.Fatal("local conversion must not be an upstream failure")
+	}
+}
+
+// TestHandlerCorruptUpstreamResponseIsUpstreamFailure proves the review-k
+// finding-3 counterexample: a 200 response that is not a valid instance of
+// the supported Chat subset (here: an object that is not a chat completion
+// at all) is corrupt upstream wire — recorded as an upstream body failure
+// with UpstreamFailure=true, never a local conversion failure.
+func TestHandlerCorruptUpstreamResponseIsUpstreamFailure(t *testing.T) {
+	mapping := responsesMapping(t)
+	var outcomes []Outcome
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+			ModelMap:   ModelMap{AllowIdentity: true},
+			LossPolicy: StrictLossPolicy(),
+			AuthPolicy: AuthPolicy{Mode: AuthNone},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"not":"chat"}`)),
+			}, nil
+		},
+		func(o Outcome) { outcomes = append(outcomes, o) },
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	// The client still receives a dialect-correct error; only the recorded
+	// provenance and breaker accounting differ from a local failure.
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("outcomes = %d", len(outcomes))
+	}
+	if outcomes[0].Provenance != ProvenanceUpstreamBodyError {
+		t.Fatalf("provenance = %s, want upstream_body_error", outcomes[0].Provenance)
+	}
+	if !outcomes[0].UpstreamFailure {
+		t.Fatal("corrupt upstream wire must be an upstream failure")
 	}
 }
 

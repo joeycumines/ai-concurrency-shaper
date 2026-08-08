@@ -695,14 +695,17 @@ func TestProxyTranscodeBreakerClientCancelNoPhantomSuccess(t *testing.T) {
 
 // TestProxyTranscodeLocalConversion502NotFailure verifies that a local
 // conversion 502 is recorded as neither success nor failure on the breaker.
+// The fixture is a VALID Chat response whose finish_reason is outside the
+// supported subset — a known-but-unsupported feature stays local (review-k
+// finding 3).
 func TestProxyTranscodeLocalConversion502NotFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		// Malformed JSON for the client dialect: the upstream returned a 200
-		// with a Chat response that lacks required fields, so the local
+		// The upstream returned a 200 with a valid Chat response whose
+		// finish_reason the transcoder does not support, so the local
 		// conversion fails.
-		_, _ = w.Write([]byte(`{"not":"chat"}`))
+		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"weird","message":{"role":"assistant","content":"x"}}]}`))
 	}))
 	t.Cleanup(upstream.Close)
 

@@ -22,26 +22,47 @@ func DecodeChatResponse(
 ) (CanonicalResponse, error) {
 	var wire ChatResponse
 	if err := strictDecode(body, &wire); err != nil {
-		return CanonicalResponse{}, fmt.Errorf("chat response: %w", err)
+		// A strict decode failure — malformed JSON, a type-corrupt value, or
+		// data outside the modeled surface — is corrupt upstream wire, an
+		// upstream failure (review-k finding 3). Valid features the
+		// transcoder knows but does not support are rejected as
+		// UnsupportedFeatureError (local) instead.
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			fmt.Errorf("chat response: %w", err),
+		)
 	}
 	if len(wire.Choices) == 0 {
-		return CanonicalResponse{}, errors.New(
-			"chat response has no choices",
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			errors.New("chat response has no choices"),
 		)
 	}
 	if len(wire.Choices) > 1 {
-		return CanonicalResponse{}, errors.New(
-			"chat response has more than one choice; the transcoder requires n=1",
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			errors.New("chat response has more than one choice; the transcoder requires n=1"),
 		)
 	}
 
 	choice := wire.Choices[0]
 	message := choice.Message
 	if message == nil {
-		return CanonicalResponse{}, errors.New("chat response choice has no message")
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			errors.New("chat response choice has no message"),
+		)
 	}
 	if err := message.Validate(); err != nil {
-		return CanonicalResponse{}, fmt.Errorf("chat response message: %w", err)
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			fmt.Errorf("chat response message: %w", err),
+		)
 	}
 
 	response := CanonicalResponse{
@@ -139,10 +160,19 @@ func chatMessageToCanonicalParts(
 						Feature:  "image_url",
 					}
 				default:
-					return nil, fmt.Errorf(
-						"chat message content block %d: unknown type %q",
-						i,
-						block.Type,
+					// An unknown content block type is outside the modeled
+					// surface: corrupt wire (an upstream failure). Known
+					// features the transcoder does not support — image_url
+					// above, unknown finish_reason values in DecodeChatResponse
+					// — are typed UnsupportedFeatureError and stay local.
+					return nil, upstreamWireError(
+						UpstreamChatCompletions,
+						0,
+						fmt.Errorf(
+							"chat message content block %d: unknown type %q",
+							i,
+							block.Type,
+						),
 					)
 				}
 			}
@@ -168,7 +198,11 @@ func chatMessageToCanonicalParts(
 
 		for i, call := range message.ToolCalls {
 			if call.ID == nil || *call.ID == "" {
-				return nil, fmt.Errorf("chat tool call %d has no id", i)
+				return nil, upstreamWireError(
+					UpstreamChatCompletions,
+					0,
+					fmt.Errorf("chat tool call %d has no id", i),
+				)
 			}
 			name := ""
 			if call.Function.Name != nil {
@@ -182,7 +216,11 @@ func chatMessageToCanonicalParts(
 			}
 			decoded, err := decodeJSONObject(arguments)
 			if err != nil {
-				return nil, fmt.Errorf("chat tool call %d arguments: %w", i, err)
+				return nil, upstreamWireError(
+					UpstreamChatCompletions,
+					0,
+					fmt.Errorf("chat tool call %d arguments: %w", i, err),
+				)
 			}
 			parts = append(parts, CanonicalFunctionCall{
 				CallID:    *call.ID,
@@ -203,7 +241,16 @@ func DecodeResponsesResponse(
 ) (CanonicalResponse, error) {
 	var envelope ResponseEnvelope
 	if err := strictDecode(body, &envelope); err != nil {
-		return CanonicalResponse{}, fmt.Errorf("responses response: %w", err)
+		// A strict decode failure — malformed JSON, a type-corrupt value, or
+		// data outside the modeled surface — is corrupt upstream wire, an
+		// upstream failure (review-k finding 3). Valid features the
+		// transcoder knows but does not support are rejected as
+		// UnsupportedFeatureError (local) instead.
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamResponses,
+			0,
+			fmt.Errorf("responses response: %w", err),
+		)
 	}
 
 	response := CanonicalResponse{
@@ -324,10 +371,14 @@ func DecodeResponsesResponse(
 			flushResultTurn()
 			arguments, err := decodeJSONObject(value.Arguments)
 			if err != nil {
-				return CanonicalResponse{}, fmt.Errorf(
-					"output item %d function call arguments: %w",
-					i,
-					err,
+				return CanonicalResponse{}, upstreamWireError(
+					UpstreamResponses,
+					0,
+					fmt.Errorf(
+						"output item %d function call arguments: %w",
+						i,
+						err,
+					),
 				)
 			}
 			assistantParts = append(assistantParts, CanonicalFunctionCall{

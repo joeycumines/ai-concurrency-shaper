@@ -3,6 +3,7 @@ package transcode
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
 )
 
 // frameConverters adapt the typed stream state machines to the
@@ -111,8 +112,10 @@ func (c *responsesToAnthropicConverter) Convert(
 		if c.state.sawTerminal {
 			return convertedBatch{Terminal: true}, nil
 		}
-		return convertedBatch{}, errors.New(
-			"responses stream [DONE] before a terminal condition",
+		return convertedBatch{}, upstreamWireError(
+			UpstreamResponses,
+			http.StatusOK,
+			errors.New("responses stream [DONE] before a terminal condition"),
 		)
 	}
 
@@ -122,7 +125,11 @@ func (c *responsesToAnthropicConverter) Convert(
 	}
 	// Validate the SSE event name equals the JSON type.
 	if err := validateEventNameMatchesJSONType(frame); err != nil {
-		return convertedBatch{}, err
+		return convertedBatch{}, upstreamWireError(
+			UpstreamResponses,
+			http.StatusOK,
+			err,
+		)
 	}
 
 	anthropicEvents, err := c.state.Convert(event)
@@ -286,7 +293,7 @@ func decodeResponsesSSEEvent(data []byte) (ResponsesSSEEvent, error) {
 		Type string `json:"type"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
-		return nil, err
+		return nil, upstreamWireError(UpstreamResponses, http.StatusOK, err)
 	}
 
 	var event ResponsesSSEEvent
@@ -340,10 +347,10 @@ func decodeResponsesSSEEvent(data []byte) (ResponsesSSEEvent, error) {
 	}
 
 	if err := strictDecode(data, event); err != nil {
-		return nil, err
+		return nil, upstreamWireError(UpstreamResponses, http.StatusOK, err)
 	}
 	if err := event.Validate(); err != nil {
-		return nil, err
+		return nil, upstreamWireError(UpstreamResponses, http.StatusOK, err)
 	}
 
 	// Return by value so the value-type switches in the state machines match.

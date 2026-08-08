@@ -18,17 +18,17 @@ import (
 // errChatStreamDone marks the [DONE] sentinel of a Chat stream.
 var errChatStreamDone = errors.New("chat stream [DONE] sentinel")
 
-// errChatDoneBeforeTerminal builds the typed upstream error returned when
-// the [DONE] sentinel arrives before any terminal condition. The sentinel
-// itself decides the result: the exchange is an upstream body failure and
-// the reader must stop immediately rather than wait on an upstream that
-// keeps the connection open after [DONE] (review-k finding 1).
+// errChatDoneBeforeTerminal builds the typed upstream wire error returned
+// when the [DONE] sentinel arrives before any terminal condition. The
+// sentinel itself decides the result: the exchange is an upstream body
+// failure and the reader must stop immediately rather than wait on an
+// upstream that keeps the connection open after [DONE] (review-k finding 1).
 func errChatDoneBeforeTerminal() error {
-	return &StreamConversionError{
-		Cause:      errors.New("chat stream [DONE] before a terminal condition"),
-		Provenance: ProvenanceUpstreamBodyError,
-		Status:     http.StatusOK,
-	}
+	return upstreamWireError(
+		UpstreamChatCompletions,
+		http.StatusOK,
+		errors.New("chat stream [DONE] before a terminal condition"),
+	)
 }
 
 // pendingToolCall buffers Chat tool-call fragments until call ID and function
@@ -106,6 +106,20 @@ type chatResponsesStreamState struct {
 	heldTerminal []ResponsesSSEEvent
 }
 
+// wireError marks a conversion error as corrupt upstream Chat wire data: the
+// exchange classifies as an upstream failure, never a local conversion
+// failure (review-k finding 3).
+func (s *chatResponsesStreamState) wireError(err error) error {
+	return upstreamWireError(UpstreamChatCompletions, http.StatusOK, err)
+}
+
+// wireError marks a conversion error as corrupt upstream Responses wire
+// data: the exchange classifies as an upstream failure, never a local
+// conversion failure (review-k finding 3).
+func (s *anthropicResponsesStreamState) wireError(err error) error {
+	return upstreamWireError(UpstreamResponses, http.StatusOK, err)
+}
+
 func newChatResponsesStreamState(
 	ctx *ExchangeContext,
 	policy LossPolicy,
@@ -148,18 +162,18 @@ func (s *chatResponsesStreamState) Convert(
 		// chunk.
 		if chunk.Usage != nil && len(chunk.Choices) == 0 {
 			if chunk.ID != "" && s.chunkID != "" && chunk.ID != s.chunkID {
-				return nil, fmt.Errorf(
+				return nil, s.wireError(fmt.Errorf(
 					"chat stream chunk id %q does not match the first chunk id %q",
 					chunk.ID,
 					s.chunkID,
-				)
+				))
 			}
 			if chunk.Model != "" && s.chunkModel != "" && chunk.Model != s.chunkModel {
-				return nil, fmt.Errorf(
+				return nil, s.wireError(fmt.Errorf(
 					"chat stream chunk model %q does not match the first chunk model %q",
 					chunk.Model,
 					s.chunkModel,
-				)
+				))
 			}
 			if chunk.ServiceTier != nil {
 				if err := s.report.Lose(
@@ -174,7 +188,7 @@ func (s *chatResponsesStreamState) Convert(
 			s.usage = chatUsageToResponsesUsage(chunk.Usage)
 			return nil, nil
 		}
-		return nil, errors.New("chat stream chunk after finish_reason")
+		return nil, s.wireError(errors.New("chat stream chunk after finish_reason"))
 	}
 
 	var events []ResponsesSSEEvent
@@ -199,18 +213,18 @@ func (s *chatResponsesStreamState) Convert(
 		// Stable chunk identity across the stream: a mismatched id or model
 		// is an upstream protocol error (review-j finding 6).
 		if chunk.ID != "" && s.chunkID != "" && chunk.ID != s.chunkID {
-			return nil, fmt.Errorf(
+			return nil, s.wireError(fmt.Errorf(
 				"chat stream chunk id %q does not match the first chunk id %q",
 				chunk.ID,
 				s.chunkID,
-			)
+			))
 		}
 		if chunk.Model != "" && s.chunkModel != "" && chunk.Model != s.chunkModel {
-			return nil, fmt.Errorf(
+			return nil, s.wireError(fmt.Errorf(
 				"chat stream chunk model %q does not match the first chunk model %q",
 				chunk.Model,
 				s.chunkModel,
-			)
+			))
 		}
 	}
 
@@ -235,16 +249,16 @@ func (s *chatResponsesStreamState) Convert(
 
 	// n=1: a chunk with more than one choice is an upstream protocol error.
 	if len(chunk.Choices) > 1 {
-		return nil, errors.New("chat stream chunk has more than one choice; n=1 required")
+		return nil, s.wireError(errors.New("chat stream chunk has more than one choice; n=1 required"))
 	}
 
 	for _, choice := range chunk.Choices {
 		// n=1: the single choice must be index 0 (review-j finding 6).
 		if choice.Index != 0 {
-			return nil, fmt.Errorf(
+			return nil, s.wireError(fmt.Errorf(
 				"chat stream chunk choice index = %d; n=1 requires index 0",
 				choice.Index,
-			)
+			))
 		}
 		if choice.LogProbs != nil {
 			if err := s.report.Lose(
@@ -475,12 +489,12 @@ func (s *chatResponsesStreamState) convertToolCall(
 		pending, ok = s.pendingCalls[*call.Index]
 		if ok && call.ID != nil && *call.ID != "" &&
 			pending.callID != "" && pending.callID != *call.ID {
-			return nil, fmt.Errorf(
+			return nil, s.wireError(fmt.Errorf(
 				"chat tool call fragment index %d carries id %q but the pending call is %q",
 				*call.Index,
 				*call.ID,
 				pending.callID,
-			)
+			))
 		}
 	}
 	if !ok && call.Index == nil && call.ID == nil {
@@ -496,9 +510,9 @@ func (s *chatResponsesStreamState) convertToolCall(
 			}
 			ok = true
 		default:
-			return nil, errors.New(
+			return nil, s.wireError(errors.New(
 				"chat tool call fragment without index or id is ambiguous",
-			)
+			))
 		}
 	}
 	if !ok {
@@ -621,9 +635,9 @@ func (s *chatResponsesStreamState) finish(
 	// it would hide the corruption behind a successful completion.
 	for _, pending := range s.pendingCalls {
 		if !pending.started {
-			return nil, errors.New(
+			return nil, s.wireError(errors.New(
 				"chat tool call fragment ended without an id and name",
-			)
+			))
 		}
 		arguments := pending.complete.String()
 		if arguments == "" {
@@ -632,11 +646,11 @@ func (s *chatResponsesStreamState) finish(
 		// A done event must never carry truncated or malformed arguments:
 		// emitting invalid JSON would poison the client's tool call.
 		if !json.Valid([]byte(arguments)) {
-			return nil, fmt.Errorf(
+			return nil, s.wireError(fmt.Errorf(
 				"tool call %q arguments are not valid JSON: %q",
 				pending.callID,
 				arguments,
-			)
+			))
 		}
 		events = append(events,
 			s.builder.FunctionArgumentsDone(
@@ -909,7 +923,11 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 		Error *json.RawMessage `json:"error"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
-		return ChatStreamResponse{}, fmt.Errorf("chat stream chunk: %w", err)
+		return ChatStreamResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			http.StatusOK,
+			fmt.Errorf("chat stream chunk: %w", err),
+		)
 	}
 	if probe.Error != nil {
 		var detail struct {
@@ -932,7 +950,11 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 	}
 	var chunk ChatStreamResponse
 	if err := json.Unmarshal(data, &chunk); err != nil {
-		return ChatStreamResponse{}, fmt.Errorf("chat stream chunk: %w", err)
+		return ChatStreamResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			http.StatusOK,
+			fmt.Errorf("chat stream chunk: %w", err),
+		)
 	}
 	return chunk, nil
 }
@@ -1112,7 +1134,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 	envelope ResponseEnvelope,
 ) ([]AnthropicStreamEvent, error) {
 	if s.messageSent {
-		return nil, errors.New("duplicate message_start")
+		return nil, s.wireError(errors.New("duplicate message_start"))
 	}
 	s.messageSent = true
 	if err := s.loseControlsOnce(envelope); err != nil {
@@ -1242,7 +1264,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 
 	pending, ok := s.pendingToolStart[call.ID]
 	if !ok {
-		return nil, fmt.Errorf("tool block for item %q was never started", call.ID)
+		return nil, s.wireError(fmt.Errorf("tool block for item %q was never started", call.ID))
 	}
 	startEvents, err := s.maybeStartToolBlock(pending)
 	if err != nil {
@@ -1256,7 +1278,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		arguments = "{}"
 	}
 	if err := validateFinalToolInput(arguments); err != nil {
-		return nil, fmt.Errorf("tool block for item %q: %w", call.ID, err)
+		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", call.ID, err))
 	}
 
 	events = append(events, AnthropicStreamEvent{
@@ -1304,7 +1326,7 @@ func (s *anthropicResponsesStreamState) textDelta(
 ) ([]AnthropicStreamEvent, error) {
 	index, ok := s.partBlocks[responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}]
 	if !ok {
-		return nil, errors.New("text delta with no open content block")
+		return nil, s.wireError(errors.New("text delta with no open content block"))
 	}
 	text := event.Delta
 	return []AnthropicStreamEvent{{
@@ -1323,7 +1345,7 @@ func (s *anthropicResponsesStreamState) contentPartDone(
 	key := responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}
 	index, ok := s.partBlocks[key]
 	if !ok {
-		return nil, errors.New("content part done with no open block")
+		return nil, s.wireError(errors.New("content part done with no open block"))
 	}
 	delete(s.partBlocks, key)
 	return []AnthropicStreamEvent{{
@@ -1337,7 +1359,7 @@ func (s *anthropicResponsesStreamState) functionArgumentsDelta(
 ) ([]AnthropicStreamEvent, error) {
 	pending, ok := s.pendingToolStart[event.ItemID]
 	if !ok {
-		return nil, fmt.Errorf("arguments delta for unknown item %q", event.ItemID)
+		return nil, s.wireError(fmt.Errorf("arguments delta for unknown item %q", event.ItemID))
 	}
 	// Ensure the block started before emitting input_json_delta.
 	startEvents, err := s.maybeStartToolBlock(pending)
@@ -1362,7 +1384,7 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 ) ([]AnthropicStreamEvent, error) {
 	pending, ok := s.pendingToolStart[event.ItemID]
 	if !ok {
-		return nil, fmt.Errorf("arguments done for unknown item %q", event.ItemID)
+		return nil, s.wireError(fmt.Errorf("arguments done for unknown item %q", event.ItemID))
 	}
 	// Record the final name (superset over the official event) and arguments.
 	if pending.name == "" && event.Name != "" {
@@ -1380,7 +1402,7 @@ func (s *anthropicResponsesStreamState) refusalDelta(
 ) ([]AnthropicStreamEvent, error) {
 	index, ok := s.partBlocks[responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}]
 	if !ok {
-		return nil, errors.New("refusal delta with no open content block")
+		return nil, s.wireError(errors.New("refusal delta with no open content block"))
 	}
 	text := event.Delta
 	return []AnthropicStreamEvent{{

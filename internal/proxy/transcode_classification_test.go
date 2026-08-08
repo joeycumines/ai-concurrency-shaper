@@ -68,12 +68,15 @@ func j2LimitedProxy(t *testing.T, upstream *httptest.Server, breaker *circuitbre
 // TestProxyTranscodeLocalConversion502NoPhantomHold proves that a local
 // response conversion failure (downstream 502, UpstreamFailure=false) does
 // NOT hold the limiter slot, even though PenaltyDuration is nonzero at zero
-// consecutive failures (review-j finding 1, false-penalty direction).
+// consecutive failures (review-j finding 1, false-penalty direction). The
+// fixture is a VALID Chat response whose finish_reason is outside the
+// supported subset — a known-but-unsupported feature stays local (review-k
+// finding 3).
 func TestProxyTranscodeLocalConversion502NoPhantomHold(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"not":"chat"}`))
+		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"weird","message":{"role":"assistant","content":"x"}}]}`))
 	}))
 	t.Cleanup(upstream.Close)
 
@@ -112,6 +115,57 @@ func TestProxyTranscodeLocalConversion502NoPhantomHold(t *testing.T) {
 	t.Logf("second request wait after local conversion 502: %v", wait)
 	if wait >= 400*time.Millisecond {
 		t.Fatalf("phantom penalty applied to local conversion 502: wait %v", wait)
+	}
+}
+
+// TestProxyTranscodeCorruptUpstreamJSONAppliesPhantomHold proves the
+// review-k finding-3 counterexample: a 200 response that is not a valid
+// instance of the supported Chat subset (an object that is not a chat
+// completion at all) is corrupt upstream wire — an upstream failure — and
+// DOES hold the limiter slot (review-k finding 3).
+func TestProxyTranscodeCorruptUpstreamJSONAppliesPhantomHold(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"not":"chat"}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker := j2Breaker(t)
+	p := j2LimitedProxy(t, upstream, breaker)
+
+	// PenaltyDuration is nonzero at zero consecutive failures: the base
+	// penalty alone holds the slot when the corrupt wire is correctly
+	// classified as an upstream failure.
+	if got := breaker.Stats().CurrentPenalty; got != 500*time.Millisecond {
+		t.Fatalf("PenaltyDuration at zero consecutive failures = %v, want 500ms", got)
+	}
+
+	req1 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec1 := httptest.NewRecorder()
+	p.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusBadGateway {
+		t.Fatalf("request 1 status = %d, want 502", rec1.Code)
+	}
+
+	// The second request MUST wait out the penalty: corrupt upstream wire is
+	// an upstream failure, so the slot is held.
+	start := time.Now()
+	req2 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"y"}`),
+	)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	wait := time.Since(start)
+	t.Logf("second request wait after corrupt upstream wire 502: %v", wait)
+	if wait < 400*time.Millisecond {
+		t.Fatalf("upstream wire failure did not hold the slot: wait %v", wait)
 	}
 }
 
