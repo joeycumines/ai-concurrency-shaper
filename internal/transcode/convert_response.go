@@ -156,6 +156,15 @@ func DecodeChatResponse(
 			fmt.Errorf("chat response message role = %q, want assistant", derefRole(shadowChoice.Message.Role)),
 		)
 	}
+	// tool_call_id is a tool-only field: on an assistant response message it
+	// would otherwise be silently dropped (review-k finding 5).
+	if shadowChoice.Message.ToolCallID != nil {
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			errors.New("chat response assistant message carries tool_call_id"),
+		)
+	}
 	for i, call := range shadowChoice.Message.ToolCalls {
 		if call.Type == nil || *call.Type != "function" {
 			return CanonicalResponse{}, upstreamWireError(

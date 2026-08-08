@@ -56,6 +56,10 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"content":"x"}}]}`,
 		},
 		{
+			name: "assistant message with tool call id",
+			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x","tool_call_id":"t1"}}]}`,
+		},
+		{
 			name: "choice index one",
 			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":1,"finish_reason":"stop","message":{"role":"assistant","content":"x"}}]}`,
 		},

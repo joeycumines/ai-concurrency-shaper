@@ -721,12 +721,24 @@ func canonicalizeAnthropicToolChoice(
 		}
 	}
 	switch choice.Type {
-	case "auto":
-		return &CanonicalToolChoice{Mode: "auto"}, nil
-	case "none":
-		return &CanonicalToolChoice{Mode: "none"}, nil
-	case "any":
-		return &CanonicalToolChoice{Mode: "required"}, nil
+	case "auto", "none", "any":
+		// A name is only meaningful with type "tool": carrying one on
+		// another mode is a contradictory union arm, rejected instead of
+		// silently discarded (review-k finding 5).
+		if choice.Name != "" {
+			return nil, fmt.Errorf(
+				"messages tool_choice type %s must not carry a name",
+				choice.Type,
+			)
+		}
+		mode := "auto"
+		switch choice.Type {
+		case "none":
+			mode = "none"
+		case "any":
+			mode = "required"
+		}
+		return &CanonicalToolChoice{Mode: mode}, nil
 	case "tool":
 		if choice.Name == "" {
 			return nil, errors.New("messages tool_choice type tool requires name")

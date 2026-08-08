@@ -102,6 +102,106 @@ type AnthropicContentBlock struct {
 	Source    *AnthropicSource  `json:"source,omitempty"`
 }
 
+// UnmarshalJSON decodes the tagged union per-arm: each type admits exactly
+// its own fields with DisallowUnknownFields, so a block carrying another
+// arm's fields is rejected at decode instead of having those fields silently
+// discarded (review-k finding 5). The public struct keeps its broad shape
+// for rendering; a decode-accepted block always validates. The type probe is
+// a lenient unmarshal — the arm decode applies the strictness.
+func (b *AnthropicContentBlock) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Type AnthropicContentBlockType `json:"type"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+
+	var block AnthropicContentBlock
+	switch probe.Type {
+	case AnthropicContentBlockTypeText:
+		var shadow struct {
+			Type AnthropicContentBlockType `json:"type"`
+			Text *string                   `json:"text"`
+		}
+		if err := strictDecode(data, &shadow); err != nil {
+			return fmt.Errorf("text block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.Text = shadow.Text
+
+	case AnthropicContentBlockTypeImage, AnthropicContentBlockTypeDocument:
+		var shadow struct {
+			Type   AnthropicContentBlockType `json:"type"`
+			Source *AnthropicSource          `json:"source"`
+		}
+		if err := strictDecode(data, &shadow); err != nil {
+			return fmt.Errorf("%s block: %w", probe.Type, err)
+		}
+		block.Type = shadow.Type
+		block.Source = shadow.Source
+
+	case AnthropicContentBlockTypeToolUse:
+		var shadow struct {
+			Type  AnthropicContentBlockType `json:"type"`
+			ID    *string                   `json:"id"`
+			Name  *string                   `json:"name"`
+			Input json.RawMessage           `json:"input"`
+		}
+		if err := strictDecode(data, &shadow); err != nil {
+			return fmt.Errorf("tool_use block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.ID = shadow.ID
+		block.Name = shadow.Name
+		block.Input = shadow.Input
+
+	case AnthropicContentBlockTypeToolResult:
+		var shadow struct {
+			Type      AnthropicContentBlockType `json:"type"`
+			ToolUseID *string                   `json:"tool_use_id"`
+			Content   *AnthropicContent         `json:"content"`
+			IsError   *bool                     `json:"is_error"`
+		}
+		if err := strictDecode(data, &shadow); err != nil {
+			return fmt.Errorf("tool_result block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.ToolUseID = shadow.ToolUseID
+		block.Content = shadow.Content
+		block.IsError = shadow.IsError
+
+	case AnthropicContentBlockTypeThinking:
+		var shadow struct {
+			Type      AnthropicContentBlockType `json:"type"`
+			Thinking  *string                   `json:"thinking"`
+			Signature *string                   `json:"signature"`
+		}
+		if err := strictDecode(data, &shadow); err != nil {
+			return fmt.Errorf("thinking block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.Thinking = shadow.Thinking
+		block.Signature = shadow.Signature
+
+	case AnthropicContentBlockTypeRedactedThinking:
+		var shadow struct {
+			Type AnthropicContentBlockType `json:"type"`
+			Data *string                   `json:"data"`
+		}
+		if err := strictDecode(data, &shadow); err != nil {
+			return fmt.Errorf("redacted_thinking block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.Data = shadow.Data
+
+	default:
+		return fmt.Errorf("unknown anthropic content block type %q", probe.Type)
+	}
+
+	*b = block
+	return b.Validate()
+}
+
 // Validate checks the block shape.
 func (b AnthropicContentBlock) Validate() error {
 	switch b.Type {

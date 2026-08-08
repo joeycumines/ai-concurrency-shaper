@@ -52,6 +52,51 @@ type ChatContentBlock struct {
 	ImageURL *ChatInputImage      `json:"image_url,omitempty"`
 }
 
+// UnmarshalJSON decodes the tagged union per-arm: a text block admits only
+// text and an image_url block only image_url (DisallowUnknownFields), so a
+// block carrying another arm's fields is rejected at decode instead of
+// having those fields silently discarded (review-k finding 5). The type
+// probe is a lenient unmarshal; the arm decode applies the strictness.
+func (b *ChatContentBlock) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Type ChatContentBlockType `json:"type"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+
+	var block ChatContentBlock
+	switch probe.Type {
+	case ChatContentBlockTypeText:
+		var shadow struct {
+			Type ChatContentBlockType `json:"type"`
+			Text *string              `json:"text"`
+		}
+		if err := strictDecode(data, &shadow); err != nil {
+			return fmt.Errorf("text block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.Text = shadow.Text
+
+	case ChatContentBlockTypeImage:
+		var shadow struct {
+			Type     ChatContentBlockType `json:"type"`
+			ImageURL *ChatInputImage      `json:"image_url"`
+		}
+		if err := strictDecode(data, &shadow); err != nil {
+			return fmt.Errorf("image block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.ImageURL = shadow.ImageURL
+
+	default:
+		return fmt.Errorf("unknown chat content block type %q", probe.Type)
+	}
+
+	*b = block
+	return b.Validate()
+}
+
 // Validate checks the block shape.
 func (b ChatContentBlock) Validate() error {
 	switch b.Type {
@@ -312,7 +357,26 @@ func (m ChatMessage) Validate() error {
 			return err
 		}
 	}
-	if m.Role == ChatMessageRoleTool && (m.ToolCallID == nil || *m.ToolCallID == "") {
+	// Role-conditional fields (review-k finding 5): refusal, tool_calls, and
+	// reasoning are assistant-only, and tool_call_id is tool-only. A message
+	// carrying another role's fields is a contradictory union, rejected at
+	// validation instead of being silently discarded or relabeled. The
+	// embedded struct pointers may be nil, so every promoted access is
+	// guarded.
+	if m.Role != ChatMessageRoleAssistant && m.ChatAssistantMessage != nil {
+		return fmt.Errorf(
+			"chat message role %q carries assistant-only fields",
+			m.Role,
+		)
+	}
+	if m.Role != ChatMessageRoleTool && m.ChatToolMessage != nil {
+		return fmt.Errorf(
+			"chat message role %q carries tool_call_id",
+			m.Role,
+		)
+	}
+	if m.Role == ChatMessageRoleTool &&
+		(m.ChatToolMessage == nil || m.ToolCallID == nil || *m.ToolCallID == "") {
 		return errors.New("tool message has no tool_call_id")
 	}
 	if m.ChatAssistantMessage != nil {

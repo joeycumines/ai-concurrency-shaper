@@ -32,6 +32,17 @@ func FuzzWireUnions(f *testing.F) {
 		[]byte(`null`),
 		[]byte(`123`),
 		[]byte(`{"type":"unknown"}`),
+		// Mixed-arm seeds (review-k finding 5): a block carrying another
+		// arm's fields must be rejected at decode, never silently discarded.
+		[]byte(`{"type":"text","text":"visible","source":{"type":"url","url":"https://example.test/image.png"}}`),
+		[]byte(`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"},"text":"t"}`),
+		[]byte(`{"type":"document","source":{"type":"url","url":"https://example.test/d.pdf"},"name":"f"}`),
+		[]byte(`{"type":"tool_use","id":"t1","name":"f","input":{},"text":"x"}`),
+		[]byte(`{"type":"tool_result","tool_use_id":"t1","content":"ok","input":{}}`),
+		[]byte(`{"type":"thinking","thinking":"x","signature":"s","data":"d"}`),
+		[]byte(`{"type":"redacted_thinking","data":"d","thinking":"x"}`),
+		[]byte(`{"type":"text","text":"x","image_url":{"url":"https://example.test/x.png"}}`),
+		[]byte(`{"type":"image_url","image_url":{"url":"https://example.test/x.png"},"text":"x"}`),
 	}
 
 	for _, seed := range seeds {
