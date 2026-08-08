@@ -78,12 +78,12 @@ func TestValidHTTPFieldName(t *testing.T) {
 	valid := []string{"X-Foo", "x", "A1", "ETag", "X*Y"}
 	invalid := []string{"", "has space", "bad\tname", "x\n", "co mma"}
 	for _, name := range valid {
-		if !validHTTPFieldName(name) {
+		if !ValidHTTPFieldName(name) {
 			t.Errorf("%q should be valid", name)
 		}
 	}
 	for _, name := range invalid {
-		if validHTTPFieldName(name) {
+		if ValidHTTPFieldName(name) {
 			t.Errorf("%q should be invalid", name)
 		}
 	}

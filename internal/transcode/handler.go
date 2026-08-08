@@ -253,14 +253,25 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// An unallowed client query parameter or an invalid inbound
 		// credential is a client fault (400); other request-construction
-		// failures are internal (500).
+		// failures are internal (500). Internal construction errors (secret
+		// resolution, signing) never leak details such as file paths into
+		// the client message (review-j finding 14); the detail is logged.
 		status := http.StatusInternalServerError
-		if strings.Contains(err.Error(), "client query parameter") ||
+		message := "build upstream request: " + err.Error()
+		if errors.Is(err, errClientQueryParameter) ||
 			errors.Is(err, errAuthInboundCredential) {
 			status = http.StatusBadRequest
+		} else {
+			log.Printf(
+				"transcode: %s %s: build upstream request: %v",
+				r.Method,
+				r.URL.Path,
+				err,
+			)
+			message = "build upstream request: internal error"
 		}
 		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
-			status, "build upstream request: "+err.Error(),
+			status, message,
 			ProvenanceLocalRequestConversionError)
 		return
 	}

@@ -16,6 +16,7 @@
 package main
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
@@ -247,5 +248,45 @@ func TestParseTranscodeAuth(t *testing.T) {
 
 	if _, err := parseTranscodeAuth("auto", "bogus", "", ""); err == nil {
 		t.Fatal("expected invalid source rejection")
+	}
+}
+
+// TestParseTranscodeRouteMessagesUpstreamRejected proves the CLI rejects a
+// messages upstream at parse time: no supported direction targets Messages,
+// so accepting it would only defer a guaranteed startup failure (review-j
+// finding 14).
+func TestParseTranscodeRouteMessagesUpstreamRejected(t *testing.T) {
+	_, err := parseTranscodeRoute("responses@/v1/responses=messages@/v1/messages")
+	if err == nil {
+		t.Fatal("expected messages upstream rejection")
+	}
+	if !strings.Contains(err.Error(), "want responses or chat-completions") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestParseTranscodeAuthExternalSignerRejectedAtStartup proves the CLI
+// cannot configure an external signer: the mode fails the mapping validation
+// at construction (review-j finding 14).
+func TestParseTranscodeAuthExternalSignerRejectedAtStartup(t *testing.T) {
+	policy, err := parseTranscodeAuth("external-signer", "inbound", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := transcode.NewRouteKey(http.MethodPost, "/v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping := transcode.Mapping{
+		ClientRoute:      key,
+		ClientProtocol:   transcode.ClientResponses,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		Auth:             policy,
+	}
+	if err := mapping.Validate(); err == nil {
+		t.Fatal("expected external-signer rejection without a signer")
+	} else if !strings.Contains(err.Error(), "requires a signer") {
+		t.Fatalf("error = %v", err)
 	}
 }

@@ -96,14 +96,17 @@ func parseTranscodeEndpoint(
 	}
 
 	if upstream {
+		// Messages is deliberately not accepted: no supported transcode
+		// direction targets Messages, so advertising or accepting it would
+		// defer a guaranteed startup failure to the first request
+		// (review-j finding 14).
 		switch transcode.UpstreamProtocol(protocolName) {
 		case transcode.UpstreamResponses,
-			transcode.UpstreamMessages,
 			transcode.UpstreamChatCompletions:
 			return "", transcode.UpstreamProtocol(protocolName), path, nil
 		}
 		return "", "", "", fmt.Errorf(
-			"unknown upstream protocol %q (want responses, messages, or chat-completions)",
+			"unknown upstream protocol %q (want responses or chat-completions)",
 			protocolName,
 		)
 	}

@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/textproto"
@@ -41,7 +42,7 @@ func RemoveHopByHopHeaders(h http.Header) {
 			if token == "" {
 				continue
 			}
-			if validHTTPFieldName(token) {
+			if ValidHTTPFieldName(token) {
 				h.Del(token)
 			}
 		}
@@ -52,10 +53,11 @@ func RemoveHopByHopHeaders(h http.Header) {
 	}
 }
 
-// validHTTPFieldName reports whether s is a valid HTTP field name using token
-// characters. Malformed Connection tokens are rejected rather than passed to
-// Header.Del as arbitrary input.
-func validHTTPFieldName(s string) bool {
+// ValidHTTPFieldName reports whether s is a valid HTTP field name using
+// token characters. Malformed Connection tokens are rejected rather than
+// passed to Header.Del as arbitrary input, and custom authentication header
+// names are validated with the same rule (review-j finding 14).
+func ValidHTTPFieldName(s string) bool {
 	if s == "" {
 		return false
 	}
@@ -131,6 +133,11 @@ func RemoveTransformedRequestRepresentationHeaders(h http.Header) {
 	}
 }
 
+// errClientQueryParameter marks an unallowed client query parameter: a
+// client fault, classified by type rather than error-string matching
+// (review-j finding 14).
+var errClientQueryParameter = errors.New("client query parameter")
+
 // BuildMappedURL joins the configured upstream base path with the mapping's
 // upstream path and preserves the base query. Client query parameters are
 // rejected unless explicitly allowed: unknown client query parameters can
@@ -167,7 +174,8 @@ func BuildMappedURL(
 	for key, values := range clientQuery {
 		if _, ok := allowedClientQuery[key]; !ok {
 			return nil, fmt.Errorf(
-				"client query parameter %q is not allowed on transcoded routes",
+				"%w %q is not allowed on transcoded routes",
+				errClientQueryParameter,
 				key,
 			)
 		}

@@ -105,7 +105,7 @@ func WithTranscodeMapping(mappings ...TranscodeMapping) *TranscodeOption {
 func (o *TranscodeOption) applyProxyOption(cfg *proxyConfig) error {
 	for i := range o.mappings {
 		m := &o.mappings[i]
-		if err := m.Mapping.Validate(); err != nil {
+		if err := m.Validate(); err != nil {
 			return fmt.Errorf("proxy: invalid transcode mapping: %w", err)
 		}
 	}
@@ -2763,4 +2763,26 @@ func (w *switchingProtocolsHandshakeWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// Validate checks the immutable transcode route configuration so a
+// misconfigured route fails at proxy.New, never on the first request
+// (review-j finding 14): the mapping (route, direction, auth, model map),
+// the body limits, and the allowed client query keys.
+func (m TranscodeMapping) Validate() error {
+	if err := m.Mapping.Validate(); err != nil {
+		return err
+	}
+	if err := m.BodyLimits.Validate(); err != nil {
+		return fmt.Errorf("body limits: %w", err)
+	}
+	for key := range m.AllowedClientQuery {
+		if !transcode.ValidHTTPFieldName(key) {
+			return fmt.Errorf(
+				"allowed client query key %q is not a valid HTTP field name",
+				key,
+			)
+		}
+	}
+	return nil
 }

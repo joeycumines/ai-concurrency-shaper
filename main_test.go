@@ -18,6 +18,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -479,3 +480,36 @@ func TestGlobalConcurrency_ActiveCounter(t *testing.T) {
 // the bind address is already in use and -tui is enabled. It does NOT
 // verify terminal restoration — that requires PTY-based integration
 // testing (see internal/tui/tuitest/).
+
+// TestValidateMBFlag proves negative and overflowing megabyte flags are
+// rejected against their actual byte shift (review-j finding 14): a value
+// valid at shift 20 may overflow at shift 22.
+func TestValidateMBFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value int64
+		shift uint
+	}{
+		{"valid", 32, 20},
+		{"zero", 0, 22},
+		{"max at 20", math.MaxInt64 >> 20, 20},
+		{"max at 22", math.MaxInt64 >> 22, 22},
+	} {
+		if err := validateMBFlag(tc.name, tc.value, tc.shift); err != nil {
+			t.Fatalf("%s = %d shift %d: %v", tc.name, tc.value, tc.shift, err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		value int64
+		shift uint
+	}{
+		{"negative", -1, 20},
+		{"overflow at 20", (math.MaxInt64 >> 20) + 1, 20},
+		{"overflow at 22", (math.MaxInt64 >> 22) + 1, 22},
+	} {
+		if err := validateMBFlag(tc.name, tc.value, tc.shift); err == nil {
+			t.Fatalf("%s = %d shift %d accepted", tc.name, tc.value, tc.shift)
+		}
+	}
+}

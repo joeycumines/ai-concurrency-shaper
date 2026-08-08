@@ -79,15 +79,27 @@ func TestAuthPolicyValidate(t *testing.T) {
 	}{
 		{
 			name:    "auto with version for messages",
-			policy:  AuthPolicy{Mode: AuthAuto, AnthropicVersion: "2023-06-01"},
+			policy:  AuthPolicy{Mode: AuthAuto, AnthropicVersion: "2023-06-01", Inbound: true},
 			target:  UpstreamMessages,
 			wantErr: false,
 		},
 		{
-			name:    "messages requires version",
-			policy:  AuthPolicy{Mode: AuthAuto},
+			name:    "auto without version or secret source",
+			policy:  AuthPolicy{Mode: AuthAuto, Inbound: true},
 			target:  UpstreamMessages,
 			wantErr: true,
+		},
+		{
+			name:    "secret mode without a source",
+			policy:  AuthPolicy{Mode: AuthBearer},
+			target:  UpstreamResponses,
+			wantErr: true,
+		},
+		{
+			name:    "secret mode with inbound",
+			policy:  AuthPolicy{Mode: AuthBearer, Inbound: true},
+			target:  UpstreamResponses,
+			wantErr: false,
 		},
 		{
 			name:    "none does not require version",

@@ -707,3 +707,63 @@ func TestProxyTranscodeNonStreamFailedEnvelopeIsUpstreamFailure(t *testing.T) {
 		t.Fatalf("streamed failed envelope not recorded as upstream failure: before=%d after=%d", before2.TotalFailures, got)
 	}
 }
+
+// TestProxyNewRejectsMisconfiguredTranscodeRoutes proves a misconfigured
+// route fails at proxy.New, never on the first request (review-j finding 14).
+func TestProxyNewRejectsMisconfiguredTranscodeRoutes(t *testing.T) {
+	pattern, err := route.Parse("POST /v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse("https://upstream.example")
+	base := func() []Option {
+		return []Option{
+			WithUpstream(u),
+			WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+			WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+			WithMetrics(metrics.NewCollector()),
+		}
+	}
+	valid := TranscodeMapping{
+		Mapping:    testResponsesMapping(t),
+		BodyLimits: transcode.BodyLimits{},
+	}
+
+	tests := []struct {
+		name    string
+		mapping TranscodeMapping
+	}{
+		{
+			name: "negative body limit",
+			mapping: func() TranscodeMapping {
+				m := valid
+				m.BodyLimits = transcode.BodyLimits{AcceptedRequestBytes: -1}
+				return m
+			}(),
+		},
+		{
+			name: "invalid allowed query key",
+			mapping: func() TranscodeMapping {
+				m := valid
+				m.AllowedClientQuery = map[string]struct{}{"bad key!": {}}
+				return m
+			}(),
+		},
+		{
+			name: "unknown auth mode",
+			mapping: func() TranscodeMapping {
+				m := valid
+				m.Auth = transcode.AuthPolicy{Mode: transcode.AuthMode("bogus")}
+				return m
+			}(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			options := append(base(), WithTranscodeMapping(tt.mapping))
+			if _, err := New(options...); err == nil {
+				t.Fatal("proxy.New accepted the misconfigured route")
+			}
+		})
+	}
+}

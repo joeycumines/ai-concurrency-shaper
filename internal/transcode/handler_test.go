@@ -1626,3 +1626,57 @@ func TestHandlerExternalSignerSeesSanitizedHeaders(t *testing.T) {
 		t.Fatalf("signer observed Content-Length = %d, want %d", signer.req.ContentLength, len(body))
 	}
 }
+
+// leakingPathSecret is a SecretSource whose error message contains a file
+// path.
+type leakingPathSecret struct{}
+
+func (leakingPathSecret) Secret(context.Context) (string, error) {
+	return "", errors.New("read /etc/secrets/upstream-key: no such file")
+}
+
+// TestHandlerInternalErrorSanitized proves internal construction errors
+// (secret file paths) never leak into the client message (review-j finding
+// 14); the detail is logged instead.
+func TestHandlerInternalErrorSanitized(t *testing.T) {
+	mapping := responsesMapping(t)
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+			ModelMap:   ModelMap{AllowIdentity: true},
+			LossPolicy: StrictLossPolicy(),
+			AuthPolicy: AuthPolicy{
+				Mode:   AuthBearer,
+				Secret: leakingPathSecret{},
+			},
+			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
+			AllowedClientQuery: map[string]struct{}{},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			t.Fatal("round trip must not be called")
+			return nil, nil
+		},
+		nil,
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "/etc/secrets") {
+		t.Fatalf("client message leaks the secret file path: %q", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "internal error") {
+		t.Fatalf("client message should be generic: %q", rec.Body.String())
+	}
+}

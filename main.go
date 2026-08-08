@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -45,6 +46,21 @@ import (
 
 // version is set via ldflags at build time (e.g. -ldflags -X main.version=1.2.3).
 var version = "dev"
+
+// validateMBFlag rejects a negative or overflowing megabyte flag value
+// before it is shifted to bytes (review-j finding 14): a negative or
+// overflowing shift would otherwise produce a silently wrong limit. shift
+// is the largest byte shift the value undergoes (e.g. 22 for
+// transcode-max-request-mb, whose decoded-request limit is MB << 22).
+func validateMBFlag(name string, value int64, shift uint) error {
+	if value < 0 {
+		return fmt.Errorf("%s must be nonnegative, got %d", name, value)
+	}
+	if shift >= 63 || value > math.MaxInt64>>shift {
+		return fmt.Errorf("%s is too large to convert to bytes: %d MiB", name, value)
+	}
+	return nil
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -139,11 +155,15 @@ func run() error {
 	flag.BoolVar(&adaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
 	flag.DurationVar(&adaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")
 	flag.BoolVar(&upstreamDisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream; avoids provider-side connection-count concurrency violations")
-	flag.Var(&transcodeRoutes, "transcode-route", "transcode route mapping clientProtocol@clientPath=upstreamProtocol@upstreamPath (repeatable); client protocols: responses, messages; upstream protocols: responses, messages, chat-completions")
+	flag.Var(&transcodeRoutes, "transcode-route", "transcode route mapping clientProtocol@clientPath=upstreamProtocol@upstreamPath (repeatable); client protocols: responses, messages; upstream protocols: responses, chat-completions")
 	flag.BoolVar(&transcodeResponsesChat, "transcode-responses-chat", false, "transcode /v1/responses to /v1/chat/completions (responses client, chat upstream)")
 	flag.BoolVar(&transcodeMessagesChat, "transcode-messages-chat", false, "transcode /v1/messages to /v1/chat/completions (messages client, chat upstream)")
 	flag.BoolVar(&transcodeMessagesResponses, "transcode-messages-responses", false, "transcode /v1/messages to /v1/responses (messages client, responses upstream)")
-	flag.StringVar(&transcodeAuth, "transcode-auth", "auto", "upstream authentication mode: auto, none, bearer, x-api-key, api-key, header, external-signer")
+	// external-signer is intentionally absent: the CLI cannot supply a
+	// signer, so the choice would only defer a startup failure (review-j
+	// finding 14). The programmatic AuthExternalSigner mode remains for API
+	// users who can provide one.
+	flag.StringVar(&transcodeAuth, "transcode-auth", "auto", "upstream authentication mode: auto, none, bearer, x-api-key, api-key, header")
 	flag.StringVar(&transcodeAuthSource, "transcode-auth-source", "inbound", "upstream secret source: inbound, env:NAME, file:PATH")
 	flag.StringVar(&transcodeAuthHeader, "transcode-auth-header", "", "custom authentication header name (with -transcode-auth header)")
 	flag.StringVar(&transcodeAnthropicVersion, "transcode-anthropic-version", "2023-06-01", "Anthropic-Version header value for Messages upstreams")
@@ -158,6 +178,22 @@ func run() error {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	// The megabyte flags are validated against the largest byte shift each
+	// value undergoes, so an overflowing shift can never silently wrap
+	// (review-j finding 14).
+	for _, mb := range []struct {
+		name  string
+		value int64
+		shift uint
+	}{
+		{"retry-max-body-mb", retryMaxBodyMB, 20},
+		{"transcode-max-request-mb", transcodeMaxRequestMB, 22},
+		{"transcode-max-response-mb", transcodeMaxResponseMB, 20},
+	} {
+		if err := validateMBFlag(mb.name, mb.value, mb.shift); err != nil {
+			log.Fatalf("invalid flag: %v", err)
+		}
+	}
 
 	if showVersion {
 		fmt.Println(version)

@@ -156,6 +156,13 @@ func (p AuthPolicy) Validate(target UpstreamProtocol) error {
 		return fmt.Errorf("unknown auth mode %q", p.Mode)
 	}
 
+	// A secret-requiring mode must have a way to obtain the secret:
+	// inbound forwarding or a configured source. A missing source would
+	// otherwise pass startup and fail every request (review-j finding 14).
+	if p.Mode != AuthNone && p.Mode != AuthExternalSigner && !p.Inbound && p.Secret == nil {
+		return errors.New("auth mode requires a secret source or inbound credentials")
+	}
+
 	if target == UpstreamMessages &&
 		p.AnthropicVersion == "" &&
 		p.Mode != AuthNone {
