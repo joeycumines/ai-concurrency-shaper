@@ -307,8 +307,18 @@ func canonicalUserTurnToChatMessages(
 				messages = append(messages, message)
 				contentParts = nil
 			}
+			parts, err := transcodeToolResult(
+				value,
+				policy,
+				report,
+				"chat",
+				"messages[].tool_result.is_error",
+			)
+			if err != nil {
+				return nil, err
+			}
 			content, err := canonicalPartsToChatMessageContent(
-				value.Parts,
+				parts,
 				capabilities,
 				report,
 				policy,

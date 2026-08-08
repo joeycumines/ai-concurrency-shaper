@@ -335,7 +335,7 @@ func TestAnthropicUsageStreamNonStreamAgree(t *testing.T) {
 	context := testExchangeContext()
 	context.LossPolicy = j6PermissivePolicy()
 	context.RequestedClientModel = "m"
-	rendered, err := RenderMessagesResponse(response, context)
+	rendered, _, err := RenderMessagesResponse(response, context)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,13 +415,13 @@ func TestAnthropicNonStreamUnknownUsageLoss(t *testing.T) {
 	}
 	strictContext := testExchangeContext()
 	strictContext.RequestedClientModel = "m"
-	if _, err := RenderMessagesResponse(response, strictContext); err == nil {
+	if _, _, err := RenderMessagesResponse(response, strictContext); err == nil {
 		t.Fatal("strict policy accepted unknown usage")
 	}
 	permissiveContext := testExchangeContext()
 	permissiveContext.LossPolicy = j6PermissivePolicy()
 	permissiveContext.RequestedClientModel = "m"
-	rendered, err := RenderMessagesResponse(response, permissiveContext)
+	rendered, _, err := RenderMessagesResponse(response, permissiveContext)
 	if err != nil {
 		t.Fatal(err)
 	}

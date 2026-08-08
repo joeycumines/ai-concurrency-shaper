@@ -21,6 +21,7 @@ func FuzzChatToResponsesStateMachine(f *testing.F) {
 			state = newChatResponsesStreamState(
 				testStreamContext(),
 				StrictLossPolicy(),
+				ChatCapabilities{},
 				"resp_1",
 				"gpt-4.1",
 				1710000000,

@@ -49,11 +49,13 @@ type openResponsesItem struct {
 // until call ID and name are known; argument fragments are emitted with delta
 // (never arguments); the completion event always carries name and arguments
 // ("{}" for empty). Provider reasoning deltas are dropped with a documented
-// loss — they are never synthesized into reasoning items.
+// loss, or mapped to ordinary text under the ProviderReasoningText
+// capability — they are never synthesized into reasoning items.
 type chatResponsesStreamState struct {
-	ctx     *ExchangeContext
-	policy  LossPolicy
-	builder ResponsesEventBuilder
+	ctx          *ExchangeContext
+	policy       LossPolicy
+	capabilities ChatCapabilities
+	builder      ResponsesEventBuilder
 
 	responseID string
 	model      string
@@ -93,6 +95,7 @@ type chatResponsesStreamState struct {
 func newChatResponsesStreamState(
 	ctx *ExchangeContext,
 	policy LossPolicy,
+	capabilities ChatCapabilities,
 	responseID string,
 	model string,
 	createdAt int64,
@@ -101,6 +104,7 @@ func newChatResponsesStreamState(
 	return &chatResponsesStreamState{
 		ctx:          ctx,
 		policy:       policy,
+		capabilities: capabilities,
 		responseID:   responseID,
 		model:        model,
 		createdAt:    createdAt,
@@ -304,16 +308,40 @@ func (s *chatResponsesStreamState) convertDelta(
 	}
 
 	if delta.Reasoning != nil && *delta.Reasoning != "" {
-		// Provider plaintext reasoning has no portable representation in a
-		// Responses stream and must never be synthesized into reasoning
-		// items. It is dropped with a documented loss.
-		if err := s.report.Lose(
-			s.policy,
-			FeatureProviderReasoning,
-			"choices[].delta.reasoning",
-			"provider reasoning is dropped during chat-to-responses streaming",
-		); err != nil {
-			return nil, err
+		// Provider plaintext reasoning is mapped to ordinary text only when
+		// the capability is enabled (a named, reported encoding); otherwise
+		// it is dropped with a documented loss (review-j finding 10). It
+		// must never be synthesized into reasoning items.
+		if !s.capabilities.ProviderReasoningText {
+			if err := s.report.Lose(
+				s.policy,
+				FeatureProviderReasoning,
+				"choices[].delta.reasoning",
+				"provider reasoning is dropped during chat-to-responses streaming",
+			); err != nil {
+				return nil, err
+			}
+		} else {
+			item, addedEvents, err := s.openMessageItemForPart("output_text")
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, addedEvents...)
+			message := item.item.(*ResponsesOutputMessage)
+			contentIndex := item.openPartIndex
+			events = append(events, s.builder.TextDelta(
+				message.ID,
+				item.outputIndex,
+				contentIndex,
+				*delta.Reasoning,
+			))
+			textPart := message.Content[contentIndex].(*ResponsesOutputText)
+			textPart.Text += *delta.Reasoning
+			s.report.Note(
+				FeatureProviderReasoning,
+				"choices[].delta.reasoning",
+				"provider reasoning maps to ordinary text (provider_reasoning_text encoding)",
+			)
 		}
 	}
 
@@ -906,6 +934,12 @@ type anthropicResponsesStreamState struct {
 	// once per stream (review-j finding 7).
 	reasoningLossRecorded bool
 
+	// phaseGated tracks the output items whose phase already entered the
+	// loss decision, so a phase-bearing item seen both in output_item.added
+	// and in the terminal envelope is gated exactly once (review-j finding
+	// 10).
+	phaseGated map[string]struct{}
+
 	usage *AnthropicUsage
 
 	// report accumulates approved losses of the conversion; it is surfaced
@@ -948,6 +982,7 @@ func newAnthropicResponsesStreamState(
 		createdAt:        createdAt,
 		pendingToolStart: make(map[string]*pendingToolBlock),
 		partBlocks:       make(map[responsePartKey]int64),
+		phaseGated:       make(map[string]struct{}),
 	}
 }
 
@@ -1077,6 +1112,11 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 	switch item := event.Item.(type) {
 	case *ResponsesOutputMessage:
 		// Message items open their content blocks via content_part.added.
+		// The output-message phase has no Messages representation: it
+		// enters the loss decision (review-j finding 10).
+		if err := s.losePhaseOnce(item); err != nil {
+			return nil, err
+		}
 		return nil, nil
 
 	case *ResponsesReasoningOutputItem:
@@ -1310,6 +1350,41 @@ func (s *anthropicResponsesStreamState) refusalDone(
 	return nil, nil
 }
 
+func (s *anthropicResponsesStreamState) gateEnvelopePhases(
+	envelope ResponseEnvelope,
+) error {
+	for _, item := range envelope.Output {
+		message, ok := item.(*ResponsesOutputMessage)
+		if !ok {
+			continue
+		}
+		if err := s.losePhaseOnce(message); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// losePhaseOnce records the output-message phase loss exactly once per
+// item (review-j finding 10).
+func (s *anthropicResponsesStreamState) losePhaseOnce(
+	message *ResponsesOutputMessage,
+) error {
+	if message == nil || message.Phase == "" {
+		return nil
+	}
+	if _, gated := s.phaseGated[message.ID]; gated {
+		return nil
+	}
+	s.phaseGated[message.ID] = struct{}{}
+	return s.report.Lose(
+		s.policy,
+		FeaturePhase,
+		"output[].phase",
+		"the output message phase cannot be reproduced in an Anthropic stream",
+	)
+}
+
 func (s *anthropicResponsesStreamState) completed(
 	envelope ResponseEnvelope,
 ) ([]AnthropicStreamEvent, error) {
@@ -1320,6 +1395,9 @@ func (s *anthropicResponsesStreamState) completed(
 	stop := CanonicalStopEndTurn
 	if outputHasFunctionCalls(envelope.Output) || s.sawToolUse {
 		stop = CanonicalStopToolUse
+	}
+	if err := s.gateEnvelopePhases(envelope); err != nil {
+		return nil, err
 	}
 	if err := s.finalizeMessage(stop, envelope.Usage); err != nil {
 		return nil, err
@@ -1337,6 +1415,9 @@ func (s *anthropicResponsesStreamState) incomplete(
 	stop := CanonicalStopMaxTokens
 	if envelope.IncompleteDetails != nil && envelope.IncompleteDetails.Reason == "content_filter" {
 		stop = CanonicalStopRefusal
+	}
+	if err := s.gateEnvelopePhases(envelope); err != nil {
+		return nil, err
 	}
 	if err := s.finalizeMessage(stop, envelope.Usage); err != nil {
 		return nil, err

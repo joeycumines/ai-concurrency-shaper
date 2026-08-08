@@ -453,6 +453,7 @@ func (h *TranscodeHandler) convertRequest(
 		if err := h.checkDecodedRequestSize(rendered); err != nil {
 			return nil, nil, err
 		}
+		report.Losses = append(report.Losses, result.Report.Losses...)
 		logConversionReport(report, r)
 		return rendered, context, nil
 
@@ -497,6 +498,7 @@ func (h *TranscodeHandler) convertRequest(
 		if err := h.checkDecodedRequestSize(rendered); err != nil {
 			return nil, nil, err
 		}
+		report.Losses = append(report.Losses, result.Report.Losses...)
 		logConversionReport(report, r)
 		return rendered, context, nil
 
@@ -675,10 +677,11 @@ func (h *TranscodeHandler) convertResponse(
 			if err != nil {
 				return nil, ProvenanceLocalResponseConversionError, err
 			}
-			converted, err := RenderResponsesResponse(response, context)
+			converted, report, err := RenderResponsesResponse(response, context)
 			if err != nil {
 				return nil, ProvenanceLocalResponseConversionError, err
 			}
+			logConversionReport(report, r)
 			return converted, ProvenanceLocalResponseConversionError, nil
 		default:
 			return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
@@ -694,10 +697,11 @@ func (h *TranscodeHandler) convertResponse(
 			if err != nil {
 				return nil, ProvenanceLocalResponseConversionError, err
 			}
-			converted, err := RenderMessagesResponse(response, context)
+			converted, report, err := RenderMessagesResponse(response, context)
 			if err != nil {
 				return nil, ProvenanceLocalResponseConversionError, err
 			}
+			logConversionReport(report, r)
 			return converted, ProvenanceLocalResponseConversionError, nil
 
 		case UpstreamResponses:
@@ -705,10 +709,11 @@ func (h *TranscodeHandler) convertResponse(
 			if err != nil {
 				return nil, ProvenanceLocalResponseConversionError, err
 			}
-			converted, err := RenderMessagesResponse(response, context)
+			converted, report, err := RenderMessagesResponse(response, context)
 			if err != nil {
 				return nil, ProvenanceLocalResponseConversionError, err
 			}
+			logConversionReport(report, r)
 			return converted, ProvenanceLocalResponseConversionError, nil
 
 		default:
@@ -832,6 +837,7 @@ func (h *TranscodeHandler) newFrameConverter(
 		state := newChatResponsesStreamState(
 			context,
 			h.cfg.LossPolicy,
+			h.cfg.ChatCapabilities,
 			responseID,
 			model,
 			createdAt,
@@ -853,6 +859,7 @@ func (h *TranscodeHandler) newFrameConverter(
 		chat := newChatResponsesStreamState(
 			context,
 			h.cfg.LossPolicy,
+			h.cfg.ChatCapabilities,
 			responseID,
 			model,
 			createdAt,

@@ -321,6 +321,12 @@ type CanonicalResponse struct {
 	// served; a non-empty value enters the explicit loss/reject decision at
 	// render time.
 	ChatServiceTier string
+
+	// ResponsesPhase reports that an output message carried a phase
+	// (commentary vs final_answer). The Messages dialect has no phase, so
+	// the distinction enters the explicit loss/reject decision at render
+	// time (review-j finding 10).
+	ResponsesPhase bool
 }
 
 // ValidateCanonicalResponse checks the response IR invariants.

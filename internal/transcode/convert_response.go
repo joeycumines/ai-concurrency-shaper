@@ -287,6 +287,9 @@ func DecodeResponsesResponse(
 		switch value := item.(type) {
 		case *ResponsesOutputMessage:
 			flushResultTurn()
+			if value.Phase != "" {
+				response.ResponsesPhase = true
+			}
 			for _, content := range value.Content {
 				switch part := content.(type) {
 				case *ResponsesOutputText:
@@ -386,16 +389,18 @@ func DecodeResponsesResponse(
 
 // RenderResponsesResponse renders the canonical response into a Responses
 // response envelope, reconstructed from the request echo. The client-facing
-// model alias is returned; the actual upstream model is never leaked.
+// model alias is returned; the actual upstream model is never leaked. The
+// returned report carries every approved loss and named encoding of the
+// conversion (review-j finding 10).
 func RenderResponsesResponse(
 	response CanonicalResponse,
 	context *ExchangeContext,
-) ([]byte, error) {
+) ([]byte, ConversionReport, error) {
 	if err := ValidateCanonicalResponse(response); err != nil {
-		return nil, err
+		return nil, ConversionReport{}, err
 	}
 	if context == nil || context.IDs == nil {
-		return nil, errors.New("render responses response requires an exchange context")
+		return nil, ConversionReport{}, errors.New("render responses response requires an exchange context")
 	}
 	// Chat response attributes the Responses envelope cannot reproduce
 	// (token log-probabilities and the tier actually served) are a loss or a
@@ -409,7 +414,7 @@ func RenderResponsesResponse(
 			"choices[].logprobs",
 			"chat response logprobs cannot be reproduced in a Responses response",
 		); err != nil {
-			return nil, err
+			return nil, report, err
 		}
 	}
 	if response.ChatServiceTier != "" {
@@ -419,7 +424,7 @@ func RenderResponsesResponse(
 			"service_tier",
 			"the upstream chat service tier cannot be reproduced in a Responses response",
 		); err != nil {
-			return nil, err
+			return nil, report, err
 		}
 	}
 
@@ -435,7 +440,7 @@ func RenderResponsesResponse(
 	// Output items from the canonical turns.
 	for _, turn := range response.Turns {
 		if turn.Role != CanonicalAssistant {
-			return nil, fmt.Errorf(
+			return nil, report, fmt.Errorf(
 				"response turn role %q is not assistant",
 				turn.Role,
 			)
@@ -484,13 +489,13 @@ func RenderResponsesResponse(
 					Content: ResponsesOutputContentParts{},
 				}
 			case CanonicalFunctionResult:
-				return nil, &UnsupportedFeatureError{
+				return nil, report, &UnsupportedFeatureError{
 					Protocol: "responses",
 					Path:     "output[]",
 					Feature:  "function result in model output",
 				}
 			default:
-				return nil, fmt.Errorf(
+				return nil, report, fmt.Errorf(
 					"response turn: unknown canonical part %T",
 					part,
 				)
@@ -556,9 +561,9 @@ func RenderResponsesResponse(
 
 	body, err := json.Marshal(envelope)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
-	return body, nil
+	return body, report, nil
 }
 
 // requestedClientModelAlias returns the stable client-facing model alias for
@@ -580,9 +585,10 @@ func requestedClientModelAlias(response CanonicalResponse, context *ExchangeCont
 func RenderMessagesResponse(
 	response CanonicalResponse,
 	context *ExchangeContext,
-) ([]byte, error) {
+) ([]byte, ConversionReport, error) {
+	var report ConversionReport
 	if err := ValidateCanonicalResponse(response); err != nil {
-		return nil, err
+		return nil, report, err
 	}
 	// A failed exchange must never be reported as a successful Messages
 	// completion (merge gate 10). The upstream failure surfaces as a
@@ -592,46 +598,55 @@ func RenderMessagesResponse(
 		if message == "" {
 			message = "upstream response failed"
 		}
-		return nil, fmt.Errorf("upstream response failed: %s", message)
+		return nil, report, fmt.Errorf("upstream response failed: %s", message)
 	}
 	if context == nil || context.IDs == nil {
-		return nil, errors.New("render messages response requires an exchange context")
+		return nil, report, errors.New("render messages response requires an exchange context")
 	}
 	// Chat response attributes the Messages response cannot reproduce
 	// (token log-probabilities and the tier actually served) are a loss or a
 	// rejection per the exchange policy — never a silent drop (review-j
 	// finding 4).
 	if response.ChatLogProbs {
-		var report ConversionReport
 		if err := report.Lose(
 			context.lossPolicy(),
 			FeatureLogprobs,
 			"choices[].logprobs",
 			"chat response logprobs cannot be reproduced in a Messages response",
 		); err != nil {
-			return nil, err
+			return nil, report, err
 		}
 	}
 	if response.ChatServiceTier != "" {
-		var report ConversionReport
 		if err := report.Lose(
 			context.lossPolicy(),
 			FeatureServiceTier,
 			"service_tier",
 			"the upstream chat service tier cannot be reproduced in a Messages response",
 		); err != nil {
-			return nil, err
+			return nil, report, err
+		}
+	}
+	// A Responses output-message phase (commentary vs final_answer) has no
+	// Messages representation (review-j finding 10).
+	if response.ResponsesPhase {
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeaturePhase,
+			"output[].phase",
+			"the output message phase cannot be reproduced in a Messages response",
+		); err != nil {
+			return nil, report, err
 		}
 	}
 	if len(response.ReasoningItems) > 0 {
-		var report ConversionReport
 		if err := report.Lose(
 			context.lossPolicy(),
 			FeatureReasoningSummary,
 			"output[].reasoning",
 			"Responses reasoning output cannot be reproduced in a Messages response",
 		); err != nil {
-			return nil, err
+			return nil, report, err
 		}
 	}
 
@@ -670,13 +685,13 @@ func RenderMessagesResponse(
 						Input: value.Arguments,
 					})
 				case CanonicalFunctionResult:
-					return nil, &UnsupportedFeatureError{
+					return nil, report, &UnsupportedFeatureError{
 						Protocol: "messages",
 						Path:     "content[]",
 						Feature:  "function result in assistant output",
 					}
 				default:
-					return nil, fmt.Errorf(
+					return nil, report, fmt.Errorf(
 						"response turn: unknown canonical part %T",
 						part,
 					)
@@ -687,18 +702,17 @@ func RenderMessagesResponse(
 			// Conversation-state echoes (tool results in the upstream output)
 			// belong to the next request, not the current Messages response.
 			// They are an approved loss or a rejection per the exchange policy.
-			var report ConversionReport
 			if err := report.Lose(
 				context.lossPolicy(),
 				FeatureConversationState,
 				"output[].function_call_output",
 				"tool results are conversation state, not part of the model response",
 			); err != nil {
-				return nil, err
+				return nil, report, err
 			}
 
 		default:
-			return nil, fmt.Errorf(
+			return nil, report, fmt.Errorf(
 				"response turn role %q is not assistant or user",
 				turn.Role,
 			)
@@ -731,14 +745,13 @@ func RenderMessagesResponse(
 	// (review-j finding 9). Unknown usage is never fabricated as zero facts:
 	// it is an explicit loss/reject decision.
 	if response.Usage.Unknown() {
-		var usageReport ConversionReport
-		if err := usageReport.Lose(
+		if err := report.Lose(
 			context.lossPolicy(),
 			FeatureUsageTiming,
 			"usage",
 			"the upstream response did not provide token usage; the required Messages usage cannot be reproduced",
 		); err != nil {
-			return nil, err
+			return nil, report, err
 		}
 		// The Messages wire contract requires the usage object; under an
 		// approved loss the zeros are a documented approximation, never a
@@ -748,7 +761,7 @@ func RenderMessagesResponse(
 		inputTokens := response.Usage.InputTokens
 		cached := response.Usage.CacheReadTokens + response.Usage.CacheWriteTokens
 		if inputTokens < 0 || cached < 0 || inputTokens-cached < 0 {
-			return nil, errors.New(
+			return nil, report, errors.New(
 				"source usage is arithmetically inconsistent: nonnegative token counts required and cached tokens must not exceed the input total",
 			)
 		}
@@ -768,7 +781,7 @@ func RenderMessagesResponse(
 
 	body, err := json.Marshal(out)
 	if err != nil {
-		return nil, err
+		return nil, report, err
 	}
-	return body, nil
+	return body, report, nil
 }

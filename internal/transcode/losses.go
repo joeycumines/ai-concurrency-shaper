@@ -40,6 +40,22 @@ const (
 	// so the omission is an explicit loss/reject decision (review-j finding
 	// 9).
 	FeatureUsageTiming Feature = "usage_timing"
+	// FeatureToolResultError covers a tool result marked as an error
+	// (Anthropic tool_result.is_error): the target dialects cannot carry the
+	// error status, so it is rejected by default. A permissive policy may
+	// encode the status into visible content only with the named
+	// "error_status_prefix" encoding, which is reported (review-j finding
+	// 10).
+	FeatureToolResultError Feature = "tool_result_error"
+	// FeaturePhase covers a Responses output-message phase (commentary vs
+	// final_answer): the Messages dialect has no phase, so the distinction
+	// is a loss/reject decision (review-j finding 10).
+	FeaturePhase Feature = "phase"
+	// FeatureReasoningSummaryRequest covers the Responses request's
+	// reasoning.summary style when rendering to a Chat upstream: Chat has
+	// reasoning_effort but no summary style, so the request is a
+	// loss/reject decision (review-j finding 10).
+	FeatureReasoningSummaryRequest Feature = "reasoning_summary_request"
 )
 
 // LossPolicy decides whether a non-portable feature may be dropped during a
@@ -111,6 +127,18 @@ func (r *ConversionReport) Lose(
 		Detail:  detail,
 	})
 	return nil
+}
+
+// Note records a named encoding that the conversion applied without a policy
+// decision — the encoding is sanctioned by a capability or an approved loss
+// — so it is observable even though no loss occurred (review-j finding 10:
+// encodings that invent or reinterpret content must be named and reported).
+func (r *ConversionReport) Note(feature Feature, path string, detail string) {
+	r.Losses = append(r.Losses, ConversionLoss{
+		Feature: feature,
+		Path:    path,
+		Detail:  detail,
+	})
 }
 
 // strictDecode decodes exactly one JSON value into dst with unknown fields

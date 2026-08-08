@@ -128,6 +128,7 @@ func TestConvertingReaderMalformedFrame(t *testing.T) {
 	converter := newChatToResponsesConverter(newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -167,6 +168,7 @@ func TestConvertingReaderEOFWithoutTerminal(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -213,6 +215,7 @@ func TestConvertingReaderDoneReleasesTerminal(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -349,6 +352,7 @@ func TestRunTranslatedStreamNoLateOps(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -487,6 +491,7 @@ func TestRunTranslatedStreamClientAbortReleases(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -559,6 +564,7 @@ func TestFixtureChatStreamToResponsesFrames(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
 		1,
@@ -600,6 +606,7 @@ func TestWriteDialectEventNameMatchesType(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,

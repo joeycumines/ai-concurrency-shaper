@@ -96,6 +96,7 @@ func TestChatStreamUsageTailProducesRealTotals(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
 		1710000000,
@@ -166,6 +167,7 @@ func TestChatStreamFixtureUsageTailEndToEnd(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
 		1710000000,
@@ -217,6 +219,7 @@ func TestChatStreamCreatedAtConsistent(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
 		999, // the handler's placeholder; the first chunk's created wins
@@ -265,6 +268,7 @@ func TestChatStreamOutputItemAddedEmptyArguments(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
 		1710000000,
@@ -311,6 +315,7 @@ func TestChatStreamComposedAnthropicUsageTail(t *testing.T) {
 	chat := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
 		1710000000,
@@ -385,6 +390,7 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
 		1710000000,
@@ -399,6 +405,7 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 	state = newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
 		1710000000,
@@ -416,6 +423,7 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 	state = newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
 		1710000000,

@@ -179,7 +179,11 @@ func DecodeResponsesRequest(
 		if err := envelope.Instructions.Validate(); err != nil {
 			return DecodeResult{}, nil, fmt.Errorf("responses instructions: %w", err)
 		}
-		turn, err := responsesInstructionsToTurns(*envelope.Instructions)
+		turn, err := responsesInstructionsToTurns(
+			*envelope.Instructions,
+			policy,
+			&result.Report,
+		)
 		if err != nil {
 			return DecodeResult{}, nil, err
 		}
@@ -229,6 +233,8 @@ func DecodeResponsesRequest(
 // system turns.
 func responsesInstructionsToTurns(
 	instructions ResponsesInput,
+	policy LossPolicy,
+	report *ConversionReport,
 ) ([]CanonicalTurn, error) {
 	if instructions.Text != nil {
 		return []CanonicalTurn{{
@@ -240,6 +246,11 @@ func responsesInstructionsToTurns(
 	for i, item := range instructions.Items {
 		switch value := item.(type) {
 		case *ResponsesEasyInputMessage:
+			// Instructions messages cannot carry phases meaningfully, but
+			// the same strict-subset rule applies (review-j finding 10).
+			if err := loseInputPhase(policy, report, value.Phase, i); err != nil {
+				return nil, err
+			}
 			parts, err := responsesInputContentToParts(value.Content)
 			if err != nil {
 				return nil, fmt.Errorf("instructions item %d: %w", i, err)
@@ -277,6 +288,9 @@ func responsesInputToTurns(
 	for i, item := range input.Items {
 		switch value := item.(type) {
 		case *ResponsesEasyInputMessage:
+			if err := loseInputPhase(policy, report, value.Phase, i); err != nil {
+				return nil, err
+			}
 			role := canonicalRoleFromResponsesInputRole(value.Role)
 			parts, err := responsesInputContentToParts(value.Content)
 			if err != nil {
@@ -285,6 +299,9 @@ func responsesInputToTurns(
 			turns = append(turns, CanonicalTurn{Role: role, Parts: parts})
 
 		case *ResponsesPreviousOutputMessage:
+			if err := loseInputPhase(policy, report, value.Phase, i); err != nil {
+				return nil, err
+			}
 			parts, err := responsesOutputContentToCanonical(value.Content)
 			if err != nil {
 				return nil, fmt.Errorf("input item %d: %w", i, err)
@@ -938,7 +955,17 @@ func RenderResponsesRequest(
 					input = append(input, item)
 					contentParts = nil
 				}
-				output, err := canonicalPartsToFunctionOutput(value.Parts)
+				parts, err := transcodeToolResult(
+					value,
+					context.lossPolicy(),
+					&report,
+					"responses",
+					"input[].function_call_output",
+				)
+				if err != nil {
+					return nil, report, err
+				}
+				output, err := canonicalPartsToFunctionOutput(parts)
 				if err != nil {
 					return nil, report, err
 				}
@@ -1272,10 +1299,77 @@ func RenderChatRequest(
 			out.ReasoningEffort = context.OriginalResponsesRequest.Reasoning.Effort
 		}
 	}
+	// The reasoning summary style has no Chat representation: only the
+	// effort is portable, so the summary request is a loss/reject decision
+	// (review-j finding 10).
+	if context != nil && context.OriginalResponsesRequest != nil &&
+		context.OriginalResponsesRequest.Reasoning != nil &&
+		context.OriginalResponsesRequest.Reasoning.Summary != nil {
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeatureReasoningSummaryRequest,
+			"reasoning.summary",
+			"the reasoning summary style cannot be reproduced in a chat request",
+		); err != nil {
+			return nil, report, err
+		}
+	}
 
 	body, err := json.Marshal(out)
 	if err != nil {
 		return nil, report, err
 	}
 	return body, report, nil
+}
+
+// transcodeToolResult applies the tool_result.is_error decision when
+// rendering a canonical tool result to a target that cannot carry the error
+// status. It is rejected by default (FeatureToolResultError); a permissive
+// policy may encode the status into visible content with the named
+// "error_status_prefix" encoding, which is reported because it invents text
+// (review-j finding 10).
+func transcodeToolResult(
+	result CanonicalFunctionResult,
+	policy LossPolicy,
+	report *ConversionReport,
+	target string,
+	path string,
+) ([]CanonicalPart, error) {
+	if !result.IsError {
+		return result.Parts, nil
+	}
+	if err := report.Lose(
+		policy,
+		FeatureToolResultError,
+		path,
+		"the tool result error status cannot be reproduced in the "+target+
+			" dialect; the permissive encoding is the visible error_status_prefix text",
+	); err != nil {
+		return nil, err
+	}
+	return append(
+		[]CanonicalPart{CanonicalText{Text: "[tool_result_error]"}},
+		result.Parts...,
+	), nil
+}
+
+// loseInputPhase applies the input-message phase decision at decode time.
+// The canonical IR cannot carry a phase and no target dialect can reproduce
+// it, so its presence is a loss/reject decision regardless of the target
+// (review-j finding 10).
+func loseInputPhase(
+	policy LossPolicy,
+	report *ConversionReport,
+	phase string,
+	index int,
+) error {
+	if phase == "" {
+		return nil
+	}
+	return report.Lose(
+		policy,
+		FeaturePhase,
+		fmt.Sprintf("input[%d].phase", index),
+		"the input message phase cannot be reproduced in any target dialect",
+	)
 }

@@ -52,10 +52,10 @@ func TestChatResponseCurrentShapeConverts(t *testing.T) {
 	}
 	context := testExchangeContext()
 	context.RequestedClientModel = "m"
-	if _, err := RenderResponsesResponse(response, context); err != nil {
+	if _, _, err := RenderResponsesResponse(response, context); err != nil {
 		t.Fatalf("responses render with absent attributes: %v", err)
 	}
-	if _, err := RenderMessagesResponse(response, context); err != nil {
+	if _, _, err := RenderMessagesResponse(response, context); err != nil {
 		t.Fatalf("messages render with absent attributes: %v", err)
 	}
 
@@ -65,10 +65,10 @@ func TestChatResponseCurrentShapeConverts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RenderResponsesResponse(response, context); err == nil {
+	if _, _, err := RenderResponsesResponse(response, context); err == nil {
 		t.Fatal("strict policy accepted a chat response with service_tier")
 	}
-	if _, err := RenderMessagesResponse(response, context); err == nil {
+	if _, _, err := RenderMessagesResponse(response, context); err == nil {
 		t.Fatal("strict policy accepted a chat response with service_tier")
 	}
 	permissive := testExchangeContext()
@@ -76,10 +76,10 @@ func TestChatResponseCurrentShapeConverts(t *testing.T) {
 		FeatureServiceTier: {},
 	}}
 	permissive.RequestedClientModel = "m"
-	if _, err := RenderResponsesResponse(response, permissive); err != nil {
+	if _, _, err := RenderResponsesResponse(response, permissive); err != nil {
 		t.Fatalf("permissive responses render: %v", err)
 	}
-	if _, err := RenderMessagesResponse(response, permissive); err != nil {
+	if _, _, err := RenderMessagesResponse(response, permissive); err != nil {
 		t.Fatalf("permissive messages render: %v", err)
 	}
 }
@@ -99,7 +99,7 @@ func TestChatResponseTypedLogprobsLossDecision(t *testing.T) {
 	}
 	context := testExchangeContext()
 	context.RequestedClientModel = "m"
-	if _, err := RenderMessagesResponse(response, context); err == nil {
+	if _, _, err := RenderMessagesResponse(response, context); err == nil {
 		t.Fatal("strict policy accepted typed logprobs")
 	}
 	permissive := testExchangeContext()
@@ -107,7 +107,7 @@ func TestChatResponseTypedLogprobsLossDecision(t *testing.T) {
 		FeatureLogprobs: {},
 	}}
 	permissive.RequestedClientModel = "m"
-	if _, err := RenderMessagesResponse(response, permissive); err != nil {
+	if _, _, err := RenderMessagesResponse(response, permissive); err != nil {
 		t.Fatalf("permissive render with logprobs: %v", err)
 	}
 }
@@ -132,6 +132,7 @@ func TestChatStreamCurrentShape(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testExchangeContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -149,6 +150,7 @@ func TestChatStreamCurrentShape(t *testing.T) {
 	state = newChatResponsesStreamState(
 		permissive,
 		permissive.LossPolicy,
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,

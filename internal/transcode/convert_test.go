@@ -582,7 +582,7 @@ func TestRenderMessagesResponseReasoningLoss(t *testing.T) {
 	if len(response.ReasoningItems) != 1 {
 		t.Fatalf("reasoning items = %d", len(response.ReasoningItems))
 	}
-	if _, err := RenderMessagesResponse(response, testExchangeContext()); err == nil {
+	if _, _, err := RenderMessagesResponse(response, testExchangeContext()); err == nil {
 		t.Fatal("expected reasoning loss rejection under strict policy")
 	}
 	// With the losses approved, rendering succeeds.
@@ -591,7 +591,7 @@ func TestRenderMessagesResponseReasoningLoss(t *testing.T) {
 		FeatureReasoningSummary:  {},
 		FeatureConversationState: {},
 	}}
-	if _, err := RenderMessagesResponse(response, context); err != nil {
+	if _, _, err := RenderMessagesResponse(response, context); err != nil {
 		t.Fatalf("render with approved loss: %v", err)
 	}
 }
@@ -609,7 +609,7 @@ func TestRenderMessagesResponseFromResponses(t *testing.T) {
 		FeatureReasoningSummary:  {},
 		FeatureConversationState: {},
 	}}
-	rendered, err := RenderMessagesResponse(response, context)
+	rendered, _, err := RenderMessagesResponse(response, context)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,7 +646,7 @@ func TestRenderResponsesResponseFromChat(t *testing.T) {
 	context := testExchangeContext()
 	context.RequestedClientModel = "gpt-4.1"
 	context.UpstreamModel = "gpt-4.1"
-	rendered, err := RenderResponsesResponse(response, context)
+	rendered, _, err := RenderResponsesResponse(response, context)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,7 +706,7 @@ func TestRenderResponsesResponseEcho(t *testing.T) {
 	context.OriginalResponsesRequest = echo
 	context.RequestedClientModel = "gpt-4.1"
 	context.UpstreamModel = "gpt-4.1"
-	rendered, err := RenderResponsesResponse(response, context)
+	rendered, _, err := RenderResponsesResponse(response, context)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,7 +742,7 @@ func TestRenderResponsesResponseFailed(t *testing.T) {
 	}
 	context := testExchangeContext()
 	context.RequestedClientModel = "m"
-	rendered, err := RenderResponsesResponse(response, context)
+	rendered, _, err := RenderResponsesResponse(response, context)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -994,6 +994,7 @@ func TestChatStreamErrorFrameSurfaced(t *testing.T) {
 	converter := newChatToResponsesConverter(newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,

@@ -35,6 +35,7 @@ func TestChatToResponsesTextStream(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
 		1710000000,
@@ -140,6 +141,7 @@ func TestChatToResponsesIncomplete(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -168,6 +170,7 @@ func TestChatToResponsesFunctionCallStream(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -273,6 +276,7 @@ func TestChatToResponsesEmptyToolArguments(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -304,6 +308,7 @@ func TestChatToResponsesBufferedToolStartUntilIdentity(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -369,6 +374,7 @@ func TestChatToResponsesProviderReasoningDropped(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -392,6 +398,7 @@ func TestChatToResponsesProviderReasoningDropped(t *testing.T) {
 	state = newChatResponsesStreamState(
 		testStreamContext(),
 		policy,
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -418,6 +425,7 @@ func TestChatToResponsesRefusal(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -471,6 +479,7 @@ func TestChatToResponsesMultipleChoicesRejected(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -790,6 +799,7 @@ func TestChatToAnthropicCompositionInMemory(t *testing.T) {
 	chat := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -877,6 +887,7 @@ func TestChatToAnthropicFailedStream(t *testing.T) {
 	chat := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -942,6 +953,7 @@ func TestChatToAnthropicInterleavedContentAndRefusal(t *testing.T) {
 		newChatResponsesStreamState(
 			testStreamContext(),
 			StrictLossPolicy(),
+			ChatCapabilities{},
 			"resp_1",
 			"m",
 			1,
@@ -1045,6 +1057,7 @@ func TestChatToResponsesUnstartedToolCallRejected(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -1067,6 +1080,7 @@ func TestChatToResponsesUnstartedToolCallRejected(t *testing.T) {
 	state2 := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -1105,6 +1119,7 @@ func TestChatToResponsesToolCallIndexCollision(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -1138,6 +1153,7 @@ func TestChatToResponsesAmbiguousFragmentRejected(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,
@@ -1236,6 +1252,7 @@ func TestChatStreamUnknownFinishReasonRejected(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"resp_1",
 		"m",
 		1,

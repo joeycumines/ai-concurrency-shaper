@@ -24,6 +24,58 @@
 //     github.com/joeycumines/sesame/stream; the handler owns downstream
 //     sealing, upstream body closure, and outcome classification around it.
 //
+// # Semantic matrix
+//
+// Every canonical field and source artifact is classified per target dialect
+// (review-j finding 10). New fields must be placed in exactly one row below
+// before being used in a renderer:
+//
+//   - exact: the value crosses protocols unchanged;
+//   - transformed: the value is mapped to an equivalent form without losing
+//     meaning (e.g. stop reasons, tool-call identity);
+//   - loss-gated: the value is dropped, and the drop is approved by the
+//     exchange LossPolicy or rejected (the Feature names the decision);
+//   - unsupported: the value always produces a client-dialect error.
+//
+// Canonical request fields:
+//
+//	ClientModel, Turns, Tools, ToolChoice, MaxOutputTokens, Temperature,
+//	TopP, Metadata        exact (rendered per target)
+//	ParallelTools         transformed (per-target capability gate)
+//	StopSequences         loss-gated (FeatureStopSequences; Responses has none)
+//	StructuredOutput      transformed (per-target capability gate)
+//	Stream                exact
+//	FunctionResult.IsError loss-gated (FeatureToolResultError; permissive
+//	                       encoding: visible error_status_prefix text)
+//	Reasoning.Effort      transformed (Chat reasoning_effort, capability gate)
+//	Reasoning.Summary     loss-gated (FeatureReasoningSummaryRequest; Chat has
+//	                       no summary style)
+//	Thinking blocks       exact only for Messages targets; loss-gated
+//	                       (FeatureAuthenticatedThinking) otherwise
+//	Reasoning items       exact only for Responses targets; loss-gated
+//	                       (FeatureReasoningSummary) otherwise
+//	Images, Documents     transformed (per-target capability gates)
+//	Developer role        transformed (capability gate; system fallback)
+//
+// Canonical response fields:
+//
+//	ID, Model, CreatedAt, Status, Turns, StopReason   exact/transformed
+//	ReasoningItems        loss-gated (FeatureReasoningSummary; Messages targets)
+//	Conversation state    loss-gated (FeatureConversationState; Messages
+//	                       responses cannot carry tool results)
+//	Output message phase  loss-gated (FeaturePhase; Messages has no phase;
+//	                       the stream gates each phase-bearing item exactly
+//	                       once; input-message phases are loss-gated at
+//	                       decode)
+//	Usage                 transformed with checked arithmetic; unknown usage
+//	                       is loss-gated (FeatureUsageTiming)
+//	Chat logprobs         loss-gated (FeatureLogprobs)
+//	Chat service tier     loss-gated (FeatureServiceTier)
+//	Provider reasoning    capability-gated (ProviderReasoningText maps to
+//	                       ordinary text with the named provider_reasoning_text
+//	                       encoding, reported via ConversionReport in the
+//	                       streaming path)
+//
 // Authoritative contracts:
 // https://platform.openai.com/docs/api-reference/responses
 // https://platform.openai.com/docs/api-reference/chat
