@@ -949,6 +949,10 @@ type anthropicResponsesStreamState struct {
 	// 10).
 	phaseGated map[string]struct{}
 
+	// controlsGated ensures the envelope-controls loss is recorded exactly
+	// once per stream (review-j finding 13).
+	controlsGated bool
+
 	usage *AnthropicUsage
 
 	// report accumulates approved losses of the conversion; it is surfaced
@@ -1008,6 +1012,11 @@ func (s *anthropicResponsesStreamState) Convert(
 		return s.messageStart(value.Response)
 
 	case ResponseInProgressEvent:
+		// The in_progress envelope may carry the request-echo controls even
+		// when the created envelope does not; gate them the same way.
+		if err := s.loseControlsOnce(value.Response); err != nil {
+			return nil, err
+		}
 		return nil, nil
 
 	case ResponseOutputItemAddedEvent:
@@ -1077,6 +1086,9 @@ func (s *anthropicResponsesStreamState) messageStart(
 		return nil, errors.New("duplicate message_start")
 	}
 	s.messageSent = true
+	if err := s.loseControlsOnce(envelope); err != nil {
+		return nil, err
+	}
 	// The stream-start message serializes stop_reason: null and
 	// stop_sequence: null (review-j finding 8): generation has not finished,
 	// and the stop fields are assigned only in message_delta.
@@ -1374,6 +1386,45 @@ func (s *anthropicResponsesStreamState) gateEnvelopePhases(
 	return nil
 }
 
+// loseControlsOnce records the pinned envelope-controls loss exactly once
+// per stream: the created envelope, the completed envelope, or an
+// incomplete envelope may each carry them, and the first sighting decides
+// (review-j finding 13). An envelope without controls never triggers a
+// loss.
+func (s *anthropicResponsesStreamState) loseControlsOnce(
+	envelope ResponseEnvelope,
+) error {
+	if s.controlsGated {
+		return nil
+	}
+	var present []string
+	for _, control := range []struct {
+		name    string
+		present bool
+	}{
+		{"background", envelope.Background != nil},
+		{"max_tool_calls", envelope.MaxToolCalls != nil},
+		{"prompt", envelope.Prompt != nil},
+		{"prompt_cache_key", envelope.PromptCacheKey != ""},
+		{"safety_identifier", envelope.SafetyIdentifier != ""},
+	} {
+		if control.present {
+			present = append(present, control.name)
+		}
+	}
+	if len(present) == 0 {
+		return nil
+	}
+	s.controlsGated = true
+	return s.report.Lose(
+		s.policy,
+		FeatureResponsesControls,
+		"response",
+		"the Responses envelope controls "+strings.Join(present, ", ")+
+			" cannot be reproduced in an Anthropic stream",
+	)
+}
+
 // losePhaseOnce records the output-message phase loss exactly once per
 // item (review-j finding 10).
 func (s *anthropicResponsesStreamState) losePhaseOnce(
@@ -1408,6 +1459,9 @@ func (s *anthropicResponsesStreamState) completed(
 	if err := s.gateEnvelopePhases(envelope); err != nil {
 		return nil, err
 	}
+	if err := s.loseControlsOnce(envelope); err != nil {
+		return nil, err
+	}
 	if err := s.finalizeMessage(stop, envelope.Usage); err != nil {
 		return nil, err
 	}
@@ -1426,6 +1480,9 @@ func (s *anthropicResponsesStreamState) incomplete(
 		stop = CanonicalStopRefusal
 	}
 	if err := s.gateEnvelopePhases(envelope); err != nil {
+		return nil, err
+	}
+	if err := s.loseControlsOnce(envelope); err != nil {
 		return nil, err
 	}
 	if err := s.finalizeMessage(stop, envelope.Usage); err != nil {

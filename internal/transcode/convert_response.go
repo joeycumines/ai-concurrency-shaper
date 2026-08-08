@@ -239,6 +239,21 @@ func DecodeResponsesResponse(
 		}
 	}
 
+	for _, control := range []struct {
+		name    string
+		present bool
+	}{
+		{"background", envelope.Background != nil},
+		{"max_tool_calls", envelope.MaxToolCalls != nil},
+		{"prompt", envelope.Prompt != nil},
+		{"prompt_cache_key", envelope.PromptCacheKey != ""},
+		{"safety_identifier", envelope.SafetyIdentifier != ""},
+	} {
+		if control.present {
+			response.ResponsesControls = append(response.ResponsesControls, control.name)
+		}
+	}
+
 	if envelope.Usage != nil {
 		response.Usage = CanonicalUsage{
 			InputTokens:     envelope.Usage.InputTokens,
@@ -625,6 +640,19 @@ func RenderMessagesResponse(
 			FeatureServiceTier,
 			"service_tier",
 			"the upstream chat service tier cannot be reproduced in a Messages response",
+		); err != nil {
+			return nil, report, err
+		}
+	}
+	// The pinned Responses envelope controls cannot be reproduced in a
+	// Messages response (review-j finding 13).
+	if len(response.ResponsesControls) > 0 {
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeatureResponsesControls,
+			"output",
+			"the Responses envelope controls "+strings.Join(response.ResponsesControls, ", ")+
+				" cannot be reproduced in a Messages response",
 		); err != nil {
 			return nil, report, err
 		}

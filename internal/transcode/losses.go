@@ -56,6 +56,13 @@ const (
 	// reasoning_effort but no summary style, so the request is a
 	// loss/reject decision (review-j finding 10).
 	FeatureReasoningSummaryRequest Feature = "reasoning_summary_request"
+	// FeatureResponsesControls covers the pinned Responses envelope control
+	// fields (background, max_tool_calls, prompt, prompt_cache_key,
+	// safety_identifier): they decode as typed shadows so strict decoding
+	// never fails on a current official response, and their presence is a
+	// loss/reject decision because the client dialects cannot reproduce
+	// them (review-j finding 13).
+	FeatureResponsesControls Feature = "responses_controls"
 )
 
 // LossPolicy decides whether a non-portable feature may be dropped during a

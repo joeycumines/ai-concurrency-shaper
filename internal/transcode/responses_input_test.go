@@ -237,16 +237,22 @@ func TestResponsesFunctionOutputUnion(t *testing.T) {
 	}
 }
 
-func TestResponsesInputInstructionsUnion(t *testing.T) {
-	// The envelope uses *ResponsesInput for instructions; both arms must
-	// decode through strict decoding.
+func TestResponsesInputInstructionsString(t *testing.T) {
+	// The create-request instructions is a plain string per the pinned
+	// ResponseNewParams shape (review-j finding 13).
 	data := `{"instructions":"system prompt","input":"hi","model":"m"}`
 	var envelope responsesRequestEnvelope
 	if err := strictDecode([]byte(data), &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope.Instructions == nil || envelope.Instructions.Text == nil {
+	if envelope.Instructions == nil || *envelope.Instructions != "system prompt" {
 		t.Fatalf("instructions = %+v", envelope.Instructions)
+	}
+
+	// An items array is not a valid create-request instructions shape.
+	bad := `{"instructions":[{"type":"message","role":"system","content":[{"type":"input_text","text":"x"}]}],"input":"hi","model":"m"}`
+	if err := strictDecode([]byte(bad), &envelope); err == nil {
+		t.Fatal("array instructions accepted on the create request")
 	}
 }
 

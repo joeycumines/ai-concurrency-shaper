@@ -130,6 +130,16 @@ type ResponsesEnvelopeError struct {
 	Message string `json:"message"`
 }
 
+// ResponsesEnvelopePrompt is the typed shadow of the pinned ResponsePrompt:
+// prompt template configuration echoed on the envelope. The transcoder does
+// not implement prompt templates; presence enters the explicit loss/reject
+// decision (review-j finding 13).
+type ResponsesEnvelopePrompt struct {
+	ID        string                     `json:"id"`
+	Variables map[string]json.RawMessage `json:"variables,omitempty"`
+	Version   string                     `json:"version,omitempty"`
+}
+
 // ResponsesIncompleteDetails explains why a response is incomplete.
 type ResponsesIncompleteDetails struct {
 	Reason string `json:"reason,omitempty"`
@@ -196,6 +206,16 @@ type ResponseEnvelope struct {
 	Error             *ResponsesEnvelopeError     `json:"error"`
 	IncompleteDetails *ResponsesIncompleteDetails `json:"incomplete_details"`
 
+	// Typed shadow fields for the pinned envelope controls (review-j
+	// finding 13): they decode so strict decoding never fails on a current
+	// official response, and their presence enters the explicit loss/reject
+	// decision at render time.
+	Background       *bool                    `json:"background,omitempty"`
+	MaxToolCalls     *int64                   `json:"max_tool_calls,omitempty"`
+	Prompt           *ResponsesEnvelopePrompt `json:"prompt,omitempty"`
+	PromptCacheKey   string                   `json:"prompt_cache_key,omitempty"`
+	SafetyIdentifier string                   `json:"safety_identifier,omitempty"`
+
 	Instructions       *ResponsesInput             `json:"instructions,omitempty"`
 	MaxOutputTokens    *int64                      `json:"max_output_tokens,omitempty"`
 	ParallelToolCalls  *bool                       `json:"parallel_tool_calls,omitempty"`
@@ -260,6 +280,11 @@ func (r *ResponseEnvelope) UnmarshalJSON(data []byte) error {
 		Output             json.RawMessage             `json:"output"`
 		Error              *ResponsesEnvelopeError     `json:"error"`
 		IncompleteDetails  *ResponsesIncompleteDetails `json:"incomplete_details"`
+		Background         *bool                       `json:"background"`
+		MaxToolCalls       *int64                      `json:"max_tool_calls"`
+		Prompt             *ResponsesEnvelopePrompt    `json:"prompt"`
+		PromptCacheKey     string                      `json:"prompt_cache_key"`
+		SafetyIdentifier   string                      `json:"safety_identifier"`
 		Instructions       *ResponsesInput             `json:"instructions"`
 		MaxOutputTokens    *int64                      `json:"max_output_tokens"`
 		ParallelToolCalls  *bool                       `json:"parallel_tool_calls"`
@@ -307,6 +332,11 @@ func (r *ResponseEnvelope) UnmarshalJSON(data []byte) error {
 		Output:             items,
 		Error:              shadow.Error,
 		IncompleteDetails:  shadow.IncompleteDetails,
+		Background:         shadow.Background,
+		MaxToolCalls:       shadow.MaxToolCalls,
+		Prompt:             shadow.Prompt,
+		PromptCacheKey:     shadow.PromptCacheKey,
+		SafetyIdentifier:   shadow.SafetyIdentifier,
 		Instructions:       shadow.Instructions,
 		MaxOutputTokens:    shadow.MaxOutputTokens,
 		ParallelToolCalls:  shadow.ParallelToolCalls,

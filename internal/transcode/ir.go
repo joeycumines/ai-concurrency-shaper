@@ -327,6 +327,13 @@ type CanonicalResponse struct {
 	// the distinction enters the explicit loss/reject decision at render
 	// time (review-j finding 10).
 	ResponsesPhase bool
+
+	// ResponsesControls lists the pinned Responses envelope control fields
+	// (background, max_tool_calls, prompt, prompt_cache_key,
+	// safety_identifier) present in the decoded envelope. The client
+	// dialects cannot reproduce them, so their presence enters the explicit
+	// loss/reject decision at render time (review-j finding 13).
+	ResponsesControls []string
 }
 
 // ValidateCanonicalResponse checks the response IR invariants.

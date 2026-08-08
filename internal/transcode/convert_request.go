@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Direct source-to-IR-to-target conversion. There must not be an
@@ -20,9 +21,12 @@ import (
 // Responses request body. Unknown fields are rejected; recognized-but-
 // unsupported fields produce an UnsupportedFeatureError before decoding.
 type responsesRequestEnvelope struct {
-	Model              string                      `json:"model"`
-	Input              *ResponsesInput             `json:"input,omitempty"`
-	Instructions       *ResponsesInput             `json:"instructions,omitempty"`
+	Model string          `json:"model"`
+	Input *ResponsesInput `json:"input,omitempty"`
+	// Instructions is a plain string on the create request (the pinned
+	// ResponseNewParams shape); the string-or-item-list union exists only on
+	// the response echo (review-j finding 13).
+	Instructions       *string                     `json:"instructions,omitempty"`
 	MaxOutputTokens    *int                        `json:"max_output_tokens,omitempty"`
 	ParallelToolCalls  *bool                       `json:"parallel_tool_calls,omitempty"`
 	PreviousResponseID *string                     `json:"previous_response_id,omitempty"`
@@ -176,18 +180,10 @@ func DecodeResponsesRequest(
 
 	// Turns from instructions and input.
 	if envelope.Instructions != nil {
-		if err := envelope.Instructions.Validate(); err != nil {
-			return DecodeResult{}, nil, fmt.Errorf("responses instructions: %w", err)
-		}
-		turn, err := responsesInstructionsToTurns(
-			*envelope.Instructions,
-			policy,
-			&result.Report,
-		)
-		if err != nil {
-			return DecodeResult{}, nil, err
-		}
-		result.Request.Turns = append(result.Request.Turns, turn...)
+		result.Request.Turns = append(result.Request.Turns, CanonicalTurn{
+			Role:  CanonicalSystem,
+			Parts: []CanonicalPart{CanonicalText{Text: *envelope.Instructions}},
+		})
 	}
 	if envelope.Input != nil {
 		if err := envelope.Input.Validate(); err != nil {
@@ -205,66 +201,31 @@ func DecodeResponsesRequest(
 		result.Request.Turns = append(result.Request.Turns, turns...)
 	}
 
-	// Echo for the client envelope reconstruction.
-	echo := &ResponsesRequestEcho{
-		Instructions:       envelope.Instructions,
-		MaxOutputTokens:    envelope.MaxOutputTokens,
-		ParallelToolCalls:  envelope.ParallelToolCalls,
-		PreviousResponseID: envelope.PreviousResponseID,
-		Store:              envelope.Store,
-		Temperature:        envelope.Temperature,
-		TopP:               envelope.TopP,
-		Truncation:         envelope.Truncation,
-		User:               envelope.User,
-		Metadata:           envelope.Metadata,
-		Tools:              envelope.Tools,
-		ToolChoice:         envelope.ToolChoice,
-		Reasoning:          envelope.Reasoning,
-		Text:               envelope.Text,
-		ServiceTier:        envelope.ServiceTier,
-		TopLogprobs:        envelope.TopLogprobs,
-		Stream:             envelope.Stream,
+	// Echo for the client envelope reconstruction. The client's
+	// instructions is a plain string; the response envelope echo renders
+	// the string arm of the pinned instructions union.
+	echo := &ResponsesRequestEcho{}
+	if envelope.Instructions != nil {
+		echo.Instructions = &ResponsesInput{Text: envelope.Instructions}
 	}
+	echo.MaxOutputTokens = envelope.MaxOutputTokens
+	echo.ParallelToolCalls = envelope.ParallelToolCalls
+	echo.PreviousResponseID = envelope.PreviousResponseID
+	echo.Store = envelope.Store
+	echo.Temperature = envelope.Temperature
+	echo.TopP = envelope.TopP
+	echo.Truncation = envelope.Truncation
+	echo.User = envelope.User
+	echo.Metadata = envelope.Metadata
+	echo.Tools = envelope.Tools
+	echo.ToolChoice = envelope.ToolChoice
+	echo.Reasoning = envelope.Reasoning
+	echo.Text = envelope.Text
+	echo.ServiceTier = envelope.ServiceTier
+	echo.TopLogprobs = envelope.TopLogprobs
+	echo.Stream = envelope.Stream
 
 	return result, echo, nil
-}
-
-// responsesInstructionsToTurns maps the Responses instructions union to
-// system turns.
-func responsesInstructionsToTurns(
-	instructions ResponsesInput,
-	policy LossPolicy,
-	report *ConversionReport,
-) ([]CanonicalTurn, error) {
-	if instructions.Text != nil {
-		return []CanonicalTurn{{
-			Role:  CanonicalSystem,
-			Parts: []CanonicalPart{CanonicalText{Text: *instructions.Text}},
-		}}, nil
-	}
-	turn := CanonicalTurn{Role: CanonicalSystem}
-	for i, item := range instructions.Items {
-		switch value := item.(type) {
-		case *ResponsesEasyInputMessage:
-			// Instructions messages cannot carry phases meaningfully, but
-			// the same strict-subset rule applies (review-j finding 10).
-			if err := loseInputPhase(policy, report, value.Phase, i); err != nil {
-				return nil, err
-			}
-			parts, err := responsesInputContentToParts(value.Content)
-			if err != nil {
-				return nil, fmt.Errorf("instructions item %d: %w", i, err)
-			}
-			turn.Parts = append(turn.Parts, parts...)
-		default:
-			return nil, &UnsupportedFeatureError{
-				Protocol: "responses",
-				Path:     "instructions[]",
-				Feature:  "non-message instructions item",
-			}
-		}
-	}
-	return []CanonicalTurn{turn}, nil
 }
 
 // responsesInputToTurns maps the Responses input item list to canonical turns,
@@ -878,7 +839,7 @@ func RenderResponsesRequest(
 		model = context.UpstreamModel
 	}
 
-	var instructions *ResponsesInput
+	var instructions *string
 	input := make(ResponsesInputItems, 0)
 
 	// Split turns into instructions (system/developer) and input items.
@@ -892,24 +853,46 @@ func RenderResponsesRequest(
 		}
 	}
 
-	if len(systemTurns) > 0 {
-		// A single text-only system turn renders as the string arm; anything
-		// richer renders as easy-message items.
-		if len(systemTurns) == 1 && len(systemTurns[0].Parts) == 1 {
-			if text, ok := systemTurns[0].Parts[0].(CanonicalText); ok {
-				instructions = &ResponsesInput{Text: &text.Text}
-			}
+	// The create-request instructions is a plain string (the pinned
+	// ResponseNewParams shape). Text-only system prompts render as that
+	// string; non-text parts (images, documents) or multiple system turns
+	// cannot be expressed in the string and are a loss/reject decision —
+	// never an illegal items array (review-j finding 13).
+	if len(systemTurns) > 1 {
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeatureResponsesControls,
+			"instructions",
+			"multiple system turns cannot be expressed in a single instructions string",
+		); err != nil {
+			return nil, report, err
 		}
-		if instructions == nil {
-			var items ResponsesInputItems
-			for _, turn := range systemTurns {
-				item, err := canonicalTurnPartsToEasyMessage(turn.Role, turn.Parts)
-				if err != nil {
+	}
+	if len(systemTurns) == 1 {
+		var builder strings.Builder
+		for _, part := range systemTurns[0].Parts {
+			text, ok := part.(CanonicalText)
+			if !ok {
+				if err := loseSystemPart(context.lossPolicy(), &report, part); err != nil {
 					return nil, report, err
 				}
-				items = append(items, item)
+				continue
 			}
-			instructions = &ResponsesInput{Items: items}
+			if builder.Len() > 0 {
+				builder.WriteByte('\n')
+			}
+			builder.WriteString(text.Text)
+		}
+		if builder.Len() > 0 {
+			if len(systemTurns[0].Parts) > 1 {
+				report.Note(
+					FeatureResponsesControls,
+					"instructions",
+					"multiple system text parts join into one instructions string (instructions_text_join encoding)",
+				)
+			}
+			rendered := builder.String()
+			instructions = &rendered
 		}
 	}
 
@@ -1371,5 +1354,33 @@ func loseInputPhase(
 		FeaturePhase,
 		fmt.Sprintf("input[%d].phase", index),
 		"the input message phase cannot be reproduced in any target dialect",
+	)
+}
+
+// loseSystemPart applies the loss/reject decision for a system prompt part
+// that cannot be expressed in the string-only create-request instructions
+// (review-j finding 13).
+func loseSystemPart(
+	policy LossPolicy,
+	report *ConversionReport,
+	part CanonicalPart,
+) error {
+	var feature Feature
+	switch part.(type) {
+	case CanonicalImage:
+		feature = FeatureImageInput
+	case CanonicalDocument:
+		feature = FeatureDocumentInput
+	default:
+		return fmt.Errorf(
+			"system prompt part %T cannot be expressed in the create-request instructions string",
+			part,
+		)
+	}
+	return report.Lose(
+		policy,
+		feature,
+		"instructions",
+		"the system prompt part cannot be expressed in the string-only create-request instructions",
 	)
 }

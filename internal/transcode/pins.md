@@ -373,16 +373,27 @@ content_block_delta  index,required; delta (union),required
 content_block_stop   index,required
 ```
 
-## Model-vs-pin deltas (as of cycle J, task J1)
+## Model-vs-pin deltas (as of cycle J, task J11)
 
-Fields the internal models must gain (J4, J11):
+Implemented J4/J5/J6/J7/J11:
 
-- Chat response envelope: `service_tier` (nullable) at completion and chunk
-  level; `logprobs` (required) on non-stream `ChatCompletionChoice`.
-- Chat streaming tool-call fragments: `index` required; non-stream tool calls
-  must have NO `index` (split wire types, J4).
-- Responses envelope: `background`, `max_tool_calls`, `prompt`,
-  `prompt_cache_key`, `safety_identifier` (typed shadow fields, J11);
-  `instructions` must render as the create-request string (J11).
-- Anthropic `message_start`: `stop_reason`/`stop_sequence` must serialize as
-  explicit nulls (J6), never `end_turn` or omission.
+- Chat: logprobs/service_tier/usage details modeled; tool-call wire types
+  split (non-stream no index, streaming index required); stream lifecycle
+  phases with the usage tail; include_usage requested.
+- Responses envelope: background, max_tool_calls, prompt (typed
+  ResponsesEnvelopePrompt), prompt_cache_key, safety_identifier modeled as
+  typed shadows entering the FeatureResponsesControls loss/reject decision.
+  NOT modeled because they are absent from v1.12.0: completed_at,
+  conversation, moderation (pin governs; a pin bump is the reviewable step
+  that introduces them).
+- Create-request instructions is a plain string; the response echo renders
+  the string arm of the ResponseInstructionsUnion; multi-part system prompts
+  are loss-gated, never an items array.
+- Anthropic message_start serializes null stop fields; usage uses checked
+  nonnegative arithmetic with FeatureUsageTiming for unknown early usage.
+
+## Pending deltas (as of cycle J, task J11)
+
+All deltas identified at J1 are implemented (J4-J11); see the implemented
+section above. Future pin bumps must re-run the inventory extraction and
+review the schema diff per the update procedure.

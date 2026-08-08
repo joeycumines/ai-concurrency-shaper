@@ -50,6 +50,11 @@
 //	Reasoning.Effort      transformed (Chat reasoning_effort, capability gate)
 //	Reasoning.Summary     loss-gated (FeatureReasoningSummaryRequest; Chat has
 //	                       no summary style)
+//	System prompt parts   transformed for text-only prompts into the
+//	                       string-only create-request instructions;
+//	                       images/documents and multiple system turns are
+//	                       loss-gated (FeatureImageInput/FeatureDocumentInput/
+//	                       FeatureResponsesControls)
 //	Thinking blocks       exact only for Messages targets; loss-gated
 //	                       (FeatureAuthenticatedThinking) otherwise
 //	Reasoning items       exact only for Responses targets; loss-gated
@@ -71,6 +76,12 @@
 //	                       is loss-gated (FeatureUsageTiming)
 //	Chat logprobs         loss-gated (FeatureLogprobs)
 //	Chat service tier     loss-gated (FeatureServiceTier)
+//	Envelope controls     loss-gated (FeatureResponsesControls; background,
+//	                       max_tool_calls, prompt, prompt_cache_key,
+//	                       safety_identifier decode as typed shadows and
+//	                       cannot be reproduced in Messages; failed
+//	                       envelopes surface as client-dialect errors and
+//	                       never reach this decision)
 //	Provider reasoning    capability-gated (ProviderReasoningText maps to
 //	                       ordinary text with the named provider_reasoning_text
 //	                       encoding, reported via ConversionReport in the
