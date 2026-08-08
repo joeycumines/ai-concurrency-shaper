@@ -720,17 +720,35 @@ func TestHandlerStreamingResponsesToChatAcceptOnly(t *testing.T) {
 
 func TestHandlerStreamingMessagesToResponses(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
-	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header: http.Header{
-				"Content-Type": []string{"text/event-stream"},
+	// The fixture carries a reasoning item and no early usage; the
+	// response-side losses are approved for this conversion.
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
 			},
-			Body: io.NopCloser(bytes.NewReader(
-				testcorpus.ResponsesStreamSSE(),
-			)),
-		}, nil
-	})
+			ModelMap:           ModelMap{AllowIdentity: true},
+			LossPolicy:         j6PermissivePolicy(),
+			AuthPolicy:         AuthPolicy{Mode: AuthNone},
+			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
+			AllowedClientQuery: map[string]struct{}{},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type": []string{"text/event-stream"},
+				},
+				Body: io.NopCloser(bytes.NewReader(
+					testcorpus.ResponsesStreamSSE(),
+				)),
+			}, nil
+		},
+		nil,
+	)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/messages",
@@ -1435,5 +1453,45 @@ func TestHandlerConversationStateRejectedChat(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("body %s: status = %d, want 400", body, rec.Code)
 		}
+	}
+}
+
+// TestHandlerStreamingMessagesToResponsesStrictRejectsEarlyUsage pins the
+// strict-policy behavior: a Messages stream whose source cannot provide the
+// required early message_start usage is rejected with a client-dialect error
+// event (review-j finding 9: zeros would fabricate facts; the FeatureUsageTiming
+// decision is explicit).
+func TestHandlerStreamingMessagesToResponsesStrictRejectsEarlyUsage(t *testing.T) {
+	mapping := messagesMapping(t, UpstreamResponses)
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"text/event-stream"},
+			},
+			Body: io.NopCloser(bytes.NewReader(
+				testcorpus.ResponsesStreamSSE(),
+			)),
+		}, nil
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		strings.NewReader(`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("strict policy must reject with an error event: %q", body)
+	}
+	if !strings.Contains(body, "usage_timing") {
+		t.Fatalf("error event must name the usage_timing feature: %q", body)
+	}
+	if strings.Contains(body, "message_stop") {
+		t.Fatalf("rejected stream must not terminate cleanly: %q", body)
 	}
 }

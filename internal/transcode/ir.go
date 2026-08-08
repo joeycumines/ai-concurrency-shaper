@@ -249,10 +249,28 @@ const (
 	CanonicalStopRefusal      CanonicalStopReason = "refusal"
 )
 
-// CanonicalUsage is the token usage of a canonical response.
+// CanonicalUsage is the token usage of a canonical response. Breakdown
+// fields are zero when the source did not provide them; the Known flags
+// distinguish a real zero from an unknown value, so a renderer never
+// fabricates zeros as fact (review-j finding 9).
 type CanonicalUsage struct {
-	InputTokens  int64
-	OutputTokens int64
+	InputTokens      int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	OutputTokens     int64
+	ReasoningTokens  int64
+
+	InputKnown      bool
+	CacheReadKnown  bool
+	CacheWriteKnown bool
+	OutputKnown     bool
+	ReasoningKnown  bool
+}
+
+// Unknown reports whether no usage value was provided by the source at all.
+func (u CanonicalUsage) Unknown() bool {
+	return !u.InputKnown && !u.OutputKnown &&
+		!u.CacheReadKnown && !u.CacheWriteKnown && !u.ReasoningKnown
 }
 
 // CanonicalResponseStatus is the lifecycle status of a canonical response.

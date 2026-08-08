@@ -58,8 +58,19 @@ func DecodeChatResponse(
 	}
 	if wire.Usage != nil {
 		response.Usage = CanonicalUsage{
-			InputTokens:  int64(wire.Usage.PromptTokens),
-			OutputTokens: int64(wire.Usage.CompletionTokens),
+			InputTokens:     int64(wire.Usage.PromptTokens),
+			OutputTokens:    int64(wire.Usage.CompletionTokens),
+			InputKnown:      true,
+			OutputKnown:     true,
+			CacheReadKnown:  wire.Usage.PromptTokensDetails != nil,
+			ReasoningKnown:  wire.Usage.CompletionTokensDetails != nil,
+			CacheWriteKnown: false, // cache-write tokens are not part of the pinned Chat contract
+		}
+		if wire.Usage.PromptTokensDetails != nil {
+			response.Usage.CacheReadTokens = int64(wire.Usage.PromptTokensDetails.CachedTokens)
+		}
+		if wire.Usage.CompletionTokensDetails != nil {
+			response.Usage.ReasoningTokens = int64(wire.Usage.CompletionTokensDetails.ReasoningTokens)
 		}
 	}
 
@@ -230,8 +241,19 @@ func DecodeResponsesResponse(
 
 	if envelope.Usage != nil {
 		response.Usage = CanonicalUsage{
-			InputTokens:  envelope.Usage.InputTokens,
-			OutputTokens: envelope.Usage.OutputTokens,
+			InputTokens:     envelope.Usage.InputTokens,
+			OutputTokens:    envelope.Usage.OutputTokens,
+			InputKnown:      true,
+			OutputKnown:     true,
+			CacheReadKnown:  envelope.Usage.InputTokensDetails != nil,
+			ReasoningKnown:  envelope.Usage.OutputTokensDetails != nil,
+			CacheWriteKnown: false, // cache-write tokens are not part of the pinned Responses contract
+		}
+		if envelope.Usage.InputTokensDetails != nil {
+			response.Usage.CacheReadTokens = envelope.Usage.InputTokensDetails.CachedTokens
+		}
+		if envelope.Usage.OutputTokensDetails != nil {
+			response.Usage.ReasoningTokens = envelope.Usage.OutputTokensDetails.ReasoningTokens
 		}
 	}
 
@@ -480,16 +502,21 @@ func RenderResponsesResponse(
 	}
 
 	// Usage.
-	envelope.Usage = &ResponsesUsage{
-		InputTokens:  response.Usage.InputTokens,
-		OutputTokens: response.Usage.OutputTokens,
-		TotalTokens:  response.Usage.InputTokens + response.Usage.OutputTokens,
-		InputTokensDetails: &UsageInputTokensDetails{
-			CachedTokens: 0,
-		},
-		OutputTokensDetails: &UsageOutputTokensDetails{
-			ReasoningTokens: 0,
-		},
+	// Usage is emitted only when the source provided it: unknown usage is
+	// never fabricated as zero facts (review-j finding 9). The cached and
+	// reasoning breakdowns are mapped from the canonical fields.
+	if !response.Usage.Unknown() {
+		envelope.Usage = &ResponsesUsage{
+			InputTokens:  response.Usage.InputTokens,
+			OutputTokens: response.Usage.OutputTokens,
+			TotalTokens:  response.Usage.InputTokens + response.Usage.OutputTokens,
+			InputTokensDetails: &UsageInputTokensDetails{
+				CachedTokens: response.Usage.CacheReadTokens,
+			},
+			OutputTokensDetails: &UsageOutputTokensDetails{
+				ReasoningTokens: response.Usage.ReasoningTokens,
+			},
+		}
 	}
 
 	// Failed responses carry an error object.
@@ -678,28 +705,65 @@ func RenderMessagesResponse(
 		}
 	}
 
+	// stop_reason and stop_sequence are always present on the wire: the
+	// completed response carries the real values (stop_sequence is null
+	// unless a custom sequence was used).
 	switch response.StopReason {
 	case CanonicalStopEndTurn:
-		out.StopReason = AnthropicStopReasonEndTurn
+		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonEndTurn)
 	case CanonicalStopMaxTokens:
-		out.StopReason = AnthropicStopReasonMaxTokens
+		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonMaxTokens)
 	case CanonicalStopStopSequence:
-		out.StopReason = AnthropicStopReasonStopSequence
+		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonStopSequence)
 		out.StopSequence = &response.StopSequence
 	case CanonicalStopToolUse:
-		out.StopReason = AnthropicStopReasonToolUse
+		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonToolUse)
 	case CanonicalStopRefusal:
-		out.StopReason = AnthropicStopReasonRefusal
+		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonRefusal)
 		out.StopDetails = &AnthropicStopDetails{Type: "refusal"}
 	default:
-		out.StopReason = AnthropicStopReasonEndTurn
+		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonEndTurn)
 	}
 
-	out.Usage = &AnthropicUsage{
-		InputTokens:              int(response.Usage.InputTokens),
-		CacheCreationInputTokens: 0,
-		CacheReadInputTokens:     0,
-		OutputTokens:             int(response.Usage.OutputTokens),
+	// Anthropic usage semantics: input_tokens + cache_creation_input_tokens
+	// + cache_read_input_tokens = total. The uncached input is the total
+	// minus the cached breakdown, with checked nonnegative arithmetic
+	// (review-j finding 9). Unknown usage is never fabricated as zero facts:
+	// it is an explicit loss/reject decision.
+	if response.Usage.Unknown() {
+		var usageReport ConversionReport
+		if err := usageReport.Lose(
+			context.lossPolicy(),
+			FeatureUsageTiming,
+			"usage",
+			"the upstream response did not provide token usage; the required Messages usage cannot be reproduced",
+		); err != nil {
+			return nil, err
+		}
+		// The Messages wire contract requires the usage object; under an
+		// approved loss the zeros are a documented approximation, never a
+		// silent fabrication.
+		out.Usage = &AnthropicUsage{}
+	} else {
+		inputTokens := response.Usage.InputTokens
+		cached := response.Usage.CacheReadTokens + response.Usage.CacheWriteTokens
+		if inputTokens < 0 || cached < 0 || inputTokens-cached < 0 {
+			return nil, errors.New(
+				"source usage is arithmetically inconsistent: nonnegative token counts required and cached tokens must not exceed the input total",
+			)
+		}
+		// output_tokens_details is required on the wire for known usage; the
+		// thinking breakdown is zero when the source did not provide it,
+		// matching the stream path.
+		out.Usage = &AnthropicUsage{
+			InputTokens:              int(inputTokens - cached),
+			CacheCreationInputTokens: int(response.Usage.CacheWriteTokens),
+			CacheReadInputTokens:     int(response.Usage.CacheReadTokens),
+			OutputTokens:             int(response.Usage.OutputTokens),
+			OutputTokensDetails: &AnthropicOutputTokensDetails{
+				ThinkingTokens: int(response.Usage.ReasoningTokens),
+			},
+		}
 	}
 
 	body, err := json.Marshal(out)

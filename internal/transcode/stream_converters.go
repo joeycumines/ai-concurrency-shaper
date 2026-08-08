@@ -877,7 +877,8 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 // object; refusal becomes ordinary text content; OpenAI reasoning is never
 // synthesized as thinking.
 type anthropicResponsesStreamState struct {
-	ctx *ExchangeContext
+	ctx    *ExchangeContext
+	policy LossPolicy
 
 	messageSent bool
 	blockIndex  int64
@@ -885,11 +886,13 @@ type anthropicResponsesStreamState struct {
 	// tool blocks buffered until call identity is complete.
 	pendingToolStart map[string]*pendingToolBlock // keyed by item_id
 
-	// partBlocks maps the Responses content part index to the Anthropic
-	// block index it opened. The composed chat->anthropic direction keeps
-	// text and refusal parts open simultaneously, so deltas must target
-	// their own block, never the lowest open one.
-	partBlocks map[int64]int64
+	// partBlocks maps the Responses content part — keyed by owning item and
+	// content index (review-j finding 7: content indices are scoped to an
+	// item, so two message items may both have content index 0) — to the
+	// Anthropic block index it opened. The composed chat->anthropic
+	// direction keeps text and refusal parts open simultaneously, so deltas
+	// must target their own block, never the lowest open one.
+	partBlocks map[responsePartKey]int64
 
 	responseID string
 	model      string
@@ -899,10 +902,26 @@ type anthropicResponsesStreamState struct {
 	sawErrorEvent bool
 	sawToolUse    bool
 
+	// reasoningLossRecorded ensures the reasoning loss is recorded exactly
+	// once per stream (review-j finding 7).
+	reasoningLossRecorded bool
+
 	usage *AnthropicUsage
+
+	// report accumulates approved losses of the conversion; it is surfaced
+	// through the frame converter so the handler can log them.
+	report ConversionReport
 
 	// Accumulated content blocks for the final message envelope.
 	message AnthropicMessageResponse
+}
+
+// responsePartKey identifies a Responses content part by its owning output
+// item and content index. Content indices are scoped to an output item, so
+// the item id is part of the identity (review-j finding 7).
+type responsePartKey struct {
+	ItemID       string
+	ContentIndex int64
 }
 
 type pendingToolBlock struct {
@@ -916,17 +935,19 @@ type pendingToolBlock struct {
 
 func newAnthropicResponsesStreamState(
 	ctx *ExchangeContext,
+	policy LossPolicy,
 	responseID string,
 	model string,
 	createdAt int64,
 ) *anthropicResponsesStreamState {
 	return &anthropicResponsesStreamState{
 		ctx:              ctx,
+		policy:           policy,
 		responseID:       responseID,
 		model:            model,
 		createdAt:        createdAt,
 		pendingToolStart: make(map[string]*pendingToolBlock),
-		partBlocks:       make(map[int64]int64),
+		partBlocks:       make(map[responsePartKey]int64),
 	}
 }
 
@@ -980,8 +1001,9 @@ func (s *anthropicResponsesStreamState) Convert(
 		ResponseReasoningSummaryTextDoneEvent,
 		ResponseReasoningSummaryPartDoneEvent:
 		// OpenAI reasoning is never synthesized as Anthropic thinking; these
-		// events are dropped.
-		return nil, nil
+		// events are dropped. The loss is recorded exactly once per stream
+		// (review-j finding 7).
+		return nil, s.loseReasoningOnce()
 
 	case ResponseCompletedEvent:
 		return s.completed(value.Response)
@@ -1011,18 +1033,37 @@ func (s *anthropicResponsesStreamState) messageStart(
 		return nil, errors.New("duplicate message_start")
 	}
 	s.messageSent = true
+	// The stream-start message serializes stop_reason: null and
+	// stop_sequence: null (review-j finding 8): generation has not finished,
+	// and the stop fields are assigned only in message_delta.
 	s.message = AnthropicMessageResponse{
-		ID:         s.responseID,
-		Type:       "message",
-		Role:       "assistant",
-		Model:      s.model,
-		Content:    []AnthropicContentBlock{},
-		StopReason: AnthropicStopReasonEndTurn,
-		Usage:      &AnthropicUsage{},
+		ID:      s.responseID,
+		Type:    "message",
+		Role:    "assistant",
+		Model:   s.model,
+		Content: []AnthropicContentBlock{},
 	}
-	if envelope.Usage != nil {
-		s.message.Usage = responsesUsageToAnthropicUsage(envelope.Usage)
-		s.usage = s.message.Usage
+	usage, err := responsesUsageToAnthropicUsage(envelope.Usage)
+	if err != nil {
+		return nil, err
+	}
+	if usage != nil {
+		s.message.Usage = usage
+		s.usage = usage
+	} else {
+		// The created envelope cannot provide usage yet (Responses streams
+		// deliver it at completion). The Messages contract requires usage on
+		// message_start; emitting zeros would fabricate facts, so the early
+		// usage is an explicit loss/reject decision (review-j finding 9).
+		if err := s.report.Lose(
+			s.policy,
+			FeatureUsageTiming,
+			"message_start.usage",
+			"the source cannot provide early token usage; the required message_start usage is a known loss",
+		); err != nil {
+			return nil, err
+		}
+		s.message.Usage = &AnthropicUsage{}
 	}
 	return []AnthropicStreamEvent{{
 		Type:    AnthropicStreamEventTypeMessageStart,
@@ -1040,8 +1081,9 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 
 	case *ResponsesReasoningOutputItem:
 		// OpenAI reasoning is never synthesized as Anthropic thinking; the
-		// reasoning item is dropped.
-		return nil, nil
+		// reasoning item is dropped. The loss is recorded exactly once per
+		// stream (review-j finding 7).
+		return nil, s.loseReasoningOnce()
 
 	case *ResponsesFunctionCallOutputItem:
 		// Buffer the tool block start until call ID and name are known.
@@ -1155,7 +1197,7 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 				Text: stringPtr(""),
 			},
 		})
-		s.partBlocks[event.ContentIndex] = s.blockIndex
+		s.partBlocks[responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}] = s.blockIndex
 		s.blockIndex++
 	default:
 		return nil, &UnsupportedFeatureError{
@@ -1170,7 +1212,7 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 func (s *anthropicResponsesStreamState) textDelta(
 	event ResponseTextDeltaEvent,
 ) ([]AnthropicStreamEvent, error) {
-	index, ok := s.partBlocks[event.ContentIndex]
+	index, ok := s.partBlocks[responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}]
 	if !ok {
 		return nil, errors.New("text delta with no open content block")
 	}
@@ -1188,11 +1230,12 @@ func (s *anthropicResponsesStreamState) textDelta(
 func (s *anthropicResponsesStreamState) contentPartDone(
 	event ResponseContentPartDoneEvent,
 ) ([]AnthropicStreamEvent, error) {
-	index, ok := s.partBlocks[event.ContentIndex]
+	key := responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}
+	index, ok := s.partBlocks[key]
 	if !ok {
 		return nil, errors.New("content part done with no open block")
 	}
-	delete(s.partBlocks, event.ContentIndex)
+	delete(s.partBlocks, key)
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockStop,
 		Index: intPtr(int(index)),
@@ -1245,7 +1288,7 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 func (s *anthropicResponsesStreamState) refusalDelta(
 	event ResponseRefusalDeltaEvent,
 ) ([]AnthropicStreamEvent, error) {
-	index, ok := s.partBlocks[event.ContentIndex]
+	index, ok := s.partBlocks[responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}]
 	if !ok {
 		return nil, errors.New("refusal delta with no open content block")
 	}
@@ -1278,7 +1321,9 @@ func (s *anthropicResponsesStreamState) completed(
 	if outputHasFunctionCalls(envelope.Output) || s.sawToolUse {
 		stop = CanonicalStopToolUse
 	}
-	s.finalizeMessage(stop, envelope.Usage)
+	if err := s.finalizeMessage(stop, envelope.Usage); err != nil {
+		return nil, err
+	}
 	s.sawTerminal = true
 	return s.terminalEvents(stop)
 }
@@ -1293,7 +1338,9 @@ func (s *anthropicResponsesStreamState) incomplete(
 	if envelope.IncompleteDetails != nil && envelope.IncompleteDetails.Reason == "content_filter" {
 		stop = CanonicalStopRefusal
 	}
-	s.finalizeMessage(stop, envelope.Usage)
+	if err := s.finalizeMessage(stop, envelope.Usage); err != nil {
+		return nil, err
+	}
 	s.sawTerminal = true
 	return s.terminalEvents(stop)
 }
@@ -1320,12 +1367,12 @@ func (s *anthropicResponsesStreamState) terminalEvents(
 	}
 	// Close any text/refusal block left open by a non-conformant upstream
 	// (content_part.done omitted).
-	for contentIndex, blockIndex := range s.partBlocks {
+	for key, blockIndex := range s.partBlocks {
 		events = append(events, AnthropicStreamEvent{
 			Type:  AnthropicStreamEventTypeContentBlockStop,
 			Index: intPtr(int(blockIndex)),
 		})
-		delete(s.partBlocks, contentIndex)
+		delete(s.partBlocks, key)
 	}
 	events = append(events,
 		AnthropicStreamEvent{
@@ -1417,17 +1464,31 @@ func anthropicErrorTypeFromCode(code string) string {
 func (s *anthropicResponsesStreamState) finalizeMessage(
 	stop CanonicalStopReason,
 	usage *ResponsesUsage,
-) {
-	s.message.StopReason = stopReasonToAnthropic(stop)
-	if usage != nil {
-		s.message.Usage = responsesUsageToAnthropicUsage(usage)
-		s.usage = s.message.Usage
+) error {
+	s.message.StopReason = anthropicStopReasonPtr(stopReasonToAnthropic(stop))
+	converted, err := responsesUsageToAnthropicUsage(usage)
+	if err != nil {
+		return err
+	}
+	if converted != nil {
+		s.message.Usage = converted
+		s.usage = converted
 	}
 	if s.usage == nil {
-		// message_delta.usage is required on the wire; emit a zero usage when
-		// the upstream did not provide one.
+		// message_delta.usage is required on the wire. The terminal envelope
+		// provided no usage: zeros would fabricate facts, so the omission is
+		// an explicit loss/reject decision (review-j finding 9).
+		if err := s.report.Lose(
+			s.policy,
+			FeatureUsageTiming,
+			"usage",
+			"the upstream response did not provide terminal token usage; the required Messages usage cannot be reproduced",
+		); err != nil {
+			return err
+		}
 		s.usage = &AnthropicUsage{}
 	}
+	return nil
 }
 
 // FinalizeEOF reports a truncation error when the stream ended without a
@@ -1444,9 +1505,16 @@ func (s *anthropicResponsesStreamState) FinalizeEOF() ([]AnthropicStreamEvent, e
 	)
 }
 
-func responsesUsageToAnthropicUsage(usage *ResponsesUsage) *AnthropicUsage {
+// responsesUsageToAnthropicUsage converts a Responses usage into the
+// Anthropic form with the pinned semantics: input_tokens +
+// cache_creation_input_tokens + cache_read_input_tokens = total, so the
+// uncached input is the total minus the cached breakdown with checked
+// nonnegative arithmetic (review-j finding 9). A nil source usage returns
+// (nil, nil): the caller decides the required-wire-usage loss instead of
+// fabricating zeros.
+func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, error) {
 	if usage == nil {
-		return &AnthropicUsage{}
+		return nil, nil
 	}
 	cached := int64(0)
 	if usage.InputTokensDetails != nil {
@@ -1456,15 +1524,37 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage) *AnthropicUsage {
 	if usage.OutputTokensDetails != nil {
 		reasoning = usage.OutputTokensDetails.ReasoningTokens
 	}
+	if usage.InputTokens < 0 || cached < 0 || usage.InputTokens-cached < 0 {
+		return nil, errors.New(
+			"source usage is arithmetically inconsistent: nonnegative token counts required and cached tokens must not exceed the input total",
+		)
+	}
 	return &AnthropicUsage{
-		InputTokens:              int(usage.InputTokens),
-		CacheCreationInputTokens: 0,
+		InputTokens:              int(usage.InputTokens - cached),
+		CacheCreationInputTokens: 0, // cache-write tokens are not part of the pinned Responses contract
 		CacheReadInputTokens:     int(cached),
 		OutputTokens:             int(usage.OutputTokens),
 		OutputTokensDetails: &AnthropicOutputTokensDetails{
 			ThinkingTokens: int(reasoning),
 		},
+	}, nil
+}
+
+// loseReasoningOnce records the reasoning loss exactly once per stream
+// (review-j finding 7): OpenAI reasoning is never synthesized as Anthropic
+// thinking, and dropping it silently would bypass the loss policy that the
+// non-streaming path consults.
+func (s *anthropicResponsesStreamState) loseReasoningOnce() error {
+	if s.reasoningLossRecorded {
+		return nil
 	}
+	s.reasoningLossRecorded = true
+	return s.report.Lose(
+		s.policy,
+		FeatureReasoningSummary,
+		"stream[].reasoning",
+		"OpenAI reasoning cannot be reproduced in an Anthropic stream",
+	)
 }
 
 func stopReasonToAnthropic(stop CanonicalStopReason) AnthropicStopReason {

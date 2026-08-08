@@ -811,6 +811,9 @@ func (h *TranscodeHandler) streamResponse(
 		}
 	}
 	h.recordOutcome(r, outcome)
+	// Response-side approved losses are logged with the same fidelity as
+	// request-side losses (review-j findings 7 and 10).
+	logConversionReport(*converter.ConversionReport(), r)
 }
 
 // newFrameConverter builds the direction-specific stream converter.
@@ -839,6 +842,7 @@ func (h *TranscodeHandler) newFrameConverter(
 	case client == ClientMessages && upstream == UpstreamResponses:
 		state := newAnthropicResponsesStreamState(
 			context,
+			h.cfg.LossPolicy,
 			context.IDs.New("msg_"),
 			model,
 			createdAt,
@@ -856,6 +860,7 @@ func (h *TranscodeHandler) newFrameConverter(
 		)
 		anthropic := newAnthropicResponsesStreamState(
 			context,
+			h.cfg.LossPolicy,
 			context.IDs.New("msg_"),
 			model,
 			createdAt,

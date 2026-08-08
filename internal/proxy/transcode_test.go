@@ -423,7 +423,14 @@ func TestProxyTranscodeMessagesToResponsesStreaming(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	p := newTranscodeProxyUpstream(t, upstream, transcodeMapping(testMessagesResponsesMapping(t)))
+	// The fixture carries a reasoning item and no early usage; the
+	// response-side losses are approved for this conversion.
+	mapping := testMessagesResponsesMapping(t)
+	mapping.LossPolicy = transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+		transcode.FeatureReasoningSummary: {},
+		transcode.FeatureUsageTiming:      {},
+	}}
+	p := newTranscodeProxyUpstream(t, upstream, transcodeMapping(mapping))
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/messages",
@@ -1051,5 +1058,49 @@ func TestProxyTranscodeRateLimitClassification(t *testing.T) {
 				t.Fatalf("failure delta = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestProxyTranscodeMessagesToChatStreaming verifies the composed
+// Messages->Chat direction through the proxy: the chat stream converts to an
+// Anthropic stream (message_start + message_stop) with the response-side
+// losses approved (the composed created envelope carries no usage).
+func TestProxyTranscodeMessagesToChatStreaming(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(testcorpus.ChatCompletionsStreamSSE())
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	mapping := testMessagesResponsesMapping(t)
+	mapping.UpstreamProtocol = transcode.UpstreamChatCompletions
+	mapping.UpstreamPath = "/v1/chat/completions"
+	mapping.LossPolicy = transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+		transcode.FeatureUsageTiming: {},
+	}}
+	p := newTranscodeProxyUpstream(t, upstream, transcodeMapping(mapping))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		strings.NewReader(`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "message_start") {
+		t.Fatalf("missing message_start: %q", body)
+	}
+	if !strings.Contains(body, "message_stop") {
+		t.Fatalf("missing message_stop: %q", body)
+	}
+	if strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("unexpected error event: %q", body)
 	}
 }

@@ -620,8 +620,8 @@ func TestRenderMessagesResponseFromResponses(t *testing.T) {
 	if message.Type != "message" || message.Role != "assistant" {
 		t.Fatalf("message = %+v", message)
 	}
-	if message.StopReason != AnthropicStopReasonToolUse {
-		t.Fatalf("stop reason = %q", message.StopReason)
+	if message.StopReason == nil || *message.StopReason != AnthropicStopReasonToolUse {
+		t.Fatalf("stop reason = %v", message.StopReason)
 	}
 	// The function call became a tool_use block; the text followed.
 	if len(message.Content) != 2 {

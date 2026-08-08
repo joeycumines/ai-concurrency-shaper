@@ -73,6 +73,11 @@ type frameConverter interface {
 	// appends this frame before surfacing the error so the client receives
 	// an explicit error terminal rather than a silent clean EOF.
 	ErrorEvent(err error) (frameEvent, bool)
+
+	// ConversionReport returns the accumulated approved losses of the
+	// conversion (never nil), so the handler can log response-side losses
+	// with the same fidelity as request-side losses (review-j finding 7).
+	ConversionReport() *ConversionReport
 }
 
 // convertingReader adapts a frameConverter into an io.Reader that emits

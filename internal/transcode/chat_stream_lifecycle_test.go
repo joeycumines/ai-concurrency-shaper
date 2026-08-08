@@ -318,6 +318,7 @@ func TestChatStreamComposedAnthropicUsageTail(t *testing.T) {
 	)
 	anthropic := newAnthropicResponsesStreamState(
 		testStreamContext(),
+		j6PermissivePolicy(),
 		"msg_1",
 		"claude-x",
 		1710000000,
@@ -364,8 +365,10 @@ func TestChatStreamComposedAnthropicUsageTail(t *testing.T) {
 	if delta.Usage == nil {
 		t.Fatal("message_delta usage is nil")
 	}
-	if delta.Usage.InputTokens != 42 || delta.Usage.OutputTokens != 18 {
-		t.Fatalf("message_delta usage = %+v, want real totals", delta.Usage)
+	// Anthropic semantics: input_tokens + cache_read = total (42); the
+	// uncached input is 42 - 5.
+	if delta.Usage.InputTokens != 37 || delta.Usage.OutputTokens != 18 {
+		t.Fatalf("message_delta usage = %+v, want uncached totals", delta.Usage)
 	}
 	if delta.Usage.CacheReadInputTokens != 5 {
 		t.Fatalf("message_delta cache_read = %d, want 5", delta.Usage.CacheReadInputTokens)
@@ -426,4 +429,13 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 	if _, err := state.Convert(mismatchedModel); err == nil {
 		t.Fatal("chunk model mismatch accepted")
 	}
+}
+
+// j6PermissivePolicy returns a policy approving the response-side losses the
+// Responses->Messages path triggers (reasoning and usage timing).
+func j6PermissivePolicy() LossPolicy {
+	return LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureReasoningSummary: {},
+		FeatureUsageTiming:      {},
+	}}
 }

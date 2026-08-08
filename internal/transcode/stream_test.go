@@ -30,6 +30,8 @@ func (c *fixedConverter) Convert(frame SSEEvent) (convertedBatch, error) {
 	}, c.err
 }
 
+func (c *fixedConverter) ConversionReport() *ConversionReport { return &ConversionReport{} }
+
 func (c *fixedConverter) FinalizeEOF() (convertedBatch, error) {
 	return convertedBatch{}, c.err
 }
@@ -642,6 +644,7 @@ func TestFixtureResponsesStreamToAnthropicFrames(t *testing.T) {
 	// fixture translates to Anthropic frames.
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
+		j6PermissivePolicy(),
 		"msg_1",
 		"gpt-4.1",
 		1,

@@ -11,7 +11,7 @@ import (
 // calling guide). The exchange must convert to a tool_use block with the
 // accumulated arguments and a tool_use stop reason.
 func TestOfficialFunctionCallWire(t *testing.T) {
-	state := newAnthropicResponsesStreamState(testStreamContext(), "resp_1", "m", 1)
+	state := newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), "resp_1", "m", 1)
 	events := []string{
 		`{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1,"status":"in_progress","model":"m","output":[],"parallel_tool_calls":true,"tools":[],"tool_choice":"auto"}}`,
 		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":""}}`,

@@ -283,14 +283,20 @@ type AnthropicUsage struct {
 }
 
 // AnthropicMessageResponse is an Anthropic messages API response.
+//
+// StopReason and StopSequence are nullable fields that are ALWAYS present on
+// the wire: they serialize as explicit null before generation completes (the
+// message_start payload) and carry their real values in message_delta or the
+// completed non-stream response (review-j finding 8). They are pointers
+// WITHOUT omitempty for exactly this reason.
 type AnthropicMessageResponse struct {
 	ID           string                  `json:"id"`
 	Type         string                  `json:"type"`
 	Role         string                  `json:"role"`
 	Content      []AnthropicContentBlock `json:"content"`
 	Model        string                  `json:"model"`
-	StopReason   AnthropicStopReason     `json:"stop_reason,omitempty"`
-	StopSequence *string                 `json:"stop_sequence,omitempty"`
+	StopReason   *AnthropicStopReason    `json:"stop_reason"`
+	StopSequence *string                 `json:"stop_sequence"`
 	Usage        *AnthropicUsage         `json:"usage,omitempty"`
 	StopDetails  *AnthropicStopDetails   `json:"stop_details,omitempty"`
 }

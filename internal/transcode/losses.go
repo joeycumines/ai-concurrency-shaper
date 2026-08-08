@@ -34,6 +34,12 @@ const (
 	// the client dialects cannot represent the tier actually served, so its
 	// presence is a loss/reject decision.
 	FeatureServiceTier Feature = "service_tier"
+	// FeatureUsageTiming covers Anthropic's required usage fields when the
+	// source cannot provide them at the required point (the early
+	// message_start usage) or at all: emitting zeros would fabricate facts,
+	// so the omission is an explicit loss/reject decision (review-j finding
+	// 9).
+	FeatureUsageTiming Feature = "usage_timing"
 )
 
 // LossPolicy decides whether a non-portable feature may be dropped during a

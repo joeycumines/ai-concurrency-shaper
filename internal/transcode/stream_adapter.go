@@ -378,6 +378,12 @@ func isResponsesDoneSentinel(data []byte) bool {
 	return string(data) == "[DONE]"
 }
 
+// ConversionReport returns the accumulated approved losses of the chat
+// state.
+func (c *chatToResponsesConverter) ConversionReport() *ConversionReport {
+	return &c.state.report
+}
+
 // ErrorEvent builds a client-dialect Responses error event frame. The
 // sequence number continues from the builder so a mid-stream error terminal
 // never collides with response.created's zero.
@@ -385,9 +391,24 @@ func (c *chatToResponsesConverter) ErrorEvent(err error) (frameEvent, bool) {
 	return responsesErrorFrame(err, c.state.builder.NextSequenceNumber())
 }
 
+// ConversionReport returns the accumulated approved losses of the
+// Anthropic state.
+func (c *responsesToAnthropicConverter) ConversionReport() *ConversionReport {
+	return &c.state.report
+}
+
 // ErrorEvent builds a client-dialect Anthropic error event frame.
 func (c *responsesToAnthropicConverter) ErrorEvent(err error) (frameEvent, bool) {
 	return anthropicErrorFrame(err)
+}
+
+// ConversionReport returns the merged approved losses of both states of the
+// composed conversion.
+func (c *chatToAnthropicConverter) ConversionReport() *ConversionReport {
+	merged := ConversionReport{}
+	merged.Losses = append(merged.Losses, c.chat.report.Losses...)
+	merged.Losses = append(merged.Losses, c.anthropic.report.Losses...)
+	return &merged
 }
 
 // ErrorEvent builds a client-dialect Anthropic error event frame (the
