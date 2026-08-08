@@ -101,6 +101,36 @@ func RemoveTransformedRepresentationHeaders(h http.Header) {
 	}
 }
 
+// RemoveTransformedRequestRepresentationHeaders removes representation
+// metadata from a transformed request (review-j finding 12): the converted
+// body is a new representation, so inbound integrity digests, message
+// signatures, content metadata, and validators describe the original bytes
+// and must never be forwarded or signed. Content-Length is removed so
+// BuildConvertedRequest recomputes it from the converted body; the remaining
+// headers are dropped entirely.
+func RemoveTransformedRequestRepresentationHeaders(h http.Header) {
+	for _, name := range []string{
+		"Content-Length",
+		"Content-Encoding",
+		"Content-Md5",
+		"Content-Range",
+		"Digest",
+		"Content-Digest",
+		"Repr-Digest",
+		"Signature",
+		"Signature-Input",
+		"Etag",
+		"Last-Modified",
+		"If-Match",
+		"If-None-Match",
+		"If-Modified-Since",
+		"If-Unmodified-Since",
+		"If-Range",
+	} {
+		h.Del(name)
+	}
+}
+
 // BuildMappedURL joins the configured upstream base path with the mapping's
 // upstream path and preserves the base query. Client query parameters are
 // rejected unless explicitly allowed: unknown client query parameters can

@@ -534,6 +534,13 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 	headers.Del("X-Forwarded-Proto")
 
 	RemoveHopByHopHeaders(headers)
+	// The converted body is a new representation: inbound integrity
+	// digests, message signatures, and validators describe the original
+	// bytes and must never be forwarded or signed. Run before
+	// BuildConvertedRequest recomputes Content-Length and before
+	// ApplyTargetAuthentication so an external signer signs the clean
+	// metadata (review-j finding 12).
+	RemoveTransformedRequestRepresentationHeaders(headers)
 	headers.Set("Content-Type", "application/json")
 
 	outReq, err := BuildConvertedRequest(r.Context(), r.Method, targetURL.String(), body, headers)

@@ -1495,3 +1495,134 @@ func TestHandlerStreamingMessagesToResponsesStrictRejectsEarlyUsage(t *testing.T
 		t.Fatalf("rejected stream must not terminate cleanly: %q", body)
 	}
 }
+
+// captureSigner records the request it signed.
+type captureSigner struct {
+	req *http.Request
+}
+
+func (s *captureSigner) Sign(_ context.Context, req *http.Request) error {
+	s.req = req
+	return nil
+}
+
+// representationHeaders returns the inbound representation-metadata headers
+// used by the sanitizer tests.
+func representationHeaders() http.Header {
+	return http.Header{
+		"Content-Digest":      {"sha-256=:abc:"},
+		"Digest":              {"sha-256=:abc:"},
+		"Repr-Digest":         {"sha-256=:abc:"},
+		"Content-Md5":         {"abc"},
+		"Signature":           {"sig1=:abc:"},
+		"Signature-Input":     {`sig1=("content-digest" "@method" "@path");created=1`},
+		"Content-Range":       {"bytes 0-10/100"},
+		"Content-Length":      {"999"},
+		"Content-Encoding":    {"identity"},
+		"Etag":                {`"abc"`},
+		"Last-Modified":       {"Wed, 21 Oct 2015 07:28:00 GMT"},
+		"If-Match":            {`"abc"`},
+		"If-None-Match":       {`"abc"`},
+		"If-Modified-Since":   {"Wed, 21 Oct 2015 07:28:00 GMT"},
+		"If-Unmodified-Since": {"Wed, 21 Oct 2015 07:28:00 GMT"},
+		"If-Range":            {`"abc"`},
+	}
+}
+
+// TestHandlerTransformedRequestSanitized proves inbound integrity digests,
+// message signatures, content metadata, and validators never reach the
+// upstream, and Content-Length is recomputed from the converted body
+// (review-j finding 12).
+func TestHandlerTransformedRequestSanitized(t *testing.T) {
+	var got *http.Request
+	mapping := responsesMapping(t)
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		got = req
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`,
+			)),
+		}, nil
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	req.Header = representationHeaders()
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got == nil {
+		t.Fatal("upstream request not captured")
+	}
+	for name := range representationHeaders() {
+		if got.Header.Get(name) != "" {
+			t.Fatalf("upstream request carries stale %s: %q", name, got.Header.Get(name))
+		}
+	}
+	body, _ := io.ReadAll(got.Body)
+	if got.ContentLength != int64(len(body)) {
+		t.Fatalf("Content-Length = %d, want %d (recomputed)", got.ContentLength, len(body))
+	}
+}
+
+// TestHandlerExternalSignerSeesSanitizedHeaders proves the external-signer
+// mode signs a request whose representation metadata was sanitized and whose
+// Content-Length matches the converted body (review-j finding 12).
+func TestHandlerExternalSignerSeesSanitizedHeaders(t *testing.T) {
+	signer := &captureSigner{}
+	mapping := responsesMapping(t)
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+			ModelMap:           ModelMap{AllowIdentity: true},
+			LossPolicy:         StrictLossPolicy(),
+			AuthPolicy:         AuthPolicy{Mode: AuthExternalSigner, Signer: signer},
+			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
+			AllowedClientQuery: map[string]struct{}{},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`,
+				)),
+			}, nil
+		},
+		nil,
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	req.Header = representationHeaders()
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if signer.req == nil {
+		t.Fatal("signer was not invoked")
+	}
+	for name := range representationHeaders() {
+		if signer.req.Header.Get(name) != "" {
+			t.Fatalf("signer observed stale %s: %q", name, signer.req.Header.Get(name))
+		}
+	}
+	body, _ := io.ReadAll(signer.req.Body)
+	if signer.req.ContentLength != int64(len(body)) {
+		t.Fatalf("signer observed Content-Length = %d, want %d", signer.req.ContentLength, len(body))
+	}
+}
