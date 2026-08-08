@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -890,7 +891,15 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 		if message == "" {
 			message = "chat stream error frame"
 		}
-		return ChatStreamResponse{}, fmt.Errorf("chat stream chunk: %s", message)
+		// An in-band Chat error frame is real upstream data: the typed
+		// error carries upstream provenance so the exchange classifies as
+		// an upstream failure, never a local conversion failure (review-j
+		// finding 11).
+		return ChatStreamResponse{}, &StreamConversionError{
+			Cause:      fmt.Errorf("chat stream chunk: %s", message),
+			Provenance: ProvenanceUpstreamBodyError,
+			Status:     http.StatusOK,
+		}
 	}
 	var chunk ChatStreamResponse
 	if err := json.Unmarshal(data, &chunk); err != nil {

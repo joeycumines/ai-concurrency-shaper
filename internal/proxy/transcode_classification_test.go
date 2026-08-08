@@ -560,3 +560,150 @@ func TestProxyTranscodeAbortNotCleanCompletion(t *testing.T) {
 		t.Fatal("journal entry records ResponseComplete for an aborted exchange")
 	}
 }
+
+// TestProxyTranscodeInBandChatErrorFrameIsUpstreamFailure proves an in-band
+// Chat error frame is classified as an upstream failure: breaker failure
+// recorded, phantom hold applied, client-dialect error event emitted — never
+// a local conversion failure (review-j finding 11).
+func TestProxyTranscodeInBandChatErrorFrameIsUpstreamFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(
+			w,
+			"data: {\"error\":{\"message\":\"upstream exploded\",\"type\":\"server_error\"}}\n\n",
+		)
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker := j2Breaker(t)
+	before := breaker.Stats()
+	p := j2LimitedProxy(t, upstream, breaker)
+
+	req1 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x","stream":true}`),
+	)
+	rec1 := httptest.NewRecorder()
+	p.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("request 1 status = %d, want 200", rec1.Code)
+	}
+	if !strings.Contains(rec1.Body.String(), `"type":"error"`) {
+		t.Fatalf("client must receive an error event: %q", rec1.Body.String())
+	}
+	if got := breaker.Stats().TotalFailures; got != before.TotalFailures+1 {
+		t.Fatalf("in-band error frame not recorded as upstream failure: before=%d after=%d", before.TotalFailures, got)
+	}
+
+	// The upstream failure holds the slot.
+	start := time.Now()
+	req2 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"y","stream":true}`),
+	)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	wait := time.Since(start)
+	t.Logf("second request wait after in-band error frame: %v", wait)
+	if wait < 400*time.Millisecond {
+		t.Fatalf("phantom hold not applied to in-band error frame: wait %v", wait)
+	}
+}
+
+// TestProxyTranscodeNonStreamFailedEnvelopeIsUpstreamFailure proves a 200
+// non-stream Responses envelope with status "failed" classifies as an
+// upstream failure — identical to the streamed response.failed case — with
+// the upstream's HTTP status driving the breaker (review-j finding 11).
+func TestProxyTranscodeNonStreamFailedEnvelopeIsUpstreamFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(
+			w,
+			`{"id":"resp_1","object":"response","created_at":1,"status":"failed","model":"m","output":[],"error":{"code":"server_error","message":"boom"}}`,
+		)
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker := j2Breaker(t)
+	before := breaker.Stats()
+	pattern, err := route.Parse("POST /v1/messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(upstream.URL)
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(breaker),
+		WithTranscodeMapping(transcodeMapping(testMessagesResponsesMapping(t))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		strings.NewReader(`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`),
+	)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if got := breaker.Stats().TotalFailures; got != before.TotalFailures+1 {
+		t.Fatalf("non-stream failed envelope not recorded as upstream failure: before=%d after=%d", before.TotalFailures, got)
+	}
+	if !strings.Contains(rec.Body.String(), "boom") {
+		t.Fatalf("client error must carry the upstream message: %q", rec.Body.String())
+	}
+
+	// Parity: the streamed response.failed classifies identically.
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(
+			w,
+			"data: {\"type\":\"response.failed\",\"sequence_number\":1,\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"created_at\":1,\"status\":\"failed\",\"model\":\"m\",\"output\":[],\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n",
+		)
+	}))
+	t.Cleanup(upstream2.Close)
+
+	breaker2 := j2Breaker(t)
+	before2 := breaker2.Stats()
+	pattern2, err := route.Parse("POST /v1/messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, _ := url.Parse(upstream2.URL)
+	p2, err := New(
+		WithUpstream(u2),
+		WithMatcher(route.NewMatcher([]route.Pattern{pattern2})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(breaker2),
+		WithTranscodeMapping(transcodeMapping(testMessagesResponsesMapping(t))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req2 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		strings.NewReader(`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	)
+	rec2 := httptest.NewRecorder()
+	p2.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("streamed status = %d, want 200", rec2.Code)
+	}
+	if got := breaker2.Stats().TotalFailures; got != before2.TotalFailures+1 {
+		t.Fatalf("streamed failed envelope not recorded as upstream failure: before=%d after=%d", before2.TotalFailures, got)
+	}
+}

@@ -594,11 +594,13 @@ func RenderMessagesResponse(
 	// completion (merge gate 10). The upstream failure surfaces as a
 	// client-dialect error, never as a message with a success stop reason.
 	if response.Status == CanonicalResponseFailed {
-		message := response.ErrorMessage
-		if message == "" {
-			message = "upstream response failed"
+		// A 2xx envelope reporting status "failed" is an upstream semantic
+		// failure: the typed error classifies the exchange as an upstream
+		// failure with the upstream HTTP status, matching the streamed
+		// response.failed classification (review-j finding 11).
+		return nil, report, &UpstreamSemanticFailureError{
+			Message: response.ErrorMessage,
 		}
-		return nil, report, fmt.Errorf("upstream response failed: %s", message)
 	}
 	if context == nil || context.IDs == nil {
 		return nil, report, errors.New("render messages response requires an exchange context")

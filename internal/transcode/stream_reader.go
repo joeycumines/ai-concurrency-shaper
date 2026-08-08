@@ -174,7 +174,10 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 }
 
 // appendErrorEvent appends the converter's client-dialect error event frame
-// so a failed stream terminates explicitly instead of a silent clean EOF.
+// so a failed stream terminates explicitly instead of a silent clean EOF. A
+// typed conversion error carrying upstream provenance is real upstream data:
+// the exchange is a definitive upstream outcome, never a local conversion
+// failure (review-j finding 11).
 func (r *convertingReader) appendErrorEvent(err error) {
 	frame, ok := r.conv.ErrorEvent(err)
 	if !ok {
@@ -182,6 +185,27 @@ func (r *convertingReader) appendErrorEvent(err error) {
 	}
 	writeFrameBytes(&r.buf, frame)
 	r.sawErrorEvent = true
+	if isUpstreamConversionError(err) {
+		r.sawUpstreamErrorFrame = true
+	}
+}
+
+// isUpstreamConversionError reports whether the conversion error carries
+// upstream provenance: the error came from real upstream data that failed
+// conversion, not from a local decode/render/validation step.
+func isUpstreamConversionError(err error) bool {
+	var convErr *StreamConversionError
+	if !errors.As(err, &convErr) {
+		return false
+	}
+	switch convErr.Provenance {
+	case ProvenanceUpstreamHTTP,
+		ProvenanceUpstreamTransportError,
+		ProvenanceUpstreamBodyError:
+		return true
+	default:
+		return false
+	}
 }
 
 // appendBatch buffers the converted frames and records the terminal/error

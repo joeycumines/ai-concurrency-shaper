@@ -324,3 +324,38 @@ func firstNonEmpty(values ...string) string {
 	}
 	return ""
 }
+
+// StreamConversionError is a typed conversion error carrying provenance and
+// the upstream response status, so the exchange classification never relies
+// on error-string matching (review-j finding 11).
+type StreamConversionError struct {
+	Cause      error
+	Provenance ExchangeProvenance
+	Status     int
+}
+
+func (e *StreamConversionError) Error() string {
+	if e.Cause == nil {
+		return "stream conversion error"
+	}
+	return e.Cause.Error()
+}
+
+func (e *StreamConversionError) Unwrap() error { return e.Cause }
+
+// UpstreamSemanticFailureError is returned when a non-stream upstream
+// response itself reports a failure — a 2xx Responses envelope with status
+// "failed". The exchange classifies as an upstream failure with the
+// upstream's HTTP status, matching the streamed response.failed
+// classification; it is never a local conversion error (review-j finding
+// 11).
+type UpstreamSemanticFailureError struct {
+	Message string
+}
+
+func (e *UpstreamSemanticFailureError) Error() string {
+	if e.Message == "" {
+		return "upstream response failed"
+	}
+	return "upstream response failed: " + e.Message
+}

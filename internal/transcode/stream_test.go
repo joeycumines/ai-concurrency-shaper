@@ -435,6 +435,20 @@ func TestClassifyStreamObservation(t *testing.T) {
 			want: streamOutcomeUpstreamFailure,
 		},
 		{
+			name: "error event from typed upstream conversion error is upstream failure",
+			obs: streamObservation{
+				SawErrorEvent:         true,
+				SawUpstreamErrorFrame: true,
+				ReaderErr: &StreamConversionError{
+					Cause:      errors.New("chat stream chunk: boom"),
+					Provenance: ProvenanceUpstreamBodyError,
+					Status:     200,
+				},
+				SawTerminal: true,
+			},
+			want: streamOutcomeUpstreamFailure,
+		},
+		{
 			name: "error event from oversized frame is upstream failure",
 			obs:  streamObservation{SawErrorEvent: true, ReaderErr: &SSEBoundError{Line: false, Bound: 1024}, SawTerminal: true},
 			want: streamOutcomeUpstreamFailure,
@@ -697,5 +711,67 @@ func TestFixtureResponsesStreamToAnthropicFrames(t *testing.T) {
 	// No terminal and error event both present is impossible.
 	if strings.Contains(body, "\"type\":\"error\"") {
 		t.Fatalf("unexpected error event: %q", body)
+	}
+}
+
+// TestChatStreamChunkTypedErrorFrame proves an in-band Chat error frame is a
+// typed upstream conversion error carrying provenance and the upstream
+// status, and that it flows through the converting reader as a definitive
+// upstream outcome (review-j finding 11).
+func TestChatStreamChunkTypedErrorFrame(t *testing.T) {
+	_, err := chatStreamChunkFromSSE(SSEEvent{
+		Data: []byte(`{"error":{"message":"boom"}}`),
+	})
+	var convErr *StreamConversionError
+	if !errors.As(err, &convErr) {
+		t.Fatalf("error = %T %v, want *StreamConversionError", err, err)
+	}
+	if convErr.Provenance != ProvenanceUpstreamBodyError {
+		t.Fatalf("provenance = %v, want upstream_body_error", convErr.Provenance)
+	}
+	if convErr.Status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", convErr.Status)
+	}
+
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		ChatCapabilities{},
+		"resp_1",
+		"m",
+		1,
+		nil,
+	)
+	converter := newChatToResponsesConverter(state)
+	reader := newConvertingReader(
+		NewSSEReaderWithLimits(
+			strings.NewReader("data: {\"error\":{\"message\":\"boom\"}}\n\n"),
+			0,
+			0,
+		),
+		converter,
+	)
+	var output bytes.Buffer
+	buf := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			output.Write(buf[:n])
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			break
+		}
+	}
+	if !reader.SawUpstreamErrorFrame() {
+		t.Fatal("in-band error frame not marked as upstream")
+	}
+	if !strings.Contains(output.String(), `"type":"error"`) {
+		t.Fatalf("client error event missing: %q", output.String())
+	}
+	if !strings.Contains(output.String(), "boom") {
+		t.Fatalf("client error event must carry the upstream message: %q", output.String())
 	}
 }

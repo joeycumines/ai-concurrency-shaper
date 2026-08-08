@@ -604,15 +604,25 @@ func (h *TranscodeHandler) jsonResponse(
 
 	converted, provenance, err := h.convertResponse(r, resp, body, context)
 	if err != nil {
-		// A local response conversion failure before headers is a
-		// client-dialect 502 and is reported via the outcome hook so the
-		// proxy never classifies it as an upstream failure.
-		h.writeDialectHTTPError(r, w, CanonicalAPIError{
+		apiErr := CanonicalAPIError{
 			Status:  http.StatusBadGateway,
 			Type:    "api_error",
 			Code:    "response_conversion_error",
 			Message: "convert response: " + err.Error(),
-		}, provenance)
+		}
+		// A typed upstream semantic failure (a 2xx envelope whose payload
+		// reports failure) classifies with the UPSTREAM status and
+		// UpstreamFailure=true, matching the streamed classification
+		// (review-j finding 11) — never a local conversion failure.
+		var upstreamFailed *UpstreamSemanticFailureError
+		if errors.As(err, &upstreamFailed) {
+			h.writeUpstreamSemanticFailure(r, w, apiErr, resp.StatusCode)
+			return
+		}
+		// A local response conversion failure before headers is a
+		// client-dialect 502 and is reported via the outcome hook so the
+		// proxy never classifies it as an upstream failure.
+		h.writeDialectHTTPError(r, w, apiErr, provenance)
 		return
 	}
 
@@ -938,6 +948,38 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 		// when the context is cancelled) while the upstream facts (status,
 		// failure, retry-after) are retained so the breaker still sees a
 		// definitive upstream failure.
+		if r.Context().Err() != nil {
+			outcome.Provenance = ProvenanceClientAbort
+			outcome.ClientAborted = true
+		} else {
+			outcome.Provenance = ProvenanceDownstreamWriteError
+		}
+	} else {
+		outcome.DownstreamComplete = true
+	}
+	h.recordOutcome(r, outcome)
+}
+
+// writeUpstreamSemanticFailure renders a client-dialect error for a typed
+// upstream semantic failure (a 2xx envelope whose payload reports failure)
+// and records the outcome with the upstream's HTTP status and
+// UpstreamFailure=true, matching the streamed response.failed classification
+// (review-j finding 11). A failed downstream write changes the provenance
+// exactly like the other error writers.
+func (h *TranscodeHandler) writeUpstreamSemanticFailure(
+	r *http.Request,
+	w http.ResponseWriter,
+	apiErr CanonicalAPIError,
+	upstreamStatus int,
+) {
+	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
+	writeErr := WriteDialectHTTPError(w, client, apiErr)
+	outcome := Outcome{
+		Status:          upstreamStatus,
+		Provenance:      ProvenanceUpstreamHTTP,
+		UpstreamFailure: true,
+	}
+	if writeErr != nil {
 		if r.Context().Err() != nil {
 			outcome.Provenance = ProvenanceClientAbort
 			outcome.ClientAborted = true
