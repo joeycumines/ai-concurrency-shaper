@@ -1107,7 +1107,13 @@ func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, ha
 		if rec, ok := w.(*statusRecorder); ok {
 			outcomeCopy := outcome
 			rec.transcodeOutcome = &outcomeCopy
-			rec.aborted = !outcomeCopy.DownstreamComplete
+			// Completion is monotonic: the recorder's independent
+			// write-failure observation (a short write or write error on
+			// the raw ResponseWriter) can never be overwritten by an
+			// outcome that claims a clean completion (review-k finding 7).
+			rec.aborted = rec.aborted ||
+				!outcomeCopy.DownstreamComplete ||
+				rec.downstreamWriteFailed()
 		}
 	default:
 	}

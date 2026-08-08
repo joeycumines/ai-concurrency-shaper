@@ -616,6 +616,104 @@ func TestProxyTranscodeAbortNotCleanCompletion(t *testing.T) {
 	}
 }
 
+// TestProxyTranscodeShortWriteNotCleanCompletion proves a transcode exchange
+// whose downstream write is short (a non-conforming ResponseWriter returning
+// (n < len(b), nil)) is never counted as a clean completion: the recorder's
+// independent write-failure observation is preserved by the monotonic
+// aborted assignment, so IncProxied does not fire, the journal marks the
+// entry aborted without ResponseComplete, and the breaker records neither
+// success nor failure (review-k finding 7).
+func TestProxyTranscodeShortWriteNotCleanCompletion(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(
+			w,
+			`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`,
+		)
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker := j2Breaker(t)
+	breakerBefore := breaker.Stats()
+	collector := metrics.NewCollector()
+	j := journal.New(64, 1<<20)
+
+	pattern, err := route.Parse("POST /v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(upstream.URL)
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+		WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+		WithMetrics(collector),
+		WithBreaker(breaker),
+		WithJournal(j),
+		WithTranscodeMapping(transcodeMapping(testResponsesMapping(t))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	writer := &shortWriteResponseWriter{}
+	p.ServeHTTP(writer, req)
+
+	snapshot := collector.Snapshot()
+	if snapshot.TotalProxied != 0 {
+		t.Fatalf("short-write exchange counted as clean completion: TotalProxied=%d", snapshot.TotalProxied)
+	}
+	if snapshot.TotalAborted != 1 {
+		t.Fatalf("short-write exchange not recorded as aborted: TotalAborted=%d", snapshot.TotalAborted)
+	}
+	after := breaker.Stats()
+	if after.TotalSuccesses != breakerBefore.TotalSuccesses ||
+		after.TotalFailures != breakerBefore.TotalFailures {
+		t.Fatalf("short-write exchange mutated breaker health: before(s=%d,f=%d) after(s=%d,f=%d)",
+			breakerBefore.TotalSuccesses, breakerBefore.TotalFailures,
+			after.TotalSuccesses, after.TotalFailures)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(entries))
+	}
+	if !entries[0].Aborted {
+		t.Fatal("journal entry not marked aborted")
+	}
+	if !entries[0].Timing.ResponseComplete.IsZero() {
+		t.Fatal("journal entry records ResponseComplete for a short-write exchange")
+	}
+}
+
+// shortWriteResponseWriter violates the io.Writer contract by returning
+// (n < len(b), nil) from Write.
+type shortWriteResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *shortWriteResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *shortWriteResponseWriter) WriteHeader(status int) { w.status = status }
+
+func (w *shortWriteResponseWriter) Write(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+	return len(b) - 1, nil
+}
+
 // TestProxyTranscodeInBandChatErrorFrameIsUpstreamFailure proves an in-band
 // Chat error frame is classified as an upstream failure: breaker failure
 // recorded, phantom hold applied, client-dialect error event emitted — never

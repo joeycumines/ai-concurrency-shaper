@@ -657,8 +657,14 @@ func (h *TranscodeHandler) jsonResponse(
 	// A failed write after a client abort must not be recorded as a
 	// successful completion (the streaming path classifies the abort the
 	// same way); a write failure without a client cancel is a downstream
-	// error.
-	_, writeErr := w.Write(converted)
+	// error. A short write (n < len) with a nil error violates the
+	// io.Writer contract — the recorder detects it independently, and the
+	// handler must never record it as a clean completion (review-k finding
+	// 7).
+	n, writeErr := w.Write(converted)
+	if writeErr == nil && n != len(converted) {
+		writeErr = io.ErrShortWrite
+	}
 	switch {
 	case writeErr != nil && r.Context().Err() != nil:
 		h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
@@ -815,7 +821,11 @@ func (h *TranscodeHandler) streamResponse(
 	// DownstreamComplete reflects the actual write state, not the
 	// classification bucket: a converted upstream error frame whose
 	// downstream write failed was never delivered, and the exchange must
-	// not be recorded as a clean completion.
+	// not be recorded as a clean completion. The streaming path needs no
+	// short-write check of its own: every downstream frame is written
+	// through sealedSSEWriter.writeAll, which treats a partial write as
+	// io.ErrShortWrite, and the writer's first error surfaces as WriterErr
+	// (review-k finding 7).
 	downstreamComplete := observation.WriterErr == nil && observation.SealErr == nil
 
 	// Classify the outcome from explicit provenance.
