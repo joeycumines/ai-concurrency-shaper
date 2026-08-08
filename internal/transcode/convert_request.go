@@ -480,23 +480,35 @@ func responsesFunctionOutputToCanonical(
 }
 
 // splitImageDataURL parses a base64 data URL of the form
-// data:<media-type>;base64,<data>. A non-data URL returns empty media type
-// and data.
+// data:<media-type>;<parameters>;base64,<data>. The parameters section must
+// include the base64 parameter — anything else is rejected, never silently
+// reinterpreted (review-j finding 15). A non-data URL returns empty media
+// type and data.
 func splitImageDataURL(url string) (mediaType string, base64Data string, err error) {
 	const prefix = "data:"
 	if !bytes.HasPrefix([]byte(url), []byte(prefix)) {
 		return "", "", nil
 	}
 	rest := url[len(prefix):]
-	semicolon := bytes.IndexByte([]byte(rest), ';')
 	comma := bytes.IndexByte([]byte(rest), ',')
-	if semicolon < 0 || comma < 0 || semicolon > comma {
+	if comma < 0 {
 		return "", "", errors.New("malformed data URL")
 	}
-	mediaType = rest[:semicolon]
+	params := strings.Split(rest[:comma], ";")
+	mediaType = params[0]
 	base64Data = rest[comma+1:]
 	if mediaType == "" || base64Data == "" {
 		return "", "", errors.New("data URL missing media type or data")
+	}
+	foundBase64 := false
+	for _, param := range params[1:] {
+		if strings.EqualFold(param, "base64") {
+			foundBase64 = true
+			break
+		}
+	}
+	if !foundBase64 {
+		return "", "", errors.New("data URL parameters must include base64")
 	}
 	switch mediaType {
 	case "image/jpeg", "image/png", "image/gif", "image/webp":

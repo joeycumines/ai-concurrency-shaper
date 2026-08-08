@@ -66,9 +66,18 @@ func (s AnthropicSource) Validate() error {
 		if s.MediaType == "" {
 			return errors.New("base64 source has no media_type")
 		}
+		// The source union is exclusive: a base64 source must not also
+		// carry a url, and vice versa — an ambiguous source is rejected
+		// instead of silently preferring one arm (review-j finding 15).
+		if s.URL != "" {
+			return errors.New("base64 source must not carry a url")
+		}
 	case AnthropicSourceTypeURL:
 		if s.URL == "" {
 			return errors.New("url source has no url")
+		}
+		if s.Data != "" {
+			return errors.New("url source must not carry base64 data")
 		}
 	default:
 		return fmt.Errorf("unknown anthropic source type %q", s.Type)

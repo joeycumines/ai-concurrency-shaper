@@ -1103,6 +1103,13 @@ func isHopByHopName(name string) bool {
 	}
 }
 
+// isEventStreamMediaType reports whether the media type is exactly
+// text/event-stream, shared by the Accept parsing and the response
+// Content-Type matching (review-j findings 6 and 15).
+func isEventStreamMediaType(mediaType string) bool {
+	return mediaType == "text/event-stream"
+}
+
 // acceptIsEventStream reports whether the Accept header selects the
 // text/event-stream media type. The header is parsed as media ranges (the
 // first parseable range decides), never compared as one exact string
@@ -1113,21 +1120,29 @@ func acceptIsEventStream(accept string) bool {
 		if err != nil {
 			continue
 		}
-		return mediaType == "text/event-stream"
+		return isEventStreamMediaType(mediaType)
 	}
 	return false
 }
 
-// isEventStream reports whether the response is an SSE stream.
+// isEventStream reports whether the response is an SSE stream, matched by
+// media type exactly — text/event-streaming and other lookalikes are not
+// streams (review-j finding 15).
 func isEventStream(resp *http.Response) bool {
-	contentType := resp.Header.Get("Content-Type")
-	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	return err == nil && isEventStreamMediaType(mediaType)
 }
 
-// isJSON reports whether the response is JSON.
+// isJSON reports whether the response is JSON: the application/json media
+// type or a structured-syntax-suffix member of the JSON family
+// (application/*+json). application/notjson and other lookalikes are not
+// JSON (review-j finding 15).
 func isJSON(resp *http.Response) bool {
-	contentType := resp.Header.Get("Content-Type")
-	return strings.Contains(strings.ToLower(contentType), "json")
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return false
+	}
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
 }
 
 // isUpgradeRequest reports whether the request carries an Upgrade token.
