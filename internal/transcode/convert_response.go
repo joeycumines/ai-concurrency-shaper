@@ -12,16 +12,84 @@ import (
 // Chat responses are constrained to a single choice (n=1) both at request
 // render time and at decode time.
 
+// chatResponseShadow is the presence-aware decode shadow of ChatResponse:
+// every presence-sensitive field is a pointer so absent-vs-zero is
+// distinguishable, while the full surface is modeled (reusing the wire types
+// for non-presence-sensitive payloads) so strictDecode's unknown-field
+// rejection is preserved. The shadow enforces the pinned required fields of
+// the Chat response contract (review-k finding 4) and its usage presence is
+// consumed by the usage Known-flag decode (review-k finding 6).
+type chatResponseShadow struct {
+	ID                string             `json:"id"`
+	Object            *string            `json:"object"`
+	Created           int64              `json:"created"`
+	Model             string             `json:"model"`
+	ServiceTier       *string            `json:"service_tier,omitempty"`
+	SystemFingerprint string             `json:"system_fingerprint,omitempty"`
+	Choices           []chatChoiceShadow `json:"choices"`
+	Usage             *chatUsageShadow   `json:"usage,omitempty"`
+}
+
+type chatChoiceShadow struct {
+	Index        *int64              `json:"index"`
+	FinishReason *string             `json:"finish_reason"`
+	LogProbs     *ChatChoiceLogprobs `json:"logprobs"`
+	Message      *chatMessageShadow  `json:"message"`
+	Delta        *ChatStreamDelta    `json:"delta,omitempty"`
+}
+
+// chatMessageShadow mirrors ChatMessage with a pointer role so an absent
+// role is distinguishable from a present one.
+type chatMessageShadow struct {
+	Name    *string             `json:"name,omitempty"`
+	Role    *ChatMessageRole    `json:"role,omitempty"`
+	Content *ChatMessageContent `json:"content,omitempty"`
+
+	ToolCallID *string              `json:"tool_call_id,omitempty"`
+	Refusal    *string              `json:"refusal,omitempty"`
+	ToolCalls  []chatToolCallShadow `json:"tool_calls,omitempty"`
+	Reasoning  *string              `json:"reasoning,omitempty"`
+}
+
+// chatToolCallShadow mirrors ChatMessageToolCall with a pointer arguments
+// field so a missing arguments field is distinguishable from an empty one.
+type chatToolCallShadow struct {
+	Type     *string                    `json:"type,omitempty"`
+	ID       *string                    `json:"id,omitempty"`
+	Function chatToolCallFunctionShadow `json:"function"`
+}
+
+type chatToolCallFunctionShadow struct {
+	Name      *string `json:"name"`
+	Arguments *string `json:"arguments"`
+}
+
+// chatUsageShadow mirrors ChatLLMUsage with pointer totals so explicit
+// presence is distinguishable from omitted (the wire fields are omitempty;
+// review-k finding 6 decodes the Known flags from this shadow).
+type chatUsageShadow struct {
+	PromptTokens            *int                         `json:"prompt_tokens,omitempty"`
+	CompletionTokens        *int                         `json:"completion_tokens,omitempty"`
+	TotalTokens             *int                         `json:"total_tokens,omitempty"`
+	PromptTokensDetails     *ChatPromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *ChatCompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
 // DecodeChatResponse decodes a non-streaming Chat Completions response into
-// the canonical IR. A response with more than one choice is rejected rather
-// than silently taking choice zero. Provider plaintext reasoning is handled
-// only when ChatCapabilities.ProviderReasoningText is enabled.
+// the canonical IR. The decode is presence-aware and strict: the pinned
+// required fields (object, one choice, choice index 0, finish_reason,
+// message with role assistant, and complete tool-call identity) must be
+// explicitly present — absent or null is rejected, never defaulted (review-k
+// finding 4). A response with more than one choice is rejected rather than
+// silently taking choice zero. Provider plaintext reasoning is handled only
+// when ChatCapabilities.ProviderReasoningText is enabled.
 func DecodeChatResponse(
 	body []byte,
 	capabilities ChatCapabilities,
 ) (CanonicalResponse, error) {
-	var wire ChatResponse
-	if err := strictDecode(body, &wire); err != nil {
+	// Presence-aware shadow decode: absent-vs-zero is distinguishable.
+	var shadow chatResponseShadow
+	if err := strictDecode(body, &shadow); err != nil {
 		// A strict decode failure — malformed JSON, a type-corrupt value, or
 		// data outside the modeled surface — is corrupt upstream wire, an
 		// upstream failure (review-k finding 3). Valid features the
@@ -33,37 +101,110 @@ func DecodeChatResponse(
 			fmt.Errorf("chat response: %w", err),
 		)
 	}
-	if len(wire.Choices) == 0 {
+
+	// The pinned Chat response contract (openai-go v1.12.0 chatcompletion.go):
+	// object, choices, created, model, finish_reason, index, message, and the
+	// message role are required fields. Every violation is corrupt upstream
+	// wire (review-k findings 3 and 4).
+	if shadow.Object == nil || *shadow.Object != "chat.completion" {
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			fmt.Errorf("chat response object = %q, want \"chat.completion\"", derefStr(shadow.Object)),
+		)
+	}
+	if len(shadow.Choices) == 0 {
 		return CanonicalResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			errors.New("chat response has no choices"),
 		)
 	}
-	if len(wire.Choices) > 1 {
+	if len(shadow.Choices) > 1 {
 		return CanonicalResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			errors.New("chat response has more than one choice; the transcoder requires n=1"),
 		)
 	}
-
-	choice := wire.Choices[0]
-	message := choice.Message
-	if message == nil {
+	shadowChoice := shadow.Choices[0]
+	if shadowChoice.Index == nil || *shadowChoice.Index != 0 {
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			fmt.Errorf("chat response choice index = %v; n=1 requires index 0", indexOrZero(shadowChoice.Index)),
+		)
+	}
+	if shadowChoice.FinishReason == nil {
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			errors.New("chat response choice has no finish_reason"),
+		)
+	}
+	if shadowChoice.Message == nil {
 		return CanonicalResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			errors.New("chat response choice has no message"),
 		)
 	}
-	if err := message.Validate(); err != nil {
+	if shadowChoice.Message.Role == nil || *shadowChoice.Message.Role != ChatMessageRoleAssistant {
 		return CanonicalResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
-			fmt.Errorf("chat response message: %w", err),
+			fmt.Errorf("chat response message role = %q, want assistant", derefRole(shadowChoice.Message.Role)),
 		)
 	}
+	for i, call := range shadowChoice.Message.ToolCalls {
+		if call.Type == nil || *call.Type != "function" {
+			return CanonicalResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				0,
+				fmt.Errorf("chat response tool call %d type = %q, want function", i, derefStr(call.Type)),
+			)
+		}
+		if call.ID == nil || *call.ID == "" {
+			return CanonicalResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				0,
+				fmt.Errorf("chat response tool call %d has no id", i),
+			)
+		}
+		if call.Function.Name == nil || *call.Function.Name == "" {
+			return CanonicalResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				0,
+				fmt.Errorf("chat response tool call %d has no function name", i),
+			)
+		}
+		if call.Function.Arguments == nil {
+			return CanonicalResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				0,
+				fmt.Errorf("chat response tool call %d has no arguments", i),
+			)
+		}
+	}
+
+	// The wire decode cannot fail after the shadow succeeded: both decode the
+	// same modeled surface with the same strictness (verified field-identical
+	// surfaces and null semantics — where the shadow used a pointer and the
+	// wire a value, a null is silently ignored by the value field, never a
+	// decode error), and the shadow's presence checks above reject every null
+	// that matters before the conversion path runs.
+	var wire ChatResponse
+	if err := strictDecode(body, &wire); err != nil {
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			fmt.Errorf("chat response: %w", err),
+		)
+	}
+	// The shadow enforced exactly one choice with an explicit message; the
+	// wire decode sees the same bytes.
+	choice := wire.Choices[0]
+	message := choice.Message
 
 	response := CanonicalResponse{
 		ID:        wire.ID,
@@ -95,8 +236,10 @@ func DecodeChatResponse(
 		}
 	}
 
+	// The shadow enforced finish_reason presence; unknown values are a
+	// known-but-unsupported feature (local), never a defaulted success.
 	switch derefStr(choice.FinishReason) {
-	case "", "stop":
+	case "stop":
 		response.StopReason = CanonicalStopEndTurn
 	case "length":
 		response.StopReason = CanonicalStopMaxTokens
@@ -131,6 +274,22 @@ func DecodeChatResponse(
 		return CanonicalResponse{}, err
 	}
 	return response, nil
+}
+
+// indexOrZero dereferences a presence pointer, defaulting to zero.
+func indexOrZero(index *int64) int64 {
+	if index == nil {
+		return 0
+	}
+	return *index
+}
+
+// derefRole dereferences a role presence pointer for error messages.
+func derefRole(role *ChatMessageRole) string {
+	if role == nil {
+		return ""
+	}
+	return string(*role)
 }
 
 // chatMessageToCanonicalParts converts a Chat assistant message into canonical
@@ -208,12 +367,10 @@ func chatMessageToCanonicalParts(
 			if call.Function.Name != nil {
 				name = *call.Function.Name
 			}
+			// The shadow enforced arguments presence; the value must parse as
+			// exactly one JSON object — the empty-string-to-"{}" substitution
+			// exists only in the render direction (review-k finding 4).
 			arguments := call.Function.Arguments
-			if strings.TrimSpace(arguments) == "" {
-				// Empty arguments are valid on the wire and represent the
-				// empty object (the Responses form of an empty argument set).
-				arguments = "{}"
-			}
 			decoded, err := decodeJSONObject(arguments)
 			if err != nil {
 				return nil, upstreamWireError(

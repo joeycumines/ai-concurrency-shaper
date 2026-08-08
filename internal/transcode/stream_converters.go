@@ -956,6 +956,19 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			fmt.Errorf("chat stream chunk: %w", err),
 		)
 	}
+	// The pinned chunk envelope requires object == "chat.completion.chunk";
+	// a present discriminator naming anything else is corrupt upstream wire
+	// (review-k finding 4, streaming parity).
+	if chunk.Object != "" && chunk.Object != "chat.completion.chunk" {
+		return ChatStreamResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			http.StatusOK,
+			fmt.Errorf(
+				"chat stream chunk object = %q, want \"chat.completion.chunk\"",
+				chunk.Object,
+			),
+		)
+	}
 	return chunk, nil
 }
 

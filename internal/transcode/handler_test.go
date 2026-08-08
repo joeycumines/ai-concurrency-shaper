@@ -552,6 +552,58 @@ func TestHandlerCorruptUpstreamResponseIsUpstreamFailure(t *testing.T) {
 	}
 }
 
+// TestHandlerReviewKChatCounterexampleIsUpstreamFailure proves the exact
+// review-k finding-4 counterexample end to end: a single choice with index
+// zero, a user-role message, and no finish_reason is rejected with a
+// client-dialect error and recorded as an upstream failure — it can never
+// become a successful assistant response (review-k findings 3 and 4).
+func TestHandlerReviewKChatCounterexampleIsUpstreamFailure(t *testing.T) {
+	mapping := responsesMapping(t)
+	var outcomes []Outcome
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+			ModelMap:   ModelMap{AllowIdentity: true},
+			LossPolicy: StrictLossPolicy(),
+			AuthPolicy: AuthPolicy{Mode: AuthNone},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"user","content":"x"}}]}`,
+				)),
+			}, nil
+		},
+		func(o Outcome) { outcomes = append(outcomes, o) },
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("outcomes = %d", len(outcomes))
+	}
+	if outcomes[0].Provenance != ProvenanceUpstreamBodyError {
+		t.Fatalf("provenance = %s, want upstream_body_error", outcomes[0].Provenance)
+	}
+	if !outcomes[0].UpstreamFailure {
+		t.Fatal("the review-k counterexample must record an upstream failure")
+	}
+}
+
 func TestHandlerMessagesToResponsesJSON(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
 	handler := NewTranscodeHandler(
