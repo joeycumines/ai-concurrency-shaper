@@ -109,6 +109,13 @@ type convertingReader struct {
 	// error. Genuine upstream error frames are definitive upstream outcomes
 	// even when the client cancels concurrently.
 	sawUpstreamErrorFrame bool
+
+	// upstreamBodyError is set when the stored error came from the SOURCE
+	// reader (the upstream body) rather than from the converter: a raw
+	// non-EOF body read failure is an upstream body/protocol failure,
+	// matching the non-streaming path (review-j finding 1: a stream that
+	// truncates OR FAILS while its body is read).
+	upstreamBodyError bool
 }
 
 // newConvertingReader wraps the source reader and converter.
@@ -134,6 +141,7 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 		if err != nil && !errors.Is(err, io.EOF) {
 			r.appendErrorEvent(err)
 			r.err = err
+			r.upstreamBodyError = true
 			// Drain the appended error frame before surfacing the error.
 			continue
 		}
@@ -254,4 +262,12 @@ func (r *convertingReader) SawUpstreamErrorFrame() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.sawUpstreamErrorFrame
+}
+
+// UpstreamBodyError reports whether the stored error came from the upstream
+// body source rather than from the converter.
+func (r *convertingReader) UpstreamBodyError() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.upstreamBodyError
 }

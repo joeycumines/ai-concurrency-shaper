@@ -435,6 +435,11 @@ func TestClassifyStreamObservation(t *testing.T) {
 			want: streamOutcomeUpstreamFailure,
 		},
 		{
+			name: "error event from upstream body read failure is upstream failure",
+			obs:  streamObservation{SawErrorEvent: true, UpstreamBodyError: true, ReaderErr: io.ErrUnexpectedEOF, SawTerminal: true},
+			want: streamOutcomeUpstreamFailure,
+		},
+		{
 			name: "error event from typed upstream conversion error is upstream failure",
 			obs: streamObservation{
 				SawErrorEvent:         true,
@@ -773,5 +778,64 @@ func TestChatStreamChunkTypedErrorFrame(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "boom") {
 		t.Fatalf("client error event must carry the upstream message: %q", output.String())
+	}
+}
+
+// errReader returns a fixed error after n bytes.
+type errReader struct {
+	data  string
+	pos   int
+	errAt int
+	err   error
+}
+
+func (r *errReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.data) {
+		return 0, r.err
+	}
+	n := copy(p, r.data[r.pos:])
+	r.pos += n
+	return n, nil
+}
+
+// TestConvertingReaderUpstreamBodyError proves a raw non-EOF upstream body
+// read failure is marked as an upstream body error (never a local conversion
+// failure) and the client still receives the dialect error event (review-j
+// finding 1: a stream that fails while its body is read).
+func TestConvertingReaderUpstreamBodyError(t *testing.T) {
+	source := &errReader{
+		data:  "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n",
+		errAt: 100,
+		err:   io.ErrUnexpectedEOF,
+	}
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		ChatCapabilities{},
+		"resp_1",
+		"m",
+		1,
+		nil,
+	)
+	reader := newConvertingReader(
+		NewSSEReaderWithLimits(source, 0, 0),
+		newChatToResponsesConverter(state),
+	)
+	var output bytes.Buffer
+	buf := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			output.Write(buf[:n])
+		}
+		if err != nil {
+			break
+		}
+	}
+	if !reader.UpstreamBodyError() {
+		t.Fatal("upstream body error not marked")
+	}
+	if !strings.Contains(output.String(), `"type":"error"`) {
+		t.Fatalf("client must receive an error event: %q", output.String())
 	}
 }

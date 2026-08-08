@@ -75,6 +75,11 @@ type streamObservation struct {
 	// real upstream data (a converted upstream error frame) rather than a
 	// local truncation or conversion error.
 	SawUpstreamErrorFrame bool
+
+	// UpstreamBodyError reports whether the stored reader error came from
+	// the upstream body source (a raw non-EOF read failure) rather than
+	// from the converter.
+	UpstreamBodyError bool
 }
 
 // runTranslatedStream runs the mandated stream.Proxy copy boundary exactly
@@ -121,6 +126,7 @@ func runTranslatedStream(
 		SawTerminal:           convertedReader.SawTerminal(),
 		SawErrorEvent:         convertedReader.SawErrorEvent(),
 		SawUpstreamErrorFrame: convertedReader.SawUpstreamErrorFrame(),
+		UpstreamBodyError:     convertedReader.UpstreamBodyError(),
 	}
 }
 
@@ -180,16 +186,20 @@ func classifyStreamObservation(o streamObservation) streamOutcome {
 		return streamOutcomeUpstreamFailure
 	}
 	// A locally generated error event is a truncation (the upstream stopped
-	// sending — an upstream body failure), a size violation (the upstream
-	// sent a line or frame beyond the configured bounds — an upstream
-	// body/protocol failure), or a conversion error on a live stream
-	// (neither success nor failure, matching the non-streaming path).
-	// An aborted exchange is never a failure.
+	// sending — an upstream body failure), a raw upstream body read failure
+	// (connection reset, read timeout — an upstream body failure, matching
+	// the non-streaming path), a size violation (the upstream sent a line or
+	// frame beyond the configured bounds — an upstream body/protocol
+	// failure), or a conversion error on a live stream (neither success nor
+	// failure, matching the non-streaming path). An aborted exchange is
+	// never a failure.
 	if o.SawErrorEvent {
 		if o.ClientContextErr != nil {
 			return streamOutcomeClientAbort
 		}
-		if errors.Is(o.ReaderErr, errStreamTruncated) || isSSEBoundError(o.ReaderErr) {
+		if o.UpstreamBodyError ||
+			errors.Is(o.ReaderErr, errStreamTruncated) ||
+			isSSEBoundError(o.ReaderErr) {
 			return streamOutcomeUpstreamFailure
 		}
 		return streamOutcomeLocalConversionFailure

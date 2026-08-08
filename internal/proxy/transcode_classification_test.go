@@ -8,6 +8,7 @@ package proxy
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -765,5 +766,70 @@ func TestProxyNewRejectsMisconfiguredTranscodeRoutes(t *testing.T) {
 				t.Fatal("proxy.New accepted the misconfigured route")
 			}
 		})
+	}
+}
+
+// TestProxyTranscodeMidStreamBodyErrorIsUpstreamFailure proves a raw
+// non-EOF upstream body failure mid-stream (a connection reset) classifies
+// as an upstream failure: breaker failure recorded, phantom hold applied,
+// client error event emitted — matching the non-streaming path (review-j
+// finding 1: a stream that truncates OR FAILS while its body is read).
+func TestProxyTranscodeMidStreamBodyErrorIsUpstreamFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		// Reset the connection mid-body with a RST so the client transport
+		// observes a raw non-EOF read failure.
+		if hijacker, ok := w.(http.Hijacker); ok {
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				return
+			}
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0)
+			}
+			_ = conn.Close()
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker := j2Breaker(t)
+	before := breaker.Stats()
+	p := j2LimitedProxy(t, upstream, breaker)
+
+	req1 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x","stream":true}`),
+	)
+	rec1 := httptest.NewRecorder()
+	p.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("request 1 status = %d, want 200", rec1.Code)
+	}
+	if !strings.Contains(rec1.Body.String(), `"type":"error"`) {
+		t.Fatalf("client must receive an error event: %q", rec1.Body.String())
+	}
+	if got := breaker.Stats().TotalFailures; got != before.TotalFailures+1 {
+		t.Fatalf("mid-stream body failure not recorded as upstream failure: before=%d after=%d", before.TotalFailures, got)
+	}
+
+	// The upstream failure holds the slot.
+	start := time.Now()
+	req2 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"y","stream":true}`),
+	)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	wait := time.Since(start)
+	t.Logf("second request wait after mid-stream body failure: %v", wait)
+	if wait < 400*time.Millisecond {
+		t.Fatalf("phantom hold not applied to mid-stream body failure: wait %v", wait)
 	}
 }
