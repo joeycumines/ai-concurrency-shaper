@@ -164,10 +164,12 @@ func TestWriteUpstreamHTTPErrorRetainsUpstreamRetryAfter(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`))
-	handler.writeUpstreamHTTPError(req, &failingResponseWriter{}, resp, apiErr)
+	handler.writeUpstreamHTTPError(req, &failingResponseWriter{}, resp, time.Now(), apiErr)
 	outcome := <-outcomes
-	if outcome.RetryAfter != 5*time.Second {
-		t.Fatalf("RetryAfter = %v, want 5s", outcome.RetryAfter)
+	// The hold is anchored at header receipt and evaluated at outcome
+	// construction: a fast body leaves ~5s remaining (review-08 blocker 9).
+	if outcome.RetryAfter <= 4*time.Second || outcome.RetryAfter > 5*time.Second {
+		t.Fatalf("RetryAfter = %v, want ~5s", outcome.RetryAfter)
 	}
 	if !outcome.UpstreamFailure {
 		t.Fatal("429 recorded with UpstreamFailure = false")
@@ -211,7 +213,7 @@ func TestWriteUpstreamHTTPErrorRateSignalled403(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
-	handler.writeUpstreamHTTPError(req, rec, resp, apiErr)
+	handler.writeUpstreamHTTPError(req, rec, resp, time.Now(), apiErr)
 	outcome := <-outcomes
 	if !outcome.UpstreamFailure {
 		t.Fatal("rate-signalled 403 recorded with UpstreamFailure = false")
@@ -259,7 +261,7 @@ func TestWriteUpstreamHTTPErrorRateSignalled403ClientAbortRetainsFailure(t *test
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`)).WithContext(ctx)
-	handler.writeUpstreamHTTPError(req, &failingResponseWriter{}, resp, apiErr)
+	handler.writeUpstreamHTTPError(req, &failingResponseWriter{}, resp, time.Now(), apiErr)
 	outcome := <-outcomes
 	if outcome.Provenance != ProvenanceClientAbort {
 		t.Fatalf("provenance = %v, want client_abort", outcome.Provenance)

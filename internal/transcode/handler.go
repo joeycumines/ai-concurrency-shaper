@@ -116,10 +116,12 @@ type Outcome struct {
 	// writes: such exchanges are never clean completions.
 	DownstreamComplete bool
 
-	// RetryAfter is the Retry-After duration signaled by the ORIGINAL
-	// upstream response (0 when absent). It is recorded so rate-signalled
-	// failures keep their hold signal even when the rendered client error
-	// cannot carry it.
+	// RetryAfter is the REMAINING Retry-After hold signaled by the ORIGINAL
+	// upstream response (0 when absent): the value is anchored at header
+	// receipt and evaluated at outcome construction, so time spent reading
+	// the error body is excluded (review-08 blocker 9). It is recorded so
+	// rate-signalled failures keep their hold signal even when the rendered
+	// client error cannot carry it.
 	RetryAfter time.Duration
 
 	// StreamOutcome is the stream classification for streaming exchanges.
@@ -286,6 +288,11 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp, err := h.roundTrip(outReq)
+	// The response headers arrived: anchor Retry-After and the 403
+	// rate-signal classification here so body-read time is excluded from the
+	// recorded hold (review-08 blocker 9; the same pattern the retry
+	// transport uses).
+	receivedAt := time.Now()
 	if err != nil {
 		// A RoundTripper may return a non-nil response alongside an error;
 		// release its body so the connection is not leaked (sound behavior).
@@ -337,7 +344,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.cfg.BodyLimits.ErrorResponseBytes,
 		)
 		if readErr != nil {
-			h.writeUpstreamBodyError(r, w, resp, CanonicalAPIError{
+			h.writeUpstreamBodyError(r, w, resp, receivedAt, CanonicalAPIError{
 				Status:  resp.StatusCode,
 				Type:    "api_error",
 				Code:    codeForStatus(resp.StatusCode),
@@ -345,7 +352,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		h.writeUpstreamHTTPError(r, w, resp, apiErr)
+		h.writeUpstreamHTTPError(r, w, resp, receivedAt, apiErr)
 		return
 	}
 
@@ -1011,20 +1018,25 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 	r *http.Request,
 	w http.ResponseWriter,
 	resp *http.Response,
+	receivedAt time.Time,
 	apiErr CanonicalAPIError,
 ) {
-	now := time.Now()
+	// Evaluate the failure classification and Retry-After at outcome
+	// construction time, anchored at header receipt: the error body was read
+	// between the two, and the hold must measure from when the headers
+	// arrived (review-08 blocker 9).
+	evaluatedAt := time.Now()
 	upstreamFailure := circuitbreaker.IsFailureStatusWithHeaders(
 		apiErr.Status,
 		resp.Header,
-		now,
-		now,
+		receivedAt,
+		evaluatedAt,
 	)
 	outcome := Outcome{
 		Status:          apiErr.Status,
 		Provenance:      ProvenanceUpstreamHTTP,
 		UpstreamFailure: upstreamFailure,
-		RetryAfter:      circuitbreaker.ParseRetryAfter(resp.Header, now, now),
+		RetryAfter:      circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, evaluatedAt),
 	}
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
 	if err := WriteDialectHTTPError(w, client, apiErr); err != nil {
@@ -1057,19 +1069,20 @@ func (h *TranscodeHandler) writeUpstreamBodyError(
 	r *http.Request,
 	w http.ResponseWriter,
 	resp *http.Response,
+	receivedAt time.Time,
 	apiErr CanonicalAPIError,
 ) {
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
 	writeErr := WriteDialectHTTPError(w, client, apiErr)
-	now := time.Now()
 	outcome := Outcome{
 		Status:          apiErr.Status,
 		Provenance:      ProvenanceUpstreamBodyError,
 		UpstreamFailure: true,
 		// The upstream's Retry-After is a header fact that survives the
 		// failed body transfer: the rate-signalled hold must be recorded
-		// even when the error body could not be read (review-08 blocker 8).
-		RetryAfter: circuitbreaker.ParseRetryAfter(resp.Header, now, now),
+		// even when the error body could not be read, anchored at header
+		// receipt (review-08 blockers 8 and 9).
+		RetryAfter: circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, time.Now()),
 	}
 	if writeErr != nil {
 		if r.Context().Err() != nil {

@@ -253,7 +253,7 @@ func TestWriteUpstreamBodyErrorWriteFailure(t *testing.T) {
 		})
 		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`))
 		resp := &http.Response{StatusCode: http.StatusTooManyRequests}
-		handler.writeUpstreamBodyError(req, &failingResponseWriter{}, resp, apiErr)
+		handler.writeUpstreamBodyError(req, &failingResponseWriter{}, resp, time.Now(), apiErr)
 		outcome := <-outcomes
 		if outcome.Provenance != ProvenanceDownstreamWriteError {
 			t.Fatalf("provenance = %v, want downstream_write_error", outcome.Provenance)
@@ -271,7 +271,7 @@ func TestWriteUpstreamBodyErrorWriteFailure(t *testing.T) {
 		cancel()
 		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{}`)).WithContext(ctx)
 		resp := &http.Response{StatusCode: http.StatusTooManyRequests}
-		handler.writeUpstreamBodyError(req, &failingResponseWriter{}, resp, apiErr)
+		handler.writeUpstreamBodyError(req, &failingResponseWriter{}, resp, time.Now(), apiErr)
 		outcome := <-outcomes
 		if outcome.Provenance != ProvenanceClientAbort || !outcome.ClientAborted {
 			t.Fatalf("provenance = %v, want client abort", outcome.Provenance)
@@ -310,8 +310,8 @@ func TestErrorBodyFailureKeepsRetryAfter(t *testing.T) {
 	if !outcome.UpstreamFailure {
 		t.Fatal("failed error-body transfer must be an upstream failure")
 	}
-	if outcome.RetryAfter != 10*time.Second {
-		t.Fatalf("RetryAfter = %v, want 10s", outcome.RetryAfter)
+	if outcome.RetryAfter <= 9*time.Second || outcome.RetryAfter > 10*time.Second {
+		t.Fatalf("RetryAfter = %v, want ~10s for a fast body", outcome.RetryAfter)
 	}
 }
 
@@ -439,4 +439,137 @@ func TestSuccessfulBodyReadCancellationDerivedAbort(t *testing.T) {
 	if outcome.Provenance != ProvenanceClientAbort || !outcome.ClientAborted {
 		t.Fatalf("cancellation-derived body error must stay a client abort: %+v", outcome)
 	}
+}
+
+// slowReadCloser delays the first read by the given duration, then returns
+// the payload or error. It simulates an upstream whose error body transfer
+// takes real time.
+type slowReadCloser struct {
+	delay   time.Duration
+	data    []byte
+	readErr error
+	delayed bool
+}
+
+func (s *slowReadCloser) Read(p []byte) (int, error) {
+	if !s.delayed {
+		s.delayed = true
+		time.Sleep(s.delay)
+	}
+	if s.readErr != nil {
+		return 0, s.readErr
+	}
+	if len(s.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, s.data)
+	s.data = s.data[n:]
+	return n, nil
+}
+
+func (s *slowReadCloser) Close() error { return nil }
+
+// TestRetryAfterUsesHeaderReceiptTime proves the recorded Outcome.RetryAfter
+// and the 403 rate-signal classification measure from the moment the
+// upstream headers arrived, never from the moment the error body finished
+// reading: body-read time is excluded from the remaining hold (review-08
+// blocker 9).
+func TestRetryAfterUsesHeaderReceiptTime(t *testing.T) {
+	const (
+		retryAfter = 10 * time.Second
+		bodyDelay  = 500 * time.Millisecond
+	)
+	assertAnchored := func(t *testing.T, outcome Outcome) {
+		t.Helper()
+		if !outcome.UpstreamFailure {
+			t.Fatal("rate-signalled failure must be an upstream failure")
+		}
+		// The body read consumed ~500ms of the 10s hold: the recorded
+		// remaining delay must exclude it.
+		if outcome.RetryAfter >= retryAfter || outcome.RetryAfter < 9*time.Second {
+			t.Fatalf("RetryAfter = %v, want the remaining hold after the body read (9s..10s)", outcome.RetryAfter)
+		}
+	}
+
+	t.Run("429 with slow failing error body", func(t *testing.T) {
+		mapping := responsesMapping(t)
+		handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+			header := http.Header{"Content-Type": []string{"application/json"}}
+			header.Set("Retry-After", "10")
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Header:     header,
+				Body:       io.NopCloser(&slowReadCloser{delay: bodyDelay, readErr: errors.New("connection reset by peer")}),
+			}, nil
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"x"}`))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		assertAnchored(t, <-outcomes)
+	})
+
+	t.Run("429 with slow successful error body", func(t *testing.T) {
+		mapping := responsesMapping(t)
+		handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+			header := http.Header{"Content-Type": []string{"application/json"}}
+			header.Set("Retry-After", "10")
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Header:     header,
+				Body: io.NopCloser(&slowReadCloser{
+					delay: bodyDelay,
+					data:  []byte(`{"error":{"message":"slow"}}`),
+				}),
+			}, nil
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"x"}`))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		assertAnchored(t, <-outcomes)
+	})
+
+	t.Run("403 rate signal with slow body", func(t *testing.T) {
+		mapping := responsesMapping(t)
+		handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+			header := http.Header{"Content-Type": []string{"application/json"}}
+			header.Set("Retry-After", "10")
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     header,
+				Body: io.NopCloser(&slowReadCloser{
+					delay: bodyDelay,
+					data:  []byte(`{"error":{"message":"rate limited"}}`),
+				}),
+			}, nil
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"x"}`))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		assertAnchored(t, <-outcomes)
+	})
+
+	t.Run("fast body records the full hold", func(t *testing.T) {
+		mapping := responsesMapping(t)
+		handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+			header := http.Header{"Content-Type": []string{"application/json"}}
+			header.Set("Retry-After", "10")
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Header:     header,
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"fast"}}`)),
+			}, nil
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"x"}`))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		outcome := <-outcomes
+		if !outcome.UpstreamFailure {
+			t.Fatal("429 must be an upstream failure")
+		}
+		// A fast body reads in microseconds: the hold is ~10s, the full
+		// signaled duration.
+		if outcome.RetryAfter <= 9*time.Second || outcome.RetryAfter > retryAfter {
+			t.Fatalf("RetryAfter = %v, want ~10s for a fast body", outcome.RetryAfter)
+		}
+	})
 }
