@@ -1103,3 +1103,54 @@ func TestProxyTranscodeWrongMediaTypeAppliesPhantomHold(t *testing.T) {
 		t.Fatalf("wrong media type failure did not hold the slot: wait %v", wait)
 	}
 }
+
+// TestProxyPassthroughRouteKeepsHeaders proves the transcode header
+// allowlists are confined to transcoded routes: a route that does not match
+// a transcode mapping forwards client and upstream headers untouched
+// (review-08 blocker 10).
+func TestProxyPassthroughRouteKeepsHeaders(t *testing.T) {
+	var gotRequestHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRequestHeader = r.Header.Get("X-Custom")
+		w.Header().Set("X-Custom", "upstream-value")
+		w.Header().Set("Set-Cookie", "session=secret")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "ok")
+	}))
+	t.Cleanup(upstream.Close)
+
+	// A route that does not match the transcode pattern (GET /v1/responses
+	// vs POST) passes through the native path.
+	pattern, err := route.Parse("POST /v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(upstream.URL)
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(transcodeMapping(testResponsesMapping(t))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses", strings.NewReader(""))
+	req.Header.Set("X-Custom", "client-value")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if gotRequestHeader != "client-value" {
+		t.Fatalf("passthrough dropped the client header: %q", gotRequestHeader)
+	}
+	if got := rec.Header().Get("X-Custom"); got != "upstream-value" {
+		t.Fatalf("passthrough dropped the upstream header: %q", got)
+	}
+	if got := rec.Header().Get("Set-Cookie"); got != "session=secret" {
+		t.Fatalf("passthrough dropped Set-Cookie: %q", got)
+	}
+}

@@ -1676,6 +1676,7 @@ func TestHandlerHopByHopHeadersStrippedJSON(t *testing.T) {
 				"Connection":        []string{"X-Internal-Secret"},
 				"X-Internal-Secret": []string{"s3cr3t"},
 				"X-Keep":            []string{"visible"},
+				"X-Request-Id":      []string{"req_1"},
 			},
 			Body: io.NopCloser(bytes.NewReader(testcorpus.ChatCompletionsResponseJSON())),
 		}, nil
@@ -1693,8 +1694,14 @@ func TestHandlerHopByHopHeadersStrippedJSON(t *testing.T) {
 	if got := rec.Header().Get("X-Internal-Secret"); got != "" {
 		t.Fatalf("Connection-nominated header leaked: %q", got)
 	}
-	if got := rec.Header().Get("X-Keep"); got != "visible" {
-		t.Fatalf("ordinary entity header dropped: %q", got)
+	// The response allowlist is stricter than hop-by-hop removal: any
+	// non-listed upstream header, including an ordinary entity header, is
+	// stripped on a transcoded route (review-08 blocker 10).
+	if got := rec.Header().Get("X-Keep"); got != "" {
+		t.Fatalf("non-allowed entity header leaked: %q", got)
+	}
+	if got := rec.Header().Get("X-Request-Id"); got != "req_1" {
+		t.Fatalf("request-id header dropped: %q", got)
 	}
 }
 

@@ -574,36 +574,23 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 		return nil, err
 	}
 
-	headers := r.Header.Clone()
-	// Sound behavior: remove the client's Accept-Encoding so the upstream
-	// does not compress the response, which would break JSON/SSE conversion.
-	headers.Del("Accept-Encoding")
-	// Sound behavior: remove forwarded headers like the passthrough path.
-	headers.Del("X-Forwarded-For")
-	headers.Del("X-Forwarded-Host")
-	headers.Del("X-Forwarded-Proto")
-
-	RemoveHopByHopHeaders(headers)
+	// The outbound request uses an explicit allowlist: NOTHING the client
+	// sent is forwarded unless it is on the list (review-08 blocker 10).
+	// Cookies, forwarding headers, range/conditional controls, idempotency
+	// keys, source-provider controls, and unknown credential or extension
+	// headers never reach the target provider; hop-by-hop and
+	// transformed-representation metadata are structurally absent.
+	headers := http.Header{}
 	// The outbound Accept is rewritten to the representation actually
 	// requested upstream: text/event-stream when the exchange streams,
 	// otherwise application/json. The client's Accept describes its own
 	// preferences, not the mode of the converted request, and must never
-	// reach the target provider unnormalized (review-08 blocker 1). The
-	// rewrite happens AFTER hop-by-hop removal so a client Connection token
-	// nominating Accept for removal at its own hop cannot strip the
-	// proxy's freshly generated negotiation header for the upstream hop.
+	// reach the target provider unnormalized (review-08 blockers 1 and 10).
 	if streamIntent {
 		headers.Set("Accept", "text/event-stream")
 	} else {
 		headers.Set("Accept", "application/json")
 	}
-	// The converted body is a new representation: inbound integrity
-	// digests, message signatures, and validators describe the original
-	// bytes and must never be forwarded or signed. Run before
-	// BuildConvertedRequest recomputes Content-Length and before
-	// ApplyTargetAuthentication so an external signer signs the clean
-	// metadata (review-j finding 12).
-	RemoveTransformedRequestRepresentationHeaders(headers)
 	headers.Set("Content-Type", "application/json")
 
 	outReq, err := BuildConvertedRequest(r.Context(), r.Method, targetURL.String(), body, headers)
@@ -614,8 +601,9 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 	// Sound behavior: preserve the request context on the upstream request.
 	outReq = outReq.WithContext(r.Context())
 
-	// Extract the inbound credential, then strip and re-apply per policy.
-	inbound, err := ExtractInboundCredential(headers)
+	// Extract the inbound credential from the CLIENT's original headers,
+	// then strip and re-apply per policy.
+	inbound, err := ExtractInboundCredential(r.Header)
 	if err != nil {
 		return nil, err
 	}
@@ -1195,14 +1183,16 @@ func (h *TranscodeHandler) recordOutcome(r *http.Request, outcome Outcome) {
 	}
 }
 
-// copyResponseHeaders copies upstream entity headers to the downstream
-// writer, skipping hop-by-hop and content-identity headers handled elsewhere.
+// copyResponseHeaders copies the upstream response headers a transcoded
+// route is allowed to expose to the client-facing origin: the request-id
+// family and the provider rate-limit informational headers (review-08
+// blocker 10). Everything else — Set-Cookie and other control headers,
+// entity metadata, and provider extension headers — is stripped: the
+// translated response is a new representation and the client's origin must
+// not receive cross-provider control signals.
 func (h *TranscodeHandler) copyResponseHeaders(dst, src http.Header) {
 	for name, values := range src {
-		if isHopByHopName(name) {
-			continue
-		}
-		if strings.EqualFold(name, "Connection") {
+		if !isAllowedResponseHeader(name) {
 			continue
 		}
 		for _, value := range values {
@@ -1211,15 +1201,19 @@ func (h *TranscodeHandler) copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-// isHopByHopName reports whether the header is a fixed hop-by-hop name.
-func isHopByHopName(name string) bool {
-	switch strings.ToLower(name) {
-	case "connection", "proxy-connection", "keep-alive", "proxy-authenticate",
-		"proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade":
+// isAllowedResponseHeader reports whether an upstream response header may be
+// exposed on a transcoded route. The allowed set is the request-id family and
+// the rate-limit informational headers of the pinned providers (OpenAI
+// x-ratelimit-*, Anthropic anthropic-ratelimit-*), plus Retry-After.
+func isAllowedResponseHeader(name string) bool {
+	lower := strings.ToLower(name)
+	switch lower {
+	case "x-request-id", "request-id", "x-amzn-requestid",
+		"x-amz-request-id", "x-amz-id-2", "retry-after":
 		return true
-	default:
-		return false
 	}
+	return strings.HasPrefix(lower, "x-ratelimit-") ||
+		strings.HasPrefix(lower, "anthropic-ratelimit-")
 }
 
 // isEventStreamMediaType reports whether the media type is exactly
