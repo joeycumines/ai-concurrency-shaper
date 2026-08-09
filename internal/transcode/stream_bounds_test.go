@@ -181,6 +181,15 @@ func TestResponsesStreamToolArgumentsCumulativeBound(t *testing.T) {
 		"m",
 		1,
 	)
+	if _, err := state.Convert(ResponseCreatedEvent{
+		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
+		Response: ResponseEnvelope{
+			ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
+			Output: []ResponsesOutputItem{},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := state.Convert(ResponseOutputItemAddedEvent{
 		responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
 		OutputIndex:        0,

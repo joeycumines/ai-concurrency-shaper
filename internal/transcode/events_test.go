@@ -104,12 +104,14 @@ func TestFunctionArgumentsDeltaUsesDelta(t *testing.T) {
 	}
 }
 
-func TestFunctionArgumentsDoneCarriesNameAndArguments(t *testing.T) {
+func TestFunctionArgumentsDoneCarriesArguments(t *testing.T) {
+	// The official done event carries arguments and NO name: call identity
+	// comes from the item-added lifecycle (review-08 blocker 5).
 	builder := &ResponsesEventBuilder{}
-	event := builder.FunctionArgumentsDone("fc_1", 1, "get_weather", `{"location":"Tokyo"}`)
+	event := builder.FunctionArgumentsDone("fc_1", 1, `{"location":"Tokyo"}`)
 	m := marshalEvent(t, event)
-	if string(requireField(t, m, "name")) != `"get_weather"` {
-		t.Fatalf("name = %s", m["name"])
+	if _, ok := m["name"]; ok {
+		t.Fatalf("done event must not carry a name field: %v", m)
 	}
 	if string(requireField(t, m, "arguments")) != `"{\"location\":\"Tokyo\"}"` {
 		t.Fatalf("arguments = %s", m["arguments"])
@@ -122,7 +124,7 @@ func TestFunctionArgumentsDoneCarriesNameAndArguments(t *testing.T) {
 func TestFunctionArgumentsDoneEmptyArgumentsValidJSON(t *testing.T) {
 	// Empty arguments are emitted as "{}", never omitted.
 	builder := &ResponsesEventBuilder{}
-	event := builder.FunctionArgumentsDone("fc_1", 0, "f", "{}")
+	event := builder.FunctionArgumentsDone("fc_1", 0, "{}")
 	if err := event.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +321,7 @@ func TestEventNameMatchesJSONType(t *testing.T) {
 		builder.OutputItemAdded(0, &ResponsesOutputMessage{ID: "m", Type: "message", Role: "assistant", Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{}}),
 		builder.TextDelta("m", 0, 0, "x"),
 		builder.FunctionArgumentsDelta("f", 0, "{}"),
-		builder.FunctionArgumentsDone("f", 0, "n", "{}"),
+		builder.FunctionArgumentsDone("f", 0, "{}"),
 		builder.ContentPartAdded("m", 0, 0, &ResponsesStreamOutputTextPart{Type: "output_text", Text: "x", Annotations: []ResponsesAnnotation{}}),
 		builder.RefusalDone("m", 0, 0, "no"),
 		builder.Completed(ResponseEnvelope{ID: "r", Object: "response", CreatedAt: 1, Status: "completed", Model: "m", Output: []ResponsesOutputItem{}}),

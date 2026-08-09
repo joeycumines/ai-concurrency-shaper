@@ -34,6 +34,11 @@ import (
 type ResponsesSSEEvent interface {
 	EventType() string
 	Validate() error
+
+	// Sequence returns the event's wire sequence number. The stream state
+	// machines enforce strictly increasing, unique sequence numbers across
+	// the stream (review-08 blocker 3).
+	Sequence() int64
 }
 
 // responsesEventBase is embedded by every event. SequenceNumber is required
@@ -41,6 +46,11 @@ type ResponsesSSEEvent interface {
 type responsesEventBase struct {
 	Type           string `json:"type"`
 	SequenceNumber int64  `json:"sequence_number"`
+}
+
+// Sequence returns the wire sequence number of the event.
+func (b responsesEventBase) Sequence() int64 {
+	return b.SequenceNumber
 }
 
 func (b responsesEventBase) validate(want string) error {
@@ -554,15 +564,13 @@ func (e ResponseFunctionCallArgumentsDeltaEvent) Validate() error {
 }
 
 // ResponseFunctionCallArgumentsDoneEvent carries the finalized arguments of a
-// function call, together with the function name. The emitted name is a
-// superset over the current official event (which requires arguments but not
-// name); official clients ignore unknown fields and the review mandates name
-// on completion so call identity never depends on a later event.
+// function call. The official event requires arguments but carries NO name:
+// call identity comes from the output_item.added lifecycle, never from a
+// private superset field (review-08 blocker 5).
 type ResponseFunctionCallArgumentsDoneEvent struct {
 	responsesEventBase
 	ItemID      string `json:"item_id"`
 	OutputIndex int64  `json:"output_index"`
-	Name        string `json:"name"`
 	Arguments   string `json:"arguments"`
 }
 
@@ -578,10 +586,9 @@ func (e ResponseFunctionCallArgumentsDoneEvent) Validate() error {
 	if e.ItemID == "" {
 		return errors.New("function arguments done requires item_id")
 	}
-	// name and arguments are optional on the wire: the official done event
-	// carries no name (the converter falls back to the pending call's
-	// identity) and may carry an empty arguments string when nothing was
-	// accumulated.
+	// arguments is optional on the wire: the official done event may carry
+	// an empty string when nothing was accumulated (the state machine
+	// reconciles the snapshot and requires an object at the boundary).
 	if e.Arguments != "" && !json.Valid([]byte(e.Arguments)) {
 		return errors.New("final function arguments are invalid JSON")
 	}
@@ -927,11 +934,12 @@ func (b *ResponsesEventBuilder) FunctionArgumentsDelta(
 }
 
 // FunctionArgumentsDone builds a response.function_call_arguments.done event
-// carrying the name and the finalized arguments (never a partial payload).
+// carrying the finalized arguments (never a partial payload). The official
+// event has no name field: call identity comes from the item-added
+// lifecycle (review-08 blocker 5).
 func (b *ResponsesEventBuilder) FunctionArgumentsDone(
 	itemID string,
 	outputIndex int64,
-	name string,
 	arguments string,
 ) ResponseFunctionCallArgumentsDoneEvent {
 	return ResponseFunctionCallArgumentsDoneEvent{
@@ -940,7 +948,6 @@ func (b *ResponsesEventBuilder) FunctionArgumentsDone(
 		),
 		ItemID:      itemID,
 		OutputIndex: outputIndex,
-		Name:        name,
 		Arguments:   arguments,
 	}
 }

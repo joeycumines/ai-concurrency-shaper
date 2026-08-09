@@ -255,7 +255,9 @@ func TestChatToResponsesFunctionCallStream(t *testing.T) {
 	if !ok {
 		t.Fatalf("held[0] = %T", held[0])
 	}
-	if done.Name != "get_weather" || done.Arguments != `{"location":"Tokyo"}` {
+	// The official done event carries arguments and no name: call identity
+	// comes from the item-added lifecycle (review-08 blocker 5).
+	if done.Arguments != `{"location":"Tokyo"}` {
 		t.Fatalf("done = %+v", done)
 	}
 	completed, ok := held[2].(ResponseCompletedEvent)
@@ -303,6 +305,42 @@ func TestChatToResponsesEmptyToolArguments(t *testing.T) {
 	}
 	if done.Arguments != "{}" {
 		t.Fatalf("empty arguments = %q, want {}", done.Arguments)
+	}
+}
+
+// TestChatToResponsesNonObjectArgumentsRejected proves completed Chat tool
+// arguments must be a JSON OBJECT: fragments assembling to an array or a
+// string are corrupt upstream wire, never emitted as completed arguments
+// (review-08 blocker 4).
+func TestChatToResponsesNonObjectArgumentsRejected(t *testing.T) {
+	for _, arguments := range []string{`[1,2]`, `"str"`, `42`} {
+		t.Run(arguments, func(t *testing.T) {
+			state := newChatResponsesStreamState(
+				testStreamContext(),
+				StrictLossPolicy(),
+				ChatCapabilities{},
+				"resp_1",
+				"m",
+				1,
+				nil,
+			)
+			if _, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
+				Index:    intPtr(0),
+				ID:       str("call_1"),
+				Type:     str("function"),
+				Function: ChatToolCallFunction{Name: str("f"), Arguments: arguments},
+			}}}, nil)); err != nil {
+				t.Fatal(err)
+			}
+			_, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("tool_calls")))
+			var wireErr *UpstreamWireError
+			if !errors.As(err, &wireErr) {
+				t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+			}
+			if !strings.Contains(err.Error(), "JSON object") {
+				t.Fatalf("error = %q, want the object violation", err.Error())
+			}
+		})
 	}
 }
 
@@ -594,12 +632,29 @@ func TestResponsesToAnthropicBasic(t *testing.T) {
 		t.Fatalf("block stop = %+v", blockStop)
 	}
 
+	// The item is closed by its done event before the terminal (review-08
+	// blocker 3).
+	if _, err := state.Convert(builder.OutputItemDone(0, &ResponsesOutputMessage{
+		ID: "msg_2", Type: "message", Role: "assistant", Status: ResponsesItemCompleted,
+		Content: ResponsesOutputContentParts{
+			&ResponsesOutputText{Type: "output_text", Text: "Hi", Annotations: []ResponsesAnnotation{}},
+		},
+	})); err != nil {
+		t.Fatal(err)
+	}
+
 	// The terminal is emitted immediately on completed: the Responses
 	// protocol has no [DONE] sentinel, so holding it would block the stream
-	// when the upstream keeps the connection open.
+	// when the upstream keeps the connection open. The envelope's message
+	// item carries the full observed content.
 	completedEnvelope := ResponseEnvelope{
 		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "completed", Model: "m",
-		Output: []ResponsesOutputItem{messageItem},
+		Output: []ResponsesOutputItem{&ResponsesOutputMessage{
+			ID: "msg_2", Type: "message", Role: "assistant", Status: ResponsesItemCompleted,
+			Content: ResponsesOutputContentParts{
+				&ResponsesOutputText{Type: "output_text", Text: "Hi", Annotations: []ResponsesAnnotation{}},
+			},
+		}},
 	}
 	events, err = state.Convert(builder.Completed(completedEnvelope))
 	if err != nil {
@@ -673,12 +728,21 @@ func TestResponsesToAnthropicFunctionCall(t *testing.T) {
 		t.Fatalf("arg delta = %+v", argDelta)
 	}
 
-	events, err = state.Convert(builder.FunctionArgumentsDone("fc_1", 0, "f", `{"x":1}`))
+	events, err = state.Convert(builder.FunctionArgumentsDone("fc_1", 0, `{"x":1}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 0 {
+	// The accumulated buffer was the byte-prefix `{"x":`; the done snapshot
+	// completes it and the missing suffix `1}` is delivered as one
+	// input_json_delta so the client's assembled input equals the snapshot
+	// (review-08 blocker 4).
+	if len(events) != 1 {
 		t.Fatalf("done events = %d", len(events))
+	}
+	suffix := events[0]
+	if suffix.Delta == nil || suffix.Delta.Type != AnthropicStreamDeltaTypeInputJSONDelta ||
+		suffix.Delta.PartialJSON == nil || *suffix.Delta.PartialJSON != `1}` {
+		t.Fatalf("suffix delta = %+v", suffix)
 	}
 
 	events, err = state.Convert(builder.OutputItemDone(0, &ResponsesFunctionCallOutputItem{
@@ -1196,10 +1260,34 @@ func TestChatToResponsesAmbiguousFragmentRejected(t *testing.T) {
 // tool_use, content_filter with refusal, and unknown finish reasons are
 // rejected.
 func TestAnthropicStreamStopReasons(t *testing.T) {
-	// Tool-call terminal -> stop_reason tool_use.
+	// Tool-call terminal -> stop_reason tool_use. The terminal envelope's
+	// function item must reconcile with the observed lifecycle.
 	state := newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), "resp_1", "m", 1)
 	builder := &ResponsesEventBuilder{}
 	parallel := true
+	created := ResponseEnvelope{
+		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
+		Output: []ResponsesOutputItem{}, ParallelToolCalls: &parallel,
+	}
+	if _, err := state.Convert(builder.Created(created)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Convert(builder.OutputItemAdded(0, &ResponsesFunctionCallOutputItem{
+		ID: "fc_1", Type: "function_call", Status: "in_progress", CallID: "call_1", Name: "f", Arguments: "",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Convert(builder.FunctionArgumentsDelta("fc_1", 0, `{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Convert(builder.FunctionArgumentsDone("fc_1", 0, `{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Convert(builder.OutputItemDone(0, &ResponsesFunctionCallOutputItem{
+		ID: "fc_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "f", Arguments: `{}`,
+	})); err != nil {
+		t.Fatal(err)
+	}
 	envelope := ResponseEnvelope{
 		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "completed", Model: "m",
 		Output: []ResponsesOutputItem{&ResponsesFunctionCallOutputItem{
@@ -1219,6 +1307,9 @@ func TestAnthropicStreamStopReasons(t *testing.T) {
 	// content_filter -> refusal stop.
 	state = newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), "resp_1", "m", 1)
 	builder = &ResponsesEventBuilder{}
+	if _, err := state.Convert(builder.Created(created)); err != nil {
+		t.Fatal(err)
+	}
 	incomplete := ResponseEnvelope{
 		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "incomplete", Model: "m",
 		Output:            []ResponsesOutputItem{},
@@ -1237,6 +1328,9 @@ func TestAnthropicStreamStopReasons(t *testing.T) {
 	// max_output_tokens -> max_tokens stop.
 	state = newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), "resp_1", "m", 1)
 	builder = &ResponsesEventBuilder{}
+	if _, err := state.Convert(builder.Created(created)); err != nil {
+		t.Fatal(err)
+	}
 	incomplete.IncompleteDetails = &ResponsesIncompleteDetails{Reason: "max_output_tokens"}
 	events, err = state.Convert(builder.Incomplete(incomplete))
 	if err != nil {
@@ -1292,7 +1386,7 @@ func TestAnthropicStreamToolTerminalSingleStop(t *testing.T) {
 		ID: "fc_1", Type: "function_call", Status: "in_progress", CallID: "call_1", Name: "f", Arguments: "",
 	}))
 	feed(builder.FunctionArgumentsDelta("fc_1", 0, `{"x":1}`))
-	feed(builder.FunctionArgumentsDone("fc_1", 0, "f", `{"x":1}`))
+	feed(builder.FunctionArgumentsDone("fc_1", 0, `{"x":1}`))
 	feed(builder.OutputItemDone(0, &ResponsesFunctionCallOutputItem{
 		ID: "fc_1", Type: "function_call", Status: "completed", CallID: "call_1", Name: "f", Arguments: `{"x":1}`,
 	}))

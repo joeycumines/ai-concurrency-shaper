@@ -68,10 +68,11 @@ type chatPartKey struct {
 // chatResponsesStreamState converts Chat stream chunks into typed Responses
 // SSE events with the full item lifecycle. Function-call starts are buffered
 // until call ID and name are known; argument fragments are emitted with delta
-// (never arguments); the completion event always carries name and arguments
-// ("{}" for empty). Provider reasoning deltas are dropped with a documented
-// loss, or mapped to ordinary text under the ProviderReasoningText
-// capability — they are never synthesized into reasoning items.
+// (never arguments); the completion event carries the arguments ("{}" for
+// empty) and no name (review-08 blocker 5). Provider reasoning deltas are
+// dropped with a documented loss, or mapped to ordinary text under the
+// ProviderReasoningText capability — they are never synthesized into
+// reasoning items.
 type chatResponsesStreamState struct {
 	ctx          *ExchangeContext
 	policy       LossPolicy
@@ -797,10 +798,11 @@ func (s *chatResponsesStreamState) finish(
 ) ([]ResponsesSSEEvent, error) {
 	var events []ResponsesSSEEvent
 
-	// Close every pending tool call: arguments done (name + arguments,
-	// "{}" for empty) then output_item.done. A fragment that never received
-	// an identity (id or name) is malformed upstream data: silently dropping
-	// it would hide the corruption behind a successful completion.
+	// Close every pending tool call: arguments done (arguments, "{}" for
+	// empty, no name — review-08 blocker 5) then output_item.done. A
+	// fragment that never received an identity (id or name) is malformed
+	// upstream data: silently dropping it would hide the corruption behind a
+	// successful completion.
 	for _, pending := range s.pendingCalls {
 		if !pending.started {
 			return nil, s.wireError(errors.New(
@@ -812,19 +814,21 @@ func (s *chatResponsesStreamState) finish(
 			arguments = "{}"
 		}
 		// A done event must never carry truncated or malformed arguments:
-		// emitting invalid JSON would poison the client's tool call.
-		if !json.Valid([]byte(arguments)) {
+		// emitting invalid JSON would poison the client's tool call. The
+		// pinned Responses contract requires a JSON OBJECT — arrays,
+		// strings, and numbers are corrupt wire, never emitted as completed
+		// arguments (review-08 blocker 4).
+		if _, err := decodeJSONObject(arguments); err != nil {
 			return nil, s.wireError(fmt.Errorf(
-				"tool call %q arguments are not valid JSON: %q",
+				"tool call %q arguments are not a JSON object: %v",
 				pending.callID,
-				arguments,
+				err,
 			))
 		}
 		events = append(events,
 			s.builder.FunctionArgumentsDone(
 				pending.itemID,
 				pending.outputIndex,
-				pending.name,
 				arguments,
 			),
 			s.builder.OutputItemDone(
@@ -1333,8 +1337,48 @@ type anthropicResponsesStreamState struct {
 	messageSent bool
 	blockIndex  int64
 
+	// lastSequence is the sequence number of the last processed event; the
+	// wire requires strictly increasing, unique sequence numbers across the
+	// stream (review-08 blocker 3). -1 accepts any nonnegative first
+	// sequence.
+	lastSequence int64
+
+	// Upstream response identity, pinned from the response.created envelope
+	// and verified on every later envelope-bearing event: id, model, and
+	// created_at must be stable across the stream (review-08 blocker 3).
+	upstreamID        string
+	upstreamModel     string
+	upstreamCreatedAt int64
+
+	// addedItems records every output item observed via output_item.added:
+	// its output index and type. Duplicate identities, content parts for
+	// unknown items, and output-index mismatches are wire errors (review-08
+	// blocker 3).
+	addedItems map[string]anthropicAddedItem
+
+	// doneItems records every output item closed by output_item.done: a
+	// duplicate done for any item type is corrupt upstream wire (review-08
+	// blocker 3).
+	doneItems map[string]struct{}
+
+	// partsSeen records every content part observed via content_part.added
+	// (keyed by owning item and content index) with its wire part type.
+	// Duplicate parts and type-mismatched content_part.done are wire errors.
+	partsSeen map[responsePartKey]string
+
+	// textBufs and refusalBufs accumulate streamed text and refusal per
+	// content part so the done events and the terminal envelope reconcile
+	// against the incrementally observed content (review-08 blocker 4).
+	textBufs    map[responsePartKey]*strings.Builder
+	refusalBufs map[responsePartKey]*strings.Builder
+
 	// tool blocks buffered until call identity is complete.
 	pendingToolStart map[string]*pendingToolBlock // keyed by item_id
+
+	// closedToolCalls records every function call closed by output_item.done:
+	// the terminal envelope's function items must reconcile against it
+	// (review-08 blocker 4).
+	closedToolCalls map[string]anthropicClosedToolCall
 
 	// partBlocks maps the Responses content part — keyed by owning item and
 	// content index (review-j finding 7: content indices are scoped to an
@@ -1391,12 +1435,28 @@ type responsePartKey struct {
 }
 
 type pendingToolBlock struct {
-	blockIndex int64
-	itemID     string
-	callID     string
-	name       string
-	arguments  strings.Builder
-	started    bool
+	blockIndex  int64
+	outputIndex int64
+	itemID      string
+	callID      string
+	name        string
+	arguments   strings.Builder
+	started     bool
+}
+
+// anthropicAddedItem records one output item observed via output_item.added.
+type anthropicAddedItem struct {
+	outputIndex int64
+	itemType    string
+}
+
+// anthropicClosedToolCall records one function call closed by
+// output_item.done, for terminal-envelope reconciliation.
+type anthropicClosedToolCall struct {
+	outputIndex int64
+	callID      string
+	name        string
+	arguments   string
 }
 
 func newAnthropicResponsesStreamState(
@@ -1412,7 +1472,14 @@ func newAnthropicResponsesStreamState(
 		responseID:       responseID,
 		model:            model,
 		createdAt:        createdAt,
+		lastSequence:     -1,
+		addedItems:       make(map[string]anthropicAddedItem),
+		doneItems:        make(map[string]struct{}),
+		partsSeen:        make(map[responsePartKey]string),
+		textBufs:         make(map[responsePartKey]*strings.Builder),
+		refusalBufs:      make(map[responsePartKey]*strings.Builder),
 		pendingToolStart: make(map[string]*pendingToolBlock),
+		closedToolCalls:  make(map[string]anthropicClosedToolCall),
 		partBlocks:       make(map[responsePartKey]int64),
 		phaseGated:       make(map[string]struct{}),
 	}
@@ -1425,6 +1492,27 @@ func (s *anthropicResponsesStreamState) Convert(
 	if s.sawTerminal {
 		return nil, errors.New("responses stream event after terminal")
 	}
+	// The wire requires strictly increasing, unique sequence numbers across
+	// the stream (review-08 blocker 3).
+	if sequence := event.Sequence(); sequence <= s.lastSequence {
+		return nil, s.wireError(fmt.Errorf(
+			"responses stream sequence number %d is not strictly increasing (last %d)",
+			sequence,
+			s.lastSequence,
+		))
+	} else {
+		s.lastSequence = sequence
+	}
+	// response.created must arrive first and exactly once: any other event
+	// before the created envelope is a corrupt lifecycle (review-08 blocker
+	// 3). The stream error event is the one exception: it is an abort
+	// terminal that may arrive at any point.
+	if !s.messageSent && event.EventType() != "response.created" &&
+		event.EventType() != "error" {
+		return nil, s.wireError(errors.New(
+			"responses stream event before response.created",
+		))
+	}
 
 	switch value := event.(type) {
 	case ResponseCreatedEvent:
@@ -1432,7 +1520,11 @@ func (s *anthropicResponsesStreamState) Convert(
 
 	case ResponseInProgressEvent:
 		// The in_progress envelope may carry the request-echo controls even
-		// when the created envelope does not; gate them the same way.
+		// when the created envelope does not; gate them the same way. The
+		// response identity must stay stable across the stream.
+		if err := s.checkEnvelopeIdentity(value.Response); err != nil {
+			return nil, err
+		}
 		if err := s.loseControlsOnce(value.Response); err != nil {
 			return nil, err
 		}
@@ -1451,7 +1543,7 @@ func (s *anthropicResponsesStreamState) Convert(
 		return s.textDelta(value)
 
 	case ResponseTextDoneEvent:
-		return nil, nil
+		return s.textDone(value)
 
 	case ResponseContentPartDoneEvent:
 		return s.contentPartDone(value)
@@ -1535,6 +1627,12 @@ func (s *anthropicResponsesStreamState) messageStart(
 		return nil, s.wireError(errors.New("duplicate message_start"))
 	}
 	s.messageSent = true
+	// Pin the upstream response identity from the created envelope: every
+	// later envelope-bearing event must carry the same id, model, and
+	// created_at (review-08 blocker 3).
+	s.upstreamID = envelope.ID
+	s.upstreamModel = envelope.Model
+	s.upstreamCreatedAt = envelope.CreatedAt
 	if err := s.loseControlsOnce(envelope); err != nil {
 		return nil, err
 	}
@@ -1550,7 +1648,8 @@ func (s *anthropicResponsesStreamState) messageStart(
 	}
 	usage, err := responsesUsageToAnthropicUsage(envelope.Usage)
 	if err != nil {
-		return nil, err
+		// Arithmetically inconsistent source usage is corrupt upstream wire.
+		return nil, s.wireError(fmt.Errorf("response usage: %w", err))
 	}
 	if usage != nil {
 		// The required Messages breakdown components the source did not
@@ -1587,9 +1686,72 @@ func (s *anthropicResponsesStreamState) messageStart(
 	}}, nil
 }
 
+// checkEnvelopeIdentity verifies a later envelope-bearing event (in_progress,
+// completed, incomplete, failed) carries the response identity pinned from
+// response.created: a drifted id, model, or created_at is corrupt upstream
+// wire (review-08 blocker 3).
+func (s *anthropicResponsesStreamState) checkEnvelopeIdentity(
+	envelope ResponseEnvelope,
+) error {
+	switch {
+	case envelope.ID != s.upstreamID:
+		return s.wireError(fmt.Errorf(
+			"responses stream response id = %q, want %q (pinned at response.created)",
+			envelope.ID,
+			s.upstreamID,
+		))
+	case envelope.Model != s.upstreamModel:
+		return s.wireError(fmt.Errorf(
+			"responses stream response model = %q, want %q (pinned at response.created)",
+			envelope.Model,
+			s.upstreamModel,
+		))
+	case envelope.CreatedAt != s.upstreamCreatedAt:
+		return s.wireError(fmt.Errorf(
+			"responses stream response created_at = %d, want %d (pinned at response.created)",
+			envelope.CreatedAt,
+			s.upstreamCreatedAt,
+		))
+	default:
+		return nil
+	}
+}
+
+// responsesOutputItemID returns the item id of a typed output item, or ""
+// for item types that never appear on the stream.
+func responsesOutputItemID(item ResponsesOutputItem) string {
+	switch value := item.(type) {
+	case *ResponsesOutputMessage:
+		return value.ID
+	case *ResponsesFunctionCallOutputItem:
+		return value.ID
+	case *ResponsesReasoningOutputItem:
+		return value.ID
+	default:
+		return ""
+	}
+}
+
 func (s *anthropicResponsesStreamState) outputItemAdded(
 	event ResponseOutputItemAddedEvent,
 ) ([]AnthropicStreamEvent, error) {
+	// Item identities are unique across the stream: a duplicate
+	// output_item.added for the same item id is corrupt upstream wire
+	// (review-08 blocker 3).
+	itemType := itemTypeName(event.Item)
+	itemID := responsesOutputItemID(event.Item)
+	if _, exists := s.addedItems[itemID]; exists {
+		return nil, s.wireError(fmt.Errorf(
+			"duplicate output item %q (%s)",
+			itemID,
+			itemType,
+		))
+	}
+	s.addedItems[itemID] = anthropicAddedItem{
+		outputIndex: event.OutputIndex,
+		itemType:    itemType,
+	}
+
 	switch item := event.Item.(type) {
 	case *ResponsesOutputMessage:
 		// Message items open their content blocks via content_part.added.
@@ -1609,10 +1771,11 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 	case *ResponsesFunctionCallOutputItem:
 		// Buffer the tool block start until call ID and name are known.
 		pending := &pendingToolBlock{
-			blockIndex: s.blockIndex,
-			itemID:     item.ID,
-			callID:     item.CallID,
-			name:       item.Name,
+			blockIndex:  s.blockIndex,
+			outputIndex: event.OutputIndex,
+			itemID:      item.ID,
+			callID:      item.CallID,
+			name:        item.Name,
 		}
 		s.blockIndex++
 		s.pendingToolStart[item.ID] = pending
@@ -1657,12 +1820,89 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 ) ([]AnthropicStreamEvent, error) {
 	var events []AnthropicStreamEvent
 
-	switch event.Item.(type) {
+	// The done item must reconcile with the observed added item: known
+	// identity, matching type, and matching output index (review-08 blocker
+	// 3). A duplicate done for any item type is corrupt upstream wire.
+	itemID := responsesOutputItemID(event.Item)
+	if _, done := s.doneItems[itemID]; done {
+		return nil, s.wireError(fmt.Errorf(
+			"duplicate output item done for %q",
+			itemID,
+		))
+	}
+	added, ok := s.addedItems[itemID]
+	if !ok {
+		return nil, s.wireError(fmt.Errorf(
+			"output item done for unknown item %q",
+			itemID,
+		))
+	}
+	if got := itemTypeName(event.Item); got != added.itemType {
+		return nil, s.wireError(fmt.Errorf(
+			"output item done type = %q, want %q (observed at output_item.added)",
+			got,
+			added.itemType,
+		))
+	}
+	if event.OutputIndex != added.outputIndex {
+		return nil, s.wireError(fmt.Errorf(
+			"output item done output index = %d, want %d (observed at output_item.added)",
+			event.OutputIndex,
+			added.outputIndex,
+		))
+	}
+
+	switch item := event.Item.(type) {
 	case *ResponsesOutputMessage:
-		// Message items are closed by content_part.done.
+		// The done message's content must match the incrementally observed
+		// parts: same parts, same types, same accumulated text (review-08
+		// blocker 4).
+		for contentIndex, part := range item.Content {
+			key := responsePartKey{ItemID: item.ID, ContentIndex: int64(contentIndex)}
+			seenType, seen := s.partsSeen[key]
+			if !seen {
+				return nil, s.wireError(fmt.Errorf(
+					"output item done message part %d was never opened",
+					contentIndex,
+				))
+			}
+			partType := outputPartTypeName(part)
+			if partType != seenType {
+				return nil, s.wireError(fmt.Errorf(
+					"output item done message part %d type = %q, want %q",
+					contentIndex,
+					partType,
+					seenType,
+				))
+			}
+			switch value := part.(type) {
+			case *ResponsesOutputText:
+				if accumulated := s.accumulatedText(key); accumulated != value.Text {
+					return nil, s.wireError(fmt.Errorf(
+						"output item done message part %d text does not match the accumulated text",
+						contentIndex,
+					))
+				}
+			case *ResponsesOutputRefusal:
+				if accumulated := s.accumulatedRefusal(key); accumulated != value.Refusal {
+					return nil, s.wireError(fmt.Errorf(
+						"output item done message part %d refusal does not match the accumulated refusal",
+						contentIndex,
+					))
+				}
+			}
+		}
+		if len(item.Content) != len(s.partsSeenForItem(item.ID)) {
+			return nil, s.wireError(fmt.Errorf(
+				"output item done message content count does not match the observed parts",
+			))
+		}
+		s.doneItems[item.ID] = struct{}{}
 		return nil, nil
 	case *ResponsesReasoningOutputItem:
-		// Reasoning items were dropped on add.
+		// Reasoning items were dropped on add; identity and type already
+		// reconciled above.
+		s.doneItems[item.ID] = struct{}{}
 		return nil, nil
 	}
 
@@ -1675,16 +1915,65 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	if !ok {
 		return nil, s.wireError(fmt.Errorf("tool block for item %q was never started", call.ID))
 	}
+	// Identity comes from the item-added lifecycle: the added item must have
+	// carried the call identity, and the done snapshot must not drift from it
+	// (review-08 blocker 4).
+	if pending.callID == "" || pending.name == "" {
+		return nil, s.wireError(fmt.Errorf(
+			"tool block for item %q was added without call identity",
+			call.ID,
+		))
+	}
+	if call.CallID != pending.callID {
+		return nil, s.wireError(fmt.Errorf(
+			"output item done call id = %q, want %q (observed at output_item.added)",
+			call.CallID,
+			pending.callID,
+		))
+	}
+	if call.Name != pending.name {
+		return nil, s.wireError(fmt.Errorf(
+			"output item done name = %q, want %q (observed at output_item.added)",
+			call.Name,
+			pending.name,
+		))
+	}
+	// The done item's status is optional on the pinned wire (the official
+	// fixture omits it); a PRESENT status other than completed is a
+	// contradiction with the done snapshot (review-08 blocker 4).
+	if call.Status != "" && call.Status != ResponsesItemCompleted {
+		return nil, s.wireError(fmt.Errorf(
+			"output item done status = %q, want completed",
+			call.Status,
+		))
+	}
 	startEvents, err := s.maybeStartToolBlock(pending)
 	if err != nil {
 		return nil, err
 	}
 	events = append(events, startEvents...)
 
-	// Final arguments must parse as exactly one JSON object.
-	arguments := pending.arguments.String()
-	if arguments == "" {
-		arguments = "{}"
+	// Reconcile the done snapshot's arguments (a JSON object, enforced) with
+	// the accumulated argument buffer: an empty or partial buffer is
+	// completed by the snapshot — never substituted with "{}" — and a
+	// conflicting snapshot is corrupt upstream wire. The reconciled
+	// arguments are delivered to the client as input_json_delta fragments
+	// so the tool input can never collapse to an empty object or drift from
+	// the done snapshot (review-08 blocker 4).
+	arguments, suffix, err := s.reconcileToolArguments(pending, call.Arguments)
+	if err != nil {
+		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", call.ID, err))
+	}
+	if suffix != "" {
+		partial := suffix
+		events = append(events, AnthropicStreamEvent{
+			Type:  AnthropicStreamEventTypeContentBlockDelta,
+			Index: intPtr(int(pending.blockIndex)),
+			Delta: &AnthropicStreamDelta{
+				Type:        AnthropicStreamDeltaTypeInputJSONDelta,
+				PartialJSON: &partial,
+			},
+		})
 	}
 	if err := validateFinalToolInput(arguments); err != nil {
 		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", call.ID, err))
@@ -1696,6 +1985,13 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	})
 	// The block is now closed; the terminal must not stop it again.
 	delete(s.pendingToolStart, call.ID)
+	s.closedToolCalls[call.ID] = anthropicClosedToolCall{
+		outputIndex: pending.outputIndex,
+		callID:      pending.callID,
+		name:        pending.name,
+		arguments:   arguments,
+	}
+	s.doneItems[call.ID] = struct{}{}
 
 	// The message envelope's content stays empty: content blocks arrive via
 	// content_block_start events (the official contract); message_start is
@@ -1703,9 +1999,129 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	return events, nil
 }
 
+// reconcileToolArguments reconciles the final arguments snapshot (a JSON
+// object, enforced) with the accumulated argument buffer. The buffer must be
+// a byte-prefix of the snapshot (an empty buffer is the degenerate prefix) —
+// the accumulated deltas and the final snapshot then agree — or, when both
+// parse as JSON objects, the two must be semantically equal (key order and
+// whitespace ignored). The buffer is completed with the snapshot, and the
+// returned suffix is the byte range the upstream never streamed as deltas:
+// the caller must emit it as one input_json_delta so the client's assembled
+// tool input equals the snapshot. A conflicting snapshot is an error:
+// arguments can never be silently replaced (review-08 blocker 4).
+func (s *anthropicResponsesStreamState) reconcileToolArguments(
+	pending *pendingToolBlock,
+	snapshot string,
+) (string, string, error) {
+	doneArgs, err := decodeJSONObject(snapshot)
+	if err != nil {
+		return "", "", fmt.Errorf("final arguments are not a JSON object: %w", err)
+	}
+	accumulated := pending.arguments.String()
+	if strings.HasPrefix(snapshot, accumulated) {
+		// The buffer is a byte-prefix of the snapshot (possibly equal): the
+		// snapshot completes it. The suffix is the part the upstream never
+		// streamed as a delta.
+		suffix := snapshot[len(accumulated):]
+		pending.arguments.Reset()
+		pending.arguments.WriteString(snapshot)
+		return snapshot, suffix, nil
+	}
+	// Not a byte-prefix: the buffer may still be semantically equal (e.g.
+	// the upstream re-serialized the object with different whitespace).
+	accArgs, accErr := decodeJSONObject(accumulated)
+	if accErr == nil && jsonObjectsEqual(accArgs, doneArgs) {
+		return accumulated, "", nil
+	}
+	return "", "", errors.New(
+		"final arguments do not match the accumulated argument deltas",
+	)
+}
+
+// accumulatedText returns the accumulated text of a content part, or the
+// empty string when the part never accumulated a delta. The empty string is
+// the reconciliation baseline: a zero-delta part reconciles with an empty
+// done snapshot and contradicts any non-empty one (review-08 blocker 4).
+func (s *anthropicResponsesStreamState) accumulatedText(key responsePartKey) string {
+	if builder := s.textBufs[key]; builder != nil {
+		return builder.String()
+	}
+	return ""
+}
+
+// accumulatedRefusal returns the accumulated refusal of a content part, or
+// the empty string when the part never accumulated a delta (review-08
+// blocker 4).
+func (s *anthropicResponsesStreamState) accumulatedRefusal(key responsePartKey) string {
+	if builder := s.refusalBufs[key]; builder != nil {
+		return builder.String()
+	}
+	return ""
+}
+
+// partsSeenForItem returns the content indices observed for one item.
+func (s *anthropicResponsesStreamState) partsSeenForItem(itemID string) []int64 {
+	var indices []int64
+	for key := range s.partsSeen {
+		if key.ItemID == itemID {
+			indices = append(indices, key.ContentIndex)
+		}
+	}
+	return indices
+}
+
+// jsonObjectsEqual compares two decoded JSON objects semantically: key order
+// and whitespace are ignored; values are compared byte-exactly.
+func jsonObjectsEqual(a, b map[string]json.RawMessage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, aValue := range a {
+		bValue, ok := b[key]
+		if !ok || !bytes.Equal(aValue, bValue) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *anthropicResponsesStreamState) contentPartAdded(
 	event ResponseContentPartAddedEvent,
 ) ([]AnthropicStreamEvent, error) {
+	// A content part must be owned by a MESSAGE item observed via
+	// output_item.added — function-call and reasoning items own no content
+	// parts — and each (item, content index) identity is unique (review-08
+	// blocker 3).
+	added, ok := s.addedItems[event.ItemID]
+	if !ok {
+		return nil, s.wireError(fmt.Errorf(
+			"content part for unknown item %q",
+			event.ItemID,
+		))
+	}
+	if added.itemType != "message" {
+		return nil, s.wireError(fmt.Errorf(
+			"content part for non-message item %q (%s)",
+			event.ItemID,
+			added.itemType,
+		))
+	}
+	if event.OutputIndex != added.outputIndex {
+		return nil, s.wireError(fmt.Errorf(
+			"content part output index = %d, want %d (observed at output_item.added)",
+			event.OutputIndex,
+			added.outputIndex,
+		))
+	}
+	key := responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}
+	if _, exists := s.partsSeen[key]; exists {
+		return nil, s.wireError(fmt.Errorf(
+			"duplicate content part %q at index %d",
+			event.ItemID,
+			event.ContentIndex,
+		))
+	}
+
 	var events []AnthropicStreamEvent
 	switch event.Part.(type) {
 	case *ResponsesStreamOutputTextPart, *ResponsesStreamRefusalPart:
@@ -1718,7 +2134,8 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 				Text: stringPtr(""),
 			},
 		})
-		s.partBlocks[responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}] = s.blockIndex
+		s.partBlocks[key] = s.blockIndex
+		s.partsSeen[key] = partTypeName(event.Part)
 		s.blockIndex++
 	default:
 		return nil, &UnsupportedFeatureError{
@@ -1733,10 +2150,29 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 func (s *anthropicResponsesStreamState) textDelta(
 	event ResponseTextDeltaEvent,
 ) ([]AnthropicStreamEvent, error) {
-	index, ok := s.partBlocks[responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}]
+	key := responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}
+	index, ok := s.partBlocks[key]
 	if !ok {
 		return nil, s.wireError(errors.New("text delta with no open content block"))
 	}
+	if err := s.checkPartOutputIndex(key, event.OutputIndex); err != nil {
+		return nil, err
+	}
+	// A text delta must target a text part: forwarding it to a refusal block
+	// would drift the emitted block from every snapshot (review-08 blocker
+	// 4).
+	if seenType := s.partsSeen[key]; seenType != "output_text" {
+		return nil, s.wireError(fmt.Errorf(
+			"text delta for part of type %q",
+			seenType,
+		))
+	}
+	builder := s.textBufs[key]
+	if builder == nil {
+		builder = &strings.Builder{}
+		s.textBufs[key] = builder
+	}
+	builder.WriteString(event.Delta)
 	text := event.Delta
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,
@@ -1748,6 +2184,34 @@ func (s *anthropicResponsesStreamState) textDelta(
 	}}, nil
 }
 
+func (s *anthropicResponsesStreamState) textDone(
+	event ResponseTextDoneEvent,
+) ([]AnthropicStreamEvent, error) {
+	key := responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}
+	if _, ok := s.partBlocks[key]; !ok {
+		return nil, s.wireError(errors.New("text done with no open content block"))
+	}
+	if err := s.checkPartOutputIndex(key, event.OutputIndex); err != nil {
+		return nil, err
+	}
+	if seenType := s.partsSeen[key]; seenType != "output_text" {
+		return nil, s.wireError(fmt.Errorf(
+			"text done for part of type %q",
+			seenType,
+		))
+	}
+	// The done text must match the accumulated deltas: a mismatch means the
+	// upstream's fragments and its final snapshot disagree (review-08
+	// blocker 4). A part that accumulated nothing reconciles with the empty
+	// string.
+	if accumulated := s.accumulatedText(key); accumulated != event.Text {
+		return nil, s.wireError(errors.New(
+			"text done does not match the accumulated text",
+		))
+	}
+	return nil, nil
+}
+
 func (s *anthropicResponsesStreamState) contentPartDone(
 	event ResponseContentPartDoneEvent,
 ) ([]AnthropicStreamEvent, error) {
@@ -1756,11 +2220,46 @@ func (s *anthropicResponsesStreamState) contentPartDone(
 	if !ok {
 		return nil, s.wireError(errors.New("content part done with no open block"))
 	}
+	if err := s.checkPartOutputIndex(key, event.OutputIndex); err != nil {
+		return nil, err
+	}
+	// The done part must match the opened part's type (review-08 blocker
+	// 4).
+	if got := partTypeName(event.Part); got != s.partsSeen[key] {
+		return nil, s.wireError(fmt.Errorf(
+			"content part done type = %q, want %q (observed at content_part.added)",
+			got,
+			s.partsSeen[key],
+		))
+	}
 	delete(s.partBlocks, key)
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockStop,
 		Index: intPtr(int(index)),
 	}}, nil
+}
+
+// checkPartOutputIndex verifies an event targeting a content part carries
+// the owning item's output index (review-08 blocker 3).
+func (s *anthropicResponsesStreamState) checkPartOutputIndex(
+	key responsePartKey,
+	outputIndex int64,
+) error {
+	added, ok := s.addedItems[key.ItemID]
+	if !ok {
+		return s.wireError(fmt.Errorf(
+			"event for unknown item %q",
+			key.ItemID,
+		))
+	}
+	if outputIndex != added.outputIndex {
+		return s.wireError(fmt.Errorf(
+			"event output index = %d, want %d (observed at output_item.added)",
+			outputIndex,
+			added.outputIndex,
+		))
+	}
+	return nil
 }
 
 func (s *anthropicResponsesStreamState) functionArgumentsDelta(
@@ -1769,6 +2268,13 @@ func (s *anthropicResponsesStreamState) functionArgumentsDelta(
 	pending, ok := s.pendingToolStart[event.ItemID]
 	if !ok {
 		return nil, s.wireError(fmt.Errorf("arguments delta for unknown item %q", event.ItemID))
+	}
+	if event.OutputIndex != pending.outputIndex {
+		return nil, s.wireError(fmt.Errorf(
+			"arguments delta output index = %d, want %d (observed at output_item.added)",
+			event.OutputIndex,
+			pending.outputIndex,
+		))
 	}
 	// Ensure the block started before emitting input_json_delta.
 	startEvents, err := s.maybeStartToolBlock(pending)
@@ -1784,6 +2290,14 @@ func (s *anthropicResponsesStreamState) functionArgumentsDelta(
 			"responses stream accumulated tool arguments exceed %d bytes",
 			maxStreamAccumulatedBytes,
 		))
+	}
+	// A block that never started (the added item lacked call identity, which
+	// is corrupt wire rejected at output_item.done) must not receive an
+	// input_json_delta without a content_block_start: the bytes are still
+	// accumulated so the eventual rejection is consistent (review-08 blocker
+	// 3).
+	if !pending.started {
+		return startEvents, nil
 	}
 	partial := event.Delta
 	out := []AnthropicStreamEvent{{
@@ -1804,24 +2318,71 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 	if !ok {
 		return nil, s.wireError(fmt.Errorf("arguments done for unknown item %q", event.ItemID))
 	}
-	// Record the final name (superset over the official event) and arguments.
-	if pending.name == "" && event.Name != "" {
-		pending.name = event.Name
+	if event.OutputIndex != pending.outputIndex {
+		return nil, s.wireError(fmt.Errorf(
+			"arguments done output index = %d, want %d (observed at output_item.added)",
+			event.OutputIndex,
+			pending.outputIndex,
+		))
 	}
-	if event.Arguments != "" {
-		pending.arguments.Reset()
-		pending.arguments.WriteString(event.Arguments)
+	// Reconcile the done snapshot with the accumulated buffer instead of
+	// silently replacing it: a mismatch is corrupt upstream wire, and any
+	// snapshot bytes the upstream never streamed as deltas are emitted as
+	// one input_json_delta so the client's assembled input equals the
+	// snapshot (review-08 blocker 4). Identity comes from the item-added
+	// lifecycle.
+	_, suffix, err := s.reconcileToolArguments(pending, event.Arguments)
+	if err != nil {
+		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", event.ItemID, err))
 	}
-	return s.maybeStartToolBlock(pending)
+	events, err := s.maybeStartToolBlock(pending)
+	if err != nil {
+		return nil, err
+	}
+	// A block that never started (the added item lacked call identity) must
+	// not receive an input_json_delta without a content_block_start; the
+	// suffix is dropped with the exchange, which the done reconciliation
+	// rejects (review-08 blocker 3).
+	if pending.started && suffix != "" {
+		partial := suffix
+		events = append(events, AnthropicStreamEvent{
+			Type:  AnthropicStreamEventTypeContentBlockDelta,
+			Index: intPtr(int(pending.blockIndex)),
+			Delta: &AnthropicStreamDelta{
+				Type:        AnthropicStreamDeltaTypeInputJSONDelta,
+				PartialJSON: &partial,
+			},
+		})
+	}
+	return events, nil
 }
 
 func (s *anthropicResponsesStreamState) refusalDelta(
 	event ResponseRefusalDeltaEvent,
 ) ([]AnthropicStreamEvent, error) {
-	index, ok := s.partBlocks[responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}]
+	key := responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}
+	index, ok := s.partBlocks[key]
 	if !ok {
 		return nil, s.wireError(errors.New("refusal delta with no open content block"))
 	}
+	if err := s.checkPartOutputIndex(key, event.OutputIndex); err != nil {
+		return nil, err
+	}
+	// A refusal delta must target a refusal part: forwarding it to a text
+	// block would drift the emitted block from every snapshot (review-08
+	// blocker 4).
+	if seenType := s.partsSeen[key]; seenType != "refusal" {
+		return nil, s.wireError(fmt.Errorf(
+			"refusal delta for part of type %q",
+			seenType,
+		))
+	}
+	builder := s.refusalBufs[key]
+	if builder == nil {
+		builder = &strings.Builder{}
+		s.refusalBufs[key] = builder
+	}
+	builder.WriteString(event.Delta)
 	text := event.Delta
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,
@@ -1836,7 +2397,26 @@ func (s *anthropicResponsesStreamState) refusalDelta(
 func (s *anthropicResponsesStreamState) refusalDone(
 	event ResponseRefusalDoneEvent,
 ) ([]AnthropicStreamEvent, error) {
-	// The refusal text block is closed by the subsequent content_part.done.
+	key := responsePartKey{ItemID: event.ItemID, ContentIndex: event.ContentIndex}
+	if _, ok := s.partBlocks[key]; !ok {
+		return nil, s.wireError(errors.New("refusal done with no open content block"))
+	}
+	if err := s.checkPartOutputIndex(key, event.OutputIndex); err != nil {
+		return nil, err
+	}
+	if seenType := s.partsSeen[key]; seenType != "refusal" {
+		return nil, s.wireError(fmt.Errorf(
+			"refusal done for part of type %q",
+			seenType,
+		))
+	}
+	// The done refusal must match the accumulated deltas (review-08 blocker
+	// 4). A part that accumulated nothing reconciles with the empty string.
+	if accumulated := s.accumulatedRefusal(key); accumulated != event.Refusal {
+		return nil, s.wireError(errors.New(
+			"refusal done does not match the accumulated refusal",
+		))
+	}
 	return nil, nil
 }
 
@@ -1917,6 +2497,9 @@ func (s *anthropicResponsesStreamState) losePhaseOnce(
 func (s *anthropicResponsesStreamState) completed(
 	envelope ResponseEnvelope,
 ) ([]AnthropicStreamEvent, error) {
+	if err := s.gateTerminalEnvelope(envelope); err != nil {
+		return nil, err
+	}
 	// The stop reason mirrors the non-streaming render: a completed
 	// response whose output carries function calls ends with tool_use. The
 	// state's own knowledge covers upstreams whose completed envelope omits
@@ -1941,6 +2524,9 @@ func (s *anthropicResponsesStreamState) completed(
 func (s *anthropicResponsesStreamState) incomplete(
 	envelope ResponseEnvelope,
 ) ([]AnthropicStreamEvent, error) {
+	if err := s.gateTerminalEnvelope(envelope); err != nil {
+		return nil, err
+	}
 	// The incomplete reason drives the stop reason, matching the
 	// non-streaming render: content_filter becomes a refusal stop, anything
 	// else max_tokens.
@@ -1961,46 +2547,170 @@ func (s *anthropicResponsesStreamState) incomplete(
 	return s.terminalEvents(stop)
 }
 
-// terminalEvents emits content_block_stop for any tool block left open by a
-// non-conformant upstream (output_item.done omitted), then the terminal
-// message_delta + message_stop. The stream trace invariant requires every
-// opened block to stop before message_delta.
+// gateTerminalEnvelope verifies a terminal envelope (completed or
+// incomplete): the response identity must match the created envelope, the
+// terminal may only follow response.created, every opened item, content
+// part, and tool block must have been closed by its done events — an open
+// block at the terminal is corrupt upstream wire, never a synthesized
+// content_block_stop (review-08 blocker 3) — and the envelope's output
+// items must match the incrementally observed output (review-08 blocker 4).
+func (s *anthropicResponsesStreamState) gateTerminalEnvelope(
+	envelope ResponseEnvelope,
+) error {
+	if !s.messageSent {
+		return s.wireError(errors.New(
+			"responses stream terminal before response.created",
+		))
+	}
+	if err := s.checkEnvelopeIdentity(envelope); err != nil {
+		return err
+	}
+	if len(s.partBlocks) > 0 || len(s.pendingToolStart) > 0 {
+		return s.wireError(fmt.Errorf(
+			"responses stream terminal with %d open content part(s) and %d open tool block(s); missing done events",
+			len(s.partBlocks),
+			len(s.pendingToolStart),
+		))
+	}
+	// Every observed output item must have been closed by its
+	// output_item.done before the terminal envelope: a message or reasoning
+	// item left open at the terminal is corrupt upstream wire (review-08
+	// blocker 3).
+	for itemID := range s.addedItems {
+		if _, done := s.doneItems[itemID]; !done {
+			return s.wireError(fmt.Errorf(
+				"responses stream terminal with the output item %q never closed by output_item.done",
+				itemID,
+			))
+		}
+	}
+	return s.reconcileTerminalOutput(envelope)
+}
+
+// reconcileTerminalOutput verifies the terminal envelope's output items are
+// consistent with the incrementally observed output: every envelope item
+// must have been added with a matching type, message content must match the
+// observed parts and accumulated text, and function calls must match their
+// closed done snapshots (review-08 blocker 4). Observed items MAY be absent
+// from the envelope: the published function-calling guide's completed
+// envelope carries "output":[] (and the stop-reason logic already falls back
+// to the state's own knowledge for such upstreams).
+func (s *anthropicResponsesStreamState) reconcileTerminalOutput(
+	envelope ResponseEnvelope,
+) error {
+	for _, item := range envelope.Output {
+		itemID := responsesOutputItemID(item)
+		added, ok := s.addedItems[itemID]
+		if !ok {
+			return s.wireError(fmt.Errorf(
+				"terminal envelope output item %q was never observed",
+				itemID,
+			))
+		}
+		if got := itemTypeName(item); got != added.itemType {
+			return s.wireError(fmt.Errorf(
+				"terminal envelope output item %q type = %q, want %q",
+				itemID,
+				got,
+				added.itemType,
+			))
+		}
+		switch value := item.(type) {
+		case *ResponsesOutputMessage:
+			for contentIndex, part := range value.Content {
+				key := responsePartKey{ItemID: itemID, ContentIndex: int64(contentIndex)}
+				seenType, partSeen := s.partsSeen[key]
+				if !partSeen {
+					return s.wireError(fmt.Errorf(
+						"terminal envelope message %q part %d was never observed",
+						itemID,
+						contentIndex,
+					))
+				}
+				if got := outputPartTypeName(part); got != seenType {
+					return s.wireError(fmt.Errorf(
+						"terminal envelope message %q part %d type = %q, want %q",
+						itemID,
+						contentIndex,
+						got,
+						seenType,
+					))
+				}
+				switch partValue := part.(type) {
+				case *ResponsesOutputText:
+					if accumulated := s.accumulatedText(key); accumulated != partValue.Text {
+						return s.wireError(fmt.Errorf(
+							"terminal envelope message %q part %d text does not match the accumulated text",
+							itemID,
+							contentIndex,
+						))
+					}
+				case *ResponsesOutputRefusal:
+					if accumulated := s.accumulatedRefusal(key); accumulated != partValue.Refusal {
+						return s.wireError(fmt.Errorf(
+							"terminal envelope message %q part %d refusal does not match the accumulated refusal",
+							itemID,
+							contentIndex,
+						))
+					}
+				}
+			}
+			if len(value.Content) != len(s.partsSeenForItem(itemID)) {
+				return s.wireError(fmt.Errorf(
+					"terminal envelope message %q content count does not match the observed parts",
+					itemID,
+				))
+			}
+		case *ResponsesFunctionCallOutputItem:
+			closed, ok := s.closedToolCalls[itemID]
+			if !ok {
+				return s.wireError(fmt.Errorf(
+					"terminal envelope function call %q was never closed by output_item.done",
+					itemID,
+				))
+			}
+			if value.CallID != closed.callID || value.Name != closed.name {
+				return s.wireError(fmt.Errorf(
+					"terminal envelope function call %q identity does not match the observed done snapshot",
+					itemID,
+				))
+			}
+			valueArgs, err := decodeJSONObject(value.Arguments)
+			if err != nil {
+				return s.wireError(fmt.Errorf(
+					"terminal envelope function call %q arguments are not a JSON object: %w",
+					itemID,
+					err,
+				))
+			}
+			closedArgs, err := decodeJSONObject(closed.arguments)
+			if err != nil || !jsonObjectsEqual(valueArgs, closedArgs) {
+				return s.wireError(fmt.Errorf(
+					"terminal envelope function call %q arguments do not match the observed done snapshot",
+					itemID,
+				))
+			}
+		}
+	}
+	return nil
+}
+
+// terminalEvents emits the terminal message_delta + message_stop. Every
+// opened block must already be closed: gateTerminalEnvelope rejected open
+// blocks, so nothing is synthesized here (review-08 blocker 3).
 func (s *anthropicResponsesStreamState) terminalEvents(
 	stop CanonicalStopReason,
 ) ([]AnthropicStreamEvent, error) {
-	var events []AnthropicStreamEvent
-	// Close any tool block left open by a non-conformant upstream
-	// (output_item.done omitted).
-	for _, pending := range s.pendingToolStart {
-		if !pending.started {
-			continue
-		}
-		events = append(events, AnthropicStreamEvent{
-			Type:  AnthropicStreamEventTypeContentBlockStop,
-			Index: intPtr(int(pending.blockIndex)),
-		})
-		delete(s.pendingToolStart, pending.itemID)
-	}
-	// Close any text/refusal block left open by a non-conformant upstream
-	// (content_part.done omitted).
-	for key, blockIndex := range s.partBlocks {
-		events = append(events, AnthropicStreamEvent{
-			Type:  AnthropicStreamEventTypeContentBlockStop,
-			Index: intPtr(int(blockIndex)),
-		})
-		delete(s.partBlocks, key)
-	}
-	events = append(events,
-		AnthropicStreamEvent{
+	return []AnthropicStreamEvent{
+		{
 			Type: AnthropicStreamEventTypeMessageDelta,
 			Delta: &AnthropicStreamDelta{
 				StopReason: anthropicStopReasonPtr(stopReasonToAnthropic(stop)),
 			},
 			Usage: s.usage,
 		},
-		AnthropicStreamEvent{Type: AnthropicStreamEventTypeMessageStop},
-	)
-	return events, nil
+		{Type: AnthropicStreamEventTypeMessageStop},
+	}, nil
 }
 
 // outputHasFunctionCalls reports whether the response output contains
@@ -2018,7 +2728,17 @@ func (s *anthropicResponsesStreamState) failed(
 	envelope ResponseEnvelope,
 ) ([]AnthropicStreamEvent, error) {
 	// A failed Responses stream must become an Anthropic error event, never
-	// end_turn.
+	// end_turn. The failure terminal may only follow response.created: a
+	// failed envelope before the created envelope is a corrupt lifecycle
+	// (review-08 blocker 3).
+	if !s.messageSent {
+		return nil, s.wireError(errors.New(
+			"responses stream terminal before response.created",
+		))
+	}
+	if err := s.checkEnvelopeIdentity(envelope); err != nil {
+		return nil, err
+	}
 	s.sawTerminal = true
 	s.sawErrorEvent = true
 	message := "upstream response failed"
@@ -2084,7 +2804,8 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 	s.message.StopReason = anthropicStopReasonPtr(stopReasonToAnthropic(stop))
 	converted, err := responsesUsageToAnthropicUsage(usage)
 	if err != nil {
-		return err
+		// Arithmetically inconsistent source usage is corrupt upstream wire.
+		return s.wireError(fmt.Errorf("response usage: %w", err))
 	}
 	if converted != nil {
 		// The required Messages breakdown components the source did not
@@ -2219,6 +2940,19 @@ func itemTypeName(item ResponsesOutputItem) string {
 		return "reasoning"
 	default:
 		return fmt.Sprintf("%T", item)
+	}
+}
+
+// outputPartTypeName returns a stable type name for a completed message
+// content part (the envelope and output_item.done shapes).
+func outputPartTypeName(part ResponsesOutputContentPart) string {
+	switch part.(type) {
+	case *ResponsesOutputText:
+		return "output_text"
+	case *ResponsesOutputRefusal:
+		return "refusal"
+	default:
+		return fmt.Sprintf("%T", part)
 	}
 }
 

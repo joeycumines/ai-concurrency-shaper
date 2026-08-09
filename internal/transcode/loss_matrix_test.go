@@ -217,14 +217,40 @@ func TestOutputMessagePhaseLossGate(t *testing.T) {
 // a phase-bearing message exactly once per item, in both the added event and
 // the terminal envelope (review-j finding 10).
 func TestStreamOutputMessagePhaseGate(t *testing.T) {
-	// Strict: the phase-bearing added event rejects the stream.
+	created := ResponseEnvelope{
+		ID:        "resp_1",
+		Object:    "response",
+		CreatedAt: 1,
+		Status:    "in_progress",
+		Model:     "m",
+		Output:    []ResponsesOutputItem{},
+		// The created envelope carries usage so the early-usage loss is not
+		// part of this test's phase-loss accounting.
+		Usage: &ResponsesUsage{
+			InputTokens: 0, OutputTokens: 0, TotalTokens: 0,
+			InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 0},
+			OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 0},
+		},
+	}
+	// Strict: the phase-bearing added event rejects the stream. The policy
+	// approves the unavoidable usage-timing loss (cache_creation is never
+	// part of the pinned Responses contract) so the created envelope can be
+	// fed, but rejects the phase.
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		StrictLossPolicy(),
+		LossPolicy{Allowed: map[Feature]struct{}{
+			FeatureUsageTiming: {},
+		}},
 		"msg_1",
 		"claude-x",
 		1,
 	)
+	if _, err := state.Convert(ResponseCreatedEvent{
+		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
+		Response:           created,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := state.Convert(ResponseOutputItemAddedEvent{
 		responsesEventBase: responsesEventBase{
 			Type:           "response.output_item.added",
@@ -256,6 +282,12 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 		"claude-x",
 		1,
 	)
+	if _, err := state.Convert(ResponseCreatedEvent{
+		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
+		Response:           created,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	envelope := ResponseEnvelope{
 		ID:        "resp_1",
 		Object:    "response",
@@ -288,10 +320,29 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// The item is closed by its done event before the terminal (review-08
+	// blocker 3).
+	if _, err := state.Convert(ResponseOutputItemDoneEvent{
+		responsesEventBase: responsesEventBase{
+			Type:           "response.output_item.done",
+			SequenceNumber: 2,
+		},
+		OutputIndex: 0,
+		Item: &ResponsesOutputMessage{
+			ID:      "msg_1",
+			Type:    "message",
+			Role:    "assistant",
+			Status:  ResponsesItemCompleted,
+			Phase:   "commentary",
+			Content: ResponsesOutputContentParts{},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := state.Convert(ResponseCompletedEvent{
 		responsesEventBase: responsesEventBase{
 			Type:           "response.completed",
-			SequenceNumber: 2,
+			SequenceNumber: 3,
 		},
 		Response: envelope,
 	}); err != nil {

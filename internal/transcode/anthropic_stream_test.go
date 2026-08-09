@@ -22,7 +22,7 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 		1,
 	)
 
-	addPart := func(itemID string, sequence int64) {
+	addPart := func(itemID string, outputIndex, sequence int64) {
 		t.Helper()
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
 			responsesEventBase: responsesEventBase{
@@ -30,7 +30,7 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 				SequenceNumber: sequence,
 			},
 			ItemID:       itemID,
-			OutputIndex:  0,
+			OutputIndex:  outputIndex,
 			ContentIndex: 0,
 			Part: &ResponsesStreamOutputTextPart{
 				Type:        "output_text",
@@ -42,15 +42,38 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 		}
 	}
 
-	addPart("item_a", 1)
-	addPart("item_b", 2)
+	// The lifecycle: created, then both message items, then their parts.
+	feedAnthropicCreated(t, state, 0)
+	addItem := func(itemID string, outputIndex, sequence int64) {
+		t.Helper()
+		if _, err := state.Convert(ResponseOutputItemAddedEvent{
+			responsesEventBase: responsesEventBase{
+				Type:           "response.output_item.added",
+				SequenceNumber: sequence,
+			},
+			OutputIndex: outputIndex,
+			Item: &ResponsesOutputMessage{
+				ID:      itemID,
+				Type:    "message",
+				Role:    "assistant",
+				Status:  ResponsesItemInProgress,
+				Content: ResponsesOutputContentParts{},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addItem("item_a", 0, 1)
+	addItem("item_b", 1, 2)
+	addPart("item_a", 0, 3)
+	addPart("item_b", 1, 4)
 
 	// A delta for item_a content_index 0 must target item_a's block (0),
 	// not item_b's (1).
 	events, err := state.Convert(ResponseTextDeltaEvent{
 		responsesEventBase: responsesEventBase{
 			Type:           "response.output_text.delta",
-			SequenceNumber: 3,
+			SequenceNumber: 5,
 		},
 		ItemID:       "item_a",
 		OutputIndex:  0,
@@ -68,10 +91,10 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 	events, err = state.Convert(ResponseTextDeltaEvent{
 		responsesEventBase: responsesEventBase{
 			Type:           "response.output_text.delta",
-			SequenceNumber: 4,
+			SequenceNumber: 6,
 		},
 		ItemID:       "item_b",
-		OutputIndex:  0,
+		OutputIndex:  1,
 		ContentIndex: 0,
 		Delta:        "world",
 		Logprobs:     []ResponsesTextLogprob{},
@@ -88,14 +111,33 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 // the loss decision exactly once: strict rejects, permissive converts with a
 // single recorded loss (review-j finding 7).
 func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
-	// Strict: the first reasoning event rejects the stream.
+	// Strict: the first reasoning event rejects the stream. The policy
+	// approves the unavoidable usage-timing loss (cache_creation is never
+	// part of the pinned Responses contract) so the created envelope can be
+	// fed, but rejects reasoning.
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		StrictLossPolicy(),
+		LossPolicy{Allowed: map[Feature]struct{}{
+			FeatureUsageTiming: {},
+		}},
 		"msg_1",
 		"claude-x",
 		1,
 	)
+	if _, err := state.Convert(ResponseCreatedEvent{
+		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
+		Response: ResponseEnvelope{
+			ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
+			Output: []ResponsesOutputItem{},
+			Usage: &ResponsesUsage{
+				InputTokens: 0, OutputTokens: 0, TotalTokens: 0,
+				InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 0},
+				OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 0},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	_, err := state.Convert(ResponseReasoningSummaryPartAddedEvent{
 		responsesEventBase: responsesEventBase{
 			Type:           "response.reasoning_summary_part.added",
@@ -122,13 +164,28 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 		"claude-x",
 		1,
 	)
-	sequence := int64(1)
+	sequence := int64(0)
 	feed := func(event ResponsesSSEEvent) {
 		t.Helper()
 		if _, err := state.Convert(event); err != nil {
 			t.Fatal(err)
 		}
 	}
+	feed(ResponseCreatedEvent{
+		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
+		Response: ResponseEnvelope{
+			ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
+			Output: []ResponsesOutputItem{},
+			// The created envelope carries usage so the early-usage loss is
+			// not part of this test's single-loss accounting.
+			Usage: &ResponsesUsage{
+				InputTokens: 0, OutputTokens: 0, TotalTokens: 0,
+				InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 0},
+				OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 0},
+			},
+		},
+	})
+	sequence = 1
 	base := func(typ string) responsesEventBase {
 		seq := sequence
 		sequence++
@@ -162,11 +219,8 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 		SummaryIndex:       0,
 		Part:               ResponsesSummaryTextPart{Type: "summary_text", Text: "reasoning"},
 	})
-	if len(state.report.Losses) != 1 {
-		t.Fatalf("reasoning losses = %d, want exactly one", len(state.report.Losses))
-	}
-	if state.report.Losses[0].Feature != FeatureReasoningSummary {
-		t.Fatalf("loss feature = %q", state.report.Losses[0].Feature)
+	if count := countFeature(state.report, FeatureReasoningSummary); count != 1 {
+		t.Fatalf("reasoning losses = %d, want exactly one", count)
 	}
 }
 
@@ -213,7 +267,8 @@ func TestAnthropicStreamMessageStartNullStopFields(t *testing.T) {
 		t.Fatalf("message_start must serialize stop_sequence null: %s", raw)
 	}
 
-	// The terminal message_delta carries the real stop reason.
+	// The terminal message_delta carries the real stop reason. No output
+	// items were observed, so the terminal envelope carries none.
 	if _, err := state.Convert(ResponseCompletedEvent{
 		responsesEventBase: responsesEventBase{
 			Type:           "response.completed",
@@ -225,13 +280,7 @@ func TestAnthropicStreamMessageStartNullStopFields(t *testing.T) {
 			CreatedAt: 1,
 			Status:    "completed",
 			Model:     "m",
-			Output: []ResponsesOutputItem{&ResponsesOutputMessage{
-				ID:      "msg_1",
-				Type:    "message",
-				Role:    "assistant",
-				Status:  ResponsesItemCompleted,
-				Content: ResponsesOutputContentParts{},
-			}},
+			Output:    []ResponsesOutputItem{},
 			Usage: &ResponsesUsage{
 				InputTokens:         10,
 				OutputTokens:        5,
@@ -355,6 +404,18 @@ func TestAnthropicUsageStreamNonStreamAgree(t *testing.T) {
 		"claude-x",
 		1,
 	)
+	if _, err := state.Convert(ResponseCreatedEvent{
+		responsesEventBase: responsesEventBase{
+			Type:           "response.created",
+			SequenceNumber: 0,
+		},
+		Response: ResponseEnvelope{
+			ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
+			Output: []ResponsesOutputItem{},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	events, err := state.Convert(ResponseCompletedEvent{
 		responsesEventBase: responsesEventBase{
 			Type:           "response.completed",
@@ -366,13 +427,7 @@ func TestAnthropicUsageStreamNonStreamAgree(t *testing.T) {
 			CreatedAt: 1,
 			Status:    "completed",
 			Model:     "m",
-			Output: []ResponsesOutputItem{&ResponsesOutputMessage{
-				ID:      "msg_1",
-				Type:    "message",
-				Role:    "assistant",
-				Status:  ResponsesItemCompleted,
-				Content: ResponsesOutputContentParts{},
-			}},
+			Output:    []ResponsesOutputItem{},
 			Usage: &ResponsesUsage{
 				InputTokens:  45,
 				OutputTokens: 25,
