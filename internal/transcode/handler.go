@@ -214,7 +214,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	body, err := h.readRequestBody(r)
 	if err != nil {
-		if r.Context().Err() != nil {
+		if r.Context().Err() != nil && isContextCancellationError(err) {
 			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 			// A cancelled client context means the exchange is already over.
 			// Return normally: the proxy classifies the abort from the
@@ -238,7 +238,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// request, resolving the model through the map.
 	upstreamBody, context, err := h.convertRequest(r, body)
 	if err != nil {
-		if r.Context().Err() != nil {
+		if r.Context().Err() != nil && isContextCancellationError(err) {
 			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 			// A cancelled client context means the exchange is already over.
 			// Return normally: the proxy classifies the abort from the
@@ -292,8 +292,11 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if resp != nil && resp.Body != nil {
 			resp.Body.Close()
 		}
-		// A cancelled client context means the exchange is already over.
-		if r.Context().Err() != nil {
+		// A client abort suppresses the failure only when the transport
+		// error is itself cancellation-derived: an unrelated connection
+		// reset, DNS, or TLS failure racing with the cancellation must win
+		// as the upstream transport failure it is (review-08 blocker 8).
+		if r.Context().Err() != nil && isContextCancellationError(err) {
 			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 			// A cancelled client context means the exchange is already over.
 			// Return normally: the proxy classifies the abort from the
@@ -334,7 +337,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.cfg.BodyLimits.ErrorResponseBytes,
 		)
 		if readErr != nil {
-			h.writeUpstreamHTTPError(r, w, resp, CanonicalAPIError{
+			h.writeUpstreamBodyError(r, w, resp, CanonicalAPIError{
 				Status:  resp.StatusCode,
 				Type:    "api_error",
 				Code:    codeForStatus(resp.StatusCode),
@@ -352,10 +355,14 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case isEventStream(resp):
 		if !context.StreamIntent {
+			// The upstream returned the wrong representation for the
+			// negotiated mode: corrupt upstream wire, an upstream failure
+			// that fails a half-open probe and applies the failure hold
+			// (review-08 blocker 8).
 			h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
 				http.StatusBadGateway,
 				"upstream returned a stream for a non-streaming request",
-				ProvenanceLocalStreamValidationError)
+				ProvenanceUpstreamBodyError)
 			return
 		}
 		h.streamResponse(w, r, resp, context)
@@ -364,7 +371,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
 				http.StatusBadGateway,
 				"upstream returned a non-streaming response for a streaming request",
-				ProvenanceLocalStreamValidationError)
+				ProvenanceUpstreamBodyError)
 			return
 		}
 		h.jsonResponse(w, r, resp, context)
@@ -373,7 +380,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
 			http.StatusBadGateway,
 			"upstream returned an unrecognized response content type",
-			ProvenanceLocalStreamValidationError)
+			ProvenanceUpstreamBodyError)
 	}
 }
 
@@ -632,7 +639,7 @@ func (h *TranscodeHandler) jsonResponse(
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		if r.Context().Err() != nil {
+		if r.Context().Err() != nil && isContextCancellationError(err) {
 			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 			// A cancelled client context means the exchange is already over.
 			// Return normally: the proxy classifies the abort from the
@@ -704,7 +711,7 @@ func (h *TranscodeHandler) jsonResponse(
 		writeErr = io.ErrShortWrite
 	}
 	switch {
-	case writeErr != nil && r.Context().Err() != nil:
+	case writeErr != nil && r.Context().Err() != nil && isContextCancellationError(writeErr):
 		h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 	case writeErr != nil:
 		h.recordOutcome(r, Outcome{Provenance: ProvenanceDownstreamWriteError})
@@ -1039,6 +1046,44 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 	h.recordOutcome(r, outcome)
 }
 
+// writeUpstreamBodyError renders a client-dialect error for a failed
+// non-2xx upstream body transfer: the error body could not be read within
+// its bound, so the upstream's own status cannot be trusted as the exchange
+// outcome. The exchange is recorded as an upstream body failure regardless
+// of the status — a truncated 400 is never a healthy non-failure (review-08
+// blocker 8). A failed downstream write changes the provenance exactly like
+// the other error writers while the upstream failure fact is retained.
+func (h *TranscodeHandler) writeUpstreamBodyError(
+	r *http.Request,
+	w http.ResponseWriter,
+	resp *http.Response,
+	apiErr CanonicalAPIError,
+) {
+	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
+	writeErr := WriteDialectHTTPError(w, client, apiErr)
+	now := time.Now()
+	outcome := Outcome{
+		Status:          apiErr.Status,
+		Provenance:      ProvenanceUpstreamBodyError,
+		UpstreamFailure: true,
+		// The upstream's Retry-After is a header fact that survives the
+		// failed body transfer: the rate-signalled hold must be recorded
+		// even when the error body could not be read (review-08 blocker 8).
+		RetryAfter: circuitbreaker.ParseRetryAfter(resp.Header, now, now),
+	}
+	if writeErr != nil {
+		if r.Context().Err() != nil {
+			outcome.Provenance = ProvenanceClientAbort
+			outcome.ClientAborted = true
+		} else {
+			outcome.Provenance = ProvenanceDownstreamWriteError
+		}
+	} else {
+		outcome.DownstreamComplete = true
+	}
+	h.recordOutcome(r, outcome)
+}
+
 // writeUpstreamSemanticFailure renders a client-dialect error for a typed
 // upstream semantic failure (a 2xx envelope whose payload reports failure)
 // and records the outcome with the upstream's HTTP status and
@@ -1348,6 +1393,15 @@ func isUpgradeRequest(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// isContextCancellationError reports whether the error is cancellation-derived
+// (context.Canceled or context.DeadlineExceeded, possibly wrapped). Client
+// abort suppression applies only to such errors: an unrelated transport or
+// body failure racing with a client cancellation must win as its true
+// classification (review-08 blocker 8).
+func isContextCancellationError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // nowUnix returns the current unix time in seconds.

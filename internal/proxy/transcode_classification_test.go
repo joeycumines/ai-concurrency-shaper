@@ -1054,3 +1054,52 @@ func TestProxyTranscodeMidStreamBodyErrorIsUpstreamFailure(t *testing.T) {
 		t.Fatalf("phantom hold not applied to mid-stream body failure: wait %v", wait)
 	}
 }
+
+// TestProxyTranscodeWrongMediaTypeAppliesPhantomHold proves a 2xx upstream
+// response carrying the wrong representation for the negotiated stream mode
+// is an UPSTREAM failure that holds the limiter slot: the old local
+// classification cancelled a half-open probe and applied no hold, letting a
+// broken provider pass for healthy (review-08 blocker 8).
+func TestProxyTranscodeWrongMediaTypeAppliesPhantomHold(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker := j2Breaker(t)
+	before := breaker.Stats()
+	p := j2LimitedProxy(t, upstream, breaker)
+
+	// The non-streaming request is answered with a stream: the wrong
+	// representation must fail the breaker.
+	req1 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec1 := httptest.NewRecorder()
+	p.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusBadGateway {
+		t.Fatalf("request 1 status = %d, want 502", rec1.Code)
+	}
+	if got := breaker.Stats().TotalFailures; got != before.TotalFailures+1 {
+		t.Fatalf("wrong media type not recorded as upstream failure: before=%d after=%d", before.TotalFailures, got)
+	}
+
+	// The second request MUST wait out the penalty: the slot is held.
+	start := time.Now()
+	req2 := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"y"}`),
+	)
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, req2)
+	wait := time.Since(start)
+	t.Logf("second request wait after wrong media type 502: %v", wait)
+	if wait < 400*time.Millisecond {
+		t.Fatalf("wrong media type failure did not hold the slot: wait %v", wait)
+	}
+}
