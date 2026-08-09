@@ -493,6 +493,7 @@ func TestValidateMBFlag(t *testing.T) {
 		{"valid", 32, 20},
 		{"zero", 0, 22},
 		{"max at 20", math.MaxInt64 >> 20, 20},
+		{"max at 21", math.MaxInt64 >> 21, 21},
 		{"max at 22", math.MaxInt64 >> 22, 22},
 	} {
 		if err := validateMBFlag(tc.name, tc.value, tc.shift); err != nil {
@@ -506,6 +507,10 @@ func TestValidateMBFlag(t *testing.T) {
 	}{
 		{"negative", -1, 20},
 		{"overflow at 20", (math.MaxInt64 >> 20) + 1, 20},
+		// retry-max-body-mb is validated at shift 21 because its byte value is
+		// doubled (journal sizing maxBody*2) and must not overflow (review-08
+		// additional 3).
+		{"overflow at 21", (math.MaxInt64 >> 21) + 1, 21},
 		{"overflow at 22", (math.MaxInt64 >> 22) + 1, 22},
 	} {
 		if err := validateMBFlag(tc.name, tc.value, tc.shift); err == nil {

@@ -53,6 +53,15 @@ func NewRouteKey(method, path string) (RouteKey, error) {
 	if !strings.HasPrefix(path, "/") {
 		return RouteKey{}, fmt.Errorf("transcode route path %q must be absolute", path)
 	}
+	// A route path is matched literally: query or fragment characters would
+	// be percent-encoded into the match, so a configured path carrying them
+	// is a configuration error (review-08 additional 5).
+	if strings.ContainsAny(path, "?#") {
+		return RouteKey{}, fmt.Errorf(
+			"transcode route path %q must not contain query or fragment characters",
+			path,
+		)
+	}
 	return RouteKey{Method: method, Path: path}, nil
 }
 

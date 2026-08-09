@@ -32,6 +32,24 @@ func TestNewRouteKey(t *testing.T) {
 	}
 }
 
+// TestNewRouteKeyRejectsQueryFragment verifies that route paths carrying
+// query or fragment syntax are configuration errors (review-08 additional 5):
+// such characters would never match a request path, which is a literal path
+// match.
+func TestNewRouteKeyRejectsQueryFragment(t *testing.T) {
+	for _, path := range []string{
+		"/v1/responses?model=x",
+		"/v1/responses#frag",
+		"/v1/responses?model=x#frag",
+		"/v1/responses?",
+		"/v1/responses#",
+	} {
+		if _, err := NewRouteKey(http.MethodPost, path); err == nil {
+			t.Fatalf("NewRouteKey(%q): want error, got nil", path)
+		}
+	}
+}
+
 func TestMappingValidate(t *testing.T) {
 	tests := []struct {
 		name    string

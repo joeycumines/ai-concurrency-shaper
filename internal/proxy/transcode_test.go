@@ -387,6 +387,23 @@ func TestProxyTranscodeStringInput(t *testing.T) {
 	}
 }
 
+// TestValidQueryName covers the allowed-client-query name rule (review-08
+// additional 6): query syntax characters ('=', '&', '#', '?'), control
+// characters, and empty names are rejected; pchar characters that field-name
+// syntax would reject (e.g. '@') are accepted.
+func TestValidQueryName(t *testing.T) {
+	for _, name := range []string{"model", "model_name", "a@b", "a/b", "x.y", "a-b"} {
+		if !validQueryName(name) {
+			t.Errorf("validQueryName(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"", "a=b", "a&b", "#x", "?x", "a%b", "a b", "a\tb", "a\nb", string(rune(0x7f))} {
+		if validQueryName(name) {
+			t.Errorf("validQueryName(%q) = true, want false", name)
+		}
+	}
+}
+
 // TestProxyTranscodeStreaming verifies a streaming transcode through the
 // proxy: the upstream SSE stream is translated and the terminal is reached.
 func TestProxyTranscodeStreaming(t *testing.T) {

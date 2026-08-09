@@ -1219,3 +1219,128 @@ func TestPanicAfterCommittedResponseIsAborted(t *testing.T) {
 		t.Fatal("ResponseComplete must be unset for an aborted exchange")
 	}
 }
+
+// TestTranscodeConfigurationIsDeepCopied proves the proxy deep-copies the
+// mutable parts of a transcoded route's configuration (model map, loss
+// policy, allowed client query, upstream URL): caller mutation after New
+// cannot change live behavior (review-08 additional 2).
+func TestTranscodeConfigurationIsDeepCopied(t *testing.T) {
+	const chatFixture = `{"id":"chatcmpl-1","object":"chat.completion","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`
+
+	newProxy := func(t *testing.T) (*Proxy, *transcode.ModelMap, *transcode.LossPolicy, map[string]struct{}, *url.URL, *httptest.Server) {
+		t.Helper()
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, chatFixture)
+		}))
+		t.Cleanup(upstream.Close)
+
+		upstreamURL, _ := url.Parse(upstream.URL)
+		pat, _ := route.Parse("POST /v1/responses")
+		passthroughPat, _ := route.Parse("GET /passthrough")
+		key, _ := transcode.NewRouteKey(http.MethodPost, "/v1/responses")
+		mapping := transcode.Mapping{
+			ClientRoute:      key,
+			ClientProtocol:   transcode.ClientResponses,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			UpstreamPath:     "/v1/chat/completions",
+			Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
+		}
+		modelMap := transcode.ModelMap{
+			Exact: map[string]transcode.ModelMapping{
+				"m": {ClientModel: "m", UpstreamModel: "m", ClientResponseModel: "m"},
+			},
+		}
+		lossPolicy := transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+			transcode.FeatureUsageTiming: {},
+		}}
+		allowedQuery := map[string]struct{}{"allowed": {}}
+		mapping.ModelMap = modelMap
+		mapping.LossPolicy = lossPolicy
+
+		p, err := New(
+			WithUpstream(upstreamURL),
+			WithMatcher(route.NewMatcher([]route.Pattern{pat, passthroughPat})),
+			WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+			WithMetrics(metrics.NewCollector()),
+			WithTranscodeMapping(TranscodeMapping{
+				Mapping:            mapping,
+				AllowedClientQuery: allowedQuery,
+			}),
+		)
+		if err != nil {
+			t.Fatalf("proxy.New: %v", err)
+		}
+		return p, &modelMap, &lossPolicy, allowedQuery, upstreamURL, upstream
+	}
+
+	serve := func(t *testing.T, p *Proxy, path, query, model string) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path+"?"+query,
+			strings.NewReader(`{"model":"`+model+`","input":"x"}`))
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	t.Run("model map", func(t *testing.T) {
+		p, modelMap, _, _, _, _ := newProxy(t)
+		if got := serve(t, p, "/v1/responses", "", "m"); got != http.StatusOK {
+			t.Fatalf("mapped model status = %d", got)
+		}
+		modelMap.Exact["mutated"] = transcode.ModelMapping{ClientModel: "mutated", UpstreamModel: "mutated", ClientResponseModel: "mutated"}
+		if got := serve(t, p, "/v1/responses", "", "mutated"); got != http.StatusBadRequest {
+			t.Fatalf("mutated model status = %d, want 400 (model map must be deep-copied)", got)
+		}
+	})
+
+	t.Run("allowed client query", func(t *testing.T) {
+		p, _, _, allowedQuery, _, _ := newProxy(t)
+		if got := serve(t, p, "/v1/responses", "allowed=1", "m"); got != http.StatusOK {
+			t.Fatalf("allowed query status = %d", got)
+		}
+		allowedQuery["mutated"] = struct{}{}
+		if got := serve(t, p, "/v1/responses", "mutated=1", "m"); got != http.StatusBadRequest {
+			t.Fatalf("mutated query status = %d, want 400 (query allowlist must be deep-copied)", got)
+		}
+	})
+
+	t.Run("upstream url", func(t *testing.T) {
+		p, _, _, _, upstreamURL, upstream := newProxy(t)
+		if got := serve(t, p, "/v1/responses", "", "m"); got != http.StatusOK {
+			t.Fatalf("status = %d", got)
+		}
+		// Passthrough requests must also use the frozen copy: the
+		// ReverseProxy director reads the upstream URL on every request.
+		passthrough := httptest.NewRequest(http.MethodGet, "/passthrough", nil)
+		passthroughRec := httptest.NewRecorder()
+		p.ServeHTTP(passthroughRec, passthrough)
+		if passthroughRec.Code != http.StatusOK {
+			t.Fatalf("passthrough status = %d, want 200", passthroughRec.Code)
+		}
+		upstreamURL.Host = "127.0.0.1:1"
+		_ = upstream
+		if got := serve(t, p, "/v1/responses", "", "m"); got != http.StatusOK {
+			t.Fatalf("mutated upstream host status = %d, want 200 (upstream URL must be deep-copied)", got)
+		}
+		passthroughRec = httptest.NewRecorder()
+		p.ServeHTTP(passthroughRec, httptest.NewRequest(http.MethodGet, "/passthrough", nil))
+		if passthroughRec.Code != http.StatusOK {
+			t.Fatalf("mutated passthrough status = %d, want 200 (passthrough director must use the frozen upstream URL)", passthroughRec.Code)
+		}
+	})
+
+	t.Run("loss policy", func(t *testing.T) {
+		p, _, lossPolicy, _, _, _ := newProxy(t)
+		// The Chat fixture's usage lacks the pinned Responses breakdown: the
+		// response-side usage loss must be approved by the COPY even after
+		// the caller empties the original policy. delete (not reassignment)
+		// mutates the original map in place, which is the aliasing the
+		// deep copy must be immune to.
+		delete(lossPolicy.Allowed, transcode.FeatureUsageTiming)
+		if got := serve(t, p, "/v1/responses", "", "m"); got != http.StatusOK {
+			t.Fatalf("mutated loss policy status = %d, want 200 (loss policy must be deep-copied)", got)
+		}
+	})
+}

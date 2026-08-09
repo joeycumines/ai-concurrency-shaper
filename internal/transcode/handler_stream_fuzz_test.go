@@ -206,6 +206,7 @@ func newStrictResponsesToChatTestHandler(t *testing.T, upstreamURL string) *tran
 				ClientProtocol:   transcode.ClientResponses,
 				UpstreamProtocol: transcode.UpstreamChatCompletions,
 				UpstreamPath:     "/v1/chat/completions",
+				Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
 			},
 			Upstream: upstream,
 			BodyLimits: transcode.BodyLimits{

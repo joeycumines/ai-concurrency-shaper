@@ -188,7 +188,10 @@ func run() error {
 		value int64
 		shift uint
 	}{
-		{"retry-max-body-mb", retryMaxBodyMB, 20},
+		// retry-max-body-mb undergoes a *2 in the journal sizing (maxBody*2):
+		// it is validated against shift 21 so the product cannot overflow
+		// (review-08 additional 3).
+		{"retry-max-body-mb", retryMaxBodyMB, 21},
 		{"transcode-max-request-mb", transcodeMaxRequestMB, 22},
 		{"transcode-max-response-mb", transcodeMaxResponseMB, 20},
 	} {
@@ -210,8 +213,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("invalid -upstream URL: %w", err)
 	}
-	if upstream.Scheme == "" {
-		return fmt.Errorf("-upstream URL must include scheme (http or https)")
+	if upstream.Scheme != "http" && upstream.Scheme != "https" {
+		return fmt.Errorf("-upstream URL scheme must be http or https, got %q", upstream.Scheme)
+	}
+	if upstream.Hostname() == "" {
+		return fmt.Errorf("-upstream URL must include a hostname")
 	}
 
 	var patterns []route.Pattern

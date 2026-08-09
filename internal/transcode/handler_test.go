@@ -48,6 +48,82 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
+// TestTranscodeConstructorValidatesConfig verifies that
+// NewTranscodeHandler validates its configuration eagerly, panicking on a
+// nil round trip, an invalid mapping, invalid body limits, or an invalid
+// upstream, rather than failing on the first request (review-08 additional
+// 9).
+func TestTranscodeConstructorValidatesConfig(t *testing.T) {
+	validMapping := responsesMapping(t)
+	validUpstream := mustParseURL(t, "https://upstream.example")
+	validRoundTrip := func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("unused")
+	}
+	validLimits := BodyLimits{AcceptedRequestBytes: 1 << 20, SuccessfulResponseBytes: 1 << 20}
+
+	withConfig := func(mutate func(*HandlerConfig)) HandlerConfig {
+		cfg := HandlerConfig{
+			Mapping:    validMapping,
+			Upstream:   validUpstream,
+			BodyLimits: validLimits,
+			AuthPolicy: AuthPolicy{Mode: AuthNone},
+			ModelMap:   ModelMap{AllowIdentity: true},
+			LossPolicy: StrictLossPolicy(),
+		}
+		mutate(&cfg)
+		return cfg
+	}
+
+	assertPanics := func(t *testing.T, cfg HandlerConfig, roundTrip RoundTrip, want string) {
+		t.Helper()
+		defer func() {
+			recovered := recover()
+			if recovered == nil {
+				t.Fatalf("NewTranscodeHandler: want panic containing %q, got nil", want)
+			}
+			if msg, ok := recovered.(string); !ok || !strings.Contains(msg, want) {
+				t.Fatalf("NewTranscodeHandler panic = %v, want containing %q", recovered, want)
+			}
+		}()
+		NewTranscodeHandler(cfg, roundTrip, nil)
+	}
+
+	t.Run("nil round trip", func(t *testing.T) {
+		assertPanics(t, withConfig(func(*HandlerConfig) {}), nil, "nil round trip")
+	})
+	t.Run("invalid mapping", func(t *testing.T) {
+		mapping := validMapping
+		mapping.ClientRoute = RouteKey{Method: http.MethodGet, Path: "/v1/responses"}
+		assertPanics(t, withConfig(func(cfg *HandlerConfig) { cfg.Mapping = mapping }), validRoundTrip, "invalid handler configuration")
+	})
+	t.Run("invalid body limits", func(t *testing.T) {
+		assertPanics(t, withConfig(func(cfg *HandlerConfig) {
+			cfg.BodyLimits = BodyLimits{AcceptedRequestBytes: -1}
+		}), validRoundTrip, "invalid body limits")
+	})
+	t.Run("nil upstream", func(t *testing.T) {
+		assertPanics(t, withConfig(func(cfg *HandlerConfig) { cfg.Upstream = nil }), validRoundTrip, "invalid upstream URL")
+	})
+	t.Run("upstream without host", func(t *testing.T) {
+		u := mustParseURL(t, "https://")
+		assertPanics(t, withConfig(func(cfg *HandlerConfig) { cfg.Upstream = u }), validRoundTrip, "invalid upstream URL")
+	})
+	t.Run("upstream port without hostname", func(t *testing.T) {
+		u := mustParseURL(t, "https://:8080")
+		assertPanics(t, withConfig(func(cfg *HandlerConfig) { cfg.Upstream = u }), validRoundTrip, "invalid upstream URL")
+	})
+	t.Run("upstream bad scheme", func(t *testing.T) {
+		u := mustParseURL(t, "ftp://upstream.example")
+		assertPanics(t, withConfig(func(cfg *HandlerConfig) { cfg.Upstream = u }), validRoundTrip, "invalid upstream URL")
+	})
+	t.Run("valid configuration does not panic", func(t *testing.T) {
+		handler := NewTranscodeHandler(withConfig(func(*HandlerConfig) {}), validRoundTrip, nil)
+		if handler == nil {
+			t.Fatal("NewTranscodeHandler returned nil")
+		}
+	})
+}
+
 func responsesMapping(t *testing.T) Mapping {
 	t.Helper()
 	key, err := NewRouteKey(http.MethodPost, "/v1/responses")
@@ -59,6 +135,7 @@ func responsesMapping(t *testing.T) Mapping {
 		ClientProtocol:   ClientResponses,
 		UpstreamProtocol: UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
+		Auth:             AuthPolicy{Mode: AuthNone},
 	}
 }
 
@@ -73,6 +150,7 @@ func messagesMapping(t *testing.T, upstream UpstreamProtocol) Mapping {
 		ClientProtocol:   ClientMessages,
 		UpstreamProtocol: upstream,
 		UpstreamPath:     "/v1/" + string(upstream),
+		Auth:             AuthPolicy{Mode: AuthNone},
 	}
 }
 

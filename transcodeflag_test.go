@@ -312,3 +312,40 @@ func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 		t.Fatal("loss policy leaks unapproved features")
 	}
 }
+
+// TestExplicitModelMapRejectsUnknownModel proves identity fallback applies
+// only when no model mappings were supplied: with an explicit mapping, an
+// unknown model must be rejected, and duplicate client models must fail
+// (review-08 additional 1).
+func TestExplicitModelMapRejectsUnknownModel(t *testing.T) {
+	m, err := parseTranscodeModelMap([]string{"client-a=upstream-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.AllowIdentity {
+		t.Fatal("explicit mapping must disable identity fallback")
+	}
+	if _, err := m.Resolve("client-a"); err != nil {
+		t.Fatalf("mapped model rejected: %v", err)
+	}
+	if _, err := m.Resolve("unknown"); err == nil {
+		t.Fatal("unknown model passed through an explicit mapping")
+	}
+
+	// No mappings: identity fallback stays.
+	m, err = parseTranscodeModelMap(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.AllowIdentity {
+		t.Fatal("no mappings must keep identity fallback")
+	}
+	if _, err := m.Resolve("anything"); err != nil {
+		t.Fatalf("identity fallback failed: %v", err)
+	}
+
+	// Duplicate client models are rejected.
+	if _, err := parseTranscodeModelMap([]string{"a=b", "a=c"}); err == nil {
+		t.Fatal("duplicate client model accepted")
+	}
+}

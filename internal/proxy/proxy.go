@@ -131,8 +131,14 @@ func (o *UpstreamOption) applyProxyOption(cfg *proxyConfig) error {
 	if o.value == nil {
 		return errors.New("proxy: upstream must not be nil")
 	}
-	if o.value.Scheme == "" {
-		return errors.New("proxy: upstream URL must include scheme (http or https)")
+	if o.value.Scheme != "http" && o.value.Scheme != "https" {
+		return errors.New("proxy: upstream URL scheme must be http or https")
+	}
+	// Hostname() (not Host) is checked: "http://:8080" has a non-empty Host
+	// but no hostname, and would fail per-request instead of at startup
+	// (review-08 additional 4).
+	if o.value.Hostname() == "" {
+		return errors.New("proxy: upstream URL must include a hostname")
 	}
 	cfg.upstream = o.value
 	return nil
@@ -619,6 +625,12 @@ func New(opts ...Option) (*Proxy, error) {
 		return nil, err
 	}
 
+	// Freeze the upstream URL: both the passthrough director and the
+	// transcode handlers read it on every request, so caller mutation of the
+	// original after New must not change live behavior or race with requests
+	// (review-08 additional 2).
+	cfg.upstream = cloneURL(cfg.upstream)
+
 	// Reject duplicate transcode client routes: the first matching handler
 	// would silently win. The key is method+path. A mapping that declares a
 	// RetryReplayBytes bound must equal the proxy's retry transport body cap
@@ -724,7 +736,9 @@ func New(opts ...Option) (*Proxy, error) {
 	}
 
 	// Build one transcode handler per mapping, each forwarding through the
-	// proxy engine (the retry/breaker-aware transport).
+	// proxy engine (the retry/breaker-aware transport). The mutable parts of
+	// the configuration are deep-copied so caller mutation after New cannot
+	// change live behavior or race with requests (review-08 additional 2).
 	p.transcodeHandlerMap = make(map[transcode.RouteKey]http.Handler, len(cfg.transcodeMappings))
 	for i := range cfg.transcodeMappings {
 		m := &cfg.transcodeMappings[i]
@@ -734,10 +748,10 @@ func New(opts ...Option) (*Proxy, error) {
 				Upstream:           cfg.upstream,
 				BodyLimits:         m.BodyLimits,
 				AuthPolicy:         m.Auth,
-				ModelMap:           m.ModelMap,
-				LossPolicy:         m.LossPolicy,
+				ModelMap:           cloneModelMap(m.ModelMap),
+				LossPolicy:         cloneLossPolicy(m.LossPolicy),
 				ChatCapabilities:   m.ChatCapabilities,
-				AllowedClientQuery: m.AllowedClientQuery,
+				AllowedClientQuery: cloneStringSet(m.AllowedClientQuery),
 			},
 			p.RoundTrip,
 			nil,
@@ -2830,12 +2844,79 @@ func (m TranscodeMapping) Validate() error {
 		return fmt.Errorf("body limits: %w", err)
 	}
 	for key := range m.AllowedClientQuery {
-		if !transcode.ValidHTTPFieldName(key) {
+		if !validQueryName(key) {
 			return fmt.Errorf(
-				"allowed client query key %q is not a valid HTTP field name",
+				"allowed client query key %q is not a valid query name",
 				key,
 			)
 		}
 	}
 	return nil
+}
+
+// validQueryName reports whether s is a valid client query parameter name on
+// a transcoded route: non-empty, no control characters, and none of the
+// characters that delimit or encode query syntax (review-08 additional 6).
+// HTTP field-name syntax is not query-name syntax: query names may contain
+// characters such as '@' or '/' that field names reject, while '=' '&' '#'
+// and '?' would alter the query structure.
+func validQueryName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x21 || c == 0x7f || strings.ContainsRune("=%&#?", rune(c)) {
+			return false
+		}
+	}
+	return true
+}
+
+// cloneModelMap deep-copies the mutable model map so caller mutation after
+// New cannot change live behavior (review-08 additional 2).
+func cloneModelMap(m transcode.ModelMap) transcode.ModelMap {
+	if m.Exact != nil {
+		cloned := make(map[string]transcode.ModelMapping, len(m.Exact))
+		for key, value := range m.Exact {
+			cloned[key] = value
+		}
+		m.Exact = cloned
+	}
+	return m
+}
+
+// cloneLossPolicy deep-copies the mutable loss policy (review-08 additional
+// 2).
+func cloneLossPolicy(p transcode.LossPolicy) transcode.LossPolicy {
+	if p.Allowed != nil {
+		cloned := make(map[transcode.Feature]struct{}, len(p.Allowed))
+		for feature := range p.Allowed {
+			cloned[feature] = struct{}{}
+		}
+		p.Allowed = cloned
+	}
+	return p
+}
+
+// cloneStringSet deep-copies a string set (review-08 additional 2).
+func cloneStringSet(s map[string]struct{}) map[string]struct{} {
+	if s == nil {
+		return nil
+	}
+	cloned := make(map[string]struct{}, len(s))
+	for key := range s {
+		cloned[key] = struct{}{}
+	}
+	return cloned
+}
+
+// cloneURL copies the upstream URL value so caller mutation of the original
+// after New cannot change the live target (review-08 additional 2).
+func cloneURL(u *url.URL) *url.URL {
+	if u == nil {
+		return nil
+	}
+	cloned := *u
+	return &cloned
 }

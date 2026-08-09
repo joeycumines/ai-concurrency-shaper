@@ -212,7 +212,6 @@ func (f *transcodeModelFlags) Set(v string) error {
 // parseTranscodeModelMap builds the ModelMap from repeated -transcode-model
 // values. With no mappings, identity fallback is used.
 func parseTranscodeModelMap(values []string) (transcode.ModelMap, error) {
-	modelMap := transcode.ModelMap{AllowIdentity: true}
 	exact := make(map[string]transcode.ModelMapping)
 	for _, value := range values {
 		client, upstream, ok := strings.Cut(value, "=")
@@ -222,14 +221,25 @@ func parseTranscodeModelMap(values []string) (transcode.ModelMap, error) {
 				value,
 			)
 		}
+		if _, dup := exact[client]; dup {
+			return transcode.ModelMap{}, fmt.Errorf(
+				"duplicate -transcode-model client model %q",
+				client,
+			)
+		}
 		exact[client] = transcode.ModelMapping{
 			ClientModel:         client,
 			UpstreamModel:       upstream,
 			ClientResponseModel: client,
 		}
 	}
-	modelMap.Exact = exact
-	return modelMap, nil
+	// Identity fallback applies only when NO mappings were supplied: with an
+	// explicit mapping, an unknown model must be rejected, never silently
+	// passed through as identity (review-08 additional 1).
+	return transcode.ModelMap{
+		Exact:         exact,
+		AllowIdentity: len(exact) == 0,
+	}, nil
 }
 
 // parseTranscodeAuth builds the AuthPolicy from the CLI contract. The secret

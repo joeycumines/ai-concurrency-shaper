@@ -163,12 +163,30 @@ type TranscodeHandler struct {
 	outcomeFn OutcomeFunc
 }
 
-// NewTranscodeHandler returns a handler for the given configuration.
+// NewTranscodeHandler returns a handler for the given configuration. The
+// configuration is validated at construction, never on the first request: a
+// nil round trip would panic at request time, negative body limits would be
+// silently defaulted, and an invalid mapping or upstream would fail
+// mid-exchange (review-08 additional 9).
 func NewTranscodeHandler(
 	cfg HandlerConfig,
 	roundTrip RoundTrip,
 	outcomeFn OutcomeFunc,
 ) *TranscodeHandler {
+	if roundTrip == nil {
+		panic("transcode: nil round trip")
+	}
+	if err := cfg.Mapping.Validate(); err != nil {
+		panic(fmt.Sprintf("transcode: invalid handler configuration: %v", err))
+	}
+	if err := cfg.BodyLimits.Validate(); err != nil {
+		panic(fmt.Sprintf("transcode: invalid body limits: %v", err))
+	}
+	if cfg.Upstream == nil ||
+		(cfg.Upstream.Scheme != "http" && cfg.Upstream.Scheme != "https") ||
+		cfg.Upstream.Hostname() == "" {
+		panic("transcode: invalid upstream URL: must be http or https with a hostname")
+	}
 	// The body limits contract (limits.go): zero values select the package
 	// defaults, computed ONCE here so zero never reaches handler logic — in
 	// particular, a zero DecodedRequestBytes is never treated as unlimited
