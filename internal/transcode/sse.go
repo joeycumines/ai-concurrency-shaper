@@ -199,12 +199,20 @@ type frameEvent struct {
 
 // writeFrameBytes writes one complete SSE frame ("event: ...\ndata: ...\n\n")
 // into buf. The frame is written in a single buffer so downstream writers
-// flush exactly one complete event per Write call.
-func writeFrameBytes(buf *bytes.Buffer, event frameEvent) {
+// flush exactly one complete event per Write call. A frame whose total size
+// exceeds the frame bound (data payload plus the event name and framing
+// overhead) is a typed frame error: the generated downstream wire must be
+// bounded like the input wire (review-08 blocker 7).
+func writeFrameBytes(buf *bytes.Buffer, event frameEvent) error {
+	total := len(event.Data) + len(event.Type) + 16
+	if total > maxSSEFrameBytes {
+		return &SSEBoundError{Bound: maxSSEFrameBytes}
+	}
 	if event.Type != "" {
 		_, _ = buf.WriteString("event: " + event.Type + "\n")
 	}
 	_, _ = buf.WriteString("data: ")
 	_, _ = buf.Write(event.Data)
 	_, _ = buf.WriteString("\n\n")
+	return nil
 }

@@ -139,7 +139,9 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 
 		sourceEvent, err := r.source.Next()
 		if err != nil && !errors.Is(err, io.EOF) {
-			r.appendErrorEvent(err)
+			if frameErr := r.appendErrorEvent(err); frameErr != nil {
+				err = frameErr
+			}
 			r.err = err
 			r.upstreamBodyError = true
 			// Drain the appended error frame before surfacing the error.
@@ -152,12 +154,21 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 		if sourceEvent.Data != nil {
 			batch, err := r.conv.Convert(sourceEvent)
 			if err != nil {
-				r.appendErrorEvent(err)
+				if frameErr := r.appendErrorEvent(err); frameErr != nil {
+					err = frameErr
+				}
 				r.err = err
 				// Drain the appended error frame before surfacing the error.
 				continue
 			}
-			r.appendBatch(batch)
+			if err := r.appendBatch(batch); err != nil {
+				if frameErr := r.appendErrorEvent(err); frameErr != nil {
+					err = frameErr
+				}
+				r.err = err
+				// Drain the appended error frame before surfacing the error.
+				continue
+			}
 			if batch.Terminal {
 				r.stopAfterDrain = true
 			}
@@ -167,12 +178,21 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 			batch, finalErr := r.conv.FinalizeEOF()
 			if finalErr != nil {
 				finalErr = fmt.Errorf("%w: %v", errStreamTruncated, finalErr)
-				r.appendErrorEvent(finalErr)
+				if frameErr := r.appendErrorEvent(finalErr); frameErr != nil {
+					finalErr = frameErr
+				}
 				r.err = finalErr
 				// Drain the appended error frame before surfacing the error.
 				continue
 			}
-			r.appendBatch(batch)
+			if err := r.appendBatch(batch); err != nil {
+				if frameErr := r.appendErrorEvent(err); frameErr != nil {
+					err = frameErr
+				}
+				r.err = err
+				// Drain the appended error frame before surfacing the error.
+				continue
+			}
 			r.stopAfterDrain = true
 			continue
 		}
@@ -186,16 +206,19 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 // typed conversion error carrying upstream provenance is real upstream data:
 // the exchange is a definitive upstream outcome, never a local conversion
 // failure (review-j finding 11).
-func (r *convertingReader) appendErrorEvent(err error) {
+func (r *convertingReader) appendErrorEvent(err error) error {
 	frame, ok := r.conv.ErrorEvent(err)
 	if !ok {
-		return
+		return nil
 	}
-	writeFrameBytes(&r.buf, frame)
+	if err := writeFrameBytes(&r.buf, frame); err != nil {
+		return err
+	}
 	r.sawErrorEvent = true
 	if isUpstreamConversionError(err) {
 		r.sawUpstreamErrorFrame = true
 	}
+	return nil
 }
 
 // isUpstreamConversionError reports whether the conversion error carries
@@ -224,9 +247,11 @@ func isUpstreamConversionError(err error) bool {
 
 // appendBatch buffers the converted frames and records the terminal/error
 // state.
-func (r *convertingReader) appendBatch(batch convertedBatch) {
+func (r *convertingReader) appendBatch(batch convertedBatch) error {
 	for _, event := range batch.Events {
-		writeFrameBytes(&r.buf, event)
+		if err := writeFrameBytes(&r.buf, event); err != nil {
+			return err
+		}
 		if event.Type == "error" {
 			r.sawErrorEvent = true
 			// A frame emitted by the converter is real upstream data; a
@@ -234,9 +259,16 @@ func (r *convertingReader) appendBatch(batch convertedBatch) {
 			r.sawUpstreamErrorFrame = true
 		}
 	}
+	// The terminal batch is buffered in full before it drains: the released
+	// item-closing events and the terminal envelope repeat the accumulated
+	// content, so the buffer must be bounded (review-08 blocker 7).
+	if r.buf.Len() > maxStreamTerminalBatchBytes {
+		return &SSEBoundError{Bound: maxStreamTerminalBatchBytes}
+	}
 	if batch.Terminal {
 		r.sawTerminal = true
 	}
+	return nil
 }
 
 // Err returns the first conversion or read error, or io.EOF once the stream

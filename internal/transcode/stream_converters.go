@@ -118,6 +118,14 @@ type chatResponsesStreamState struct {
 	serviceTierLossRecorded bool
 	logprobsLossRecorded    bool
 
+	// reasoningReportRecorded gates the provider-reasoning report entry
+	// (loss or note) to exactly once per stream (review-08 blocker 7).
+	reasoningReportRecorded bool
+
+	// totalAccumulated bounds the exchange-wide sum of accumulated semantic
+	// bytes (review-08 blocker 7).
+	totalAccumulated int64
+
 	usage *ResponsesUsage
 
 	report ConversionReport
@@ -151,17 +159,26 @@ func (s *chatResponsesStreamState) wireError(err error) error {
 }
 
 // checkAccumulated rejects accumulated semantic state (text, refusal, tool
-// arguments) beyond the per-item cumulative bound: individually bounded SSE
-// frames could otherwise accumulate without limit and be emitted as one
-// generated downstream frame, and a corrupt upstream can amplify memory
-// without bound (review-k finding 9). The typed upstream wire error classifies
-// the exchange as an upstream failure.
-func (s *chatResponsesStreamState) checkAccumulated(builder *strings.Builder, what string) error {
+// arguments) beyond the per-item cumulative bound and the exchange total:
+// individually bounded SSE frames could otherwise accumulate without limit
+// and be emitted as one generated downstream frame, and a corrupt upstream
+// can amplify memory without bound (review-k finding 9, review-08 blocker
+// 7). The typed upstream wire error classifies the exchange as an upstream
+// failure.
+func (s *chatResponsesStreamState) checkAccumulated(builder *strings.Builder, added int, what string) error {
 	if builder.Len() > maxStreamAccumulatedBytes {
 		return s.wireError(fmt.Errorf(
 			"chat stream accumulated %s exceeds %d bytes",
 			what,
 			maxStreamAccumulatedBytes,
+		))
+	}
+	s.totalAccumulated += int64(added)
+	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
+		return s.wireError(fmt.Errorf(
+			"chat stream accumulated %s exceeds the exchange total of %d bytes",
+			what,
+			maxStreamTotalAccumulatedBytes,
 		))
 	}
 	return nil
@@ -432,7 +449,7 @@ func (s *chatResponsesStreamState) convertDelta(
 			s.textBufs[key] = builder
 		}
 		builder.WriteString(*delta.Content)
-		if err := s.checkAccumulated(builder, "text"); err != nil {
+		if err := s.checkAccumulated(builder, len(*delta.Content), "text"); err != nil {
 			return nil, err
 		}
 	}
@@ -458,7 +475,7 @@ func (s *chatResponsesStreamState) convertDelta(
 			s.refusalBufs[key] = builder
 		}
 		builder.WriteString(*delta.Refusal)
-		if err := s.checkAccumulated(builder, "refusal"); err != nil {
+		if err := s.checkAccumulated(builder, len(*delta.Refusal), "refusal"); err != nil {
 			return nil, err
 		}
 	}
@@ -467,15 +484,20 @@ func (s *chatResponsesStreamState) convertDelta(
 		// Provider plaintext reasoning is mapped to ordinary text only when
 		// the capability is enabled (a named, reported encoding); otherwise
 		// it is dropped with a documented loss (review-j finding 10). It
-		// must never be synthesized into reasoning items.
+		// must never be synthesized into reasoning items. Either report
+		// entry is recorded exactly once per stream, never once per delta
+		// (review-08 blocker 7).
 		if !s.capabilities.ProviderReasoningText {
-			if err := s.report.Lose(
-				s.policy,
-				FeatureProviderReasoning,
-				"choices[].delta.reasoning",
-				"provider reasoning is dropped during chat-to-responses streaming",
-			); err != nil {
-				return nil, err
+			if !s.reasoningReportRecorded {
+				s.reasoningReportRecorded = true
+				if err := s.report.Lose(
+					s.policy,
+					FeatureProviderReasoning,
+					"choices[].delta.reasoning",
+					"provider reasoning is dropped during chat-to-responses streaming",
+				); err != nil {
+					return nil, err
+				}
 			}
 		} else {
 			item, addedEvents, err := s.openMessageItemForPart("output_text")
@@ -498,14 +520,19 @@ func (s *chatResponsesStreamState) convertDelta(
 				s.textBufs[key] = builder
 			}
 			builder.WriteString(*delta.Reasoning)
-			if err := s.checkAccumulated(builder, "text"); err != nil {
+			if err := s.checkAccumulated(builder, len(*delta.Reasoning), "text"); err != nil {
 				return nil, err
 			}
-			s.report.Note(
-				FeatureProviderReasoning,
-				"choices[].delta.reasoning",
-				"provider reasoning maps to ordinary text (provider_reasoning_text encoding)",
-			)
+			// The encoding note is recorded exactly once per stream, never
+			// once per delta (review-08 blocker 7).
+			if !s.reasoningReportRecorded {
+				s.reasoningReportRecorded = true
+				s.report.Note(
+					FeatureProviderReasoning,
+					"choices[].delta.reasoning",
+					"provider reasoning maps to ordinary text (provider_reasoning_text encoding)",
+				)
+			}
 		}
 	}
 
@@ -565,6 +592,12 @@ func (s *chatResponsesStreamState) openMessageItemForPartWithEvents(
 	}
 
 	// Otherwise open a new content part.
+	if len(message.Content) >= maxStreamPartsPerItem {
+		return nil, nil, s.wireError(fmt.Errorf(
+			"chat stream content parts per item exceed the exchange bound of %d",
+			maxStreamPartsPerItem,
+		))
+	}
 	contentIndex := int64(len(message.Content))
 	item.openPartIndex = contentIndex
 	switch partType {
@@ -655,6 +688,12 @@ func (s *chatResponsesStreamState) convertToolCall(
 		// New pending call. An index-less fragment that arrives alongside
 		// existing calls gets a synthetic negative key so it cannot collide
 		// with a real fragment index.
+		if len(s.pendingCalls) >= maxStreamToolCalls {
+			return nil, s.wireError(fmt.Errorf(
+				"chat stream tool calls exceed the exchange bound of %d",
+				maxStreamToolCalls,
+			))
+		}
 		index := 0
 		if call.Index != nil {
 			index = *call.Index
@@ -713,7 +752,7 @@ func (s *chatResponsesStreamState) convertToolCall(
 		pending.complete.WriteString(call.Function.Arguments)
 		// The complete buffer is emitted as one generated downstream frame
 		// at finish: bound its cumulative size (review-k finding 9).
-		if err := s.checkAccumulated(&pending.complete, "tool arguments"); err != nil {
+		if err := s.checkAccumulated(&pending.complete, len(call.Function.Arguments), "tool arguments"); err != nil {
 			return nil, err
 		}
 	}
@@ -763,6 +802,12 @@ func (s *chatResponsesStreamState) convertToolCall(
 // sharing the pointer would leak that mutation into the already-emitted
 // output_item.added frame (review-k finding 1).
 func (s *chatResponsesStreamState) openMessageItem() ([]ResponsesSSEEvent, error) {
+	if len(s.items) >= maxStreamOutputItems {
+		return nil, s.wireError(fmt.Errorf(
+			"chat stream output items exceed the exchange bound of %d",
+			maxStreamOutputItems,
+		))
+	}
 	message := &ResponsesOutputMessage{
 		ID:      s.ctx.IDs.New("msg_"),
 		Type:    "message",
@@ -1366,6 +1411,11 @@ type anthropicResponsesStreamState struct {
 	// Duplicate parts and type-mismatched content_part.done are wire errors.
 	partsSeen map[responsePartKey]string
 
+	// partCounts tracks the number of parts observed per item so the
+	// per-item part bound and the done/envelope count checks are O(1)
+	// instead of scanning partsSeen (review-08 blocker 7).
+	partCounts map[string]int
+
 	// textBufs and refusalBufs accumulate streamed text and refusal per
 	// content part so the done events and the terminal envelope reconcile
 	// against the incrementally observed content (review-08 blocker 4).
@@ -1405,6 +1455,10 @@ type anthropicResponsesStreamState struct {
 	// Responses source never provides, and the decision is recorded exactly
 	// once per stream.
 	usageComponentsLossRecorded bool
+
+	// totalAccumulated bounds the exchange-wide sum of accumulated semantic
+	// bytes (text, refusal, tool arguments; review-08 blocker 7).
+	totalAccumulated int64
 
 	// phaseGated tracks the output items whose phase already entered the
 	// loss decision, so a phase-bearing item seen both in output_item.added
@@ -1476,6 +1530,7 @@ func newAnthropicResponsesStreamState(
 		addedItems:       make(map[string]anthropicAddedItem),
 		doneItems:        make(map[string]struct{}),
 		partsSeen:        make(map[responsePartKey]string),
+		partCounts:       make(map[string]int),
 		textBufs:         make(map[responsePartKey]*strings.Builder),
 		refusalBufs:      make(map[responsePartKey]*strings.Builder),
 		pendingToolStart: make(map[string]*pendingToolBlock),
@@ -1747,6 +1802,12 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 			itemType,
 		))
 	}
+	if len(s.addedItems) >= maxStreamOutputItems {
+		return nil, s.wireError(fmt.Errorf(
+			"responses stream output items exceed the exchange bound of %d",
+			maxStreamOutputItems,
+		))
+	}
 	s.addedItems[itemID] = anthropicAddedItem{
 		outputIndex: event.OutputIndex,
 		itemType:    itemType,
@@ -1770,6 +1831,12 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 
 	case *ResponsesFunctionCallOutputItem:
 		// Buffer the tool block start until call ID and name are known.
+		if len(s.pendingToolStart) >= maxStreamToolCalls {
+			return nil, s.wireError(fmt.Errorf(
+				"responses stream tool calls exceed the exchange bound of %d",
+				maxStreamToolCalls,
+			))
+		}
 		pending := &pendingToolBlock{
 			blockIndex:  s.blockIndex,
 			outputIndex: event.OutputIndex,
@@ -1892,7 +1959,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 				}
 			}
 		}
-		if len(item.Content) != len(s.partsSeenForItem(item.ID)) {
+		if len(item.Content) != s.partCounts[item.ID] {
 			return nil, s.wireError(fmt.Errorf(
 				"output item done message content count does not match the observed parts",
 			))
@@ -2021,8 +2088,17 @@ func (s *anthropicResponsesStreamState) reconcileToolArguments(
 	if strings.HasPrefix(snapshot, accumulated) {
 		// The buffer is a byte-prefix of the snapshot (possibly equal): the
 		// snapshot completes it. The suffix is the part the upstream never
-		// streamed as a delta.
+		// streamed as a delta — and the snapshot bytes retained for the
+		// exchange's lifetime must count against the exchange total like any
+		// other accumulation (review-08 blocker 7).
 		suffix := snapshot[len(accumulated):]
+		s.totalAccumulated += int64(len(suffix))
+		if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
+			return "", "", fmt.Errorf(
+				"responses stream accumulated tool arguments exceed the exchange total of %d bytes",
+				maxStreamTotalAccumulatedBytes,
+			)
+		}
 		pending.arguments.Reset()
 		pending.arguments.WriteString(snapshot)
 		return snapshot, suffix, nil
@@ -2036,6 +2112,29 @@ func (s *anthropicResponsesStreamState) reconcileToolArguments(
 	return "", "", errors.New(
 		"final arguments do not match the accumulated argument deltas",
 	)
+}
+
+// checkAccumulated bounds one accumulated semantic builder (text, refusal,
+// or tool arguments) by the per-item bound and the exchange-wide total
+// (review-08 blocker 7): a corrupt upstream must not amplify memory without
+// limit across many parts.
+func (s *anthropicResponsesStreamState) checkAccumulated(builder *strings.Builder, added int, what string) error {
+	if builder.Len() > maxStreamAccumulatedBytes {
+		return s.wireError(fmt.Errorf(
+			"responses stream accumulated %s exceeds %d bytes",
+			what,
+			maxStreamAccumulatedBytes,
+		))
+	}
+	s.totalAccumulated += int64(added)
+	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
+		return s.wireError(fmt.Errorf(
+			"responses stream accumulated %s exceeds the exchange total of %d bytes",
+			what,
+			maxStreamTotalAccumulatedBytes,
+		))
+	}
+	return nil
 }
 
 // accumulatedText returns the accumulated text of a content part, or the
@@ -2057,17 +2156,6 @@ func (s *anthropicResponsesStreamState) accumulatedRefusal(key responsePartKey) 
 		return builder.String()
 	}
 	return ""
-}
-
-// partsSeenForItem returns the content indices observed for one item.
-func (s *anthropicResponsesStreamState) partsSeenForItem(itemID string) []int64 {
-	var indices []int64
-	for key := range s.partsSeen {
-		if key.ItemID == itemID {
-			indices = append(indices, key.ContentIndex)
-		}
-	}
-	return indices
 }
 
 // jsonObjectsEqual compares two decoded JSON objects semantically: key order
@@ -2121,6 +2209,12 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 			event.ContentIndex,
 		))
 	}
+	if s.partCounts[event.ItemID] >= maxStreamPartsPerItem {
+		return nil, s.wireError(fmt.Errorf(
+			"responses stream content parts per item exceed the exchange bound of %d",
+			maxStreamPartsPerItem,
+		))
+	}
 
 	var events []AnthropicStreamEvent
 	switch event.Part.(type) {
@@ -2136,6 +2230,7 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 		})
 		s.partBlocks[key] = s.blockIndex
 		s.partsSeen[key] = partTypeName(event.Part)
+		s.partCounts[event.ItemID]++
 		s.blockIndex++
 	default:
 		return nil, &UnsupportedFeatureError{
@@ -2173,6 +2268,9 @@ func (s *anthropicResponsesStreamState) textDelta(
 		s.textBufs[key] = builder
 	}
 	builder.WriteString(event.Delta)
+	if err := s.checkAccumulated(builder, len(event.Delta), "text"); err != nil {
+		return nil, err
+	}
 	text := event.Delta
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,
@@ -2284,12 +2382,9 @@ func (s *anthropicResponsesStreamState) functionArgumentsDelta(
 	pending.arguments.WriteString(event.Delta)
 	// The accumulated arguments are emitted as one generated downstream
 	// frame at output_item.done: bound their cumulative size (review-k
-	// finding 9).
-	if pending.arguments.Len() > maxStreamAccumulatedBytes {
-		return nil, s.wireError(fmt.Errorf(
-			"responses stream accumulated tool arguments exceed %d bytes",
-			maxStreamAccumulatedBytes,
-		))
+	// finding 9) and the exchange-wide total (review-08 blocker 7).
+	if err := s.checkAccumulated(&pending.arguments, len(event.Delta), "tool arguments"); err != nil {
+		return nil, err
 	}
 	// A block that never started (the added item lacked call identity, which
 	// is corrupt wire rejected at output_item.done) must not receive an
@@ -2383,6 +2478,9 @@ func (s *anthropicResponsesStreamState) refusalDelta(
 		s.refusalBufs[key] = builder
 	}
 	builder.WriteString(event.Delta)
+	if err := s.checkAccumulated(builder, len(event.Delta), "refusal"); err != nil {
+		return nil, err
+	}
 	text := event.Delta
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,
@@ -2655,7 +2753,7 @@ func (s *anthropicResponsesStreamState) reconcileTerminalOutput(
 					}
 				}
 			}
-			if len(value.Content) != len(s.partsSeenForItem(itemID)) {
+			if len(value.Content) != s.partCounts[itemID] {
 				return s.wireError(fmt.Errorf(
 					"terminal envelope message %q content count does not match the observed parts",
 					itemID,

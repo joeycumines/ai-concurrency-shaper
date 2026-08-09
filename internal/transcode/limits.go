@@ -10,6 +10,37 @@ import "fmt"
 // (review-k finding 9). Aligned with the default SSE frame bound.
 const maxStreamAccumulatedBytes = 1 << 20
 
+// Exchange-level stream budgets (review-08 blocker 7): the per-item/part
+// bounds above limit a single accumulator; these budgets bound the whole
+// exchange so a corrupt upstream cannot grow memory without limit across
+// many items, parts, tool calls, or report entries, and cannot amplify the
+// generated downstream output (JSON escaping, terminal repetition) without
+// bound. Every violation terminates the exchange as corrupt upstream wire.
+const (
+	// maxStreamTotalAccumulatedBytes bounds the sum of all accumulated
+	// semantic bytes (text, refusal, tool arguments) across every item,
+	// part, and tool call of one exchange.
+	maxStreamTotalAccumulatedBytes = 4 << 20
+	// maxStreamOutputItems bounds the output items one exchange may open.
+	maxStreamOutputItems = 4096
+	// maxStreamPartsPerItem bounds the content parts one output item may
+	// open.
+	maxStreamPartsPerItem = 4096
+	// maxStreamToolCalls bounds the tool calls one exchange may open.
+	maxStreamToolCalls = 4096
+	// maxStreamTerminalBatchBytes bounds the terminal batch buffered in the
+	// converting reader: the released item-closing events and the terminal
+	// envelope repeat the accumulated content several times, and JSON
+	// escaping can amplify each copy.
+	maxStreamTerminalBatchBytes = 32 << 20
+	// maxStreamConversionReportEntries bounds the accumulated losses and
+	// notes of one exchange.
+	maxStreamConversionReportEntries = 4096
+	// maxStreamErrorTextBytes bounds the error text embedded in a
+	// client-dialect error frame; longer messages are truncated.
+	maxStreamErrorTextBytes = 4 << 10
+)
+
 // Package defaults for the BodyLimits fields. A zero value in a programmatic
 // BodyLimits selects the field's default; the effective limits are computed
 // once at handler construction so zero never reaches handler logic (review-k

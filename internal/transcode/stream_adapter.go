@@ -79,7 +79,9 @@ func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
 }
 
 // marshalResponsesEvents validates and marshals typed Responses events into
-// frames.
+// frames. A marshaled payload amplified beyond the frame bound (JSON
+// escaping, terminal repetition) is a typed frame error (review-08 blocker
+// 7): the generated downstream wire must be bounded like the input wire.
 func marshalResponsesEvents(
 	events []ResponsesSSEEvent,
 ) (convertedBatch, error) {
@@ -88,6 +90,9 @@ func marshalResponsesEvents(
 		data, err := MarshalResponsesEvent(event)
 		if err != nil {
 			return convertedBatch{}, err
+		}
+		if len(data) > maxSSEFrameBytes {
+			return convertedBatch{}, &SSEBoundError{Bound: maxSSEFrameBytes}
 		}
 		batch.Events = append(batch.Events, frameEvent{
 			Type: event.EventType(),
@@ -171,7 +176,9 @@ func (c *responsesToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 
 // marshalAnthropicEvents marshals typed Anthropic events into frames. The
 // SSE event name equals the JSON type, matching the manual conformance
-// validator.
+// validator. A marshaled payload amplified beyond the frame bound (JSON
+// escaping, terminal repetition) is a typed frame error (review-08 blocker
+// 7).
 func marshalAnthropicEvents(
 	events []AnthropicStreamEvent,
 ) (convertedBatch, error) {
@@ -180,6 +187,9 @@ func marshalAnthropicEvents(
 		data, err := json.Marshal(event)
 		if err != nil {
 			return convertedBatch{}, err
+		}
+		if len(data) > maxSSEFrameBytes {
+			return convertedBatch{}, &SSEBoundError{Bound: maxSSEFrameBytes}
 		}
 		batch.Events = append(batch.Events, frameEvent{
 			Type: string(event.Type),
@@ -462,6 +472,18 @@ func (c *chatToAnthropicConverter) ErrorEvent(err error) (frameEvent, bool) {
 	return anthropicErrorFrame(err)
 }
 
+// boundedErrorMessage bounds the error text embedded in a client-dialect
+// error frame: a conversion error may carry an entire corrupt upstream
+// payload (e.g. an invalid tool-argument buffer), which must not amplify the
+// downstream frame without bound (review-08 blocker 7).
+func boundedErrorMessage(err error) string {
+	message := err.Error()
+	if len(message) <= maxStreamErrorTextBytes {
+		return message
+	}
+	return message[:maxStreamErrorTextBytes] + "…"
+}
+
 // responsesErrorFrame marshals a Responses error event.
 func responsesErrorFrame(err error, sequence int64) (frameEvent, bool) {
 	event := ResponseErrorEvent{
@@ -470,7 +492,7 @@ func responsesErrorFrame(err error, sequence int64) (frameEvent, bool) {
 			SequenceNumber: sequence,
 		},
 		Code:    "conversion_error",
-		Message: err.Error(),
+		Message: boundedErrorMessage(err),
 		Param:   "",
 	}
 	data, marshalErr := MarshalResponsesEvent(event)
@@ -487,7 +509,7 @@ func anthropicErrorFrame(err error) (frameEvent, bool) {
 		Type: AnthropicStreamEventTypeError,
 		Error: &AnthropicStreamError{
 			Type:    "api_error",
-			Message: err.Error(),
+			Message: boundedErrorMessage(err),
 		},
 	}
 	data, marshalErr := json.Marshal(event)

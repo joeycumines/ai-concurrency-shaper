@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -145,7 +146,9 @@ type ConversionReport struct {
 }
 
 // Lose records a loss of the feature, or returns an UnsupportedFeatureError
-// when the policy does not allow it.
+// when the policy does not allow it. The report is bounded: an exchange that
+// accumulates more entries than the exchange budget is corrupt (review-08
+// blocker 7).
 func (r *ConversionReport) Lose(
 	policy LossPolicy,
 	feature Feature,
@@ -157,6 +160,16 @@ func (r *ConversionReport) Lose(
 			Protocol: "transcode",
 			Path:     path,
 			Feature:  string(feature),
+		}
+	}
+	if len(r.Losses) >= maxStreamConversionReportEntries {
+		// A report overflow is corrupt upstream data on the response side
+		// (the stream path derives upstream provenance from this typed
+		// error) while the request path records its own explicit local
+		// provenance (review-08 blocker 7).
+		return &UpstreamWireError{
+			Cause: errors.New("conversion report exceeds the exchange bound of " +
+				strconv.Itoa(maxStreamConversionReportEntries) + " entries"),
 		}
 	}
 	r.Losses = append(r.Losses, ConversionLoss{
