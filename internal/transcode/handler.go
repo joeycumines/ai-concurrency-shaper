@@ -165,6 +165,13 @@ func NewTranscodeHandler(
 	roundTrip RoundTrip,
 	outcomeFn OutcomeFunc,
 ) *TranscodeHandler {
+	// The body limits contract (limits.go): zero values select the package
+	// defaults, computed ONCE here so zero never reaches handler logic — in
+	// particular, a zero DecodedRequestBytes is never treated as unlimited
+	// (review-k finding 8). The handler-side per-use fallbacks remain as
+	// defense-in-depth for any future construction path that bypasses this
+	// normalization.
+	cfg.BodyLimits = cfg.BodyLimits.WithDefaults()
 	return &TranscodeHandler{
 		cfg:       cfg,
 		roundTrip: roundTrip,

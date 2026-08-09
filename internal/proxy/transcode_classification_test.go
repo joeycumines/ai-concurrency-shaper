@@ -861,6 +861,75 @@ func TestProxyTranscodeNonStreamFailedEnvelopeIsUpstreamFailure(t *testing.T) {
 	}
 }
 
+// TestProxyNewRetryReplayBytesContract proves the retry-replay contract
+// (review-k finding 8): a declared RetryReplayBytes must equal the proxy
+// retry body cap with retries enabled, or proxy.New fails naming the route
+// and both values; equal values construct.
+func TestProxyNewRetryReplayBytesContract(t *testing.T) {
+	pattern, err := route.Parse("POST /v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse("https://upstream.example")
+	base := func() []Option {
+		return []Option{
+			WithUpstream(u),
+			WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+			WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+			WithMetrics(metrics.NewCollector()),
+		}
+	}
+
+	// Mismatch: the declared replay bound (1 MiB) differs from the proxy
+	// retry body cap (32 MiB). The error names the route and both values.
+	mismatch := TranscodeMapping{
+		Mapping:    testResponsesMapping(t),
+		BodyLimits: transcode.BodyLimits{RetryReplayBytes: 1 << 20},
+	}
+	_, err = New(append(base(),
+		WithMaxRetries(3),
+		WithMaxBodyBytes(32<<20),
+		WithTranscodeMapping(mismatch),
+	)...)
+	if err == nil {
+		t.Fatal("mismatched RetryReplayBytes accepted")
+	}
+	if !strings.Contains(err.Error(), "POST /v1/responses") ||
+		!strings.Contains(err.Error(), "RetryReplayBytes=1048576") ||
+		!strings.Contains(err.Error(), "33554432") {
+		t.Fatalf("error does not name the route and both values: %v", err)
+	}
+
+	// Retries disabled with a non-zero declared bound also fails.
+	_, err = New(append(base(), WithTranscodeMapping(mismatch))...)
+	if err == nil {
+		t.Fatal("declared RetryReplayBytes with retries disabled accepted")
+	}
+	if !strings.Contains(err.Error(), "retries are disabled") {
+		t.Fatalf("error does not report disabled retries: %v", err)
+	}
+
+	// Equal values construct.
+	equal := TranscodeMapping{
+		Mapping:    testResponsesMapping(t),
+		BodyLimits: transcode.BodyLimits{RetryReplayBytes: 32 << 20},
+	}
+	if _, err := New(append(base(),
+		WithMaxRetries(3),
+		WithMaxBodyBytes(32<<20),
+		WithTranscodeMapping(equal),
+	)...); err != nil {
+		t.Fatalf("equal values rejected: %v", err)
+	}
+
+	// An undeclared (zero) bound constructs without retries: no equality
+	// check applies to a route that declares no replay bound.
+	undeclared := TranscodeMapping{Mapping: testResponsesMapping(t)}
+	if _, err := New(append(base(), WithTranscodeMapping(undeclared))...); err != nil {
+		t.Fatalf("undeclared replay bound rejected: %v", err)
+	}
+}
+
 // TestProxyNewRejectsMisconfiguredTranscodeRoutes proves a misconfigured
 // route fails at proxy.New, never on the first request (review-j finding 14).
 func TestProxyNewRejectsMisconfiguredTranscodeRoutes(t *testing.T) {

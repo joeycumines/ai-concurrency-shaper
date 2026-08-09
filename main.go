@@ -323,18 +323,26 @@ func run() error {
 	for i := range mappings {
 		mappings[i].ModelMap = transcodeModelMap
 		mappings[i].Auth = transcodeAuthPolicy
-		mappings[i].BodyLimits = transcode.BodyLimits{
+		limits := transcode.BodyLimits{
 			AcceptedRequestBytes: transcodeMaxRequestMB << 20,
 			// The decoded limit is separate from the accepted raw-body limit
 			// (merge gate 19): it bounds the rendered upstream request, with
 			// headroom for decode amplification.
 			DecodedRequestBytes:     transcodeMaxRequestMB << 22,
 			SuccessfulResponseBytes: transcodeMaxResponseMB << 20,
-			RetryReplayBytes:        int64(retryMaxBodyMB) << 20,
 			ErrorResponseBytes:      1 << 20,
 			SSELineBytes:            1 << 20,
 			SSEFrameBytes:           1 << 20,
 		}
+		// The retry-replay contract (internal/transcode/limits.go): a
+		// declared bound must equal the proxy retry body cap with retries
+		// enabled. With retries disabled no replay happens, so no bound is
+		// declared and the fail-fast equality check does not apply
+		// (review-k finding 8).
+		if retryMax != 0 {
+			limits.RetryReplayBytes = int64(retryMaxBodyMB) << 20
+		}
+		mappings[i].BodyLimits = limits
 	}
 
 	proxyOpts := []proxy.Option{

@@ -620,7 +620,10 @@ func New(opts ...Option) (*Proxy, error) {
 	}
 
 	// Reject duplicate transcode client routes: the first matching handler
-	// would silently win. The key is method+path.
+	// would silently win. The key is method+path. A mapping that declares a
+	// RetryReplayBytes bound must equal the proxy's retry transport body cap
+	// with retries enabled (review-k finding 8): the declared bound is
+	// otherwise a silent lie about the actual replay cap.
 	seenTranscodeRoutes := make(map[transcode.RouteKey]struct{}, len(cfg.transcodeMappings))
 	for i := range cfg.transcodeMappings {
 		routeKey := cfg.transcodeMappings[i].Mapping.ClientRoute
@@ -628,6 +631,26 @@ func New(opts ...Option) (*Proxy, error) {
 			return nil, fmt.Errorf("proxy: duplicate transcode client route %s %s", routeKey.Method, routeKey.Path)
 		}
 		seenTranscodeRoutes[routeKey] = struct{}{}
+
+		if declared := cfg.transcodeMappings[i].BodyLimits.RetryReplayBytes; declared != 0 {
+			if cfg.maxRetries == 0 {
+				return nil, fmt.Errorf(
+					"proxy: transcode route %s %s declares RetryReplayBytes=%d but retries are disabled",
+					routeKey.Method,
+					routeKey.Path,
+					declared,
+				)
+			}
+			if declared != cfg.maxBodyBytes {
+				return nil, fmt.Errorf(
+					"proxy: transcode route %s %s RetryReplayBytes=%d must equal the proxy retry body cap %d",
+					routeKey.Method,
+					routeKey.Path,
+					declared,
+					cfg.maxBodyBytes,
+				)
+			}
+		}
 	}
 
 	// Build retry transport when retries are enabled.

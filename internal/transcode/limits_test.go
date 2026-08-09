@@ -22,3 +22,50 @@ func TestBodyLimitsValidate(t *testing.T) {
 		}
 	}
 }
+
+// TestBodyLimitsWithDefaults proves every zero field selects its package
+// default and explicit values are preserved (review-k finding 8): an
+// all-zero BodyLimits enforces real bounds on every field, never unlimited.
+func TestBodyLimitsWithDefaults(t *testing.T) {
+	effective := (BodyLimits{}).WithDefaults()
+	want := BodyLimits{
+		AcceptedRequestBytes:    DefaultAcceptedRequestBytes,
+		DecodedRequestBytes:     DefaultDecodedRequestBytes,
+		RetryReplayBytes:        DefaultRetryReplayBytes,
+		SuccessfulResponseBytes: DefaultSuccessfulResponseBytes,
+		ErrorResponseBytes:      DefaultErrorResponseBytes,
+		SSELineBytes:            DefaultSSELineBytes,
+		SSEFrameBytes:           DefaultSSEFrameBytes,
+	}
+	if effective != want {
+		t.Fatalf("effective = %+v, want %+v", effective, want)
+	}
+
+	explicit := BodyLimits{
+		AcceptedRequestBytes:    1,
+		DecodedRequestBytes:     2,
+		RetryReplayBytes:        3,
+		SuccessfulResponseBytes: 4,
+		ErrorResponseBytes:      5,
+		SSELineBytes:            6,
+		SSEFrameBytes:           7,
+	}.WithDefaults()
+	if explicit != (BodyLimits{
+		AcceptedRequestBytes:    1,
+		DecodedRequestBytes:     2,
+		RetryReplayBytes:        3,
+		SuccessfulResponseBytes: 4,
+		ErrorResponseBytes:      5,
+		SSELineBytes:            6,
+		SSEFrameBytes:           7,
+	}) {
+		t.Fatalf("explicit values changed: %+v", explicit)
+	}
+
+	// Per-field defaulting: only the zero fields are replaced.
+	partial := (BodyLimits{DecodedRequestBytes: 42}).WithDefaults()
+	if partial.DecodedRequestBytes != 42 ||
+		partial.AcceptedRequestBytes != DefaultAcceptedRequestBytes {
+		t.Fatalf("partial = %+v", partial)
+	}
+}
