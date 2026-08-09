@@ -1154,3 +1154,68 @@ func TestProxyPassthroughRouteKeepsHeaders(t *testing.T) {
 		t.Fatalf("passthrough dropped Set-Cookie: %q", got)
 	}
 }
+
+// panickingBody panics on the first Read, simulating an upstream whose body
+// copy blows up after the response headers were committed.
+type panickingBody struct{}
+
+func (panickingBody) Read([]byte) (int, error) { panic("boom in body copy") }
+func (panickingBody) Close() error             { return nil }
+
+// TestPanicAfterCommittedResponseIsAborted proves a panic after the response
+// was committed is an ABORTED exchange, never a clean completion: the
+// completion counters are skipped and the journal records Aborted with
+// ResponseComplete unset (review-08 blocker 12).
+func TestPanicAfterCommittedResponseIsAborted(t *testing.T) {
+	upstreamURL, _ := url.Parse("https://upstream.example")
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+	j := journal.New(512, 1<<20)
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithJournal(j),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       panickingBody{},
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m"}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	// The response was committed (200) before the body copy panicked.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want the committed 200", rec.Code)
+	}
+
+	snap := met.Snapshot()
+	if snap.TotalAborted != 1 {
+		t.Fatalf("TotalAborted = %d, want 1", snap.TotalAborted)
+	}
+	if snap.TotalProxied != 0 {
+		t.Fatalf("TotalProxied = %d, want 0 (aborted panic is not a clean completion)", snap.TotalProxied)
+	}
+
+	entries := j.Entries()
+	if len(entries) == 0 {
+		t.Fatal("no journal entry")
+	}
+	entry := entries[len(entries)-1]
+	if !entry.Aborted {
+		t.Fatal("journal entry must be marked aborted")
+	}
+	if !entry.Timing.ResponseComplete.IsZero() {
+		t.Fatal("ResponseComplete must be unset for an aborted exchange")
+	}
+}

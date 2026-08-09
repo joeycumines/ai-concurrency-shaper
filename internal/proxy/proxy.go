@@ -1034,16 +1034,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("proxy panic: %v", rv)
 			if recPtr != nil {
+				// Any recovered panic is an aborted exchange: the exchange never
+				// completed cleanly, the clean-completion counters are skipped,
+				// and the journal records Aborted with ResponseComplete unset
+				// (review-08 blocker 12).
+				recPtr.aborted = true
 				if !recPtr.terminalWritten {
 					recPtr.proxyGeneratedError = true
 				}
 				http.Error(recPtr, "internal error", http.StatusBadGateway)
-				if limited {
-					p.m.IncProxied()
-				} else {
-					p.m.IncPassThrough()
-				}
-				finalize(false)
+				finalize(true)
 			} else {
 				// No statusRecorder — write directly to the raw ResponseWriter.
 				// This path should not happen in practice (recPtr is always set
@@ -1333,9 +1333,15 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 					panic(rv)
 				}
 				log.Printf("proxy panic in servePassthrough: %v", rv)
-				if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
-					rec.proxyGeneratedError = true
-					http.Error(rec, "internal error", http.StatusBadGateway)
+				if rec, ok := w.(*statusRecorder); ok {
+					// Any recovered panic is an aborted exchange: it never
+					// reaches the completion counters or a clean journal
+					// finalization (review-08 blocker 12).
+					rec.aborted = true
+					if !rec.terminalWritten {
+						rec.proxyGeneratedError = true
+						http.Error(rec, "internal error", http.StatusBadGateway)
+					}
 				}
 				localPanic = true
 			}
@@ -1367,8 +1373,14 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 		// path. The breaker is resolved from the classification: a
 		// definitive upstream failure retained in the result is recorded
 		// (mirroring the native abort path); everything else cancels the
-		// probe.
-		p.resolveAbortedExchange(result, retryAttempt, proxyStart, breakerEpoch, upstreamAbortFailure)
+		// probe. A LOCAL panic is not an upstream failure: its
+		// proxy-generated 502 must never fail the breaker (review-08
+		// blocker 12 preserves the localPanic guard).
+		if !localPanic {
+			p.resolveAbortedExchange(result, retryAttempt, proxyStart, breakerEpoch, upstreamAbortFailure)
+		} else {
+			p.cancelSuppressedAbortProbe(retryAttempt, proxyStart, breakerEpoch)
+		}
 		return
 	}
 
@@ -1386,10 +1398,10 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 	// forwarded AND the breaker logic has run. This placement mirrors
 	// serveLimited's IncProxied() at the end of that function. If a
 	// panic occurs in the breaker logic above, IncPassThrough is NOT
-	// called — the outer ServeHTTP recovery handles metrics recording,
-	// calling IncPassThrough exactly once (via the !metRecorded guard).
-	// Placing this BEFORE the breaker logic would cause a double-count
-	// on panic: once here, once in the outer recovery.
+	// called — the recovered panic marks the exchange aborted and the
+	// outer ServeHTTP recovery finalizes it as aborted (RecordAbortedRequest;
+	// review-08 blocker 12), so the completion counter is never
+	// double-counted.
 	p.m.IncPassThrough()
 }
 
@@ -1640,9 +1652,15 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 					panic(rv)
 				}
 				log.Printf("proxy panic in serveLimited: %v", rv)
-				if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
-					rec.proxyGeneratedError = true
-					http.Error(rec, "internal error", http.StatusBadGateway)
+				if rec, ok := w.(*statusRecorder); ok {
+					// Any recovered panic is an aborted exchange: it never
+					// reaches the completion counters or a clean journal
+					// finalization (review-08 blocker 12).
+					rec.aborted = true
+					if !rec.terminalWritten {
+						rec.proxyGeneratedError = true
+						http.Error(rec, "internal error", http.StatusBadGateway)
+					}
 				}
 				localPanic = true
 			}
@@ -1674,8 +1692,14 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		// path. The breaker is resolved from the classification: a
 		// definitive upstream failure retained in the result is recorded
 		// (mirroring the native abort path); everything else cancels the
-		// probe.
-		p.resolveAbortedExchange(result, retryAttempt, proxyStart, breakerEpoch, upstreamAbortFailure)
+		// probe. A LOCAL panic is not an upstream failure: its
+		// proxy-generated 502 must never fail the breaker (review-08
+		// blocker 12 preserves the localPanic guard).
+		if !localPanic {
+			p.resolveAbortedExchange(result, retryAttempt, proxyStart, breakerEpoch, upstreamAbortFailure)
+		} else {
+			p.cancelSuppressedAbortProbe(retryAttempt, proxyStart, breakerEpoch)
+		}
 		return
 	}
 

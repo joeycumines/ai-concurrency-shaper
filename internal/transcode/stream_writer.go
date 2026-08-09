@@ -102,17 +102,17 @@ func (w *sealedSSEWriter) Seal() error {
 	return nil
 }
 
-// writeAll writes p fully to w.
+// writeAll writes p fully to w with a single Write. A partial write with a
+// nil error is io.ErrShortWrite: repeated partial writes must never be
+// retried into a false success, because a caller that sees nil records the
+// write as complete (review-08 blocker 11).
 func writeAll(w io.Writer, p []byte) error {
-	for len(p) != 0 {
-		n, err := w.Write(p)
-		if err != nil {
-			return err
-		}
-		if n <= 0 {
-			return io.ErrShortWrite
-		}
-		p = p[n:]
+	n, err := w.Write(p)
+	if err != nil {
+		return err
+	}
+	if n != len(p) {
+		return io.ErrShortWrite
 	}
 	return nil
 }
