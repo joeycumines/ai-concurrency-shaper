@@ -45,6 +45,35 @@ type responsesRequestEnvelope struct {
 	Stream             bool                        `json:"stream,omitempty"`
 }
 
+// responsesRequestShadow is the presence-aware decode shadow of
+// responsesRequestEnvelope: the request body's stream field must be
+// distinguishable from absent so the handler can apply the documented
+// stream-intent precedence — an explicit stream:false is authoritative over
+// the Accept header (review-08 blocker 1). The shadow models the full
+// envelope surface with the same strictness (unknown fields rejected) and a
+// pointer stream; values are consumed from the envelope decode that follows.
+type responsesRequestShadow struct {
+	Model              string                      `json:"model"`
+	Input              *ResponsesInput             `json:"input,omitempty"`
+	Instructions       *string                     `json:"instructions,omitempty"`
+	MaxOutputTokens    *int                        `json:"max_output_tokens,omitempty"`
+	ParallelToolCalls  *bool                       `json:"parallel_tool_calls,omitempty"`
+	PreviousResponseID *string                     `json:"previous_response_id,omitempty"`
+	Store              *bool                       `json:"store,omitempty"`
+	Temperature        *float64                    `json:"temperature,omitempty"`
+	TopP               *float64                    `json:"top_p,omitempty"`
+	Truncation         *string                     `json:"truncation,omitempty"`
+	User               *string                     `json:"user,omitempty"`
+	Metadata           map[string]string           `json:"metadata,omitempty"`
+	Tools              []ResponsesTool             `json:"tools,omitempty"`
+	ToolChoice         *ResponsesToolChoice        `json:"tool_choice,omitempty"`
+	Reasoning          *ResponsesEnvelopeReasoning `json:"reasoning,omitempty"`
+	Text               *ResponsesEnvelopeText      `json:"text,omitempty"`
+	ServiceTier        *string                     `json:"service_tier,omitempty"`
+	TopLogprobs        *int64                      `json:"top_logprobs,omitempty"`
+	Stream             *bool                       `json:"stream,omitempty"`
+}
+
 // probeUnsupportedResponsesFields reports the first recognized-but-unsupported
 // Responses request field, or "" when none is present. These fields are
 // conversation-state and background controls that the transcoder deliberately
@@ -88,10 +117,26 @@ func DecodeResponsesRequest(
 		}
 	}
 
+	// Presence-aware shadow decode: the body's stream field must be
+	// distinguishable from absent (review-08 blocker 1). The shadow models
+	// the same surface as the envelope with the same strictness; values are
+	// consumed from the envelope decode below.
+	var shadow responsesRequestShadow
+	if err := strictDecode(body, &shadow); err != nil {
+		return DecodeResult{}, nil, fmt.Errorf("responses request: %w", err)
+	}
+
 	var envelope responsesRequestEnvelope
 	if err := strictDecode(body, &envelope); err != nil {
 		return DecodeResult{}, nil, fmt.Errorf("responses request: %w", err)
 	}
+	// The envelope decode cannot fail after the shadow succeeded: both
+	// decode the same modeled surface with the same strictness (verified
+	// field-identical surfaces and null semantics — where the shadow used a
+	// pointer and the envelope a value, a null is silently ignored by the
+	// value field, never a decode error), so an input rejected by the
+	// envelope is rejected by the shadow first. The decode is defensive, the
+	// same shadow-then-wire pattern DecodeChatResponse uses.
 	if envelope.Model == "" {
 		return DecodeResult{}, nil, errors.New("responses request model is empty")
 	}
@@ -112,6 +157,14 @@ func DecodeResponsesRequest(
 	var result DecodeResult
 	result.Request.ClientModel = envelope.Model
 	result.Request.Stream = envelope.Stream
+	// An explicitly present body stream field (true or false) is recorded as
+	// present so the handler can apply the documented precedence over the
+	// Accept header (review-08 blocker 1). An absent or null field is treated
+	// as absent, consistent with the envelope's other pointer fields.
+	if shadow.Stream != nil {
+		result.StreamSet = true
+		result.Request.Stream = *shadow.Stream
+	}
 	result.Request.MaxOutputTokens = envelope.MaxOutputTokens
 	result.Request.ParallelTools = envelope.ParallelToolCalls
 	result.Request.Temperature = envelope.Temperature
@@ -612,6 +665,7 @@ func DecodeMessagesRequest(
 	}
 	result.Request.Metadata = metadata
 	if envelope.Stream != nil {
+		result.StreamSet = true
 		result.Request.Stream = *envelope.Stream
 	}
 

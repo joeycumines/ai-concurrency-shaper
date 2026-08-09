@@ -777,12 +777,14 @@ func TestHandlerStreamingResponsesToChat(t *testing.T) {
 func TestHandlerStreamingResponsesToChatAcceptOnly(t *testing.T) {
 	var (
 		mu      sync.Mutex
+		gotReq  *http.Request
 		gotBody []byte
 	)
 	mapping := responsesMapping(t)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
 		body, _ := io.ReadAll(req.Body)
 		mu.Lock()
+		gotReq = req.Clone(req.Context())
 		gotBody = body
 		mu.Unlock()
 		return &http.Response{
@@ -817,6 +819,9 @@ func TestHandlerStreamingResponsesToChatAcceptOnly(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if got := gotReq.Header.Get("Accept"); got != "text/event-stream" {
+		t.Errorf("outbound Accept = %q, want text/event-stream", got)
+	}
 	if err := json.Unmarshal(gotBody, &probe); err != nil {
 		t.Fatal(err)
 	}
@@ -825,6 +830,160 @@ func TestHandlerStreamingResponsesToChatAcceptOnly(t *testing.T) {
 	}
 	if probe.StreamOptions == nil || probe.StreamOptions.IncludeUsage == nil || !*probe.StreamOptions.IncludeUsage {
 		t.Fatalf("upstream request include_usage = %v, want true: %s", probe.StreamOptions, gotBody)
+	}
+}
+
+// TestExplicitStreamFalseIsNotOverridden proves the request body's stream
+// field is authoritative over the Accept header (review-08 blocker 1): an
+// explicit stream:false must never become an upstream SSE request or an SSE
+// response, regardless of the client's Accept header — the outbound request
+// stays non-streaming, its Accept header is rewritten to application/json,
+// and a JSON upstream response is accepted.
+func TestExplicitStreamFalseIsNotOverridden(t *testing.T) {
+	assertNonStreaming := func(t *testing.T, clientProtocol string, policy LossPolicy, body string) {
+		t.Helper()
+		var (
+			mu      sync.Mutex
+			gotReq  *http.Request
+			gotBody []byte
+		)
+		var mapping Mapping
+		if clientProtocol == string(ClientResponses) {
+			mapping = responsesMapping(t)
+		} else {
+			mapping = messagesMapping(t, UpstreamChatCompletions)
+		}
+		handler := NewTranscodeHandler(
+			HandlerConfig{
+				Mapping:  mapping,
+				Upstream: mustParseURL(t, "https://upstream.example"),
+				BodyLimits: BodyLimits{
+					AcceptedRequestBytes:    1 << 20,
+					SuccessfulResponseBytes: 1 << 20,
+				},
+				ModelMap:           ModelMap{AllowIdentity: true},
+				LossPolicy:         policy,
+				AuthPolicy:         AuthPolicy{Mode: AuthNone},
+				ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
+				AllowedClientQuery: map[string]struct{}{},
+			},
+			func(req *http.Request) (*http.Response, error) {
+				body, _ := io.ReadAll(req.Body)
+				mu.Lock()
+				gotReq = req.Clone(req.Context())
+				gotBody = body
+				mu.Unlock()
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(bytes.NewReader(testcorpus.ChatCompletionsResponseJSON())),
+				}, nil
+			},
+			nil,
+		)
+		req := httptest.NewRequest(http.MethodPost, mapping.ClientRoute.Path, strings.NewReader(body))
+		req.Header.Set("Accept", "text/event-stream")
+		// A client Connection token nominating Accept for removal at its hop
+		// must not strip the proxy's rewritten outbound Accept: the client's
+		// hop-by-hop directives govern the client-to-proxy hop only, and the
+		// proxy generates a fresh Accept for its own hop upstream.
+		req.Header.Set("Connection", "accept")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if got := gotReq.Header.Get("Accept"); got != "application/json" {
+			t.Errorf("outbound Accept = %q, want application/json", got)
+		}
+		var probe struct {
+			Stream *bool `json:"stream"`
+		}
+		if err := json.Unmarshal(gotBody, &probe); err != nil {
+			t.Fatal(err)
+		}
+		if probe.Stream == nil || *probe.Stream {
+			t.Errorf("upstream request stream = %v, want explicit false: %s", probe.Stream, gotBody)
+		}
+		// The client receives a JSON response, never an SSE stream.
+		if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Errorf("response Content-Type = %q, want application/json", ct)
+		}
+		if strings.Contains(rec.Body.String(), "event: response.created") {
+			t.Errorf("response carries SSE events for a non-streaming exchange: %q", rec.Body.String())
+		}
+	}
+	t.Run("responses-client", func(t *testing.T) {
+		assertNonStreaming(t, string(ClientResponses), StrictLossPolicy(),
+			`{"model":"m","input":"x","stream":false}`)
+	})
+	t.Run("messages-client", func(t *testing.T) {
+		// The Chat fixture's usage_timing breakdown is not portable to
+		// Messages; the permissive policy approves that response-side loss.
+		assertNonStreaming(t, string(ClientMessages), j6PermissivePolicy(),
+			`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	})
+}
+
+// TestExplicitStreamTrueOverridesJsonAccept proves the body-authoritative
+// precedence in the streaming direction (review-08 blocker 1): an explicit
+// body stream:true with Accept: application/json still produces an upstream
+// SSE request whose outbound Accept is rewritten to text/event-stream, and
+// the SSE response is accepted — the mirror of
+// TestExplicitStreamFalseIsNotOverridden, pinning the documented rule that
+// the outbound Accept always matches the converted request body's stream
+// value.
+func TestExplicitStreamTrueOverridesJsonAccept(t *testing.T) {
+	var (
+		mu      sync.Mutex
+		gotReq  *http.Request
+		gotBody []byte
+	)
+	mapping := responsesMapping(t)
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(req.Body)
+		mu.Lock()
+		gotReq = req.Clone(req.Context())
+		gotBody = body
+		mu.Unlock()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(bytes.NewReader(testcorpus.ChatCompletionsStreamSSE())),
+		}, nil
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x","stream":true}`),
+	)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := gotReq.Header.Get("Accept"); got != "text/event-stream" {
+		t.Errorf("outbound Accept = %q, want text/event-stream", got)
+	}
+	var probe struct {
+		Stream *bool `json:"stream"`
+	}
+	if err := json.Unmarshal(gotBody, &probe); err != nil {
+		t.Fatal(err)
+	}
+	if probe.Stream == nil || !*probe.Stream {
+		t.Errorf("upstream request stream = %v, want explicit true: %s", probe.Stream, gotBody)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("response Content-Type = %q, want text/event-stream", ct)
+	}
+	if !strings.Contains(rec.Body.String(), "response.completed") {
+		t.Errorf("missing SSE terminal: %q", rec.Body.String())
 	}
 }
 

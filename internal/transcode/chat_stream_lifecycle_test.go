@@ -32,9 +32,73 @@ func TestAcceptIsEventStream(t *testing.T) {
 		{"", false},
 		{"application/notjson", false},
 		{"text/event-stream; charset=utf-8", true},
-		// The first parseable range decides: a garbage first range is not
-		// an SSE preference.
-		{"bogus, text/event-stream", false},
+		// A range that matches neither representation is ignored, never a
+		// veto: text/event-stream still applies after it.
+		{"bogus, text/event-stream", true},
+	}
+	for _, tt := range tests {
+		if got := acceptIsEventStream(tt.accept); got != tt.want {
+			t.Errorf("acceptIsEventStream(%q) = %v, want %v", tt.accept, got, tt.want)
+		}
+	}
+}
+
+// TestAcceptStreamSelectionQualityAndOrdering pins the RFC 9110 media-range
+// selection of the Accept header (review-08 blocker 1): every range is
+// evaluated with its quality value, q=0 excludes a representation, and the
+// client's most-preferred acceptable representation between text/event-stream
+// and application/json wins — by effective quality, then specificity, then
+// order of appearance.
+func TestAcceptStreamSelectionQualityAndOrdering(t *testing.T) {
+	tests := []struct {
+		name   string
+		accept string
+		want   bool
+	}{
+		// The review-08 examples: the first parseable range must not decide,
+		// and q=0 must be honored.
+		{"json-then-sse", "application/json, text/event-stream", false},
+		{"sse-q0-then-json", "text/event-stream;q=0, application/json", false},
+		{"json-q01-sse-q1", "application/json;q=0.1, text/event-stream;q=1", true},
+		// q=0 excludes a representation entirely, even against */*.
+		{"sse-q0-only", "text/event-stream;q=0", false},
+		{"both-q0", "text/event-stream;q=0, application/json;q=0", false},
+		{"sse-q0-beats-star", "text/event-stream;q=0, */*;q=1", false},
+		// Excluding one representation selects the other: an unmentioned
+		// representation is acceptable by default (RFC 9110 §12.5.1), so
+		// application/json;q=0 must never deliver JSON.
+		{"json-q0-only", "application/json;q=0", true},
+		{"json-q0-json-star", "application/json;q=0, application/*;q=0.1", true},
+		{"star-q0-only", "*/*;q=0", false},
+		{"wildcard-excluded-sse-wins", "*/*;q=0, text/event-stream;q=1", true},
+		// Equal quality: the more specific applicable range wins.
+		{"star-then-sse", "*/*;q=1, text/event-stream;q=1", true},
+		{"text-star-vs-json-exact", "text/*;q=1, application/json;q=1", false},
+		{"text-star-only", "text/*;q=1", true},
+		// Equal quality and specificity: the first-listed range wins.
+		{"sse-then-json-equal", "text/event-stream;q=0.5, application/json;q=0.5", true},
+		{"json-then-sse-equal", "application/json;q=0.5, text/event-stream;q=0.5", false},
+		// A lone */* is a full tie with no order information: the
+		// non-streaming default applies.
+		{"star-only", "*/*", false},
+		// Among equally specific ranges the highest q applies.
+		{"sse-tier-max-q", "text/event-stream;q=0.4, application/json;q=0.4, text/event-stream;q=0.9", true},
+		// Malformed ranges are ignored: they never decide and never disturb
+		// the ordering of the ranges around them.
+		{"non-matching-first", "bogus, text/event-stream", true},
+		{"non-matching-mid", "application/json, bogus, text/event-stream", false},
+		{"malformed-q", "text/event-stream;q=abc, application/json", false},
+		{"q-out-of-range", "text/event-stream;q=2", false},
+		// NaN parses as a float but is outside the documented 0..1 q
+		// contract; the range is skipped like any other malformed q.
+		{"q-nan-skipped", "text/event-stream;q=NaN, application/json;q=NaN, text/event-stream;q=1", true},
+		// A comma inside a quoted parameter value is part of the range, not
+		// a range separator (RFC 9110 quoted-string); the range survives.
+		{"quoted-comma-sse", `text/event-stream;note="a,b", application/json`, true},
+		{"quoted-comma-json", `application/json;note="a,b", text/event-stream`, false},
+		{"quoted-comma-escaped", `text/event-stream;note="a\,b", application/json`, true},
+		// Media types and parameter names are case-insensitive.
+		{"case-insensitive", "TEXT/EVENT-STREAM;Q=0.5, APPLICATION/JSON;Q=0.5", true},
 	}
 	for _, tt := range tests {
 		if got := acceptIsEventStream(tt.accept); got != tt.want {
@@ -64,9 +128,13 @@ func TestChatStreamIntentWrittenBack(t *testing.T) {
 		StreamIntent:             true, // from Accept: text/event-stream
 		OriginalResponsesRequest: echo,
 	}
-	// The handler merges the Accept-derived intent into the canonical
-	// request before rendering; replicate that write-back here.
-	context.StreamIntent = context.StreamIntent || result.Request.Stream
+	// The handler applies the documented stream-intent precedence: the
+	// request body's stream field, when explicitly present, is authoritative;
+	// here it is absent, so the Accept-derived intent stands. Replicate the
+	// handler's merge and write-back.
+	if result.StreamSet {
+		context.StreamIntent = result.Request.Stream
+	}
 	result.Request.Stream = context.StreamIntent
 	rendered, _, err := RenderChatRequest(result.Request, context, ChatCapabilities{ParallelToolCalls: true})
 	if err != nil {

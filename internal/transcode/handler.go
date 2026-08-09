@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -256,7 +258,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outReq, err := h.buildUpstreamRequest(r, upstreamBody)
+	outReq, err := h.buildUpstreamRequest(r, upstreamBody, context.StreamIntent)
 	if err != nil {
 		// An unallowed client query parameter or an invalid inbound
 		// credential is a client fault (400); other request-construction
@@ -410,10 +412,12 @@ func (h *TranscodeHandler) convertRequest(
 	context := &ExchangeContext{
 		IDs:        NewExchangeIDs(),
 		LossPolicy: policy,
-		// Stream intent is expressed either by the client Accept header (the
-		// Messages dialect signals streaming only this way) or by the
-		// request body's stream flag (Responses). Both are merged after
-		// decode below; the response media type must agree (merge gate 17).
+		// Stream intent precedence (review-08 blocker 1): the request body's
+		// stream field, when explicitly present, is authoritative; only when
+		// absent does the client Accept header select the representation
+		// (parsed below with full media-range and q-value semantics — q=0
+		// excludes, malformed ranges are ignored). The response media type
+		// must agree with the resolved intent (merge gate 17).
 		StreamIntent: acceptIsEventStream(r.Header.Get("Accept")),
 	}
 
@@ -436,11 +440,16 @@ func (h *TranscodeHandler) convertRequest(
 		if err != nil {
 			return nil, nil, err
 		}
-		context.StreamIntent = context.StreamIntent || result.Request.Stream
-		// Write the merged intent back into the canonical request so the
-		// upstream renderer emits stream:true (review-j finding 6): an
-		// Accept-only stream request must not ask the upstream for JSON
-		// while the handler expects SSE.
+		// The request body's stream field, when explicitly present, is
+		// authoritative over the Accept header (review-08 blocker 1): an
+		// explicit stream:false is never merged into streaming.
+		if result.StreamSet {
+			context.StreamIntent = result.Request.Stream
+		}
+		// Write the resolved intent back into the canonical request so the
+		// upstream renderer emits the stream value matching the negotiated
+		// mode (review-j finding 6): an Accept-only stream request must not
+		// ask the upstream for JSON while the handler expects SSE.
 		result.Request.Stream = context.StreamIntent
 		if err := resolveModel(result.Request.ClientModel); err != nil {
 			return nil, nil, err
@@ -480,9 +489,16 @@ func (h *TranscodeHandler) convertRequest(
 		if err != nil {
 			return nil, nil, err
 		}
-		context.StreamIntent = context.StreamIntent || result.Request.Stream
-		// Write the merged intent back into the canonical request so the
-		// upstream renderer emits stream:true (review-j finding 6).
+		// The request body's stream field, when explicitly present, is
+		// authoritative over the Accept header (review-08 blocker 1): an
+		// explicit stream:false is never merged into streaming.
+		if result.StreamSet {
+			context.StreamIntent = result.Request.Stream
+		}
+		// Write the resolved intent back into the canonical request so the
+		// upstream renderer emits the stream value matching the negotiated
+		// mode (review-j finding 6): an Accept-only stream request must not
+		// ask the upstream for JSON while the handler expects SSE.
 		result.Request.Stream = context.StreamIntent
 		if err := resolveModel(result.Request.ClientModel); err != nil {
 			return nil, nil, err
@@ -527,10 +543,12 @@ func (h *TranscodeHandler) convertRequest(
 
 // buildUpstreamRequest builds the outbound request: hop-by-hop sanitization,
 // source auth stripping, target auth application, recomputed Content-Length,
-// and the client context carried so downstream cancellation aborts upstream.
+// the outbound Accept rewritten to the negotiated stream mode, and the client
+// context carried so downstream cancellation aborts upstream.
 func (h *TranscodeHandler) buildUpstreamRequest(
 	r *http.Request,
 	body []byte,
+	streamIntent bool,
 ) (*http.Request, error) {
 	targetURL, err := BuildMappedURL(
 		h.cfg.Upstream,
@@ -552,6 +570,19 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 	headers.Del("X-Forwarded-Proto")
 
 	RemoveHopByHopHeaders(headers)
+	// The outbound Accept is rewritten to the representation actually
+	// requested upstream: text/event-stream when the exchange streams,
+	// otherwise application/json. The client's Accept describes its own
+	// preferences, not the mode of the converted request, and must never
+	// reach the target provider unnormalized (review-08 blocker 1). The
+	// rewrite happens AFTER hop-by-hop removal so a client Connection token
+	// nominating Accept for removal at its own hop cannot strip the
+	// proxy's freshly generated negotiation header for the upstream hop.
+	if streamIntent {
+		headers.Set("Accept", "text/event-stream")
+	} else {
+		headers.Set("Accept", "application/json")
+	}
 	// The converted body is a new representation: inbound integrity
 	// digests, message signatures, and validators describe the original
 	// bytes and must never be forwarded or signed. Run before
@@ -1140,17 +1171,146 @@ func isEventStreamMediaType(mediaType string) bool {
 	return mediaType == "text/event-stream"
 }
 
-// acceptIsEventStream reports whether the Accept header selects the
-// text/event-stream media type. The header is parsed as media ranges (the
-// first parseable range decides), never compared as one exact string
-// (review-j finding 6).
-func acceptIsEventStream(accept string) bool {
-	for _, part := range strings.Split(accept, ",") {
-		mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(part))
+// acceptRange is one parsed media range of an Accept header.
+type acceptRange struct {
+	mediaType string  // lowercased
+	q         float64 // 0..1
+	order     int     // position in the header; the first range is 0
+}
+
+// splitAcceptRanges splits an Accept header into its media ranges on commas
+// that are outside quoted strings. RFC 9110 quoted-string parameter values
+// may contain commas (and backslash-escaped characters); splitting naively
+// on every comma would destroy such a range.
+func splitAcceptRanges(accept string) []string {
+	var parts []string
+	start := 0
+	inQuotes := false
+	escaped := false
+	for i := 0; i < len(accept); i++ {
+		switch c := accept[i]; {
+		case escaped:
+			escaped = false
+		case inQuotes && c == '\\':
+			escaped = true
+		case c == '"':
+			inQuotes = !inQuotes
+		case c == ',' && !inQuotes:
+			parts = append(parts, accept[start:i])
+			start = i + 1
+		}
+	}
+	return append(parts, accept[start:])
+}
+
+// parseAcceptRanges parses every media range of an Accept header. Ranges
+// that fail to parse, or whose q value is outside 0..1, are skipped: a
+// malformed range expresses no usable preference and is ignored — it never
+// decides and never disturbs the ordering of the ranges around it.
+func parseAcceptRanges(accept string) []acceptRange {
+	var ranges []acceptRange
+	for order, part := range splitAcceptRanges(accept) {
+		mediaType, params, err := mime.ParseMediaType(part)
 		if err != nil {
 			continue
 		}
-		return isEventStreamMediaType(mediaType)
+		r := acceptRange{mediaType: mediaType, q: 1, order: order}
+		if raw, ok := params["q"]; ok {
+			q, err := strconv.ParseFloat(raw, 64)
+			// math.IsNaN rejects NaN, which passes the numeric bounds check
+			// (NaN compares false against everything) and would otherwise
+			// poison same-specificity selection as an undefeatable exclusion.
+			if err != nil || math.IsNaN(q) || q < 0 || q > 1 {
+				continue
+			}
+			r.q = q
+		}
+		ranges = append(ranges, r)
+	}
+	return ranges
+}
+
+// acceptPreference is the client's preference for one representation derived
+// from an Accept header.
+type acceptPreference struct {
+	acceptable  bool    // the representation is not excluded (see below)
+	q           float64 // effective quality of the deciding range
+	specificity int     // specificity of the deciding range
+	order       int     // position of the deciding range
+}
+
+// effectiveAcceptPreference derives the client's preference for mediaType
+// from parsed Accept ranges, matched by the exact type, typeWildcard, or
+// */*. The most specific applicable range determines the representation's
+// quality (RFC 9110 §12.5.1): a q=0 exact exclusion wins over a later */*,
+// and a less specific range never dilutes the most specific decision. Among
+// equally specific ranges the highest q wins, and the earliest such range
+// decides order ties. A representation with no applicable range is
+// acceptable by default (RFC 9110: unmentioned representations are
+// acceptable); it is excluded only when an applicable range exists and the
+// most specific tier's quality is 0.
+func effectiveAcceptPreference(ranges []acceptRange, mediaType, typeWildcard string) acceptPreference {
+	var best acceptPreference
+	best.specificity = -1
+	for _, r := range ranges {
+		specificity := -1
+		switch r.mediaType {
+		case mediaType:
+			specificity = 2
+		case typeWildcard:
+			specificity = 1
+		case "*/*":
+			specificity = 0
+		}
+		if specificity < 0 {
+			continue
+		}
+		if specificity > best.specificity ||
+			specificity == best.specificity &&
+				(r.q > best.q || r.q == best.q && r.order < best.order) {
+			best = acceptPreference{
+				q:           r.q,
+				specificity: specificity,
+				order:       r.order,
+			}
+		}
+	}
+	best.acceptable = !(best.specificity >= 0 && best.q == 0)
+	return best
+}
+
+// acceptIsEventStream reports whether the client's Accept header selects
+// text/event-stream as the most-preferred acceptable representation over
+// application/json. Every media range is parsed (media type and q); a q=0
+// range excludes the representation it names (an unmentioned representation
+// remains acceptable by default); malformed ranges are ignored. When exactly
+// one representation is acceptable it is selected; otherwise the documented
+// precedence applies: (1) effective quality, where the most specific
+// applicable range determines a representation's quality; (2) specificity
+// (exact type over type/* over */*); (3) order of appearance in the header.
+// A tie that remains (e.g. Accept: */*, or no acceptable representation at
+// all) defaults to application/json, the non-streaming representation.
+func acceptIsEventStream(accept string) bool {
+	ranges := parseAcceptRanges(accept)
+	sse := effectiveAcceptPreference(ranges, "text/event-stream", "text/*")
+	jsonPref := effectiveAcceptPreference(ranges, "application/json", "application/*")
+	if !sse.acceptable && !jsonPref.acceptable {
+		return false
+	}
+	if !jsonPref.acceptable {
+		return true
+	}
+	if !sse.acceptable {
+		return false
+	}
+	if sse.q != jsonPref.q {
+		return sse.q > jsonPref.q
+	}
+	if sse.specificity != jsonPref.specificity {
+		return sse.specificity > jsonPref.specificity
+	}
+	if sse.order != jsonPref.order {
+		return sse.order < jsonPref.order
 	}
 	return false
 }

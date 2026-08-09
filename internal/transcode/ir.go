@@ -147,6 +147,12 @@ type CanonicalRequest struct {
 type DecodeResult struct {
 	Request CanonicalRequest
 	Report  ConversionReport
+
+	// StreamSet is true when the request body explicitly carried a stream
+	// field (true or false). The handler applies the documented stream-intent
+	// precedence: a present body field is authoritative over the client
+	// Accept header (review-08 blocker 1).
+	StreamSet bool
 }
 
 // ExchangeContext carries per-exchange state required to render the client
@@ -167,9 +173,11 @@ type ExchangeContext struct {
 	OriginalResponsesRequest *ResponsesRequestEcho
 	OriginalMessagesRequest  *MessagesRequestContext
 
-	// StreamIntent records the source request's stream value so a stream/JSON
-	// mismatch on the upstream response is an error rather than a silent mode
-	// change.
+	// StreamIntent records the resolved stream mode of the exchange: the
+	// request body's stream field when explicitly present, otherwise the
+	// client Accept header's most-preferred acceptable representation
+	// (review-08 blocker 1). A stream/JSON mismatch on the upstream response
+	// is an error rather than a silent mode change.
 	StreamIntent bool
 }
 
