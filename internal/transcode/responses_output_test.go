@@ -2,7 +2,7 @@ package transcode
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -306,12 +306,20 @@ func TestSplitImageDataURL(t *testing.T) {
 }
 
 func TestExchangeIDs(t *testing.T) {
+	// IDs within one exchange share the random prefix and carry a
+	// monotonic counter (review-08 blocker 6); the prefix shape is 16
+	// lowercase hex characters.
 	ids := NewExchangeIDs()
-	if ids.New("msg_") != "msg_1" {
-		t.Fatalf("first = %q", ids.New("msg_"))
+	first := ids.New("msg_")
+	second := ids.New("fc_")
+	var prefix string
+	if n, err := fmt.Sscanf(first, "msg_%16s_1", &prefix); n != 1 || err != nil {
+		t.Fatalf("first = %q, want the msg_<16 hex>_1 shape", first)
 	}
-	if ids.New("fc_") != "fc_2" {
-		t.Fatalf("second = %q", ids.New("fc_"))
+	if want := "fc_" + prefix + "_2"; second != want {
+		t.Fatalf("second = %q, want %q (same prefix, next counter)", second, want)
 	}
-	_ = errors.New // keep errors import
+	if ids.New("msg_") == first {
+		t.Fatal("third ID equals the first")
+	}
 }
