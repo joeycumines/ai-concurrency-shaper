@@ -102,7 +102,9 @@ func TestChatToResponsesTextStream(t *testing.T) {
 	if !state.sawFinish {
 		t.Fatal("sawFinish not set")
 	}
-	// The terminal is held until [DONE] or EOF.
+	// The terminal is held until the [DONE] sentinel releases it (review-08
+	// blocker 2); this test drives the release directly, as the [DONE]
+	// adapter path does.
 	held, ok := state.releaseTerminal()
 	if !ok {
 		t.Fatal("no held terminal")

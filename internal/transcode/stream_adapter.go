@@ -34,10 +34,20 @@ func (c *chatToResponsesConverter) Convert(
 		// returned so the exchange classifies as an upstream body failure
 		// and the reader stops immediately — never an empty successful
 		// batch that would wait on an upstream keeping the connection open
-		// after [DONE] (review-k finding 1).
+		// after [DONE] (review-k finding 1). The sawFinish guard is
+		// required because a zero-output finish holds an EMPTY batch that
+		// releaseTerminal still releases (review-08 blocker 2).
+		if !c.state.sawFinish {
+			return convertedBatch{}, errChatDoneBeforeTerminal()
+		}
 		held, ok := c.state.releaseTerminal()
 		if !ok {
-			return convertedBatch{}, errChatDoneBeforeTerminal()
+			// Defensive: the terminal was already released (the reader
+			// stops at the first terminal batch, so a second [DONE] is
+			// unreachable through the reader).
+			return convertedBatch{}, c.state.wireError(errors.New(
+				"chat stream [DONE] after the terminal was released",
+			))
 		}
 		batch, err := marshalResponsesEvents(held)
 		batch.Terminal = true
@@ -54,9 +64,10 @@ func (c *chatToResponsesConverter) Convert(
 	return marshalResponsesEvents(events)
 }
 
-// FinalizeEOF releases a held terminal or reports a truncation error. A
-// stream that ended without a terminal condition is never reported as
-// success.
+// FinalizeEOF reports a truncation error unless the stream terminated
+// correctly. The held terminal (which may be an empty batch for a
+// zero-output finish) is released ONLY by the [DONE] sentinel (review-08
+// blocker 2).
 func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
@@ -209,7 +220,12 @@ func (c *chatToAnthropicConverter) Convert(
 		// classifies as an upstream body failure and the reader stops
 		// immediately — never an empty non-terminal batch that would wait
 		// on an upstream keeping the connection open after [DONE] (review-k
-		// finding 1).
+		// finding 1). The sawFinish guard is required because a zero-output
+		// finish holds an EMPTY batch that releaseTerminals still releases
+		// (review-08 blocker 2).
+		if !c.chat.sawFinish {
+			return convertedBatch{}, errChatDoneBeforeTerminal()
+		}
 		batch, releaseErr := c.releaseTerminals()
 		if releaseErr != nil {
 			return convertedBatch{}, releaseErr
@@ -267,15 +283,16 @@ func (c *chatToAnthropicConverter) releaseTerminals() (convertedBatch, error) {
 	return batch, nil
 }
 
-// FinalizeEOF releases any held terminals or reports a truncation error.
+// FinalizeEOF reports a truncation error unless the stream terminated
+// correctly. The Chat held terminal (which may be an empty batch for a
+// zero-output finish) is released ONLY by the [DONE] sentinel (review-08
+// blocker 2): EOF after finish_reason without [DONE] is a typed upstream
+// truncation, never a released terminal.
 func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
-	batch, err := c.releaseTerminals()
-	if err != nil {
-		return convertedBatch{}, err
-	}
-	if batch.Terminal || len(batch.Events) > 0 {
-		batch.Terminal = true
-		return batch, nil
+	if c.chat.sawFinish && !c.chat.terminalReleased {
+		return convertedBatch{}, c.chat.wireError(errors.New(
+			"chat stream ended after finish_reason without the [DONE] sentinel",
+		))
 	}
 	if c.chat.sawFinish || c.anthropic.sawTerminal {
 		return convertedBatch{Terminal: true}, nil

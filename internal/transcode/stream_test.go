@@ -165,6 +165,9 @@ func TestConvertingReaderMalformedFrame(t *testing.T) {
 func TestConvertingReaderEOFWithoutTerminal(t *testing.T) {
 	// EOF before any terminal is a truncation error, never success. The
 	// client-dialect error event frame is drained before the error surfaces.
+	// The fixture is a pin-conformant empty chunk (no finish_reason) so the
+	// stream really exercises the EOF-truncation path, not a decode
+	// rejection.
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
@@ -176,7 +179,9 @@ func TestConvertingReaderEOFWithoutTerminal(t *testing.T) {
 	)
 	converter := newChatToResponsesConverter(state)
 	reader := newConvertingReader(
-		NewSSEReaderWithLimits(strings.NewReader("data: {\"id\":\"x\",\"choices\":[]}\n\n"), 0, 0),
+		NewSSEReaderWithLimits(strings.NewReader(
+			"data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[]}\n\n",
+		), 0, 0),
 		converter,
 	)
 	var output bytes.Buffer
@@ -736,6 +741,17 @@ func TestChatStreamChunkTypedErrorFrame(t *testing.T) {
 	}
 	if convErr.Status != http.StatusOK {
 		t.Fatalf("status = %d, want 200", convErr.Status)
+	}
+
+	// An error frame without a message falls back to a stable description.
+	_, err = chatStreamChunkFromSSE(SSEEvent{
+		Data: []byte(`{"error":{}}`),
+	})
+	if !errors.As(err, &convErr) {
+		t.Fatalf("error = %T %v, want *StreamConversionError", err, err)
+	}
+	if !strings.Contains(err.Error(), "chat stream error frame") {
+		t.Fatalf("error = %q, want the fallback description", err.Error())
 	}
 
 	state := newChatResponsesStreamState(

@@ -122,9 +122,18 @@ type chatResponsesStreamState struct {
 	report ConversionReport
 
 	// heldTerminal holds the item-closing events built on finish_reason; the
-	// terminal envelope is appended at release by the [DONE] frame or
-	// FinalizeEOF.
+	// terminal envelope is appended at release by the [DONE] sentinel (the
+	// only release path; review-08 blocker 2). A finish that opened no items
+	// leaves this nil — the release signal is terminalReleased, never this
+	// slice's nil-ness.
 	heldTerminal []ResponsesSSEEvent
+
+	// terminalReleased is set when the held terminal was released by the
+	// [DONE] sentinel. It is the release signal, NOT heldTerminal's nil-ness:
+	// a finish that opened no items holds a nil slice, which must remain
+	// distinguishable from "no terminal condition reached" (review-08
+	// blocker 2).
+	terminalReleased bool
 
 	// usageComponentsLossRecorded gates the required-usage-component loss
 	// (review-k finding 6): the pinned Responses usage requires the breakdown
@@ -254,8 +263,8 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 //  2. after the finish reason — the optional usage-only tail chunk
 //     (choices: []/empty, usage present) that the official protocol sends
 //     before [DONE] when include_usage is requested;
-//  3. terminal — built at release (the [DONE] frame or EOF) with the final
-//     usage.
+//  3. terminal — built at release by the [DONE] frame only (review-08
+//     blocker 2), with the final usage.
 func (s *chatResponsesStreamState) Convert(
 	chunk ChatStreamResponse,
 ) ([]ResponsesSSEEvent, error) {
@@ -266,14 +275,17 @@ func (s *chatResponsesStreamState) Convert(
 		// the tail enters the same loss/reject decision as on any other
 		// chunk.
 		if chunk.Usage != nil && len(chunk.Choices) == 0 {
-			if chunk.ID != "" && s.chunkID != "" && chunk.ID != s.chunkID {
+			// The strict chunk decode guarantees id and model are always
+			// present, so a mismatch is an upstream protocol error (review-j
+			// finding 6).
+			if chunk.ID != s.chunkID {
 				return nil, s.wireError(fmt.Errorf(
 					"chat stream chunk id %q does not match the first chunk id %q",
 					chunk.ID,
 					s.chunkID,
 				))
 			}
-			if chunk.Model != "" && s.chunkModel != "" && chunk.Model != s.chunkModel {
+			if chunk.Model != s.chunkModel {
 				return nil, s.wireError(fmt.Errorf(
 					"chat stream chunk model %q does not match the first chunk model %q",
 					chunk.Model,
@@ -313,16 +325,17 @@ func (s *chatResponsesStreamState) Convert(
 		)
 		s.started = true
 	} else {
-		// Stable chunk identity across the stream: a mismatched id or model
-		// is an upstream protocol error (review-j finding 6).
-		if chunk.ID != "" && s.chunkID != "" && chunk.ID != s.chunkID {
+		// Stable chunk identity across the stream: the strict chunk decode
+		// guarantees id and model are always present, so a mismatch is an
+		// upstream protocol error (review-j finding 6).
+		if chunk.ID != s.chunkID {
 			return nil, s.wireError(fmt.Errorf(
 				"chat stream chunk id %q does not match the first chunk id %q",
 				chunk.ID,
 				s.chunkID,
 			))
 		}
-		if chunk.Model != "" && s.chunkModel != "" && chunk.Model != s.chunkModel {
+		if chunk.Model != s.chunkModel {
 			return nil, s.wireError(fmt.Errorf(
 				"chat stream chunk model %q does not match the first chunk model %q",
 				chunk.Model,
@@ -381,7 +394,8 @@ func (s *chatResponsesStreamState) Convert(
 			}
 			// Hold the item-closing events; the terminal envelope is built
 			// at release so the optional usage tail is reflected in its
-			// usage. Released by [DONE] or EOF.
+			// usage. Released ONLY by the [DONE] sentinel (review-08 blocker
+			// 2); EOF after finish_reason without [DONE] is a truncation.
 			s.heldTerminal = terminal
 			s.sawFinish = true
 		}
@@ -657,6 +671,34 @@ func (s *chatResponsesStreamState) convertToolCall(
 		}
 		s.itemIndex++
 		s.pendingCalls[index] = pending
+	} else if call.Index != nil {
+		// The fragment resolved by id (or the single-pending fallback) but
+		// also carries an index: the index must resolve to the same pending
+		// call, never silently select another (review-08 blocker 2).
+		if other, exists := s.pendingCalls[*call.Index]; exists && other != pending {
+			return nil, s.wireError(fmt.Errorf(
+				"chat tool call fragment index %d resolves to call %q but the fragment id %q resolves to call %q",
+				*call.Index,
+				other.callID,
+				derefStr(call.ID),
+				pending.callID,
+			))
+		}
+	}
+
+	// Identity immutability (review-08 blocker 2): once the output_item.added
+	// event was announced, a later fragment changing the call NAME is corrupt
+	// upstream wire — the client already saw the announced identity and the
+	// done events must never drift from it. A conflicting id cannot reach
+	// this point: id resolution matches exactly, and an index resolution
+	// whose stored id differs is rejected above.
+	if pending.started && call.Function.Name != nil && *call.Function.Name != "" &&
+		pending.name != *call.Function.Name {
+		return nil, s.wireError(fmt.Errorf(
+			"chat tool call name changed from %q to %q after the added event",
+			pending.name,
+			*call.Function.Name,
+		))
 	}
 
 	if call.ID != nil && *call.ID != "" {
@@ -989,27 +1031,37 @@ func (s *chatResponsesStreamState) baseEnvelope(status string) ResponseEnvelope 
 }
 
 // releaseTerminal returns the held terminal batch — the item-closing events
-// plus the terminal envelope — and whether it exists. The envelope is built
-// at release time so the optional usage tail is reflected in its usage
-// (review-j finding 6).
+// plus the terminal envelope — and whether this call performed the release.
+// The envelope is built at release time so the optional usage tail is
+// reflected in its usage (review-j finding 6). A finish that opened no items
+// still releases a one-event batch (just the terminal envelope): the [DONE]
+// sentinel must be able to release a zero-output completion (review-08
+// blocker 2).
 func (s *chatResponsesStreamState) releaseTerminal() ([]ResponsesSSEEvent, bool) {
-	if s.heldTerminal == nil {
+	if s.terminalReleased {
 		return nil, false
 	}
+	s.terminalReleased = true
 	held := s.heldTerminal
 	s.heldTerminal = nil
 	return append(held, s.terminalEnvelope()), true
 }
 
-// FinalizeEOF releases the held terminal or reports a truncation error. A
-// stream that ended without a terminal condition is never reported as
-// success.
+// FinalizeEOF reports a truncation error unless the stream terminated
+// correctly. The held terminal is released ONLY by the [DONE] sentinel
+// (review-08 blocker 2): a stream that ends after finish_reason without
+// [DONE] is a truncated stream — the usage tail never arrived — and is a
+// typed upstream truncation, never a released clean terminal. A zero-output
+// finish is pinned the same way: the terminal was reached but not released.
 func (s *chatResponsesStreamState) FinalizeEOF() ([]ResponsesSSEEvent, error) {
-	if held, ok := s.releaseTerminal(); ok {
-		return held, nil
+	if s.sawFinish && !s.terminalReleased {
+		return nil, s.wireError(errors.New(
+			"chat stream ended after finish_reason without the [DONE] sentinel",
+		))
 	}
 	if s.sawFinish {
-		// The finish chunk was consumed and released; nothing more to emit.
+		// The finish chunk was consumed and the [DONE] sentinel released the
+		// terminal; nothing more to emit.
 		return nil, nil
 	}
 	return nil, errors.New(
@@ -1052,6 +1104,39 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) *ResponsesUsage {
 	return out
 }
 
+// chatStreamChunkShadow is the presence-aware strict decode shadow of a Chat
+// streaming chunk (review-08 blocker 2): the pinned envelope fields (object,
+// id, model, created) and the choice fields (index, delta) are required and
+// must be explicitly present — absent fields are corrupt upstream wire,
+// never zero-defaulted. The non-streaming message arm is outside the
+// streaming surface, so a chunk carrying it is rejected as an unknown field.
+// The delta reuses ChatStreamDelta (already pointer-based); usage reuses
+// chatUsageShadow so an omitted total is distinguishable from zero (the
+// pinned contract requires all three totals).
+type chatStreamChunkShadow struct {
+	ID                string                   `json:"id"`
+	Object            *string                  `json:"object"`
+	Created           *int64                   `json:"created"`
+	Model             string                   `json:"model"`
+	ServiceTier       *string                  `json:"service_tier,omitempty"`
+	SystemFingerprint string                   `json:"system_fingerprint,omitempty"`
+	Choices           []chatStreamChoiceShadow `json:"choices"`
+	Usage             *chatUsageShadow         `json:"usage,omitempty"`
+}
+
+// chatStreamChoiceShadow mirrors the pinned streaming choice: index and
+// delta are required, finish_reason is a present-or-absent nullable string
+// (no terminal is enforced here), logprobs is nullable, and a message arm
+// would be an unknown-field rejection. Choices absent from the chunk are not
+// distinguished from an empty list: a usage-only tail chunk legitimately
+// carries choices: [].
+type chatStreamChoiceShadow struct {
+	Index        *int64              `json:"index"`
+	FinishReason *string             `json:"finish_reason"`
+	LogProbs     *ChatChoiceLogprobs `json:"logprobs"`
+	Delta        *ChatStreamDelta    `json:"delta"`
+}
+
 // chatStreamChunkFromSSE parses one upstream SSE frame into a Chat stream
 // chunk, reporting the [DONE] sentinel via errChatStreamDone. An in-band
 // error frame is surfaced as an error: it must never be silently ignored
@@ -1090,25 +1175,147 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			Status:     http.StatusOK,
 		}
 	}
-	var chunk ChatStreamResponse
-	if err := json.Unmarshal(data, &chunk); err != nil {
+	// Presence-aware strict shadow decode: the pinned envelope and choice
+	// fields must be explicitly present, unknown fields are rejected, and
+	// the message arm is outside the streaming surface (review-08 blocker
+	// 2). Every violation is corrupt upstream wire.
+	var shadow chatStreamChunkShadow
+	if err := strictDecode(data, &shadow); err != nil {
 		return ChatStreamResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			http.StatusOK,
 			fmt.Errorf("chat stream chunk: %w", err),
 		)
 	}
-	// The pinned chunk envelope requires object == "chat.completion.chunk";
-	// a present discriminator naming anything else is corrupt upstream wire
-	// (review-k finding 4, streaming parity).
-	if chunk.Object != "" && chunk.Object != "chat.completion.chunk" {
+	if shadow.Object == nil || *shadow.Object != "chat.completion.chunk" {
 		return ChatStreamResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			http.StatusOK,
 			fmt.Errorf(
 				"chat stream chunk object = %q, want \"chat.completion.chunk\"",
-				chunk.Object,
+				derefStr(shadow.Object),
 			),
+		)
+	}
+	if shadow.ID == "" {
+		return ChatStreamResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			http.StatusOK,
+			errors.New("chat stream chunk id is empty"),
+		)
+	}
+	if shadow.Model == "" {
+		return ChatStreamResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			http.StatusOK,
+			errors.New("chat stream chunk model is empty"),
+		)
+	}
+	if shadow.Created == nil {
+		return ChatStreamResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			http.StatusOK,
+			errors.New("chat stream chunk created is missing"),
+		)
+	}
+	// n=1: a chunk with more than one choice is an upstream protocol error.
+	if len(shadow.Choices) > 1 {
+		return ChatStreamResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			http.StatusOK,
+			errors.New("chat stream chunk has more than one choice; n=1 required"),
+		)
+	}
+	for i := range shadow.Choices {
+		choice := &shadow.Choices[i]
+		if choice.Index == nil {
+			return ChatStreamResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				http.StatusOK,
+				fmt.Errorf("chat stream chunk choice %d has no index", i),
+			)
+		}
+		if *choice.Index != 0 {
+			return ChatStreamResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				http.StatusOK,
+				fmt.Errorf(
+					"chat stream chunk choice index = %d; n=1 requires index 0",
+					*choice.Index,
+				),
+			)
+		}
+		if choice.Delta == nil {
+			return ChatStreamResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				http.StatusOK,
+				errors.New("chat stream chunk choice has no delta"),
+			)
+		}
+		// A present delta role must be assistant: a non-assistant role is
+		// corrupt upstream wire, never relabeled as assistant output
+		// (review-08 blocker 2).
+		if choice.Delta.Role != nil && *choice.Delta.Role != "assistant" {
+			return ChatStreamResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				http.StatusOK,
+				fmt.Errorf(
+					"chat stream chunk delta role = %q, want assistant",
+					*choice.Delta.Role,
+				),
+			)
+		}
+		// The pinned streaming tool-call fragment requires an explicit
+		// index; a present type must be function (the pinned contract marks
+		// type optional, so an absent type is accepted).
+		for callIndex, call := range choice.Delta.ToolCalls {
+			if call.Index == nil {
+				return ChatStreamResponse{}, upstreamWireError(
+					UpstreamChatCompletions,
+					http.StatusOK,
+					fmt.Errorf("chat stream chunk tool call %d has no index", callIndex),
+				)
+			}
+			if call.Type != nil && *call.Type != "function" {
+				return ChatStreamResponse{}, upstreamWireError(
+					UpstreamChatCompletions,
+					http.StatusOK,
+					fmt.Errorf(
+						"chat stream chunk tool call %d type = %q, want function",
+						callIndex,
+						*call.Type,
+					),
+				)
+			}
+		}
+	}
+	// The pinned CompletionUsage requires all three totals: an omitted total
+	// must never become a factual zero (review-08 blocker 2). The breakdown
+	// components remain optional and enter the loss/reject decision.
+	if shadow.Usage != nil &&
+		(shadow.Usage.PromptTokens == nil ||
+			shadow.Usage.CompletionTokens == nil ||
+			shadow.Usage.TotalTokens == nil) {
+		return ChatStreamResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			http.StatusOK,
+			errors.New(
+				"chat stream chunk usage must carry prompt_tokens, completion_tokens, and total_tokens",
+			),
+		)
+	}
+	// The wire decode cannot fail after the shadow succeeded: the shadow
+	// models the full streaming surface with the same strictness (where the
+	// shadow used a pointer and the wire a value, a null is silently ignored
+	// by the value field, never a decode error), and the shadow's presence
+	// checks above reject every null that matters before the conversion path
+	// runs.
+	var chunk ChatStreamResponse
+	if err := json.Unmarshal(data, &chunk); err != nil {
+		return ChatStreamResponse{}, upstreamWireError(
+			UpstreamChatCompletions,
+			http.StatusOK,
+			fmt.Errorf("chat stream chunk: %w", err),
 		)
 	}
 	return chunk, nil

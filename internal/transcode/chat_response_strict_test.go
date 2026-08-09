@@ -203,10 +203,10 @@ func TestChatResponseOfficialShapesStillDecode(t *testing.T) {
 	}
 }
 
-// TestChatStreamChunkObjectDiscriminator proves the streaming parity: a
-// chunk whose object discriminator is present but wrong is corrupt upstream
-// wire; an absent discriminator is tolerated (the state machine does not
-// depend on it); the correct discriminator passes.
+// TestChatStreamChunkObjectDiscriminator proves the streaming parity: the
+// chunk object discriminator is a required field of the pinned envelope —
+// a chunk with a missing or wrong object is corrupt upstream wire
+// (review-08 blocker 2); the correct discriminator passes.
 func TestChatStreamChunkObjectDiscriminator(t *testing.T) {
 	good := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}`
 	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(good)}); err != nil {
@@ -214,8 +214,13 @@ func TestChatStreamChunkObjectDiscriminator(t *testing.T) {
 	}
 
 	absent := `{"id":"c","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}`
-	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(absent)}); err != nil {
-		t.Fatalf("object-absent chunk rejected: %v", err)
+	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(absent)}); err == nil {
+		t.Fatal("object-absent chunk accepted")
+	} else {
+		var wireErr *UpstreamWireError
+		if !errors.As(err, &wireErr) {
+			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+		}
 	}
 
 	wrong := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}`
