@@ -58,6 +58,13 @@ type openResponsesItem struct {
 	openPartIndex int64
 }
 
+// chatPartKey identifies one content part of one open message item by the
+// item's output index and the part's content index.
+type chatPartKey struct {
+	outputIndex  int64
+	contentIndex int64
+}
+
 // chatResponsesStreamState converts Chat stream chunks into typed Responses
 // SSE events with the full item lifecycle. Function-call starts are buffered
 // until call ID and name are known; argument fragments are emitted with delta
@@ -96,6 +103,20 @@ type chatResponsesStreamState struct {
 	itemIndex    int64
 	pendingCalls map[int]*pendingToolCall // keyed by chat tool fragment index
 
+	// textBufs and refusalBufs accumulate streamed text and refusal per
+	// content part in strings.Builder, avoiding quadratic re-copying of the
+	// whole accumulated string on every delta (review-k finding 9). The
+	// final strings are materialized into the message parts once at
+	// finish(); the parts stay empty while the stream is in progress, so
+	// the emitted deltas remain the only per-chunk representation.
+	textBufs    map[chatPartKey]*strings.Builder
+	refusalBufs map[chatPartKey]*strings.Builder
+
+	// serviceTierLossRecorded and logprobsLossRecorded gate the per-chunk
+	// envelope losses to exactly once per stream (review-k finding 9).
+	serviceTierLossRecorded bool
+	logprobsLossRecorded    bool
+
 	usage *ResponsesUsage
 
 	report ConversionReport
@@ -117,6 +138,54 @@ type chatResponsesStreamState struct {
 // failure (review-k finding 3).
 func (s *chatResponsesStreamState) wireError(err error) error {
 	return upstreamWireError(UpstreamChatCompletions, http.StatusOK, err)
+}
+
+// checkAccumulated rejects accumulated semantic state (text, refusal, tool
+// arguments) beyond the per-item cumulative bound: individually bounded SSE
+// frames could otherwise accumulate without limit and be emitted as one
+// generated downstream frame, and a corrupt upstream can amplify memory
+// without bound (review-k finding 9). The typed upstream wire error classifies
+// the exchange as an upstream failure.
+func (s *chatResponsesStreamState) checkAccumulated(builder *strings.Builder, what string) error {
+	if builder.Len() > maxStreamAccumulatedBytes {
+		return s.wireError(fmt.Errorf(
+			"chat stream accumulated %s exceeds %d bytes",
+			what,
+			maxStreamAccumulatedBytes,
+		))
+	}
+	return nil
+}
+
+// loseServiceTierOnce records the service-tier loss exactly once per stream:
+// the tier is a chunk-envelope attribute whose presence on any chunk enters
+// the decision once, not once per chunk (review-k finding 9).
+func (s *chatResponsesStreamState) loseServiceTierOnce() error {
+	if s.serviceTierLossRecorded {
+		return nil
+	}
+	s.serviceTierLossRecorded = true
+	return s.report.Lose(
+		s.policy,
+		FeatureServiceTier,
+		"service_tier",
+		"the upstream chat service tier cannot be reproduced in the client dialect",
+	)
+}
+
+// loseLogprobsOnce records the log-probabilities loss exactly once per
+// stream (review-k finding 9).
+func (s *chatResponsesStreamState) loseLogprobsOnce() error {
+	if s.logprobsLossRecorded {
+		return nil
+	}
+	s.logprobsLossRecorded = true
+	return s.report.Lose(
+		s.policy,
+		FeatureLogprobs,
+		"choices[].logprobs",
+		"chat response logprobs cannot be reproduced in the client dialect",
+	)
 }
 
 // wireError marks a conversion error as corrupt upstream Responses wire
@@ -144,6 +213,8 @@ func newChatResponsesStreamState(
 		createdAt:    createdAt,
 		echo:         echo,
 		pendingCalls: make(map[int]*pendingToolCall),
+		textBufs:     make(map[chatPartKey]*strings.Builder),
+		refusalBufs:  make(map[chatPartKey]*strings.Builder),
 	}
 }
 
@@ -210,12 +281,7 @@ func (s *chatResponsesStreamState) Convert(
 				))
 			}
 			if chunk.ServiceTier != nil {
-				if err := s.report.Lose(
-					s.policy,
-					FeatureServiceTier,
-					"service_tier",
-					"the upstream chat service tier cannot be reproduced in the client dialect",
-				); err != nil {
+				if err := s.loseServiceTierOnce(); err != nil {
 					return nil, err
 				}
 			}
@@ -275,14 +341,10 @@ func (s *chatResponsesStreamState) Convert(
 	// The chunk envelope's service tier and per-choice token log
 	// probabilities cannot be reproduced in the client dialect: their
 	// presence enters the explicit loss/reject decision instead of being
-	// silently dropped (review-j finding 4).
+	// silently dropped (review-j finding 4), recorded exactly once per
+	// stream (review-k finding 9).
 	if chunk.ServiceTier != nil {
-		if err := s.report.Lose(
-			s.policy,
-			FeatureServiceTier,
-			"service_tier",
-			"the upstream chat service tier cannot be reproduced in the client dialect",
-		); err != nil {
+		if err := s.loseServiceTierOnce(); err != nil {
 			return nil, err
 		}
 	}
@@ -301,12 +363,7 @@ func (s *chatResponsesStreamState) Convert(
 			))
 		}
 		if choice.LogProbs != nil {
-			if err := s.report.Lose(
-				s.policy,
-				FeatureLogprobs,
-				"choices[].logprobs",
-				"chat response logprobs cannot be reproduced in the client dialect",
-			); err != nil {
+			if err := s.loseLogprobsOnce(); err != nil {
 				return nil, err
 			}
 		}
@@ -353,8 +410,16 @@ func (s *chatResponsesStreamState) convertDelta(
 			contentIndex,
 			*delta.Content,
 		))
-		textPart := message.Content[contentIndex].(*ResponsesOutputText)
-		textPart.Text += *delta.Content
+		key := chatPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
+		builder := s.textBufs[key]
+		if builder == nil {
+			builder = &strings.Builder{}
+			s.textBufs[key] = builder
+		}
+		builder.WriteString(*delta.Content)
+		if err := s.checkAccumulated(builder, "text"); err != nil {
+			return nil, err
+		}
 	}
 
 	if delta.Refusal != nil && *delta.Refusal != "" {
@@ -371,8 +436,16 @@ func (s *chatResponsesStreamState) convertDelta(
 			contentIndex,
 			*delta.Refusal,
 		))
-		refusalPart := message.Content[contentIndex].(*ResponsesOutputRefusal)
-		refusalPart.Refusal += *delta.Refusal
+		key := chatPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
+		builder := s.refusalBufs[key]
+		if builder == nil {
+			builder = &strings.Builder{}
+			s.refusalBufs[key] = builder
+		}
+		builder.WriteString(*delta.Refusal)
+		if err := s.checkAccumulated(builder, "refusal"); err != nil {
+			return nil, err
+		}
 	}
 
 	if delta.Reasoning != nil && *delta.Reasoning != "" {
@@ -403,8 +476,16 @@ func (s *chatResponsesStreamState) convertDelta(
 				contentIndex,
 				*delta.Reasoning,
 			))
-			textPart := message.Content[contentIndex].(*ResponsesOutputText)
-			textPart.Text += *delta.Reasoning
+			key := chatPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
+			builder := s.textBufs[key]
+			if builder == nil {
+				builder = &strings.Builder{}
+				s.textBufs[key] = builder
+			}
+			builder.WriteString(*delta.Reasoning)
+			if err := s.checkAccumulated(builder, "text"); err != nil {
+				return nil, err
+			}
 			s.report.Note(
 				FeatureProviderReasoning,
 				"choices[].delta.reasoning",
@@ -587,6 +668,11 @@ func (s *chatResponsesStreamState) convertToolCall(
 	if call.Function.Arguments != "" {
 		pending.pending.WriteString(call.Function.Arguments)
 		pending.complete.WriteString(call.Function.Arguments)
+		// The complete buffer is emitted as one generated downstream frame
+		// at finish: bound its cumulative size (review-k finding 9).
+		if err := s.checkAccumulated(&pending.complete, "tool arguments"); err != nil {
+			return nil, err
+		}
 	}
 
 	// Emit the output_item.added only once identity (call ID + name) is
@@ -714,6 +800,10 @@ func (s *chatResponsesStreamState) finish(
 	}
 
 	// Close open message items: content parts done, then output_item.done.
+	// The accumulated text and refusal strings are materialized into the
+	// parts ONCE here — the parts stayed empty while the stream was in
+	// progress (review-k finding 9) — so the done events and the terminal
+	// envelope carry the full content.
 	for i := range s.items {
 		item := &s.items[i]
 		message, ok := item.item.(*ResponsesOutputMessage)
@@ -721,8 +811,12 @@ func (s *chatResponsesStreamState) finish(
 			continue
 		}
 		for contentIndex, part := range message.Content {
+			key := chatPartKey{outputIndex: item.outputIndex, contentIndex: int64(contentIndex)}
 			switch value := part.(type) {
 			case *ResponsesOutputText:
+				if builder := s.textBufs[key]; builder != nil {
+					value.Text = builder.String()
+				}
 				events = append(events,
 					s.builder.TextDone(
 						message.ID,
@@ -742,6 +836,9 @@ func (s *chatResponsesStreamState) finish(
 					),
 				)
 			case *ResponsesOutputRefusal:
+				if builder := s.refusalBufs[key]; builder != nil {
+					value.Refusal = builder.String()
+				}
 				events = append(events,
 					s.builder.RefusalDone(
 						message.ID,
@@ -1472,6 +1569,15 @@ func (s *anthropicResponsesStreamState) functionArgumentsDelta(
 		return nil, err
 	}
 	pending.arguments.WriteString(event.Delta)
+	// The accumulated arguments are emitted as one generated downstream
+	// frame at output_item.done: bound their cumulative size (review-k
+	// finding 9).
+	if pending.arguments.Len() > maxStreamAccumulatedBytes {
+		return nil, s.wireError(fmt.Errorf(
+			"responses stream accumulated tool arguments exceed %d bytes",
+			maxStreamAccumulatedBytes,
+		))
+	}
 	partial := event.Delta
 	out := []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,

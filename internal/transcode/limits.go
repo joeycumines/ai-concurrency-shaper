@@ -2,6 +2,14 @@ package transcode
 
 import "fmt"
 
+// maxStreamAccumulatedBytes bounds the cumulative semantic state a stream
+// may accumulate per item or part (text, refusal, tool-call arguments)
+// before the exchange is rejected as corrupt upstream wire: individually
+// bounded SSE frames could otherwise accumulate without limit and be emitted
+// as one generated downstream frame, amplifying memory without bound
+// (review-k finding 9). Aligned with the default SSE frame bound.
+const maxStreamAccumulatedBytes = 1 << 20
+
 // Package defaults for the BodyLimits fields. A zero value in a programmatic
 // BodyLimits selects the field's default; the effective limits are computed
 // once at handler construction so zero never reaches handler logic (review-k
