@@ -162,18 +162,21 @@ func TestUsagePartialPreservesKnownTotals(t *testing.T) {
 // at the call sites sanctions the zeros (review-k finding 6) — and reflects
 // provided breakdowns.
 func TestUsageStreamingDetailObjectsPresence(t *testing.T) {
-	usage := chatUsageToResponsesUsage(&ChatLLMUsage{
+	usage, err := chatUsageToResponsesUsage(&ChatLLMUsage{
 		PromptTokens:     10,
 		CompletionTokens: 2,
 		TotalTokens:      12,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if usage.InputTokensDetails == nil || usage.OutputTokensDetails == nil {
 		t.Fatalf("required detail objects missing: %+v", usage)
 	}
 	if usage.InputTokensDetails.CachedTokens != 0 || usage.OutputTokensDetails.ReasoningTokens != 0 {
 		t.Fatalf("unknown breakdowns invented: %+v", usage)
 	}
-	usage = chatUsageToResponsesUsage(&ChatLLMUsage{
+	usage, err = chatUsageToResponsesUsage(&ChatLLMUsage{
 		PromptTokens:     10,
 		CompletionTokens: 2,
 		TotalTokens:      12,
@@ -184,6 +187,9 @@ func TestUsageStreamingDetailObjectsPresence(t *testing.T) {
 			ReasoningTokens: 4,
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if usage.InputTokensDetails == nil || usage.InputTokensDetails.CachedTokens != 3 {
 		t.Fatalf("cached = %+v", usage.InputTokensDetails)
 	}

@@ -139,7 +139,17 @@ func (c *responsesToAnthropicConverter) Convert(
 	if err != nil {
 		return convertedBatch{}, err
 	}
-	// Validate the SSE event name equals the JSON type.
+	// Validate the SSE event name equals the JSON type. Responses streams
+	// require event: to be present and equal the JSON type tag (the
+	// package's own rule, review-08 additional 12): an empty event name is
+	// a wire error, not a silent pass.
+	if frame.Event == "" {
+		return convertedBatch{}, upstreamWireError(
+			UpstreamResponses,
+			http.StatusOK,
+			errors.New("responses stream event has no event name"),
+		)
+	}
 	if err := validateEventNameMatchesJSONType(frame); err != nil {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamResponses,

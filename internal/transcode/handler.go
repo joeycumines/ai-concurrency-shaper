@@ -886,43 +886,36 @@ func (h *TranscodeHandler) streamResponse(
 	// (review-k finding 7).
 	downstreamComplete := observation.WriterErr == nil && observation.SealErr == nil
 
-	// Classify the outcome from explicit provenance.
+	// Classify the outcome from explicit provenance. The classification is
+	// recorded on the outcome (review-08 additional 8) so downstream sinks
+	// observe the truthful stream bucket for every exchange, not the zero
+	// value.
 	var outcome Outcome
-	switch classifyStreamObservation(observation) {
+	classification := classifyStreamObservation(observation)
+	outcome.StreamOutcome = classification
+	switch classification {
 	case streamOutcomeSuccess:
-		outcome = Outcome{
-			Status:             resp.StatusCode,
-			Provenance:         ProvenanceUpstreamHTTP,
-			DownstreamComplete: downstreamComplete,
-		}
+		outcome.Status = resp.StatusCode
+		outcome.Provenance = ProvenanceUpstreamHTTP
+		outcome.DownstreamComplete = downstreamComplete
 	case streamOutcomeClientAbort:
-		outcome = Outcome{
-			Provenance:    ProvenanceClientAbort,
-			ClientAborted: true,
-		}
+		outcome.Provenance = ProvenanceClientAbort
+		outcome.ClientAborted = true
 	case streamOutcomeUpstreamFailure:
-		outcome = Outcome{
-			Status:             resp.StatusCode,
-			Provenance:         ProvenanceUpstreamBodyError,
-			UpstreamFailure:    true,
-			DownstreamComplete: downstreamComplete,
-		}
+		outcome.Status = resp.StatusCode
+		outcome.Provenance = ProvenanceUpstreamBodyError
+		outcome.UpstreamFailure = true
+		outcome.DownstreamComplete = downstreamComplete
 	case streamOutcomeLocalConversionFailure:
-		outcome = Outcome{
-			Status:             http.StatusBadGateway,
-			Provenance:         ProvenanceLocalResponseConversionError,
-			DownstreamComplete: downstreamComplete,
-		}
+		outcome.Status = http.StatusBadGateway
+		outcome.Provenance = ProvenanceLocalResponseConversionError
+		outcome.DownstreamComplete = downstreamComplete
 	case streamOutcomeDownstreamFailure:
-		outcome = Outcome{
-			Provenance: ProvenanceDownstreamWriteError,
-		}
+		outcome.Provenance = ProvenanceDownstreamWriteError
 	default:
-		outcome = Outcome{
-			Status:             resp.StatusCode,
-			Provenance:         ProvenanceUpstreamHTTP,
-			DownstreamComplete: downstreamComplete,
-		}
+		outcome.Status = resp.StatusCode
+		outcome.Provenance = ProvenanceUpstreamHTTP
+		outcome.DownstreamComplete = downstreamComplete
 	}
 	h.recordOutcome(r, outcome)
 	// Response-side approved losses are logged with the same fidelity as
@@ -1396,13 +1389,23 @@ func isEventStream(resp *http.Response) bool {
 // isJSON reports whether the response is JSON: the application/json media
 // type or a structured-syntax-suffix member of the JSON family
 // (application/*+json). application/notjson and other lookalikes are not
-// JSON (review-j finding 15).
+// JSON (review-j finding 15). The structured-syntax suffix "+json" matches
+// only within the application tree (review-08 additional 7):
+// text/example+json is NOT JSON, per RFC 6839 — the suffix is only defined
+// for application/*.
 func isJSON(resp *http.Response) bool {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil {
 		return false
 	}
-	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
+	if mediaType == "application/json" {
+		return true
+	}
+	base, _, ok := strings.Cut(mediaType, "/")
+	if !ok || base != "application" {
+		return false
+	}
+	return strings.HasSuffix(mediaType, "+json")
 }
 
 // isUpgradeRequest reports whether the request carries an Upgrade token.

@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -227,9 +228,18 @@ func RequirePortableArtifacts(
 	return nil
 }
 
-// ValidateCanonicalRequest checks the IR invariants before rendering.
+// ValidateCanonicalRequest checks the IR invariants before rendering:
+// every turn role is one of the canonical values, every turn has content,
+// every part is non-nil, tool calls carry non-empty identity (item/call id
+// and name) with object-shaped arguments, and tool results carry a non-empty
+// call id (review-08 additional 10).
 func ValidateCanonicalRequest(request CanonicalRequest) error {
 	for turnIndex, turn := range request.Turns {
+		switch turn.Role {
+		case CanonicalUser, CanonicalAssistant, CanonicalSystem, CanonicalDeveloper:
+		default:
+			return fmt.Errorf("turn %d has invalid role %q", turnIndex, turn.Role)
+		}
 		if len(turn.Parts) == 0 {
 			return fmt.Errorf("turn %d has no content parts", turnIndex)
 		}
@@ -240,6 +250,9 @@ func ValidateCanonicalRequest(request CanonicalRequest) error {
 					turnIndex,
 					partIndex,
 				)
+			}
+			if err := validateCanonicalPart(part); err != nil {
+				return fmt.Errorf("turn %d part %d: %w", turnIndex, partIndex, err)
 			}
 		}
 	}
@@ -348,9 +361,34 @@ type CanonicalResponse struct {
 	ResponsesControls []string
 }
 
-// ValidateCanonicalResponse checks the response IR invariants.
+// ValidateCanonicalResponse checks the response IR invariants: a non-empty
+// model, a valid status and stop reason, well-formed turns, non-negative and
+// consistent usage, and tool-call identity (review-08 additional 10).
 func ValidateCanonicalResponse(response CanonicalResponse) error {
+	if response.Model == "" {
+		return errors.New("response has no model")
+	}
+	switch response.Status {
+	case CanonicalResponseCompleted, CanonicalResponseIncomplete, CanonicalResponseFailed:
+	case "":
+		return errors.New("response has no status")
+	default:
+		return fmt.Errorf("response has invalid status %q", response.Status)
+	}
+	switch response.StopReason {
+	case CanonicalStopEndTurn, CanonicalStopMaxTokens, CanonicalStopStopSequence,
+		CanonicalStopToolUse, CanonicalStopRefusal:
+	case "":
+		return errors.New("response has no stop reason")
+	default:
+		return fmt.Errorf("response has invalid stop reason %q", response.StopReason)
+	}
 	for turnIndex, turn := range response.Turns {
+		switch turn.Role {
+		case CanonicalUser, CanonicalAssistant, CanonicalSystem, CanonicalDeveloper:
+		default:
+			return fmt.Errorf("response turn %d has invalid role %q", turnIndex, turn.Role)
+		}
 		if len(turn.Parts) == 0 {
 			return fmt.Errorf("response turn %d has no content parts", turnIndex)
 		}
@@ -358,6 +396,58 @@ func ValidateCanonicalResponse(response CanonicalResponse) error {
 			if part == nil {
 				return fmt.Errorf("response turn %d part %d is nil", turnIndex, partIndex)
 			}
+			if err := validateCanonicalPart(part); err != nil {
+				return fmt.Errorf("response turn %d part %d: %w", turnIndex, partIndex, err)
+			}
+		}
+	}
+	if err := validateCanonicalUsage(response.Usage); err != nil {
+		return fmt.Errorf("response usage: %w", err)
+	}
+	return nil
+}
+
+// validateCanonicalPart checks the per-part invariants shared by request and
+// response IR: tool calls carry a non-empty call id and name with an
+// object-shaped arguments payload, and tool results carry a non-empty call id
+// (review-08 additional 10). ItemID is Responses-specific and may be empty
+// for Chat/Messages-originated calls.
+func validateCanonicalPart(part CanonicalPart) error {
+	switch p := part.(type) {
+	case CanonicalFunctionCall:
+		if p.CallID == "" {
+			return errors.New("function call has empty call id")
+		}
+		if p.Name == "" {
+			return errors.New("function call has empty name")
+		}
+		if _, err := decodeJSONObject(string(p.Arguments)); err != nil {
+			return fmt.Errorf("function call %q arguments: %w", p.Name, err)
+		}
+	case CanonicalFunctionResult:
+		if p.CallID == "" {
+			return errors.New("function result has empty call id")
+		}
+	}
+	return nil
+}
+
+// validateCanonicalUsage enforces non-negative token counts and, where a
+// total is known, its consistency with the known components (review-08
+// additional 10/11). An input + output total must not underflow or exceed a
+// known total.
+func validateCanonicalUsage(u CanonicalUsage) error {
+	if u.InputTokens < 0 || u.OutputTokens < 0 || u.ReasoningTokens < 0 ||
+		u.CacheReadTokens < 0 || u.CacheWriteTokens < 0 || u.TotalTokens < 0 {
+		return errors.New("usage has negative token counts")
+	}
+	if u.InputKnown && u.OutputKnown && u.TotalKnown {
+		sum := u.InputTokens + u.OutputTokens
+		if sum < u.InputTokens || sum > u.TotalTokens {
+			return fmt.Errorf(
+				"usage total %d is inconsistent with input %d + output %d",
+				u.TotalTokens, u.InputTokens, u.OutputTokens,
+			)
 		}
 	}
 	return nil

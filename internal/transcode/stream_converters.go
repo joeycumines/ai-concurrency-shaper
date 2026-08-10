@@ -318,7 +318,11 @@ func (s *chatResponsesStreamState) Convert(
 			if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
 				return nil, err
 			}
-			s.usage = chatUsageToResponsesUsage(chunk.Usage)
+			converted, err := chatUsageToResponsesUsage(chunk.Usage)
+			if err != nil {
+				return nil, s.wireError(err)
+			}
+			s.usage = converted
 			return nil, nil
 		}
 		return nil, s.wireError(errors.New("chat stream chunk after finish_reason"))
@@ -366,7 +370,11 @@ func (s *chatResponsesStreamState) Convert(
 		if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
 			return nil, err
 		}
-		s.usage = chatUsageToResponsesUsage(chunk.Usage)
+		converted, err := chatUsageToResponsesUsage(chunk.Usage)
+		if err != nil {
+			return nil, s.wireError(err)
+		}
+		s.usage = converted
 	}
 
 	// The chunk envelope's service tier and per-choice token log
@@ -1129,14 +1137,36 @@ func (o *openResponsesItem) isMessage() bool {
 // the call sites gate the unknown components through
 // loseUnknownUsageComponentsOnce before this runs, so the zeros below are
 // emitted only after the explicit usage-timing loss (review-k finding 6).
-func chatUsageToResponsesUsage(usage *ChatLLMUsage) *ResponsesUsage {
+func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
 	if usage == nil {
-		return nil
+		return nil, nil
+	}
+	prompt := int64(usage.PromptTokens)
+	completion := int64(usage.CompletionTokens)
+	total := int64(usage.TotalTokens)
+	cached := int64(0)
+	reasoning := int64(0)
+	if usage.PromptTokensDetails != nil {
+		cached = int64(usage.PromptTokensDetails.CachedTokens)
+	}
+	if usage.CompletionTokensDetails != nil {
+		reasoning = int64(usage.CompletionTokensDetails.ReasoningTokens)
+	}
+	if prompt < 0 || completion < 0 || total < 0 || cached < 0 || reasoning < 0 {
+		return nil, errors.New(
+			"chat usage has negative token counts",
+		)
+	}
+	if prompt+completion < prompt || prompt+completion > total {
+		return nil, fmt.Errorf(
+			"chat usage total %d is inconsistent with prompt %d + completion %d",
+			total, prompt, completion,
+		)
 	}
 	out := &ResponsesUsage{
-		InputTokens:  int64(usage.PromptTokens),
-		OutputTokens: int64(usage.CompletionTokens),
-		TotalTokens:  int64(usage.TotalTokens),
+		InputTokens:  prompt,
+		OutputTokens: completion,
+		TotalTokens:  total,
 		InputTokensDetails: &UsageInputTokensDetails{
 			CachedTokens: 0,
 		},
@@ -1144,13 +1174,9 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) *ResponsesUsage {
 			ReasoningTokens: 0,
 		},
 	}
-	if usage.PromptTokensDetails != nil {
-		out.InputTokensDetails.CachedTokens = int64(usage.PromptTokensDetails.CachedTokens)
-	}
-	if usage.CompletionTokensDetails != nil {
-		out.OutputTokensDetails.ReasoningTokens = int64(usage.CompletionTokensDetails.ReasoningTokens)
-	}
-	return out
+	out.InputTokensDetails.CachedTokens = cached
+	out.OutputTokensDetails.ReasoningTokens = reasoning
+	return out, nil
 }
 
 // chatStreamChunkShadow is the presence-aware strict decode shadow of a Chat
@@ -2970,7 +2996,8 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, err
 	if usage.OutputTokensDetails != nil {
 		reasoning = usage.OutputTokensDetails.ReasoningTokens
 	}
-	if usage.InputTokens < 0 || cached < 0 || usage.InputTokens-cached < 0 {
+	if usage.InputTokens < 0 || cached < 0 || usage.InputTokens-cached < 0 ||
+		usage.OutputTokens < 0 || reasoning < 0 {
 		return nil, errors.New(
 			"source usage is arithmetically inconsistent: nonnegative token counts required and cached tokens must not exceed the input total",
 		)

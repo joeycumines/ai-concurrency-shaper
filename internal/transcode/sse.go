@@ -138,31 +138,51 @@ func readSSEEventLimited(r *bufio.Reader, lineMax, frameMax int) (SSEEvent, erro
 	}
 }
 
-// readSSELine reads one line, trimming the trailing CR/LF, without growing
-// past maxSSELineBytes: oversized lines are consumed and reported as
+// readSSELine reads one line, without growing past lineMax, handling all
+// three SSE line terminators defined by the HTML spec: LF, CR, and CRLF
+// (review-08 additional 12). Oversized lines are consumed and reported as
 // errSSELineOversized so the frame parser can report the size violation as
 // fatal.
 func readSSELine(r *bufio.Reader, lineMax int) (string, error) {
 	var line []byte
 	for {
-		frag, err := r.ReadSlice('\n')
-		// Check the bound BEFORE appending so the buffer never exceeds
-		// maxSSELineBytes + a small overshoot from the reader's internal
-		// buffer.
-		if len(line)+len(frag) > lineMax {
-			// Consume the rest of the oversized line, then report the
-			// sentinel error.
-			for err == bufio.ErrBufferFull {
-				_, err = r.ReadSlice('\n')
-			}
-			return "", errSSELineOversized
-		}
-		line = append(line, frag...)
-		if err != bufio.ErrBufferFull {
+		b, err := r.ReadByte()
+		if err != nil {
 			if errors.Is(err, io.EOF) && len(line) == 0 {
 				return "", io.EOF
 			}
-			return strings.TrimRight(string(line), "\r\n"), err
+			return string(line), err
+		}
+		if b == '\r' {
+			// CRLF is a single line ending: consume a following LF if
+			// present.
+			if next, perr := r.ReadByte(); perr == nil && next != '\n' {
+				_ = r.UnreadByte()
+			}
+			return string(line), nil
+		}
+		if b == '\n' {
+			return string(line), nil
+		}
+		line = append(line, b)
+		if len(line) > lineMax {
+			// Consume the rest of the oversized line.
+			for {
+				b, err := r.ReadByte()
+				if err != nil {
+					break
+				}
+				if b == '\n' {
+					break
+				}
+				if b == '\r' {
+					if next, perr := r.ReadByte(); perr == nil && next != '\n' {
+						_ = r.UnreadByte()
+					}
+					break
+				}
+			}
+			return "", errSSELineOversized
 		}
 	}
 }
