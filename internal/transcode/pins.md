@@ -1,33 +1,43 @@
 # Wire contract pins
 
-Authority for every schema decision in this package. Any claim about an
-official wire shape must trace to these pinned revisions. Unpinned "current
-contract" claims are not normative; when live documentation disagrees with
-the pin, the pin wins until the pin is deliberately bumped (see below).
+Authority for every schema decision in this package. The authoritative
+registry is `contracts.lock.json` — the pinned-revisions table below is
+generated from it (`go generate ./internal/transcode`, see contracts.go) and
+must never be maintained by hand. Any claim about an official wire shape must
+trace to these pinned revisions. Unpinned "current contract" claims are not
+normative; when live documentation disagrees with the pin, the pin wins until
+the pin is deliberately bumped (see below).
 
 ## Pinned revisions
 
-| Protocol | Module | Revision | File | Lines |
-| --- | --- | --- | --- | --- |
-| OpenAI Chat Completions | `github.com/openai/openai-go` | v1.12.0 | `chatcompletion.go` | 2738 |
-| OpenAI Responses | `github.com/openai/openai-go` | v1.12.0 | `responses/response.go` | 13046 |
-| Anthropic Messages | `github.com/anthropics/anthropic-sdk-go` | v1.61.0 | `message.go` | 10108 |
+| Protocol | Source | Version | Snapshot SHA256 |
+| --- | --- | --- | --- |
+| OpenAI Responses | openai-go | v1.12.0 | `bbd67c90691efe37097affc8cd3200b2360f14426ae0d60b2d59e444a7f87186` |
+| OpenAI Chat Completions | openai-go | v1.12.0 | `bde5294743898ff93efee09fe80eb59c07599c252cb591d532205fbde1aeb53c` |
+| Anthropic Messages | anthropic-api | 2023-06-01 | `7904599c41df8745b57614322d73e970c8bf54bb48563829d8ec3a2381920ce5` |
 
-Pinned 2026-08-07 (review cycle J, task J1). Extracted from the module cache
-copies (`go env GOMODCACHE`) by the disposable wirecheck module at
-`/var/folders/_r/v0qs308n49952w5gddyqznbw0000gn/T/opencode/wirecheck`
-(`extract.go`), which is deleted after use and never enters `go.mod`/`go.sum`.
+Generated from `contracts.lock.json` (authoritative) by `go generate` — see
+contracts.go. Do not edit this table by hand. The schema inventories below
+are the checked-in schema detail; their integrity is covered by the snapshot
+hashes (drift test in contracts_test.go).
 
 ## Update procedure (governance, review-j finding 17)
 
-1. Bump the revision in the disposable wirecheck module (`go get ...@vX.Y.Z`).
+1. Bump the revision in `contracts.lock.json` (the authoritative registry)
+   and in the disposable wirecheck module (`go get ...@vX.Y.Z`).
 2. Re-run `extract.go` for the affected files and regenerate this document's
    inventories.
-3. Review the schema diff: every added/removed/changed field must be traced to
-   `internal/transcode/*.go` (strict decoders reject unknown fields, so a bump
-   that adds official fields is a breaking step that must land with its schema
-   and fixture updates in the same commit).
-4. Record the bump in this file and in `blueprint.json` goalLog.
+3. Update the affected inventory section (its content is covered by the
+   lock's `snapshot_sha256` — a change without a deliberate pin bump fails
+   the drift test in contracts_test.go).
+4. Run `go generate ./internal/transcode` to regenerate the pinned-revisions
+   table from the lock.
+5. Review the schema diff: every added/removed/changed field must be traced to
+   `internal/transcode/*.go` and `internal/transcode/wire/` (strict decoders
+   reject unknown fields, so a bump that adds official fields is a breaking
+   step that must land with its schema and fixture updates in the same commit).
+6. Record the bump in `contracts.lock.json`, this file, and `blueprint.json`
+   goalLog.
 
 ## OpenAI Chat Completions inventory (chatcompletion.go, v1.12.0)
 

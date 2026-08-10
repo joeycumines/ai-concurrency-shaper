@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
 // frameConverters adapt the typed stream state machines to the
@@ -324,114 +327,65 @@ func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 
 // decodeResponsesSSEEvent decodes one Responses stream frame into the typed
 // event union. Events are returned by value so the state machines' value-type
-// switches match.
+// switches match. The wire layer's unknown-event-type report is a valid-but-
+// unsupported source feature (local), never corrupt wire; every other decode
+// or validation failure is upstream wire corruption.
 func decodeResponsesSSEEvent(data []byte) (ResponsesSSEEvent, error) {
-	var probe struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(data, &probe); err != nil {
-		return nil, upstreamWireError(UpstreamResponses, http.StatusOK, err)
-	}
-
-	var event ResponsesSSEEvent
-	switch probe.Type {
-	case "response.created":
-		event = &ResponseCreatedEvent{}
-	case "response.in_progress":
-		event = &ResponseInProgressEvent{}
-	case "response.output_item.added":
-		event = &ResponseOutputItemAddedEvent{}
-	case "response.output_item.done":
-		event = &ResponseOutputItemDoneEvent{}
-	case "response.reasoning_summary_part.added":
-		event = &ResponseReasoningSummaryPartAddedEvent{}
-	case "response.reasoning_summary_text.delta":
-		event = &ResponseReasoningSummaryTextDeltaEvent{}
-	case "response.reasoning_summary_text.done":
-		event = &ResponseReasoningSummaryTextDoneEvent{}
-	case "response.reasoning_summary_part.done":
-		event = &ResponseReasoningSummaryPartDoneEvent{}
-	case "response.content_part.added":
-		event = &ResponseContentPartAddedEvent{}
-	case "response.output_text.delta":
-		event = &ResponseTextDeltaEvent{}
-	case "response.output_text.done":
-		event = &ResponseTextDoneEvent{}
-	case "response.content_part.done":
-		event = &ResponseContentPartDoneEvent{}
-	case "response.function_call_arguments.delta":
-		event = &ResponseFunctionCallArgumentsDeltaEvent{}
-	case "response.function_call_arguments.done":
-		event = &ResponseFunctionCallArgumentsDoneEvent{}
-	case "response.refusal.delta":
-		event = &ResponseRefusalDeltaEvent{}
-	case "response.refusal.done":
-		event = &ResponseRefusalDoneEvent{}
-	case "response.completed":
-		event = &ResponseCompletedEvent{}
-	case "response.incomplete":
-		event = &ResponseIncompleteEvent{}
-	case "response.failed":
-		event = &ResponseFailedEvent{}
-	case "error":
-		event = &ResponseErrorEvent{}
-	default:
-		return nil, &UnsupportedFeatureError{
-			Protocol: "responses",
-			Path:     "stream[].type",
-			Feature:  probe.Type,
+	event, err := openairesponses.DecodeEvent(data)
+	if err != nil {
+		var unsupported *wire.UnsupportedTypeError
+		if errors.As(err, &unsupported) {
+			return nil, &UnsupportedFeatureError{
+				Protocol: unsupported.Protocol,
+				Path:     unsupported.Path,
+				Feature:  unsupported.Type,
+			}
 		}
-	}
-
-	if err := strictDecode(data, event); err != nil {
-		return nil, upstreamWireError(UpstreamResponses, http.StatusOK, err)
-	}
-	if err := event.Validate(); err != nil {
 		return nil, upstreamWireError(UpstreamResponses, http.StatusOK, err)
 	}
 
 	// Return by value so the value-type switches in the state machines match.
-	switch probe.Type {
-	case "response.created":
-		return *(event.(*ResponseCreatedEvent)), nil
-	case "response.in_progress":
-		return *(event.(*ResponseInProgressEvent)), nil
-	case "response.output_item.added":
-		return *(event.(*ResponseOutputItemAddedEvent)), nil
-	case "response.output_item.done":
-		return *(event.(*ResponseOutputItemDoneEvent)), nil
-	case "response.reasoning_summary_part.added":
-		return *(event.(*ResponseReasoningSummaryPartAddedEvent)), nil
-	case "response.reasoning_summary_text.delta":
-		return *(event.(*ResponseReasoningSummaryTextDeltaEvent)), nil
-	case "response.reasoning_summary_text.done":
-		return *(event.(*ResponseReasoningSummaryTextDoneEvent)), nil
-	case "response.reasoning_summary_part.done":
-		return *(event.(*ResponseReasoningSummaryPartDoneEvent)), nil
-	case "response.content_part.added":
-		return *(event.(*ResponseContentPartAddedEvent)), nil
-	case "response.output_text.delta":
-		return *(event.(*ResponseTextDeltaEvent)), nil
-	case "response.output_text.done":
-		return *(event.(*ResponseTextDoneEvent)), nil
-	case "response.content_part.done":
-		return *(event.(*ResponseContentPartDoneEvent)), nil
-	case "response.function_call_arguments.delta":
-		return *(event.(*ResponseFunctionCallArgumentsDeltaEvent)), nil
-	case "response.function_call_arguments.done":
-		return *(event.(*ResponseFunctionCallArgumentsDoneEvent)), nil
-	case "response.refusal.delta":
-		return *(event.(*ResponseRefusalDeltaEvent)), nil
-	case "response.refusal.done":
-		return *(event.(*ResponseRefusalDoneEvent)), nil
-	case "response.completed":
-		return *(event.(*ResponseCompletedEvent)), nil
-	case "response.incomplete":
-		return *(event.(*ResponseIncompleteEvent)), nil
-	case "response.failed":
-		return *(event.(*ResponseFailedEvent)), nil
-	case "error":
-		return *(event.(*ResponseErrorEvent)), nil
+	switch probe := event.(type) {
+	case *openairesponses.CreatedEvent:
+		return *probe, nil
+	case *openairesponses.InProgressEvent:
+		return *probe, nil
+	case *openairesponses.OutputItemAddedEvent:
+		return *probe, nil
+	case *openairesponses.OutputItemDoneEvent:
+		return *probe, nil
+	case *openairesponses.ReasoningSummaryPartAddedEvent:
+		return *probe, nil
+	case *openairesponses.ReasoningSummaryTextDeltaEvent:
+		return *probe, nil
+	case *openairesponses.ReasoningSummaryTextDoneEvent:
+		return *probe, nil
+	case *openairesponses.ReasoningSummaryPartDoneEvent:
+		return *probe, nil
+	case *openairesponses.ContentPartAddedEvent:
+		return *probe, nil
+	case *openairesponses.TextDeltaEvent:
+		return *probe, nil
+	case *openairesponses.TextDoneEvent:
+		return *probe, nil
+	case *openairesponses.ContentPartDoneEvent:
+		return *probe, nil
+	case *openairesponses.FunctionCallArgumentsDeltaEvent:
+		return *probe, nil
+	case *openairesponses.FunctionCallArgumentsDoneEvent:
+		return *probe, nil
+	case *openairesponses.RefusalDeltaEvent:
+		return *probe, nil
+	case *openairesponses.RefusalDoneEvent:
+		return *probe, nil
+	case *openairesponses.CompletedEvent:
+		return *probe, nil
+	case *openairesponses.IncompleteEvent:
+		return *probe, nil
+	case *openairesponses.FailedEvent:
+		return *probe, nil
+	case *openairesponses.ErrorEvent:
+		return *probe, nil
 	default:
 		panic("unreachable: validated event type")
 	}
@@ -497,7 +451,7 @@ func boundedErrorMessage(err error) string {
 // responsesErrorFrame marshals a Responses error event.
 func responsesErrorFrame(err error, sequence int64) (frameEvent, bool) {
 	event := ResponseErrorEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "error",
 			SequenceNumber: sequence,
 		},

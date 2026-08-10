@@ -6,6 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/anthropicmessages"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
 // Direct source-to-IR-to-target conversion. There must not be an
@@ -16,63 +20,6 @@ import (
 // because every intermediate serializer loses source semantics and invents
 // fields that were never supplied. Each source decodes exactly once into the
 // canonical IR and each target renders directly from that IR.
-
-// responsesRequestEnvelope is the strict request envelope decoded from a
-// Responses request body. Unknown fields are rejected; recognized-but-
-// unsupported fields produce an UnsupportedFeatureError before decoding.
-type responsesRequestEnvelope struct {
-	Model string          `json:"model"`
-	Input *ResponsesInput `json:"input,omitempty"`
-	// Instructions is a plain string on the create request (the pinned
-	// ResponseNewParams shape); the string-or-item-list union exists only on
-	// the response echo (review-j finding 13).
-	Instructions       *string                     `json:"instructions,omitempty"`
-	MaxOutputTokens    *int                        `json:"max_output_tokens,omitempty"`
-	ParallelToolCalls  *bool                       `json:"parallel_tool_calls,omitempty"`
-	PreviousResponseID *string                     `json:"previous_response_id,omitempty"`
-	Store              *bool                       `json:"store,omitempty"`
-	Temperature        *float64                    `json:"temperature,omitempty"`
-	TopP               *float64                    `json:"top_p,omitempty"`
-	Truncation         *string                     `json:"truncation,omitempty"`
-	User               *string                     `json:"user,omitempty"`
-	Metadata           map[string]string           `json:"metadata,omitempty"`
-	Tools              []ResponsesTool             `json:"tools,omitempty"`
-	ToolChoice         *ResponsesToolChoice        `json:"tool_choice,omitempty"`
-	Reasoning          *ResponsesEnvelopeReasoning `json:"reasoning,omitempty"`
-	Text               *ResponsesEnvelopeText      `json:"text,omitempty"`
-	ServiceTier        *string                     `json:"service_tier,omitempty"`
-	TopLogprobs        *int64                      `json:"top_logprobs,omitempty"`
-	Stream             bool                        `json:"stream,omitempty"`
-}
-
-// responsesRequestShadow is the presence-aware decode shadow of
-// responsesRequestEnvelope: the request body's stream field must be
-// distinguishable from absent so the handler can apply the documented
-// stream-intent precedence — an explicit stream:false is authoritative over
-// the Accept header (review-08 blocker 1). The shadow models the full
-// envelope surface with the same strictness (unknown fields rejected) and a
-// pointer stream; values are consumed from the envelope decode that follows.
-type responsesRequestShadow struct {
-	Model              string                      `json:"model"`
-	Input              *ResponsesInput             `json:"input,omitempty"`
-	Instructions       *string                     `json:"instructions,omitempty"`
-	MaxOutputTokens    *int                        `json:"max_output_tokens,omitempty"`
-	ParallelToolCalls  *bool                       `json:"parallel_tool_calls,omitempty"`
-	PreviousResponseID *string                     `json:"previous_response_id,omitempty"`
-	Store              *bool                       `json:"store,omitempty"`
-	Temperature        *float64                    `json:"temperature,omitempty"`
-	TopP               *float64                    `json:"top_p,omitempty"`
-	Truncation         *string                     `json:"truncation,omitempty"`
-	User               *string                     `json:"user,omitempty"`
-	Metadata           map[string]string           `json:"metadata,omitempty"`
-	Tools              []ResponsesTool             `json:"tools,omitempty"`
-	ToolChoice         *ResponsesToolChoice        `json:"tool_choice,omitempty"`
-	Reasoning          *ResponsesEnvelopeReasoning `json:"reasoning,omitempty"`
-	Text               *ResponsesEnvelopeText      `json:"text,omitempty"`
-	ServiceTier        *string                     `json:"service_tier,omitempty"`
-	TopLogprobs        *int64                      `json:"top_logprobs,omitempty"`
-	Stream             *bool                       `json:"stream,omitempty"`
-}
 
 // probeUnsupportedResponsesFields reports the first recognized-but-unsupported
 // Responses request field, or "" when none is present. These fields are
@@ -102,11 +49,30 @@ func probeUnsupportedResponsesFields(data []byte) (string, error) {
 
 // DecodeResponsesRequest decodes a Responses request body into the canonical
 // IR and captures the request echo required to reconstruct the client
-// response envelope.
+// response envelope. The body is decoded through the pinned wire contract
+// (wire/openairesponses.Request): the stream field is presence-aware so the
+// handler can apply the documented precedence over the Accept header, and
+// tool entries must carry an explicit strict (a missing or null strict is a
+// malformed request, rejected client-dialect before any upstream request).
 func DecodeResponsesRequest(
 	body []byte,
 	policy LossPolicy,
 ) (DecodeResult, *ResponsesRequestEcho, error) {
+	var request openairesponses.Request
+	if err := wire.Decode(body, &request); err != nil {
+		// A valid-but-unsupported feature reported by a wire union dispatcher
+		// (e.g. an input_audio part) surfaces as UnsupportedFeatureError —
+		// client-dialect local — never as a malformed-request error. All six
+		// malformed-JSON categories surface as typed wire.DecodeError.
+		return DecodeResult{}, nil, fmt.Errorf(
+			"responses request: %w",
+			wireUnsupportedToFeature(err),
+		)
+	}
+	// Recognized-but-unsupported request fields (conversation-state and
+	// background controls) are a typed unsupported-feature error, never a
+	// silent drop. The probe runs after the strict decode so a malformed
+	// document is reported as malformed, not as an unsupported field.
 	if name, err := probeUnsupportedResponsesFields(body); err != nil {
 		return DecodeResult{}, nil, err
 	} else if name != "" {
@@ -117,69 +83,60 @@ func DecodeResponsesRequest(
 		}
 	}
 
-	// Presence-aware shadow decode: the body's stream field must be
-	// distinguishable from absent (review-08 blocker 1). The shadow models
-	// the same surface as the envelope with the same strictness; values are
-	// consumed from the envelope decode below.
-	var shadow responsesRequestShadow
-	if err := strictDecode(body, &shadow); err != nil {
-		return DecodeResult{}, nil, fmt.Errorf("responses request: %w", err)
+	// Tool strictness is required on the wire for function tools: reject
+	// before any value is consumed so a strict-less tool can never reach the
+	// converters.
+	for i, tool := range request.Tools {
+		if err := tool.Validate(); err != nil {
+			return DecodeResult{}, nil, fmt.Errorf("responses tools[%d]: %w", i, err)
+		}
 	}
 
-	var envelope responsesRequestEnvelope
-	if err := strictDecode(body, &envelope); err != nil {
-		return DecodeResult{}, nil, fmt.Errorf("responses request: %w", err)
+	if request.Model == "" {
+		return DecodeResult{}, nil, &wire.DecodeError{
+			Kind:    wire.DecodeMissingRequired,
+			Path:    "model",
+			Message: "responses request model is empty",
+		}
 	}
-	// The envelope decode cannot fail after the shadow succeeded: both
-	// decode the same modeled surface with the same strictness (verified
-	// field-identical surfaces and null semantics — where the shadow used a
-	// pointer and the envelope a value, a null is silently ignored by the
-	// value field, never a decode error), so an input rejected by the
-	// envelope is rejected by the shadow first. The decode is defensive, the
-	// same shadow-then-wire pattern DecodeChatResponse uses.
-	if envelope.Model == "" {
-		return DecodeResult{}, nil, errors.New("responses request model is empty")
-	}
-	if envelope.Truncation != nil {
-		switch *envelope.Truncation {
+	if request.Truncation != nil {
+		switch *request.Truncation {
 		case "auto", "disabled":
 		default:
 			return DecodeResult{}, nil, fmt.Errorf(
 				"invalid truncation %q",
-				*envelope.Truncation,
+				*request.Truncation,
 			)
 		}
 	}
-	if envelope.TopLogprobs != nil && *envelope.TopLogprobs < 0 {
+	if request.TopLogprobs != nil && *request.TopLogprobs < 0 {
 		return DecodeResult{}, nil, errors.New("negative top_logprobs")
 	}
 
 	var result DecodeResult
-	result.Request.ClientModel = envelope.Model
-	result.Request.Stream = envelope.Stream
-	// An explicitly present body stream field (true or false) is recorded as
-	// present so the handler can apply the documented precedence over the
-	// Accept header (review-08 blocker 1). An absent or null field is treated
-	// as absent, consistent with the envelope's other pointer fields.
-	if shadow.Stream != nil {
+	result.Request.ClientModel = request.Model
+	result.Request.Stream = request.Stream.Value
+	// An explicitly present body stream field (true or false, never null) is
+	// recorded as present so the handler can apply the documented precedence
+	// over the Accept header (review-08 blocker 1). An absent or null field
+	// is treated as absent, consistent with the envelope's other pointer
+	// fields.
+	if request.Stream.Present && !request.Stream.Null {
 		result.StreamSet = true
-		result.Request.Stream = *shadow.Stream
+		result.Request.Stream = request.Stream.Value
 	}
-	result.Request.MaxOutputTokens = envelope.MaxOutputTokens
-	result.Request.ParallelTools = envelope.ParallelToolCalls
-	result.Request.Temperature = envelope.Temperature
-	result.Request.TopP = envelope.TopP
-	result.Request.Metadata = envelope.Metadata
+	result.Request.MaxOutputTokens = request.MaxOutputTokens
+	result.Request.ParallelTools = request.ParallelToolCalls
+	result.Request.Temperature = request.Temperature
+	result.Request.TopP = request.TopP
+	result.Request.Metadata = request.Metadata
 
 	// Tools. Only function tools are supported; built-in tools are a typed
 	// unsupported feature. The raw parameters schema is validated as exactly
 	// one JSON object at this boundary; its bytes are preserved, never
 	// decoded and remarshaled through a map, so large integers, decimals,
 	// and exponents survive byte-exact (review-k finding 2).
-	for i, tool := range envelope.Tools {
-		if err := tool.Validate(); err != nil {
-			return DecodeResult{}, nil, fmt.Errorf("responses tools[%d]: %w", i, err)
-		}
+	for i, tool := range request.Tools {
 		if len(tool.Parameters) > 0 {
 			if _, err := decodeJSONObject(string(tool.Parameters)); err != nil {
 				return DecodeResult{}, nil, fmt.Errorf(
@@ -193,13 +150,13 @@ func DecodeResponsesRequest(
 			Name:        tool.Name,
 			Description: tool.Description,
 			JSONSchema:  tool.Parameters,
-			Strict:      tool.Strict,
+			Strict:      fieldBoolPtr(tool.Strict),
 		})
 	}
 
 	// Tool choice.
-	if envelope.ToolChoice != nil {
-		choice, err := canonicalizeResponsesToolChoice(*envelope.ToolChoice)
+	if request.ToolChoice != nil {
+		choice, err := canonicalizeResponsesToolChoice(*request.ToolChoice)
 		if err != nil {
 			return DecodeResult{}, nil, err
 		}
@@ -207,8 +164,8 @@ func DecodeResponsesRequest(
 	}
 
 	// Structured output from text.format.
-	if envelope.Text != nil && envelope.Text.Format != nil {
-		format := envelope.Text.Format
+	if request.Text != nil && request.Text.Format != nil {
+		format := request.Text.Format
 		switch format.Type {
 		case "", "text":
 			// No structured output requested.
@@ -250,18 +207,18 @@ func DecodeResponsesRequest(
 	}
 
 	// Turns from instructions and input.
-	if envelope.Instructions != nil {
+	if request.Instructions != nil {
 		result.Request.Turns = append(result.Request.Turns, CanonicalTurn{
 			Role:  CanonicalSystem,
-			Parts: []CanonicalPart{CanonicalText{Text: *envelope.Instructions}},
+			Parts: []CanonicalPart{CanonicalText{Text: *request.Instructions}},
 		})
 	}
-	if envelope.Input != nil {
-		if err := envelope.Input.Validate(); err != nil {
+	if request.Input != nil {
+		if err := request.Input.Validate(); err != nil {
 			return DecodeResult{}, nil, fmt.Errorf("responses input: %w", err)
 		}
 		turns, err := responsesInputToTurns(
-			*envelope.Input,
+			*request.Input,
 			policy,
 			&result.Report,
 			&result.Request.Artifacts,
@@ -274,27 +231,30 @@ func DecodeResponsesRequest(
 
 	// Echo for the client envelope reconstruction. The client's
 	// instructions is a plain string; the response envelope echo renders
-	// the string arm of the pinned instructions union.
+	// the string arm of the pinned instructions union. The effective values
+	// (parallel_tool_calls, temperature, top_p, tool_choice) carry the
+	// pinned API defaults — parallel_tool_calls defaults to true,
+	// temperature to 1.0, top_p to 1.0, tool_choice to "auto" — so the
+	// renderer can emit a complete response envelope without guessing later.
 	echo := &ResponsesRequestEcho{}
-	if envelope.Instructions != nil {
-		echo.Instructions = &ResponsesInput{Text: envelope.Instructions}
+	if request.Instructions != nil {
+		echo.Instructions = &ResponsesInput{Text: request.Instructions}
 	}
-	echo.MaxOutputTokens = envelope.MaxOutputTokens
-	echo.ParallelToolCalls = envelope.ParallelToolCalls
-	echo.PreviousResponseID = envelope.PreviousResponseID
-	echo.Store = envelope.Store
-	echo.Temperature = envelope.Temperature
-	echo.TopP = envelope.TopP
-	echo.Truncation = envelope.Truncation
-	echo.User = envelope.User
-	echo.Metadata = envelope.Metadata
-	echo.Tools = envelope.Tools
-	echo.ToolChoice = envelope.ToolChoice
-	echo.Reasoning = envelope.Reasoning
-	echo.Text = envelope.Text
-	echo.ServiceTier = envelope.ServiceTier
-	echo.TopLogprobs = envelope.TopLogprobs
-	echo.Stream = envelope.Stream
+	echo.MaxOutputTokens = request.MaxOutputTokens
+	echo.ParallelToolCalls = defaultBoolValue(request.ParallelToolCalls, true)
+	echo.PreviousResponseID = request.PreviousResponseID
+	echo.Store = request.Store
+	echo.Temperature = defaultFloatValue(request.Temperature, 1.0)
+	echo.TopP = defaultFloatValue(request.TopP, 1.0)
+	echo.Truncation = request.Truncation
+	echo.User = request.User
+	echo.Metadata = request.Metadata
+	echo.Tools = request.Tools
+	echo.ToolChoice = defaultToolChoice(request.ToolChoice)
+	echo.Reasoning = request.Reasoning
+	echo.Text = request.Text
+	echo.ServiceTier = request.ServiceTier
+	echo.TopLogprobs = request.TopLogprobs
 
 	return result, echo, nil
 }
@@ -619,31 +579,14 @@ func mustRawMessage(value map[string]json.RawMessage) json.RawMessage {
 	return raw
 }
 
-// messagesRequestEnvelope is the strict request envelope decoded from an
-// Anthropic Messages request body.
-type messagesRequestEnvelope struct {
-	Model         string               `json:"model"`
-	MaxTokens     int                  `json:"max_tokens"`
-	Messages      []AnthropicMessage   `json:"messages"`
-	System        *AnthropicContent    `json:"system,omitempty"`
-	Temperature   *float64             `json:"temperature,omitempty"`
-	TopP          *float64             `json:"top_p,omitempty"`
-	TopK          *int                 `json:"top_k,omitempty"`
-	StopSequences []string             `json:"stop_sequences,omitempty"`
-	Stream        *bool                `json:"stream,omitempty"`
-	Tools         []AnthropicTool      `json:"tools,omitempty"`
-	ToolChoice    *AnthropicToolChoice `json:"tool_choice,omitempty"`
-	Metadata      map[string]any       `json:"metadata,omitempty"`
-}
-
 // DecodeMessagesRequest decodes an Anthropic Messages request body into the
 // canonical IR.
 func DecodeMessagesRequest(
 	body []byte,
 	policy LossPolicy,
 ) (DecodeResult, error) {
-	var envelope messagesRequestEnvelope
-	if err := strictDecode(body, &envelope); err != nil {
+	var envelope anthropicmessages.Request
+	if err := wire.Decode(body, &envelope); err != nil {
 		return DecodeResult{}, fmt.Errorf("messages request: %w", err)
 	}
 	if envelope.Model == "" {
@@ -1073,7 +1016,7 @@ func RenderResponsesRequest(
 		}
 	}
 
-	out := responsesRequestEnvelope{
+	out := openairesponses.Request{
 		Model:             model,
 		Instructions:      instructions,
 		Input:             &ResponsesInput{Items: input},
@@ -1082,7 +1025,9 @@ func RenderResponsesRequest(
 		Temperature:       request.Temperature,
 		TopP:              request.TopP,
 		Metadata:          request.Metadata,
-		Stream:            request.Stream,
+		// The stream field is emitted only when true, matching the
+		// pre-contract behavior (a non-streaming request body omits it).
+		Stream: wire.Field[bool]{Value: true, Present: request.Stream},
 	}
 
 	// Stop sequences are not representable in Responses.
@@ -1097,18 +1042,27 @@ func RenderResponsesRequest(
 		}
 	}
 
-	// Tools.
+	// Tools. The pinned Responses function-tool contract requires an
+	// explicit strict on the wire. A source tool that carries no strictness
+	// semantic (Messages tools have none; Chat tools may omit it) cannot
+	// provide one: under strict policy the conversion is rejected, and under
+	// the tool_schema_strictness permission it emits explicit strict:false —
+	// the non-tightening value — never an omitted or guessed strict.
 	for _, tool := range request.Tools {
 		parameters := tool.JSONSchema
 		if len(parameters) == 0 {
 			parameters = json.RawMessage(`{"type":"object"}`)
+		}
+		strict, err := responsesToolStrictField(context, tool, &report)
+		if err != nil {
+			return nil, report, err
 		}
 		out.Tools = append(out.Tools, ResponsesTool{
 			Type:        "function",
 			Name:        tool.Name,
 			Description: tool.Description,
 			Parameters:  parameters,
-			Strict:      tool.Strict,
+			Strict:      strict,
 		})
 	}
 
@@ -1478,4 +1432,65 @@ func loseSystemPart(
 		"instructions",
 		"the system prompt part cannot be expressed in the string-only create-request instructions",
 	)
+}
+
+// fieldBoolPtr converts a presence-aware wire bool to a plain pointer:
+// absent or explicit null becomes nil, everything else becomes the value.
+func fieldBoolPtr(field wire.Field[bool]) *bool {
+	if !field.Present || field.Null {
+		return nil
+	}
+	value := field.Value
+	return &value
+}
+
+// defaultBoolValue applies the pinned API default when the field is absent.
+func defaultBoolValue(value *bool, def bool) bool {
+	if value == nil {
+		return def
+	}
+	return *value
+}
+
+// defaultFloatValue applies the pinned API default when the field is absent.
+func defaultFloatValue(value *float64, def float64) float64 {
+	if value == nil {
+		return def
+	}
+	return *value
+}
+
+// defaultToolChoice applies the pinned tool_choice default ("auto") when the
+// request carried no explicit choice, so the response envelope echo always
+// carries a valid value.
+func defaultToolChoice(choice *ResponsesToolChoice) ResponsesToolChoice {
+	if choice != nil {
+		return *choice
+	}
+	auto := "auto"
+	return ResponsesToolChoice{Str: &auto}
+}
+
+// responsesToolStrictField renders the required strict field of a Responses
+// function tool. A source strict value is preserved exactly. A source tool
+// without a strictness semantic is an explicit loss decision: rejected under
+// strict policy, and emitted as explicit strict:false under the
+// tool_schema_strictness permission.
+func responsesToolStrictField(
+	context *ExchangeContext,
+	tool CanonicalTool,
+	report *ConversionReport,
+) (wire.Field[bool], error) {
+	if tool.Strict != nil {
+		return wire.Field[bool]{Value: *tool.Strict, Present: true}, nil
+	}
+	if err := report.Lose(
+		context.lossPolicy(),
+		FeatureToolSchemaStrictness,
+		"tools[].strict",
+		"the source tool schema has no strictness semantic; emitting explicit strict:false",
+	); err != nil {
+		return wire.Field[bool]{}, err
+	}
+	return wire.Field[bool]{Value: false, Present: true}, nil
 }

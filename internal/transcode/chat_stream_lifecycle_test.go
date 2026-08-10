@@ -309,7 +309,7 @@ func TestChatStreamCreatedAtConsistent(t *testing.T) {
 		t.Fatalf("event 1 = %T", events[1])
 	}
 	if created.Response.CreatedAt != 1710000000 || inProgress.Response.CreatedAt != 1710000000 {
-		t.Fatalf("created_at = %d/%d, want 1710000000",
+		t.Fatalf("created_at = %v/%v, want 1710000000",
 			created.Response.CreatedAt, inProgress.Response.CreatedAt)
 	}
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("stop"))); err != nil {
@@ -324,7 +324,7 @@ func TestChatStreamCreatedAtConsistent(t *testing.T) {
 		t.Fatalf("terminal = %T", held[len(held)-1])
 	}
 	if completed.Response.CreatedAt != 1710000000 {
-		t.Fatalf("terminal created_at = %d, want 1710000000", completed.Response.CreatedAt)
+		t.Fatalf("terminal created_at = %v, want 1710000000", completed.Response.CreatedAt)
 	}
 }
 

@@ -5,6 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
 func decodeJSON(t *testing.T, data string, dst any) {
@@ -28,6 +31,17 @@ func asUnsupportedFeatureError(t *testing.T, err error) *UnsupportedFeatureError
 	var target *UnsupportedFeatureError
 	if !errors.As(err, &target) {
 		t.Fatalf("error type = %T, want *UnsupportedFeatureError: %v", err, err)
+	}
+	return target
+}
+
+// asWireUnsupportedTypeError asserts the error chain carries the wire
+// layer's typed unsupported-type report.
+func asWireUnsupportedTypeError(t *testing.T, err error) *wire.UnsupportedTypeError {
+	t.Helper()
+	var target *wire.UnsupportedTypeError
+	if !errors.As(err, &target) {
+		t.Fatalf("error type = %T, want *wire.UnsupportedTypeError: %v", err, err)
 	}
 	return target
 }
@@ -106,14 +120,19 @@ func TestResponsesInputItems(t *testing.T) {
 }
 
 func TestResponsesInputUnsupportedItemType(t *testing.T) {
+	// The wire-layer union dispatch reports the unsupported arm as the
+	// typed wire.UnsupportedTypeError; the transcode request/response
+	// boundaries translate it into UnsupportedFeatureError (covered by the
+	// classification tests). At the direct decode level the wire type is the
+	// contract.
 	var input ResponsesInput
 	err := json.Unmarshal([]byte(`[{"type":"web_search_call"}]`), &input)
 	if err == nil {
 		t.Fatal("expected error for web_search_call")
 	}
-	ue := asUnsupportedFeatureError(t, err)
-	if ue.Feature != "web_search_call" {
-		t.Fatalf("feature = %q", ue.Feature)
+	ue := asWireUnsupportedTypeError(t, err)
+	if ue.Type != "web_search_call" {
+		t.Fatalf("type = %q", ue.Type)
 	}
 }
 
@@ -140,14 +159,19 @@ func TestResponsesInputInvalid(t *testing.T) {
 }
 
 func TestResponsesInputContentPartUnsupported(t *testing.T) {
+	// The wire-layer union dispatch reports the unsupported arm as the
+	// typed wire.UnsupportedTypeError; the transcode request/response
+	// boundaries translate it into UnsupportedFeatureError (covered by the
+	// classification tests). At the direct decode level the wire type is the
+	// contract.
 	var parts ResponsesInputContentParts
 	err := json.Unmarshal([]byte(`[{"type":"input_audio","audio":"x"}]`), &parts)
 	if err == nil {
 		t.Fatal("expected error for input_audio")
 	}
-	ue := asUnsupportedFeatureError(t, err)
-	if ue.Feature != "input_audio" {
-		t.Fatalf("feature = %q", ue.Feature)
+	ue := asWireUnsupportedTypeError(t, err)
+	if ue.Type != "input_audio" {
+		t.Fatalf("type = %q", ue.Type)
 	}
 }
 
@@ -241,7 +265,7 @@ func TestResponsesInputInstructionsString(t *testing.T) {
 	// The create-request instructions is a plain string per the pinned
 	// ResponseNewParams shape (review-j finding 13).
 	data := `{"instructions":"system prompt","input":"hi","model":"m"}`
-	var envelope responsesRequestEnvelope
+	var envelope openairesponses.Request
 	if err := strictDecode([]byte(data), &envelope); err != nil {
 		t.Fatal(err)
 	}

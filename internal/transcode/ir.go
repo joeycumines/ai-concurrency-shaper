@@ -312,9 +312,13 @@ const (
 // text, refusal, and function-call parts; tool results appear in subsequent
 // user turns.
 type CanonicalResponse struct {
-	ID           string
-	Model        string
-	CreatedAt    int64
+	ID    string
+	Model string
+	// CreatedAt is float64 end-to-end: the Responses contract's created_at
+	// is a float64 and fractional timestamps must survive decoding, stream
+	// identity pinning, and rendering without truncation. Chat's integer
+	// created converts at the decode boundary.
+	CreatedAt    float64
 	Status       CanonicalResponseStatus
 	StopReason   CanonicalStopReason
 	StopSequence string

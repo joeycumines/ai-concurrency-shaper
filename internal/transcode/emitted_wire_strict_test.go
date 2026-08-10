@@ -187,39 +187,39 @@ func strictDecodeTargetForResponseType(typeTag string) (any, bool) {
 		}{}, true
 	case "response.output_item.added", "response.output_item.done":
 		return &struct {
-			Type           string           `json:"type"`
-			SequenceNumber int              `json:"sequence_number"`
-			OutputIndex    int              `json:"output_index"`
-			Item           json.RawMessage  `json:"item"`
+			Type           string          `json:"type"`
+			SequenceNumber int             `json:"sequence_number"`
+			OutputIndex    int             `json:"output_index"`
+			Item           json.RawMessage `json:"item"`
 		}{}, true
 	case "response.content_part.added", "response.content_part.done":
 		return &struct {
-			Type           string           `json:"type"`
-			SequenceNumber int              `json:"sequence_number"`
-			ItemID         string           `json:"item_id"`
-			OutputIndex    int              `json:"output_index"`
-			ContentIndex   int              `json:"content_index"`
-			Part           json.RawMessage  `json:"part"`
+			Type           string          `json:"type"`
+			SequenceNumber int             `json:"sequence_number"`
+			ItemID         string          `json:"item_id"`
+			OutputIndex    int             `json:"output_index"`
+			ContentIndex   int             `json:"content_index"`
+			Part           json.RawMessage `json:"part"`
 		}{}, true
 	case "response.output_text.delta":
 		return &struct {
-			Type           string           `json:"type"`
-			SequenceNumber int              `json:"sequence_number"`
-			ItemID         string           `json:"item_id"`
-			OutputIndex    int              `json:"output_index"`
-			ContentIndex   int              `json:"content_index"`
-			Delta          string           `json:"delta"`
-			Logprobs       json.RawMessage  `json:"logprobs"`
+			Type           string          `json:"type"`
+			SequenceNumber int             `json:"sequence_number"`
+			ItemID         string          `json:"item_id"`
+			OutputIndex    int             `json:"output_index"`
+			ContentIndex   int             `json:"content_index"`
+			Delta          string          `json:"delta"`
+			Logprobs       json.RawMessage `json:"logprobs"`
 		}{}, true
 	case "response.output_text.done":
 		return &struct {
-			Type           string           `json:"type"`
-			SequenceNumber int              `json:"sequence_number"`
-			ItemID         string           `json:"item_id"`
-			OutputIndex    int              `json:"output_index"`
-			ContentIndex   int              `json:"content_index"`
-			Text           string           `json:"text"`
-			Logprobs       json.RawMessage  `json:"logprobs"`
+			Type           string          `json:"type"`
+			SequenceNumber int             `json:"sequence_number"`
+			ItemID         string          `json:"item_id"`
+			OutputIndex    int             `json:"output_index"`
+			ContentIndex   int             `json:"content_index"`
+			Text           string          `json:"text"`
+			Logprobs       json.RawMessage `json:"logprobs"`
 		}{}, true
 	}
 	return nil, false

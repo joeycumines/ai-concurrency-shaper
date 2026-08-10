@@ -3,6 +3,8 @@ package transcode
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"testing"
 )
 
@@ -50,12 +52,17 @@ func TestResponsesOutputTextRequiresAnnotations(t *testing.T) {
 }
 
 func TestResponsesOutputContentUnsupportedPart(t *testing.T) {
+	// The wire-layer union dispatch reports the unsupported arm as the
+	// typed wire.UnsupportedTypeError; the transcode request/response
+	// boundaries translate it into UnsupportedFeatureError (covered by the
+	// classification tests). At the direct decode level the wire type is the
+	// contract.
 	var parts ResponsesOutputContentParts
 	err := json.Unmarshal([]byte(`[{"type":"output_audio","audio":"x"}]`), &parts)
 	if err == nil {
 		t.Fatal("expected error for output_audio")
 	}
-	asUnsupportedFeatureError(t, err)
+	asWireUnsupportedTypeError(t, err)
 }
 
 func TestResponsesOutputMessage(t *testing.T) {
@@ -66,7 +73,7 @@ func TestResponsesOutputMessage(t *testing.T) {
 		"status":"completed",
 		"content":[{"type":"output_text","text":"hi","annotations":[]}]
 	}`
-	item, err := DecodeResponsesOutputItem([]byte(data))
+	item, err := openairesponses.DecodeOutputItem([]byte(data))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +95,7 @@ func TestResponsesOutputFunctionCall(t *testing.T) {
 		"name":"f",
 		"arguments":"{\"x\":1}"
 	}`
-	item, err := DecodeResponsesOutputItem([]byte(data))
+	item, err := openairesponses.DecodeOutputItem([]byte(data))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +115,7 @@ func TestResponsesOutputReasoning(t *testing.T) {
 		"status":"completed",
 		"summary":[{"type":"summary_text","text":"thinking"}]
 	}`
-	item, err := DecodeResponsesOutputItem([]byte(data))
+	item, err := openairesponses.DecodeOutputItem([]byte(data))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,12 +129,12 @@ func TestResponsesOutputReasoning(t *testing.T) {
 }
 
 func TestResponsesOutputUnsupportedItem(t *testing.T) {
-	_, err := DecodeResponsesOutputItem([]byte(`{"type":"web_search_call"}`))
+	_, err := openairesponses.DecodeOutputItem([]byte(`{"type":"web_search_call"}`))
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	ue := asUnsupportedFeatureError(t, err)
-	if ue.Feature != "web_search_call" || ue.Path != "output[].type" {
+	ue := asWireUnsupportedTypeError(t, err)
+	if ue.Type != "web_search_call" || ue.Path != "output[].type" {
 		t.Fatalf("ue = %+v", ue)
 	}
 }
@@ -140,7 +147,7 @@ func TestResponsesOutputInvalid(t *testing.T) {
 		`{"type":"function_call","id":"f","status":"completed","call_id":"c","name":"n","arguments":"not json"}`,
 	}
 	for _, data := range tests {
-		_, err := DecodeResponsesOutputItem([]byte(data))
+		_, err := openairesponses.DecodeOutputItem([]byte(data))
 		if err == nil {
 			t.Errorf("accepted invalid output %s", data)
 		}
@@ -240,9 +247,19 @@ func TestResponsesToolChoice(t *testing.T) {
 }
 
 func TestResponsesToolValidate(t *testing.T) {
-	tool := ResponsesTool{Type: "function", Name: "f", Parameters: json.RawMessage(`{"type":"object"}`)}
+	// strict is required on the wire per the pinned function-tool contract:
+	// a tool without an explicit strict value is malformed.
+	tool := ResponsesTool{
+		Type:       "function",
+		Name:       "f",
+		Parameters: json.RawMessage(`{"type":"object"}`),
+		Strict:     wire.Field[bool]{Value: true, Present: true},
+	}
 	if err := tool.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	if err := (ResponsesTool{Type: "function", Name: "f"}).Validate(); err == nil {
+		t.Fatal("expected error for missing strict")
 	}
 	tool = ResponsesTool{Type: "web_search", Name: "ws"}
 	if err := tool.Validate(); err == nil {

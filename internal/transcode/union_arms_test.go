@@ -290,7 +290,7 @@ func TestChatMessageRoleConditionalValidate(t *testing.T) {
 				ChatAssistantMessage: &ChatAssistantMessage{
 					ToolCalls: []ChatMessageToolCall{{
 						ID:   str("call_1"),
-						Type: str("function"),
+						Type: "function",
 						Function: ChatToolCallFunction{
 							Name:      str("f"),
 							Arguments: "{}",
@@ -344,7 +344,7 @@ func TestChatMessageRoleConditionalValidate(t *testing.T) {
 		{Role: ChatMessageRoleAssistant, ChatAssistantMessage: &ChatAssistantMessage{
 			ToolCalls: []ChatMessageToolCall{{
 				ID:   str("call_1"),
-				Type: str("function"),
+				Type: "function",
 				Function: ChatToolCallFunction{
 					Name:      str("f"),
 					Arguments: "{}",

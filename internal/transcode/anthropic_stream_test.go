@@ -25,7 +25,7 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 	addPart := func(itemID string, outputIndex, sequence int64) {
 		t.Helper()
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{
+			EventBase: EventBase{
 				Type:           "response.content_part.added",
 				SequenceNumber: sequence,
 			},
@@ -47,7 +47,7 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 	addItem := func(itemID string, outputIndex, sequence int64) {
 		t.Helper()
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{
+			EventBase: EventBase{
 				Type:           "response.output_item.added",
 				SequenceNumber: sequence,
 			},
@@ -71,7 +71,7 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 	// A delta for item_a content_index 0 must target item_a's block (0),
 	// not item_b's (1).
 	events, err := state.Convert(ResponseTextDeltaEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.output_text.delta",
 			SequenceNumber: 5,
 		},
@@ -89,7 +89,7 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 	}
 
 	events, err = state.Convert(ResponseTextDeltaEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.output_text.delta",
 			SequenceNumber: 6,
 		},
@@ -125,7 +125,7 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 		1,
 	)
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 0},
 		Response: ResponseEnvelope{
 			ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
 			Output: []ResponsesOutputItem{},
@@ -139,7 +139,7 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := state.Convert(ResponseReasoningSummaryPartAddedEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.reasoning_summary_part.added",
 			SequenceNumber: 1,
 		},
@@ -172,7 +172,7 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 		}
 	}
 	feed(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 0},
 		Response: ResponseEnvelope{
 			ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
 			Output: []ResponsesOutputItem{},
@@ -186,38 +186,38 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 		},
 	})
 	sequence = 1
-	base := func(typ string) responsesEventBase {
+	base := func(typ string) EventBase {
 		seq := sequence
 		sequence++
-		return responsesEventBase{Type: typ, SequenceNumber: seq}
+		return EventBase{Type: typ, SequenceNumber: seq}
 	}
 	feed(ResponseReasoningSummaryPartAddedEvent{
-		responsesEventBase: base("response.reasoning_summary_part.added"),
-		ItemID:             "rs_1",
-		OutputIndex:        0,
-		SummaryIndex:       0,
-		Part:               ResponsesSummaryTextPart{Type: "summary_text", Text: ""},
+		EventBase:    base("response.reasoning_summary_part.added"),
+		ItemID:       "rs_1",
+		OutputIndex:  0,
+		SummaryIndex: 0,
+		Part:         ResponsesSummaryTextPart{Type: "summary_text", Text: ""},
 	})
 	feed(ResponseReasoningSummaryTextDeltaEvent{
-		responsesEventBase: base("response.reasoning_summary_text.delta"),
-		ItemID:             "rs_1",
-		OutputIndex:        0,
-		SummaryIndex:       0,
-		Delta:              "reasoning",
+		EventBase:    base("response.reasoning_summary_text.delta"),
+		ItemID:       "rs_1",
+		OutputIndex:  0,
+		SummaryIndex: 0,
+		Delta:        "reasoning",
 	})
 	feed(ResponseReasoningSummaryTextDoneEvent{
-		responsesEventBase: base("response.reasoning_summary_text.done"),
-		ItemID:             "rs_1",
-		OutputIndex:        0,
-		SummaryIndex:       0,
-		Text:               "reasoning",
+		EventBase:    base("response.reasoning_summary_text.done"),
+		ItemID:       "rs_1",
+		OutputIndex:  0,
+		SummaryIndex: 0,
+		Text:         "reasoning",
 	})
 	feed(ResponseReasoningSummaryPartDoneEvent{
-		responsesEventBase: base("response.reasoning_summary_part.done"),
-		ItemID:             "rs_1",
-		OutputIndex:        0,
-		SummaryIndex:       0,
-		Part:               ResponsesSummaryTextPart{Type: "summary_text", Text: "reasoning"},
+		EventBase:    base("response.reasoning_summary_part.done"),
+		ItemID:       "rs_1",
+		OutputIndex:  0,
+		SummaryIndex: 0,
+		Part:         ResponsesSummaryTextPart{Type: "summary_text", Text: "reasoning"},
 	})
 	if count := countFeature(state.report, FeatureReasoningSummary); count != 1 {
 		t.Fatalf("reasoning losses = %d, want exactly one", count)
@@ -236,7 +236,7 @@ func TestAnthropicStreamMessageStartNullStopFields(t *testing.T) {
 		1,
 	)
 	events, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.created",
 			SequenceNumber: 1,
 		},
@@ -270,7 +270,7 @@ func TestAnthropicStreamMessageStartNullStopFields(t *testing.T) {
 	// The terminal message_delta carries the real stop reason. No output
 	// items were observed, so the terminal envelope carries none.
 	if _, err := state.Convert(ResponseCompletedEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.completed",
 			SequenceNumber: 2,
 		},
@@ -405,7 +405,7 @@ func TestAnthropicUsageStreamNonStreamAgree(t *testing.T) {
 		1,
 	)
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.created",
 			SequenceNumber: 0,
 		},
@@ -417,7 +417,7 @@ func TestAnthropicUsageStreamNonStreamAgree(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, err := state.Convert(ResponseCompletedEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.completed",
 			SequenceNumber: 1,
 		},

@@ -1432,9 +1432,11 @@ func isContextCancellationError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
-// nowUnix returns the current unix time in seconds.
-func nowUnix() int64 {
-	return time.Now().Unix()
+// nowUnix returns the current unix time in seconds as a float64: the
+// Responses contract's created_at is float64, so the generated stream
+// identity timestamps share the type end-to-end (review-z commit 1).
+func nowUnix() float64 {
+	return float64(time.Now().Unix())
 }
 
 // derefInt returns the value of v, or 0 when v is nil.

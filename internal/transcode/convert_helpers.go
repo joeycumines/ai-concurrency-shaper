@@ -490,11 +490,12 @@ func canonicalAssistantTurnToChatMessage(
 				arguments = "{}"
 			}
 			// The official non-stream assistant tool-call shape carries id,
-			// function, and type with NO index (review-j finding 5): the
-			// position-as-index bug is dropped, and the elidable type field
-			// is omitted (the wire default is "function").
+			// function, and type with NO index (review-j finding 5). The
+			// type field is required on the wire and always emitted as
+			// "function" (review-z commit 1) — never omitted.
 			toolCalls = append(toolCalls, ChatMessageToolCall{
-				ID: &callID,
+				Type: "function",
+				ID:   &callID,
 				Function: ChatToolCallFunction{
 					Name:      &name,
 					Arguments: arguments,

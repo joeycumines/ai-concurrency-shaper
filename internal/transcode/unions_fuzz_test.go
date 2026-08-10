@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"reflect"
 	"testing"
 )
@@ -179,7 +180,7 @@ type ResponsesInputItemEnvelope struct {
 }
 
 func (e *ResponsesInputItemEnvelope) UnmarshalJSON(data []byte) error {
-	item, err := decodeResponsesInputItem(data)
+	item, err := openairesponses.DecodeInputItem(data)
 	if err != nil {
 		return err
 	}
@@ -206,7 +207,7 @@ type ResponsesOutputItemEnvelope struct {
 }
 
 func (e *ResponsesOutputItemEnvelope) UnmarshalJSON(data []byte) error {
-	item, err := DecodeResponsesOutputItem(data)
+	item, err := openairesponses.DecodeOutputItem(data)
 	if err != nil {
 		return err
 	}

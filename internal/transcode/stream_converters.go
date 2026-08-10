@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 	"net/http"
 	"strings"
 )
@@ -81,7 +82,7 @@ type chatResponsesStreamState struct {
 
 	responseID string
 	model      string
-	createdAt  int64
+	createdAt  float64
 
 	// Envelope echo from the original request.
 	echo *ResponsesRequestEcho
@@ -228,7 +229,7 @@ func newChatResponsesStreamState(
 	capabilities ChatCapabilities,
 	responseID string,
 	model string,
-	createdAt int64,
+	createdAt float64,
 	echo *ResponsesRequestEcho,
 ) *chatResponsesStreamState {
 	return &chatResponsesStreamState{
@@ -336,7 +337,7 @@ func (s *chatResponsesStreamState) Convert(
 		// response.in_progress, and the terminal envelope share one
 		// created_at.
 		if chunk.Created != 0 {
-			s.createdAt = chunk.Created
+			s.createdAt = float64(chunk.Created)
 		}
 		s.chunkID = chunk.ID
 		s.chunkModel = chunk.Model
@@ -1069,16 +1070,16 @@ func (s *chatResponsesStreamState) baseEnvelope(status string) ResponseEnvelope 
 			value := int64(*s.echo.MaxOutputTokens)
 			envelope.MaxOutputTokens = &value
 		}
-		envelope.ParallelToolCalls = s.echo.ParallelToolCalls
+		envelope.ParallelToolCalls = boolPtr(s.echo.ParallelToolCalls)
 		envelope.PreviousResponseID = s.echo.PreviousResponseID
 		envelope.Store = s.echo.Store
-		envelope.Temperature = s.echo.Temperature
-		envelope.TopP = s.echo.TopP
+		envelope.Temperature = &s.echo.Temperature
+		envelope.TopP = &s.echo.TopP
 		envelope.Truncation = s.echo.Truncation
 		envelope.User = s.echo.User
 		envelope.Metadata = s.echo.Metadata
 		envelope.Tools = s.echo.Tools
-		envelope.ToolChoice = s.echo.ToolChoice
+		envelope.ToolChoice = &s.echo.ToolChoice
 		envelope.Reasoning = s.echo.Reasoning
 		envelope.Text = s.echo.Text
 		envelope.ServiceTier = s.echo.ServiceTier
@@ -1255,7 +1256,7 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 	// the message arm is outside the streaming surface (review-08 blocker
 	// 2). Every violation is corrupt upstream wire.
 	var shadow chatStreamChunkShadow
-	if err := strictDecode(data, &shadow); err != nil {
+	if err := wire.Decode(data, &shadow); err != nil {
 		return ChatStreamResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			http.StatusOK,
@@ -1417,9 +1418,10 @@ type anthropicResponsesStreamState struct {
 	// Upstream response identity, pinned from the response.created envelope
 	// and verified on every later envelope-bearing event: id, model, and
 	// created_at must be stable across the stream (review-08 blocker 3).
+	// created_at is float64 end-to-end (review-z commit 1).
 	upstreamID        string
 	upstreamModel     string
-	upstreamCreatedAt int64
+	upstreamCreatedAt float64
 
 	// addedItems records every output item observed via output_item.added:
 	// its output index and type. Duplicate identities, content parts for
@@ -1466,7 +1468,7 @@ type anthropicResponsesStreamState struct {
 
 	responseID string
 	model      string
-	createdAt  int64
+	createdAt  float64
 
 	sawTerminal   bool
 	sawErrorEvent bool
@@ -1544,7 +1546,7 @@ func newAnthropicResponsesStreamState(
 	policy LossPolicy,
 	responseID string,
 	model string,
-	createdAt int64,
+	createdAt float64,
 ) *anthropicResponsesStreamState {
 	return &anthropicResponsesStreamState{
 		ctx:              ctx,
@@ -1789,7 +1791,7 @@ func (s *anthropicResponsesStreamState) checkEnvelopeIdentity(
 		))
 	case envelope.CreatedAt != s.upstreamCreatedAt:
 		return s.wireError(fmt.Errorf(
-			"responses stream response created_at = %d, want %d (pinned at response.created)",
+			"responses stream response created_at = %v, want %v (pinned at response.created)",
 			envelope.CreatedAt,
 			s.upstreamCreatedAt,
 		))

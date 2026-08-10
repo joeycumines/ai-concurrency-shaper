@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 	"strings"
 )
 
@@ -15,7 +16,7 @@ import (
 // chatResponseShadow is the presence-aware decode shadow of ChatResponse:
 // every presence-sensitive field is a pointer so absent-vs-zero is
 // distinguishable, while the full surface is modeled (reusing the wire types
-// for non-presence-sensitive payloads) so strictDecode's unknown-field
+// for non-presence-sensitive payloads) so the strict decode's unknown-field
 // rejection is preserved. The shadow enforces the pinned required fields of
 // the Chat response contract (review-k finding 4) and its usage presence is
 // consumed by the usage Known-flag decode (review-k finding 6).
@@ -89,7 +90,7 @@ func DecodeChatResponse(
 ) (CanonicalResponse, error) {
 	// Presence-aware shadow decode: absent-vs-zero is distinguishable.
 	var shadow chatResponseShadow
-	if err := strictDecode(body, &shadow); err != nil {
+	if err := wire.Decode(body, &shadow); err != nil {
 		// A strict decode failure — malformed JSON, a type-corrupt value, or
 		// data outside the modeled surface — is corrupt upstream wire, an
 		// upstream failure (review-k finding 3). Valid features the
@@ -157,12 +158,18 @@ func DecodeChatResponse(
 		)
 	}
 	// tool_call_id is a tool-only field: on an assistant response message it
-	// would otherwise be silently dropped (review-k finding 5).
+	// would otherwise be silently dropped (review-k finding 5). A message
+	// carrying another role's fields is a contradictory union — a typed
+	// decode rejection.
 	if shadowChoice.Message.ToolCallID != nil {
 		return CanonicalResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
-			errors.New("chat response assistant message carries tool_call_id"),
+			&wire.DecodeError{
+				Kind:    wire.DecodeContradictoryUnion,
+				Path:    "choices[].message.tool_call_id",
+				Message: "chat response assistant message carries tool_call_id",
+			},
 		)
 	}
 	for i, call := range shadowChoice.Message.ToolCalls {
@@ -196,14 +203,15 @@ func DecodeChatResponse(
 		}
 	}
 
-	// The wire decode cannot fail after the shadow succeeded: both decode the
-	// same modeled surface with the same strictness (verified field-identical
-	// surfaces and null semantics — where the shadow used a pointer and the
-	// wire a value, a null is silently ignored by the value field, never a
-	// decode error), and the shadow's presence checks above reject every null
-	// that matters before the conversion path runs.
-	var wire ChatResponse
-	if err := strictDecode(body, &wire); err != nil {
+	// The wire decode may reject what the shadow accepted: the shadow's
+	// pointer fields tolerate nulls that wire.Decode rejects as illegal
+	// (e.g. usage.total_tokens:null into a plain value field). Both decode
+	// the same modeled surface with the same strictness otherwise; the
+	// shadow's presence checks above reject every null that matters before
+	// the conversion path runs, and any rejection here is corrupt upstream
+	// wire either way.
+	var chat ChatResponse
+	if err := wire.Decode(body, &chat); err != nil {
 		return CanonicalResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
@@ -212,17 +220,17 @@ func DecodeChatResponse(
 	}
 	// The shadow enforced exactly one choice with an explicit message; the
 	// wire decode sees the same bytes.
-	choice := wire.Choices[0]
+	choice := chat.Choices[0]
 	message := choice.Message
 
 	response := CanonicalResponse{
-		ID:        wire.ID,
-		Model:     wire.Model,
-		CreatedAt: wire.Created,
+		ID:        chat.ID,
+		Model:     chat.Model,
+		CreatedAt: float64(chat.Created),
 		Status:    CanonicalResponseCompleted,
 	}
-	if wire.ServiceTier != nil {
-		response.ChatServiceTier = *wire.ServiceTier
+	if chat.ServiceTier != nil {
+		response.ChatServiceTier = *chat.ServiceTier
 	}
 	if choice.LogProbs != nil {
 		response.ChatLogProbs = true
@@ -422,16 +430,21 @@ func DecodeResponsesResponse(
 	body []byte,
 ) (CanonicalResponse, error) {
 	var envelope ResponseEnvelope
-	if err := strictDecode(body, &envelope); err != nil {
+	if err := wire.Decode(body, &envelope); err != nil {
 		// A strict decode failure — malformed JSON, a type-corrupt value, or
 		// data outside the modeled surface — is corrupt upstream wire, an
 		// upstream failure (review-k finding 3). Valid features the
 		// transcoder knows but does not support are rejected as
-		// UnsupportedFeatureError (local) instead.
+		// UnsupportedFeatureError (local) instead: the wire layer reports
+		// them as wire.UnsupportedTypeError and the boundary translates
+		// before the upstream-wire guard, so they can never be misclassified.
 		return CanonicalResponse{}, upstreamWireError(
 			UpstreamResponses,
 			0,
-			fmt.Errorf("responses response: %w", err),
+			fmt.Errorf(
+				"responses response: %w",
+				wireUnsupportedToFeature(err),
+			),
 		)
 	}
 
@@ -815,23 +828,25 @@ func RenderResponsesResponse(
 		}
 	}
 
-	// Request echo.
+	// Request echo. The effective values were normalized at request decode
+	// with the pinned API defaults, so the envelope echo always carries a
+	// complete, valid value for the required fields.
 	if echo := context.OriginalResponsesRequest; echo != nil {
 		envelope.Instructions = echo.Instructions
 		if echo.MaxOutputTokens != nil {
 			value := int64(*echo.MaxOutputTokens)
 			envelope.MaxOutputTokens = &value
 		}
-		envelope.ParallelToolCalls = echo.ParallelToolCalls
+		envelope.ParallelToolCalls = boolPtr(echo.ParallelToolCalls)
 		envelope.PreviousResponseID = echo.PreviousResponseID
 		envelope.Store = echo.Store
-		envelope.Temperature = echo.Temperature
-		envelope.TopP = echo.TopP
+		envelope.Temperature = &echo.Temperature
+		envelope.TopP = &echo.TopP
 		envelope.Truncation = echo.Truncation
 		envelope.User = echo.User
 		envelope.Metadata = echo.Metadata
 		envelope.Tools = echo.Tools
-		envelope.ToolChoice = echo.ToolChoice
+		envelope.ToolChoice = &echo.ToolChoice
 		envelope.Reasoning = echo.Reasoning
 		envelope.Text = echo.Text
 		envelope.ServiceTier = echo.ServiceTier

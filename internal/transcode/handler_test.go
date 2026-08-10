@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -694,10 +695,11 @@ func TestHandlerMessagesToResponsesJSON(t *testing.T) {
 			},
 			ModelMap: ModelMap{AllowIdentity: true},
 			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureTopK:              {},
-				FeatureReasoningSummary:  {},
-				FeatureConversationState: {},
-				FeatureUsageTiming:       {},
+				FeatureTopK:                 {},
+				FeatureReasoningSummary:     {},
+				FeatureConversationState:    {},
+				FeatureUsageTiming:          {},
+				FeatureToolSchemaStrictness: {},
 			}},
 			AuthPolicy:         AuthPolicy{Mode: AuthNone},
 			AllowedClientQuery: map[string]struct{}{},
@@ -705,12 +707,18 @@ func TestHandlerMessagesToResponsesJSON(t *testing.T) {
 		func(req *http.Request) (*http.Response, error) {
 			// The upstream request is a Responses request with instructions.
 			body, _ := io.ReadAll(req.Body)
-			var envelope responsesRequestEnvelope
+			var envelope openairesponses.Request
 			if err := strictDecode(body, &envelope); err != nil {
 				t.Fatalf("upstream request: %v\n%s", err, body)
 			}
 			if envelope.Instructions == nil {
 				t.Fatal("instructions missing")
+			}
+			// A non-streaming exchange must not demand SSE from the
+			// upstream: the rendered request carries no stream key
+			// (review run 1 finding F1).
+			if envelope.Stream.Present {
+				t.Fatalf("non-streaming upstream request carries stream: %s", body)
 			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -1705,9 +1713,10 @@ func TestHandlerMessagesFailedUpstreamNotSuccess(t *testing.T) {
 			},
 			ModelMap: ModelMap{AllowIdentity: true},
 			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureTopK:              {},
-				FeatureReasoningSummary:  {},
-				FeatureConversationState: {},
+				FeatureTopK:                 {},
+				FeatureReasoningSummary:     {},
+				FeatureConversationState:    {},
+				FeatureToolSchemaStrictness: {},
 			}},
 			AuthPolicy:         AuthPolicy{Mode: AuthNone},
 			AllowedClientQuery: map[string]struct{}{},
@@ -2033,5 +2042,53 @@ func TestHandlerInternalErrorSanitized(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "internal error") {
 		t.Fatalf("client message should be generic: %q", rec.Body.String())
+	}
+}
+
+// TestHandlerResponsesRequestMissingToolStrictRejected proves the pinned
+// strict requirement end to end: a Responses client request whose tool
+// entries omit strict is rejected client-dialect (400) BEFORE any upstream
+// request is made (review-z commit 1).
+func TestHandlerResponsesRequestMissingToolStrictRejected(t *testing.T) {
+	mapping := responsesMapping(t)
+	upstreamCalls := 0
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+			ModelMap:   ModelMap{AllowIdentity: true},
+			LossPolicy: StrictLossPolicy(),
+			AuthPolicy: AuthPolicy{Mode: AuthNone},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			upstreamCalls++
+			t.Fatal("upstream must never be reached for a malformed request")
+			return nil, nil
+		},
+		func(Outcome) {},
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{
+			"model":"m",
+			"input":"hi",
+			"tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]
+		}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want 0", upstreamCalls)
+	}
+	if !strings.Contains(rec.Body.String(), "strict") {
+		t.Fatalf("error body does not name strict: %s", rec.Body.String())
 	}
 }

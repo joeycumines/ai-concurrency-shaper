@@ -185,7 +185,7 @@ func TestResponsesStreamToolArgumentsCumulativeBound(t *testing.T) {
 		1,
 	)
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 0},
 		Response: ResponseEnvelope{
 			ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
 			Output: []ResponsesOutputItem{},
@@ -194,8 +194,8 @@ func TestResponsesStreamToolArgumentsCumulativeBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseOutputItemAddedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-		OutputIndex:        0,
+		EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+		OutputIndex: 0,
 		Item: &ResponsesFunctionCallOutputItem{
 			ID:        "fc_1",
 			Type:      "function_call",
@@ -210,10 +210,10 @@ func TestResponsesStreamToolArgumentsCumulativeBound(t *testing.T) {
 	fragment := strings.Repeat("x", 128*1024)
 	feed := func(sequence int64) error {
 		_, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: sequence},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              fragment,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: sequence},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       fragment,
 		})
 		return err
 	}
@@ -287,8 +287,8 @@ func TestStreamTotalStateBound(t *testing.T) {
 		feedAnthropicCreated(t, state, 0)
 		for i := 0; i < maxStreamOutputItems; i++ {
 			if _, err := state.Convert(ResponseOutputItemAddedEvent{
-				responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: int64(i + 1)},
-				OutputIndex:        int64(i),
+				EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: int64(i + 1)},
+				OutputIndex: int64(i),
 				Item: &ResponsesReasoningOutputItem{
 					ID: "r" + strconv.Itoa(i), Type: "reasoning", Status: ResponsesItemInProgress,
 					Summary: []ResponsesReasoningSummary{},
@@ -298,8 +298,8 @@ func TestStreamTotalStateBound(t *testing.T) {
 			}
 		}
 		_, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: maxStreamOutputItems + 1},
-			OutputIndex:        maxStreamOutputItems,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: maxStreamOutputItems + 1},
+			OutputIndex: maxStreamOutputItems,
 			Item: &ResponsesReasoningOutputItem{
 				ID: "overflow", Type: "reasoning", Status: ResponsesItemInProgress,
 				Summary: []ResponsesReasoningSummary{},
@@ -318,8 +318,8 @@ func TestStreamTotalStateBound(t *testing.T) {
 		)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesOutputMessage{
 				ID: "m1", Type: "message", Role: "assistant",
 				Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{},
@@ -329,21 +329,21 @@ func TestStreamTotalStateBound(t *testing.T) {
 		}
 		for i := 0; i < maxStreamPartsPerItem; i++ {
 			if _, err := state.Convert(ResponseContentPartAddedEvent{
-				responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: int64(i + 2)},
-				ItemID:             "m1",
-				OutputIndex:        0,
-				ContentIndex:       int64(i),
-				Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+				EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: int64(i + 2)},
+				ItemID:       "m1",
+				OutputIndex:  0,
+				ContentIndex: int64(i),
+				Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 			}); err != nil {
 				t.Fatalf("part %d: %v", i, err)
 			}
 		}
 		_, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: maxStreamPartsPerItem + 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       maxStreamPartsPerItem,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: maxStreamPartsPerItem + 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: maxStreamPartsPerItem,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		})
 		assertAnthropicWireError(t, err, "parts")
 	})
@@ -547,8 +547,8 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 		)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesOutputMessage{
 				ID: "m1", Type: "message", Role: "assistant",
 				Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{},
@@ -557,11 +557,11 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -569,24 +569,24 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 		var err error
 		for i := 0; i < 8; i++ {
 			_, err = state.Convert(ResponseTextDeltaEvent{
-				responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: int64(i + 3)},
-				ItemID:             "m1",
-				OutputIndex:        0,
-				ContentIndex:       0,
-				Delta:              delta,
-				Logprobs:           []ResponsesTextLogprob{},
+				EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: int64(i + 3)},
+				ItemID:       "m1",
+				OutputIndex:  0,
+				ContentIndex: 0,
+				Delta:        delta,
+				Logprobs:     []ResponsesTextLogprob{},
 			})
 			if err != nil {
 				t.Fatalf("delta %d: %v", i, err)
 			}
 		}
 		_, err = state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 99},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              delta,
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 99},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        delta,
+			Logprobs:     []ResponsesTextLogprob{},
 		})
 		var wireErr *UpstreamWireError
 		if !errors.As(err, &wireErr) {
@@ -605,8 +605,8 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 		feedAnthropicCreated(t, state, 0)
 		for i := 0; i < maxStreamToolCalls; i++ {
 			if _, err := state.Convert(ResponseOutputItemAddedEvent{
-				responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: int64(i + 1)},
-				OutputIndex:        int64(i),
+				EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: int64(i + 1)},
+				OutputIndex: int64(i),
 				Item: &ResponsesFunctionCallOutputItem{
 					ID: "fc" + strconv.Itoa(i), Type: "function_call", Status: ResponsesItemInProgress,
 					CallID: "call" + strconv.Itoa(i), Name: "f", Arguments: "",
@@ -616,8 +616,8 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 			}
 		}
 		_, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: maxStreamToolCalls + 1},
-			OutputIndex:        maxStreamToolCalls,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: maxStreamToolCalls + 1},
+			OutputIndex: maxStreamToolCalls,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "overflow", Type: "function_call", Status: ResponsesItemInProgress,
 				CallID: "call_overflow", Name: "f", Arguments: "",
@@ -703,8 +703,8 @@ func TestStreamToolSnapshotBytesCounted(t *testing.T) {
 	// 8 calls × 500 KiB snapshots = 4 MiB: exactly at the exchange total.
 	for i := 0; i < 8; i++ {
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: int64(i*3 + 1)},
-			OutputIndex:        int64(i),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: int64(i*3 + 1)},
+			OutputIndex: int64(i),
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc" + strconv.Itoa(i), Type: "function_call", Status: ResponsesItemInProgress,
 				CallID: "call" + strconv.Itoa(i), Name: "f", Arguments: "",
@@ -713,16 +713,16 @@ func TestStreamToolSnapshotBytesCounted(t *testing.T) {
 			t.Fatalf("added %d: %v", i, err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: int64(i*3 + 2)},
-			ItemID:             "fc" + strconv.Itoa(i),
-			OutputIndex:        int64(i),
-			Arguments:          snapshot,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: int64(i*3 + 2)},
+			ItemID:      "fc" + strconv.Itoa(i),
+			OutputIndex: int64(i),
+			Arguments:   snapshot,
 		}); err != nil {
 			t.Fatalf("args done %d: %v", i, err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: int64(i*3 + 3)},
-			OutputIndex:        int64(i),
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: int64(i*3 + 3)},
+			OutputIndex: int64(i),
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc" + strconv.Itoa(i), Type: "function_call", Status: ResponsesItemCompleted,
 				CallID: "call" + strconv.Itoa(i), Name: "f", Arguments: snapshot,
@@ -733,8 +733,8 @@ func TestStreamToolSnapshotBytesCounted(t *testing.T) {
 	}
 	// The 9th call's snapshot crosses the exchange total.
 	if _, err := state.Convert(ResponseOutputItemAddedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 25},
-		OutputIndex:        8,
+		EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 25},
+		OutputIndex: 8,
 		Item: &ResponsesFunctionCallOutputItem{
 			ID: "fc8", Type: "function_call", Status: ResponsesItemInProgress,
 			CallID: "call8", Name: "f", Arguments: "",
@@ -743,10 +743,10 @@ func TestStreamToolSnapshotBytesCounted(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-		responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 26},
-		ItemID:             "fc8",
-		OutputIndex:        8,
-		Arguments:          snapshot,
+		EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 26},
+		ItemID:      "fc8",
+		OutputIndex: 8,
+		Arguments:   snapshot,
 	})
 	var wireErr *UpstreamWireError
 	if !errors.As(err, &wireErr) {

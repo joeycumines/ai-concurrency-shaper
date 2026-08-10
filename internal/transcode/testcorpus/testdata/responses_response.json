@@ -68,6 +68,7 @@
       "type": "function",
       "name": "get_weather",
       "description": "Get the current weather for a location",
+      "strict": false,
       "parameters": {
         "type": "object",
         "properties": {

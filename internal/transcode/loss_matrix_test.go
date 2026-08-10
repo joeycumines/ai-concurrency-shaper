@@ -246,13 +246,13 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 		1,
 	)
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
-		Response:           created,
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 0},
+		Response:  created,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	_, err := state.Convert(ResponseOutputItemAddedEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.output_item.added",
 			SequenceNumber: 1,
 		},
@@ -283,8 +283,8 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 		1,
 	)
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
-		Response:           created,
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 0},
+		Response:  created,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 		},
 	}
 	if _, err := state.Convert(ResponseOutputItemAddedEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.output_item.added",
 			SequenceNumber: 1,
 		},
@@ -323,7 +323,7 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 	// The item is closed by its done event before the terminal (review-08
 	// blocker 3).
 	if _, err := state.Convert(ResponseOutputItemDoneEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.output_item.done",
 			SequenceNumber: 2,
 		},
@@ -340,7 +340,7 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseCompletedEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.completed",
 			SequenceNumber: 3,
 		},

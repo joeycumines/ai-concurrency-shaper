@@ -10,6 +10,7 @@ package transcode
 import (
 	"bytes"
 	"encoding/json"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"testing"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/testcorpus"
@@ -105,17 +106,36 @@ func TestSchemaBigNumbersMessagesToResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, _, err := RenderResponsesRequest(result.Request, testExchangeContext())
+	// Under strict policy a Messages tool (no strictness semantic) cannot be
+	// rendered as a Responses function tool: the conversion is rejected
+	// client-dialect before any upstream request (review-z commit 1).
+	if _, _, err := RenderResponsesRequest(
+		result.Request,
+		testExchangeContext(),
+	); err == nil {
+		t.Fatal("expected strict-policy rejection for missing tool strictness")
+	}
+	// Under the tool_schema_strictness permission the render emits explicit
+	// strict:false — the non-tightening value — never an omitted strict.
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureToolSchemaStrictness: {},
+	}}
+	rendered, _, err := RenderResponsesRequest(result.Request, context)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertSchemaBytesExact(t, rendered)
-	var envelope responsesRequestEnvelope
+	var envelope openairesponses.Request
 	if err := strictDecode(rendered, &envelope); err != nil {
 		t.Fatalf("rendered responses: %v\n%s", err, rendered)
 	}
 	if len(envelope.Tools) != 1 {
 		t.Fatalf("tools = %d", len(envelope.Tools))
+	}
+	if !envelope.Tools[0].Strict.Present || envelope.Tools[0].Strict.Null ||
+		envelope.Tools[0].Strict.Value {
+		t.Fatalf("rendered strict = %+v, want explicit false", envelope.Tools[0].Strict)
 	}
 	if string(envelope.Tools[0].Parameters) != schemaNumbers {
 		t.Fatalf("rendered parameters = %s, want the raw bytes", envelope.Tools[0].Parameters)
@@ -132,6 +152,7 @@ func TestSchemaBigNumbersResponsesToChat(t *testing.T) {
 			"type":"function",
 			"name":"get_weather",
 			"description":"d",
+			"strict":true,
 			"parameters":` + schemaNumbers + `
 		}]
 	}`)
@@ -162,6 +183,7 @@ func TestSchemaBigNumbersResponsesToResponses(t *testing.T) {
 			"type":"function",
 			"name":"get_weather",
 			"description":"d",
+			"strict":true,
 			"parameters":` + schemaNumbers + `
 		}]
 	}`)
@@ -202,7 +224,7 @@ func TestSchemaBigNumbersStructuredOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSchemaBytesExact(t, rendered)
-	var envelope responsesRequestEnvelope
+	var envelope openairesponses.Request
 	if err := strictDecode(rendered, &envelope); err != nil {
 		t.Fatalf("rendered responses: %v\n%s", err, rendered)
 	}
@@ -302,7 +324,14 @@ func TestSchemaOfficialFixturesStillDecode(t *testing.T) {
 	if len(result.Request.Tools[0].JSONSchema) == 0 {
 		t.Fatal("fixture tool lost its schema")
 	}
-	if _, _, err := RenderResponsesRequest(result.Request, testExchangeContext()); err != nil {
+	// The Messages source tool carries no strictness semantic: approve the
+	// tool_schema_strictness loss so rendering proceeds with explicit
+	// strict:false (the fixture's schema must still survive byte-exact).
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureToolSchemaStrictness: {},
+	}}
+	if _, _, err := RenderResponsesRequest(result.Request, context); err != nil {
 		t.Fatal(err)
 	}
 

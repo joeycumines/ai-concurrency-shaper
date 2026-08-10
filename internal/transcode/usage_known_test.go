@@ -289,8 +289,8 @@ func TestUsageStreamingResponsesToAnthropicLossGatedOnce(t *testing.T) {
 		1,
 	)
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 1},
-		Response:           created,
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 1},
+		Response:  created,
 	}); err == nil {
 		t.Fatal("strict policy accepted the unknown cache-creation breakdown")
 	}
@@ -307,14 +307,14 @@ func TestUsageStreamingResponsesToAnthropicLossGatedOnce(t *testing.T) {
 		1,
 	)
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 1},
-		Response:           created,
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 1},
+		Response:  created,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseCompletedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 2},
-		Response:           completed,
+		EventBase: EventBase{Type: "response.completed", SequenceNumber: 2},
+		Response:  completed,
 	}); err != nil {
 		t.Fatal(err)
 	}

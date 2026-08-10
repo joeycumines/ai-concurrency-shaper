@@ -3,10 +3,12 @@ package transcode
 import (
 	"encoding/json"
 	"errors"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"strings"
 	"testing"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/testcorpus"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/anthropicmessages"
 )
 
 func testExchangeContext() *ExchangeContext {
@@ -33,7 +35,7 @@ func TestDecodeResponsesRequestFixture(t *testing.T) {
 	if echo.MaxOutputTokens == nil || *echo.MaxOutputTokens != 512 {
 		t.Fatalf("max_output_tokens = %v", echo.MaxOutputTokens)
 	}
-	if echo.Temperature == nil || *echo.Temperature != 0.7 {
+	if echo.Temperature != 0.7 {
 		t.Fatalf("temperature = %v", echo.Temperature)
 	}
 	if len(result.Request.Tools) != 1 {
@@ -392,11 +394,26 @@ func TestRenderResponsesRequestFromMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, _, err := RenderResponsesRequest(result.Request, testExchangeContext())
+	// The Messages source tool carries no strictness semantic: under strict
+	// policy the conversion is rejected client-dialect (review-z commit 1).
+	if _, _, err := RenderResponsesRequest(
+		result.Request,
+		testExchangeContext(),
+	); err == nil {
+		t.Fatal("expected strict-policy rejection for missing tool strictness")
+	}
+	// Under the tool_schema_strictness permission the render emits explicit
+	// strict:false and succeeds.
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureTopK:                 {},
+		FeatureToolSchemaStrictness: {},
+	}}
+	rendered, _, err := RenderResponsesRequest(result.Request, context)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var envelope responsesRequestEnvelope
+	var envelope openairesponses.Request
 	if err := strictDecode(rendered, &envelope); err != nil {
 		t.Fatalf("rendered responses: %v\n%s", err, rendered)
 	}
@@ -414,6 +431,10 @@ func TestRenderResponsesRequestFromMessages(t *testing.T) {
 	}
 	if len(envelope.Tools) != 1 {
 		t.Fatalf("tools = %d", len(envelope.Tools))
+	}
+	if !envelope.Tools[0].Strict.Present || envelope.Tools[0].Strict.Null ||
+		envelope.Tools[0].Strict.Value {
+		t.Fatalf("rendered strict = %+v, want explicit false", envelope.Tools[0].Strict)
 	}
 }
 
@@ -837,7 +858,7 @@ func TestChatSchemaOfficialShapes(t *testing.T) {
 }
 
 func TestAnthropicSchemaStrict(t *testing.T) {
-	var request messagesRequestEnvelope
+	var request anthropicmessages.Request
 	// Unknown top-level fields are rejected.
 	if err := strictDecode([]byte(`{"model":"m","max_tokens":10,"messages":[],"bogus":1}`), &request); err == nil {
 		t.Fatal("expected unknown field rejection")

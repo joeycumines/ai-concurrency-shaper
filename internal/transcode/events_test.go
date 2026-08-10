@@ -296,16 +296,16 @@ func TestErrorEventRequiredFields(t *testing.T) {
 func TestEventValidateRejectsMismatch(t *testing.T) {
 	builder := &ResponsesEventBuilder{}
 	event := builder.TextDelta("msg_1", 0, 0, "x")
-	event.responsesEventBase.Type = "wrong"
+	event.EventBase.Type = "wrong"
 	if err := event.Validate(); err == nil {
 		t.Fatal("expected type mismatch rejection")
 	}
 
 	// Negative sequence numbers are rejected.
 	builder = &ResponsesEventBuilder{}
-	base := builder.base("error")
+	base := EventBase{Type: "error", SequenceNumber: 0}
 	base.SequenceNumber = -1
-	errorEvent := ResponseErrorEvent{responsesEventBase: base, Code: "c", Message: "m"}
+	errorEvent := ResponseErrorEvent{EventBase: base, Code: "c", Message: "m"}
 	if err := errorEvent.Validate(); err == nil {
 		t.Fatal("expected negative sequence rejection")
 	}

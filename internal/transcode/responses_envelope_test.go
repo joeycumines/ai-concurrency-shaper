@@ -203,8 +203,8 @@ func TestStreamingEnvelopeControlsGated(t *testing.T) {
 		1,
 	)
 	_, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 1},
-		Response:           envelopeWithControls(),
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 1},
+		Response:  envelopeWithControls(),
 	})
 	if err == nil {
 		t.Fatal("strict policy accepted envelope controls in a stream")
@@ -223,16 +223,16 @@ func TestStreamingEnvelopeControlsGated(t *testing.T) {
 		1,
 	)
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 1},
-		Response:           envelopeWithControls(),
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 1},
+		Response:  envelopeWithControls(),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	completed := envelopeWithControls()
 	completed.Status = "completed"
 	if _, err := state.Convert(ResponseCompletedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 2},
-		Response:           completed,
+		EventBase: EventBase{Type: "response.completed", SequenceNumber: 2},
+		Response:  completed,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -375,16 +375,16 @@ func TestStreamingEnvelopeControlsLateAppearance(t *testing.T) {
 		},
 	}
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 1},
-		Response:           created,
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 1},
+		Response:  created,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	completed := envelopeWithControls()
 	completed.Status = "completed"
 	if _, err := state.Convert(ResponseCompletedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 2},
-		Response:           completed,
+		EventBase: EventBase{Type: "response.completed", SequenceNumber: 2},
+		Response:  completed,
 	}); err == nil {
 		t.Fatal("strict policy accepted late-appearing envelope controls")
 	}
@@ -402,7 +402,7 @@ func TestStreamingEnvelopeControlsLateAppearance(t *testing.T) {
 		1,
 	)
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 1},
+		EventBase: EventBase{Type: "response.created", SequenceNumber: 1},
 		Response: ResponseEnvelope{
 			ID:        "resp_1",
 			Object:    "response",
@@ -415,8 +415,8 @@ func TestStreamingEnvelopeControlsLateAppearance(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseCompletedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 2},
-		Response:           completed,
+		EventBase: EventBase{Type: "response.completed", SequenceNumber: 2},
+		Response:  completed,
 	}); err != nil {
 		t.Fatal(err)
 	}

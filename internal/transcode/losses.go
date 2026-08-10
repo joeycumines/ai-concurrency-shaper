@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+
 	"strconv"
 	"strings"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
 
 // Feature names a semantic that is not portable between two dialects. Whether
@@ -64,6 +66,13 @@ const (
 	// loss/reject decision because the client dialects cannot reproduce
 	// them (review-j finding 13).
 	FeatureResponsesControls Feature = "responses_controls"
+	// FeatureToolSchemaStrictness covers a source tool schema that carries
+	// no strictness semantic (Messages tools have none). Responses function
+	// tools require an explicit strict on the wire; when the source cannot
+	// provide one, the conversion emits explicit strict:false (the
+	// non-tightening value) only under this loss decision, and is rejected
+	// under strict policy (review-z commit 1).
+	FeatureToolSchemaStrictness Feature = "tool_schema_strictness"
 )
 
 // LossPolicy decides whether a non-portable feature may be dropped during a
@@ -90,7 +99,7 @@ func ParseLossFeatures(names ...string) (map[Feature]struct{}, error) {
 		FeatureProviderReasoning, FeatureAuthenticatedThinking, FeatureTopK,
 		FeatureLogprobs, FeatureServiceTier, FeatureUsageTiming,
 		FeatureToolResultError, FeaturePhase, FeatureReasoningSummaryRequest,
-		FeatureResponsesControls,
+		FeatureResponsesControls, FeatureToolSchemaStrictness,
 	} {
 		known[feature] = struct{}{}
 	}
@@ -192,27 +201,6 @@ func (r *ConversionReport) Note(feature Feature, path string, detail string) {
 	})
 }
 
-// strictDecode decodes exactly one JSON value into dst with unknown fields
-// rejected and trailing values rejected. It is the standard entry point for
-// every wire union and strict request/response schema in this package.
-func strictDecode(data []byte, dst any) error {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-
-	if err := dec.Decode(dst); err != nil {
-		return err
-	}
-
-	var trailing any
-	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("unexpected trailing JSON value")
-		}
-		return err
-	}
-	return nil
-}
-
 // trimJSONSpace returns data with surrounding whitespace removed.
 func trimJSONSpace(data []byte) []byte {
 	return bytes.TrimSpace(data)
@@ -220,17 +208,8 @@ func trimJSONSpace(data []byte) []byte {
 
 // decodeJSONObject ensures function-call arguments are objects before
 // converting them to Anthropic tool_use.input, whose final input must be an
-// object.
+// object. It delegates to the wire layer's shared strict object decoder so
+// the object rule has exactly one implementation.
 func decodeJSONObject(raw string) (map[string]json.RawMessage, error) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, errors.New("empty JSON object")
-	}
-	var value map[string]json.RawMessage
-	if err := strictDecode([]byte(raw), &value); err != nil {
-		return nil, err
-	}
-	if value == nil {
-		return nil, errors.New("tool arguments must be a JSON object")
-	}
-	return value, nil
+	return wire.JSONObject(raw)
 }

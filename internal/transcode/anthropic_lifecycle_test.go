@@ -43,7 +43,7 @@ func anthropicLifecycleState(t *testing.T) *anthropicResponsesStreamState {
 func feedAnthropicCreated(t *testing.T, state *anthropicResponsesStreamState, sequence int64) {
 	t.Helper()
 	if _, err := state.Convert(ResponseCreatedEvent{
-		responsesEventBase: responsesEventBase{
+		EventBase: EventBase{
 			Type:           "response.created",
 			SequenceNumber: sequence,
 		},
@@ -79,7 +79,7 @@ func TestResponsesStreamRejectsTerminalBeforeCreated(t *testing.T) {
 		{
 			name: "completed",
 			event: ResponseCompletedEvent{
-				responsesEventBase: responsesEventBase{
+				EventBase: EventBase{
 					Type:           "response.completed",
 					SequenceNumber: 0,
 				},
@@ -89,7 +89,7 @@ func TestResponsesStreamRejectsTerminalBeforeCreated(t *testing.T) {
 		{
 			name: "incomplete",
 			event: ResponseIncompleteEvent{
-				responsesEventBase: responsesEventBase{
+				EventBase: EventBase{
 					Type:           "response.incomplete",
 					SequenceNumber: 0,
 				},
@@ -99,7 +99,7 @@ func TestResponsesStreamRejectsTerminalBeforeCreated(t *testing.T) {
 		{
 			name: "failed",
 			event: ResponseFailedEvent{
-				responsesEventBase: responsesEventBase{
+				EventBase: EventBase{
 					Type:           "response.failed",
 					SequenceNumber: 0,
 				},
@@ -131,8 +131,8 @@ func TestResponsesStreamRejectsMissingDoneEvents(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesOutputMessage{
 				ID: "m1", Type: "message", Role: "assistant",
 				Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{},
@@ -141,16 +141,16 @@ func TestResponsesStreamRejectsMissingDoneEvents(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 3},
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 3},
 			Response: ResponseEnvelope{
 				ID: "resp_1", Object: "response", CreatedAt: 1710000000,
 				Status: "completed", Model: "gpt-4.1", Output: []ResponsesOutputItem{},
@@ -162,8 +162,8 @@ func TestResponsesStreamRejectsMissingDoneEvents(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
 				CallID: "call_1", Name: "f", Arguments: "",
@@ -172,15 +172,15 @@ func TestResponsesStreamRejectsMissingDoneEvents(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `{"x":`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `{"x":`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 3},
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 3},
 			Response: ResponseEnvelope{
 				ID: "resp_1", Object: "response", CreatedAt: 1710000000,
 				Status: "completed", Model: "gpt-4.1", Output: []ResponsesOutputItem{},
@@ -202,8 +202,8 @@ func TestResponsesStreamRejectsSequenceRegression(t *testing.T) {
 			feed: func(t *testing.T, state *anthropicResponsesStreamState) {
 				feedAnthropicCreated(t, state, 0)
 				if _, err := state.Convert(ResponseInProgressEvent{
-					responsesEventBase: responsesEventBase{Type: "response.in_progress", SequenceNumber: 0},
-					Response:           anthropicLifecycleEnvelope("resp_1"),
+					EventBase: EventBase{Type: "response.in_progress", SequenceNumber: 0},
+					Response:  anthropicLifecycleEnvelope("resp_1"),
 				}); err == nil {
 					t.Fatal("duplicate sequence accepted")
 				} else {
@@ -216,8 +216,8 @@ func TestResponsesStreamRejectsSequenceRegression(t *testing.T) {
 			feed: func(t *testing.T, state *anthropicResponsesStreamState) {
 				feedAnthropicCreated(t, state, 5)
 				if _, err := state.Convert(ResponseInProgressEvent{
-					responsesEventBase: responsesEventBase{Type: "response.in_progress", SequenceNumber: 3},
-					Response:           anthropicLifecycleEnvelope("resp_1"),
+					EventBase: EventBase{Type: "response.in_progress", SequenceNumber: 3},
+					Response:  anthropicLifecycleEnvelope("resp_1"),
 				}); err == nil {
 					t.Fatal("regressing sequence accepted")
 				} else {
@@ -242,8 +242,8 @@ func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 	t.Run("event before created", func(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		_, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 0},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 0},
+			OutputIndex: 0,
 			Item: &ResponsesOutputMessage{
 				ID: "m1", Type: "message", Role: "assistant",
 				Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{},
@@ -254,8 +254,8 @@ func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 	t.Run("in_progress before created", func(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		_, err := state.Convert(ResponseInProgressEvent{
-			responsesEventBase: responsesEventBase{Type: "response.in_progress", SequenceNumber: 0},
-			Response:           anthropicLifecycleEnvelope("resp_1"),
+			EventBase: EventBase{Type: "response.in_progress", SequenceNumber: 0},
+			Response:  anthropicLifecycleEnvelope("resp_1"),
 		})
 		assertAnthropicWireError(t, err, "response.created")
 	})
@@ -264,8 +264,8 @@ func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 		feedAnthropicCreated(t, state, 0)
 		envelope := anthropicLifecycleEnvelope("resp_2")
 		_, err := state.Convert(ResponseInProgressEvent{
-			responsesEventBase: responsesEventBase{Type: "response.in_progress", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.in_progress", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "resp_1")
 	})
@@ -275,8 +275,8 @@ func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 		envelope := anthropicLifecycleEnvelope("resp_1")
 		envelope.Model = "other-model"
 		_, err := state.Convert(ResponseInProgressEvent{
-			responsesEventBase: responsesEventBase{Type: "response.in_progress", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.in_progress", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "model")
 	})
@@ -288,16 +288,16 @@ func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 			Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{},
 		}
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               item,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        item,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 2},
-			OutputIndex:        1,
-			Item:               item,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 2},
+			OutputIndex: 1,
+			Item:        item,
 		})
 		assertAnthropicWireError(t, err, "duplicate")
 	})
@@ -305,11 +305,11 @@ func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		_, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 1},
-			ItemID:             "ghost",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 1},
+			ItemID:       "ghost",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		})
 		assertAnthropicWireError(t, err, "item")
 	})
@@ -317,8 +317,8 @@ func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesOutputMessage{
 				ID: "m1", Type: "message", Role: "assistant",
 				Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{},
@@ -328,20 +328,20 @@ func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 		}
 		part := &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               part,
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         part,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               part,
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         part,
 		})
 		assertAnthropicWireError(t, err, "duplicate")
 	})
@@ -349,8 +349,8 @@ func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesOutputMessage{
 				ID: "m1", Type: "message", Role: "assistant",
 				Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{},
@@ -359,21 +359,21 @@ func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        1,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  1,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		})
 		assertAnthropicWireError(t, err, "output index")
 	})
@@ -400,48 +400,48 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               anthropicMessageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        anthropicMessageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hel",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hel",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "lo",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "lo",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "help",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "help",
+			Logprobs:     []ResponsesTextLogprob{},
 		})
 		assertAnthropicWireError(t, err, "does not match")
 	})
@@ -450,36 +450,36 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               anthropicMessageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        anthropicMessageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamRefusalPart{Type: "refusal", Refusal: ""},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamRefusalPart{Type: "refusal", Refusal: ""},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseRefusalDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "no",
+			EventBase:    EventBase{Type: "response.refusal.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "no",
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseRefusalDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Refusal:            "yes",
+			EventBase:    EventBase{Type: "response.refusal.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Refusal:      "yes",
 		})
 		assertAnthropicWireError(t, err, "refusal")
 	})
@@ -488,47 +488,47 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               anthropicMessageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        anthropicMessageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamRefusalPart{Type: "refusal", Refusal: "hi"},
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamRefusalPart{Type: "refusal", Refusal: "hi"},
 		})
 		assertAnthropicWireError(t, err, "output_text")
 	})
@@ -537,47 +537,47 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               anthropicMessageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        anthropicMessageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -585,9 +585,9 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 			&ResponsesOutputText{Type: "output_text", Text: "bye", Annotations: []ResponsesAnnotation{}},
 		)
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-			OutputIndex:        0,
-			Item:               done,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+			OutputIndex: 0,
+			Item:        done,
 		})
 		assertAnthropicWireError(t, err, "does not match")
 	})
@@ -596,8 +596,8 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
 				CallID: "call_1", Name: "f", Arguments: "",
@@ -606,18 +606,18 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `{"x":`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `{"x":`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Arguments:          `{"y":1}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Arguments:   `{"y":1}`,
 		})
 		assertAnthropicWireError(t, err, "arguments")
 	})
@@ -626,8 +626,8 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
 				CallID: "call_1", Name: "f", Arguments: "",
@@ -636,24 +636,24 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `{"x":1}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `{"x":1}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Arguments:          `{"x":1}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Arguments:   `{"x":1}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 4},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 4},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
 				CallID: "call_2", Name: "f", Arguments: `{"x":1}`,
@@ -666,8 +666,8 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
 				CallID: "call_1", Name: "f", Arguments: "",
@@ -676,24 +676,24 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `{"x":1}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `{"x":1}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Arguments:          `{"x":1}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Arguments:   `{"x":1}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 4},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 4},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
 				CallID: "call_1", Name: "f", Arguments: `{"x":1}`,
@@ -706,53 +706,53 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               anthropicMessageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        anthropicMessageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+			OutputIndex: 0,
 			Item: anthropicMessageItem("m1",
 				&ResponsesOutputText{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
 			),
@@ -765,8 +765,8 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 			&ResponsesOutputText{Type: "output_text", Text: "bye", Annotations: []ResponsesAnnotation{}},
 		)}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 7},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 7},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "does not match")
 	})
@@ -780,8 +780,8 @@ func TestResponsesToolArgumentsCannotBecomeEmptyObject(t *testing.T) {
 	state := anthropicLifecycleState(t)
 	feedAnthropicCreated(t, state, 0)
 	addedEvents, err := state.Convert(ResponseOutputItemAddedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-		OutputIndex:        0,
+		EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+		OutputIndex: 0,
 		Item: &ResponsesFunctionCallOutputItem{
 			ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
 			CallID: "call_1", Name: "f", Arguments: "",
@@ -791,8 +791,8 @@ func TestResponsesToolArgumentsCannotBecomeEmptyObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	events, err := state.Convert(ResponseOutputItemDoneEvent{
-		responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 2},
-		OutputIndex:        0,
+		EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 2},
+		OutputIndex: 0,
 		Item: &ResponsesFunctionCallOutputItem{
 			ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
 			CallID: "call_1", Name: "f", Arguments: `{"x":1}`,
@@ -835,53 +835,53 @@ func TestResponsesStreamOfficialLifecycleStillConverts(t *testing.T) {
 	state := anthropicLifecycleState(t)
 	feedAnthropicCreated(t, state, 0)
 	if _, err := state.Convert(ResponseOutputItemAddedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-		OutputIndex:        0,
-		Item:               anthropicMessageItem("m1"),
+		EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+		OutputIndex: 0,
+		Item:        anthropicMessageItem("m1"),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseContentPartAddedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-		ItemID:             "m1",
-		OutputIndex:        0,
-		ContentIndex:       0,
-		Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+		EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+		ItemID:       "m1",
+		OutputIndex:  0,
+		ContentIndex: 0,
+		Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseTextDeltaEvent{
-		responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-		ItemID:             "m1",
-		OutputIndex:        0,
-		ContentIndex:       0,
-		Delta:              "hi",
-		Logprobs:           []ResponsesTextLogprob{},
+		EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+		ItemID:       "m1",
+		OutputIndex:  0,
+		ContentIndex: 0,
+		Delta:        "hi",
+		Logprobs:     []ResponsesTextLogprob{},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseTextDoneEvent{
-		responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 4},
-		ItemID:             "m1",
-		OutputIndex:        0,
-		ContentIndex:       0,
-		Text:               "hi",
-		Logprobs:           []ResponsesTextLogprob{},
+		EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 4},
+		ItemID:       "m1",
+		OutputIndex:  0,
+		ContentIndex: 0,
+		Text:         "hi",
+		Logprobs:     []ResponsesTextLogprob{},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseContentPartDoneEvent{
-		responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-		ItemID:             "m1",
-		OutputIndex:        0,
-		ContentIndex:       0,
-		Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
+		EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+		ItemID:       "m1",
+		OutputIndex:  0,
+		ContentIndex: 0,
+		Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseOutputItemDoneEvent{
-		responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-		OutputIndex:        0,
+		EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+		OutputIndex: 0,
 		Item: anthropicMessageItem("m1",
 			&ResponsesOutputText{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
 		),
@@ -894,8 +894,8 @@ func TestResponsesStreamOfficialLifecycleStillConverts(t *testing.T) {
 		&ResponsesOutputText{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
 	)}
 	events, err := state.Convert(ResponseCompletedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 7},
-		Response:           envelope,
+		EventBase: EventBase{Type: "response.completed", SequenceNumber: 7},
+		Response:  envelope,
 	})
 	if err != nil {
 		t.Fatalf("official lifecycle rejected: %v", err)
@@ -946,8 +946,8 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		envelope := anthropicLifecycleEnvelope("resp_1")
 		envelope.CreatedAt = 2
 		_, err := state.Convert(ResponseInProgressEvent{
-			responsesEventBase: responsesEventBase{Type: "response.in_progress", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.in_progress", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "created_at")
 	})
@@ -958,8 +958,8 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		envelope := anthropicLifecycleEnvelope("resp_2")
 		envelope.Status = "completed"
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "resp_1")
 	})
@@ -969,16 +969,16 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		feedAnthropicCreated(t, state, 0)
 		item := fcItem("fc_1", "call_1", "f", "")
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               item,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        item,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 2},
-			OutputIndex:        1,
-			Item:               item,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 2},
+			OutputIndex: 1,
+			Item:        item,
 		})
 		assertAnthropicWireError(t, err, "duplicate")
 	})
@@ -987,9 +987,9 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("ghost"),
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("ghost"),
 		})
 		assertAnthropicWireError(t, err, "unknown item")
 	})
@@ -998,15 +998,15 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 2},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 2},
+			OutputIndex: 0,
 			Item: &ResponsesReasoningOutputItem{
 				ID: "m1", Type: "reasoning", Status: ResponsesItemCompleted,
 				Summary: []ResponsesReasoningSummary{},
@@ -1019,16 +1019,16 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 2},
-			OutputIndex:        1,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 2},
+			OutputIndex: 1,
+			Item:        messageItem("m1"),
 		})
 		assertAnthropicWireError(t, err, "output index")
 	})
@@ -1037,45 +1037,45 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               refusalPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         refusalPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseRefusalDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "no",
+			EventBase:    EventBase{Type: "response.refusal.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "no",
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseRefusalDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Refusal:            "no",
+			EventBase:    EventBase{Type: "response.refusal.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Refusal:      "no",
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               refusalPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         refusalPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1083,9 +1083,9 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 			&ResponsesOutputRefusal{Type: "refusal", Refusal: "yes"},
 		)
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-			OutputIndex:        0,
-			Item:               done,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+			OutputIndex: 0,
+			Item:        done,
 		})
 		assertAnthropicWireError(t, err, "does not match")
 	})
@@ -1094,47 +1094,47 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1143,9 +1143,9 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 			&ResponsesOutputText{Type: "output_text", Text: "extra", Annotations: []ResponsesAnnotation{}},
 		)
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-			OutputIndex:        0,
-			Item:               done,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+			OutputIndex: 0,
+			Item:        done,
 		})
 		assertAnthropicWireError(t, err, "never opened")
 	})
@@ -1154,25 +1154,25 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               fcItem("fc_1", "call_1", "f", ""),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        fcItem("fc_1", "call_1", "f", ""),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `{"x":1}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `{"x":1}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Arguments:          `{"x":2}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Arguments:   `{"x":2}`,
 		})
 		assertAnthropicWireError(t, err, "do not match")
 	})
@@ -1181,25 +1181,25 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               fcItem("fc_1", "call_1", "f", ""),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        fcItem("fc_1", "call_1", "f", ""),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `not json`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `not json`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Arguments:          `{"x":1}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Arguments:   `{"x":1}`,
 		})
 		assertAnthropicWireError(t, err, "do not match")
 	})
@@ -1208,10 +1208,10 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		_, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 1},
-			ItemID:             "ghost",
-			OutputIndex:        0,
-			Delta:              `{}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 1},
+			ItemID:      "ghost",
+			OutputIndex: 0,
+			Delta:       `{}`,
 		})
 		assertAnthropicWireError(t, err, "unknown item")
 	})
@@ -1220,17 +1220,17 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               fcItem("fc_1", "call_1", "f", ""),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        fcItem("fc_1", "call_1", "f", ""),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        1,
-			Delta:              `{}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 1,
+			Delta:       `{}`,
 		})
 		assertAnthropicWireError(t, err, "output index")
 	})
@@ -1239,10 +1239,10 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		_, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 1},
-			ItemID:             "ghost",
-			OutputIndex:        0,
-			Arguments:          `{}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 1},
+			ItemID:      "ghost",
+			OutputIndex: 0,
+			Arguments:   `{}`,
 		})
 		assertAnthropicWireError(t, err, "unknown item")
 	})
@@ -1251,12 +1251,12 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		_, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 1},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 1},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		})
 		assertAnthropicWireError(t, err, "no open content block")
 	})
@@ -1265,28 +1265,28 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               refusalPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         refusalPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		})
 		assertAnthropicWireError(t, err, "refusal")
 	})
@@ -1295,11 +1295,11 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		_, err := state.Convert(ResponseRefusalDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.done", SequenceNumber: 1},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Refusal:            "no",
+			EventBase:    EventBase{Type: "response.refusal.done", SequenceNumber: 1},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Refusal:      "no",
 		})
 		assertAnthropicWireError(t, err, "no open content block")
 	})
@@ -1308,27 +1308,27 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseRefusalDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.done", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Refusal:            "no",
+			EventBase:    EventBase{Type: "response.refusal.done", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Refusal:      "no",
 		})
 		assertAnthropicWireError(t, err, "output_text")
 	})
@@ -1337,11 +1337,11 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		_, err := state.Convert(ResponseRefusalDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.delta", SequenceNumber: 1},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "no",
+			EventBase:    EventBase{Type: "response.refusal.delta", SequenceNumber: 1},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "no",
 		})
 		assertAnthropicWireError(t, err, "no open content block")
 	})
@@ -1350,11 +1350,11 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		_, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 1},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 1},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		})
 		assertAnthropicWireError(t, err, "no open block")
 	})
@@ -1363,18 +1363,18 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1382,8 +1382,8 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		envelope.Status = "incomplete"
 		envelope.IncompleteDetails = &ResponsesIncompleteDetails{Reason: "max_output_tokens"}
 		_, err := state.Convert(ResponseIncompleteEvent{
-			responsesEventBase: responsesEventBase{Type: "response.incomplete", SequenceNumber: 3},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.incomplete", SequenceNumber: 3},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "done")
 	})
@@ -1394,8 +1394,8 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		envelope.Status = "failed"
 		envelope.Error = &ResponsesEnvelopeError{Code: "server_error", Message: "boom"}
 		_, err := state.Convert(ResponseFailedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.failed", SequenceNumber: 0},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.failed", SequenceNumber: 0},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "response.created")
 	})
@@ -1404,16 +1404,16 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 2},
-			OutputIndex:        0,
-			Item:               anthropicMessageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 2},
+			OutputIndex: 0,
+			Item:        anthropicMessageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1421,8 +1421,8 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		envelope.Status = "completed"
 		envelope.Output = []ResponsesOutputItem{fcItem("m1", "call_1", "f", "{}")}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 3},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 3},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "type")
 	})
@@ -1431,9 +1431,9 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               fcItem("fc_1", "call_1", "f", ""),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        fcItem("fc_1", "call_1", "f", ""),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1441,8 +1441,8 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		envelope.Status = "completed"
 		envelope.Output = []ResponsesOutputItem{fcItem("fc_1", "call_1", "f", "{}")}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 2},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 2},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "done")
 	})
@@ -1451,31 +1451,31 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               fcItem("fc_1", "call_1", "f", ""),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        fcItem("fc_1", "call_1", "f", ""),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `{}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `{}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Arguments:          `{}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Arguments:   `{}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 4},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 4},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
 				CallID: "call_1", Name: "f", Arguments: `{}`,
@@ -1487,8 +1487,8 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		envelope.Status = "completed"
 		envelope.Output = []ResponsesOutputItem{fcItem("fc_1", "call_2", "f", "{}")}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 5},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 5},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "identity")
 	})
@@ -1497,31 +1497,31 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               fcItem("fc_1", "call_1", "f", ""),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        fcItem("fc_1", "call_1", "f", ""),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `{"x":1}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `{"x":1}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Arguments:          `{"x":1}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Arguments:   `{"x":1}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 4},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 4},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
 				CallID: "call_1", Name: "f", Arguments: `{"x":1}`,
@@ -1533,8 +1533,8 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 		envelope.Status = "completed"
 		envelope.Output = []ResponsesOutputItem{fcItem("fc_1", "call_1", "f", `{"x":2}`)}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 5},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 5},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "arguments")
 	})
@@ -1548,8 +1548,8 @@ func TestResponsesToolArgumentsSemanticEquality(t *testing.T) {
 	state := anthropicLifecycleState(t)
 	feedAnthropicCreated(t, state, 0)
 	if _, err := state.Convert(ResponseOutputItemAddedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-		OutputIndex:        0,
+		EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+		OutputIndex: 0,
 		Item: &ResponsesFunctionCallOutputItem{
 			ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
 			CallID: "call_1", Name: "f", Arguments: "",
@@ -1558,18 +1558,18 @@ func TestResponsesToolArgumentsSemanticEquality(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-		responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-		ItemID:             "fc_1",
-		OutputIndex:        0,
-		Delta:              `{"x": 1}`,
+		EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+		ItemID:      "fc_1",
+		OutputIndex: 0,
+		Delta:       `{"x": 1}`,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	events, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-		responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-		ItemID:             "fc_1",
-		OutputIndex:        0,
-		Arguments:          `{"x":1}`,
+		EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+		ItemID:      "fc_1",
+		OutputIndex: 0,
+		Arguments:   `{"x":1}`,
 	})
 	if err != nil {
 		t.Fatalf("semantically equal snapshot rejected: %v", err)
@@ -1612,8 +1612,8 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 			InputTokensDetails: &UsageInputTokensDetails{CachedTokens: 10},
 		}
 		_, err := state.Convert(ResponseCreatedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.created", SequenceNumber: 0},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.created", SequenceNumber: 0},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "usage")
 	})
@@ -1622,8 +1622,8 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		_, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputResultItem{
 				ID: "r1", Type: "function_call_output", Status: ResponsesItemCompleted,
 				CallID: "call_1", Output: ResponsesFunctionOutput{Text: stringPtr("ok")},
@@ -1639,18 +1639,18 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        1,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  1,
+			ContentIndex: 0,
+			Part:         textPart(),
 		})
 		assertAnthropicWireError(t, err, "output index")
 	})
@@ -1659,27 +1659,27 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        1,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  1,
+			ContentIndex: 0,
+			Part:         textPart(),
 		})
 		assertAnthropicWireError(t, err, "output index")
 	})
@@ -1688,27 +1688,27 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               refusalPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         refusalPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseRefusalDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        1,
-			ContentIndex:       0,
-			Delta:              "no",
+			EventBase:    EventBase{Type: "response.refusal.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  1,
+			ContentIndex: 0,
+			Delta:        "no",
 		})
 		assertAnthropicWireError(t, err, "output index")
 	})
@@ -1717,36 +1717,36 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               refusalPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         refusalPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseRefusalDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "no",
+			EventBase:    EventBase{Type: "response.refusal.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "no",
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseRefusalDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        1,
-			ContentIndex:       0,
-			Refusal:            "no",
+			EventBase:    EventBase{Type: "response.refusal.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  1,
+			ContentIndex: 0,
+			Refusal:      "no",
 		})
 		assertAnthropicWireError(t, err, "output index")
 	})
@@ -1755,31 +1755,31 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               fcItem("fc_1", "call_1", "f", ""),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        fcItem("fc_1", "call_1", "f", ""),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `{}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `{}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Arguments:          `{}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Arguments:   `{}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 4},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 4},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
 				CallID: "call_1", Name: "g", Arguments: `{}`,
@@ -1793,15 +1793,15 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		feedAnthropicCreated(t, state, 0)
 		item := fcItem("fc_1", "", "", "")
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               item,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        item,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 2},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 2},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
 				CallID: "call_1", Name: "f", Arguments: `{}`,
@@ -1814,15 +1814,15 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               fcItem("fc_1", "call_1", "f", ""),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        fcItem("fc_1", "call_1", "f", ""),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 2},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 2},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
 				CallID: "call_1", Name: "f", Arguments: `[1,2]`,
@@ -1835,47 +1835,47 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1883,9 +1883,9 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 			&ResponsesOutputRefusal{Type: "refusal", Refusal: "hi"},
 		)
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-			OutputIndex:        0,
-			Item:               done,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+			OutputIndex: 0,
+			Item:        done,
 		})
 		assertAnthropicWireError(t, err, "output_text")
 	})
@@ -1894,25 +1894,25 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               fcItem("fc_1", "call_1", "f", ""),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        fcItem("fc_1", "call_1", "f", ""),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `{"x":1}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `{"x":1}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Arguments:          `{"x":1,"y":2}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Arguments:   `{"x":1,"y":2}`,
 		})
 		assertAnthropicWireError(t, err, "do not match")
 	})
@@ -1921,16 +1921,16 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 2},
-			OutputIndex:        0,
-			Item:               anthropicMessageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 2},
+			OutputIndex: 0,
+			Item:        anthropicMessageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -1940,8 +1940,8 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 			&ResponsesOutputText{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
 		)}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 3},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 3},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "never observed")
 	})
@@ -1950,53 +1950,53 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+			OutputIndex: 0,
 			Item: anthropicMessageItem("m1",
 				&ResponsesOutputText{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
 			),
@@ -2009,8 +2009,8 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 			&ResponsesOutputRefusal{Type: "refusal", Refusal: "hi"},
 		)}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 7},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 7},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "want")
 	})
@@ -2019,51 +2019,51 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               refusalPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         refusalPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseRefusalDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "no",
+			EventBase:    EventBase{Type: "response.refusal.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "no",
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseRefusalDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Refusal:            "no",
+			EventBase:    EventBase{Type: "response.refusal.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Refusal:      "no",
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               refusalPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         refusalPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+			OutputIndex: 0,
 			Item: anthropicMessageItem("m1",
 				&ResponsesOutputRefusal{Type: "refusal", Refusal: "no"},
 			),
@@ -2076,8 +2076,8 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 			&ResponsesOutputRefusal{Type: "refusal", Refusal: "yes"},
 		)}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 7},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 7},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "does not match")
 	})
@@ -2089,8 +2089,8 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		envelope.Status = "failed"
 		envelope.Error = &ResponsesEnvelopeError{Code: "", Message: ""}
 		events, err := state.Convert(ResponseFailedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.failed", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.failed", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -2120,54 +2120,54 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-			OutputIndex:        0,
-			Item:               anthropicMessageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+			OutputIndex: 0,
+			Item:        anthropicMessageItem("m1"),
 		})
 		assertAnthropicWireError(t, err, "content count")
 	})
@@ -2176,12 +2176,12 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		_, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 1},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 1},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		})
 		assertAnthropicWireError(t, err, "no open content block")
 	})
@@ -2190,38 +2190,38 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        1,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  1,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		})
 		assertAnthropicWireError(t, err, "output index")
 	})
@@ -2230,8 +2230,8 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
 				CallID: "call_1", Name: "f", Arguments: "",
@@ -2240,10 +2240,10 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        1,
-			Arguments:          `{}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 1,
+			Arguments:   `{}`,
 		})
 		assertAnthropicWireError(t, err, "output index")
 	})
@@ -2263,16 +2263,16 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		feedAnthropicCreated(t, state, 0)
 		item := messageItem("m1")
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               item,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        item,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 2},
-			OutputIndex:        0,
-			Item:               anthropicMessageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 2},
+			OutputIndex: 0,
+			Item:        anthropicMessageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -2283,8 +2283,8 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		withPhase.Status = ResponsesItemCompleted
 		envelope.Output = []ResponsesOutputItem{withPhase}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 3},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 3},
+			Response:  envelope,
 		})
 		var unsupported *UnsupportedFeatureError
 		if !errors.As(err, &unsupported) {
@@ -2308,8 +2308,8 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		background := true
 		envelope.Background = &background
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		var unsupported *UnsupportedFeatureError
 		if !errors.As(err, &unsupported) {
@@ -2327,8 +2327,8 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 			InputTokensDetails: &UsageInputTokensDetails{CachedTokens: 10},
 		}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "usage")
 	})
@@ -2340,8 +2340,8 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		envelope.Status = "completed"
 		envelope.Output = []ResponsesOutputItem{anthropicMessageItem("ghost")}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "never observed")
 	})
@@ -2350,53 +2350,53 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "hi",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "hi",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 5},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 5},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+			OutputIndex: 0,
 			Item: anthropicMessageItem("m1",
 				&ResponsesOutputText{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
 			),
@@ -2407,8 +2407,8 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		envelope.Status = "completed"
 		envelope.Output = []ResponsesOutputItem{anthropicMessageItem("m1")}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 7},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 7},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "content count")
 	})
@@ -2417,8 +2417,8 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
 				CallID: "call_1", Name: "f", Arguments: "",
@@ -2427,24 +2427,24 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Delta:              `{}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.delta", SequenceNumber: 2},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Delta:       `{}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			Arguments:          `{}`,
+			EventBase:   EventBase{Type: "response.function_call_arguments.done", SequenceNumber: 3},
+			ItemID:      "fc_1",
+			OutputIndex: 0,
+			Arguments:   `{}`,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 4},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 4},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
 				CallID: "call_1", Name: "f", Arguments: `{}`,
@@ -2459,8 +2459,8 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 			CallID: "call_1", Name: "f", Arguments: `[1,2]`,
 		}}
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 5},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 5},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "JSON object")
 	})
@@ -2472,8 +2472,8 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		envelope.Status = "failed"
 		envelope.Error = &ResponsesEnvelopeError{Code: "server_error", Message: "boom"}
 		_, err := state.Convert(ResponseFailedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.failed", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.failed", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "resp_1")
 	})
@@ -2494,8 +2494,8 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 		)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesOutputMessage{
 				ID: "m1", Type: "message", Role: "assistant",
 				Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{},
@@ -2504,9 +2504,9 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 2},
-			OutputIndex:        0,
-			Item:               anthropicMessageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 2},
+			OutputIndex: 0,
+			Item:        anthropicMessageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -2520,8 +2520,8 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 		}
 		envelope.Output = []ResponsesOutputItem{item}
 		_, err := state.Convert(ResponseIncompleteEvent{
-			responsesEventBase: responsesEventBase{Type: "response.incomplete", SequenceNumber: 3},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.incomplete", SequenceNumber: 3},
+			Response:  envelope,
 		})
 		var unsupported *UnsupportedFeatureError
 		if !errors.As(err, &unsupported) {
@@ -2546,8 +2546,8 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 		background := true
 		envelope.Background = &background
 		_, err := state.Convert(ResponseIncompleteEvent{
-			responsesEventBase: responsesEventBase{Type: "response.incomplete", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.incomplete", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		var unsupported *UnsupportedFeatureError
 		if !errors.As(err, &unsupported) {
@@ -2566,8 +2566,8 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 			InputTokensDetails: &UsageInputTokensDetails{CachedTokens: 10},
 		}
 		_, err := state.Convert(ResponseIncompleteEvent{
-			responsesEventBase: responsesEventBase{Type: "response.incomplete", SequenceNumber: 1},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.incomplete", SequenceNumber: 1},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "usage")
 	})
@@ -2594,18 +2594,18 @@ func TestResponsesStreamZeroDeltaPartReconciliation(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -2615,12 +2615,12 @@ func TestResponsesStreamZeroDeltaPartReconciliation(t *testing.T) {
 	t.Run("consistent empty text done accepted", func(t *testing.T) {
 		state, _ := setup(t)
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatalf("zero-delta empty text done rejected: %v", err)
 		}
@@ -2629,21 +2629,21 @@ func TestResponsesStreamZeroDeltaPartReconciliation(t *testing.T) {
 	t.Run("contradictory item done text rejected", func(t *testing.T) {
 		state, _ := setup(t)
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -2651,9 +2651,9 @@ func TestResponsesStreamZeroDeltaPartReconciliation(t *testing.T) {
 			&ResponsesOutputText{Type: "output_text", Text: "phantom", Annotations: []ResponsesAnnotation{}},
 		)
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 5},
-			OutputIndex:        0,
-			Item:               done,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 5},
+			OutputIndex: 0,
+			Item:        done,
 		})
 		assertAnthropicWireError(t, err, "does not match")
 	})
@@ -2661,27 +2661,27 @@ func TestResponsesStreamZeroDeltaPartReconciliation(t *testing.T) {
 	t.Run("terminal envelope consistent empty text accepted", func(t *testing.T) {
 		state, _ := setup(t)
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 5},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 5},
+			OutputIndex: 0,
 			Item: anthropicMessageItem("m1",
 				&ResponsesOutputText{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 			),
@@ -2694,8 +2694,8 @@ func TestResponsesStreamZeroDeltaPartReconciliation(t *testing.T) {
 			&ResponsesOutputText{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		)}
 		if _, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 6},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 6},
+			Response:  envelope,
 		}); err != nil {
 			t.Fatalf("zero-delta empty terminal text rejected: %v", err)
 		}
@@ -2704,21 +2704,21 @@ func TestResponsesStreamZeroDeltaPartReconciliation(t *testing.T) {
 	t.Run("duplicate message item done rejected", func(t *testing.T) {
 		state, _ := setup(t)
 		if _, err := state.Convert(ResponseTextDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.done", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Text:               "",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.done", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Text:         "",
+			Logprobs:     []ResponsesTextLogprob{},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.done", SequenceNumber: 4},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.done", SequenceNumber: 4},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -2726,16 +2726,16 @@ func TestResponsesStreamZeroDeltaPartReconciliation(t *testing.T) {
 			&ResponsesOutputText{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		)
 		if _, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 5},
-			OutputIndex:        0,
-			Item:               done,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 5},
+			OutputIndex: 0,
+			Item:        done,
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseOutputItemDoneEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.done", SequenceNumber: 6},
-			OutputIndex:        0,
-			Item:               done,
+			EventBase:   EventBase{Type: "response.output_item.done", SequenceNumber: 6},
+			OutputIndex: 0,
+			Item:        done,
 		})
 		assertAnthropicWireError(t, err, "duplicate")
 	})
@@ -2750,8 +2750,8 @@ func TestResponsesStreamZeroDeltaRefusalReconciliation(t *testing.T) {
 	state := anthropicLifecycleState(t)
 	feedAnthropicCreated(t, state, 0)
 	if _, err := state.Convert(ResponseOutputItemAddedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-		OutputIndex:        0,
+		EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+		OutputIndex: 0,
 		Item: &ResponsesOutputMessage{
 			ID: "m1", Type: "message", Role: "assistant",
 			Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{},
@@ -2760,31 +2760,31 @@ func TestResponsesStreamZeroDeltaRefusalReconciliation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(ResponseContentPartAddedEvent{
-		responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-		ItemID:             "m1",
-		OutputIndex:        0,
-		ContentIndex:       0,
-		Part:               refusalPart(),
+		EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+		ItemID:       "m1",
+		OutputIndex:  0,
+		ContentIndex: 0,
+		Part:         refusalPart(),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	// A zero-delta part reconciles with an empty done snapshot.
 	if _, err := state.Convert(ResponseRefusalDoneEvent{
-		responsesEventBase: responsesEventBase{Type: "response.refusal.done", SequenceNumber: 3},
-		ItemID:             "m1",
-		OutputIndex:        0,
-		ContentIndex:       0,
-		Refusal:            "",
+		EventBase:    EventBase{Type: "response.refusal.done", SequenceNumber: 3},
+		ItemID:       "m1",
+		OutputIndex:  0,
+		ContentIndex: 0,
+		Refusal:      "",
 	}); err != nil {
 		t.Fatalf("zero-delta empty refusal done rejected: %v", err)
 	}
 	// A contradictory non-empty done snapshot is corrupt wire.
 	if _, err := state.Convert(ResponseRefusalDoneEvent{
-		responsesEventBase: responsesEventBase{Type: "response.refusal.done", SequenceNumber: 4},
-		ItemID:             "m1",
-		OutputIndex:        0,
-		ContentIndex:       0,
-		Refusal:            "phantom",
+		EventBase:    EventBase{Type: "response.refusal.done", SequenceNumber: 4},
+		ItemID:       "m1",
+		OutputIndex:  0,
+		ContentIndex: 0,
+		Refusal:      "phantom",
 	}); err == nil {
 		t.Fatal("contradictory refusal done accepted")
 	}
@@ -2798,8 +2798,8 @@ func TestResponsesStreamItemClosureAndPartOwnership(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesOutputMessage{
 				ID: "m1", Type: "message", Role: "assistant",
 				Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{},
@@ -2811,8 +2811,8 @@ func TestResponsesStreamItemClosureAndPartOwnership(t *testing.T) {
 		envelope := anthropicLifecycleEnvelope("resp_1")
 		envelope.Status = "completed"
 		_, err := state.Convert(ResponseCompletedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.completed", SequenceNumber: 2},
-			Response:           envelope,
+			EventBase: EventBase{Type: "response.completed", SequenceNumber: 2},
+			Response:  envelope,
 		})
 		assertAnthropicWireError(t, err, "output_item.done")
 	})
@@ -2821,8 +2821,8 @@ func TestResponsesStreamItemClosureAndPartOwnership(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputItem{
 				ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
 				CallID: "call_1", Name: "f", Arguments: "",
@@ -2831,11 +2831,11 @@ func TestResponsesStreamItemClosureAndPartOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "fc_1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "fc_1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
 		})
 		assertAnthropicWireError(t, err, "non-message")
 	})
@@ -2862,28 +2862,28 @@ func TestResponsesStreamDeltaPartTypeMatching(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               refusalPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         refusalPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseTextDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_text.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "x",
-			Logprobs:           []ResponsesTextLogprob{},
+			EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "x",
+			Logprobs:     []ResponsesTextLogprob{},
 		})
 		assertAnthropicWireError(t, err, "refusal")
 	})
@@ -2892,27 +2892,27 @@ func TestResponsesStreamDeltaPartTypeMatching(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.output_item.added", SequenceNumber: 1},
-			OutputIndex:        0,
-			Item:               messageItem("m1"),
+			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: 1},
+			OutputIndex: 0,
+			Item:        messageItem("m1"),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := state.Convert(ResponseContentPartAddedEvent{
-			responsesEventBase: responsesEventBase{Type: "response.content_part.added", SequenceNumber: 2},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Part:               textPart(),
+			EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: 2},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Part:         textPart(),
 		}); err != nil {
 			t.Fatal(err)
 		}
 		_, err := state.Convert(ResponseRefusalDeltaEvent{
-			responsesEventBase: responsesEventBase{Type: "response.refusal.delta", SequenceNumber: 3},
-			ItemID:             "m1",
-			OutputIndex:        0,
-			ContentIndex:       0,
-			Delta:              "no",
+			EventBase:    EventBase{Type: "response.refusal.delta", SequenceNumber: 3},
+			ItemID:       "m1",
+			OutputIndex:  0,
+			ContentIndex: 0,
+			Delta:        "no",
 		})
 		assertAnthropicWireError(t, err, "output_text")
 	})
