@@ -197,7 +197,11 @@ func ApplyTargetAuthentication(
 	}
 
 	if policy.Mode == AuthExternalSigner {
-		return policy.Signer.Sign(ctx, req)
+		// The signer is attached to the request context; the signing
+		// transport inside the retry chain signs EVERY actual attempt after
+		// body reconstruction (review-z commit 4).
+		*req = *req.WithContext(WithRequestSigner(req.Context(), policy.Signer))
+		return nil
 	}
 
 	secret, err := resolveSecret(ctx, policy, inbound)

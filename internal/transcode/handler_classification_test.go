@@ -310,7 +310,7 @@ func TestErrorBodyFailureKeepsRetryAfter(t *testing.T) {
 	if !outcome.UpstreamFailure {
 		t.Fatal("failed error-body transfer must be an upstream failure")
 	}
-	if outcome.RetryAfter <= 9*time.Second || outcome.RetryAfter > 10*time.Second {
+	if !outcome.RetryAfter.Set || outcome.RetryAfter.Value <= 9*time.Second || outcome.RetryAfter.Value > 10*time.Second {
 		t.Fatalf("RetryAfter = %v, want ~10s for a fast body", outcome.RetryAfter)
 	}
 }
@@ -486,7 +486,7 @@ func TestRetryAfterUsesHeaderReceiptTime(t *testing.T) {
 		}
 		// The body read consumed ~500ms of the 10s hold: the recorded
 		// remaining delay must exclude it.
-		if outcome.RetryAfter >= retryAfter || outcome.RetryAfter < 9*time.Second {
+		if !outcome.RetryAfter.Set || outcome.RetryAfter.Value >= retryAfter || outcome.RetryAfter.Value < 9*time.Second {
 			t.Fatalf("RetryAfter = %v, want the remaining hold after the body read (9s..10s)", outcome.RetryAfter)
 		}
 	}
@@ -568,7 +568,7 @@ func TestRetryAfterUsesHeaderReceiptTime(t *testing.T) {
 		}
 		// A fast body reads in microseconds: the hold is ~10s, the full
 		// signaled duration.
-		if outcome.RetryAfter <= 9*time.Second || outcome.RetryAfter > retryAfter {
+		if !outcome.RetryAfter.Set || outcome.RetryAfter.Value <= 9*time.Second || outcome.RetryAfter.Value > retryAfter {
 			t.Fatalf("RetryAfter = %v, want ~10s for a fast body", outcome.RetryAfter)
 		}
 	})

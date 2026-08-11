@@ -85,10 +85,6 @@ type TranscodeMapping struct {
 	// BodyLimits bounds request/response bodies on this route. Zero values
 	// fall back to the proxy defaults.
 	BodyLimits transcode.BodyLimits
-
-	// AllowedClientQuery lists client query parameters permitted on the
-	// transcoded route. Unknown client query parameters are rejected.
-	AllowedClientQuery map[string]struct{}
 }
 
 // TranscodeOption configures transcoding route mappings.
@@ -675,7 +671,9 @@ func New(opts ...Option) (*Proxy, error) {
 		if cfg.retrySkipOn429 {
 			checkRetry = func(resp *http.Response, err error) bool {
 				if err != nil {
-					return true
+					// Local non-retryable defects (e.g. signing failures)
+					// are never retried (review-z commit 4).
+					return !retry.IsNonRetryable(err)
 				}
 				if resp == nil {
 					return false
@@ -685,8 +683,14 @@ func New(opts ...Option) (*Proxy, error) {
 				return resp.StatusCode >= 500
 			}
 		}
+		// The signing transport sits inside the retry chain so EVERY
+		// attempt is signed after the retry layer rebuilt the body and
+		// finalized Content-Length (review-z commit 4). Requests without a
+		// signer in their context pass through untouched.
 		transport = &retry.Transport{
-			Inner:         withAttemptMarkingTransport(transport),
+			Inner: withAttemptMarkingTransport(&transcode.SigningTransport{
+				Inner: transport,
+			}),
 			MaxRetries:    cfg.maxRetries,
 			MaxBodyBytes:  cfg.maxBodyBytes,
 			WaitMin:       cfg.retryWaitMin,
@@ -696,7 +700,9 @@ func New(opts ...Option) (*Proxy, error) {
 			CheckRetry:    checkRetry,
 		}
 	} else {
-		transport = withAttemptMarkingTransport(transport)
+		transport = withAttemptMarkingTransport(&transcode.SigningTransport{
+			Inner: transport,
+		})
 	}
 
 	// Track whether the retry transport handles breaker reporting. Detect direct
@@ -742,16 +748,15 @@ func New(opts ...Option) (*Proxy, error) {
 	p.transcodeHandlerMap = make(map[transcode.RouteKey]http.Handler, len(cfg.transcodeMappings))
 	for i := range cfg.transcodeMappings {
 		m := &cfg.transcodeMappings[i]
+		mapping := m.Mapping
+		mapping.ModelMap = cloneModelMap(m.ModelMap)
+		mapping.LossPolicy = cloneLossPolicy(m.LossPolicy)
+		mapping.AllowedClientQuery = cloneStringSet(m.AllowedClientQuery)
 		h := transcode.NewTranscodeHandler(
 			transcode.HandlerConfig{
-				Mapping:            m.Mapping,
-				Upstream:           cfg.upstream,
-				BodyLimits:         m.BodyLimits,
-				AuthPolicy:         m.Auth,
-				ModelMap:           cloneModelMap(m.ModelMap),
-				LossPolicy:         cloneLossPolicy(m.LossPolicy),
-				ChatCapabilities:   m.ChatCapabilities,
-				AllowedClientQuery: cloneStringSet(m.AllowedClientQuery),
+				Mapping:    mapping,
+				Upstream:   cfg.upstream,
+				BodyLimits: m.BodyLimits,
 			},
 			p.RoundTrip,
 			nil,
@@ -1139,20 +1144,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, handler http.Handler) {
 	ctx, sink := transcode.WithOutcomeSink(r.Context())
 	handler.ServeHTTP(w, r.WithContext(ctx))
-	select {
-	case outcome := <-sink:
-		if rec, ok := w.(*statusRecorder); ok {
-			outcomeCopy := outcome
-			rec.transcodeOutcome = &outcomeCopy
-			// Completion is monotonic: the recorder's independent
-			// write-failure observation (a short write or write error on
-			// the raw ResponseWriter) can never be overwritten by an
-			// outcome that claims a clean completion (review-k finding 7).
-			rec.aborted = rec.aborted ||
-				!outcomeCopy.DownstreamComplete ||
-				rec.downstreamWriteFailed()
-		}
-	default:
+	// The handler records EXACTLY ONE outcome synchronously (its defer
+	// guarantees one when no path recorded it): there is no non-blocking
+	// branch that silently loses provenance, and a missing outcome is an
+	// internal invariant violation (review-z commit 4).
+	outcome, recorded := sink.Load()
+	if !recorded {
+		panic("transcode handler returned without recording an outcome")
+	}
+	if rec, ok := w.(*statusRecorder); ok {
+		outcomeCopy := outcome
+		rec.transcodeOutcome = &outcomeCopy
+		// Completion is monotonic: the recorder's independent
+		// write-failure observation (a short write or write error on
+		// the raw ResponseWriter) can never be overwritten by an
+		// outcome that claims a clean completion (review-k finding 7).
+		rec.aborted = rec.aborted ||
+			!outcomeCopy.DownstreamComplete ||
+			rec.downstreamWriteFailed()
 	}
 }
 
@@ -1840,11 +1849,20 @@ func classifyTranscodeExchange(
 	now time.Time,
 ) exchangeResult {
 	outcome := rec.transcodeOutcome
+	// The attempt marker fires when the signing+dispatch chain starts, which
+	// precedes the signer: a local request conversion or signing error never
+	// dispatches, so its outcome fact overrides the marker. The marker still
+	// ORs in for exchanges aborted mid-flight where the handler recorded no
+	// attempt fact (review-z commit 4).
+	attempted := outcome.UpstreamAttempted ||
+		(upstreamAttempted && outcome.Provenance != transcode.ProvenanceLocalRequestConversionError)
 	result := exchangeResult{
-		upstreamAttempted: upstreamAttempted,
-		upstreamStatus:    outcome.Status,
+		upstreamAttempted: attempted,
 		upstreamFailure:   outcome.UpstreamFailure,
 		clientAborted:     outcome.ClientAborted || outcome.Provenance == transcode.ProvenanceClientAbort,
+	}
+	if outcome.UpstreamStatus.Set {
+		result.upstreamStatus = outcome.UpstreamStatus.Value
 	}
 	switch outcome.Provenance {
 	case transcode.ProvenanceLocalRequestConversionError,
@@ -1853,11 +1871,16 @@ func classifyTranscodeExchange(
 		transcode.ProvenanceDownstreamWriteError:
 		result.localFailure = true
 	}
+	result.localFailure = result.localFailure || outcome.LocalFailure
 	result.upstreamSuccess = !result.upstreamFailure &&
-		outcome.Status >= http.StatusOK && outcome.Status < http.StatusMultipleChoices
-	result.retryAfter = outcome.RetryAfter
-	if result.retryAfter == 0 {
-		result.retryAfter = parseRetryAfterFromRecorder(rec, now)
+		outcome.UpstreamStatus.Set &&
+		outcome.UpstreamStatus.Value >= http.StatusOK &&
+		outcome.UpstreamStatus.Value < http.StatusMultipleChoices
+	// Retry-After is anchored at the ORIGINAL header receipt in the
+	// outcome; the translated downstream header is NEVER re-parsed with a
+	// fresh receipt timestamp (review-z commit 4).
+	if outcome.RetryAfter.Set {
+		result.retryAfter = outcome.RetryAfter.Value
 	}
 	// A client abort suppresses the phantom hold and breaker failure only
 	// when the outcome carries no definitive upstream failure signal —

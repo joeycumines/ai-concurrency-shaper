@@ -202,11 +202,15 @@ func newStrictResponsesToChatTestHandler(t *testing.T, upstreamURL string) *tran
 	return transcode.NewTranscodeHandler(
 		transcode.HandlerConfig{
 			Mapping: transcode.Mapping{
-				ClientRoute:      key,
-				ClientProtocol:   transcode.ClientResponses,
-				UpstreamProtocol: transcode.UpstreamChatCompletions,
-				UpstreamPath:     "/v1/chat/completions",
-				Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
+				ClientRoute:        key,
+				ClientProtocol:     transcode.ClientResponses,
+				UpstreamProtocol:   transcode.UpstreamChatCompletions,
+				UpstreamPath:       "/v1/chat/completions",
+				Auth:               transcode.AuthPolicy{Mode: transcode.AuthNone},
+				ModelMap:           transcode.ModelMap{AllowIdentity: true},
+				LossPolicy:         transcode.StrictLossPolicy(),
+				ChatCapabilities:   transcode.ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
+				AllowedClientQuery: map[string]struct{}{},
 			},
 			Upstream: upstream,
 			BodyLimits: transcode.BodyLimits{
@@ -218,11 +222,6 @@ func newStrictResponsesToChatTestHandler(t *testing.T, upstreamURL string) *tran
 				SSELineBytes:  1 << 20,
 				SSEFrameBytes: 1 << 20,
 			},
-			AuthPolicy:         transcode.AuthPolicy{Mode: transcode.AuthNone},
-			ModelMap:           transcode.ModelMap{AllowIdentity: true},
-			LossPolicy:         transcode.StrictLossPolicy(),
-			ChatCapabilities:   transcode.ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			return http.DefaultTransport.RoundTrip(req)

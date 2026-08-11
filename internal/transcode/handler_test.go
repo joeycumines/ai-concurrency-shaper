@@ -21,6 +21,13 @@ import (
 // testHandler builds a TranscodeHandler with a scripted round trip.
 func testHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) *TranscodeHandler {
 	t.Helper()
+	// The common test defaults live on the mapping (HandlerConfig carries
+	// only Mapping, Upstream, and BodyLimits — review-z commit 4).
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	mapping.AllowedClientQuery = map[string]struct{}{}
 	return NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -29,11 +36,6 @@ func testHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) *TranscodeH
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:           ModelMap{AllowIdentity: true},
-			LossPolicy:         StrictLossPolicy(),
-			AuthPolicy:         AuthPolicy{Mode: AuthNone},
-			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		roundTrip,
 		nil,
@@ -63,13 +65,13 @@ func TestTranscodeConstructorValidatesConfig(t *testing.T) {
 	validLimits := BodyLimits{AcceptedRequestBytes: 1 << 20, SuccessfulResponseBytes: 1 << 20}
 
 	withConfig := func(mutate func(*HandlerConfig)) HandlerConfig {
+		validMapping.Auth = AuthPolicy{Mode: AuthNone}
+		validMapping.ModelMap = ModelMap{AllowIdentity: true}
+		validMapping.LossPolicy = StrictLossPolicy()
 		cfg := HandlerConfig{
 			Mapping:    validMapping,
 			Upstream:   validUpstream,
 			BodyLimits: validLimits,
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
 		}
 		mutate(&cfg)
 		return cfg
@@ -272,6 +274,10 @@ func TestHandlerRequestConversionErrorDialect400(t *testing.T) {
 
 func TestHandlerBodyLimit413(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -279,9 +285,6 @@ func TestHandlerBodyLimit413(t *testing.T) {
 			BodyLimits: BodyLimits{
 				AcceptedRequestBytes: 16,
 			},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			t.Fatal("round trip must not be called")
@@ -307,6 +310,12 @@ func TestHandlerBodyLimit413(t *testing.T) {
 // own MaxBodyBytes bounds what can be replayed, never what is admitted).
 func TestHandlerRetryReplayLimitSeparateFromInbound(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
 	const (
 		replayCap = 1 << 20 // 1 MiB — what retries may replay
 		bodySize  = replayCap * 6
@@ -320,11 +329,6 @@ func TestHandlerRetryReplayLimitSeparateFromInbound(t *testing.T) {
 				RetryReplayBytes:        replayCap,    // payload is far above what retries may replay
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:           ModelMap{AllowIdentity: true},
-			LossPolicy:         StrictLossPolicy(),
-			AuthPolicy:         AuthPolicy{Mode: AuthNone},
-			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			upstreamBody, err := io.ReadAll(req.Body)
@@ -411,6 +415,12 @@ func TestHandlerDecodedRequestAmplification413(t *testing.T) {
 	// body limit is a 413 in the client dialect, not the generic conversion
 	// 400 (review-j finding 15).
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -420,11 +430,6 @@ func TestHandlerDecodedRequestAmplification413(t *testing.T) {
 				DecodedRequestBytes:     16,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:           ModelMap{AllowIdentity: true},
-			LossPolicy:         StrictLossPolicy(),
-			AuthPolicy:         AuthPolicy{Mode: AuthNone},
-			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			t.Fatal("round trip must not be called")
@@ -528,6 +533,10 @@ func TestHandlerUpstreamErrorMessagesDialect(t *testing.T) {
 
 func TestHandlerLocalConversion502NotUpstreamFailure(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
 	var outcomes []Outcome
 	handler := NewTranscodeHandler(
 		HandlerConfig{
@@ -537,9 +546,6 @@ func TestHandlerLocalConversion502NotUpstreamFailure(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			// Upstream returns a 200 with a VALID Chat response whose
@@ -586,6 +592,10 @@ func TestHandlerLocalConversion502NotUpstreamFailure(t *testing.T) {
 // with UpstreamFailure=true, never a local conversion failure.
 func TestHandlerCorruptUpstreamResponseIsUpstreamFailure(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
 	var outcomes []Outcome
 	handler := NewTranscodeHandler(
 		HandlerConfig{
@@ -595,9 +605,6 @@ func TestHandlerCorruptUpstreamResponseIsUpstreamFailure(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -638,6 +645,10 @@ func TestHandlerCorruptUpstreamResponseIsUpstreamFailure(t *testing.T) {
 // become a successful assistant response (review-k findings 3 and 4).
 func TestHandlerReviewKChatCounterexampleIsUpstreamFailure(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
 	var outcomes []Outcome
 	handler := NewTranscodeHandler(
 		HandlerConfig{
@@ -647,9 +658,6 @@ func TestHandlerReviewKChatCounterexampleIsUpstreamFailure(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -685,6 +693,21 @@ func TestHandlerReviewKChatCounterexampleIsUpstreamFailure(t *testing.T) {
 
 func TestHandlerMessagesToResponsesJSON(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureTopK:                   {},
+		FeatureReasoningSummary:       {},
+		FeatureOutputItemBoundaries:   {},
+		FeaturePreviousResponseID:     {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
+		FeatureToolSchemaStrictness:   {},
+	}}
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -693,20 +716,6 @@ func TestHandlerMessagesToResponsesJSON(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap: ModelMap{AllowIdentity: true},
-			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureTopK:                   {},
-				FeatureReasoningSummary:       {},
-				FeatureOutputItemBoundaries:   {},
-				FeaturePreviousResponseID:     {},
-				FeatureUsageCacheReadUnknown:  {},
-				FeatureUsageCacheWriteUnknown: {},
-				FeatureUsageReasoningUnknown:  {},
-				FeatureUsageUnknown:           {},
-				FeatureToolSchemaStrictness:   {},
-			}},
-			AuthPolicy:         AuthPolicy{Mode: AuthNone},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			// The upstream request is a Responses request with instructions.
@@ -756,6 +765,20 @@ func TestHandlerMessagesToResponsesJSON(t *testing.T) {
 // Anthropic message envelope, not as a Responses envelope.
 func TestHandlerMessagesToChatJSON(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamChatCompletions)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureTopK:                   {},
+		FeatureReasoningSummary:       {},
+		FeatureOutputItemBoundaries:   {},
+		FeaturePreviousResponseID:     {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
+	}}
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -764,19 +787,6 @@ func TestHandlerMessagesToChatJSON(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap: ModelMap{AllowIdentity: true},
-			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureTopK:                   {},
-				FeatureReasoningSummary:       {},
-				FeatureOutputItemBoundaries:   {},
-				FeaturePreviousResponseID:     {},
-				FeatureUsageCacheReadUnknown:  {},
-				FeatureUsageCacheWriteUnknown: {},
-				FeatureUsageReasoningUnknown:  {},
-				FeatureUsageUnknown:           {},
-			}},
-			AuthPolicy:         AuthPolicy{Mode: AuthNone},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			// The upstream request is a Chat request.
@@ -944,8 +954,19 @@ func TestExplicitStreamFalseIsNotOverridden(t *testing.T) {
 		var mapping Mapping
 		if clientProtocol == string(ClientResponses) {
 			mapping = responsesMapping(t)
+			mapping.ModelMap = ModelMap{AllowIdentity: true}
+			mapping.LossPolicy = policy
+			mapping.Auth = AuthPolicy{Mode: AuthNone}
+			mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+			mapping.AllowedClientQuery = map[string]struct{}{}
 		} else {
 			mapping = messagesMapping(t, UpstreamChatCompletions)
+			mapping.ModelMap = ModelMap{AllowIdentity: true}
+			mapping.LossPolicy = policy
+			mapping.Auth = AuthPolicy{Mode: AuthNone}
+			mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+			mapping.AllowedClientQuery = map[string]struct{}{}
+
 		}
 		handler := NewTranscodeHandler(
 			HandlerConfig{
@@ -955,11 +976,6 @@ func TestExplicitStreamFalseIsNotOverridden(t *testing.T) {
 					AcceptedRequestBytes:    1 << 20,
 					SuccessfulResponseBytes: 1 << 20,
 				},
-				ModelMap:           ModelMap{AllowIdentity: true},
-				LossPolicy:         policy,
-				AuthPolicy:         AuthPolicy{Mode: AuthNone},
-				ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-				AllowedClientQuery: map[string]struct{}{},
 			},
 			func(req *http.Request) (*http.Response, error) {
 				body, _ := io.ReadAll(req.Body)
@@ -1083,6 +1099,12 @@ func TestExplicitStreamTrueOverridesJsonAccept(t *testing.T) {
 
 func TestHandlerStreamingMessagesToResponses(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = j6PermissivePolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
 	// The fixture carries a reasoning item and no early usage; the
 	// response-side losses are approved for this conversion.
 	handler := NewTranscodeHandler(
@@ -1093,11 +1115,6 @@ func TestHandlerStreamingMessagesToResponses(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:           ModelMap{AllowIdentity: true},
-			LossPolicy:         j6PermissivePolicy(),
-			AuthPolicy:         AuthPolicy{Mode: AuthNone},
-			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -1229,6 +1246,16 @@ func TestHandlerUpgradeRequestRejected(t *testing.T) {
 
 func TestHandlerModelMapping(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{Exact: map[string]ModelMapping{
+		"client-model": {
+			ClientModel:         "client-model",
+			UpstreamModel:       "upstream-model",
+			ClientResponseModel: "client-model",
+		},
+	}}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -1237,15 +1264,6 @@ func TestHandlerModelMapping(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap: ModelMap{Exact: map[string]ModelMapping{
-				"client-model": {
-					ClientModel:         "client-model",
-					UpstreamModel:       "upstream-model",
-					ClientResponseModel: "client-model",
-				},
-			}},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			body, _ := io.ReadAll(req.Body)
@@ -1285,6 +1303,10 @@ func TestHandlerModelMapping(t *testing.T) {
 
 func TestHandlerModelMappingMissing(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{RequireExplicitMap: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -1292,9 +1314,6 @@ func TestHandlerModelMappingMissing(t *testing.T) {
 			BodyLimits: BodyLimits{
 				AcceptedRequestBytes: 1 << 20,
 			},
-			ModelMap:   ModelMap{RequireExplicitMap: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			t.Fatal("round trip must not be called")
@@ -1316,6 +1335,23 @@ func TestHandlerModelMappingMissing(t *testing.T) {
 
 func TestHandlerAuthApplied(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureReasoningSummary:       {},
+		FeatureOutputItemBoundaries:   {},
+		FeaturePreviousResponseID:     {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
+	}}
+	mapping.Auth = AuthPolicy{
+		Mode:             AuthBearer,
+		Inbound:          true,
+		AnthropicVersion: "2023-06-01",
+	}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -1324,22 +1360,6 @@ func TestHandlerAuthApplied(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap: ModelMap{AllowIdentity: true},
-			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureReasoningSummary:       {},
-				FeatureOutputItemBoundaries:   {},
-				FeaturePreviousResponseID:     {},
-				FeatureUsageCacheReadUnknown:  {},
-				FeatureUsageCacheWriteUnknown: {},
-				FeatureUsageReasoningUnknown:  {},
-				FeatureUsageUnknown:           {},
-			}},
-			AuthPolicy: AuthPolicy{
-				Mode:             AuthBearer,
-				Inbound:          true,
-				AnthropicVersion: "2023-06-01",
-			},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			if got := req.Header.Get("Authorization"); got != "Bearer client-key" {
@@ -1375,6 +1395,13 @@ func TestHandlerAuthApplied(t *testing.T) {
 
 func TestHandlerQueryParametersAsConfig(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.AllowedClientQuery = map[string]struct{}{
+		"api-version": {},
+	}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -1382,12 +1409,6 @@ func TestHandlerQueryParametersAsConfig(t *testing.T) {
 			BodyLimits: BodyLimits{
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
-			},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
-			AllowedClientQuery: map[string]struct{}{
-				"api-version": {},
 			},
 		},
 		func(req *http.Request) (*http.Response, error) {
@@ -1417,18 +1438,19 @@ func TestHandlerQueryParametersAsConfig(t *testing.T) {
 
 func TestHandlerUnknownQueryRejected(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.AllowedClientQuery = map[string]struct{}{
+		"api-version": {},
+	}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
 			Upstream: mustParseURL(t, "https://upstream.example"),
 			BodyLimits: BodyLimits{
 				AcceptedRequestBytes: 1 << 20,
-			},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
-			AllowedClientQuery: map[string]struct{}{
-				"api-version": {},
 			},
 		},
 		func(req *http.Request) (*http.Response, error) {
@@ -1488,6 +1510,12 @@ func (b *closeTrackingBody) Close() error {
 
 func TestHandlerClientAbortReturns(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
 	var (
 		gotOutcome Outcome
 		outcomeMu  sync.Mutex
@@ -1500,11 +1528,6 @@ func TestHandlerClientAbortReturns(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:           ModelMap{AllowIdentity: true},
-			LossPolicy:         StrictLossPolicy(),
-			AuthPolicy:         AuthPolicy{Mode: AuthNone},
-			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			return nil, context.Canceled
@@ -1715,6 +1738,17 @@ func (w *lateOpGuardWriter) flushCount() int {
 // as a client-dialect error, never as a successful Messages completion.
 func TestHandlerMessagesFailedUpstreamNotSuccess(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureTopK:                 {},
+		FeatureReasoningSummary:     {},
+		FeatureOutputItemBoundaries: {},
+		FeaturePreviousResponseID:   {},
+		FeatureToolSchemaStrictness: {},
+	}}
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -1723,16 +1757,6 @@ func TestHandlerMessagesFailedUpstreamNotSuccess(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap: ModelMap{AllowIdentity: true},
-			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureTopK:                 {},
-				FeatureReasoningSummary:     {},
-				FeatureOutputItemBoundaries: {},
-				FeaturePreviousResponseID:   {},
-				FeatureToolSchemaStrictness: {},
-			}},
-			AuthPolicy:         AuthPolicy{Mode: AuthNone},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -1948,12 +1972,20 @@ func TestHandlerTransformedRequestSanitized(t *testing.T) {
 	}
 }
 
-// TestHandlerExternalSignerSeesSanitizedHeaders proves the external-signer
-// mode signs a request whose representation metadata was sanitized and whose
-// Content-Length matches the converted body (review-j finding 12).
-func TestHandlerExternalSignerSeesSanitizedHeaders(t *testing.T) {
+// TestHandlerExternalSignerAttachedToContext proves the external-signer mode
+// attaches the signer to the request context instead of invoking it inline:
+// the signing transport inside the retry chain signs every actual attempt
+// after body reconstruction (review-z commit 4).
+func TestHandlerExternalSignerAttachedToContext(t *testing.T) {
 	signer := &captureSigner{}
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthExternalSigner, Signer: signer}
+	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
+	var observed *http.Request
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -1962,16 +1994,17 @@ func TestHandlerExternalSignerSeesSanitizedHeaders(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:           ModelMap{AllowIdentity: true},
-			LossPolicy:         StrictLossPolicy(),
-			AuthPolicy:         AuthPolicy{Mode: AuthExternalSigner, Signer: signer},
-			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
+			// The signer travels in the request context; the transport
+			// layer (SigningTransport) invokes it per attempt.
+			if RequestSignerFromContext(req.Context()) != signer {
+				t.Fatal("signer not attached to the upstream request context")
+			}
+			observed = req
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": {"application/json"}},
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
 				Body: io.NopCloser(strings.NewReader(
 					`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`,
 				)),
@@ -1990,18 +2023,16 @@ func TestHandlerExternalSignerSeesSanitizedHeaders(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
-	if signer.req == nil {
-		t.Fatal("signer was not invoked")
+	if observed == nil {
+		t.Fatal("round trip was not called")
 	}
 	for name := range representationHeaders() {
-		if signer.req.Header.Get(name) != "" {
-			t.Fatalf("signer observed stale %s: %q", name, signer.req.Header.Get(name))
+		if observed.Header.Get(name) != "" {
+			t.Fatalf("upstream request carries stale %s: %q", name, observed.Header.Get(name))
 		}
 	}
-	body, _ := io.ReadAll(signer.req.Body)
-	if signer.req.ContentLength != int64(len(body)) {
-		t.Fatalf("signer observed Content-Length = %d, want %d", signer.req.ContentLength, len(body))
-	}
+	// The signer itself is exercised end-to-end by the proxy-level signing
+	// tests (SigningTransport signs the exact attempt).
 }
 
 // leakingPathSecret is a SecretSource whose error message contains a file
@@ -2017,6 +2048,15 @@ func (leakingPathSecret) Secret(context.Context) (string, error) {
 // 14); the detail is logged instead.
 func TestHandlerInternalErrorSanitized(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{
+		Mode:   AuthBearer,
+		Secret: leakingPathSecret{},
+	}
+	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -2025,14 +2065,6 @@ func TestHandlerInternalErrorSanitized(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{
-				Mode:   AuthBearer,
-				Secret: leakingPathSecret{},
-			},
-			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			t.Fatal("round trip must not be called")
@@ -2064,6 +2096,10 @@ func TestHandlerInternalErrorSanitized(t *testing.T) {
 // request is made (review-z commit 1).
 func TestHandlerResponsesRequestMissingToolStrictRejected(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
 	upstreamCalls := 0
 	handler := NewTranscodeHandler(
 		HandlerConfig{
@@ -2073,9 +2109,6 @@ func TestHandlerResponsesRequestMissingToolStrictRejected(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			upstreamCalls++

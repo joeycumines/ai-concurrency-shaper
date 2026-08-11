@@ -18,6 +18,12 @@ import (
 )
 
 // HandlerConfig configures one transcoded route.
+// HandlerConfig is the transcode handler configuration. The route-specific
+// values (auth, model map, loss policy, capabilities, allowed client query)
+// live in Mapping — HandlerConfig does not duplicate them (review-z commit
+// 4). The constructor validates, defaults, and deep-copies the mapping once
+// into a private immutable configuration; runtime always reads the
+// normalized copy.
 type HandlerConfig struct {
 	// Mapping is the validated route mapping.
 	Mapping Mapping
@@ -27,23 +33,6 @@ type HandlerConfig struct {
 
 	// BodyLimits are the independent request/response body limits.
 	BodyLimits BodyLimits
-
-	// AuthPolicy authenticates the upstream request.
-	AuthPolicy AuthPolicy
-
-	// ModelMap resolves client model identifiers.
-	ModelMap ModelMap
-
-	// LossPolicy decides whether non-portable features may be dropped.
-	LossPolicy LossPolicy
-
-	// ChatCapabilities gates provider-extension fields for the Chat
-	// upstream.
-	ChatCapabilities ChatCapabilities
-
-	// AllowedClientQuery is the set of client query parameters permitted on
-	// the transcoded route. Unknown client query parameters are rejected.
-	AllowedClientQuery map[string]struct{}
 }
 
 // RoundTrip executes an outbound HTTP request through the proxy engine.
@@ -95,56 +84,10 @@ func (p ExchangeProvenance) String() string {
 // provenance and downstream completion are separate facts: the upstream may
 // have returned a definitive failure while the client disconnected before
 // the translated error was fully written, and both must be recorded.
-type Outcome struct {
-	Status     int
-	Provenance ExchangeProvenance
-
-	// UpstreamFailure is true when the outcome is a definitive upstream
-	// failure: a transport error, an upstream HTTP >= 500, a 429, or a
-	// rate-signalled 403. Local conversion errors are never upstream
-	// failures.
-	UpstreamFailure bool
-
-	// ClientAborted is true when the client disconnected before the exchange
-	// completed (the request context was cancelled). It is recorded only
-	// when the abort is observable at outcome time; a context cancelled
-	// after successful delivery is not an abort.
-	ClientAborted bool
-
-	// DownstreamComplete is true when the translated response was fully
-	// written downstream. It is false for aborted exchanges and failed
-	// writes: such exchanges are never clean completions.
-	DownstreamComplete bool
-
-	// RetryAfter is the REMAINING Retry-After hold signaled by the ORIGINAL
-	// upstream response (0 when absent): the value is anchored at header
-	// receipt and evaluated at outcome construction, so time spent reading
-	// the error body is excluded (review-08 blocker 9). It is recorded so
-	// rate-signalled failures keep their hold signal even when the rendered
-	// client error cannot carry it.
-	RetryAfter time.Duration
-
-	// StreamOutcome is the stream classification for streaming exchanges.
-	StreamOutcome streamOutcome
-}
-
 // OutcomeFunc receives the exchange outcome. The proxy wires this to breaker
 // accounting. It must be safe to call at most once per exchange, after the
 // handler has stopped mutating the recorder.
 type OutcomeFunc func(Outcome)
-
-// outcomeContextKey carries the recorded Outcome through the request context
-// so the proxy can read explicit provenance after ServeHTTP returns. This is
-// per-request state and is race-free.
-type outcomeContextKey struct{}
-
-// WithOutcomeSink attaches a buffered outcome sink to the request context.
-// The handler records the outcome here in addition to invoking OutcomeFunc.
-// The sink is buffered so the handler never blocks.
-func WithOutcomeSink(ctx context.Context) (context.Context, chan Outcome) {
-	sink := make(chan Outcome, 1)
-	return context.WithValue(ctx, outcomeContextKey{}, sink), sink
-}
 
 // TranscodeHandler intercepts requests for a transcoded route, converts the
 // payload to the upstream schema, forwards through the proxy engine, and
@@ -194,6 +137,13 @@ func NewTranscodeHandler(
 	// defense-in-depth for any future construction path that bypasses this
 	// normalization.
 	cfg.BodyLimits = cfg.BodyLimits.WithDefaults()
+	// The configuration is frozen at construction: the mapping and upstream
+	// URL are deep-copied once into the private configuration, so
+	// programmatic callers can never mutate live configuration (review-z
+	// commit 4).
+	cfg.Mapping = cloneMapping(cfg.Mapping)
+	upstream := *cfg.Upstream
+	cfg.Upstream = &upstream
 	return &TranscodeHandler{
 		cfg:       cfg,
 		roundTrip: roundTrip,
@@ -201,13 +151,76 @@ func NewTranscodeHandler(
 	}
 }
 
+// cloneMapping deep-copies every mutable value of a Mapping.
+func cloneMapping(m Mapping) Mapping {
+	m.LossPolicy = LossPolicy{Allowed: cloneLossSet(m.LossPolicy.Allowed)}
+	m.ModelMap = cloneModelMapValues(m.ModelMap)
+	m.AllowedClientQuery = cloneQuerySet(m.AllowedClientQuery)
+	return m
+}
+
+// cloneLossSet deep-copies a loss-policy allow set.
+func cloneLossSet(allowed map[Feature]struct{}) map[Feature]struct{} {
+	if allowed == nil {
+		return nil
+	}
+	out := make(map[Feature]struct{}, len(allowed))
+	for feature := range allowed {
+		out[feature] = struct{}{}
+	}
+	return out
+}
+
+// cloneModelMapValues deep-copies the model-map entries.
+func cloneModelMapValues(m ModelMap) ModelMap {
+	m.Exact = cloneModelMappings(m.Exact)
+	return m
+}
+
+// cloneModelMappings deep-copies a model-mapping map.
+func cloneModelMappings(m map[string]ModelMapping) map[string]ModelMapping {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]ModelMapping, len(m))
+	for key, value := range m {
+		out[key] = value
+	}
+	return out
+}
+
+// cloneQuerySet deep-copies the allowed-client-query set.
+func cloneQuerySet(s map[string]struct{}) map[string]struct{} {
+	if s == nil {
+		return nil
+	}
+	out := make(map[string]struct{}, len(s))
+	for key := range s {
+		out[key] = struct{}{}
+	}
+	return out
+}
+
 // ClientPath returns the client-facing route path of the handler.
 func (h *TranscodeHandler) ClientPath() string {
 	return h.cfg.Mapping.ClientRoute.Path
 }
 
-// ServeHTTP implements http.Handler.
+// ServeHTTP implements http.Handler. Every exchange records EXACTLY ONE
+// outcome: the defer below records an internal local-failure outcome when no
+// path recorded one, so the proxy's synchronous sink read can never observe a
+// missing outcome (review-z commit 4).
 func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if sink := OutcomeSinkFromContext(r.Context()); sink != nil {
+			if _, recorded := sink.Load(); !recorded {
+				sink.Record(LocalFailureOutcome())
+				if h.outcomeFn != nil {
+					h.outcomeFn(LocalFailureOutcome())
+				}
+			}
+		}
+	}()
 	// Reject Upgrade requests on transcoded routes: a 101 Switching
 	// Protocols response cannot be meaningfully schema-transcoded.
 	if isUpgradeRequest(r) {
@@ -329,6 +342,24 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// that returns without writing to a dead connection.
 			return
 		}
+		// A signer error is a local construction/auth failure (neutral),
+		// never an upstream transport failure (review-z commit 4).
+		var signingErr *SigningError
+		if errors.As(err, &signingErr) {
+			// The signer failure is logged with detail; the client message
+			// is sanitized (review-j finding 14: local construction errors
+			// never leak details). The code is request-side: the failure
+			// happened building the upstream request, before any response
+			// existed (review-z commit 4).
+			h.logRequestError(r, signingErr)
+			h.writeDialectHTTPError(r, w, CanonicalAPIError{
+				Status:  http.StatusBadGateway,
+				Type:    "api_error",
+				Code:    "request_conversion_error",
+				Message: "build upstream request: internal error",
+			}, ProvenanceLocalRequestConversionError)
+			return
+		}
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadGateway,
 			Type:    "api_error",
@@ -390,7 +421,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				ProvenanceUpstreamBodyError)
 			return
 		}
-		h.streamResponse(w, r, resp, context)
+		h.streamResponse(w, r, resp, context, receivedAt)
 	case isJSON(resp):
 		if context.StreamIntent {
 			h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
@@ -438,7 +469,7 @@ func (h *TranscodeHandler) convertRequest(
 	r *http.Request,
 	body []byte,
 ) ([]byte, *ExchangeContext, error) {
-	policy := h.cfg.LossPolicy
+	policy := h.cfg.Mapping.LossPolicy
 	mapping := h.cfg.Mapping
 
 	context := &ExchangeContext{
@@ -457,7 +488,7 @@ func (h *TranscodeHandler) convertRequest(
 	// reveals it. The client-facing alias is returned in the response; the
 	// upstream model is used on the outbound request.
 	resolveModel := func(clientModel string) error {
-		mappingModel, err := h.cfg.ModelMap.Resolve(clientModel)
+		mappingModel, err := h.cfg.Mapping.ModelMap.Resolve(clientModel)
 		if err != nil {
 			return err
 		}
@@ -496,7 +527,7 @@ func (h *TranscodeHandler) convertRequest(
 			rendered, report, err = RenderChatRequest(
 				result.Request,
 				context,
-				h.cfg.ChatCapabilities,
+				h.cfg.Mapping.ChatCapabilities,
 			)
 		case UpstreamResponses:
 			rendered, report, err = RenderResponsesRequest(result.Request, context)
@@ -550,7 +581,7 @@ func (h *TranscodeHandler) convertRequest(
 			rendered, report, err = RenderChatRequest(
 				result.Request,
 				context,
-				h.cfg.ChatCapabilities,
+				h.cfg.Mapping.ChatCapabilities,
 			)
 		default:
 			return nil, nil, fmt.Errorf(
@@ -586,7 +617,7 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 		h.cfg.Upstream,
 		h.cfg.Mapping.UpstreamPath,
 		r.URL.Query(),
-		h.cfg.AllowedClientQuery,
+		h.cfg.Mapping.AllowedClientQuery,
 	)
 	if err != nil {
 		return nil, err
@@ -629,7 +660,7 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 		r.Context(),
 		outReq,
 		h.cfg.Mapping.UpstreamProtocol,
-		h.cfg.AuthPolicy,
+		h.cfg.Mapping.Auth,
 		inbound,
 	); err != nil {
 		return nil, err
@@ -742,7 +773,8 @@ func (h *TranscodeHandler) jsonResponse(
 		h.recordOutcome(r, Outcome{Provenance: ProvenanceDownstreamWriteError})
 	default:
 		h.recordOutcome(r, Outcome{
-			Status:             resp.StatusCode,
+			UpstreamAttempted:  true,
+			UpstreamStatus:     Optional[int]{Value: resp.StatusCode, Set: true},
 			Provenance:         ProvenanceUpstreamHTTP,
 			DownstreamComplete: true,
 		})
@@ -790,7 +822,7 @@ func (h *TranscodeHandler) convertResponse(
 	case ClientResponses:
 		switch h.cfg.Mapping.UpstreamProtocol {
 		case UpstreamChatCompletions:
-			response, err := DecodeChatResponse(body, h.cfg.ChatCapabilities)
+			response, err := DecodeChatResponse(body, h.cfg.Mapping.ChatCapabilities)
 			if err != nil {
 				return nil, conversionProvenance(err), err
 			}
@@ -810,7 +842,7 @@ func (h *TranscodeHandler) convertResponse(
 	case ClientMessages:
 		switch h.cfg.Mapping.UpstreamProtocol {
 		case UpstreamChatCompletions:
-			response, err := DecodeChatResponse(body, h.cfg.ChatCapabilities)
+			response, err := DecodeChatResponse(body, h.cfg.Mapping.ChatCapabilities)
 			if err != nil {
 				return nil, conversionProvenance(err), err
 			}
@@ -856,6 +888,7 @@ func (h *TranscodeHandler) streamResponse(
 	r *http.Request,
 	resp *http.Response,
 	context *ExchangeContext,
+	receivedAt time.Time,
 ) {
 	converter, err := h.newFrameConverter(context)
 	if err != nil {
@@ -911,25 +944,40 @@ func (h *TranscodeHandler) streamResponse(
 	outcome.StreamOutcome = classification
 	switch classification {
 	case streamOutcomeSuccess:
-		outcome.Status = resp.StatusCode
+		outcome.UpstreamAttempted = true
+		outcome.UpstreamStatus = Optional[int]{Value: resp.StatusCode, Set: true}
 		outcome.Provenance = ProvenanceUpstreamHTTP
 		outcome.DownstreamComplete = downstreamComplete
 	case streamOutcomeClientAbort:
 		outcome.Provenance = ProvenanceClientAbort
 		outcome.ClientAborted = true
 	case streamOutcomeUpstreamFailure:
-		outcome.Status = resp.StatusCode
+		outcome.UpstreamAttempted = true
+		outcome.UpstreamStatus = Optional[int]{Value: resp.StatusCode, Set: true}
 		outcome.Provenance = ProvenanceUpstreamBodyError
 		outcome.UpstreamFailure = true
 		outcome.DownstreamComplete = downstreamComplete
+		// A hold signaled on the streamed response is a header fact that
+		// survives the failed stream, anchored at the TRUE header-receipt
+		// time captured when the upstream response arrived: the remaining
+		// hold excludes the stream duration, exactly as the JSON error
+		// writers record it. Set=true whenever the upstream signaled, even
+		// when already expired (review-z commit 4).
+		outcome.RetryAfter = Optional[time.Duration]{
+			Value: circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, time.Now()),
+			Set:   resp.Header.Get("Retry-After") != "",
+		}
 	case streamOutcomeLocalConversionFailure:
-		outcome.Status = http.StatusBadGateway
+		outcome.UpstreamAttempted = true
+		outcome.UpstreamStatus = Optional[int]{Value: http.StatusBadGateway, Set: true}
 		outcome.Provenance = ProvenanceLocalResponseConversionError
+		outcome.LocalFailure = true
 		outcome.DownstreamComplete = downstreamComplete
 	case streamOutcomeDownstreamFailure:
 		outcome.Provenance = ProvenanceDownstreamWriteError
 	default:
-		outcome.Status = resp.StatusCode
+		outcome.UpstreamAttempted = true
+		outcome.UpstreamStatus = Optional[int]{Value: resp.StatusCode, Set: true}
 		outcome.Provenance = ProvenanceUpstreamHTTP
 		outcome.DownstreamComplete = downstreamComplete
 	}
@@ -954,8 +1002,8 @@ func (h *TranscodeHandler) newFrameConverter(
 	case client == ClientResponses && upstream == UpstreamChatCompletions:
 		state := newChatResponsesStreamState(
 			context,
-			h.cfg.LossPolicy,
-			h.cfg.ChatCapabilities,
+			h.cfg.Mapping.LossPolicy,
+			h.cfg.Mapping.ChatCapabilities,
 			responseID,
 			model,
 			createdAt,
@@ -966,7 +1014,7 @@ func (h *TranscodeHandler) newFrameConverter(
 	case client == ClientMessages && upstream == UpstreamResponses:
 		state := newAnthropicResponsesStreamState(
 			context,
-			h.cfg.LossPolicy,
+			h.cfg.Mapping.LossPolicy,
 			context.IDs.New("msg_"),
 			model,
 			createdAt,
@@ -976,8 +1024,8 @@ func (h *TranscodeHandler) newFrameConverter(
 	case client == ClientMessages && upstream == UpstreamChatCompletions:
 		chat := newChatResponsesStreamState(
 			context,
-			h.cfg.LossPolicy,
-			h.cfg.ChatCapabilities,
+			h.cfg.Mapping.LossPolicy,
+			h.cfg.Mapping.ChatCapabilities,
 			responseID,
 			model,
 			createdAt,
@@ -985,7 +1033,7 @@ func (h *TranscodeHandler) newFrameConverter(
 		)
 		anthropic := newAnthropicResponsesStreamState(
 			context,
-			h.cfg.LossPolicy,
+			h.cfg.Mapping.LossPolicy,
 			context.IDs.New("msg_"),
 			model,
 			createdAt,
@@ -1047,11 +1095,19 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 		receivedAt,
 		evaluatedAt,
 	)
+	retryAfter := circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, evaluatedAt)
 	outcome := Outcome{
-		Status:          apiErr.Status,
-		Provenance:      ProvenanceUpstreamHTTP,
-		UpstreamFailure: upstreamFailure,
-		RetryAfter:      circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, evaluatedAt),
+		UpstreamAttempted: true,
+		UpstreamStatus:    Optional[int]{Value: apiErr.Status, Set: true},
+		Provenance:        ProvenanceUpstreamHTTP,
+		UpstreamFailure:   upstreamFailure,
+		// Set=true whenever the upstream SIGNALED a hold, even when it has
+		// already expired (a zero remaining hold is present-but-expired);
+		// Set=false when no hold was signaled (review-z commit 4).
+		RetryAfter: Optional[time.Duration]{
+			Value: retryAfter,
+			Set:   resp.Header.Get("Retry-After") != "",
+		},
 	}
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
 	apiErr.Message = h.boundErrorMessage(apiErr.Message)
@@ -1091,15 +1147,21 @@ func (h *TranscodeHandler) writeUpstreamBodyError(
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
 	apiErr.Message = h.boundErrorMessage(apiErr.Message)
 	writeErr := WriteDialectHTTPError(w, client, apiErr)
+	retryAfter := circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, time.Now())
 	outcome := Outcome{
-		Status:          apiErr.Status,
-		Provenance:      ProvenanceUpstreamBodyError,
-		UpstreamFailure: true,
+		UpstreamAttempted: true,
+		UpstreamStatus:    Optional[int]{Value: apiErr.Status, Set: true},
+		Provenance:        ProvenanceUpstreamBodyError,
+		UpstreamFailure:   true,
 		// The upstream's Retry-After is a header fact that survives the
 		// failed body transfer: the rate-signalled hold must be recorded
 		// even when the error body could not be read, anchored at header
-		// receipt (review-08 blockers 8 and 9).
-		RetryAfter: circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, time.Now()),
+		// receipt (review-08 blockers 8 and 9). Set=true whenever the
+		// upstream signaled a hold, even when it has already expired.
+		RetryAfter: Optional[time.Duration]{
+			Value: retryAfter,
+			Set:   resp.Header.Get("Retry-After") != "",
+		},
 	}
 	if writeErr != nil {
 		if r.Context().Err() != nil {
@@ -1130,9 +1192,10 @@ func (h *TranscodeHandler) writeUpstreamSemanticFailure(
 	apiErr.Message = h.boundErrorMessage(apiErr.Message)
 	writeErr := WriteDialectHTTPError(w, client, apiErr)
 	outcome := Outcome{
-		Status:          upstreamStatus,
-		Provenance:      ProvenanceUpstreamHTTP,
-		UpstreamFailure: true,
+		UpstreamAttempted: true,
+		UpstreamStatus:    Optional[int]{Value: upstreamStatus, Set: true},
+		Provenance:        ProvenanceUpstreamHTTP,
+		UpstreamFailure:   true,
 	}
 	if writeErr != nil {
 		if r.Context().Err() != nil {
@@ -1178,9 +1241,17 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 			(apiErr.Status == http.StatusForbidden && apiErr.RetryAfter != "")
 	}
 	outcome := Outcome{
-		Status:          apiErr.Status,
-		Provenance:      provenance,
-		UpstreamFailure: upstreamFailure,
+		// The attempt fact reflects whether an upstream request was
+		// dispatched: local REQUEST conversion and signing errors never
+		// are; upstream HTTP/body/transport outcomes and local RESPONSE
+		// conversion errors are (review-z commit 4).
+		UpstreamAttempted: provenance != ProvenanceLocalRequestConversionError,
+		UpstreamStatus:    Optional[int]{Value: apiErr.Status, Set: true},
+		Provenance:        provenance,
+		UpstreamFailure:   upstreamFailure,
+		LocalFailure: provenance == ProvenanceLocalRequestConversionError ||
+			provenance == ProvenanceLocalResponseConversionError ||
+			provenance == ProvenanceLocalStreamValidationError,
 	}
 	if writeErr != nil {
 		// The translated error was never delivered: the exchange did not
@@ -1203,12 +1274,12 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 // outcome sink is present on the request context, to the proxy's per-request
 // provenance reader.
 func (h *TranscodeHandler) recordOutcome(r *http.Request, outcome Outcome) {
+	// The synchronous per-request sink records exactly once (review-z
+	// commit 4): there is no non-blocking path that can silently lose
+	// provenance.
 	if r != nil {
-		if sink, _ := r.Context().Value(outcomeContextKey{}).(chan Outcome); sink != nil {
-			select {
-			case sink <- outcome:
-			default:
-			}
+		if sink := OutcomeSinkFromContext(r.Context()); sink != nil {
+			sink.Record(outcome)
 		}
 	}
 	if h.outcomeFn != nil {
@@ -1500,4 +1571,11 @@ func (h *TranscodeHandler) boundErrorMessage(message string) string {
 		return message[:max-3] + "…"
 	}
 	return message[:max]
+}
+
+// logRequestError logs a request error with its detail (never the client
+// message): local construction failures are logged, sanitized, and reported
+// neutrally (review-j finding 14).
+func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
+	log.Printf("transcode: %s %s: %v", r.Method, r.URL.Path, err)
 }

@@ -39,6 +39,11 @@ func (w *failingResponseWriter) Write([]byte) (int, error) { return 0, io.ErrClo
 func outcomeCaptureHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) (*TranscodeHandler, chan Outcome) {
 	t.Helper()
 	outcomes := make(chan Outcome, 1)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	mapping.AllowedClientQuery = map[string]struct{}{}
 	handler := NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
@@ -47,11 +52,6 @@ func outcomeCaptureHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) (
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:           ModelMap{AllowIdentity: true},
-			LossPolicy:         StrictLossPolicy(),
-			AuthPolicy:         AuthPolicy{Mode: AuthNone},
-			ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-			AllowedClientQuery: map[string]struct{}{},
 		},
 		roundTrip,
 		func(o Outcome) { outcomes <- o },
@@ -168,7 +168,7 @@ func TestWriteUpstreamHTTPErrorRetainsUpstreamRetryAfter(t *testing.T) {
 	outcome := <-outcomes
 	// The hold is anchored at header receipt and evaluated at outcome
 	// construction: a fast body leaves ~5s remaining (review-08 blocker 9).
-	if outcome.RetryAfter <= 4*time.Second || outcome.RetryAfter > 5*time.Second {
+	if !outcome.RetryAfter.Set || outcome.RetryAfter.Value <= 4*time.Second || outcome.RetryAfter.Value > 5*time.Second {
 		t.Fatalf("RetryAfter = %v, want ~5s", outcome.RetryAfter)
 	}
 	if !outcome.UpstreamFailure {
@@ -177,8 +177,8 @@ func TestWriteUpstreamHTTPErrorRetainsUpstreamRetryAfter(t *testing.T) {
 	if outcome.Provenance != ProvenanceDownstreamWriteError {
 		t.Fatalf("provenance = %v, want downstream_write_error (write failed)", outcome.Provenance)
 	}
-	if outcome.Status != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429 (retained)", outcome.Status)
+	if !outcome.UpstreamStatus.Set || outcome.UpstreamStatus.Value != http.StatusTooManyRequests {
+		t.Fatalf("status = %v, want 429 (retained)", outcome.UpstreamStatus)
 	}
 	if outcome.DownstreamComplete {
 		t.Fatal("DownstreamComplete = true for a failed write")
@@ -272,8 +272,8 @@ func TestWriteUpstreamHTTPErrorRateSignalled403ClientAbortRetainsFailure(t *test
 	if !outcome.UpstreamFailure {
 		t.Fatal("UpstreamFailure lost on write failure: the rate-signalled 403 must remain a definitive upstream failure")
 	}
-	if outcome.Status != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 (retained)", outcome.Status)
+	if !outcome.UpstreamStatus.Set || outcome.UpstreamStatus.Value != http.StatusForbidden {
+		t.Fatalf("status = %v, want 403 (retained)", outcome.UpstreamStatus)
 	}
 	if outcome.DownstreamComplete {
 		t.Fatal("DownstreamComplete = true for a failed write")

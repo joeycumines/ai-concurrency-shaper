@@ -43,6 +43,10 @@ func (w *shortWriteResponseWriter) Write(b []byte) (int, error) {
 // downstream write error and never a clean completion (review-k finding 7).
 func TestHandlerShortWriteNotCleanCompletion(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
 	var outcomes []Outcome
 	handler := NewTranscodeHandler(
 		HandlerConfig{
@@ -52,9 +56,6 @@ func TestHandlerShortWriteNotCleanCompletion(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			return &http.Response{

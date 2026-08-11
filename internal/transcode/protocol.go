@@ -96,6 +96,10 @@ type Mapping struct {
 	LossPolicy       LossPolicy
 	ModelMap         ModelMap
 	Auth             AuthPolicy
+
+	// AllowedClientQuery is the set of client query parameters permitted on
+	// the transcoded route. Unknown client query parameters are rejected.
+	AllowedClientQuery map[string]struct{}
 }
 
 // Validate checks the whole immutable route configuration so a misconfigured

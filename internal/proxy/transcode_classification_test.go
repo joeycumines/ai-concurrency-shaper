@@ -7,12 +7,14 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -375,7 +377,7 @@ func TestClassifyTranscodeExchangeSuppressibleAbort(t *testing.T) {
 	// Rate-signalled 403 + client abort: NOT suppressible (the retained
 	// upstream failure drives the hold and breaker failure).
 	rec := makeRec(transcode.Outcome{
-		Status:          http.StatusForbidden,
+		UpstreamStatus:  transcode.Optional[int]{Value: http.StatusForbidden, Set: true},
 		Provenance:      transcode.ProvenanceClientAbort,
 		UpstreamFailure: true,
 		ClientAborted:   true,
@@ -401,7 +403,7 @@ func TestClassifyTranscodeExchangeSuppressibleAbort(t *testing.T) {
 	// Local conversion failure + client abort: suppressible (not an upstream
 	// failure).
 	rec = makeRec(transcode.Outcome{
-		Status:          http.StatusBadGateway,
+		UpstreamStatus:  transcode.Optional[int]{Value: http.StatusBadGateway, Set: true},
 		Provenance:      transcode.ProvenanceLocalResponseConversionError,
 		ClientAborted:   true,
 		UpstreamFailure: false,
@@ -413,7 +415,7 @@ func TestClassifyTranscodeExchangeSuppressibleAbort(t *testing.T) {
 
 	// 429 + client abort: NOT suppressible.
 	rec = makeRec(transcode.Outcome{
-		Status:          http.StatusTooManyRequests,
+		UpstreamStatus:  transcode.Optional[int]{Value: http.StatusTooManyRequests, Set: true},
 		Provenance:      transcode.ProvenanceClientAbort,
 		UpstreamFailure: true,
 		ClientAborted:   true,
@@ -1268,8 +1270,10 @@ func TestTranscodeConfigurationIsDeepCopied(t *testing.T) {
 			WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
 			WithMetrics(metrics.NewCollector()),
 			WithTranscodeMapping(TranscodeMapping{
-				Mapping:            mapping,
-				AllowedClientQuery: allowedQuery,
+				Mapping: func() transcode.Mapping {
+					mapping.AllowedClientQuery = allowedQuery
+					return mapping
+				}(),
 			}),
 		)
 		if err != nil {
@@ -1346,4 +1350,279 @@ func TestTranscodeConfigurationIsDeepCopied(t *testing.T) {
 			t.Fatalf("mutated loss policy status = %d, want 200 (loss policy must be deep-copied)", got)
 		}
 	})
+}
+
+// TestTranscodeRetryAfterNoRecorderFallback proves the transcoded exchange
+// classification derives Retry-After ONLY from the outcome: a recorder whose
+// rendered header carries a fresh Retry-After must not influence the result
+// (review-z commit 4 — the fallback was removed).
+func TestTranscodeRetryAfterNoRecorderFallback(t *testing.T) {
+	makeRec := func(outcome transcode.Outcome) *statusRecorder {
+		rec := &statusRecorder{
+			ResponseWriter:   httptest.NewRecorder(),
+			transcodeOutcome: &outcome,
+		}
+		rec.status = outcome.UpstreamStatus.Value
+		rec.Header().Set("Retry-After", "120")
+		return rec
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	now := time.Now()
+	// The outcome carries a present-but-expired hold (Set=true, zero): the
+	// recorder's rendered header carries a FRESH Retry-After value that must
+	// be ignored.
+	outcome := transcode.Outcome{
+		UpstreamStatus:  transcode.Optional[int]{Value: http.StatusTooManyRequests, Set: true},
+		Provenance:      transcode.ProvenanceUpstreamHTTP,
+		UpstreamFailure: true,
+		RetryAfter:      transcode.Optional[time.Duration]{Value: 0, Set: true},
+	}
+	rec := makeRec(outcome)
+	result := classifyTranscodeExchange(rec, req, true, now)
+	if result.retryAfter != 0 {
+		t.Fatalf("retryAfter = %v, want the outcome's expired hold (never re-parsed from the rendered header)", result.retryAfter)
+	}
+
+	// An absent hold (Set=false) also yields zero, never a header re-read.
+	absent := transcode.Outcome{
+		UpstreamStatus:  transcode.Optional[int]{Value: http.StatusTooManyRequests, Set: true},
+		Provenance:      transcode.ProvenanceUpstreamHTTP,
+		UpstreamFailure: true,
+	}
+	rec = makeRec(absent)
+	result = classifyTranscodeExchange(rec, req, true, now)
+	if result.retryAfter != 0 {
+		t.Fatalf("retryAfter = %v, want zero when the outcome carries no hold", result.retryAfter)
+	}
+}
+
+// TestProxyExternalSignerFailureIsLocal proves a failing external signer
+// classifies the exchange as a LOCAL failure (neutral): the breaker never
+// records an upstream failure for a signer defect, and the client receives a
+// dialect-correct error (review-z commit 4).
+func TestProxyExternalSignerFailureIsLocal(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream must never be reached when signing fails")
+	}))
+	t.Cleanup(upstream.Close)
+
+	mapping := testResponsesMapping(t)
+	mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthExternalSigner, Signer: failingSigner{}}
+	breaker := j2Breaker(t)
+	p := newTranscodeProxyUpstreamBreaker(t, upstream, breaker, transcodeMapping(mapping))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"hi"}`))
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	// The proxy's breaker must not record a failure for the signer error.
+	if stats := breaker.Stats(); stats.TotalFailures != 0 {
+		t.Fatalf("breaker failures = %d, want 0 for a local signing failure", stats.TotalFailures)
+	}
+}
+
+// newTranscodeProxyUpstreamBreaker builds a proxy with an explicit breaker.
+func newTranscodeProxyUpstreamBreaker(
+	t *testing.T,
+	upstream *httptest.Server,
+	breaker *circuitbreaker.Breaker,
+	mappings ...TranscodeMapping,
+) *Proxy {
+	t.Helper()
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, err := route.Parse("POST /v1/responses")
+	if err != nil {
+		t.Fatalf("route.Parse: %v", err)
+	}
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(breaker),
+		WithTranscodeMapping(mappings...),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	return p
+}
+
+// TestProxyExternalSignerSeesSanitizedRequest proves the external signer,
+// invoked per attempt inside the retry chain, observes the sanitized
+// converted request with a finalized Content-Length (review-j finding 12;
+// review-z commit 4).
+func TestProxyExternalSignerSeesSanitizedRequest(t *testing.T) {
+	var mu sync.Mutex
+	var signed []*http.Request
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	mapping := testResponsesMapping(t)
+	mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthExternalSigner, Signer: recordSigner(&mu, &signed)}
+	p := newTranscodeProxyUpstream(t, upstream, transcodeMapping(mapping))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"hi"}`))
+	req.Header.Set("Content-Digest", "sha-256=:abc:")
+	req.Header.Set("Etag", `"abc"`)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(signed) == 0 {
+		t.Fatal("signer never invoked")
+	}
+	for _, r := range signed {
+		if r.Header.Get("Content-Digest") != "" || r.Header.Get("Etag") != "" {
+			t.Fatalf("signer observed stale representation headers: %v", r.Header)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if r.ContentLength != int64(len(body)) {
+			t.Fatalf("signer observed Content-Length = %d, want %d", r.ContentLength, len(body))
+		}
+	}
+}
+
+// failingSigner fails every sign attempt.
+type failingSigner struct{}
+
+func (failingSigner) Sign(context.Context, *http.Request) error {
+	return errors.New("signing failed")
+}
+
+// recordSigner records every request it signs.
+func recordSigner(mu *sync.Mutex, out *[]*http.Request) transcode.RequestSigner {
+	return signerFunc(func(_ context.Context, req *http.Request) error {
+		mu.Lock()
+		defer mu.Unlock()
+		*out = append(*out, req.Clone(req.Context()))
+		return nil
+	})
+}
+
+type signerFunc func(context.Context, *http.Request) error
+
+func (f signerFunc) Sign(ctx context.Context, req *http.Request) error {
+	return f(ctx, req)
+}
+
+// TestProxyExternalSignerFailureWithRetriesIsLocal proves the CLI-default
+// configuration (retries + breaker enabled) treats a failing signer as a
+// local non-retryable defect: ZERO breaker failures, ZERO retries, and the
+// upstream is never contacted (review-z commit 4).
+func TestProxyExternalSignerFailureWithRetriesIsLocal(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("upstream must never be reached when signing fails")
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker := j2Breaker(t)
+	mapping := testResponsesMapping(t)
+	mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthExternalSigner, Signer: failingSigner{}}
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, err := route.Parse("POST /v1/responses")
+	if err != nil {
+		t.Fatalf("route.Parse: %v", err)
+	}
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(breaker),
+		WithMaxRetries(3),
+		WithTranscodeMapping(transcodeMapping(mapping)),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"hi"}`))
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	if stats := breaker.Stats(); stats.TotalFailures != 0 {
+		t.Fatalf("breaker failures = %d, want 0 for local signing failures", stats.TotalFailures)
+	}
+}
+
+// TestClassifyTranscodeExchangeAttemptFact pins the attempt-fact override:
+// the attempt marker fires when the signing+dispatch chain STARTS, which
+// precedes the signer — a local request conversion or signing error never
+// dispatches, so the outcome fact must override the marker; everything else
+// keeps the marker (review-z commit 4).
+func TestClassifyTranscodeExchangeAttemptFact(t *testing.T) {
+	makeRec := func(outcome transcode.Outcome) *statusRecorder {
+		outcomeCopy := outcome
+		return &statusRecorder{
+			ResponseWriter:   httptest.NewRecorder(),
+			transcodeOutcome: &outcomeCopy,
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	now := time.Now()
+
+	// Signer failure: the marker fired (dispatch chain started) but the
+	// upstream was never reached — the outcome overrides it to false.
+	rec := makeRec(transcode.Outcome{
+		UpstreamStatus: transcode.Optional[int]{Value: http.StatusBadGateway, Set: true},
+		Provenance:     transcode.ProvenanceLocalRequestConversionError,
+		LocalFailure:   true,
+	})
+	result := classifyTranscodeExchange(rec, req, true, now)
+	if result.upstreamAttempted {
+		t.Fatal("signer failure reads as upstream-attempted; the outcome must override the marker")
+	}
+
+	// Local request conversion error with marker AND no outcome attempt:
+	// still not attempted.
+	result = classifyTranscodeExchange(rec, req, false, now)
+	if result.upstreamAttempted {
+		t.Fatal("local request conversion error reads as upstream-attempted")
+	}
+
+	// Upstream outcome with marker: attempted.
+	rec = makeRec(transcode.Outcome{
+		UpstreamAttempted: true,
+		UpstreamStatus:    transcode.Optional[int]{Value: 200, Set: true},
+		Provenance:        transcode.ProvenanceUpstreamHTTP,
+	})
+	result = classifyTranscodeExchange(rec, req, true, now)
+	if !result.upstreamAttempted {
+		t.Fatal("upstream outcome lost its attempt fact")
+	}
+
+	// Mid-flight client abort: the marker covers the attempt the outcome
+	// does not record.
+	rec = makeRec(transcode.Outcome{
+		Provenance:    transcode.ProvenanceClientAbort,
+		ClientAborted: true,
+	})
+	result = classifyTranscodeExchange(rec, req, true, now)
+	if !result.upstreamAttempted {
+		t.Fatal("mid-flight abort lost the marker attempt fact")
+	}
+	if !result.suppressibleAbort {
+		t.Fatal("plain abort with marker is not suppressible")
+	}
+
+	// Mid-flight client abort without marker: not attempted.
+	result = classifyTranscodeExchange(rec, req, false, now)
+	if result.upstreamAttempted {
+		t.Fatal("abort without marker reads as upstream-attempted")
+	}
 }

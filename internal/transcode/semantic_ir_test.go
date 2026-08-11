@@ -419,6 +419,10 @@ func TestToolArgumentsFidelityAcrossTargets(t *testing.T) {
 // breaker stays neutral).
 func TestHandlerInvalidToolArgumentsNeverUpstreamFailure(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamChatCompletions)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
 	var outcomes []Outcome
 	handler := NewTranscodeHandler(
 		HandlerConfig{
@@ -428,9 +432,6 @@ func TestHandlerInvalidToolArgumentsNeverUpstreamFailure(t *testing.T) {
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
 			},
-			ModelMap:   ModelMap{AllowIdentity: true},
-			LossPolicy: StrictLossPolicy(),
-			AuthPolicy: AuthPolicy{Mode: AuthNone},
 		},
 		func(req *http.Request) (*http.Response, error) {
 			return &http.Response{

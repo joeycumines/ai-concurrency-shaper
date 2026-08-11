@@ -373,6 +373,11 @@ func TestSSEEmptyDataFrameHandledPerSpec(t *testing.T) {
 // classification bucket (review-08 additional 8).
 func TestStreamOutcomeReflectsClassification(t *testing.T) {
 	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	mapping.AllowedClientQuery = map[string]struct{}{}
 
 	t.Run("success", func(t *testing.T) {
 		var captured Outcome
@@ -384,11 +389,6 @@ func TestStreamOutcomeReflectsClassification(t *testing.T) {
 					AcceptedRequestBytes:    1 << 20,
 					SuccessfulResponseBytes: 1 << 20,
 				},
-				ModelMap:           ModelMap{AllowIdentity: true},
-				LossPolicy:         StrictLossPolicy(),
-				AuthPolicy:         AuthPolicy{Mode: AuthNone},
-				ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-				AllowedClientQuery: map[string]struct{}{},
 			},
 			func(req *http.Request) (*http.Response, error) {
 				return &http.Response{
@@ -420,11 +420,6 @@ func TestStreamOutcomeReflectsClassification(t *testing.T) {
 					AcceptedRequestBytes:    1 << 20,
 					SuccessfulResponseBytes: 1 << 20,
 				},
-				ModelMap:           ModelMap{AllowIdentity: true},
-				LossPolicy:         StrictLossPolicy(),
-				AuthPolicy:         AuthPolicy{Mode: AuthNone},
-				ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-				AllowedClientQuery: map[string]struct{}{},
 			},
 			func(req *http.Request) (*http.Response, error) {
 				// A malformed SSE stream that truncates before a terminal.
@@ -457,11 +452,6 @@ func TestStreamOutcomeReflectsClassification(t *testing.T) {
 					AcceptedRequestBytes:    1 << 20,
 					SuccessfulResponseBytes: 1 << 20,
 				},
-				ModelMap:           ModelMap{AllowIdentity: true},
-				LossPolicy:         StrictLossPolicy(),
-				AuthPolicy:         AuthPolicy{Mode: AuthNone},
-				ChatCapabilities:   ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-				AllowedClientQuery: map[string]struct{}{},
 			},
 			func(req *http.Request) (*http.Response, error) {
 				return &http.Response{
