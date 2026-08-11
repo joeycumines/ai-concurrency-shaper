@@ -4,6 +4,84 @@
 
 product
 
+## Transcoding architecture
+
+### Compiler pipeline
+
+A transcoded exchange is a one-directional compile: **decode source wire →
+source-aware semantic IR → render target wire**. The IR is never a wire
+intermediate — JSON is never re-encoded into a second dialect through a
+generic envelope. Request conversion (`convert_request.go`) and response
+conversion (`convert_response.go`) each preserve turn boundaries, content
+order, tool-call identity, and tool-result identity; the source's raw
+model-generated tool arguments survive byte-exact. Every unsupported field
+or variant produces a client-dialect error under the configured loss
+policy — nothing is silently dropped, defaulted, merged, or reinterpreted.
+
+### Failure taxonomy
+
+Every exchange records exactly one typed outcome
+(`internal/transcode/outcome.go`), and the breaker classification uses
+only that outcome:
+
+| Provenance | Classification |
+| --- | --- |
+| `upstream_http` / `upstream_body_error` / `upstream_transport_error` | Upstream failure (breaker penalty, slot hold) |
+| `local_request_conversion_error` / `local_response_conversion_error` / `local_stream_validation_error` | Local failure (never breaker-relevant) |
+| `client_abort` | Neither success nor upstream failure unless a definitive upstream failure already exists |
+| `downstream_write_error` | Local, downstream delivery failed |
+
+Invalid model-generated tool arguments are local unrepresentable output
+when the target requires an object. Malformed source wire (strict decode
+violations, lifecycle contradictions, contract-violating usage totals) is
+corrupt upstream wire: an upstream failure. Unsupported-but-valid source
+features are local conversion errors.
+
+### Outcome accounting
+
+The per-request `OutcomeSink` records exactly once (a handler defer records
+an internal local-failure outcome if no path recorded one; the proxy panics
+if the outcome is missing — an invariant violation). Retry-After is
+anchored at the original upstream header receipt (`Set=true` whenever the
+upstream signaled a hold, even when already expired); the translated
+downstream header is never re-parsed. Attempt facts are explicit: a local
+request-conversion or signing error never reads as upstream-attempted, so
+no cancel-cooldown hold fires for an upstream that was never contacted.
+
+### Retry/signing order
+
+`retry.Transport` (buffers and replays bodies) wraps the attempt-marker
+transport, which wraps `SigningTransport`, which wraps the base transport.
+Each actual attempt is therefore: rebuild body → finalize Content-Length →
+**sign** → send. Signatures are never reused across attempts and the
+original request is never mutated. Signer failures are typed
+non-retryable local defects: never retried, never recorded as breaker
+failures, never masked as context cancellations, and sanitized for the
+client (detail goes to the log).
+
+### Stream FSM
+
+Every supported stream event (chat chunks, responses events, anthropic
+events) passes through one lifecycle state machine per direction
+(`responses_stream_fsm.go`, the direction converters in
+`stream_converters.go`): duplicate and post-done events are rejected, a
+terminal requires every child lifecycle closed, output indexes are unique,
+terminal snapshots reconcile with the incremental observation, and total
+event/item/part/state/byte budgets bound the whole exchange. Converted
+output commits in atomic staged terminal batches; the stream is translated
+incrementally through `stream.Proxy` (mandatory copy/cancellation boundary)
+and a stream that ends before a terminal condition emits a client-dialect
+error event — never a silent clean EOF. A failed, malformed, truncated, or
+cancelled exchange is never reported as a successful model completion.
+
+### Wire pins and the loss matrix
+
+`internal/transcode/contracts.lock.json` is the authoritative contract
+registry; `internal/transcode/pins.md` is generated from it (`go generate
+./internal/transcode`) and drift-tested. `internal/transcode/LOSS_MATRIX.md`
+is generated from the same loss-key registry the program uses
+(`gen/lossmatrix`), so code and documentation cannot drift.
+
 ## Current visual system
 
 The interface is a single full-screen Bubble Tea v2 terminal dashboard rendered with Lip Gloss v2. All visual values are defined as package-level `lipgloss.Style` variables in `internal/tui/tui.go`.

@@ -69,10 +69,26 @@ func parseTranscodeRoute(value string) (proxy.TranscodeMapping, error) {
 		ModelMap:         transcode.ModelMap{AllowIdentity: true},
 		Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
 	}
-	if err := mapping.Validate(); err != nil {
+	if err := provisionalStrictnessLoss(mapping).Validate(); err != nil {
 		return proxy.TranscodeMapping{}, fmt.Errorf("invalid transcode route %q: %w", value, err)
 	}
 	return proxy.TranscodeMapping{Mapping: mapping}, nil
+}
+
+// provisionalStrictnessLoss is applied to a route mapping during PARSING
+// only: the CLI's real loss policy is applied later by
+// buildTranscodeMappings, which re-runs the strictness rejection against
+// the final policy. Without this provisional allowance, a
+// messages->responses route could never parse even when the operator
+// approves tool_schema_strictness on the command line (review-z commit 6).
+func provisionalStrictnessLoss(m transcode.Mapping) transcode.Mapping {
+	if m.ClientProtocol == transcode.ClientMessages &&
+		m.UpstreamProtocol == transcode.UpstreamResponses {
+		m.LossPolicy = transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+			transcode.FeatureToolSchemaStrictness: {},
+		}}
+	}
+	return m
 }
 
 // parseTranscodeEndpoint splits "protocol@path" and validates the protocol
@@ -151,6 +167,17 @@ func buildTranscodeMappings(
 	var mappings []proxy.TranscodeMapping
 	for _, route := range routes {
 		route.Mapping.LossPolicy = lossPolicy
+		if err := route.Mapping.Validate(); err != nil {
+			// The FINAL loss policy is applied here; a messages->responses
+			// mapping under the strict policy cannot serve tool requests
+			// and fails startup (review-z commit 6).
+			return nil, fmt.Errorf(
+				"invalid transcode route %s %s: %w",
+				route.ClientRoute.Method,
+				route.ClientRoute.Path,
+				err,
+			)
+		}
 		mappings = append(mappings, route)
 	}
 	if responsesChat {

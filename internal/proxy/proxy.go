@@ -640,6 +640,21 @@ func New(opts ...Option) (*Proxy, error) {
 		}
 		seenTranscodeRoutes[routeKey] = struct{}{}
 
+		// An external signer signs EVERY actual attempt AFTER the retry
+		// layer rebuilt the body (review-z commit 4). With retries enabled,
+		// that requires the retry transport to buffer and replay bodies: a
+		// zero body cap means no GetBody is ever supplied, so the signer
+		// contract cannot be met and the configuration cannot possibly work
+		// (review-z commit 6).
+		if cfg.transcodeMappings[i].Mapping.Auth.Mode == transcode.AuthExternalSigner &&
+			cfg.maxRetries != 0 && cfg.maxBodyBytes <= 0 {
+			return nil, fmt.Errorf(
+				"proxy: transcode route %s %s uses an external signer with retries enabled but the retry body cap is zero; the signer cannot replay request bodies (set a positive retry body cap)",
+				routeKey.Method,
+				routeKey.Path,
+			)
+		}
+
 		if declared := cfg.transcodeMappings[i].BodyLimits.RetryReplayBytes; declared != 0 {
 			if cfg.maxRetries == 0 {
 				return nil, fmt.Errorf(

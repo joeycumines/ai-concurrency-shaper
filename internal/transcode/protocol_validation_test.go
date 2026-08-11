@@ -6,6 +6,7 @@ package transcode
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -97,5 +98,50 @@ func TestAnthropicSourceExclusivity(t *testing.T) {
 	body := `{"model":"m","max_tokens":100,"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGk=","url":"https://example.com/image.png"}}]}]}`
 	if _, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy()); err == nil {
 		t.Fatal("decode accepted an ambiguous image source")
+	}
+}
+
+// TestMappingMissingModelPolicyRejected proves a mapping whose model map has
+// neither identity fallback nor explicit entries is a construction error:
+// every request model would fail to resolve (review-z commit 6).
+func TestMappingMissingModelPolicyRejected(t *testing.T) {
+	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{} // no policy at all
+	if err := mapping.Validate(); err == nil {
+		t.Fatal("mapping with no model-resolution policy accepted")
+	} else if !strings.Contains(err.Error(), "no model-resolution policy") {
+		t.Fatalf("err = %v, want the model-policy error", err)
+	}
+}
+
+// TestMappingMessagesResponsesStrictRejected proves a Messages->Responses
+// mapping under the strict loss policy is a construction error: Messages
+// tools carry no strictness and the Responses contract requires explicit
+// strict, so tool requests could never be served (review-z commit 6).
+func TestMappingMessagesResponsesStrictRejected(t *testing.T) {
+	key, err := NewRouteKey(http.MethodPost, "/v1/messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping := Mapping{
+		ClientRoute:      key,
+		ClientProtocol:   ClientMessages,
+		UpstreamProtocol: UpstreamResponses,
+		UpstreamPath:     "/v1/responses",
+		ModelMap:         ModelMap{AllowIdentity: true},
+		Auth:             AuthPolicy{Mode: AuthNone},
+		// zero LossPolicy = strict
+	}
+	if err := mapping.Validate(); err == nil {
+		t.Fatal("messages->responses mapping under strict policy accepted")
+	} else if !strings.Contains(err.Error(), "tool_schema_strictness") {
+		t.Fatalf("err = %v, want the strictness-policy error", err)
+	}
+	// Allowing the strictness loss makes the same mapping valid.
+	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureToolSchemaStrictness: {},
+	}}
+	if err := mapping.Validate(); err != nil {
+		t.Fatalf("mapping with the strictness loss allowed: %v", err)
 	}
 }

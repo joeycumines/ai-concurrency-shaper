@@ -63,6 +63,7 @@ func TestMappingValidate(t *testing.T) {
 				ClientProtocol:   ClientResponses,
 				UpstreamProtocol: UpstreamChatCompletions,
 				UpstreamPath:     "/v1/chat/completions",
+				ModelMap:         ModelMap{AllowIdentity: true},
 				Auth:             AuthPolicy{Mode: AuthNone},
 			},
 			wantErr: false,
@@ -74,7 +75,11 @@ func TestMappingValidate(t *testing.T) {
 				ClientProtocol:   ClientMessages,
 				UpstreamProtocol: UpstreamResponses,
 				UpstreamPath:     "/v1/responses",
+				ModelMap:         ModelMap{AllowIdentity: true},
 				Auth:             AuthPolicy{Mode: AuthNone},
+				LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
+					FeatureToolSchemaStrictness: {},
+				}},
 			},
 			wantErr: false,
 		},
@@ -85,6 +90,7 @@ func TestMappingValidate(t *testing.T) {
 				ClientProtocol:   ClientMessages,
 				UpstreamProtocol: UpstreamChatCompletions,
 				UpstreamPath:     "/v1/chat/completions",
+				ModelMap:         ModelMap{AllowIdentity: true},
 				Auth:             AuthPolicy{Mode: AuthNone},
 			},
 			wantErr: false,
@@ -148,6 +154,7 @@ func TestMappingValidateConfiguration(t *testing.T) {
 		ClientProtocol:   ClientResponses,
 		UpstreamProtocol: UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         ModelMap{AllowIdentity: true},
 		Auth:             AuthPolicy{Mode: AuthNone},
 	}
 

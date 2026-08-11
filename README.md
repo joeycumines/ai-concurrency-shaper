@@ -162,6 +162,98 @@ ai-concurrency-shaper \
 - **`-upstream-disable-keep-alives`** the provider counts *open* connections, not just in-flight requests. Without this, idle keep-alive connections can push the observed concurrency above the `-concurrency 4` limit and trigger 429s.
 - **`-adaptive-headroom` / `-adaptive-headroom-window 30s`** some providers (or their CDNs) can still observe a momentary N+1 concurrent requests because connection teardown is asynchronous. When a 429 arrives, these flags temporarily reduce the effective limit by one slot, creating headroom. The slot is restored after 30s with no new 429s.
 
+## Transcoding
+
+The proxy can transcode requests between the OpenAI Responses API
+(`/v1/responses`), the OpenAI Chat Completions API (`/v1/chat/completions`,
+upstream only), and the Anthropic Messages API (`/v1/messages`). A
+transcoded route is **method + path** scoped and intercepts only the
+configured client route; every other route stays a transparent passthrough.
+Transcoding is **off by default** — no mapping, no interception.
+
+### Route examples
+
+```sh
+# Responses client -> Chat upstream (transcode /v1/responses to /v1/chat/completions)
+ai-concurrency-shaper -upstream https://api.openai.com -transcode-responses-chat
+
+# Messages client -> Responses upstream
+ai-concurrency-shaper -upstream https://api.openai.com -transcode-messages-responses \
+  -transcode-allow-loss tool_schema_strictness
+
+# Messages client -> Chat upstream
+ai-concurrency-shaper -upstream https://api.anthropic.com -transcode-messages-chat \
+  -transcode-allow-loss usage_unknown
+
+# Explicit route with a custom path
+ai-concurrency-shaper -upstream https://api.example.com \
+  -transcode-route "responses@/v1/responses=chat-completions@/v1/chat/completions"
+```
+
+Both Messages presets map `/v1/messages`, so enabling both is a startup
+error. A Messages-to-Responses mapping under the strict loss policy is also
+a startup error (Messages tools cannot preserve the strictness the
+Responses contract requires) unless `tool_schema_strictness` is allowed.
+
+### Loss policy
+
+Every non-portable feature is gated by exactly one granular, direction-
+specific loss key (the complete registry is `internal/transcode/LOSS_MATRIX.md`,
+generated from the same registry the program uses). The default **strict**
+policy rejects every non-portable feature with a client-dialect error —
+nothing is silently dropped, defaulted, merged, or reinterpreted. The
+`-transcode-allow-loss` flag (repeatable, comma/space separated) approves
+individual keys; only the granular names exist, there are no aliases:
+
+```sh
+# Approve exactly two losses: unknown usage and reasoning summaries
+-transcode-allow-loss usage_unknown -transcode-allow-loss reasoning_summary
+```
+
+### Stream negotiation
+
+A streaming request must be answered with a stream and a non-streaming
+request with a JSON document; a mismatch (an upstream SSE stream for a
+non-streaming request, or JSON for a streaming request) is an upstream
+failure, never a silent fallback. The client's stream intent (the
+`stream`/`stream: true` field in the client dialect) drives the negotiation.
+
+### Authentication
+
+- `-transcode-auth` selects the target policy: `auto`, `none`, `bearer`,
+  `x-api-key`, `api-key`, or a custom `header`.
+- `-transcode-auth-source inbound` forwards the single credential from the
+  client request; `env:NAME` and `file:PATH` supply the secret from the
+  environment or a bounded file read (64 KiB cap; atomic file replacement
+  rotates the credential without a restart).
+- Secrets are never accepted as command-line arguments. Inbound
+  credentials are stripped before the target policy is applied: nothing is
+  forwarded across provider boundaries unless the configured policy says
+  so, and cookies, forwarding headers, and provider-specific controls
+  never cross unless explicitly allowlisted.
+
+### Operational limits
+
+Every client-visible error message is bounded (`ErrorMessageBytes`), the
+complete rendered JSON response is bounded before any header is committed
+(`GeneratedResponseBytes`), generated SSE frames and terminal batches are
+bounded (`GeneratedSSEFrameBytes`/`GeneratedSSEBatchBytes`), and the
+inbound request/response bodies are bounded independently. Output limits
+smaller than the minimum legal terminal or error frame are rejected at
+startup — a stream that could never emit its terminal is a configuration
+error, not a runtime surprise.
+
+### Failure taxonomy
+
+| Exchange | Classification |
+| --- | --- |
+| Unsupported-but-valid source feature | Local conversion error (never an upstream failure) |
+| Malformed source wire, body failures, contract-violating usage totals | Upstream failure |
+| Invalid model-generated tool arguments (target requires an object) | Local unrepresentable output |
+| Client abort, no definitive upstream failure yet | Neither success nor upstream failure |
+| Client abort after a definitive upstream failure | Upstream failure retained |
+| Local signer failure | Local, never retried, never breaker-relevant |
+
 ## How Concurrency Protection Works
 
 The proxy uses a token-bucket channel to enforce the concurrency limit. Each limited request acquires a token; the token is returned when the request completes. This bounds the proxy's internal concurrency, but the downstream may still observe more due to accounting lag (see above).

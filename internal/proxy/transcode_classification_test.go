@@ -1541,6 +1541,9 @@ func TestProxyExternalSignerFailureWithRetriesIsLocal(t *testing.T) {
 		WithMetrics(metrics.NewCollector()),
 		WithBreaker(breaker),
 		WithMaxRetries(3),
+		// The CLI-default retry body cap: a positive cap is what makes the
+		// signer's per-attempt body replay possible (review-z commit 6).
+		WithMaxBodyBytes(5<<20),
 		WithTranscodeMapping(transcodeMapping(mapping)),
 	)
 	if err != nil {

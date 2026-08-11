@@ -124,6 +124,18 @@ func (m Mapping) Validate() error {
 
 	case m.ClientProtocol == ClientMessages &&
 		m.UpstreamProtocol == UpstreamResponses:
+		// A Messages-to-Responses mapping under the strict loss policy can
+		// never serve a tool-carrying request: Messages tools carry no
+		// strictness semantic, the Responses function-tool contract
+		// requires explicit strict, and emitting strict:false is the
+		// tool_schema_strictness loss — rejected by strict policy on every
+		// request (review-z commit 6). The configuration cannot possibly
+		// work, so it fails at startup instead.
+		if len(m.LossPolicy.Allowed) == 0 {
+			return fmt.Errorf(
+				"messages-to-responses tool mapping cannot preserve tool strictness under the strict loss policy; allow the tool_schema_strictness loss (e.g. -transcode-allow-loss tool_schema_strictness)",
+			)
+		}
 
 	case m.ClientProtocol == ClientMessages &&
 		m.UpstreamProtocol == UpstreamChatCompletions:
@@ -155,6 +167,19 @@ func (m Mapping) Validate() error {
 				m.Auth.CustomHeader,
 			)
 		}
+	}
+
+	// A model map with no explicit entries AND no usable identity fallback
+	// is no model-resolution policy at all: every request model fails to
+	// resolve. RequireExplicitMap disables the identity fallback even when
+	// AllowIdentity is set, so it too demands explicit entries (review-z
+	// commit 6). Checked after the auth policy so a more specific auth
+	// failure is reported first.
+	if len(m.ModelMap.Exact) == 0 &&
+		(!m.ModelMap.AllowIdentity || m.ModelMap.RequireExplicitMap) {
+		return errors.New(
+			"model map: no model-resolution policy; enable identity fallback or configure explicit model mappings",
+		)
 	}
 
 	// Model map: every explicit entry must resolve to a real upstream model.

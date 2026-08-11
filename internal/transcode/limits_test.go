@@ -120,7 +120,9 @@ func TestRenderedResponseBoundEndToEnd(t *testing.T) {
 			BodyLimits: BodyLimits{
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
-				GeneratedResponseBytes:  512,
+				// The minimum legal rendered-response bound (review-z
+				// commit 6); the 4096-char content still overflows it.
+				GeneratedResponseBytes: MinGeneratedResponseBytes,
 			},
 		},
 		roundTrip,
@@ -137,8 +139,8 @@ func TestRenderedResponseBoundEndToEnd(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "generated response exceeds the configured limit") {
 		t.Fatalf("error body = %q, want the generated-response bound error", rec.Body.String())
 	}
-	if len(rec.Body.Bytes()) > 512 {
-		t.Fatalf("rendered error body = %d bytes, want <= the 512 bound", len(rec.Body.Bytes()))
+	if len(rec.Body.Bytes()) > int(MinGeneratedResponseBytes) {
+		t.Fatalf("rendered error body = %d bytes, want <= the bound", len(rec.Body.Bytes()))
 	}
 }
 
@@ -190,5 +192,136 @@ func TestErrorMessageBoundEndToEnd(t *testing.T) {
 	}
 	if len(envelope.Error.Message) == 0 {
 		t.Fatal("client-visible message is empty")
+	}
+}
+
+// TestMinimumOutputBoundsFit PROVES the MinGenerated* constants: the actual
+// smallest legal terminal batches (both client dialects), the smallest SSE
+// error frame, and the smallest rendered JSON response all fit within the
+// constants, so a limit below them could never carry a legal completion
+// (review-z commit 6).
+func TestMinimumOutputBoundsFit(t *testing.T) {
+	// Messages-client terminal batch: message_delta + message_stop. The
+	// real state machine always carries the usage object on the delta when
+	// the source provided usage (the required-wire shape), so BOTH the
+	// bare and usage-carrying variants are measured and the larger must
+	// fit.
+	deltaBare, err := json.Marshal(AnthropicStreamEvent{
+		Type: AnthropicStreamEventTypeMessageDelta,
+		Delta: &AnthropicStreamDelta{
+			StopReason: anthropicStopReasonPtr("end_turn"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltaWithUsage, err := json.Marshal(AnthropicStreamEvent{
+		Type: AnthropicStreamEventTypeMessageDelta,
+		Delta: &AnthropicStreamDelta{
+			StopReason: anthropicStopReasonPtr("end_turn"),
+		},
+		Usage: &AnthropicUsage{
+			InputTokens:              0,
+			CacheCreationInputTokens: 0,
+			CacheReadInputTokens:     0,
+			OutputTokens:             0,
+			OutputTokensDetails:      &AnthropicOutputTokensDetails{ThinkingTokens: 0},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop, err := json.Marshal(AnthropicStreamEvent{Type: AnthropicStreamEventTypeMessageStop})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SSE framing: "event: <type>\ndata: <json>\n\n" per frame.
+	messagesBatch := len(deltaWithUsage) + len(stop) + 128
+	if messagesBatch > MinGeneratedBatchBytes {
+		t.Fatalf("largest smallest messages terminal batch = %d, want <= %d", messagesBatch, MinGeneratedBatchBytes)
+	}
+	if len(deltaBare) > len(deltaWithUsage) {
+		t.Fatal("bare delta larger than the usage-carrying delta; measure the wrong variant")
+	}
+
+	// Responses-client terminal frame: response.completed with the minimal
+	// envelope (all required fields, empty output).
+	completed, err := json.Marshal(ResponseEnvelope{
+		ID: "resp_1234567890abcdef", Object: "response", CreatedAt: 1, Status: "completed",
+		Model: "m", Output: []ResponsesOutputItem{}, Usage: &ResponsesUsage{
+			InputTokens: 0, OutputTokens: 0, TotalTokens: 0,
+			InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 0},
+			OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 0},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedFrame := len(completed) + 64
+	if completedFrame > MinGeneratedFrameBytes {
+		t.Fatalf("smallest responses terminal frame = %d, want <= %d", completedFrame, MinGeneratedFrameBytes)
+	}
+
+	// Smallest SSE error event.
+	errorEvent, err := json.Marshal(AnthropicStreamEvent{
+		Type: AnthropicStreamEventTypeError,
+		Error: &AnthropicStreamError{
+			Type:    "api_error",
+			Message: "",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(errorEvent)+64 > MinGeneratedFrameBytes {
+		t.Fatalf("smallest error frame = %d, want <= %d", len(errorEvent)+64, MinGeneratedFrameBytes)
+	}
+
+	// Smallest rendered non-stream JSON response.
+	ctx := testStreamContext()
+	response := CanonicalResponse{
+		ID: "resp_1", Model: "m", CreatedAt: 1, Status: CanonicalResponseCompleted,
+		Stop:  CanonicalStop{Reason: CanonicalStopEndTurn},
+		Items: []CanonicalResponseItem{},
+		Usage: CanonicalUsage{},
+	}
+	rendered, _, err := RenderResponsesResponse(response, ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(rendered)) > MinGeneratedResponseBytes {
+		t.Fatalf("smallest rendered response = %d, want <= %d", len(rendered), MinGeneratedResponseBytes)
+	}
+}
+
+// TestBodyLimitsMinimumOutputRejected proves output limits below the
+// minimum legal terminal or error frame fail validation while zero values
+// (default-selected) and the minimum itself pass (review-z commit 6).
+func TestBodyLimitsMinimumOutputRejected(t *testing.T) {
+	base := BodyLimits{AcceptedRequestBytes: 1 << 20, SuccessfulResponseBytes: 1 << 20}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("zero generated limits must be valid (defaults): %v", err)
+	}
+	tooSmall := base
+	tooSmall.GeneratedSSEFrameBytes = MinGeneratedFrameBytes - 1
+	if err := tooSmall.Validate(); err == nil {
+		t.Fatal("GeneratedSSEFrameBytes below the minimum accepted")
+	}
+	tooSmall = base
+	tooSmall.GeneratedSSEBatchBytes = MinGeneratedBatchBytes - 1
+	if err := tooSmall.Validate(); err == nil {
+		t.Fatal("GeneratedSSEBatchBytes below the minimum accepted")
+	}
+	tooSmall = base
+	tooSmall.GeneratedResponseBytes = MinGeneratedResponseBytes - 1
+	if err := tooSmall.Validate(); err == nil {
+		t.Fatal("GeneratedResponseBytes below the minimum accepted")
+	}
+	atMin := base
+	atMin.GeneratedSSEFrameBytes = MinGeneratedFrameBytes
+	atMin.GeneratedSSEBatchBytes = MinGeneratedBatchBytes
+	atMin.GeneratedResponseBytes = MinGeneratedResponseBytes
+	if err := atMin.Validate(); err != nil {
+		t.Fatalf("the minimum values must be valid: %v", err)
 	}
 }

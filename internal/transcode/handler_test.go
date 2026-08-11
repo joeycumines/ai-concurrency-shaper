@@ -24,7 +24,9 @@ func testHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) *TranscodeH
 	// The common test defaults live on the mapping (HandlerConfig carries
 	// only Mapping, Upstream, and BodyLimits — review-z commit 4).
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
-	mapping.LossPolicy = StrictLossPolicy()
+	if mapping.LossPolicy.Allowed == nil {
+		mapping.LossPolicy = StrictLossPolicy()
+	}
 	mapping.Auth = AuthPolicy{Mode: AuthNone}
 	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
 	mapping.AllowedClientQuery = map[string]struct{}{}
@@ -148,13 +150,23 @@ func messagesMapping(t *testing.T, upstream UpstreamProtocol) Mapping {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Mapping{
+	mapping := Mapping{
 		ClientRoute:      key,
 		ClientProtocol:   ClientMessages,
 		UpstreamProtocol: upstream,
 		UpstreamPath:     "/v1/" + string(upstream),
 		Auth:             AuthPolicy{Mode: AuthNone},
 	}
+	if upstream == UpstreamResponses {
+		// Messages tools carry no strictness; a messages->responses mapping
+		// under the strict policy is a startup rejection (review-z commit
+		// 6). These tests exercise error/stream behavior, not the
+		// strictness loss, so the mapping allows it explicitly.
+		mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+			FeatureToolSchemaStrictness: {},
+		}}
+	}
+	return mapping
 }
 
 func TestHandlerResponsesToChatJSON(t *testing.T) {
@@ -1303,7 +1315,16 @@ func TestHandlerModelMapping(t *testing.T) {
 
 func TestHandlerModelMappingMissing(t *testing.T) {
 	mapping := responsesMapping(t)
-	mapping.ModelMap = ModelMap{RequireExplicitMap: true}
+	mapping.ModelMap = ModelMap{
+		// An explicit-map policy must actually map something: with entries,
+		// an UNKNOWN model is rejected at request time (400); a policy with
+		// zero entries is a startup rejection (see
+		// TestMappingMissingModelPolicyRejected).
+		RequireExplicitMap: true,
+		Exact: map[string]ModelMapping{
+			"known": {ClientModel: "known", UpstreamModel: "upstream-known"},
+		},
+	}
 	mapping.LossPolicy = StrictLossPolicy()
 	mapping.Auth = AuthPolicy{Mode: AuthNone}
 

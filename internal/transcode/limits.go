@@ -64,6 +64,17 @@ const (
 	// DefaultGeneratedSSEFrameBytes bounds one generated downstream SSE
 	// frame (the outbound counterpart of SSEFrameBytes).
 	DefaultGeneratedSSEFrameBytes int = 1 << 20
+	// The minimum legal output sizes (review-z commit 6): a generated SSE
+	// frame, terminal batch, or rendered JSON response smaller than these
+	// could never carry even the smallest legal terminal/error/created
+	// event or an empty rendered response, so the stream could never
+	// complete or the response could never be served. The constants are
+	// PROVEN by TestMinimumOutputBoundsFit (the actual minimal terminal
+	// batches, error frames, and rendered responses are rendered and
+	// asserted to fit).
+	MinGeneratedFrameBytes    int   = 1 << 10
+	MinGeneratedBatchBytes    int   = 1 << 10
+	MinGeneratedResponseBytes int64 = 1 << 10
 	// DefaultGeneratedSSEBatchBytes bounds one generated terminal batch
 	// (the released item-closing events plus the terminal envelope).
 	DefaultGeneratedSSEBatchBytes int = 32 << 20
@@ -147,6 +158,17 @@ func (l BodyLimits) WithDefaults() BodyLimits {
 	return l
 }
 
+// minGeneratedOutputError builds the fail-fast message for an output limit
+// below the minimum legal terminal or error frame (review-z commit 6). The
+// prefix is omitted: every caller wraps the error with its own context
+// (e.g. "body limits: %w").
+func minGeneratedOutputError(name string, limit, minimum any) error {
+	return fmt.Errorf(
+		"%s = %v is smaller than the minimum legal terminal/error frame %v",
+		name, limit, minimum,
+	)
+}
+
 // Validate checks the body limits are usable: every byte limit and the SSE
 // line/frame bounds are nonnegative (review-j finding 14). Zero values mean
 // "use the package default" and are valid.
@@ -179,6 +201,20 @@ func (l BodyLimits) Validate() error {
 	}
 	if l.GeneratedSSEBatchBytes < 0 {
 		return fmt.Errorf("GeneratedSSEBatchBytes must be nonnegative, got %d", l.GeneratedSSEBatchBytes)
+	}
+	// Output limits below the minimum legal terminal or error frame make
+	// completion impossible: zero values select the package defaults
+	// (WithDefaults) and are skipped here; a small-but-positive limit that
+	// could never carry the smallest legal frame is a construction error
+	// (review-z commit 6).
+	if l.GeneratedSSEFrameBytes > 0 && l.GeneratedSSEFrameBytes < MinGeneratedFrameBytes {
+		return minGeneratedOutputError("GeneratedSSEFrameBytes", l.GeneratedSSEFrameBytes, MinGeneratedFrameBytes)
+	}
+	if l.GeneratedSSEBatchBytes > 0 && l.GeneratedSSEBatchBytes < MinGeneratedBatchBytes {
+		return minGeneratedOutputError("GeneratedSSEBatchBytes", l.GeneratedSSEBatchBytes, MinGeneratedBatchBytes)
+	}
+	if l.GeneratedResponseBytes > 0 && l.GeneratedResponseBytes < MinGeneratedResponseBytes {
+		return minGeneratedOutputError("GeneratedResponseBytes", l.GeneratedResponseBytes, MinGeneratedResponseBytes)
 	}
 	return nil
 }

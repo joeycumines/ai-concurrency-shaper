@@ -76,7 +76,7 @@ func testMessagesResponsesMapping(t *testing.T) transcode.Mapping {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return transcode.Mapping{
+	mapping := transcode.Mapping{
 		ClientRoute:      key,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
@@ -84,6 +84,13 @@ func testMessagesResponsesMapping(t *testing.T) transcode.Mapping {
 		ModelMap:         transcode.ModelMap{AllowIdentity: true},
 		Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
 	}
+	// Messages tools carry no strictness; a messages->responses mapping
+	// under the strict policy is a startup rejection (review-z commit 6).
+	// These tests exercise error/stream behavior, not the strictness loss.
+	mapping.LossPolicy = transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+		transcode.FeatureToolSchemaStrictness: {},
+	}}
+	return mapping
 }
 
 func transcodeMapping(m transcode.Mapping) TranscodeMapping {
@@ -1136,5 +1143,39 @@ func TestProxyTranscodeMessagesToChatStreaming(t *testing.T) {
 	}
 	if strings.Contains(body, `"type":"error"`) {
 		t.Fatalf("unexpected error event: %q", body)
+	}
+}
+
+// noopSigner signs without doing anything.
+type noopSigner struct{}
+
+func (noopSigner) Sign(_ context.Context, _ *http.Request) error { return nil }
+
+// TestProxyExternalSignerRequiresReplayableBodies proves the startup
+// rejection for signer configurations that cannot supply replayable request
+// bodies: an external signer with retries enabled but a zero retry body cap
+// fails construction (review-z commit 6).
+func TestProxyExternalSignerRequiresReplayableBodies(t *testing.T) {
+	mapping := testResponsesMapping(t)
+	mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthExternalSigner, Signer: noopSigner{}}
+
+	upstreamURL, _ := url.Parse("https://upstream.example")
+	pat, err := route.Parse("POST /v1/responses")
+	if err != nil {
+		t.Fatalf("route.Parse: %v", err)
+	}
+	_, err = New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithMaxRetries(3),
+		WithTranscodeMapping(transcodeMapping(mapping)),
+	)
+	if err == nil {
+		t.Fatal("external signer with retries and a zero body cap accepted")
+	}
+	if !strings.Contains(err.Error(), "cannot replay request bodies") {
+		t.Fatalf("err = %v, want the replayability error", err)
 	}
 }

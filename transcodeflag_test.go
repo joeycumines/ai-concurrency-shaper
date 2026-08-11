@@ -116,6 +116,8 @@ func TestBuildTranscodeMappings(t *testing.T) {
 		ClientProtocol:   transcode.ClientResponses,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/upstream",
+		ModelMap:         transcode.ModelMap{AllowIdentity: true},
+		Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
 	}}
 
 	none, err := buildTranscodeMappings(nil, false, false, false, transcode.StrictLossPolicy())
