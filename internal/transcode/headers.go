@@ -1,0 +1,159 @@
+package transcode
+
+import (
+	"errors"
+	"fmt"
+	"net/http"
+	"net/textproto"
+	"net/url"
+	"strings"
+)
+
+// Mirrors the standard-library algorithm:
+//
+// https://go.dev/src/net/http/httputil/reverseproxy.go
+// See hopHeaders and removeHopByHopHeaders.
+//
+// RFC connection handling:
+// https://www.rfc-editor.org/rfc/rfc9110.html#section-7.6.1
+
+// fixedHopByHopHeaders is the fixed list removed by the standard library's
+// reverse proxy, including the non-standard but widely emitted
+// Proxy-Connection.
+var fixedHopByHopHeaders = []string{
+	"Connection",
+	"Proxy-Connection", // non-standard but widely emitted
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+// RemoveHopByHopHeaders removes every header nominated by a Connection token
+// and then the fixed hop-by-hop list. This must run before deleting
+// Connection itself.
+func RemoveHopByHopHeaders(h http.Header) {
+	for _, connectionValue := range h.Values("Connection") {
+		for _, token := range strings.Split(connectionValue, ",") {
+			token = textproto.TrimString(token)
+			if token == "" {
+				continue
+			}
+			if ValidHTTPFieldName(token) {
+				h.Del(token)
+			}
+		}
+	}
+
+	for _, name := range fixedHopByHopHeaders {
+		h.Del(name)
+	}
+}
+
+// ValidHTTPFieldName reports whether s is a valid HTTP field name using
+// token characters. Malformed Connection tokens are rejected rather than
+// passed to Header.Del as arbitrary input, and custom authentication header
+// names are validated with the same rule (review-j finding 14).
+func ValidHTTPFieldName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", rune(c)):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// RemoveTransformedRepresentationHeaders removes entity headers that describe
+// the upstream representation. A converted body is a new representation, so
+// these upstream values no longer describe the bytes sent downstream.
+//
+// Digest fields:
+// https://www.rfc-editor.org/rfc/rfc9530.html
+//
+// HTTP message signatures:
+// https://www.rfc-editor.org/rfc/rfc9421.html
+func RemoveTransformedRepresentationHeaders(h http.Header) {
+	for _, name := range []string{
+		"Content-Length",
+		"Content-Encoding",
+		"Content-Md5",
+		"Content-Range",
+		"Accept-Ranges",
+		"Digest",
+		"Content-Digest",
+		"Repr-Digest",
+		"Etag",
+		"Last-Modified",
+		"Signature",
+		"Signature-Input",
+	} {
+		h.Del(name)
+	}
+}
+
+// errClientQueryParameter marks an unallowed client query parameter: a
+// client fault, classified by type rather than error-string matching
+// (review-j finding 14).
+var errClientQueryParameter = errors.New("client query parameter")
+
+// BuildMappedURL joins the configured upstream base path with the mapping's
+// upstream path and preserves the base query. Client query parameters are
+// rejected unless explicitly allowed: unknown client query parameters can
+// alter target behavior, and the configured base query is required for
+// deployments whose endpoint encodes controls such as api-version.
+//
+// The standard library's reverse-proxy query joining can be reviewed at:
+// https://go.dev/src/net/http/httputil/reverseproxy.go
+func BuildMappedURL(
+	base *url.URL,
+	upstreamPath string,
+	clientQuery url.Values,
+	allowedClientQuery map[string]struct{},
+) (*url.URL, error) {
+	if base == nil {
+		return nil, fmt.Errorf("nil upstream URL")
+	}
+
+	out := *base
+
+	joined, err := url.JoinPath(base.Path, upstreamPath)
+	if err != nil {
+		return nil, fmt.Errorf("join upstream path: %w", err)
+	}
+	// url.JoinPath drops the leading slash when the base path is empty; the
+	// upstream path is absolute and the result must stay absolute.
+	if !strings.HasPrefix(joined, "/") {
+		joined = "/" + joined
+	}
+	out.Path = joined
+	out.RawPath = ""
+
+	query := base.Query()
+	for key, values := range clientQuery {
+		if _, ok := allowedClientQuery[key]; !ok {
+			return nil, fmt.Errorf(
+				"%w %q is not allowed on transcoded routes",
+				errClientQueryParameter,
+				key,
+			)
+		}
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
+	out.RawQuery = query.Encode()
+
+	return &out, nil
+}

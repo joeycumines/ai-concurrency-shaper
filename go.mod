@@ -7,6 +7,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.4
 	github.com/charmbracelet/x/term v0.2.2
 	github.com/joeycumines/go-prompt v0.0.0-20260429212922-e8b9e8f9d754
+	github.com/joeycumines/sesame v0.1.1
 	github.com/rivo/uniseg v0.4.7
 )
 

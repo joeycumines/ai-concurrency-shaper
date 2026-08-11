@@ -22,6 +22,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,11 +40,27 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
 )
 
 // version is set via ldflags at build time (e.g. -ldflags -X main.version=1.2.3).
 var version = "dev"
+
+// validateMBFlag rejects a negative or overflowing megabyte flag value
+// before it is shifted to bytes (review-j finding 14): a negative or
+// overflowing shift would otherwise produce a silently wrong limit. shift
+// is the largest byte shift the value undergoes (e.g. 22 for
+// transcode-max-request-mb, whose decoded-request limit is MB << 22).
+func validateMBFlag(name string, value int64, shift uint) error {
+	if value < 0 {
+		return fmt.Errorf("%s must be nonnegative, got %d", name, value)
+	}
+	if shift >= 63 || value > math.MaxInt64>>shift {
+		return fmt.Errorf("%s is too large to convert to bytes: %d MiB", name, value)
+	}
+	return nil
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -90,6 +108,20 @@ func run() error {
 
 		// Transport tuning.
 		upstreamDisableKeepAlives bool
+
+		// Transcoding flags.
+		transcodeRoutes            transcodeRouteFlags
+		transcodeResponsesChat     bool
+		transcodeMessagesChat      bool
+		transcodeMessagesResponses bool
+		transcodeAuth              string
+		transcodeAuthSource        string
+		transcodeAuthHeader        string
+		transcodeAnthropicVersion  string
+		transcodeModels            transcodeModelFlags
+		transcodeMaxRequestMB      int64
+		transcodeMaxResponseMB     int64
+		transcodeAllowLoss         transcodeLossFlags
 	)
 
 	flag.StringVar(&bindAddr, "bind", ":8080", "listen address")
@@ -124,6 +156,22 @@ func run() error {
 	flag.BoolVar(&adaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
 	flag.DurationVar(&adaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")
 	flag.BoolVar(&upstreamDisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream; avoids provider-side connection-count concurrency violations")
+	flag.Var(&transcodeRoutes, "transcode-route", "transcode route mapping clientProtocol@clientPath=upstreamProtocol@upstreamPath (repeatable); client protocols: responses, messages; upstream protocols: responses, chat-completions")
+	flag.BoolVar(&transcodeResponsesChat, "transcode-responses-chat", false, "transcode /v1/responses to /v1/chat/completions (responses client, chat upstream)")
+	flag.BoolVar(&transcodeMessagesChat, "transcode-messages-chat", false, "transcode /v1/messages to /v1/chat/completions (messages client, chat upstream)")
+	flag.BoolVar(&transcodeMessagesResponses, "transcode-messages-responses", false, "transcode /v1/messages to /v1/responses (messages client, responses upstream)")
+	// external-signer is intentionally absent: the CLI cannot supply a
+	// signer, so the choice would only defer a startup failure (review-j
+	// finding 14). The programmatic AuthExternalSigner mode remains for API
+	// users who can provide one.
+	flag.StringVar(&transcodeAuth, "transcode-auth", "auto", "upstream authentication mode: auto, none, bearer, x-api-key, api-key, header")
+	flag.Var(&transcodeAllowLoss, "transcode-allow-loss", "granular loss features the transcoder may drop (repeatable, comma/space separated); the default strict policy rejects every non-portable feature, so e.g. messages-client streaming requires usage_unknown")
+	flag.StringVar(&transcodeAuthSource, "transcode-auth-source", "inbound", "upstream secret source: inbound, env:NAME, file:PATH")
+	flag.StringVar(&transcodeAuthHeader, "transcode-auth-header", "", "custom authentication header name (with -transcode-auth header)")
+	flag.StringVar(&transcodeAnthropicVersion, "transcode-anthropic-version", "2023-06-01", "Anthropic-Version header value for Messages upstreams")
+	flag.Var(&transcodeModels, "transcode-model", "client-model=upstream-model mapping (repeatable)")
+	flag.Int64Var(&transcodeMaxRequestMB, "transcode-max-request-mb", 32, "max transcoded request body size (MB)")
+	flag.Int64Var(&transcodeMaxResponseMB, "transcode-max-response-mb", 32, "max transcoded response body size (MB)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "ai-concurrency-shaper %s\n\n", version)
@@ -132,6 +180,25 @@ func run() error {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+	// The megabyte flags are validated against the largest byte shift each
+	// value undergoes, so an overflowing shift can never silently wrap
+	// (review-j finding 14).
+	for _, mb := range []struct {
+		name  string
+		value int64
+		shift uint
+	}{
+		// retry-max-body-mb undergoes a *2 in the journal sizing (maxBody*2):
+		// it is validated against shift 21 so the product cannot overflow
+		// (review-08 additional 3).
+		{"retry-max-body-mb", retryMaxBodyMB, 21},
+		{"transcode-max-request-mb", transcodeMaxRequestMB, 22},
+		{"transcode-max-response-mb", transcodeMaxResponseMB, 20},
+	} {
+		if err := validateMBFlag(mb.name, mb.value, mb.shift); err != nil {
+			log.Fatalf("invalid flag: %v", err)
+		}
+	}
 
 	if showVersion {
 		fmt.Println(version)
@@ -146,8 +213,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("invalid -upstream URL: %w", err)
 	}
-	if upstream.Scheme == "" {
-		return fmt.Errorf("-upstream URL must include scheme (http or https)")
+	if upstream.Scheme != "http" && upstream.Scheme != "https" {
+		return fmt.Errorf("-upstream URL scheme must be http or https, got %q", upstream.Scheme)
+	}
+	if upstream.Hostname() == "" {
+		return fmt.Errorf("-upstream URL must include a hostname")
 	}
 
 	var patterns []route.Pattern
@@ -231,7 +301,57 @@ func run() error {
 		DisableKeepAlives:   upstreamDisableKeepAlives,
 	}
 
-	p, err := proxy.New(
+	// Wire transcoding mappings: repeatable -transcode-route values plus the
+	// preset flags. Both Messages presets conflict and are rejected before
+	// proxy.New runs.
+	lossAllowed, err := transcode.ParseLossFeatures(transcodeAllowLoss...)
+	if err != nil {
+		log.Fatalf("invalid -transcode-allow-loss: %v", err)
+	}
+	lossPolicy := transcode.LossPolicy{Allowed: lossAllowed}
+	mappings, err := buildTranscodeMappings(transcodeRoutes, transcodeResponsesChat, transcodeMessagesChat, transcodeMessagesResponses, lossPolicy)
+	if err != nil {
+		return err
+	}
+	transcodeModelMap, err := parseTranscodeModelMap(transcodeModels)
+	if err != nil {
+		return err
+	}
+	transcodeAuthPolicy, err := parseTranscodeAuth(
+		transcodeAuth,
+		transcodeAuthSource,
+		transcodeAuthHeader,
+		transcodeAnthropicVersion,
+	)
+	if err != nil {
+		return err
+	}
+	for i := range mappings {
+		mappings[i].ModelMap = transcodeModelMap
+		mappings[i].Auth = transcodeAuthPolicy
+		limits := transcode.BodyLimits{
+			AcceptedRequestBytes: transcodeMaxRequestMB << 20,
+			// The decoded limit is separate from the accepted raw-body limit
+			// (merge gate 19): it bounds the rendered upstream request, with
+			// headroom for decode amplification.
+			DecodedRequestBytes:     transcodeMaxRequestMB << 22,
+			SuccessfulResponseBytes: transcodeMaxResponseMB << 20,
+			ErrorResponseBytes:      1 << 20,
+			SSELineBytes:            1 << 20,
+			SSEFrameBytes:           1 << 20,
+		}
+		// The retry-replay contract (internal/transcode/limits.go): a
+		// declared bound must equal the proxy retry body cap with retries
+		// enabled. With retries disabled no replay happens, so no bound is
+		// declared and the fail-fast equality check does not apply
+		// (review-k finding 8).
+		if retryMax != 0 {
+			limits.RetryReplayBytes = int64(retryMaxBodyMB) << 20
+		}
+		mappings[i].BodyLimits = limits
+	}
+
+	proxyOpts := []proxy.Option{
 		proxy.WithUpstream(upstream),
 		proxy.WithMatcher(matcher),
 		proxy.WithLimiter(limiter),
@@ -240,7 +360,7 @@ func run() error {
 		proxy.WithGlobalLimiter(globalLimiter),
 		proxy.WithRouteLimiters(routeLimiters),
 		proxy.WithMaxRetries(retryMax),
-		proxy.WithMaxBodyBytes(int64(retryMaxBodyMB)<<20),
+		proxy.WithMaxBodyBytes(int64(retryMaxBodyMB) << 20),
 		proxy.WithRetryWaitMin(retryWaitMin),
 		proxy.WithRetryWaitMax(retryWaitMax),
 		proxy.WithRetryMinDelay(retryMinDelay),
@@ -253,7 +373,22 @@ func run() error {
 		proxy.WithTransport(transport),
 		proxy.WithJournal(j),
 		proxy.WithBreaker(breaker),
-	)
+	}
+	if len(mappings) > 0 {
+		proxyOpts = append(proxyOpts, proxy.WithTranscodeMapping(mappings...))
+		for _, m := range mappings {
+			log.Printf(
+				"transcoding %s %s (%s) -> %s (%s)",
+				m.ClientRoute.Method,
+				m.ClientRoute.Path,
+				m.ClientProtocol,
+				m.UpstreamPath,
+				m.UpstreamProtocol,
+			)
+		}
+	}
+
+	p, err := proxy.New(proxyOpts...)
 	if err != nil {
 		return fmt.Errorf("proxy config: %w", err)
 	}
@@ -304,9 +439,16 @@ func run() error {
 
 	srv := &http.Server{Addr: bindAddr, Handler: p}
 
+	ln, err := net.Listen("tcp", bindAddr)
+	if err != nil {
+		return fmt.Errorf("bind %s: %w", bindAddr, err)
+	}
+	defer ln.Close()
+	log.Printf("listening on %s", ln.Addr().String())
+
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()

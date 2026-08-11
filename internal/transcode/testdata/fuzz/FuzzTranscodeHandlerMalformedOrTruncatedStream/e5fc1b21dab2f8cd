@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("event: respznse.completedcdata: {")
+uint16(91)
+byte('\x00')

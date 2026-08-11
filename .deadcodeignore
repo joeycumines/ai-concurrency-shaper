@@ -4,4 +4,8 @@
 
 # DO NOT ADD IGNORES TO THIS FILE WITH THE INTENT OF "WIRING THEM UP LATER"
 
+# Test-only support packages: their accessors are exercised exclusively by
+# test files, so deadcode (which analyzes production entry points) reports
+# them as unreachable.
 internal/tui/tuitest/helper.go:*
+internal/transcode/testcorpus/*

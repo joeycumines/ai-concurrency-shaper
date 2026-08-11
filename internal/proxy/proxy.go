@@ -40,6 +40,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/retry"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
 // --- Option Interface ---
@@ -73,7 +74,42 @@ type proxyConfig struct {
 	adaptiveHeadroom       bool
 	adaptiveHeadroomWindow time.Duration
 	limitAll               bool
+	transcodeMappings      []TranscodeMapping
 }
+
+// TranscodeMapping configures one transcoded route. The embedded
+// transcode.Mapping is validated by WithTranscodeMapping and proxy.New.
+type TranscodeMapping struct {
+	transcode.Mapping
+
+	// BodyLimits bounds request/response bodies on this route. Zero values
+	// fall back to the proxy defaults.
+	BodyLimits transcode.BodyLimits
+}
+
+// TranscodeOption configures transcoding route mappings.
+type TranscodeOption struct {
+	mappings []TranscodeMapping
+}
+
+// WithTranscodeMapping returns an option that registers transcoding route
+// mappings. Unsupported format pairs are rejected.
+func WithTranscodeMapping(mappings ...TranscodeMapping) *TranscodeOption {
+	return &TranscodeOption{mappings: mappings}
+}
+
+func (o *TranscodeOption) applyProxyOption(cfg *proxyConfig) error {
+	for i := range o.mappings {
+		m := &o.mappings[i]
+		if err := m.Validate(); err != nil {
+			return fmt.Errorf("proxy: invalid transcode mapping: %w", err)
+		}
+	}
+	cfg.transcodeMappings = append(cfg.transcodeMappings, o.mappings...)
+	return nil
+}
+
+var _ Option = (*TranscodeOption)(nil)
 
 // --- Concrete Options ---
 
@@ -91,8 +127,14 @@ func (o *UpstreamOption) applyProxyOption(cfg *proxyConfig) error {
 	if o.value == nil {
 		return errors.New("proxy: upstream must not be nil")
 	}
-	if o.value.Scheme == "" {
-		return errors.New("proxy: upstream URL must include scheme (http or https)")
+	if o.value.Scheme != "http" && o.value.Scheme != "https" {
+		return errors.New("proxy: upstream URL scheme must be http or https")
+	}
+	// Hostname() (not Host) is checked: "http://:8080" has a non-empty Host
+	// but no hostname, and would fail per-request instead of at startup
+	// (review-08 additional 4).
+	if o.value.Hostname() == "" {
+		return errors.New("proxy: upstream URL must include a hostname")
 	}
 	cfg.upstream = o.value
 	return nil
@@ -543,6 +585,13 @@ type Proxy struct {
 	// limitAll routes every request through the default limiter, not just
 	// requests matching a limited route.
 	limitAll bool
+
+	// transcodeHandlers serves transcoded routes, one per mapping.
+	transcodeHandlers []*transcode.TranscodeHandler
+
+	// transcodeHandlerMap provides O(1) lookup of transcode handlers by
+	// method+path route key, built once at construction.
+	transcodeHandlerMap map[transcode.RouteKey]http.Handler
 }
 
 // New creates a Proxy from the given options.
@@ -572,6 +621,61 @@ func New(opts ...Option) (*Proxy, error) {
 		return nil, err
 	}
 
+	// Freeze the upstream URL: both the passthrough director and the
+	// transcode handlers read it on every request, so caller mutation of the
+	// original after New must not change live behavior or race with requests
+	// (review-08 additional 2).
+	cfg.upstream = cloneURL(cfg.upstream)
+
+	// Reject duplicate transcode client routes: the first matching handler
+	// would silently win. The key is method+path. A mapping that declares a
+	// RetryReplayBytes bound must equal the proxy's retry transport body cap
+	// with retries enabled (review-k finding 8): the declared bound is
+	// otherwise a silent lie about the actual replay cap.
+	seenTranscodeRoutes := make(map[transcode.RouteKey]struct{}, len(cfg.transcodeMappings))
+	for i := range cfg.transcodeMappings {
+		routeKey := cfg.transcodeMappings[i].Mapping.ClientRoute
+		if _, dup := seenTranscodeRoutes[routeKey]; dup {
+			return nil, fmt.Errorf("proxy: duplicate transcode client route %s %s", routeKey.Method, routeKey.Path)
+		}
+		seenTranscodeRoutes[routeKey] = struct{}{}
+
+		// An external signer signs EVERY actual attempt AFTER the retry
+		// layer rebuilt the body (review-z commit 4). With retries enabled,
+		// that requires the retry transport to buffer and replay bodies: a
+		// zero body cap means no GetBody is ever supplied, so the signer
+		// contract cannot be met and the configuration cannot possibly work
+		// (review-z commit 6).
+		if cfg.transcodeMappings[i].Mapping.Auth.Mode == transcode.AuthExternalSigner &&
+			cfg.maxRetries != 0 && cfg.maxBodyBytes <= 0 {
+			return nil, fmt.Errorf(
+				"proxy: transcode route %s %s uses an external signer with retries enabled but the retry body cap is zero; the signer cannot replay request bodies (set a positive retry body cap)",
+				routeKey.Method,
+				routeKey.Path,
+			)
+		}
+
+		if declared := cfg.transcodeMappings[i].BodyLimits.RetryReplayBytes; declared != 0 {
+			if cfg.maxRetries == 0 {
+				return nil, fmt.Errorf(
+					"proxy: transcode route %s %s declares RetryReplayBytes=%d but retries are disabled",
+					routeKey.Method,
+					routeKey.Path,
+					declared,
+				)
+			}
+			if declared != cfg.maxBodyBytes {
+				return nil, fmt.Errorf(
+					"proxy: transcode route %s %s RetryReplayBytes=%d must equal the proxy retry body cap %d",
+					routeKey.Method,
+					routeKey.Path,
+					declared,
+					cfg.maxBodyBytes,
+				)
+			}
+		}
+	}
+
 	// Build retry transport when retries are enabled.
 	var transport http.RoundTripper = cfg.transport
 	if transport == nil {
@@ -582,7 +686,9 @@ func New(opts ...Option) (*Proxy, error) {
 		if cfg.retrySkipOn429 {
 			checkRetry = func(resp *http.Response, err error) bool {
 				if err != nil {
-					return true
+					// Local non-retryable defects (e.g. signing failures)
+					// are never retried (review-z commit 4).
+					return !retry.IsNonRetryable(err)
 				}
 				if resp == nil {
 					return false
@@ -592,8 +698,14 @@ func New(opts ...Option) (*Proxy, error) {
 				return resp.StatusCode >= 500
 			}
 		}
+		// The signing transport sits inside the retry chain so EVERY
+		// attempt is signed after the retry layer rebuilt the body and
+		// finalized Content-Length (review-z commit 4). Requests without a
+		// signer in their context pass through untouched.
 		transport = &retry.Transport{
-			Inner:         withAttemptMarkingTransport(transport),
+			Inner: withAttemptMarkingTransport(&transcode.SigningTransport{
+				Inner: transport,
+			}),
 			MaxRetries:    cfg.maxRetries,
 			MaxBodyBytes:  cfg.maxBodyBytes,
 			WaitMin:       cfg.retryWaitMin,
@@ -603,7 +715,9 @@ func New(opts ...Option) (*Proxy, error) {
 			CheckRetry:    checkRetry,
 		}
 	} else {
-		transport = withAttemptMarkingTransport(transport)
+		transport = withAttemptMarkingTransport(&transcode.SigningTransport{
+			Inner: transport,
+		})
 	}
 
 	// Track whether the retry transport handles breaker reporting. Detect direct
@@ -640,6 +754,33 @@ func New(opts ...Option) (*Proxy, error) {
 		adaptiveHeadroom:       cfg.adaptiveHeadroom,
 		adaptiveHeadroomWindow: cfg.adaptiveHeadroomWindow,
 		limitAll:               cfg.limitAll,
+	}
+
+	// Build one transcode handler per mapping, each forwarding through the
+	// proxy engine (the retry/breaker-aware transport). The mutable parts of
+	// the configuration are deep-copied so caller mutation after New cannot
+	// change live behavior or race with requests (review-08 additional 2).
+	p.transcodeHandlerMap = make(map[transcode.RouteKey]http.Handler, len(cfg.transcodeMappings))
+	for i := range cfg.transcodeMappings {
+		m := &cfg.transcodeMappings[i]
+		mapping := m.Mapping
+		mapping.ModelMap = cloneModelMap(m.ModelMap)
+		mapping.LossPolicy = cloneLossPolicy(m.LossPolicy)
+		mapping.AllowedClientQuery = cloneStringSet(m.AllowedClientQuery)
+		h := transcode.NewTranscodeHandler(
+			transcode.HandlerConfig{
+				Mapping:    mapping,
+				Upstream:   cfg.upstream,
+				BodyLimits: m.BodyLimits,
+			},
+			p.RoundTrip,
+			nil,
+		)
+		p.transcodeHandlers = append(p.transcodeHandlers, h)
+		// First-match wins for duplicate route keys.
+		if _, exists := p.transcodeHandlerMap[m.ClientRoute]; !exists {
+			p.transcodeHandlerMap[m.ClientRoute] = h
+		}
 	}
 
 	rp := &httputil.ReverseProxy{
@@ -927,16 +1068,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("proxy panic: %v", rv)
 			if recPtr != nil {
+				// Any recovered panic is an aborted exchange: the exchange never
+				// completed cleanly, the clean-completion counters are skipped,
+				// and the journal records Aborted with ResponseComplete unset
+				// (review-08 blocker 12).
+				recPtr.aborted = true
 				if !recPtr.terminalWritten {
 					recPtr.proxyGeneratedError = true
 				}
 				http.Error(recPtr, "internal error", http.StatusBadGateway)
-				if limited {
-					p.m.IncProxied()
-				} else {
-					p.m.IncPassThrough()
-				}
-				finalize(false)
+				finalize(true)
 			} else {
 				// No statusRecorder — write directly to the raw ResponseWriter.
 				// This path should not happen in practice (recPtr is always set
@@ -994,6 +1135,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = reqBodyReader
 	}
 
+	// Dispatch to the admission paths. Transcoded routes are dispatched
+	// inside serveLimited/servePassthrough (via lookupTranscodeHandler) so they
+	// are bounded exactly like ordinary requests: limited routes acquire the
+	// per-route and global limiter slots, and passthrough routes honor the
+	// global limiter.
 	if limited {
 		p.serveLimited(rec, r, flightID)
 	} else {
@@ -1001,6 +1147,49 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	finalize(recPtr != nil && recPtr.aborted)
+}
+
+// serveTranscodeHandler runs a transcode handler with the per-request outcome
+// sink wired. After the handler returns, the recorded outcome provenance is
+// attached to the statusRecorder so breaker accounting and slot protection
+// use it instead of status-code guessing. Recorder completion state is set
+// from the outcome before breaker or metrics processing: an exchange whose
+// downstream response was not fully written (client abort or failed write) is
+// marked aborted so it is never counted as a clean completion.
+func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, handler http.Handler) {
+	ctx, sink := transcode.WithOutcomeSink(r.Context())
+	handler.ServeHTTP(w, r.WithContext(ctx))
+	// The handler records EXACTLY ONE outcome synchronously (its defer
+	// guarantees one when no path recorded it): there is no non-blocking
+	// branch that silently loses provenance, and a missing outcome is an
+	// internal invariant violation (review-z commit 4).
+	outcome, recorded := sink.Load()
+	if !recorded {
+		panic("transcode handler returned without recording an outcome")
+	}
+	if rec, ok := w.(*statusRecorder); ok {
+		outcomeCopy := outcome
+		rec.transcodeOutcome = &outcomeCopy
+		// Completion is monotonic: the recorder's independent
+		// write-failure observation (a short write or write error on
+		// the raw ResponseWriter) can never be overwritten by an
+		// outcome that claims a clean completion (review-k finding 7).
+		rec.aborted = rec.aborted ||
+			!outcomeCopy.DownstreamComplete ||
+			rec.downstreamWriteFailed()
+	}
+}
+
+// lookupTranscodeHandler returns the transcode handler mapped to the request
+// method and path, or nil when the route is not transcoded. Dispatch is
+// method-scoped: OPTIONS/GET/HEAD/DELETE on a mapped path pass through
+// transparently.
+func (p *Proxy) lookupTranscodeHandler(r *http.Request) http.Handler {
+	key, err := transcode.NewRouteKey(r.Method, r.URL.Path)
+	if err != nil {
+		return nil
+	}
+	return p.transcodeHandlerMap[key]
 }
 
 func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightID uint64) {
@@ -1012,6 +1201,12 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 	ctx := withCopyErrorState(r.Context(), copyState)
 	ctx = withUpstreamAttemptState(ctx, attemptState)
 	r = r.WithContext(ctx)
+
+	// result is the immutable per-exchange classification produced after the
+	// handler finishes. It is assigned before the slot-release defer can run
+	// and consumed by the defer, the breaker resolution, and the completion
+	// counters — never recomputed.
+	var result exchangeResult
 
 	// Reject immediately if the circuit breaker is OPEN, BEFORE acquiring
 	// any resources. This mirrors the pre-check in serveLimited (which checks
@@ -1097,15 +1292,15 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 			isClientCancel := isContextCancellation(ctxErr) || (recOK && rec.downstreamWriteFailed())
 			finalUnclean := isClientCancel || (recOK && rec.aborted)
 			retryRecordedFailure := retryAttemptFailureForSlot(retryAttempt, retryHistoricalFailureCanDriveSlot(rec, finalUnclean))
-			suppressFailureForClientAbort := recOK && rec.suppressibleClientAbort(ctxErr) && !retryRecordedFailure
-			// Single anchor for classification decisions in this defer.
-			now := time.Now()
-			upstreamFailure := retryRecordedFailure || (recOK && (isUpstreamFailureStatus(rec, now) || upstreamAbortFailure))
+			suppressFailureForClientAbort := result.suppressibleAbort && !retryRecordedFailure
+			// Single anchor for classification decisions in this defer:
+			// the immutable per-exchange result, plus the slot-specific
+			// retry-recorded failure fact.
+			upstreamFailure := result.upstreamFailure || retryRecordedFailure
 			// Phantom penalty: hold the global-limiter slot after an upstream failure
 			// when the circuit breaker is enabled and the penalty is non-zero. If the
-			// penalty is zero (currently unreachable — basePenalty is always > 0 — but
-			// defensive), fall through to check failureHold.
-			if p.breaker != nil && attemptState.started.Load() && !suppressFailureForClientAbort && upstreamFailure {
+			// penalty is zero, fall through to check failureHold.
+			if p.breaker != nil && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 				penalty := p.breaker.PenaltyDuration()
 				if penalty > 0 {
 					time.AfterFunc(penalty, release)
@@ -1113,14 +1308,14 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 				}
 				// Penalty is zero — fall through to check failureHold below.
 			}
-			if p.failureHold > 0 && attemptState.started.Load() && !suppressFailureForClientAbort && upstreamFailure {
+			if p.failureHold > 0 && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 				// Standalone failure hold: holds the global-limiter slot after an
 				// upstream failure. This applies when the circuit breaker is disabled
 				// or when the breaker penalty is zero. Mirrors serveLimited.
 				time.AfterFunc(p.failureHold, release)
 				return
 			}
-			if isClientCancel && attemptState.started.Load() && p.cancelCooldown > 0 {
+			if isClientCancel && result.upstreamAttempted && p.cancelCooldown > 0 {
 				// Client disconnected after an upstream transport attempt started. Hold
 				// the slot briefly to prevent N+1 observed concurrency from
 				// downstream accounting lag (KILL-04 mitigation). Unlike
@@ -1169,87 +1364,82 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 					} else {
 						p.cancelSuppressedAbortProbe(retryAttempt, proxyStart, breakerEpoch)
 					}
+					// Classify before re-panicking so the slot-release defer
+					// still sees the real exchange result during unwinding.
+					rec, _ := w.(*statusRecorder)
+					result = p.classifyExchange(rec, r, retryAttempt, attemptState.started.Load(), upstreamAbortFailure, breakerEpoch, time.Now())
 					panic(rv)
 				}
 				log.Printf("proxy panic in servePassthrough: %v", rv)
-				if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
-					rec.proxyGeneratedError = true
-					http.Error(rec, "internal error", http.StatusBadGateway)
+				if rec, ok := w.(*statusRecorder); ok {
+					// Any recovered panic is an aborted exchange: it never
+					// reaches the completion counters or a clean journal
+					// finalization (review-08 blocker 12).
+					rec.aborted = true
+					if !rec.terminalWritten {
+						rec.proxyGeneratedError = true
+						http.Error(rec, "internal error", http.StatusBadGateway)
+					}
 				}
 				localPanic = true
 			}
 		}()
-		p.inner.ServeHTTP(w, r)
+		if handler := p.lookupTranscodeHandler(r); handler != nil {
+			p.serveTranscodeHandler(w, r, handler)
+		} else {
+			p.inner.ServeHTTP(w, r)
+		}
 	}()
 	if p.handleSuppressedAbort(w, r, attemptState.started.Load(), retryAttempt, proxyStart, breakerEpoch) {
 		upstreamAbortFailure = true
 	}
+	// One immutable per-exchange classification, produced after the handler
+	// finishes. It drives the slot-release defer, breaker resolution,
+	// adaptive action, completion accounting, and journal finalization and
+	// is never recomputed.
+	rec, recOK := w.(*statusRecorder)
+	result = p.classifyExchange(rec, r, retryAttempt, attemptState.started.Load(), upstreamAbortFailure, breakerEpoch, time.Now())
 	if !attemptState.started.Load() {
 		if p.breaker != nil {
 			p.breaker.CancelProbe(breakerEpoch)
 		}
 		return
 	}
-	if rec, ok := w.(*statusRecorder); ok && rec.aborted {
-		if !upstreamAbortFailure {
+	if recOK && rec.aborted {
+		// An aborted exchange is never a clean completion: it does not
+		// reach the completion counters or the journal's clean-completion
+		// path. The breaker is resolved from the classification: a
+		// definitive upstream failure retained in the result is recorded
+		// (mirroring the native abort path); everything else cancels the
+		// probe. A LOCAL panic is not an upstream failure: its
+		// proxy-generated 502 must never fail the breaker (review-08
+		// blocker 12 preserves the localPanic guard).
+		if !localPanic {
+			p.resolveAbortedExchange(result, retryAttempt, proxyStart, breakerEpoch, upstreamAbortFailure)
+		} else {
 			p.cancelSuppressedAbortProbe(retryAttempt, proxyStart, breakerEpoch)
 		}
 		return
 	}
 
-	// Feed failure/success signals to the circuit breaker. Without retries, the
-	// proxy reports the whole exchange. With retry-enabled breaker reporting, the
-	// retry transport reports failures immediately but defers 2xx success via the
-	// request context; the proxy records that success only after ReverseProxy has
-	// copied the response body without an abort.
+	// Feed failure/success signals to the circuit breaker from the
+	// immutable exchange result. Without retries, the proxy reports the
+	// whole exchange. With retry-enabled breaker reporting, the retry
+	// transport reports failures immediately (attempt.FailureRecorded) but
+	// defers 2xx success via the request context; the proxy records that
+	// success only after ReverseProxy has copied the response body without
+	// an abort.
 	if p.breaker != nil && !localPanic {
-		rec, recOK := w.(*statusRecorder)
-		if recOK {
-			now := time.Now()
-			if p.retryHandlesBreaker {
-				attemptStart, attemptEpoch := retryAttemptOrDefault(retryAttempt, proxyStart, breakerEpoch)
-				p.recordRetryOwnedProxyTransportFailure(w, r, retryAttempt, attemptStart, attemptEpoch, now)
-				if isBreakerSuccessStatus(rec, now, attemptEpoch) {
-					p.breaker.RecordSuccess(attemptStart, attemptEpoch)
-				}
-				p.m.IncPassThrough()
-				return
-			}
-			// Client-initiated context cancellation (e.g., the user
-			// closed their browser tab) is NOT an upstream failure —
-			// do not feed it to the breaker. An attacker could
-			// otherwise trip the breaker by initiating and
-			// immediately dropping connections. This mirrors the
-			// isClientCancel guard in the retry transport. Note:
-			// unlike the retry transport which checks the RoundTrip
-			// error directly, the proxy uses r.Context().Err() because
-			// httputil.ReverseProxy.ServeHTTP writes to the
-			// ResponseWriter instead of returning a Go error.
-			ctxErr := r.Context().Err()
-			// Only skip recording for transport errors (status 0) and
-			// proxy-generated 502 errors when the client cancelled. The
-			// proxy's error handler writes 502 on context cancellation —
-			// this is NOT an upstream failure. Any other 5xx (500, 503,
-			// 504, 429) came from the upstream and MUST be reported
-			// regardless of whether the client disconnected mid-response.
-			suppressFailureForClientAbort := rec.suppressibleClientAbort(ctxErr)
-			// Evaluate classification and Retry-After under a single time
-			// anchor so a slow response body cannot create a split-brain state.
-			if !suppressFailureForClientAbort && isUpstreamFailureStatus(rec, now) {
-				p.breaker.RecordFailure(rec.status, parseRetryAfterFromRecorder(rec, now), proxyStart, breakerEpoch)
-			} else if isBreakerSuccessStatus(rec, now, breakerEpoch) {
-				p.breaker.RecordSuccess(proxyStart, breakerEpoch)
-			}
-		}
+		p.resolveBreakerResult(result, retryAttempt, proxyStart, breakerEpoch)
 	}
 	// Count the passthrough request only after it has actually been
 	// forwarded AND the breaker logic has run. This placement mirrors
 	// serveLimited's IncProxied() at the end of that function. If a
 	// panic occurs in the breaker logic above, IncPassThrough is NOT
-	// called — the outer ServeHTTP recovery handles metrics recording,
-	// calling IncPassThrough exactly once (via the !metRecorded guard).
-	// Placing this BEFORE the breaker logic would cause a double-count
-	// on panic: once here, once in the outer recovery.
+	// called — the recovered panic marks the exchange aborted and the
+	// outer ServeHTTP recovery finalizes it as aborted (RecordAbortedRequest;
+	// review-08 blocker 12), so the completion counter is never
+	// double-counted.
 	p.m.IncPassThrough()
 }
 
@@ -1260,6 +1450,12 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	copyState := &copyErrorState{}
 	ctx = withCopyErrorState(ctx, copyState)
 	r = r.WithContext(ctx)
+
+	// result is the immutable per-exchange classification produced after the
+	// handler finishes. It is assigned before the slot-release defer can run
+	// and consumed by the defer, the breaker resolution, and the completion
+	// counters — never recomputed.
+	var result exchangeResult
 	if p.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, p.timeout)
@@ -1363,25 +1559,26 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		// provider observed more concurrent load than the proxy intended.
 		// Temporarily reduce the effective limit of the limiter that owns this
 		// slot by one, creating breathing room for teardown/accounting races.
-		reachedUpstream = attemptState.started.Load()
-		if p.adaptiveHeadroom && recOK && reachedUpstream && slotLimiter != nil && rec.status == http.StatusTooManyRequests {
+		reachedUpstream = result.upstreamAttempted
+		if p.adaptiveHeadroom && recOK && reachedUpstream && slotLimiter != nil && result.upstreamStatus == http.StatusTooManyRequests {
 			slotLimiter.AdaptiveReduce(p.adaptiveHeadroomWindow)
 		}
 
 		ctxErr := r.Context().Err()
 		isClientCancel := isContextCancellation(ctxErr) || (recOK && rec.downstreamWriteFailed())
 		// Only suppress phantom penalty/failureHold when the client cancelled
-		// AND the status is ambiguous (transport error or proxy-generated 502).
+		// AND the outcome is ambiguous (transport error or proxy-generated 502).
 		// If the upstream returned a definitive 5xx/429 before the client
 		// disconnected, the penalty must apply — the upstream is genuinely
 		// failing. See the comment block above for the full rationale.
 		finalUnclean := isClientCancel || (recOK && rec.aborted)
 		retryRecordedFailure := retryAttemptFailureForSlot(retryAttempt, retryHistoricalFailureCanDriveSlot(rec, finalUnclean))
-		suppressFailureForClientAbort := recOK && rec.suppressibleClientAbort(ctxErr) && !retryRecordedFailure
-		// Single anchor for classification decisions in this defer.
-		now := time.Now()
-		upstreamFailure := retryRecordedFailure || (recOK && (isUpstreamFailureStatus(rec, now) || upstreamAbortFailure))
-		if p.breaker != nil && reachedUpstream && !suppressFailureForClientAbort && upstreamFailure {
+		suppressFailureForClientAbort := result.suppressibleAbort && !retryRecordedFailure
+		// Single anchor for classification decisions in this defer: the
+		// immutable per-exchange result, plus the slot-specific retry-recorded
+		// failure fact.
+		upstreamFailure := result.upstreamFailure || retryRecordedFailure
+		if p.breaker != nil && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 			penalty := p.breaker.PenaltyDuration()
 			if penalty > 0 {
 				time.AfterFunc(penalty, release)
@@ -1389,7 +1586,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			}
 			// Penalty is zero — fall through to check failureHold below.
 		}
-		if p.failureHold > 0 && reachedUpstream && !suppressFailureForClientAbort && upstreamFailure {
+		if p.failureHold > 0 && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 			// Standalone failure hold: holds the slot after an upstream failure.
 			// This applies when the circuit breaker is disabled or when the
 			// breaker penalty is zero. Uses the same suppressible-client-abort
@@ -1399,7 +1596,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			time.AfterFunc(p.failureHold, release)
 			return
 		}
-		if isClientCancel && reachedUpstream && p.cancelCooldown > 0 {
+		if isClientCancel && result.upstreamAttempted && p.cancelCooldown > 0 {
 			// Client disconnected after an upstream transport attempt started. Hold the
 			// slot briefly to prevent N+1 observed concurrency from downstream
 			// accounting lag (KILL-04 mitigation). Unlike phantom penalty and
@@ -1486,86 +1683,75 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 					} else {
 						p.cancelSuppressedAbortProbe(retryAttempt, proxyStart, breakerEpoch)
 					}
+					// Classify before re-panicking so the slot-release defer
+					// still sees the real exchange result during unwinding.
+					rec, _ := w.(*statusRecorder)
+					result = p.classifyExchange(rec, r, retryAttempt, attemptState.started.Load(), upstreamAbortFailure, breakerEpoch, time.Now())
 					panic(rv)
 				}
 				log.Printf("proxy panic in serveLimited: %v", rv)
-				if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
-					rec.proxyGeneratedError = true
-					http.Error(rec, "internal error", http.StatusBadGateway)
+				if rec, ok := w.(*statusRecorder); ok {
+					// Any recovered panic is an aborted exchange: it never
+					// reaches the completion counters or a clean journal
+					// finalization (review-08 blocker 12).
+					rec.aborted = true
+					if !rec.terminalWritten {
+						rec.proxyGeneratedError = true
+						http.Error(rec, "internal error", http.StatusBadGateway)
+					}
 				}
 				localPanic = true
 			}
 		}()
-		p.inner.ServeHTTP(w, r)
+		if handler := p.lookupTranscodeHandler(r); handler != nil {
+			p.serveTranscodeHandler(w, r, handler)
+		} else {
+			p.inner.ServeHTTP(w, r)
+		}
 	}()
 	if p.handleSuppressedAbort(w, r, attemptState.started.Load(), retryAttempt, proxyStart, breakerEpoch) {
 		upstreamAbortFailure = true
 	}
+	// One immutable per-exchange classification, produced after the handler
+	// finishes. It drives the slot-release defer, breaker resolution,
+	// adaptive action, completion accounting, and journal finalization and
+	// is never recomputed.
+	rec, recOK := w.(*statusRecorder)
+	result = p.classifyExchange(rec, r, retryAttempt, attemptState.started.Load(), upstreamAbortFailure, breakerEpoch, time.Now())
 	if !attemptState.started.Load() {
 		if p.breaker != nil {
 			p.breaker.CancelProbe(breakerEpoch)
 		}
 		return
 	}
-	if rec, ok := w.(*statusRecorder); ok && rec.aborted {
-		if !upstreamAbortFailure {
+	if recOK && rec.aborted {
+		// An aborted exchange is never a clean completion: it does not
+		// reach the completion counters or the journal's clean-completion
+		// path. The breaker is resolved from the classification: a
+		// definitive upstream failure retained in the result is recorded
+		// (mirroring the native abort path); everything else cancels the
+		// probe. A LOCAL panic is not an upstream failure: its
+		// proxy-generated 502 must never fail the breaker (review-08
+		// blocker 12 preserves the localPanic guard).
+		if !localPanic {
+			p.resolveAbortedExchange(result, retryAttempt, proxyStart, breakerEpoch, upstreamAbortFailure)
+		} else {
 			p.cancelSuppressedAbortProbe(retryAttempt, proxyStart, breakerEpoch)
 		}
 		return
 	}
 
-	// Feed failure/success signals to the circuit breaker. Without retries, the
-	// proxy reports the whole exchange. With retry-enabled breaker reporting, the
-	// retry transport reports failures immediately but defers 2xx success via the
-	// request context; the proxy records that success only after ReverseProxy has
-	// copied the response body without an abort.
+	// Feed failure/success signals to the circuit breaker from the
+	// immutable exchange result. Without retries, the proxy reports the
+	// whole exchange. With retry-enabled breaker reporting, the retry
+	// transport records failures immediately (attempt.FailureRecorded) but
+	// defers 2xx success via the request context; the proxy records that
+	// success only after ReverseProxy has copied the response body without
+	// an abort. A transcoded exchange contributes explicit outcome
+	// provenance: a client-aborted 2xx stream is neither success nor
+	// failure; a local conversion failure is not an upstream failure.
 	if p.breaker != nil && !localPanic {
-		rec, recOK := w.(*statusRecorder)
-		if recOK {
-			now := time.Now()
-			if p.retryHandlesBreaker {
-				attemptStart, attemptEpoch := retryAttemptOrDefault(retryAttempt, proxyStart, breakerEpoch)
-				p.recordRetryOwnedProxyTransportFailure(w, r, retryAttempt, attemptStart, attemptEpoch, now)
-				if isBreakerSuccessStatus(rec, now, attemptEpoch) {
-					p.breaker.RecordSuccess(attemptStart, attemptEpoch)
-				}
-				p.m.IncProxied()
-				return
-			}
-			// Client-initiated context cancellation (e.g., the user
-			// closed their browser tab) is NOT an upstream failure —
-			// do not feed it to the breaker. An attacker could
-			// otherwise trip the breaker by initiating and
-			// immediately dropping connections. This mirrors the
-			// isClientCancel guard in the retry transport. Note:
-			// unlike the retry transport which checks the RoundTrip
-			// error directly, the proxy uses r.Context().Err() because
-			// httputil.ReverseProxy.ServeHTTP writes to the
-			// ResponseWriter instead of returning a Go error.
-			ctxErr := r.Context().Err()
-			// Both Canceled (explicit disconnect) and DeadlineExceeded
-			// (client-imposed timeout) are client-initiated. The retry
-			// transport also checks both — since it never calls
-			// context.WithTimeout, all DeadlineExceeded errors originate
-			// from the client context or the proxy's queue timeout, not
-			// from per-attempt deadlines controlled by the transport.
-			suppressFailureForClientAbort := rec.suppressibleClientAbort(ctxErr)
-			// Only skip recording for transport errors (status 0) and
-			// proxy-generated 502 errors when the client cancelled. The
-			// proxy's error handler writes 502 on context cancellation —
-			// this is NOT an upstream failure. Any other 5xx came from
-			// the upstream and MUST be reported regardless of client state.
-			// A provider-generated 502 is a definitive upstream failure. Only status
-			// 0 and proxy-generated 502s with client-side provenance are suppressible.
-			// Evaluate classification and Retry-After under a single time
-			// anchor so a slow response body cannot create a split-brain state
-			// where the breaker sees a temporary ban but the penalty is zero.
-			if !suppressFailureForClientAbort && isUpstreamFailureStatus(rec, now) {
-				p.breaker.RecordFailure(rec.status, parseRetryAfterFromRecorder(rec, now), proxyStart, breakerEpoch)
-			} else if isBreakerSuccessStatus(rec, now, breakerEpoch) {
-				p.breaker.RecordSuccess(proxyStart, breakerEpoch)
-			}
-		}
+		p.resolveBreakerResult(result, retryAttempt, proxyStart, breakerEpoch)
 	}
 
 	p.m.IncProxied()
@@ -1586,14 +1772,277 @@ func (p *Proxy) acquireSlot(ctx context.Context, method, path string) (release f
 	return rel, p.limiter, err
 }
 
-func isUpstreamFailureStatus(rec *statusRecorder, now time.Time) bool {
+func isUpstreamFailureStatus(rec *statusRecorder, now time.Time, ctxErr error) bool {
 	if rec != nil && (rec.localUpgradeFailure || rec.retryCircuitOpen()) {
+		return false
+	}
+	// When the client cancelled the context and the upstream returned a
+	// clean 2xx response, this is a suppressible client abort — the
+	// upstream succeeded and the client just disconnected. Classifying
+	// it as an upstream failure would incorrectly trip the breaker.
+	if ctxErr != nil && rec != nil && rec.status >= 200 && rec.status < 300 {
 		return false
 	}
 	return circuitbreaker.IsFailureStatusWithHeaders(rec.status, responseHeaders(rec), rec.responseAt, now)
 }
 
-func isBreakerSuccessStatus(rec *statusRecorder, now time.Time, epoch uint64) bool {
+// exchangeResult is the immutable per-exchange classification produced after
+// the handler finishes. One value drives breaker resolution, slot holds,
+// adaptive action, completion counters, and journal finalization for both
+// admission paths. It is never recomputed or reinterpreted.
+type exchangeResult struct {
+	// upstreamAttempted reports whether an upstream transport attempt
+	// started (the transport-level fact, tracked for both admission paths).
+	upstreamAttempted bool
+
+	// upstreamStatus is the definitive upstream response status (0 when no
+	// response was received).
+	upstreamStatus int
+
+	// upstreamFailure reports a definitive upstream failure: an HTTP
+	// failure status, a transport error, a truncated upstream body, or an
+	// abort caused by an upstream body error.
+	upstreamFailure bool
+
+	// upstreamSuccess reports a definitive upstream success (2xx, or a
+	// HALF_OPEN probe resolved by a non-failure status). A cancelled 2xx is
+	// neither success nor failure.
+	upstreamSuccess bool
+
+	// retryAfter is the upstream-signaled Retry-After (0 when absent). For
+	// transcoded exchanges it comes from the ORIGINAL upstream response,
+	// never from the rendered client error.
+	retryAfter time.Duration
+
+	// clientAborted reports that the client disconnected before the
+	// exchange completed (context cancellation or a failed downstream
+	// write).
+	clientAborted bool
+
+	// localFailure reports a proxy-local failure (conversion error,
+	// proxy-generated error): not upstream-health input.
+	localFailure bool
+
+	// switchingProtocolsResolved reports that a 101 switching-protocols
+	// response had its probe resolved by the handshake hooks; the hooks
+	// already recorded the outcome and the breaker section must not
+	// re-record it.
+	switchingProtocolsResolved bool
+
+	// suppressibleAbort reports a client abort with no definitive upstream
+	// failure signal: the exchange must not drive a phantom hold or a
+	// breaker failure.
+	suppressibleAbort bool
+}
+
+// classifyExchange produces the immutable per-exchange result. Transcode
+// exchanges classify from the explicit outcome provenance (plus recorder
+// write state); native exchanges normalize the existing recorder facts into
+// the same structure with their exact legacy semantics.
+func (p *Proxy) classifyExchange(
+	rec *statusRecorder,
+	r *http.Request,
+	retryAttempt *retry.BreakerAttempt,
+	upstreamAttempted bool,
+	upstreamAbortFailure bool,
+	breakerEpoch uint64,
+	now time.Time,
+) exchangeResult {
+	if rec != nil && rec.transcodeOutcome != nil {
+		return classifyTranscodeExchange(rec, r, upstreamAttempted, now)
+	}
+	return classifyNativeExchange(rec, r, retryAttempt, upstreamAttempted, upstreamAbortFailure, breakerEpoch, now)
+}
+
+// classifyTranscodeExchange classifies a transcoded exchange from the
+// explicit outcome provenance. Upstream failure, client abort, downstream
+// completion, and Retry-After are independent dimensions of the outcome.
+func classifyTranscodeExchange(
+	rec *statusRecorder,
+	r *http.Request,
+	upstreamAttempted bool,
+	now time.Time,
+) exchangeResult {
+	outcome := rec.transcodeOutcome
+	// The attempt marker fires when the signing+dispatch chain starts, which
+	// precedes the signer: a local request conversion or signing error never
+	// dispatches, so its outcome fact overrides the marker. The marker still
+	// ORs in for exchanges aborted mid-flight where the handler recorded no
+	// attempt fact (review-z commit 4).
+	attempted := outcome.UpstreamAttempted ||
+		(upstreamAttempted && outcome.Provenance != transcode.ProvenanceLocalRequestConversionError)
+	result := exchangeResult{
+		upstreamAttempted: attempted,
+		upstreamFailure:   outcome.UpstreamFailure,
+		clientAborted:     outcome.ClientAborted || outcome.Provenance == transcode.ProvenanceClientAbort,
+	}
+	if outcome.UpstreamStatus.Set {
+		result.upstreamStatus = outcome.UpstreamStatus.Value
+	}
+	switch outcome.Provenance {
+	case transcode.ProvenanceLocalRequestConversionError,
+		transcode.ProvenanceLocalResponseConversionError,
+		transcode.ProvenanceLocalStreamValidationError,
+		transcode.ProvenanceDownstreamWriteError:
+		result.localFailure = true
+	}
+	result.localFailure = result.localFailure || outcome.LocalFailure
+	result.upstreamSuccess = !result.upstreamFailure &&
+		outcome.UpstreamStatus.Set &&
+		outcome.UpstreamStatus.Value >= http.StatusOK &&
+		outcome.UpstreamStatus.Value < http.StatusMultipleChoices
+	// Retry-After is anchored at the ORIGINAL header receipt in the
+	// outcome; the translated downstream header is NEVER re-parsed with a
+	// fresh receipt timestamp (review-z commit 4).
+	if outcome.RetryAfter.Set {
+		result.retryAfter = outcome.RetryAfter.Value
+	}
+	// A client abort suppresses the phantom hold and breaker failure only
+	// when the outcome carries no definitive upstream failure signal —
+	// mirroring the native suppressible-abort guard, where a definitive
+	// upstream status (429, 5xx, or a rate-signalled 403 classified from
+	// the ORIGINAL upstream headers) is recorded even if the client
+	// disconnects while the translated error is written.
+	result.suppressibleAbort = result.clientAborted && !outcome.UpstreamFailure
+	return result
+}
+
+// classifyNativeExchange normalizes the existing recorder facts into the
+// exchange result with their exact legacy semantics. breakerEpoch is the
+// probe epoch from Allow(); it is passed to isBreakerSuccessStatus so a
+// resolved 101 switching-protocols handshake is not double-recorded.
+func classifyNativeExchange(
+	rec *statusRecorder,
+	r *http.Request,
+	retryAttempt *retry.BreakerAttempt,
+	upstreamAttempted bool,
+	upstreamAbortFailure bool,
+	breakerEpoch uint64,
+	now time.Time,
+) exchangeResult {
+	result := exchangeResult{
+		upstreamAttempted: upstreamAttempted,
+		clientAborted: isContextCancellation(r.Context().Err()) ||
+			(rec != nil && rec.downstreamWriteFailed()),
+	}
+	if rec == nil {
+		return result
+	}
+	ctxErr := r.Context().Err()
+	epoch := breakerEpoch
+	if retryAttempt != nil && retryAttempt.Epoch != 0 {
+		epoch = retryAttempt.Epoch
+	}
+	result.upstreamStatus = rec.status
+	result.upstreamFailure = isUpstreamFailureStatus(rec, now, ctxErr) || upstreamAbortFailure
+	result.switchingProtocolsResolved = rec.status == http.StatusSwitchingProtocols &&
+		rec.switchingProtocolsProbeResolved.Load()
+	// A cancelled 2xx is neither success nor failure: the upstream completed
+	// but the client abandoned the response. Recording it as a success could
+	// reset an existing failure streak.
+	result.upstreamSuccess = !result.upstreamFailure && !result.clientAborted &&
+		isBreakerSuccessStatus(rec, now, epoch, ctxErr)
+	result.retryAfter = parseRetryAfterFromRecorder(rec, now)
+	result.localFailure = rec.status == http.StatusBadGateway && rec.proxyGeneratedError
+	result.suppressibleAbort = rec.suppressibleClientAbort(ctxErr)
+	return result
+}
+
+// resolveAbortedExchange resolves the breaker for an aborted exchange. An
+// aborted exchange never reaches the completion counters or the journal's
+// clean-completion path; the breaker is resolved from the classification — a
+// definitive upstream failure retained in the result is recorded (mirroring
+// the native abort path), everything else cancels the probe.
+func (p *Proxy) resolveAbortedExchange(
+	result exchangeResult,
+	attempt *retry.BreakerAttempt,
+	startedAt time.Time,
+	epoch uint64,
+	upstreamAbortFailure bool,
+) {
+	if p.breaker == nil {
+		return
+	}
+	if upstreamAbortFailure {
+		// handleAbortHandler already recorded the failure and marked the
+		// attempt; the probe resolution stands.
+		return
+	}
+	if result.upstreamFailure && !result.suppressibleAbort {
+		p.recordFailureOnce(result, attempt, startedAt, epoch)
+		return
+	}
+	p.cancelSuppressedAbortProbe(attempt, startedAt, epoch)
+}
+
+// resolveBreakerResult feeds the immutable exchange result into the circuit
+// breaker. Only definitive upstream outcomes mutate breaker health:
+//
+//   - upstream failures (HTTP >= 500, 429, rate-signalled 403, transport and
+//     body errors) are failures;
+//   - upstream successes (2xx, completed streams, resolved HALF_OPEN probes)
+//     are successes;
+//   - client aborts, local failures, and suppressed aborts are neither
+//     success nor failure — a cancelled 2xx stream must not reset a failure
+//     streak, and a local conversion error is not an upstream failure.
+//
+// The retry transport records HTTP-level failures immediately
+// (attempt.FailureRecorded); that resolution is authoritative and is never
+// duplicated here. Success is always recorded here: the retry transport
+// defers 2xx success to the proxy.
+func (p *Proxy) resolveBreakerResult(
+	result exchangeResult,
+	attempt *retry.BreakerAttempt,
+	startedAt time.Time,
+	epoch uint64,
+) {
+	if p.breaker == nil {
+		return
+	}
+	attemptStart, attemptEpoch := retryAttemptOrDefault(attempt, startedAt, epoch)
+	switch {
+	case result.upstreamFailure && !result.suppressibleAbort:
+		p.recordFailureOnce(result, attempt, startedAt, epoch)
+	case result.upstreamSuccess && !result.suppressibleAbort:
+		p.breaker.RecordSuccess(attemptStart, attemptEpoch)
+	case attemptEpoch != 0 && result.upstreamStatus > 0 &&
+		!result.upstreamFailure && !result.localFailure && !result.suppressibleAbort &&
+		!result.switchingProtocolsResolved:
+		// A HALF_OPEN probe must be resolved by every definitive upstream
+		// response; non-failure statuses prove the upstream answered even if
+		// they are not ordinary CLOSED-state 2xx successes. A resolved 101
+		// handshake is excluded: the switching-protocols hooks already
+		// recorded its outcome.
+		p.breaker.RecordSuccess(attemptStart, attemptEpoch)
+	default:
+		if attempt != nil && attempt.FailureRecorded {
+			return
+		}
+		p.breaker.CancelProbe(attemptEpoch)
+	}
+}
+
+// recordFailureOnce records an upstream failure unless the retry transport
+// already recorded it at the HTTP level. Only transports that own breaker
+// reporting set the flag meaningfully; a retry transport without a breaker
+// sets FailureRecorded without recording, and the proxy must still report.
+func (p *Proxy) recordFailureOnce(
+	result exchangeResult,
+	attempt *retry.BreakerAttempt,
+	startedAt time.Time,
+	epoch uint64,
+) {
+	if p.breaker == nil {
+		return
+	}
+	if p.retryHandlesBreaker && attempt != nil && attempt.FailureRecorded {
+		return
+	}
+	attemptStart, attemptEpoch := retryAttemptOrDefault(attempt, startedAt, epoch)
+	p.breaker.RecordFailure(result.upstreamStatus, result.retryAfter, attemptStart, attemptEpoch)
+}
+
+func isBreakerSuccessStatus(rec *statusRecorder, now time.Time, epoch uint64, ctxErr error) bool {
 	if rec == nil || rec.proxyTransportOrGeneratedError() {
 		return false
 	}
@@ -1607,7 +2056,7 @@ func isBreakerSuccessStatus(rec *statusRecorder, now time.Time, epoch uint64) bo
 	// Clean 101 upgrades are successful HTTP handshakes, and other non-failure
 	// statuses (for example a bare auth 403) prove the upstream answered even if
 	// they are not counted as ordinary CLOSED-state 2xx successes.
-	if epoch != 0 && rec.status > 0 && !isUpstreamFailureStatus(rec, now) {
+	if epoch != 0 && rec.status > 0 && !isUpstreamFailureStatus(rec, now, ctxErr) {
 		return true
 	}
 	return false
@@ -1987,12 +2436,12 @@ func (p *Proxy) handleAbortHandler(w http.ResponseWriter, r *http.Request, attem
 	// is being written.
 	if rec != nil {
 		if rec.hasRealProxyTransportError(r.Context().Err()) {
-			p.recordAbortFailure(w, attempt, recordStartedAt, recordEpoch)
+			p.recordAbortFailure(w, attempt, recordStartedAt, recordEpoch, r.Context().Err())
 			return true
 		}
 		isTransportOrProxyError := rec.proxyTransportOrGeneratedError()
-		if !isTransportOrProxyError && isUpstreamFailureStatus(rec, now) {
-			p.recordAbortFailure(w, attempt, recordStartedAt, recordEpoch)
+		if !isTransportOrProxyError && isUpstreamFailureStatus(rec, now, r.Context().Err()) {
+			p.recordAbortFailure(w, attempt, recordStartedAt, recordEpoch, r.Context().Err())
 			return true
 		}
 	}
@@ -2005,7 +2454,7 @@ func (p *Proxy) handleAbortHandler(w http.ResponseWriter, r *http.Request, attem
 		if isContextCancellation(upstreamErr) && isContextCancellation(r.Context().Err()) {
 			return false
 		}
-		p.recordAbortFailure(w, attempt, recordStartedAt, recordEpoch)
+		p.recordAbortFailure(w, attempt, recordStartedAt, recordEpoch, r.Context().Err())
 		return true
 	}
 
@@ -2025,13 +2474,22 @@ func (p *Proxy) handleAbortHandler(w http.ResponseWriter, r *http.Request, attem
 		return false
 	}
 
-	p.recordAbortFailure(w, attempt, recordStartedAt, recordEpoch)
+	p.recordAbortFailure(w, attempt, recordStartedAt, recordEpoch, r.Context().Err())
 	return true
 }
 
 func (p *Proxy) handleSuppressedAbort(w http.ResponseWriter, r *http.Request, reachedUpstream bool, attempt *retry.BreakerAttempt, startedAt time.Time, epoch uint64) bool {
 	rec, _ := w.(*statusRecorder)
 	if rec == nil {
+		return false
+	}
+	if rec.transcodeOutcome != nil {
+		// A transcoded exchange records explicit outcome provenance after the
+		// handler returns. Its upstream-body reads are tracked in the shared
+		// copy error state, so a client cancellation that interrupts the
+		// stream would look like a copy failure here. The explicit outcome
+		// (ClientAbort, upstream failure, success) is authoritative; the
+		// legacy copy-error abort accounting must not override it.
 		return false
 	}
 	copyFailed := copyErrorStateFromContext(r.Context()).upstreamError() != nil || rec.downstreamWriteFailed()
@@ -2046,7 +2504,7 @@ func (p *Proxy) handleSuppressedAbort(w http.ResponseWriter, r *http.Request, re
 	return p.handleAbortHandler(w, r, attempt, startedAt, epoch)
 }
 
-func (p *Proxy) recordAbortFailure(w http.ResponseWriter, attempt *retry.BreakerAttempt, startedAt time.Time, epoch uint64) {
+func (p *Proxy) recordAbortFailure(w http.ResponseWriter, attempt *retry.BreakerAttempt, startedAt time.Time, epoch uint64, ctxErr error) {
 	if p.breaker == nil {
 		return
 	}
@@ -2055,33 +2513,19 @@ func (p *Proxy) recordAbortFailure(w http.ResponseWriter, attempt *retry.Breaker
 	now := time.Now()
 	status := 0
 	var retryAfter time.Duration
+	// Only skip when the retry transport itself owns breaker reporting and
+	// already recorded this failure. A retry transport WITHOUT a breaker
+	// sets FailureRecorded without recording to any breaker; the proxy must
+	// still report the definitive upstream failure.
 	if p.retryHandlesBreaker && attempt != nil && attempt.FailureRecorded {
 		return
 	}
-	if rec != nil && !rec.proxyTransportOrGeneratedError() && isUpstreamFailureStatus(rec, now) {
+	if rec != nil && !rec.proxyTransportOrGeneratedError() && isUpstreamFailureStatus(rec, now, ctxErr) {
 		status = rec.status
 		retryAfter = parseRetryAfterFromRecorder(rec, now)
 	}
 
 	p.breaker.RecordFailure(status, retryAfter, startedAt, epoch)
-	if attempt != nil {
-		attempt.FailureRecorded = true
-		attempt.AnyFailureRecorded = true
-	}
-}
-
-func (p *Proxy) recordRetryOwnedProxyTransportFailure(w http.ResponseWriter, r *http.Request, attempt *retry.BreakerAttempt, startedAt time.Time, epoch uint64, now time.Time) {
-	if p.breaker == nil || !p.retryHandlesBreaker {
-		return
-	}
-	if attempt != nil && attempt.FailureRecorded {
-		return
-	}
-	rec, _ := w.(*statusRecorder)
-	if rec == nil || !rec.hasRealProxyTransportError(r.Context().Err()) {
-		return
-	}
-	p.breaker.RecordFailure(rec.status, parseRetryAfterFromRecorder(rec, now), startedAt, epoch)
 	if attempt != nil {
 		attempt.FailureRecorded = true
 		attempt.AnyFailureRecorded = true
@@ -2166,6 +2610,11 @@ type statusRecorder struct {
 	switchingProtocolsProbeResolved      atomic.Bool
 	onSwitchingProtocolsHandshakeSuccess func()
 	onSwitchingProtocolsHandshakeFailure func()
+
+	// transcodeOutcome is the explicit outcome provenance recorded by a
+	// transcoded exchange. When set, breaker accounting uses it instead of
+	// status-code guessing.
+	transcodeOutcome *transcode.Outcome
 }
 
 func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
@@ -2419,4 +2868,93 @@ func (w *switchingProtocolsHandshakeWriter) Write(p []byte) (int, error) {
 		}
 	}
 	return n, err
+}
+
+// Validate checks the immutable transcode route configuration so a
+// misconfigured route fails at proxy.New, never on the first request
+// (review-j finding 14): the mapping (route, direction, auth, model map),
+// the body limits, and the allowed client query keys.
+func (m TranscodeMapping) Validate() error {
+	if err := m.Mapping.Validate(); err != nil {
+		return err
+	}
+	if err := m.BodyLimits.Validate(); err != nil {
+		return fmt.Errorf("body limits: %w", err)
+	}
+	for key := range m.AllowedClientQuery {
+		if !validQueryName(key) {
+			return fmt.Errorf(
+				"allowed client query key %q is not a valid query name",
+				key,
+			)
+		}
+	}
+	return nil
+}
+
+// validQueryName reports whether s is a valid client query parameter name on
+// a transcoded route: non-empty, no control characters, and none of the
+// characters that delimit or encode query syntax (review-08 additional 6).
+// HTTP field-name syntax is not query-name syntax: query names may contain
+// characters such as '@' or '/' that field names reject, while '=' '&' '#'
+// and '?' would alter the query structure.
+func validQueryName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x21 || c == 0x7f || strings.ContainsRune("=%&#?", rune(c)) {
+			return false
+		}
+	}
+	return true
+}
+
+// cloneModelMap deep-copies the mutable model map so caller mutation after
+// New cannot change live behavior (review-08 additional 2).
+func cloneModelMap(m transcode.ModelMap) transcode.ModelMap {
+	if m.Exact != nil {
+		cloned := make(map[string]transcode.ModelMapping, len(m.Exact))
+		for key, value := range m.Exact {
+			cloned[key] = value
+		}
+		m.Exact = cloned
+	}
+	return m
+}
+
+// cloneLossPolicy deep-copies the mutable loss policy (review-08 additional
+// 2).
+func cloneLossPolicy(p transcode.LossPolicy) transcode.LossPolicy {
+	if p.Allowed != nil {
+		cloned := make(map[transcode.Feature]struct{}, len(p.Allowed))
+		for feature := range p.Allowed {
+			cloned[feature] = struct{}{}
+		}
+		p.Allowed = cloned
+	}
+	return p
+}
+
+// cloneStringSet deep-copies a string set (review-08 additional 2).
+func cloneStringSet(s map[string]struct{}) map[string]struct{} {
+	if s == nil {
+		return nil
+	}
+	cloned := make(map[string]struct{}, len(s))
+	for key := range s {
+		cloned[key] = struct{}{}
+	}
+	return cloned
+}
+
+// cloneURL copies the upstream URL value so caller mutation of the original
+// after New cannot change the live target (review-08 additional 2).
+func cloneURL(u *url.URL) *url.URL {
+	if u == nil {
+		return nil
+	}
+	cloned := *u
+	return &cloned
 }
