@@ -28,11 +28,11 @@ func TestChatResponseCurrentShapeStrictDecodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("strict decode: %v", err)
 	}
-	if response.ChatLogProbs {
+	if response.Source.ChatLogProbs {
 		t.Fatal("logprobs:null must not set the logprobs presence flag")
 	}
-	if response.ChatServiceTier != "auto" {
-		t.Fatalf("service tier = %q, want auto", response.ChatServiceTier)
+	if response.Source.ChatServiceTier != "auto" {
+		t.Fatalf("service tier = %q, want auto", response.Source.ChatServiceTier)
 	}
 	if response.Usage.InputTokens != 5 || response.Usage.OutputTokens != 7 {
 		t.Fatalf("usage = %+v", response.Usage)
@@ -64,7 +64,9 @@ func TestChatResponseCurrentShapeConverts(t *testing.T) {
 	}
 	usagePermissive := testExchangeContext()
 	usagePermissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureUsageTiming: {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
 	}}
 	usagePermissive.RequestedClientModel = "m"
 	if _, _, err := RenderResponsesResponse(response, usagePermissive); err != nil {
@@ -88,8 +90,10 @@ func TestChatResponseCurrentShapeConverts(t *testing.T) {
 	}
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureServiceTier: {},
-		FeatureUsageTiming: {},
+		FeatureResponseServiceTier:    {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
 	}}
 	permissive.RequestedClientModel = "m"
 	if _, _, err := RenderResponsesResponse(response, permissive); err != nil {
@@ -110,7 +114,7 @@ func TestChatResponseTypedLogprobsLossDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("typed logprobs must strict-decode: %v", err)
 	}
-	if !response.ChatLogProbs {
+	if !response.Source.ChatLogProbs {
 		t.Fatal("typed logprobs must set the presence flag")
 	}
 	context := testExchangeContext()
@@ -120,8 +124,10 @@ func TestChatResponseTypedLogprobsLossDecision(t *testing.T) {
 	}
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureLogprobs:    {},
-		FeatureUsageTiming: {},
+		FeatureLogprobs:               {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
 	}}
 	permissive.RequestedClientModel = "m"
 	if _, _, err := RenderMessagesResponse(response, permissive); err != nil {
@@ -162,7 +168,7 @@ func TestChatStreamCurrentShape(t *testing.T) {
 	// Permissive policy: the stream converts with the loss recorded.
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureServiceTier: {},
+		FeatureResponseServiceTier: {},
 	}}
 	state = newChatResponsesStreamState(
 		permissive,

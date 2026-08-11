@@ -178,7 +178,11 @@ func (m *OutputMessage) Validate() error {
 		return fmt.Errorf("output message type = %q", m.Type)
 	}
 	if m.Role != "assistant" {
-		return fmt.Errorf("output message role = %q", m.Role)
+		return &wire.DecodeError{
+			Kind:    wire.DecodeContradictoryUnion,
+			Path:    "role",
+			Message: fmt.Sprintf("output message role = %q, want assistant", m.Role),
+		}
 	}
 	if !ValidStatus(m.Status) {
 		return fmt.Errorf("invalid output message status %q", m.Status)
@@ -216,17 +220,9 @@ func (c *FunctionCallOutputItem) Validate() error {
 	if c.CallID == "" || c.Name == "" {
 		return errors.New("output function call requires call_id and name")
 	}
-	// arguments may be empty on the wire: the official added event carries
-	// an empty arguments string, with the payload arriving via deltas. A
-	// non-empty invalid payload is a contradictory union arm — the tagged
-	// type promises JSON — reported as a typed decode rejection.
-	if c.Arguments != "" && !json.Valid([]byte(c.Arguments)) {
-		return &wire.DecodeError{
-			Kind:    wire.DecodeContradictoryUnion,
-			Path:    "arguments",
-			Message: "output function call arguments are invalid JSON",
-		}
-	}
+	// arguments is a stringified payload: model-generated arguments are
+	// preserved exactly and are NOT required to be valid JSON (review-z
+	// commit 2) — invalid model output is never an upstream defect.
 	return nil
 }
 

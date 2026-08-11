@@ -27,6 +27,8 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 		// wantUnsupported marks cases that are rejected as a
 		// known-but-unsupported feature (local) rather than corrupt wire.
 		wantUnsupported bool
+		// wantAccept marks cases that must decode successfully.
+		wantAccept bool
 	}{
 		{
 			name: "missing finish reason",
@@ -91,13 +93,18 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 			name: "tool call missing arguments",
 			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f"}}]}}]}`,
 		},
+		// Empty and non-object model-generated arguments are PRESERVED
+		// byte-exact, never rejected as corrupt wire (review-z commit 2);
+		// the exact preservation is asserted in TestToolArgumentsFidelityAcrossTargets.
 		{
-			name: "tool call empty arguments",
-			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":""}}]}}]}`,
+			name:       "tool call empty arguments preserved",
+			body:       `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":""}}]}}]}`,
+			wantAccept: true,
 		},
 		{
-			name: "tool call non-object arguments",
-			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"[1,2]"}}]}}]}`,
+			name:       "tool call non-object arguments preserved",
+			body:       `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"[1,2]"}}]}}]}`,
+			wantAccept: true,
 		},
 		{
 			name: "tool call missing id",
@@ -116,6 +123,12 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := DecodeChatResponse([]byte(tt.body), ChatCapabilities{})
+			if tt.wantAccept {
+				if err != nil {
+					t.Fatalf("decode = %v, want acceptance", err)
+				}
+				return
+			}
 			if tt.wantUnsupported {
 				var unsupportedErr *UnsupportedFeatureError
 				if !errors.As(err, &unsupportedErr) {
@@ -196,8 +209,19 @@ func TestChatResponseOfficialShapesStillDecode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(response.Turns) != 1 || len(response.Turns[0].Parts) == 0 {
+			if len(response.Items) != 1 {
 				t.Fatalf("response = %+v", response)
+			}
+			// A content-bearing response has one message item; a
+			// tool-call-only response has one function-call item.
+			switch item := response.Items[0].(type) {
+			case *CanonicalMessageItem:
+				if len(item.Parts) == 0 {
+					t.Fatalf("response = %+v", response)
+				}
+			case *CanonicalFunctionCallItem:
+			default:
+				t.Fatalf("item = %T", response.Items[0])
 			}
 		})
 	}

@@ -230,10 +230,10 @@ func DecodeChatResponse(
 		Status:    CanonicalResponseCompleted,
 	}
 	if chat.ServiceTier != nil {
-		response.ChatServiceTier = *chat.ServiceTier
+		response.Source.ChatServiceTier = *chat.ServiceTier
 	}
 	if choice.LogProbs != nil {
-		response.ChatLogProbs = true
+		response.Source.ChatLogProbs = true
 	}
 	// Usage. The Known flags reflect the shadow's explicit presence: the
 	// Chat usage totals are modeled omitempty (defensively — the pinned
@@ -273,18 +273,18 @@ func DecodeChatResponse(
 	// known-but-unsupported feature (local), never a defaulted success.
 	switch derefStr(choice.FinishReason) {
 	case "stop":
-		response.StopReason = CanonicalStopEndTurn
+		response.Stop.Reason = CanonicalStopEndTurn
 	case "length":
-		response.StopReason = CanonicalStopMaxTokens
+		response.Stop.Reason = CanonicalStopMaxTokens
 		response.Status = CanonicalResponseIncomplete
 		response.IncompleteReason = "max_output_tokens"
 	case "tool_calls", "function_call":
-		response.StopReason = CanonicalStopToolUse
+		response.Stop.Reason = CanonicalStopToolUse
 	case "content_filter":
 		// The official Responses contract represents a filtered response as
 		// status incomplete with reason content_filter; the Anthropic
 		// dialect renders the refusal stop reason.
-		response.StopReason = CanonicalStopRefusal
+		response.Stop.Reason = CanonicalStopRefusal
 		response.Status = CanonicalResponseIncomplete
 		response.IncompleteReason = "content_filter"
 	default:
@@ -295,14 +295,24 @@ func DecodeChatResponse(
 		}
 	}
 
-	parts, err := chatMessageToCanonicalParts(message, capabilities)
+	// The assistant message becomes one message item; tool calls become
+	// their own function-call items, preserving function-call identity and
+	// the model-generated arguments byte-exact (review-z commit 2).
+	parts, calls, err := chatMessageToCanonicalParts(message, capabilities)
 	if err != nil {
 		return CanonicalResponse{}, err
 	}
-	response.Turns = []CanonicalTurn{{
-		Role:  CanonicalAssistant,
-		Parts: parts,
-	}}
+	items := make([]CanonicalResponseItem, 0, 1+len(calls))
+	if len(parts) > 0 {
+		items = append(items, &CanonicalMessageItem{
+			Role:  CanonicalAssistant,
+			Parts: parts,
+		})
+	}
+	for _, call := range calls {
+		items = append(items, call)
+	}
+	response.Items = items
 	if err := ValidateCanonicalResponse(response); err != nil {
 		return CanonicalResponse{}, err
 	}
@@ -325,14 +335,18 @@ func derefRole(role *ChatMessageRole) string {
 	return string(*role)
 }
 
-// chatMessageToCanonicalParts converts a Chat assistant message into canonical
-// parts: text content, refusal, tool calls, and (when the capability is
-// enabled) provider plaintext reasoning.
+// chatMessageToCanonicalParts converts a Chat assistant message into
+// canonical output: content parts (text, refusal, and — when the capability
+// is enabled — provider plaintext reasoning mapped to ordinary text) and
+// separate function-call items. Tool-call arguments are model-generated and
+// preserved byte-exact in ToolArguments; invalid model output is never an
+// upstream defect (review-z commit 2).
 func chatMessageToCanonicalParts(
 	message *ChatMessage,
 	capabilities ChatCapabilities,
-) ([]CanonicalPart, error) {
+) ([]CanonicalPart, []*CanonicalFunctionCallItem, error) {
 	var parts []CanonicalPart
+	var calls []*CanonicalFunctionCallItem
 
 	if message.Content != nil {
 		switch {
@@ -346,7 +360,7 @@ func chatMessageToCanonicalParts(
 						parts = append(parts, CanonicalText{Text: *block.Text})
 					}
 				case ChatContentBlockTypeImage:
-					return nil, &UnsupportedFeatureError{
+					return nil, nil, &UnsupportedFeatureError{
 						Protocol: "chat",
 						Path:     "choices[].message.content[].type",
 						Feature:  "image_url",
@@ -357,7 +371,7 @@ func chatMessageToCanonicalParts(
 					// features the transcoder does not support — image_url
 					// above, unknown finish_reason values in DecodeChatResponse
 					// — are typed UnsupportedFeatureError and stay local.
-					return nil, upstreamWireError(
+					return nil, nil, upstreamWireError(
 						UpstreamChatCompletions,
 						0,
 						fmt.Errorf(
@@ -378,7 +392,7 @@ func chatMessageToCanonicalParts(
 
 		if message.Reasoning != nil {
 			if !capabilities.ProviderReasoningText {
-				return nil, &UnsupportedFeatureError{
+				return nil, nil, &UnsupportedFeatureError{
 					Protocol: "chat",
 					Path:     "choices[].message.reasoning",
 					Feature:  "provider reasoning text",
@@ -390,7 +404,7 @@ func chatMessageToCanonicalParts(
 
 		for i, call := range message.ToolCalls {
 			if call.ID == nil || *call.ID == "" {
-				return nil, upstreamWireError(
+				return nil, nil, upstreamWireError(
 					UpstreamChatCompletions,
 					0,
 					fmt.Errorf("chat tool call %d has no id", i),
@@ -400,27 +414,20 @@ func chatMessageToCanonicalParts(
 			if call.Function.Name != nil {
 				name = *call.Function.Name
 			}
-			// The shadow enforced arguments presence; the value must parse as
-			// exactly one JSON object — the empty-string-to-"{}" substitution
-			// exists only in the render direction (review-k finding 4).
-			arguments := call.Function.Arguments
-			decoded, err := decodeJSONObject(arguments)
-			if err != nil {
-				return nil, upstreamWireError(
-					UpstreamChatCompletions,
-					0,
-					fmt.Errorf("chat tool call %d arguments: %w", i, err),
-				)
-			}
-			parts = append(parts, CanonicalFunctionCall{
+			// The shadow enforced arguments presence; the raw string is
+			// preserved byte-exact — invalid model output is preserved, not
+			// rejected (review-z commit 2). The empty-string-to-"{}"
+			// substitution exists only in the render direction (review-k
+			// finding 4).
+			calls = append(calls, &CanonicalFunctionCallItem{
 				CallID:    *call.ID,
 				Name:      name,
-				Arguments: mustRawMessage(decoded),
+				Arguments: ParseToolArguments(call.Function.Arguments),
 			})
 		}
 	}
 
-	return parts, nil
+	return parts, calls, nil
 }
 
 // DecodeResponsesResponse decodes a non-streaming Responses response into the
@@ -464,9 +471,9 @@ func DecodeResponsesResponse(
 		// Match the streaming path: content_filter renders a refusal stop
 		// reason, anything else max_tokens.
 		if response.IncompleteReason == "content_filter" {
-			response.StopReason = CanonicalStopRefusal
+			response.Stop.Reason = CanonicalStopRefusal
 		} else {
-			response.StopReason = CanonicalStopMaxTokens
+			response.Stop.Reason = CanonicalStopMaxTokens
 		}
 	case "failed":
 		response.Status = CanonicalResponseFailed
@@ -492,7 +499,7 @@ func DecodeResponsesResponse(
 		{"safety_identifier", envelope.SafetyIdentifier != ""},
 	} {
 		if control.present {
-			response.ResponsesControls = append(response.ResponsesControls, control.name)
+			response.Source.ResponsesControls = append(response.Source.ResponsesControls, control.name)
 		}
 	}
 
@@ -516,45 +523,21 @@ func DecodeResponsesResponse(
 		}
 	}
 
-	var turns []CanonicalTurn
-	var assistantParts []CanonicalPart
-	var resultParts []CanonicalPart
+	// Output items decode one-to-one into canonical items: item boundaries,
+	// output ordering, phases, reasoning artifacts, function calls, and
+	// conversation-state items survive until the target renderer (review-z
+	// commit 2).
 	sawToolUse := false
-
-	// flushAssistantTurn emits the accumulated assistant parts as one turn.
-	flushAssistantTurn := func() {
-		if len(assistantParts) > 0 {
-			turns = append(turns, CanonicalTurn{
-				Role:  CanonicalAssistant,
-				Parts: assistantParts,
-			})
-			assistantParts = nil
-		}
-	}
-	// flushResultTurn emits the accumulated function results as one user turn.
-	flushResultTurn := func() {
-		if len(resultParts) > 0 {
-			turns = append(turns, CanonicalTurn{
-				Role:  CanonicalUser,
-				Parts: resultParts,
-			})
-			resultParts = nil
-		}
-	}
-
 	for i, item := range envelope.Output {
 		switch value := item.(type) {
 		case *ResponsesOutputMessage:
-			flushResultTurn()
-			if value.Phase != "" {
-				response.ResponsesPhase = true
-			}
+			var parts []CanonicalPart
 			for _, content := range value.Content {
 				switch part := content.(type) {
 				case *ResponsesOutputText:
-					assistantParts = append(assistantParts, CanonicalText{Text: part.Text})
+					parts = append(parts, CanonicalText{Text: part.Text})
 				case *ResponsesOutputRefusal:
-					assistantParts = append(assistantParts, CanonicalRefusal{Text: part.Refusal})
+					parts = append(parts, CanonicalRefusal{Text: part.Refusal})
 				default:
 					return CanonicalResponse{}, fmt.Errorf(
 						"output item %d: unknown content part %T",
@@ -563,30 +546,25 @@ func DecodeResponsesResponse(
 					)
 				}
 			}
+			response.Items = append(response.Items, &CanonicalMessageItem{
+				ID:    value.ID,
+				Role:  CanonicalAssistant,
+				Phase: Optional[string]{Value: value.Phase, Set: value.Phase != ""},
+				Parts: parts,
+			})
 
 		case *ResponsesFunctionCallOutputItem:
-			flushResultTurn()
-			arguments, err := decodeJSONObject(value.Arguments)
-			if err != nil {
-				return CanonicalResponse{}, upstreamWireError(
-					UpstreamResponses,
-					0,
-					fmt.Errorf(
-						"output item %d function call arguments: %w",
-						i,
-						err,
-					),
-				)
-			}
-			assistantParts = append(assistantParts, CanonicalFunctionCall{
+			// Model-generated arguments are preserved byte-exact; invalid
+			// model output is never an upstream defect (review-z commit 2).
+			response.Items = append(response.Items, &CanonicalFunctionCallItem{
+				ItemID:    value.ID,
 				CallID:    value.CallID,
 				Name:      value.Name,
-				Arguments: mustRawMessage(arguments),
+				Arguments: ParseToolArguments(value.Arguments),
 			})
 			sawToolUse = true
 
 		case *ResponsesFunctionCallOutputResultItem:
-			flushAssistantTurn()
 			outputParts, err := responsesFunctionOutputToCanonical(value.Output)
 			if err != nil {
 				return CanonicalResponse{}, fmt.Errorf(
@@ -595,22 +573,18 @@ func DecodeResponsesResponse(
 					err,
 				)
 			}
-			resultParts = append(resultParts, CanonicalFunctionResult{
-				CallID:  value.CallID,
-				IsError: false,
-				Parts:   outputParts,
+			response.Items = append(response.Items, &CanonicalFunctionResultItem{
+				ItemID: value.ID,
+				CallID: value.CallID,
+				Parts:  outputParts,
 			})
 
 		case *ResponsesReasoningOutputItem:
-			flushResultTurn()
 			raw, err := json.Marshal(value)
 			if err != nil {
 				return CanonicalResponse{}, fmt.Errorf("output item %d: %w", i, err)
 			}
-			response.ReasoningItems = append(
-				response.ReasoningItems,
-				raw,
-			)
+			response.Items = append(response.Items, &CanonicalReasoningItem{Raw: raw})
 
 		default:
 			return CanonicalResponse{}, fmt.Errorf(
@@ -620,28 +594,22 @@ func DecodeResponsesResponse(
 			)
 		}
 	}
-	flushAssistantTurn()
-	flushResultTurn()
-
-	if len(turns) > 0 {
-		response.Turns = turns
-	}
 
 	switch response.Status {
 	case CanonicalResponseCompleted:
 		if sawToolUse {
-			response.StopReason = CanonicalStopToolUse
+			response.Stop.Reason = CanonicalStopToolUse
 		} else {
-			response.StopReason = CanonicalStopEndTurn
+			response.Stop.Reason = CanonicalStopEndTurn
 		}
 	case CanonicalResponseIncomplete:
 		// The decode already recorded the reason-specific stop reason
 		// (content_filter -> refusal, anything else max_tokens); keep it.
-		if response.StopReason == "" {
-			response.StopReason = CanonicalStopMaxTokens
+		if response.Stop.Reason == "" {
+			response.Stop.Reason = CanonicalStopMaxTokens
 		}
 	case CanonicalResponseFailed:
-		response.StopReason = CanonicalStopEndTurn
+		response.Stop.Reason = CanonicalStopEndTurn
 	}
 
 	if err := ValidateCanonicalResponse(response); err != nil {
@@ -670,7 +638,7 @@ func RenderResponsesResponse(
 	// rejection per the exchange policy — never a silent drop (review-j
 	// finding 4).
 	var report ConversionReport
-	if response.ChatLogProbs {
+	if response.Source.ChatLogProbs {
 		if err := report.Lose(
 			context.lossPolicy(),
 			FeatureLogprobs,
@@ -680,12 +648,12 @@ func RenderResponsesResponse(
 			return nil, report, err
 		}
 	}
-	if response.ChatServiceTier != "" {
+	if response.Source.ChatServiceTier != "" {
 		if err := report.Lose(
 			context.lossPolicy(),
-			FeatureServiceTier,
+			FeatureResponseServiceTier,
 			"service_tier",
-			"the upstream chat service tier cannot be reproduced in a Responses response",
+			"the upstream chat service tier actually served cannot be reproduced in a Responses response",
 		); err != nil {
 			return nil, report, err
 		}
@@ -700,72 +668,75 @@ func RenderResponsesResponse(
 		Output:    []ResponsesOutputItem{},
 	}
 
-	// Output items from the canonical turns.
-	for _, turn := range response.Turns {
-		if turn.Role != CanonicalAssistant {
-			return nil, report, fmt.Errorf(
-				"response turn role %q is not assistant",
-				turn.Role,
-			)
-		}
-		message := &ResponsesOutputMessage{
-			ID:      context.IDs.New("msg_"),
-			Type:    "message",
-			Role:    "assistant",
-			Status:  ResponsesItemCompleted,
-			Content: ResponsesOutputContentParts{},
-		}
-		for _, part := range turn.Parts {
-			switch value := part.(type) {
-			case CanonicalText:
-				message.Content = append(message.Content, &ResponsesOutputText{
-					Type:        "output_text",
-					Text:        value.Text,
-					Annotations: []ResponsesAnnotation{},
-				})
-			case CanonicalRefusal:
-				message.Content = append(message.Content, &ResponsesOutputRefusal{
-					Type:    "refusal",
-					Refusal: value.Text,
-				})
-			case CanonicalFunctionCall:
-				// Only emit the message when it actually carries content; a
-				// turn that starts with a tool call must not produce a
-				// phantom empty message item before it.
-				if len(message.Content) > 0 {
-					envelope.Output = append(envelope.Output, message)
-				}
-				message = nil
-				envelope.Output = append(envelope.Output, &ResponsesFunctionCallOutputItem{
-					ID:        context.IDs.New("fc_"),
-					Type:      "function_call",
-					Status:    ResponsesItemCompleted,
-					CallID:    value.CallID,
-					Name:      value.Name,
-					Arguments: string(value.Arguments),
-				})
-				message = &ResponsesOutputMessage{
-					ID:      context.IDs.New("msg_"),
-					Type:    "message",
-					Role:    "assistant",
-					Status:  ResponsesItemCompleted,
-					Content: ResponsesOutputContentParts{},
-				}
-			case CanonicalFunctionResult:
-				return nil, report, &UnsupportedFeatureError{
-					Protocol: "responses",
-					Path:     "output[]",
-					Feature:  "function result in model output",
-				}
-			default:
-				return nil, report, fmt.Errorf(
-					"response turn: unknown canonical part %T",
-					part,
-				)
+	// Output items render one-to-one from the canonical items; item
+	// boundaries and identities are preserved (review-z commit 2).
+	for _, item := range response.Items {
+		switch value := item.(type) {
+		case *CanonicalMessageItem:
+			message := &ResponsesOutputMessage{
+				ID:      context.IDs.New("msg_"),
+				Type:    "message",
+				Role:    "assistant",
+				Status:  ResponsesItemCompleted,
+				Content: ResponsesOutputContentParts{},
 			}
-		}
-		if message != nil && len(message.Content) > 0 {
+			if value.Phase.Set {
+				message.Phase = value.Phase.Value
+			}
+			for _, part := range value.Parts {
+				switch partValue := part.(type) {
+				case CanonicalText:
+					message.Content = append(message.Content, &ResponsesOutputText{
+						Type:        "output_text",
+						Text:        partValue.Text,
+						Annotations: []ResponsesAnnotation{},
+					})
+				case CanonicalRefusal:
+					message.Content = append(message.Content, &ResponsesOutputRefusal{
+						Type:    "refusal",
+						Refusal: partValue.Text,
+					})
+				default:
+					return nil, report, fmt.Errorf(
+						"response message item: unknown canonical part %T",
+						part,
+					)
+				}
+			}
 			envelope.Output = append(envelope.Output, message)
+
+		case *CanonicalFunctionCallItem:
+			// The Responses function_call arguments field is a string:
+			// the model-generated raw text is preserved byte-exact
+			// (review-z commit 2).
+			envelope.Output = append(envelope.Output, &ResponsesFunctionCallOutputItem{
+				ID:        context.IDs.New("fc_"),
+				Type:      "function_call",
+				Status:    ResponsesItemCompleted,
+				CallID:    value.CallID,
+				Name:      value.Name,
+				Arguments: value.Arguments.Raw,
+			})
+
+		case *CanonicalFunctionResultItem:
+			return nil, report, &UnsupportedFeatureError{
+				Protocol: "responses",
+				Path:     "output[]",
+				Feature:  "function result in model output",
+			}
+
+		case *CanonicalReasoningItem:
+			var reasoning ResponsesReasoningOutputItem
+			if err := json.Unmarshal(value.Raw, &reasoning); err != nil {
+				return nil, report, fmt.Errorf("response reasoning item: %w", err)
+			}
+			envelope.Output = append(envelope.Output, &reasoning)
+
+		default:
+			return nil, report, fmt.Errorf(
+				"response item: unknown canonical item type %T",
+				item,
+			)
 		}
 	}
 
@@ -788,22 +759,26 @@ func RenderResponsesResponse(
 		if response.Usage.TotalKnown {
 			envelope.Usage.TotalTokens = response.Usage.TotalTokens
 		}
-		var unknown []string
-		if !response.Usage.CacheReadKnown {
-			unknown = append(unknown, "input_tokens_details.cached_tokens")
+		// Each wire-required component the source did not provide is its own
+		// granular loss decision (review-z commit 2).
+		components := []struct {
+			feature Feature
+			name    string
+			known   bool
+		}{
+			{FeatureUsageCacheReadUnknown, "input_tokens_details.cached_tokens", response.Usage.CacheReadKnown},
+			{FeatureUsageReasoningUnknown, "output_tokens_details.reasoning_tokens", response.Usage.ReasoningKnown},
+			{FeatureUsageUnknown, "input_tokens or output_tokens", response.Usage.InputKnown && response.Usage.OutputKnown},
 		}
-		if !response.Usage.ReasoningKnown {
-			unknown = append(unknown, "output_tokens_details.reasoning_tokens")
-		}
-		if !response.Usage.InputKnown || !response.Usage.OutputKnown {
-			unknown = append(unknown, "input_tokens or output_tokens")
-		}
-		if len(unknown) > 0 {
+		for _, component := range components {
+			if component.known {
+				continue
+			}
 			if err := report.Lose(
 				context.lossPolicy(),
-				FeatureUsageTiming,
+				component.feature,
 				"usage",
-				"the upstream response did not provide "+strings.Join(unknown, ", ")+"; the required Responses usage cannot be reproduced",
+				"the upstream response did not provide "+component.name+"; the required Responses usage cannot be reproduced",
 			); err != nil {
 				return nil, report, err
 			}
@@ -903,7 +878,7 @@ func RenderMessagesResponse(
 	// (token log-probabilities and the tier actually served) are a loss or a
 	// rejection per the exchange policy — never a silent drop (review-j
 	// finding 4).
-	if response.ChatLogProbs {
+	if response.Source.ChatLogProbs {
 		if err := report.Lose(
 			context.lossPolicy(),
 			FeatureLogprobs,
@@ -913,47 +888,25 @@ func RenderMessagesResponse(
 			return nil, report, err
 		}
 	}
-	if response.ChatServiceTier != "" {
+	if response.Source.ChatServiceTier != "" {
 		if err := report.Lose(
 			context.lossPolicy(),
-			FeatureServiceTier,
+			FeatureResponseServiceTier,
 			"service_tier",
-			"the upstream chat service tier cannot be reproduced in a Messages response",
+			"the upstream chat service tier actually served cannot be reproduced in a Messages response",
 		); err != nil {
 			return nil, report, err
 		}
 	}
 	// The pinned Responses envelope controls cannot be reproduced in a
 	// Messages response (review-j finding 13).
-	if len(response.ResponsesControls) > 0 {
+	if len(response.Source.ResponsesControls) > 0 {
 		if err := report.Lose(
 			context.lossPolicy(),
 			FeatureResponsesControls,
 			"output",
-			"the Responses envelope controls "+strings.Join(response.ResponsesControls, ", ")+
+			"the Responses envelope controls "+strings.Join(response.Source.ResponsesControls, ", ")+
 				" cannot be reproduced in a Messages response",
-		); err != nil {
-			return nil, report, err
-		}
-	}
-	// A Responses output-message phase (commentary vs final_answer) has no
-	// Messages representation (review-j finding 10).
-	if response.ResponsesPhase {
-		if err := report.Lose(
-			context.lossPolicy(),
-			FeaturePhase,
-			"output[].phase",
-			"the output message phase cannot be reproduced in a Messages response",
-		); err != nil {
-			return nil, report, err
-		}
-	}
-	if len(response.ReasoningItems) > 0 {
-		if err := report.Lose(
-			context.lossPolicy(),
-			FeatureReasoningSummary,
-			"output[].reasoning",
-			"Responses reasoning output cannot be reproduced in a Messages response",
 		); err != nil {
 			return nil, report, err
 		}
@@ -967,63 +920,96 @@ func RenderMessagesResponse(
 		Content: []AnthropicContentBlock{},
 	}
 
-	for _, turn := range response.Turns {
-		switch turn.Role {
-		case CanonicalAssistant:
-			for _, part := range turn.Parts {
-				switch value := part.(type) {
+	// Phase and reasoning losses are recorded once per response, before the
+	// items render.
+	phaseLossRecorded := false
+	reasoningLossRecorded := false
+	for _, item := range response.Items {
+		switch value := item.(type) {
+		case *CanonicalMessageItem:
+			if value.Phase.Set && !phaseLossRecorded {
+				phaseLossRecorded = true
+				if err := report.Lose(
+					context.lossPolicy(),
+					FeatureOutputPhase,
+					"output[].phase",
+					"the output message phase cannot be reproduced in a Messages response",
+				); err != nil {
+					return nil, report, err
+				}
+			}
+			for _, part := range value.Parts {
+				switch partValue := part.(type) {
 				case CanonicalText:
-					text := value.Text
+					text := partValue.Text
 					out.Content = append(out.Content, AnthropicContentBlock{
 						Type: AnthropicContentBlockTypeText,
 						Text: &text,
 					})
 				case CanonicalRefusal:
-					text := value.Text
+					text := partValue.Text
 					out.Content = append(out.Content, AnthropicContentBlock{
 						Type: AnthropicContentBlockTypeText,
 						Text: &text,
 					})
-				case CanonicalFunctionCall:
-					callID := value.CallID
-					name := value.Name
-					out.Content = append(out.Content, AnthropicContentBlock{
-						Type:  AnthropicContentBlockTypeToolUse,
-						ID:    &callID,
-						Name:  &name,
-						Input: value.Arguments,
-					})
-				case CanonicalFunctionResult:
-					return nil, report, &UnsupportedFeatureError{
-						Protocol: "messages",
-						Path:     "content[]",
-						Feature:  "function result in assistant output",
-					}
 				default:
 					return nil, report, fmt.Errorf(
-						"response turn: unknown canonical part %T",
+						"response message item: unknown canonical part %T",
 						part,
 					)
 				}
 			}
 
-		case CanonicalUser:
+		case *CanonicalFunctionCallItem:
+			// Anthropic tool_use.input requires an object. Model-generated
+			// arguments that are not an object are a LOCAL unrepresentable
+			// output — never corrupt upstream wire (review-z commit 2).
+			if !value.Arguments.IsObject {
+				return nil, report, &UnrepresentableError{
+					Protocol: "messages",
+					Path:     "content[].tool_use.input",
+					Detail:   "the model-generated tool arguments are not a JSON object and cannot be represented as tool_use.input",
+				}
+			}
+			callID := value.CallID
+			name := value.Name
+			out.Content = append(out.Content, AnthropicContentBlock{
+				Type:  AnthropicContentBlockTypeToolUse,
+				ID:    &callID,
+				Name:  &name,
+				Input: value.Arguments.Object,
+			})
+
+		case *CanonicalFunctionResultItem:
 			// Conversation-state echoes (tool results in the upstream output)
 			// belong to the next request, not the current Messages response.
 			// They are an approved loss or a rejection per the exchange policy.
 			if err := report.Lose(
 				context.lossPolicy(),
-				FeatureConversationState,
+				FeatureOutputItemBoundaries,
 				"output[].function_call_output",
-				"tool results are conversation state, not part of the model response",
+				"tool results are conversation-state output items, not part of the model response",
 			); err != nil {
 				return nil, report, err
 			}
 
+		case *CanonicalReasoningItem:
+			if !reasoningLossRecorded {
+				reasoningLossRecorded = true
+				if err := report.Lose(
+					context.lossPolicy(),
+					FeatureReasoningSummary,
+					"output[].reasoning",
+					"Responses reasoning output cannot be reproduced in a Messages response",
+				); err != nil {
+					return nil, report, err
+				}
+			}
+
 		default:
 			return nil, report, fmt.Errorf(
-				"response turn role %q is not assistant or user",
-				turn.Role,
+				"response item: unknown canonical item type %T",
+				item,
 			)
 		}
 	}
@@ -1031,14 +1017,14 @@ func RenderMessagesResponse(
 	// stop_reason and stop_sequence are always present on the wire: the
 	// completed response carries the real values (stop_sequence is null
 	// unless a custom sequence was used).
-	switch response.StopReason {
+	switch response.Stop.Reason {
 	case CanonicalStopEndTurn:
 		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonEndTurn)
 	case CanonicalStopMaxTokens:
 		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonMaxTokens)
 	case CanonicalStopStopSequence:
 		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonStopSequence)
-		out.StopSequence = &response.StopSequence
+		out.StopSequence = &response.Stop.Sequence
 	case CanonicalStopToolUse:
 		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonToolUse)
 	case CanonicalStopRefusal:
@@ -1056,7 +1042,7 @@ func RenderMessagesResponse(
 	if response.Usage.Unknown() {
 		if err := report.Lose(
 			context.lossPolicy(),
-			FeatureUsageTiming,
+			FeatureUsageUnknown,
 			"usage",
 			"the upstream response did not provide token usage; the required Messages usage cannot be reproduced",
 		); err != nil {
@@ -1077,28 +1063,28 @@ func RenderMessagesResponse(
 		// not part of the pinned Chat/Responses contract, so CacheWriteKnown
 		// stays false and the cache-creation component always enters this
 		// decision.
-		var unknown []string
-		if !response.Usage.InputKnown {
-			unknown = append(unknown, "input_tokens")
+		// Each wire-required component the source did not provide is its own
+		// granular loss decision (review-z commit 2).
+		components := []struct {
+			feature Feature
+			name    string
+			known   bool
+		}{
+			{FeatureUsageUnknown, "input_tokens", response.Usage.InputKnown},
+			{FeatureUsageCacheReadUnknown, "cache_read_input_tokens", response.Usage.CacheReadKnown},
+			{FeatureUsageCacheWriteUnknown, "cache_creation_input_tokens", response.Usage.CacheWriteKnown},
+			{FeatureUsageUnknown, "output_tokens", response.Usage.OutputKnown},
+			{FeatureUsageReasoningUnknown, "output_tokens_details.thinking_tokens", response.Usage.ReasoningKnown},
 		}
-		if !response.Usage.CacheReadKnown {
-			unknown = append(unknown, "cache_read_input_tokens")
-		}
-		if !response.Usage.CacheWriteKnown {
-			unknown = append(unknown, "cache_creation_input_tokens")
-		}
-		if !response.Usage.OutputKnown {
-			unknown = append(unknown, "output_tokens")
-		}
-		if !response.Usage.ReasoningKnown {
-			unknown = append(unknown, "output_tokens_details.thinking_tokens")
-		}
-		if len(unknown) > 0 {
+		for _, component := range components {
+			if component.known {
+				continue
+			}
 			if err := report.Lose(
 				context.lossPolicy(),
-				FeatureUsageTiming,
+				component.feature,
 				"usage",
-				"the upstream response did not provide "+strings.Join(unknown, ", ")+"; the required Messages usage cannot be reproduced",
+				"the upstream response did not provide "+component.name+"; the required Messages usage cannot be reproduced",
 			); err != nil {
 				return nil, report, err
 			}

@@ -133,12 +133,12 @@ func TestEventValidateNegativeCases(t *testing.T) {
 	).Validate(); err == nil || !strings.Contains(err.Error(), "item_id") {
 		t.Fatalf("missing arguments delta item_id accepted: %v", err)
 	}
-	// A done event whose accumulated arguments are not JSON is a
-	// contradictory union arm.
+	// A done event carries model-generated arguments preserved byte-exact:
+	// any string is legal on the wire (review-z commit 2).
 	if err := builder.FunctionArgumentsDone(
 		"fc_1", 0, "not json",
-	).Validate(); err == nil {
-		t.Fatal("invalid final arguments accepted")
+	).Validate(); err != nil {
+		t.Fatalf("invalid final arguments rejected: %v", err)
 	}
 	// Negative indexes.
 	if err := builder.ContentPartAdded(

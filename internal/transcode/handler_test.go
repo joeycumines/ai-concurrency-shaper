@@ -695,11 +695,15 @@ func TestHandlerMessagesToResponsesJSON(t *testing.T) {
 			},
 			ModelMap: ModelMap{AllowIdentity: true},
 			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureTopK:                 {},
-				FeatureReasoningSummary:     {},
-				FeatureConversationState:    {},
-				FeatureUsageTiming:          {},
-				FeatureToolSchemaStrictness: {},
+				FeatureTopK:                   {},
+				FeatureReasoningSummary:       {},
+				FeatureOutputItemBoundaries:   {},
+				FeaturePreviousResponseID:     {},
+				FeatureUsageCacheReadUnknown:  {},
+				FeatureUsageCacheWriteUnknown: {},
+				FeatureUsageReasoningUnknown:  {},
+				FeatureUsageUnknown:           {},
+				FeatureToolSchemaStrictness:   {},
 			}},
 			AuthPolicy:         AuthPolicy{Mode: AuthNone},
 			AllowedClientQuery: map[string]struct{}{},
@@ -762,10 +766,14 @@ func TestHandlerMessagesToChatJSON(t *testing.T) {
 			},
 			ModelMap: ModelMap{AllowIdentity: true},
 			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureTopK:              {},
-				FeatureReasoningSummary:  {},
-				FeatureConversationState: {},
-				FeatureUsageTiming:       {},
+				FeatureTopK:                   {},
+				FeatureReasoningSummary:       {},
+				FeatureOutputItemBoundaries:   {},
+				FeaturePreviousResponseID:     {},
+				FeatureUsageCacheReadUnknown:  {},
+				FeatureUsageCacheWriteUnknown: {},
+				FeatureUsageReasoningUnknown:  {},
+				FeatureUsageUnknown:           {},
 			}},
 			AuthPolicy:         AuthPolicy{Mode: AuthNone},
 			AllowedClientQuery: map[string]struct{}{},
@@ -1318,9 +1326,13 @@ func TestHandlerAuthApplied(t *testing.T) {
 			},
 			ModelMap: ModelMap{AllowIdentity: true},
 			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureReasoningSummary:  {},
-				FeatureConversationState: {},
-				FeatureUsageTiming:       {},
+				FeatureReasoningSummary:       {},
+				FeatureOutputItemBoundaries:   {},
+				FeaturePreviousResponseID:     {},
+				FeatureUsageCacheReadUnknown:  {},
+				FeatureUsageCacheWriteUnknown: {},
+				FeatureUsageReasoningUnknown:  {},
+				FeatureUsageUnknown:           {},
 			}},
 			AuthPolicy: AuthPolicy{
 				Mode:             AuthBearer,
@@ -1715,7 +1727,8 @@ func TestHandlerMessagesFailedUpstreamNotSuccess(t *testing.T) {
 			LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
 				FeatureTopK:                 {},
 				FeatureReasoningSummary:     {},
-				FeatureConversationState:    {},
+				FeatureOutputItemBoundaries: {},
+				FeaturePreviousResponseID:   {},
 				FeatureToolSchemaStrictness: {},
 			}},
 			AuthPolicy:         AuthPolicy{Mode: AuthNone},
@@ -1823,7 +1836,7 @@ func TestHandlerConversationStateRejectedChat(t *testing.T) {
 // TestHandlerStreamingMessagesToResponsesStrictRejectsEarlyUsage pins the
 // strict-policy behavior: a Messages stream whose source cannot provide the
 // required early message_start usage is rejected with a client-dialect error
-// event (review-j finding 9: zeros would fabricate facts; the FeatureUsageTiming
+// event (review-j finding 9: zeros would fabricate facts; the FeatureUsageUnknown
 // decision is explicit).
 func TestHandlerStreamingMessagesToResponsesStrictRejectsEarlyUsage(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
@@ -1852,8 +1865,8 @@ func TestHandlerStreamingMessagesToResponsesStrictRejectsEarlyUsage(t *testing.T
 	if !strings.Contains(body, `"type":"error"`) {
 		t.Fatalf("strict policy must reject with an error event: %q", body)
 	}
-	if !strings.Contains(body, "usage_timing") {
-		t.Fatalf("error event must name the usage_timing feature: %q", body)
+	if !strings.Contains(body, "usage_unknown") {
+		t.Fatalf("error event must name the usage_unknown feature: %q", body)
 	}
 	if strings.Contains(body, "message_stop") {
 		t.Fatalf("rejected stream must not terminate cleanly: %q", body)

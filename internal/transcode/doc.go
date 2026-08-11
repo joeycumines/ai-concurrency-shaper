@@ -45,16 +45,16 @@
 //	StopSequences         loss-gated (FeatureStopSequences; Responses has none)
 //	StructuredOutput      transformed (per-target capability gate)
 //	Stream                exact
-//	FunctionResult.IsError loss-gated (FeatureToolResultError; permissive
+//	FunctionResult.IsError loss-gated (FeatureToolResultErrorStatus; permissive
 //	                       encoding: visible error_status_prefix text)
 //	Reasoning.Effort      transformed (Chat reasoning_effort, capability gate)
-//	Reasoning.Summary     loss-gated (FeatureReasoningSummaryRequest; Chat has
+//	Reasoning.Summary     loss-gated (FeatureReasoningSummary; Chat has
 //	                       no summary style)
 //	System prompt parts   transformed for text-only prompts into the
 //	                       string-only create-request instructions;
-//	                       images/documents and multiple system turns are
-//	                       loss-gated (FeatureImageInput/FeatureDocumentInput/
-//	                       FeatureResponsesControls)
+//	                       multiple system turns and non-text system content
+//	                       are loss-gated (FeatureMultipleSystemTurns,
+//	                       FeatureSystemNonTextContent)
 //	Thinking blocks       exact only for Messages targets; loss-gated
 //	                       (FeatureAuthenticatedThinking) otherwise
 //	Reasoning items       exact only for Responses targets; loss-gated
@@ -64,18 +64,21 @@
 //
 // Canonical response fields:
 //
-//	ID, Model, CreatedAt, Status, Turns, StopReason   exact/transformed
-//	ReasoningItems        loss-gated (FeatureReasoningSummary; Messages targets)
-//	Conversation state    loss-gated (FeatureConversationState; Messages
+//	ID, Model, CreatedAt, Status, Stop, Items      exact/transformed
+//	Reasoning items       loss-gated (FeatureReasoningSummary; Messages targets)
+//	Conversation state    loss-gated (FeatureOutputItemBoundaries; Messages
 //	                       responses cannot carry tool results)
-//	Output message phase  loss-gated (FeaturePhase; Messages has no phase;
+//	Output message phase  loss-gated (FeatureOutputPhase; Messages has no phase;
 //	                       the stream gates each phase-bearing item exactly
 //	                       once; input-message phases are loss-gated at
 //	                       decode)
-//	Usage                 transformed with checked arithmetic; unknown usage
-//	                       is loss-gated (FeatureUsageTiming)
+//	Usage                 transformed with checked arithmetic; each unknown
+//	                       component is loss-gated (FeatureUsageUnknown,
+//	                       FeatureUsageCacheReadUnknown,
+//	                       FeatureUsageCacheWriteUnknown,
+//	                       FeatureUsageReasoningUnknown)
 //	Chat logprobs         loss-gated (FeatureLogprobs)
-//	Chat service tier     loss-gated (FeatureServiceTier)
+//	Chat service tier     loss-gated (FeatureResponseServiceTier)
 //	Envelope controls     loss-gated (FeatureResponsesControls; background,
 //	                       max_tool_calls, prompt, prompt_cache_key,
 //	                       safety_identifier decode as typed shadows and

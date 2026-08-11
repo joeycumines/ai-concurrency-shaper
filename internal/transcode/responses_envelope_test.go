@@ -27,8 +27,8 @@ func TestResponsesEnvelopePinnedControlsStrictDecode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("strict decode: %v", err)
 	}
-	if len(response.ResponsesControls) != 5 {
-		t.Fatalf("controls = %v, want all five", response.ResponsesControls)
+	if len(response.Source.ResponsesControls) != 5 {
+		t.Fatalf("controls = %v, want all five", response.Source.ResponsesControls)
 	}
 
 	strict := testExchangeContext()
@@ -39,8 +39,11 @@ func TestResponsesEnvelopePinnedControlsStrictDecode(t *testing.T) {
 
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureResponsesControls: {},
-		FeatureUsageTiming:       {},
+		FeatureResponsesControls:      {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
 	}}
 	permissive.RequestedClientModel = "m"
 	rendered, report, err := RenderMessagesResponse(response, permissive)
@@ -63,8 +66,8 @@ func TestResponsesEnvelopeControlsAbsentNoLoss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(response.ResponsesControls) != 0 {
-		t.Fatalf("controls = %v, want none", response.ResponsesControls)
+	if len(response.Source.ResponsesControls) != 0 {
+		t.Fatalf("controls = %v, want none", response.Source.ResponsesControls)
 	}
 	// The usage breakdown is fully known (both detail objects present), but
 	// cache-creation is never part of the pinned Responses contract: the
@@ -73,7 +76,10 @@ func TestResponsesEnvelopeControlsAbsentNoLoss(t *testing.T) {
 	// test.
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureUsageTiming: {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
 	}}
 	context.RequestedClientModel = "m"
 	if _, _, err := RenderMessagesResponse(response, context); err != nil {
@@ -116,7 +122,7 @@ func TestResponsesRequestInstructionsStringOnly(t *testing.T) {
 	}
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureImageInput: {},
+		FeatureSystemNonTextContent: {},
 	}}
 	rendered, report, err := RenderResponsesRequest(result.Request, permissive)
 	if err != nil {
@@ -125,7 +131,7 @@ func TestResponsesRequestInstructionsStringOnly(t *testing.T) {
 	if strings.Contains(string(rendered), `"items"`) {
 		t.Fatalf("instructions rendered as an items array: %s", rendered)
 	}
-	if !reportHasFeature(report, FeatureImageInput) {
+	if !reportHasFeature(report, FeatureSystemNonTextContent) {
 		t.Fatalf("report lacks the image loss: %+v", report)
 	}
 }
@@ -146,17 +152,20 @@ func TestResponsesEchoInstructionsStringArm(t *testing.T) {
 	// source did not provide: the render enters the usage-timing loss
 	// decision (review-k finding 6).
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureUsageTiming: {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
 	}}
 	context.OriginalResponsesRequest = echo
 	context.RequestedClientModel = "m"
 	rendered, _, err := RenderResponsesResponse(CanonicalResponse{
-		ID:         "resp_1",
-		Model:      "m",
-		CreatedAt:  1,
-		Status:     CanonicalResponseCompleted,
-		StopReason: CanonicalStopEndTurn,
-		Turns: []CanonicalTurn{{
+		ID:        "resp_1",
+		Model:     "m",
+		CreatedAt: 1,
+		Status:    CanonicalResponseCompleted,
+		Stop:      CanonicalStop{Reason: CanonicalStopEndTurn},
+		Items: []CanonicalResponseItem{&CanonicalMessageItem{
 			Role:  CanonicalAssistant,
 			Parts: []CanonicalPart{CanonicalText{Text: "hi"}},
 		}},
@@ -215,8 +224,11 @@ func TestStreamingEnvelopeControlsGated(t *testing.T) {
 	state = newAnthropicResponsesStreamState(
 		testStreamContext(),
 		LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureResponsesControls: {},
-			FeatureUsageTiming:       {},
+			FeatureResponsesControls:      {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
+			FeatureUsageUnknown:           {},
 		}},
 		"msg_1",
 		"claude-x",
@@ -280,20 +292,20 @@ func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 	}
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureResponsesControls: {},
+		FeatureMultipleSystemTurns: {},
 	}}
 	rendered, report, err := RenderResponsesRequest(request, permissive)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reportHasFeature(report, FeatureResponsesControls) {
+	if !reportHasFeature(report, FeatureMultipleSystemTurns) {
 		t.Fatalf("report lacks the multi-turn loss: %+v", report)
 	}
 	if strings.Contains(string(rendered), `"items"`) {
 		t.Fatalf("multi-turn instructions rendered as items: %s", rendered)
 	}
 
-	// A document system part is loss-gated with FeatureDocumentInput.
+	// A document system part is loss-gated with system_non_text_content.
 	request = CanonicalRequest{
 		ClientModel: "m",
 		Turns: []CanonicalTurn{{
@@ -303,13 +315,13 @@ func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 	}
 	permissive = testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureDocumentInput: {},
+		FeatureSystemNonTextContent: {},
 	}}
 	rendered, report, err = RenderResponsesRequest(request, permissive)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reportHasFeature(report, FeatureDocumentInput) {
+	if !reportHasFeature(report, FeatureSystemNonTextContent) {
 		t.Fatalf("report lacks the document loss: %+v", report)
 	}
 	if strings.Contains(string(rendered), `"items"`) {
@@ -334,7 +346,7 @@ func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 	if !strings.Contains(string(rendered), `"instructions":"one\ntwo"`) {
 		t.Fatalf("text parts must join into the string: %s", rendered)
 	}
-	if !reportHasFeature(report, FeatureResponsesControls) {
+	if !reportHasFeature(report, FeatureMultipleSystemTurns) {
 		t.Fatalf("report lacks the join encoding note: %+v", report)
 	}
 }
@@ -353,7 +365,10 @@ func TestStreamingEnvelopeControlsLateAppearance(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureUsageTiming: {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
+			FeatureUsageUnknown:           {},
 		}},
 		"msg_1",
 		"claude-x",
@@ -394,8 +409,11 @@ func TestStreamingEnvelopeControlsLateAppearance(t *testing.T) {
 	state = newAnthropicResponsesStreamState(
 		testStreamContext(),
 		LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureResponsesControls: {},
-			FeatureUsageTiming:       {},
+			FeatureResponsesControls:      {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
+			FeatureUsageUnknown:           {},
 		}},
 		"msg_1",
 		"claude-x",

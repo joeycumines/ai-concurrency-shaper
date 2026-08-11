@@ -83,10 +83,10 @@ func TestWireDecodeSixCategoriesUpstream(t *testing.T) {
 			wire.DecodeTrailingValue,
 		},
 		{
-			// Contradictory union arm: an output item whose arguments are
-			// not valid JSON is a contradictory tagged union.
+			// Contradictory union arm: an output message whose role is not
+			// assistant violates the assistant-only output contract.
 			"contradictory_union",
-			`{"id":"r","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"fc_1","type":"function_call","status":"completed","call_id":"c","name":"f","arguments":"not json"}]}`,
+			`{"id":"r","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"m_1","type":"message","role":"user","status":"completed","content":[]}]}`,
 			wire.DecodeContradictoryUnion,
 		},
 	}

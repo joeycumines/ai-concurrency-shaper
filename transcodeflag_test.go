@@ -296,7 +296,7 @@ func TestParseTranscodeAuthExternalSignerRejectedAtStartup(t *testing.T) {
 // usage_timing (review-j finding 14 / J15 gate).
 func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 	policy := transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
-		transcode.FeatureUsageTiming: {},
+		transcode.FeatureUsageUnknown: {},
 	}}
 	mappings, err := buildTranscodeMappings(nil, false, true, false, policy)
 	if err != nil {
@@ -305,10 +305,10 @@ func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 	if len(mappings) != 1 {
 		t.Fatalf("mappings = %d", len(mappings))
 	}
-	if !mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureUsageTiming) {
+	if !mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureUsageUnknown) {
 		t.Fatal("loss policy not applied to the mapping")
 	}
-	if mappings[0].Mapping.LossPolicy.Allows(transcode.FeaturePhase) {
+	if mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureOutputPhase) {
 		t.Fatal("loss policy leaks unapproved features")
 	}
 }

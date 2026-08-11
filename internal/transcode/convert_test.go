@@ -466,18 +466,22 @@ func TestDecodeChatResponseFixture(t *testing.T) {
 	if response.Status != CanonicalResponseCompleted {
 		t.Fatalf("status = %q", response.Status)
 	}
-	if response.StopReason != CanonicalStopEndTurn {
-		t.Fatalf("stop reason = %q", response.StopReason)
+	if response.Stop.Reason != CanonicalStopEndTurn {
+		t.Fatalf("stop reason = %q", response.Stop.Reason)
 	}
 	if response.Usage.InputTokens != 42 || response.Usage.OutputTokens != 18 {
 		t.Fatalf("usage = %+v", response.Usage)
 	}
-	if len(response.Turns) != 1 {
-		t.Fatalf("turns = %d", len(response.Turns))
+	if len(response.Items) != 1 {
+		t.Fatalf("items = %d", len(response.Items))
 	}
-	text, ok := response.Turns[0].Parts[0].(CanonicalText)
+	message, ok := response.Items[0].(*CanonicalMessageItem)
+	if !ok || len(message.Parts) == 0 {
+		t.Fatalf("item = %T", response.Items[0])
+	}
+	text, ok := message.Parts[0].(CanonicalText)
 	if !ok {
-		t.Fatalf("part = %T", response.Turns[0].Parts[0])
+		t.Fatalf("part = %T", message.Parts[0])
 	}
 	if !strings.Contains(text.Text, "21°C") {
 		t.Fatalf("text = %q", text.Text)
@@ -498,14 +502,18 @@ func TestDecodeChatResponseProviderReasoning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	message, ok := response.Items[0].(*CanonicalMessageItem)
+	if !ok {
+		t.Fatalf("item = %T", response.Items[0])
+	}
 	found := false
-	for _, part := range response.Turns[0].Parts {
+	for _, part := range message.Parts {
 		if text, ok := part.(CanonicalText); ok && text.Text == "think" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("reasoning text missing: %+v", response.Turns[0].Parts)
+		t.Fatalf("reasoning text missing: %+v", message.Parts)
 	}
 }
 
@@ -534,21 +542,24 @@ func TestDecodeChatResponseToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.StopReason != CanonicalStopToolUse {
-		t.Fatalf("stop reason = %q", response.StopReason)
+	if response.Stop.Reason != CanonicalStopToolUse {
+		t.Fatalf("stop reason = %q", response.Stop.Reason)
 	}
-	var found *CanonicalFunctionCall
-	for _, part := range response.Turns[0].Parts {
-		if call, ok := part.(CanonicalFunctionCall); ok {
-			found = &call
+	var found *CanonicalFunctionCallItem
+	for _, item := range response.Items {
+		if call, ok := item.(*CanonicalFunctionCallItem); ok {
+			found = call
 			break
 		}
 	}
 	if found == nil {
-		t.Fatalf("no function call in parts: %+v", response.Turns[0].Parts)
+		t.Fatalf("no function call item: %+v", response.Items)
 	}
 	if found.CallID != "call_1" || found.Name != "f" {
 		t.Fatalf("call = %+v", found)
+	}
+	if !found.Arguments.IsObject || found.Arguments.Raw != `{"x":1}` {
+		t.Fatalf("arguments = %+v", found.Arguments)
 	}
 }
 
@@ -563,33 +574,32 @@ func TestDecodeResponsesResponseFixture(t *testing.T) {
 	if response.Status != CanonicalResponseCompleted {
 		t.Fatalf("status = %q", response.Status)
 	}
-	if response.StopReason != CanonicalStopToolUse {
-		t.Fatalf("stop reason = %q (fixture has function_call)", response.StopReason)
+	if response.Stop.Reason != CanonicalStopToolUse {
+		t.Fatalf("stop reason = %q (fixture has function_call)", response.Stop.Reason)
 	}
 	if response.Usage.InputTokens != 45 || response.Usage.OutputTokens != 25 {
 		t.Fatalf("usage = %+v", response.Usage)
 	}
 	// The fixture output: reasoning item, function call, function call
-	// output, message. The function call is an assistant part, the result a
-	// user part, the message text an assistant part.
-	if len(response.Turns) != 3 {
-		t.Fatalf("turns = %d, want 3: %+v", len(response.Turns), response.Turns)
+	// output, message — each preserved as its own canonical item.
+	if len(response.Items) != 4 {
+		t.Fatalf("items = %d, want 4: %+v", len(response.Items), response.Items)
 	}
-	call, ok := response.Turns[0].Parts[0].(CanonicalFunctionCall)
+	call, ok := response.Items[1].(*CanonicalFunctionCallItem)
 	if !ok {
-		t.Fatalf("turn 0 part = %T", response.Turns[0].Parts[0])
+		t.Fatalf("item 1 = %T", response.Items[1])
 	}
 	if call.CallID != "call_abc123" || call.Name != "get_weather" {
 		t.Fatalf("call = %+v", call)
 	}
-	if response.Turns[1].Role != CanonicalUser {
-		t.Fatalf("turn 1 role = %q", response.Turns[1].Role)
+	if _, ok := response.Items[2].(*CanonicalFunctionResultItem); !ok {
+		t.Fatalf("item 2 = %T, want a function result item", response.Items[2])
 	}
-	if response.Turns[2].Role != CanonicalAssistant {
-		t.Fatalf("turn 2 role = %q", response.Turns[2].Role)
+	if _, ok := response.Items[3].(*CanonicalMessageItem); !ok {
+		t.Fatalf("item 3 = %T, want a message item", response.Items[3])
 	}
-	if len(response.ReasoningItems) != 1 {
-		t.Fatalf("reasoning items = %d", len(response.ReasoningItems))
+	if _, ok := response.Items[0].(*CanonicalReasoningItem); !ok {
+		t.Fatalf("item 0 = %T, want a reasoning item", response.Items[0])
 	}
 }
 
@@ -600,8 +610,11 @@ func TestRenderMessagesResponseReasoningLoss(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(response.ReasoningItems) != 1 {
-		t.Fatalf("reasoning items = %d", len(response.ReasoningItems))
+	if len(response.Items) != 4 {
+		t.Fatalf("items = %d", len(response.Items))
+	}
+	if _, ok := response.Items[0].(*CanonicalReasoningItem); !ok {
+		t.Fatalf("item 0 = %T, want a reasoning item", response.Items[0])
 	}
 	if _, _, err := RenderMessagesResponse(response, testExchangeContext()); err == nil {
 		t.Fatal("expected reasoning loss rejection under strict policy")
@@ -609,9 +622,11 @@ func TestRenderMessagesResponseReasoningLoss(t *testing.T) {
 	// With the losses approved, rendering succeeds.
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureReasoningSummary:  {},
-		FeatureConversationState: {},
-		FeatureUsageTiming:       {},
+		FeatureReasoningSummary:       {},
+		FeatureOutputItemBoundaries:   {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
 	}}
 	if _, _, err := RenderMessagesResponse(response, context); err != nil {
 		t.Fatalf("render with approved loss: %v", err)
@@ -628,9 +643,11 @@ func TestRenderMessagesResponseFromResponses(t *testing.T) {
 	// block shapes can be asserted.
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureReasoningSummary:  {},
-		FeatureConversationState: {},
-		FeatureUsageTiming:       {},
+		FeatureReasoningSummary:       {},
+		FeatureOutputItemBoundaries:   {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
 	}}
 	rendered, _, err := RenderMessagesResponse(response, context)
 	if err != nil {
@@ -715,12 +732,12 @@ func TestRenderResponsesResponseEcho(t *testing.T) {
 	}
 	_ = result
 	response := CanonicalResponse{
-		ID:         "resp_upstream",
-		Model:      "gpt-4.1",
-		CreatedAt:  1710000000,
-		Status:     CanonicalResponseCompleted,
-		StopReason: CanonicalStopEndTurn,
-		Turns: []CanonicalTurn{{
+		ID:        "resp_upstream",
+		Model:     "gpt-4.1",
+		CreatedAt: 1710000000,
+		Status:    CanonicalResponseCompleted,
+		Stop:      CanonicalStop{Reason: CanonicalStopEndTurn},
+		Items: []CanonicalResponseItem{&CanonicalMessageItem{
 			Role:  CanonicalAssistant,
 			Parts: []CanonicalPart{CanonicalText{Text: "The weather is 21°C."}},
 		}},
@@ -760,7 +777,7 @@ func TestRenderResponsesResponseFailed(t *testing.T) {
 		Model:        "m",
 		CreatedAt:    1,
 		Status:       CanonicalResponseFailed,
-		StopReason:   CanonicalStopEndTurn,
+		Stop:         CanonicalStop{Reason: CanonicalStopEndTurn},
 		ErrorMessage: "upstream exploded",
 	}
 	context := testExchangeContext()
@@ -1006,8 +1023,8 @@ func TestDecodeChatResponseContentFilterIncomplete(t *testing.T) {
 	if response.IncompleteReason != "content_filter" {
 		t.Fatalf("incomplete reason = %q", response.IncompleteReason)
 	}
-	if response.StopReason != CanonicalStopRefusal {
-		t.Fatalf("stop reason = %v, want refusal", response.StopReason)
+	if response.Stop.Reason != CanonicalStopRefusal {
+		t.Fatalf("stop reason = %v, want refusal", response.Stop.Reason)
 	}
 }
 
@@ -1046,7 +1063,7 @@ func TestDecodeResponsesResponseContentFilterRefusal(t *testing.T) {
 	if response.IncompleteReason != "content_filter" {
 		t.Fatalf("incomplete reason = %q", response.IncompleteReason)
 	}
-	if response.StopReason != CanonicalStopRefusal {
-		t.Fatalf("stop reason = %v, want refusal", response.StopReason)
+	if response.Stop.Reason != CanonicalStopRefusal {
+		t.Fatalf("stop reason = %v, want refusal", response.Stop.Reason)
 	}
 }

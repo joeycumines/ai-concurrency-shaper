@@ -1828,7 +1828,13 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 				CallID: "call_1", Name: "f", Arguments: `[1,2]`,
 			},
 		})
-		assertAnthropicWireError(t, err, "JSON object")
+		// Non-object model-generated arguments cannot be represented as
+		// tool_use.input: a LOCAL unrepresentable output, never corrupt
+		// upstream wire (review-z commit 2).
+		var unrepresentable *UnrepresentableError
+		if !errors.As(err, &unrepresentable) {
+			t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
+		}
 	})
 
 	t.Run("item done message part type mismatch", func(t *testing.T) {
@@ -2254,7 +2260,10 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureUsageTiming: {},
+				FeatureUsageCacheReadUnknown:  {},
+				FeatureUsageCacheWriteUnknown: {},
+				FeatureUsageReasoningUnknown:  {},
+				FeatureUsageUnknown:           {},
 			}},
 			"msg_1",
 			"claude-x",
@@ -2296,7 +2305,10 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureUsageTiming: {},
+				FeatureUsageCacheReadUnknown:  {},
+				FeatureUsageCacheWriteUnknown: {},
+				FeatureUsageReasoningUnknown:  {},
+				FeatureUsageUnknown:           {},
 			}},
 			"msg_1",
 			"claude-x",
@@ -2462,7 +2474,13 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 			EventBase: EventBase{Type: "response.completed", SequenceNumber: 5},
 			Response:  envelope,
 		})
-		assertAnthropicWireError(t, err, "JSON object")
+		// Non-object terminal-envelope arguments are a LOCAL unrepresentable
+		// output (review-z commit 2); only snapshot-vs-accumulated identity
+		// drift remains corrupt upstream wire.
+		var unrepresentable *UnrepresentableError
+		if !errors.As(err, &unrepresentable) {
+			t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
+		}
 	})
 
 	t.Run("failed identity drift", func(t *testing.T) {
@@ -2486,7 +2504,10 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureUsageTiming: {},
+				FeatureUsageCacheReadUnknown:  {},
+				FeatureUsageCacheWriteUnknown: {},
+				FeatureUsageReasoningUnknown:  {},
+				FeatureUsageUnknown:           {},
 			}},
 			"msg_1",
 			"claude-x",
@@ -2533,7 +2554,10 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			LossPolicy{Allowed: map[Feature]struct{}{
-				FeatureUsageTiming: {},
+				FeatureUsageCacheReadUnknown:  {},
+				FeatureUsageCacheWriteUnknown: {},
+				FeatureUsageReasoningUnknown:  {},
+				FeatureUsageUnknown:           {},
 			}},
 			"msg_1",
 			"claude-x",

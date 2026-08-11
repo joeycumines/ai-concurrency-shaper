@@ -118,7 +118,10 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureUsageTiming: {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
+			FeatureUsageUnknown:           {},
 		}},
 		"msg_1",
 		"claude-x",

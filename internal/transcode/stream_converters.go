@@ -195,9 +195,9 @@ func (s *chatResponsesStreamState) loseServiceTierOnce() error {
 	s.serviceTierLossRecorded = true
 	return s.report.Lose(
 		s.policy,
-		FeatureServiceTier,
+		FeatureResponseServiceTier,
 		"service_tier",
-		"the upstream chat service tier cannot be reproduced in the client dialect",
+		"the upstream chat service tier actually served cannot be reproduced in the client dialect",
 	)
 }
 
@@ -255,23 +255,28 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 	if s.usageComponentsLossRecorded || usage == nil {
 		return nil
 	}
-	var unknown []string
+	s.usageComponentsLossRecorded = true
 	if usage.PromptTokensDetails == nil {
-		unknown = append(unknown, "input_tokens_details.cached_tokens")
+		if err := s.report.Lose(
+			s.policy,
+			FeatureUsageCacheReadUnknown,
+			"usage",
+			"the upstream response did not provide input_tokens_details.cached_tokens; the required Responses usage breakdown cannot be reproduced",
+		); err != nil {
+			return err
+		}
 	}
 	if usage.CompletionTokensDetails == nil {
-		unknown = append(unknown, "output_tokens_details.reasoning_tokens")
+		if err := s.report.Lose(
+			s.policy,
+			FeatureUsageReasoningUnknown,
+			"usage",
+			"the upstream response did not provide output_tokens_details.reasoning_tokens; the required Responses usage breakdown cannot be reproduced",
+		); err != nil {
+			return err
+		}
 	}
-	if len(unknown) == 0 {
-		return nil
-	}
-	s.usageComponentsLossRecorded = true
-	return s.report.Lose(
-		s.policy,
-		FeatureUsageTiming,
-		"usage",
-		"the upstream response did not provide "+strings.Join(unknown, ", ")+"; the required Responses usage breakdown cannot be reproduced",
-	)
+	return nil
 }
 
 // Convert processes one Chat stream chunk into Responses events.
@@ -501,7 +506,7 @@ func (s *chatResponsesStreamState) convertDelta(
 				s.reasoningReportRecorded = true
 				if err := s.report.Lose(
 					s.policy,
-					FeatureProviderReasoning,
+					FeatureProviderReasoningText,
 					"choices[].delta.reasoning",
 					"provider reasoning is dropped during chat-to-responses streaming",
 				); err != nil {
@@ -537,7 +542,7 @@ func (s *chatResponsesStreamState) convertDelta(
 			if !s.reasoningReportRecorded {
 				s.reasoningReportRecorded = true
 				s.report.Note(
-					FeatureProviderReasoning,
+					FeatureProviderReasoningText,
 					"choices[].delta.reasoning",
 					"provider reasoning maps to ordinary text (provider_reasoning_text encoding)",
 				)
@@ -867,18 +872,10 @@ func (s *chatResponsesStreamState) finish(
 		if arguments == "" {
 			arguments = "{}"
 		}
-		// A done event must never carry truncated or malformed arguments:
-		// emitting invalid JSON would poison the client's tool call. The
-		// pinned Responses contract requires a JSON OBJECT — arrays,
-		// strings, and numbers are corrupt wire, never emitted as completed
-		// arguments (review-08 blocker 4).
-		if _, err := decodeJSONObject(arguments); err != nil {
-			return nil, s.wireError(fmt.Errorf(
-				"tool call %q arguments are not a JSON object: %v",
-				pending.callID,
-				err,
-			))
-		}
+		// Model-generated arguments are preserved byte-exact: the Responses
+		// function_call arguments field is a string, and invalid model
+		// output is never an upstream defect (review-z commit 2). Only the
+		// snapshot-vs-accumulated identity check remains wire-corrupt.
 		events = append(events,
 			s.builder.FunctionArgumentsDone(
 				pending.itemID,
@@ -1683,24 +1680,38 @@ func (s *anthropicResponsesStreamState) loseUnknownUsageComponentsOnce(usage *Re
 	if s.usageComponentsLossRecorded || usage == nil {
 		return nil
 	}
-	var unknown []string
-	if usage.InputTokensDetails == nil {
-		unknown = append(unknown, "cache_read_input_tokens")
-	}
-	unknown = append(unknown, "cache_creation_input_tokens")
-	if usage.OutputTokensDetails == nil {
-		unknown = append(unknown, "output_tokens_details.thinking_tokens")
-	}
-	if len(unknown) == 0 {
-		return nil
-	}
 	s.usageComponentsLossRecorded = true
-	return s.report.Lose(
+	if usage.InputTokensDetails == nil {
+		if err := s.report.Lose(
+			s.policy,
+			FeatureUsageCacheReadUnknown,
+			"usage",
+			"the upstream response did not provide cache_read_input_tokens; the required Messages usage breakdown cannot be reproduced",
+		); err != nil {
+			return err
+		}
+	}
+	// cache_creation_input_tokens is never part of the pinned Responses
+	// contract.
+	if err := s.report.Lose(
 		s.policy,
-		FeatureUsageTiming,
+		FeatureUsageCacheWriteUnknown,
 		"usage",
-		"the upstream response did not provide "+strings.Join(unknown, ", ")+"; the required Messages usage breakdown cannot be reproduced",
-	)
+		"the upstream response cannot provide cache_creation_input_tokens; the required Messages usage breakdown cannot be reproduced",
+	); err != nil {
+		return err
+	}
+	if usage.OutputTokensDetails == nil {
+		if err := s.report.Lose(
+			s.policy,
+			FeatureUsageReasoningUnknown,
+			"usage",
+			"the upstream response did not provide output_tokens_details.thinking_tokens; the required Messages usage breakdown cannot be reproduced",
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *anthropicResponsesStreamState) messageStart(
@@ -1750,7 +1761,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 		// usage is an explicit loss/reject decision (review-j finding 9).
 		if err := s.report.Lose(
 			s.policy,
-			FeatureUsageTiming,
+			FeatureUsageUnknown,
 			"message_start.usage",
 			"the source cannot provide early token usage; the required message_start usage is a known loss",
 		); err != nil {
@@ -2057,6 +2068,10 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	// the done snapshot (review-08 blocker 4).
 	arguments, suffix, err := s.reconcileToolArguments(pending, call.Arguments)
 	if err != nil {
+		var unrepresentable *UnrepresentableError
+		if errors.As(err, &unrepresentable) {
+			return nil, err
+		}
 		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", call.ID, err))
 	}
 	if suffix != "" {
@@ -2071,7 +2086,14 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		})
 	}
 	if err := validateFinalToolInput(arguments); err != nil {
-		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", call.ID, err))
+		// Anthropic tool_use.input requires an object: invalid
+		// model-generated arguments are a LOCAL unrepresentable output,
+		// never corrupt upstream wire (review-z commit 2).
+		return nil, &UnrepresentableError{
+			Protocol: "anthropic",
+			Path:     "content_block.input",
+			Detail:   fmt.Sprintf("tool block for item %q: %v", call.ID, err),
+		}
 	}
 
 	events = append(events, AnthropicStreamEvent{
@@ -2110,7 +2132,15 @@ func (s *anthropicResponsesStreamState) reconcileToolArguments(
 ) (string, string, error) {
 	doneArgs, err := decodeJSONObject(snapshot)
 	if err != nil {
-		return "", "", fmt.Errorf("final arguments are not a JSON object: %w", err)
+		// The snapshot is the upstream's final claim about model-generated
+		// arguments: a non-object is a LOCAL unrepresentable output, never
+		// corrupt upstream wire (review-z commit 2). Callers pass this
+		// typed error through unwrapped.
+		return "", "", &UnrepresentableError{
+			Protocol: "anthropic",
+			Path:     "content_block.input",
+			Detail:   fmt.Sprintf("final arguments are not a JSON object: %v", err),
+		}
 	}
 	accumulated := pending.arguments.String()
 	if strings.HasPrefix(snapshot, accumulated) {
@@ -2456,6 +2486,10 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 	// lifecycle.
 	_, suffix, err := s.reconcileToolArguments(pending, event.Arguments)
 	if err != nil {
+		var unrepresentable *UnrepresentableError
+		if errors.As(err, &unrepresentable) {
+			return nil, err
+		}
 		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", event.ItemID, err))
 	}
 	events, err := s.maybeStartToolBlock(pending)
@@ -2614,7 +2648,7 @@ func (s *anthropicResponsesStreamState) losePhaseOnce(
 	s.phaseGated[message.ID] = struct{}{}
 	return s.report.Lose(
 		s.policy,
-		FeaturePhase,
+		FeatureOutputPhase,
 		"output[].phase",
 		"the output message phase cannot be reproduced in an Anthropic stream",
 	)
@@ -2803,11 +2837,18 @@ func (s *anthropicResponsesStreamState) reconcileTerminalOutput(
 			}
 			valueArgs, err := decodeJSONObject(value.Arguments)
 			if err != nil {
-				return s.wireError(fmt.Errorf(
-					"terminal envelope function call %q arguments are not a JSON object: %w",
-					itemID,
-					err,
-				))
+				// Anthropic tool_use.input requires an object: invalid
+				// model-generated arguments are a LOCAL unrepresentable
+				// output, never corrupt upstream wire (review-z commit 2).
+				return &UnrepresentableError{
+					Protocol: "anthropic",
+					Path:     "content_block.input",
+					Detail: fmt.Sprintf(
+						"terminal envelope function call %q arguments are not a JSON object: %v",
+						itemID,
+						err,
+					),
+				}
 			}
 			closedArgs, err := decodeJSONObject(closed.arguments)
 			if err != nil || !jsonObjectsEqual(valueArgs, closedArgs) {
@@ -2949,7 +2990,7 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 		// an explicit loss/reject decision (review-j finding 9).
 		if err := s.report.Lose(
 			s.policy,
-			FeatureUsageTiming,
+			FeatureUsageUnknown,
 			"usage",
 			"the upstream response did not provide terminal token usage; the required Messages usage cannot be reproduced",
 		); err != nil {

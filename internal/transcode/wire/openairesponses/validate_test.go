@@ -288,10 +288,12 @@ func TestOutputItemValidateBranches(t *testing.T) {
 	}).Validate(); err == nil {
 		t.Fatal("name-less function call accepted")
 	}
+	// Invalid model-generated arguments are preserved exactly: any string
+	// is legal on the wire (review-z commit 2).
 	if err := (&FunctionCallOutputItem{
 		ID: "fc_1", Type: "function_call", Status: ItemCompleted, CallID: "c", Name: "f", Arguments: `{`,
-	}).Validate(); err == nil {
-		t.Fatal("invalid arguments accepted")
+	}).Validate(); err != nil {
+		t.Fatalf("invalid model arguments rejected: %v", err)
 	}
 
 	if err := (&FunctionCallOutputResultItem{

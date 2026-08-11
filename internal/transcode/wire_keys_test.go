@@ -131,12 +131,12 @@ func TestRawKeyResponsesEnvelope(t *testing.T) {
 // render (Chat→Responses) emits the 14 required keys in the client body.
 func TestRawKeyResponsesEnvelopeRenderPath(t *testing.T) {
 	resp := CanonicalResponse{
-		ID:         "resp_1",
-		Model:      "m",
-		CreatedAt:  1710000000.5,
-		Status:     CanonicalResponseCompleted,
-		StopReason: CanonicalStopEndTurn,
-		Turns: []CanonicalTurn{{
+		ID:        "resp_1",
+		Model:     "m",
+		CreatedAt: 1710000000.5,
+		Status:    CanonicalResponseCompleted,
+		Stop:      CanonicalStop{Reason: CanonicalStopEndTurn},
+		Items: []CanonicalResponseItem{&CanonicalMessageItem{
 			Role:  CanonicalAssistant,
 			Parts: []CanonicalPart{CanonicalText{Text: "hello"}},
 		}},
@@ -151,7 +151,9 @@ func TestRawKeyResponsesEnvelopeRenderPath(t *testing.T) {
 		UpstreamModel:        "m",
 		IDs:                  NewExchangeIDs(),
 		LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureUsageTiming: {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
 		}},
 	}
 	body, _, err := RenderResponsesResponse(resp, ctx)
@@ -233,12 +235,12 @@ func TestRawKeyResponsesStreamTerminalEnvelope(t *testing.T) {
 // unset.
 func TestRawKeyMessagesResponse(t *testing.T) {
 	resp := CanonicalResponse{
-		ID:         "resp_1",
-		Model:      "m",
-		CreatedAt:  1,
-		Status:     CanonicalResponseCompleted,
-		StopReason: CanonicalStopEndTurn,
-		Turns: []CanonicalTurn{{
+		ID:        "resp_1",
+		Model:     "m",
+		CreatedAt: 1,
+		Status:    CanonicalResponseCompleted,
+		Stop:      CanonicalStop{Reason: CanonicalStopEndTurn},
+		Items: []CanonicalResponseItem{&CanonicalMessageItem{
 			Role:  CanonicalAssistant,
 			Parts: []CanonicalPart{CanonicalText{Text: "hello"}},
 		}},
@@ -254,7 +256,9 @@ func TestRawKeyMessagesResponse(t *testing.T) {
 		// The Chat-source usage cannot reproduce cache_creation tokens; the
 		// required usage_timing loss is approved so rendering proceeds.
 		LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureUsageTiming: {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
 		}},
 	})
 	if err != nil {

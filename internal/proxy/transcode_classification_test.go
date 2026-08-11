@@ -1253,7 +1253,10 @@ func TestTranscodeConfigurationIsDeepCopied(t *testing.T) {
 			},
 		}
 		lossPolicy := transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
-			transcode.FeatureUsageTiming: {},
+			transcode.FeatureUsageCacheReadUnknown:  {},
+			transcode.FeatureUsageCacheWriteUnknown: {},
+			transcode.FeatureUsageReasoningUnknown:  {},
+			transcode.FeatureUsageUnknown:           {},
 		}}
 		allowedQuery := map[string]struct{}{"allowed": {}}
 		mapping.ModelMap = modelMap
@@ -1338,7 +1341,7 @@ func TestTranscodeConfigurationIsDeepCopied(t *testing.T) {
 		// the caller empties the original policy. delete (not reassignment)
 		// mutates the original map in place, which is the aliasing the
 		// deep copy must be immune to.
-		delete(lossPolicy.Allowed, transcode.FeatureUsageTiming)
+		delete(lossPolicy.Allowed, transcode.FeatureUsageCacheReadUnknown)
 		if got := serve(t, p, "/v1/responses", "", "m"); got != http.StatusOK {
 			t.Fatalf("mutated loss policy status = %d, want 200 (loss policy must be deep-copied)", got)
 		}

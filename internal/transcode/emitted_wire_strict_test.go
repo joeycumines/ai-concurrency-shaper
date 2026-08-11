@@ -24,12 +24,12 @@ func strictDecodeUnknown(t *testing.T, wire []byte, target any, label string) {
 // the package schema (no unknown fields, review-08 task 12b).
 func TestEmittedWireResponsesEnvelopeStrictConformance(t *testing.T) {
 	resp := CanonicalResponse{
-		ID:         "resp_1",
-		Model:      "m",
-		CreatedAt:  1,
-		Status:     CanonicalResponseCompleted,
-		StopReason: CanonicalStopEndTurn,
-		Turns: []CanonicalTurn{{
+		ID:        "resp_1",
+		Model:     "m",
+		CreatedAt: 1,
+		Status:    CanonicalResponseCompleted,
+		Stop:      CanonicalStop{Reason: CanonicalStopEndTurn},
+		Items: []CanonicalResponseItem{&CanonicalMessageItem{
 			Role:  CanonicalAssistant,
 			Parts: []CanonicalPart{CanonicalText{Text: "hello"}},
 		}},
@@ -44,7 +44,9 @@ func TestEmittedWireResponsesEnvelopeStrictConformance(t *testing.T) {
 		UpstreamModel:        "m",
 		IDs:                  NewExchangeIDs(),
 		LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureUsageTiming: {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
 		}},
 	}
 	wire, _, err := RenderResponsesResponse(resp, ctx)

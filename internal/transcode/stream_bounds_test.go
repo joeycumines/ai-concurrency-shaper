@@ -72,8 +72,8 @@ func TestChatStreamRepeatedLossesRecordedOnce(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureServiceTier: {},
-			FeatureLogprobs:    {},
+			FeatureResponseServiceTier: {},
+			FeatureLogprobs:            {},
 		}},
 		ChatCapabilities{},
 		"resp_1",
@@ -92,7 +92,7 @@ func TestChatStreamRepeatedLossesRecordedOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if count := countFeature(state.report, FeatureServiceTier); count != 1 {
+	if count := countFeature(state.report, FeatureResponseServiceTier); count != 1 {
 		t.Fatalf("service tier losses = %d, want exactly one", count)
 	}
 	if count := countFeature(state.report, FeatureLogprobs); count != 1 {
@@ -388,13 +388,13 @@ func TestGeneratedFrameBoundAfterJSONEscaping(t *testing.T) {
 func TestStreamBoundaryHelpers(t *testing.T) {
 	t.Run("conversion report entry cap", func(t *testing.T) {
 		report := ConversionReport{}
-		policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureServiceTier: {}}}
+		policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureResponseServiceTier: {}}}
 		for i := 0; i < maxStreamConversionReportEntries; i++ {
-			if err := report.Lose(policy, FeatureServiceTier, "x", "y"); err != nil {
+			if err := report.Lose(policy, FeatureResponseServiceTier, "x", "y"); err != nil {
 				t.Fatalf("entry %d: %v", i, err)
 			}
 		}
-		err := report.Lose(policy, FeatureServiceTier, "x", "y")
+		err := report.Lose(policy, FeatureResponseServiceTier, "x", "y")
 		var wireErr *UpstreamWireError
 		if !errors.As(err, &wireErr) {
 			t.Fatalf("err = %T %v, want *UpstreamWireError (upstream classification)", err, err)
@@ -649,7 +649,7 @@ func TestChatStreamReasoningReportRecordedOnce(t *testing.T) {
 	t.Run("loss without capability", func(t *testing.T) {
 		state := newChatResponsesStreamState(
 			testStreamContext(),
-			LossPolicy{Allowed: map[Feature]struct{}{FeatureProviderReasoning: {}}},
+			LossPolicy{Allowed: map[Feature]struct{}{FeatureProviderReasoningText: {}}},
 			ChatCapabilities{},
 			"resp_1",
 			"m",
@@ -661,7 +661,7 @@ func TestChatStreamReasoningReportRecordedOnce(t *testing.T) {
 				t.Fatalf("delta %d: %v", i, err)
 			}
 		}
-		if count := countFeature(state.report, FeatureProviderReasoning); count != 1 {
+		if count := countFeature(state.report, FeatureProviderReasoningText); count != 1 {
 			t.Fatalf("reasoning losses = %d, want exactly one", count)
 		}
 	})
@@ -680,7 +680,7 @@ func TestChatStreamReasoningReportRecordedOnce(t *testing.T) {
 				t.Fatalf("delta %d: %v", i, err)
 			}
 		}
-		if count := countFeature(state.report, FeatureProviderReasoning); count != 1 {
+		if count := countFeature(state.report, FeatureProviderReasoningText); count != 1 {
 			t.Fatalf("reasoning notes = %d, want exactly one", count)
 		}
 	})

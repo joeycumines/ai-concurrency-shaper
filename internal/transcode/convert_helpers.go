@@ -1,8 +1,10 @@
 package transcode
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // boolPtr returns a pointer to v.
@@ -147,6 +149,14 @@ func canonicalImageToResponsesInputImage(
 }
 
 // imageDataURL builds a base64 data URL for an image media type.
+// encodeDataURL builds a data URL for any media type (documents included).
+func encodeDataURL(mediaType, base64Data string) (string, error) {
+	if base64Data == "" {
+		return "", errors.New("empty data")
+	}
+	return "data:" + mediaType + ";base64," + base64Data, nil
+}
+
 func imageDataURL(mediaType, base64Data string) (string, error) {
 	switch mediaType {
 	case "image/jpeg", "image/png", "image/gif", "image/webp":
@@ -307,31 +317,13 @@ func canonicalUserTurnToChatMessages(
 				messages = append(messages, message)
 				contentParts = nil
 			}
-			parts, err := transcodeToolResult(
-				value,
-				policy,
-				report,
-				"chat",
-				"messages[].tool_result.is_error",
-			)
+			// Tool messages use the dedicated tool-result renderer — never
+			// the user-message renderer (review-z commit 2).
+			toolMessage, err := renderChatToolResult(value, policy, report)
 			if err != nil {
 				return nil, err
 			}
-			content, err := canonicalPartsToChatMessageContent(
-				parts,
-				capabilities,
-				report,
-				policy,
-			)
-			if err != nil {
-				return nil, err
-			}
-			callID := value.CallID
-			messages = append(messages, ChatMessage{
-				Role:            ChatMessageRoleTool,
-				Content:         &content,
-				ChatToolMessage: &ChatToolMessage{ToolCallID: &callID},
-			})
+			messages = append(messages, toolMessage)
 
 		default:
 			contentParts = append(contentParts, part)
@@ -406,11 +398,18 @@ func canonicalContentPartsToChatUserMessage(
 			})
 
 		case CanonicalDocument:
-			return ChatMessage{}, &UnsupportedFeatureError{
-				Protocol: "chat",
-				Path:     "messages[].content",
-				Feature:  string(FeatureDocumentInput),
+			// Document input cannot be rendered by the chat provider; it is
+			// an approved loss (the part is dropped) or a rejection, mirroring
+			// the image-input decision (review-z commit 2).
+			if err := report.Lose(
+				policy,
+				FeatureDocumentInput,
+				"messages[].content",
+				"document input is not supported by the configured chat provider",
+			); err != nil {
+				return ChatMessage{}, err
 			}
+			continue
 
 		case CanonicalRefusal:
 			return ChatMessage{}, &UnsupportedFeatureError{
@@ -431,34 +430,6 @@ func canonicalContentPartsToChatUserMessage(
 		return ChatMessage{}, errors.New("user turn has no portable content")
 	}
 	return ChatMessage{Role: ChatMessageRoleUser, Content: &ChatMessageContent{ContentBlocks: blocks}}, nil
-}
-
-// canonicalPartsToChatMessageContent renders canonical parts into a Chat
-// message content union, collapsing a single text part into the string arm.
-func canonicalPartsToChatMessageContent(
-	parts []CanonicalPart,
-	capabilities ChatCapabilities,
-	report *ConversionReport,
-	policy LossPolicy,
-) (ChatMessageContent, error) {
-	if len(parts) == 1 {
-		if text, ok := parts[0].(CanonicalText); ok {
-			return ChatMessageContent{ContentStr: &text.Text}, nil
-		}
-	}
-	message, err := canonicalContentPartsToChatUserMessage(
-		parts,
-		capabilities,
-		report,
-		policy,
-	)
-	if err != nil {
-		return ChatMessageContent{}, err
-	}
-	if message.Content == nil {
-		return ChatMessageContent{}, errors.New("empty tool result content")
-	}
-	return *message.Content, nil
 }
 
 // canonicalAssistantTurnToChatMessage renders an assistant turn into a Chat
@@ -537,4 +508,176 @@ func derefStr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// toolResultEnvelopeContent is one entry of the deterministic
+// tool_result_json_envelope JSON text envelope (transcode_version 1).
+type toolResultEnvelopeContent struct {
+	Type      string `json:"type"`
+	Text      string `json:"text,omitempty"`
+	MediaType string `json:"media_type,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+// toolResultEnvelope is the deterministic JSON text envelope carrying
+// multimodal tool-result content inside a Chat tool message
+// (tool_result_json_envelope, transcode_version 1).
+type toolResultEnvelope struct {
+	TranscodeVersion int                         `json:"transcode_version"`
+	Content          []toolResultEnvelopeContent `json:"content"`
+}
+
+// renderChatToolResult renders a function result into a complete Chat
+// tool-role message — the dedicated tool-result renderer, never the
+// user-message renderer (review-z commit 2). Exact text results stay exact
+// text. Image, document, or mixed results are rejected under strict policy
+// (UnrepresentableError — local, never corrupt wire) and, under the
+// tool_result_multimodal_content and tool_result_json_envelope permissions,
+// encoded as ONE deterministic JSON text envelope (transcode_version 1) that
+// is recorded in the conversion report. Invalid wire (image_url blocks
+// inside a tool-role message) is never emitted.
+func renderChatToolResult(
+	result CanonicalFunctionResult,
+	policy LossPolicy,
+	report *ConversionReport,
+) (ChatMessage, error) {
+	parts := result.Parts
+	if result.IsError {
+		// The error status cannot be carried by a Chat tool message; the
+		// permissive encoding is the visible error_status_prefix text
+		// (review-j finding 10).
+		if err := report.Lose(
+			policy,
+			FeatureToolResultErrorStatus,
+			"messages[].tool_result.is_error",
+			"the tool result error status cannot be reproduced in the chat dialect; the permissive encoding is the visible error_status_prefix text",
+		); err != nil {
+			return ChatMessage{}, err
+		}
+		parts = append(
+			[]CanonicalPart{CanonicalText{Text: "[tool_result_error]"}},
+			parts...,
+		)
+	}
+
+	// Exact text results stay exact text: the string arm of the Chat
+	// message content union.
+	if allTextParts(parts) {
+		var builder strings.Builder
+		for i, part := range parts {
+			if i > 0 {
+				builder.WriteByte('\n')
+			}
+			builder.WriteString(part.(CanonicalText).Text)
+		}
+		text := builder.String()
+		callID := result.CallID
+		return ChatMessage{
+			Role:            ChatMessageRoleTool,
+			Content:         &ChatMessageContent{ContentStr: &text},
+			ChatToolMessage: &ChatToolMessage{ToolCallID: &callID},
+		}, nil
+	}
+
+	// Multimodal content: the content-shape loss and the sanctioned
+	// encoding loss gate the deterministic JSON text envelope.
+	if err := report.Lose(
+		policy,
+		FeatureToolResultMultimodalContent,
+		"messages[].tool_result.content",
+		"the multimodal tool-result content cannot be carried exactly by a Chat tool message",
+	); err != nil {
+		return ChatMessage{}, &UnrepresentableError{
+			Protocol: "chat",
+			Path:     "messages[].tool_result.content",
+			Detail:   "the multimodal tool-result content cannot be represented as a Chat tool message",
+		}
+	}
+	envelopeText, err := encodeToolResultEnvelope(parts)
+	if err != nil {
+		return ChatMessage{}, err
+	}
+	if err := report.Lose(
+		policy,
+		FeatureToolResultJSONEnvelope,
+		"messages[].tool_result.content",
+		"the multimodal tool-result content is encoded as the deterministic transcode JSON text envelope (tool_result_json_envelope, transcode_version 1)",
+	); err != nil {
+		return ChatMessage{}, &UnrepresentableError{
+			Protocol: "chat",
+			Path:     "messages[].tool_result.content",
+			Detail:   "the multimodal tool-result content cannot be represented as a Chat tool message",
+		}
+	}
+	callID := result.CallID
+	return ChatMessage{
+		Role:            ChatMessageRoleTool,
+		Content:         &ChatMessageContent{ContentStr: &envelopeText},
+		ChatToolMessage: &ChatToolMessage{ToolCallID: &callID},
+	}, nil
+}
+
+// allTextParts reports whether every part is ordinary text.
+func allTextParts(parts []CanonicalPart) bool {
+	for _, part := range parts {
+		if _, ok := part.(CanonicalText); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// encodeToolResultEnvelope renders the deterministic tool_result_json_envelope
+// JSON text (transcode_version 1): text, image, and document parts in order,
+// with base64 images/documents carried as data URLs.
+func encodeToolResultEnvelope(parts []CanonicalPart) (string, error) {
+	envelope := toolResultEnvelope{TranscodeVersion: 1}
+	for i, part := range parts {
+		switch value := part.(type) {
+		case CanonicalText:
+			envelope.Content = append(envelope.Content, toolResultEnvelopeContent{
+				Type: "text",
+				Text: value.Text,
+			})
+		case CanonicalImage:
+			url := value.URL
+			if url == "" {
+				var err error
+				url, err = imageDataURL(value.MediaType, value.Base64)
+				if err != nil {
+					return "", fmt.Errorf("tool result part %d: %w", i, err)
+				}
+			}
+			envelope.Content = append(envelope.Content, toolResultEnvelopeContent{
+				Type:      "image",
+				MediaType: value.MediaType,
+				URL:       url,
+			})
+		case CanonicalDocument:
+			url := value.URL
+			if url == "" {
+				var err error
+				url, err = encodeDataURL(value.MediaType, value.Base64)
+				if err != nil {
+					return "", fmt.Errorf("tool result part %d: %w", i, err)
+				}
+			}
+			envelope.Content = append(envelope.Content, toolResultEnvelopeContent{
+				Type:      "document",
+				MediaType: value.MediaType,
+				URL:       url,
+			})
+		default:
+			return "", fmt.Errorf(
+				"tool result part %d: cannot encode canonical part %T in the tool_result_json_envelope",
+				i,
+				part,
+			)
+		}
+	}
+	raw, err := json.Marshal(envelope)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }

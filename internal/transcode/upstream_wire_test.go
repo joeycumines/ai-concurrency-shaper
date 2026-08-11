@@ -8,6 +8,7 @@ package transcode
 
 import (
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -24,6 +25,8 @@ func TestUpstreamWireDecodeMatrix(t *testing.T) {
 		// wantUnsupported reports whether the error must remain an
 		// UnsupportedFeatureError (local).
 		wantUnsupported bool
+		// wantAccept reports that the decode must succeed.
+		wantAccept bool
 	}{
 		{
 			name:     "chat invalid envelope",
@@ -50,10 +53,13 @@ func TestUpstreamWireDecodeMatrix(t *testing.T) {
 			body:     `{"id":"c","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop"}]}`,
 			wantWire: true,
 		},
+		// Invalid model-generated tool arguments are PRESERVED byte-exact,
+		// never corrupt wire (review-z commit 2); the preservation is
+		// asserted in TestToolArgumentsFidelityAcrossTargets.
 		{
-			name:     "chat malformed tool arguments",
-			body:     `{"id":"c","object":"chat.completion","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":"}}]}}]}`,
-			wantWire: true,
+			name:       "chat invalid tool arguments preserved",
+			body:       `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":"}}]}}]}`,
+			wantAccept: true,
 		},
 		{
 			name:     "chat unknown field",
@@ -75,6 +81,12 @@ func TestUpstreamWireDecodeMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := DecodeChatResponse([]byte(tt.body), ChatCapabilities{})
+			if tt.wantAccept {
+				if err != nil {
+					t.Fatalf("decode = %v, want acceptance", err)
+				}
+				return
+			}
 			assertWireClassification(t, err, tt.wantWire, tt.wantUnsupported)
 		})
 	}
@@ -91,15 +103,18 @@ func TestUpstreamWireDecodeMatrix(t *testing.T) {
 			t.Fatalf("responses protocol = %v", wireErr.Protocol)
 		}
 	}
-	if _, err := DecodeResponsesResponse([]byte(
+	// Invalid model-generated Responses tool arguments are preserved
+	// byte-exact (review-z commit 2): the decode succeeds and carries the
+	// raw string.
+	response, err := DecodeResponsesResponse([]byte(
 		`{"id":"r","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"f","arguments":"{\"a\":"}]}`,
-	)); err == nil {
-		t.Fatal("expected decode error")
-	} else {
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
-			t.Fatalf("responses tool args err = %T %v, want *UpstreamWireError", err, err)
-		}
+	))
+	if err != nil {
+		t.Fatalf("invalid model arguments rejected: %v", err)
+	}
+	call, ok := response.Items[0].(*CanonicalFunctionCallItem)
+	if !ok || call.Arguments.Raw != `{"a":` || call.Arguments.IsObject {
+		t.Fatalf("arguments = %+v, want the raw string preserved", call.Arguments)
 	}
 	if _, err := DecodeResponsesResponse([]byte(
 		`{"id":"r","object":"response","created_at":1,"status":"bogus","model":"m","output":[]}`,
@@ -176,6 +191,8 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 		// UnsupportedFeatureError too (report.Lose), so they share this
 		// bucket.
 		wantUnsupported bool
+		// wantSuccess expects the stream to terminate cleanly.
+		wantSuccess bool
 	}{
 		{
 			name:      "chat malformed chunk JSON",
@@ -231,13 +248,17 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 			wantUpstream: true,
 		},
 		{
-			name:      "chat invalid final tool arguments",
+			// Invalid model-generated tool arguments are preserved
+			// byte-exact in the emitted function_call arguments, never
+			// corrupt wire (review-z commit 2).
+			name:      "chat invalid final tool arguments preserved",
 			direction: "chat",
 			frames: []string{
 				"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"a\\\":\"}}]},\"finish_reason\":null}]}\n\n",
 				"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+				"data: [DONE]\n\n",
 			},
-			wantUpstream: true,
+			wantSuccess: true,
 		},
 		{
 			name:      "composed chat wire error",
@@ -390,6 +411,18 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 			isUnsupported := errors.As(readErr, &unsupportedErr)
 
 			switch {
+			case tt.wantSuccess:
+				// drainReader reports the terminal EOF; a clean terminal is
+				// EOF (or nil), never a typed error.
+				if readErr != nil && !errors.Is(readErr, io.EOF) {
+					t.Fatalf("read err = %v, want a clean terminal", readErr)
+				}
+				if reader.SawUpstreamErrorFrame() {
+					t.Fatal("preserved arguments must not mark the stream as an upstream error")
+				}
+				if !reader.SawTerminal() {
+					t.Fatal("stream must terminate cleanly")
+				}
 			case tt.wantUpstream:
 				if !isWire {
 					t.Fatalf("read err = %T %v, want *UpstreamWireError", readErr, readErr)

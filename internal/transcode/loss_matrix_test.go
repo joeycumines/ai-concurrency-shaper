@@ -52,7 +52,7 @@ func TestToolResultIsErrorPermissiveEncoding(t *testing.T) {
 	}
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureToolResultError: {},
+		FeatureToolResultErrorStatus: {},
 	}}
 
 	rendered, report, err := RenderResponsesRequest(result.Request, context)
@@ -62,7 +62,7 @@ func TestToolResultIsErrorPermissiveEncoding(t *testing.T) {
 	if !strings.Contains(string(rendered), "[tool_result_error]") {
 		t.Fatalf("responses render lacks the error_status_prefix encoding: %s", rendered)
 	}
-	if !reportHasFeature(report, FeatureToolResultError) {
+	if !reportHasFeature(report, FeatureToolResultErrorStatus) {
 		t.Fatalf("responses render report lacks the tool_result_error loss: %+v", report)
 	}
 
@@ -73,7 +73,7 @@ func TestToolResultIsErrorPermissiveEncoding(t *testing.T) {
 	if !strings.Contains(string(rendered), "[tool_result_error]") {
 		t.Fatalf("chat render lacks the error_status_prefix encoding: %s", rendered)
 	}
-	if !reportHasFeature(report, FeatureToolResultError) {
+	if !reportHasFeature(report, FeatureToolResultErrorStatus) {
 		t.Fatalf("chat render report lacks the tool_result_error loss: %+v", report)
 	}
 }
@@ -100,8 +100,8 @@ func TestReasoningSummaryRequestLossGate(t *testing.T) {
 	permissive := testExchangeContext()
 	permissive.OriginalResponsesRequest = echo
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureReasoningSummaryRequest: {},
-		FeatureProviderReasoning:       {},
+		FeatureReasoningSummary:      {},
+		FeatureProviderReasoningText: {},
 	}}
 	rendered, report, err := RenderChatRequest(result.Request, permissive, ChatCapabilities{ReasoningEffort: true})
 	if err != nil {
@@ -110,8 +110,8 @@ func TestReasoningSummaryRequestLossGate(t *testing.T) {
 	if !strings.Contains(string(rendered), `"reasoning_effort":"medium"`) {
 		t.Fatalf("effort must still render: %s", rendered)
 	}
-	if !reportHasFeature(report, FeatureReasoningSummaryRequest) {
-		t.Fatalf("report lacks the reasoning_summary_request loss: %+v", report)
+	if !reportHasFeature(report, FeatureReasoningSummary) {
+		t.Fatalf("report lacks the reasoning_summary loss: %+v", report)
 	}
 }
 
@@ -136,7 +136,7 @@ func TestStreamProviderReasoningCapabilityGate(t *testing.T) {
 
 	state = newChatResponsesStreamState(
 		testStreamContext(),
-		LossPolicy{Allowed: map[Feature]struct{}{FeatureProviderReasoning: {}}},
+		LossPolicy{Allowed: map[Feature]struct{}{FeatureProviderReasoningText: {}}},
 		ChatCapabilities{},
 		"resp_1",
 		"m",
@@ -146,7 +146,7 @@ func TestStreamProviderReasoningCapabilityGate(t *testing.T) {
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: str("think")}, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if !reportHasFeature(state.report, FeatureProviderReasoning) {
+	if !reportHasFeature(state.report, FeatureProviderReasoningText) {
 		t.Fatalf("report lacks the provider reasoning loss: %+v", state.report)
 	}
 
@@ -174,7 +174,7 @@ func TestStreamProviderReasoningCapabilityGate(t *testing.T) {
 	if !sawText {
 		t.Fatalf("provider reasoning delta not mapped to text: %+v", events)
 	}
-	if !reportHasFeature(state.report, FeatureProviderReasoning) {
+	if !reportHasFeature(state.report, FeatureProviderReasoningText) {
 		t.Fatalf("report lacks the provider_reasoning_text encoding note: %+v", state.report)
 	}
 }
@@ -187,7 +187,7 @@ func TestOutputMessagePhaseLossGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !response.ResponsesPhase {
+	if !responseHasPhase(response) {
 		t.Fatal("phase flag not set at decode")
 	}
 	strict := testExchangeContext()
@@ -197,8 +197,11 @@ func TestOutputMessagePhaseLossGate(t *testing.T) {
 	}
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeaturePhase:       {},
-		FeatureUsageTiming: {},
+		FeatureOutputPhase:            {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
 	}}
 	permissive.RequestedClientModel = "m"
 	rendered, report, err := RenderMessagesResponse(response, permissive)
@@ -208,7 +211,7 @@ func TestOutputMessagePhaseLossGate(t *testing.T) {
 	if !strings.Contains(string(rendered), "thinking out loud") {
 		t.Fatalf("content must still render: %s", rendered)
 	}
-	if !reportHasFeature(report, FeaturePhase) {
+	if !reportHasFeature(report, FeatureOutputPhase) {
 		t.Fatalf("report lacks the phase loss: %+v", report)
 	}
 }
@@ -239,7 +242,10 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureUsageTiming: {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
+			FeatureUsageUnknown:           {},
 		}},
 		"msg_1",
 		"claude-x",
@@ -275,8 +281,11 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 	state = newAnthropicResponsesStreamState(
 		testStreamContext(),
 		LossPolicy{Allowed: map[Feature]struct{}{
-			FeaturePhase:       {},
-			FeatureUsageTiming: {},
+			FeatureOutputPhase:            {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
+			FeatureUsageUnknown:           {},
 		}},
 		"msg_1",
 		"claude-x",
@@ -348,7 +357,7 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if count := countFeature(state.report, FeaturePhase); count != 1 {
+	if count := countFeature(state.report, FeatureOutputPhase); count != 1 {
 		t.Fatalf("phase losses = %d, want exactly one per item", count)
 	}
 }
@@ -361,14 +370,24 @@ func TestInputMessagePhaseGate(t *testing.T) {
 		t.Fatal("strict policy accepted an input message phase")
 	}
 	result, _, err := DecodeResponsesRequest([]byte(body), LossPolicy{Allowed: map[Feature]struct{}{
-		FeaturePhase: {},
+		FeatureOutputPhase: {},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := countFeature(result.Report, FeaturePhase); count != 1 {
+	if count := countFeature(result.Report, FeatureOutputPhase); count != 1 {
 		t.Fatalf("phase losses = %d, want one", count)
 	}
+}
+
+// responseHasPhase reports whether any output message item carries a phase.
+func responseHasPhase(response CanonicalResponse) bool {
+	for _, item := range response.Items {
+		if message, ok := item.(*CanonicalMessageItem); ok && message.Phase.Set {
+			return true
+		}
+	}
+	return false
 }
 
 // countFeature counts the report records for a feature.
@@ -393,15 +412,18 @@ func TestResponseRenderReportSurfaced(t *testing.T) {
 	}
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureConversationState: {},
-		FeatureUsageTiming:       {},
+		FeatureOutputItemBoundaries:   {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
 	}}
 	context.RequestedClientModel = "m"
 	_, report, err := RenderMessagesResponse(response, context)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reportHasFeature(report, FeatureConversationState) {
+	if !reportHasFeature(report, FeatureOutputItemBoundaries) {
 		t.Fatalf("report lacks the conversation-state loss: %+v", report)
 	}
 }

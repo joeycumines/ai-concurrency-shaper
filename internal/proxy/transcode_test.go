@@ -60,8 +60,10 @@ func testResponsesMapping(t *testing.T) transcode.Mapping {
 		// fixtures' usage lacks them, so the shared mapping permits the
 		// usage-timing loss.
 		LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
-			transcode.FeatureUsageTiming: {},
-		}},
+			transcode.FeatureUsageCacheReadUnknown:  {},
+			transcode.FeatureUsageCacheWriteUnknown: {},
+			transcode.FeatureUsageReasoningUnknown:  {},
+			transcode.FeatureUsageUnknown:           {}}},
 		ModelMap: transcode.ModelMap{AllowIdentity: true},
 		Auth:     transcode.AuthPolicy{Mode: transcode.AuthNone},
 	}
@@ -451,9 +453,11 @@ func TestProxyTranscodeMessagesToResponsesStreaming(t *testing.T) {
 	// response-side losses are approved for this conversion.
 	mapping := testMessagesResponsesMapping(t)
 	mapping.LossPolicy = transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
-		transcode.FeatureReasoningSummary: {},
-		transcode.FeatureUsageTiming:      {},
-	}}
+		transcode.FeatureReasoningSummary:       {},
+		transcode.FeatureUsageUnknown:           {},
+		transcode.FeatureUsageCacheReadUnknown:  {},
+		transcode.FeatureUsageCacheWriteUnknown: {},
+		transcode.FeatureUsageReasoningUnknown:  {}}}
 	p := newTranscodeProxyUpstream(t, upstream, transcodeMapping(mapping))
 	req := httptest.NewRequest(
 		http.MethodPost,
@@ -1107,8 +1111,11 @@ func TestProxyTranscodeMessagesToChatStreaming(t *testing.T) {
 	mapping.UpstreamProtocol = transcode.UpstreamChatCompletions
 	mapping.UpstreamPath = "/v1/chat/completions"
 	mapping.LossPolicy = transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
-		transcode.FeatureUsageTiming: {},
-	}}
+		transcode.FeatureReasoningSummary:       {},
+		transcode.FeatureUsageUnknown:           {},
+		transcode.FeatureUsageCacheReadUnknown:  {},
+		transcode.FeatureUsageCacheWriteUnknown: {},
+		transcode.FeatureUsageReasoningUnknown:  {}}}
 	p := newTranscodeProxyUpstream(t, upstream, transcodeMapping(mapping))
 	req := httptest.NewRequest(
 		http.MethodPost,

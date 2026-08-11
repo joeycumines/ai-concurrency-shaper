@@ -177,11 +177,11 @@ func TestValidateCanonicalRequestNegativeMatrix(t *testing.T) {
 func TestValidateCanonicalResponseNegativeMatrix(t *testing.T) {
 	base := func() CanonicalResponse {
 		return CanonicalResponse{
-			ID:         "resp_1",
-			Model:      "m",
-			Status:     CanonicalResponseCompleted,
-			StopReason: CanonicalStopEndTurn,
-			Turns: []CanonicalTurn{{
+			ID:     "resp_1",
+			Model:  "m",
+			Status: CanonicalResponseCompleted,
+			Stop:   CanonicalStop{Reason: CanonicalStopEndTurn},
+			Items: []CanonicalResponseItem{&CanonicalMessageItem{
 				Role:  CanonicalAssistant,
 				Parts: []CanonicalPart{CanonicalText{Text: "hi"}},
 			}},
@@ -219,7 +219,7 @@ func TestValidateCanonicalResponseNegativeMatrix(t *testing.T) {
 
 	t.Run("invalid stop reason", func(t *testing.T) {
 		r := base()
-		r.StopReason = CanonicalStopReason("because")
+		r.Stop.Reason = CanonicalStopReason("because")
 		if err := ValidateCanonicalResponse(r); err == nil {
 			t.Fatal("invalid stop reason accepted")
 		}

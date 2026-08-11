@@ -400,3 +400,21 @@ func (e *UpstreamSemanticFailureError) Error() string {
 	}
 	return "upstream response failed: " + e.Message
 }
+
+// UnrepresentableError reports a valid source value that the target dialect
+// cannot represent at all — e.g. model-generated tool arguments that are not
+// a JSON object when the target requires an object. It is a LOCAL conversion
+// result: invalid model output is never an upstream defect, never opens the
+// circuit breaker, and the exchange records it neutral (review-z commit 2).
+type UnrepresentableError struct {
+	Protocol string
+	Path     string
+	Detail   string
+}
+
+func (e *UnrepresentableError) Error() string {
+	if e.Detail == "" {
+		return e.Protocol + " field " + e.Path + " is unrepresentable in the target dialect"
+	}
+	return e.Protocol + " field " + e.Path + ": " + e.Detail
+}

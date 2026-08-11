@@ -37,14 +37,18 @@ func TestUsageCounterexampleResponsesLossGated(t *testing.T) {
 	}
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureUsageTiming: {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
 	}}
 	rendered, report, err := RenderResponsesResponse(response, context)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := countFeature(report, FeatureUsageTiming); count != 1 {
-		t.Fatalf("usage losses = %d, want exactly one", count)
+	if count := countFeature(report, FeatureUsageCacheReadUnknown) +
+		countFeature(report, FeatureUsageReasoningUnknown); count != 2 {
+		t.Fatalf("usage component losses = %d, want exactly one per unknown component", count)
 	}
 	body := string(rendered)
 	if !strings.Contains(body, `"input_tokens":10`) ||
@@ -72,14 +76,19 @@ func TestUsageCounterexampleMessagesLossGated(t *testing.T) {
 	}
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureUsageTiming: {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
 	}}
 	rendered, report, err := RenderMessagesResponse(response, context)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := countFeature(report, FeatureUsageTiming); count != 1 {
-		t.Fatalf("usage losses = %d, want exactly one", count)
+	if count := countFeature(report, FeatureUsageCacheReadUnknown) +
+		countFeature(report, FeatureUsageCacheWriteUnknown) +
+		countFeature(report, FeatureUsageReasoningUnknown); count != 3 {
+		t.Fatalf("usage component losses = %d, want exactly one per unknown component", count)
 	}
 	body := string(rendered)
 	if !strings.Contains(body, `"cache_creation_input_tokens":0`) ||
@@ -112,14 +121,19 @@ func TestUsagePartialPreservesKnownTotals(t *testing.T) {
 	}
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureUsageTiming: {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
 	}}
 	rendered, report, err := RenderResponsesResponse(response, context)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count := countFeature(report, FeatureUsageTiming); count != 1 {
-		t.Fatalf("usage losses = %d, want exactly one", count)
+	if count := countFeature(report, FeatureUsageUnknown) +
+		countFeature(report, FeatureUsageCacheReadUnknown) +
+		countFeature(report, FeatureUsageReasoningUnknown); count != 3 {
+		t.Fatalf("usage component losses = %d, want exactly one per unknown component", count)
 	}
 	emitted := string(rendered)
 	if !strings.Contains(emitted, `"input_tokens":10`) ||
@@ -146,7 +160,10 @@ func TestUsagePartialPreservesKnownTotals(t *testing.T) {
 	}
 	context = testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureUsageTiming: {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
 	}}
 	rendered, _, err = RenderResponsesResponse(response, context)
 	if err != nil {
@@ -226,7 +243,10 @@ func TestUsageStreamingChatToResponsesLossGatedOnce(t *testing.T) {
 	state = newChatResponsesStreamState(
 		testStreamContext(),
 		LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureUsageTiming: {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
+			FeatureUsageUnknown:           {},
 		}},
 		ChatCapabilities{},
 		"resp_1",
@@ -246,8 +266,9 @@ func TestUsageStreamingChatToResponsesLossGatedOnce(t *testing.T) {
 	if _, err := state.Convert(tail); err != nil {
 		t.Fatal(err)
 	}
-	if count := countFeature(state.report, FeatureUsageTiming); count != 1 {
-		t.Fatalf("usage losses = %d, want exactly one", count)
+	if count := countFeature(state.report, FeatureUsageCacheReadUnknown) +
+		countFeature(state.report, FeatureUsageReasoningUnknown); count != 2 {
+		t.Fatalf("usage component losses = %d, want exactly one per unknown component", count)
 	}
 }
 
@@ -300,7 +321,10 @@ func TestUsageStreamingResponsesToAnthropicLossGatedOnce(t *testing.T) {
 	state = newAnthropicResponsesStreamState(
 		testStreamContext(),
 		LossPolicy{Allowed: map[Feature]struct{}{
-			FeatureUsageTiming: {},
+			FeatureUsageCacheReadUnknown:  {},
+			FeatureUsageCacheWriteUnknown: {},
+			FeatureUsageReasoningUnknown:  {},
+			FeatureUsageUnknown:           {},
 		}},
 		"msg_1",
 		"m",
@@ -318,7 +342,10 @@ func TestUsageStreamingResponsesToAnthropicLossGatedOnce(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if count := countFeature(state.report, FeatureUsageTiming); count != 1 {
-		t.Fatalf("usage losses = %d, want exactly one", count)
+	// The source provides both detail objects; only cache-creation tokens
+	// are never part of the pinned Responses contract, so exactly one
+	// component loss is recorded.
+	if count := countFeature(state.report, FeatureUsageCacheWriteUnknown); count != 1 {
+		t.Fatalf("usage component losses = %d, want exactly one", count)
 	}
 }

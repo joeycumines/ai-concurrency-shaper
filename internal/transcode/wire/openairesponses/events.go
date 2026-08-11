@@ -564,17 +564,9 @@ func (e FunctionCallArgumentsDoneEvent) Validate() error {
 		return errors.New("negative function arguments index")
 	}
 	// arguments is optional on the wire: the official done event may carry
-	// an empty string when nothing was accumulated (the state machine
-	// reconciles the snapshot and requires an object at the boundary). A
-	// non-empty invalid payload is a contradictory union arm — the tagged
-	// type promises JSON — reported as a typed decode rejection.
-	if e.Arguments != "" && !json.Valid([]byte(e.Arguments)) {
-		return &wire.DecodeError{
-			Kind:    wire.DecodeContradictoryUnion,
-			Path:    "arguments",
-			Message: "final function arguments are invalid JSON",
-		}
-	}
+	// an empty string when nothing was accumulated. The payload is
+	// model-generated output preserved byte-exact; any string is legal and
+	// invalid model output is never an upstream defect (review-z commit 2).
 	return nil
 }
 

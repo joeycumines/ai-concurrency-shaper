@@ -511,7 +511,10 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 // Responses->Messages path triggers (reasoning and usage timing).
 func j6PermissivePolicy() LossPolicy {
 	return LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureReasoningSummary: {},
-		FeatureUsageTiming:      {},
+		FeatureReasoningSummary:       {},
+		FeatureUsageUnknown:           {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
 	}}
 }

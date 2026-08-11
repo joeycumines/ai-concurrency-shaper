@@ -144,7 +144,6 @@ func TestResponsesOutputInvalid(t *testing.T) {
 		`{"type":"message","role":"assistant","status":"completed","content":[]}`,      // no id
 		`{"type":"message","id":"m","role":"user","status":"completed","content":[]}`,  // wrong role
 		`{"type":"message","id":"m","role":"assistant","status":"bogus","content":[]}`, // bad status
-		`{"type":"function_call","id":"f","status":"completed","call_id":"c","name":"n","arguments":"not json"}`,
 	}
 	for _, data := range tests {
 		_, err := openairesponses.DecodeOutputItem([]byte(data))

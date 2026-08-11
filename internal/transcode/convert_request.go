@@ -346,7 +346,7 @@ func responsesInputToTurns(
 		case *ResponsesItemReferenceInput:
 			if err := report.Lose(
 				policy,
-				FeatureConversationState,
+				FeaturePreviousResponseID,
 				"input[].item_reference",
 				"item references are Responses-specific conversation state",
 			); err != nil {
@@ -906,7 +906,7 @@ func RenderResponsesRequest(
 	if len(systemTurns) > 1 {
 		if err := report.Lose(
 			context.lossPolicy(),
-			FeatureResponsesControls,
+			FeatureMultipleSystemTurns,
 			"instructions",
 			"multiple system turns cannot be expressed in a single instructions string",
 		); err != nil {
@@ -931,7 +931,7 @@ func RenderResponsesRequest(
 		if builder.Len() > 0 {
 			if len(systemTurns[0].Parts) > 1 {
 				report.Note(
-					FeatureResponsesControls,
+					FeatureMultipleSystemTurns,
 					"instructions",
 					"multiple system text parts join into one instructions string (instructions_text_join encoding)",
 				)
@@ -1155,13 +1155,42 @@ func RenderChatRequest(
 	if echo := context.OriginalResponsesRequest; echo != nil {
 		out.User = echo.User
 		out.Store = echo.Store
-		if echo.PreviousResponseID != nil || echo.TopLogprobs != nil ||
-			echo.ServiceTier != nil || echo.Truncation != nil {
+		if echo.PreviousResponseID != nil {
 			if err := report.Lose(
 				context.lossPolicy(),
-				FeatureConversationState,
-				"request",
-				"responses conversation-state and request-tuning fields are not portable to a chat upstream",
+				FeaturePreviousResponseID,
+				"request.previous_response_id",
+				"the Responses previous_response_id field is not portable to a chat upstream",
+			); err != nil {
+				return nil, report, err
+			}
+		}
+		if echo.TopLogprobs != nil {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureRequestTopLogprobs,
+				"request.top_logprobs",
+				"the Responses top_logprobs field is not portable to a chat upstream",
+			); err != nil {
+				return nil, report, err
+			}
+		}
+		if echo.ServiceTier != nil {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureRequestServiceTier,
+				"request.service_tier",
+				"the Responses service_tier field is not portable to a chat upstream",
+			); err != nil {
+				return nil, report, err
+			}
+		}
+		if echo.Truncation != nil {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureRequestTruncation,
+				"request.truncation",
+				"the Responses truncation field is not portable to a chat upstream",
 			); err != nil {
 				return nil, report, err
 			}
@@ -1227,6 +1256,16 @@ func RenderChatRequest(
 			}
 			out.Messages = append(out.Messages, message)
 		}
+	}
+
+	// A source request with no Chat-representable messages is a
+	// client-dialect invalid-request error before any upstream request:
+	// messages:null or an invented empty user prompt are never emitted
+	// (review-z commit 2).
+	if len(out.Messages) == 0 {
+		return nil, report, errors.New(
+			"the source request has no Chat-representable messages",
+		)
 	}
 
 	// Tools. The canonical schema is passed through byte-exact: it was
@@ -1321,7 +1360,7 @@ func RenderChatRequest(
 		if !capabilities.ReasoningEffort {
 			if err := report.Lose(
 				context.lossPolicy(),
-				FeatureProviderReasoning,
+				FeatureProviderReasoningText,
 				"reasoning.effort",
 				"reasoning effort is not supported by the configured chat provider",
 			); err != nil {
@@ -1339,7 +1378,7 @@ func RenderChatRequest(
 		context.OriginalResponsesRequest.Reasoning.Summary != nil {
 		if err := report.Lose(
 			context.lossPolicy(),
-			FeatureReasoningSummaryRequest,
+			FeatureReasoningSummary,
 			"reasoning.summary",
 			"the reasoning summary style cannot be reproduced in a chat request",
 		); err != nil {
@@ -1356,7 +1395,7 @@ func RenderChatRequest(
 
 // transcodeToolResult applies the tool_result.is_error decision when
 // rendering a canonical tool result to a target that cannot carry the error
-// status. It is rejected by default (FeatureToolResultError); a permissive
+// status. It is rejected by default (FeatureToolResultErrorStatus); a permissive
 // policy may encode the status into visible content with the named
 // "error_status_prefix" encoding, which is reported because it invents text
 // (review-j finding 10).
@@ -1372,7 +1411,7 @@ func transcodeToolResult(
 	}
 	if err := report.Lose(
 		policy,
-		FeatureToolResultError,
+		FeatureToolResultErrorStatus,
 		path,
 		"the tool result error status cannot be reproduced in the "+target+
 			" dialect; the permissive encoding is the visible error_status_prefix text",
@@ -1400,7 +1439,7 @@ func loseInputPhase(
 	}
 	return report.Lose(
 		policy,
-		FeaturePhase,
+		FeatureOutputPhase,
 		fmt.Sprintf("input[%d].phase", index),
 		"the input message phase cannot be reproduced in any target dialect",
 	)
@@ -1414,12 +1453,8 @@ func loseSystemPart(
 	report *ConversionReport,
 	part CanonicalPart,
 ) error {
-	var feature Feature
 	switch part.(type) {
-	case CanonicalImage:
-		feature = FeatureImageInput
-	case CanonicalDocument:
-		feature = FeatureDocumentInput
+	case CanonicalImage, CanonicalDocument:
 	default:
 		return fmt.Errorf(
 			"system prompt part %T cannot be expressed in the create-request instructions string",
@@ -1428,7 +1463,7 @@ func loseSystemPart(
 	}
 	return report.Lose(
 		policy,
-		feature,
+		FeatureSystemNonTextContent,
 		"instructions",
 		"the system prompt part cannot be expressed in the string-only create-request instructions",
 	)

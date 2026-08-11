@@ -308,11 +308,12 @@ func TestChatToResponsesEmptyToolArguments(t *testing.T) {
 	}
 }
 
-// TestChatToResponsesNonObjectArgumentsRejected proves completed Chat tool
-// arguments must be a JSON OBJECT: fragments assembling to an array or a
-// string are corrupt upstream wire, never emitted as completed arguments
-// (review-08 blocker 4).
-func TestChatToResponsesNonObjectArgumentsRejected(t *testing.T) {
+// TestChatToResponsesNonObjectArgumentsPreserved proves completed Chat tool
+// arguments are preserved byte-exact in the emitted function_call arguments,
+// whatever their shape: invalid model-generated arguments are never corrupt
+// upstream wire (review-z commit 2; supersedes the review-08 object
+// requirement).
+func TestChatToResponsesNonObjectArgumentsPreserved(t *testing.T) {
 	for _, arguments := range []string{`[1,2]`, `"str"`, `42`} {
 		t.Run(arguments, func(t *testing.T) {
 			state := newChatResponsesStreamState(
@@ -332,13 +333,27 @@ func TestChatToResponsesNonObjectArgumentsRejected(t *testing.T) {
 			}}}, nil)); err != nil {
 				t.Fatal(err)
 			}
-			_, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("tool_calls")))
-			var wireErr *UpstreamWireError
-			if !errors.As(err, &wireErr) {
-				t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+			if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("tool_calls"))); err != nil {
+				t.Fatal(err)
 			}
-			if !strings.Contains(err.Error(), "JSON object") {
-				t.Fatalf("error = %q, want the object violation", err.Error())
+			// The finish holds the item-closing events until the [DONE]
+			// sentinel releases them (review-08 blocker 2).
+			held, ok := state.releaseTerminal()
+			if !ok {
+				t.Fatal("no held terminal")
+			}
+			var done *ResponseFunctionCallArgumentsDoneEvent
+			for _, event := range held {
+				if candidate, ok := event.(ResponseFunctionCallArgumentsDoneEvent); ok {
+					done = &candidate
+					break
+				}
+			}
+			if done == nil {
+				t.Fatalf("no arguments-done event: %+v", held)
+			}
+			if done.Arguments != arguments {
+				t.Fatalf("done arguments = %q, want %q preserved", done.Arguments, arguments)
 			}
 		})
 	}
@@ -428,13 +443,13 @@ func TestChatToResponsesProviderReasoningDropped(t *testing.T) {
 	if !errors.As(err, &target) {
 		t.Fatalf("error = %T", err)
 	}
-	if target.Feature != string(FeatureProviderReasoning) {
+	if target.Feature != string(FeatureProviderReasoningText) {
 		t.Fatalf("feature = %q", target.Feature)
 	}
 
 	// With the loss approved, the reasoning delta is dropped and the text
 	// continues.
-	policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureProviderReasoning: {}}}
+	policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureProviderReasoningText: {}}}
 	state = newChatResponsesStreamState(
 		testStreamContext(),
 		policy,
