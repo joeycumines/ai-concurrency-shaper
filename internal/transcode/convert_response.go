@@ -314,6 +314,13 @@ func DecodeChatResponse(
 	}
 	response.Items = items
 	if err := ValidateCanonicalResponse(response); err != nil {
+		// A contract-violating token total is corrupt upstream wire — an
+		// upstream failure, never a local conversion error (review-z
+		// commit 5).
+		var usageErr *UsageArithmeticError
+		if errors.As(err, &usageErr) {
+			return CanonicalResponse{}, upstreamWireError(UpstreamChatCompletions, 0, err)
+		}
 		return CanonicalResponse{}, err
 	}
 	return response, nil
@@ -613,6 +620,13 @@ func DecodeResponsesResponse(
 	}
 
 	if err := ValidateCanonicalResponse(response); err != nil {
+		// A contract-violating token total is corrupt upstream wire — an
+		// upstream failure, never a local conversion error (review-z
+		// commit 5).
+		var usageErr *UsageArithmeticError
+		if errors.As(err, &usageErr) {
+			return CanonicalResponse{}, upstreamWireError(UpstreamResponses, 0, err)
+		}
 		return CanonicalResponse{}, err
 	}
 	return response, nil
@@ -1096,16 +1110,40 @@ func RenderMessagesResponse(
 				"source usage is arithmetically inconsistent: nonnegative token counts required and cached tokens must not exceed the input total",
 			)
 		}
+		// Checked, architecture-independent int64-to-int conversion before
+		// rendering Messages usage: a count that cannot be represented on
+		// this platform (32-bit builds) is a typed error, never a silent
+		// overflow (review-z commit 5).
+		uncached, err := checkedInt64ToInt(inputTokens - cached)
+		if err != nil {
+			return nil, report, &UsageArithmeticError{Detail: "input tokens: " + err.Error()}
+		}
+		cacheWrite, err := checkedInt64ToInt(response.Usage.CacheWriteTokens)
+		if err != nil {
+			return nil, report, &UsageArithmeticError{Detail: "cache-creation tokens: " + err.Error()}
+		}
+		cacheRead, err := checkedInt64ToInt(response.Usage.CacheReadTokens)
+		if err != nil {
+			return nil, report, &UsageArithmeticError{Detail: "cache-read tokens: " + err.Error()}
+		}
+		output, err := checkedInt64ToInt(response.Usage.OutputTokens)
+		if err != nil {
+			return nil, report, &UsageArithmeticError{Detail: "output tokens: " + err.Error()}
+		}
+		thinking, err := checkedInt64ToInt(response.Usage.ReasoningTokens)
+		if err != nil {
+			return nil, report, &UsageArithmeticError{Detail: "reasoning tokens: " + err.Error()}
+		}
 		// output_tokens_details is required on the wire for known usage; the
 		// thinking breakdown is zero only after the loss decision above,
 		// matching the stream path.
 		out.Usage = &AnthropicUsage{
-			InputTokens:              int(inputTokens - cached),
-			CacheCreationInputTokens: int(response.Usage.CacheWriteTokens),
-			CacheReadInputTokens:     int(response.Usage.CacheReadTokens),
-			OutputTokens:             int(response.Usage.OutputTokens),
+			InputTokens:              uncached,
+			CacheCreationInputTokens: cacheWrite,
+			CacheReadInputTokens:     cacheRead,
+			OutputTokens:             output,
 			OutputTokensDetails: &AnthropicOutputTokensDetails{
-				ThinkingTokens: int(response.Usage.ReasoningTokens),
+				ThinkingTokens: thinking,
 			},
 		}
 	}

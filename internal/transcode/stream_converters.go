@@ -1164,11 +1164,20 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
 			"chat usage has negative token counts",
 		)
 	}
-	if prompt+completion < prompt || prompt+completion > total {
-		return nil, fmt.Errorf(
-			"chat usage total %d is inconsistent with prompt %d + completion %d",
-			total, prompt, completion,
-		)
+	// The chat contract defines total_tokens as prompt + completion
+	// EXACTLY: a known total that is not their exact sum is corrupt
+	// upstream wire (review-z commit 5).
+	if prompt+completion < prompt || prompt+completion != total {
+		return nil, &UsageArithmeticError{
+			Detail: fmt.Sprintf(
+				"chat usage total %d is not the exact sum of prompt %d + completion %d",
+				total, prompt, completion,
+			),
+			SourceMismatch: true,
+			Input:          prompt,
+			Output:         completion,
+			Total:          total,
+		}
 	}
 	out := &ResponsesUsage{
 		InputTokens:  prompt,
@@ -1770,7 +1779,15 @@ func (s *anthropicResponsesStreamState) messageStart(
 	}
 	usage, err := responsesUsageToAnthropicUsage(envelope.Usage)
 	if err != nil {
-		// Arithmetically inconsistent source usage is corrupt upstream wire.
+		// A source-total mismatch is corrupt upstream wire; an int-width
+		// overflow while rendering stays local (review-z commit 5).
+		var usageErr *UsageArithmeticError
+		if errors.As(err, &usageErr) {
+			if usageErr.SourceMismatch {
+				return nil, s.wireError(fmt.Errorf("response usage: %w", err))
+			}
+			return nil, usageErr
+		}
 		return nil, s.wireError(fmt.Errorf("response usage: %w", err))
 	}
 	if usage != nil {
@@ -3005,7 +3022,15 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 	s.message.StopReason = anthropicStopReasonPtr(stopReasonToAnthropic(stop))
 	converted, err := responsesUsageToAnthropicUsage(usage)
 	if err != nil {
-		// Arithmetically inconsistent source usage is corrupt upstream wire.
+		// A source-total mismatch is corrupt upstream wire; an int-width
+		// overflow while rendering stays local (review-z commit 5).
+		var usageErr *UsageArithmeticError
+		if errors.As(err, &usageErr) {
+			if usageErr.SourceMismatch {
+				return s.wireError(fmt.Errorf("response usage: %w", err))
+			}
+			return usageErr
+		}
 		return s.wireError(fmt.Errorf("response usage: %w", err))
 	}
 	if converted != nil {
@@ -3079,13 +3104,49 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, err
 			"source usage is arithmetically inconsistent: nonnegative token counts required and cached tokens must not exceed the input total",
 		)
 	}
+	// The responses contract defines total_tokens as input + output
+	// EXACTLY: a known total that is not their exact sum is corrupt
+	// upstream wire (review-z commit 5).
+	if sum := usage.InputTokens + usage.OutputTokens; sum < usage.InputTokens ||
+		sum != usage.TotalTokens {
+		return nil, &UsageArithmeticError{
+			Detail: fmt.Sprintf(
+				"responses usage total %d is not the exact sum of input %d + output %d",
+				usage.TotalTokens, usage.InputTokens, usage.OutputTokens,
+			),
+			SourceMismatch: true,
+			Input:          usage.InputTokens,
+			Output:         usage.OutputTokens,
+			Total:          usage.TotalTokens,
+		}
+	}
+	// Checked, architecture-independent int64-to-int conversion before
+	// rendering Messages usage: a count that cannot be represented on this
+	// platform (32-bit builds) is a typed error, never a silent overflow
+	// (review-z commit 5).
+	uncached, err := checkedInt64ToInt(usage.InputTokens - cached)
+	if err != nil {
+		return nil, &UsageArithmeticError{Detail: "input tokens: " + err.Error()}
+	}
+	readCached, err := checkedInt64ToInt(cached)
+	if err != nil {
+		return nil, &UsageArithmeticError{Detail: "cached tokens: " + err.Error()}
+	}
+	output, err := checkedInt64ToInt(usage.OutputTokens)
+	if err != nil {
+		return nil, &UsageArithmeticError{Detail: "output tokens: " + err.Error()}
+	}
+	thinking, err := checkedInt64ToInt(reasoning)
+	if err != nil {
+		return nil, &UsageArithmeticError{Detail: "reasoning tokens: " + err.Error()}
+	}
 	return &AnthropicUsage{
-		InputTokens:              int(usage.InputTokens - cached),
+		InputTokens:              uncached,
 		CacheCreationInputTokens: 0, // cache-write tokens are not part of the pinned Responses contract
-		CacheReadInputTokens:     int(cached),
-		OutputTokens:             int(usage.OutputTokens),
+		CacheReadInputTokens:     readCached,
+		OutputTokens:             output,
 		OutputTokensDetails: &AnthropicOutputTokensDetails{
-			ThinkingTokens: int(reasoning),
+			ThinkingTokens: thinking,
 		},
 	}, nil
 }
@@ -3173,4 +3234,16 @@ func partTypeName(part ResponsesStreamContentPart) string {
 // anthropicStopReasonPtr returns a pointer to the stop reason.
 func anthropicStopReasonPtr(reason AnthropicStopReason) *AnthropicStopReason {
 	return &reason
+}
+
+// checkedInt64ToInt converts an int64 token count to int with an explicit
+// range check: the Messages wire types use platform int, and a silent
+// wrap on 32-bit builds would emit a corrupt negative count (review-z
+// commit 5).
+func checkedInt64ToInt(value int64) (int, error) {
+	converted := int(value)
+	if int64(converted) != value {
+		return 0, fmt.Errorf("token count %d does not fit the platform int width", value)
+	}
+	return converted, nil
 }

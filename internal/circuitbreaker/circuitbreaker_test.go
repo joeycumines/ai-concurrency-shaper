@@ -17,6 +17,7 @@ package circuitbreaker
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"sync"
 	"testing"
@@ -1802,9 +1803,26 @@ func TestBreaker_PenaltyDurationFormula(t *testing.T) {
 		{"zero consecutive", 0, base},
 		{"first failure", 1, 2 * base},
 		{"second consecutive", 2, 3 * base},
-		// Cap: base * (1 + 4) = 10s exceeds maxPenalty.
-		{"cap at four consecutive", 4, maxPenalty},
-		{"far beyond the cap", 20, maxPenalty},
+		// Cap (review-z commit 5): consecutive is capped at
+		// maxPenalty/basePenalty - 1, so the scaled product can never
+		// exceed maxPenalty by construction. With base=2s, max=7s the cap
+		// is 7/2-1 = 2 -> penalty = 2s * (1+2) = 6s (the largest multiple
+		// of base below max; the old min()-clamp reached 7s but could
+		// overflow at extreme counts).
+		{"cap at four consecutive", 4, 3 * base},
+		{"far beyond the cap", 20, 3 * base},
+	}
+	// Divisible boundary: base=2s, max=6s -> cap = 6/2-1 = 2, so the
+	// scaled value is exactly maxPenalty by construction, no clamp needed.
+	divisible, err := New(WithBasePenalty(base), WithMaxPenalty(6*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		divisible.RecordFailure(500, 0, time.Time{}, 0)
+	}
+	if got := divisible.PenaltyDuration(); got != 6*time.Second {
+		t.Fatalf("divisible-boundary penalty = %v, want exactly 6s (maxPenalty by construction)", got)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1821,6 +1839,75 @@ func TestBreaker_PenaltyDurationFormula(t *testing.T) {
 			stats := b.Stats()
 			if stats.ConsecutiveFailures != int64(tt.failures) {
 				t.Fatalf("consecutive = %d, want %d", stats.ConsecutiveFailures, tt.failures)
+			}
+		})
+	}
+}
+
+// TestBreaker_PenaltyOverflowExtreme pins the review-z commit 5 cap at the
+// true overflow edge: with a 1ns base penalty and a max penalty of
+// MaxInt64ns, the OLD cap (max/base without -1) let 1+consecutive wrap to
+// MinInt64, zeroing the penalty. The -1 cap (floored at 0) makes the product
+// provably overflow-free and always >= basePenalty.
+func TestBreaker_PenaltyOverflowExtreme(t *testing.T) {
+	b, err := New(
+		WithBasePenalty(time.Nanosecond),
+		WithMaxPenalty(time.Duration(math.MaxInt64)),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b.consecutive = math.MaxInt64
+	penalty := b.PenaltyDuration()
+	if penalty != b.cfg.maxPenalty {
+		t.Fatalf("penalty at the extreme edge = %v, want %v (no overflow, no clamp needed)", penalty, b.cfg.maxPenalty)
+	}
+	if penalty <= 0 {
+		t.Fatal("penalty must be positive at the extreme edge")
+	}
+	// Floor: base > max (only reachable by direct struct misuse) still
+	// yields a sane penalty: the cap floors at 0, the scaled value is one
+	// base unit, and the min() clamp caps it at maxPenalty — never an
+	// overflow, never negative (review-z commit 5).
+	b2 := &Breaker{cfg: breakerConfig{basePenalty: 10 * time.Second, maxPenalty: time.Second}}
+	b2.consecutive = math.MaxInt64
+	if p := b2.PenaltyDuration(); p != time.Second {
+		t.Fatalf("penalty with base > max = %v, want %v (min-clamped to max)", p, time.Second)
+	}
+}
+
+// TestBreaker_ConstructorValidationMatrix proves impossible constructor
+// values fail fast at construction (review-z commit 5): zero/negative
+// penalties, an inconsistent max < base pair, and invalid thresholds are
+// all construction errors, never silent coercions.
+func TestBreaker_ConstructorValidationMatrix(t *testing.T) {
+	tests := []struct {
+		name    string
+		opts    []Option
+		wantErr bool
+	}{
+		{"zero threshold", []Option{WithFailureThreshold(0)}, true},
+		{"negative threshold", []Option{WithFailureThreshold(-1)}, true},
+		{"zero window", []Option{WithWindow(0)}, true},
+		{"zero open timeout", []Option{WithOpenTimeout(0)}, true},
+		{"zero max open timeout", []Option{WithMaxOpenTimeout(0)}, true},
+		{"zero base penalty", []Option{WithBasePenalty(0)}, true},
+		{"negative base penalty", []Option{WithBasePenalty(-time.Second)}, true},
+		{"zero max penalty", []Option{WithMaxPenalty(0)}, true},
+		{"negative max penalty", []Option{WithMaxPenalty(-time.Second)}, true},
+		{"max below base", []Option{WithBasePenalty(10 * time.Second), WithMaxPenalty(5 * time.Second)}, true},
+		{"max equal to base", []Option{WithBasePenalty(5 * time.Second), WithMaxPenalty(5 * time.Second)}, false},
+		{"defaults only", []Option{}, false},
+		{"valid explicit", []Option{WithFailureThreshold(7), WithWindow(time.Second), WithOpenTimeout(2 * time.Second), WithMaxOpenTimeout(4 * time.Second), WithBasePenalty(time.Second), WithMaxPenalty(30 * time.Second)}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := New(tt.opts...)
+			if tt.wantErr && err == nil {
+				t.Fatal("construction succeeded; want error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("construction failed: %v", err)
 			}
 		})
 	}

@@ -353,6 +353,41 @@ func (e *UpstreamWireError) Error() string {
 
 func (e *UpstreamWireError) Unwrap() error { return e.Cause }
 
+// UsageArithmeticError is the typed error for token-usage arithmetic that
+// violates the pinned contracts (review-z commit 5): a known total that is
+// not the exact sum of its components (chat and responses contracts define
+// total_tokens as input + output exactly), or a component too large for the
+// target wire's integer width (silent overflow on 32-bit builds is never
+// acceptable). Classification: the decode sites wrap instances raised from
+// a SOURCE total mismatch in upstreamWireError (corrupt upstream wire — an
+// upstream failure); instances raised while RENDERING a target dialect
+// (integer-width overflow) stay local. errors.As finds the typed error
+// through either wrap; Detail names the violated invariant and Input,
+// Output, Total carry the involved counts.
+type UsageArithmeticError struct {
+	// Detail names the violated invariant.
+	Detail string
+	// SourceMismatch discriminates the two raise sites: TRUE for a known
+	// total that is not the exact sum of its components (corrupt upstream
+	// wire — an upstream failure); FALSE for a count that is valid per
+	// contract but unrepresentable on this platform while rendering a
+	// target dialect (a local rendering impossibility). Classification
+	// points must branch on this flag, never on the detail text.
+	SourceMismatch bool
+	// Input, Output, Total are the involved token counts (zero when not
+	// applicable).
+	Input  int64
+	Output int64
+	Total  int64
+}
+
+func (e *UsageArithmeticError) Error() string {
+	if e.Detail == "" {
+		return "usage arithmetic error"
+	}
+	return "usage arithmetic: " + e.Detail
+}
+
 // upstreamWireError wraps cause as corrupt upstream wire data. A cause that
 // is or carries an UnsupportedFeatureError is NEVER wrapped: a valid source
 // feature this transcoder knows but does not support is a local conversion

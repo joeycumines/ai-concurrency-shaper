@@ -17,11 +17,13 @@ import (
 // (resp_1/msg_1/fc_1 on every exchange) made collisions certain (review-08
 // blocker 6).
 //
-// The prefix is 16 lowercase hex characters (64 bits of entropy from
+// The prefix is 32 lowercase hex characters (128 bits of entropy from
 // crypto/rand): both provider ID shapes are opaque lowercase-alphanumeric
 // strings (e.g. Anthropic msg_01X...), so the emitted IDs stay within the
-// shape clients already accept. The local counter is appended only for
-// ordering within one exchange.
+// shape clients already accept. 128 random bits make collisions across
+// unrelated exchanges cryptographically negligible (~2^-64 after 2^32
+// exchanges, birthday bound) while the local counter keeps ordering within
+// one exchange deterministic (review-z commit 5).
 //
 // https://platform.openai.com/docs/api-reference/responses
 // https://platform.claude.com/docs/en/api/messages
@@ -33,7 +35,7 @@ type ExchangeIDs struct {
 // NewExchangeIDs returns an exchange-scoped allocator with a random
 // collision-resistant prefix.
 func NewExchangeIDs() *ExchangeIDs {
-	var raw [8]byte
+	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		// crypto/rand.Read never fails on supported platforms; a failure
 		// means the process cannot produce unique identifiers, so the

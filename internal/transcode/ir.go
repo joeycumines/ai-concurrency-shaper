@@ -691,13 +691,24 @@ func validateCanonicalUsage(u CanonicalUsage) error {
 		u.CacheReadTokens < 0 || u.CacheWriteTokens < 0 || u.TotalTokens < 0 {
 		return errors.New("usage has negative token counts")
 	}
+	// A known total must be the EXACT sum of the known components: the
+	// chat and responses contracts both define total_tokens as
+	// input + output (review-z commit 5). Only chat and responses sources
+	// reach this branch with a known total — anthropic wire has no total —
+	// so exact equality cannot reject a legitimate cache-inclusive total.
 	if u.InputKnown && u.OutputKnown && u.TotalKnown {
 		sum := u.InputTokens + u.OutputTokens
-		if sum < u.InputTokens || sum > u.TotalTokens {
-			return fmt.Errorf(
-				"usage total %d is inconsistent with input %d + output %d",
-				u.TotalTokens, u.InputTokens, u.OutputTokens,
-			)
+		if sum < u.InputTokens || sum != u.TotalTokens {
+			return &UsageArithmeticError{
+				Detail: fmt.Sprintf(
+					"total %d is not the exact sum of input %d + output %d",
+					u.TotalTokens, u.InputTokens, u.OutputTokens,
+				),
+				SourceMismatch: true,
+				Input:          u.InputTokens,
+				Output:         u.OutputTokens,
+				Total:          u.TotalTokens,
+			}
 		}
 	}
 	return nil

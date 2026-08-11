@@ -323,14 +323,14 @@ func TestSplitImageDataURL(t *testing.T) {
 
 func TestExchangeIDs(t *testing.T) {
 	// IDs within one exchange share the random prefix and carry a
-	// monotonic counter (review-08 blocker 6); the prefix shape is 16
-	// lowercase hex characters.
+	// monotonic counter (review-08 blocker 6); the prefix shape is 32
+	// lowercase hex characters (128 random bits, review-z commit 5).
 	ids := NewExchangeIDs()
 	first := ids.New("msg_")
 	second := ids.New("fc_")
 	var prefix string
-	if n, err := fmt.Sscanf(first, "msg_%16s_1", &prefix); n != 1 || err != nil {
-		t.Fatalf("first = %q, want the msg_<16 hex>_1 shape", first)
+	if n, err := fmt.Sscanf(first, "msg_%32s_1", &prefix); n != 1 || err != nil {
+		t.Fatalf("first = %q, want the msg_<32 hex>_1 shape", first)
 	}
 	if want := "fc_" + prefix + "_2"; second != want {
 		t.Fatalf("second = %q, want %q (same prefix, next counter)", second, want)
