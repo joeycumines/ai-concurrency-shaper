@@ -223,10 +223,12 @@ type frameEvent struct {
 // exceeds the frame bound (data payload plus the event name and framing
 // overhead) is a typed frame error: the generated downstream wire must be
 // bounded like the input wire (review-08 blocker 7).
-func writeFrameBytes(buf *bytes.Buffer, event frameEvent) error {
+// writeFrameBytesBounded writes one SSE frame bounded by max bytes. The
+// bound covers the type and data payloads plus the framing overhead.
+func writeFrameBytesBounded(buf *bytes.Buffer, event frameEvent, max int) error {
 	total := len(event.Data) + len(event.Type) + 16
-	if total > maxSSEFrameBytes {
-		return &SSEBoundError{Bound: maxSSEFrameBytes}
+	if total > max {
+		return &SSEBoundError{Bound: max}
 	}
 	if event.Type != "" {
 		_, _ = buf.WriteString("event: " + event.Type + "\n")

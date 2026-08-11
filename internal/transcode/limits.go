@@ -54,6 +54,19 @@ const (
 	DefaultErrorResponseBytes      int64 = 1 << 20
 	DefaultSSELineBytes            int   = 1 << 20
 	DefaultSSEFrameBytes           int   = 1 << 20
+	// DefaultGeneratedResponseBytes bounds the complete rendered non-stream
+	// JSON response body, applied after conversion and BEFORE headers
+	// commit (review-z commit 3).
+	DefaultGeneratedResponseBytes int64 = 32 << 20
+	// DefaultErrorMessageBytes bounds every client-visible error message
+	// (stream error frames and dialect error bodies).
+	DefaultErrorMessageBytes int = 4 << 10
+	// DefaultGeneratedSSEFrameBytes bounds one generated downstream SSE
+	// frame (the outbound counterpart of SSEFrameBytes).
+	DefaultGeneratedSSEFrameBytes int = 1 << 20
+	// DefaultGeneratedSSEBatchBytes bounds one generated terminal batch
+	// (the released item-closing events plus the terminal envelope).
+	DefaultGeneratedSSEBatchBytes int = 32 << 20
 )
 
 // BodyLimits holds the independent body limits of a transcoded route. The
@@ -82,6 +95,13 @@ type BodyLimits struct {
 	ErrorResponseBytes      int64
 	SSELineBytes            int
 	SSEFrameBytes           int
+	// Output-side limits (review-z commit 3). SSELineBytes and SSEFrameBytes
+	// bound the INBOUND upstream stream; the Generated* fields bound what the
+	// transcoder emits.
+	GeneratedResponseBytes int64
+	ErrorMessageBytes      int
+	GeneratedSSEFrameBytes int
+	GeneratedSSEBatchBytes int
 }
 
 // WithDefaults returns the body limits with every zero field replaced by its
@@ -112,6 +132,18 @@ func (l BodyLimits) WithDefaults() BodyLimits {
 	if l.SSEFrameBytes <= 0 {
 		l.SSEFrameBytes = DefaultSSEFrameBytes
 	}
+	if l.GeneratedResponseBytes <= 0 {
+		l.GeneratedResponseBytes = DefaultGeneratedResponseBytes
+	}
+	if l.ErrorMessageBytes <= 0 {
+		l.ErrorMessageBytes = DefaultErrorMessageBytes
+	}
+	if l.GeneratedSSEFrameBytes <= 0 {
+		l.GeneratedSSEFrameBytes = DefaultGeneratedSSEFrameBytes
+	}
+	if l.GeneratedSSEBatchBytes <= 0 {
+		l.GeneratedSSEBatchBytes = DefaultGeneratedSSEBatchBytes
+	}
 	return l
 }
 
@@ -135,6 +167,18 @@ func (l BodyLimits) Validate() error {
 	}
 	if l.SSEFrameBytes < 0 {
 		return fmt.Errorf("SSEFrameBytes must be nonnegative, got %d", l.SSEFrameBytes)
+	}
+	if l.GeneratedResponseBytes < 0 {
+		return fmt.Errorf("GeneratedResponseBytes must be nonnegative, got %d", l.GeneratedResponseBytes)
+	}
+	if l.ErrorMessageBytes < 0 {
+		return fmt.Errorf("ErrorMessageBytes must be nonnegative, got %d", l.ErrorMessageBytes)
+	}
+	if l.GeneratedSSEFrameBytes < 0 {
+		return fmt.Errorf("GeneratedSSEFrameBytes must be nonnegative, got %d", l.GeneratedSSEFrameBytes)
+	}
+	if l.GeneratedSSEBatchBytes < 0 {
+		return fmt.Errorf("GeneratedSSEBatchBytes must be nonnegative, got %d", l.GeneratedSSEBatchBytes)
 	}
 	return nil
 }

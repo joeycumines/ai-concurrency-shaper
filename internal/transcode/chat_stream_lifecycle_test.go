@@ -242,9 +242,9 @@ func TestChatStreamFixtureUsageTailEndToEnd(t *testing.T) {
 		nil,
 	)
 	converter := newChatToResponsesConverter(state)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(bytes.NewReader(testcorpus.ChatCompletionsStreamSSE()), 0, 0),
-		converter,
+		converter, 0, 0, 0,
 	)
 	var output bytes.Buffer
 	buf := make([]byte, 4096)

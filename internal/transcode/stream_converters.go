@@ -127,6 +127,11 @@ type chatResponsesStreamState struct {
 	// bytes (review-08 blocker 7).
 	totalAccumulated int64
 
+	// budget is the seven-dimension total exchange budget (review-z commit
+	// 3): every event and every state allocation charges it BEFORE the
+	// mutation.
+	budget streamBudget
+
 	usage *ResponsesUsage
 
 	report ConversionReport
@@ -240,6 +245,7 @@ func newChatResponsesStreamState(
 		model:        model,
 		createdAt:    createdAt,
 		echo:         echo,
+		budget:       newStreamBudget(),
 		pendingCalls: make(map[int]*pendingToolCall),
 		textBufs:     make(map[chatPartKey]*strings.Builder),
 		refusalBufs:  make(map[chatPartKey]*strings.Builder),
@@ -292,6 +298,9 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 func (s *chatResponsesStreamState) Convert(
 	chunk ChatStreamResponse,
 ) ([]ResponsesSSEEvent, error) {
+	if err := s.budget.addEvent(); err != nil {
+		return nil, s.wireError(err)
+	}
 	if s.sawFinish {
 		// Phase 2: accept only the usage-only tail chunk and fold its totals
 		// into the terminal envelope's usage. The tail is still part of the
@@ -1467,6 +1476,15 @@ type anthropicResponsesStreamState struct {
 	model      string
 	createdAt  float64
 
+	// budget is the seven-dimension total exchange budget (review-z commit
+	// 3): every event and every state allocation charges it BEFORE the
+	// mutation.
+	budget streamBudget
+
+	// fsm is the single lifecycle validator every event passes before
+	// interpretation (review-z commit 3).
+	fsm *responsesStreamFSM
+
 	sawTerminal   bool
 	sawErrorEvent bool
 	sawToolUse    bool
@@ -1550,6 +1568,8 @@ func newAnthropicResponsesStreamState(
 		policy:           policy,
 		responseID:       responseID,
 		model:            model,
+		budget:           newStreamBudget(),
+		fsm:              newResponsesStreamFSM(),
 		createdAt:        createdAt,
 		lastSequence:     -1,
 		addedItems:       make(map[string]anthropicAddedItem),
@@ -1571,6 +1591,14 @@ func (s *anthropicResponsesStreamState) Convert(
 ) ([]AnthropicStreamEvent, error) {
 	if s.sawTerminal {
 		return nil, errors.New("responses stream event after terminal")
+	}
+	// Every event passes the single lifecycle validator FIRST (review-z
+	// commit 3); the render-side checks below remain as defense.
+	if err := s.fsm.Validate(event); err != nil {
+		return nil, err
+	}
+	if err := s.budget.addEvent(); err != nil {
+		return nil, s.wireError(err)
 	}
 	// The wire requires strictly increasing, unique sequence numbers across
 	// the stream (review-08 blocker 3).
@@ -1841,11 +1869,11 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 			itemType,
 		))
 	}
-	if len(s.addedItems) >= maxStreamOutputItems {
-		return nil, s.wireError(fmt.Errorf(
-			"responses stream output items exceed the exchange bound of %d",
-			maxStreamOutputItems,
-		))
+	if err := s.budget.addItem(); err != nil {
+		return nil, s.wireError(err)
+	}
+	if err := s.budget.addStateEntries(1); err != nil {
+		return nil, s.wireError(err)
 	}
 	s.addedItems[itemID] = anthropicAddedItem{
 		outputIndex: event.OutputIndex,
@@ -1870,11 +1898,11 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 
 	case *ResponsesFunctionCallOutputItem:
 		// Buffer the tool block start until call ID and name are known.
-		if len(s.pendingToolStart) >= maxStreamToolCalls {
-			return nil, s.wireError(fmt.Errorf(
-				"responses stream tool calls exceed the exchange bound of %d",
-				maxStreamToolCalls,
-			))
+		if err := s.budget.addToolCall(); err != nil {
+			return nil, s.wireError(err)
+		}
+		if err := s.budget.addStateEntries(1); err != nil {
+			return nil, s.wireError(err)
 		}
 		pending := &pendingToolBlock{
 			blockIndex:  s.blockIndex,
@@ -2286,6 +2314,12 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 				Text: stringPtr(""),
 			},
 		})
+		if err := s.budget.addPart(); err != nil {
+			return nil, s.wireError(err)
+		}
+		if err := s.budget.addStateEntries(2); err != nil {
+			return nil, s.wireError(err)
+		}
 		s.partBlocks[key] = s.blockIndex
 		s.partsSeen[key] = partTypeName(event.Part)
 		s.partCounts[event.ItemID]++

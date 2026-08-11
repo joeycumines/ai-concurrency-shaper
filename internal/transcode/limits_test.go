@@ -9,13 +9,17 @@ func TestBodyLimitsValidate(t *testing.T) {
 		t.Fatalf("zero limits must be valid: %v", err)
 	}
 	for name, limits := range map[string]BodyLimits{
-		"accepted":     {AcceptedRequestBytes: -1},
-		"decoded":      {DecodedRequestBytes: -1},
-		"retry replay": {RetryReplayBytes: -1},
-		"successful":   {SuccessfulResponseBytes: -1},
-		"error":        {ErrorResponseBytes: -1},
-		"sse line":     {SSELineBytes: -1},
-		"sse frame":    {SSEFrameBytes: -1},
+		"accepted":            {AcceptedRequestBytes: -1},
+		"decoded":             {DecodedRequestBytes: -1},
+		"retry replay":        {RetryReplayBytes: -1},
+		"successful":          {SuccessfulResponseBytes: -1},
+		"error":               {ErrorResponseBytes: -1},
+		"sse line":            {SSELineBytes: -1},
+		"sse frame":           {SSEFrameBytes: -1},
+		"generated response":  {GeneratedResponseBytes: -1},
+		"error message":       {ErrorMessageBytes: -1},
+		"generated sse frame": {GeneratedSSEFrameBytes: -1},
+		"generated sse batch": {GeneratedSSEBatchBytes: -1},
 	} {
 		if err := limits.Validate(); err == nil {
 			t.Fatalf("%s: negative limit accepted", name)
@@ -36,6 +40,10 @@ func TestBodyLimitsWithDefaults(t *testing.T) {
 		ErrorResponseBytes:      DefaultErrorResponseBytes,
 		SSELineBytes:            DefaultSSELineBytes,
 		SSEFrameBytes:           DefaultSSEFrameBytes,
+		GeneratedResponseBytes:  DefaultGeneratedResponseBytes,
+		ErrorMessageBytes:       DefaultErrorMessageBytes,
+		GeneratedSSEFrameBytes:  DefaultGeneratedSSEFrameBytes,
+		GeneratedSSEBatchBytes:  DefaultGeneratedSSEBatchBytes,
 	}
 	if effective != want {
 		t.Fatalf("effective = %+v, want %+v", effective, want)
@@ -58,6 +66,10 @@ func TestBodyLimitsWithDefaults(t *testing.T) {
 		ErrorResponseBytes:      5,
 		SSELineBytes:            6,
 		SSEFrameBytes:           7,
+		GeneratedResponseBytes:  DefaultGeneratedResponseBytes,
+		ErrorMessageBytes:       DefaultErrorMessageBytes,
+		GeneratedSSEFrameBytes:  DefaultGeneratedSSEFrameBytes,
+		GeneratedSSEBatchBytes:  DefaultGeneratedSSEBatchBytes,
 	}) {
 		t.Fatalf("explicit values changed: %+v", explicit)
 	}

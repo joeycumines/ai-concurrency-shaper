@@ -363,9 +363,9 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 					"m",
 					1,
 				)
-				reader = newConvertingReader(
+				reader = newConvertingReaderWithLimits(
 					NewSSEReaderWithLimits(strings.NewReader(input), 0, 0),
-					newResponsesToAnthropicConverter(state),
+					newResponsesToAnthropicConverter(state), 0, 0, 0,
 				)
 			} else if tt.direction == "composed" {
 				chat := newChatResponsesStreamState(
@@ -384,9 +384,9 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 					"m",
 					1,
 				)
-				reader = newConvertingReader(
+				reader = newConvertingReaderWithLimits(
 					NewSSEReaderWithLimits(strings.NewReader(input), 0, 0),
-					newChatToAnthropicConverter(chat, anthropic),
+					newChatToAnthropicConverter(chat, anthropic), 0, 0, 0,
 				)
 			} else {
 				state := newChatResponsesStreamState(
@@ -398,9 +398,9 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 					1,
 					nil,
 				)
-				reader = newConvertingReader(
+				reader = newConvertingReaderWithLimits(
 					NewSSEReaderWithLimits(strings.NewReader(input), 0, 0),
-					newChatToResponsesConverter(state),
+					newChatToResponsesConverter(state), 0, 0, 0,
 				)
 			}
 

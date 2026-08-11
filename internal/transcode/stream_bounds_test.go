@@ -402,7 +402,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 	})
 
 	t.Run("terminal batch bound", func(t *testing.T) {
-		reader := newConvertingReader(NewSSEReaderWithLimits(strings.NewReader(""), 0, 0), &fixedConverter{})
+		reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(strings.NewReader(""), 0, 0), &fixedConverter{}, 0, 0, 0)
 		frames := (maxStreamTerminalBatchBytes / (maxSSEFrameBytes - 64)) + 2
 		batch := convertedBatch{}
 		for i := 0; i < frames; i++ {
@@ -486,8 +486,10 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 	t.Run("bounded error text", func(t *testing.T) {
 		long := strings.Repeat("x", maxStreamErrorTextBytes*2)
 		bounded := boundedErrorMessage(errors.New(long))
-		if len(bounded) != maxStreamErrorTextBytes+len("…") {
-			t.Fatalf("bounded length = %d", len(bounded))
+		// The ellipsis must not push the text past the bound (review-z
+		// commit 3): truncated text is bound-3 plus the ellipsis.
+		if len(bounded) > maxStreamErrorTextBytes {
+			t.Fatalf("bounded length = %d, want <= %d", len(bounded), maxStreamErrorTextBytes)
 		}
 		if !strings.HasSuffix(bounded, "…") {
 			t.Fatalf("bounded = %q, want ellipsis", bounded)
@@ -630,7 +632,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 	})
 
 	t.Run("append batch frame bound", func(t *testing.T) {
-		reader := newConvertingReader(NewSSEReaderWithLimits(strings.NewReader(""), 0, 0), &fixedConverter{})
+		reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(strings.NewReader(""), 0, 0), &fixedConverter{}, 0, 0, 0)
 		err := reader.appendBatch(convertedBatch{Events: []frameEvent{{
 			Type: "x",
 			Data: bytes.Repeat([]byte("a"), maxSSEFrameBytes),

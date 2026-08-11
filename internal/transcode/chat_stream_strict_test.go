@@ -354,11 +354,10 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			nil,
 		)
 		converter := newChatToResponsesConverter(state)
-		reader := newConvertingReader(
+		reader := newConvertingReaderWithLimits(
 			NewSSEReaderWithLimits(strings.NewReader(
-				"data: "+finishChunk+"\n\n",
-			), 0, 0),
-			converter,
+				"data: "+finishChunk+"\n\n"), 0, 0),
+			converter, 0, 0, 0,
 		)
 		output, readErr := drainReader(t, reader)
 		if readErr == nil || errors.Is(readErr, io.EOF) {
@@ -472,11 +471,10 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			nil,
 		)
 		converter := newChatToResponsesConverter(state)
-		reader := newConvertingReader(
+		reader := newConvertingReaderWithLimits(
 			NewSSEReaderWithLimits(strings.NewReader(
-				"data: "+emptyFinishChunk+"\n\n",
-			), 0, 0),
-			converter,
+				"data: "+emptyFinishChunk+"\n\n"), 0, 0),
+			converter, 0, 0, 0,
 		)
 		output, readErr := drainReader(t, reader)
 		if readErr == nil || errors.Is(readErr, io.EOF) {
@@ -507,11 +505,10 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			nil,
 		)
 		converter := newChatToResponsesConverter(state)
-		reader := newConvertingReader(
+		reader := newConvertingReaderWithLimits(
 			NewSSEReaderWithLimits(strings.NewReader(
-				"data: "+emptyFinishChunk+"\n\n"+"data: [DONE]\n\n",
-			), 0, 0),
-			converter,
+				"data: "+emptyFinishChunk+"\n\n"+"data: [DONE]\n\n"), 0, 0),
+			converter, 0, 0, 0,
 		)
 		output, readErr := drainReader(t, reader)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
@@ -597,11 +594,10 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			nil,
 		)
 		converter := newChatToResponsesConverter(state)
-		reader := newConvertingReader(
+		reader := newConvertingReaderWithLimits(
 			NewSSEReaderWithLimits(strings.NewReader(
-				"data: "+finishChunk+"\n\n"+"data: [DONE]\n\n",
-			), 0, 0),
-			converter,
+				"data: "+finishChunk+"\n\n"+"data: [DONE]\n\n"), 0, 0),
+			converter, 0, 0, 0,
 		)
 		output, readErr := drainReader(t, reader)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
@@ -644,12 +640,11 @@ func TestChatStreamReviewMalformedStreamIsUpstreamFailure(t *testing.T) {
 		nil,
 	)
 	converter := newChatToResponsesConverter(state)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(strings.NewReader(
-			"data: {\"choices\":[{\"delta\":{\"role\":\"user\",\"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n"+
-				"data: [DONE]\n\n",
-		), 0, 0),
-		converter,
+			"data: {\"choices\":[{\"delta\":{\"role\":\"user\", \"content\":\"x\"},\"finish_reason\":\"stop\"}]}\n\n"+
+				"data: [DONE]\n\n"), 0, 0),
+		converter, 0, 0, 0,
 	)
 	output, readErr := drainReader(t, reader)
 	assertChatStreamChunkWireError(t, readErr)

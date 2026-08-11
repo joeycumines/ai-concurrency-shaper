@@ -707,6 +707,18 @@ func (h *TranscodeHandler) jsonResponse(
 	// Connection-nominated tokens can only be resolved from the source),
 	// then recompute Content-Length after conversion.
 	RemoveHopByHopHeaders(resp.Header)
+	// The complete rendered JSON response is bounded AFTER conversion and
+	// BEFORE any header commits: an oversized body fails the exchange
+	// without a partial response escaping (review-z commit 3).
+	if int64(len(converted)) > h.cfg.BodyLimits.GeneratedResponseBytes {
+		h.writeDialectHTTPError(r, w, CanonicalAPIError{
+			Status:  http.StatusBadGateway,
+			Type:    "api_error",
+			Code:    "response_conversion_error",
+			Message: "generated response exceeds the configured limit",
+		}, ProvenanceUpstreamBodyError)
+		return
+	}
 	h.copyResponseHeaders(w.Header(), resp.Header)
 	RemoveTransformedRepresentationHeaders(w.Header())
 	w.Header().Set("Content-Type", "application/json")
@@ -869,11 +881,15 @@ func (h *TranscodeHandler) streamResponse(
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(resp.StatusCode)
 
-	reader := newConvertingReader(NewSSEReaderWithLimits(
+	reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(
 		resp.Body,
 		h.cfg.BodyLimits.SSELineBytes,
 		h.cfg.BodyLimits.SSEFrameBytes,
-	), converter)
+	), converter,
+		h.cfg.BodyLimits.GeneratedSSEFrameBytes,
+		h.cfg.BodyLimits.GeneratedSSEBatchBytes,
+		h.cfg.BodyLimits.ErrorMessageBytes,
+	)
 	observation := runTranslatedStream(r.Context(), w, resp.Body, reader)
 
 	// DownstreamComplete reflects the actual write state, not the
@@ -1038,6 +1054,7 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 		RetryAfter:      circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, evaluatedAt),
 	}
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
+	apiErr.Message = h.boundErrorMessage(apiErr.Message)
 	if err := WriteDialectHTTPError(w, client, apiErr); err != nil {
 		// A failed downstream write is a fact about the exchange, not a
 		// log line: the translated error was never delivered. The recorded
@@ -1072,6 +1089,7 @@ func (h *TranscodeHandler) writeUpstreamBodyError(
 	apiErr CanonicalAPIError,
 ) {
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
+	apiErr.Message = h.boundErrorMessage(apiErr.Message)
 	writeErr := WriteDialectHTTPError(w, client, apiErr)
 	outcome := Outcome{
 		Status:          apiErr.Status,
@@ -1109,6 +1127,7 @@ func (h *TranscodeHandler) writeUpstreamSemanticFailure(
 	upstreamStatus int,
 ) {
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
+	apiErr.Message = h.boundErrorMessage(apiErr.Message)
 	writeErr := WriteDialectHTTPError(w, client, apiErr)
 	outcome := Outcome{
 		Status:          upstreamStatus,
@@ -1142,6 +1161,9 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 	provenance ExchangeProvenance,
 ) {
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
+	// Every client-visible error message respects the configured
+	// ErrorMessageBytes bound (review-z commit 3).
+	apiErr.Message = h.boundErrorMessage(apiErr.Message)
 	writeErr := WriteDialectHTTPError(w, client, apiErr)
 	upstreamFailure := false
 	switch provenance {
@@ -1459,4 +1481,23 @@ func logConversionReport(report ConversionReport, r *http.Request) {
 			loss.Detail,
 		)
 	}
+}
+
+// boundErrorMessage truncates a client-visible error message to the
+// configured ErrorMessageBytes bound (review-z commit 3). Every error
+// writing path goes through it, so no upstream error body can amplify
+// client-visible text beyond the bound.
+func (h *TranscodeHandler) boundErrorMessage(message string) string {
+	max := h.cfg.BodyLimits.ErrorMessageBytes
+	if max <= 0 {
+		return message
+	}
+	if len(message) <= max {
+		return message
+	}
+	// The ellipsis must not push the message past the configured bound.
+	if max > 3 {
+		return message[:max-3] + "…"
+	}
+	return message[:max]
 }

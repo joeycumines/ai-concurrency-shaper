@@ -278,3 +278,9 @@ func TestReadSSEEventStaleNameReset(t *testing.T) {
 		t.Fatalf("stale event name leaked: %q", events[0].Event)
 	}
 }
+
+// writeFrameBytes writes one SSE frame with the package frame bound (test
+// helper; production uses writeFrameBytesBounded).
+func writeFrameBytes(buf *bytes.Buffer, event frameEvent) error {
+	return writeFrameBytesBounded(buf, event, maxSSEFrameBytes)
+}

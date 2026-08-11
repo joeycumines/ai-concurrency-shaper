@@ -43,7 +43,7 @@ func (c *fixedConverter) ErrorEvent(err error) (frameEvent, bool) {
 func TestConvertingReaderDrainsTerminal(t *testing.T) {
 	source := NewSSEReaderWithLimits(strings.NewReader("data: {\"x\":1}\n\n"), 0, 0)
 	converter := &fixedConverter{terminal: true}
-	reader := newConvertingReader(source, converter)
+	reader := newConvertingReaderWithLimits(source, converter, 0, 0, 0)
 
 	// The first Read returns the frame bytes.
 	buf := make([]byte, 4096)
@@ -67,9 +67,9 @@ func TestConvertingReaderDrainsTerminal(t *testing.T) {
 func TestConvertingReaderStopAfterDrainEvenWithOpenUpstream(t *testing.T) {
 	// After the terminal batch drains, the reader returns EOF even when the
 	// upstream keeps the connection open (an endless stream of bytes).
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(&thenHangReader{data: []byte("data: {}\n\n")}, 0, 0),
-		&fixedConverter{terminal: true},
+		&fixedConverter{terminal: true}, 0, 0, 0,
 	)
 	buf := make([]byte, 4096)
 	if _, err := reader.Read(buf); err != nil {
@@ -99,7 +99,7 @@ func (r *thenHangReader) Read(p []byte) (int, error) {
 func TestConvertingReaderConversionError(t *testing.T) {
 	source := NewSSEReaderWithLimits(strings.NewReader("data: {}\n\n"), 0, 0)
 	converter := &fixedConverter{err: errors.New("convert failed")}
-	reader := newConvertingReader(source, converter)
+	reader := newConvertingReaderWithLimits(source, converter, 0, 0, 0)
 	var output bytes.Buffer
 	buf := make([]byte, 64)
 	var readErr error
@@ -134,9 +134,9 @@ func TestConvertingReaderMalformedFrame(t *testing.T) {
 		1,
 		nil,
 	))
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(strings.NewReader("data: not-json\n\n"), 0, 0),
-		converter,
+		converter, 0, 0, 0,
 	)
 	var output bytes.Buffer
 	buf := make([]byte, 4096)
@@ -178,11 +178,10 @@ func TestConvertingReaderEOFWithoutTerminal(t *testing.T) {
 		nil,
 	)
 	converter := newChatToResponsesConverter(state)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(strings.NewReader(
-			"data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[]}\n\n",
-		), 0, 0),
-		converter,
+			"data: {\"id\":\"x\", \"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[]}\n\n"), 0, 0),
+		converter, 0, 0, 0,
 	)
 	var output bytes.Buffer
 	buf := make([]byte, 4096)
@@ -230,7 +229,7 @@ func TestConvertingReaderDoneReleasesTerminal(t *testing.T) {
 	input := "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
 		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
-	reader := newConvertingReader(NewSSEReaderWithLimits(strings.NewReader(input), 0, 0), converter)
+	reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(strings.NewReader(input), 0, 0), converter, 0, 0, 0)
 
 	var output bytes.Buffer
 	// The upstream never EOFs (simulated by the [DONE] frame terminating the
@@ -371,7 +370,7 @@ func TestRunTranslatedStreamNoLateOps(t *testing.T) {
 	// The upstream body keeps the connection open after [DONE]; the reader
 	// terminates on the terminal batch and the handler closes the body.
 	upstream := &heldOpenBody{reader: strings.NewReader(input)}
-	reader := newConvertingReader(NewSSEReaderWithLimits(upstream, 0, 0), converter)
+	reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(upstream, 0, 0), converter, 0, 0, 0)
 
 	var w guardResponseWriter
 	observation := runTranslatedStream(context.Background(), &w, upstream, reader)
@@ -525,7 +524,7 @@ func TestRunTranslatedStreamClientAbortReleases(t *testing.T) {
 	upstream := &heldOpenBody{reader: strings.NewReader(
 		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
 	)}
-	reader := newConvertingReader(NewSSEReaderWithLimits(upstream, 0, 0), converter)
+	reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(upstream, 0, 0), converter, 0, 0, 0)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var w guardResponseWriter
@@ -595,9 +594,9 @@ func TestFixtureChatStreamToResponsesFrames(t *testing.T) {
 		nil,
 	)
 	converter := newChatToResponsesConverter(state)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(bytes.NewReader(testcorpus.ChatCompletionsStreamSSE()), 0, 0),
-		converter,
+		converter, 0, 0, 0,
 	)
 	var output bytes.Buffer
 	buf := make([]byte, 4096)
@@ -637,9 +636,9 @@ func TestWriteDialectEventNameMatchesType(t *testing.T) {
 		nil,
 	)
 	converter := newChatToResponsesConverter(state)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(bytes.NewReader(testcorpus.ChatCompletionsStreamSSE()), 0, 0),
-		converter,
+		converter, 0, 0, 0,
 	)
 	var output bytes.Buffer
 	buf := make([]byte, 4096)
@@ -681,9 +680,9 @@ func TestFixtureResponsesStreamToAnthropicFrames(t *testing.T) {
 		1,
 	)
 	converter := newResponsesToAnthropicConverter(state)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(bytes.NewReader(testcorpus.ResponsesStreamSSE()), 0, 0),
-		converter,
+		converter, 0, 0, 0,
 	)
 	var output bytes.Buffer
 	buf := make([]byte, 4096)
@@ -764,13 +763,10 @@ func TestChatStreamChunkTypedErrorFrame(t *testing.T) {
 		nil,
 	)
 	converter := newChatToResponsesConverter(state)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(
-			strings.NewReader("data: {\"error\":{\"message\":\"boom\"}}\n\n"),
-			0,
-			0,
-		),
-		converter,
+			strings.NewReader("data: {\"error\":{\"message\":\"boom\"}}\n\n"), 0, 0),
+		converter, 0, 0, 0,
 	)
 	var output bytes.Buffer
 	buf := make([]byte, 4096)
@@ -833,9 +829,9 @@ func TestConvertingReaderUpstreamBodyError(t *testing.T) {
 		1,
 		nil,
 	)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(source, 0, 0),
-		newChatToResponsesConverter(state),
+		newChatToResponsesConverter(state), 0, 0, 0,
 	)
 	var output bytes.Buffer
 	buf := make([]byte, 4096)

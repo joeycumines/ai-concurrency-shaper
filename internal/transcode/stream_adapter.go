@@ -441,11 +441,25 @@ func (c *chatToAnthropicConverter) ErrorEvent(err error) (frameEvent, bool) {
 // payload (e.g. an invalid tool-argument buffer), which must not amplify the
 // downstream frame without bound (review-08 blocker 7).
 func boundedErrorMessage(err error) string {
+	return boundedErrorMessageLimit(err, maxStreamErrorTextBytes)
+}
+
+// boundedErrorMessageLimit bounds the error text embedded in a client-dialect
+// error frame to max bytes: a conversion error may carry an entire corrupt
+// upstream payload (e.g. an invalid tool-argument buffer), which must not
+// amplify the downstream frame without bound (review-08 blocker 7; the
+// configured ErrorMessageBytes is wired at the call sites, review-z commit
+// 3).
+func boundedErrorMessageLimit(err error, max int) string {
 	message := err.Error()
-	if len(message) <= maxStreamErrorTextBytes {
+	if len(message) <= max {
 		return message
 	}
-	return message[:maxStreamErrorTextBytes] + "…"
+	// The ellipsis must not push the text past the configured bound.
+	if max > 3 {
+		return message[:max-3] + "…"
+	}
+	return message[:max]
 }
 
 // responsesErrorFrame marshals a Responses error event.

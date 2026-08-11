@@ -206,12 +206,11 @@ func TestChatStreamPrematureDoneImmediateEOF(t *testing.T) {
 		nil,
 	)
 	converter := newChatToResponsesConverter(state)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(strings.NewReader(
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"gpt-4.1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"+
-				"data: [DONE]\n\n",
-		), 0, 0),
-		converter,
+			"data: {\"id\":\"c\", \"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"gpt-4.1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"+
+				"data: [DONE]\n\n"), 0, 0),
+		converter, 0, 0, 0,
 	)
 
 	output, readErr := drainReader(t, reader)
@@ -276,12 +275,11 @@ func TestChatStreamPrematureDoneHeldOpen(t *testing.T) {
 		nil,
 	)
 	converter := newChatToResponsesConverter(state)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(&thenHangReader{data: []byte(
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"gpt-4.1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
-				"data: [DONE]\n\n",
-		)}, 0, 0),
-		converter,
+			"data: {\"id\":\"c\", \"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"gpt-4.1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n" +
+				"data: [DONE]\n\n")}, 0, 0),
+		converter, 0, 0, 0,
 	)
 
 	type result struct {
@@ -365,12 +363,11 @@ func TestChatStreamComposedPrematureDone(t *testing.T) {
 		1710000000,
 	)
 	converter2 := newChatToAnthropicConverter(chat2, anthropic2)
-	reader := newConvertingReader(
+	reader := newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(strings.NewReader(
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"gpt-4.1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"+
-				"data: [DONE]\n\n",
-		), 0, 0),
-		converter2,
+			"data: {\"id\":\"c\", \"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"gpt-4.1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"+
+				"data: [DONE]\n\n"), 0, 0),
+		converter2, 0, 0, 0,
 	)
 
 	output, readErr := drainReader(t, reader)
