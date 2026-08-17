@@ -50,7 +50,7 @@ Palette is terminal-friendly true-color, designed against a near-black backgroun
 
 - Chrome: header (row 0), tab bar (row 1), separator (row 2), content (rows 3..n-2), footer (last row).
 - Content area uses a right-hand scrollbar in the last column.
-- Dashboard stacks vertically: Throughput, Concurrency, Queue Depth, Status Distribution, In-Flight Requests, Summary, optional Circuit Breaker.
+- Dashboard stacks vertically: Circuit Breaker (when configured), Throughput, Active + Queued bars, Status, In-Flight Requests, Summary.
 - Scrollable tabs (Requests, Network, Logs, Concurrency, Routes) have tables/lists with selected-row highlight.
 
 ## Components
