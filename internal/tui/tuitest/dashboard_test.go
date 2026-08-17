@@ -18,6 +18,7 @@
 package tuitest
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -44,12 +45,13 @@ func TestPTY_DashboardSections(t *testing.T) {
 
 	out := h.Console().String()
 
-	// Verify dashboard sections
+	// Verify dashboard sections (Circuit Breaker is optional
+	// and only rendered when configured).
 	checks := []string{
 		"Throughput",
-		"Concurrency",
-		"Queue Depth",
-		"Status Distribution",
+		"Active",
+		"Queued",
+		"Status",
 		"In-Flight Requests",
 		"Summary",
 	}
@@ -73,9 +75,53 @@ func TestPTY_DashboardSections(t *testing.T) {
 	}
 }
 
+func TestPTY_DashboardNarrowStatusVisibility(t *testing.T) {
+	// A 40-column terminal must still show every non-zero status class
+	// label. Before the budget/render mismatch fix the composed status row
+	// was 50 cells wide, so renderContentWithScrollbar truncated the
+	// rightmost cells and "4xx:" / "5xx:" were cut off the screen.
+	h := Launch(t, WithTermSize(40, 40))
+	defer h.Close()
+
+	proxyURL := h.ProxyURL()
+	// Send 200s first so the 2xx statuses commit before the 500
+	// responses trip the circuit breaker; once it opens, later
+	// requests are rejected locally with a 503 (recorded as 5xx).
+	for range 2 {
+		h.Ctrl().SetStatus(http.StatusOK)
+		sendRequest(t, t.Context(), proxyURL+"/v1/messages")
+		time.Sleep(50 * time.Millisecond)
+	}
+	for range 2 {
+		h.Ctrl().SetStatus(http.StatusNotFound)
+		sendRequest(t, t.Context(), proxyURL+"/v1/messages")
+		time.Sleep(50 * time.Millisecond)
+	}
+	for range 2 {
+		h.Ctrl().SetStatus(http.StatusInternalServerError)
+		sendRequest(t, t.Context(), proxyURL+"/v1/messages")
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// Dashboard is the default tab (1).
+	if _, err := h.Console().WriteString("1"); err != nil {
+		t.Fatalf("WriteString 1: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	out := h.Console().String()
+	for _, check := range []string{"2xx:", "4xx:", "5xx:"} {
+		if !strings.Contains(out, check) {
+			t.Errorf("40-column dashboard should show %q, got output:\n%s", check, out)
+		}
+	}
+}
+
 func TestPTY_DashboardScrollsDown(t *testing.T) {
 	// Use a short terminal so the dashboard content overflows.
-	h := Launch(t, WithTermSize(20, 80))
+	h := Launch(t, WithTermSize(10, 80))
 	defer h.Close()
 
 	proxyURL := h.ProxyURL()
