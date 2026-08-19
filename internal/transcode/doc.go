@@ -71,6 +71,10 @@
 //	                       (FeatureAuthenticatedThinking) otherwise
 //	Reasoning items       exact only for Responses targets; loss-gated
 //	                       (FeatureReasoningSummary) otherwise
+//	Input item identity   dropped unconditionally; the drop is noted
+//	                       observably under FeaturePreviousResponseID (input
+//	                       item ids are Responses conversation-state
+//	                       references; no target dialect carries them)
 //	Images, Documents     transformed (per-target capability gates)
 //	Developer role        transformed (capability gate; system fallback)
 //
@@ -91,10 +95,10 @@
 //	                       FeatureUsageReasoningUnknown)
 //	Chat logprobs         loss-gated (FeatureLogprobs)
 //	Chat service tier     loss-gated (FeatureResponseServiceTier)
-//	Envelope controls     loss-gated (FeatureResponsesControls; background,
-//	                       max_tool_calls, prompt, prompt_cache_key,
-//	                       safety_identifier decode as typed shadows and
-//	                       cannot be reproduced in Messages; failed
+//	Envelope controls     loss-gated (FeatureResponsesControls; the
+//	                       background/max_tool_calls/prompt/prompt_cache_key/
+//	                       safety_identifier controls echoed on a Responses
+//	                       upstream cannot be reproduced in Messages; failed
 //	                       envelopes surface as client-dialect errors and
 //	                       never reach this decision)
 //	Provider reasoning    capability-gated (ProviderReasoningText maps to

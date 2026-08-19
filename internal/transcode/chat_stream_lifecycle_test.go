@@ -508,13 +508,112 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 }
 
 // j6PermissivePolicy returns a policy approving the response-side losses the
-// Responses->Messages path triggers (reasoning and usage timing).
+// Responses->Messages path triggers (reasoning and usage timing) plus the
+// tool strictness loss a messages->responses mapping requires to serve tool
+// traffic (review-z commit 6).
 func j6PermissivePolicy() LossPolicy {
 	return LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureToolSchemaStrictness:   {},
 		FeatureReasoningSummary:       {},
 		FeatureUsageUnknown:           {},
 		FeatureUsageCacheReadUnknown:  {},
 		FeatureUsageCacheWriteUnknown: {},
 		FeatureUsageReasoningUnknown:  {},
 	}}
+}
+
+// TestChatStreamComposedCreatedCacheTokens pins the stream-path parity of
+// the created_cache_tokens provider extension with the non-streaming decode
+// (review-gate task-11 finding 5): a usage tail carrying it renders
+// cache_creation_input_tokens with the value and records NO
+// usage_cache_write_unknown loss (the component is known); a tail without it
+// keeps the loss-gated zero path with exactly one recorded loss. The
+// uncached input is the total minus the full cached breakdown
+// (cached + created), matching Messages semantics.
+func TestChatStreamComposedCreatedCacheTokens(t *testing.T) {
+	run := func(t *testing.T, usageTail string) (*chatToAnthropicConverter, *AnthropicStreamEvent) {
+		t.Helper()
+		chat := newChatResponsesStreamState(
+			testStreamContext(),
+			StrictLossPolicy(),
+			ChatCapabilities{},
+			"resp_1",
+			"gpt-4.1",
+			1710000000,
+			nil,
+		)
+		anthropic := newAnthropicResponsesStreamState(
+			testStreamContext(),
+			j6PermissivePolicy(),
+			"msg_1",
+			"claude-x",
+			1710000000,
+		)
+		converter := newChatToAnthropicConverter(chat, anthropic)
+		convert := func(raw string) error {
+			_, err := converter.Convert(SSEEvent{Data: []byte(raw)})
+			return err
+		}
+		if err := convert(`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`); err != nil {
+			t.Fatal(err)
+		}
+		if err := convert(`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`); err != nil {
+			t.Fatal(err)
+		}
+		if err := convert(usageTail); err != nil {
+			t.Fatalf("usage tail rejected: %v", err)
+		}
+		batch, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var delta *AnthropicStreamEvent
+		for _, frame := range batch.Events {
+			var event AnthropicStreamEvent
+			if err := json.Unmarshal(frame.Data, &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.Type == AnthropicStreamEventTypeMessageDelta {
+				delta = &event
+			}
+		}
+		if delta == nil {
+			t.Fatal("no message_delta in the terminal batch")
+		}
+		return converter, delta
+	}
+
+	t.Run("extension present", func(t *testing.T) {
+		converter, delta := run(t,
+			`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":18,"total_tokens":60,"prompt_tokens_details":{"cached_tokens":5,"created_cache_tokens":7},"completion_tokens_details":{"reasoning_tokens":12}}}`)
+		if delta.Usage == nil {
+			t.Fatal("message_delta usage is nil")
+		}
+		if delta.Usage.CacheCreationInputTokens != 7 {
+			t.Fatalf("cache_creation_input_tokens = %d, want 7", delta.Usage.CacheCreationInputTokens)
+		}
+		if delta.Usage.CacheReadInputTokens != 5 {
+			t.Fatalf("cache_read_input_tokens = %d, want 5", delta.Usage.CacheReadInputTokens)
+		}
+		// Uncached input: 42 - 5 (cached) - 7 (created).
+		if delta.Usage.InputTokens != 30 {
+			t.Fatalf("input_tokens = %d, want 30", delta.Usage.InputTokens)
+		}
+		if got := countFeature(*converter.ConversionReport(), FeatureUsageCacheWriteUnknown); got != 0 {
+			t.Fatalf("usage_cache_write_unknown losses = %d, want 0 (the component is known)", got)
+		}
+	})
+	t.Run("extension absent", func(t *testing.T) {
+		converter, delta := run(t,
+			`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":18,"total_tokens":60,"prompt_tokens_details":{"cached_tokens":5},"completion_tokens_details":{"reasoning_tokens":12}}}`)
+		if delta.Usage == nil {
+			t.Fatal("message_delta usage is nil")
+		}
+		if delta.Usage.CacheCreationInputTokens != 0 {
+			t.Fatalf("cache_creation_input_tokens = %d, want 0", delta.Usage.CacheCreationInputTokens)
+		}
+		if got := countFeature(*converter.ConversionReport(), FeatureUsageCacheWriteUnknown); got != 1 {
+			t.Fatalf("usage_cache_write_unknown losses = %d, want exactly 1", got)
+		}
+	})
 }

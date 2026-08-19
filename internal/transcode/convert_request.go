@@ -23,21 +23,22 @@ import (
 
 // probeUnsupportedResponsesFields reports the first recognized-but-unsupported
 // Responses request field, or "" when none is present. These fields are
-// conversation-state and background controls that the transcoder deliberately
+// background and conversation-state controls the transcoder deliberately
 // does not implement; their presence is a typed unsupported-feature error,
-// never a silent drop.
+// never a silent drop. (include and prompt_cache_key are NOT probed here:
+// include is a best-effort response-format preference and prompt_cache_key
+// is the responses_controls loss decision, both handled in
+// DecodeResponsesRequest.)
 func probeUnsupportedResponsesFields(data []byte) (string, error) {
 	var probe map[string]json.RawMessage
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return "", err
 	}
 	for _, name := range []string{
-		"include",
 		"prompt",
 		"background",
 		"max_tool_calls",
 		"safety_identifier",
-		"prompt_cache_key",
 		"status",
 	} {
 		if _, ok := probe[name]; ok {
@@ -69,10 +70,11 @@ func DecodeResponsesRequest(
 			wireUnsupportedToFeature(err),
 		)
 	}
-	// Recognized-but-unsupported request fields (conversation-state and
-	// background controls) are a typed unsupported-feature error, never a
-	// silent drop. The probe runs after the strict decode so a malformed
-	// document is reported as malformed, not as an unsupported field.
+	// Recognized-but-unsupported request fields (background and
+	// conversation-state controls) are a typed unsupported-feature error,
+	// never a silent drop. The probe runs after the strict decode so a
+	// malformed document is reported as malformed, not as an unsupported
+	// field.
 	if name, err := probeUnsupportedResponsesFields(body); err != nil {
 		return DecodeResult{}, nil, err
 	} else if name != "" {
@@ -80,6 +82,46 @@ func DecodeResponsesRequest(
 			Protocol: "responses",
 			Path:     name,
 			Feature:  name,
+		}
+	}
+
+	var result DecodeResult
+
+	// Client-controlled request fields that a chat upstream cannot honor
+	// are recorded, never silently dropped:
+	//
+	//   - include requests extra response fields (e.g.
+	//     reasoning.encrypted_content). The chat upstream cannot produce
+	//     them; the rendered response carries what the source actually
+	//     provided (the reasoning content mapping under the
+	//     provider_reasoning_text capability). Best-effort by nature.
+	//   - client_metadata is pure client telemetry with no upstream
+	//     semantics.
+	//   - prompt_cache_key is a conversation-cache control; the
+	//     responses_controls loss decision applies (approved by the CLI
+	//     defaults, rejectable by policy).
+	if len(request.Include) > 0 {
+		result.Report.Note(
+			FeatureResponsesControls,
+			"include",
+			"the include response-format preference cannot be honored by a chat upstream; the rendered response carries what the source provides",
+		)
+	}
+	if len(request.ClientMetadata) > 0 {
+		result.Report.Note(
+			FeatureResponsesControls,
+			"client_metadata",
+			"client_metadata is client telemetry with no upstream semantics; it is not forwarded",
+		)
+	}
+	if request.PromptCacheKey != "" {
+		if err := result.Report.Lose(
+			policy,
+			FeatureResponsesControls,
+			"prompt_cache_key",
+			"the prompt cache key cannot be reproduced by a chat upstream",
+		); err != nil {
+			return DecodeResult{}, nil, err
 		}
 	}
 
@@ -113,7 +155,6 @@ func DecodeResponsesRequest(
 		return DecodeResult{}, nil, errors.New("negative top_logprobs")
 	}
 
-	var result DecodeResult
 	result.Request.ClientModel = request.Model
 	result.Request.Stream = request.Stream.Value
 	// An explicitly present body stream field (true or false, never null) is
@@ -131,32 +172,94 @@ func DecodeResponsesRequest(
 	result.Request.TopP = request.TopP
 	result.Request.Metadata = request.Metadata
 
-	// Tools. Only function tools are supported; built-in tools are a typed
-	// unsupported feature. The raw parameters schema is validated as exactly
-	// one JSON object at this boundary; its bytes are preserved, never
-	// decoded and remarshaled through a map, so large integers, decimals,
-	// and exponents survive byte-exact (review-k finding 2).
+	// Tools. Function tools are supported; namespace tools are flattened
+	// into their nested function tools (the grouping is client-side
+	// structure the chat target cannot express; the functions themselves
+	// are fully portable); built-in tools (web_search, file_search,
+	// code_interpreter, computer_use, ...) are the builtin_tools loss
+	// decision — approved, they are dropped; rejected, the request fails.
+	// The raw parameters schema is validated as exactly one JSON object at
+	// this boundary; its bytes are preserved, never decoded and remarshaled
+	// through a map, so large integers, decimals, and exponents survive
+	// byte-exact (review-k finding 2).
 	for i, tool := range request.Tools {
-		if len(tool.Parameters) > 0 {
-			if _, err := decodeJSONObject(string(tool.Parameters)); err != nil {
+		switch tool.Type {
+		case "namespace":
+			flattened, err := flattenNamespaceTool(tool, &result.Report, policy)
+			if err != nil {
 				return DecodeResult{}, nil, fmt.Errorf(
-					"responses tools[%d] parameters: %w",
+					"responses tools[%d]: %w",
 					i,
 					err,
 				)
 			}
+			for j, nested := range flattened {
+				if len(nested.Parameters) > 0 {
+					if _, err := decodeJSONObject(string(nested.Parameters)); err != nil {
+						return DecodeResult{}, nil, fmt.Errorf(
+							"responses tools[%d] namespace[%d] parameters: %w",
+							i,
+							j,
+							err,
+						)
+					}
+				}
+				result.Request.Tools = append(result.Request.Tools, CanonicalTool{
+					Name:        nested.Name,
+					Description: nested.Description,
+					JSONSchema:  nested.Parameters,
+					Strict:      fieldBoolPtr(nested.Strict),
+				})
+			}
+		case "function":
+			if len(tool.Parameters) > 0 {
+				if _, err := decodeJSONObject(string(tool.Parameters)); err != nil {
+					return DecodeResult{}, nil, fmt.Errorf(
+						"responses tools[%d] parameters: %w",
+						i,
+						err,
+					)
+				}
+			}
+			result.Request.Tools = append(result.Request.Tools, CanonicalTool{
+				Name:        tool.Name,
+				Description: tool.Description,
+				JSONSchema:  tool.Parameters,
+				Strict:      fieldBoolPtr(tool.Strict),
+			})
+		default:
+			// Built-in and unknown tool types: the builtin_tools loss
+			// decision (approved by the CLI defaults, rejectable by
+			// policy).
+			if err := result.Report.Lose(
+				policy,
+				FeatureBuiltinTools,
+				fmt.Sprintf("tools[%d]", i),
+				fmt.Sprintf(
+					"the %q built-in tool cannot be reproduced in a chat request",
+					tool.Type,
+				),
+			); err != nil {
+				return DecodeResult{}, nil, err
+			}
 		}
-		result.Request.Tools = append(result.Request.Tools, CanonicalTool{
-			Name:        tool.Name,
-			Description: tool.Description,
-			JSONSchema:  tool.Parameters,
-			Strict:      fieldBoolPtr(tool.Strict),
-		})
 	}
 
-	// Tool choice.
+	// Tool choice, reconciled against the tools that survive conversion: an
+	// approved built-in drop can leave "required" or a named function choice
+	// pointing at tools that no longer exist, which would render an invalid
+	// upstream request (review-12 finding 5).
 	if request.ToolChoice != nil {
 		choice, err := canonicalizeResponsesToolChoice(*request.ToolChoice)
+		if err != nil {
+			return DecodeResult{}, nil, err
+		}
+		choice, err = reconcileToolChoice(
+			choice,
+			len(request.Tools),
+			&result.Request,
+			&result.Report,
+		)
 		if err != nil {
 			return DecodeResult{}, nil, err
 		}
@@ -277,9 +380,31 @@ func responsesInputToTurns(
 	}
 
 	var turns []CanonicalTurn
+	// Input item identity (the id on an easy message, a previous output
+	// message, a function call, or a function call output) is a Responses
+	// conversation-state reference: the canonical IR tracks turn boundaries,
+	// content order, and tool-call identity — not item ids — and every
+	// renderer rebuilds items from turns. The drop is unconditional and
+	// observable: one deduped note per exchange under the conversation-state
+	// feature, never a silent elision (review-gate task-11 finding 3).
+	itemIdentityNoted := false
+	noteItemIdentity := func() {
+		if itemIdentityNoted {
+			return
+		}
+		itemIdentityNoted = true
+		report.Note(
+			FeaturePreviousResponseID,
+			"input[].id",
+			"input item ids are not forwarded (the target dialect has no item identity)",
+		)
+	}
 	for i, item := range input.Items {
 		switch value := item.(type) {
 		case *ResponsesEasyInputMessage:
+			if value.ID != "" {
+				noteItemIdentity()
+			}
 			if err := loseInputPhase(policy, report, value.Phase, i); err != nil {
 				return nil, err
 			}
@@ -291,6 +416,9 @@ func responsesInputToTurns(
 			turns = append(turns, CanonicalTurn{Role: role, Parts: parts})
 
 		case *ResponsesPreviousOutputMessage:
+			if value.ID != "" {
+				noteItemIdentity()
+			}
 			if err := loseInputPhase(policy, report, value.Phase, i); err != nil {
 				return nil, err
 			}
@@ -304,6 +432,9 @@ func responsesInputToTurns(
 			})
 
 		case *ResponsesFunctionCallInput:
+			if value.ID != "" {
+				noteItemIdentity()
+			}
 			arguments, err := decodeJSONObject(value.Arguments)
 			if err != nil {
 				return nil, fmt.Errorf(
@@ -320,6 +451,9 @@ func responsesInputToTurns(
 			turns = appendFunctionCallTurn(turns, part)
 
 		case *ResponsesFunctionCallOutputInput:
+			if value.ID != "" {
+				noteItemIdentity()
+			}
 			parts, err := responsesFunctionOutputToCanonical(value.Output)
 			if err != nil {
 				return nil, fmt.Errorf("input item %d: %w", i, err)
@@ -579,6 +713,64 @@ func mustRawMessage(value map[string]json.RawMessage) json.RawMessage {
 	return raw
 }
 
+// flattenNamespaceTool returns the nested function tools of a namespace
+// tool, recursing into nested namespaces. The grouping is client-side
+// structure a chat request cannot express; the nested function tools are
+// fully portable, so the flatten is reported as a named Note. A nested
+// non-function tool type is the SAME builtin_tools loss decision as a
+// top-level built-in tool (review-11 finding 2): approved, it drops
+// observably; rejected, the request fails — never a different, harder rule
+// than the top-level path.
+func flattenNamespaceTool(
+	tool openairesponses.Tool,
+	report *ConversionReport,
+	policy LossPolicy,
+) ([]openairesponses.Tool, error) {
+	var out []openairesponses.Tool
+	for i, nested := range tool.Tools {
+		switch nested.Type {
+		case "namespace":
+			inner, err := flattenNamespaceTool(nested, report, policy)
+			if err != nil {
+				return nil, fmt.Errorf("namespace %d: %w", i, err)
+			}
+			out = append(out, inner...)
+		case "function":
+			out = append(out, nested)
+		default:
+			if err := report.Lose(
+				policy,
+				FeatureBuiltinTools,
+				fmt.Sprintf("tools[].tools[%d]", i),
+				fmt.Sprintf(
+					"the %q built-in tool nested in a namespace cannot be reproduced in a chat request",
+					nested.Type,
+				),
+			); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if len(out) == 0 {
+		// Every nested tool was a dropped built-in. The top-level rule for
+		// an all-built-in tools list is accept-and-drop under the approval,
+		// and the tool_choice reconciliation owns the no-tools-left case —
+		// a namespace is never a different, harder rule than the top level
+		// (review-11 finding 2).
+		return nil, nil
+	}
+	report.Note(
+		FeatureBuiltinTools,
+		"tools[]",
+		fmt.Sprintf(
+			"namespace tool %q flattened into %d function tool(s) for the chat request",
+			tool.Name,
+			len(out),
+		),
+	)
+	return out, nil
+}
+
 // DecodeMessagesRequest decodes an Anthropic Messages request body into the
 // canonical IR.
 func DecodeMessagesRequest(
@@ -623,6 +815,126 @@ func DecodeMessagesRequest(
 		}
 	}
 
+	// The modern Anthropic envelope controls are client-side semantics with
+	// no target representation: output_config.budget_tokens is an output
+	// budget whose effective cap is already carried by max_tokens, and
+	// context_management directs server-side conversation trimming. They are
+	// never silently stripped — each present control is an explicit
+	// loss/reject decision under anthropic_controls (review-11 finding 1).
+	if envelope.ContextManagement != nil {
+		if err := result.Report.Lose(
+			policy,
+			FeatureAnthropicControls,
+			"context_management",
+			"context_management is a server-side conversation control the target cannot reproduce",
+		); err != nil {
+			return DecodeResult{}, err
+		}
+	}
+	if envelope.OutputConfig != nil {
+		if err := result.Report.Lose(
+			policy,
+			FeatureAnthropicControls,
+			"output_config",
+			"the output_config budget duplicates max_tokens, which the target already carries",
+		); err != nil {
+			return DecodeResult{}, err
+		}
+	}
+
+	// cache_control is the Anthropic prompt-cache marker real clients attach
+	// to text blocks, tools, and the system prompt. It is a pure performance
+	// hint with no semantic content and no portable equivalent, so it is a
+	// sanctioned observable elision — one deduped note per exchange, never a
+	// policy gate and never a silent drop (analysis G3).
+	cacheControlNoted := false
+	noteCacheControl := func() {
+		if cacheControlNoted {
+			return
+		}
+		cacheControlNoted = true
+		result.Report.Note(
+			FeatureAnthropicControls,
+			"cache_control",
+			"cache_control performance hints are not forwarded (chat upstreams cache automatically)",
+		)
+	}
+	if envelope.System != nil {
+		for _, block := range envelope.System.ContentBlocks {
+			if block.CacheControl != nil {
+				noteCacheControl()
+			}
+		}
+	}
+	for _, tool := range envelope.Tools {
+		if tool.CacheControl != nil {
+			noteCacheControl()
+		}
+	}
+	// Blocks nest one level: tool_result content carries its own block
+	// array, and the marker is legal on those nested blocks too, so the
+	// scan walks the nested content of every top-level block.
+	var contentBlocksCarryCacheControl func(blocks []anthropicmessages.ContentBlock)
+	contentBlocksCarryCacheControl = func(blocks []anthropicmessages.ContentBlock) {
+		for _, block := range blocks {
+			if block.CacheControl != nil {
+				noteCacheControl()
+			}
+			if block.Content != nil {
+				contentBlocksCarryCacheControl(block.Content.ContentBlocks)
+			}
+		}
+	}
+	for _, message := range envelope.Messages {
+		contentBlocksCarryCacheControl(message.Content.ContentBlocks)
+	}
+
+	// Thinking configuration. "enabled" requires an explicit budget; members
+	// are validated per type against the official contract (enabled={type,
+	// budget_tokens}, disabled={type}, adaptive={type,display}) so a
+	// cross-type member is a malformed request, never silently ignored
+	// (review-12 R12-L1). The strict wire decode already rejected unknown
+	// fields inside the object.
+	if envelope.Thinking != nil {
+		switch envelope.Thinking.Type {
+		case "enabled":
+			if envelope.Thinking.Display != nil {
+				return DecodeResult{}, errors.New(
+					"messages thinking type enabled cannot carry display (it belongs to adaptive)",
+				)
+			}
+			if envelope.Thinking.BudgetTokens == nil {
+				return DecodeResult{}, errors.New(
+					"messages thinking type enabled requires budget_tokens",
+				)
+			}
+			if *envelope.Thinking.BudgetTokens <= 0 {
+				return DecodeResult{}, errors.New(
+					"messages thinking budget_tokens must be positive",
+				)
+			}
+			result.Request.Thinking = &CanonicalThinking{
+				Type:         "enabled",
+				BudgetTokens: envelope.Thinking.BudgetTokens,
+			}
+		case "disabled", "adaptive":
+			if envelope.Thinking.BudgetTokens != nil {
+				return DecodeResult{}, fmt.Errorf(
+					"messages thinking type %s cannot carry budget_tokens (it belongs to enabled)",
+					envelope.Thinking.Type,
+				)
+			}
+			result.Request.Thinking = &CanonicalThinking{
+				Type: envelope.Thinking.Type,
+			}
+		default:
+			return DecodeResult{}, fmt.Errorf(
+				"messages thinking type %q is invalid (want enabled, disabled, or adaptive)",
+				envelope.Thinking.Type,
+			)
+		}
+	}
+
 	// System prompt becomes a system turn.
 	if envelope.System != nil {
 		if err := envelope.System.Validate(); err != nil {
@@ -638,14 +950,27 @@ func DecodeMessagesRequest(
 		})
 	}
 
-	// Conversation messages.
+	// Conversation messages. The modern Anthropic wire admits inline
+	// system-role messages alongside user/assistant turns; they map to the
+	// canonical system role like the top-level system field.
 	for i, message := range envelope.Messages {
 		if err := message.Validate(); err != nil {
 			return DecodeResult{}, fmt.Errorf("messages[%d]: %w", i, err)
 		}
-		role := CanonicalUser
-		if message.Role == AnthropicMessageRoleAssistant {
+		var role CanonicalRole
+		switch message.Role {
+		case AnthropicMessageRoleUser:
+			role = CanonicalUser
+		case AnthropicMessageRoleAssistant:
 			role = CanonicalAssistant
+		case AnthropicMessageRoleSystem:
+			role = CanonicalSystem
+		default:
+			return DecodeResult{}, fmt.Errorf(
+				"messages[%d]: unknown anthropic message role %q",
+				i,
+				message.Role,
+			)
 		}
 		parts, err := anthropicContentToCanonical(message.Content, policy, &result.Report, &result.Request.Artifacts)
 		if err != nil {
@@ -683,12 +1008,23 @@ func DecodeMessagesRequest(
 		})
 	}
 
-	// Tool choice: Anthropic "auto"/"none"/"any"/named tool.
+	// Tool choice: Anthropic "auto"/"none"/"any"/named tool, reconciled
+	// against the surviving tools so a dangling reference never reaches a
+	// renderer (review-12 finding 5).
 	if envelope.ToolChoice != nil {
 		choice, err := canonicalizeAnthropicToolChoice(
 			*envelope.ToolChoice,
 			&result.Report,
 			policy,
+		)
+		if err != nil {
+			return DecodeResult{}, err
+		}
+		choice, err = reconcileToolChoice(
+			choice,
+			len(envelope.Tools),
+			&result.Request,
+			&result.Report,
 		)
 		if err != nil {
 			return DecodeResult{}, err
@@ -748,6 +1084,56 @@ func canonicalizeAnthropicToolChoice(
 			Feature:  choice.Type,
 		}
 	}
+}
+
+// reconcileToolChoice checks a canonicalized tool choice against the tools
+// that actually survive conversion (review-12 finding 5). A named choice must
+// reference a surviving tool under every policy — a dangling reference is
+// malformed no matter how many tools the client sent. A mode choice is only
+// reconciled when the client DID send tools and the converter dropped them
+// all (built-in-tool loss): "required" against zero tools is a client-dialect
+// error (the converter would otherwise render an invalid upstream request),
+// and "auto" is dropped with an observable note because an empty tool list
+// leaves it meaningless. When the client sent no tools at all the choice
+// passes through untouched — the upstream judges that incoherence, not the
+// converter (TestDecodeResponsesRequestToolChoiceRequired pins it).
+func reconcileToolChoice(
+	choice *CanonicalToolChoice,
+	requestToolCount int,
+	request *CanonicalRequest,
+	report *ConversionReport,
+) (*CanonicalToolChoice, error) {
+	if choice == nil {
+		return nil, nil
+	}
+	if choice.Mode == "named" {
+		for _, tool := range request.Tools {
+			if tool.Name == choice.Name {
+				return choice, nil
+			}
+		}
+		return nil, fmt.Errorf(
+			"tool_choice names tool %q which is not among the tools that survive conversion",
+			choice.Name,
+		)
+	}
+	if requestToolCount == 0 || len(request.Tools) > 0 {
+		return choice, nil
+	}
+	switch choice.Mode {
+	case "required":
+		return nil, errors.New(
+			"tool_choice required but no portable tools remain after the builtin_tools loss",
+		)
+	case "auto":
+		report.Note(
+			FeatureBuiltinTools,
+			"tool_choice",
+			"tool_choice auto dropped with the last tool (no tools remain to choose among)",
+		)
+		return nil, nil
+	}
+	return choice, nil
 }
 
 // anthropicContentToCanonical maps Anthropic message content (string or
@@ -1108,6 +1494,25 @@ func RenderResponsesRequest(
 	return body, report, nil
 }
 
+// thinkingBudgetToEffort maps an Anthropic Messages thinking budget_tokens
+// value to the OpenAI chat reasoning_effort vocabulary. The thresholds are
+// the documented midpoints of the classic Claude Code effort budgets
+// (minimal ~ 256, low ~ 1024, medium ~ 4096, high ~ 16384); the mapping is
+// deterministic, capped at "high" (the non-standard "xhigh" is never
+// synthesized), and reported as a named Note on every mapped exchange.
+func thinkingBudgetToEffort(budget int) string {
+	switch {
+	case budget < 1024:
+		return "minimal"
+	case budget < 4096:
+		return "low"
+	case budget < 16384:
+		return "medium"
+	default:
+		return "high"
+	}
+}
+
 func RenderChatRequest(
 	request CanonicalRequest,
 	context *ExchangeContext,
@@ -1360,7 +1765,7 @@ func RenderChatRequest(
 		if !capabilities.ReasoningEffort {
 			if err := report.Lose(
 				context.lossPolicy(),
-				FeatureProviderReasoningText,
+				FeatureRequestReasoning,
 				"reasoning.effort",
 				"reasoning effort is not supported by the configured chat provider",
 			); err != nil {
@@ -1383,6 +1788,67 @@ func RenderChatRequest(
 			"the reasoning summary style cannot be reproduced in a chat request",
 		); err != nil {
 			return nil, report, err
+		}
+	}
+
+	// Anthropic Messages thinking (Messages source only): the client's
+	// thinking request maps to the chat reasoning_effort parameter when the
+	// chat provider supports it (ReasoningEffort capability). The mapping is
+	// explicit and documented — never silent:
+	//
+	//   - "adaptive"   the client delegated the thinking decision to the
+	//                  model; chat's absent reasoning_effort is the exact
+	//                  semantic (the provider applies its own default).
+	//   - "disabled"   no thinking requested; nothing is emitted.
+	//   - "enabled"    the explicit budget_tokens maps through the
+	//                  documented deterministic threshold table in
+	//                  thinkingBudgetToEffort; the mapping is reported as a
+	//                  named Note so it is observable on every exchange.
+	//
+	// Without the ReasoningEffort capability an enabled budget is a
+	// loss/reject decision (request_reasoning), never a silent drop.
+	if request.Thinking != nil {
+		switch request.Thinking.Type {
+		case "enabled":
+			if request.Thinking.BudgetTokens != nil {
+				if !capabilities.ReasoningEffort {
+					if err := report.Lose(
+						context.lossPolicy(),
+						FeatureRequestReasoning,
+						"thinking",
+						"the thinking budget cannot be reproduced by the configured chat provider",
+					); err != nil {
+						return nil, report, err
+					}
+				} else {
+					effort := thinkingBudgetToEffort(*request.Thinking.BudgetTokens)
+					out.ReasoningEffort = &effort
+					report.Note(
+						FeatureRequestReasoning,
+						"thinking",
+						fmt.Sprintf(
+							"Anthropic thinking budget %d mapped to chat reasoning_effort %q",
+							*request.Thinking.BudgetTokens,
+							effort,
+						),
+					)
+				}
+			}
+		case "adaptive":
+			report.Note(
+				FeatureRequestReasoning,
+				"thinking",
+				"adaptive thinking maps to the chat provider's default reasoning effort",
+			)
+		case "disabled":
+			// An explicit client-asserted no-thinking is observable, like
+			// adaptive: the elision maps to the absence of chat
+			// reasoning_effort and is reported (analysis doc 05 §4 / G8).
+			report.Note(
+				FeatureRequestReasoning,
+				"thinking",
+				"thinking disabled maps to the absence of chat reasoning_effort",
+			)
 		}
 	}
 

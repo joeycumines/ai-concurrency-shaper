@@ -47,12 +47,16 @@ type Request struct {
 	// transcoder deliberately does not implement: they decode so strict
 	// decoding never fails on a current official request, and their presence
 	// is a typed unsupported-feature rejection at the request boundary
-	// (probeUnsupportedResponsesFields), never a silent drop.
-	Include          []string `json:"include,omitempty"`
-	Prompt           *Prompt  `json:"prompt,omitempty"`
-	Background       *bool    `json:"background,omitempty"`
-	MaxToolCalls     *int64   `json:"max_tool_calls,omitempty"`
-	SafetyIdentifier string   `json:"safety_identifier,omitempty"`
-	PromptCacheKey   string   `json:"prompt_cache_key,omitempty"`
-	Status           string   `json:"status,omitempty"`
+	// (probeUnsupportedResponsesFields), never a silent drop. include and
+	// client_metadata are accepted (best-effort / telemetry, reported at the
+	// transcode boundary); prompt_cache_key is the responses_controls loss
+	// decision.
+	Include          []string       `json:"include,omitempty"`
+	Prompt           *Prompt        `json:"prompt,omitempty"`
+	Background       *bool          `json:"background,omitempty"`
+	MaxToolCalls     *int64         `json:"max_tool_calls,omitempty"`
+	SafetyIdentifier string         `json:"safety_identifier,omitempty"`
+	PromptCacheKey   string         `json:"prompt_cache_key,omitempty"`
+	Status           string         `json:"status,omitempty"`
+	ClientMetadata   map[string]any `json:"client_metadata,omitempty"`
 }

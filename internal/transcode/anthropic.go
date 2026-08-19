@@ -14,6 +14,7 @@ type AnthropicMessageRole = anthropicmessages.Role
 const (
 	AnthropicMessageRoleUser      = anthropicmessages.RoleUser
 	AnthropicMessageRoleAssistant = anthropicmessages.RoleAssistant
+	AnthropicMessageRoleSystem    = anthropicmessages.RoleSystem
 )
 
 // AnthropicContentBlockType is the type of an Anthropic content block.

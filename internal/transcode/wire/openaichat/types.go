@@ -515,9 +515,14 @@ type Request struct {
 
 // PromptTokensDetails breaks down prompt tokens. The cached token field is
 // always present on the wire (zero when unused), matching the real API.
+// Provider-extension fields (created_cache_tokens, multimodal_tokens) are
+// decoded and never forwarded.
 type PromptTokensDetails struct {
 	CachedTokens int `json:"cached_tokens"`
 	AudioTokens  int `json:"audio_tokens"`
+
+	CreatedCacheTokens *int `json:"created_cache_tokens,omitempty"`
+	MultimodalTokens   *int `json:"multimodal_tokens,omitempty"`
 }
 
 // CompletionTokensDetails breaks down completion tokens. The reasoning token
@@ -583,9 +588,20 @@ type Choice struct {
 	LogProbs     *ChoiceLogprobs `json:"logprobs"`
 	Message      *Message        `json:"message,omitempty"`
 	Delta        *StreamDelta    `json:"delta,omitempty"`
+
+	// Opaque provider-extension fields present on real streaming and
+	// non-streaming chat responses (e.g. the yolo gateway's token_ids,
+	// routed_experts, stop_reason): decoded so strict wire decoding never
+	// fails on a current provider, never forwarded.
+	TokenIDs      any     `json:"token_ids,omitempty"`
+	RoutedExperts any     `json:"routed_experts,omitempty"`
+	StopReason    *string `json:"stop_reason,omitempty"`
 }
 
-// Response is a chat completions response (the non-streaming shape).
+// Response is a chat completions response (the non-streaming shape). Opaque
+// provider-extension fields (prompt_token_ids, prompt_text) are decoded so
+// strict wire decoding never fails on a current provider, never forwarded —
+// mirroring StreamChunk so the non-streaming and streaming surfaces agree.
 type Response struct {
 	ID                string    `json:"id"`
 	Object            string    `json:"object"`
@@ -595,11 +611,15 @@ type Response struct {
 	SystemFingerprint string    `json:"system_fingerprint,omitempty"`
 	Choices           []Choice  `json:"choices"`
 	Usage             *LLMUsage `json:"usage,omitempty"`
+
+	PromptTokenIDs any     `json:"prompt_token_ids,omitempty"`
+	PromptText     *string `json:"prompt_text,omitempty"`
 }
 
 // StreamChunk is one SSE frame of a streaming chat completion: the chunk
 // envelope (id, object, created, model, choices, usage) around the
-// per-choice deltas.
+// per-choice deltas. Opaque provider-extension fields (prompt_token_ids,
+// prompt_text) are decoded and never forwarded.
 type StreamChunk struct {
 	ID                string    `json:"id"`
 	Object            string    `json:"object"`
@@ -609,4 +629,7 @@ type StreamChunk struct {
 	SystemFingerprint string    `json:"system_fingerprint,omitempty"`
 	Choices           []Choice  `json:"choices"`
 	Usage             *LLMUsage `json:"usage,omitempty"`
+
+	PromptTokenIDs any     `json:"prompt_token_ids,omitempty"`
+	PromptText     *string `json:"prompt_text,omitempty"`
 }

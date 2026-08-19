@@ -18,9 +18,14 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
 
-// Tool is a function tool definition. Only function tools are part of the
+// Tool is a function tool definition, or a namespace tool that groups
+// nested tools (the Responses namespace-tool contract used by agents such as
+// the Codex CLI's multi-agent surface). Function tools are part of the
 // supported subset; built-in tools (web search, file search, code
-// interpreter, computer use, and so on) are rejected as unsupported features.
+// interpreter, computer use, and so on) decode but are rejected as
+// unsupported features at the transcode boundary; namespace tools are
+// flattened by the converters (the nested function tools are fully
+// portable; the grouping itself is not).
 //
 // Strict is required on the wire for both the create request (the pinned
 // FunctionToolParam) and the response echo (the pinned ResponseFunctionTool):
@@ -31,24 +36,166 @@ type Tool struct {
 	Description string           `json:"description,omitempty"`
 	Parameters  json.RawMessage  `json:"parameters,omitempty"`
 	Strict      wire.Field[bool] `json:"strict"`
+	// Tools carries the nested tools of a namespace tool.
+	Tools []Tool `json:"tools,omitempty"`
 }
 
-// Validate checks the function-tool shape and the required strict field.
+// Validate checks the tool shape and the required strict field. Namespace
+// tools validate their nested tools and do not require strict themselves
+// (the strict contract applies to function tools). A missing type is a
+// typed malformed rejection under every policy: a tool with no type is
+// never a built-in (built-ins are known non-empty strings), so it must
+// never reach the builtin_tools loss path (review-12 finding 4).
 func (t Tool) Validate() error {
-	if t.Type != "function" {
-		return fmt.Errorf("responses tool type = %q, want function", t.Type)
-	}
-	if t.Name == "" {
-		return errors.New("responses tool name is empty")
-	}
-	if !t.Strict.Present || t.Strict.Null {
+	if t.Type == "" {
 		return &wire.DecodeError{
 			Kind:    wire.DecodeMissingRequired,
-			Path:    "strict",
-			Message: "responses function tool requires an explicit strict value",
+			Path:    "tools[].type",
+			Message: "responses tool requires an explicit non-empty type",
 		}
 	}
-	return nil
+	switch t.Type {
+	case "namespace":
+		if t.Name == "" {
+			return errors.New("namespace tool name is empty")
+		}
+		if len(t.Tools) == 0 {
+			return errors.New("namespace tool has no nested tools")
+		}
+		if len(t.Parameters) != 0 {
+			return &wire.DecodeError{
+				Kind:    wire.DecodeContradictoryUnion,
+				Path:    "tools[].parameters",
+				Message: "namespace tool cannot carry parameters (they belong to function tools)",
+			}
+		}
+		if t.Strict.Present {
+			return &wire.DecodeError{
+				Kind:    wire.DecodeContradictoryUnion,
+				Path:    "tools[].strict",
+				Message: "namespace tool cannot carry strict (the strict contract applies to function tools)",
+			}
+		}
+		for i, nested := range t.Tools {
+			if err := nested.Validate(); err != nil {
+				return fmt.Errorf("namespace tool %d: %w", i, err)
+			}
+		}
+		return nil
+	case "function":
+		if t.Name == "" {
+			return errors.New("responses tool name is empty")
+		}
+		if len(t.Tools) != 0 {
+			return &wire.DecodeError{
+				Kind:    wire.DecodeContradictoryUnion,
+				Path:    "tools[].tools",
+				Message: "function tool cannot carry nested tools (they belong to namespace tools)",
+			}
+		}
+		if !t.Strict.Present || t.Strict.Null {
+			return &wire.DecodeError{
+				Kind:    wire.DecodeMissingRequired,
+				Path:    "tools[].strict",
+				Message: "responses function tool requires an explicit strict value",
+			}
+		}
+		return nil
+	default:
+		// Built-in tools (web_search, file_search, code_interpreter,
+		// computer_use, ...) decode; the transcode boundary decides the
+		// loss/reject path. Unknown types are the same classification.
+		return nil
+	}
+}
+
+// UnmarshalJSON decodes function and namespace tools strictly. Built-in
+// tool types (web_search, file_search, ...) are accepted wholesale — their
+// payloads are provider-specific (e.g. the Codex CLI's web_search tool
+// carries external_web_access) and the transcode boundary decides the
+// loss/reject path, so strictness here would only reject real clients. A
+// missing or empty type is rejected here, at decode time, so it can never
+// masquerade as a built-in under an approved loss (review-12 finding 4);
+// cross-type fields (tools on a function tool, parameters/strict on a
+// namespace tool) are rejected rather than silently swallowed into the
+// shared struct.
+func (t *Tool) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	if probe.Type != "function" && probe.Type != "namespace" {
+		if probe.Type == "" {
+			return &wire.DecodeError{
+				Kind:    wire.DecodeMissingRequired,
+				Path:    "tools[].type",
+				Message: "responses tool requires an explicit non-empty type",
+			}
+		}
+		// Lenient: built-in tool payloads are opaque and never forwarded.
+		var builtin struct {
+			Type string `json:"type"`
+			Name string `json:"name,omitempty"`
+		}
+		if err := json.Unmarshal(data, &builtin); err != nil {
+			return err
+		}
+		t.Type = builtin.Type
+		t.Name = builtin.Name
+		return nil
+	}
+	var strict struct {
+		Type        string           `json:"type"`
+		Name        string           `json:"name,omitempty"`
+		Description string           `json:"description,omitempty"`
+		Parameters  json.RawMessage  `json:"parameters,omitempty"`
+		Strict      wire.Field[bool] `json:"strict"`
+		Tools       []Tool           `json:"tools,omitempty"`
+	}
+	if err := wire.Decode(data, &strict); err != nil {
+		return err
+	}
+	t.Type = strict.Type
+	t.Name = strict.Name
+	t.Description = strict.Description
+	t.Parameters = strict.Parameters
+	t.Strict = strict.Strict
+	t.Tools = strict.Tools
+	// Cross-type shape violations are rejected at decode so the shared
+	// struct can never silently swallow a field the tool's type does not
+	// own (review-12 finding 4).
+	return t.Validate()
+}
+
+// MarshalJSON emits the tool in its decode-union shape: function tools
+// always carry strict (the pinned contract marks it required on both the
+// create request and the response echo), namespace and built-in tools
+// never do. A blanket struct marshal would invent strict:false on echoed
+// built-in and namespace tools — bytes the strict decoder classifies as a
+// contradictory union for namespaces — so the marshal mirrors the union.
+func (t Tool) MarshalJSON() ([]byte, error) {
+	type toolFields struct {
+		Type        string          `json:"type"`
+		Name        string          `json:"name,omitempty"`
+		Description string          `json:"description,omitempty"`
+		Parameters  json.RawMessage `json:"parameters,omitempty"`
+		Strict      *bool           `json:"strict,omitempty"`
+		Tools       []Tool          `json:"tools,omitempty"`
+	}
+	fields := toolFields{
+		Type:        t.Type,
+		Name:        t.Name,
+		Description: t.Description,
+		Parameters:  t.Parameters,
+		Tools:       t.Tools,
+	}
+	if t.Type == "function" {
+		value := t.Strict.Value
+		fields.Strict = &value
+	}
+	return json.Marshal(fields)
 }
 
 // ToolChoiceNamed is the named-function arm of tool_choice.
@@ -159,6 +306,15 @@ type Usage struct {
 	OutputTokens        int64                     `json:"output_tokens"`
 	OutputTokensDetails *UsageOutputTokensDetails `json:"output_tokens_details"`
 	TotalTokens         int64                     `json:"total_tokens"`
+
+	// CreatedCacheTokens is NOT part of the pinned Responses wire contract:
+	// encoding/json never emits or accepts it (json:"-"), and a wire
+	// input_tokens_details.created_cache_tokens key is still rejected as an
+	// unknown field by strict decode. It is an in-memory composition carrier
+	// for the Chat provider extension of the same name, so the composed
+	// Messages←Chat stream can know the cache-write component without
+	// inventing wire bytes the Responses contract does not define.
+	CreatedCacheTokens *int64 `json:"-"`
 }
 
 // UsageInputTokensDetails breaks down input tokens.

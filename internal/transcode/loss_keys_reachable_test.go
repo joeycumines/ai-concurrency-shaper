@@ -429,6 +429,25 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
+			key:  FeatureRequestReasoning,
+			perm: []Feature{FeatureRequestReasoning},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				// An explicit enabled thinking budget crossing to a Chat
+				// provider without the reasoning_effort capability (the
+				// request-side reasoning control).
+				result, err := DecodeMessagesRequest([]byte(
+					`{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":4096}}`,
+				), policy)
+				if err != nil {
+					return ConversionReport{}, err
+				}
+				ctx := testExchangeContext()
+				ctx.LossPolicy = policy
+				_, report, err := RenderChatRequest(result.Request, ctx, ChatCapabilities{})
+				return report, err
+			},
+		},
+		{
 			key: FeatureReasoningSummary,
 			perm: []Feature{
 				FeatureReasoningSummary,
@@ -659,6 +678,34 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 				context.RequestedClientModel = "m"
 				_, report, err := RenderMessagesResponse(response, context)
 				return report, err
+			},
+		},
+		{
+			// The modern Anthropic envelope controls (context_management,
+			// output_config) are approved or rejected per the exchange policy;
+			// the approved drop is reported for each present control.
+			key:  FeatureAnthropicControls,
+			perm: []Feature{FeatureAnthropicControls},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				result, err := DecodeMessagesRequest([]byte(
+					`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"context_management":{"edits":[]},"output_config":{"budget_tokens":32000}}`,
+				), policy)
+				return result.Report, err
+			},
+		},
+		{
+			// Built-in tools (web_search) are approved or rejected per the
+			// exchange policy; the approved drop is reported.
+			key: FeatureBuiltinTools,
+			perm: []Feature{
+				FeatureBuiltinTools,
+				FeatureResponsesControls,
+			},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				result, _, err := DecodeResponsesRequest([]byte(
+					`{"model":"m","input":"hi","include":["reasoning.encrypted_content"],"tools":[{"type":"web_search","name":"ws"}]}`,
+				), policy)
+				return result.Report, err
 			},
 		},
 		{

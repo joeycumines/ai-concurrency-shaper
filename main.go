@@ -122,6 +122,9 @@ func run() error {
 		transcodeMaxRequestMB      int64
 		transcodeMaxResponseMB     int64
 		transcodeAllowLoss         transcodeLossFlags
+		transcodeCapabilities      transcodeCapabilityFlags
+		transcodeClientQuery       transcodeClientQueryFlags
+		transcodeStrictDefaults    bool
 	)
 
 	flag.StringVar(&bindAddr, "bind", ":8080", "listen address")
@@ -165,13 +168,16 @@ func run() error {
 	// finding 14). The programmatic AuthExternalSigner mode remains for API
 	// users who can provide one.
 	flag.StringVar(&transcodeAuth, "transcode-auth", "auto", "upstream authentication mode: auto, none, bearer, x-api-key, api-key, header")
-	flag.Var(&transcodeAllowLoss, "transcode-allow-loss", "granular loss features the transcoder may drop (repeatable, comma/space separated); the default strict policy rejects every non-portable feature, so e.g. messages-client streaming requires usage_unknown")
+	flag.Var(&transcodeAllowLoss, "transcode-allow-loss", "granular loss features the transcoder may drop (repeatable, comma/space separated; prefix ! to withdraw a default); CLI mappings already approve the sensible default set (reasoning_summary, authenticated_thinking, responses_controls, anthropic_controls, builtin_tools, usage_*), this flag adds more or removes defaults")
 	flag.StringVar(&transcodeAuthSource, "transcode-auth-source", "inbound", "upstream secret source: inbound, env:NAME, file:PATH")
 	flag.StringVar(&transcodeAuthHeader, "transcode-auth-header", "", "custom authentication header name (with -transcode-auth header)")
 	flag.StringVar(&transcodeAnthropicVersion, "transcode-anthropic-version", "2023-06-01", "Anthropic-Version header value for Messages upstreams")
 	flag.Var(&transcodeModels, "transcode-model", "client-model=upstream-model mapping (repeatable)")
 	flag.Int64Var(&transcodeMaxRequestMB, "transcode-max-request-mb", 32, "max transcoded request body size (MB)")
 	flag.Int64Var(&transcodeMaxResponseMB, "transcode-max-response-mb", 32, "max transcoded response body size (MB)")
+	flag.Var(&transcodeCapabilities, "transcode-chat-capability", "chat-provider capability the transcoder may use (repeatable, comma/space separated; prefix ! to withdraw a default): developer_role, image_input, structured_outputs, parallel_tool_calls, stop_sequences, reasoning_effort, provider_reasoning_text; the presets already enable the standard modern surface by default")
+	flag.Var(&transcodeClientQuery, "transcode-allow-client-query", "client query parameter to forward on transcoded routes (repeatable, comma/space separated; prefix ! to withdraw a default); all CLI mappings allow beta by default")
+	flag.BoolVar(&transcodeStrictDefaults, "transcode-strict-defaults", false, "start CLI transcode mappings from zero instead of the sensible defaults: no default chat capabilities, no beta query forwarding, and no default loss approvals (explicit -transcode-chat-capability/-transcode-allow-client-query/-transcode-allow-loss values still apply)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "ai-concurrency-shaper %s\n\n", version)
@@ -303,13 +309,38 @@ func run() error {
 
 	// Wire transcoding mappings: repeatable -transcode-route values plus the
 	// preset flags. Both Messages presets conflict and are rejected before
-	// proxy.New runs.
-	lossAllowed, err := transcode.ParseLossFeatures(transcodeAllowLoss...)
+	// proxy.New runs. Every mapping carries the sensible default capability,
+	// query-allowlist, and loss policies merged with the CLI additions, so a
+	// minimal invocation works against a modern OpenAI-compatible chat
+	// upstream out of the box.
+	lossAllowed, lossNegated, err := parseNegatedLosses(transcodeAllowLoss...)
 	if err != nil {
 		log.Fatalf("invalid -transcode-allow-loss: %v", err)
 	}
 	lossPolicy := transcode.LossPolicy{Allowed: lossAllowed}
-	mappings, err := buildTranscodeMappings(transcodeRoutes, transcodeResponsesChat, transcodeMessagesChat, transcodeMessagesResponses, lossPolicy)
+	chatCapabilities, capabilityNegated, err := parseChatCapabilities(transcodeCapabilities)
+	if err != nil {
+		log.Fatalf("invalid -transcode-chat-capability: %v", err)
+	}
+	allowedClientQuery, queryNegated, err := parseClientQuery(transcodeClientQuery)
+	if err != nil {
+		log.Fatalf("invalid -transcode-allow-client-query: %v", err)
+	}
+	mappings, err := buildTranscodeMappings(
+		transcodeRoutes,
+		transcodeResponsesChat,
+		transcodeMessagesChat,
+		transcodeMessagesResponses,
+		transcodeCLIOptions{
+			lossPolicy:          lossPolicy,
+			negatedLosses:       lossNegated,
+			capabilities:        chatCapabilities,
+			negatedCapabilities: capabilityNegated,
+			clientQuery:         allowedClientQuery,
+			negatedQuery:        queryNegated,
+			strictDefaults:      transcodeStrictDefaults,
+		},
+	)
 	if err != nil {
 		return err
 	}

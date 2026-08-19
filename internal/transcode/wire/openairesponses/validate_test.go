@@ -7,6 +7,7 @@ package openairesponses
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -18,8 +19,27 @@ func TestToolValidateBranches(t *testing.T) {
 	if err := good.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if err := (Tool{Type: "web_search", Name: "f", Strict: fieldBool(true)}).Validate(); err == nil {
-		t.Fatal("non-function tool accepted")
+	// Non-function (built-in) tool types decode and validate at the wire
+	// layer; the loss/reject decision lives at the transcode boundary.
+	if err := (Tool{Type: "web_search", Name: "f", Strict: fieldBool(true)}).Validate(); err != nil {
+		t.Fatalf("built-in tool validate: %v", err)
+	}
+	// Namespace tools validate their nested tools and need no strict.
+	namespace := Tool{
+		Type: "namespace", Name: "ns",
+		Tools: []Tool{{Type: "function", Name: "inner", Strict: fieldBool(false)}},
+	}
+	if err := namespace.Validate(); err != nil {
+		t.Fatalf("namespace tool validate: %v", err)
+	}
+	if err := (Tool{Type: "namespace", Name: "ns"}).Validate(); err == nil {
+		t.Fatal("tool-less namespace accepted")
+	}
+	if err := (Tool{
+		Type: "namespace", Name: "ns",
+		Tools: []Tool{{Type: "namespace", Name: "inner"}},
+	}).Validate(); err == nil {
+		t.Fatal("function-less nested namespace accepted")
 	}
 	if err := (Tool{Type: "function", Strict: fieldBool(true)}).Validate(); err == nil {
 		t.Fatal("name-less tool accepted")
@@ -40,6 +60,145 @@ func TestToolValidateBranches(t *testing.T) {
 	}
 	if string(wire) != `{"type":"function","name":"f","strict":true}` {
 		t.Fatalf("marshal = %s", wire)
+	}
+}
+
+// TestToolValidateMissingType reproduces review-12 finding 4: a tool with an
+// empty/missing type decodes into the lenient built-in branch and Validate's
+// default arm returns nil, so it can be silently dropped under an approved
+// builtin_tools loss instead of rejected as malformed. Missing type is never
+// a built-in — built-ins are known non-empty strings — so it must be a
+// typed missing-required error under every policy.
+func TestToolValidateMissingType(t *testing.T) {
+	err := (Tool{}).Validate()
+	if err == nil {
+		t.Fatal("empty-type tool accepted")
+	}
+	var de *wire.DecodeError
+	if !errors.As(err, &de) || de.Kind != wire.DecodeMissingRequired {
+		t.Fatalf("err = %v, want DecodeError{missing_required}", err)
+	}
+	if !strings.Contains(de.Path, "type") {
+		t.Fatalf("path = %q, want it to name type", de.Path)
+	}
+	// An explicitly null type field is the same defect: not a built-in.
+	err = (Tool{Type: "", Name: "f"}).Validate()
+	if err == nil {
+		t.Fatal("empty-string type tool accepted")
+	}
+	if !errors.As(err, &de) || de.Kind != wire.DecodeMissingRequired {
+		t.Fatalf("err = %v, want DecodeError{missing_required}", err)
+	}
+}
+
+// TestToolValidateCrossTypeFields reproduces review-12 finding 4: cross-type
+// fields (tools on a function tool; parameters/strict on a namespace tool)
+// are accepted by the shared decode struct then silently ignored. The union
+// must reject them with typed errors so a malformed tool definition never
+// reaches the converter with half its fields discarded.
+func TestToolValidateCrossTypeFields(t *testing.T) {
+	// A function tool carrying nested tools is a shape violation: the
+	// converter would ignore tool.Tools entirely.
+	err := (Tool{
+		Type:   "function",
+		Name:   "f",
+		Strict: fieldBool(true),
+		Tools:  []Tool{{Type: "function", Name: "inner", Strict: fieldBool(true)}},
+	}).Validate()
+	if err == nil {
+		t.Fatal("function tool with nested tools accepted")
+	}
+	if !strings.Contains(err.Error(), "tools") {
+		t.Fatalf("err = %v, want it to name tools", err)
+	}
+
+	// A namespace tool carrying parameters is a shape violation.
+	err = (Tool{
+		Type:       "namespace",
+		Name:       "ns",
+		Parameters: json.RawMessage(`{"type":"object"}`),
+		Tools:      []Tool{{Type: "function", Name: "inner", Strict: fieldBool(true)}},
+	}).Validate()
+	if err == nil {
+		t.Fatal("namespace tool with parameters accepted")
+	}
+	if !strings.Contains(err.Error(), "parameters") {
+		t.Fatalf("err = %v, want it to name parameters", err)
+	}
+
+	// A namespace tool carrying strict is a shape violation.
+	err = (Tool{
+		Type:   "namespace",
+		Name:   "ns",
+		Strict: fieldBool(true),
+		Tools:  []Tool{{Type: "function", Name: "inner", Strict: fieldBool(true)}},
+	}).Validate()
+	if err == nil {
+		t.Fatal("namespace tool with strict accepted")
+	}
+	if !strings.Contains(err.Error(), "strict") {
+		t.Fatalf("err = %v, want it to name strict", err)
+	}
+}
+
+// TestToolUnmarshalMissingTypeIsMalformed proves a missing/null type is
+// rejected at DECODE time so it can never reach the builtin_tools loss path,
+// under every policy.
+func TestToolUnmarshalMissingTypeIsMalformed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"missing type", `{"name":"f","strict":true}`},
+		{"null type", `{"type":null,"name":"f","strict":true}`},
+		{"empty type", `{"type":"","name":"f","strict":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var tool Tool
+			if err := json.Unmarshal([]byte(tc.body), &tool); err == nil {
+				t.Fatalf("decoded without error; tool = %+v", tool)
+			} else {
+				var de *wire.DecodeError
+				if !errors.As(err, &de) || de.Kind != wire.DecodeMissingRequired {
+					t.Fatalf("err = %v, want DecodeError{missing_required}", err)
+				}
+			}
+		})
+	}
+
+	// A genuine built-in (web_search) still decodes — the loss/reject path
+	// for built-ins is unchanged.
+	var tool Tool
+	if err := json.Unmarshal([]byte(`{"type":"web_search","name":"ws"}`), &tool); err != nil {
+		t.Fatalf("built-in tool decode: %v", err)
+	}
+	if tool.Type != "web_search" {
+		t.Fatalf("tool = %+v", tool)
+	}
+}
+
+// TestToolUnmarshalCrossTypeFieldsRejected proves cross-type fields are
+// rejected at DECODE time, not silently swallowed into the shared struct.
+func TestToolUnmarshalCrossTypeFieldsRejected(t *testing.T) {
+	// function tool with tools.
+	var fn Tool
+	if err := json.Unmarshal([]byte(`{"type":"function","name":"f","strict":true,"tools":[{"type":"function","name":"inner","strict":true}]}`), &fn); err == nil {
+		t.Fatalf("function tool with tools decoded; tool = %+v", fn)
+	} else if !strings.Contains(err.Error(), "tools") {
+		t.Fatalf("err = %v, want it to name tools", err)
+	}
+	// namespace tool with parameters.
+	var ns Tool
+	if err := json.Unmarshal([]byte(`{"type":"namespace","name":"ns","parameters":{"type":"object"},"tools":[{"type":"function","name":"inner","strict":true}]}`), &ns); err == nil {
+		t.Fatalf("namespace tool with parameters decoded; tool = %+v", ns)
+	} else if !strings.Contains(err.Error(), "parameters") {
+		t.Fatalf("err = %v, want it to name parameters", err)
+	}
+	// namespace tool with strict.
+	if err := json.Unmarshal([]byte(`{"type":"namespace","name":"ns","strict":true,"tools":[{"type":"function","name":"inner","strict":true}]}`), &ns); err == nil {
+		t.Fatalf("namespace tool with strict decoded; tool = %+v", ns)
+	} else if !strings.Contains(err.Error(), "strict") {
+		t.Fatalf("err = %v, want it to name strict", err)
 	}
 }
 

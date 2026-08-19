@@ -134,6 +134,91 @@ func TestCLIRejectsImpossibleTranscodeConfigs(t *testing.T) {
 			},
 			wantErr: "duplicate transcode client route",
 		},
+		{
+			// Unknown chat capability names are rejected at startup, never
+			// on the first request.
+			name: "unknown chat capability",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "http://127.0.0.1:1",
+				"-transcode-responses-chat",
+				"-transcode-chat-capability", "bogus",
+			},
+			wantErr: "unknown chat capability",
+		},
+		{
+			// An invalid client query parameter name is rejected at
+			// startup.
+			name: "invalid client query parameter",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "http://127.0.0.1:1",
+				"-transcode-messages-chat",
+				"-transcode-allow-client-query", "a=b",
+			},
+			wantErr: "invalid client query parameter name",
+		},
+		{
+			// An unknown !name negation is exactly as fatal as an unknown
+			// positive: the vocabulary is validated in both directions
+			// (review-11 finding 3).
+			name: "unknown negated loss",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "http://127.0.0.1:1",
+				"-transcode-responses-chat",
+				"-transcode-allow-loss", "!bogus",
+			},
+			wantErr: "unknown loss feature",
+		},
+		{
+			name: "unknown negated capability",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "http://127.0.0.1:1",
+				"-transcode-responses-chat",
+				"-transcode-chat-capability", "!bogus",
+			},
+			wantErr: "unknown chat capability",
+		},
+		{
+			// A name given both positively and negated is a conflict a
+			// negation silently overridden elsewhere would be a trap.
+			name: "conflicting capability positive and negated",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "http://127.0.0.1:1",
+				"-transcode-responses-chat",
+				"-transcode-chat-capability", "reasoning_effort",
+				"-transcode-chat-capability", "!reasoning_effort",
+			},
+			wantErr: "conflicting",
+		},
+		{
+			// Negations are valid startup input: withdrawing a default
+			// must configure cleanly (the bind error is the only failure).
+			name: "negated defaults configure cleanly",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "http://127.0.0.1:1",
+				"-transcode-responses-chat",
+				"-transcode-chat-capability", "!reasoning_effort",
+				"-transcode-allow-client-query", "!beta",
+				"-transcode-allow-loss", "!builtin_tools",
+			},
+			wantErr: "",
+		},
+		{
+			// The blank-slate flag configures cleanly on its own.
+			name: "strict defaults configure cleanly",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "http://127.0.0.1:1",
+				"-transcode-responses-chat",
+				"-transcode-strict-defaults",
+			},
+			wantErr: "",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

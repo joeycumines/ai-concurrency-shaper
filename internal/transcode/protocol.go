@@ -124,16 +124,18 @@ func (m Mapping) Validate() error {
 
 	case m.ClientProtocol == ClientMessages &&
 		m.UpstreamProtocol == UpstreamResponses:
-		// A Messages-to-Responses mapping under the strict loss policy can
-		// never serve a tool-carrying request: Messages tools carry no
-		// strictness semantic, the Responses function-tool contract
-		// requires explicit strict, and emitting strict:false is the
-		// tool_schema_strictness loss — rejected by strict policy on every
-		// request (review-z commit 6). The configuration cannot possibly
-		// work, so it fails at startup instead.
-		if len(m.LossPolicy.Allowed) == 0 {
+		// A Messages-to-Responses mapping cannot preserve tool strictness
+		// unless the tool_schema_strictness loss is explicitly approved:
+		// Messages tools carry no strictness semantic, the Responses
+		// function-tool contract requires explicit strict, and emitting
+		// strict:false is that loss — rejected on every tool request
+		// otherwise (review-z commit 6). The configuration cannot possibly
+		// serve tool traffic, so it fails at startup instead. The check is
+		// feature-specific rather than "empty policy" so the CLI's sensible
+		// default loss set cannot accidentally silence it.
+		if !m.LossPolicy.Allows(FeatureToolSchemaStrictness) {
 			return fmt.Errorf(
-				"messages-to-responses tool mapping cannot preserve tool strictness under the strict loss policy; allow the tool_schema_strictness loss (e.g. -transcode-allow-loss tool_schema_strictness)",
+				"messages-to-responses tool mapping cannot preserve tool strictness; allow the tool_schema_strictness loss (e.g. -transcode-allow-loss tool_schema_strictness)",
 			)
 		}
 

@@ -191,23 +191,123 @@ ai-concurrency-shaper -upstream https://api.example.com \
 ```
 
 Both Messages presets map `/v1/messages`, so enabling both is a startup
-error. A Messages-to-Responses mapping under the strict loss policy is also
-a startup error (Messages tools cannot preserve the strictness the
-Responses contract requires) unless `tool_schema_strictness` is allowed.
+error. A Messages-to-Responses mapping without an approved
+`tool_schema_strictness` loss is also a startup error (Messages tools cannot
+preserve the strictness the Responses contract requires).
+
+### Sensible defaults
+
+Every CLI mapping (`-transcode-route` and the presets) starts from a
+sensible out-of-the-box configuration so a minimal invocation works against
+a modern OpenAI-compatible chat upstream. All three layers are additive —
+the flags below extend the defaults, never replace them:
+
+| Layer | Default | Meaning |
+| --- | --- | --- |
+| Chat capabilities | `developer_role`, `parallel_tool_calls`, `reasoning_effort`, `provider_reasoning_text` | the standard modern OpenAI-compatible chat surface, enabled via `-transcode-chat-capability` (granular names: `developer_role`, `image_input`, `structured_outputs`, `parallel_tool_calls`, `stop_sequences`, `reasoning_effort`, `provider_reasoning_text`) |
+| Allowed client query | `beta` | Anthropic clients (Claude Code) gate every request with `?beta=true`; harmless on chat endpoints. Add more via `-transcode-allow-client-query` |
+| Loss policy | `reasoning_summary`, `authenticated_thinking`, `responses_controls`, `anthropic_controls`, `builtin_tools`, `usage_unknown`, `usage_cache_read_unknown`, `usage_cache_write_unknown`, `usage_reasoning_unknown` | the non-portable features real Responses/Messages client traffic triggers (reasoning summaries, Anthropic thinking blocks, Responses and Anthropic envelope controls, built-in tools, and usage breakdowns the chat upstreams do not always report); approved via `-transcode-allow-loss` on top of the defaults. Note: approving `responses_controls` tolerates `include`/`client_metadata`/`prompt_cache_key` and upstream-echoed controls — the conversation-state request controls (`background`, `max_tool_calls`, `prompt`, `safety_identifier`, `status`) are errors under every policy |
+
+Capabilities are exercised only when the client actually uses the feature:
+`reasoning_effort` forwards the Responses `reasoning.effort` (and an
+Anthropic `thinking` budget, see below) as the chat `reasoning_effort`
+parameter; `provider_reasoning_text` maps the chat `reasoning` response
+extension to client text; `developer_role` preserves the Responses
+developer-role messages; `parallel_tool_calls` forwards the
+parallel-tool-calls setting.
+
+Anthropic `thinking` on a Messages client maps to chat `reasoning_effort`
+as follows: `type: adaptive` emits nothing (the client delegated the
+decision to the model — the chat provider applies its own default);
+`type: disabled` emits nothing (no thinking requested, matching the chat
+absence of `reasoning_effort`) and the elision is reported;
+`type: enabled` maps `budget_tokens` through
+a deterministic, documented threshold table (`<1024` minimal, `<4096` low,
+`<16384` medium, else high) and the mapping is reported on every exchange.
+The thinking members are validated per type (`enabled` carries
+`budget_tokens`, `disabled` carries none, `adaptive` carries `display`) —
+a cross-type member is a malformed request, not a silently ignored field.
+Request-side reasoning controls — an enabled `thinking` budget or a
+Responses `reasoning.effort` — are gated by their own `request_reasoning`
+loss key, deliberately distinct from the response-side
+`provider_reasoning_text` (chat reasoning content): an operator never has
+to approve losing response reasoning text just to strip a request knob,
+or vice versa. Without the `reasoning_effort` capability an enabled budget
+is a loss/reject decision, never a silent drop — and on a non-Chat target
+(e.g. Messages→Responses) an enabled budget is likewise a loss/reject
+decision, never silently dropped.
+
+One scope caveat on "out of the box": the sensible defaults make a minimal
+invocation work for the Chat directions (`-transcode-responses-chat`,
+`-transcode-messages-chat`). The Messages→Responses direction is not
+zero-flag: it requires `-transcode-allow-loss tool_schema_strictness`
+(shown in the route examples above), and a mapping without that approval
+fails at startup rather than serving tool traffic loosely.
+
+### Removing defaults
+
+The sensible defaults above exist so a minimal invocation works out of the
+box against a modern OpenAI-compatible chat upstream. An operator targeting
+a strict legacy chat upstream — one that rejects the `reasoning_effort`
+parameter or chokes on the `?beta=true` query — can withdraw any default
+from the command line alone, without the programmatic API. Three layers are
+negatable the same way: a value prefixed with `!` withdraws a default.
+
+```sh
+# Withdraw the default reasoning_effort capability and the default beta
+# query forwarding, but keep every other default. Explicit positives still
+# apply on top, so this also adds image_input:
+ai-concurrency-shaper -upstream https://api.example.com -transcode-responses-chat \
+  -transcode-chat-capability '!reasoning_effort' \
+  -transcode-chat-capability image_input \
+  -transcode-allow-client-query '!beta'
+
+# Withdraw a default loss approval (builtin_tools) so built-in tool requests
+# are rejected instead of dropped:
+ai-concurrency-shaper -upstream https://api.example.com -transcode-responses-chat \
+  -transcode-allow-loss '!builtin_tools'
+```
+
+Negations validate against the same granular vocabulary as positives: an
+unknown `!name` fails at startup exactly like an unknown positive, never on
+the first request. A name given both positively and negated is a conflict
+and fails at startup — a negation that could be silently overridden by a
+positive elsewhere on the command line would be a trap. An explicit
+positive always survives a negation of a *different* name; a negation only
+ever withdraws a default.
+
+To start from a completely blank slate instead of withdrawing defaults one
+by one, `-transcode-strict-defaults` removes every default at once: no
+default chat capabilities, no beta query forwarding, and no default loss
+approvals. Explicit `-transcode-chat-capability`,
+`-transcode-allow-client-query`, and `-transcode-allow-loss` values still
+apply on top.
+
+```sh
+# Blank slate: approve only usage_unknown and forward only the api-version
+# query, nothing else:
+ai-concurrency-shaper -upstream https://api.example.com -transcode-responses-chat \
+  -transcode-strict-defaults \
+  -transcode-allow-loss usage_unknown \
+  -transcode-allow-client-query api-version
+```
 
 ### Loss policy
 
 Every non-portable feature is gated by exactly one granular, direction-
 specific loss key (the complete registry is `internal/transcode/LOSS_MATRIX.md`,
-generated from the same registry the program uses). The default **strict**
-policy rejects every non-portable feature with a client-dialect error —
-nothing is silently dropped, defaulted, merged, or reinterpreted. The
-`-transcode-allow-loss` flag (repeatable, comma/space separated) approves
-individual keys; only the granular names exist, there are no aliases:
+generated from the same registry the program uses). CLI mappings start from
+the sensible default approvals listed above; the programmatic API (zero
+`LossPolicy`) is **strict** and rejects every non-portable feature with a
+client-dialect error — nothing is silently dropped, defaulted, merged, or
+reinterpreted. The `-transcode-allow-loss` flag (repeatable, comma/space
+separated) approves additional keys on top of the defaults; only the
+granular names exist, there are no aliases:
 
 ```sh
-# Approve exactly two losses: unknown usage and reasoning summaries
--transcode-allow-loss usage_unknown -transcode-allow-loss reasoning_summary
+# Approve two further losses on top of the CLI defaults: image input and
+# multiple system turns
+-transcode-allow-loss image_input -transcode-allow-loss multiple_system_turns
 ```
 
 ### Stream negotiation

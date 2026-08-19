@@ -260,9 +260,10 @@ func TestResponsesToolValidate(t *testing.T) {
 	if err := (ResponsesTool{Type: "function", Name: "f"}).Validate(); err == nil {
 		t.Fatal("expected error for missing strict")
 	}
-	tool = ResponsesTool{Type: "web_search", Name: "ws"}
-	if err := tool.Validate(); err == nil {
-		t.Fatal("expected error for non-function tool")
+	// Non-function (built-in) tool types decode and validate; the
+	// builtin_tools loss/reject decision happens at the transcode boundary.
+	if err := (ResponsesTool{Type: "web_search", Name: "ws"}).Validate(); err != nil {
+		t.Fatalf("built-in tool validate: %v", err)
 	}
 	tool = ResponsesTool{Type: "function"}
 	if err := tool.Validate(); err == nil {

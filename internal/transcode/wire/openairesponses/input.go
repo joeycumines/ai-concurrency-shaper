@@ -323,6 +323,14 @@ type InputItem interface {
 
 // EasyInputMessage is an easy input message without an ID.
 type EasyInputMessage struct {
+	// ID is the optional item identity real Responses clients (e.g. the
+	// Codex CLI) attach to user/developer messages. No target dialect
+	// carries input item identity; the field is accepted on the wire and
+	// the decode path reports the drop observably (one deduped
+	// previous_response_id note per exchange, like every other input item
+	// identity: previous output messages, function calls, and function
+	// call outputs).
+	ID      string              `json:"id,omitempty"`
 	Type    string              `json:"type,omitempty"`
 	Role    InputRole           `json:"role"`
 	Content InputMessageContent `json:"content"`

@@ -20,10 +20,12 @@ import (
 // Role is the role of an Anthropic message.
 type Role string
 
-// Role values.
+// Role values. RoleSystem covers the modern inline system-role message
+// (Claude Code 2.1.x emits system turns inside the messages array).
 const (
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	RoleSystem    Role = "system"
 )
 
 // ContentBlockType is the type of an Anthropic content block.
@@ -103,6 +105,15 @@ type ContentBlock struct {
 	Content   *Content        `json:"content,omitempty"`
 	IsError   *bool           `json:"is_error,omitempty"`
 	Source    *Source         `json:"source,omitempty"`
+
+	// CacheControl is the Anthropic prompt-cache marker (e.g.
+	// {"type":"ephemeral"}) real clients (Claude Code) attach to text,
+	// image, tool_use, and tool_result blocks. It is a caching performance
+	// hint with no semantic content; chat upstreams cache automatically,
+	// so it is accepted on the wire and not forwarded — the decode path
+	// reports the drop observably (one deduped anthropic_controls note per
+	// exchange).
+	CacheControl any `json:"cache_control,omitempty"`
 }
 
 // UnmarshalJSON decodes the tagged union per-arm: each type admits exactly
@@ -123,32 +134,37 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 	switch probe.Type {
 	case ContentBlockTypeText:
 		var shadow struct {
-			Type ContentBlockType `json:"type"`
-			Text *string          `json:"text"`
+			Type         ContentBlockType `json:"type"`
+			Text         *string          `json:"text"`
+			CacheControl any              `json:"cache_control,omitempty"`
 		}
 		if err := wire.Decode(data, &shadow); err != nil {
 			return fmt.Errorf("text block: %w", err)
 		}
 		block.Type = shadow.Type
 		block.Text = shadow.Text
+		block.CacheControl = shadow.CacheControl
 
 	case ContentBlockTypeImage, ContentBlockTypeDocument:
 		var shadow struct {
-			Type   ContentBlockType `json:"type"`
-			Source *Source          `json:"source"`
+			Type         ContentBlockType `json:"type"`
+			Source       *Source          `json:"source"`
+			CacheControl any              `json:"cache_control,omitempty"`
 		}
 		if err := wire.Decode(data, &shadow); err != nil {
 			return fmt.Errorf("%s block: %w", probe.Type, err)
 		}
 		block.Type = shadow.Type
 		block.Source = shadow.Source
+		block.CacheControl = shadow.CacheControl
 
 	case ContentBlockTypeToolUse:
 		var shadow struct {
-			Type  ContentBlockType `json:"type"`
-			ID    *string          `json:"id"`
-			Name  *string          `json:"name"`
-			Input json.RawMessage  `json:"input"`
+			Type         ContentBlockType `json:"type"`
+			ID           *string          `json:"id"`
+			Name         *string          `json:"name"`
+			Input        json.RawMessage  `json:"input"`
+			CacheControl any              `json:"cache_control,omitempty"`
 		}
 		if err := wire.Decode(data, &shadow); err != nil {
 			return fmt.Errorf("tool_use block: %w", err)
@@ -157,13 +173,15 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 		block.ID = shadow.ID
 		block.Name = shadow.Name
 		block.Input = shadow.Input
+		block.CacheControl = shadow.CacheControl
 
 	case ContentBlockTypeToolResult:
 		var shadow struct {
-			Type      ContentBlockType `json:"type"`
-			ToolUseID *string          `json:"tool_use_id"`
-			Content   *Content         `json:"content"`
-			IsError   *bool            `json:"is_error"`
+			Type         ContentBlockType `json:"type"`
+			ToolUseID    *string          `json:"tool_use_id"`
+			Content      *Content         `json:"content"`
+			IsError      *bool            `json:"is_error"`
+			CacheControl any              `json:"cache_control,omitempty"`
 		}
 		if err := wire.Decode(data, &shadow); err != nil {
 			return fmt.Errorf("tool_result block: %w", err)
@@ -172,6 +190,7 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 		block.ToolUseID = shadow.ToolUseID
 		block.Content = shadow.Content
 		block.IsError = shadow.IsError
+		block.CacheControl = shadow.CacheControl
 
 	case ContentBlockTypeThinking:
 		var shadow struct {
@@ -325,7 +344,7 @@ type Message struct {
 // Validate checks the message shape.
 func (m Message) Validate() error {
 	switch m.Role {
-	case RoleUser, RoleAssistant:
+	case RoleUser, RoleAssistant, RoleSystem:
 	default:
 		return fmt.Errorf("unknown anthropic message role %q", m.Role)
 	}
@@ -340,6 +359,12 @@ type Tool struct {
 	Name        string          `json:"name"`
 	Description *string         `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+
+	// CacheControl is the Anthropic prompt-cache marker real clients
+	// (Claude Code) attach to tool definitions; a caching performance hint
+	// accepted on the wire and not forwarded — the decode path reports the
+	// drop observably (one deduped anthropic_controls note per exchange).
+	CacheControl any `json:"cache_control,omitempty"`
 }
 
 // Validate checks the tool shape.
@@ -418,18 +443,47 @@ type Response struct {
 // Request is an Anthropic messages API request (the pinned subset the
 // transcoder maps; unsupported fields are rejected by strict decoding).
 type Request struct {
-	Model         string         `json:"model"`
-	MaxTokens     int            `json:"max_tokens"`
-	Messages      []Message      `json:"messages"`
-	System        *Content       `json:"system,omitempty"`
-	Temperature   *float64       `json:"temperature,omitempty"`
-	TopP          *float64       `json:"top_p,omitempty"`
-	TopK          *int           `json:"top_k,omitempty"`
-	StopSequences []string       `json:"stop_sequences,omitempty"`
-	Stream        *bool          `json:"stream,omitempty"`
-	Tools         []Tool         `json:"tools,omitempty"`
-	ToolChoice    *ToolChoice    `json:"tool_choice,omitempty"`
-	Metadata      map[string]any `json:"metadata,omitempty"`
+	Model         string          `json:"model"`
+	MaxTokens     int             `json:"max_tokens"`
+	Messages      []Message       `json:"messages"`
+	System        *Content        `json:"system,omitempty"`
+	Temperature   *float64        `json:"temperature,omitempty"`
+	TopP          *float64        `json:"top_p,omitempty"`
+	TopK          *int            `json:"top_k,omitempty"`
+	StopSequences []string        `json:"stop_sequences,omitempty"`
+	Stream        *bool           `json:"stream,omitempty"`
+	Thinking      *ThinkingConfig `json:"thinking,omitempty"`
+	Tools         []Tool          `json:"tools,omitempty"`
+	ToolChoice    *ToolChoice     `json:"tool_choice,omitempty"`
+	Metadata      map[string]any  `json:"metadata,omitempty"`
+
+	// ContextManagement and OutputConfig are the newest Anthropic Messages
+	// request controls (sent by Claude Code 2.1.x: context_management with
+	// clear_thinking_20251015 edits, output_config with the output budget).
+	// They are client-side controls with no target equivalent: accepted on
+	// the wire and gated as an observable loss/reject decision
+	// (anthropic_controls) by the transcode layer — never silently dropped.
+	ContextManagement any `json:"context_management,omitempty"`
+	OutputConfig      any `json:"output_config,omitempty"`
+}
+
+// ThinkingConfig is the Anthropic Messages thinking request configuration.
+// The official contract is:
+//
+//	{"type": "enabled", "budget_tokens": N}
+//	{"type": "disabled"}
+//	{"type": "adaptive", "display": "omitted"}
+//
+// "adaptive" (used by Claude Code 2.1.x effort picker) delegates the
+// thinking decision to the model/server. Unknown fields are rejected by the
+// strict wire decode; the Type value and the per-type member set (a
+// budget_tokens on disabled/adaptive or a display on enabled is malformed,
+// never silently ignored — review-12 R12-L1) are validated by the transcode
+// layer.
+type ThinkingConfig struct {
+	Type         string  `json:"type"`
+	BudgetTokens *int    `json:"budget_tokens,omitempty"`
+	Display      *string `json:"display,omitempty"`
 }
 
 // StreamEventType is the type of an Anthropic SSE event.

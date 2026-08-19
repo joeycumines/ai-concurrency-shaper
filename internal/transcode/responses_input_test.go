@@ -401,19 +401,43 @@ func TestStringInputDecodeEndToEnd(t *testing.T) {
 }
 
 func TestUnsupportedRequestFieldRejected(t *testing.T) {
+	// background is a recognized-but-unsupported envelope control: rejected
+	// as a typed unsupported feature, never silently dropped.
 	_, _, err := DecodeResponsesRequest(
-		[]byte(`{"model":"m","input":"hi","include":["reasoning.encrypted_content"]}`),
+		[]byte(`{"model":"m","input":"hi","background":true}`),
 		StrictLossPolicy(),
 	)
 	if err == nil {
-		t.Fatal("expected include rejection")
+		t.Fatal("expected background rejection")
 	}
 	ue := asUnsupportedFeatureError(t, err)
-	if ue.Path != "include" {
+	if ue.Path != "background" {
 		t.Fatalf("path = %q", ue.Path)
 	}
-	if !strings.Contains(err.Error(), "include") {
+	if !strings.Contains(err.Error(), "background") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestIncludeAcceptedWithNote(t *testing.T) {
+	// include is a best-effort response-format preference: accepted, noted,
+	// never forwarded. The decoded request carries no rejection.
+	result, _, err := DecodeResponsesRequest(
+		[]byte(`{"model":"m","input":"hi","include":["reasoning.encrypted_content"]}`),
+		StrictLossPolicy(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, loss := range result.Report.Losses {
+		if loss.Feature == FeatureResponsesControls &&
+			strings.Contains(loss.Detail, "include") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("include note missing: %+v", result.Report.Losses)
 	}
 }
 
@@ -429,4 +453,78 @@ func TestResponsesInputImageDetailOptional(t *testing.T) {
 	if err := content.Validate(); err != nil {
 		t.Fatalf("validate without detail: %v", err)
 	}
+}
+
+// TestResponsesInputItemIdentityNoted pins the observable drop of input
+// item identity (review-gate task-11 finding 3): every ID-bearing input
+// item type (easy message, previous output message, function call, function
+// call output) accepts an id on the wire, and the decode records exactly one
+// deduped previous_response_id note per exchange — never a silent drop and
+// never a policy gate. A request whose items carry no ids records no note.
+func TestResponsesInputItemIdentityNoted(t *testing.T) {
+	countNotes := func(report ConversionReport) int {
+		count := 0
+		for _, loss := range report.Losses {
+			if loss.Feature == FeaturePreviousResponseID && loss.Path == "input[].id" {
+				count++
+			}
+		}
+		return count
+	}
+
+	t.Run("id on every item type, one deduped note", func(t *testing.T) {
+		result, _, err := DecodeResponsesRequest([]byte(`{
+			"model": "m",
+			"input": [
+				{"id": "msg_1", "role": "user", "content": "hi"},
+				{"id": "msg_2", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": "hello", "annotations": []}]},
+				{"id": "fc_1", "type": "function_call", "call_id": "call_1", "name": "f", "arguments": "{\"x\":1}"},
+				{"id": "fo_1", "type": "function_call_output", "call_id": "call_1", "output": "ok"}
+			]
+		}`), StrictLossPolicy())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := countNotes(result.Report); got != 1 {
+			t.Fatalf("input[].id notes = %d, want exactly 1 (deduped)", got)
+		}
+		// The ids never reach the canonical turns: every renderer rebuilds
+		// items from turns.
+		for _, turn := range result.Request.Turns {
+			for _, part := range turn.Parts {
+				switch value := part.(type) {
+				case CanonicalFunctionCall:
+					if value.CallID != "call_1" {
+						t.Fatalf("call identity = %q", value.CallID)
+					}
+				}
+			}
+		}
+	})
+
+	t.Run("single id, one note", func(t *testing.T) {
+		result, _, err := DecodeResponsesRequest([]byte(`{
+			"model": "m",
+			"input": [{"id": "msg_1", "role": "user", "content": "hi"}]
+		}`), StrictLossPolicy())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := countNotes(result.Report); got != 1 {
+			t.Fatalf("input[].id notes = %d, want 1", got)
+		}
+	})
+
+	t.Run("no ids, no note", func(t *testing.T) {
+		result, _, err := DecodeResponsesRequest([]byte(`{
+			"model": "m",
+			"input": [{"role": "user", "content": "hi"}]
+		}`), StrictLossPolicy())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := countNotes(result.Report); got != 0 {
+			t.Fatalf("input[].id notes = %d, want 0", got)
+		}
+	})
 }

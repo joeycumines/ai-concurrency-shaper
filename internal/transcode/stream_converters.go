@@ -1144,6 +1144,10 @@ func (o *openResponsesItem) isMessage() bool {
 // the call sites gate the unknown components through
 // loseUnknownUsageComponentsOnce before this runs, so the zeros below are
 // emitted only after the explicit usage-timing loss (review-k finding 6).
+// The created_cache_tokens provider extension rides the in-memory Responses
+// usage carrier (json:"-"): the composed Messages←Chat stream can then know
+// the cache-write component exactly like the non-streaming decode, without
+// emitting wire bytes the Responses contract does not define.
 func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
 	if usage == nil {
 		return nil, nil
@@ -1192,6 +1196,10 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
 	}
 	out.InputTokensDetails.CachedTokens = cached
 	out.OutputTokensDetails.ReasoningTokens = reasoning
+	if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CreatedCacheTokens != nil {
+		created := int64(*usage.PromptTokensDetails.CreatedCacheTokens)
+		out.CreatedCacheTokens = &created
+	}
 	return out, nil
 }
 
@@ -1213,6 +1221,12 @@ type chatStreamChunkShadow struct {
 	SystemFingerprint string                   `json:"system_fingerprint,omitempty"`
 	Choices           []chatStreamChoiceShadow `json:"choices"`
 	Usage             *chatUsageShadow         `json:"usage,omitempty"`
+
+	// Opaque provider-extension fields present on real chat streams (e.g.
+	// the yolo gateway's prompt_token_ids/prompt_text): decoded so strict
+	// wire decoding never fails on a current provider; never forwarded.
+	PromptTokenIDs any     `json:"prompt_token_ids,omitempty"`
+	PromptText     *string `json:"prompt_text,omitempty"`
 }
 
 // chatStreamChoiceShadow mirrors the pinned streaming choice: index and
@@ -1226,6 +1240,10 @@ type chatStreamChoiceShadow struct {
 	FinishReason *string             `json:"finish_reason"`
 	LogProbs     *ChatChoiceLogprobs `json:"logprobs"`
 	Delta        *ChatStreamDelta    `json:"delta"`
+
+	TokenIDs      any     `json:"token_ids,omitempty"`
+	RoutedExperts any     `json:"routed_experts,omitempty"`
+	StopReason    *string `json:"stop_reason,omitempty"`
 }
 
 // chatStreamChunkFromSSE parses one upstream SSE frame into a Chat stream
@@ -1709,9 +1727,11 @@ func (s *anthropicResponsesStreamState) Convert(
 
 // loseUnknownUsageComponentsOnce records the usage-timing loss exactly once
 // per stream when a wire-required Messages usage component is unknown on the
-// source: cache_creation_input_tokens is never part of the pinned Responses
-// contract, and cache_read_input_tokens / thinking_tokens are unknown when
-// their detail objects are absent. Zeros are never emitted silently
+// source: cache_read_input_tokens / thinking_tokens are unknown when their
+// detail objects are absent, and cache_creation_input_tokens is unknown
+// unless the composed Chat source carried the created_cache_tokens provider
+// extension through the in-memory usage carrier (it is never part of the
+// pinned Responses wire contract). Zeros are never emitted silently
 // (review-k finding 6).
 func (s *anthropicResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ResponsesUsage) error {
 	if s.usageComponentsLossRecorded || usage == nil {
@@ -1728,15 +1748,17 @@ func (s *anthropicResponsesStreamState) loseUnknownUsageComponentsOnce(usage *Re
 			return err
 		}
 	}
-	// cache_creation_input_tokens is never part of the pinned Responses
-	// contract.
-	if err := s.report.Lose(
-		s.policy,
-		FeatureUsageCacheWriteUnknown,
-		"usage",
-		"the upstream response cannot provide cache_creation_input_tokens; the required Messages usage breakdown cannot be reproduced",
-	); err != nil {
-		return err
+	// cache_creation_input_tokens is known only through the in-memory
+	// created_cache_tokens carrier set by the composed Chat source.
+	if usage.CreatedCacheTokens == nil {
+		if err := s.report.Lose(
+			s.policy,
+			FeatureUsageCacheWriteUnknown,
+			"usage",
+			"the upstream response cannot provide cache_creation_input_tokens; the required Messages usage breakdown cannot be reproduced",
+		); err != nil {
+			return err
+		}
 	}
 	if usage.OutputTokensDetails == nil {
 		if err := s.report.Lose(
@@ -3083,9 +3105,11 @@ func (s *anthropicResponsesStreamState) FinalizeEOF() ([]AnthropicStreamEvent, e
 // Anthropic form with the pinned semantics: input_tokens +
 // cache_creation_input_tokens + cache_read_input_tokens = total, so the
 // uncached input is the total minus the cached breakdown with checked
-// nonnegative arithmetic (review-j finding 9). A nil source usage returns
-// (nil, nil): the caller decides the required-wire-usage loss instead of
-// fabricating zeros.
+// nonnegative arithmetic (review-j finding 9). The in-memory
+// created_cache_tokens carrier (never a wire field; set by the composed Chat
+// source) supplies the cache-creation component when present, matching the
+// non-streaming decode. A nil source usage returns (nil, nil): the caller
+// decides the required-wire-usage loss instead of fabricating zeros.
 func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, error) {
 	if usage == nil {
 		return nil, nil
@@ -3094,11 +3118,15 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, err
 	if usage.InputTokensDetails != nil {
 		cached = usage.InputTokensDetails.CachedTokens
 	}
+	cacheWrite := int64(0)
+	if usage.CreatedCacheTokens != nil {
+		cacheWrite = *usage.CreatedCacheTokens
+	}
 	reasoning := int64(0)
 	if usage.OutputTokensDetails != nil {
 		reasoning = usage.OutputTokensDetails.ReasoningTokens
 	}
-	if usage.InputTokens < 0 || cached < 0 || usage.InputTokens-cached < 0 ||
+	if usage.InputTokens < 0 || cached < 0 || cacheWrite < 0 || usage.InputTokens-cached-cacheWrite < 0 ||
 		usage.OutputTokens < 0 || reasoning < 0 {
 		return nil, errors.New(
 			"source usage is arithmetically inconsistent: nonnegative token counts required and cached tokens must not exceed the input total",
@@ -3124,13 +3152,17 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, err
 	// rendering Messages usage: a count that cannot be represented on this
 	// platform (32-bit builds) is a typed error, never a silent overflow
 	// (review-z commit 5).
-	uncached, err := checkedInt64ToInt(usage.InputTokens - cached)
+	uncached, err := checkedInt64ToInt(usage.InputTokens - cached - cacheWrite)
 	if err != nil {
 		return nil, &UsageArithmeticError{Detail: "input tokens: " + err.Error()}
 	}
 	readCached, err := checkedInt64ToInt(cached)
 	if err != nil {
 		return nil, &UsageArithmeticError{Detail: "cached tokens: " + err.Error()}
+	}
+	created, err := checkedInt64ToInt(cacheWrite)
+	if err != nil {
+		return nil, &UsageArithmeticError{Detail: "cache-creation tokens: " + err.Error()}
 	}
 	output, err := checkedInt64ToInt(usage.OutputTokens)
 	if err != nil {
@@ -3142,7 +3174,7 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, err
 	}
 	return &AnthropicUsage{
 		InputTokens:              uncached,
-		CacheCreationInputTokens: 0, // cache-write tokens are not part of the pinned Responses contract
+		CacheCreationInputTokens: created,
 		CacheReadInputTokens:     readCached,
 		OutputTokens:             output,
 		OutputTokensDetails: &AnthropicOutputTokensDetails{

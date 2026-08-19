@@ -33,6 +33,10 @@ const (
 	// PreviousResponseID covers the Responses previous_response_id request
 	// field (and Responses-specific conversation-state references such as
 	// item_reference input items): the target request cannot reproduce them.
+	// Input item ids (the id of an easy message, a previous output message, a
+	// function call, or a function call output) are also conversation-state
+	// references; they cannot cross either and their unconditional drop is
+	// noted observably rather than loss-gated.
 	FeaturePreviousResponseID Feature = "previous_response_id"
 	// RequestTopLogprobs covers the Responses top_logprobs request field.
 	FeatureRequestTopLogprobs Feature = "request_top_logprobs"
@@ -87,9 +91,18 @@ const (
 	// breakdown.
 	FeatureUsageReasoningUnknown Feature = "usage_reasoning_unknown"
 	// ProviderReasoningText covers provider reasoning text (a Chat provider
-	// extension) that cannot be reproduced in the target: it may map only to
-	// ordinary text, an approved loss, or a rejection.
+	// extension) in a RESPONSE that cannot be reproduced in the target: it
+	// may map only to ordinary text, an approved loss, or a rejection.
+	// Request-side reasoning controls are a separate semantic — see
+	// RequestReasoning — and must never reuse this key (review-11 finding 4).
 	FeatureProviderReasoningText Feature = "provider_reasoning_text"
+	// RequestReasoning covers request-side reasoning controls — the Anthropic
+	// Messages thinking budget (an explicit enabled budget_tokens) and the
+	// Responses reasoning.effort — that the target request cannot reproduce.
+	// It is deliberately distinct from ProviderReasoningText: an operator
+	// must never have to approve losing response reasoning text just to
+	// strip a request knob, or vice versa.
+	FeatureRequestReasoning Feature = "request_reasoning"
 	// ReasoningSummary covers reasoning summaries (Responses reasoning
 	// output and the request-side reasoning.summary style) that cannot be
 	// reproduced in the target.
@@ -127,10 +140,29 @@ const (
 	// Logprobs covers response token log-probabilities that the client
 	// dialects cannot reproduce.
 	FeatureLogprobs Feature = "logprobs"
-	// ResponsesControls covers the pinned Responses envelope control fields
-	// (background, max_tool_calls, prompt, prompt_cache_key,
-	// safety_identifier): the client dialects cannot reproduce them.
+	// ResponsesControls covers the Responses envelope controls that are
+	// tolerated observably. Request-side, include and client_metadata are
+	// noted (sanctioned encodings) and prompt_cache_key is dropped under
+	// this permission; the conversation-state request controls (background,
+	// max_tool_calls, prompt, safety_identifier, status) are typed
+	// unsupported-feature errors under every policy — this key cannot
+	// un-gate them (review-12 R12-1). Response-side, Responses envelope
+	// controls echoed on an upstream response (background, max_tool_calls,
+	// prompt, prompt_cache_key, safety_identifier) are dropped under this
+	// permission.
 	FeatureResponsesControls Feature = "responses_controls"
+	// AnthropicControls covers the Anthropic Messages client-side envelope
+	// controls (context_management, output_config): they are client/server
+	// conversation controls with no representation in the target request —
+	// output_config.budget_tokens duplicates the max_tokens output budget
+	// already carried by max_tokens, and context_management edits direct
+	// server-side context trimming. An approved loss drops them observably.
+	FeatureAnthropicControls Feature = "anthropic_controls"
+	// BuiltinTools covers Responses built-in tools (web_search, file_search,
+	// code_interpreter, computer_use, and other non-function tool types) that
+	// a chat request cannot express: an approved loss drops them from the
+	// upstream request, a rejection refuses the request.
+	FeatureBuiltinTools Feature = "builtin_tools"
 	// ResponseServiceTier covers the upstream chat service tier ACTUALLY
 	// SERVED (distinct from the requested tier): the client dialects cannot
 	// represent the tier served.
@@ -147,7 +179,7 @@ type lossEntry struct {
 // lossRegistry is the ordered granular registry — the single source for the
 // CLI, the converters, and the generated LOSS_MATRIX.md.
 var lossRegistry = []lossEntry{
-	{FeaturePreviousResponseID, "the Responses previous_response_id request field (and item_reference conversation-state references) cannot be reproduced in the target request"},
+	{FeaturePreviousResponseID, "the Responses previous_response_id request field and item_reference conversation-state references cannot be reproduced in the target request; input item ids are also conversation-state references and their unconditional drop is noted observably"},
 	{FeatureRequestTopLogprobs, "the Responses top_logprobs request field cannot be reproduced in the target request"},
 	{FeatureRequestServiceTier, "the Responses service_tier request field cannot be reproduced in the target request"},
 	{FeatureRequestTruncation, "the Responses truncation request field cannot be reproduced in the target request"},
@@ -162,7 +194,8 @@ var lossRegistry = []lossEntry{
 	{FeatureUsageCacheReadUnknown, "the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageCacheWriteUnknown, "the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageReasoningUnknown, "the source provided no reasoning-token breakdown; the required target usage breakdown cannot be reproduced"},
-	{FeatureProviderReasoningText, "provider reasoning text cannot be reproduced in the target"},
+	{FeatureProviderReasoningText, "provider reasoning text in a RESPONSE cannot be reproduced in the target (request-side reasoning controls are the separate request_reasoning key)"},
+	{FeatureRequestReasoning, "request-side reasoning controls (the Anthropic thinking budget and the Responses reasoning.effort) cannot be reproduced in the target request"},
 	{FeatureReasoningSummary, "reasoning summaries (output and request-side summary style) cannot be reproduced in the target"},
 	{FeatureToolResultJSONEnvelope, "multimodal tool results are encoded as the deterministic transcode JSON text envelope (transcode_version 1) inside a Chat tool message"},
 	{FeatureDeveloperRole, "the developer-role distinction cannot be reproduced in the target"},
@@ -174,7 +207,9 @@ var lossRegistry = []lossEntry{
 	{FeatureAuthenticatedThinking, "Anthropic authenticated thinking blocks cannot cross protocol boundaries"},
 	{FeatureTopK, "the top_k setting cannot be reproduced in the target"},
 	{FeatureLogprobs, "token log-probabilities cannot be reproduced in the target"},
-	{FeatureResponsesControls, "the pinned Responses envelope controls (background, max_tool_calls, prompt, prompt_cache_key, safety_identifier) cannot be reproduced in the target"},
+	{FeatureResponsesControls, "the Responses envelope controls that are tolerated observably: include and client_metadata are noted and prompt_cache_key is dropped under this permission, and Responses envelope controls echoed on an upstream response are dropped under this permission; the request-side conversation-state controls (background, max_tool_calls, prompt, safety_identifier, status) remain typed unsupported-feature errors under every policy"},
+	{FeatureAnthropicControls, "the Anthropic Messages client-side envelope controls (context_management, output_config) have no representation in the target request; an approved loss drops them observably"},
+	{FeatureBuiltinTools, "Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject)"},
 	{FeatureResponseServiceTier, "the upstream chat service tier actually served cannot be reproduced in the target"},
 }
 

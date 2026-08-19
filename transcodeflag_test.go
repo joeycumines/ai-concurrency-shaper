@@ -109,7 +109,8 @@ func TestTranscodeRouteFlagsSet(t *testing.T) {
 }
 
 // TestBuildTranscodeMappings verifies the preset flags expand to the correct
-// route mappings, appended after any explicit -transcode-route values.
+// route mappings, appended after any explicit -transcode-route values, and
+// that the sensible defaults are applied to every mapping.
 func TestBuildTranscodeMappings(t *testing.T) {
 	explicit := proxy.TranscodeMapping{Mapping: transcode.Mapping{
 		ClientRoute:      mustRouteKey("POST", "/v1/custom"),
@@ -120,7 +121,7 @@ func TestBuildTranscodeMappings(t *testing.T) {
 		Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
 	}}
 
-	none, err := buildTranscodeMappings(nil, false, false, false, transcode.StrictLossPolicy())
+	none, err := buildTranscodeMappings(nil, false, false, false, transcodeCLIOptions{lossPolicy: transcode.StrictLossPolicy()})
 	if err != nil {
 		t.Fatalf("no flags: %v", err)
 	}
@@ -128,7 +129,15 @@ func TestBuildTranscodeMappings(t *testing.T) {
 		t.Errorf("no flags: mappings = %+v, want none", none)
 	}
 
-	all, err := buildTranscodeMappings([]proxy.TranscodeMapping{explicit}, true, false, true, transcode.StrictLossPolicy())
+	all, err := buildTranscodeMappings(
+		[]proxy.TranscodeMapping{explicit},
+		true,
+		false,
+		true,
+		transcodeCLIOptions{lossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+			transcode.FeatureToolSchemaStrictness: {},
+		}}},
+	)
 	if err != nil {
 		t.Fatalf("all flags: %v", err)
 	}
@@ -158,7 +167,7 @@ func TestBuildTranscodeMappings(t *testing.T) {
 
 	// The messages->chat preset maps the same client route as messages->
 	// responses, so they are mutually exclusive; messages-chat alone works.
-	withChat, err := buildTranscodeMappings(nil, false, true, false, transcode.StrictLossPolicy())
+	withChat, err := buildTranscodeMappings(nil, false, true, false, transcodeCLIOptions{lossPolicy: transcode.StrictLossPolicy()})
 	if err != nil {
 		t.Fatalf("messages-chat: %v", err)
 	}
@@ -167,7 +176,7 @@ func TestBuildTranscodeMappings(t *testing.T) {
 		t.Errorf("messages-chat = %+v", withChat)
 	}
 
-	single, err := buildTranscodeMappings(nil, true, false, false, transcode.StrictLossPolicy())
+	single, err := buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{lossPolicy: transcode.StrictLossPolicy()})
 	if err != nil {
 		t.Fatalf("responses-chat: %v", err)
 	}
@@ -176,10 +185,333 @@ func TestBuildTranscodeMappings(t *testing.T) {
 	}
 }
 
+// TestBuildTranscodeMappingsDefaults verifies the sensible out-of-the-box
+// defaults land on every CLI mapping: the standard modern chat capability
+// surface, the beta client query for Messages routes, and the default loss
+// set — with CLI additions merged additively.
+func TestBuildTranscodeMappingsDefaults(t *testing.T) {
+	mappings, err := buildTranscodeMappings(
+		nil,
+		true,
+		true,
+		false,
+		transcodeCLIOptions{
+			lossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+				transcode.FeatureImageInput: {},
+			}},
+			capabilities: transcode.ChatCapabilities{StopSequences: true},
+			clientQuery:  map[string]struct{}{"foo": {}},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 2 {
+		t.Fatalf("mappings = %d, want 2", len(mappings))
+	}
+	for i, m := range mappings {
+		cap := m.Mapping.ChatCapabilities
+		if !cap.ReasoningEffort || !cap.ProviderReasoningText ||
+			!cap.DeveloperRole || !cap.ParallelToolCalls {
+			t.Errorf("mapping %d capabilities = %+v, want the default modern surface", i, cap)
+		}
+		if !cap.StopSequences {
+			t.Errorf("mapping %d: CLI stop_sequences capability not merged", i)
+		}
+		if !m.Mapping.LossPolicy.Allows(transcode.FeatureReasoningSummary) ||
+			!m.Mapping.LossPolicy.Allows(transcode.FeatureUsageCacheWriteUnknown) ||
+			!m.Mapping.LossPolicy.Allows(transcode.FeatureAnthropicControls) {
+			t.Errorf("mapping %d: default losses missing", i)
+		}
+		if !m.Mapping.LossPolicy.Allows(transcode.FeatureImageInput) {
+			t.Errorf("mapping %d: CLI image_input loss not merged", i)
+		}
+		if _, ok := m.Mapping.AllowedClientQuery["beta"]; !ok {
+			t.Errorf("mapping %d: default beta query not allowed", i)
+		}
+		if _, ok := m.Mapping.AllowedClientQuery["foo"]; !ok {
+			t.Errorf("mapping %d: CLI query not merged", i)
+		}
+	}
+}
+
+// TestBuildTranscodeMappingsNegation proves `!name` negations withdraw the
+// sensible defaults on every CLI mapping (review-11 finding 3): a legacy
+// chat upstream can shed the modern capabilities, the beta query default,
+// and any default loss from the command line alone.
+func TestBuildTranscodeMappingsNegation(t *testing.T) {
+	mappings, err := buildTranscodeMappings(
+		nil,
+		true,
+		true,
+		false,
+		transcodeCLIOptions{
+			negatedCapabilities: map[string]struct{}{
+				"reasoning_effort": {},
+			},
+			negatedQuery: map[string]struct{}{"beta": {}},
+			negatedLosses: map[transcode.Feature]struct{}{
+				transcode.FeatureBuiltinTools: {},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 2 {
+		t.Fatalf("mappings = %d, want 2", len(mappings))
+	}
+	for i, m := range mappings {
+		cap := m.Mapping.ChatCapabilities
+		if cap.ReasoningEffort {
+			t.Errorf("mapping %d: !reasoning_effort did not withdraw the default", i)
+		}
+		if !cap.DeveloperRole || !cap.ProviderReasoningText || !cap.ParallelToolCalls {
+			t.Errorf("mapping %d: unrelated default capabilities withdrawn: %+v", i, cap)
+		}
+		if _, ok := m.Mapping.AllowedClientQuery["beta"]; ok {
+			t.Errorf("mapping %d: !beta did not withdraw the default query", i)
+		}
+		if m.Mapping.LossPolicy.Allows(transcode.FeatureBuiltinTools) {
+			t.Errorf("mapping %d: !builtin_tools did not withdraw the default loss", i)
+		}
+		if !m.Mapping.LossPolicy.Allows(transcode.FeatureReasoningSummary) {
+			t.Errorf("mapping %d: unrelated default losses withdrawn", i)
+		}
+	}
+
+	// Explicit positives still apply on top of negations of other names.
+	mappings, err = buildTranscodeMappings(
+		nil,
+		true,
+		false,
+		false,
+		transcodeCLIOptions{
+			negatedCapabilities: map[string]struct{}{"reasoning_effort": {}},
+			capabilities:        transcode.ChatCapabilities{StopSequences: true},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cap := mappings[0].Mapping.ChatCapabilities
+	if !cap.StopSequences {
+		t.Fatal("explicit positive lost under an unrelated negation")
+	}
+	if cap.ReasoningEffort {
+		t.Fatal("negated default still present")
+	}
+}
+
+// TestBuildTranscodeMappingsStrictDefaults proves -transcode-strict-defaults
+// yields the blank-slate configuration: no default capabilities, no beta
+// query forwarding, no default loss approvals — with explicit positives
+// still applied on top (review-11 finding 3).
+func TestBuildTranscodeMappingsStrictDefaults(t *testing.T) {
+	mappings, err := buildTranscodeMappings(
+		nil,
+		true,
+		false,
+		false,
+		transcodeCLIOptions{
+			strictDefaults: true,
+			capabilities:   transcode.ChatCapabilities{ImageInput: true},
+			clientQuery:    map[string]struct{}{"custom": {}},
+			lossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+				transcode.FeatureTopK: {},
+			}},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	m := mappings[0].Mapping
+	if m.ChatCapabilities.ReasoningEffort || m.ChatCapabilities.DeveloperRole ||
+		m.ChatCapabilities.ProviderReasoningText || m.ChatCapabilities.ParallelToolCalls {
+		t.Fatalf("capabilities = %+v, want blank slate", m.ChatCapabilities)
+	}
+	if !m.ChatCapabilities.ImageInput {
+		t.Fatal("explicit positive capability lost under strict defaults")
+	}
+	if len(m.AllowedClientQuery) != 1 {
+		t.Fatalf("allowed query = %v, want only the explicit custom", m.AllowedClientQuery)
+	}
+	if _, ok := m.AllowedClientQuery["custom"]; !ok {
+		t.Fatal("explicit positive query lost under strict defaults")
+	}
+	if m.LossPolicy.Allows(transcode.FeatureReasoningSummary) ||
+		m.LossPolicy.Allows(transcode.FeatureResponsesControls) ||
+		m.LossPolicy.Allows(transcode.FeatureAnthropicControls) ||
+		m.LossPolicy.Allows(transcode.FeatureBuiltinTools) {
+		t.Fatalf("loss policy allows defaults, want blank slate")
+	}
+	if !m.LossPolicy.Allows(transcode.FeatureTopK) {
+		t.Fatal("explicit positive loss lost under strict defaults")
+	}
+}
+
+// TestParseNegatedLosses verifies the -transcode-allow-loss values with
+// `!name` negations: granular names validated in both directions, the
+// conflict rule, and the empty-name rejection.
+func TestParseNegatedLosses(t *testing.T) {
+	allowed, negated, err := parseNegatedLosses("top_k", "!builtin_tools", "image_input")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := allowed[transcode.FeatureTopK]; !ok {
+		t.Fatal("top_k missing from positives")
+	}
+	if _, ok := allowed[transcode.FeatureImageInput]; !ok {
+		t.Fatal("image_input missing from positives")
+	}
+	if _, ok := negated[transcode.FeatureBuiltinTools]; !ok {
+		t.Fatal("builtin_tools missing from negations")
+	}
+	if _, ok := allowed[transcode.FeatureBuiltinTools]; ok {
+		t.Fatal("negated name leaked into positives")
+	}
+
+	// Unknown negation is exactly as fatal as unknown positive.
+	if _, _, err := parseNegatedLosses("!bogus"); err == nil {
+		t.Fatal("unknown negated loss accepted")
+	} else if !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("error = %v", err)
+	}
+	// Conflict: the same name positively and negated.
+	if _, _, err := parseNegatedLosses("top_k", "!top_k"); err == nil {
+		t.Fatal("conflicting loss accepted")
+	} else if !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("error = %v", err)
+	}
+	// A bare "!" is an empty name.
+	if _, _, err := parseNegatedLosses("!"); err == nil {
+		t.Fatal("empty negation accepted")
+	}
+	// The legacy broad names are still rejected in both directions.
+	if _, _, err := parseNegatedLosses("!all"); err == nil {
+		t.Fatal("legacy broad negation accepted")
+	}
+}
+
+// TestParseChatCapabilities verifies the -transcode-chat-capability
+// vocabulary: granular names only, unknown names (positive or negated)
+// rejected at startup.
+func TestParseChatCapabilities(t *testing.T) {
+	cap, negated, err := parseChatCapabilities([]string{"reasoning_effort", "developer_role parallel_tool_calls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cap.ReasoningEffort || !cap.DeveloperRole || !cap.ParallelToolCalls {
+		t.Fatalf("capabilities = %+v", cap)
+	}
+	if cap.ImageInput || cap.StopSequences {
+		t.Fatalf("capabilities = %+v, want untouched fields false", cap)
+	}
+	if len(negated) != 0 {
+		t.Fatalf("negated = %v, want none", negated)
+	}
+
+	// `!name` negations are reported for the merge layer to withdraw.
+	cap, negated, err = parseChatCapabilities([]string{"!reasoning_effort", "stop_sequences"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap.ReasoningEffort || !cap.StopSequences {
+		t.Fatalf("capabilities = %+v", cap)
+	}
+	if _, ok := negated["reasoning_effort"]; !ok {
+		t.Fatalf("negated = %v, want reasoning_effort", negated)
+	}
+
+	if _, _, err := parseChatCapabilities([]string{"bogus"}); err == nil {
+		t.Fatal("unknown capability accepted")
+	} else if !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("error = %v", err)
+	}
+	// An unknown negation is exactly as fatal as an unknown positive.
+	if _, _, err := parseChatCapabilities([]string{"!bogus"}); err == nil {
+		t.Fatal("unknown negated capability accepted")
+	} else if !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("error = %v", err)
+	}
+	// A name given both positively and negated is a conflict.
+	if _, _, err := parseChatCapabilities([]string{"reasoning_effort", "!reasoning_effort"}); err == nil {
+		t.Fatal("conflicting capability accepted")
+	} else if !strings.Contains(err.Error(), "conflicting") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, _, err := parseChatCapabilities([]string{"all"}); err == nil {
+		t.Fatal("broad legacy name accepted")
+	}
+	// A bare "!" is an empty name, never a valid negation.
+	if _, _, err := parseChatCapabilities([]string{"!"}); err == nil {
+		t.Fatal("empty negation accepted")
+	}
+}
+
+// TestParseClientQuery verifies the -transcode-allow-client-query parsing,
+// including `!name` negations that withdraw the default beta forwarding.
+func TestParseClientQuery(t *testing.T) {
+	q, negated, err := parseClientQuery([]string{"beta", "api-version foo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := q["beta"]; !ok {
+		t.Fatal("beta missing")
+	}
+	if _, ok := q["api-version"]; !ok {
+		t.Fatal("api-version missing")
+	}
+	if _, ok := q["foo"]; !ok {
+		t.Fatal("foo missing")
+	}
+	if len(negated) != 0 {
+		t.Fatalf("negated = %v, want none", negated)
+	}
+
+	q, negated, err = parseClientQuery([]string{"!beta", "extra"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := q["beta"]; ok {
+		t.Fatal("negated beta still in positives")
+	}
+	if _, ok := q["extra"]; !ok {
+		t.Fatal("extra missing")
+	}
+	if _, ok := negated["beta"]; !ok {
+		t.Fatalf("negated = %v, want beta", negated)
+	}
+
+	// An unknown-negation concept does not exist for query names (any
+	// syntactically valid name is legal), but the conflict rule still holds.
+	if _, _, err := parseClientQuery([]string{"beta", "!beta"}); err == nil {
+		t.Fatal("conflicting query name accepted")
+	}
+
+	for _, bad := range []string{"a=b", "a&b", "a#b", "a?b"} {
+		if _, _, err := parseClientQuery([]string{bad}); err == nil {
+			t.Errorf("parseClientQuery(%q): want error", bad)
+		}
+	}
+	// A negated name is validated with the same character rule.
+	if _, _, err := parseClientQuery([]string{"!a=b"}); err == nil {
+		t.Error("parseClientQuery(!a=b): want error")
+	}
+	// Whitespace-only input yields an empty set (no parameters), not an error.
+	empty, negated, err := parseClientQuery([]string{" "})
+	if err != nil || len(empty) != 0 || len(negated) != 0 {
+		t.Fatalf("parseClientQuery(whitespace) = %v, %v; want empty sets", empty, err)
+	}
+}
+
 // TestBuildTranscodeMappingsConflict verifies enabling both Messages presets
 // fails before proxy.New runs.
 func TestBuildTranscodeMappingsConflict(t *testing.T) {
-	_, err := buildTranscodeMappings(nil, false, true, true, transcode.StrictLossPolicy())
+	_, err := buildTranscodeMappings(nil, false, true, true, transcodeCLIOptions{lossPolicy: transcode.StrictLossPolicy()})
 	if err == nil {
 		t.Fatal("expected both-messages-preset conflict")
 	}
@@ -300,7 +632,7 @@ func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 	policy := transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
 		transcode.FeatureUsageUnknown: {},
 	}}
-	mappings, err := buildTranscodeMappings(nil, false, true, false, policy)
+	mappings, err := buildTranscodeMappings(nil, false, true, false, transcodeCLIOptions{lossPolicy: policy})
 	if err != nil {
 		t.Fatal(err)
 	}

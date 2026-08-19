@@ -3,12 +3,14 @@ package transcode
 import (
 	"encoding/json"
 	"errors"
-	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/testcorpus"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/anthropicmessages"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
 func testExchangeContext() *ExchangeContext {
@@ -109,7 +111,10 @@ func TestDecodeResponsesRequestRejectsUnsupported(t *testing.T) {
 		name string
 		body string
 	}{
-		{"include", `{"model":"m","input":"x","include":["reasoning"]}`},
+		// prompt_cache_key is the responses_controls loss decision:
+		// rejected under the strict policy, approved by the CLI defaults.
+		{"prompt_cache_key", `{"model":"m","input":"x","prompt_cache_key":"k"}`},
+		{"background", `{"model":"m","input":"x","background":true}`},
 		{"unknown field", `{"model":"m","input":"x","bogus":1}`},
 		{"unsupported text format", `{"model":"m","input":"x","text":{"format":{"type":"json_object"}}}`},
 		{"missing model", `{"input":"x"}`},
@@ -125,6 +130,55 @@ func TestDecodeResponsesRequestRejectsUnsupported(t *testing.T) {
 	}
 }
 
+// TestDecodeResponsesRequestControlsPermissiveProbe pins the responses_controls
+// contract against every policy (review-12 R12-1): the five conversation-state
+// request controls are typed unsupported-feature errors even when
+// responses_controls is APPROVED — the key cannot un-gate them — while
+// prompt_cache_key under the same approval drops observably.
+func TestDecodeResponsesRequestControlsPermissiveProbe(t *testing.T) {
+	permissive := LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureResponsesControls: {},
+	}}
+	hardRejected := map[string]string{
+		"background":        `{"model":"m","input":"x","background":true}`,
+		"max_tool_calls":    `{"model":"m","input":"x","max_tool_calls":3}`,
+		"prompt":            `{"model":"m","input":"x","prompt":{"id":"p"}}`,
+		"safety_identifier": `{"model":"m","input":"x","safety_identifier":"u"}`,
+		"status":            `{"model":"m","input":"x","status":"completed"}`,
+	}
+	for name, body := range hardRejected {
+		_, _, err := DecodeResponsesRequest([]byte(body), permissive)
+		if err == nil {
+			t.Fatalf("responses_controls approval un-gated the hard-rejected %q", name)
+		}
+		var target *UnsupportedFeatureError
+		if !errors.As(err, &target) {
+			t.Fatalf("%s: err = %T: %v, want UnsupportedFeatureError", name, err, err)
+		}
+		if target.Feature != name {
+			t.Fatalf("%s: feature = %q", name, target.Feature)
+		}
+	}
+
+	// prompt_cache_key under the SAME approval is an observable loss.
+	result, _, err := DecodeResponsesRequest(
+		[]byte(`{"model":"m","input":"x","prompt_cache_key":"k"}`),
+		permissive,
+	)
+	if err != nil {
+		t.Fatalf("prompt_cache_key rejected under an approved responses_controls: %v", err)
+	}
+	found := false
+	for _, loss := range result.Report.Losses {
+		if loss.Feature == FeatureResponsesControls && loss.Path == "prompt_cache_key" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("report = %+v, want a responses_controls loss at prompt_cache_key", result.Report.Losses)
+	}
+}
+
 func TestDecodeResponsesRequestToolChoiceRequired(t *testing.T) {
 	// "required" is part of the official Responses tool_choice contract and
 	// renders natively into Chat; it must decode, not be rejected.
@@ -137,6 +191,319 @@ func TestDecodeResponsesRequestToolChoiceRequired(t *testing.T) {
 	}
 	if result.Request.ToolChoice == nil || result.Request.ToolChoice.Mode != "required" {
 		t.Fatalf("tool choice = %+v", result.Request.ToolChoice)
+	}
+}
+
+// TestDecodeResponsesRequestToolTypeViolations reproduces review-12 finding
+// 4 at the decode boundary: a tool with a missing type must be a malformed
+// request under EVERY policy (never silently droppable as a pseudo
+// built-in under an approved builtin_tools loss), and cross-type fields
+// must be rejected, not silently ignored.
+func TestDecodeResponsesRequestToolTypeViolations(t *testing.T) {
+	bodies := map[string]string{
+		"missing type": `{
+			"model":"m","input":"x",
+			"tools":[{"name":"f","strict":true}]
+		}`,
+		"null type": `{
+			"model":"m","input":"x",
+			"tools":[{"type":null,"name":"f","strict":true}]
+		}`,
+		"function tool with tools": `{
+			"model":"m","input":"x",
+			"tools":[{"type":"function","name":"f","strict":true,"tools":[{"type":"function","name":"inner","strict":true}]}]
+		}`,
+		"namespace with parameters": `{
+			"model":"m","input":"x",
+			"tools":[{"type":"namespace","name":"ns","parameters":{"type":"object"},"tools":[{"type":"function","name":"inner","strict":true}]}]
+		}`,
+		"namespace with strict": `{
+			"model":"m","input":"x",
+			"tools":[{"type":"namespace","name":"ns","strict":true,"tools":[{"type":"function","name":"inner","strict":true}]}]
+		}`,
+	}
+	for name, body := range bodies {
+		for policyName, policy := range map[string]LossPolicy{
+			"strict":     StrictLossPolicy(),
+			"permissive": {Allowed: map[Feature]struct{}{FeatureBuiltinTools: {}}},
+		} {
+			t.Run(name+"/"+policyName, func(t *testing.T) {
+				_, _, err := DecodeResponsesRequest([]byte(body), policy)
+				if err == nil {
+					t.Fatalf("%s policy accepted a tool-union shape violation", policyName)
+				}
+				var de *wire.DecodeError
+				if errors.As(err, &de) {
+					if de.Kind != wire.DecodeMissingRequired && de.Kind != wire.DecodeContradictoryUnion {
+						t.Fatalf("err kind = %s, want missing_required or contradictory_union", de.Kind)
+					}
+					return
+				}
+				// Wrapped decode errors keep their typed kind.
+				t.Fatalf("err = %v (%T), want a typed DecodeError", err, err)
+			})
+		}
+	}
+}
+
+// TestDecodeResponsesRequestNamespaceNestedBuiltinTools verifies a built-in
+// tool nested inside a namespace is the SAME builtin_tools loss decision as a
+// top-level one: approved (e.g. by the CLI defaults) it drops observably,
+// rejected it fails the request — never a different, harder rule than the
+// top-level path (review-11 finding 2).
+func TestDecodeResponsesRequestNamespaceNestedBuiltinTools(t *testing.T) {
+	body := []byte(`{
+		"model":"m",
+		"input":"hi",
+		"tools":[
+			{"type":"namespace","name":"ns","tools":[
+				{"type":"function","name":"f","parameters":{"type":"object"},"strict":true},
+				{"type":"web_search","name":"ws"}
+			]}
+		]
+	}`)
+
+	// Approved: the nested built-in tool drops observably and the nested
+	// function tool survives.
+	result, _, err := DecodeResponsesRequest(body, LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureBuiltinTools: {},
+	}})
+	if err != nil {
+		t.Fatalf("approved policy rejected the nested built-in tool: %v", err)
+	}
+	if len(result.Request.Tools) != 1 || result.Request.Tools[0].Name != "f" {
+		t.Fatalf("tools = %+v, want only the nested function tool", result.Request.Tools)
+	}
+	found := false
+	for _, loss := range result.Report.Losses {
+		if loss.Feature == FeatureBuiltinTools &&
+			(strings.Contains(loss.Path, "web_search") || strings.Contains(loss.Detail, "web_search")) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("report = %+v, want an observable builtin_tools loss naming web_search", result.Report.Losses)
+	}
+
+	// Strict: rejected exactly like a top-level built-in tool.
+	_, _, err = DecodeResponsesRequest(body, StrictLossPolicy())
+	if err == nil {
+		t.Fatal("strict policy accepted a namespace-nested built-in tool; want rejection")
+	}
+	var target *UnsupportedFeatureError
+	if !errors.As(err, &target) {
+		t.Fatalf("error = %T: %v, want UnsupportedFeatureError", err, err)
+	}
+	if target.Feature != string(FeatureBuiltinTools) {
+		t.Fatalf("feature = %q, want builtin_tools", target.Feature)
+	}
+}
+
+// TestDecodeResponsesRequestToolChoiceReconciliation reproduces review-12
+// finding 5: an approved built-in tool drop must reconcile tool_choice against
+// the tools that actually survive, or the converter renders an invalid
+// upstream request (tool_choice "required" or a named function with zero
+// tools).
+func TestDecodeResponsesRequestToolChoiceReconciliation(t *testing.T) {
+	builtinBody := `{
+		"model":"m","input":"x",
+		"tools":[{"type":"web_search"}],
+		"tool_choice":%s
+	}`
+	mixedBody := `{
+		"model":"m","input":"x",
+		"tools":[
+			{"type":"function","name":"f","parameters":{"type":"object"},"strict":true},
+			{"type":"web_search"}
+		],
+		"tool_choice":%s
+	}`
+	permissive := LossPolicy{Allowed: map[Feature]struct{}{FeatureBuiltinTools: {}}}
+
+	t.Run("required with no surviving tools is an error", func(t *testing.T) {
+		_, _, err := DecodeResponsesRequest(
+			[]byte(fmt.Sprintf(builtinBody, `"required"`)),
+			permissive,
+		)
+		if err == nil {
+			t.Fatal("accepted tool_choice required after every tool dropped; want a client-dialect error")
+		}
+		if !strings.Contains(err.Error(), "tool_choice") {
+			t.Fatalf("err = %v, want it to name tool_choice", err)
+		}
+	})
+
+	t.Run("named choice whose tool was dropped is an error", func(t *testing.T) {
+		_, _, err := DecodeResponsesRequest(
+			[]byte(fmt.Sprintf(builtinBody, `{"type":"function","name":"web_search"}`)),
+			permissive,
+		)
+		if err == nil {
+			t.Fatal("accepted a named tool_choice whose tool was dropped; want a client-dialect error")
+		}
+		if !strings.Contains(err.Error(), "web_search") {
+			t.Fatalf("err = %v, want it to name the dropped tool", err)
+		}
+	})
+
+	t.Run("named choice with no matching function tool is an error", func(t *testing.T) {
+		_, _, err := DecodeResponsesRequest(
+			[]byte(fmt.Sprintf(mixedBody, `{"type":"function","name":"missing"}`)),
+			permissive,
+		)
+		if err == nil {
+			t.Fatal("accepted a named tool_choice no surviving tool matches; want a client-dialect error")
+		}
+		if !strings.Contains(err.Error(), "missing") {
+			t.Fatalf("err = %v, want it to name the unmatched tool", err)
+		}
+	})
+
+	t.Run("auto with no surviving tools drops with a note", func(t *testing.T) {
+		result, _, err := DecodeResponsesRequest(
+			[]byte(fmt.Sprintf(builtinBody, `"auto"`)),
+			permissive,
+		)
+		if err != nil {
+			t.Fatalf("auto tool_choice rejected: %v", err)
+		}
+		if len(result.Request.Tools) != 0 {
+			t.Fatalf("tools = %+v, want none to survive", result.Request.Tools)
+		}
+		if result.Request.ToolChoice != nil {
+			t.Fatalf("tool choice = %+v, want nil after the last tool dropped", result.Request.ToolChoice)
+		}
+		found := false
+		for _, loss := range result.Report.Losses {
+			if loss.Feature == FeatureBuiltinTools && loss.Path == "tool_choice" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("report = %+v, want a builtin_tools note at tool_choice", result.Report.Losses)
+		}
+	})
+
+	t.Run("none with no surviving tools is preserved", func(t *testing.T) {
+		result, _, err := DecodeResponsesRequest(
+			[]byte(fmt.Sprintf(builtinBody, `"none"`)),
+			permissive,
+		)
+		if err != nil {
+			t.Fatalf("none tool_choice rejected: %v", err)
+		}
+		if result.Request.ToolChoice == nil || result.Request.ToolChoice.Mode != "none" {
+			t.Fatalf("tool choice = %+v, want none preserved", result.Request.ToolChoice)
+		}
+	})
+
+	t.Run("required and named with surviving tools pass through", func(t *testing.T) {
+		for _, choice := range []string{`"required"`, `{"type":"function","name":"f"}`} {
+			result, _, err := DecodeResponsesRequest(
+				[]byte(fmt.Sprintf(mixedBody, choice)),
+				permissive,
+			)
+			if err != nil {
+				t.Fatalf("choice %s rejected: %v", choice, err)
+			}
+			if len(result.Request.Tools) != 1 || result.Request.Tools[0].Name != "f" {
+				t.Fatalf("tools = %+v, want the function tool to survive", result.Request.Tools)
+			}
+			wantMode := "required"
+			if strings.HasPrefix(choice, "{") {
+				wantMode = "named"
+			}
+			if result.Request.ToolChoice == nil || result.Request.ToolChoice.Mode != wantMode {
+				t.Fatalf("tool choice = %+v, want %s preserved", result.Request.ToolChoice, wantMode)
+			}
+		}
+	})
+
+	t.Run("required with no tools requested still decodes", func(t *testing.T) {
+		// Pinned pass-through: the reconciliation is about converter-caused
+		// emptiness, not client incoherence the upstream can judge.
+		result, _, err := DecodeResponsesRequest(
+			[]byte(`{"model":"m","input":"x","tool_choice":"required"}`),
+			StrictLossPolicy(),
+		)
+		if err != nil {
+			t.Fatalf("required with no tools rejected: %v", err)
+		}
+		if result.Request.ToolChoice == nil || result.Request.ToolChoice.Mode != "required" {
+			t.Fatalf("tool choice = %+v", result.Request.ToolChoice)
+		}
+	})
+}
+
+// TestRenderChatRequestNoDanglingToolChoice proves the chat body carries no
+// tool_choice when the built-in drop left no tools to choose among
+// (review-12 finding 5, render level).
+func TestRenderChatRequestNoDanglingToolChoice(t *testing.T) {
+	body := []byte(`{
+		"model":"m","input":"x",
+		"tools":[{"type":"web_search"}],
+		"tool_choice":"auto"
+	}`)
+	result, _, err := DecodeResponsesRequest(
+		body,
+		LossPolicy{Allowed: map[Feature]struct{}{FeatureBuiltinTools: {}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Request.ToolChoice != nil {
+		t.Fatalf("decode left a dangling tool choice: %+v", result.Request.ToolChoice)
+	}
+	rendered, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chat ChatRequest
+	if err := strictDecode(rendered, &chat); err != nil {
+		t.Fatalf("rendered chat: %v\n%s", err, rendered)
+	}
+	if chat.ToolChoice != nil {
+		t.Fatalf("rendered tool_choice = %+v, want none with zero tools", chat.ToolChoice)
+	}
+	if len(chat.Tools) != 0 {
+		t.Fatalf("rendered tools = %+v, want none", chat.Tools)
+	}
+}
+
+// TestDecodeMessagesRequestToolChoiceNamedMissingTool pins the Messages side
+// of review-12 finding 5: Messages has no built-in tools (every tool is a
+// function and always survives), so only the dangling named reference needs
+// guarding.
+func TestDecodeMessagesRequestToolChoiceNamedMissingTool(t *testing.T) {
+	body := []byte(`{
+		"model":"m","max_tokens":10,
+		"messages":[{"role":"user","content":"x"}],
+		"tools":[{"name":"f","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"g"}
+	}`)
+	_, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	if err == nil {
+		t.Fatal("accepted a named tool_choice no tool matches; want a client-dialect error")
+	}
+	if !strings.Contains(err.Error(), "g") {
+		t.Fatalf("err = %v, want it to name the unmatched tool", err)
+	}
+
+	// A matching name decodes untouched.
+	good := []byte(`{
+		"model":"m","max_tokens":10,
+		"messages":[{"role":"user","content":"x"}],
+		"tools":[{"name":"f","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"f"}
+	}`)
+	result, err := DecodeMessagesRequest(good, StrictLossPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Request.ToolChoice == nil ||
+		result.Request.ToolChoice.Mode != "named" ||
+		result.Request.ToolChoice.Name != "f" {
+		t.Fatalf("tool choice = %+v, want named f", result.Request.ToolChoice)
 	}
 }
 
@@ -1065,5 +1432,228 @@ func TestDecodeResponsesResponseContentFilterRefusal(t *testing.T) {
 	}
 	if response.Stop.Reason != CanonicalStopRefusal {
 		t.Fatalf("stop reason = %v, want refusal", response.Stop.Reason)
+	}
+}
+
+// TestResponsesToolMarshalUnionShape pins the response-echo marshal shape of
+// the tool union (review-gate task-11 finding 1): a function tool always
+// carries strict (the pinned contract marks it required on both the create
+// request and the response echo), while built-in and namespace tools never
+// do — a blanket struct marshal would invent strict:false on echoed
+// built-in and namespace tools, bytes the strict decoder classifies as a
+// contradictory union for namespaces. Every echoed shape must round-trip
+// through the package's own strict decoder.
+func TestResponsesToolMarshalUnionShape(t *testing.T) {
+	marshal := func(t *testing.T, tool openairesponses.Tool) []byte {
+		t.Helper()
+		data, err := json.Marshal(tool)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return data
+	}
+
+	t.Run("function tool carries strict", func(t *testing.T) {
+		strict := true
+		data := marshal(t, openairesponses.Tool{
+			Type: "function", Name: "f",
+			Parameters: json.RawMessage(`{"type":"object"}`), Strict: wire.Field[bool]{Present: true, Value: strict},
+		})
+		if !strings.Contains(string(data), `"strict":true`) {
+			t.Fatalf("function tool marshal = %s, want strict:true", data)
+		}
+		var decoded openairesponses.Tool
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("round-trip decode: %v", err)
+		}
+		if decoded.Type != "function" || decoded.Name != "f" || !decoded.Strict.Present || decoded.Strict.Value != true {
+			t.Fatalf("round trip = %+v", decoded)
+		}
+	})
+
+	t.Run("built-in tool never carries strict", func(t *testing.T) {
+		data := marshal(t, openairesponses.Tool{Type: "web_search", Name: "ws"})
+		if strings.Contains(string(data), "strict") {
+			t.Fatalf("built-in tool marshal = %s, want no strict key", data)
+		}
+		var decoded openairesponses.Tool
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("round-trip decode: %v", err)
+		}
+		if decoded.Type != "web_search" || decoded.Name != "ws" {
+			t.Fatalf("round trip = %+v", decoded)
+		}
+	})
+
+	t.Run("namespace tool never carries strict", func(t *testing.T) {
+		inner := true
+		data := marshal(t, openairesponses.Tool{
+			Type: "namespace", Name: "ns",
+			Tools: []openairesponses.Tool{{
+				Type: "function", Name: "f",
+				Parameters: json.RawMessage(`{"type":"object"}`),
+				Strict:     wire.Field[bool]{Present: true, Value: inner},
+			}},
+		})
+		if strings.Count(string(data), "strict") != 1 {
+			t.Fatalf("namespace tool marshal = %s, want strict only on the nested function tool", data)
+		}
+		// The echo must survive the package's own strict decoder: the old
+		// blanket marshal invented strict:false here, which decodes as a
+		// contradictory union.
+		var decoded openairesponses.Tool
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("namespace echo failed its own strict decoder: %v", err)
+		}
+		if decoded.Type != "namespace" || len(decoded.Tools) != 1 || !decoded.Tools[0].Strict.Present {
+			t.Fatalf("round trip = %+v", decoded)
+		}
+	})
+
+	t.Run("echoed envelope tools round-trip through the strict decoder", func(t *testing.T) {
+		// The client-facing response envelope echoes the original tools;
+		// the full envelope path must not invent union-inconsistent bytes.
+		strict := true
+		envelope := openairesponses.Response{
+			ID: "resp_1", Object: "response", CreatedAt: 1,
+			Status: "completed", Model: "m",
+			Output: []openairesponses.OutputItem{},
+			Tools: []openairesponses.Tool{
+				{Type: "web_search", Name: "ws"},
+				{Type: "namespace", Name: "ns", Tools: []openairesponses.Tool{{
+					Type: "function", Name: "f",
+					Parameters: json.RawMessage(`{"type":"object"}`),
+					Strict:     wire.Field[bool]{Present: true, Value: strict},
+				}}},
+			},
+		}
+		data, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatalf("marshal envelope: %v", err)
+		}
+		var decoded openairesponses.Response
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("envelope echo failed its own strict decoder: %v", err)
+		}
+		if len(decoded.Tools) != 2 || decoded.Tools[0].Type != "web_search" || decoded.Tools[1].Type != "namespace" {
+			t.Fatalf("round trip tools = %+v", decoded.Tools)
+		}
+	})
+}
+
+// TestAnthropicNestedOnlyCacheControlNoted pins the recursive cache_control
+// scan (review-gate task-11 finding 2): a marker that appears ONLY inside
+// nested tool_result content (no top-level block carries it) still produces
+// exactly one deduped anthropic_controls note per exchange.
+func TestAnthropicNestedOnlyCacheControlNoted(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-x",
+		"max_tokens": 16,
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "call_1", "content": [
+					{"type": "text", "text": "nested", "cache_control": {"type": "ephemeral"}}
+				]}
+			]}
+		]
+	}`)
+	result, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("strict decode rejected a nested-only cache_control marker: %v", err)
+	}
+	count := 0
+	for _, loss := range result.Report.Losses {
+		if loss.Feature == FeatureAnthropicControls && loss.Path == "cache_control" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("cache_control notes = %d, want exactly 1: %+v", count, result.Report.Losses)
+	}
+
+	// Multiple nested markers still dedupe to one note.
+	bodyMulti := []byte(`{
+		"model": "claude-x",
+		"max_tokens": 16,
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "tool_result", "tool_use_id": "call_1", "content": [
+					{"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}},
+					{"type": "text", "text": "b", "cache_control": {"type": "ephemeral"}}
+				]},
+				{"type": "tool_result", "tool_use_id": "call_2", "content": [
+					{"type": "text", "text": "c", "cache_control": {"type": "ephemeral"}}
+				]}
+			]}
+		]
+	}`)
+	result, err = DecodeMessagesRequest(bodyMulti, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("strict decode rejected multiple nested markers: %v", err)
+	}
+	count = 0
+	for _, loss := range result.Report.Losses {
+		if loss.Feature == FeatureAnthropicControls && loss.Path == "cache_control" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("cache_control notes = %d, want exactly 1 (deduped): %+v", count, result.Report.Losses)
+	}
+}
+
+// TestDecodeResponsesRequestAllBuiltinNamespace pins the top-level parity of
+// a namespace whose nested tools are ALL built-ins (review-gate task-11
+// finding 6): under an approved builtin_tools loss the namespace drops
+// observably exactly like a top-level all-built-in tools list (tool_choice
+// reconciliation owns the no-tools-left case), and under a strict policy it
+// is the same typed builtin_tools rejection — never a different, harder
+// error.
+func TestDecodeResponsesRequestAllBuiltinNamespace(t *testing.T) {
+	body := []byte(`{
+		"model": "m",
+		"input": "hi",
+		"tools": [
+			{"type": "namespace", "name": "ns", "tools": [
+				{"type": "web_search", "name": "ws"},
+				{"type": "file_search", "name": "fs"}
+			]}
+		]
+	}`)
+
+	// Approved: accept-and-drop, identical to the top-level all-built-in
+	// rule; a tool-less request renders (tool_choice defaults to none set).
+	result, _, err := DecodeResponsesRequest(body, LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureBuiltinTools: {},
+	}})
+	if err != nil {
+		t.Fatalf("approved policy rejected an all-built-in namespace: %v", err)
+	}
+	if len(result.Request.Tools) != 0 {
+		t.Fatalf("tools = %+v, want none to survive", result.Request.Tools)
+	}
+	found := false
+	for _, loss := range result.Report.Losses {
+		if loss.Feature == FeatureBuiltinTools &&
+			(strings.Contains(loss.Detail, "web_search") || strings.Contains(loss.Detail, "file_search")) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("report = %+v, want an observable builtin_tools loss naming the dropped built-ins", result.Report.Losses)
+	}
+
+	// Strict: the same typed builtin_tools rejection as a top-level
+	// built-in tool.
+	_, _, err = DecodeResponsesRequest(body, StrictLossPolicy())
+	if err == nil {
+		t.Fatal("strict policy accepted an all-built-in namespace; want rejection")
+	}
+	var target *UnsupportedFeatureError
+	if !errors.As(err, &target) {
+		t.Fatalf("error = %T: %v, want UnsupportedFeatureError", err, err)
+	}
+	if target.Feature != string(FeatureBuiltinTools) {
+		t.Fatalf("feature = %q, want builtin_tools", target.Feature)
 	}
 }

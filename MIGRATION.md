@@ -23,7 +23,7 @@ program uses):
 
 | Loss key | What losing it authorizes |
 | --- | --- |
-| `previous_response_id` | Responses previous-response conversation state |
+| `previous_response_id` | Responses previous-response conversation state (input item ids are dropped unconditionally and noted observably under this key) |
 | `request_top_logprobs` | The Responses `top_logprobs` request field |
 | `request_service_tier` | The Responses `service_tier` request field |
 | `request_truncation` | The Responses `truncation` request field |
@@ -39,6 +39,7 @@ program uses):
 | `usage_cache_write_unknown` | Rendering the required cache-creation breakdown when unknown |
 | `usage_reasoning_unknown` | Rendering the required reasoning breakdown when unknown |
 | `provider_reasoning_text` | Mapping provider reasoning text to ordinary text |
+| `request_reasoning` | Dropping a request-side reasoning control (an Anthropic `thinking` budget or a Responses `reasoning.effort`) the target cannot reproduce |
 | `reasoning_summary` | Dropping reasoning summaries |
 | `tool_result_json_envelope` | The sanctioned `transcode_version 1` multimodal encoding |
 | `developer_role` | Collapsing the developer role |
@@ -50,7 +51,9 @@ program uses):
 | `authenticated_thinking` | Dropping Anthropic thinking/signature blocks across protocols |
 | `top_k` | Dropping the `top_k` setting |
 | `logprobs` | Dropping response token log-probabilities |
-| `responses_controls` | Dropping the pinned Responses envelope control fields |
+| `responses_controls` | Tolerating Responses envelope controls observably: noting `include`/`client_metadata`, dropping `prompt_cache_key` on requests, and dropping the controls echoed on Responses upstream responses (the conversation-state request controls `background`/`max_tool_calls`/`prompt`/`safety_identifier`/`status` are errors under every policy) |
+| `anthropic_controls` | Dropping the Anthropic Messages client-side envelope controls (`context_management`, `output_config`) |
+| `builtin_tools` | Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject) |
 | `response_service_tier` | Dropping the upstream tier actually served |
 
 ## Behavior changes

@@ -460,6 +460,7 @@ func TestProxyTranscodeMessagesToResponsesStreaming(t *testing.T) {
 	// response-side losses are approved for this conversion.
 	mapping := testMessagesResponsesMapping(t)
 	mapping.LossPolicy = transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+		transcode.FeatureToolSchemaStrictness:   {},
 		transcode.FeatureReasoningSummary:       {},
 		transcode.FeatureUsageUnknown:           {},
 		transcode.FeatureUsageCacheReadUnknown:  {},

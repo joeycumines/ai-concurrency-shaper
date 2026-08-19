@@ -29,6 +29,13 @@ type chatResponseShadow struct {
 	SystemFingerprint string             `json:"system_fingerprint,omitempty"`
 	Choices           []chatChoiceShadow `json:"choices"`
 	Usage             *chatUsageShadow   `json:"usage,omitempty"`
+
+	// Opaque provider-extension fields present on real chat responses
+	// (e.g. the yolo gateway's prompt_token_ids/prompt_text): decoded so
+	// strict wire decoding never fails on a current provider; never
+	// forwarded.
+	PromptTokenIDs any     `json:"prompt_token_ids,omitempty"`
+	PromptText     *string `json:"prompt_text,omitempty"`
 }
 
 type chatChoiceShadow struct {
@@ -37,6 +44,10 @@ type chatChoiceShadow struct {
 	LogProbs     *ChatChoiceLogprobs `json:"logprobs"`
 	Message      *chatMessageShadow  `json:"message"`
 	Delta        *ChatStreamDelta    `json:"delta,omitempty"`
+
+	TokenIDs      any     `json:"token_ids,omitempty"`
+	RoutedExperts any     `json:"routed_experts,omitempty"`
+	StopReason    *string `json:"stop_reason,omitempty"`
 }
 
 // chatMessageShadow mirrors ChatMessage with a pointer role so an absent
@@ -50,6 +61,10 @@ type chatMessageShadow struct {
 	Refusal    *string              `json:"refusal,omitempty"`
 	ToolCalls  []chatToolCallShadow `json:"tool_calls,omitempty"`
 	Reasoning  *string              `json:"reasoning,omitempty"`
+
+	TokenIDs      any     `json:"token_ids,omitempty"`
+	RoutedExperts any     `json:"routed_experts,omitempty"`
+	StopReason    *string `json:"stop_reason,omitempty"`
 }
 
 // chatToolCallShadow mirrors ChatMessageToolCall with a pointer arguments
@@ -239,15 +254,16 @@ func DecodeChatResponse(
 	// Chat usage totals are modeled omitempty (defensively — the pinned
 	// contract marks them required, so a conforming upstream always sends
 	// them, but presence is distinguishable only through the probe;
-	// review-k finding 6). Cache-write tokens are not part of the pinned
-	// Chat contract, so CacheWriteKnown stays false: a Messages render must
-	// loss-gate the required cache-creation component instead of silently
-	// emitting zero.
+	// review-k finding 6). Cache-write tokens come from the
+	// created_cache_tokens provider extension: a provider that reports it
+	// makes the Messages cache-creation component known; one that does not
+	// leaves the loss-gated unknown decision.
 	if shadow.Usage != nil {
 		response.Usage = CanonicalUsage{
-			CacheReadKnown:  shadow.Usage.PromptTokensDetails != nil,
-			ReasoningKnown:  shadow.Usage.CompletionTokensDetails != nil,
-			CacheWriteKnown: false,
+			CacheReadKnown: shadow.Usage.PromptTokensDetails != nil,
+			ReasoningKnown: shadow.Usage.CompletionTokensDetails != nil,
+			CacheWriteKnown: shadow.Usage.PromptTokensDetails != nil &&
+				shadow.Usage.PromptTokensDetails.CreatedCacheTokens != nil,
 		}
 		if shadow.Usage.PromptTokens != nil {
 			response.Usage.InputTokens = int64(*shadow.Usage.PromptTokens)
@@ -263,6 +279,9 @@ func DecodeChatResponse(
 		}
 		if shadow.Usage.PromptTokensDetails != nil {
 			response.Usage.CacheReadTokens = int64(shadow.Usage.PromptTokensDetails.CachedTokens)
+			if shadow.Usage.PromptTokensDetails.CreatedCacheTokens != nil {
+				response.Usage.CacheWriteTokens = int64(*shadow.Usage.PromptTokensDetails.CreatedCacheTokens)
+			}
 		}
 		if shadow.Usage.CompletionTokensDetails != nil {
 			response.Usage.ReasoningTokens = int64(shadow.Usage.CompletionTokensDetails.ReasoningTokens)
@@ -1074,9 +1093,9 @@ func RenderMessagesResponse(
 		// on the usage object: every component the source did not provide is
 		// a usage-timing loss (approved or rejected per the exchange policy),
 		// never a silent zero (review-k finding 6). Cache-write tokens are
-		// not part of the pinned Chat/Responses contract, so CacheWriteKnown
-		// stays false and the cache-creation component always enters this
-		// decision.
+		// not part of the pinned Chat/Responses contract; the chat source
+		// knows them only through the created_cache_tokens provider
+		// extension, and the Responses source never does.
 		// Each wire-required component the source did not provide is its own
 		// granular loss decision (review-z commit 2).
 		components := []struct {

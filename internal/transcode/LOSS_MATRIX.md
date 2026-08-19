@@ -10,7 +10,7 @@ individual keys via `-transcode-allow-loss`.
 
 | Loss key | Loss description |
 | --- | --- |
-| `previous_response_id` | the Responses previous_response_id request field (and item_reference conversation-state references) cannot be reproduced in the target request |
+| `previous_response_id` | the Responses previous_response_id request field and item_reference conversation-state references cannot be reproduced in the target request; input item ids are also conversation-state references and their unconditional drop is noted observably |
 | `request_top_logprobs` | the Responses top_logprobs request field cannot be reproduced in the target request |
 | `request_service_tier` | the Responses service_tier request field cannot be reproduced in the target request |
 | `request_truncation` | the Responses truncation request field cannot be reproduced in the target request |
@@ -25,7 +25,8 @@ individual keys via `-transcode-allow-loss`.
 | `usage_cache_read_unknown` | the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced |
 | `usage_cache_write_unknown` | the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced |
 | `usage_reasoning_unknown` | the source provided no reasoning-token breakdown; the required target usage breakdown cannot be reproduced |
-| `provider_reasoning_text` | provider reasoning text cannot be reproduced in the target |
+| `provider_reasoning_text` | provider reasoning text in a RESPONSE cannot be reproduced in the target (request-side reasoning controls are the separate request_reasoning key) |
+| `request_reasoning` | request-side reasoning controls (the Anthropic thinking budget and the Responses reasoning.effort) cannot be reproduced in the target request |
 | `reasoning_summary` | reasoning summaries (output and request-side summary style) cannot be reproduced in the target |
 | `tool_result_json_envelope` | multimodal tool results are encoded as the deterministic transcode JSON text envelope (transcode_version 1) inside a Chat tool message |
 | `developer_role` | the developer-role distinction cannot be reproduced in the target |
@@ -37,6 +38,8 @@ individual keys via `-transcode-allow-loss`.
 | `authenticated_thinking` | Anthropic authenticated thinking blocks cannot cross protocol boundaries |
 | `top_k` | the top_k setting cannot be reproduced in the target |
 | `logprobs` | token log-probabilities cannot be reproduced in the target |
-| `responses_controls` | the pinned Responses envelope controls (background, max_tool_calls, prompt, prompt_cache_key, safety_identifier) cannot be reproduced in the target |
+| `responses_controls` | the Responses envelope controls that are tolerated observably: include and client_metadata are noted and prompt_cache_key is dropped under this permission, and Responses envelope controls echoed on an upstream response are dropped under this permission; the request-side conversation-state controls (background, max_tool_calls, prompt, safety_identifier, status) remain typed unsupported-feature errors under every policy |
+| `anthropic_controls` | the Anthropic Messages client-side envelope controls (context_management, output_config) have no representation in the target request; an approved loss drops them observably |
+| `builtin_tools` | Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject) |
 | `response_service_tier` | the upstream chat service tier actually served cannot be reproduced in the target |
 

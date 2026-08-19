@@ -1358,6 +1358,7 @@ func TestHandlerAuthApplied(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
 	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureToolSchemaStrictness:   {},
 		FeatureReasoningSummary:       {},
 		FeatureOutputItemBoundaries:   {},
 		FeaturePreviousResponseID:     {},

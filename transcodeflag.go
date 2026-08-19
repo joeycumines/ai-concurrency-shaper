@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
@@ -143,15 +144,36 @@ func parseTranscodeEndpoint(
 
 const httpMethodPost = "POST"
 
+// transcodeCLIOptions carries the repeatable transcode feature flags through
+// buildTranscodeMappings: the positive -transcode-allow-loss,
+// -transcode-chat-capability, and -transcode-allow-client-query values with
+// their `!name` negations, plus -transcode-strict-defaults. The positives
+// extend the sensible defaults; the negations withdraw them;
+// -transcode-strict-defaults removes every default at once (blank slate)
+// while explicit positives still apply.
+type transcodeCLIOptions struct {
+	lossPolicy          transcode.LossPolicy
+	negatedLosses       map[transcode.Feature]struct{}
+	capabilities        transcode.ChatCapabilities
+	negatedCapabilities map[string]struct{}
+	clientQuery         map[string]struct{}
+	negatedQuery        map[string]struct{}
+	strictDefaults      bool
+}
+
 // buildTranscodeMappings combines the repeatable -transcode-route values with
 // the preset flags, in that order. Enabling both Messages presets is a
-// conflict because they register the same client route. lossPolicy is
-// applied to every mapping (the default strict policy rejects any
-// non-portable feature).
+// conflict because they register the same client route. The CLI feature
+// flags in opts are merged over the sensible defaults (see the merged*
+// helpers) — additive positives, `!name` negations, and the
+// -transcode-strict-defaults blank slate — so a minimal invocation works out
+// of the box against a modern OpenAI-compatible chat upstream while a strict
+// legacy upstream can shed the defaults from the command line alone
+// (review-11 finding 3).
 func buildTranscodeMappings(
 	routes []proxy.TranscodeMapping,
 	responsesChat, messagesChat, messagesResponses bool,
-	lossPolicy transcode.LossPolicy,
+	opts transcodeCLIOptions,
 ) ([]proxy.TranscodeMapping, error) {
 	if messagesChat && messagesResponses {
 		return nil, fmt.Errorf(
@@ -159,14 +181,22 @@ func buildTranscodeMappings(
 		)
 	}
 
+	lossPolicy := mergedLossPolicy(opts.lossPolicy, opts.negatedLosses, opts.strictDefaults)
+	capabilities := mergedChatCapabilities(opts.capabilities, opts.negatedCapabilities, opts.strictDefaults)
+	allowedQuery := mergedAllowedQuery(opts.clientQuery, opts.negatedQuery, opts.strictDefaults)
+
 	lossMapping := func(m transcode.Mapping) proxy.TranscodeMapping {
 		m.LossPolicy = lossPolicy
+		m.ChatCapabilities = capabilities
+		m.AllowedClientQuery = allowedQuery
 		return proxy.TranscodeMapping{Mapping: m}
 	}
 
 	var mappings []proxy.TranscodeMapping
 	for _, route := range routes {
 		route.Mapping.LossPolicy = lossPolicy
+		route.Mapping.ChatCapabilities = capabilities
+		route.Mapping.AllowedClientQuery = allowedQuery
 		if err := route.Mapping.Validate(); err != nil {
 			// The FINAL loss policy is applied here; a messages->responses
 			// mapping under the strict policy cannot serve tool requests
@@ -333,4 +363,346 @@ func (f transcodeLossFlags) String() string {
 func (f *transcodeLossFlags) Set(v string) error {
 	*f = append(*f, v)
 	return nil
+}
+
+// transcodeCapabilityFlags accumulates repeatable -transcode-chat-capability
+// values: the granular chat-provider capabilities a mapping may use.
+type transcodeCapabilityFlags []string
+
+func (f transcodeCapabilityFlags) String() string {
+	return strings.Join(f, ",")
+}
+
+func (f *transcodeCapabilityFlags) Set(v string) error {
+	*f = append(*f, v)
+	return nil
+}
+
+// transcodeClientQueryFlags accumulates repeatable
+// -transcode-allow-client-query values: client query parameters forwarded on
+// transcoded routes.
+type transcodeClientQueryFlags []string
+
+func (f transcodeClientQueryFlags) String() string {
+	return strings.Join(f, ",")
+}
+
+func (f *transcodeClientQueryFlags) Set(v string) error {
+	*f = append(*f, v)
+	return nil
+}
+
+// chatCapabilityNames is the canonical CLI vocabulary for
+// -transcode-chat-capability. Every granular ChatCapabilities field has
+// exactly one name; unknown names fail at startup, never on the first
+// request (review-j finding 14). The field selector doubles as the negation
+// handle: `!name` clears the same field a bare `name` sets.
+var chatCapabilityNames = []struct {
+	name  string
+	field func(*transcode.ChatCapabilities) *bool
+}{
+	{"developer_role", func(c *transcode.ChatCapabilities) *bool { return &c.DeveloperRole }},
+	{"image_input", func(c *transcode.ChatCapabilities) *bool { return &c.ImageInput }},
+	{"structured_outputs", func(c *transcode.ChatCapabilities) *bool { return &c.StructuredOutputs }},
+	{"parallel_tool_calls", func(c *transcode.ChatCapabilities) *bool { return &c.ParallelToolCalls }},
+	{"stop_sequences", func(c *transcode.ChatCapabilities) *bool { return &c.StopSequences }},
+	{"reasoning_effort", func(c *transcode.ChatCapabilities) *bool { return &c.ReasoningEffort }},
+	{"provider_reasoning_text", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningText }},
+}
+
+// splitFlagNegations splits repeatable flag values into the positive names
+// and the set of `!name` negations. Every name — positive or negated — is
+// checked by validate, so an unknown negation fails at startup exactly like
+// an unknown positive, never on the first request. A name given both
+// positively and negated is a conflict and fails at startup: a negation that
+// could be silently overridden by a positive elsewhere on the command line
+// would be a trap. The positives are sorted for deterministic behavior.
+func splitFlagNegations(
+	values []string,
+	validate func(name string) error,
+) (positives []string, negated map[string]struct{}, err error) {
+	positiveSet := make(map[string]struct{})
+	negated = make(map[string]struct{})
+	for _, value := range values {
+		for _, part := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ' '
+		}) {
+			name, negative := strings.CutPrefix(part, "!")
+			if name == "" {
+				return nil, nil, fmt.Errorf("empty name in %q", part)
+			}
+			if err := validate(name); err != nil {
+				return nil, nil, err
+			}
+			if negative {
+				negated[name] = struct{}{}
+			} else {
+				positiveSet[name] = struct{}{}
+			}
+		}
+	}
+	for name := range negated {
+		if _, ok := positiveSet[name]; ok {
+			return nil, nil, fmt.Errorf(
+				"conflicting values for %q: given both positively and negated (!%s)",
+				name, name,
+			)
+		}
+	}
+	positives = make([]string, 0, len(positiveSet))
+	for name := range positiveSet {
+		positives = append(positives, name)
+	}
+	sort.Strings(positives)
+	return positives, negated, nil
+}
+
+// parseChatCapabilities validates the -transcode-chat-capability names and
+// returns the capability set they enable plus the set of `!name` negations
+// (unknown names in either direction fail at startup). The negations
+// withdraw the sensible default capabilities inside
+// buildTranscodeMappings — a CLI positive for a negated name is rejected by
+// splitFlagNegations, so the two can never race.
+func parseChatCapabilities(
+	values []string,
+) (transcode.ChatCapabilities, map[string]struct{}, error) {
+	validate := func(name string) error {
+		for _, entry := range chatCapabilityNames {
+			if entry.name == name {
+				return nil
+			}
+		}
+		return fmt.Errorf("unknown chat capability %q", name)
+	}
+	positives, negated, err := splitFlagNegations(values, validate)
+	if err != nil {
+		return transcode.ChatCapabilities{}, nil, err
+	}
+	var out transcode.ChatCapabilities
+	for _, name := range positives {
+		for _, entry := range chatCapabilityNames {
+			if entry.name == name {
+				*entry.field(&out) = true
+				break
+			}
+		}
+	}
+	return out, negated, nil
+}
+
+// parseNegatedLosses validates the -transcode-allow-loss values into the
+// approved feature set plus the set of `!name` negations. Both directions
+// validate against the same granular registry: an unknown negation is
+// exactly as fatal as an unknown positive.
+func parseNegatedLosses(
+	values ...string,
+) (map[transcode.Feature]struct{}, map[transcode.Feature]struct{}, error) {
+	validate := func(name string) error {
+		_, err := transcode.ParseLossFeatures(name)
+		return err
+	}
+	positives, negatedNames, err := splitFlagNegations(values, validate)
+	if err != nil {
+		return nil, nil, err
+	}
+	allowed, err := transcode.ParseLossFeatures(positives...)
+	if err != nil {
+		return nil, nil, err
+	}
+	negated := make(map[transcode.Feature]struct{}, len(negatedNames))
+	for name := range negatedNames {
+		negated[transcode.Feature(name)] = struct{}{}
+	}
+	return allowed, negated, nil
+}
+
+// validClientQueryName reports the CLI-side rule for one
+// -transcode-allow-client-query name. Names must be non-empty and may not
+// contain '=', '&', '#', '?', or control characters — the exact rule the
+// proxy applies to allowed client query names (validQueryName), so a
+// CLI-accepted name is never rejected later (review-j finding 14).
+func validClientQueryName(name string) error {
+	if name == "" {
+		return fmt.Errorf("empty client query parameter name")
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c < 0x21 || c == 0x7f || strings.ContainsRune("=%&#?", rune(c)) {
+			return fmt.Errorf(
+				"invalid client query parameter name %q",
+				name,
+			)
+		}
+	}
+	return nil
+}
+
+// parseClientQuery validates the -transcode-allow-client-query values into
+// a set of forwarded query parameter names plus the set of `!name`
+// negations that withdraw default query forwarding.
+func parseClientQuery(
+	values []string,
+) (map[string]struct{}, map[string]struct{}, error) {
+	positives, negated, err := splitFlagNegations(values, validClientQueryName)
+	if err != nil {
+		return nil, nil, err
+	}
+	out := make(map[string]struct{}, len(positives))
+	for _, name := range positives {
+		out[name] = struct{}{}
+	}
+	return out, negated, nil
+}
+
+// The sensible out-of-the-box defaults applied to every CLI transcode
+// mapping. Each preset direction is the "common case" configuration: a
+// modern OpenAI-compatible chat upstream fronting real Responses/Messages
+// clients. Operators adjust per-mapping via -transcode-chat-capability,
+// -transcode-allow-client-query, and -transcode-allow-loss; the defaults
+// exist so a minimal invocation works without enumerating every feature.
+
+// defaultTranscodeChatCapabilities is the standard modern
+// OpenAI-compatible chat surface: developer role, parallel tool calls,
+// reasoning effort, and provider plaintext reasoning (the chat
+// "reasoning" response extension). All four were verified against real
+// providers; the capability gates only fire when the client actually uses
+// the feature.
+var defaultTranscodeChatCapabilities = transcode.ChatCapabilities{
+	DeveloperRole:         true,
+	ParallelToolCalls:     true,
+	ReasoningEffort:       true,
+	ProviderReasoningText: true,
+}
+
+// defaultTranscodeAllowedQuery are the client query parameters forwarded
+// on CLI mappings. Anthropic Messages clients (Claude Code) gate every
+// request with ?beta=true, and the chat completions endpoints of real
+// providers tolerate the harmless parameter (verified).
+var defaultTranscodeAllowedQuery = map[string]struct{}{
+	"beta": {},
+}
+
+// defaultTranscodeLosses are the non-portable features real
+// Responses/Messages client traffic triggers that a CLI mapping approves
+// out of the box. Reasoning summaries, Anthropic thinking blocks, envelope
+// cache controls (Responses and the modern Anthropic context_management/
+// output_config controls), and built-in tools are client-side controls the
+// chat target cannot reproduce; usage breakdowns are observability metadata
+// the chat upstreams do not always report (the documented loss encodings
+// emit zeros rather than failing the exchange).
+var defaultTranscodeLosses = map[transcode.Feature]struct{}{
+	transcode.FeatureReasoningSummary:       {},
+	transcode.FeatureAuthenticatedThinking:  {},
+	transcode.FeatureResponsesControls:      {},
+	transcode.FeatureAnthropicControls:      {},
+	transcode.FeatureBuiltinTools:           {},
+	transcode.FeatureUsageUnknown:           {},
+	transcode.FeatureUsageCacheReadUnknown:  {},
+	transcode.FeatureUsageCacheWriteUnknown: {},
+	transcode.FeatureUsageReasoningUnknown:  {},
+}
+
+// mergedLossPolicy combines the CLI -transcode-allow-loss values with the
+// default loss set: CLI approvals are additive; `!name` negations and
+// -transcode-strict-defaults withdraw them. A negated name that is also
+// given positively never reaches this function — splitFlagNegations rejects
+// the conflict at startup. With negations and strictDefaults together, the
+// strict-defaults blank slate wins the default side and the negations are
+// redundant no-ops against it (they are kept in the signature for
+// uniformity across the three merged* helpers).
+func mergedLossPolicy(
+	lossPolicy transcode.LossPolicy,
+	negated map[transcode.Feature]struct{},
+	strictDefaults bool,
+) transcode.LossPolicy {
+	allowed := make(
+		map[transcode.Feature]struct{},
+		len(defaultTranscodeLosses)+len(lossPolicy.Allowed),
+	)
+	if !strictDefaults {
+		for feature := range defaultTranscodeLosses {
+			allowed[feature] = struct{}{}
+		}
+	}
+	for feature := range lossPolicy.Allowed {
+		allowed[feature] = struct{}{}
+	}
+	for feature := range negated {
+		// A negation withdraws a DEFAULT: the parse layer rejects a name
+		// given both positively and negated, so this guard only matters
+		// for direct programmatic construction of overlapping sets.
+		if _, positive := lossPolicy.Allowed[feature]; !positive {
+			delete(allowed, feature)
+		}
+	}
+	return transcode.LossPolicy{Allowed: allowed}
+}
+
+// mergedChatCapabilities combines the CLI -transcode-chat-capability values
+// with the default capability set: additive positives, `!name` negations
+// that withdraw a default, and the -transcode-strict-defaults blank slate.
+// A negated name is guaranteed absent from the CLI positives
+// (splitFlagNegations rejects the conflict at parse time), so a negation
+// here can only strip a default.
+func mergedChatCapabilities(
+	capabilities transcode.ChatCapabilities,
+	negated map[string]struct{},
+	strictDefaults bool,
+) transcode.ChatCapabilities {
+	out := transcode.ChatCapabilities{}
+	if !strictDefaults {
+		out = defaultTranscodeChatCapabilities
+	}
+	fields := map[string]*bool{
+		"developer_role":          &out.DeveloperRole,
+		"image_input":             &out.ImageInput,
+		"structured_outputs":      &out.StructuredOutputs,
+		"parallel_tool_calls":     &out.ParallelToolCalls,
+		"stop_sequences":          &out.StopSequences,
+		"reasoning_effort":        &out.ReasoningEffort,
+		"provider_reasoning_text": &out.ProviderReasoningText,
+	}
+	cli := map[string]bool{
+		"developer_role":          capabilities.DeveloperRole,
+		"image_input":             capabilities.ImageInput,
+		"structured_outputs":      capabilities.StructuredOutputs,
+		"parallel_tool_calls":     capabilities.ParallelToolCalls,
+		"stop_sequences":          capabilities.StopSequences,
+		"reasoning_effort":        capabilities.ReasoningEffort,
+		"provider_reasoning_text": capabilities.ProviderReasoningText,
+	}
+	for name, field := range fields {
+		_, deny := negated[name]
+		// A negation withdraws a DEFAULT; an explicit CLI positive always
+		// survives it (the parse layer rejects the direct conflict).
+		*field = (*field || cli[name]) && !(deny && !cli[name])
+	}
+	return out
+}
+
+// mergedAllowedQuery combines the CLI -transcode-allow-client-query values
+// with the default query allowlist: additive positives, `!name` negations,
+// and the -transcode-strict-defaults blank slate.
+func mergedAllowedQuery(
+	clientQuery map[string]struct{},
+	negated map[string]struct{},
+	strictDefaults bool,
+) map[string]struct{} {
+	out := make(map[string]struct{}, len(defaultTranscodeAllowedQuery)+len(clientQuery))
+	if !strictDefaults {
+		for name := range defaultTranscodeAllowedQuery {
+			out[name] = struct{}{}
+		}
+	}
+	for name := range clientQuery {
+		out[name] = struct{}{}
+	}
+	for name := range negated {
+		// A negation withdraws a DEFAULT; an explicit CLI positive always
+		// survives it (the parse layer rejects the direct conflict).
+		if _, positive := clientQuery[name]; !positive {
+			delete(out, name)
+		}
+	}
+	return out
 }

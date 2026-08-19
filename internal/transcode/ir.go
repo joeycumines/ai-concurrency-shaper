@@ -124,6 +124,14 @@ type SourceArtifacts struct {
 	AnthropicThinkingBlocks []json.RawMessage
 }
 
+// CanonicalThinking is the decoded Anthropic Messages thinking
+// configuration. Type is one of "enabled", "disabled", or "adaptive";
+// BudgetTokens is set only when Type is "enabled".
+type CanonicalThinking struct {
+	Type         string
+	BudgetTokens *int
+}
+
 // CanonicalRequest is the decoded request in canonical form.
 type CanonicalRequest struct {
 	ClientModel string
@@ -140,6 +148,10 @@ type CanonicalRequest struct {
 	StructuredOutput *CanonicalStructuredOutput
 	Stream           bool
 	Metadata         map[string]string
+
+	// Thinking is the Anthropic Messages thinking configuration (nil when
+	// absent or when the source protocol has no thinking concept).
+	Thinking *CanonicalThinking
 
 	Artifacts SourceArtifacts
 }
@@ -220,6 +232,26 @@ func RequirePortableArtifacts(
 			FeatureReasoningSummary,
 			"input[]",
 			"Responses reasoning items cannot be reproduced in the target protocol",
+		); err != nil {
+			return err
+		}
+	}
+
+	// The request-side Anthropic thinking configuration (an explicit
+	// enabled budget) is provider intent a non-Chat target cannot express:
+	// it is an approved loss or a rejection, never a silent drop. adaptive
+	// and disabled carry no budget — the target's own reasoning default is
+	// the exact semantic — so only an explicit enabled budget is gated.
+	// This is a request-side reasoning control (request_reasoning), distinct
+	// from response-side provider reasoning text (provider_reasoning_text).
+	if target != UpstreamChatCompletions &&
+		request.Thinking != nil &&
+		request.Thinking.Type == "enabled" {
+		if err := report.Lose(
+			policy,
+			FeatureRequestReasoning,
+			"thinking",
+			"the Anthropic thinking budget cannot be reproduced in the target protocol",
 		); err != nil {
 			return err
 		}
