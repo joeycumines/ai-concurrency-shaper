@@ -1643,6 +1643,22 @@ func TestDecodeResponsesRequestAllBuiltinNamespace(t *testing.T) {
 		t.Fatalf("report = %+v, want an observable builtin_tools loss naming the dropped built-ins", result.Report.Losses)
 	}
 
+	// The zero-flatten itself is observable too: the namespace produced no
+	// portable function tools, so the report carries an explicit note saying
+	// so rather than an unremarked empty tools list (review-gate task-12
+	// finding 4).
+	foundZeroFlatten := false
+	for _, loss := range result.Report.Losses {
+		if loss.Feature == FeatureBuiltinTools &&
+			loss.Path == "tools[]" &&
+			strings.Contains(loss.Detail, "no portable function tools") {
+			foundZeroFlatten = true
+		}
+	}
+	if !foundZeroFlatten {
+		t.Fatalf("report = %+v, want a builtin_tools note on tools[] recording the zero-flatten", result.Report.Losses)
+	}
+
 	// Strict: the same typed builtin_tools rejection as a top-level
 	// built-in tool.
 	_, _, err = DecodeResponsesRequest(body, StrictLossPolicy())

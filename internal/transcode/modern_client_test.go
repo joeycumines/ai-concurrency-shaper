@@ -219,6 +219,64 @@ func TestAnthropicCacheControlNoted(t *testing.T) {
 	}
 }
 
+// TestOpenAIChatResponseMessageLevelExtensions pins that a provider body
+// carrying the opaque extensions at MESSAGE level (inside
+// choices[].message, not on the choice or envelope) decodes end-to-end:
+// before the fix the wire Message type rejected them as unknown fields
+// while chatMessageShadow modeled them, so the fields were dead surface and
+// the exchange failed as corrupt upstream wire (gate run 2 F1). Value
+// fixtures, not explicit nulls — presence is what the wire decode rejects.
+func TestOpenAIChatResponseMessageLevelExtensions(t *testing.T) {
+	raw := []byte(`{"id":"chatcmpl-ml","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok","token_ids":[7,8,9],"routed_experts":["expert-Alpha-9"],"stop_reason":"end_turn"},"finish_reason":"stop"}]}`)
+
+	var response openaichat.Response
+	if err := wire.Decode(raw, &response); err != nil {
+		t.Fatalf("wire decode: %v", err)
+	}
+	msg := response.Choices[0].Message
+	if msg == nil || msg.ChatAssistantMessage == nil {
+		t.Fatalf("message = %+v", msg)
+	}
+	if len(msg.ChatAssistantMessage.TokenIDs.([]any)) != 3 {
+		t.Fatalf("token_ids = %+v", msg.ChatAssistantMessage.TokenIDs)
+	}
+	if msg.ChatAssistantMessage.RoutedExperts == nil {
+		t.Fatalf("routed_experts = %+v", msg.ChatAssistantMessage.RoutedExperts)
+	}
+	if msg.ChatAssistantMessage.StopReason == nil || *msg.ChatAssistantMessage.StopReason != "end_turn" {
+		t.Fatalf("stop_reason = %+v", msg.ChatAssistantMessage.StopReason)
+	}
+
+	decoded, err := DecodeChatResponse(raw, ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("DecodeChatResponse: %v", err)
+	}
+	if decoded.ID != "chatcmpl-ml" {
+		t.Fatalf("id = %q", decoded.ID)
+	}
+
+	// The extensions never leak into the client-dialect render. The
+	// Messages dialect has its own envelope stop_reason (end_turn), so the
+	// leak check targets the extension VALUES and the names the dialect
+	// does not share.
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageUnknown:           {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+	}}
+	rendered, _, err := RenderMessagesResponse(decoded, context)
+	if err != nil {
+		t.Fatalf("RenderMessagesResponse: %v", err)
+	}
+	for _, forbidden := range []string{"token_ids", "routed_experts", "expert-Alpha-9"} {
+		if bytes.Contains(rendered, []byte(forbidden)) {
+			t.Fatalf("client response leaks %s: %s", forbidden, rendered)
+		}
+	}
+}
+
 // TestOpenAIChatStreamProviderExtensions verifies provider-extension fields
 // on real chat streams (yolo gateway) decode: prompt_token_ids and
 // prompt_text on the chunk, reasoning deltas, and the

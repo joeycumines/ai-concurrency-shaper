@@ -550,11 +550,13 @@ func (s *chatResponsesStreamState) convertDelta(
 			// once per delta (review-08 blocker 7).
 			if !s.reasoningReportRecorded {
 				s.reasoningReportRecorded = true
-				s.report.Note(
+				if err := s.report.Note(
 					FeatureProviderReasoningText,
 					"choices[].delta.reasoning",
 					"provider reasoning maps to ordinary text (provider_reasoning_text encoding)",
-				)
+				); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

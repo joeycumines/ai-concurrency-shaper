@@ -337,6 +337,15 @@ type ChatAssistantMessage struct {
 	// ChatCapabilities.ProviderReasoningText is enabled and may map only to
 	// ordinary text, an approved loss, or a rejection.
 	Reasoning *string `json:"reasoning,omitempty"`
+
+	// Opaque provider-extension fields present on real assistant messages
+	// (e.g. the yolo gateway's token_ids, routed_experts, stop_reason):
+	// decoded so strict wire decoding never fails on a current provider,
+	// never forwarded — mirroring Choice so the message and choice surfaces
+	// agree.
+	TokenIDs      any     `json:"token_ids,omitempty"`
+	RoutedExperts any     `json:"routed_experts,omitempty"`
+	StopReason    *string `json:"stop_reason,omitempty"`
 }
 
 // Message is a message in a chat conversation. Assistant messages flatten

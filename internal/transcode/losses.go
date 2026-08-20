@@ -312,10 +312,26 @@ type ConversionReport struct {
 	Losses []ConversionLoss
 }
 
+// reserve enforces the shared report bound for both entry paths: an exchange
+// that accumulates more entries than the exchange budget is corrupt
+// (review-08 blocker 7). Notes and losses accumulate into the same slice, so
+// an unbounded Note path could grow the report past the bound without either
+// path noticing (review-gate task-12 finding 5).
+func (r *ConversionReport) reserve() error {
+	if len(r.Losses) >= maxStreamConversionReportEntries {
+		// A report overflow is corrupt upstream data on the response side
+		// (the stream path derives upstream provenance from this typed
+		// error) while the request path records its own explicit local
+		// provenance (review-08 blocker 7).
+		return &UpstreamWireError{
+			Cause: fmt.Errorf("conversion report exceeds the exchange bound of %d entries", maxStreamConversionReportEntries),
+		}
+	}
+	return nil
+}
+
 // Lose records a loss of the feature, or returns an UnsupportedFeatureError
-// when the policy does not allow it. The report is bounded: an exchange that
-// accumulates more entries than the exchange budget is corrupt (review-08
-// blocker 7).
+// when the policy does not allow it. The report is bounded: see reserve.
 func (r *ConversionReport) Lose(
 	policy LossPolicy,
 	feature Feature,
@@ -329,14 +345,8 @@ func (r *ConversionReport) Lose(
 			Feature:  string(feature),
 		}
 	}
-	if len(r.Losses) >= maxStreamConversionReportEntries {
-		// A report overflow is corrupt upstream data on the response side
-		// (the stream path derives upstream provenance from this typed
-		// error) while the request path records its own explicit local
-		// provenance (review-08 blocker 7).
-		return &UpstreamWireError{
-			Cause: fmt.Errorf("conversion report exceeds the exchange bound of %d entries", maxStreamConversionReportEntries),
-		}
+	if err := r.reserve(); err != nil {
+		return err
 	}
 	r.Losses = append(r.Losses, ConversionLoss{
 		Feature: feature,
@@ -350,12 +360,17 @@ func (r *ConversionReport) Lose(
 // decision — the encoding is sanctioned by a capability or an approved loss
 // — so it is observable even though no loss occurred (review-j finding 10:
 // encodings that invent or reinterpret content must be named and reported).
-func (r *ConversionReport) Note(feature Feature, path string, detail string) {
+// The report is bounded exactly like Lose: see reserve.
+func (r *ConversionReport) Note(feature Feature, path string, detail string) error {
+	if err := r.reserve(); err != nil {
+		return err
+	}
 	r.Losses = append(r.Losses, ConversionLoss{
 		Feature: feature,
 		Path:    path,
 		Detail:  detail,
 	})
+	return nil
 }
 
 // decodeJSONObject ensures function-call arguments are objects before

@@ -193,6 +193,15 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 		block.CacheControl = shadow.CacheControl
 
 	case ContentBlockTypeThinking:
+		// cache_control is intentionally NOT admitted on this arm (and the
+		// redacted_thinking arm below), unlike text/image/document/tool_use/
+		// tool_result: the official prompt-caching contract states "Thinking
+		// blocks cannot be cached directly with cache_control" (Anthropic,
+		// Build with Claude → Prompt caching, "What cannot be cached"), so a
+		// block carrying it is a contract violation on the client side and
+		// the typed unknown-field rejection below is the correct strict-side
+		// behavior — pinned by TestThinkingBlockCacheControlRejected (gate
+		// run 1 informational note 1).
 		var shadow struct {
 			Type      ContentBlockType `json:"type"`
 			Thinking  *string          `json:"thinking"`
@@ -206,6 +215,9 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 		block.Signature = shadow.Signature
 
 	case ContentBlockTypeRedactedThinking:
+		// Same contract exclusion as the thinking arm above:
+		// thinking-family blocks are never directly cacheable, so
+		// cache_control is rejected here too.
 		var shadow struct {
 			Type ContentBlockType `json:"type"`
 			Data *string          `json:"data"`

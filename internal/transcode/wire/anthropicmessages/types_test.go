@@ -6,7 +6,10 @@ package anthropicmessages
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
 
 func TestSourceValidate(t *testing.T) {
@@ -162,5 +165,30 @@ func TestRequestShape(t *testing.T) {
 	}
 	if request.Model != "m" || request.MaxTokens != 10 || len(request.Messages) != 1 {
 		t.Fatalf("request = %+v", request)
+	}
+}
+
+// TestThinkingBlockCacheControlRejected pins that cache_control on a
+// thinking-family block is a typed unknown-field rejection, matching the
+// official prompt-caching contract ("Thinking blocks cannot be cached
+// directly with cache_control", Anthropic Build with Claude -> Prompt
+// caching, "What cannot be cached"). The asymmetry with the
+// text/image/document/tool_use/tool_result arms - which admit the marker
+// and note the drop at decode - is the contract's own shape, not an
+// oversight (gate run 1 informational note 1).
+func TestThinkingBlockCacheControlRejected(t *testing.T) {
+	for _, block := range []string{
+		`{"type":"thinking","thinking":"t","signature":"s","cache_control":{"type":"ephemeral"}}`,
+		`{"type":"redacted_thinking","data":"ZGF0YQ==","cache_control":{"type":"ephemeral"}}`,
+	} {
+		var cb ContentBlock
+		err := json.Unmarshal([]byte(block), &cb)
+		if err == nil {
+			t.Fatalf("cache_control accepted on a thinking-family block: %s", block)
+		}
+		var typed *wire.DecodeError
+		if !errors.As(err, &typed) || typed.Kind != wire.DecodeUnknownField {
+			t.Fatalf("block %s: error = %v (%T), want wire.DecodeError/unknown_field", block, err, err)
+		}
 	}
 }

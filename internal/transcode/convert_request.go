@@ -101,18 +101,22 @@ func DecodeResponsesRequest(
 	//     responses_controls loss decision applies (approved by the CLI
 	//     defaults, rejectable by policy).
 	if len(request.Include) > 0 {
-		result.Report.Note(
+		if err := result.Report.Note(
 			FeatureResponsesControls,
 			"include",
 			"the include response-format preference cannot be honored by a chat upstream; the rendered response carries what the source provides",
-		)
+		); err != nil {
+			return DecodeResult{}, nil, err
+		}
 	}
 	if len(request.ClientMetadata) > 0 {
-		result.Report.Note(
+		if err := result.Report.Note(
 			FeatureResponsesControls,
 			"client_metadata",
 			"client_metadata is client telemetry with no upstream semantics; it is not forwarded",
-		)
+		); err != nil {
+			return DecodeResult{}, nil, err
+		}
 	}
 	if request.PromptCacheKey != "" {
 		if err := result.Report.Lose(
@@ -388,12 +392,12 @@ func responsesInputToTurns(
 	// observable: one deduped note per exchange under the conversation-state
 	// feature, never a silent elision (review-gate task-11 finding 3).
 	itemIdentityNoted := false
-	noteItemIdentity := func() {
+	noteItemIdentity := func() error {
 		if itemIdentityNoted {
-			return
+			return nil
 		}
 		itemIdentityNoted = true
-		report.Note(
+		return report.Note(
 			FeaturePreviousResponseID,
 			"input[].id",
 			"input item ids are not forwarded (the target dialect has no item identity)",
@@ -403,7 +407,9 @@ func responsesInputToTurns(
 		switch value := item.(type) {
 		case *ResponsesEasyInputMessage:
 			if value.ID != "" {
-				noteItemIdentity()
+				if err := noteItemIdentity(); err != nil {
+					return nil, err
+				}
 			}
 			if err := loseInputPhase(policy, report, value.Phase, i); err != nil {
 				return nil, err
@@ -417,7 +423,9 @@ func responsesInputToTurns(
 
 		case *ResponsesPreviousOutputMessage:
 			if value.ID != "" {
-				noteItemIdentity()
+				if err := noteItemIdentity(); err != nil {
+					return nil, err
+				}
 			}
 			if err := loseInputPhase(policy, report, value.Phase, i); err != nil {
 				return nil, err
@@ -433,7 +441,9 @@ func responsesInputToTurns(
 
 		case *ResponsesFunctionCallInput:
 			if value.ID != "" {
-				noteItemIdentity()
+				if err := noteItemIdentity(); err != nil {
+					return nil, err
+				}
 			}
 			arguments, err := decodeJSONObject(value.Arguments)
 			if err != nil {
@@ -452,7 +462,9 @@ func responsesInputToTurns(
 
 		case *ResponsesFunctionCallOutputInput:
 			if value.ID != "" {
-				noteItemIdentity()
+				if err := noteItemIdentity(); err != nil {
+					return nil, err
+				}
 			}
 			parts, err := responsesFunctionOutputToCanonical(value.Output)
 			if err != nil {
@@ -757,9 +769,19 @@ func flattenNamespaceTool(
 		// and the tool_choice reconciliation owns the no-tools-left case —
 		// a namespace is never a different, harder rule than the top level
 		// (review-11 finding 2).
+		if err := report.Note(
+			FeatureBuiltinTools,
+			"tools[]",
+			fmt.Sprintf(
+				"namespace tool %q carried no portable function tools (all nested tools dropped under the builtin_tools approval)",
+				tool.Name,
+			),
+		); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
-	report.Note(
+	if err := report.Note(
 		FeatureBuiltinTools,
 		"tools[]",
 		fmt.Sprintf(
@@ -767,7 +789,9 @@ func flattenNamespaceTool(
 			tool.Name,
 			len(out),
 		),
-	)
+	); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -848,12 +872,12 @@ func DecodeMessagesRequest(
 	// sanctioned observable elision — one deduped note per exchange, never a
 	// policy gate and never a silent drop (analysis G3).
 	cacheControlNoted := false
-	noteCacheControl := func() {
+	noteCacheControl := func() error {
 		if cacheControlNoted {
-			return
+			return nil
 		}
 		cacheControlNoted = true
-		result.Report.Note(
+		return result.Report.Note(
 			FeatureAnthropicControls,
 			"cache_control",
 			"cache_control performance hints are not forwarded (chat upstreams cache automatically)",
@@ -862,31 +886,42 @@ func DecodeMessagesRequest(
 	if envelope.System != nil {
 		for _, block := range envelope.System.ContentBlocks {
 			if block.CacheControl != nil {
-				noteCacheControl()
+				if err := noteCacheControl(); err != nil {
+					return DecodeResult{}, err
+				}
 			}
 		}
 	}
 	for _, tool := range envelope.Tools {
 		if tool.CacheControl != nil {
-			noteCacheControl()
+			if err := noteCacheControl(); err != nil {
+				return DecodeResult{}, err
+			}
 		}
 	}
 	// Blocks nest one level: tool_result content carries its own block
 	// array, and the marker is legal on those nested blocks too, so the
 	// scan walks the nested content of every top-level block.
-	var contentBlocksCarryCacheControl func(blocks []anthropicmessages.ContentBlock)
-	contentBlocksCarryCacheControl = func(blocks []anthropicmessages.ContentBlock) {
+	var contentBlocksCarryCacheControl func(blocks []anthropicmessages.ContentBlock) error
+	contentBlocksCarryCacheControl = func(blocks []anthropicmessages.ContentBlock) error {
 		for _, block := range blocks {
 			if block.CacheControl != nil {
-				noteCacheControl()
+				if err := noteCacheControl(); err != nil {
+					return err
+				}
 			}
 			if block.Content != nil {
-				contentBlocksCarryCacheControl(block.Content.ContentBlocks)
+				if err := contentBlocksCarryCacheControl(block.Content.ContentBlocks); err != nil {
+					return err
+				}
 			}
 		}
+		return nil
 	}
 	for _, message := range envelope.Messages {
-		contentBlocksCarryCacheControl(message.Content.ContentBlocks)
+		if err := contentBlocksCarryCacheControl(message.Content.ContentBlocks); err != nil {
+			return DecodeResult{}, err
+		}
 	}
 
 	// Thinking configuration. "enabled" requires an explicit budget; members
@@ -1126,11 +1161,13 @@ func reconcileToolChoice(
 			"tool_choice required but no portable tools remain after the builtin_tools loss",
 		)
 	case "auto":
-		report.Note(
+		if err := report.Note(
 			FeatureBuiltinTools,
 			"tool_choice",
 			"tool_choice auto dropped with the last tool (no tools remain to choose among)",
-		)
+		); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	return choice, nil
@@ -1316,11 +1353,13 @@ func RenderResponsesRequest(
 		}
 		if builder.Len() > 0 {
 			if len(systemTurns[0].Parts) > 1 {
-				report.Note(
+				if err := report.Note(
 					FeatureMultipleSystemTurns,
 					"instructions",
 					"multiple system text parts join into one instructions string (instructions_text_join encoding)",
-				)
+				); err != nil {
+					return nil, report, err
+				}
 			}
 			rendered := builder.String()
 			instructions = &rendered
@@ -1823,7 +1862,7 @@ func RenderChatRequest(
 				} else {
 					effort := thinkingBudgetToEffort(*request.Thinking.BudgetTokens)
 					out.ReasoningEffort = &effort
-					report.Note(
+					if err := report.Note(
 						FeatureRequestReasoning,
 						"thinking",
 						fmt.Sprintf(
@@ -1831,24 +1870,30 @@ func RenderChatRequest(
 							*request.Thinking.BudgetTokens,
 							effort,
 						),
-					)
+					); err != nil {
+						return nil, report, err
+					}
 				}
 			}
 		case "adaptive":
-			report.Note(
+			if err := report.Note(
 				FeatureRequestReasoning,
 				"thinking",
 				"adaptive thinking maps to the chat provider's default reasoning effort",
-			)
+			); err != nil {
+				return nil, report, err
+			}
 		case "disabled":
 			// An explicit client-asserted no-thinking is observable, like
 			// adaptive: the elision maps to the absence of chat
 			// reasoning_effort and is reported (analysis doc 05 §4 / G8).
-			report.Note(
+			if err := report.Note(
 				FeatureRequestReasoning,
 				"thinking",
 				"thinking disabled maps to the absence of chat reasoning_effort",
-			)
+			); err != nil {
+				return nil, report, err
+			}
 		}
 	}
 
