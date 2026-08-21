@@ -699,6 +699,15 @@ func New(opts ...Option) (*Proxy, error) {
 				return resp.StatusCode >= 500
 			}
 		}
+		// Disposition (autopsy 04 rec 2, grounded moot): a deterministic
+		// transcode decode failure (a 200 body outside the supported wire
+		// subset) can NEVER be retried here, because this policy sees only
+		// RoundTrip errors and HTTP status — the body fails AFTER the
+		// response returns, inside the TranscodeHandler. The proxy therefore
+		// re-sends a poisonous body zero times; the field-observed repeat
+		// 502s were client-driven retries. Pinned by
+		// TestProxyTranscodePoisonUsage200IsNeverRetried
+		// (transcode_classification_test.go).
 		// The signing transport sits inside the retry chain so EVERY
 		// attempt is signed after the retry layer rebuilt the body and
 		// finalized Content-Length (review-z commit 4). Requests without a

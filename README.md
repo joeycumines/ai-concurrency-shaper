@@ -372,6 +372,28 @@ error, not a runtime surprise.
 | Client abort after a definitive upstream failure | Upstream failure retained |
 | Local signer failure | Local, never retried, never breaker-relevant |
 
+### Strict transcoding and the circuit breaker
+
+A deterministic upstream body-shape failure on a **non-streaming JSON
+exchange** — a 2xx response whose body violates the pinned wire contract
+(malformed source wire, never a merely-unsupported feature) — is classified
+as an **upstream failure** and counts against the
+circuit breaker: a consistently-poisonous upstream will open the breaker,
+which is the correct signal (the upstream, not the proxy, is emitting
+bodies no client can consume). Streams classify identically: a corrupt
+frame inside a stream is corrupt upstream wire — an upstream failure,
+breaker-counted whether or not the exchange streams — while only locally
+generated conversion errors on a live stream stay local. The proxy never re-sends a poisonous body
+itself: its retry transport decides before the body is read, so a
+decode-failure 502 costs exactly one upstream hit; the repeat 502s you may
+see in the field are client-driven retries. Fix dialect coverage (teach the
+transcoder the provider's shape) rather than widening breaker tolerance,
+and note that with `-concurrency 1` each poison round trip holds the slot
+for the full inference time, so queue latency amplifies while a poison
+loop persists. Every non-streaming upstream-response wire-decode failure
+is logged server-side (`transcode: METHOD /path: …`) alongside the bounded
+client-facing error.
+
 ## How Concurrency Protection Works
 
 The proxy uses a token-bucket channel to enforce the concurrency limit. Each limited request acquires a token; the token is returned when the request completes. This bounds the proxy's internal concurrency, but the downstream may still observe more due to accounting lag (see above).

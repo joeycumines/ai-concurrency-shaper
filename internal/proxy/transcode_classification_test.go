@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -168,6 +169,68 @@ func TestProxyTranscodeCorruptUpstreamJSONAppliesPhantomHold(t *testing.T) {
 	t.Logf("second request wait after corrupt upstream wire 502: %v", wait)
 	if wait < 400*time.Millisecond {
 		t.Fatalf("upstream wire failure did not hold the slot: wait %v", wait)
+	}
+}
+
+// TestProxyTranscodePoisonUsage200IsNeverRetried pins the autopsy-04 retry
+// disposition: the proxy retry transport classifies only RoundTrip errors
+// and HTTP status, so a 200 body that fails transcode decode (a
+// deterministic schema violation) is never re-sent — the upstream is hit
+// EXACTLY ONCE per client request while the client sees 502. The
+// field-observed repeat 502s were client-driven retries, not proxy retries.
+func TestProxyTranscodePoisonUsage200IsNeverRetried(t *testing.T) {
+	var hits int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// A poisonous usage block: an unknown field outside the modeled
+		// surface still fails decode after the autopsy-03 extensions landed
+		// — by design (strictness pin).
+		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"bogus_tokens":1}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	breaker := j2Breaker(t)
+	pattern, err := route.Parse("POST /v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := url.Parse(upstream.URL)
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(transcodeMapping(testResponsesMapping(t))),
+		WithBreaker(breaker),
+		// Retries fully enabled, as the field configuration had them. The
+		// replay cap matches production sizing: without it a bodied request
+		// is structurally unreplayable and hits==1 would hold regardless of
+		// CheckRetry — this pin must exercise the real retry decision.
+		WithMaxRetries(3),
+		WithMaxBodyBytes(1<<20),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	if got := atomic.LoadInt64(&hits); got != 1 {
+		t.Fatalf("upstream hits = %d, want exactly 1 (the poison body is never re-sent)", got)
+	}
+	// The single decode failure counts once against the breaker.
+	if got := breaker.Stats().ConsecutiveFailures; got != 1 {
+		t.Fatalf("breaker consecutive failures = %d, want 1", got)
 	}
 }
 

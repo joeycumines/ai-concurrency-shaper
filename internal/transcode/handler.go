@@ -725,9 +725,12 @@ func (h *TranscodeHandler) jsonResponse(
 			h.writeUpstreamSemanticFailure(r, w, apiErr, resp.StatusCode)
 			return
 		}
-		// A local response conversion failure before headers is a
-		// client-dialect 502 and is reported via the outcome hook so the
-		// proxy never classifies it as an upstream failure.
+		// The conversion failure is logged server-side (autopsy 04 rec 3:
+		// a parse-failure cascade must be visible to the operator) in
+		// addition to the bounded client message below. Upstream-authored
+		// semantic-failure text is NOT logged: it is already echoed to the
+		// client and must not enter the server log unbounded.
+		h.logRequestError(r, err)
 		h.writeDialectHTTPError(r, w, apiErr, provenance)
 		return
 	}
@@ -1251,6 +1254,14 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 		// Match the proxy's breaker classification (IsFailureStatus /
 		// IsFailureStatusWithHeaders): 429 and 5xx are failures, and 403 is
 		// a failure only when it carries a rate-limit signal (Retry-After).
+		//
+		// Disposition (autopsy 04 rec 2, no change): the upstream-failure
+		// classification of body errors is pinned review-k design — a body
+		// violating the wire contract IS an upstream health signal, and a
+		// consistently-poisonous upstream SHOULD open the breaker
+		// (TestHandlerCorruptUpstreamResponseIsUpstreamFailure). The
+		// field-observed poison sources are eliminated at the decode layer
+		// (autopsy tasks 13-15), not by widening breaker tolerance here.
 		upstreamFailure = apiErr.Status == http.StatusTooManyRequests ||
 			(apiErr.Status >= 500 && apiErr.Status < 600) ||
 			(apiErr.Status == http.StatusForbidden && apiErr.RetryAfter != "")
@@ -1588,9 +1599,10 @@ func (h *TranscodeHandler) boundErrorMessage(message string) string {
 	return message[:max]
 }
 
-// logRequestError logs a request error with its detail (never the client
-// message): local construction failures are logged, sanitized, and reported
-// neutrally (review-j finding 14).
+// logRequestError logs a local failure with its detail (never the client
+// message): local construction and conversion failures are logged,
+// sanitized, and reported neutrally (review-j finding 14; autopsy 04 rec 3
+// pins the conversion-failure path for operator observability).
 func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
 	log.Printf("transcode: %s %s: %v", r.Method, r.URL.Path, err)
 }

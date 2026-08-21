@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -647,6 +648,80 @@ func TestHandlerCorruptUpstreamResponseIsUpstreamFailure(t *testing.T) {
 	}
 	if !outcomes[0].UpstreamFailure {
 		t.Fatal("corrupt upstream wire must be an upstream failure")
+	}
+}
+
+// TestHandlerDecodeFailure502IsLogged pins the operator-observability path
+// (autopsy 04 rec 3): a 200 body that fails transcode decode is logged
+// server-side with the conversion detail before the bounded client 502 is
+// written — a parse-failure cascade must be visible in the server log, not
+// only in client-visible error bodies.
+func TestHandlerDecodeFailure502IsLogged(t *testing.T) {
+	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
+	var outcomes []Outcome
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			// A poisonous usage block: an unknown field outside the modeled
+			// surface still fails decode after the autopsy-03 extensions
+			// landed — by design (strictness pin).
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"bogus_tokens":1}}`,
+				)),
+			}, nil
+		},
+		func(o Outcome) { outcomes = append(outcomes, o) },
+	)
+
+	var logBuf bytes.Buffer
+	prevWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(prevWriter) })
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+	logged := logBuf.String()
+	for _, want := range []string{
+		"transcode: POST /v1/responses",
+		"bogus_tokens",
+	} {
+		if !strings.Contains(logged, want) {
+			t.Fatalf("server log missing %q; got %q", want, logged)
+		}
+	}
+	// The client message carries the same failure with its conversion
+	// prefix.
+	if !strings.Contains(rec.Body.String(), "convert response:") {
+		t.Fatalf("client 502 missing the conversion prefix: %q", rec.Body.String())
+	}
+	// The classification facts are unchanged by logging.
+	if len(outcomes) != 1 {
+		t.Fatalf("outcomes = %d", len(outcomes))
+	}
+	if outcomes[0].Provenance != ProvenanceUpstreamBodyError || !outcomes[0].UpstreamFailure {
+		t.Fatalf("outcome = %+v, want upstream body failure", outcomes[0])
 	}
 }
 
