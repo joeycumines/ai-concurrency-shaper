@@ -81,6 +81,14 @@ type ChatCapabilities struct {
 	// ordinary text, an approved loss, or a rejection. It must never become an
 	// Anthropic thinking or redacted_thinking block.
 	ProviderReasoningText bool
+
+	// SystemAnywhere renders system/developer turns positionally exactly as
+	// decoded, for upstreams that accept system messages anywhere (e.g. the
+	// genuine OpenAI chat endpoint). When unset — the default —
+	// system-channel turns consolidate into one leading system message
+	// under the mid_conversation_system loss policy (autopsy 02: open-weights
+	// chat templates reject any system message after index 0).
+	SystemAnywhere bool
 }
 
 // Mapping declares one transcoded route: a POST client route in one client

@@ -66,7 +66,13 @@
 //	                       string-only create-request instructions;
 //	                       multiple system turns and non-text system content
 //	                       are loss-gated (FeatureMultipleSystemTurns,
-//	                       FeatureSystemNonTextContent)
+//	                       FeatureSystemNonTextContent); for Chat targets
+//	                       system-channel turns consolidate into one
+//	                       leading system message — a turn after dialog
+//	                       turns is loss-gated (FeatureMidConversation
+//	                       System) and a leading-only merge is a sanctioned
+//	                       note under the same key; the system_anywhere
+//	                       capability restores positional rendering
 //	Thinking blocks       exact only for Messages targets; loss-gated
 //	                       (FeatureAuthenticatedThinking) otherwise
 //	Reasoning items       exact only for Responses targets; loss-gated

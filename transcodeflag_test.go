@@ -450,6 +450,30 @@ func TestParseChatCapabilities(t *testing.T) {
 	if _, _, err := parseChatCapabilities([]string{"!"}); err == nil {
 		t.Fatal("empty negation accepted")
 	}
+
+	// system_anywhere is a granular capability in both directions (task
+	// 14): a positive sets the field, an unknown negation fails, and a
+	// negation of the non-default name is a harmless no-op withdrawal.
+	cap, negated, err = parseChatCapabilities([]string{"system_anywhere"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cap.SystemAnywhere {
+		t.Fatalf("capabilities = %+v, want SystemAnywhere", cap)
+	}
+	if len(negated) != 0 {
+		t.Fatalf("negated = %v, want none", negated)
+	}
+	cap, negated, err = parseChatCapabilities([]string{"!system_anywhere"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap.SystemAnywhere {
+		t.Fatalf("capabilities = %+v, want SystemAnywhere unset", cap)
+	}
+	if _, ok := negated["system_anywhere"]; !ok {
+		t.Fatalf("negated = %v, want system_anywhere", negated)
+	}
 }
 
 // TestParseClientQuery verifies the -transcode-allow-client-query parsing,

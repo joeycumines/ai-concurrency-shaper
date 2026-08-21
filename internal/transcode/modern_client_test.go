@@ -403,22 +403,43 @@ func TestMessagesSystemCoexistence(t *testing.T) {
 		t.Fatalf("system texts = %v, want [top inline]", got)
 	}
 
-	// The Chat render carries both system turns as two system messages in
-	// the same order (no capability gate on system message count).
-	rendered, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{})
+	// INTENDED SEMANTIC CHANGE (autopsy 02, task 14): the Chat render no
+	// longer carries multiple system turns positionally — open-weights
+	// chat templates (Qwen/Llama/DeepSeek Jinja) reject any role:system
+	// message after index 0, including a second leading one, which killed
+	// 100% of real Claude Code multi-turn traffic in the field. This
+	// fixture's inline system turn follows dialog turns, so the strict
+	// render now rejects the position loss; under the
+	// mid_conversation_system permission the system-channel turns
+	// consolidate into one leading system message carrying both texts in
+	// order.
+	if _, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{}); err == nil {
+		t.Fatal("strict chat render accepted a mid-conversation system turn; want rejection")
+	}
+	permissiveChat := testExchangeContext()
+	permissiveChat.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureMidConversationSystem: {},
+	}}
+	rendered, report, err := RenderChatRequest(result.Request, permissiveChat, ChatCapabilities{})
 	if err != nil {
-		t.Fatalf("chat render: %v", err)
+		t.Fatalf("permissive chat render: %v", err)
 	}
 	var chat ChatRequest
 	if err := strictDecode(rendered, &chat); err != nil {
 		t.Fatalf("rendered chat: %v\n%s", err, rendered)
 	}
+	systemCount := 0
 	var systemContents []string
-	for _, message := range chat.Messages {
+	for i, message := range chat.Messages {
 		if message.Role != ChatMessageRoleSystem {
 			continue
 		}
-		// canonicalTextTurnToChatMessage emits text blocks, one per part.
+		systemCount++
+		if i != 0 {
+			t.Fatalf("system message at index %d violates the single-leading-system property: %s", i, rendered)
+		}
+		// canonicalTextTurnToChatMessage emits text blocks; consolidation
+		// joins them into one block.
 		if message.Content == nil {
 			t.Fatalf("system message has no content: %+v", message)
 		}
@@ -429,8 +450,20 @@ func TestMessagesSystemCoexistence(t *testing.T) {
 			systemContents = append(systemContents, *block.Text)
 		}
 	}
-	if len(systemContents) != 2 || systemContents[0] != "top" || systemContents[1] != "inline" {
-		t.Fatalf("chat system messages = %v, want [top inline]", systemContents)
+	if systemCount != 1 {
+		t.Fatalf("chat system messages = %d, want exactly 1: %s", systemCount, rendered)
+	}
+	if len(systemContents) != 1 || systemContents[0] != "top\n\ninline" {
+		t.Fatalf("consolidated chat system content = %v, want [\"top\\n\\ninline\"]", systemContents)
+	}
+	found := 0
+	for _, loss := range report.Losses {
+		if loss.Feature == FeatureMidConversationSystem {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("mid_conversation_system entries = %d, want exactly 1: %+v", found, report.Losses)
 	}
 
 	// The Responses render cannot express two system turns as one

@@ -1779,3 +1779,216 @@ func TestDecodeResponsesRequestFunctionOutputOutputPartRejected(t *testing.T) {
 		t.Fatal("strict policy accepted an output_text function-output part")
 	}
 }
+
+func TestRenderChatRequestMidConversationSystemConsolidates(t *testing.T) {
+	// Field-observed Claude Code shape (autopsy 02): envelope.system plus an
+	// inline role:system message AFTER dialog turns. Positional rendering
+	// puts role:system at index >0 — the exact shape Qwen/Llama/DeepSeek
+	// Jinja templates reject with "System message must be at the
+	// beginning." The chat render must never emit a system message after
+	// index 0: system-channel turns consolidate into one leading system
+	// message, and the position loss is policy-gated.
+	body := []byte(`{
+		"model":"m",
+		"max_tokens":100,
+		"system":[{"type":"text","text":"top"}],
+		"messages":[
+			{"role":"user","content":"first"},
+			{"role":"system","content":"inline"},
+			{"role":"user","content":"second"}
+		]
+	}`)
+	result, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Strict programmatic policy: the position loss is a client-dialect
+	// error.
+	if _, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{}); err == nil {
+		t.Fatal("strict render accepted a mid-conversation system turn; want rejection")
+	}
+
+	// Approved policy: exactly one leading system message carrying all
+	// system-channel text in order, and exactly one recorded loss.
+	permissive := testExchangeContext()
+	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureMidConversationSystem: {},
+	}}
+	rendered, report, err := RenderChatRequest(result.Request, permissive, ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("permissive render: %v", err)
+	}
+	var chat ChatRequest
+	if err := strictDecode(rendered, &chat); err != nil {
+		t.Fatalf("rendered chat: %v\n%s", err, rendered)
+	}
+	// The Jinja property: no system-role message after index 0.
+	for i, message := range chat.Messages {
+		if i > 0 && message.Role == ChatMessageRoleSystem {
+			t.Fatalf(
+				"system message at index %d violates the single-leading-system property: %s",
+				i, rendered,
+			)
+		}
+	}
+	if len(chat.Messages) != 3 ||
+		chat.Messages[0].Role != ChatMessageRoleSystem ||
+		chat.Messages[1].Role != ChatMessageRoleUser ||
+		chat.Messages[2].Role != ChatMessageRoleUser {
+		t.Fatalf("messages = %+v, want [system user user]", chat.Messages)
+	}
+	var texts []string
+	for _, block := range chat.Messages[0].Content.ContentBlocks {
+		if block.Text != nil {
+			texts = append(texts, *block.Text)
+		}
+	}
+	if len(texts) != 1 || texts[0] != "top\n\ninline" {
+		t.Fatalf("consolidated system content = %q, want [\"top\\n\\ninline\"]", texts)
+	}
+	found := 0
+	for _, loss := range report.Losses {
+		if loss.Feature == FeatureMidConversationSystem {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("mid_conversation_system entries = %d, want exactly 1: %+v", found, report.Losses)
+	}
+}
+
+func TestRenderChatRequestLeadingSystemPairMergesWithNote(t *testing.T) {
+	// Two LEADING system turns (envelope.system + an inline system before
+	// any dialog) also consolidate: open-weights Jinja templates reject a
+	// second system message even at index 1. Leading-only consolidation is
+	// a sanctioned note under the same key — observable without a policy
+	// approval, so the strict render succeeds with the note recorded.
+	body := []byte(`{
+		"model":"m",
+		"max_tokens":100,
+		"system":[{"type":"text","text":"top"}],
+		"messages":[
+			{"role":"system","content":"inline"},
+			{"role":"user","content":"hi"}
+		]
+	}`)
+	result, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, report, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("strict render rejected a leading-only system merge: %v", err)
+	}
+	var chat ChatRequest
+	if err := strictDecode(rendered, &chat); err != nil {
+		t.Fatalf("rendered chat: %v\n%s", err, rendered)
+	}
+	for i, message := range chat.Messages {
+		if i > 0 && message.Role == ChatMessageRoleSystem {
+			t.Fatalf("system message at index %d: %s", i, rendered)
+		}
+	}
+	if len(chat.Messages) != 2 ||
+		chat.Messages[0].Role != ChatMessageRoleSystem ||
+		chat.Messages[1].Role != ChatMessageRoleUser {
+		t.Fatalf("messages = %+v, want [system user]", chat.Messages)
+	}
+	var texts []string
+	for _, block := range chat.Messages[0].Content.ContentBlocks {
+		if block.Text != nil {
+			texts = append(texts, *block.Text)
+		}
+	}
+	if len(texts) != 1 || texts[0] != "top\n\ninline" {
+		t.Fatalf("merged system content = %q, want [\"top\\n\\ninline\"]", texts)
+	}
+	found := 0
+	for _, loss := range report.Losses {
+		if loss.Feature == FeatureMidConversationSystem {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("mid_conversation_system entries = %d, want exactly 1: %+v", found, report.Losses)
+	}
+}
+
+func TestRenderChatRequestSingleLeadingSystemUnchanged(t *testing.T) {
+	// The common case — exactly one leading system turn — renders exactly
+	// as before, with zero report entries: consolidation never adds noise
+	// to requests that were already Jinja-safe.
+	body := []byte(`{
+		"model":"m",
+		"max_tokens":100,
+		"system":[{"type":"text","text":"top"}],
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	result, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, report, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chat ChatRequest
+	if err := strictDecode(rendered, &chat); err != nil {
+		t.Fatalf("rendered chat: %v\n%s", err, rendered)
+	}
+	if len(chat.Messages) != 2 ||
+		chat.Messages[0].Role != ChatMessageRoleSystem ||
+		chat.Messages[1].Role != ChatMessageRoleUser {
+		t.Fatalf("messages = %+v, want [system user]", chat.Messages)
+	}
+	if len(chat.Messages[0].Content.ContentBlocks) != 1 ||
+		*chat.Messages[0].Content.ContentBlocks[0].Text != "top" {
+		t.Fatalf("system content = %+v, want the original single block", chat.Messages[0].Content)
+	}
+	if len(report.Losses) != 0 {
+		t.Fatalf("report entries = %+v, want none", report.Losses)
+	}
+}
+
+func TestRenderChatRequestSystemAnywhereCapability(t *testing.T) {
+	// The system_anywhere capability restores positional rendering for
+	// upstreams that accept system messages anywhere (e.g. genuine
+	// OpenAI), with zero report entries.
+	body := []byte(`{
+		"model":"m",
+		"max_tokens":100,
+		"system":[{"type":"text","text":"top"}],
+		"messages":[
+			{"role":"user","content":"first"},
+			{"role":"system","content":"inline"},
+			{"role":"user","content":"second"}
+		]
+	}`)
+	result, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, report, err := RenderChatRequest(
+		result.Request,
+		testExchangeContext(),
+		ChatCapabilities{SystemAnywhere: true},
+	)
+	if err != nil {
+		t.Fatalf("system-anywhere render: %v", err)
+	}
+	var chat ChatRequest
+	if err := strictDecode(rendered, &chat); err != nil {
+		t.Fatalf("rendered chat: %v\n%s", err, rendered)
+	}
+	if len(chat.Messages) != 4 ||
+		chat.Messages[0].Role != ChatMessageRoleSystem ||
+		chat.Messages[1].Role != ChatMessageRoleUser ||
+		chat.Messages[2].Role != ChatMessageRoleSystem ||
+		chat.Messages[3].Role != ChatMessageRoleUser {
+		t.Fatalf("messages = %+v, want positional [system user system user]", chat.Messages)
+	}
+	if len(report.Losses) != 0 {
+		t.Fatalf("report entries = %+v, want none", report.Losses)
+	}
+}

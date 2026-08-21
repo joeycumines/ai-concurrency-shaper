@@ -3265,13 +3265,6 @@ func partTypeName(part ResponsesStreamContentPart) string {
 	}
 }
 
-// anthropicStopReasonPtr returns a pointer to the stop reason.
-//
-//go:fix inline
-func anthropicStopReasonPtr(reason AnthropicStopReason) *AnthropicStopReason {
-	return new(reason)
-}
-
 // checkedInt64ToInt converts an int64 token count to int with an explicit
 // range check: the Messages wire types use platform int, and a silent
 // wrap on 32-bit builds would emit a corrupt negative count (review-z

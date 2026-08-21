@@ -29,9 +29,6 @@ func chatChunk(t *testing.T, delta ChatStreamDelta, finish *string) ChatStreamRe
 	}
 }
 
-//go:fix inline
-func str(v string) *string { return new(v) }
-
 func TestChatToResponsesTextStream(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),

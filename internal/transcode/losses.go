@@ -50,6 +50,16 @@ const (
 	// SystemNonTextContent covers non-text system prompt content that cannot
 	// be expressed in the target's system/instructions shape.
 	FeatureSystemNonTextContent Feature = "system_non_text_content"
+	// MidConversationSystem covers system-channel turns that cannot keep
+	// their position in a chat request: open-weights chat templates reject
+	// any system-role message after index 0, including a second leading
+	// one. Under this permission system-channel turns consolidate into one
+	// leading system message (position/timing lost, content and authority
+	// preserved); leading-only consolidation of multiple system turns is a
+	// sanctioned note under the same key. The system_anywhere chat
+	// capability restores positional rendering for upstreams that accept
+	// system messages anywhere.
+	FeatureMidConversationSystem Feature = "mid_conversation_system"
 	// FeatureToolSchemaStrictness covers a source tool schema that carries
 	// no strictness semantic (Messages tools have none). Responses function
 	// tools require an explicit strict on the wire; when the source cannot
@@ -185,6 +195,7 @@ var lossRegistry = []lossEntry{
 	{FeatureRequestTruncation, "the Responses truncation request field cannot be reproduced in the target request"},
 	{FeatureMultipleSystemTurns, "multiple system turns cannot be expressed in the target's single system/instructions shape"},
 	{FeatureSystemNonTextContent, "non-text system prompt content cannot be expressed in the target's system/instructions shape"},
+	{FeatureMidConversationSystem, "mid-conversation system turns cannot keep their position in a chat request; under this permission system-channel turns consolidate into one leading system message (position/timing lost, content and authority preserved), and leading-only consolidation of multiple system turns is a sanctioned note under the same key"},
 	{FeatureToolSchemaStrictness, "the source tool schema has no strictness semantic; the Responses function-tool contract requires explicit strict, emitted as strict:false under this permission"},
 	{FeatureToolResultErrorStatus, "the tool result error status cannot be reproduced in the target; the permissive encoding is the visible error_status_prefix text"},
 	{FeatureToolResultMultimodalContent, "multimodal tool-result content cannot be carried by a Chat tool message; under this permission it is encoded as the tool_result_json_envelope text"},

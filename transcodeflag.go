@@ -408,6 +408,7 @@ var chatCapabilityNames = []struct {
 	{"stop_sequences", func(c *transcode.ChatCapabilities) *bool { return &c.StopSequences }},
 	{"reasoning_effort", func(c *transcode.ChatCapabilities) *bool { return &c.ReasoningEffort }},
 	{"provider_reasoning_text", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningText }},
+	{"system_anywhere", func(c *transcode.ChatCapabilities) *bool { return &c.SystemAnywhere }},
 }
 
 // splitFlagNegations splits repeatable flag values into the positive names
@@ -584,15 +585,18 @@ var defaultTranscodeAllowedQuery = map[string]struct{}{
 
 // defaultTranscodeLosses are the non-portable features real
 // Responses/Messages client traffic triggers that a CLI mapping approves
-// out of the box. Reasoning summaries, Anthropic thinking blocks, envelope
-// cache controls (Responses and the modern Anthropic context_management/
-// output_config controls), and built-in tools are client-side controls the
-// chat target cannot reproduce; usage breakdowns are observability metadata
-// the chat upstreams do not always report (the documented loss encodings
-// emit zeros rather than failing the exchange).
+// out of the box. Reasoning summaries, Anthropic thinking blocks, system
+// turns that cannot keep their position in a chat request (Claude Code
+// sends mid-conversation system on every request), envelope cache controls
+// (Responses and the modern Anthropic context_management/output_config
+// controls), and built-in tools are client-side controls the chat target
+// cannot reproduce; usage breakdowns are observability metadata the chat
+// upstreams do not always report (the documented loss encodings emit zeros
+// rather than failing the exchange).
 var defaultTranscodeLosses = map[transcode.Feature]struct{}{
 	transcode.FeatureReasoningSummary:       {},
 	transcode.FeatureAuthenticatedThinking:  {},
+	transcode.FeatureMidConversationSystem:  {},
 	transcode.FeatureResponsesControls:      {},
 	transcode.FeatureAnthropicControls:      {},
 	transcode.FeatureBuiltinTools:           {},
@@ -661,6 +665,7 @@ func mergedChatCapabilities(
 		"stop_sequences":          &out.StopSequences,
 		"reasoning_effort":        &out.ReasoningEffort,
 		"provider_reasoning_text": &out.ProviderReasoningText,
+		"system_anywhere":         &out.SystemAnywhere,
 	}
 	cli := map[string]bool{
 		"developer_role":          capabilities.DeveloperRole,
@@ -670,6 +675,7 @@ func mergedChatCapabilities(
 		"stop_sequences":          capabilities.StopSequences,
 		"reasoning_effort":        capabilities.ReasoningEffort,
 		"provider_reasoning_text": capabilities.ProviderReasoningText,
+		"system_anywhere":         capabilities.SystemAnywhere,
 	}
 	for name, field := range fields {
 		_, deny := negated[name]

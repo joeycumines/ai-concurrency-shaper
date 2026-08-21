@@ -168,14 +168,14 @@ func run() error {
 	// finding 14). The programmatic AuthExternalSigner mode remains for API
 	// users who can provide one.
 	flag.StringVar(&transcodeAuth, "transcode-auth", "auto", "upstream authentication mode: auto, none, bearer, x-api-key, api-key, header")
-	flag.Var(&transcodeAllowLoss, "transcode-allow-loss", "granular loss features the transcoder may drop (repeatable, comma/space separated; prefix ! to withdraw a default); CLI mappings already approve the sensible default set (reasoning_summary, authenticated_thinking, responses_controls, anthropic_controls, builtin_tools, usage_*), this flag adds more or removes defaults")
+	flag.Var(&transcodeAllowLoss, "transcode-allow-loss", "granular loss features the transcoder may drop (repeatable, comma/space separated; prefix ! to withdraw a default); CLI mappings already approve the sensible default set (reasoning_summary, authenticated_thinking, mid_conversation_system, responses_controls, anthropic_controls, builtin_tools, usage_*), this flag adds more or removes defaults")
 	flag.StringVar(&transcodeAuthSource, "transcode-auth-source", "inbound", "upstream secret source: inbound, env:NAME, file:PATH")
 	flag.StringVar(&transcodeAuthHeader, "transcode-auth-header", "", "custom authentication header name (with -transcode-auth header)")
 	flag.StringVar(&transcodeAnthropicVersion, "transcode-anthropic-version", "2023-06-01", "Anthropic-Version header value for Messages upstreams")
 	flag.Var(&transcodeModels, "transcode-model", "client-model=upstream-model mapping (repeatable)")
 	flag.Int64Var(&transcodeMaxRequestMB, "transcode-max-request-mb", 32, "max transcoded request body size (MB)")
 	flag.Int64Var(&transcodeMaxResponseMB, "transcode-max-response-mb", 32, "max transcoded response body size (MB)")
-	flag.Var(&transcodeCapabilities, "transcode-chat-capability", "chat-provider capability the transcoder may use (repeatable, comma/space separated; prefix ! to withdraw a default): developer_role, image_input, structured_outputs, parallel_tool_calls, stop_sequences, reasoning_effort, provider_reasoning_text; the presets already enable the standard modern surface by default")
+	flag.Var(&transcodeCapabilities, "transcode-chat-capability", "chat-provider capability the transcoder may use (repeatable, comma/space separated; prefix ! to withdraw a default): developer_role, image_input, structured_outputs, parallel_tool_calls, stop_sequences, reasoning_effort, provider_reasoning_text, system_anywhere; the presets already enable the standard modern surface by default")
 	flag.Var(&transcodeClientQuery, "transcode-allow-client-query", "client query parameter to forward on transcoded routes (repeatable, comma/space separated; prefix ! to withdraw a default); all CLI mappings allow beta by default")
 	flag.BoolVar(&transcodeStrictDefaults, "transcode-strict-defaults", false, "start CLI transcode mappings from zero instead of the sensible defaults: no default chat capabilities, no beta query forwarding, and no default loss approvals (explicit -transcode-chat-capability/-transcode-allow-client-query/-transcode-allow-loss values still apply)")
 

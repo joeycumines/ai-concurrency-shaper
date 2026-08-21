@@ -29,6 +29,7 @@ program uses):
 | `request_truncation` | The Responses `truncation` request field |
 | `multiple_system_turns` | Multiple system turns collapsed into one shape |
 | `system_non_text_content` | Non-text system prompt content |
+| `mid_conversation_system` | Mid-conversation system turns cannot keep their position in a chat request; under this permission system-channel turns consolidate into one leading system message (position/timing lost, content and authority preserved), and leading-only consolidation of multiple system turns is a sanctioned note under the same key. The `system_anywhere` chat capability restores positional rendering for upstreams that accept system messages anywhere |
 | `tool_schema_strictness` | Emitting explicit `strict:false` for source tools without a strictness semantic |
 | `tool_result_error_status` | Encoding a tool-result error status into visible content |
 | `tool_result_multimodal_content` | Encoding multimodal tool results as a JSON text envelope |

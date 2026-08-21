@@ -209,7 +209,7 @@ func TestMinimumOutputBoundsFit(t *testing.T) {
 	deltaBare, err := json.Marshal(AnthropicStreamEvent{
 		Type: AnthropicStreamEventTypeMessageDelta,
 		Delta: &AnthropicStreamDelta{
-			StopReason: anthropicStopReasonPtr("end_turn"),
+			StopReason: new(AnthropicStopReason("end_turn")),
 		},
 	})
 	if err != nil {
@@ -218,7 +218,7 @@ func TestMinimumOutputBoundsFit(t *testing.T) {
 	deltaWithUsage, err := json.Marshal(AnthropicStreamEvent{
 		Type: AnthropicStreamEventTypeMessageDelta,
 		Delta: &AnthropicStreamDelta{
-			StopReason: anthropicStopReasonPtr("end_turn"),
+			StopReason: new(AnthropicStopReason("end_turn")),
 		},
 		Usage: &AnthropicUsage{
 			InputTokens:              0,

@@ -7,16 +7,6 @@ import (
 	"strings"
 )
 
-// boolPtr returns a pointer to v.
-//
-//go:fix inline
-func boolPtr(v bool) *bool { return new(v) }
-
-// intPtr returns a pointer to v.
-//
-//go:fix inline
-func intPtr(v int) *int { return new(v) }
-
 // anyMap converts a string map to an any-typed map for wire rendering.
 func anyMap(m map[string]string) map[string]any {
 	if m == nil {
@@ -294,6 +284,33 @@ func canonicalTextTurnToChatMessage(
 	return ChatMessage{Role: role, Content: &ChatMessageContent{ContentBlocks: blocks}}, nil
 }
 
+// joinChatSystemMessages consolidates rendered system-channel messages into
+// one leading system message, joining their text with "\n\n" in encounter
+// order (autopsy 02). Every input message is text-only (canonicalTextTurnTo
+// ChatMessage rejects anything else), so the join cannot lose content.
+func joinChatSystemMessages(leading, midDialog []ChatMessage) ChatMessage {
+	texts := make([]string, 0, len(leading)+len(midDialog))
+	for _, group := range [][]ChatMessage{leading, midDialog} {
+		for _, message := range group {
+			for _, block := range message.Content.ContentBlocks {
+				if block.Text != nil {
+					texts = append(texts, *block.Text)
+				}
+			}
+		}
+	}
+	joined := strings.Join(texts, "\n\n")
+	return ChatMessage{
+		Role: ChatMessageRoleSystem,
+		Content: &ChatMessageContent{
+			ContentBlocks: []ChatContentBlock{{
+				Type: ChatContentBlockTypeText,
+				Text: &joined,
+			}},
+		},
+	}
+}
+
 // canonicalUserTurnToChatMessages renders a user turn into Chat messages:
 // function results become tool-role messages and the remaining content
 // becomes one user message. Image input requires the configured capability.
@@ -502,11 +519,6 @@ func canonicalAssistantTurnToChatMessage(
 	}
 	return message, nil
 }
-
-// stringPtr returns a pointer to s.
-//
-//go:fix inline
-func stringPtr(s string) *string { return new(s) }
 
 // derefStr returns the value of s, or "" when s is nil.
 func derefStr(s *string) string {

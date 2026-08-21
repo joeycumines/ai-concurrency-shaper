@@ -204,9 +204,9 @@ the flags below extend the defaults, never replace them:
 
 | Layer | Default | Meaning |
 | --- | --- | --- |
-| Chat capabilities | `developer_role`, `parallel_tool_calls`, `reasoning_effort`, `provider_reasoning_text` | the standard modern OpenAI-compatible chat surface, enabled via `-transcode-chat-capability` (granular names: `developer_role`, `image_input`, `structured_outputs`, `parallel_tool_calls`, `stop_sequences`, `reasoning_effort`, `provider_reasoning_text`) |
+| Chat capabilities | `developer_role`, `parallel_tool_calls`, `reasoning_effort`, `provider_reasoning_text` | the standard modern OpenAI-compatible chat surface, enabled via `-transcode-chat-capability` (granular names: `developer_role`, `image_input`, `structured_outputs`, `parallel_tool_calls`, `stop_sequences`, `reasoning_effort`, `provider_reasoning_text`, `system_anywhere`) |
 | Allowed client query | `beta` | Anthropic clients (Claude Code) gate every request with `?beta=true`; harmless on chat endpoints. Add more via `-transcode-allow-client-query` |
-| Loss policy | `reasoning_summary`, `authenticated_thinking`, `responses_controls`, `anthropic_controls`, `builtin_tools`, `usage_unknown`, `usage_cache_read_unknown`, `usage_cache_write_unknown`, `usage_reasoning_unknown` | the non-portable features real Responses/Messages client traffic triggers (reasoning summaries, Anthropic thinking blocks, Responses and Anthropic envelope controls, built-in tools, and usage breakdowns the chat upstreams do not always report); approved via `-transcode-allow-loss` on top of the defaults. Note: approving `responses_controls` tolerates `include`/`client_metadata`/`prompt_cache_key` and upstream-echoed controls — the conversation-state request controls (`background`, `max_tool_calls`, `prompt`, `safety_identifier`, `status`) are errors under every policy |
+| Loss policy | `reasoning_summary`, `authenticated_thinking`, `mid_conversation_system`, `responses_controls`, `anthropic_controls`, `builtin_tools`, `usage_unknown`, `usage_cache_read_unknown`, `usage_cache_write_unknown`, `usage_reasoning_unknown` | the non-portable features real Responses/Messages client traffic triggers (reasoning summaries, Anthropic thinking blocks, system turns that cannot keep their position in a chat request, Responses and Anthropic envelope controls, built-in tools, and usage breakdowns the chat upstreams do not always report); approved via `-transcode-allow-loss` on top of the defaults. Note: approving `responses_controls` tolerates `include`/`client_metadata`/`prompt_cache_key` and upstream-echoed controls — the conversation-state request controls (`background`, `max_tool_calls`, `prompt`, `safety_identifier`, `status`) are errors under every policy |
 
 Capabilities are exercised only when the client actually uses the feature:
 `reasoning_effort` forwards the Responses `reasoning.effort` (and an
@@ -214,7 +214,25 @@ Anthropic `thinking` budget, see below) as the chat `reasoning_effort`
 parameter; `provider_reasoning_text` maps the chat `reasoning` response
 extension to client text; `developer_role` preserves the Responses
 developer-role messages; `parallel_tool_calls` forwards the
-parallel-tool-calls setting.
+parallel-tool-calls setting; `system_anywhere` renders system/developer
+turns positionally for upstreams that accept system messages anywhere
+(e.g. genuine OpenAI).
+
+### System message placement
+
+By default (no `system_anywhere` capability) a chat request carries
+exactly one system-role message, at index 0: open-weights chat templates
+(Qwen/Llama/DeepSeek Jinja) reject any system-role message after index 0,
+including a second leading one. System-channel turns — the Anthropic
+envelope `system` plus inline mid-conversation `role: "system"` messages,
+and developer-role messages when the `developer_role` capability is off —
+consolidate into that single leading message with their content joined in
+order. When a system turn followed dialog turns, the position loss is
+approved under the default `mid_conversation_system` loss key; a leading-
+only merge of multiple system turns is recorded as a sanctioned note under
+the same key. The strict programmatic policy rejects the position loss;
+pass `-transcode-chat-capability system_anywhere` to restore positional
+rendering for upstreams that accept it.
 
 Anthropic `thinking` on a Messages client maps to chat `reasoning_effort`
 as follows: `type: adaptive` emits nothing (the client delegated the

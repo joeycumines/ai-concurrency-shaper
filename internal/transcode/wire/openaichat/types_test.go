@@ -124,9 +124,6 @@ func TestMessageValidateRoleConditional(t *testing.T) {
 	}
 }
 
-//go:fix inline
-func stringPtr(s string) *string { return new(s) }
-
 func TestToolValidate(t *testing.T) {
 	if err := (Tool{Type: ToolTypeFunction, Function: &ToolFunction{Name: "f"}}).Validate(); err != nil {
 		t.Fatal(err)

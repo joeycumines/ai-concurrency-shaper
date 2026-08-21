@@ -160,6 +160,28 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
+			// A system-channel turn following dialog turns cannot keep its
+			// position in a chat request (autopsy 02): the consolidation
+			// into one leading system message is the approved loss; strict
+			// policy rejects the position loss.
+			key:  FeatureMidConversationSystem,
+			perm: []Feature{FeatureMidConversationSystem},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				request := CanonicalRequest{
+					ClientModel: "m",
+					Turns: []CanonicalTurn{
+						{Role: CanonicalSystem, Parts: []CanonicalPart{CanonicalText{Text: "top"}}},
+						{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: "hi"}}},
+						{Role: CanonicalSystem, Parts: []CanonicalPart{CanonicalText{Text: "mid"}}},
+					},
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				_, report, err := RenderChatRequest(request, context, ChatCapabilities{})
+				return report, err
+			},
+		},
+		{
 			key:  FeatureToolSchemaStrictness,
 			perm: []Feature{FeatureToolSchemaStrictness},
 			run: func(policy LossPolicy) (ConversionReport, error) {

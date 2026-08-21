@@ -1671,6 +1671,18 @@ func RenderChatRequest(
 	// Messages: system/developer turns become system/developer messages; user
 	// turns carry text and tool results; assistant turns carry text, refusal,
 	// and tool calls.
+	//
+	// System-channel placement (autopsy 02): open-weights chat templates
+	// (Qwen/Llama/DeepSeek Jinja) reject ANY role:system message after
+	// index 0 — including a second leading one. Unless the configured
+	// upstream declared the system_anywhere capability, system-channel turns
+	// (CanonicalSystem, plus CanonicalDeveloper when the developer-role
+	// capability is off) consolidate into exactly one leading system
+	// message: a turn following dialog turns is the policy-gated
+	// mid_conversation_system position loss, and a leading-only merge of
+	// multiple system turns is a sanctioned note under the same key.
+	rendered := make([]ChatMessage, 0, len(request.Turns))
+	systemChannel := make([]bool, 0, len(request.Turns))
 	for _, turn := range request.Turns {
 		switch turn.Role {
 		case CanonicalSystem:
@@ -1678,18 +1690,22 @@ func RenderChatRequest(
 			if err != nil {
 				return nil, report, err
 			}
-			out.Messages = append(out.Messages, message)
+			rendered = append(rendered, message)
+			systemChannel = append(systemChannel, true)
 
 		case CanonicalDeveloper:
 			role := ChatMessageRoleDeveloper
+			channel := false
 			if !capabilities.DeveloperRole {
 				role = ChatMessageRoleSystem
+				channel = true
 			}
 			message, err := canonicalTextTurnToChatMessage(turn, role)
 			if err != nil {
 				return nil, report, err
 			}
-			out.Messages = append(out.Messages, message)
+			rendered = append(rendered, message)
+			systemChannel = append(systemChannel, channel)
 
 		case CanonicalUser:
 			messages, err := canonicalUserTurnToChatMessages(
@@ -1701,15 +1717,77 @@ func RenderChatRequest(
 			if err != nil {
 				return nil, report, err
 			}
-			out.Messages = append(out.Messages, messages...)
+			for _, message := range messages {
+				rendered = append(rendered, message)
+				systemChannel = append(systemChannel, false)
+			}
 
 		case CanonicalAssistant:
 			message, err := canonicalAssistantTurnToChatMessage(turn)
 			if err != nil {
 				return nil, report, err
 			}
-			out.Messages = append(out.Messages, message)
+			rendered = append(rendered, message)
+			systemChannel = append(systemChannel, false)
 		}
+	}
+
+	if capabilities.SystemAnywhere {
+		// Fidelity mode for upstreams that accept system messages
+		// anywhere: positional rendering exactly as decoded, no report
+		// entries.
+		out.Messages = rendered
+	} else {
+		var (
+			leading   []ChatMessage // system-channel messages before any dialog turn
+			midDialog []ChatMessage // system-channel messages after a dialog turn
+			dialog    []ChatMessage
+		)
+		sawDialog := false
+		for i, message := range rendered {
+			if !systemChannel[i] {
+				sawDialog = true
+				dialog = append(dialog, message)
+				continue
+			}
+			if sawDialog {
+				midDialog = append(midDialog, message)
+			} else {
+				leading = append(leading, message)
+			}
+		}
+		switch {
+		case len(midDialog) > 0:
+			// The position/timing of system-channel content following
+			// dialog turns cannot survive; the consolidation is the
+			// approved loss.
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureMidConversationSystem,
+				"messages[]",
+				"mid-conversation system turns cannot keep their position in a chat request; system-channel turns consolidate into one leading system message (position/timing lost, content and authority preserved)",
+			); err != nil {
+				return nil, report, err
+			}
+			out.Messages = append(out.Messages, joinChatSystemMessages(leading, midDialog))
+		case len(leading) > 1:
+			// Leading-only consolidation: open-weights templates reject a
+			// second system message even at index 1, so the merge is
+			// unconditional — but sanctioned and observable, never silent.
+			if err := report.Note(
+				FeatureMidConversationSystem,
+				"messages[]",
+				"multiple leading system turns consolidate into one leading system message",
+			); err != nil {
+				return nil, report, err
+			}
+			out.Messages = append(out.Messages, joinChatSystemMessages(leading, nil))
+		case len(leading) == 1:
+			// The common single-leading-system case renders exactly one
+			// system message at index 0 with its original blocks.
+			out.Messages = append(out.Messages, leading[0])
+		}
+		out.Messages = append(out.Messages, dialog...)
 	}
 
 	// A source request with no Chat-representable messages is a

@@ -16,6 +16,7 @@ individual keys via `-transcode-allow-loss`.
 | `request_truncation` | the Responses truncation request field cannot be reproduced in the target request |
 | `multiple_system_turns` | multiple system turns cannot be expressed in the target's single system/instructions shape |
 | `system_non_text_content` | non-text system prompt content cannot be expressed in the target's system/instructions shape |
+| `mid_conversation_system` | mid-conversation system turns cannot keep their position in a chat request; under this permission system-channel turns consolidate into one leading system message (position/timing lost, content and authority preserved), and leading-only consolidation of multiple system turns is a sanctioned note under the same key |
 | `tool_schema_strictness` | the source tool schema has no strictness semantic; the Responses function-tool contract requires explicit strict, emitted as strict:false under this permission |
 | `tool_result_error_status` | the tool result error status cannot be reproduced in the target; the permissive encoding is the visible error_status_prefix text |
 | `tool_result_multimodal_content` | multimodal tool-result content cannot be carried by a Chat tool message; under this permission it is encoded as the tool_result_json_envelope text |

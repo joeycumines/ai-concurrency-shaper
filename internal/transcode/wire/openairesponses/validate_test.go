@@ -492,9 +492,6 @@ func TestOutputItemValidateBranches(t *testing.T) {
 	}
 }
 
-//go:fix inline
-func stringP(s string) *string { return new(s) }
-
 // TestFunctionCallOutputResultBranches covers the result item's type and
 // status rejection branches.
 func TestFunctionCallOutputResultBranches(t *testing.T) {
