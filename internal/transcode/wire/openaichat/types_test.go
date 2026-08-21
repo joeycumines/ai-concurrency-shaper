@@ -104,7 +104,7 @@ func TestMessageValidateRoleConditional(t *testing.T) {
 	// union, reported as a typed decode rejection.
 	message := Message{
 		Role:                 MessageRoleTool,
-		ChatAssistantMessage: &ChatAssistantMessage{Refusal: stringPtr("no")},
+		ChatAssistantMessage: &ChatAssistantMessage{Refusal: new("no")},
 	}
 	err := message.Validate()
 	if err == nil {
@@ -117,14 +117,15 @@ func TestMessageValidateRoleConditional(t *testing.T) {
 	// Tool-only fields on a user-role message are likewise contradictory.
 	user := Message{
 		Role:            MessageRoleUser,
-		ChatToolMessage: &ChatToolMessage{ToolCallID: stringPtr("t1")},
+		ChatToolMessage: &ChatToolMessage{ToolCallID: new("t1")},
 	}
 	if err := user.Validate(); err == nil {
 		t.Fatal("user message with tool_call_id accepted")
 	}
 }
 
-func stringPtr(s string) *string { return &s }
+//go:fix inline
+func stringPtr(s string) *string { return new(s) }
 
 func TestToolValidate(t *testing.T) {
 	if err := (Tool{Type: ToolTypeFunction, Function: &ToolFunction{Name: "f"}}).Validate(); err != nil {
@@ -186,7 +187,7 @@ func TestMessageValidateBranches(t *testing.T) {
 	msg := Message{
 		Role: MessageRoleAssistant,
 		ChatAssistantMessage: &ChatAssistantMessage{
-			ToolCalls: []MessageToolCall{{Type: "function", Function: ToolCallFunction{Name: stringPtr("f"), Arguments: "{}"}}},
+			ToolCalls: []MessageToolCall{{Type: "function", Function: ToolCallFunction{Name: new("f"), Arguments: "{}"}}},
 		},
 	}
 	if err := msg.Validate(); err == nil {
@@ -196,7 +197,7 @@ func TestMessageValidateBranches(t *testing.T) {
 	msg = Message{
 		Role: MessageRoleAssistant,
 		ChatAssistantMessage: &ChatAssistantMessage{
-			ToolCalls: []MessageToolCall{{Type: "bogus", ID: stringPtr("t"), Function: ToolCallFunction{Name: stringPtr("f"), Arguments: "{}"}}},
+			ToolCalls: []MessageToolCall{{Type: "bogus", ID: new("t"), Function: ToolCallFunction{Name: new("f"), Arguments: "{}"}}},
 		},
 	}
 	if err := msg.Validate(); err == nil {

@@ -2846,6 +2846,30 @@ func (e *nonRetryableTestError) IsNonRetryable() bool {
 	return true
 }
 
+// TestIsNonRetryableTraversesMultiUnwrap pins the multi-error unwrap form:
+// a non-retryable marker nested inside errors.Join / a multi-%w tree must be
+// detected, exactly as errors.Is traverses Unwrap() []error. A missed marker
+// would cause a local defect to be retried and falsely trip the breaker.
+func TestIsNonRetryableTraversesMultiUnwrap(t *testing.T) {
+	marker := &nonRetryableTestError{err: errors.New("signing failed")}
+	// Multi-error unwrap (errors.Join / fmt.Errorf with multiple %w).
+	joined := errors.Join(errors.New("transport: connection reset"), marker)
+	if !IsNonRetryable(joined) {
+		t.Fatal("a non-retryable marker joined with other errors must be detected")
+	}
+	// Single-error unwrap still detected.
+	if !IsNonRetryable(marker) {
+		t.Fatal("a directly-marked error must be detected")
+	}
+	// A retryable transport error (no marker anywhere) must not be.
+	if IsNonRetryable(errors.Join(errors.New("transport: reset"), errors.New("upstream 500"))) {
+		t.Fatal("a plain retryable transport error must not be treated as non-retryable")
+	}
+	if IsNonRetryable(nil) {
+		t.Fatal("nil must not be non-retryable")
+	}
+}
+
 // TestSignerErrorBodyTooLargeReturnsTypedError pins the body-too-large
 // branch: a non-retryable local defect (e.g. a signing failure) must return
 // its own typed error, never a fabricated context.Canceled, and must not

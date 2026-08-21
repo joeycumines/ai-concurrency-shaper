@@ -23,6 +23,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -43,17 +44,23 @@ type nonRetryableError interface {
 }
 
 // IsNonRetryable reports whether the error (or anything it wraps) must not
-// be retried.
+// be retried. Both single-error and multi-error unwrap forms are followed
+// (Unwrap() error and Unwrap() []error), so a non-retryable marker nested
+// inside errors.Join / a multi-%w tree is detected — mirroring errors.Is.
 func IsNonRetryable(err error) bool {
-	for current := err; current != nil; {
-		if marker, ok := current.(nonRetryableError); ok && marker.IsNonRetryable() {
+	if err == nil {
+		return false
+	}
+	if marker, ok := err.(nonRetryableError); ok && marker.IsNonRetryable() {
+		return true
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() []error }:
+		if slices.ContainsFunc(u.Unwrap(), IsNonRetryable) {
 			return true
 		}
-		unwrapper, ok := current.(interface{ Unwrap() error })
-		if !ok {
-			return false
-		}
-		current = unwrapper.Unwrap()
+	case interface{ Unwrap() error }:
+		return IsNonRetryable(u.Unwrap())
 	}
 	return false
 }

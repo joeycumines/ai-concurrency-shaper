@@ -37,8 +37,8 @@ func TestChatStreamAccumulationIsNonQuadratic(t *testing.T) {
 	runtime.GC()
 	var before runtime.MemStats
 	runtime.ReadMemStats(&before)
-	for i := 0; i < chunks; i++ {
-		if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: str(delta)}, nil)); err != nil {
+	for range chunks {
+		if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new(delta)}, nil)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -48,7 +48,7 @@ func TestChatStreamAccumulationIsNonQuadratic(t *testing.T) {
 		t.Fatalf("allocated %d bytes for 10k x 100 B deltas — quadratic accumulation", allocated)
 	}
 
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("stop"))); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("stop"))); err != nil {
 		t.Fatal(err)
 	}
 	held, ok := state.releaseTerminal()
@@ -81,9 +81,9 @@ func TestChatStreamRepeatedLossesRecordedOnce(t *testing.T) {
 		1,
 		nil,
 	)
-	for i := 0; i < 3; i++ {
-		chunk := chatChunk(t, ChatStreamDelta{Content: str("x")}, nil)
-		chunk.ServiceTier = str("auto")
+	for range 3 {
+		chunk := chatChunk(t, ChatStreamDelta{Content: new("x")}, nil)
+		chunk.ServiceTier = new("auto")
 		chunk.Choices[0].LogProbs = &ChatChoiceLogprobs{
 			Content: []ChatTokenLogprob{},
 			Refusal: []ChatTokenLogprob{},
@@ -118,10 +118,10 @@ func TestChatStreamToolArgumentsCumulativeBound(t *testing.T) {
 	feed := func() error {
 		_, err := state.Convert(chatChunk(t, ChatStreamDelta{
 			ToolCalls: []ChatToolCallDelta{{
-				Index: intPtr(0),
-				ID:    str("call_1"),
+				Index: new(0),
+				ID:    new("call_1"),
 				Function: ChatToolCallFunction{
-					Name:      str("f"),
+					Name:      new("f"),
 					Arguments: fragment,
 				},
 			}},
@@ -129,7 +129,7 @@ func TestChatStreamToolArgumentsCumulativeBound(t *testing.T) {
 		return err
 	}
 	// 8 x 128 KiB = 1 MiB exactly: still within the bound.
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if err := feed(); err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}
@@ -159,12 +159,12 @@ func TestChatStreamTextCumulativeBound(t *testing.T) {
 		nil,
 	)
 	delta := strings.Repeat("x", 128*1024)
-	for i := 0; i < 8; i++ {
-		if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: str(delta)}, nil)); err != nil {
+	for i := range 8 {
+		if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new(delta)}, nil)); err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}
 	}
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: str(delta)}, nil)); err == nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new(delta)}, nil)); err == nil {
 		t.Fatal("unbounded text accepted")
 	} else {
 		var wireErr *UpstreamWireError
@@ -217,7 +217,7 @@ func TestResponsesStreamToolArgumentsCumulativeBound(t *testing.T) {
 		})
 		return err
 	}
-	for i := int64(0); i < 8; i++ {
+	for i := range int64(8) {
 		if err := feed(2 + i); err != nil {
 			t.Fatalf("delta %d: %v", i, err)
 		}
@@ -251,9 +251,9 @@ func TestStreamTotalStateBound(t *testing.T) {
 		// Each part stays under the per-part bound; the sum crosses the
 		// exchange total.
 		delta := strings.Repeat("x", 900*1024)
-		content := ChatStreamDelta{Content: str(delta)}
-		refusal := ChatStreamDelta{Refusal: str(delta)}
-		for i := 0; i < 5; i++ {
+		content := ChatStreamDelta{Content: new(delta)}
+		refusal := ChatStreamDelta{Refusal: new(delta)}
+		for i := range 5 {
 			var err error
 			if i%2 == 0 {
 				_, err = state.Convert(chatChunk(t, content, nil))
@@ -285,7 +285,7 @@ func TestStreamTotalStateBound(t *testing.T) {
 			1,
 		)
 		feedAnthropicCreated(t, state, 0)
-		for i := 0; i < maxStreamOutputItems; i++ {
+		for i := range maxStreamOutputItems {
 			if _, err := state.Convert(ResponseOutputItemAddedEvent{
 				EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: int64(i + 1)},
 				OutputIndex: int64(i),
@@ -327,7 +327,7 @@ func TestStreamTotalStateBound(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		for i := 0; i < maxStreamPartsPerItem; i++ {
+		for i := range maxStreamPartsPerItem {
 			if _, err := state.Convert(ResponseContentPartAddedEvent{
 				EventBase:    EventBase{Type: "response.content_part.added", SequenceNumber: int64(i + 2)},
 				ItemID:       "m1",
@@ -389,7 +389,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 	t.Run("conversion report entry cap", func(t *testing.T) {
 		report := ConversionReport{}
 		policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureResponseServiceTier: {}}}
-		for i := 0; i < maxStreamConversionReportEntries; i++ {
+		for i := range maxStreamConversionReportEntries {
 			if err := report.Lose(policy, FeatureResponseServiceTier, "x", "y"); err != nil {
 				t.Fatalf("entry %d: %v", i, err)
 			}
@@ -405,7 +405,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 		reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(strings.NewReader(""), 0, 0), &fixedConverter{}, 0, 0, 0)
 		frames := (maxStreamTerminalBatchBytes / (maxSSEFrameBytes - 64)) + 2
 		batch := convertedBatch{}
-		for i := 0; i < frames; i++ {
+		for range frames {
 			batch.Events = append(batch.Events, frameEvent{
 				Type: "x",
 				Data: bytes.Repeat([]byte("a"), maxSSEFrameBytes-64),
@@ -428,13 +428,13 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 			1,
 			nil,
 		)
-		for i := 0; i < maxStreamToolCalls; i++ {
+		for i := range maxStreamToolCalls {
 			chunk := chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
-				Index: intPtr(i),
-				ID:    str(fmt.Sprintf("call_%d", i)),
-				Type:  str("function"),
+				Index: new(i),
+				ID:    new(fmt.Sprintf("call_%d", i)),
+				Type:  new("function"),
 				Function: ChatToolCallFunction{
-					Name:      str("f"),
+					Name:      new("f"),
 					Arguments: "{}",
 				},
 			}}}, nil)
@@ -443,10 +443,10 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 			}
 		}
 		chunk := chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
-			Index:    intPtr(maxStreamToolCalls),
-			ID:       str("overflow"),
-			Type:     str("function"),
-			Function: ChatToolCallFunction{Name: str("f"), Arguments: "{}"},
+			Index:    new(maxStreamToolCalls),
+			ID:       new("overflow"),
+			Type:     new("function"),
+			Function: ChatToolCallFunction{Name: new("f"), Arguments: "{}"},
 		}}}, nil)
 		_, err := state.Convert(chunk)
 		var wireErr *UpstreamWireError
@@ -465,18 +465,18 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 			1,
 			nil,
 		)
-		for i := 0; i < maxStreamPartsPerItem; i++ {
+		for i := range maxStreamPartsPerItem {
 			var delta ChatStreamDelta
 			if i%2 == 0 {
-				delta = ChatStreamDelta{Content: str("x")}
+				delta = ChatStreamDelta{Content: new("x")}
 			} else {
-				delta = ChatStreamDelta{Refusal: str("x")}
+				delta = ChatStreamDelta{Refusal: new("x")}
 			}
 			if _, err := state.Convert(chatChunk(t, delta, nil)); err != nil {
 				t.Fatalf("part %d: %v", i, err)
 			}
 		}
-		_, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: str("x")}, nil))
+		_, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new("x")}, nil))
 		var wireErr *UpstreamWireError
 		if !errors.As(err, &wireErr) {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
@@ -569,7 +569,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 		}
 		delta := strings.Repeat("x", 128*1024)
 		var err error
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			_, err = state.Convert(ResponseTextDeltaEvent{
 				EventBase:    EventBase{Type: "response.output_text.delta", SequenceNumber: int64(i + 3)},
 				ItemID:       "m1",
@@ -605,7 +605,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 			1,
 		)
 		feedAnthropicCreated(t, state, 0)
-		for i := 0; i < maxStreamToolCalls; i++ {
+		for i := range maxStreamToolCalls {
 			if _, err := state.Convert(ResponseOutputItemAddedEvent{
 				EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: int64(i + 1)},
 				OutputIndex: int64(i),
@@ -658,8 +658,8 @@ func TestChatStreamReasoningReportRecordedOnce(t *testing.T) {
 			1,
 			nil,
 		)
-		for i := 0; i < 3; i++ {
-			if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: str("think")}, nil)); err != nil {
+		for i := range 3 {
+			if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: new("think")}, nil)); err != nil {
 				t.Fatalf("delta %d: %v", i, err)
 			}
 		}
@@ -677,8 +677,8 @@ func TestChatStreamReasoningReportRecordedOnce(t *testing.T) {
 			1,
 			nil,
 		)
-		for i := 0; i < 3; i++ {
-			if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: str("think")}, nil)); err != nil {
+		for i := range 3 {
+			if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: new("think")}, nil)); err != nil {
 				t.Fatalf("delta %d: %v", i, err)
 			}
 		}
@@ -703,7 +703,7 @@ func TestStreamToolSnapshotBytesCounted(t *testing.T) {
 	feedAnthropicCreated(t, state, 0)
 	snapshot := `{"x":"` + strings.Repeat("a", 500*1024) + `"}`
 	// 8 calls × 500 KiB snapshots = 4 MiB: exactly at the exchange total.
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if _, err := state.Convert(ResponseOutputItemAddedEvent{
 			EventBase:   EventBase{Type: "response.output_item.added", SequenceNumber: int64(i*3 + 1)},
 			OutputIndex: int64(i),

@@ -424,7 +424,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 					1,
 					nil,
 				)
-				_, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: stringPtr("think")}, nil))
+				_, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: new("think")}, nil))
 				return state.report, err
 			},
 		},

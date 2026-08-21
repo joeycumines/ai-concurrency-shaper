@@ -29,7 +29,8 @@ func chatChunk(t *testing.T, delta ChatStreamDelta, finish *string) ChatStreamRe
 	}
 }
 
-func str(v string) *string { return &v }
+//go:fix inline
+func str(v string) *string { return new(v) }
 
 func TestChatToResponsesTextStream(t *testing.T) {
 	state := newChatResponsesStreamState(
@@ -44,8 +45,8 @@ func TestChatToResponsesTextStream(t *testing.T) {
 
 	// Role + first content.
 	events, err := state.Convert(chatChunk(t, ChatStreamDelta{
-		Role:    str("assistant"),
-		Content: str("Hello"),
+		Role:    new("assistant"),
+		Content: new("Hello"),
 	}, nil))
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +80,7 @@ func TestChatToResponsesTextStream(t *testing.T) {
 	}
 
 	// Second content delta.
-	events, err = state.Convert(chatChunk(t, ChatStreamDelta{Content: str(" world")}, nil))
+	events, err = state.Convert(chatChunk(t, ChatStreamDelta{Content: new(" world")}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +93,7 @@ func TestChatToResponsesTextStream(t *testing.T) {
 	}
 
 	// Finish.
-	events, err = state.Convert(chatChunk(t, ChatStreamDelta{}, str("stop")))
+	events, err = state.Convert(chatChunk(t, ChatStreamDelta{}, new("stop")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,10 +150,10 @@ func TestChatToResponsesIncomplete(t *testing.T) {
 		1,
 		nil,
 	)
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: str("x")}, nil)); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new("x")}, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("length"))); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("length"))); err != nil {
 		t.Fatal(err)
 	}
 	held, ok := state.releaseTerminal()
@@ -182,10 +183,10 @@ func TestChatToResponsesFunctionCallStream(t *testing.T) {
 	// First fragment: index + id + name. The first chunk also carries
 	// response.created + response.in_progress.
 	events, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
-		Index: intPtr(0),
-		ID:    str("call_1"),
+		Index: new(0),
+		ID:    new("call_1"),
 		Function: ChatToolCallFunction{
-			Name:      str("get_weather"),
+			Name:      new("get_weather"),
 			Arguments: `{"loc`,
 		},
 	}}}, nil))
@@ -220,7 +221,7 @@ func TestChatToResponsesFunctionCallStream(t *testing.T) {
 
 	// Second fragment: arguments continuation only.
 	events, err = state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
-		Index: intPtr(0),
+		Index: new(0),
 		Function: ChatToolCallFunction{
 			Arguments: `ation":"Tokyo"}`,
 		},
@@ -240,7 +241,7 @@ func TestChatToResponsesFunctionCallStream(t *testing.T) {
 	}
 
 	// Finish with tool_calls.
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("tool_calls"))); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("tool_calls"))); err != nil {
 		t.Fatal(err)
 	}
 	held, ok := state.releaseTerminal()
@@ -288,14 +289,14 @@ func TestChatToResponsesEmptyToolArguments(t *testing.T) {
 	)
 	// Tool call with no arguments at all.
 	_, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
-		Index:    intPtr(0),
-		ID:       str("call_1"),
-		Function: ChatToolCallFunction{Name: str("f")},
+		Index:    new(0),
+		ID:       new("call_1"),
+		Function: ChatToolCallFunction{Name: new("f")},
 	}}}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("tool_calls"))); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("tool_calls"))); err != nil {
 		t.Fatal(err)
 	}
 	held, _ := state.releaseTerminal()
@@ -326,14 +327,14 @@ func TestChatToResponsesNonObjectArgumentsPreserved(t *testing.T) {
 				nil,
 			)
 			if _, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
-				Index:    intPtr(0),
-				ID:       str("call_1"),
-				Type:     str("function"),
-				Function: ChatToolCallFunction{Name: str("f"), Arguments: arguments},
+				Index:    new(0),
+				ID:       new("call_1"),
+				Type:     new("function"),
+				Function: ChatToolCallFunction{Name: new("f"), Arguments: arguments},
 			}}}, nil)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("tool_calls"))); err != nil {
+			if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("tool_calls"))); err != nil {
 				t.Fatal(err)
 			}
 			// The finish holds the item-closing events until the [DONE]
@@ -372,8 +373,8 @@ func TestChatToResponsesBufferedToolStartUntilIdentity(t *testing.T) {
 	// Name arrives first, id later: output_item.added must be withheld. The
 	// first chunk still carries response.created + response.in_progress.
 	events, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
-		Index:    intPtr(0),
-		Function: ChatToolCallFunction{Name: str("f"), Arguments: `{"x":`},
+		Index:    new(0),
+		Function: ChatToolCallFunction{Name: new("f"), Arguments: `{"x":`},
 	}}}, nil))
 	if err != nil {
 		t.Fatal(err)
@@ -389,8 +390,8 @@ func TestChatToResponsesBufferedToolStartUntilIdentity(t *testing.T) {
 	}
 	// id arrives now. The buffered arguments replay as one delta.
 	events, err = state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
-		Index: intPtr(0),
-		ID:    str("call_1"),
+		Index: new(0),
+		ID:    new("call_1"),
 		Function: ChatToolCallFunction{
 			Arguments: `1}`,
 		},
@@ -435,7 +436,7 @@ func TestChatToResponsesProviderReasoningDropped(t *testing.T) {
 		1,
 		nil,
 	)
-	_, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: str("think")}, nil))
+	_, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: new("think")}, nil))
 	if err == nil {
 		t.Fatal("expected reasoning rejection under strict policy")
 	}
@@ -460,8 +461,8 @@ func TestChatToResponsesProviderReasoningDropped(t *testing.T) {
 		nil,
 	)
 	events, err := state.Convert(chatChunk(t, ChatStreamDelta{
-		Content:   str("answer"),
-		Reasoning: str("think"),
+		Content:   new("answer"),
+		Reasoning: new("think"),
 	}, nil))
 	if err != nil {
 		t.Fatal(err)
@@ -486,7 +487,7 @@ func TestChatToResponsesRefusal(t *testing.T) {
 		1,
 		nil,
 	)
-	events, err := state.Convert(chatChunk(t, ChatStreamDelta{Refusal: str("I cannot")}, nil))
+	events, err := state.Convert(chatChunk(t, ChatStreamDelta{Refusal: new("I cannot")}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -504,7 +505,7 @@ func TestChatToResponsesRefusal(t *testing.T) {
 	if _, ok := events[4].(ResponseRefusalDeltaEvent); !ok {
 		t.Fatalf("event 4 = %T", events[4])
 	}
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("stop"))); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("stop"))); err != nil {
 		t.Fatal(err)
 	}
 	held, _ := state.releaseTerminal()
@@ -543,8 +544,8 @@ func TestChatToResponsesMultipleChoicesRejected(t *testing.T) {
 	chunk := ChatStreamResponse{
 		ID: "x", Object: "chat.completion.chunk", Created: 1, Model: "m",
 		Choices: []ChatChoice{
-			{Index: 0, Delta: &ChatStreamDelta{Content: str("a")}},
-			{Index: 1, Delta: &ChatStreamDelta{Content: str("b")}},
+			{Index: 0, Delta: &ChatStreamDelta{Content: new("a")}},
+			{Index: 1, Delta: &ChatStreamDelta{Content: new("b")}},
 		},
 	}
 	if _, err := state.Convert(chunk); err == nil {
@@ -1152,7 +1153,7 @@ func TestChatToResponsesUnstartedToolCallRejected(t *testing.T) {
 	}, nil)); err != nil {
 		t.Fatal(err)
 	}
-	_, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("tool_calls")))
+	_, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("tool_calls")))
 	if err == nil {
 		t.Fatal("finish accepted an unstarted tool call")
 	}
@@ -1171,8 +1172,8 @@ func TestChatToResponsesUnstartedToolCallRejected(t *testing.T) {
 		ID: "c", Model: "m", Created: 1,
 		Choices: []ChatChoice{{Index: 0, Delta: &ChatStreamDelta{
 			ToolCalls: []ChatToolCallDelta{
-				{ID: str("call_a"), Function: ChatToolCallFunction{Name: str("f_a"), Arguments: `{}`}},
-				{ID: str("call_b"), Function: ChatToolCallFunction{Name: str("f_b"), Arguments: `{}`}},
+				{ID: new("call_a"), Function: ChatToolCallFunction{Name: new("f_a"), Arguments: `{}`}},
+				{ID: new("call_b"), Function: ChatToolCallFunction{Name: new("f_b"), Arguments: `{}`}},
 			},
 		}}},
 	}
@@ -1208,18 +1209,18 @@ func TestChatToResponsesToolCallIndexCollision(t *testing.T) {
 	)
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
 		ToolCalls: []ChatToolCallDelta{{
-			Index:    intPtr(0),
-			ID:       str("call_a"),
-			Function: ChatToolCallFunction{Name: str("f_a"), Arguments: `{}`},
+			Index:    new(0),
+			ID:       new("call_a"),
+			Function: ChatToolCallFunction{Name: new("f_a"), Arguments: `{}`},
 		}},
 	}, nil)); err != nil {
 		t.Fatal(err)
 	}
 	_, err := state.Convert(chatChunk(t, ChatStreamDelta{
 		ToolCalls: []ChatToolCallDelta{{
-			Index:    intPtr(0),
-			ID:       str("call_b"),
-			Function: ChatToolCallFunction{Name: str("f_b"), Arguments: `{}`},
+			Index:    new(0),
+			ID:       new("call_b"),
+			Function: ChatToolCallFunction{Name: new("f_b"), Arguments: `{}`},
 		}},
 	}, nil))
 	if err == nil {
@@ -1243,18 +1244,18 @@ func TestChatToResponsesAmbiguousFragmentRejected(t *testing.T) {
 	// Two identified calls at distinct indexes.
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
 		ToolCalls: []ChatToolCallDelta{{
-			Index:    intPtr(0),
-			ID:       str("call_a"),
-			Function: ChatToolCallFunction{Name: str("f_a"), Arguments: `{}`},
+			Index:    new(0),
+			ID:       new("call_a"),
+			Function: ChatToolCallFunction{Name: new("f_a"), Arguments: `{}`},
 		}},
 	}, nil)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{
 		ToolCalls: []ChatToolCallDelta{{
-			Index:    intPtr(1),
-			ID:       str("call_b"),
-			Function: ChatToolCallFunction{Name: str("f_b"), Arguments: `{}`},
+			Index:    new(1),
+			ID:       new("call_b"),
+			Function: ChatToolCallFunction{Name: new("f_b"), Arguments: `{}`},
 		}},
 	}, nil)); err != nil {
 		t.Fatal(err)
@@ -1369,7 +1370,7 @@ func TestChatStreamUnknownFinishReasonRejected(t *testing.T) {
 		1,
 		nil,
 	)
-	_, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("mystery_reason")))
+	_, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("mystery_reason")))
 	if err == nil {
 		t.Fatal("unknown finish reason accepted")
 	}

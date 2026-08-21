@@ -845,7 +845,7 @@ func RenderResponsesResponse(
 			value := int64(*echo.MaxOutputTokens)
 			envelope.MaxOutputTokens = &value
 		}
-		envelope.ParallelToolCalls = boolPtr(echo.ParallelToolCalls)
+		envelope.ParallelToolCalls = new(echo.ParallelToolCalls)
 		envelope.PreviousResponseID = echo.PreviousResponseID
 		envelope.Store = echo.Store
 		envelope.Temperature = &echo.Temperature
@@ -1052,19 +1052,19 @@ func RenderMessagesResponse(
 	// unless a custom sequence was used).
 	switch response.Stop.Reason {
 	case CanonicalStopEndTurn:
-		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonEndTurn)
+		out.StopReason = new(AnthropicStopReasonEndTurn)
 	case CanonicalStopMaxTokens:
-		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonMaxTokens)
+		out.StopReason = new(AnthropicStopReasonMaxTokens)
 	case CanonicalStopStopSequence:
-		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonStopSequence)
+		out.StopReason = new(AnthropicStopReasonStopSequence)
 		out.StopSequence = &response.Stop.Sequence
 	case CanonicalStopToolUse:
-		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonToolUse)
+		out.StopReason = new(AnthropicStopReasonToolUse)
 	case CanonicalStopRefusal:
-		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonRefusal)
+		out.StopReason = new(AnthropicStopReasonRefusal)
 		out.StopDetails = &AnthropicStopDetails{Type: "refusal"}
 	default:
-		out.StopReason = anthropicStopReasonPtr(AnthropicStopReasonEndTurn)
+		out.StopReason = new(AnthropicStopReasonEndTurn)
 	}
 
 	// Anthropic usage semantics: input_tokens + cache_creation_input_tokens

@@ -1078,7 +1078,7 @@ func (s *chatResponsesStreamState) baseEnvelope(status string) ResponseEnvelope 
 			value := int64(*s.echo.MaxOutputTokens)
 			envelope.MaxOutputTokens = &value
 		}
-		envelope.ParallelToolCalls = boolPtr(s.echo.ParallelToolCalls)
+		envelope.ParallelToolCalls = new(s.echo.ParallelToolCalls)
 		envelope.PreviousResponseID = s.echo.PreviousResponseID
 		envelope.Store = s.echo.Store
 		envelope.Temperature = &s.echo.Temperature
@@ -1980,7 +1980,7 @@ func (s *anthropicResponsesStreamState) maybeStartToolBlock(
 	name := pending.name
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockStart,
-		Index: intPtr(int(pending.blockIndex)),
+		Index: new(int(pending.blockIndex)),
 		ContentBlock: &AnthropicContentBlock{
 			Type:  AnthropicContentBlockTypeToolUse,
 			ID:    &callID,
@@ -2147,7 +2147,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		partial := suffix
 		events = append(events, AnthropicStreamEvent{
 			Type:  AnthropicStreamEventTypeContentBlockDelta,
-			Index: intPtr(int(pending.blockIndex)),
+			Index: new(int(pending.blockIndex)),
 			Delta: &AnthropicStreamDelta{
 				Type:        AnthropicStreamDeltaTypeInputJSONDelta,
 				PartialJSON: &partial,
@@ -2167,7 +2167,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 
 	events = append(events, AnthropicStreamEvent{
 		Type:  AnthropicStreamEventTypeContentBlockStop,
-		Index: intPtr(int(pending.blockIndex)),
+		Index: new(int(pending.blockIndex)),
 	})
 	// The block is now closed; the terminal must not stop it again.
 	delete(s.pendingToolStart, call.ID)
@@ -2349,10 +2349,10 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 		// Refusal becomes ordinary text content.
 		events = append(events, AnthropicStreamEvent{
 			Type:  AnthropicStreamEventTypeContentBlockStart,
-			Index: intPtr(int(s.blockIndex)),
+			Index: new(int(s.blockIndex)),
 			ContentBlock: &AnthropicContentBlock{
 				Type: AnthropicContentBlockTypeText,
-				Text: stringPtr(""),
+				Text: new(""),
 			},
 		})
 		if err := s.budget.addPart(); err != nil {
@@ -2407,7 +2407,7 @@ func (s *anthropicResponsesStreamState) textDelta(
 	text := event.Delta
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,
-		Index: intPtr(int(index)),
+		Index: new(int(index)),
 		Delta: &AnthropicStreamDelta{
 			Type: AnthropicStreamDeltaTypeTextDelta,
 			Text: &text,
@@ -2466,7 +2466,7 @@ func (s *anthropicResponsesStreamState) contentPartDone(
 	delete(s.partBlocks, key)
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockStop,
-		Index: intPtr(int(index)),
+		Index: new(int(index)),
 	}}, nil
 }
 
@@ -2530,7 +2530,7 @@ func (s *anthropicResponsesStreamState) functionArgumentsDelta(
 	partial := event.Delta
 	out := []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,
-		Index: intPtr(int(pending.blockIndex)),
+		Index: new(int(pending.blockIndex)),
 		Delta: &AnthropicStreamDelta{
 			Type:        AnthropicStreamDeltaTypeInputJSONDelta,
 			PartialJSON: &partial,
@@ -2579,7 +2579,7 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 		partial := suffix
 		events = append(events, AnthropicStreamEvent{
 			Type:  AnthropicStreamEventTypeContentBlockDelta,
-			Index: intPtr(int(pending.blockIndex)),
+			Index: new(int(pending.blockIndex)),
 			Delta: &AnthropicStreamDelta{
 				Type:        AnthropicStreamDeltaTypeInputJSONDelta,
 				PartialJSON: &partial,
@@ -2621,7 +2621,7 @@ func (s *anthropicResponsesStreamState) refusalDelta(
 	text := event.Delta
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,
-		Index: intPtr(int(index)),
+		Index: new(int(index)),
 		Delta: &AnthropicStreamDelta{
 			Type: AnthropicStreamDeltaTypeTextDelta,
 			Text: &text,
@@ -2947,7 +2947,7 @@ func (s *anthropicResponsesStreamState) terminalEvents(
 		{
 			Type: AnthropicStreamEventTypeMessageDelta,
 			Delta: &AnthropicStreamDelta{
-				StopReason: anthropicStopReasonPtr(stopReasonToAnthropic(stop)),
+				StopReason: new(stopReasonToAnthropic(stop)),
 			},
 			Usage: s.usage,
 		},
@@ -3043,7 +3043,7 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 	stop CanonicalStopReason,
 	usage *ResponsesUsage,
 ) error {
-	s.message.StopReason = anthropicStopReasonPtr(stopReasonToAnthropic(stop))
+	s.message.StopReason = new(stopReasonToAnthropic(stop))
 	converted, err := responsesUsageToAnthropicUsage(usage)
 	if err != nil {
 		// A source-total mismatch is corrupt upstream wire; an int-width
@@ -3266,8 +3266,10 @@ func partTypeName(part ResponsesStreamContentPart) string {
 }
 
 // anthropicStopReasonPtr returns a pointer to the stop reason.
+//
+//go:fix inline
 func anthropicStopReasonPtr(reason AnthropicStopReason) *AnthropicStopReason {
-	return &reason
+	return new(reason)
 }
 
 // checkedInt64ToInt converts an int64 token count to int with an explicit

@@ -46,10 +46,7 @@ func FuzzTranscodeHandlerMalformedOrTruncatedStream(f *testing.F) {
 			t.Skip()
 		}
 
-		cut := int(cutAt)
-		if cut > len(upstreamBytes) {
-			cut = len(upstreamBytes)
-		}
+		cut := min(int(cutAt), len(upstreamBytes))
 		wire := upstreamBytes[:cut]
 
 		upstream := httptest.NewServer(http.HandlerFunc(
@@ -59,10 +56,7 @@ func FuzzTranscodeHandlerMalformedOrTruncatedStream(f *testing.F) {
 
 				size := int(chunkSize%32) + 1
 				for len(wire) != 0 {
-					n := size
-					if n > len(wire) {
-						n = len(wire)
-					}
+					n := min(size, len(wire))
 					_, _ = w.Write(wire[:n])
 					wire = wire[n:]
 					if flusher, ok := w.(http.Flusher); ok {
@@ -252,7 +246,7 @@ func parseCompleteSSE(data []byte) ([]sseEvent, []byte, error) {
 		i += rel + 2
 
 		var event sseEvent
-		for _, line := range bytes.Split(frame, []byte("\n")) {
+		for line := range bytes.SplitSeq(frame, []byte("\n")) {
 			switch {
 			case bytes.HasPrefix(line, []byte("event:")):
 				event.Event = strings.TrimSpace(strings.TrimPrefix(string(line), "event:"))

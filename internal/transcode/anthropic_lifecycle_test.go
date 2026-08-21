@@ -1626,7 +1626,7 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 			OutputIndex: 0,
 			Item: &ResponsesFunctionCallOutputResultItem{
 				ID: "r1", Type: "function_call_output", Status: ResponsesItemCompleted,
-				CallID: "call_1", Output: ResponsesFunctionOutput{Text: stringPtr("ok")},
+				CallID: "call_1", Output: ResponsesFunctionOutput{Text: new("ok")},
 			},
 		})
 		var unsupported *UnsupportedFeatureError

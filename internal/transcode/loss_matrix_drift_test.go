@@ -56,7 +56,7 @@ func TestLossMatrixRegistryComplete(t *testing.T) {
 		}
 	}
 	// Every matrix row names a registered key.
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		if !strings.HasPrefix(line, "| `") {
 			continue
 		}

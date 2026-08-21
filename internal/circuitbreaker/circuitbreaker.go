@@ -764,10 +764,7 @@ func (b *Breaker) currentPenaltyLocked() time.Duration {
 	// by construction (review-z commit 5).
 	c := b.consecutive
 	if c > 0 {
-		maxConsecutive := int64(b.cfg.maxPenalty/b.cfg.basePenalty) - 1
-		if maxConsecutive < 0 {
-			maxConsecutive = 0
-		}
+		maxConsecutive := max(int64(b.cfg.maxPenalty/b.cfg.basePenalty)-1, 0)
 		if c > maxConsecutive {
 			c = maxConsecutive
 		}

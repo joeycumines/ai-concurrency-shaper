@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"mime"
 	"net/http"
@@ -183,9 +184,7 @@ func cloneModelMappings(m map[string]ModelMapping) map[string]ModelMapping {
 		return nil
 	}
 	out := make(map[string]ModelMapping, len(m))
-	for key, value := range m {
-		out[key] = value
-	}
+	maps.Copy(out, m)
 	return out
 }
 
@@ -768,9 +767,25 @@ func (h *TranscodeHandler) jsonResponse(
 	}
 	switch {
 	case writeErr != nil && r.Context().Err() != nil && isContextCancellationError(writeErr):
-		h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
+		h.recordOutcome(r, Outcome{
+			// The upstream did respond (headers were committed with the
+			// 2xx status); the client abandoned the exchange mid-write. The
+			// completed upstream success is retained so breaker recovery and
+			// monitoring still see it, matching the sibling error writers.
+			UpstreamAttempted: true,
+			UpstreamStatus:    Optional[int]{Value: resp.StatusCode, Set: true},
+			Provenance:        ProvenanceClientAbort,
+			ClientAborted:     true,
+		})
 	case writeErr != nil:
-		h.recordOutcome(r, Outcome{Provenance: ProvenanceDownstreamWriteError})
+		h.recordOutcome(r, Outcome{
+			// A downstream write failure (e.g. a short write) after a
+			// successful upstream response retains the upstream success fact;
+			// only the provenance changes, exactly like the error writers.
+			UpstreamAttempted: true,
+			UpstreamStatus:    Optional[int]{Value: resp.StatusCode, Set: true},
+			Provenance:        ProvenanceDownstreamWriteError,
+		})
 	default:
 		h.recordOutcome(r, Outcome{
 			UpstreamAttempted:  true,
@@ -1507,7 +1522,7 @@ func isUpgradeRequest(r *http.Request) bool {
 		return true
 	}
 	for _, value := range r.Header.Values("Connection") {
-		for _, token := range strings.Split(value, ",") {
+		for token := range strings.SplitSeq(value, ",") {
 			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
 				return true
 			}

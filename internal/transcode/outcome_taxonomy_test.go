@@ -224,7 +224,7 @@ func TestSigningTransportSignsEveryAttempt(t *testing.T) {
 
 	// Three sequential requests through the same transport: the signer must
 	// run exactly once per attempt and the original must stay untouched.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		resp, err := transport.RoundTrip(original)
 		if err != nil {
 			t.Fatal(err)

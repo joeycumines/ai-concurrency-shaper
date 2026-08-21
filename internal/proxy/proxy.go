@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -1887,7 +1888,14 @@ func classifyTranscodeExchange(
 		result.localFailure = true
 	}
 	result.localFailure = result.localFailure || outcome.LocalFailure
+	// A client-aborted exchange is never breaker SUCCESS, even when the
+	// upstream answered 2xx: a client is not a health probe, and crediting a
+	// partial stream could reset a real failure streak. This mirrors the
+	// native path's !clientAborted guard so classification is self-contained
+	// and does not depend on the recorder's independent rec.aborted coupling
+	// in serveTranscodeHandler (review-z commit 4).
 	result.upstreamSuccess = !result.upstreamFailure &&
+		!result.clientAborted &&
 		outcome.UpstreamStatus.Set &&
 		outcome.UpstreamStatus.Value >= http.StatusOK &&
 		outcome.UpstreamStatus.Value < http.StatusMultipleChoices
@@ -2916,9 +2924,7 @@ func validQueryName(s string) bool {
 func cloneModelMap(m transcode.ModelMap) transcode.ModelMap {
 	if m.Exact != nil {
 		cloned := make(map[string]transcode.ModelMapping, len(m.Exact))
-		for key, value := range m.Exact {
-			cloned[key] = value
-		}
+		maps.Copy(cloned, m.Exact)
 		m.Exact = cloned
 	}
 	return m

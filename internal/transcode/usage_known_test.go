@@ -220,7 +220,7 @@ func TestUsageStreamingDetailObjectsPresence(t *testing.T) {
 // strict policy and converts under an approved usage_timing loss recorded
 // exactly once per stream (review-k finding 6).
 func TestUsageStreamingChatToResponsesLossGatedOnce(t *testing.T) {
-	chunk := chatChunk(t, ChatStreamDelta{Content: str("x")}, nil)
+	chunk := chatChunk(t, ChatStreamDelta{Content: new("x")}, nil)
 	chunk.Usage = &ChatLLMUsage{
 		PromptTokens:     10,
 		CompletionTokens: 2,

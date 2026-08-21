@@ -87,4 +87,11 @@ func TestHandlerShortWriteNotCleanCompletion(t *testing.T) {
 	if outcomes[0].Provenance != ProvenanceDownstreamWriteError {
 		t.Fatalf("provenance = %s, want downstream_write_error", outcomes[0].Provenance)
 	}
+	// The upstream did return a definitive 2xx and its headers were already
+	// committed: the successful upstream fact is retained so breaker recovery
+	// and monitoring still see it, exactly like the sibling error writers.
+	if !outcomes[0].UpstreamAttempted || !outcomes[0].UpstreamStatus.Set ||
+		outcomes[0].UpstreamStatus.Value != http.StatusOK {
+		t.Fatalf("downstream write failure must retain the upstream 200 fact: %+v", outcomes[0])
+	}
 }

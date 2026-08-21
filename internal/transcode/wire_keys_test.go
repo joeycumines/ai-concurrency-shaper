@@ -185,16 +185,16 @@ func TestRawKeyResponsesStreamTerminalEnvelope(t *testing.T) {
 		"m",
 		1710000000,
 		&ResponsesRequestEcho{
-			Instructions:      &ResponsesInput{Text: stringPtr("sys")},
+			Instructions:      &ResponsesInput{Text: new("sys")},
 			ParallelToolCalls: true,
 			Temperature:       1.0,
-			ToolChoice:        ResponsesToolChoice{Str: stringPtr("auto")},
+			ToolChoice:        ResponsesToolChoice{Str: new("auto")},
 			TopP:              1.0,
 		},
 	)
 	// A zero-output finish: release the terminal through the [DONE] sentinel
 	// path used by the converters.
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("stop"))); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("stop"))); err != nil {
 		t.Fatal(err)
 	}
 	held, ok := state.releaseTerminal()

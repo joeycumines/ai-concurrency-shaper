@@ -8,10 +8,14 @@ import (
 )
 
 // boolPtr returns a pointer to v.
-func boolPtr(v bool) *bool { return &v }
+//
+//go:fix inline
+func boolPtr(v bool) *bool { return new(v) }
 
 // intPtr returns a pointer to v.
-func intPtr(v int) *int { return &v }
+//
+//go:fix inline
+func intPtr(v int) *int { return new(v) }
 
 // anyMap converts a string map to an any-typed map for wire rendering.
 func anyMap(m map[string]string) map[string]any {
@@ -500,7 +504,9 @@ func canonicalAssistantTurnToChatMessage(
 }
 
 // stringPtr returns a pointer to s.
-func stringPtr(s string) *string { return &s }
+//
+//go:fix inline
+func stringPtr(s string) *string { return new(s) }
 
 // derefStr returns the value of s, or "" when s is nil.
 func derefStr(s *string) string {

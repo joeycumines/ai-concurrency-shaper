@@ -252,10 +252,7 @@ func (r *fixedChunkReader) Read(p []byte) (int, error) {
 	if r.consumed >= len(r.data) {
 		return 0, io.EOF
 	}
-	n := r.chunkSize
-	if n > len(p) {
-		n = len(p)
-	}
+	n := min(r.chunkSize, len(p))
 	if remaining := len(r.data) - r.consumed; n > remaining {
 		n = remaining
 	}

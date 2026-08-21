@@ -299,16 +299,16 @@ func TestInputMessageContentBranches(t *testing.T) {
 }
 
 func TestInputItemValidateBranches(t *testing.T) {
-	if err := (&EasyInputMessage{Role: InputRoleUser, Content: InputMessageContent{Text: stringP("hi")}}).Validate(); err != nil {
+	if err := (&EasyInputMessage{Role: InputRoleUser, Content: InputMessageContent{Text: new("hi")}}).Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&EasyInputMessage{Role: "bogus", Content: InputMessageContent{Text: stringP("hi")}}).Validate(); err == nil {
+	if err := (&EasyInputMessage{Role: "bogus", Content: InputMessageContent{Text: new("hi")}}).Validate(); err == nil {
 		t.Fatal("bad role accepted")
 	}
-	if err := (&EasyInputMessage{Role: InputRoleUser, Content: InputMessageContent{Text: stringP("hi")}, Phase: "bogus"}).Validate(); err == nil {
+	if err := (&EasyInputMessage{Role: InputRoleUser, Content: InputMessageContent{Text: new("hi")}, Phase: "bogus"}).Validate(); err == nil {
 		t.Fatal("bad phase accepted")
 	}
-	if err := (&EasyInputMessage{Role: InputRoleUser, Content: InputMessageContent{Text: stringP("hi")}, Type: "bogus"}).Validate(); err == nil {
+	if err := (&EasyInputMessage{Role: InputRoleUser, Content: InputMessageContent{Text: new("hi")}, Type: "bogus"}).Validate(); err == nil {
 		t.Fatal("bad type accepted")
 	}
 
@@ -351,12 +351,12 @@ func TestInputItemValidateBranches(t *testing.T) {
 	}
 
 	if err := (&FunctionCallOutputInput{
-		Type: "function_call_output", CallID: "c", Output: FunctionOutput{Text: stringP("ok")},
+		Type: "function_call_output", CallID: "c", Output: FunctionOutput{Text: new("ok")},
 	}).Validate(); err != nil {
 		t.Fatal(err)
 	}
 	if err := (&FunctionCallOutputInput{
-		Type: "function_call_output", Output: FunctionOutput{Text: stringP("ok")},
+		Type: "function_call_output", Output: FunctionOutput{Text: new("ok")},
 	}).Validate(); err == nil {
 		t.Fatal("call_id-less output input accepted")
 	}
@@ -457,13 +457,13 @@ func TestOutputItemValidateBranches(t *testing.T) {
 
 	if err := (&FunctionCallOutputResultItem{
 		ID: "fc_2", Type: "function_call_output", Status: ItemCompleted, CallID: "c",
-		Output: FunctionOutput{Text: stringP("ok")},
+		Output: FunctionOutput{Text: new("ok")},
 	}).Validate(); err != nil {
 		t.Fatal(err)
 	}
 	if err := (&FunctionCallOutputResultItem{
 		Type: "function_call_output", Status: ItemCompleted, CallID: "c",
-		Output: FunctionOutput{Text: stringP("ok")},
+		Output: FunctionOutput{Text: new("ok")},
 	}).Validate(); err == nil {
 		t.Fatal("id-less result accepted")
 	}
@@ -492,14 +492,15 @@ func TestOutputItemValidateBranches(t *testing.T) {
 	}
 }
 
-func stringP(s string) *string { return &s }
+//go:fix inline
+func stringP(s string) *string { return new(s) }
 
 // TestFunctionCallOutputResultBranches covers the result item's type and
 // status rejection branches.
 func TestFunctionCallOutputResultBranches(t *testing.T) {
 	good := &FunctionCallOutputResultItem{
 		ID: "fc_2", Type: "function_call_output", Status: ItemCompleted, CallID: "c",
-		Output: FunctionOutput{Text: stringP("ok")},
+		Output: FunctionOutput{Text: new("ok")},
 	}
 	if err := good.Validate(); err != nil {
 		t.Fatal(err)

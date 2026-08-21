@@ -385,7 +385,7 @@ func TestResponsesStreamFSMBudgetBounds(t *testing.T) {
 	t.Run("item flood", func(t *testing.T) {
 		fsm := newResponsesStreamFSM()
 		mustValidateFSM(t, fsm, fsmCreated(0))
-		for i := 0; i < maxStreamOutputItems; i++ {
+		for i := range maxStreamOutputItems {
 			if err := fsm.Validate(fsmMessageAdded(int64(i+1), int64(i), "m"+json.Number(string(rune('0'+i%10))).String()+string(rune('a'+i/10)))); err != nil {
 				t.Fatalf("item %d rejected early: %v", i, err)
 			}
@@ -456,7 +456,7 @@ func TestConvertingReaderStagingAtomicity(t *testing.T) {
 	// accumulated delta, so the batch bound binds while each frame stays far
 	// below the frame bound.
 	var frames strings.Builder
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		frames.WriteString("data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" +
 			strings.Repeat("x", 64) +
 			"\"},\"finish_reason\":null}]}\n\n")
@@ -471,11 +471,11 @@ func TestConvertingReaderStagingAtomicity(t *testing.T) {
 		0,
 	)
 	output := make([]byte, 1<<20)
-	var body string
+	var body strings.Builder
 	var err error
 	for {
 		n, readErr := reader.Read(output)
-		body += string(output[:n])
+		body.WriteString(string(output[:n]))
 		if readErr != nil {
 			err = readErr
 			break
@@ -491,7 +491,7 @@ func TestConvertingReaderStagingAtomicity(t *testing.T) {
 	if !errors.As(err, &boundErr) {
 		t.Fatalf("err = %T %v, want *SSEBoundError", err, err)
 	}
-	if strings.Contains(body, `"type":"response.completed"`) {
+	if strings.Contains(body.String(), `"type":"response.completed"`) {
 		t.Fatal("a success terminal escaped before the size failure")
 	}
 	if reader.SawTerminal() {
@@ -500,7 +500,7 @@ func TestConvertingReaderStagingAtomicity(t *testing.T) {
 	// The error event may be appended (the reader surfaces the conversion
 	// failure as an error terminal) — but never after a success terminal.
 	if reader.SawErrorEvent() {
-		if strings.Contains(body, `"type":"response.completed"`) {
+		if strings.Contains(body.String(), `"type":"response.completed"`) {
 			t.Fatal("error event after a success terminal")
 		}
 	}
@@ -618,7 +618,7 @@ func TestResponsesStreamFSMRemainingRejectionClasses(t *testing.T) {
 		fsm := newResponsesStreamFSM()
 		mustValidateFSM(t, fsm, fsmCreated(0))
 		rejected := false
-		for i := 0; i < maxStreamToolCalls+10; i++ {
+		for i := range maxStreamToolCalls + 10 {
 			err := fsm.Validate(fsmCallAdded(int64(i+1), int64(i), "fc_"+json.Number(string(rune('a'+i%26))).String()+string(rune('0'+i/26)), "c"+json.Number(string(rune('a'+i%26))).String()))
 			if err != nil {
 				assertFSMWire(t, err)

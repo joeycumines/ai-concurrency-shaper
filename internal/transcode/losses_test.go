@@ -39,7 +39,7 @@ func TestConversionReportNoteBound(t *testing.T) {
 		allowed[feature] = struct{}{}
 	}
 	fill := func(r *ConversionReport) {
-		for i := 0; i < maxStreamConversionReportEntries; i++ {
+		for i := range maxStreamConversionReportEntries {
 			// Alternate Lose and Note so the shared reserve is exercised by
 			// both entry paths on one report.
 			if i%2 == 0 {

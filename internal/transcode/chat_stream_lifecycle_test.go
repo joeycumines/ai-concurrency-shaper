@@ -170,10 +170,10 @@ func TestChatStreamUsageTailProducesRealTotals(t *testing.T) {
 		1710000000,
 		nil,
 	)
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: str("hi")}, nil)); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new("hi")}, nil)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("stop"))); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("stop"))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -293,7 +293,7 @@ func TestChatStreamCreatedAtConsistent(t *testing.T) {
 		999, // the handler's placeholder; the first chunk's created wins
 		nil,
 	)
-	events, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: str("hi")}, nil))
+	events, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new("hi")}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestChatStreamCreatedAtConsistent(t *testing.T) {
 		t.Fatalf("created_at = %v/%v, want 1710000000",
 			created.Response.CreatedAt, inProgress.Response.CreatedAt)
 	}
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, str("stop"))); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("stop"))); err != nil {
 		t.Fatal(err)
 	}
 	held, ok := state.releaseTerminal()
@@ -344,10 +344,10 @@ func TestChatStreamOutputItemAddedEmptyArguments(t *testing.T) {
 	)
 	events, err := state.Convert(chatChunk(t, ChatStreamDelta{
 		ToolCalls: []ChatToolCallDelta{{
-			Index: intPtr(0),
-			ID:    str("call_1"),
+			Index: new(0),
+			ID:    new("call_1"),
 			Function: ChatToolCallFunction{
-				Name:      str("get_weather"),
+				Name:      new("get_weather"),
 				Arguments: `{"city":"`,
 			},
 		}},
@@ -464,7 +464,7 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 		1710000000,
 		nil,
 	)
-	chunk := chatChunk(t, ChatStreamDelta{Content: str("x")}, nil)
+	chunk := chatChunk(t, ChatStreamDelta{Content: new("x")}, nil)
 	chunk.Choices[0].Index = 1
 	if _, err := state.Convert(chunk); err == nil {
 		t.Fatal("choice index 1 accepted")
@@ -479,10 +479,10 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 		1710000000,
 		nil,
 	)
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: str("x")}, nil)); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new("x")}, nil)); err != nil {
 		t.Fatal(err)
 	}
-	mismatchedID := chatChunk(t, ChatStreamDelta{Content: str("y")}, nil)
+	mismatchedID := chatChunk(t, ChatStreamDelta{Content: new("y")}, nil)
 	mismatchedID.ID = "chatcmpl-other"
 	if _, err := state.Convert(mismatchedID); err == nil {
 		t.Fatal("chunk id mismatch accepted")
@@ -497,10 +497,10 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 		1710000000,
 		nil,
 	)
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: str("x")}, nil)); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new("x")}, nil)); err != nil {
 		t.Fatal(err)
 	}
-	mismatchedModel := chatChunk(t, ChatStreamDelta{Content: str("y")}, nil)
+	mismatchedModel := chatChunk(t, ChatStreamDelta{Content: new("y")}, nil)
 	mismatchedModel.Model = "gpt-other"
 	if _, err := state.Convert(mismatchedModel); err == nil {
 		t.Fatal("chunk model mismatch accepted")

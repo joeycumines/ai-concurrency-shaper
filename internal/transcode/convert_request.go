@@ -1512,7 +1512,7 @@ func RenderResponsesRequest(
 				Name:        request.StructuredOutput.Name,
 				Description: request.StructuredOutput.Description,
 				Schema:      schema,
-				Strict:      boolPtr(request.StructuredOutput.Strict),
+				Strict:      new(request.StructuredOutput.Strict),
 			},
 		}
 	}
@@ -1580,9 +1580,9 @@ func RenderChatRequest(
 		Temperature:         request.Temperature,
 		TopP:                request.TopP,
 		MaxCompletionTokens: request.MaxOutputTokens,
-		Stream:              boolPtr(request.Stream),
+		Stream:              new(request.Stream),
 		Metadata:            anyMap(request.Metadata),
-		N:                   intPtr(1),
+		N:                   new(1),
 	}
 	// The official stream protocol sends a final usage-only chunk before
 	// [DONE] when include_usage is requested; the state machine consumes it
@@ -1590,7 +1590,7 @@ func RenderChatRequest(
 	// requested whenever the exchange streams, so Messages clients receive
 	// real totals instead of fabricated zero usage.
 	if request.Stream {
-		out.StreamOptions = &ChatStreamOptions{IncludeUsage: boolPtr(true)}
+		out.StreamOptions = &ChatStreamOptions{IncludeUsage: new(true)}
 	}
 
 	// Responses request fields that Chat can express are rendered; the rest
@@ -1791,7 +1791,7 @@ func RenderChatRequest(
 					Name:        request.StructuredOutput.Name,
 					Description: &request.StructuredOutput.Description,
 					Schema:      request.StructuredOutput.Schema,
-					Strict:      boolPtr(request.StructuredOutput.Strict),
+					Strict:      new(request.StructuredOutput.Strict),
 				},
 			}
 		}

@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -42,19 +43,19 @@ func TestOfficialFunctionCallWire(t *testing.T) {
 		t.Fatalf("stop reason = %q, want tool_use", stop)
 	}
 	var sawToolUseBlock bool
-	var accumulated string
+	var accumulated strings.Builder
 	for _, e := range all {
 		if e.ContentBlock != nil && e.ContentBlock.Type == AnthropicContentBlockTypeToolUse {
 			sawToolUseBlock = true
 		}
 		if e.Delta != nil && e.Delta.PartialJSON != nil {
-			accumulated += *e.Delta.PartialJSON
+			accumulated.WriteString(*e.Delta.PartialJSON)
 		}
 	}
 	if !sawToolUseBlock {
 		t.Fatal("no tool_use block emitted")
 	}
-	if accumulated != `{"city":"Tokyo"}` {
-		t.Fatalf("accumulated arguments = %q", accumulated)
+	if accumulated.String() != `{"city":"Tokyo"}` {
+		t.Fatalf("accumulated arguments = %q", accumulated.String())
 	}
 }

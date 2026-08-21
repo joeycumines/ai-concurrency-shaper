@@ -279,7 +279,7 @@ func TestChatMessageRoleConditionalValidate(t *testing.T) {
 			msg: ChatMessage{
 				Role: ChatMessageRoleUser,
 				ChatAssistantMessage: &ChatAssistantMessage{
-					Refusal: str("no"),
+					Refusal: new("no"),
 				},
 			},
 		},
@@ -289,10 +289,10 @@ func TestChatMessageRoleConditionalValidate(t *testing.T) {
 				Role: ChatMessageRoleUser,
 				ChatAssistantMessage: &ChatAssistantMessage{
 					ToolCalls: []ChatMessageToolCall{{
-						ID:   str("call_1"),
+						ID:   new("call_1"),
 						Type: "function",
 						Function: ChatToolCallFunction{
-							Name:      str("f"),
+							Name:      new("f"),
 							Arguments: "{}",
 						},
 					}},
@@ -304,7 +304,7 @@ func TestChatMessageRoleConditionalValidate(t *testing.T) {
 			msg: ChatMessage{
 				Role: ChatMessageRoleUser,
 				ChatAssistantMessage: &ChatAssistantMessage{
-					Reasoning: str("think"),
+					Reasoning: new("think"),
 				},
 			},
 		},
@@ -312,7 +312,7 @@ func TestChatMessageRoleConditionalValidate(t *testing.T) {
 			name: "assistant with tool call id",
 			msg: ChatMessage{
 				Role:            ChatMessageRoleAssistant,
-				ChatToolMessage: &ChatToolMessage{ToolCallID: str("t1")},
+				ChatToolMessage: &ChatToolMessage{ToolCallID: new("t1")},
 			},
 		},
 		{
@@ -320,7 +320,7 @@ func TestChatMessageRoleConditionalValidate(t *testing.T) {
 			msg: ChatMessage{
 				Role: ChatMessageRoleSystem,
 				ChatAssistantMessage: &ChatAssistantMessage{
-					Refusal: str("no"),
+					Refusal: new("no"),
 				},
 			},
 		},
@@ -340,19 +340,19 @@ func TestChatMessageRoleConditionalValidate(t *testing.T) {
 	}
 
 	accepted := []ChatMessage{
-		{Role: ChatMessageRoleAssistant, ChatAssistantMessage: &ChatAssistantMessage{Refusal: str("no")}},
+		{Role: ChatMessageRoleAssistant, ChatAssistantMessage: &ChatAssistantMessage{Refusal: new("no")}},
 		{Role: ChatMessageRoleAssistant, ChatAssistantMessage: &ChatAssistantMessage{
 			ToolCalls: []ChatMessageToolCall{{
-				ID:   str("call_1"),
+				ID:   new("call_1"),
 				Type: "function",
 				Function: ChatToolCallFunction{
-					Name:      str("f"),
+					Name:      new("f"),
 					Arguments: "{}",
 				},
 			}},
 		}},
-		{Role: ChatMessageRoleTool, ChatToolMessage: &ChatToolMessage{ToolCallID: str("t1")}},
-		{Role: ChatMessageRoleUser, Content: &ChatMessageContent{ContentStr: str("hi")}},
+		{Role: ChatMessageRoleTool, ChatToolMessage: &ChatToolMessage{ToolCallID: new("t1")}},
+		{Role: ChatMessageRoleUser, Content: &ChatMessageContent{ContentStr: new("hi")}},
 	}
 	for i, msg := range accepted {
 		if err := msg.Validate(); err != nil {

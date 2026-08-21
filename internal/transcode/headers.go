@@ -37,7 +37,7 @@ var fixedHopByHopHeaders = []string{
 // Connection itself.
 func RemoveHopByHopHeaders(h http.Header) {
 	for _, connectionValue := range h.Values("Connection") {
-		for _, token := range strings.Split(connectionValue, ",") {
+		for token := range strings.SplitSeq(connectionValue, ",") {
 			token = textproto.TrimString(token)
 			if token == "" {
 				continue

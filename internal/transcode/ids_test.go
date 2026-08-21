@@ -47,10 +47,8 @@ func TestGeneratedIDsAreUniqueAcrossExchanges(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < exchanges; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range exchanges {
+		wg.Go(func() {
 			ids := NewExchangeIDs()
 			for j := 1; j <= perExchange; j++ {
 				id := ids.New("msg_")
@@ -67,7 +65,7 @@ func TestGeneratedIDsAreUniqueAcrossExchanges(t *testing.T) {
 				seen[id] = struct{}{}
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if shapeMismatch.Load() {
@@ -83,7 +81,7 @@ func TestGeneratedIDsAreUniqueAcrossExchanges(t *testing.T) {
 // alphabet across draws (review-z commit 5).
 func TestExchangeIDsEntropyFloor(t *testing.T) {
 	alphabet := make(map[byte]struct{})
-	for i := 0; i < 4096; i++ {
+	for range 4096 {
 		id := NewExchangeIDs().New("msg_")
 		parts := strings.Split(id, "_")
 		if len(parts) != 3 || len(parts[1]) != 32 {

@@ -835,14 +835,14 @@ func TestHandlerMessagesToChatJSON(t *testing.T) {
 	if message.Type != "message" || message.Role != "assistant" {
 		t.Fatalf("message = %+v", message)
 	}
-	var text string
+	var text strings.Builder
 	for _, block := range message.Content {
 		if block.Type == AnthropicContentBlockTypeText && block.Text != nil {
-			text += *block.Text
+			text.WriteString(*block.Text)
 		}
 	}
-	if !strings.Contains(text, "weather") {
-		t.Fatalf("message text %q does not contain the upstream content", text)
+	if !strings.Contains(text.String(), "weather") {
+		t.Fatalf("message text %q does not contain the upstream content", text.String())
 	}
 }
 

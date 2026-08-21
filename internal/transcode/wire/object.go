@@ -290,7 +290,7 @@ func checkDuplicateKeys(data []byte) error {
 }
 
 // unmarshalerType is the json.Unmarshaler interface type.
-var unmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
+var unmarshalerType = reflect.TypeFor[json.Unmarshaler]()
 
 // checkIllegalNulls walks the JSON document against the destination type and
 // rejects null for non-nullable fields: fields whose type cannot hold null
@@ -300,7 +300,7 @@ var unmarshalerType = reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
 // and any custom Unmarshaler — record or reject the null themselves.
 func checkIllegalNulls(data []byte, dst any) error {
 	typ := reflect.TypeOf(dst)
-	for typ.Kind() == reflect.Ptr {
+	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -341,7 +341,7 @@ func checkNullToken(dec *json.Decoder, typ reflect.Type, tok json.Token, path st
 
 	// Unwrap pointers for descent: the value is not null, so a pointer
 	// field holds an allocated value of its element type.
-	for typ.Kind() == reflect.Ptr {
+	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
 	}
 
@@ -444,11 +444,11 @@ func checkNullObject(dec *json.Decoder, typ reflect.Type, path string) error {
 // anonymous field today; if one is ever introduced, this walk must be
 // extended to honor the tag.
 func structFieldByJSONName(typ reflect.Type, key string) (reflect.StructField, bool) {
-	for i := 0; i < typ.NumField(); i++ {
-		field := typ.Field(i)
+	for field := range typ.Fields() {
+		field := field
 		if field.Anonymous {
 			ft := field.Type
-			for ft.Kind() == reflect.Ptr {
+			for ft.Kind() == reflect.Pointer {
 				ft = ft.Elem()
 			}
 			if ft.Kind() == reflect.Struct && !isCustomUnmarshaler(ft) {
@@ -489,7 +489,7 @@ func isCustomUnmarshaler(typ reflect.Type) bool {
 // its zero value under encoding/json, so a null there is an illegal null.
 func nullCapable(typ reflect.Type) bool {
 	switch typ.Kind() {
-	case reflect.Ptr, reflect.Slice, reflect.Map, reflect.Interface:
+	case reflect.Pointer, reflect.Slice, reflect.Map, reflect.Interface:
 		return true
 	}
 	return isCustomUnmarshaler(typ)

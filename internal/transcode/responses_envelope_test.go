@@ -263,7 +263,7 @@ func envelopeWithControls() ResponseEnvelope {
 		Status:           "in_progress",
 		Model:            "m",
 		Output:           []ResponsesOutputItem{},
-		Background:       boolPtr(false),
+		Background:       new(false),
 		MaxToolCalls:     int64Ptr(5),
 		Prompt:           &ResponsesEnvelopePrompt{ID: "pt_1", Version: "v2"},
 		PromptCacheKey:   "cache_1",
@@ -351,7 +351,8 @@ func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 	}
 }
 
-func int64Ptr(v int64) *int64 { return &v }
+//go:fix inline
+func int64Ptr(v int64) *int64 { return new(v) }
 
 // TestStreamingEnvelopeControlsLateAppearance proves controls appearing only
 // on the completed envelope (not the created one) are still gated exactly

@@ -130,7 +130,7 @@ func TestStreamProviderReasoningCapabilityGate(t *testing.T) {
 		1,
 		nil,
 	)
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: str("think")}, nil)); err == nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: new("think")}, nil)); err == nil {
 		t.Fatal("strict policy accepted a provider reasoning delta without the capability")
 	}
 
@@ -143,7 +143,7 @@ func TestStreamProviderReasoningCapabilityGate(t *testing.T) {
 		1,
 		nil,
 	)
-	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: str("think")}, nil)); err != nil {
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: new("think")}, nil)); err != nil {
 		t.Fatal(err)
 	}
 	if !reportHasFeature(state.report, FeatureProviderReasoningText) {
@@ -161,7 +161,7 @@ func TestStreamProviderReasoningCapabilityGate(t *testing.T) {
 		1,
 		nil,
 	)
-	events, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: str("think")}, nil))
+	events, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: new("think")}, nil))
 	if err != nil {
 		t.Fatalf("capability-gated reasoning delta rejected: %v", err)
 	}

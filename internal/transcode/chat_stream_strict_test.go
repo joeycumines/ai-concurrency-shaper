@@ -171,7 +171,7 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				_, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(fmt.Sprintf(base, tt.call))})
+				_, err := chatStreamChunkFromSSE(SSEEvent{Data: fmt.Appendf(nil, base, tt.call)})
 				if tt.want {
 					assertChatStreamChunkWireError(t, err)
 				} else if err != nil {
@@ -205,11 +205,11 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 		}
 		// The added event is announced once id and name are both known.
 		if _, err := state.Convert(chunk(ChatToolCallDelta{
-			Index: intPtr(0),
-			ID:    stringPtr("call_1"),
-			Type:  stringPtr("function"),
+			Index: new(0),
+			ID:    new("call_1"),
+			Type:  new("function"),
 			Function: ChatToolCallFunction{
-				Name:      stringPtr("f"),
+				Name:      new("f"),
 				Arguments: `{"x":`,
 			},
 		})); err != nil {
@@ -222,14 +222,14 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 			{
 				name: "index carries a different id",
 				call: ChatToolCallDelta{
-					Index:    intPtr(0),
-					ID:       stringPtr("call_zz"),
-					Function: ChatToolCallFunction{Name: stringPtr("f")},
+					Index:    new(0),
+					ID:       new("call_zz"),
+					Function: ChatToolCallFunction{Name: new("f")},
 				},
 			},
 			{
 				name: "name changes after added",
-				call: ChatToolCallDelta{Index: intPtr(0), Function: ChatToolCallFunction{Name: stringPtr("g")}},
+				call: ChatToolCallDelta{Index: new(0), Function: ChatToolCallFunction{Name: new("g")}},
 			},
 		}
 		for _, tt := range tests {
@@ -252,11 +252,11 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 		}
 		// A second call opens at index 1.
 		if _, err := state.Convert(chunk(ChatToolCallDelta{
-			Index: intPtr(1),
-			ID:    stringPtr("call_2"),
-			Type:  stringPtr("function"),
+			Index: new(1),
+			ID:    new("call_2"),
+			Type:  new("function"),
 			Function: ChatToolCallFunction{
-				Name:      stringPtr("g"),
+				Name:      new("g"),
 				Arguments: "{}",
 			},
 		})); err != nil {
@@ -265,8 +265,8 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 		// The fragment id resolves to call_1 while its index resolves to
 		// call_2: the conflicting index must never be silently ignored.
 		_, err := state.Convert(chunk(ChatToolCallDelta{
-			Index: intPtr(1),
-			ID:    stringPtr("call_1"),
+			Index: new(1),
+			ID:    new("call_1"),
 		}))
 		var wireErr *UpstreamWireError
 		if !errors.As(err, &wireErr) {
@@ -278,18 +278,18 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 		// With two pending calls, an index-less, id-less fragment is
 		// ambiguous.
 		_, err = state.Convert(chunk(ChatToolCallDelta{
-			Function: ChatToolCallFunction{Name: stringPtr("h")},
+			Function: ChatToolCallFunction{Name: new("h")},
 		}))
 		if !errors.As(err, &wireErr) {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 		// Same identity fragments remain accepted (argument continuation).
 		if _, err := state.Convert(chunk(ChatToolCallDelta{
-			Index: intPtr(0),
-			ID:    stringPtr("call_1"),
-			Type:  stringPtr("function"),
+			Index: new(0),
+			ID:    new("call_1"),
+			Type:  new("function"),
 			Function: ChatToolCallFunction{
-				Name:      stringPtr("f"),
+				Name:      new("f"),
 				Arguments: `"z":2}`,
 			},
 		})); err != nil {
@@ -327,8 +327,8 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			Model:   "gpt-4.1",
 			Choices: []ChatChoice{{
 				Index:        0,
-				Delta:        &ChatStreamDelta{Content: stringPtr("hi")},
-				FinishReason: stringPtr("stop"),
+				Delta:        &ChatStreamDelta{Content: new("hi")},
+				FinishReason: new("stop"),
 			}},
 		}); err != nil {
 			t.Fatal(err)

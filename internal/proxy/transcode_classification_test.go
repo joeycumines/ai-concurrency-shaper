@@ -426,6 +426,62 @@ func TestClassifyTranscodeExchangeSuppressibleAbort(t *testing.T) {
 	}
 }
 
+// TestClassifyTranscodeExchangeClientAborted2xxIsNotSuccess pins the
+// !clientAborted guard on upstreamSuccess: a client-aborted exchange whose
+// upstream answered 2xx is never classifiable as breaker SUCCESS, matching
+// the native path's guard. Without it, classification would depend on the
+// recorder's external rec.aborted coupling and a partial stream could reset
+// a real failure streak.
+func TestClassifyTranscodeExchangeClientAborted2xxIsNotSuccess(t *testing.T) {
+	makeRec := func(outcome transcode.Outcome) *statusRecorder {
+		outcomeCopy := outcome
+		return &statusRecorder{
+			ResponseWriter:   httptest.NewRecorder(),
+			transcodeOutcome: &outcomeCopy,
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	now := time.Now()
+
+	// Client aborted mid-2xx: the 200 status is present but the exchange is
+	// NOT a success (and not suppressed as ambiguous — the abort is
+	// suppressible because there is no definitive upstream failure).
+	rec := makeRec(transcode.Outcome{
+		UpstreamAttempted: true,
+		UpstreamStatus:    transcode.Optional[int]{Value: http.StatusOK, Set: true},
+		Provenance:        transcode.ProvenanceClientAbort,
+		ClientAborted:     true,
+	})
+	result := classifyTranscodeExchange(rec, req, true, now)
+	if result.clientAborted == false {
+		t.Fatal("setup: expected a client-aborted exchange")
+	}
+	if result.upstreamSuccess {
+		t.Fatal("a client-aborted 2xx must not classify as upstream success")
+	}
+	if result.upstreamFailure {
+		t.Fatal("setup: a plain 2xx is not an upstream failure")
+	}
+	if !result.suppressibleAbort {
+		t.Fatal("a client-aborted plain 2xx should be a suppressible abort")
+	}
+
+	// Control: the same 2xx fully completed downstream IS a success.
+	rec = makeRec(transcode.Outcome{
+		UpstreamAttempted:  true,
+		UpstreamStatus:     transcode.Optional[int]{Value: http.StatusOK, Set: true},
+		Provenance:         transcode.ProvenanceUpstreamHTTP,
+		DownstreamComplete: true,
+	})
+	result = classifyTranscodeExchange(rec, req, true, now)
+	if !result.upstreamSuccess {
+		t.Fatal("a fully-completed 2xx must classify as upstream success")
+	}
+	if result.suppressibleAbort {
+		t.Fatal("a fully-completed exchange must not be a suppressible abort")
+	}
+}
+
 // TestProxyTranscodeOversizedSSEFatalNotShortenedSuccess proves that an
 // oversized SSE frame (part of a tool call) followed by a valid terminal
 // frame terminates the exchange with a client-dialect error event classified
@@ -1550,7 +1606,7 @@ func TestProxyExternalSignerFailureWithRetriesIsLocal(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"hi"}`))
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, req)

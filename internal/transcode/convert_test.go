@@ -322,7 +322,7 @@ func TestDecodeResponsesRequestToolChoiceReconciliation(t *testing.T) {
 
 	t.Run("required with no surviving tools is an error", func(t *testing.T) {
 		_, _, err := DecodeResponsesRequest(
-			[]byte(fmt.Sprintf(builtinBody, `"required"`)),
+			fmt.Appendf(nil, builtinBody, `"required"`),
 			permissive,
 		)
 		if err == nil {
@@ -335,7 +335,7 @@ func TestDecodeResponsesRequestToolChoiceReconciliation(t *testing.T) {
 
 	t.Run("named choice whose tool was dropped is an error", func(t *testing.T) {
 		_, _, err := DecodeResponsesRequest(
-			[]byte(fmt.Sprintf(builtinBody, `{"type":"function","name":"web_search"}`)),
+			fmt.Appendf(nil, builtinBody, `{"type":"function","name":"web_search"}`),
 			permissive,
 		)
 		if err == nil {
@@ -348,7 +348,7 @@ func TestDecodeResponsesRequestToolChoiceReconciliation(t *testing.T) {
 
 	t.Run("named choice with no matching function tool is an error", func(t *testing.T) {
 		_, _, err := DecodeResponsesRequest(
-			[]byte(fmt.Sprintf(mixedBody, `{"type":"function","name":"missing"}`)),
+			fmt.Appendf(nil, mixedBody, `{"type":"function","name":"missing"}`),
 			permissive,
 		)
 		if err == nil {
@@ -361,7 +361,7 @@ func TestDecodeResponsesRequestToolChoiceReconciliation(t *testing.T) {
 
 	t.Run("auto with no surviving tools drops with a note", func(t *testing.T) {
 		result, _, err := DecodeResponsesRequest(
-			[]byte(fmt.Sprintf(builtinBody, `"auto"`)),
+			fmt.Appendf(nil, builtinBody, `"auto"`),
 			permissive,
 		)
 		if err != nil {
@@ -386,7 +386,7 @@ func TestDecodeResponsesRequestToolChoiceReconciliation(t *testing.T) {
 
 	t.Run("none with no surviving tools is preserved", func(t *testing.T) {
 		result, _, err := DecodeResponsesRequest(
-			[]byte(fmt.Sprintf(builtinBody, `"none"`)),
+			fmt.Appendf(nil, builtinBody, `"none"`),
 			permissive,
 		)
 		if err != nil {
@@ -400,7 +400,7 @@ func TestDecodeResponsesRequestToolChoiceReconciliation(t *testing.T) {
 	t.Run("required and named with surviving tools pass through", func(t *testing.T) {
 		for _, choice := range []string{`"required"`, `{"type":"function","name":"f"}`} {
 			result, _, err := DecodeResponsesRequest(
-				[]byte(fmt.Sprintf(mixedBody, choice)),
+				fmt.Appendf(nil, mixedBody, choice),
 				permissive,
 			)
 			if err != nil {

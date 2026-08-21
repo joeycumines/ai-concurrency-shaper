@@ -64,30 +64,30 @@ func fuzzChatChunk(operation byte, index int) ChatStreamResponse {
 
 	switch operation % 10 {
 	case 0:
-		delta.Role = stringPtr("assistant")
+		delta.Role = new("assistant")
 
 	case 1:
-		delta.Content = stringPtr(fmt.Sprintf("text-%d", index))
+		delta.Content = new(fmt.Sprintf("text-%d", index))
 
 	case 2:
-		delta.Refusal = stringPtr(fmt.Sprintf("refusal-%d", index))
+		delta.Refusal = new(fmt.Sprintf("refusal-%d", index))
 
 	case 3:
-		delta.Reasoning = stringPtr(fmt.Sprintf("reason-%d", index))
+		delta.Reasoning = new(fmt.Sprintf("reason-%d", index))
 
 	case 4:
-		base.Choices[0].FinishReason = stringPtr("stop")
+		base.Choices[0].FinishReason = new("stop")
 
 	case 5:
-		base.Choices[0].FinishReason = stringPtr("length")
+		base.Choices[0].FinishReason = new("length")
 
 	case 6:
 		callIndex := index % 3
 		delta.ToolCalls = []ChatToolCallDelta{{
-			Index: intPtr(callIndex),
-			ID:    stringPtr(fmt.Sprintf("call-%d", callIndex)),
+			Index: new(callIndex),
+			ID:    new(fmt.Sprintf("call-%d", callIndex)),
 			Function: ChatToolCallFunction{
-				Name:      stringPtr(fmt.Sprintf("tool_%d", callIndex)),
+				Name:      new(fmt.Sprintf("tool_%d", callIndex)),
 				Arguments: `{"x":`,
 			},
 		}}
@@ -95,14 +95,14 @@ func fuzzChatChunk(operation byte, index int) ChatStreamResponse {
 	case 7:
 		callIndex := index % 3
 		delta.ToolCalls = []ChatToolCallDelta{{
-			Index: intPtr(callIndex),
+			Index: new(callIndex),
 			Function: ChatToolCallFunction{
 				Arguments: fmt.Sprintf("%d}", index),
 			},
 		}}
 
 	case 8:
-		base.Choices[0].FinishReason = stringPtr("tool_calls")
+		base.Choices[0].FinishReason = new("tool_calls")
 
 	case 9:
 		base.Choices = nil

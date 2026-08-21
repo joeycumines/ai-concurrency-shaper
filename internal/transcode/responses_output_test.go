@@ -272,7 +272,7 @@ func TestResponsesToolValidate(t *testing.T) {
 }
 
 func TestCanonicalizeResponsesToolChoice(t *testing.T) {
-	choice := ResponsesToolChoice{Str: stringPtr("auto")}
+	choice := ResponsesToolChoice{Str: new("auto")}
 	out, err := canonicalizeResponsesToolChoice(choice)
 	if err != nil {
 		t.Fatal(err)
@@ -289,7 +289,7 @@ func TestCanonicalizeResponsesToolChoice(t *testing.T) {
 		t.Fatalf("out = %+v", out)
 	}
 	// "required" is part of the official contract and canonicalizes as-is.
-	choice = ResponsesToolChoice{Str: stringPtr("required")}
+	choice = ResponsesToolChoice{Str: new("required")}
 	requiredOut, err := canonicalizeResponsesToolChoice(choice)
 	if err != nil {
 		t.Fatalf("required tool choice rejected: %v", err)
