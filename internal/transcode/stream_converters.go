@@ -262,7 +262,12 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 		return nil
 	}
 	s.usageComponentsLossRecorded = true
-	if usage.PromptTokensDetails == nil {
+	// A component is unknown only when NO signal exists anywhere (autopsy
+	// 03): the top-level provider extensions make the same components known
+	// as the pinned detail objects.
+	if usage.PromptTokensDetails == nil &&
+		usage.CachedTokens == nil &&
+		usage.PromptCacheHitTokens == nil {
 		if err := s.report.Lose(
 			s.policy,
 			FeatureUsageCacheReadUnknown,
@@ -272,7 +277,7 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 			return err
 		}
 	}
-	if usage.CompletionTokensDetails == nil {
+	if usage.CompletionTokensDetails == nil && usage.ReasoningTokens == nil {
 		if err := s.report.Lose(
 			s.policy,
 			FeatureUsageReasoningUnknown,
@@ -1146,10 +1151,12 @@ func (o *openResponsesItem) isMessage() bool {
 // the call sites gate the unknown components through
 // loseUnknownUsageComponentsOnce before this runs, so the zeros below are
 // emitted only after the explicit usage-timing loss (review-k finding 6).
-// The created_cache_tokens provider extension rides the in-memory Responses
-// usage carrier (json:"-"): the composed Messages←Chat stream can then know
-// the cache-write component exactly like the non-streaming decode, without
-// emitting wire bytes the Responses contract does not define.
+// The top-level provider extensions feed the same breakdowns with details
+// winning (autopsy 03). The created_cache_tokens provider extension rides
+// the in-memory Responses usage carrier (json:"-"): the composed
+// Messages←Chat stream can then know the cache-write component exactly like
+// the non-streaming decode, without emitting wire bytes the Responses
+// contract does not define.
 func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
 	if usage == nil {
 		return nil, nil
@@ -1159,11 +1166,19 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
 	total := int64(usage.TotalTokens)
 	cached := int64(0)
 	reasoning := int64(0)
-	if usage.PromptTokensDetails != nil {
+	switch {
+	case usage.PromptTokensDetails != nil:
 		cached = int64(usage.PromptTokensDetails.CachedTokens)
+	case usage.CachedTokens != nil:
+		cached = int64(*usage.CachedTokens)
+	case usage.PromptCacheHitTokens != nil:
+		cached = int64(*usage.PromptCacheHitTokens)
 	}
-	if usage.CompletionTokensDetails != nil {
+	switch {
+	case usage.CompletionTokensDetails != nil:
 		reasoning = int64(usage.CompletionTokensDetails.ReasoningTokens)
+	case usage.ReasoningTokens != nil:
+		reasoning = int64(*usage.ReasoningTokens)
 	}
 	if prompt < 0 || completion < 0 || total < 0 || cached < 0 || reasoning < 0 {
 		return nil, errors.New(

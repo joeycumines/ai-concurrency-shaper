@@ -82,11 +82,18 @@ type chatToolCallFunctionShadow struct {
 
 // chatUsageShadow mirrors ChatLLMUsage with pointer totals so explicit
 // presence is distinguishable from omitted (the wire fields are omitempty;
-// review-k finding 6 decodes the Known flags from this shadow).
+// review-k finding 6 decodes the Known flags from this shadow). The four
+// provider-extension pointers mirror the wire LLMUsage extensions exactly
+// (shadow-mirrors-wire, task-12 F1 pattern): the shared struct covers both
+// the non-streaming response and the streaming chunk shadows.
 type chatUsageShadow struct {
 	PromptTokens            *int                         `json:"prompt_tokens,omitempty"`
 	CompletionTokens        *int                         `json:"completion_tokens,omitempty"`
 	TotalTokens             *int                         `json:"total_tokens,omitempty"`
+	ReasoningTokens         *int                         `json:"reasoning_tokens,omitempty"`
+	CachedTokens            *int                         `json:"cached_tokens,omitempty"`
+	PromptCacheHitTokens    *int                         `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens   *int                         `json:"prompt_cache_miss_tokens,omitempty"`
 	PromptTokensDetails     *ChatPromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *ChatCompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
@@ -258,10 +265,21 @@ func DecodeChatResponse(
 	// created_cache_tokens provider extension: a provider that reports it
 	// makes the Messages cache-creation component known; one that does not
 	// leaves the loss-gated unknown decision.
+	//
+	// Top-level provider extensions (autopsy 03): a reasoning signal from
+	// EITHER the pinned detail object OR the top-level reasoning_tokens
+	// makes the component known (details win); a cache-read signal comes
+	// from prompt_tokens_details.cached_tokens, then cached_tokens, then
+	// prompt_cache_hit_tokens (DeepSeek hit = cached-read semantics).
+	// prompt_cache_miss_tokens has no canonical home — the miss is the
+	// derivable uncached prompt.
 	if shadow.Usage != nil {
 		response.Usage = CanonicalUsage{
-			CacheReadKnown: shadow.Usage.PromptTokensDetails != nil,
-			ReasoningKnown: shadow.Usage.CompletionTokensDetails != nil,
+			CacheReadKnown: shadow.Usage.PromptTokensDetails != nil ||
+				shadow.Usage.CachedTokens != nil ||
+				shadow.Usage.PromptCacheHitTokens != nil,
+			ReasoningKnown: shadow.Usage.CompletionTokensDetails != nil ||
+				shadow.Usage.ReasoningTokens != nil,
 			CacheWriteKnown: shadow.Usage.PromptTokensDetails != nil &&
 				shadow.Usage.PromptTokensDetails.CreatedCacheTokens != nil,
 		}
@@ -277,14 +295,22 @@ func DecodeChatResponse(
 			response.Usage.TotalTokens = int64(*shadow.Usage.TotalTokens)
 			response.Usage.TotalKnown = true
 		}
-		if shadow.Usage.PromptTokensDetails != nil {
+		switch {
+		case shadow.Usage.PromptTokensDetails != nil:
 			response.Usage.CacheReadTokens = int64(shadow.Usage.PromptTokensDetails.CachedTokens)
 			if shadow.Usage.PromptTokensDetails.CreatedCacheTokens != nil {
 				response.Usage.CacheWriteTokens = int64(*shadow.Usage.PromptTokensDetails.CreatedCacheTokens)
 			}
+		case shadow.Usage.CachedTokens != nil:
+			response.Usage.CacheReadTokens = int64(*shadow.Usage.CachedTokens)
+		case shadow.Usage.PromptCacheHitTokens != nil:
+			response.Usage.CacheReadTokens = int64(*shadow.Usage.PromptCacheHitTokens)
 		}
-		if shadow.Usage.CompletionTokensDetails != nil {
+		switch {
+		case shadow.Usage.CompletionTokensDetails != nil:
 			response.Usage.ReasoningTokens = int64(shadow.Usage.CompletionTokensDetails.ReasoningTokens)
+		case shadow.Usage.ReasoningTokens != nil:
+			response.Usage.ReasoningTokens = int64(*shadow.Usage.ReasoningTokens)
 		}
 	}
 

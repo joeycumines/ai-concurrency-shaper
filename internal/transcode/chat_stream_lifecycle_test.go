@@ -228,6 +228,57 @@ func TestChatStreamUsageTailProducesRealTotals(t *testing.T) {
 	}
 }
 
+// TestChatStreamTopLevelUsageExtensionsDecode reproduces the stream-side
+// field shape (autopsy 03): a raw usage tail chunk carrying ONLY the
+// top-level provider extensions (DeepSeek/vLLM convention) must decode
+// through the strict chunk shadow, record NO unknown-usage losses for the
+// covered components (the run below uses the STRICT policy — any fired loss
+// would fail the Convert), and fold the converted breakdowns into the
+// terminal.
+func TestChatStreamTopLevelUsageExtensionsDecode(t *testing.T) {
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		ChatCapabilities{},
+		"resp_1",
+		"gpt-4.1",
+		1710000000,
+		nil,
+	)
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new("hi")}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{}, new("stop"))); err != nil {
+		t.Fatal(err)
+	}
+
+	tailChunk, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":18,"total_tokens":60,"reasoning_tokens":12,"cached_tokens":5}}`)})
+	if err != nil {
+		t.Fatalf("tail chunk with top-level provider extensions rejected: %v", err)
+	}
+	if _, err := state.Convert(tailChunk); err != nil {
+		t.Fatalf("strict-policy Convert rejected a fully-known usage tail: %v", err)
+	}
+
+	held, ok := state.releaseTerminal()
+	if !ok {
+		t.Fatal("no held terminal")
+	}
+	completed, ok := held[len(held)-1].(ResponseCompletedEvent)
+	if !ok {
+		t.Fatalf("terminal = %T", held[len(held)-1])
+	}
+	usage := completed.Response.Usage
+	if usage == nil || usage.InputTokensDetails == nil || usage.OutputTokensDetails == nil {
+		t.Fatalf("terminal usage = %+v", usage)
+	}
+	if usage.InputTokensDetails.CachedTokens != 5 ||
+		usage.OutputTokensDetails.ReasoningTokens != 12 {
+		t.Fatalf("breakdowns = cached %+v reasoning %+v, want fallback values 5/12",
+			usage.InputTokensDetails, usage.OutputTokensDetails)
+	}
+}
+
 // TestChatStreamFixtureUsageTailEndToEnd proves the official-shaped fixture
 // (finish chunk, then a usage-only tail chunk, then [DONE]) converts through
 // the full reader with the real totals folded into the terminal envelope.

@@ -7,7 +7,9 @@ package transcode
 // (index-carrying) (review-j finding 5).
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/testcorpus"
@@ -266,4 +268,139 @@ func TestStreamToolCallDeltaKeepsIndex(t *testing.T) {
 	// ChatMessageToolCall and ChatToolCallDelta are distinct wire types.
 	var nonStream ChatMessageToolCall
 	_ = nonStream
+}
+
+// TestChatResponseTopLevelReasoningTokens reproduces the field-observed 502
+// (autopsy 03): open-weights gateways (DeepSeek/vLLM/LiteLLM convention)
+// report reasoning_tokens at the TOP LEVEL of usage. Pre-fix the strict
+// decode rejected the unknown field and discarded 15-40s successful
+// completions; post-fix it decodes into a known reasoning breakdown.
+func TestChatResponseTopLevelReasoningTokens(t *testing.T) {
+	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,"reasoning_tokens":15}}`
+	response, err := DecodeChatResponse([]byte(body), ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !response.Usage.ReasoningKnown || response.Usage.ReasoningTokens != 15 {
+		t.Fatalf("usage = %+v, want known reasoning 15", response.Usage)
+	}
+
+	// The reasoning signal reaches both client renders without the
+	// unknown-reasoning loss: approve only the unrelated cache components
+	// under the strict policy — if usage_reasoning_unknown still fired, the
+	// strict render would fail.
+	context := testExchangeContext()
+	context.RequestedClientModel = "m"
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+	}}
+	messagesRendered, messagesReport, err := RenderMessagesResponse(response, context)
+	if err != nil {
+		t.Fatalf("strict messages render: %v", err)
+	}
+	responsesRendered, responsesReport, err := RenderResponsesResponse(response, context)
+	if err != nil {
+		t.Fatalf("strict responses render: %v", err)
+	}
+	for name, report := range map[string]ConversionReport{
+		"messages":  messagesReport,
+		"responses": responsesReport,
+	} {
+		if reportHasFeature(report, FeatureUsageReasoningUnknown) {
+			t.Fatalf("%s render recorded %v despite the top-level reasoning signal: %+v",
+				name, FeatureUsageReasoningUnknown, report.Losses)
+		}
+	}
+
+	// Zero leakage: no provider-extension key that has no canonical home in
+	// either client dialect appears in any rendered body. (reasoning_tokens
+	// and cached_tokens exist legitimately as nested detail fields; the
+	// DeepSeek cache pair never does.)
+	for _, rendered := range [][]byte{messagesRendered, responsesRendered} {
+		for _, forbidden := range []string{"prompt_cache_hit_tokens", "prompt_cache_miss_tokens"} {
+			if bytes.Contains(rendered, []byte(forbidden)) {
+				t.Fatalf("client render leaks %s: %s", forbidden, rendered)
+			}
+		}
+	}
+}
+
+// TestChatUsageExtensionPrecedence pins the value precedence: the pinned
+// detail objects win over the top-level provider extensions when both are
+// present (exactly one signal reaches the IR), and cached_tokens outranks
+// prompt_cache_hit_tokens when there are no details.
+func TestChatUsageExtensionPrecedence(t *testing.T) {
+	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"reasoning_tokens":99,"cached_tokens":9,"prompt_cache_hit_tokens":8,"completion_tokens_details":{"accepted_prediction_tokens":0,"audio_tokens":0,"reasoning_tokens":7,"rejected_prediction_tokens":0},"prompt_tokens_details":{"cached_tokens":2}}}`
+	response, err := DecodeChatResponse([]byte(body), ChatCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.Usage.ReasoningKnown || response.Usage.ReasoningTokens != 7 {
+		t.Fatalf("reasoning = %+v, want details value 7", response.Usage)
+	}
+	if !response.Usage.CacheReadKnown || response.Usage.CacheReadTokens != 2 {
+		t.Fatalf("cache read = %+v, want details value 2", response.Usage)
+	}
+
+	noDetails := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cached_tokens":9,"prompt_cache_hit_tokens":8}}`
+	response, err = DecodeChatResponse([]byte(noDetails), ChatCapabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.Usage.CacheReadKnown || response.Usage.CacheReadTokens != 9 {
+		t.Fatalf("cache read = %+v, want cached_tokens value 9", response.Usage)
+	}
+}
+
+// TestChatUsageDeepSeekCacheConvention proves the third cache convention:
+// prompt_cache_hit_tokens makes the cache-read component known with hit =
+// cached-read semantics (DeepSeek), and prompt_cache_miss_tokens decodes
+// without a canonical home (derivable uncached prompt) and never leaks.
+func TestChatUsageDeepSeekCacheConvention(t *testing.T) {
+	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"reasoning_tokens":2,"prompt_cache_hit_tokens":4,"prompt_cache_miss_tokens":6}}`
+	response, err := DecodeChatResponse([]byte(body), ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !response.Usage.CacheReadKnown || response.Usage.CacheReadTokens != 4 {
+		t.Fatalf("cache read = %+v, want hit value 4", response.Usage)
+	}
+	if !response.Usage.ReasoningKnown || response.Usage.ReasoningTokens != 2 {
+		t.Fatalf("reasoning = %+v, want top-level value 2", response.Usage)
+	}
+	context := testExchangeContext()
+	context.RequestedClientModel = "m"
+	// The fixture carries no created_cache_tokens, so the Messages render
+	// fires the unrelated cache-write unknown loss under strict policy;
+	// approve exactly that loss so the render succeeds and the leakage
+	// assertion below actually runs against a body carrying the DeepSeek
+	// keys.
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageCacheWriteUnknown: {},
+	}}
+	rendered, report, err := RenderMessagesResponse(response, context)
+	if err != nil {
+		t.Fatalf("messages render with approved cache-write loss: %v", err)
+	}
+	if !reportHasFeature(report, FeatureUsageCacheWriteUnknown) {
+		t.Fatalf("report lacks the expected cache-write loss: %+v", report.Losses)
+	}
+	if bytes.Contains(rendered, []byte("prompt_cache")) {
+		t.Fatalf("client render leaks prompt_cache keys: %s", rendered)
+	}
+}
+
+// TestChatUsageUnknownFieldStillRejected pins the strict wire contract: an
+// unknown usage field that is NOT one of the four decoded extensions still
+// fails decode — the leniency ends exactly at the modeled surface.
+func TestChatUsageUnknownFieldStillRejected(t *testing.T) {
+	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"bogus_tokens":1}}`
+	_, err := DecodeChatResponse([]byte(body), ChatCapabilities{})
+	if err == nil {
+		t.Fatal("decode accepted unknown usage field bogus_tokens")
+	}
+	if !strings.Contains(err.Error(), "bogus_tokens") {
+		t.Fatalf("err = %v, want the offending field named", err)
+	}
 }

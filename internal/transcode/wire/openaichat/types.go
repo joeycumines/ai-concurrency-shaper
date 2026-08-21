@@ -547,10 +547,21 @@ type CompletionTokensDetails struct {
 // LLMUsage is the token usage of a chat completion. PromptTokens and
 // CompletionTokens are omitted when zero; the always-on-wire fields are the
 // sub-fields (CachedTokens/ReasoningTokens).
+//
+// ReasoningTokens, CachedTokens, PromptCacheHitTokens, and
+// PromptCacheMissTokens are opaque provider extensions present on real
+// open-weights gateways (the DeepSeek/vLLM/LiteLLM convention of reporting
+// reasoning_tokens and cache breakdowns at the TOP LEVEL of usage): decoded
+// so strict wire decoding never fails on a current provider; never
+// forwarded. omitempty keeps them off rendered output.
 type LLMUsage struct {
 	PromptTokens            int                      `json:"prompt_tokens,omitempty"`
 	CompletionTokens        int                      `json:"completion_tokens,omitempty"`
 	TotalTokens             int                      `json:"total_tokens"`
+	ReasoningTokens         *int                     `json:"reasoning_tokens,omitempty"`
+	CachedTokens            *int                     `json:"cached_tokens,omitempty"`
+	PromptCacheHitTokens    *int                     `json:"prompt_cache_hit_tokens,omitempty"`
+	PromptCacheMissTokens   *int                     `json:"prompt_cache_miss_tokens,omitempty"`
 	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
