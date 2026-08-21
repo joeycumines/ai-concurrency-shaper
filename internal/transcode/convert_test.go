@@ -1673,3 +1673,109 @@ func TestDecodeResponsesRequestAllBuiltinNamespace(t *testing.T) {
 		t.Fatalf("feature = %q, want builtin_tools", target.Feature)
 	}
 }
+
+func TestDecodeResponsesRequestCodexTurnTwoHistory(t *testing.T) {
+	// Byte-faithful replay of the field-observed Codex turn-2 shape
+	// (autopsy 01): the assistant history item carries output_text with NO
+	// annotations key. Pre-fix this failed locally in 14ms with
+	// "output_text annotations must be present; use an empty array".
+	body := []byte(`{
+		"model":"gpt-5.1",
+		"instructions":"You are helpful.",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 1"}]},
+			{"type":"message","id":"item_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 2"}]}
+		]
+	}`)
+	result, _, err := DecodeResponsesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// instructions + three input items.
+	if len(result.Request.Turns) != 4 {
+		t.Fatalf("turns = %d", len(result.Request.Turns))
+	}
+	assistant := result.Request.Turns[2]
+	if assistant.Role != CanonicalAssistant {
+		t.Fatalf("turn 2 role = %q", assistant.Role)
+	}
+	text, ok := assistant.Parts[0].(CanonicalText)
+	if !ok || text.Text != "hi" {
+		t.Fatalf("assistant parts = %+v", assistant.Parts)
+	}
+
+	// The decoded history renders a chat request carrying the converted
+	// assistant turn — Codex sessions survive turn 2+.
+	rendered, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("render chat: %v", err)
+	}
+	var chat ChatRequest
+	if err := strictDecode(rendered, &chat); err != nil {
+		t.Fatalf("rendered chat: %v\n%s", err, rendered)
+	}
+	found := false
+	for _, message := range chat.Messages {
+		if message.Role != ChatMessageRoleAssistant || message.Content == nil {
+			continue
+		}
+		for _, block := range message.Content.ContentBlocks {
+			if block.Text != nil && *block.Text == "hi" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("converted assistant history missing from %s", rendered)
+	}
+}
+
+func TestDecodeResponsesRequestIdStrippedAssistantHistory(t *testing.T) {
+	// An assistant history turn stripped of id/status routes to the easy
+	// message arm (autopsy 01 §3.3) and carries output-type parts.
+	body := []byte(`{
+		"model":"m",
+		"input":[
+			{"type":"message","role":"user","content":"q"},
+			{"role":"assistant","content":[{"type":"output_text","text":"a"}]},
+			{"type":"message","role":"user","content":"follow-up"}
+		]
+	}`)
+	result, _, err := DecodeResponsesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Request.Turns) != 3 {
+		t.Fatalf("turns = %d", len(result.Request.Turns))
+	}
+	assistant := result.Request.Turns[1]
+	if assistant.Role != CanonicalAssistant {
+		t.Fatalf("turn 1 role = %q", assistant.Role)
+	}
+	text, ok := assistant.Parts[0].(CanonicalText)
+	if !ok || text.Text != "a" {
+		t.Fatalf("assistant parts = %+v", assistant.Parts)
+	}
+
+	if _, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{}); err != nil {
+		t.Fatalf("render chat: %v", err)
+	}
+}
+
+func TestDecodeResponsesRequestFunctionOutputOutputPartRejected(t *testing.T) {
+	// Review F1 pin (decode level): output-type parts stay rejected inside
+	// function_call_output payloads. Decode precedes loss-policy
+	// evaluation, so StrictLossPolicy() here covers every policy: no policy
+	// can reach this rejection at all.
+	body := []byte(`{
+		"model":"m",
+		"input":[
+			{"type":"message","role":"user","content":"q"},
+			{"type":"function_call_output","call_id":"c","output":[{"type":"output_text","text":"x"}]}
+		]
+	}`)
+	if _, _, err := DecodeResponsesRequest(body, StrictLossPolicy()); err == nil {
+		t.Fatal("strict policy accepted an output_text function-output part")
+	}
+}

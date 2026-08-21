@@ -125,6 +125,13 @@ func (parts *OutputContentParts) UnmarshalJSON(data []byte) error {
 		if err := wire.Decode(partData, part); err != nil {
 			return fmt.Errorf("output content part %d: %w", i, err)
 		}
+		// Decode-side normalization (autopsy 01): real clients omit the
+		// annotations key on output_text parts; a decoded absent array is
+		// the same empty array. Validate itself stays strict for hand-built
+		// values.
+		if text, ok := part.(*OutputText); ok && text.Annotations == nil {
+			text.Annotations = []Annotation{}
+		}
 		if err := part.Validate(); err != nil {
 			return fmt.Errorf("output content part %d: %w", i, err)
 		}

@@ -83,6 +83,32 @@ type InputContentPart interface {
 	Validate() error
 }
 
+// Output-type parts join the input-part union directly (autopsy 01 §3.3):
+// an assistant easy input message carries the same output_text/refusal
+// shapes the response side produces, so the response wire types are reused
+// instead of duplicated behind adapters. Legality is enforced at the
+// consumers that know their context: EasyInputMessage.Validate admits them
+// only for the assistant role, and FunctionOutput.Validate rejects them
+// everywhere (a function_call_output payload takes input-type parts only).
+func (*OutputText) isInputContentPart() {}
+
+func (*OutputRefusal) isInputContentPart() {}
+
+// outputPartTypeName reports the union-arm name of an output-type input
+// part, or "" for any other part. The static arm name is reported — not the
+// instance tag — so the typed rejection names the unsupported kind even for
+// hand-built untagged values.
+func outputPartTypeName(part InputContentPart) string {
+	switch part.(type) {
+	case *OutputText:
+		return "output_text"
+	case *OutputRefusal:
+		return "refusal"
+	default:
+		return ""
+	}
+}
+
 // InputText is an input_text content part.
 type InputText struct {
 	Type string `json:"type"`
@@ -215,6 +241,14 @@ func (p InputContentParts) MarshalJSON() ([]byte, error) {
 
 // DecodeInputContentPart dispatches on the type tag. Unknown part types
 // produce a wire.UnsupportedTypeError identifying the exact type.
+//
+// Output-type parts (output_text, refusal) are decoded through the same
+// OutputText/OutputRefusal types the response side uses — reused via the
+// input-part marker below rather than thin adapters — because the field
+// shapes are identical and the canonical mapping reads only .Text/.Refusal
+// (autopsy 01 §3.3). This dispatcher has no context, so the consumers gate
+// legality: EasyInputMessage.Validate admits output parts only for the
+// assistant role, and FunctionOutput.Validate rejects them everywhere.
 func DecodeInputContentPart(data []byte) (InputContentPart, error) {
 	var probe struct {
 		Type string `json:"type"`
@@ -238,6 +272,10 @@ func DecodeInputContentPart(data []byte) (InputContentPart, error) {
 		part = &InputImage{}
 	case "input_file":
 		part = &InputFile{}
+	case "output_text":
+		part = &OutputText{}
+	case "refusal":
+		part = &OutputRefusal{}
 	default:
 		return nil, &wire.UnsupportedTypeError{
 			Protocol: "responses",
@@ -248,6 +286,12 @@ func DecodeInputContentPart(data []byte) (InputContentPart, error) {
 
 	if err := wire.Decode(data, part); err != nil {
 		return nil, err
+	}
+	// Decode-side normalization (autopsy 01): real clients omit the
+	// annotations key on output_text parts; a decoded absent array is the
+	// same empty array. Validate itself stays strict for hand-built values.
+	if text, ok := part.(*OutputText); ok && text.Annotations == nil {
+		text.Annotations = []Annotation{}
 	}
 	if err := part.Validate(); err != nil {
 		return nil, err
@@ -354,6 +398,20 @@ func (m *EasyInputMessage) Validate() error {
 	if m.Phase != "" && m.Phase != "commentary" && m.Phase != "final_answer" {
 		return fmt.Errorf("invalid assistant phase %q", m.Phase)
 	}
+	// Output-type parts are assistant output: legal only on an assistant
+	// easy message (autopsy 01 §3.3). Other roles keep the typed rejection
+	// the union dispatch produced before output arms were added.
+	if m.Role != InputRoleAssistant {
+		for i, part := range m.Content.Parts {
+			if name := outputPartTypeName(part); name != "" {
+				return &wire.UnsupportedTypeError{
+					Protocol: "responses",
+					Path:     fmt.Sprintf("input[].content[%d].type", i),
+					Type:     name,
+				}
+			}
+		}
+	}
 	return m.Content.Validate()
 }
 
@@ -436,6 +494,19 @@ func (o FunctionOutput) Validate() error {
 	}
 	if o.Text == nil && o.Parts == nil {
 		return errors.New("function output has no selected variant")
+	}
+	// A function_call_output payload takes input-type parts only: the
+	// output_text/refusal arms exist for assistant message history, never
+	// for tool results (autopsy 01 review F1 — the typed rejection the
+	// union dispatch produced before those arms existed is preserved).
+	for i, part := range o.Parts {
+		if name := outputPartTypeName(part); name != "" {
+			return &wire.UnsupportedTypeError{
+				Protocol: "responses",
+				Path:     fmt.Sprintf("output[%d].type", i),
+				Type:     name,
+			}
+		}
 	}
 	for i, part := range o.Parts {
 		if err := part.Validate(); err != nil {

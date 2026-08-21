@@ -512,6 +512,12 @@ func decodeStreamContentPart(data []byte) (StreamContentPart, error) {
 	if err := wire.Decode(data, part); err != nil {
 		return nil, err
 	}
+	// Decode-side normalization (autopsy 01): real clients omit the
+	// annotations key on output_text parts; a decoded absent array is the
+	// same empty array. Validate itself stays strict for hand-built values.
+	if text, ok := part.(*StreamOutputTextPart); ok && text.Annotations == nil {
+		text.Annotations = []Annotation{}
+	}
 	if err := part.Validate(); err != nil {
 		return nil, err
 	}

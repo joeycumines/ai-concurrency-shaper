@@ -610,6 +610,16 @@ func responsesInputContentPartToCanonical(
 			Filename:  value.Filename,
 		}, nil
 
+	case *ResponsesOutputText:
+		// Assistant easy-message history turns carry output-type parts
+		// (autopsy 01 §3.3); they map exactly like
+		// responsesOutputContentToCanonical — only .Text/.Refusal reach the
+		// IR, annotations never do.
+		return CanonicalText{Text: value.Text}, nil
+
+	case *ResponsesOutputRefusal:
+		return CanonicalRefusal{Text: value.Refusal}, nil
+
 	default:
 		return nil, fmt.Errorf("unknown input content part type %T", part)
 	}
