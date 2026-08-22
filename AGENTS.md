@@ -52,6 +52,7 @@ Transcoding handlers are **route-scoped wrappers** around the existing proxy pip
 
 ### Transcoding invariants
 
+- Default behavior must be highly compatible out of the box — as strict as possible while remaining so: fidelity-only knobs (parameters, roles) are opt-in capabilities whose absence is an observable policy-gated loss, never a hard error and never a silently rendered incompatibility.
 - Client-facing protocols are OpenAI Responses and Anthropic Messages only. Chat Completions is an upstream-only fallback.
 - Prefer native upstream protocols: Messages → Messages, Responses → Responses, then Messages → Responses, and Chat last.
 - Match mappings by HTTP method + path. Create-route mappings are POST-only.
