@@ -544,6 +544,58 @@ func TestHandlerUpstreamErrorMessagesDialect(t *testing.T) {
 	}
 }
 
+// TestHandlerUpstreamErrorDialectStreamingRequest pins the streaming half of
+// the upstream-error contract (field regression 2026-08-22, the observed
+// codex /v1/responses 400s): a STREAMING client request whose upstream
+// answers non-2xx receives the UPSTREAM status with the error body re-rendered
+// in the CLIENT dialect — the branch runs before stream dispatch (the
+// operational rule at the non-2xx gate), so a streaming request never gets a
+// half-open SSE exchange for an error the upstream already decided.
+func TestHandlerUpstreamErrorDialectStreamingRequest(t *testing.T) {
+	mapping := responsesMapping(t)
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header: http.Header{
+				"Content-Type": []string{"application/json"},
+				"X-Request-Id": []string{"req_400"},
+			},
+			Body: io.NopCloser(strings.NewReader(
+				`{"error":{"message":"this model's maximum context length is 32768 tokens","type":"invalid_request_error","code":"context_length_exceeded"}}`,
+			)),
+		}, nil
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x","stream":true}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want the upstream 400", rec.Code)
+	}
+	if rec.Header().Get("X-Request-Id") != "req_400" {
+		t.Fatalf("request id = %q", rec.Header().Get("X-Request-Id"))
+	}
+	// The body is a Responses-dialect error envelope carrying the upstream
+	// message verbatim — never SSE frames and never a chat-dialect body.
+	body := rec.Body.String()
+	var envelope struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("body is not a JSON error envelope: %v\n%s", err, body)
+	}
+	if envelope.Error.Type != "invalid_request_error" ||
+		envelope.Error.Message != "this model's maximum context length is 32768 tokens" {
+		t.Fatalf("error = %+v", envelope.Error)
+	}
+}
+
 func TestHandlerLocalConversion502NotUpstreamFailure(t *testing.T) {
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}

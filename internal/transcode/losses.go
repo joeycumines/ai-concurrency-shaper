@@ -100,11 +100,13 @@ const (
 	// UsageReasoningUnknown covers a source that provided no reasoning-token
 	// breakdown.
 	FeatureUsageReasoningUnknown Feature = "usage_reasoning_unknown"
-	// ProviderReasoningText covers provider reasoning text (a Chat provider
-	// extension) in a RESPONSE that cannot be reproduced in the target: it
-	// may map only to ordinary text, an approved loss, or a rejection.
-	// Request-side reasoning controls are a separate semantic — see
-	// RequestReasoning — and must never reuse this key (review-11 finding 4).
+	// ProviderReasoningText covers provider reasoning text in a RESPONSE —
+	// the Chat provider extension spelled `reasoning` (OpenRouter style) or
+	// `reasoning_content` (the DeepSeek/Qwen convention real open-weights
+	// gateways stream) — that cannot be reproduced in the target: it may map
+	// only to ordinary text, an approved loss, or a rejection. Request-side
+	// reasoning controls are a separate semantic — see RequestReasoning —
+	// and must never reuse this key (review-11 finding 4).
 	FeatureProviderReasoningText Feature = "provider_reasoning_text"
 	// RequestReasoning covers request-side reasoning controls — the Anthropic
 	// Messages thinking budget (an explicit enabled budget_tokens) and the
@@ -205,7 +207,7 @@ var lossRegistry = []lossEntry{
 	{FeatureUsageCacheReadUnknown, "the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageCacheWriteUnknown, "the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageReasoningUnknown, "the source provided no reasoning-token breakdown; the required target usage breakdown cannot be reproduced"},
-	{FeatureProviderReasoningText, "provider reasoning text in a RESPONSE cannot be reproduced in the target (request-side reasoning controls are the separate request_reasoning key)"},
+	{FeatureProviderReasoningText, "provider reasoning text in a RESPONSE (the chat extension spelled `reasoning` or, in the DeepSeek/Qwen convention real open-weights gateways emit, `reasoning_content`) cannot be reproduced in the target; it may map only to ordinary text, an approved loss, or a rejection (request-side reasoning controls are the separate request_reasoning key)"},
 	{FeatureRequestReasoning, "request-side reasoning controls (the Anthropic thinking budget and the Responses reasoning.effort) cannot be reproduced in the target request"},
 	{FeatureReasoningSummary, "reasoning summaries (output and request-side summary style) cannot be reproduced in the target"},
 	{FeatureToolResultJSONEnvelope, "multimodal tool results are encoded as the deterministic transcode JSON text envelope (transcode_version 1) inside a Chat tool message"},

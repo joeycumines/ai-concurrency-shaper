@@ -186,9 +186,15 @@ func TestBuildTranscodeMappings(t *testing.T) {
 }
 
 // TestBuildTranscodeMappingsDefaults verifies the sensible out-of-the-box
-// defaults land on every CLI mapping: the standard modern chat capability
-// surface, the beta client query for Messages routes, and the default loss
-// set — with CLI additions merged additively.
+// defaults land on every CLI mapping: the maximally compatible chat
+// capability core (parallel_tool_calls + provider_reasoning_text; the
+// fidelity-only reasoning_effort and developer_role knobs are opt-in so
+// generic and open-weights gateways never see parameters or roles they
+// reject), the beta client query for Messages routes, and the default loss
+// set (which now backs those opt-in knobs with observable drops) — with CLI
+// additions merged additively. Intended semantic change (field regression
+// 2026-08-22, user direction): the former default modern surface rendered
+// reasoning_effort and developer roles that generic upstreams reject.
 func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 	mappings, err := buildTranscodeMappings(
 		nil,
@@ -211,9 +217,11 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 	}
 	for i, m := range mappings {
 		cap := m.Mapping.ChatCapabilities
-		if !cap.ReasoningEffort || !cap.ProviderReasoningText ||
-			!cap.DeveloperRole || !cap.ParallelToolCalls {
-			t.Errorf("mapping %d capabilities = %+v, want the default modern surface", i, cap)
+		if !cap.ProviderReasoningText || !cap.ParallelToolCalls {
+			t.Errorf("mapping %d capabilities = %+v, want the compatible core", i, cap)
+		}
+		if cap.ReasoningEffort || cap.DeveloperRole {
+			t.Errorf("mapping %d: fidelity-only capabilities must be opt-in, got %+v", i, cap)
 		}
 		if !cap.StopSequences {
 			t.Errorf("mapping %d: CLI stop_sequences capability not merged", i)
@@ -222,6 +230,10 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 			!m.Mapping.LossPolicy.Allows(transcode.FeatureUsageCacheWriteUnknown) ||
 			!m.Mapping.LossPolicy.Allows(transcode.FeatureAnthropicControls) {
 			t.Errorf("mapping %d: default losses missing", i)
+		}
+		if !m.Mapping.LossPolicy.Allows(transcode.FeatureRequestReasoning) ||
+			!m.Mapping.LossPolicy.Allows(transcode.FeatureDeveloperRole) {
+			t.Errorf("mapping %d: compatibility-default losses missing", i)
 		}
 		if !m.Mapping.LossPolicy.Allows(transcode.FeatureImageInput) {
 			t.Errorf("mapping %d: CLI image_input loss not merged", i)
@@ -237,8 +249,12 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 
 // TestBuildTranscodeMappingsNegation proves `!name` negations withdraw the
 // sensible defaults on every CLI mapping (review-11 finding 3): a legacy
-// chat upstream can shed the modern capabilities, the beta query default,
-// and any default loss from the command line alone.
+// chat upstream can shed any default capability, the beta query default,
+// and any default loss from the command line alone. Intended semantic
+// change (field regression 2026-08-22): the capability defaults are now the
+// compatible core, so this test negates provider_reasoning_text (a default)
+// and additionally pins that reasoning_effort/developer_role stay OFF by
+// default — negating a non-default is validated but vacuous.
 func TestBuildTranscodeMappingsNegation(t *testing.T) {
 	mappings, err := buildTranscodeMappings(
 		nil,
@@ -247,7 +263,7 @@ func TestBuildTranscodeMappingsNegation(t *testing.T) {
 		false,
 		transcodeCLIOptions{
 			negatedCapabilities: map[string]struct{}{
-				"reasoning_effort": {},
+				"provider_reasoning_text": {},
 			},
 			negatedQuery: map[string]struct{}{"beta": {}},
 			negatedLosses: map[transcode.Feature]struct{}{
@@ -263,11 +279,14 @@ func TestBuildTranscodeMappingsNegation(t *testing.T) {
 	}
 	for i, m := range mappings {
 		cap := m.Mapping.ChatCapabilities
-		if cap.ReasoningEffort {
-			t.Errorf("mapping %d: !reasoning_effort did not withdraw the default", i)
+		if cap.ProviderReasoningText {
+			t.Errorf("mapping %d: !provider_reasoning_text did not withdraw the default", i)
 		}
-		if !cap.DeveloperRole || !cap.ProviderReasoningText || !cap.ParallelToolCalls {
+		if !cap.ParallelToolCalls {
 			t.Errorf("mapping %d: unrelated default capabilities withdrawn: %+v", i, cap)
+		}
+		if cap.ReasoningEffort || cap.DeveloperRole {
+			t.Errorf("mapping %d: opt-in capabilities must be off by default: %+v", i, cap)
 		}
 		if _, ok := m.Mapping.AllowedClientQuery["beta"]; ok {
 			t.Errorf("mapping %d: !beta did not withdraw the default query", i)
@@ -275,7 +294,8 @@ func TestBuildTranscodeMappingsNegation(t *testing.T) {
 		if m.Mapping.LossPolicy.Allows(transcode.FeatureBuiltinTools) {
 			t.Errorf("mapping %d: !builtin_tools did not withdraw the default loss", i)
 		}
-		if !m.Mapping.LossPolicy.Allows(transcode.FeatureReasoningSummary) {
+		if !m.Mapping.LossPolicy.Allows(transcode.FeatureReasoningSummary) ||
+			!m.Mapping.LossPolicy.Allows(transcode.FeatureRequestReasoning) {
 			t.Errorf("mapping %d: unrelated default losses withdrawn", i)
 		}
 	}
@@ -287,7 +307,7 @@ func TestBuildTranscodeMappingsNegation(t *testing.T) {
 		false,
 		false,
 		transcodeCLIOptions{
-			negatedCapabilities: map[string]struct{}{"reasoning_effort": {}},
+			negatedCapabilities: map[string]struct{}{"parallel_tool_calls": {}},
 			capabilities:        transcode.ChatCapabilities{StopSequences: true},
 		},
 	)
@@ -298,7 +318,7 @@ func TestBuildTranscodeMappingsNegation(t *testing.T) {
 	if !cap.StopSequences {
 		t.Fatal("explicit positive lost under an unrelated negation")
 	}
-	if cap.ReasoningEffort {
+	if cap.ParallelToolCalls {
 		t.Fatal("negated default still present")
 	}
 }

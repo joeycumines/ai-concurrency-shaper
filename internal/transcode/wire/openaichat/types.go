@@ -337,6 +337,11 @@ type ChatAssistantMessage struct {
 	// ChatCapabilities.ProviderReasoningText is enabled and may map only to
 	// ordinary text, an approved loss, or a rejection.
 	Reasoning *string `json:"reasoning,omitempty"`
+	// ReasoningContent is the same provider extension in the DeepSeek/Qwen
+	// spelling that real open-weights gateways emit on assistant messages.
+	// It follows Reasoning's semantics exactly; a message carrying two
+	// non-empty spellings at once is a contradiction, never a merge.
+	ReasoningContent *string `json:"reasoning_content,omitempty"`
 
 	// Opaque provider-extension fields present on real assistant messages
 	// (e.g. the yolo gateway's token_ids, routed_experts, stop_reason):
@@ -568,11 +573,16 @@ type LLMUsage struct {
 
 // StreamDelta is the delta payload of a streaming chat completion chunk.
 type StreamDelta struct {
-	Role      *string         `json:"role,omitempty"`
-	Content   *string         `json:"content,omitempty"`
-	Refusal   *string         `json:"refusal,omitempty"`
-	Reasoning *string         `json:"reasoning,omitempty"`
-	ToolCalls []ToolCallDelta `json:"tool_calls,omitempty"`
+	Role      *string `json:"role,omitempty"`
+	Content   *string `json:"content,omitempty"`
+	Refusal   *string `json:"refusal,omitempty"`
+	Reasoning *string `json:"reasoning,omitempty"`
+	// ReasoningContent is the same provider extension in the DeepSeek/Qwen
+	// spelling that real open-weights gateways stream. It follows Reasoning's
+	// semantics exactly; a delta carrying two non-empty spellings at once is
+	// a contradiction, never a merge.
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCallDelta `json:"tool_calls,omitempty"`
 }
 
 // TopLogprob is one alternative token of a token log-probability entry.

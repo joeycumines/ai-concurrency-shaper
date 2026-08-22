@@ -61,6 +61,10 @@ type chatMessageShadow struct {
 	Refusal    *string              `json:"refusal,omitempty"`
 	ToolCalls  []chatToolCallShadow `json:"tool_calls,omitempty"`
 	Reasoning  *string              `json:"reasoning,omitempty"`
+	// ReasoningContent mirrors the wire ChatAssistantMessage extension (the
+	// DeepSeek/Qwen spelling); shadow-mirrors-wire per the task-12 F1
+	// pattern.
+	ReasoningContent *string `json:"reasoning_content,omitempty"`
 
 	TokenIDs      any     `json:"token_ids,omitempty"`
 	RoutedExperts any     `json:"routed_experts,omitempty"`
@@ -442,16 +446,42 @@ func chatMessageToCanonicalParts(
 			parts = append(parts, CanonicalRefusal{Text: *message.Refusal})
 		}
 
-		if message.Reasoning != nil {
+		// Provider plaintext reasoning arrives in two provider spellings:
+		// `reasoning` (OpenRouter style) and `reasoning_content` (the
+		// DeepSeek/Qwen convention real open-weights gateways emit). They
+		// are one logical field; a body carrying two non-empty spellings at
+		// once is contradictory upstream wire, never an ordered merge. The
+		// resolved text follows Reasoning's semantics exactly: capability on
+		// maps to ordinary text, capability off is a typed rejection naming
+		// the actual field.
+		reasoningText := ""
+		reasoningPath := ""
+		switch {
+		case nonEmpty(message.Reasoning) && nonEmpty(message.ReasoningContent):
+			return nil, nil, upstreamWireError(
+				UpstreamChatCompletions,
+				0,
+				errors.New(
+					"chat message carries both reasoning and reasoning_content",
+				),
+			)
+		case nonEmpty(message.ReasoningContent):
+			reasoningText = *message.ReasoningContent
+			reasoningPath = "choices[].message.reasoning_content"
+		case nonEmpty(message.Reasoning):
+			reasoningText = *message.Reasoning
+			reasoningPath = "choices[].message.reasoning"
+		}
+		if reasoningText != "" {
 			if !capabilities.ProviderReasoningText {
 				return nil, nil, &UnsupportedFeatureError{
 					Protocol: "chat",
-					Path:     "choices[].message.reasoning",
+					Path:     reasoningPath,
 					Feature:  "provider reasoning text",
 				}
 			}
 			// Provider plaintext reasoning is mapped to ordinary text only.
-			parts = append(parts, CanonicalText{Text: *message.Reasoning})
+			parts = append(parts, CanonicalText{Text: reasoningText})
 		}
 
 		for i, call := range message.ToolCalls {

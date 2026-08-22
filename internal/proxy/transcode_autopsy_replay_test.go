@@ -254,3 +254,174 @@ func TestReplayPoisonUsageSuccess(t *testing.T) {
 		t.Fatalf("converted usage totals missing from the client body: %s", rec.Body.String())
 	}
 }
+
+// qwenReasoningStreamUpstream replays the observed yolo/qwen streaming
+// behavior (field regression 2026-08-22): role + reasoning_content deltas
+// (the DeepSeek/Qwen spelling), then answer content, then the finish chunk
+// and the [DONE] sentinel.
+func qwenReasoningStreamUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		frame := func(data string) {
+			_, _ = w.Write([]byte("data: " + data + "\n\n"))
+		}
+		frame(`{"id":"chatcmpl-q","object":"chat.completion.chunk","created":1710000000,"model":"qwen","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"let me think"},"finish_reason":null}]}`)
+		frame(`{"id":"chatcmpl-q","object":"chat.completion.chunk","created":1710000000,"model":"qwen","choices":[{"index":0,"delta":{"reasoning_content":"more thought"},"finish_reason":null}]}`)
+		frame(`{"id":"chatcmpl-q","object":"chat.completion.chunk","created":1710000000,"model":"qwen","choices":[{"index":0,"delta":{"content":"final answer"},"finish_reason":null}]}`)
+		frame(`{"id":"chatcmpl-q","object":"chat.completion.chunk","created":1710000000,"model":"qwen","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream
+}
+
+// qwenMessagesMapping is the Claude Code Messages->Chat mapping with the CLI
+// default capability set that the regression traffic ran against:
+// ProviderReasoningText and ParallelToolCalls are the compatible core
+// defaults (defaultTranscodeChatCapabilities), and the usage-timing losses
+// are default approvals.
+func qwenMessagesMapping(t *testing.T) transcode.Mapping {
+	t.Helper()
+	key, err := transcode.NewRouteKey(http.MethodPost, "/v1/messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return transcode.Mapping{
+		ClientRoute:      key,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+			transcode.FeatureUsageCacheReadUnknown:  {},
+			transcode.FeatureUsageCacheWriteUnknown: {},
+			transcode.FeatureUsageReasoningUnknown:  {},
+			transcode.FeatureUsageUnknown:           {},
+		}},
+		ChatCapabilities: transcode.ChatCapabilities{
+			ParallelToolCalls:     true,
+			ProviderReasoningText: true,
+		},
+		ModelMap: transcode.ModelMap{AllowIdentity: true},
+		Auth:     transcode.AuthPolicy{Mode: transcode.AuthNone},
+		AllowedClientQuery: map[string]struct{}{
+			"beta": {},
+		},
+	}
+}
+
+// TestReplayQwenReasoningContentStream proves the 2026-08-22 stream failure
+// is dead end-to-end: a streaming Claude Code request against a qwen-style
+// upstream whose chunks carry delta.reasoning_content yields a 200 SSE
+// exchange with NO error event — the reasoning text arrives as ordinary text
+// content under the default provider_reasoning_text capability. Pre-fix this
+// exact upstream shape died at TTFB with 'chat stream chunk: wire: unknown
+// field "reasoning_content"'.
+func TestReplayQwenReasoningContentStream(t *testing.T) {
+	upstream := qwenReasoningStreamUpstream(t)
+
+	u, _ := url.Parse(upstream.URL)
+	pattern, err := route.Parse("POST /v1/messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(transcodeMapping(qwenMessagesMapping(t))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages?beta=true",
+		strings.NewReader(`{"model":"qwen","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hello"}]}`),
+	)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "text/event-stream") && rec.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("content type = %q, want text/event-stream", rec.Header().Get("Content-Type"))
+	}
+	// The exchange must NOT end in an in-band error event (the observed
+	// failure surfaced exactly there).
+	if strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("downstream stream carries an error event: %s", body)
+	}
+	// The terminal lifecycle must be complete: message_delta with stop
+	// reason end_turn plus message_stop — never a silent truncation.
+	if !strings.Contains(body, `"type":"message_stop"`) {
+		t.Fatalf("message_stop missing from the downstream stream: %s", body)
+	}
+	// Both reasoning texts arrive as ordinary text content (the sanctioned
+	// provider_reasoning_text encoding), followed by the answer.
+	for _, want := range []string{"let me think", "more thought", "final answer"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("downstream stream missing %q: %s", want, body)
+		}
+	}
+}
+
+// TestReplayQwenReasoningContentNonStream proves the non-streaming half of
+// the 2026-08-22 regression is dead end-to-end: a non-streaming completion
+// whose message carries reasoning_content returns 200 with the reasoning as
+// ordinary text instead of the field-observed 502 that discarded finished
+// generations.
+func TestReplayQwenReasoningContentNonStream(t *testing.T) {
+	var body string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		body = string(raw)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-n","object":"chat.completion","created":1710000000,"model":"qwen","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"answer","reasoning_content":"deep think"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	u, _ := url.Parse(upstream.URL)
+	pattern, err := route.Parse("POST /v1/messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(transcodeMapping(qwenMessagesMapping(t))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages?beta=true",
+		strings.NewReader(`{"model":"qwen","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`),
+	)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	// The reasoning text reaches the client as ordinary content; the
+	// extension field name itself never leaks.
+	if !strings.Contains(rec.Body.String(), "deep think") {
+		t.Fatalf("reasoning text missing from the client body: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "reasoning_content") {
+		t.Fatalf("client body leaks the extension field name: %s", rec.Body.String())
+	}
+	// The rendered upstream request stayed a well-formed chat completion.
+	if !strings.Contains(body, `"role":"user"`) {
+		t.Fatalf("upstream body missing the converted user message: %s", body)
+	}
+}

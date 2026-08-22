@@ -508,7 +508,29 @@ func (s *chatResponsesStreamState) convertDelta(
 		}
 	}
 
-	if delta.Reasoning != nil && *delta.Reasoning != "" {
+	// Provider plaintext reasoning arrives in two provider spellings:
+	// `reasoning` (OpenRouter style) and `reasoning_content` (the
+	// DeepSeek/Qwen convention real open-weights gateways stream). They are
+	// one logical field; a delta carrying two non-empty spellings at once is
+	// contradictory upstream wire, never an ordered merge. The resolved text
+	// runs the identical capability-gated block below, reported under the
+	// actual field path.
+	reasoningText := ""
+	reasoningPath := ""
+	switch {
+	case nonEmpty(delta.Reasoning) && nonEmpty(delta.ReasoningContent):
+		return nil, s.wireError(errors.New(
+			"chat stream chunk delta carries both reasoning and reasoning_content",
+		))
+	case nonEmpty(delta.ReasoningContent):
+		reasoningText = *delta.ReasoningContent
+		reasoningPath = "choices[].delta.reasoning_content"
+	case nonEmpty(delta.Reasoning):
+		reasoningText = *delta.Reasoning
+		reasoningPath = "choices[].delta.reasoning"
+	}
+
+	if reasoningText != "" {
 		// Provider plaintext reasoning is mapped to ordinary text only when
 		// the capability is enabled (a named, reported encoding); otherwise
 		// it is dropped with a documented loss (review-j finding 10). It
@@ -521,7 +543,7 @@ func (s *chatResponsesStreamState) convertDelta(
 				if err := s.report.Lose(
 					s.policy,
 					FeatureProviderReasoningText,
-					"choices[].delta.reasoning",
+					reasoningPath,
 					"provider reasoning is dropped during chat-to-responses streaming",
 				); err != nil {
 					return nil, err
@@ -539,7 +561,7 @@ func (s *chatResponsesStreamState) convertDelta(
 				message.ID,
 				item.outputIndex,
 				contentIndex,
-				*delta.Reasoning,
+				reasoningText,
 			))
 			key := chatPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
 			builder := s.textBufs[key]
@@ -547,8 +569,8 @@ func (s *chatResponsesStreamState) convertDelta(
 				builder = &strings.Builder{}
 				s.textBufs[key] = builder
 			}
-			builder.WriteString(*delta.Reasoning)
-			if err := s.checkAccumulated(builder, len(*delta.Reasoning), "text"); err != nil {
+			builder.WriteString(reasoningText)
+			if err := s.checkAccumulated(builder, len(reasoningText), "text"); err != nil {
 				return nil, err
 			}
 			// The encoding note is recorded exactly once per stream, never
@@ -557,7 +579,7 @@ func (s *chatResponsesStreamState) convertDelta(
 				s.reasoningReportRecorded = true
 				if err := s.report.Note(
 					FeatureProviderReasoningText,
-					"choices[].delta.reasoning",
+					reasoningPath,
 					"provider reasoning maps to ordinary text (provider_reasoning_text encoding)",
 				); err != nil {
 					return nil, err

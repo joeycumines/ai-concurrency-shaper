@@ -562,16 +562,21 @@ func parseClientQuery(
 // -transcode-allow-client-query, and -transcode-allow-loss; the defaults
 // exist so a minimal invocation works without enumerating every feature.
 
-// defaultTranscodeChatCapabilities is the standard modern
-// OpenAI-compatible chat surface: developer role, parallel tool calls,
-// reasoning effort, and provider plaintext reasoning (the chat
-// "reasoning" response extension). All four were verified against real
-// providers; the capability gates only fire when the client actually uses
-// the feature.
+// defaultTranscodeChatCapabilities is the maximally compatible out-of-the-box
+// core: parallel tool calls (universally understood since 2023) and provider
+// plaintext reasoning mapping (wire-safe in both directions — the extension
+// is decoded and either mapped to ordinary text under this capability or
+// observably dropped). Two fidelity-only knobs are deliberately OPT-IN
+// because generic and open-weights gateways reject them: `reasoning_effort`
+// (a 2024-era parameter several servers refuse outright; off by default the
+// effort/budget knob drops observably under the request_reasoning loss) and
+// developer-role messages (Qwen/Llama/DeepSeek Jinja templates only know
+// system/user/assistant; off by default developer turns render as system and
+// the distinction drop is observable under the developer_role loss).
 var defaultTranscodeChatCapabilities = transcode.ChatCapabilities{
-	DeveloperRole:         true,
+	DeveloperRole:         false,
 	ParallelToolCalls:     true,
-	ReasoningEffort:       true,
+	ReasoningEffort:       false,
 	ProviderReasoningText: true,
 }
 
@@ -592,7 +597,10 @@ var defaultTranscodeAllowedQuery = map[string]struct{}{
 // controls), and built-in tools are client-side controls the chat target
 // cannot reproduce; usage breakdowns are observability metadata the chat
 // upstreams do not always report (the documented loss encodings emit zeros
-// rather than failing the exchange).
+// rather than failing the exchange). request_reasoning and developer_role
+// back the compatibility-first capability defaults: with reasoning_effort
+// and developer_role opt-in, the effort/budget knob and the role distinction
+// drop observably instead of erroring out of the box.
 var defaultTranscodeLosses = map[transcode.Feature]struct{}{
 	transcode.FeatureReasoningSummary:       {},
 	transcode.FeatureAuthenticatedThinking:  {},
@@ -604,6 +612,8 @@ var defaultTranscodeLosses = map[transcode.Feature]struct{}{
 	transcode.FeatureUsageCacheReadUnknown:  {},
 	transcode.FeatureUsageCacheWriteUnknown: {},
 	transcode.FeatureUsageReasoningUnknown:  {},
+	transcode.FeatureRequestReasoning:       {},
+	transcode.FeatureDeveloperRole:          {},
 }
 
 // mergedLossPolicy combines the CLI -transcode-allow-loss values with the

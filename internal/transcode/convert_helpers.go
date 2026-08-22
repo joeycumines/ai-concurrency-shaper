@@ -699,3 +699,11 @@ func encodeToolResultEnvelope(parts []CanonicalPart) (string, error) {
 	}
 	return string(raw), nil
 }
+
+// nonEmpty reports whether a presence-aware string pointer carries a
+// non-empty value: the provider reasoning spellings (reasoning and
+// reasoning_content) treat present-but-empty exactly like absent, matching
+// the stream delta idiom.
+func nonEmpty(s *string) bool {
+	return s != nil && *s != ""
+}

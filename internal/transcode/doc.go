@@ -107,10 +107,12 @@
 //	                       upstream cannot be reproduced in Messages; failed
 //	                       envelopes surface as client-dialect errors and
 //	                       never reach this decision)
-//	Provider reasoning    capability-gated (ProviderReasoningText maps to
-//	                       ordinary text with the named provider_reasoning_text
-//	                       encoding, reported via ConversionReport in the
-//	                       streaming path)
+//	Provider reasoning    capability-gated (ProviderReasoningText — the chat
+//	                       `reasoning` / DeepSeek-Qwen `reasoning_content`
+//	                       response extension — maps to ordinary text with
+//	                       the named provider_reasoning_text encoding,
+//	                       reported via ConversionReport in the streaming
+//	                       path)
 //
 // # Failure taxonomy
 //

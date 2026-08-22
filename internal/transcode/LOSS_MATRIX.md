@@ -26,7 +26,7 @@ individual keys via `-transcode-allow-loss`.
 | `usage_cache_read_unknown` | the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced |
 | `usage_cache_write_unknown` | the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced |
 | `usage_reasoning_unknown` | the source provided no reasoning-token breakdown; the required target usage breakdown cannot be reproduced |
-| `provider_reasoning_text` | provider reasoning text in a RESPONSE cannot be reproduced in the target (request-side reasoning controls are the separate request_reasoning key) |
+| `provider_reasoning_text` | provider reasoning text in a RESPONSE (the chat extension spelled `reasoning` or, in the DeepSeek/Qwen convention real open-weights gateways emit, `reasoning_content`) cannot be reproduced in the target; it may map only to ordinary text, an approved loss, or a rejection (request-side reasoning controls are the separate request_reasoning key) |
 | `request_reasoning` | request-side reasoning controls (the Anthropic thinking budget and the Responses reasoning.effort) cannot be reproduced in the target request |
 | `reasoning_summary` | reasoning summaries (output and request-side summary style) cannot be reproduced in the target |
 | `tool_result_json_envelope` | multimodal tool results are encoded as the deterministic transcode JSON text envelope (transcode_version 1) inside a Chat tool message |
