@@ -1859,7 +1859,7 @@ func (p *Proxy) classifyExchange(
 	now time.Time,
 ) exchangeResult {
 	if rec != nil && rec.transcodeOutcome != nil {
-		return classifyTranscodeExchange(rec, r, upstreamAttempted, now)
+		return classifyTranscodeExchange(rec, upstreamAttempted)
 	}
 	return classifyNativeExchange(rec, r, retryAttempt, upstreamAttempted, upstreamAbortFailure, breakerEpoch, now)
 }
@@ -1869,9 +1869,7 @@ func (p *Proxy) classifyExchange(
 // completion, and Retry-After are independent dimensions of the outcome.
 func classifyTranscodeExchange(
 	rec *statusRecorder,
-	r *http.Request,
 	upstreamAttempted bool,
-	now time.Time,
 ) exchangeResult {
 	outcome := rec.transcodeOutcome
 	// The attempt marker fires when the signing+dispatch chain starts, which

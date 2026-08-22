@@ -363,9 +363,9 @@ func TestToolArgumentsFidelityAcrossTargets(t *testing.T) {
 	// the unescaped original ({"city":) preserved byte-exact.
 	const invalidRaw = `{"city":`
 	const invalidRawEscaped = `{\"city\":`
-	response, err := DecodeChatResponse([]byte(
+	response, _, err := DecodeChatResponseWithPolicy([]byte(
 		`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"`+invalidRawEscaped+`"}}]}}]}`,
-	), ChatCapabilities{})
+	), ChatCapabilities{}, StrictLossPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}

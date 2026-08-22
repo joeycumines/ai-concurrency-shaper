@@ -707,3 +707,35 @@ func encodeToolResultEnvelope(parts []CanonicalPart) (string, error) {
 func nonEmpty(s *string) bool {
 	return s != nil && *s != ""
 }
+
+// chatProviderReasoningDroppedDetail is the single loss detail reported when
+// provider plaintext reasoning must be dropped because the
+// ProviderReasoningText capability is not enabled. One constant, shared
+// verbatim by the non-stream and stream chat surfaces, so a capability-off
+// exchange produces observably identical loss text through both conversion
+// paths (task 22 de-asymmetry).
+const chatProviderReasoningDroppedDetail = "provider reasoning is dropped because the provider_reasoning_text capability is not enabled"
+
+// resolveChatReasoningSpelling resolves the two provider spelling of chat
+// plaintext reasoning — `reasoning_content` (the DeepSeek/Qwen convention)
+// and `reasoning` (OpenRouter style) — into a single text and its wire path.
+// They are one logical field shared by the non-stream and stream chat
+// surfaces, so the resolution invariant has exactly one implementation
+// (review-reuse finding 5). A present-but-empty value counts as absent; two
+// non-empty spellings at once are contradictory upstream wire and reported by
+// returning empty text with both set. The caller supplies the per-surface
+// report paths and owns the surface-specific rejection/encoding decision.
+func resolveChatReasoningSpelling(
+	reasoning, reasoningContent *string,
+	reasoningPath, reasoningContentPath string,
+) (text, path string, both bool) {
+	switch {
+	case nonEmpty(reasoning) && nonEmpty(reasoningContent):
+		return "", "", true
+	case nonEmpty(reasoningContent):
+		return *reasoningContent, reasoningContentPath, false
+	case nonEmpty(reasoning):
+		return *reasoning, reasoningPath, false
+	}
+	return "", "", false
+}

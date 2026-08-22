@@ -445,7 +445,6 @@ func checkNullObject(dec *json.Decoder, typ reflect.Type, path string) error {
 // extended to honor the tag.
 func structFieldByJSONName(typ reflect.Type, key string) (reflect.StructField, bool) {
 	for field := range typ.Fields() {
-		field := field
 		if field.Anonymous {
 			ft := field.Type
 			for ft.Kind() == reflect.Pointer {

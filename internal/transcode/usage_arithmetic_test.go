@@ -68,7 +68,7 @@ func TestResponsesUsageExactTotalNonStreaming(t *testing.T) {
 // rejects a contract-violating total the same way (review-z commit 5).
 func TestChatUsageExactTotalNonStreaming(t *testing.T) {
 	body := []byte(`{"object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":20}}`)
-	_, err := DecodeChatResponse(body, ChatCapabilities{})
+	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
 	mustUsageError(t, err, "non-streaming chat usage")
 	var wireErr *UpstreamWireError
 	if !errors.As(err, &wireErr) {
@@ -135,7 +135,7 @@ func TestUsageAbsentVsZeroPreserved(t *testing.T) {
 	// Chat usage without total_tokens: the shadow marks the total unknown,
 	// the decode must not fabricate a mismatch.
 	body := []byte(`{"object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
-	response, err := DecodeChatResponse(body, ChatCapabilities{})
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
 	if err != nil {
 		t.Fatalf("chat decode with absent total rejected: %v", err)
 	}

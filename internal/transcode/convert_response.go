@@ -102,18 +102,23 @@ type chatUsageShadow struct {
 	CompletionTokensDetails *ChatCompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
-// DecodeChatResponse decodes a non-streaming Chat Completions response into
-// the canonical IR. The decode is presence-aware and strict: the pinned
-// required fields (object, one choice, choice index 0, finish_reason,
-// message with role assistant, and complete tool-call identity) must be
-// explicitly present — absent or null is rejected, never defaulted (review-k
-// finding 4). A response with more than one choice is rejected rather than
-// silently taking choice zero. Provider plaintext reasoning is handled only
-// when ChatCapabilities.ProviderReasoningText is enabled.
-func DecodeChatResponse(
+// DecodeChatResponseWithPolicy decodes a non-streaming Chat Completions
+// response into the canonical IR, applying the exchange loss policy to the
+// provider plaintext reasoning decision. The decode is strict on the pinned
+// wire contract: the required fields (object, one choice, choice index 0,
+// finish_reason, message with role assistant, and complete tool-call identity)
+// must be explicitly present — absent or null is rejected, never defaulted
+// (review-k finding 4); corrupt upstream wire is an upstream failure. Provider
+// plaintext reasoning is the one field that instead follows the loss policy:
+// mapped to ordinary text with the capability, an approved loss with the
+// reasoning dropped when the policy allows losing provider_reasoning_text, or
+// an UnsupportedFeatureError otherwise — never a silent drop (stream
+// disposition parity).
+func DecodeChatResponseWithPolicy(
 	body []byte,
 	capabilities ChatCapabilities,
-) (CanonicalResponse, error) {
+	policy LossPolicy,
+) (CanonicalResponse, ConversionReport, error) {
 	// Presence-aware shadow decode: absent-vs-zero is distinguishable.
 	var shadow chatResponseShadow
 	if err := wire.Decode(body, &shadow); err != nil {
@@ -122,7 +127,7 @@ func DecodeChatResponse(
 		// upstream failure (review-k finding 3). Valid features the
 		// transcoder knows but does not support are rejected as
 		// UnsupportedFeatureError (local) instead.
-		return CanonicalResponse{}, upstreamWireError(
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			fmt.Errorf("chat response: %w", err),
@@ -134,21 +139,21 @@ func DecodeChatResponse(
 	// message role are required fields. Every violation is corrupt upstream
 	// wire (review-k findings 3 and 4).
 	if shadow.Object == nil || *shadow.Object != "chat.completion" {
-		return CanonicalResponse{}, upstreamWireError(
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			fmt.Errorf("chat response object = %q, want \"chat.completion\"", derefStr(shadow.Object)),
 		)
 	}
 	if len(shadow.Choices) == 0 {
-		return CanonicalResponse{}, upstreamWireError(
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			errors.New("chat response has no choices"),
 		)
 	}
 	if len(shadow.Choices) > 1 {
-		return CanonicalResponse{}, upstreamWireError(
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			errors.New("chat response has more than one choice; the transcoder requires n=1"),
@@ -156,28 +161,28 @@ func DecodeChatResponse(
 	}
 	shadowChoice := shadow.Choices[0]
 	if shadowChoice.Index == nil || *shadowChoice.Index != 0 {
-		return CanonicalResponse{}, upstreamWireError(
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			fmt.Errorf("chat response choice index = %v; n=1 requires index 0", indexOrZero(shadowChoice.Index)),
 		)
 	}
 	if shadowChoice.FinishReason == nil {
-		return CanonicalResponse{}, upstreamWireError(
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			errors.New("chat response choice has no finish_reason"),
 		)
 	}
 	if shadowChoice.Message == nil {
-		return CanonicalResponse{}, upstreamWireError(
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			errors.New("chat response choice has no message"),
 		)
 	}
 	if shadowChoice.Message.Role == nil || *shadowChoice.Message.Role != ChatMessageRoleAssistant {
-		return CanonicalResponse{}, upstreamWireError(
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			fmt.Errorf("chat response message role = %q, want assistant", derefRole(shadowChoice.Message.Role)),
@@ -188,7 +193,7 @@ func DecodeChatResponse(
 	// carrying another role's fields is a contradictory union — a typed
 	// decode rejection.
 	if shadowChoice.Message.ToolCallID != nil {
-		return CanonicalResponse{}, upstreamWireError(
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			&wire.DecodeError{
@@ -200,28 +205,28 @@ func DecodeChatResponse(
 	}
 	for i, call := range shadowChoice.Message.ToolCalls {
 		if call.Type == nil || *call.Type != "function" {
-			return CanonicalResponse{}, upstreamWireError(
+			return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 				UpstreamChatCompletions,
 				0,
 				fmt.Errorf("chat response tool call %d type = %q, want function", i, derefStr(call.Type)),
 			)
 		}
 		if call.ID == nil || *call.ID == "" {
-			return CanonicalResponse{}, upstreamWireError(
+			return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 				UpstreamChatCompletions,
 				0,
 				fmt.Errorf("chat response tool call %d has no id", i),
 			)
 		}
 		if call.Function.Name == nil || *call.Function.Name == "" {
-			return CanonicalResponse{}, upstreamWireError(
+			return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 				UpstreamChatCompletions,
 				0,
 				fmt.Errorf("chat response tool call %d has no function name", i),
 			)
 		}
 		if call.Function.Arguments == nil {
-			return CanonicalResponse{}, upstreamWireError(
+			return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 				UpstreamChatCompletions,
 				0,
 				fmt.Errorf("chat response tool call %d has no arguments", i),
@@ -238,7 +243,7 @@ func DecodeChatResponse(
 	// wire either way.
 	var chat ChatResponse
 	if err := wire.Decode(body, &chat); err != nil {
-		return CanonicalResponse{}, upstreamWireError(
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
 			fmt.Errorf("chat response: %w", err),
@@ -337,7 +342,7 @@ func DecodeChatResponse(
 		response.Status = CanonicalResponseIncomplete
 		response.IncompleteReason = "content_filter"
 	default:
-		return CanonicalResponse{}, &UnsupportedFeatureError{
+		return CanonicalResponse{}, ConversionReport{}, &UnsupportedFeatureError{
 			Protocol: "chat",
 			Path:     "choices[].finish_reason",
 			Feature:  *choice.FinishReason,
@@ -346,10 +351,13 @@ func DecodeChatResponse(
 
 	// The assistant message becomes one message item; tool calls become
 	// their own function-call items, preserving function-call identity and
-	// the model-generated arguments byte-exact (review-z commit 2).
-	parts, calls, err := chatMessageToCanonicalParts(message, capabilities)
+	// the model-generated arguments byte-exact (review-z commit 2). The
+	// answer-content parts render even while provider reasoning is dropped
+	// under an approved loss, so the client still receives a rendered response.
+	var report ConversionReport
+	parts, calls, err := chatMessageToCanonicalParts(message, capabilities, policy, &report)
 	if err != nil {
-		return CanonicalResponse{}, err
+		return CanonicalResponse{}, report, err
 	}
 	items := make([]CanonicalResponseItem, 0, 1+len(calls))
 	if len(parts) > 0 {
@@ -366,13 +374,12 @@ func DecodeChatResponse(
 		// A contract-violating token total is corrupt upstream wire — an
 		// upstream failure, never a local conversion error (review-z
 		// commit 5).
-		var usageErr *UsageArithmeticError
-		if errors.As(err, &usageErr) {
-			return CanonicalResponse{}, upstreamWireError(UpstreamChatCompletions, 0, err)
+		if _, ok := errors.AsType[*UsageArithmeticError](err); ok {
+			return CanonicalResponse{}, ConversionReport{}, upstreamWireError(UpstreamChatCompletions, 0, err)
 		}
-		return CanonicalResponse{}, err
+		return CanonicalResponse{}, ConversionReport{}, err
 	}
-	return response, nil
+	return response, report, nil
 }
 
 // indexOrZero dereferences a presence pointer, defaulting to zero.
@@ -396,10 +403,16 @@ func derefRole(role *ChatMessageRole) string {
 // is enabled — provider plaintext reasoning mapped to ordinary text) and
 // separate function-call items. Tool-call arguments are model-generated and
 // preserved byte-exact in ToolArguments; invalid model output is never an
-// upstream defect (review-z commit 2).
+// upstream defect (review-z commit 2). Provider plaintext reasoning without
+// the capability follows the loss policy: an approved
+// provider_reasoning_text loss with the reasoning dropped when the policy
+// allows it, an error otherwise (the stream disposition, sharing the same
+// loss key and detail). The report is non-nil.
 func chatMessageToCanonicalParts(
 	message *ChatMessage,
 	capabilities ChatCapabilities,
+	policy LossPolicy,
+	report *ConversionReport,
 ) ([]CanonicalPart, []*CanonicalFunctionCallItem, error) {
 	var parts []CanonicalPart
 	var calls []*CanonicalFunctionCallItem
@@ -454,10 +467,13 @@ func chatMessageToCanonicalParts(
 		// resolved text follows Reasoning's semantics exactly: capability on
 		// maps to ordinary text, capability off is a typed rejection naming
 		// the actual field.
-		reasoningText := ""
-		reasoningPath := ""
-		switch {
-		case nonEmpty(message.Reasoning) && nonEmpty(message.ReasoningContent):
+		reasoningText, reasoningPath, both := resolveChatReasoningSpelling(
+			message.Reasoning,
+			message.ReasoningContent,
+			"choices[].message.reasoning",
+			"choices[].message.reasoning_content",
+		)
+		if both {
 			return nil, nil, upstreamWireError(
 				UpstreamChatCompletions,
 				0,
@@ -465,23 +481,28 @@ func chatMessageToCanonicalParts(
 					"chat message carries both reasoning and reasoning_content",
 				),
 			)
-		case nonEmpty(message.ReasoningContent):
-			reasoningText = *message.ReasoningContent
-			reasoningPath = "choices[].message.reasoning_content"
-		case nonEmpty(message.Reasoning):
-			reasoningText = *message.Reasoning
-			reasoningPath = "choices[].message.reasoning"
 		}
 		if reasoningText != "" {
 			if !capabilities.ProviderReasoningText {
-				return nil, nil, &UnsupportedFeatureError{
-					Protocol: "chat",
-					Path:     reasoningPath,
-					Feature:  "provider reasoning text",
+				// Provider plaintext reasoning is capability-gated exactly
+				// like the stream surface: an approved loss with the reasoning
+				// dropped (the content parts still render) or an
+				// UnsupportedFeatureError under the strict policy — never a
+				// silent drop (stream disposition parity).
+				if err := report.Lose(
+					policy,
+					FeatureProviderReasoningText,
+					reasoningPath,
+					chatProviderReasoningDroppedDetail,
+				); err != nil {
+					return nil, nil, err
 				}
+				// The reasoning text is dropped; rendering continues with the
+				// ordinary content.
+			} else {
+				// Provider plaintext reasoning is mapped to ordinary text only.
+				parts = append(parts, CanonicalText{Text: reasoningText})
 			}
-			// Provider plaintext reasoning is mapped to ordinary text only.
-			parts = append(parts, CanonicalText{Text: reasoningText})
 		}
 
 		for i, call := range message.ToolCalls {
@@ -698,8 +719,7 @@ func DecodeResponsesResponse(
 		// A contract-violating token total is corrupt upstream wire — an
 		// upstream failure, never a local conversion error (review-z
 		// commit 5).
-		var usageErr *UsageArithmeticError
-		if errors.As(err, &usageErr) {
+		if _, ok := errors.AsType[*UsageArithmeticError](err); ok {
 			return CanonicalResponse{}, upstreamWireError(UpstreamResponses, 0, err)
 		}
 		return CanonicalResponse{}, err

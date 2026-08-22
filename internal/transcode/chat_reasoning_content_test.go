@@ -78,7 +78,7 @@ func TestDecodeChatResponseReasoningContentMirrorsReasoning(t *testing.T) {
 
 	// Without the capability: the same typed rejection as message.reasoning,
 	// naming the actual field.
-	_, err := DecodeChatResponse(body, ChatCapabilities{})
+	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
 	var unsupported *UnsupportedFeatureError
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
@@ -88,7 +88,7 @@ func TestDecodeChatResponseReasoningContentMirrorsReasoning(t *testing.T) {
 	}
 
 	// With the capability (a CLI default): mapped to ordinary text.
-	response, err := DecodeChatResponse(body, ChatCapabilities{ProviderReasoningText: true})
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy())
 	if err != nil {
 		t.Fatalf("decode with capability: %v", err)
 	}
@@ -238,7 +238,100 @@ func TestDecodeChatResponseReasoningContradictionRejected(t *testing.T) {
 		"id":"x","object":"chat.completion","created":1,"model":"m",
 		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"answer","reasoning":"a","reasoning_content":"b"}}]
 	}`)
-	if _, err := DecodeChatResponse(body, ChatCapabilities{ProviderReasoningText: true}); err == nil {
+	if _, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy()); err == nil {
 		t.Fatal("expected contradiction rejection for reasoning + reasoning_content in one message")
+	}
+}
+
+// TestChatProviderReasoningCapabilityOffParity pins the task-22
+// de-asymmetry: a non-stream chat response carrying plaintext reasoning
+// while the ProviderReasoningText capability is off now follows the STREAM
+// disposition — an approved provider_reasoning_text loss with the reasoning
+// dropped and the ordinary content still rendered, sharing the same loss
+// detail text — instead of a hard local rejection. The clause matches the
+// streaming surface's capability-off clause (same loss feature, same detail);
+// the both-spellings contradiction stays a hard reject on both surfaces.
+func TestChatProviderReasoningCapabilityOffParity(t *testing.T) {
+	approved := LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureProviderReasoningText: {},
+	}}
+	body := []byte(`{
+		"id":"x","object":"chat.completion","created":1,"model":"m",
+		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"answer","reasoning_content":"deep think"}}]
+	}`)
+
+	nonStream, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, approved)
+	if err != nil {
+		t.Fatalf("decode with an approved provider_reasoning_text loss: %v", err)
+	}
+	// The reasoning is dropped; the ordinary content still renders.
+	var found strings.Builder
+	for _, part := range nonStream.Items[0].(*CanonicalMessageItem).Parts {
+		if text, ok := part.(CanonicalText); ok {
+			found.WriteString(text.Text)
+		}
+	}
+	if found.String() != "answer" {
+		t.Fatalf("non-stream items = %q, want only the answer with the reasoning dropped", found.String())
+	}
+	// The loss is recorded with the shared detail text.
+	detail := ""
+	path := ""
+	lossCount := 0
+	for _, loss := range report.Losses {
+		if loss.Feature == FeatureProviderReasoningText {
+			lossCount++
+			detail = loss.Detail
+			path = loss.Path
+		}
+	}
+	if lossCount != 1 {
+		t.Fatalf("provider_reasoning_text losses = %d (%+v), want exactly one", lossCount, report.Losses)
+	}
+	if detail != chatProviderReasoningDroppedDetail {
+		t.Fatalf("loss detail = %q, want the shared %q", detail, chatProviderReasoningDroppedDetail)
+	}
+	if path != "choices[].message.reasoning_content" {
+		t.Fatalf("loss path = %q, want choices[].message.reasoning_content", path)
+	}
+
+	// The streaming surface's capability-off clause records the same feature
+	// with the same detail text (this is the disposition now shared).
+	stream := newChatResponsesStreamState(
+		testStreamContext(),
+		approved,
+		ChatCapabilities{},
+		"resp_1",
+		"m",
+		1,
+		nil,
+	)
+	if _, err := stream.Convert(chatChunk(t, ChatStreamDelta{ReasoningContent: new("deep think")}, nil)); err != nil {
+		t.Fatalf("stream convert: %v", err)
+	}
+	streamDetail := ""
+	streamCount := 0
+	for _, loss := range stream.report.Losses {
+		if loss.Feature == FeatureProviderReasoningText {
+			streamCount++
+			streamDetail = loss.Detail
+		}
+	}
+	if streamCount != 1 {
+		t.Fatalf("stream provider_reasoning_text losses = %d (%+v), want exactly one", streamCount, stream.report.Losses)
+	}
+	if streamCount == 1 && detail != streamDetail {
+		t.Fatalf("non-stream detail %q != stream detail %q", detail, streamDetail)
+	}
+
+	// The both-spellings contradiction stays a hard reject on the non-stream
+	// surface, exactly like the stream surface — an approved loss cannot waive
+	// contradictory upstream wire.
+	both := []byte(`{
+		"id":"x","object":"chat.completion","created":1,"model":"m",
+		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"answer","reasoning":"a","reasoning_content":"b"}}]
+	}`)
+	if _, _, err := DecodeChatResponseWithPolicy(both, ChatCapabilities{ProviderReasoningText: true}, approved); err == nil {
+		t.Fatal("non-stream accepted two reasoning spellings with an approved loss")
 	}
 }

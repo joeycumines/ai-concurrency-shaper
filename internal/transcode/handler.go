@@ -223,7 +223,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Reject Upgrade requests on transcoded routes: a 101 Switching
 	// Protocols response cannot be meaningfully schema-transcoded.
 	if isUpgradeRequest(r) {
-		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+		h.writeLocalError(r, w,
 			http.StatusBadRequest, "upgrade requests are not supported on transcoded routes",
 			ProvenanceLocalRequestConversionError)
 		return
@@ -255,12 +255,12 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, errRequestBodyTooLarge) {
-			h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+			h.writeLocalError(r, w,
 				http.StatusRequestEntityTooLarge, "request body too large",
 				ProvenanceLocalRequestConversionError)
 			return
 		}
-		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+		h.writeLocalError(r, w,
 			http.StatusBadRequest, "read request body: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
 		return
@@ -284,7 +284,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errDecodedRequestTooLarge) {
 			status = http.StatusRequestEntityTooLarge
 		}
-		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+		h.writeLocalError(r, w,
 			status, "convert request: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
 		return
@@ -311,7 +311,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			)
 			message = "build upstream request: internal error"
 		}
-		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+		h.writeLocalError(r, w,
 			status, message,
 			ProvenanceLocalRequestConversionError)
 		return
@@ -414,7 +414,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// negotiated mode: corrupt upstream wire, an upstream failure
 			// that fails a half-open probe and applies the failure hold
 			// (review-08 blocker 8).
-			h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+			h.writeLocalError(r, w,
 				http.StatusBadGateway,
 				"upstream returned a stream for a non-streaming request",
 				ProvenanceUpstreamBodyError)
@@ -423,7 +423,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.streamResponse(w, r, resp, context, receivedAt)
 	case isJSON(resp):
 		if context.StreamIntent {
-			h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+			h.writeLocalError(r, w,
 				http.StatusBadGateway,
 				"upstream returned a non-streaming response for a streaming request",
 				ProvenanceUpstreamBodyError)
@@ -432,7 +432,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.jsonResponse(w, r, resp, context)
 	default:
 		// A 2xx non-JSON non-SSE response is a stream-intent mismatch.
-		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+		h.writeLocalError(r, w,
 			http.StatusBadGateway,
 			"upstream returned an unrecognized response content type",
 			ProvenanceUpstreamBodyError)
@@ -472,9 +472,10 @@ func (h *TranscodeHandler) convertRequest(
 	mapping := h.cfg.Mapping
 
 	context := &ExchangeContext{
-		IDs:        NewExchangeIDs(),
-		LossPolicy: policy,
-		// Stream intent precedence (review-08 blocker 1): the request body's
+		IDs:          NewExchangeIDs(),
+		LossPolicy:   policy,
+		Capabilities: mapping.ChatCapabilities,
+		// Stream intent precedence (v1 blocker 1): the request body's
 		// stream field, when explicitly present, is authoritative; only when
 		// absent does the client Accept header select the representation
 		// (parsed below with full media-range and q-value semantics — q=0
@@ -840,7 +841,11 @@ func (h *TranscodeHandler) convertResponse(
 	case ClientResponses:
 		switch h.cfg.Mapping.UpstreamProtocol {
 		case UpstreamChatCompletions:
-			response, err := DecodeChatResponse(body, h.cfg.Mapping.ChatCapabilities)
+			response, decodeReport, err := DecodeChatResponseWithPolicy(
+				body,
+				h.cfg.Mapping.ChatCapabilities,
+				h.cfg.Mapping.LossPolicy,
+			)
 			if err != nil {
 				return nil, conversionProvenance(err), err
 			}
@@ -848,6 +853,10 @@ func (h *TranscodeHandler) convertResponse(
 			if err != nil {
 				return nil, conversionProvenance(err), err
 			}
+			// The decode's provider reasoning drop is part of the same
+			// exchange log as the render's losses (request-side merge
+			// precedent).
+			report.Losses = append(report.Losses, decodeReport.Losses...)
 			logConversionReport(report, r)
 			return converted, ProvenanceLocalResponseConversionError, nil
 		default:
@@ -860,7 +869,11 @@ func (h *TranscodeHandler) convertResponse(
 	case ClientMessages:
 		switch h.cfg.Mapping.UpstreamProtocol {
 		case UpstreamChatCompletions:
-			response, err := DecodeChatResponse(body, h.cfg.Mapping.ChatCapabilities)
+			response, decodeReport, err := DecodeChatResponseWithPolicy(
+				body,
+				h.cfg.Mapping.ChatCapabilities,
+				h.cfg.Mapping.LossPolicy,
+			)
 			if err != nil {
 				return nil, conversionProvenance(err), err
 			}
@@ -868,6 +881,10 @@ func (h *TranscodeHandler) convertResponse(
 			if err != nil {
 				return nil, conversionProvenance(err), err
 			}
+			// The decode's provider reasoning drop is part of the same
+			// exchange log as the render's losses (request-side merge
+			// precedent).
+			report.Losses = append(report.Losses, decodeReport.Losses...)
 			logConversionReport(report, r)
 			return converted, ProvenanceLocalResponseConversionError, nil
 
@@ -912,7 +929,7 @@ func (h *TranscodeHandler) streamResponse(
 	if err != nil {
 		// writeLocalError -> writeDialectHTTPError records the outcome
 		// exactly once.
-		h.writeLocalError(r, w, ClientProtocol(h.cfg.Mapping.ClientProtocol),
+		h.writeLocalError(r, w,
 			http.StatusInternalServerError, "build stream converter: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
 		return
@@ -1073,7 +1090,6 @@ func (h *TranscodeHandler) newFrameConverter(
 func (h *TranscodeHandler) writeLocalError(
 	r *http.Request,
 	w http.ResponseWriter,
-	client ClientProtocol,
 	status int,
 	message string,
 	provenance ExchangeProvenance,

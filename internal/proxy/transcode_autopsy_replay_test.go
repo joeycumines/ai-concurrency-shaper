@@ -278,10 +278,15 @@ func qwenReasoningStreamUpstream(t *testing.T) *httptest.Server {
 }
 
 // qwenMessagesMapping is the Claude Code Messages->Chat mapping with the CLI
-// default capability set that the regression traffic ran against:
-// ProviderReasoningText and ParallelToolCalls are the compatible core
-// defaults (defaultTranscodeChatCapabilities), and the usage-timing losses
-// are default approvals.
+// default capability set that the regression traffic ran against: the
+// compatible core capability defaults (defaultTranscodeChatCapabilities) and
+// the default-approved losses this direction can exercise — the usage-timing
+// losses and the two compatibility-first request-side controls the commit-2
+// defaults flipped (request_reasoning and developer_role: with
+// reasoning_effort and developer_role opt-in, the effort/budget knob and the
+// developer-role distinction drop observably). The mapping intentionally pins
+// those defaults so a future default-set regression cannot silently pass the
+// replay suite.
 func qwenMessagesMapping(t *testing.T) transcode.Mapping {
 	t.Helper()
 	key, err := transcode.NewRouteKey(http.MethodPost, "/v1/messages")
@@ -298,6 +303,8 @@ func qwenMessagesMapping(t *testing.T) transcode.Mapping {
 			transcode.FeatureUsageCacheWriteUnknown: {},
 			transcode.FeatureUsageReasoningUnknown:  {},
 			transcode.FeatureUsageUnknown:           {},
+			transcode.FeatureRequestReasoning:       {},
+			transcode.FeatureDeveloperRole:          {},
 		}},
 		ChatCapabilities: transcode.ChatCapabilities{
 			ParallelToolCalls:     true,
@@ -348,7 +355,7 @@ func TestReplayQwenReasoningContentStream(t *testing.T) {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "text/event-stream") && rec.Header().Get("Content-Type") != "text/event-stream" {
+	if rec.Header().Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("content type = %q, want text/event-stream", rec.Header().Get("Content-Type"))
 	}
 	// The exchange must NOT end in an in-band error event (the observed

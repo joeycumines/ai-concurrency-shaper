@@ -244,3 +244,79 @@ func TestMessagesThinkingRejectedOnResponsesTarget(t *testing.T) {
 		t.Fatalf("thinking loss not recorded: %+v", report.Losses)
 	}
 }
+
+// TestMessagesThinkingBudgetMapsToResponsesEffort is the task 21 reproduction
+// for the high finding request_reasoning-default-native-path: an explicit
+// Anthropic thinking budget must map to Responses reasoning.effort when the
+// exchange grants the ReasoningEffort capability, instead of being consumed as
+// an approved request_reasoning loss that never appears on the upstream
+// request. Before the mapping existed this test failed with an
+// UnsupportedFeatureError even under the strict policy because
+// RequirePortableArtifacts gated the budget; the previous renderer never
+// emitted reasoning.effort for a Messages-sourced request.
+func TestMessagesThinkingBudgetMapsToResponsesEffort(t *testing.T) {
+	cases := []struct {
+		thinking string
+		want     string
+	}{
+		{`{"type":"enabled","budget_tokens":1023}`, "minimal"},
+		{`{"type":"enabled","budget_tokens":4096}`, "medium"},
+		{`{"type":"enabled","budget_tokens":16384}`, "high"},
+	}
+	for _, c := range cases {
+		body := []byte(`{
+			"model":"m","max_tokens":100,
+			"messages":[{"role":"user","content":"hi"}],
+			"stream":false,
+			"thinking":` + c.thinking + `
+		}`)
+		result, err := DecodeMessagesRequest(body, StrictLossPolicy())
+		if err != nil {
+			t.Fatalf("decode %s: %v", c.thinking, err)
+		}
+		ctx := testExchangeContext()
+		ctx.Capabilities = ChatCapabilities{ReasoningEffort: true}
+		rendered, report, err := RenderResponsesRequest(result.Request, ctx)
+		if err != nil {
+			t.Fatalf("render %s with ReasoningEffort: %v", c.thinking, err)
+		}
+		var envelope struct {
+			Reasoning *ResponsesEnvelopeReasoning `json:"reasoning"`
+		}
+		if err := json.Unmarshal(rendered, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Reasoning == nil ||
+			envelope.Reasoning.Effort == nil ||
+			*envelope.Reasoning.Effort != c.want {
+			t.Fatalf("thinking %s: reasoning = %+v, want effort %q", c.thinking, envelope.Reasoning, c.want)
+		}
+		mapped := false
+		for _, loss := range report.Losses {
+			if loss.Feature == FeatureRequestReasoning &&
+				strings.Contains(loss.Detail, "mapped to Responses reasoning.effort") {
+				mapped = true
+			}
+		}
+		if !mapped {
+			t.Fatalf("thinking %s: mapping note not recorded: %+v", c.thinking, report.Losses)
+		}
+	}
+
+	// Without the capability the same request stays a policy-gated loss, never
+	// a silently rendered budget (this is the existing capability-off contract,
+	// pinned here so the two capability arms cannot diverge).
+	body := []byte(`{
+		"model":"m","max_tokens":100,
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false,
+		"thinking":{"type":"enabled","budget_tokens":4096}
+	}`)
+	result, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RenderResponsesRequest(result.Request, testExchangeContext()); err == nil {
+		t.Fatal("expected the messages->responses render to reject the thinking budget without the capability")
+	}
+}

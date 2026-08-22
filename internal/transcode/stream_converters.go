@@ -515,19 +515,16 @@ func (s *chatResponsesStreamState) convertDelta(
 	// contradictory upstream wire, never an ordered merge. The resolved text
 	// runs the identical capability-gated block below, reported under the
 	// actual field path.
-	reasoningText := ""
-	reasoningPath := ""
-	switch {
-	case nonEmpty(delta.Reasoning) && nonEmpty(delta.ReasoningContent):
+	reasoningText, reasoningPath, both := resolveChatReasoningSpelling(
+		delta.Reasoning,
+		delta.ReasoningContent,
+		"choices[].delta.reasoning",
+		"choices[].delta.reasoning_content",
+	)
+	if both {
 		return nil, s.wireError(errors.New(
 			"chat stream chunk delta carries both reasoning and reasoning_content",
 		))
-	case nonEmpty(delta.ReasoningContent):
-		reasoningText = *delta.ReasoningContent
-		reasoningPath = "choices[].delta.reasoning_content"
-	case nonEmpty(delta.Reasoning):
-		reasoningText = *delta.Reasoning
-		reasoningPath = "choices[].delta.reasoning"
 	}
 
 	if reasoningText != "" {
@@ -544,7 +541,7 @@ func (s *chatResponsesStreamState) convertDelta(
 					s.policy,
 					FeatureProviderReasoningText,
 					reasoningPath,
-					"provider reasoning is dropped during chat-to-responses streaming",
+					chatProviderReasoningDroppedDetail,
 				); err != nil {
 					return nil, err
 				}
@@ -1842,8 +1839,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 	if err != nil {
 		// A source-total mismatch is corrupt upstream wire; an int-width
 		// overflow while rendering stays local (review-z commit 5).
-		var usageErr *UsageArithmeticError
-		if errors.As(err, &usageErr) {
+		if usageErr, ok := errors.AsType[*UsageArithmeticError](err); ok {
 			if usageErr.SourceMismatch {
 				return nil, s.wireError(fmt.Errorf("response usage: %w", err))
 			}
@@ -2174,8 +2170,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	// the done snapshot (review-08 blocker 4).
 	arguments, suffix, err := s.reconcileToolArguments(pending, call.Arguments)
 	if err != nil {
-		var unrepresentable *UnrepresentableError
-		if errors.As(err, &unrepresentable) {
+		if _, ok := errors.AsType[*UnrepresentableError](err); ok {
 			return nil, err
 		}
 		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", call.ID, err))
@@ -2598,8 +2593,7 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 	// lifecycle.
 	_, suffix, err := s.reconcileToolArguments(pending, event.Arguments)
 	if err != nil {
-		var unrepresentable *UnrepresentableError
-		if errors.As(err, &unrepresentable) {
+		if _, ok := errors.AsType[*UnrepresentableError](err); ok {
 			return nil, err
 		}
 		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", event.ItemID, err))
@@ -3085,8 +3079,7 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 	if err != nil {
 		// A source-total mismatch is corrupt upstream wire; an int-width
 		// overflow while rendering stays local (review-z commit 5).
-		var usageErr *UsageArithmeticError
-		if errors.As(err, &usageErr) {
+		if usageErr, ok := errors.AsType[*UsageArithmeticError](err); ok {
 			if usageErr.SourceMismatch {
 				return s.wireError(fmt.Errorf("response usage: %w", err))
 			}

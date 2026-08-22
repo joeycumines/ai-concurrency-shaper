@@ -122,7 +122,7 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := DecodeChatResponse([]byte(tt.body), ChatCapabilities{})
+			_, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy())
 			if tt.wantAccept {
 				if err != nil {
 					t.Fatalf("decode = %v, want acceptance", err)
@@ -157,7 +157,7 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 // become a successful assistant response.
 func TestChatResponseReviewKCounterexampleIsRejected(t *testing.T) {
 	body := []byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"user","content":"x"}}]}`)
-	_, err := DecodeChatResponse(body, ChatCapabilities{})
+	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
 	var wireErr *UpstreamWireError
 	if !errors.As(err, &wireErr) {
 		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
@@ -205,7 +205,7 @@ func TestChatResponseOfficialShapesStillDecode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			response, err := DecodeChatResponse([]byte(tt.body), ChatCapabilities{})
+			response, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy())
 			if err != nil {
 				t.Fatal(err)
 			}

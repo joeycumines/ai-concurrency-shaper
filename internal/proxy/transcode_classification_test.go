@@ -434,8 +434,6 @@ func TestClassifyTranscodeExchangeSuppressibleAbort(t *testing.T) {
 			transcodeOutcome: &outcomeCopy,
 		}
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	now := time.Now()
 
 	// Rate-signalled 403 + client abort: NOT suppressible (the retained
 	// upstream failure drives the hold and breaker failure).
@@ -445,7 +443,7 @@ func TestClassifyTranscodeExchangeSuppressibleAbort(t *testing.T) {
 		UpstreamFailure: true,
 		ClientAborted:   true,
 	})
-	result := classifyTranscodeExchange(rec, req, true, now)
+	result := classifyTranscodeExchange(rec, true)
 	if result.suppressibleAbort {
 		t.Fatal("rate-signalled 403 with client abort is suppressible; the definitive upstream failure must be recorded")
 	}
@@ -458,7 +456,7 @@ func TestClassifyTranscodeExchangeSuppressibleAbort(t *testing.T) {
 		Provenance:    transcode.ProvenanceClientAbort,
 		ClientAborted: true,
 	})
-	result = classifyTranscodeExchange(rec, req, true, now)
+	result = classifyTranscodeExchange(rec, true)
 	if !result.suppressibleAbort {
 		t.Fatal("plain client abort is not suppressible")
 	}
@@ -471,7 +469,7 @@ func TestClassifyTranscodeExchangeSuppressibleAbort(t *testing.T) {
 		ClientAborted:   true,
 		UpstreamFailure: false,
 	})
-	result = classifyTranscodeExchange(rec, req, true, now)
+	result = classifyTranscodeExchange(rec, true)
 	if !result.suppressibleAbort {
 		t.Fatal("local conversion failure with client abort is not suppressible")
 	}
@@ -483,7 +481,7 @@ func TestClassifyTranscodeExchangeSuppressibleAbort(t *testing.T) {
 		UpstreamFailure: true,
 		ClientAborted:   true,
 	})
-	result = classifyTranscodeExchange(rec, req, true, now)
+	result = classifyTranscodeExchange(rec, true)
 	if result.suppressibleAbort {
 		t.Fatal("429 with client abort is suppressible; the definitive upstream failure must be recorded")
 	}
@@ -503,8 +501,6 @@ func TestClassifyTranscodeExchangeClientAborted2xxIsNotSuccess(t *testing.T) {
 			transcodeOutcome: &outcomeCopy,
 		}
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	now := time.Now()
 
 	// Client aborted mid-2xx: the 200 status is present but the exchange is
 	// NOT a success (and not suppressed as ambiguous — the abort is
@@ -515,7 +511,7 @@ func TestClassifyTranscodeExchangeClientAborted2xxIsNotSuccess(t *testing.T) {
 		Provenance:        transcode.ProvenanceClientAbort,
 		ClientAborted:     true,
 	})
-	result := classifyTranscodeExchange(rec, req, true, now)
+	result := classifyTranscodeExchange(rec, true)
 	if result.clientAborted == false {
 		t.Fatal("setup: expected a client-aborted exchange")
 	}
@@ -536,7 +532,7 @@ func TestClassifyTranscodeExchangeClientAborted2xxIsNotSuccess(t *testing.T) {
 		Provenance:         transcode.ProvenanceUpstreamHTTP,
 		DownstreamComplete: true,
 	})
-	result = classifyTranscodeExchange(rec, req, true, now)
+	result = classifyTranscodeExchange(rec, true)
 	if !result.upstreamSuccess {
 		t.Fatal("a fully-completed 2xx must classify as upstream success")
 	}
@@ -1485,8 +1481,6 @@ func TestTranscodeRetryAfterNoRecorderFallback(t *testing.T) {
 		rec.Header().Set("Retry-After", "120")
 		return rec
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	now := time.Now()
 	// The outcome carries a present-but-expired hold (Set=true, zero): the
 	// recorder's rendered header carries a FRESH Retry-After value that must
 	// be ignored.
@@ -1497,7 +1491,7 @@ func TestTranscodeRetryAfterNoRecorderFallback(t *testing.T) {
 		RetryAfter:      transcode.Optional[time.Duration]{Value: 0, Set: true},
 	}
 	rec := makeRec(outcome)
-	result := classifyTranscodeExchange(rec, req, true, now)
+	result := classifyTranscodeExchange(rec, true)
 	if result.retryAfter != 0 {
 		t.Fatalf("retryAfter = %v, want the outcome's expired hold (never re-parsed from the rendered header)", result.retryAfter)
 	}
@@ -1509,7 +1503,7 @@ func TestTranscodeRetryAfterNoRecorderFallback(t *testing.T) {
 		UpstreamFailure: true,
 	}
 	rec = makeRec(absent)
-	result = classifyTranscodeExchange(rec, req, true, now)
+	result = classifyTranscodeExchange(rec, true)
 	if result.retryAfter != 0 {
 		t.Fatalf("retryAfter = %v, want zero when the outcome carries no hold", result.retryAfter)
 	}
@@ -1695,8 +1689,6 @@ func TestClassifyTranscodeExchangeAttemptFact(t *testing.T) {
 			transcodeOutcome: &outcomeCopy,
 		}
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	now := time.Now()
 
 	// Signer failure: the marker fired (dispatch chain started) but the
 	// upstream was never reached — the outcome overrides it to false.
@@ -1705,14 +1697,14 @@ func TestClassifyTranscodeExchangeAttemptFact(t *testing.T) {
 		Provenance:     transcode.ProvenanceLocalRequestConversionError,
 		LocalFailure:   true,
 	})
-	result := classifyTranscodeExchange(rec, req, true, now)
+	result := classifyTranscodeExchange(rec, true)
 	if result.upstreamAttempted {
 		t.Fatal("signer failure reads as upstream-attempted; the outcome must override the marker")
 	}
 
 	// Local request conversion error with marker AND no outcome attempt:
 	// still not attempted.
-	result = classifyTranscodeExchange(rec, req, false, now)
+	result = classifyTranscodeExchange(rec, false)
 	if result.upstreamAttempted {
 		t.Fatal("local request conversion error reads as upstream-attempted")
 	}
@@ -1723,7 +1715,7 @@ func TestClassifyTranscodeExchangeAttemptFact(t *testing.T) {
 		UpstreamStatus:    transcode.Optional[int]{Value: 200, Set: true},
 		Provenance:        transcode.ProvenanceUpstreamHTTP,
 	})
-	result = classifyTranscodeExchange(rec, req, true, now)
+	result = classifyTranscodeExchange(rec, true)
 	if !result.upstreamAttempted {
 		t.Fatal("upstream outcome lost its attempt fact")
 	}
@@ -1734,7 +1726,7 @@ func TestClassifyTranscodeExchangeAttemptFact(t *testing.T) {
 		Provenance:    transcode.ProvenanceClientAbort,
 		ClientAborted: true,
 	})
-	result = classifyTranscodeExchange(rec, req, true, now)
+	result = classifyTranscodeExchange(rec, true)
 	if !result.upstreamAttempted {
 		t.Fatal("mid-flight abort lost the marker attempt fact")
 	}
@@ -1743,7 +1735,7 @@ func TestClassifyTranscodeExchangeAttemptFact(t *testing.T) {
 	}
 
 	// Mid-flight client abort without marker: not attempted.
-	result = classifyTranscodeExchange(rec, req, false, now)
+	result = classifyTranscodeExchange(rec, false)
 	if result.upstreamAttempted {
 		t.Fatal("abort without marker reads as upstream-attempted")
 	}

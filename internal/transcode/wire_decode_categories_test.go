@@ -195,7 +195,7 @@ func TestWireDecodeSixCategoriesChat(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := DecodeChatResponse([]byte(c.body), ChatCapabilities{})
+			_, _, err := DecodeChatResponseWithPolicy([]byte(c.body), ChatCapabilities{}, StrictLossPolicy())
 			if err == nil {
 				t.Fatal("expected decode rejection")
 			}

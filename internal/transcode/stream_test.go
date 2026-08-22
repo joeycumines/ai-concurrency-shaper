@@ -116,7 +116,7 @@ func TestConvertingReaderConversionError(t *testing.T) {
 			t.Fatal("no progress")
 		}
 	}
-	if readErr == nil || !strings.Contains(readErr.Error(), "convert failed") {
+	if !strings.Contains(readErr.Error(), "convert failed") {
 		t.Fatalf("err = %v", readErr)
 	}
 }
@@ -140,22 +140,17 @@ func TestConvertingReaderMalformedFrame(t *testing.T) {
 	)
 	var output bytes.Buffer
 	buf := make([]byte, 4096)
-	var readErr error
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
 			output.Write(buf[:n])
 		}
 		if err != nil {
-			readErr = err
 			break
 		}
 		if n == 0 {
 			t.Fatal("no progress")
 		}
-	}
-	if readErr == nil {
-		t.Fatal("expected malformed frame error")
 	}
 	if !strings.Contains(output.String(), "event: error") {
 		t.Fatalf("missing error event: %q", output.String())
@@ -199,7 +194,7 @@ func TestConvertingReaderEOFWithoutTerminal(t *testing.T) {
 			t.Fatal("no progress")
 		}
 	}
-	if readErr == nil || errors.Is(readErr, io.EOF) {
+	if errors.Is(readErr, io.EOF) {
 		t.Fatalf("err = %v, want truncation error (not clean EOF)", readErr)
 	}
 	if !strings.Contains(output.String(), "event: error") {

@@ -296,7 +296,7 @@ func (f *responsesStreamFSM) itemDone(event ResponseOutputItemDoneEvent) error {
 
 // partAdded opens a content part on a message item.
 func (f *responsesStreamFSM) partAdded(event ResponseContentPartAddedEvent) error {
-	item, err := f.messageItem(event.ItemID, event.OutputIndex, event.ContentIndex)
+	item, err := f.messageItem(event.ItemID, event.OutputIndex)
 	if err != nil {
 		return err
 	}
@@ -323,7 +323,7 @@ func (f *responsesStreamFSM) partAdded(event ResponseContentPartAddedEvent) erro
 
 // partDone closes a content part; value-done must precede it (11).
 func (f *responsesStreamFSM) partDone(event ResponseContentPartDoneEvent) error {
-	item, err := f.messageItem(event.ItemID, event.OutputIndex, event.ContentIndex)
+	item, err := f.messageItem(event.ItemID, event.OutputIndex)
 	if err != nil {
 		return err
 	}
@@ -633,7 +633,7 @@ func (f *responsesStreamFSM) terminalEvent(envelope ResponseEnvelope, wantStatus
 // non-message, or completed items).
 func (f *responsesStreamFSM) messageItem(
 	itemID string,
-	outputIndex, contentIndex int64,
+	outputIndex int64,
 ) (*fsmItem, error) {
 	item, ok := f.items[itemID]
 	if !ok {
@@ -679,7 +679,7 @@ func (f *responsesStreamFSM) partForDelta(
 			item.outputIndex,
 		))
 	}
-	item, err := f.messageItem(itemID, outputIndex, contentIndex)
+	item, err := f.messageItem(itemID, outputIndex)
 	if err != nil {
 		// A delta for an item the stream never opened has no open part.
 		return nil, fsmPart{}, upstreamWireError(UpstreamResponses, http.StatusOK, fmt.Errorf(

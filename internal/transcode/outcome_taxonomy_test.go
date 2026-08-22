@@ -287,7 +287,6 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 // re-parsed from the translated downstream header with a fresh receipt
 // timestamp (review-z commit 4).
 func TestTranscodeRetryAfterNeverReDerivedFromRenderedHeader(t *testing.T) {
-	now := time.Now()
 	// The outcome carries a present-but-expired hold (Set=true, zero): the
 	// translated header may carry a stale value, but the classification must
 	// NOT re-read it.
@@ -297,9 +296,17 @@ func TestTranscodeRetryAfterNeverReDerivedFromRenderedHeader(t *testing.T) {
 		UpstreamFailure: true,
 		RetryAfter:      Optional[time.Duration]{Value: 0, Set: true},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	_ = req
-	_ = now
+	// The scenario is a 429 upstream failure: only the anchored hold may
+	// drive the classification.
+	if !outcome.UpstreamStatus.Set || outcome.UpstreamStatus.Value != 429 {
+		t.Fatalf("UpstreamStatus = %+v, want a 429 upstream response", outcome.UpstreamStatus)
+	}
+	if outcome.Provenance != ProvenanceUpstreamHTTP {
+		t.Fatalf("Provenance = %v, want ProvenanceUpstreamHTTP", outcome.Provenance)
+	}
+	if !outcome.UpstreamFailure {
+		t.Fatal("UpstreamFailure = false, want true")
+	}
 	// The proxy-side classification is asserted in the proxy package; here
 	// we pin the outcome contract: Set=true with zero means
 	// present-but-expired, Set=false means not supplied.

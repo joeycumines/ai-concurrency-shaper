@@ -180,6 +180,12 @@ type ExchangeContext struct {
 	// rendering. It is copied from the mapping.
 	LossPolicy LossPolicy
 
+	// Capabilities is the mapping's independent-verification gate for
+	// fidelity-only rendering decisions, e.g. realizing an Anthropic thinking
+	// budget as Responses reasoning.effort. Copied from the mapping, like
+	// LossPolicy (high finding request_reasoning-default-native-path, task 21).
+	Capabilities ChatCapabilities
+
 	// Request-derived state required to reconstruct the client response
 	// envelope. A stateless convertResponse(body) cannot faithfully construct
 	// a Responses response.
@@ -237,26 +243,12 @@ func RequirePortableArtifacts(
 		}
 	}
 
-	// The request-side Anthropic thinking configuration (an explicit
-	// enabled budget) is provider intent a non-Chat target cannot express:
-	// it is an approved loss or a rejection, never a silent drop. adaptive
-	// and disabled carry no budget — the target's own reasoning default is
-	// the exact semantic — so only an explicit enabled budget is gated.
-	// This is a request-side reasoning control (request_reasoning), distinct
-	// from response-side provider reasoning text (provider_reasoning_text).
-	if target != UpstreamChatCompletions &&
-		request.Thinking != nil &&
-		request.Thinking.Type == "enabled" {
-		if err := report.Lose(
-			policy,
-			FeatureRequestReasoning,
-			"thinking",
-			"the Anthropic thinking budget cannot be reproduced in the target protocol",
-		); err != nil {
-			return err
-		}
-	}
-
+	// The request-side Anthropic thinking configuration is a renderer-owned
+	// decision, not an artifact gate: the Chat and Responses renderers map an
+	// enabled budget to a reasoning effort when the exchange grants the
+	// capability and record the request_reasoning loss elsewhere, so a budget
+	// is never silently dropped nor double-reported (high finding
+	// request_reasoning-default-native-path, task 21).
 	return nil
 }
 

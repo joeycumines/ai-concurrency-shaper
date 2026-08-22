@@ -80,7 +80,7 @@ func TestUpstreamWireDecodeMatrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := DecodeChatResponse([]byte(tt.body), ChatCapabilities{})
+			_, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy())
 			if tt.wantAccept {
 				if err != nil {
 					t.Fatalf("decode = %v, want acceptance", err)
@@ -355,7 +355,8 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			input := strings.Join(tt.frames, "")
 			var reader *convertingReader
-			if tt.direction == "responses" {
+			switch tt.direction {
+			case "responses":
 				state := newAnthropicResponsesStreamState(
 					testStreamContext(),
 					j6PermissivePolicy(),
@@ -367,7 +368,7 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 					NewSSEReaderWithLimits(strings.NewReader(input), 0, 0),
 					newResponsesToAnthropicConverter(state), 0, 0, 0,
 				)
-			} else if tt.direction == "composed" {
+			case "composed":
 				chat := newChatResponsesStreamState(
 					testStreamContext(),
 					StrictLossPolicy(),
@@ -388,7 +389,7 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 					NewSSEReaderWithLimits(strings.NewReader(input), 0, 0),
 					newChatToAnthropicConverter(chat, anthropic), 0, 0, 0,
 				)
-			} else {
+			default:
 				state := newChatResponsesStreamState(
 					testStreamContext(),
 					StrictLossPolicy(),

@@ -484,9 +484,6 @@ func TestConvertingReaderStagingAtomicity(t *testing.T) {
 			t.Fatal("reader made no progress")
 		}
 	}
-	if err == nil {
-		t.Fatal("expected the staged batch to fail")
-	}
 	var boundErr *SSEBoundError
 	if !errors.As(err, &boundErr) {
 		t.Fatalf("err = %T %v, want *SSEBoundError", err, err)

@@ -1536,6 +1536,78 @@ func RenderResponsesRequest(
 		}
 	}
 
+	// Anthropic Messages thinking configuration (Messages source only): the
+	// client's thinking request maps to Responses reasoning.effort when the
+	// exchange grants the ReasoningEffort capability (mapping
+	// ExchangeContext.Capabilities). The mapping is explicit and documented —
+	// never silent (high finding request_reasoning-default-native-path):
+	//
+	//   - "adaptive"  the client delegated the thinking decision to the
+	//                 model; the absence of reasoning.effort is the exact
+	//                 semantic (the upstream applies its own default).
+	//   - "disabled"  no thinking requested; nothing is emitted.
+	//   - "enabled"   the explicit budget_tokens maps through the documented
+	//                 deterministic threshold table thinkingBudgetToEffort
+	//                 and is reported as a named Note.
+	//
+	// Without the ReasoningEffort capability an enabled budget is a
+	// loss/reject decision (request_reasoning), never a silent drop — the
+	// same policy as the chat renderer.
+	if request.Thinking != nil {
+		var capabilities ChatCapabilities
+		if context != nil {
+			capabilities = context.Capabilities
+		}
+		switch request.Thinking.Type {
+		case "enabled":
+			if request.Thinking.BudgetTokens != nil {
+				if !capabilities.ReasoningEffort {
+					if err := report.Lose(
+						context.lossPolicy(),
+						FeatureRequestReasoning,
+						"thinking",
+						"the thinking budget cannot be reproduced by the configured upstream provider",
+					); err != nil {
+						return nil, report, err
+					}
+				} else {
+					if out.Reasoning == nil {
+						out.Reasoning = &ResponsesEnvelopeReasoning{}
+					}
+					effort := thinkingBudgetToEffort(*request.Thinking.BudgetTokens)
+					out.Reasoning.Effort = &effort
+					if err := report.Note(
+						FeatureRequestReasoning,
+						"thinking",
+						fmt.Sprintf(
+							"Anthropic thinking budget %d mapped to Responses reasoning.effort %q",
+							*request.Thinking.BudgetTokens,
+							effort,
+						),
+					); err != nil {
+						return nil, report, err
+					}
+				}
+			}
+		case "adaptive":
+			if err := report.Note(
+				FeatureRequestReasoning,
+				"thinking",
+				"adaptive thinking maps to the upstream provider's default reasoning effort",
+			); err != nil {
+				return nil, report, err
+			}
+		case "disabled":
+			if err := report.Note(
+				FeatureRequestReasoning,
+				"thinking",
+				"thinking disabled maps to the absence of Responses reasoning.effort",
+			); err != nil {
+				return nil, report, err
+			}
+		}
+	}
+
 	body, err := json.Marshal(out)
 	if err != nil {
 		return nil, report, err

@@ -148,7 +148,7 @@ func TestOpenAIChatResponseProviderExtensions(t *testing.T) {
 	}
 
 	// The full conversion path must accept the same body.
-	decoded, err := DecodeChatResponse(raw, ChatCapabilities{})
+	decoded, _, err := DecodeChatResponseWithPolicy(raw, ChatCapabilities{}, StrictLossPolicy())
 	if err != nil {
 		t.Fatalf("DecodeChatResponse: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestOpenAIChatResponseMessageLevelExtensions(t *testing.T) {
 		t.Fatalf("stop_reason = %+v", msg.ChatAssistantMessage.StopReason)
 	}
 
-	decoded, err := DecodeChatResponse(raw, ChatCapabilities{})
+	decoded, _, err := DecodeChatResponseWithPolicy(raw, ChatCapabilities{}, StrictLossPolicy())
 	if err != nil {
 		t.Fatalf("DecodeChatResponse: %v", err)
 	}

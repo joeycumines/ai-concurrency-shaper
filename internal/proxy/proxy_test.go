@@ -884,7 +884,7 @@ func TestResponseWriterCanHijackUnwrapsAndIgnoresRecorderItself(t *testing.T) {
 }
 
 func TestStatusRecorderDefaultStatusZero(t *testing.T) {
-	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+	rec := &statusRecorder{}
 	if rec.status != 0 {
 		t.Errorf("default status = %d, want 0", rec.status)
 	}
