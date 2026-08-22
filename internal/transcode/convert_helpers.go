@@ -716,6 +716,14 @@ func nonEmpty(s *string) bool {
 // paths (task 22 de-asymmetry).
 const chatProviderReasoningDroppedDetail = "provider reasoning is dropped because the provider_reasoning_text capability is not enabled"
 
+// chatProviderReasoningMappedDetail is the single note detail reported when
+// provider plaintext reasoning maps to ordinary text under the enabled
+// ProviderReasoningText capability. One constant, shared verbatim by the
+// non-stream and stream chat surfaces, so a capability-on exchange produces
+// observably identical note text through both conversion paths (task 22
+// de-asymmetry).
+const chatProviderReasoningMappedDetail = "provider reasoning maps to ordinary text (provider_reasoning_text encoding)"
+
 // resolveChatReasoningSpelling resolves the two provider spelling of chat
 // plaintext reasoning — `reasoning_content` (the DeepSeek/Qwen convention)
 // and `reasoning` (OpenRouter style) — into a single text and its wire path.

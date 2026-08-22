@@ -351,9 +351,6 @@ func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 	}
 }
 
-//go:fix inline
-func int64Ptr(v int64) *int64 { return new(v) }
-
 // TestStreamingEnvelopeControlsLateAppearance proves controls appearing only
 // on the completed envelope (not the created one) are still gated exactly
 // once — the gate must not latch on a control-free first envelope

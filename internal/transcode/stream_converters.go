@@ -577,7 +577,7 @@ func (s *chatResponsesStreamState) convertDelta(
 				if err := s.report.Note(
 					FeatureProviderReasoningText,
 					reasoningPath,
-					"provider reasoning maps to ordinary text (provider_reasoning_text encoding)",
+					chatProviderReasoningMappedDetail,
 				); err != nil {
 					return nil, err
 				}

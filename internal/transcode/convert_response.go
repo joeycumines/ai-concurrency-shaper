@@ -501,7 +501,19 @@ func chatMessageToCanonicalParts(
 				// ordinary content.
 			} else {
 				// Provider plaintext reasoning is mapped to ordinary text only.
+				// The mapping is the named provider_reasoning_text encoding and
+				// is recorded exactly once, sharing the stream surface's note
+				// detail so a capability-on exchange is observable through both
+				// conversion paths (review-j finding 10 / task-22
+				// de-asymmetry).
 				parts = append(parts, CanonicalText{Text: reasoningText})
+				if err := report.Note(
+					FeatureProviderReasoningText,
+					reasoningPath,
+					chatProviderReasoningMappedDetail,
+				); err != nil {
+					return nil, nil, err
+				}
 			}
 		}
 

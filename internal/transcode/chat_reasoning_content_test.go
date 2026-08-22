@@ -88,7 +88,7 @@ func TestDecodeChatResponseReasoningContentMirrorsReasoning(t *testing.T) {
 	}
 
 	// With the capability (a CLI default): mapped to ordinary text.
-	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy())
+	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy())
 	if err != nil {
 		t.Fatalf("decode with capability: %v", err)
 	}
@@ -104,6 +104,30 @@ func TestDecodeChatResponseReasoningContentMirrorsReasoning(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("reasoning_content text missing from parts: %+v", message.Parts)
+	}
+
+	// The mapping is the named provider_reasoning_text encoding, recorded
+	// exactly once with the resolved field path and the detail shared with the
+	// stream surface — a capability-on non-stream exchange is observable in the
+	// exchange report (review-j finding 10 / task-22 de-asymmetry).
+	var mapped []ConversionLoss
+	for _, loss := range report.Losses {
+		if loss.Feature == FeatureProviderReasoningText {
+			mapped = append(mapped, loss)
+		}
+	}
+	if len(mapped) != 1 {
+		t.Fatalf(
+			"provider_reasoning_text records = %d, want exactly one: %+v",
+			len(mapped),
+			report.Losses,
+		)
+	}
+	if mapped[0].Path != "choices[].message.reasoning_content" {
+		t.Fatalf("note path = %q, want the resolved spelling path", mapped[0].Path)
+	}
+	if mapped[0].Detail != chatProviderReasoningMappedDetail {
+		t.Fatalf("note detail = %q, want %q", mapped[0].Detail, chatProviderReasoningMappedDetail)
 	}
 
 	// The extension bytes never leak into a rendered client response.
