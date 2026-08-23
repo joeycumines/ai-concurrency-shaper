@@ -23,7 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -841,7 +841,7 @@ func New(opts ...Option) (*Proxy, error) {
 			if isContextCancellation(r.Context().Err()) && isContextCancellation(err) {
 				return
 			}
-			log.Printf("proxy transport error: %v", err)
+			slog.Error("proxy transport error", "error", err)
 			if rec, ok := w.(*statusRecorder); ok {
 				if !rec.terminalWritten {
 					rec.proxyGeneratedError = true
@@ -1076,7 +1076,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				finalize(true)
 				panic(rv)
 			}
-			log.Printf("proxy panic: %v", rv)
+			slog.Error("proxy panic", "panic", rv)
 			if recPtr != nil {
 				// Any recovered panic is an aborted exchange: the exchange never
 				// completed cleanly, the clean-completion counters are skipped,
@@ -1380,7 +1380,7 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 					result = p.classifyExchange(rec, r, retryAttempt, attemptState.started.Load(), upstreamAbortFailure, breakerEpoch, time.Now())
 					panic(rv)
 				}
-				log.Printf("proxy panic in servePassthrough: %v", rv)
+				slog.Error("proxy panic in servePassthrough", "panic", rv)
 				if rec, ok := w.(*statusRecorder); ok {
 					// Any recovered panic is an aborted exchange: it never
 					// reaches the completion counters or a clean journal
@@ -1699,7 +1699,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 					result = p.classifyExchange(rec, r, retryAttempt, attemptState.started.Load(), upstreamAbortFailure, breakerEpoch, time.Now())
 					panic(rv)
 				}
-				log.Printf("proxy panic in serveLimited: %v", rv)
+				slog.Error("proxy panic in serveLimited", "panic", rv)
 				if rec, ok := w.(*statusRecorder); ok {
 					// Any recovered panic is an aborted exchange: it never
 					// reaches the completion counters or a clean journal

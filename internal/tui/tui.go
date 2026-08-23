@@ -32,6 +32,7 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"math"
@@ -100,6 +101,7 @@ const (
 const (
 	logRingCapacity      = 2048
 	defaultToastDuration = 5 * time.Second
+	defaultToastWidth    = 80
 	contentStartRow      = 3
 	redrawInterval       = 10 * time.Second
 )
@@ -135,6 +137,8 @@ func (r *logRing) Write(p []byte) (int, error) {
 		}
 		line := text[:idx]
 		text = text[idx+1:]
+		// Blank lines are deliberately skipped here too, mirroring
+		// LogBuffer.Write; pinned by TestLogRing_WriteEmptyLinesSkipped.
 		if line == "" {
 			continue
 		}
@@ -162,10 +166,227 @@ func (r *logRing) snapshot() []string {
 	return out
 }
 
+// Len returns the number of retained lines, guarded by the same lock that
+// protects Write, so reading the total cannot race a concurrent writer.
+func (r *logRing) Len() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.count
+}
+
 // logWriter wraps a logRing as an io.Writer.
 type logWriter struct{ ring *logRing }
 
 func (w *logWriter) Write(p []byte) (int, error) { return w.ring.Write(p) }
+
+// LogBufferCapacity is the default line capacity of a LogBuffer.
+const LogBufferCapacity = 2048
+
+// logBufLine is a single captured line with a globally unique sequence number.
+// The sequence number lets a poller read only the lines written since its last
+// read without deduplicating by snapshot identity.
+type logBufLine struct {
+	seq  uint64
+	text string
+}
+
+// LogBuffer is a thread-safe, bounded capture buffer for program log output. It
+// is the sink that main() installs for the global log/slog writers when the TUI
+// is enabled, so that (a) logs never leak to stderr and (b) the Logs tab
+// has a bounded, pollable source of lines. Lines beyond capacity evict the oldest.
+// Bounded means line count: an individual line — and thus the transient
+// allocation publishing it — is as large as its input write.
+//
+// Once RedirectTo hands the buffer a live target (main.go does this the moment
+// the TUI exits), Writes stream straight through to that target instead: after
+// the dashboard is gone there is no poller left to drain the ring, so teardown
+// telemetry must not be parked here to die with the process. The flip also
+// hands over every line no poller has ever delivered, plus any pending
+// fragment, so nothing undelivered is stranded in the dead buffer.
+type LogBuffer struct {
+	mu       sync.Mutex
+	lines    []logBufLine
+	head     int
+	count    int
+	capacity int
+	seq      uint64
+	pending  []byte
+
+	// polled is the delivery high-water mark: the highest sequence number any
+	// ReadNew call has returned to a poller. Lines above it were never seen by
+	// the TUI and are exactly what RedirectTo forwards at teardown.
+	polled uint64
+
+	passthrough io.Writer
+}
+
+// NewLogBuffer returns an empty LogBuffer with the given line capacity.
+func NewLogBuffer(capacity int) *LogBuffer {
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &LogBuffer{lines: make([]logBufLine, capacity), capacity: capacity}
+}
+
+// maxPendingLine caps the unterminated fragment a LogBuffer retains between
+// Writes (64 KiB). Both real producers (stdlib log, slog TextHandler)
+// terminate every write with a newline, so the fragment stays empty in
+// practice; the cap only bounds memory if some writer streams newline-free
+// bytes without end.
+const maxPendingLine = 64 << 10
+
+// Write captures complete newline-terminated lines from p, assembling a logical
+// line that is split across multiple Write calls (io.Writer has no line-boundary
+// guarantees, so a trailing unterminated fragment is carried forward until a
+// newline arrives or Flush is called rather than being published as a phony
+// line). The retained fragment never exceeds maxPendingLine bytes: a writer
+// that streams past the cap without a newline has its accumulated fragment
+// published at the cap boundary with Flush semantics, so retained memory stays
+// bounded while no bytes are dropped or reordered. It always consumes all of p
+// and reports that: the caller's byte count is the full length of the input,
+// never a partial write.
+func (b *LogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.passthrough != nil {
+		return b.passthrough.Write(p)
+	}
+	total := len(p)
+	// Prepend any fragment left over from a prior write so a line split across
+	// Write boundaries is reassembled before splitting again.
+	if b.pending != nil {
+		data := make([]byte, 0, len(b.pending)+len(p))
+		data = append(data, b.pending...)
+		data = append(data, p...)
+		b.pending = nil
+		p = data
+	}
+	for len(p) > 0 {
+		idx := bytes.IndexByte(p, '\n')
+		if idx >= 0 {
+			seg := p[:idx]
+			p = p[idx+1:]
+			// Blank segments are deliberately not published: real producers
+			// (stdlib log, slog TextHandler) never emit bare empty lines and
+			// they would only spend ring capacity — pinned by
+			// TestLogBuffer_EmptySegmentsSkipped.
+			if len(seg) > 0 {
+				b.publish(seg)
+			}
+			continue
+		}
+		// Unterminated tail. Retain it — as a copy (io.Writer implementations
+		// must not retain p, and the caller is free to reuse its buffer after
+		// Write returns) — unless it exceeds the cap, in which case publish the
+		// overflow now rather than let retained memory grow without bound.
+		if len(p) > maxPendingLine {
+			b.publish(p[:maxPendingLine])
+			p = p[maxPendingLine:]
+			continue
+		}
+		b.pending = append([]byte(nil), p...)
+		break
+	}
+	return total, nil
+}
+
+// publish appends one complete line to the ring, evicting the oldest line when
+// full. Callers must hold b.mu.
+func (b *LogBuffer) publish(text []byte) {
+	b.seq++
+	line := logBufLine{seq: b.seq, text: string(text)}
+	if b.count < b.capacity {
+		b.lines[(b.head+b.count)%b.capacity] = line
+		b.count++
+	} else {
+		b.lines[b.head] = line
+		b.head = (b.head + 1) % b.capacity
+	}
+}
+
+// Flush publishes any unterminated fragment retained from prior Write calls as
+// a single final line. It is idempotent and a no-op when no fragment is pending.
+func (b *LogBuffer) Flush() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.pending) == 0 {
+		return
+	}
+	b.publish(b.pending)
+	b.pending = nil
+}
+
+// RedirectTo switches the buffer into live passthrough mode: from this call on,
+// Write delegates directly to w (under the same lock, so producers cannot tear
+// a line across the switch), bypassing the bounded ring entirely. Before the
+// flip it hands w everything no poller has delivered: every retained line whose
+// sequence number exceeds the ReadNew high-water mark, then any pending
+// fragment, so nothing undelivered is stranded in the dead buffer. Forwarded
+// content is dropped from the buffer — repeated redirects, or a restore-and-flip
+// cycle, can therefore never emit a line twice, and lines a poller already
+// delivered are never re-emitted. A nil w restores ordinary buffering without
+// forwarding anything. This is what main.go invokes the moment the TUI exits:
+// with the dashboard gone there is no poller to drain the ring, so
+// graceful-shutdown logging must stream to stderr instead of being parked here
+// until process exit.
+func (b *LogBuffer) RedirectTo(w io.Writer) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if w == nil {
+		b.passthrough = nil
+		return
+	}
+	b.passthrough = w
+	var out bytes.Buffer
+	for i := 0; i < b.count; i++ {
+		if line := b.lines[(b.head+i)%b.capacity]; line.seq > b.polled {
+			out.WriteString(line.text)
+			out.WriteByte('\n')
+		}
+	}
+	out.Write(b.pending)
+	// Best-effort flush mirroring the io.Writer contract elsewhere in this
+	// type: a failing sink cannot be meaningfully handled under this lock,
+	// and the handed-off content is dropped either way.
+	_, _ = w.Write(out.Bytes()) //nolint:errcheck
+	b.pending = nil
+	b.head, b.count = 0, 0
+}
+
+// Revision returns the sequence number of the most recently written line (0 when
+// none have been written). It is monotonic across overwrites.
+func (b *LogBuffer) Revision() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.seq
+}
+
+// ReadNew returns every retained line whose sequence number exceeds after, in
+// write order, together with the revision the caller must resume from. Both are
+// computed under a single lock, so a line written in the middle of a poll can
+// never be returned twice: this poll either returns it (and the caller resumes
+// past it) or misses it (and the next poll returns it, since it is still
+// retained). Lines evicted by the bounded capacity are simply not returned; the
+// revision still advances past them so an evicted line is never re-read.
+//
+// Each call also advances the buffer's polled high-water mark to the returned
+// revision, recording what has been delivered; RedirectTo relies on that mark
+// to forward only lines no poller ever saw.
+func (b *LogBuffer) ReadNew(after uint64) ([]string, uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.polled = b.seq
+	if after >= b.seq {
+		return nil, b.seq
+	}
+	var out []string
+	for i := 0; i < b.count; i++ {
+		if line := b.lines[(b.head+i)%b.capacity]; line.seq > after {
+			out = append(out, line.text)
+		}
+	}
+	return out, b.seq
+}
 
 type Model struct {
 	width, height int
@@ -200,6 +421,46 @@ type Model struct {
 	toasts     []*toast.Toast
 	scrollbars [numTabs]scrollbar.Model
 
+	// followLogs makes the Logs tab anchor on the newest lines, auto-scrolling
+	// as they arrive. Any explicit scroll input pauses following; G/End or
+	// switching back to the Logs tab re-engages it.
+	followLogs bool
+
+	// toastSeen deduplicates log lines that already triggered a toast so the
+	// same recurring message does not spam the dashboard. It is bounded: when
+	// it reaches toastSeenMax keys, the oldest toastSeenEvict entries are
+	// evicted in insertion order, so recently seen errors keep their dedup
+	// protection instead of the whole set resetting simultaneously.
+	toastSeen map[string]struct{}
+
+	// toastSeenOrder preserves the insertion order of the keys currently in
+	// toastSeen (oldest first) so eviction can drop the oldest entries. It
+	// always contains exactly the keys present in toastSeen.
+	toastSeenOrder []string
+
+	// logBuf wires the model to the shared captured-log buffer when Run
+	// installs one (nil otherwise), and logBufSeen is the model's read cursor
+	// into it. The cursor is confined to the update loop — both periodic
+	// draining (logPollTickMsg) and the quit-time flush read through it inside
+	// Update — so a line can never be extracted on one goroutine and lost
+	// before another applies it. nil logBuf means no buffer wiring.
+	logBuf     *LogBuffer
+	logBufSeen uint64
+
+	// animTickDeadline is the time at which the single armed animation tick will
+	// fire (zero = none armed). It makes the animation ticker single-owner: once
+	// Update arms a tick for a future moment, unrelated updates (snapshots, mouse
+	// motion, log polls) must not stack a second independent ticker. The deadline
+	// is cleared by AddToast so a newly added toast re-arms promptly.
+	animTickDeadline time.Time
+
+	// animTickGen invalidates outstanding animation ticks. tea.Tick commands
+	// cannot be cancelled, so every armed tick captures the generation at arming
+	// time and a stale-generation animTickMsg is dropped on arrival instead of
+	// stacking a redundant ticker under a delayed event loop. AddToast is the
+	// only mutator: it is the sole point where an armed schedule is superseded.
+	animTickGen uint64
+
 	dragging        bool
 	dragStartY      int
 	dragStartScroll int
@@ -212,10 +473,12 @@ type Model struct {
 
 func NewModel(conc int) Model {
 	m := Model{
-		conc:      conc,
-		startTime: time.Now(),
-		resetCh:   make(chan struct{}, 1),
-		logRing:   newLogRing(logRingCapacity),
+		conc:       conc,
+		startTime:  time.Now(),
+		resetCh:    make(chan struct{}, 1),
+		logRing:    newLogRing(logRingCapacity),
+		followLogs: true,
+		toastSeen:  make(map[string]struct{}),
 	}
 	for i := range m.scrollbars {
 		m.scrollbars[i] = *scrollbar.New()
@@ -227,6 +490,93 @@ func (m *Model) LogWriter() io.Writer { return &logWriter{ring: m.logRing} }
 
 type resyncTickMsg struct{}
 type resyncDrawMsg struct{}
+
+// logPollTickMsg wakes the update loop so it can drain freshly captured log
+// lines from the LogBuffer itself (see Model.drainLogs). It carries no data:
+// lines are read inside Update, keeping delivery single-threaded with respect
+// to quit handling.
+type logPollTickMsg struct{}
+
+// animTickMsg fires on a short interval while any toast is animating so the
+// slide-in/out is visible between the coarser metrics redraw ticks.
+//
+// generation identifies the arming schedule: AddToast bumps the model's counter
+// so ticks armed for a superseded schedule arrive stale and are ignored (see
+// Update), keeping exactly one live timer generation.
+type animTickMsg struct{ generation uint64 }
+
+// toastAnimInterval is the animation tick cadence.
+const toastAnimInterval = 30 * time.Millisecond
+
+const (
+	// toastSeenMax bounds the log-toast dedup set. Reaching it evicts the
+	// oldest toastSeenEvict keys before the next key is inserted, so the set
+	// never exceeds toastSeenMax entries.
+	toastSeenMax = 400
+
+	// toastSeenEvict is how many of the oldest dedup keys each eviction drops.
+	toastSeenEvict = 200
+
+	// toastLiveMax is the hard bound on live toasts. The Logs buffer bounds
+	// retained lines, not ingest rate, so a storm of distinct actionable errors
+	// would otherwise accumulate thousands of five-second Toast objects. Beyond
+	// the cap the oldest alerts are dropped; every line still reaches the Logs
+	// tab. The cap sits comfortably above the three-toast render limit.
+	toastLiveMax = 8
+)
+
+// toastAnimCmd returns a tick command for the next moment an animation frame is
+// actually needed, nil when none is.
+//
+// While any toast is mid slide-in/out the ticker runs at toastAnimInterval so the
+// motion is smooth. When no toast is currently animating, it instead arms a single
+// one-shot tick at the earliest toast's SlideOutStart, so a fixed-duration toast
+// still begins its exit animation promptly — an idle 30ms tick in the settled
+// middle (which can last minutes) would re-render identical content hundreds of
+// times for nothing. A settled sticky toast (Duration 0) never animates again and
+// arms no tick; it is refreshed on the coarser metrics redraw cadence. Expired
+// toasts are pruned by Update regardless of any tick, so expiry never relies on
+// this command.
+//
+// The timer is single-owner. Update calls this at the end of every message, but
+// once a tick is armed for a future animTickDeadline a later unrelated update
+// must not stack a second one; otherwise a settled toast would spawn a fresh
+// sleep-per-event and the resulting burst at SlideOutStart would multiply 30ms
+// animation loops. Only a tick that has actually fired (deadline now in the
+// past) re-arms the next one, keeping exactly one timer generation alive. Each
+// armed tick captures the current animTickGen, so a tick orphaned by AddToast
+// (which bumps the generation) is recognized and discarded on arrival instead
+// of stacking a redundant ticker under a delayed event loop.
+func (m *Model) toastAnimCmd() tea.Cmd {
+	now := time.Now()
+	// A tick is already armed for a future moment; leave it in place instead of
+	// scheduling an independent duplicate.
+	if m.animTickDeadline.After(now) {
+		return nil
+	}
+	gen := m.animTickGen
+	for _, t := range m.toasts {
+		if !t.ExpiredAt(now) && t.AnimatingAt(now) {
+			m.animTickDeadline = now.Add(toastAnimInterval)
+			return tea.Tick(toastAnimInterval, func(time.Time) tea.Msg { return animTickMsg{generation: gen} })
+		}
+	}
+	var next time.Time
+	for _, t := range m.toasts {
+		if t.ExpiredAt(now) {
+			continue
+		}
+		if begin := t.SlideOutStart(); !begin.IsZero() && begin.After(now) && (next.IsZero() || begin.Before(next)) {
+			next = begin
+		}
+	}
+	if next.IsZero() {
+		m.animTickDeadline = time.Time{}
+		return nil
+	}
+	m.animTickDeadline = next
+	return tea.Tick(next.Sub(now), func(time.Time) tea.Msg { return animTickMsg{generation: gen} })
+}
 
 func (m Model) resyncTickCmd() tea.Cmd {
 	return tea.Tick(redrawInterval, func(time.Time) tea.Msg {
@@ -256,7 +606,134 @@ func (m *Model) AddToast(t *toast.Toast) {
 		t.Duration = defaultToastDuration
 	}
 	t.Show()
+	// A new toast must start its slide-in promptly, so clear any tick already
+	// armed for an older toast's future slide-out and invalidate its generation —
+	// tea.Tick commands cannot be cancelled, so the stale tick must be
+	// recognizably dead when its message eventually arrives. The subsequent
+	// Update re-arms a short animation tick for the fresh toast.
+	m.animTickDeadline = time.Time{}
+	m.animTickGen++
 	m.toasts = append(m.toasts, t)
+	// Hard bound on live toasts (see toastLiveMax): a storm of distinct
+	// actionable errors must not accumulate unbounded Toast objects. The oldest
+	// alerts are dropped; every line still reaches the Logs tab above.
+	if len(m.toasts) > toastLiveMax {
+		m.toasts = m.toasts[len(m.toasts)-toastLiveMax:]
+	}
+}
+
+// handleLogLines appends captured log lines to the render-facing ring and
+// raises a toast for each line that looks actionable. Incoming lines are first
+// stripped of ANSI escape sequences so neither the Logs tab nor a toast message
+// can inject terminal control output. Toasts are deduplicated per normalized
+// line when a stable key exists; an actionable line that cannot be keyed (e.g.
+// slog's msg="") toasts every occurrence rather than being dropped, matching
+// logDedupKey's documented contract for empty keys.
+func (m *Model) handleLogLines(lines []string) {
+	for _, raw := range lines {
+		line := stripANSI(raw)
+		m.logRing.Write([]byte(line + "\n"))
+
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if logLineIsActionable(line) {
+			key := logDedupKey(line)
+			if key != "" {
+				if _, seen := m.toastSeen[key]; seen {
+					continue
+				}
+				if len(m.toastSeen) >= toastSeenMax {
+					m.evictOldestToastSeen(toastSeenEvict)
+				}
+				m.toastSeen[key] = struct{}{}
+				m.toastSeenOrder = append(m.toastSeenOrder, key)
+			}
+
+			style := lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#FFF0F0")).
+				Background(lipgloss.Color("#B62324")).
+				Bold(true).
+				PaddingLeft(1).
+				PaddingRight(1)
+			m.AddToast(&toast.Toast{
+				Message: strings.TrimSpace(line),
+				Style:   style,
+				Width:   toastToastWidth(m.width),
+			})
+		}
+	}
+}
+
+// evictOldestToastSeen drops the n oldest dedup keys so the set stays bounded
+// while recently seen errors keep their dedup protection. An evicted key may
+// therefore re-toast once; keys are tracked in insertion order by toastSeenOrder.
+func (m *Model) evictOldestToastSeen(n int) {
+	for n > 0 && len(m.toastSeenOrder) > 0 {
+		delete(m.toastSeen, m.toastSeenOrder[0])
+		m.toastSeenOrder = m.toastSeenOrder[1:]
+		n--
+	}
+}
+
+// drainLogs delivers every buffered log line written since the last drain
+// through handleLogLines, advancing the model's read cursor. It runs only
+// inside Update (periodic ticks and the quit path are both handled there), so
+// delivery is sequential with respect to quit handling: a drained line is
+// applied to the model before anything else can observe or act on the cursor.
+// No-op for models built without a buffer.
+func (m *Model) drainLogs() {
+	if m.logBuf == nil {
+		return
+	}
+	lines, cur := m.logBuf.ReadNew(m.logBufSeen)
+	m.logBufSeen = cur
+	if len(lines) > 0 {
+		m.handleLogLines(lines)
+	}
+}
+
+// flushPendingLogs publishes any unterminated fragment held in the shared log
+// buffer and drains everything not yet delivered. This is a BEST-EFFORT final
+// delivery: every line the producers published before the quit key was
+// processed reaches the model, plus the torn tail if the producer has gone
+// quiet. Lines written concurrently with (or after) this drain are not
+// delivered here — they stay above the buffer's polled high-water mark and
+// RedirectTo hands them to stderr at teardown, so only lines already evicted
+// under ring-capacity pressure are ever lost. A completeness guarantee would
+// require stopping and joining all log producers before the final drain, which
+// this architecture cannot do: main() triggers proxy shutdown only after
+// tui.Run returns. What DOES hold structurally is exactly-once: the drain runs
+// inside Update through the model's shared read cursor, so no line can be
+// delivered twice, and the teardown forward skips everything at or below that
+// same cursor. bubbletea v2.0.7 then re-renders the returned model on graceful
+// exit and paints that frame while stopping the renderer (tea.go render at
+// event-loop and shutdown, stopRenderer's flush), so delivered lines are part
+// of the visible final output. Teardown paths that bypass Update (Program.Kill,
+// context cancellation) skip this flush and the final paint; their undrained
+// tail still reaches stderr via the redirect, just unpainted. Both real
+// producers newline-terminate their writes, so the torn-tail case is defensive
+// hardening.
+func (m *Model) flushPendingLogs() {
+	if m.logBuf == nil {
+		return
+	}
+	m.logBuf.Flush()
+	m.drainLogs()
+}
+
+// toastToastWidth clamps the toast width to the terminal width so a long log line
+// cannot push the styled toast past the pane edge. Before the terminal size is
+// known (or for degenerately narrow widths) it assumes defaultToastWidth:
+// RenderAt ignores a stored Width larger than the real pane, so a wrong guess
+// only forfeits the reserved right margin on narrower terminals instead of
+// overflowing them, while startup toasts keep that margin on terminals this
+// wide or wider.
+func toastToastWidth(width int) int {
+	if width > 4 {
+		return width - 4
+	}
+	return defaultToastWidth - 4
 }
 
 func (m Model) Init() tea.Cmd { return m.resyncTickCmd() }
@@ -269,6 +746,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case m.resetCh <- struct{}{}:
 		default:
 		}
+	case logPollTickMsg:
+		m.drainLogs()
+	case animTickMsg:
+		if msg.generation != m.animTickGen {
+			// Stale schedule (superseded by a later AddToast): drop the tick
+			// without re-rendering or re-arming. Model state has not changed
+			// since the last update, so the tail processing is unnecessary.
+			return m, nil
+		}
+		// No state to change; flows through to re-render and, if still
+		// animating, schedule the next tick below.
 	case resyncTickMsg:
 		return m, resyncRedrawSequence()
 	case resyncDrawMsg:
@@ -294,7 +782,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	m.networkFiltered = m.computeVisibleNetworkEntries()
 	m.toasts = toast.VisibleToasts(m.toasts)
+
+	// Tail-follow: while on the Logs tab and not paused by scroll input, keep the
+	// viewport pinned to the newest lines so incoming logs scroll into view.
+	if m.tab == tabLogs && m.followLogs && m.width > 0 && m.height > 0 {
+		m.cursor = m.maxCursor()
+		m.scroll = m.maxScroll()
+	}
 	m.adjustViewport()
+
+	if c := m.toastAnimCmd(); c != nil {
+		cmd = tea.Batch(cmd, c)
+	}
 	return m, cmd
 }
 
@@ -321,6 +820,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "q", "ctrl+c":
+		// Best-effort final drain so the last render includes everything
+		// published before this key was processed (see flushPendingLogs).
+		m.flushPendingLogs()
 		return m, tea.Quit
 	}
 
@@ -365,6 +867,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	keyCode := msg.Key().Code
 	if keyCode == tea.KeyPgUp {
+		if m.tab == tabLogs {
+			m.followLogs = false
+		}
 		if m.tab == tabDashboard {
 			m.scrollDashboard(-m.dataRows())
 		} else {
@@ -377,6 +882,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	if keyCode == tea.KeyPgDown {
+		if m.tab == tabLogs {
+			m.followLogs = false
+		}
 		if m.tab == tabDashboard {
 			m.scrollDashboard(m.dataRows())
 		} else {
@@ -389,6 +897,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	if keyCode == tea.KeyHome {
+		if m.tab == tabLogs {
+			m.followLogs = false
+		}
 		if m.tab == tabDashboard {
 			m.scroll = 0
 			m.cursor = 0
@@ -399,6 +910,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 	if keyCode == tea.KeyEnd {
+		if m.tab == tabLogs {
+			m.followLogs = true
+		}
 		if m.tab == tabDashboard {
 			m.scroll = m.maxScroll()
 			m.cursor = m.scroll
@@ -430,8 +944,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "k", "up":
 		m.moveCursor(-1)
 	case "g":
+		if m.tab == tabLogs {
+			m.followLogs = false
+		}
 		m.cursor, m.scroll = 0, 0
 	case "G":
+		if m.tab == tabLogs {
+			m.followLogs = true
+		}
 		if m.tab == tabDashboard {
 			m.scroll = m.maxScroll()
 			m.cursor = m.scroll
@@ -440,6 +960,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 
 	case "ctrl+u":
+		if m.tab == tabLogs {
+			m.followLogs = false
+		}
 		if m.tab == tabDashboard {
 			m.scrollDashboard(-m.dataRows() / 2)
 		} else {
@@ -450,6 +973,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 			m.adjustViewport()
 		}
 	case "ctrl+d":
+		if m.tab == tabLogs {
+			m.followLogs = false
+		}
 		if m.tab == tabDashboard {
 			m.scrollDashboard(m.dataRows() / 2)
 		} else {
@@ -498,9 +1024,15 @@ func (m *Model) switchTab(t tabID) {
 	m.scroll = 0
 	m.mode = modeBrowse
 	m.dashboardLinesCache = nil
+	if t == tabLogs {
+		m.followLogs = true
+	}
 }
 
 func (m *Model) moveCursor(delta int) {
+	if m.tab == tabLogs {
+		m.followLogs = false
+	}
 	if m.tab == tabDashboard {
 		m.scrollDashboard(delta)
 		return
@@ -803,7 +1335,16 @@ func truncateANSI(line string, width int) string {
 	return b.String()
 }
 
-// stripANSI removes ANSI escape sequences from a string.
+// stripANSI removes ANSI escape sequences and terminal control characters from
+// a string: CSI, OSC (terminated by BEL or ST), the ST-terminated string
+// sequences DCS/SOS/PM/APC, bare two-byte ESC sequences, all C0 controls except
+// tab, and DEL plus the C1 control block U+0080–U+009F — both their UTF-8
+// encodings and stray raw bytes in that range, which are the 8-bit control
+// positions legacy terminals act on. Valid multibyte text passes through
+// untouched even when its continuation bytes fall inside the C1 range, and the
+// payloads of string sequences are swallowed whole, so logged output cannot
+// carry cursor movement or other control-function content of those classes
+// into the Logs tab or a toast message.
 func stripANSI(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -819,14 +1360,60 @@ func stripANSI(s string) string {
 					}
 					i++
 				}
+			} else if i+1 < len(s) && s[i+1] == ']' {
+				i = skipStringSequence(s, i+2, true)
+			} else if i+1 < len(s) && (s[i+1] == 'P' || s[i+1] == 'X' || s[i+1] == '^' || s[i+1] == '_') {
+				i = skipStringSequence(s, i+2, false)
 			} else if i+1 < len(s) {
 				i++
 			}
 			continue
 		}
-		b.WriteByte(c)
+		if c < utf8.RuneSelf {
+			// Printable ASCII and tab survive; every other C0 control and DEL
+			// is dropped before it can reposition a cursor or ring a bell.
+			if c == '\t' || (c >= 0x20 && c != 0x7F) {
+				b.WriteByte(c)
+			}
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if size == 1 && r == utf8.RuneError {
+			// Invalid UTF-8 byte. Stray bytes sitting in the raw C1 range are
+			// dropped like the 8-bit controls a legacy terminal would act on;
+			// other invalid bytes pass through untouched.
+			if c < 0x80 || c > 0x9F {
+				b.WriteByte(c)
+			}
+		} else {
+			// Valid rune — including a legitimately encoded U+FFFD, which
+			// DecodeRuneInString also reports as RuneError (size 3).
+			if r > 0x9F {
+				b.WriteString(s[i : i+size])
+			}
+			// Otherwise a valid UTF-8-encoded C1 control: drop.
+		}
+		i += size - 1 // the loop's post statement supplies the final step
 	}
 	return b.String()
+}
+
+// skipStringSequence returns the index of the last byte of the terminator that
+// closes the OSC/DCS/SOS/PM/APC body starting at s[i] — BEL or ST for an OSC,
+// ST alone for the rest — so stripANSI's loop increment steps past it. Input
+// that ends before a terminator consumes through EOF (returning len(s)-1)
+// rather than leak the unterminated payload.
+func skipStringSequence(s string, i int, belTerminated bool) int {
+	for i < len(s) {
+		if belTerminated && s[i] == '\x07' {
+			return i
+		}
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '\\' {
+			return i + 1
+		}
+		i++
+	}
+	return len(s) - 1
 }
 
 // renderContentWithScrollbar wraps the active tab's content with a scrollbar
@@ -971,6 +1558,9 @@ func (m *Model) canInspect() bool {
 }
 
 func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
+	if m.tab == tabLogs {
+		m.followLogs = false
+	}
 	mx := msg.Mouse().X
 	my := msg.Mouse().Y
 
@@ -1045,6 +1635,9 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (Model, tea.Cmd) {
 	if !m.dragging {
 		return m, nil
+	}
+	if m.tab == tabLogs {
+		m.followLogs = false
 	}
 	my := msg.Mouse().Y
 	contentHeight := m.maxCursor() + 1
@@ -1785,7 +2378,7 @@ func (m Model) renderLogs() string {
 	}
 
 	if m.filterText != "" {
-		fmt.Fprintf(&b, "  Filter: %q  (%d / %d lines)\n", m.filterText, len(lines), m.logRing.count)
+		fmt.Fprintf(&b, "  Filter: %q  (%d / %d lines)\n", m.filterText, len(lines), m.logRing.Len())
 	}
 
 	visible := m.dataRows()
@@ -2575,10 +3168,55 @@ var (
 // Run starts the TUI dashboard and blocks until the program exits.
 // The returned *tea.Program may be used by the caller to shut down the
 // TUI and restore terminal state (see Kill / RestoreTerminal).
-func Run(snapCh <-chan metrics.Snapshot, conc int, j *journal.Journal, progCh chan<- *tea.Program) *tea.Program {
+// logPollInterval is how often the Logs tab poller checks the shared LogBuffer
+// for freshly captured lines.
+const logPollInterval = 100 * time.Millisecond
+
+// Run starts the TUI program. When logBuf is non-nil it installs a ticker that
+// wakes the model to drain captured log lines; lines already buffered before
+// the TUI starts (e.g. startup config summaries) are replayed in order. The
+// ticker carries no data — the model reads the buffer inside Update — so log
+// delivery is sequential with quit handling and cannot lose an in-flight batch.
+func Run(snapCh <-chan metrics.Snapshot, conc int, j *journal.Journal, progCh chan<- *tea.Program, logBuf *LogBuffer) *tea.Program {
 	m := NewModel(conc)
 	m.journal = j
+
+	if logBuf != nil {
+		m.logBuf = logBuf
+	}
 	p := tea.NewProgram(m)
+
+	done := make(chan struct{})
+
+	if logBuf != nil {
+		go func() {
+			defer func() { recover() }()
+			ticker := time.NewTicker(logPollInterval)
+			defer ticker.Stop()
+			// Replay any startup lines promptly. The model drains via ReadNew(logBufSeen)
+			// inside Update, so this first tick guarantees buffered startup summaries
+			// (written before Run) are not delayed a full poll interval.
+			// Subsequent ticks are revision-gated to avoid 10 Hz wake-ups when idle.
+			// Note: bubbletea v2.0.7 Program.Send is non-blocking after shutdown
+			// (select { case <-ctx.Done(): case msgs <- msg: } at tea.go:1183), so even
+			// if ticker and done are simultaneously ready at shutdown, Send cannot leak.
+			lastSentRev := logBuf.Revision()
+			if lastSentRev != 0 {
+				p.Send(logPollTickMsg{})
+			}
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					if cur := logBuf.Revision(); cur != lastSentRev {
+						lastSentRev = cur
+						p.Send(logPollTickMsg{})
+					}
+				}
+			}
+		}()
+	}
 
 	go func() {
 		defer func() { recover() }()
@@ -2594,5 +3232,6 @@ func Run(snapCh <-chan metrics.Snapshot, conc int, j *journal.Journal, progCh ch
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI: %v\n", err)
 	}
+	close(done)
 	return p
 }
