@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"fmt"
 	"image/color"
+	"math"
 	"net/url"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/toast"
@@ -562,7 +564,7 @@ func TestRenderGaugeBarEmpty(t *testing.T) {
 func TestRenderHBar_Padding(t *testing.T) {
 	m := NewModel(4)
 	m.width = 80
-	g := stripANSI(m.renderHBar(5, 10, 20, queueFillStyle(5, 10)))
+	g := stripANSI(m.renderHBar(5, 10, 20, m.queueFillStyle(5, 10)))
 	if !strings.HasPrefix(g, "  [") {
 		t.Errorf("hbar should have two-cell left margin, got: %q", g)
 	}
@@ -577,6 +579,116 @@ func TestRenderHBar_Padding(t *testing.T) {
 func hexString(c color.Color) string {
 	r, g, b, _ := c.RGBA()
 	return fmt.Sprintf("#%02X%02X%02X", r>>8, g>>8, b>>8)
+}
+
+// darkModel returns a bare Model with the default dark palette populated, for
+// style-selection tests that only read m.styles (no renderer wiring needed).
+func darkModel() Model { return Model{styles: newTheme(true)} }
+
+// relativeLuminance returns the WCAG relative luminance of a color, each sRGB
+// channel linearized per the WCAG 2.x transfer function. Used by the theme
+// contrast tests to prove the light palette actually meets AA on a light terminal.
+func relativeLuminance(c color.Color) float64 {
+	r, g, b, _ := c.RGBA()
+	lin := func(v uint32) float64 {
+		x := float64(v) / 0xFFFF
+		if x <= 0.04045 {
+			return x / 12.92
+		}
+		return math.Pow((x+0.055)/1.055, 2.4)
+	}
+	return 0.2126*lin(r) + 0.7152*lin(g) + 0.0722*lin(b)
+}
+
+// contrastRatio returns the WCAG contrast ratio between two colors (L1+0.05)/(L2+0.05)
+// with the lighter luminance always in the numerator, so >= 4.5 means AA for normal text.
+func contrastRatio(a, b color.Color) float64 {
+	la, lb := relativeLuminance(a), relativeLuminance(b)
+	if la < lb {
+		la, lb = lb, la
+	}
+	return (la + 0.05) / (lb + 0.05)
+}
+
+// TestBackgroundColorMsgSwitchesTheme proves the TUI defaults to the dark palette
+// and swaps to the light palette when the terminal reports a light background
+// (tea.BackgroundColorMsg), then back to dark on a dark report. The swaps
+// cover the whole theme, including the per-tab scrollbar thumb/track.
+func TestBackgroundColorMsgSwitchesTheme(t *testing.T) {
+	m := NewModel(4)
+	if got, want := hexString(m.styles.rowStyle.GetForeground()), "#E6EDF3"; got != want {
+		t.Fatalf("default row foreground = %s, want dark default %s", got, want)
+	}
+	if got, want := hexString(m.scrollbars[0].ThumbStyle.GetForeground()), "#58A6FF"; got != want {
+		t.Fatalf("default scrollbar thumb = %s, want dark default %s", got, want)
+	}
+
+	m = update(m, tea.BackgroundColorMsg{Color: color.White})
+	if got, want := hexString(m.styles.rowStyle.GetForeground()), "#24292F"; got != want {
+		t.Errorf("light row foreground = %s, want %s", got, want)
+	}
+	// Hue-to-state meaning survives the palette swap.
+	if got, want := hexString(m.styles.statusOkStyle.GetForeground()), "#1A7F37"; got != want {
+		t.Errorf("light status-ok foreground = %s, want %s", got, want)
+	}
+	if got, want := hexString(m.styles.gaugeCriticalStyle.GetForeground()), "#CF222E"; got != want {
+		t.Errorf("light gauge-critical foreground = %s, want %s", got, want)
+	}
+	if got, want := hexString(m.scrollbars[0].ThumbStyle.GetForeground()), "#0969DA"; got != want {
+		t.Errorf("light scrollbar thumb = %s, want %s", got, want)
+	}
+
+	m = update(m, tea.BackgroundColorMsg{Color: color.Black})
+	if got, want := hexString(m.styles.rowStyle.GetForeground()), "#E6EDF3"; got != want {
+		t.Errorf("restored dark row foreground = %s, want %s", got, want)
+	}
+}
+
+// TestLightThemeContrast pins the light palette to WCAG AA (>= 4.5:1) for
+// every text-bearing ink against the light surface it actually renders on. This is the
+// regression guard for the "pale text invisible on a light terminal" bug: a future
+// pastel edit to any of these styles fails loudly instead of shipping.
+func TestLightThemeContrast(t *testing.T) {
+	white := color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
+	// The two header/tab texts are white ink on blue fills; #FFFFFF vs #0969DA
+	// measures ~5.2:1 and is included exactly because it is the tightest of the
+	// light palette.
+	tests := []struct {
+		name   string
+		ink    lipgloss.Style
+		ground color.Color
+	}{
+		{"row on white", lightTheme().rowStyle, white},
+		{"section on white", lightTheme().sectionStyle, white},
+		{"dim on white", lightTheme().dimStyle2, white},
+		{"table header on white", lightTheme().tableHeaderStyle, white},
+		{"header on its blue fill", lightTheme().headerStyle, color.RGBA{0x09, 0x69, 0xDA, 0xFF}},
+		{"status ok on white", lightTheme().statusOkStyle, white},
+		{"status info on white", lightTheme().statusInfoStyle, white},
+		{"status client error on white", lightTheme().statusClientErrStyle, white},
+		{"status server error on white", lightTheme().statusServerErrStyle, white},
+		{"gauge normal on white", lightTheme().gaugeNormalStyle, white},
+		{"gauge warn on white", lightTheme().gaugeWarnStyle, white},
+		{"gauge critical on white", lightTheme().gaugeCriticalStyle, white},
+		{"queue warn on white", lightTheme().queueWarnStyle, white},
+		{"sparkline on white", lightTheme().sparklineStyle, white},
+		{"circuit open on white", lightTheme().circuitOpenStyle, white},
+		{"tab inactive on its bg", lightTheme().tabInactiveStyle, color.RGBA{0xEA, 0xF1, 0xF6, 0xFF}},
+		{"footer on its bg", lightTheme().footerStyle, color.RGBA{0xEA, 0xF1, 0xF6, 0xFF}},
+		{"overlay on white", lightTheme().overlayStyle, white},
+	}
+	for _, c := range tests {
+		t.Run(c.name, func(t *testing.T) {
+			fg := c.ink.GetForeground()
+			if fg == nil {
+				t.Fatal("ink style has no foreground color")
+			}
+			if r := contrastRatio(fg, c.ground); r < 4.5 {
+				t.Errorf("contrast = %.2f:1, want >= 4.5:1 (%s on %s)",
+					r, hexString(fg), hexString(c.ground))
+			}
+		})
+	}
 }
 
 func TestGaugeFillStyleSeverity(t *testing.T) {
@@ -594,7 +706,7 @@ func TestGaugeFillStyleSeverity(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			style := gaugeFillStyle(c.pct)
+			style := darkModel().gaugeFillStyle(c.pct)
 			gotHex := hexString(style.GetForeground())
 			if gotHex != c.wantHex {
 				t.Errorf("gaugeFillStyle(%d) foreground = %s, want %s", c.pct, gotHex, c.wantHex)
@@ -626,7 +738,7 @@ func TestQueueFillStyleSeverity(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			style := queueFillStyle(c.value, c.max)
+			style := darkModel().queueFillStyle(c.value, c.max)
 			gotHex := hexString(style.GetForeground())
 			if gotHex != c.wantHex {
 				t.Errorf("queueFillStyle(%d, %d) foreground = %s, want %s", c.value, c.max, gotHex, c.wantHex)
@@ -732,8 +844,9 @@ func TestMouseClickTabBar(t *testing.T) {
 }
 
 func TestStatusStyle(t *testing.T) {
+	m := darkModel()
 	for _, code := range []int{200, 201, 301, 404, 429, 500, 503, 0, 99} {
-		_ = statusStyle(code) // just verify no panic
+		_ = m.statusStyle(code) // just verify no panic
 	}
 }
 
@@ -763,7 +876,7 @@ func TestSparklineFillStyleSeverity(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := hexString(sparklineFillStyle(c.last, 10).GetForeground())
+			got := hexString(darkModel().sparklineFillStyle(c.last, 10).GetForeground())
 			if got != c.want {
 				t.Errorf("sparklineFillStyle(%d, 10) foreground = %s, want %s", c.last, got, c.want)
 			}
@@ -778,7 +891,7 @@ func TestSparklineEmptyState(t *testing.T) {
 	m.tab = tabDashboard
 	m.snap.Sparkline = nil
 	v := m.View()
-	if !strings.Contains(v.Content, dimStyle2.Render("  —")) {
+	if !strings.Contains(v.Content, m.styles.dimStyle2.Render("  —")) {
 		t.Errorf("Empty sparkline should render a dim em dash, got: %s", v.Content)
 	}
 }
@@ -1039,7 +1152,7 @@ func TestConcurrencyTabInFlightEmptyIsDim(t *testing.T) {
 	m.height = 24
 	m.tab = tabConcurrency
 	s := m.renderConcurrency()
-	if !strings.Contains(s, dimStyle2.Render("  No requests in flight.\n")) {
+	if !strings.Contains(s, m.styles.dimStyle2.Render("  No requests in flight.\n")) {
 		t.Errorf("Concurrency tab should show a dim empty in-flight message, got: %s", s)
 	}
 }
@@ -2363,7 +2476,7 @@ func TestRenderStatusBar_ColoredLabels(t *testing.T) {
 func composedStatusLines(m Model) []string {
 	lines := m.renderStatusBar(m.gaugeTrackWidth())
 	out := make([]string, len(lines))
-	out[0] = sectionStyle.Render("  Status  ") + lines[0]
+	out[0] = m.styles.sectionStyle.Render("  Status  ") + lines[0]
 	copy(out[1:], lines[1:])
 	return out
 }
@@ -4450,17 +4563,19 @@ func TestTruncateANSI(t *testing.T) {
 		width       int
 		wantVisible int // 0 means use the natural width bound
 	}{
-		{"short unchanged", statusOkStyle.Render("ok"), 10, 0},
-		{"ascii truncation", statusOkStyle.Render(strings.Repeat("x", 50)), 10, 0},
-		{"cjk truncation", statusOkStyle.Render("日本語説明文"), 4, 0},
-		{"cjk full width", statusOkStyle.Render("日本語説明文"), 10, 0},
-		{"emoji zwj", statusOkStyle.Render("🏳️‍🌈🏳️‍🌈🏳️‍🌈"), 4, 0},
+		// darkModel is the default palette; TruncateANSI is color-agnostic so
+		// any theme's default green suffices as a multi-byte ANSI load.
+		{"short unchanged", darkModel().styles.statusOkStyle.Render("ok"), 10, 0},
+		{"ascii truncation", darkModel().styles.statusOkStyle.Render(strings.Repeat("x", 50)), 10, 0},
+		{"cjk truncation", darkModel().styles.statusOkStyle.Render("日本語説明文"), 4, 0},
+		{"cjk full width", darkModel().styles.statusOkStyle.Render("日本語説明文"), 10, 0},
+		{"emoji zwj", darkModel().styles.statusOkStyle.Render("🏳️‍🌈🏳️‍🌈🏳️‍🌈"), 4, 0},
 		{"zero width", "hello", 0, 0},
 		// Odd boundary: the third CJK grapheme would cross the 5-cell mark,
 		// so truncation stops at the first two graphemes (4 cells). This is
 		// the multi-cell underflow condition that renderContentWithScrollbar
 		// must pad away.
-		{"cjk odd boundary underflow", statusOkStyle.Render("日本語"), 5, 4},
+		{"cjk odd boundary underflow", darkModel().styles.statusOkStyle.Render("日本語"), 5, 4},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

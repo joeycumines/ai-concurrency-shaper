@@ -99,6 +99,12 @@ func TestLogLineIsActionable_WholeWordTokens(t *testing.T) {
 		{"slog error offset", `time=... level=ERROR+1 msg="boom"`, true},
 		{"slog WARNING spelling", `time=... level=WARNING msg="disk almost full"`, true},
 		{"slog info offset stays quiet", `time=... level=INFO+2 msg="all good"`, false},
+		// The TUI startup summary must stay hyphen-bound ("failure-hold: 2s").
+		// A space between "failure" and "hold" reads like prose and toasts on
+		// every start (see main.go's startup summaries); the hyphen binds the two
+		// into one identifier, which isTokenChar keeps from matching the keyword.
+		{"failure-hold startup summary quiet", "2026/08/23 18:43:11 failure-hold: 2s", false},
+		{"failure hold prose remains actionable", "2026/08/23 18:43:11 failure hold: 2s", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

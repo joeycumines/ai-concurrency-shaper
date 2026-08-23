@@ -558,6 +558,68 @@ func TestTUIExitsOnBindFailure(t *testing.T) {
 	// err == nil is also acceptable: TUI failure triggered clean shutdown.
 }
 
+// TestTUIStartupFailureHoldLogIsNotActionable guards the "-failure-hold"
+// startup summary that is emitted into the captured Logs buffer on every TUI
+// start (main.go). The summary must be printed in hyphen-bound form
+// ("failure-hold: 2s") — a space-separated "failure hold: 2s" reads like
+// prose to the Logs-tab classifier, whose whole-line keyword scan fires on the
+// word-boundary "failure" and raises a toast every time the dashboard launches.
+// The classifier-side contract is pinned in logclass_test.go; this test pins the
+// actual line the binary emits so a future rephrase cannot regress the toast.
+func TestTUIStartupFailureHoldLogIsNotActionable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	// Build the binary.
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	// A free bind address so startup config logging runs and renders into the
+	// buffer; the only reason the TUI fails to start is the missing controlling
+	// terminal (Setsid below), exactly as in TestTUIExitsOnBindFailure.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	defer ln.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Do not pass -failure-hold: the 2s default must hold so the startup line
+	// is actually emitted. -tui routes the buffered startup summaries through the
+	// Logs classifier; on shutdown the buffer flushes to stderr, which
+	// CombinedOutput captures.
+	cmd := exec.CommandContext(ctx, bin,
+		"-tui",
+		"-bind", addr,
+		"-upstream", "http://127.0.0.1:1",
+	)
+	stdinR, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer stdinR.Close()
+	cmd.Stdin = stdinR
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+
+	out, _ := cmd.CombinedOutput()
+	output := string(out)
+
+	if strings.Contains(output, "failure hold: 2s") {
+		t.Fatalf("startup log emitted space-separated \"failure hold: 2s\" (actionable → toast):\n%s", output)
+	}
+	if !strings.Contains(output, "failure-hold: 2s") {
+		t.Fatalf("startup log missing hyphenated \"failure-hold: 2s\":\n%s", output)
+	}
+}
+
 func TestUpstreamMaxIdleConnsPerHost(t *testing.T) {
 	parsePatterns := func(t *testing.T, specs ...string) []route.Pattern {
 		t.Helper()

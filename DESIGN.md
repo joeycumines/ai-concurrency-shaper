@@ -10,7 +10,7 @@ The interface is a single full-screen Bubble Tea v2 terminal dashboard rendered 
 
 ## Color palette
 
-Palette is terminal-friendly true-color, designed against a near-black background for long operator sessions.
+The dashboard carries **two true-color palettes** behind one hue-to-state contract. The **dark palette** (this section) is the default and is designed against a near-black background for long operator sessions; the **light palette** (see below) re-inks the *same hue meanings* with darker, high-contrast colors for light terminals. On startup the TUI queries the terminal background (`tea.RequestBackgroundColor`) and swaps in the light palette when the report comes back light; terminals that do not answer keep the dark default. Hue never changes meaning across palettes: green=ok, blue=info/limit, orange=warn, red=error.
 
 | Token / style               | Hex       | Role                                                                 |
 | ---------------------------- | --------- | -------------------------------------------------------------------- |
@@ -38,6 +38,28 @@ Palette is terminal-friendly true-color, designed against a near-black backgroun
 - `3xx` → `statusRedirectStyle` (`#58A6FF`)
 - `4xx` → `statusClientErrStyle` (`#F0883E`)
 - `5xx` → `statusServerErrStyle` (`#F85149`)
+
+
+### Light palette (light terminal background)
+
+Applied when the terminal reports a light background. The same hue-to-state mapping, re-inked to meet WCAG AA (>= 4.5:1) against a white surface; kept darker for contrast rather than pastel.
+
+| Token / style               | Hex        | Role                                                                 |
+| --------------------------- | ---------- | -------------------------------------------------------------------- |
+| Header / active tab fill (`#0969DA`) | `#0969DA` | Header and active tab background; white text on it measures ~5.2:1. |
+| Text primary (`#24292F`)    | `#24292F` | Body text, overlays.                                                  |
+| Text secondary (`#57606A`)   | `#57606A` | Inactive tabs, footer.                                                |
+| Text muted (`#59636E`)      | `#59636E` | Dim labels, status info.                                              |
+| Accent blue (`#0550AE`)     | `#0550AE` | Sections, table headers, tab active text, sparkline, 3xx.           |
+| Success green (`#1A7F37`)  | `#1A7F37` | 2xx status, active gauge, download segment, CLOSED breaker.           |
+| Warning amber (`#9A6700`)   | `#9A6700` | Queue depth bar, queued waterfall segment.                             |
+| Error red (`#CF222E`)        | `#CF222E` | 5xx status, gauge critical, gauge empty-adjacent warn, OPEN breaker. |
+| Alert orange (`#BC4C00`)    | `#BC4C00` | 4xx status, limited tag, queue warn, HALF_OPEN breaker.           |
+| Row selection (`#0550AE`)    | `#0550AE` | Selected row background with white text.                                  |
+| Light sheets (`#EAF1F6`/`#EFF3F6`) | `#EAF1F6` | Inactive tab / footer / filter prompt backgrounds.             |
+| Separator / track (`#C9D4DE`/`#D0D7DE`) | `#C9D4DE` | Separators, gauge empty track, scrollbar track.          |
+
+Toasts are self-colored on both palettes, so they stay legible regardless of the detected background.
 
 ## Typography
 
