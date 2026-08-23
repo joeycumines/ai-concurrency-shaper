@@ -724,6 +724,14 @@ const chatProviderReasoningDroppedDetail = "provider reasoning is dropped becaus
 // de-asymmetry).
 const chatProviderReasoningMappedDetail = "provider reasoning maps to ordinary text (provider_reasoning_text encoding)"
 
+// chatProviderReasoningBothDetail is the single loss detail reported when a
+// chat response carries two provider reasoning spellings at once (a non-stream
+// message with both, or one stream delta carrying both) — the contradiction
+// that is never an ordered merge. One constant, shared verbatim by the
+// non-stream and stream chat surfaces, so the both-spellings disposition has
+// exactly one spelling across both conversion paths (task 22 de-asymmetry).
+const chatProviderReasoningBothDetail = "chat response carries both reasoning and reasoning_content"
+
 // resolveChatReasoningSpelling resolves the two provider spelling of chat
 // plaintext reasoning — `reasoning_content` (the DeepSeek/Qwen convention)
 // and `reasoning` (OpenRouter style) — into a single text and its wire path.

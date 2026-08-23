@@ -709,7 +709,7 @@ func (h *TranscodeHandler) jsonResponse(
 		return
 	}
 
-	converted, provenance, err := h.convertResponse(r, resp, body, context)
+	converted, provenance, err := h.convertResponse(r, body, context)
 	if err != nil {
 		apiErr := CanonicalAPIError{
 			Status:  http.StatusBadGateway,
@@ -833,7 +833,6 @@ func conversionProvenance(err error) ExchangeProvenance {
 // by the CLIENT protocol, never by the upstream protocol.
 func (h *TranscodeHandler) convertResponse(
 	r *http.Request,
-	resp *http.Response,
 	body []byte,
 	context *ExchangeContext,
 ) ([]byte, ExchangeProvenance, error) {

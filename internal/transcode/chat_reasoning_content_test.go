@@ -359,3 +359,58 @@ func TestChatProviderReasoningCapabilityOffParity(t *testing.T) {
 		t.Fatal("non-stream accepted two reasoning spellings with an approved loss")
 	}
 }
+
+// assertChatReasoningBothDetail asserts the error is the typed upstream-wire
+// rejection carrying exactly the shared both-spellings detail — the
+// de-asymmetrized single-constant disposition.
+func assertChatReasoningBothDetail(t *testing.T, err error) {
+	t.Helper()
+	var wireErr *UpstreamWireError
+	if !errors.As(err, &wireErr) {
+		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	}
+	if wireErr.Cause == nil {
+		t.Fatalf("cause = nil, want the shared both-detail %q", chatProviderReasoningBothDetail)
+	}
+	if wireErr.Cause.Error() != chatProviderReasoningBothDetail {
+		t.Fatalf(
+			"cause = %q, want the shared both-detail %q",
+			wireErr.Cause.Error(),
+			chatProviderReasoningBothDetail,
+		)
+	}
+}
+
+// TestChatReasoningBothDetailShared pins the task-22 de-asymmetry of the
+// both-spellings contradiction as a single verbatim constant across both chat
+// surfaces: a non-stream message carrying reasoning + reasoning_content and a
+// stream delta carrying both are rejected with the exact same shared detail
+// text (chatProviderReasoningBothDetail). A drift that splits the texts across
+// the non-stream and stream paths fails.
+func TestChatReasoningBothDetailShared(t *testing.T) {
+	// Non-streaming chat surface: a message carrying both spellings.
+	nonStream := []byte(`{
+		"id":"x","object":"chat.completion","created":1,"model":"m",
+		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"answer","reasoning":"a","reasoning_content":"b"}}]
+	}`)
+	_, _, err := DecodeChatResponseWithPolicy(nonStream, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy())
+	assertChatReasoningBothDetail(t, err)
+
+	// Streaming chat surface: one delta carrying both spellings.
+	frame := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"reasoning":"a","reasoning_content":"b"},"finish_reason":null}]}`
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		ChatCapabilities{ProviderReasoningText: true},
+		"resp_1",
+		"m",
+		1,
+		nil,
+	)
+	chunk, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(frame)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = state.Convert(chunk)
+	assertChatReasoningBothDetail(t, err)
+}

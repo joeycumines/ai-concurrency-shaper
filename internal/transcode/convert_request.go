@@ -1560,33 +1560,44 @@ func RenderResponsesRequest(
 		}
 		switch request.Thinking.Type {
 		case "enabled":
-			if request.Thinking.BudgetTokens != nil {
-				if !capabilities.ReasoningEffort {
-					if err := report.Lose(
-						context.lossPolicy(),
-						FeatureRequestReasoning,
-						"thinking",
-						"the thinking budget cannot be reproduced by the configured upstream provider",
-					); err != nil {
-						return nil, report, err
-					}
-				} else {
-					if out.Reasoning == nil {
-						out.Reasoning = &ResponsesEnvelopeReasoning{}
-					}
-					effort := thinkingBudgetToEffort(*request.Thinking.BudgetTokens)
-					out.Reasoning.Effort = &effort
-					if err := report.Note(
-						FeatureRequestReasoning,
-						"thinking",
-						fmt.Sprintf(
-							"Anthropic thinking budget %d mapped to Responses reasoning.effort %q",
-							*request.Thinking.BudgetTokens,
-							effort,
-						),
-					); err != nil {
-						return nil, report, err
-					}
+			if request.Thinking.BudgetTokens == nil {
+				// An "enabled" thinking request without a budget is provider
+				// intent the responses target cannot reproduce. Decode rejects
+				// this shape today; a hand-built CanonicalRequest or a future
+				// decode relaxation must never pass it silently (task-21
+				// never-silent invariant).
+				if err := report.Note(
+					FeatureRequestReasoning,
+					"thinking",
+					"thinking enabled without a budget maps to the upstream provider's default reasoning effort",
+				); err != nil {
+					return nil, report, err
+				}
+			} else if !capabilities.ReasoningEffort {
+				if err := report.Lose(
+					context.lossPolicy(),
+					FeatureRequestReasoning,
+					"thinking",
+					"the thinking budget cannot be reproduced by the configured upstream provider",
+				); err != nil {
+					return nil, report, err
+				}
+			} else {
+				if out.Reasoning == nil {
+					out.Reasoning = &ResponsesEnvelopeReasoning{}
+				}
+				effort := thinkingBudgetToEffort(*request.Thinking.BudgetTokens)
+				out.Reasoning.Effort = &effort
+				if err := report.Note(
+					FeatureRequestReasoning,
+					"thinking",
+					fmt.Sprintf(
+						"Anthropic thinking budget %d mapped to Responses reasoning.effort %q",
+						*request.Thinking.BudgetTokens,
+						effort,
+					),
+				); err != nil {
+					return nil, report, err
 				}
 			}
 		case "adaptive":
@@ -2009,30 +2020,41 @@ func RenderChatRequest(
 	if request.Thinking != nil {
 		switch request.Thinking.Type {
 		case "enabled":
-			if request.Thinking.BudgetTokens != nil {
-				if !capabilities.ReasoningEffort {
-					if err := report.Lose(
-						context.lossPolicy(),
-						FeatureRequestReasoning,
-						"thinking",
-						"the thinking budget cannot be reproduced by the configured chat provider",
-					); err != nil {
-						return nil, report, err
-					}
-				} else {
-					effort := thinkingBudgetToEffort(*request.Thinking.BudgetTokens)
-					out.ReasoningEffort = &effort
-					if err := report.Note(
-						FeatureRequestReasoning,
-						"thinking",
-						fmt.Sprintf(
-							"Anthropic thinking budget %d mapped to chat reasoning_effort %q",
-							*request.Thinking.BudgetTokens,
-							effort,
-						),
-					); err != nil {
-						return nil, report, err
-					}
+			if request.Thinking.BudgetTokens == nil {
+				// An "enabled" thinking request without a budget is provider
+				// intent the chat target cannot reproduce. Decode rejects
+				// this shape today; a hand-built CanonicalRequest or a future
+				// decode relaxation must never pass it silently (task-21
+				// never-silent invariant).
+				if err := report.Note(
+					FeatureRequestReasoning,
+					"thinking",
+					"thinking enabled without a budget maps to the chat provider's default reasoning effort",
+				); err != nil {
+					return nil, report, err
+				}
+			} else if !capabilities.ReasoningEffort {
+				if err := report.Lose(
+					context.lossPolicy(),
+					FeatureRequestReasoning,
+					"thinking",
+					"the thinking budget cannot be reproduced by the configured chat provider",
+				); err != nil {
+					return nil, report, err
+				}
+			} else {
+				effort := thinkingBudgetToEffort(*request.Thinking.BudgetTokens)
+				out.ReasoningEffort = &effort
+				if err := report.Note(
+					FeatureRequestReasoning,
+					"thinking",
+					fmt.Sprintf(
+						"Anthropic thinking budget %d mapped to chat reasoning_effort %q",
+						*request.Thinking.BudgetTokens,
+						effort,
+					),
+				); err != nil {
+					return nil, report, err
 				}
 			}
 		case "adaptive":

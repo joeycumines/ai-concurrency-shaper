@@ -477,9 +477,7 @@ func chatMessageToCanonicalParts(
 			return nil, nil, upstreamWireError(
 				UpstreamChatCompletions,
 				0,
-				errors.New(
-					"chat message carries both reasoning and reasoning_content",
-				),
+				errors.New(chatProviderReasoningBothDetail),
 			)
 		}
 		if reasoningText != "" {

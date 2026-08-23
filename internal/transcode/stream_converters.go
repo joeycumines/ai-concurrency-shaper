@@ -522,9 +522,7 @@ func (s *chatResponsesStreamState) convertDelta(
 		"choices[].delta.reasoning_content",
 	)
 	if both {
-		return nil, s.wireError(errors.New(
-			"chat stream chunk delta carries both reasoning and reasoning_content",
-		))
+		return nil, s.wireError(errors.New(chatProviderReasoningBothDetail))
 	}
 
 	if reasoningText != "" {

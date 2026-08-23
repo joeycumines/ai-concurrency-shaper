@@ -320,3 +320,75 @@ func TestMessagesThinkingBudgetMapsToResponsesEffort(t *testing.T) {
 		t.Fatal("expected the messages->responses render to reject the thinking budget without the capability")
 	}
 }
+
+// TestMessagesThinkingEnabledWithoutBudgetNoted pins the task-21 never-silent
+// invariant for the render path: an "enabled" thinking config rendered with no
+// budget — a shape decode rejects today but a hand-built CanonicalRequest or a
+// future decode relaxation can reach — is never silently passed. Both renderers
+// record exactly one request_reasoning note naming the upstream default effort
+// and still render a body; neither hard-errors and neither is silent.
+func TestMessagesThinkingEnabledWithoutBudgetNoted(t *testing.T) {
+	result, err := DecodeMessagesRequest([]byte(`{
+		"model":"m",
+		"max_tokens":100,
+		"messages":[{"role":"user","content":"hi"}],
+		"stream":false,
+		"thinking":{"type":"enabled","budget_tokens":4096}
+	}`), StrictLossPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt the decoded shape deliberately to reach the hand-built /
+	// relaxed-decode surface the invariant protects.
+	result.Request.Thinking.BudgetTokens = nil
+
+	assertSingleNote := func(rendered []byte, report ConversionReport, wantDetail string) {
+		t.Helper()
+		if len(rendered) == 0 {
+			t.Fatal("empty rendered body")
+		}
+		if !json.Valid(rendered) {
+			t.Fatalf("rendered body is not valid JSON: %s", rendered)
+		}
+		count := 0
+		for _, loss := range report.Losses {
+			if loss.Feature != FeatureRequestReasoning {
+				continue
+			}
+			count++
+			if loss.Detail != wantDetail {
+				t.Fatalf("reasoning detail = %q, want %q", loss.Detail, wantDetail)
+			}
+		}
+		if count != 1 {
+			t.Fatalf("request_reasoning notes = %d (%+v), want exactly one", count, report.Losses)
+		}
+	}
+
+	// Native Responses renderer.
+	rendered, report, err := RenderResponsesRequest(result.Request, testExchangeContext())
+	if err != nil {
+		t.Fatalf("responses render: %v", err)
+	}
+	assertSingleNote(
+		rendered,
+		report,
+		"thinking enabled without a budget maps to the upstream provider's default reasoning effort",
+	)
+
+	// Chat renderer, capability granted: the budget-less shape is still
+	// unreproducible and must not be silent.
+	rendered, report, err = RenderChatRequest(
+		result.Request,
+		testExchangeContext(),
+		ChatCapabilities{ReasoningEffort: true},
+	)
+	if err != nil {
+		t.Fatalf("chat render: %v", err)
+	}
+	assertSingleNote(
+		rendered,
+		report,
+		"thinking enabled without a budget maps to the chat provider's default reasoning effort",
+	)
+}
