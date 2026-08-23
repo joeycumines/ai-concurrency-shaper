@@ -39,3 +39,5 @@ Engineers and operators running HTTP proxies in front of AI/LLM providers. They 
 - Uses true-color ANSI sequences when available; falls back to 256-color and 16-color palettes.
 - Respects `prefers-reduced-motion` by avoiding flashing progress updates (updates are polling-driven).
 - Status hues are chosen for deuteranopia/protanopia distinguishability by pairing color with glyph/position/label.
+- **Background-adaptive.** The dashboard queries the terminal background on startup and repaints itself: a dark default for typical terminals, an inverted high-contrast palette (dark ink on light surfaces) when the terminal reports a light background. Hue-to-state meaning — green=ok, blue=info/limit, orange=warn, red=error — is identical in both palettes, so a light terminal never changes how state is read.
+- **Contrast floor.** Light-palette text inks are pinned to at least 4.5:1 (WCAG AA) against the surface they render on, and toasts are self-colored blocks that stay legible on either background.

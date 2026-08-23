@@ -493,7 +493,12 @@ func run() error {
 		log.Printf("cancel cooldown: %s", cancelCooldown)
 	}
 	if failureHold > 0 {
-		log.Printf("failure hold: %s", failureHold)
+		// Hyphen-bound on purpose: the Logs tab's actionable-line heuristic
+		// toasts whole-word "failure". "failure-hold" is one identifier (like
+		// open-timeout=10s), which the classifier ignores — a space-separated
+		// "failure hold: 2s" reads like prose and raised a false toast on every
+		// TUI start. Keep the summary hyphen-bound.
+		log.Printf("failure-hold: %s", failureHold)
 	}
 	if adaptiveHeadroom {
 		log.Printf("adaptive headroom: enabled (window %s)", adaptiveHeadroomWindow)

@@ -399,6 +399,12 @@ type Model struct {
 	startTime     time.Time
 	filterText    string
 
+	// styles is the active color/style set. It defaults to the dark palette
+	// (NewModel) and is swapped to the light palette when the program receives
+	// a tea.BackgroundColorMsg reporting a light terminal background (see
+	// Init / Update). All render paths resolve styles through this field.
+	styles tuiTheme
+
 	resetCh chan struct{}
 	journal *journal.Journal
 
@@ -479,10 +485,12 @@ func NewModel(conc int) Model {
 		logRing:    newLogRing(logRingCapacity),
 		followLogs: true,
 		toastSeen:  make(map[string]struct{}),
+		styles:     newTheme(true),
 	}
 	for i := range m.scrollbars {
 		m.scrollbars[i] = *scrollbar.New()
 	}
+	m.applyScrollbarTheme()
 	return m
 }
 
@@ -736,7 +744,13 @@ func toastToastWidth(width int) int {
 	return defaultToastWidth - 4
 }
 
-func (m Model) Init() tea.Cmd { return m.resyncTickCmd() }
+func (m Model) Init() tea.Cmd {
+	// Ask the terminal for its background color. The response arrives as a
+	// tea.BackgroundColorMsg (handled in Update) and swaps to the light
+	// palette if the terminal reports a light background; terminals that do
+	// not answer simply keep the dark default.
+	return tea.Batch(m.resyncTickCmd(), tea.RequestBackgroundColor)
+}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -769,6 +783,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.dashboardLinesCache = nil
+	case tea.BackgroundColorMsg:
+		// The terminal reported its background (see Init). Repaint the whole
+		// UI for the light palette when the background is light; the dark
+		// palette is the built-in default. Rendering caches are invalidated so
+		// the next View repaints from the new theme, and scrollbars repaint too.
+		m.styles = newTheme(msg.IsDark())
+		m.dashboardLinesCache = nil
+		m.applyScrollbarTheme()
 	case tea.KeyPressMsg:
 		m, cmd = m.handleKey(msg)
 	case tea.MouseClickMsg:
@@ -1276,6 +1298,16 @@ func (m *Model) visibleLogLines() []string {
 	return filtered
 }
 
+// applyScrollbarTheme paints every per-tab scrollbar with the active theme's
+// thumb/track colors. Called from NewModel and on theme swaps (and re-applied
+// on each updateScrollbars) so a background change repaints the scrollbars too.
+func (m *Model) applyScrollbarTheme() {
+	for i := range m.scrollbars {
+		m.scrollbars[i].ThumbStyle = m.styles.scrollbarThumb
+		m.scrollbars[i].TrackStyle = m.styles.scrollbarTrack
+	}
+}
+
 func (m *Model) updateScrollbars() {
 	contentHeight := m.maxCursor() + 1
 	viewportHeight := m.dataRows()
@@ -1283,6 +1315,7 @@ func (m *Model) updateScrollbars() {
 	sb.ContentHeight = contentHeight
 	sb.ViewportHeight = viewportHeight
 	sb.YOffset = m.scroll
+	m.applyScrollbarTheme()
 }
 
 // truncateANSI truncates line to at most width terminal cells, preserving the
@@ -1704,7 +1737,7 @@ func (m Model) View() tea.View {
 	b.WriteByte('\n')
 	b.WriteString(m.renderTabBar())
 	b.WriteByte('\n')
-	b.WriteString(sepStyle.Render(strings.Repeat("─", m.width)))
+	b.WriteString(m.styles.sepStyle.Render(strings.Repeat("─", m.width)))
 	b.WriteByte('\n')
 
 	switch m.mode {
@@ -1727,7 +1760,7 @@ func (m Model) View() tea.View {
 	}
 
 	if m.mode == modeFilter && (m.tab == tabRequests || m.tab == tabNetwork || m.tab == tabLogs) {
-		b.WriteString(filterPromptStyle.Render(fmt.Sprintf(" Filter: %s█", m.filterText)))
+		b.WriteString(m.styles.filterPromptStyle.Render(fmt.Sprintf(" Filter: %s█", m.filterText)))
 	}
 
 	// Place the footer on the next row without inserting a wasted blank row.
@@ -1805,7 +1838,7 @@ func builderEndsWithNewline(b *strings.Builder) bool {
 
 func (m Model) renderHeader() string {
 	uptime := time.Since(m.startTime).Truncate(time.Second)
-	return headerStyle.Render(
+	return m.styles.headerStyle.Render(
 		fmt.Sprintf(" ⚡ shaper │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
 			m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput,
 			m.snap.TotalTimeout, uptime),
@@ -1817,9 +1850,9 @@ func (m Model) renderTabBar() string {
 	parts := make([]string, len(names))
 	for i, name := range names {
 		if tabID(i) == m.tab {
-			parts[i] = tabActiveStyle.Render(" " + name + " ")
+			parts[i] = m.styles.tabActiveStyle.Render(" " + name + " ")
 		} else {
-			parts[i] = tabInactiveStyle.Render(" " + name + " ")
+			parts[i] = m.styles.tabInactiveStyle.Render(" " + name + " ")
 		}
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
@@ -1859,7 +1892,7 @@ func (m Model) renderDashboardContent() string {
 func (m Model) renderSparkline() string {
 	spark := m.snap.Sparkline
 	if len(spark) == 0 {
-		return dimStyle2.Render("  —")
+		return m.styles.dimStyle2.Render("  —")
 	}
 	maxVal := 0
 	for _, v := range spark {
@@ -1880,22 +1913,22 @@ func (m Model) renderSparkline() string {
 		}
 		line.WriteString(chars[idx])
 	}
-	style := sparklineFillStyle(spark[len(spark)-1], maxVal)
+	style := m.sparklineFillStyle(spark[len(spark)-1], maxVal)
 	return style.Render(line.String())
 }
 
-func sparklineFillStyle(last, max int) lipgloss.Style {
+func (m Model) sparklineFillStyle(last, max int) lipgloss.Style {
 	if max <= 0 {
-		return sparklineStyle
+		return m.styles.sparklineStyle
 	}
 	pct := min(int(math.Round(float64(last)/float64(max)*100)), 100)
 	switch {
 	case pct >= 90:
-		return gaugeCriticalStyle
+		return m.styles.gaugeCriticalStyle
 	case pct >= 60:
-		return gaugeWarnStyle
+		return m.styles.gaugeWarnStyle
 	default:
-		return sparklineStyle
+		return m.styles.sparklineStyle
 	}
 }
 
@@ -1923,7 +1956,7 @@ func (m Model) renderStatusBar(width int) []string {
 
 	labels := []string{"1xx", "2xx", "3xx", "4xx", "5xx"}
 	cvalues := []int64{counts[1], counts[2], counts[3], counts[4], counts[5]}
-	colors := []lipgloss.Style{statusInfoStyle, statusOkStyle, statusRedirectStyle, statusClientErrStyle, statusServerErrStyle}
+	colors := []lipgloss.Style{m.styles.statusInfoStyle, m.styles.statusOkStyle, m.styles.statusRedirectStyle, m.styles.statusClientErrStyle, m.styles.statusServerErrStyle}
 
 	// The rendered labels are exactly the non-zero classes, matching
 	// the bar segments; budget the same set so the width math matches
@@ -1941,7 +1974,7 @@ func (m Model) renderStatusBar(width int) []string {
 	}
 	var abortedPart string
 	if m.snap.TotalAborted > 0 {
-		abortedPart = gaugeWarnStyle.Render("Aborted:" + formatCount(m.snap.TotalAborted))
+		abortedPart = m.styles.gaugeWarnStyle.Render("Aborted:" + formatCount(m.snap.TotalAborted))
 		labelsWidth += 1 + uniseg.StringWidth(stripANSI(abortedPart))
 	}
 
@@ -1959,7 +1992,7 @@ func (m Model) renderStatusBar(width int) []string {
 	var b strings.Builder
 	b.WriteString("[")
 	if total == 0 {
-		b.WriteString(gaugeEmptyStyle.Render(strings.Repeat("░", barWidth)))
+		b.WriteString(m.styles.gaugeEmptyStyle.Render(strings.Repeat("░", barWidth)))
 	} else {
 		pos := 0
 		for i, v := range cvalues {
@@ -1977,7 +2010,7 @@ func (m Model) renderStatusBar(width int) []string {
 			pos += seg
 		}
 		if pos < barWidth {
-			b.WriteString(gaugeEmptyStyle.Render(strings.Repeat("░", barWidth-pos)))
+			b.WriteString(m.styles.gaugeEmptyStyle.Render(strings.Repeat("░", barWidth-pos)))
 		}
 	}
 	b.WriteString("]")
@@ -2089,15 +2122,15 @@ func (m Model) dashboardLines() []string {
 	var lines []string
 
 	if cb := m.snap.CircuitBreaker; cb != nil {
-		lines = append(lines, sectionStyle.Render(" Circuit Breaker "))
+		lines = append(lines, m.styles.sectionStyle.Render(" Circuit Breaker "))
 		var stateStyle lipgloss.Style
 		switch cb.State {
 		case "CLOSED":
-			stateStyle = circuitClosedStyle
+			stateStyle = m.styles.circuitClosedStyle
 		case "OPEN":
-			stateStyle = circuitOpenStyle
+			stateStyle = m.styles.circuitOpenStyle
 		case "HALF_OPEN":
-			stateStyle = circuitHalfOpenStyle
+			stateStyle = m.styles.circuitHalfOpenStyle
 		default:
 			stateStyle = lipgloss.NewStyle()
 		}
@@ -2122,7 +2155,7 @@ func (m Model) dashboardLines() []string {
 		}
 		lines = append(lines, "")
 	}
-	lines = append(lines, sectionStyle.Render(" Throughput (10s) "))
+	lines = append(lines, m.styles.sectionStyle.Render(" Throughput (10s) "))
 	lines = append(lines, m.renderSparkline())
 	lines = append(lines, "")
 
@@ -2136,11 +2169,11 @@ func (m Model) dashboardLines() []string {
 
 	lines = append(lines, "")
 	statusLines := m.renderStatusBar(gaugeWidth)
-	lines = append(lines, sectionStyle.Render("  Status  ")+statusLines[0])
+	lines = append(lines, m.styles.sectionStyle.Render("  Status  ")+statusLines[0])
 	lines = append(lines, statusLines[1:]...)
 
 	lines = append(lines, "")
-	lines = append(lines, sectionStyle.Render(" In-Flight Requests "))
+	lines = append(lines, m.styles.sectionStyle.Render(" In-Flight Requests "))
 	flights := m.snap.InFlight
 	// The summary renders as a single line whenever the abbreviated
 	// counts fit the viewport (always at width >= 80: the widest single
@@ -2184,9 +2217,9 @@ func (m Model) dashboardLines() []string {
 	for i := range show {
 		r := flights[i]
 		age := r.Age().Truncate(time.Millisecond)
-		tag := limitedTag
+		tag := m.styles.limitedTag
 		if !r.Limited {
-			tag = passTag
+			tag = m.styles.passTag
 		}
 		fixed := 2 + uniseg.StringWidth(stripANSI(tag)) + 1 + max(6, uniseg.StringWidth(r.Method)) + 1 + 1 + uniseg.StringWidth(age.String())
 		pathWidth := min(35, max(m.viewportWidth()-fixed, 0))
@@ -2197,7 +2230,7 @@ func (m Model) dashboardLines() []string {
 	}
 
 	lines = append(lines, "")
-	lines = append(lines, sectionStyle.Render(" Summary "))
+	lines = append(lines, m.styles.sectionStyle.Render(" Summary "))
 	// The Summary metrics are packed into rows that fit the viewport:
 	// "Label: count" parts joined by "  │  ", each row indented by two
 	// cells. A single part is at most 26 cells (the longest label,
@@ -2260,7 +2293,7 @@ func (m Model) renderRequests() string {
 	}
 
 	b.WriteString("  ")
-	b.WriteString(tableHeaderStyle.Render(
+	b.WriteString(m.styles.tableHeaderStyle.Render(
 		fmt.Sprintf("%-8s %-6s %4s  %9s  %s", "Time", "Method", "St", "Duration", "Path")))
 	b.WriteByte('\n')
 
@@ -2270,11 +2303,11 @@ func (m Model) renderRequests() string {
 
 	for i := start; i < end; i++ {
 		e := entries[i]
-		style := rowStyle
+		style := m.styles.rowStyle
 		if i == m.cursor {
-			style = rowSelectedStyle
+			style = m.styles.rowSelectedStyle
 		}
-		stStr := statusStyle(e.Status).Render(fmt.Sprintf("%4d", e.Status))
+		stStr := m.statusStyle(e.Status).Render(fmt.Sprintf("%4d", e.Status))
 		path := e.Path
 		if e.Aborted {
 			path += " [aborted]"
@@ -2312,7 +2345,7 @@ func (m Model) renderNetwork() string {
 
 	// Column header (always shown).
 	b.WriteString("  ")
-	b.WriteString(tableHeaderStyle.Render(
+	b.WriteString(m.styles.tableHeaderStyle.Render(
 		fmt.Sprintf("%-22s %-6s %4s  %-6s %7s  %8s  %s",
 			"Name", "Method", "St", "Type", "Size", "Time", "Waterfall")))
 	b.WriteByte('\n')
@@ -2336,13 +2369,13 @@ func (m Model) renderNetwork() string {
 
 	for i := start; i < end; i++ {
 		e := entries[i]
-		style := rowStyle
+		style := m.styles.rowStyle
 		if i == m.cursor {
-			style = rowSelectedStyle
+			style = m.styles.rowSelectedStyle
 		}
 
 		name := truncate(e.Name(), 22)
-		stStr := networkStatusStyle(e.StatusCode).Render(fmt.Sprintf("%4d", e.StatusCode))
+		stStr := m.networkStatusStyle(e.StatusCode).Render(fmt.Sprintf("%4d", e.StatusCode))
 		typeStr := e.Type()
 		if e.Aborted {
 			typeStr = "abort"
@@ -2386,9 +2419,9 @@ func (m Model) renderLogs() string {
 	end := min(start+visible, len(lines))
 
 	for i := start; i < end; i++ {
-		style := rowStyle
+		style := m.styles.rowStyle
 		if i == m.cursor {
-			style = rowSelectedStyle
+			style = m.styles.rowSelectedStyle
 		}
 		b.WriteString(style.Render(fmt.Sprintf("  %6d  ", i+1) + lines[i]))
 		b.WriteByte('\n')
@@ -2422,36 +2455,36 @@ func (m Model) renderWaterfall(e *journal.Entry) string {
 
 	var b strings.Builder
 	if queueSeg > 0 {
-		b.WriteString(waterfallQueueStyle.Render(strings.Repeat("█", queueSeg)))
+		b.WriteString(m.styles.waterfallQueueStyle.Render(strings.Repeat("█", queueSeg)))
 	}
 	if ttfbSeg > 0 {
-		b.WriteString(waterfallTTFBStyle.Render(strings.Repeat("█", ttfbSeg)))
+		b.WriteString(m.styles.waterfallTTFBStyle.Render(strings.Repeat("█", ttfbSeg)))
 	}
 	if downloadSeg > 0 {
-		b.WriteString(waterfallDownloadStyle.Render(strings.Repeat("█", downloadSeg)))
+		b.WriteString(m.styles.waterfallDownloadStyle.Render(strings.Repeat("█", downloadSeg)))
 	}
 	return b.String()
 }
 
-func networkStatusStyle(code int) lipgloss.Style {
+func (m Model) networkStatusStyle(code int) lipgloss.Style {
 	switch {
 	case code >= 200 && code < 300:
-		return statusOkStyle
+		return m.styles.statusOkStyle
 	case code >= 300 && code < 400:
-		return statusRedirectStyle
+		return m.styles.statusRedirectStyle
 	case code >= 400 && code < 500:
-		return statusClientErrStyle
+		return m.styles.statusClientErrStyle
 	case code >= 500:
-		return statusServerErrStyle
+		return m.styles.statusServerErrStyle
 	default:
-		return dimStyle2
+		return m.styles.dimStyle2
 	}
 }
 
 func (m Model) renderConcurrency() string {
 	var b strings.Builder
 
-	b.WriteString(sectionStyle.Render(" Concurrency Gauge "))
+	b.WriteString(m.styles.sectionStyle.Render(" Concurrency Gauge "))
 	b.WriteByte('\n')
 	b.WriteString(m.renderGaugeBar(int(m.snap.Active), m.conc, m.gaugeBarWidth()))
 	b.WriteByte('\n')
@@ -2466,26 +2499,26 @@ func (m Model) renderConcurrency() string {
 	}
 	b.WriteByte('\n')
 
-	b.WriteString(sectionStyle.Render(" Queue Depth "))
+	b.WriteString(m.styles.sectionStyle.Render(" Queue Depth "))
 	b.WriteByte('\n')
 	queueMax := m.conc * 4
 	if queueMax == 0 {
 		queueMax = 1
 	}
-	b.WriteString(m.renderHBar(int(m.snap.Queued), queueMax, m.hBarWidth(), queueFillStyle(int(m.snap.Queued), queueMax)))
+	b.WriteString(m.renderHBar(int(m.snap.Queued), queueMax, m.hBarWidth(), m.queueFillStyle(int(m.snap.Queued), queueMax)))
 	b.WriteByte('\n')
 	if m.snap.Queued == 0 {
-		b.WriteString(dimStyle2.Render("  Queue: empty\n"))
+		b.WriteString(m.styles.dimStyle2.Render("  Queue: empty\n"))
 	} else {
 		fmt.Fprintf(&b, "  %d waiting\n", m.snap.Queued)
 	}
 	b.WriteByte('\n')
 
-	b.WriteString(sectionStyle.Render(" In-Flight Requests "))
+	b.WriteString(m.styles.sectionStyle.Render(" In-Flight Requests "))
 	b.WriteByte('\n')
 	flights := m.snap.InFlight
 	if len(flights) == 0 {
-		b.WriteString(dimStyle2.Render("  No requests in flight.\n"))
+		b.WriteString(m.styles.dimStyle2.Render("  No requests in flight.\n"))
 		return b.String()
 	}
 
@@ -2495,15 +2528,15 @@ func (m Model) renderConcurrency() string {
 
 	for i := start; i < end; i++ {
 		r := flights[i]
-		style := rowStyle
+		style := m.styles.rowStyle
 		if i == m.cursor {
-			style = rowSelectedStyle
+			style = m.styles.rowSelectedStyle
 		}
 		age := r.Age().Truncate(time.Millisecond)
 		totalAge := r.TotalAge().Truncate(time.Millisecond)
-		tag := limitedTag
+		tag := m.styles.limitedTag
 		if !r.Limited {
-			tag = passTag
+			tag = m.styles.passTag
 		}
 		line := fmt.Sprintf("  %s %-6s %-35s age=%s  total=%s",
 			tag, r.Method, r.Path, age, totalAge)
@@ -2576,7 +2609,7 @@ func (m Model) renderRoutes() string {
 	rates := m.perRouteRate()
 
 	b.WriteString("  ")
-	b.WriteString(tableHeaderStyle.Render(
+	b.WriteString(m.styles.tableHeaderStyle.Render(
 		fmt.Sprintf("%-32s %5s %5s %5s %5s %5s %7s", "Route", "Total", "2xx", "4xx", "5xx", "✗ TO", "req/s")))
 	b.WriteByte('\n')
 
@@ -2586,9 +2619,9 @@ func (m Model) renderRoutes() string {
 
 	for i := start; i < end; i++ {
 		p := pairs[i]
-		style := rowStyle
+		style := m.styles.rowStyle
 		if i == m.cursor {
-			style = rowSelectedStyle
+			style = m.styles.rowSelectedStyle
 		}
 		s := p.stat
 		rate := rates[p.key]
@@ -2613,7 +2646,7 @@ func (m Model) resetCmd() tea.Cmd {
 type resetMsg struct{}
 
 func (m Model) renderConfirmOverlay() string {
-	return overlayStyle.Render(
+	return m.styles.overlayStyle.Render(
 		fmt.Sprintf(" Reset Stats \n\n"+
 			" Clear all cumulative counters?\n"+
 			" (Proxied, Passthrough, Timeouts, etc.)\n\n"+
@@ -2630,7 +2663,7 @@ func (m Model) renderDetailOverlay() string {
 			return ""
 		}
 		e := entries[m.cursor]
-		b.WriteString(overlayStyle.Render(
+		b.WriteString(m.styles.overlayStyle.Render(
 			fmt.Sprintf(" Request Detail \n"+
 				" Time:     %s\n"+
 				" Method:   %s\n"+
@@ -2655,7 +2688,7 @@ func (m Model) renderDetailOverlay() string {
 			return ""
 		}
 		r := m.snap.InFlight[m.cursor]
-		b.WriteString(overlayStyle.Render(
+		b.WriteString(m.styles.overlayStyle.Render(
 			fmt.Sprintf(" In-Flight Detail \n"+
 				" ID:       %d\n"+
 				" Method:   %s\n"+
@@ -2699,7 +2732,7 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 
 	var b strings.Builder
 
-	b.WriteString(sectionStyle.Render(" Request "))
+	b.WriteString(m.styles.sectionStyle.Render(" Request "))
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, " Method:   %s\n", e.Method)
 	fmt.Fprintf(&b, " URL:      %s\n", e.URL)
@@ -2731,7 +2764,7 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 	}
 	b.WriteByte('\n')
 
-	b.WriteString(sectionStyle.Render(" Response "))
+	b.WriteString(m.styles.sectionStyle.Render(" Response "))
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, " Status:   %d\n", e.StatusCode)
 	if e.Aborted {
@@ -2768,7 +2801,7 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 	}
 	b.WriteByte('\n')
 
-	b.WriteString(sectionStyle.Render(" Timing "))
+	b.WriteString(m.styles.sectionStyle.Render(" Timing "))
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, " Queue:    %s\n", e.Timing.QueueDuration().Truncate(time.Millisecond))
 	fmt.Fprintf(&b, " TTFB:     %s\n", e.Timing.TTFB().Truncate(time.Millisecond))
@@ -2783,7 +2816,7 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 	fmt.Fprintf(&b, " %s\n", m.renderDetailWaterfall(e, barWidth))
 
 	b.WriteString("\n [Esc/Enter] close ")
-	return overlayStyle.Render(b.String())
+	return m.styles.overlayStyle.Render(b.String())
 }
 
 func (m Model) renderDetailWaterfall(e *journal.Entry, width int) string {
@@ -2807,19 +2840,19 @@ func (m Model) renderDetailWaterfall(e *journal.Entry, width int) string {
 
 	var b strings.Builder
 	if queueSeg > 0 {
-		b.WriteString(waterfallQueueStyle.Render(strings.Repeat("█", queueSeg)))
+		b.WriteString(m.styles.waterfallQueueStyle.Render(strings.Repeat("█", queueSeg)))
 	}
 	if ttfbSeg > 0 {
-		b.WriteString(waterfallTTFBStyle.Render(strings.Repeat("█", ttfbSeg)))
+		b.WriteString(m.styles.waterfallTTFBStyle.Render(strings.Repeat("█", ttfbSeg)))
 	}
 	if downloadSeg > 0 {
-		b.WriteString(waterfallDownloadStyle.Render(strings.Repeat("█", downloadSeg)))
+		b.WriteString(m.styles.waterfallDownloadStyle.Render(strings.Repeat("█", downloadSeg)))
 	}
 	return b.String()
 }
 
 func (m Model) renderHelpOverlay() string {
-	return overlayStyle.Render(" Keybindings \n\n"+
+	return m.styles.overlayStyle.Render(" Keybindings \n\n"+
 		" 1-6          Switch tab (Overview/Requests/Network/Logs/Concurrency/Routes)\n"+
 		" j/k or ↑/↓   Scroll down/up\n"+
 		" PgUp/PgDn     Page up / Page down\n"+
@@ -2839,12 +2872,12 @@ func (m Model) renderHelpOverlay() string {
 
 func (m Model) renderFooter() string {
 	keys := " 1-6:tab │ j/k:scroll │ PgUp/PgDn │ Home/End │ Ctrl-U/D │ /:filter │ t:type │ s:status │ ?:help │ q:quit "
-	return footerStyle.Render(keys)
+	return m.styles.footerStyle.Render(keys)
 }
 
 func (m Model) renderGaugeBar(active, max, width int) string {
 	if max <= 0 || width <= 0 {
-		return dimStyle2.Render("  [ empty ]")
+		return m.styles.dimStyle2.Render("  [ empty ]")
 	}
 	pct := min(int(math.Round(float64(active)/float64(max)*100)), 100)
 	filled := min(int(math.Round(float64(pct)/100.0*float64(width))), width)
@@ -2854,28 +2887,28 @@ func (m Model) renderGaugeBar(active, max, width int) string {
 	empty := width - filled
 
 	bar := "  ["
-	bar += gaugeFillStyle(pct).Render(strings.Repeat("█", filled))
+	bar += m.gaugeFillStyle(pct).Render(strings.Repeat("█", filled))
 	if empty > 0 {
-		bar += gaugeEmptyStyle.Render(strings.Repeat("░", empty))
+		bar += m.styles.gaugeEmptyStyle.Render(strings.Repeat("░", empty))
 	}
 	bar += "]  "
 	return bar
 }
 
-func gaugeFillStyle(pct int) lipgloss.Style {
+func (m Model) gaugeFillStyle(pct int) lipgloss.Style {
 	switch {
 	case pct >= 90:
-		return gaugeCriticalStyle
+		return m.styles.gaugeCriticalStyle
 	case pct >= 60:
-		return gaugeWarnStyle
+		return m.styles.gaugeWarnStyle
 	default:
-		return gaugeNormalStyle
+		return m.styles.gaugeNormalStyle
 	}
 }
 
 func (m Model) renderHBar(value, valueMax, width int, color lipgloss.Style) string {
 	if valueMax <= 0 || width <= 0 {
-		return dimStyle2.Render("  [ empty ]")
+		return m.styles.dimStyle2.Render("  [ empty ]")
 	}
 	filled := max(min(int(math.Round(float64(value)/float64(valueMax)*float64(width))), width), 0)
 	empty := width - filled
@@ -2885,7 +2918,7 @@ func (m Model) renderHBar(value, valueMax, width int, color lipgloss.Style) stri
 		bar += color.Render(strings.Repeat("█", filled))
 	}
 	if empty > 0 {
-		bar += gaugeEmptyStyle.Render(strings.Repeat("░", empty))
+		bar += m.styles.gaugeEmptyStyle.Render(strings.Repeat("░", empty))
 	}
 	bar += "]  "
 	return bar
@@ -2906,8 +2939,8 @@ func (m Model) renderDualBars(activeWidth int) string {
 	// Layout: "  Active  [" + lhsBlocks + "]  Queued   [" + rhsBlocks + "]  "
 	// Total = 10 + 1 + activeWidth + 1 + 2 + 9 + 1 + rhsWidth + 1 + 2 = activeWidth + rhsWidth + 27
 	// rhsWidth = vw - activeWidth - 27
-	lhsLabel := sectionStyle.Render("  Active  ")
-	rhsLabel := sectionStyle.Render("Queued   ")
+	lhsLabel := m.styles.sectionStyle.Render("  Active  ")
+	rhsLabel := m.styles.sectionStyle.Render("Queued   ")
 	trailing := "  "
 	rhsWidth := max(vw-activeWidth-27, 0)
 
@@ -2924,12 +2957,12 @@ func (m Model) renderDualBars(activeWidth int) string {
 	if m.conc > 0 && activeWidth > 0 {
 		lhsFilled := max(min(int(math.Round(float64(m.snap.Active)/float64(m.conc)*float64(activeWidth))), activeWidth), 0)
 		pct := min(int(math.Round(float64(m.snap.Active)/float64(m.conc)*100)), 100)
-		b.WriteString(gaugeFillStyle(pct).Render(strings.Repeat("█", lhsFilled)))
+		b.WriteString(m.gaugeFillStyle(pct).Render(strings.Repeat("█", lhsFilled)))
 		if lhsFilled < activeWidth {
-			b.WriteString(gaugeEmptyStyle.Render(strings.Repeat("░", activeWidth-lhsFilled)))
+			b.WriteString(m.styles.gaugeEmptyStyle.Render(strings.Repeat("░", activeWidth-lhsFilled)))
 		}
 	} else {
-		b.WriteString(gaugeEmptyStyle.Render(strings.Repeat("░", activeWidth)))
+		b.WriteString(m.styles.gaugeEmptyStyle.Render(strings.Repeat("░", activeWidth)))
 	}
 	b.WriteString("]")
 
@@ -2941,49 +2974,49 @@ func (m Model) renderDualBars(activeWidth int) string {
 	b.WriteString("[")
 	if queueMax > 0 && rhsWidth > 0 {
 		rhsFilled := max(min(int(math.Round(float64(m.snap.Queued)/float64(queueMax)*float64(rhsWidth))), rhsWidth), 0)
-		b.WriteString(queueFillStyle(int(m.snap.Queued), queueMax).Render(strings.Repeat("█", rhsFilled)))
+		b.WriteString(m.queueFillStyle(int(m.snap.Queued), queueMax).Render(strings.Repeat("█", rhsFilled)))
 		if rhsFilled < rhsWidth {
-			b.WriteString(gaugeEmptyStyle.Render(strings.Repeat("░", rhsWidth-rhsFilled)))
+			b.WriteString(m.styles.gaugeEmptyStyle.Render(strings.Repeat("░", rhsWidth-rhsFilled)))
 		}
 	} else {
-		b.WriteString(gaugeEmptyStyle.Render(strings.Repeat("░", rhsWidth)))
+		b.WriteString(m.styles.gaugeEmptyStyle.Render(strings.Repeat("░", rhsWidth)))
 	}
 	b.WriteString("]" + trailing)
 
 	return b.String()
 }
 
-func queueFillStyle(value, valueMax int) lipgloss.Style {
+func (m Model) queueFillStyle(value, valueMax int) lipgloss.Style {
 	if valueMax <= 0 {
-		return gaugeEmptyStyle
+		return m.styles.gaugeEmptyStyle
 	}
 	pct := min(int(math.Round(float64(value)/float64(valueMax)*100)), 100)
 	switch {
 	case pct >= 90:
-		return gaugeCriticalStyle
+		return m.styles.gaugeCriticalStyle
 	case pct >= 50:
-		return queueWarnStyle
+		return m.styles.queueWarnStyle
 	case value > 0:
-		return queueFillDefaultStyle
+		return m.styles.queueFillDefaultStyle
 	default:
-		return gaugeEmptyStyle
+		return m.styles.gaugeEmptyStyle
 	}
 }
 
-func statusStyle(code int) lipgloss.Style {
+func (m Model) statusStyle(code int) lipgloss.Style {
 	switch {
 	case code >= 100 && code < 200:
-		return statusInfoStyle
+		return m.styles.statusInfoStyle
 	case code >= 200 && code < 300:
-		return statusOkStyle
+		return m.styles.statusOkStyle
 	case code >= 300 && code < 400:
-		return statusRedirectStyle
+		return m.styles.statusRedirectStyle
 	case code >= 400 && code < 500:
-		return statusClientErrStyle
+		return m.styles.statusClientErrStyle
 	case code >= 500:
-		return statusServerErrStyle
+		return m.styles.statusServerErrStyle
 	default:
-		return dimStyle2
+		return m.styles.dimStyle2
 	}
 }
 
@@ -3041,129 +3074,6 @@ func sortedHeaderKeys(h http.Header) []string {
 	sort.Strings(keys)
 	return keys
 }
-
-var (
-	headerStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#E6EDF3")).
-			Background(lipgloss.Color("#1F6FEB")).
-			PaddingLeft(1).
-			PaddingRight(1)
-
-	sectionStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#58A6FF"))
-
-	dimStyle2 = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#6E7681"))
-
-	sepStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#30363D"))
-
-	filterPromptStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#58A6FF")).
-				Background(lipgloss.Color("#0D1117")).
-				Bold(true)
-
-	tabActiveStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#0D1117")).
-			Background(lipgloss.Color("#58A6FF")).
-			PaddingLeft(1).
-			PaddingRight(1)
-
-	tabInactiveStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#8B949E")).
-				Background(lipgloss.Color("#161B22")).
-				PaddingLeft(1).
-				PaddingRight(1)
-
-	tableHeaderStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(lipgloss.Color("#58A6FF"))
-
-	rowStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#E6EDF3"))
-
-	rowSelectedStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#0D1117")).
-				Background(lipgloss.Color("#388BFD"))
-
-	gaugeNormalStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#58A6FF")).Bold(true)
-
-	gaugeWarnStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D29922")).Bold(true)
-
-	gaugeCriticalStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#F85149")).Bold(true)
-
-	queueWarnStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#F0883E")).Bold(true)
-
-	sparklineStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#58A6FF"))
-
-	gaugeEmptyStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#21262D"))
-
-	statusInfoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#8B949E"))
-
-	statusOkStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#3FB950"))
-
-	statusRedirectStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#58A6FF"))
-
-	statusClientErrStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#F0883E"))
-
-	statusServerErrStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#F85149"))
-
-	limitedTag = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#F0883E")).
-			Render(" lim")
-
-	passTag = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#6E7681")).
-		Render(" pas")
-
-	overlayStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#E6EDF3")).
-			Background(lipgloss.Color("#161B22")).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#58A6FF")).
-			Padding(1, 2).
-			MarginLeft(2)
-
-	footerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#8B949E")).
-			Background(lipgloss.Color("#0D1117"))
-
-	circuitClosedStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#3FB950"))
-
-	circuitOpenStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#F85149")).
-				Bold(true)
-
-	circuitHalfOpenStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#F0883E"))
-
-	queueFillDefaultStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#39D353")).Bold(true)
-
-	waterfallQueueStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#D29922"))
-
-	waterfallTTFBStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#58A6FF"))
-
-	waterfallDownloadStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("#3FB950"))
-)
 
 // Run starts the TUI dashboard and blocks until the program exits.
 // The returned *tea.Program may be used by the caller to shut down the

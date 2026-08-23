@@ -270,6 +270,90 @@ func TestTUIExitsOnBindFailure(t *testing.T) {
 	}
 }
 
+// TestTUIStartupFailureHoldLogIsNotActionable guards the "-failure-hold"
+// startup summary that is emitted into the captured Logs buffer on every TUI
+// start (main.go). The summary must be printed in hyphen-bound form
+// ("failure-hold: 2s") — a space-separated "failure hold: 2s" reads like
+// prose to the Logs-tab classifier, whose whole-line keyword scan fires on the
+// word-boundary "failure" and raises a toast every time the dashboard launches.
+// The classifier-side contract is pinned in logclass_test.go; this test pins the
+// actual line the binary emits so a future rephrase cannot regress the toast.
+func TestTUIStartupFailureHoldLogIsNotActionable(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	// A free bind address so startup config logging runs and renders into the
+	// buffer; the only reason the TUI fails to start is the missing controlling
+	// terminal (isolateSubprocess below), exactly as in TestTUIExitsOnBindFailure.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin,
+		"-tui",
+		"-bind", addr,
+		"-upstream", "http://127.0.0.1:1",
+	)
+
+	// Same two-layer isolation as TestTUIExitsOnBindFailure: /dev/null stdin
+	// keeps bubbletea off os.Stdin, and isolateSubprocess removes the
+	// controlling terminal so OpenTTY() cannot reach the parent's /dev/tty.
+	stdinR, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer stdinR.Close()
+	cmd.Stdin = stdinR
+	isolateSubprocess(cmd)
+
+	var out lockedBuffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- cmd.Run()
+	}()
+
+	select {
+	case err := <-runErr:
+		// Either exit code is fine here: without a controlling terminal the
+		// TUI goroutine exits early and triggers a clean shutdown (nil), or
+		// an early startup error wins the race. What matters is that the
+		// buffered startup summaries flushed to stderr before exit.
+		if err != nil {
+			t.Logf("proxy exited with error (tolerated): %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
+		<-runErr
+		t.Fatal("TUI process did not exit without a controlling terminal")
+	}
+
+	output := out.String()
+
+	if strings.Contains(output, "failure hold: 2s") {
+		t.Fatalf("startup log emitted space-separated \"failure hold: 2s\" (actionable → toast):\n%s", output)
+	}
+	if !strings.Contains(output, "failure-hold: 2s") {
+		t.Fatalf("startup log missing hyphenated \"failure-hold: 2s\":\n%s", output)
+	}
+}
+
 func TestUpstreamMaxIdleConnsPerHost(t *testing.T) {
 	parsePatterns := func(t *testing.T, specs ...string) []route.Pattern {
 		t.Helper()
