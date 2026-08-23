@@ -165,7 +165,10 @@ func TestPTY_NavigationAllTabs(t *testing.T) {
 		{"1", "Throughput"},
 		{"2", "No requests yet"},
 		{"3", "Waterfall"},
-		{"4", "No log output yet"},
+		// Match the truncation-safe prefix rather than the full string: the Logs tab
+		// truncates long lines to the column width, which can cut trailing content on
+		// narrower viewports.
+		{"4", "auto-detecting LLM"},
 		{"5", "Concurrency Gauge"},
 		{"6", "No route data yet"},
 	}

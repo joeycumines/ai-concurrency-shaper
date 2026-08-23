@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10356,6 +10357,59 @@ func TestProxy_ErrorHandler_TransportErrorBeforeResponse_Records502(t *testing.T
 				t.Fatalf("breaker TotalFailures = %d, want 1 for real pre-response transport error", stats.TotalFailures)
 			}
 		})
+	}
+}
+
+// TestProxy_ErrorHandler_StructuredTransportErrorLog pins review-11 #1: the
+// ErrorHandler logs the failure through slog with the error as a structured
+// attribute (machine-readable context preserved), not flattened into the
+// message string via fmt.Sprintf.
+func TestProxy_ErrorHandler_StructuredTransportErrorLog(t *testing.T) {
+	prevDefault := slog.Default()
+	var logSink bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logSink, nil)))
+	defer slog.SetDefault(prevDefault)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "unused")
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	pat, _ := route.Parse("POST /v1/messages")
+	met := metrics.NewCollector()
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithMaxRetries(0),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, errProxyTestTransport
+		})),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", rec.Code)
+	}
+
+	line := strings.TrimSpace(logSink.String())
+	if line == "" {
+		t.Fatal("ErrorHandler emitted no slog record")
+	}
+	if !strings.Contains(line, `msg="proxy transport error"`) {
+		t.Fatalf("slog record must keep the message text: %q", line)
+	}
+	if !strings.Contains(line, `error="`+errProxyTestTransport.Error()+`"`) {
+		t.Fatalf("error must be a structured attribute carrying the underlying error text: %q", line)
 	}
 }
 

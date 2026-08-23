@@ -72,6 +72,7 @@ func (u *controllableUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request)
 type harnessConfig struct {
 	rows uint16
 	cols uint16
+	args []string
 }
 
 // HarnessOption configures the test harness.
@@ -82,6 +83,15 @@ func WithTermSize(rows, cols uint16) HarnessOption {
 	return func(c *harnessConfig) {
 		c.rows = rows
 		c.cols = cols
+	}
+}
+
+// WithArgs appends extra command-line arguments to the launched binary, after the
+// harness's own flags. The harness flags are fixed (e.g. -tui), so callers
+// can only supply additional flags this way.
+func WithArgs(args ...string) HarnessOption {
+	return func(c *harnessConfig) {
+		c.args = append(c.args, args...)
 	}
 }
 
@@ -151,16 +161,13 @@ func Launch(t *testing.T, opts ...HarnessOption) *TUIHarness {
 	// its actual address.
 	time.Sleep(50 * time.Millisecond)
 
+	args := []string{binPath, "-tui"}
+	args = append(args, "-upstream", upstream.URL, "-bind", "127.0.0.1:"+port,
+		"-release-cooldown", "0", "-cancel-cooldown", "0", "-failure-hold", "0", "-retry-min-delay", "0")
+	args = append(args, cfg.args...)
+
 	console, err := termtest.NewConsole(ctx,
-		termtest.WithCommand(binPath,
-			"-tui",
-			"-upstream", upstream.URL,
-			"-bind", "127.0.0.1:"+port,
-			"-release-cooldown", "0",
-			"-cancel-cooldown", "0",
-			"-failure-hold", "0",
-			"-retry-min-delay", "0",
-		),
+		termtest.WithCommand(args[0], args[1:]...),
 		termtest.WithSize(cfg.rows, cfg.cols),
 		termtest.WithDefaultTimeout(15*time.Second),
 		termtest.WithEnv([]string{"TERM=xterm-256color"}),

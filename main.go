@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -46,7 +47,11 @@ var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("error: %v", err)
+		// Write fatal errors straight to stderr. In TUI mode run() may have
+		// redirected the global log writer into the on-screen buffer, so the
+		// error must be emitted explicitly to remain visible to the operator.
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
@@ -148,6 +153,32 @@ func run() error {
 	}
 	if upstream.Scheme == "" {
 		return fmt.Errorf("-upstream URL must include scheme (http or https)")
+	}
+
+	// In TUI mode, capture output of the global stdlib logger and slog.Default()
+	// into an on-screen bounded buffer instead of letting it degrade the terminal
+	// dashboard. The buffer is created here — before route parsing and the config
+	// summaries below — so even config warnings (e.g. a conflicting @group limit)
+	// and startup messages appear in the Logs tab. Direct os.Stderr writes,
+	// standalone log.Logger/slog.Logger instances, and anything emitted before
+	// this wiring are NOT captured. Fatal errors are written to stderr explicitly
+	// by main() and are never swallowed by this redirect; once the TUI exits the
+	// buffer is redirected back to stderr so shutdown logging stays visible.
+	// Only TUI mode is affected; non-TUI runs keep normal stderr logging.
+	//
+	// Order is load-bearing: slog.SetDefault rewires the standard logger
+	// through its handler at INFO level, so installing log.SetOutput before it
+	// would silently demote every stdlib line (including the route-group config
+	// WARNING) into structured level=INFO records that the Logs tab correctly
+	// treats as non-actionable — suppressing their toast. Restoring the stdlib
+	// writer afterwards keeps those lines in their timestamped identity, which
+	// the actionable-keyword heuristics classify as intended.
+	var logBuf *tui.LogBuffer
+	if useTUI {
+		logBuf = tui.NewLogBuffer(tui.LogBufferCapacity)
+		slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, nil)))
+		log.SetFlags(log.LstdFlags)
+		log.SetOutput(logBuf)
 	}
 
 	var patterns []route.Pattern
@@ -322,7 +353,11 @@ func run() error {
 		snapCh := make(chan metrics.Snapshot, 16)
 		progCh := make(chan *tea.Program, 1)
 		go func() {
-			tui.Run(snapCh, concurrency, j, progCh)
+			tui.Run(snapCh, concurrency, j, progCh, logBuf)
+			// The dashboard is gone and its poller with it: stream any further
+			// logging (the shutdown sequence below) straight to stderr rather
+			// than parking it in a buffer nobody drains.
+			logBuf.RedirectTo(os.Stderr)
 			close(tuiDone)
 			stop() // trigger graceful shutdown when TUI exits
 		}()

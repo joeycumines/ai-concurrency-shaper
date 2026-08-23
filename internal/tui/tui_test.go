@@ -383,6 +383,107 @@ func TestStripANSI(t *testing.T) {
 	}
 }
 
+// TestStripANSI_SwallowsNonCSISequences pins review-10 #5d: OSC payloads
+// (terminated by BEL or ST) and DCS/SOS/PM/APC bodies (terminated by ST) must
+// not leak their bytes into stripped output — logged text can never inject
+// terminal control sequences into the Logs tab or a toast.
+func TestStripANSI_SwallowsNonCSISequences(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"\x1b]0;evil\x07ok", "ok"},
+		{"\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\after", "linkafter"},
+		{"\x1bP+q544e\x1b\\tail", "tail"},
+		{"\x1bXsos body\x1b\\end", "end"},
+		{"\x1b^pm body\x1b\\end", "end"},
+		{"\x1b_apc body\x1b\\end", "end"},
+		{"head\x1b]0;mid\x07tail", "headtail"},
+		{"\x1b]unterminated-eof", ""},
+		{"\x1bPunterminated-eof", ""},
+	}
+	for _, tt := range tests {
+		got := stripANSI(tt.input)
+		if got != tt.want {
+			t.Errorf("stripANSI(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// TestStripANSI_StripsControlBytes pins review-14 #5: C0 controls other than
+// tab, DEL, and the C1 block are stripped — both their UTF-8 encodings and
+// stray raw bytes in the 0x80–0x9F range, which are the 8-bit control
+// positions legacy terminals act on. Valid multibyte text must survive
+// untouched even when its continuation bytes fall inside that range (the
+// emoji row guards against any naive byte-level implementation). The \n row
+// additionally pins the review-15 #1 rebuttal: no literal newline can survive
+// stripping, so multi-line toast messages with unindented continuations are
+// impossible to produce.
+func TestStripANSI_StripsControlBytes(t *testing.T) {
+	tests := []struct{ input, want string }{
+		{"a\rb", "ab"},
+		{"x\by", "xy"},
+		{"tab\tkept", "tab\tkept"},
+		{"\x00nul\x07bell", "nulbell"},
+		{"del\x7f!", "del!"},
+		{"lone\x9b2J", "lone2J"},
+		{"caf\u00e9 stays", "caf\u00e9 stays"},
+		{"caf\u00e9 \u009bok", "caf\u00e9 ok"},
+		{"emoji \U0001F512 lock", "emoji \U0001F512 lock"},
+		{"line1\nline2", "line1line2"},
+	}
+	for _, tt := range tests {
+		if got := stripANSI(tt.input); got != tt.want {
+			t.Errorf("stripANSI(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// TestStripANSI_PreservesEncodedReplacementChar pins review-16 #1: a
+// legitimately encoded U+FFFD (bytes EF BF BD) must survive stripping byte-for-
+// byte. utf8.DecodeRuneInString reports utf8.RuneError for it (size 3), the
+// same rune it reports for an invalid byte (size 1), so a decoder that keys on
+// the rune alone corrupts the valid encoding down to its lone first byte.
+// Stray-byte passthrough outside C1 and C1 dropping are re-pinned here so the
+// size-based distinction cannot regress either contract.
+func TestStripANSI_PreservesEncodedReplacementChar(t *testing.T) {
+	tests := []struct{ input, want string }{
+		{"\uFFFD", "\uFFFD"},
+		{"bad \uFFFD ok", "bad \uFFFD ok"},
+		{"\uFFFD\uFFFD", "\uFFFD\uFFFD"},
+		{"\xff", "\xff"},
+		{"lone\x9b2J", "lone2J"},
+	}
+	for _, tt := range tests {
+		if got := stripANSI(tt.input); got != tt.want {
+			t.Errorf("stripANSI(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// TestToastToastWidth_Fallback pins review-14 #8: with the terminal size not
+// yet known (or degenerately narrow) the toast width falls back to an 80-column
+// assumption minus the four reserved margin cells, so startup toasts keep a
+// right margin instead of rendering flush against the pane edge once the first
+// WindowSizeMsg paints.
+func TestToastToastWidth_Fallback(t *testing.T) {
+	tests := []struct {
+		width int
+		want  int
+	}{
+		{0, 76},
+		{-3, 76},
+		{4, 76},
+		{5, 1},
+		{100, 96},
+	}
+	for _, tt := range tests {
+		if got := toastToastWidth(tt.width); got != tt.want {
+			t.Errorf("toastToastWidth(%d) = %d, want %d", tt.width, got, tt.want)
+		}
+	}
+}
+
 func TestSnapshotUpdate(t *testing.T) {
 	m := NewModel(4)
 	m.width = 80

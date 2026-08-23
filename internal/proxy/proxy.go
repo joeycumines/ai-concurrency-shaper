@@ -23,7 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -690,7 +690,7 @@ func New(opts ...Option) (*Proxy, error) {
 			if isContextCancellation(r.Context().Err()) && isContextCancellation(err) {
 				return
 			}
-			log.Printf("proxy transport error: %v", err)
+			slog.Error("proxy transport error", "error", err)
 			if rec, ok := w.(*statusRecorder); ok {
 				if !rec.terminalWritten {
 					rec.proxyGeneratedError = true
@@ -925,7 +925,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				finalize(true)
 				panic(rv)
 			}
-			log.Printf("proxy panic: %v", rv)
+			slog.Error("proxy panic", "panic", rv)
 			if recPtr != nil {
 				if !recPtr.terminalWritten {
 					recPtr.proxyGeneratedError = true
@@ -1171,7 +1171,7 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 					}
 					panic(rv)
 				}
-				log.Printf("proxy panic in servePassthrough: %v", rv)
+				slog.Error("proxy panic in servePassthrough", "panic", rv)
 				if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
 					rec.proxyGeneratedError = true
 					http.Error(rec, "internal error", http.StatusBadGateway)
@@ -1488,7 +1488,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 					}
 					panic(rv)
 				}
-				log.Printf("proxy panic in serveLimited: %v", rv)
+				slog.Error("proxy panic in serveLimited", "panic", rv)
 				if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
 					rec.proxyGeneratedError = true
 					http.Error(rec, "internal error", http.StatusBadGateway)
