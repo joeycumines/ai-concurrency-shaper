@@ -285,3 +285,102 @@ func TestTraversalResolution(t *testing.T) {
 		t.Errorf("b upstream should not have been hit, saw %q", got)
 	}
 }
+
+// TestDispatchEncodedSlashAndDotSegments pins the decode-then-match invariant
+// of prefix mounting: url.Parse has already percent-decoded r.URL.Path before
+// the router sees it, and matching runs on those DECODED, traversal-resolved
+// segments. Consequently:
+//
+//   - an encoded separator (%2F) splits segments exactly like a literal "/";
+//   - an encoded dot-dot (%2E%2E) resolves exactly like a literal "..";
+//   - a request whose RESOLVED path escapes its apparent mount never aliases
+//     a sibling provider — it either resolves under the sibling (correct
+//     dispatch by resolved identity) or 404s;
+//   - the forwarded path is rebuilt from the resolved remainder (RawPath is
+//     cleared), so upstreams always observe fully resolved paths.
+//
+// These cases pin CURRENT correct behavior as the contract; if any assertion
+// fails against future changes, the change broke containment or silently
+// altered mount semantics.
+func TestDispatchEncodedSlashAndDotSegments(t *testing.T) {
+	acme, pa := echo(t)
+	beta, pb := echo(t)
+
+	h, err := New([]Provider{
+		{Name: "acme", Prefix: "/acme", Proxy: acme},
+		{Name: "beta", Prefix: "/beta", Proxy: beta},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		target     string
+		wantStatus int
+		wantA      string // path observed by the acme upstream ("" = not hit)
+		wantB      string // path observed by the beta upstream ("" = not hit)
+	}{
+		{
+			// The encoded slash is a real separator post-decode: the request
+			// lands on acme with a resolved remainder.
+			name:       "encoded slash splits under mount",
+			target:     "http://example.com/acme/foo%2Fbar",
+			wantStatus: http.StatusNoContent,
+			wantA:      "/foo/bar",
+		},
+		{
+			// Encoded dots resolve like literal dots: escape above the mount
+			// yields a path outside every mount => 404, never a sibling hit.
+			name:       "encoded dot-dot escaping mount 404s",
+			target:     "http://example.com/acme/%2E%2E/escape",
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			// A hostile client encoding a SIBLING prefix plus traversal
+			// resolves to a genuine /acme path: dispatch correctly follows
+			// the resolved identity (this documents why resolution-before-
+			// match cannot be smuggled into a wrong provider).
+			name:       "resolved identity wins over wire spelling",
+			target:     "http://example.com/beta%2F..%2F..%2Facme%2Fx",
+			wantStatus: http.StatusNoContent,
+			wantA:      "/x",
+		},
+		{
+			name:       "dot-dot inside remainder resolves within mount",
+			target:     "http://example.com/acme/a/%2E%2E/b",
+			wantStatus: http.StatusNoContent,
+			wantA:      "/b",
+		},
+		{
+			// RawPath is cleared, so the proxy re-encodes from the decoded
+			// Path: no double-encoding artifacts reach the upstream.
+			name:       "trailing slash parity with bare mount",
+			target:     "http://example.com/acme/",
+			wantStatus: http.StatusNoContent,
+			wantA:      "/",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pa.mu.Lock()
+			pa.path = ""
+			pa.mu.Unlock()
+			pb.mu.Lock()
+			pb.path = ""
+			pb.mu.Unlock()
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, tt.target, nil))
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status %d, want %d", rec.Code, tt.wantStatus)
+			}
+			if got := pa.get(); got != tt.wantA {
+				t.Errorf("acme upstream saw %q, want %q", got, tt.wantA)
+			}
+			if got := pb.get(); got != tt.wantB {
+				t.Errorf("beta upstream saw %q, want %q", got, tt.wantB)
+			}
+		})
+	}
+}
