@@ -157,6 +157,12 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	// Transport tuning.
 	r.boolVar(&p.DisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream")
 
+	// Upstream authentication.
+	r.stringVar(&p.AuthMode, "auth-mode", "", "upstream auth mode: auto | none | bearer | x-api-key | api-key | header:NAME (default: auto-derived from the upstream host when -auth-source is set)")
+	r.stringVar(&p.AuthSource, "auth-source", "", "upstream credential source: env:VAR | file:PATH | none (empty disables upstream auth entirely; requests are forwarded verbatim)")
+	r.stringVar(&p.AuthHeader, "auth-header", "", "custom upstream auth header name (required by -auth-mode header:<NAME>)")
+	r.stringVar(&p.AnthropicVersion, "anthropic-version", "2023-06-01", "anthropic-version header value applied when the auth mode resolves to x-api-key")
+
 	// Circuit breaker.
 	r.boolVar(&p.CBEnabled, "circuit-breaker", true, "enable the circuit breaker")
 	r.intVar(&p.CBThreshold, "cb-threshold", 5, "failures within window to trip circuit breaker")

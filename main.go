@@ -222,6 +222,31 @@ func logProviderConfig(pr *config.Provider) {
 	if pr.AdaptiveHeadroom {
 		log.Printf("adaptive headroom: enabled (window %s)", pr.AdaptiveHeadroomWindow)
 	}
+	if policy := pr.AuthPolicy(); policy != nil {
+		// Hyphen-bound "auth-source"/"auth-mode" tokens keep the Logs-tab
+		// classifier from reading these as actionable prose (same discipline
+		// as failure-hold above). Only references are logged - never values.
+		source := pr.AuthSource
+		if source == "" {
+			source = "none"
+		}
+		log.Printf("upstream auth: auth-mode=%s auth-source=%s", policy.Mode, source)
+	}
+}
+
+// warnNoUpstreamAuth emits one honest startup line when multiple providers
+// are configured without any upstream authentication: requests are forwarded
+// verbatim, so each client must supply the correct provider credential.
+// The wording deliberately avoids standalone warn/error/fail/timeout words so
+// the Logs tab's actionable-line heuristic never toasts on it.
+func warnNoUpstreamAuth(cfg *config.Config) {
+	total := len(cfg.Providers)
+	if total <= 1 {
+		return
+	}
+	if unprotected := cfg.UnprotectedProviderCount(); unprotected > 0 {
+		log.Printf("note: %d of %d providers configured without upstream auth (requests forwarded verbatim)", unprotected, total)
+	}
 }
 
 // drainResetSignals empties the buffered reset channel so a burst of "Reset
@@ -306,6 +331,7 @@ func run() error {
 		entries = append(entries, router.Provider{Name: pr.Name, Prefix: pr.Prefix, Proxy: p})
 		logProviderConfig(pr)
 	}
+	warnNoUpstreamAuth(cfg)
 
 	h, err := router.New(entries)
 	if err != nil {

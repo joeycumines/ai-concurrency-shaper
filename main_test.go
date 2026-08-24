@@ -1525,3 +1525,145 @@ func TestSemanticErrorStillExitsOne(t *testing.T) {
 		t.Errorf("stderr should name the semantic failure:\n%s", stderr.String())
 	}
 }
+
+// TestCLI_AuthFailClosedStartup proves a missing credential fails before any
+// socket binds, naming the offending reference on stderr with exit code 1.
+func TestCLI_AuthFailClosedStartup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	const missing = "SHAPER_DEFINITELY_UNSET_KEY"
+	os.Unsetenv(missing)
+
+	cmd := exec.Command(bin,
+		"-bind", "127.0.0.1:0",
+		"-upstream", "https://api.openai.com",
+		"-auth-source", "env:"+missing,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("want exit error, got %v\nstderr:\n%s", err, stderr.String())
+	}
+	if code := exitErr.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d, want 1 (semantic failure)", code)
+	}
+	for _, want := range []string{missing, "-auth-source"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+// TestCLI_AuthStartupLines pins the process-level logging contract: an
+// authenticated provider logs its mode and source REFERENCE (never the value),
+// and a mixed fleet emits exactly one forwarded-verbatim notice.
+func TestCLI_AuthStartupLines(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	upA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	t.Cleanup(upA.Close)
+	upB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	t.Cleanup(upB.Close)
+
+	const secretRef = "SHAPER_TEST_AUTH_LINE_KEY"
+	const secretValue = "super-sekrit-value"
+	t.Setenv(secretRef, secretValue)
+
+	newAddr := func() string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		return addr
+	}
+
+	proxyAddr := newAddr()
+	var out bytes.Buffer
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"--provider=authed",
+		"-upstream", upA.URL,
+		"-prefix", "/authed",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"-release-cooldown", "0",
+		"-auth-source", "env:"+secretRef,
+		"--provider=open",
+		"-upstream", upB.URL,
+		"-prefix", "/open",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"-release-cooldown", "0",
+	)
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- cmd.Wait() }()
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-runErr:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-runErr
+		}
+		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+	}
+
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-runErr:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-runErr
+		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
+	}
+
+	logged := out.String()
+	// The summary prints the RESOLVED mode (auto derived bearer from the
+	// openai upstream host), not the raw flag value.
+	if !strings.Contains(logged, "upstream auth: auth-mode=bearer auth-source=env:"+secretRef) {
+		t.Errorf("missing auth summary line:\n%s", logged)
+	}
+	if n := strings.Count(logged, "providers configured without upstream auth"); n != 1 {
+		t.Errorf("forwarded-verbatim notice count = %d, want 1:\n%s", n, logged)
+	}
+	if strings.Contains(logged, secretValue) {
+		t.Errorf("log leaked the secret value:\n%s", logged)
+	}
+}

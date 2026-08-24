@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
@@ -124,6 +125,23 @@ type Provider struct {
 	AdaptiveHeadroomWindow time.Duration
 	DisableKeepAlives      bool
 
+	// ---- Upstream authentication (provider scope) ----
+
+	// AuthSource names where the upstream credential comes from:
+	// "env:VAR", "file:PATH", or the literal "none" (strip-only hygiene).
+	// Empty disables upstream authentication entirely: requests are
+	// forwarded verbatim, exactly as they always have been.
+	AuthSource string
+	// AuthMode selects how the credential is attached upstream:
+	// "auto" (default when a source is set), "none", "bearer", "x-api-key",
+	// "api-key", or "header:<NAME>". Auto derives from the upstream host.
+	AuthMode string
+	// AuthHeader names the injection target when AuthMode is header.
+	AuthHeader string
+	// AnthropicVersion is applied as the Anthropic-Version header when the
+	// resolved mode is x-api-key.
+	AnthropicVersion string
+
 	// ---- Circuit breaker (provider scope) ----
 
 	CBEnabled     bool
@@ -144,6 +162,7 @@ type Provider struct {
 	routeLimiters  map[string]*queue.Limiter
 	breaker        *circuitbreaker.Breaker
 	maxIdlePerHost int
+	authPolicy     *auth.AuthPolicy
 }
 
 // UpstreamURL returns the parsed upstream URL.
@@ -174,6 +193,11 @@ func (p *Provider) Breaker() *circuitbreaker.Breaker { return p.breaker }
 // MaxIdleConnsPerHost returns the transport's per-host idle connection pool
 // size derived from the provider's limiters.
 func (p *Provider) MaxIdleConnsPerHost() int { return p.maxIdlePerHost }
+
+// AuthPolicy returns the provider's resolved upstream authentication policy,
+// or nil when no -auth-source/-auth-mode was configured: nil means requests
+// are forwarded verbatim with no stripping or injection.
+func (p *Provider) AuthPolicy() *auth.AuthPolicy { return p.authPolicy }
 
 // Account is reserved for the future multi-account layer: per-account keys and
 // limits cooperating under a provider-scoped shared ceiling. Declared as a type
@@ -324,6 +348,10 @@ func (p *Provider) validateBasic(index int, multi bool) error {
 		}
 	}
 
+	if err := p.validateAuth(); err != nil {
+		return fmt.Errorf("%s%w", ctx(), err)
+	}
+
 	for _, s := range p.Limits {
 		if _, err := route.Parse(s); err != nil {
 			return fmt.Errorf("%sinvalid -limit %q: %w", ctx(), s, err)
@@ -419,6 +447,10 @@ func (p *Provider) resolve(index int, multi bool) error {
 		if err != nil {
 			return fmt.Errorf("%scircuit breaker config: %w", ctx(), err)
 		}
+	}
+
+	if err := p.buildAuthPolicy(); err != nil {
+		return fmt.Errorf("%s%w", ctx(), err)
 	}
 
 	p.maxIdlePerHost = proxy.MaxIdleConnsPerHost(p.GlobalConcurrency, p.Concurrency, patterns, p.routeLimiters, p.LimitAll)

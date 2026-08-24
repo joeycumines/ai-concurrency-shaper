@@ -381,3 +381,68 @@ func TestPrintUsage_CoversAllFlagsAndSections(t *testing.T) {
 		}
 	}
 }
+
+// TestParse_AuthFlags_LegacyMode checks the upstream-authentication flags bind
+// at top level (single implicit provider), exactly like every other
+// provider-scope flag.
+func TestParse_AuthFlags_LegacyMode(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.anthropic.com",
+		"-auth-source", "env:MY_KEY",
+		"-auth-mode", "x-api-key",
+		"-anthropic-version", "2099-01-01",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	p := cfg.Providers[0]
+	if p.AuthSource != "env:MY_KEY" {
+		t.Errorf("AuthSource = %q, want env:MY_KEY", p.AuthSource)
+	}
+	if p.AuthMode != "x-api-key" {
+		t.Errorf("AuthMode = %q, want x-api-key", p.AuthMode)
+	}
+	if p.AnthropicVersion != "2099-01-01" {
+		t.Errorf("AnthropicVersion = %q, want 2099-01-01", p.AnthropicVersion)
+	}
+}
+
+// TestParse_AuthFlags_SectionedMode checks the auth flags are provider-scoped:
+// legal inside a --provider section, rejected at server scope in sectioned
+// mode (mixed mode stays forbidden).
+func TestParse_AuthFlags_SectionedMode(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-bind", ":9999",
+		"--provider=acme",
+		"-upstream", "https://a",
+		"-prefix", "/acme",
+		"-auth-source", "file:/tmp/k",
+		"-auth-header", "X-Custom-Key",
+	})
+	if err != nil {
+		t.Fatalf("Parse sectioned: %v", err)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("len(Providers) = %d, want 1", len(cfg.Providers))
+	}
+	p := cfg.Providers[0]
+	if p.AuthSource != "file:/tmp/k" || p.AuthHeader != "X-Custom-Key" {
+		t.Errorf("auth fields = %q/%q, want file:/tmp/k / X-Custom-Key", p.AuthSource, p.AuthHeader)
+	}
+
+	if _, err := Parse([]string{"-auth-source", "env:X", "--provider=a", "-upstream", "https://x"}); err == nil {
+		t.Error("provider-scope -auth-source at server scope in sectioned mode must be rejected")
+	}
+}
+
+// TestParse_AuthModeDefault pins the registered default of -anthropic-version
+// so the x-api-key path never starts with an empty version header.
+func TestParse_AuthModeDefault(t *testing.T) {
+	cfg, err := Parse([]string{"-upstream", "https://x"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Providers[0].AnthropicVersion; got != "2023-06-01" {
+		t.Errorf("default AnthropicVersion = %q, want 2023-06-01", got)
+	}
+}
