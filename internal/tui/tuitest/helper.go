@@ -86,9 +86,9 @@ func WithTermSize(rows, cols uint16) HarnessOption {
 	}
 }
 
-// WithArgs appends extra command-line arguments to the launched binary, after the
-// harness's own flags. The harness flags are fixed (e.g. -tui), so callers
-// can only supply additional flags this way.
+// WithArgs appends extra command-line arguments to the launched binary, after
+// the harness's own flags. It lets a test exercise configurations the default
+// Launch cannot express (e.g. additional server-scope flags).
 func WithArgs(args ...string) HarnessOption {
 	return func(c *harnessConfig) {
 		c.args = append(c.args, args...)
@@ -100,6 +100,7 @@ type TUIHarness struct {
 	t         *testing.T
 	console   *termtest.Console
 	upstream  *httptest.Server
+	upstreams []*httptest.Server
 	ctrl      *controllableUpstream
 	ctx       context.CancelFunc
 	proxyPort string
@@ -131,19 +132,14 @@ func buildBinary(t *testing.T) string {
 	return binPath
 }
 
-// Launch builds the ai-concurrency-shaper binary, starts it with -tui in a PTY,
-// and waits for the initial render.
+// Launch builds the ai-concurrency-shaper binary, starts it with -tui in a PTY
+// against a single controllable upstream, and waits for the initial render.
 func Launch(t *testing.T, opts ...HarnessOption) *TUIHarness {
 	t.Helper()
 
 	cfg := &harnessConfig{rows: 40, cols: 120}
 	for _, o := range opts {
 		o(cfg)
-	}
-
-	port, err := freePort()
-	if err != nil {
-		t.Fatalf("freePort: %v", err)
 	}
 
 	// Build before allocating any test resources so a compile failure leaves
@@ -153,7 +149,82 @@ func Launch(t *testing.T, opts ...HarnessOption) *TUIHarness {
 	ctrl := newControllableUpstream()
 	upstream := httptest.NewServer(ctrl)
 
+	args := []string{
+		"-tui",
+		"-upstream", upstream.URL,
+		"-release-cooldown", "0",
+		"-cancel-cooldown", "0",
+		"-failure-hold", "0",
+		"-retry-min-delay", "0",
+	}
+
+	return startConsole(t, binPath, upstream, nil, ctrl, "shaper", args, cfg)
+}
+
+// LaunchMulti builds the binary and starts it with -tui in a PTY serving one
+// --provider section per upstream. Each provider mounts at /prov<i> and is
+// named prov<i>, so tests can address them deterministically in both the
+// header chips and the proxy URLs. The fast-cooldown flags are repeated inside
+// every provider section (they are provider-scoped). Extra args from WithArgs
+// are appended after the provider sections. The launch awaits the first
+// provider's name, since the multi-provider header shows it in place of
+// "shaper".
+func LaunchMulti(t *testing.T, upstreams []*httptest.Server, opts ...HarnessOption) *TUIHarness {
+	t.Helper()
+
+	cfg := &harnessConfig{rows: 40, cols: 120}
+	for _, o := range opts {
+		o(cfg)
+	}
+
+	if len(upstreams) == 0 {
+		t.Fatal("LaunchMulti requires at least one upstream")
+	}
+
+	binPath := buildBinary(t)
+
+	args := []string{"-tui"}
+	for i, up := range upstreams {
+		args = append(args,
+			fmt.Sprintf("--provider=prov%d", i+1),
+			"-upstream", up.URL,
+			"-prefix", fmt.Sprintf("/prov%d", i+1),
+			"-release-cooldown", "0",
+			"-cancel-cooldown", "0",
+			"-failure-hold", "0",
+			"-retry-min-delay", "0",
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+	}
+
+	// Multi-provider mode has no single controllable upstream: the caller
+	// owns every upstream server. The harness's ctrl field is left nil;
+	// multi-provider tests that need to hold requests in flight pass their
+	// own delayed/gated httptest servers.
+	return startConsole(t, binPath, upstreams[0], upstreams, nil, "prov1", args, cfg)
+}
+
+// startConsole binds a free proxy port, starts the binary in a PTY with the
+// given args, and waits until the header renders the awaited name. It owns
+// every resource it allocates: on any failure it cleans them up before
+// failing the test.
+func startConsole(t *testing.T, binPath string, upstream *httptest.Server, upstreams []*httptest.Server, ctrl *controllableUpstream, awaitName string, args []string, cfg *harnessConfig) *TUIHarness {
+	t.Helper()
+
+	port, err := freePort()
+	if err != nil {
+		t.Fatalf("freePort: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// -bind is a server-scope flag: in sectioned (multi-provider) mode it
+	// must come BEFORE the first --provider section, or the parser rejects
+	// it as a stray flag inside the last provider section. Prefixing keeps
+	// the flat single-provider invocation equivalent.
+	fullArgs := append([]string{"-bind", "127.0.0.1:" + port}, args...)
+	fullArgs = append(fullArgs, cfg.args...)
 
 	// Brief pause to reduce the chance of port collision between freePort's
 	// Listen/Close and the binary binding the same port. This is inherently
@@ -161,13 +232,8 @@ func Launch(t *testing.T, opts ...HarnessOption) *TUIHarness {
 	// its actual address.
 	time.Sleep(50 * time.Millisecond)
 
-	args := []string{binPath, "-tui"}
-	args = append(args, "-upstream", upstream.URL, "-bind", "127.0.0.1:"+port,
-		"-release-cooldown", "0", "-cancel-cooldown", "0", "-failure-hold", "0", "-retry-min-delay", "0")
-	args = append(args, cfg.args...)
-
 	console, err := termtest.NewConsole(ctx,
-		termtest.WithCommand(args[0], args[1:]...),
+		termtest.WithCommand(binPath, fullArgs...),
 		termtest.WithSize(cfg.rows, cfg.cols),
 		termtest.WithDefaultTimeout(15*time.Second),
 		termtest.WithEnv([]string{"TERM=xterm-256color"}),
@@ -175,6 +241,9 @@ func Launch(t *testing.T, opts ...HarnessOption) *TUIHarness {
 	if err != nil {
 		cancel()
 		upstream.Close()
+		for _, up := range upstreams {
+			up.Close()
+		}
 		t.Fatalf("termtest.NewConsole: %v", err)
 	}
 
@@ -182,15 +251,16 @@ func Launch(t *testing.T, opts ...HarnessOption) *TUIHarness {
 		t:         t,
 		console:   console,
 		upstream:  upstream,
+		upstreams: upstreams,
 		ctrl:      ctrl,
 		ctx:       cancel,
 		proxyPort: port,
 	}
 
 	snap := console.Snapshot()
-	if err := console.Await(ctx, snap, termtest.Contains("shaper")); err != nil {
+	if err := console.Await(ctx, snap, termtest.Contains(awaitName)); err != nil {
 		h.Close()
-		t.Fatalf("TUI did not render: %v\nOutput: %s", err, console.String())
+		t.Fatalf("TUI did not render %q: %v\nOutput: %s", awaitName, err, console.String())
 	}
 
 	return h
@@ -216,6 +286,12 @@ func (h *TUIHarness) ProxyURL() string {
 	return "http://127.0.0.1:" + h.proxyPort
 }
 
+// ProviderURL returns the proxy URL with provider i's mount prefix applied,
+// for sending requests to a specific provider in multi-provider mode.
+func (h *TUIHarness) ProviderURL(i int) string {
+	return fmt.Sprintf("http://127.0.0.1:%s/prov%d", h.proxyPort, i+1)
+}
+
 // Close terminates the TUI and cleans up.
 //
 // It sends Ctrl+C to trigger a graceful TUI exit, then waits for the process
@@ -237,6 +313,9 @@ func (h *TUIHarness) Close() {
 	// Now cancel the context and close everything.
 	h.ctx()
 	h.console.Close()
+	for _, up := range h.upstreams {
+		up.Close()
+	}
 	h.upstream.Close()
 }
 

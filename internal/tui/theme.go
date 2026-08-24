@@ -31,7 +31,13 @@ import (
 // readable on a white or light terminal. Hue never changes meaning across
 // palettes: green=ok, blue=info/limit, orange=warn, red=error.
 type tuiTheme struct {
-	headerStyle            lipgloss.Style
+	headerStyle lipgloss.Style
+	// chipActiveStyle / chipInactiveStyle render the provider switcher chips
+	// in the header (multi-provider mode). They follow the same hue-to-state
+	// contract as the tab bar: blue background = selected/active, muted =
+	// inactive.
+	chipActiveStyle        lipgloss.Style
+	chipInactiveStyle      lipgloss.Style
 	sectionStyle           lipgloss.Style
 	dimStyle2              lipgloss.Style
 	sepStyle               lipgloss.Style
@@ -115,6 +121,19 @@ func darkTheme() tuiTheme {
 			PaddingRight(1),
 
 		tabInactiveStyle: s().
+			Foreground(lipgloss.Color("#8B949E")).
+			Background(lipgloss.Color("#161B22")).
+			PaddingLeft(1).
+			PaddingRight(1),
+
+		chipActiveStyle: s().
+			Bold(true).
+			Foreground(lipgloss.Color("#0D1117")).
+			Background(lipgloss.Color("#58A6FF")).
+			PaddingLeft(1).
+			PaddingRight(1),
+
+		chipInactiveStyle: s().
 			Foreground(lipgloss.Color("#8B949E")).
 			Background(lipgloss.Color("#161B22")).
 			PaddingLeft(1).
@@ -251,6 +270,19 @@ func lightTheme() tuiTheme {
 			PaddingRight(1),
 
 		tabInactiveStyle: s().
+			Foreground(lipgloss.Color("#57606A")).
+			Background(lipgloss.Color("#EAF1F6")).
+			PaddingLeft(1).
+			PaddingRight(1),
+
+		chipActiveStyle: s().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#0969DA")).
+			PaddingLeft(1).
+			PaddingRight(1),
+
+		chipInactiveStyle: s().
 			Foreground(lipgloss.Color("#57606A")).
 			Background(lipgloss.Color("#EAF1F6")).
 			PaddingLeft(1).

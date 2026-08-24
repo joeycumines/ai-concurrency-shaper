@@ -1202,6 +1202,56 @@ func TestHelpOverlayDismissWithAnyKey(t *testing.T) {
 	}
 }
 
+// The provider-switch binding documents the switcher, which only exists in
+// multi-provider mode (or with a single named provider). A single unnamed
+// provider must keep the legacy overlay byte-identical.
+func TestHelpOverlaySingleProviderOmitsSwitchProvider(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+
+	if m.hasSwitcher() {
+		t.Fatal("a single unnamed provider must not render a provider switcher")
+	}
+	if s := m.renderHelpOverlay(); strings.Contains(s, "Switch provider") {
+		t.Errorf("single-provider help overlay must not document the provider switcher, got:\n%s", s)
+	}
+}
+
+func TestHelpOverlayMultiProviderShowsSwitchProvider(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{
+		{Name: "acme", Concurrency: 4},
+		{Name: "anthropic", Concurrency: 8},
+	})
+	m.width = 80
+	m.height = 24
+
+	if !m.hasSwitcher() {
+		t.Fatal("multiple providers must render a provider switcher")
+	}
+	s := m.renderHelpOverlay()
+	for _, want := range []string{"Tab/Shift+Tab", "Switch provider"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("multi-provider help overlay should document %q, got:\n%s", want, s)
+		}
+	}
+}
+
+// A single provider with an explicit name also renders the switcher, so its
+// overlay documents the binding too.
+func TestHelpOverlaySingleNamedProviderShowsSwitchProvider(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Name: "acme", Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+
+	if !m.hasSwitcher() {
+		t.Fatal("a single named provider renders a provider switcher")
+	}
+	if s := m.renderHelpOverlay(); !strings.Contains(s, "Switch provider") {
+		t.Errorf("single-named-provider help overlay should document the provider switcher, got:\n%s", s)
+	}
+}
+
 func TestFilterModeToggle(t *testing.T) {
 	m := NewModel(4)
 	m.width = 80
@@ -3428,10 +3478,22 @@ func TestRenderHelpOverlay_ContainsKeybindings(t *testing.T) {
 	m.height = 24
 	s := m.renderHelpOverlay()
 	text := stripANSI(s)
-	for _, kw := range []string{"Switch tab", "scroll", "filter", "Quit"} {
+	for _, kw := range []string{"Switch tab", "scroll", "filter", "Quit", "Reset Stats"} {
 		if !strings.Contains(text, kw) {
 			t.Errorf("help overlay should contain %q", kw)
 		}
+	}
+}
+
+// TestFooterMentionsReset pins the footer's c:reset hint so the binding stays
+// discoverable from every tab.
+func TestFooterMentionsReset(t *testing.T) {
+	m := NewModel(4)
+	m.width = 100
+	m.height = 24
+	s := stripANSI(m.renderFooter())
+	if !strings.Contains(s, "c:reset") {
+		t.Errorf("footer should contain %q, got:\n%s", "c:reset", s)
 	}
 }
 
@@ -4779,4 +4841,346 @@ func splitAtCells(s string, width int) (int, int) {
 		state = newState
 	}
 	return split, seen
+}
+
+// ─── Provider switcher (multi-provider) ───
+
+func TestProviderSwitcherKeys(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{
+		{Name: "acme", Concurrency: 4},
+		{Name: "anthropic", Concurrency: 8},
+		{Name: "openai", Concurrency: 12},
+	})
+	m.width = 80
+	m.height = 24
+
+	// Tab cycles to the next provider and wraps from the last back to the first.
+	for _, want := range []string{"anthropic", "openai", "acme"} {
+		m = update(m, tea.KeyPressMsg{Code: tea.KeyTab})
+		if got := m.providers[m.active].name; got != want {
+			t.Fatalf("after Tab: active provider = %q, want %q", got, want)
+		}
+		if got := m.providerName(); got != " "+want {
+			t.Errorf("after Tab: header name = %q, want %q", got, " "+want)
+		}
+	}
+
+	// Shift+Tab cycles to the previous provider and wraps from the first back
+	// to the last.
+	for _, want := range []string{"openai", "anthropic", "acme"} {
+		m = update(m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+		if got := m.providers[m.active].name; got != want {
+			t.Fatalf("after Shift+Tab: active provider = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestProviderSwitcherChipClick(t *testing.T) {
+	p := NewModelForProviders([]ProviderMeta{
+		{Name: "acme", Concurrency: 4},
+		{Name: "anthropic", Concurrency: 8},
+		{Name: "openai", Concurrency: 12},
+	})
+	p.width = 100
+	p.height = 24
+
+	// A click on header row 0 inside a chip's right-aligned range switches
+	// to that provider. The chips end at column width-2 and are joined
+	// right-to-left: each chip occupies [x-w+1, x] where x is its
+	// right edge and w is its rendered width.
+	// The spans come from the production budgetedChips layout — the same
+	// parts chipAt hit-tests — so the test cannot drift from what is
+	// actually rendered. At width 100 all three chips are at full width.
+	right := p.width - 2
+	layout := p.budgetedChips()
+	parts := layout.parts
+	if len(parts) != 3 {
+		t.Fatalf("budgetedChips rendered %d chips at width 100, want all 3", len(parts))
+	}
+	for i := len(parts) - 1; i >= 0; i-- {
+		w := lipgloss.Width(parts[i])
+		p = update(p, tea.MouseClickMsg{X: right, Y: 0})
+		if p.active != i {
+			t.Fatalf("click at column %d: active = %d, want %d", right, p.active, i)
+		}
+		right -= w + 1
+	}
+
+	// A click on row 0 far outside the chips (the brand-filled left side)
+	// must leave the active provider unchanged.
+	p = update(p, tea.MouseClickMsg{X: 0, Y: 0})
+	if p.active != 0 {
+		t.Errorf("click outside chips changed active to %d, want 0", p.active)
+	}
+}
+
+func TestSingleProviderHeaderKeepsShaper(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+
+	if m.hasSwitcher() {
+		t.Fatal("a single unnamed provider must not render a provider switcher")
+	}
+	if s := m.renderProviderSwitcher(); s != "" {
+		t.Fatalf("renderProviderSwitcher = %q, want \"\" for a single unnamed provider", s)
+	}
+	if got := m.providerName(); got != " ⚡ shaper" {
+		t.Errorf("providerName = %q, want %q", got, " ⚡ shaper")
+	}
+	if _, ok := m.chipAt(0); ok {
+		t.Error("chipAt must not hit a chip for a single unnamed provider")
+	}
+	h := stripANSI(m.renderHeader())
+	if !strings.Contains(h, "⚡ shaper") {
+		t.Errorf("header must keep the \"⚡ shaper\" brand, got: %s", h)
+	}
+}
+
+// TestHeaderWidthBudget pins the narrow-pane contract of Task 9: for every
+// width >= 40 and any provider names, the header row must never exceed the
+// terminal width (no wrap onto the tab bar), the active provider's chip must
+// stay visible and clickable, chipAt must map clicks to exactly the chips
+// actually rendered (walking every rendered x-position), and the
+// single-provider "⚡ shaper" header must be byte-identical at every width.
+func TestHeaderWidthBudget(t *testing.T) {
+	widths := []int{40, 60, 80, 120}
+	multi := []ProviderMeta{
+		{Name: "anthropic-eu-central", Concurrency: 4},
+		{Name: "openai-prod-longname", Concurrency: 8},
+		{Name: "acme-edge-provider", Concurrency: 12},
+	}
+
+	// (a) Row 0 never exceeds m.width, for every width and every active
+	// provider.
+	for _, w := range widths {
+		for active := range multi {
+			m := NewModelForProviders(multi)
+			m.width = w
+			m.height = 24
+			m.active = active
+			m.syncActive() // mirror the new active provider's state, as switchProvider does
+			if got := lipgloss.Width(m.renderHeader()); got > w {
+				t.Errorf("width=%d active=%d: header row is %d cells, exceeds %d (wrap onto tab bar):\n%s",
+					w, active, got, w, m.renderHeader())
+			}
+			// (b) The active provider's chip is always present — visible in
+			// the rendered row and returned by chipAt at its position.
+			layout := m.budgetedChips()
+			found := false
+			for k, prov := range layout.providers {
+				if prov == active {
+					found = true
+					// chipAt must hit-test this chip somewhere inside its
+					// rendered span. Walk the right-aligned layout the same
+					// way chipAt does.
+					right := m.width - 2
+					for i := len(layout.parts) - 1; i >= 0; i-- {
+						cw := lipgloss.Width(layout.parts[i])
+						if i == k {
+							if idx, ok := m.chipAt(right); !ok || idx != prov {
+								t.Errorf("width=%d active=%d: chipAt(%d) = (%d,%v), want (%d,true)",
+									w, active, right, idx, ok, prov)
+							}
+							break
+						}
+						right -= cw + 1
+					}
+				}
+			}
+			if !found {
+				t.Errorf("width=%d active=%d: active provider's chip missing from the rendered switcher", w, active)
+			}
+		}
+	}
+
+	// (c) chipAt maps every rendered chip x-position to exactly that chip,
+	// and never reports a provider whose chip is not rendered.
+	for _, w := range widths {
+		for active := range multi {
+			m := NewModelForProviders(multi)
+			m.width = w
+			m.height = 24
+			m.active = active
+			m.syncActive()
+			layout := m.budgetedChips()
+			rendered := make(map[int]bool)
+			for _, prov := range layout.providers {
+				rendered[prov] = true
+			}
+			// Every column of the row: a hit must be a rendered chip.
+			for x := 0; x < m.width; x++ {
+				idx, ok := m.chipAt(x)
+				if ok && !rendered[idx] {
+					t.Errorf("width=%d active=%d: chipAt(%d) hit provider %d whose chip is not rendered", w, active, x, idx)
+				}
+			}
+			// Every rendered chip: each of its columns maps back to itself.
+			right := m.width - 2
+			for i := len(layout.parts) - 1; i >= 0; i-- {
+				cw := lipgloss.Width(layout.parts[i])
+				prov := layout.providers[i]
+				for x := right - cw + 1; x <= right; x++ {
+					if idx, ok := m.chipAt(x); !ok || idx != prov {
+						t.Errorf("width=%d active=%d: chipAt(%d) = (%d,%v), want (%d,true) across the rendered chip span",
+							w, active, x, idx, ok, prov)
+					}
+				}
+				right -= cw + 1
+			}
+		}
+	}
+
+	// (d) The single-provider header keeps the legacy layout: byte-identical
+	// at every width the legacy row fits (no switcher, no budgeting), and
+	// truncated — never wrapping — below that. The legacy natural row is 67
+	// content cells + 2 padding = 69 total.
+	single := NewModel(4)
+	single.width = 80
+	single.height = 24
+	want := single.renderHeader()
+	if w := lipgloss.Width(want); w != 69 {
+		t.Fatalf("legacy single-provider header width = %d, want the 69-cell baseline this test pins", w)
+	}
+	for _, w := range widths {
+		m := NewModel(4)
+		m.width = w
+		m.height = 24
+		got := m.renderHeader()
+		if w >= 69 && got != want {
+			t.Errorf("width=%d: single-provider header changed:\n got: %q\nwant: %q", w, got, want)
+		}
+		if lipgloss.Width(got) > w {
+			t.Errorf("width=%d: single-provider header is %d cells, exceeds %d", w, lipgloss.Width(got), w)
+		}
+	}
+}
+
+func TestSnapshotSugarGuardsNoProviders(t *testing.T) {
+	// A model created with no providers must accept a legacy metrics.Snapshot
+	// update without panicking (the ProviderUpdate guard mirrors this).
+	m := NewModelForProviders(nil)
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("metrics.Snapshot on a zero-provider model panicked: %v", r)
+		}
+	}()
+	update(m, metrics.Snapshot{})
+}
+
+func TestMultiProviderHeaderShowsNames(t *testing.T) {
+	// Width 120 gives the budget for both full names (at 80 the "anthropic"
+	// chip legitimately truncates to "anthro" — see
+	// TestHeaderWidthBudget), so this test pins natural rendering and
+	// styling; the width test pins degradation.
+	m := NewModelForProviders([]ProviderMeta{
+		{Name: "acme", Concurrency: 4},
+		{Name: "anthropic", Concurrency: 8},
+	})
+	m.width = 120
+	m.height = 24
+
+	if !m.hasSwitcher() {
+		t.Fatal("multiple providers must render a provider switcher")
+	}
+	// At width 120 both chips fit at their full styled widths, so the
+	// budgeted layout must equal the unbudgeted rendering exactly.
+	layout := m.budgetedChips()
+	if len(layout.parts) != 2 || layout.providers[0] != 0 || layout.providers[1] != 1 {
+		t.Fatalf("budgetedChips layout = %v, want both providers [0 1] at width 120", layout.providers)
+	}
+	if layout.parts[0] != m.styles.chipActiveStyle.Render(" acme ") {
+		t.Errorf("active chip = %q, want the untruncated active style %q", layout.parts[0], m.styles.chipActiveStyle.Render(" acme "))
+	}
+	if layout.parts[1] != m.styles.chipInactiveStyle.Render(" anthropic ") {
+		t.Errorf("inactive chip = %q, want the untruncated inactive style %q", layout.parts[1], m.styles.chipInactiveStyle.Render(" anthropic "))
+	}
+	for _, want := range []string{"acme", "anthropic"} {
+		if !strings.Contains(m.renderHeader(), want) {
+			t.Errorf("header should show both provider names in its chips, missing %q", want)
+		}
+	}
+
+	// Switching providers updates the highlighted chip.
+	m = update(m, tea.MouseClickMsg{X: m.width - 2, Y: 0})
+	layout = m.budgetedChips()
+	if layout.parts[0] != m.styles.chipInactiveStyle.Render(" acme ") {
+		t.Errorf("after switching, acme chip = %q, want the inactive style", layout.parts[0])
+	}
+	if layout.parts[1] != m.styles.chipActiveStyle.Render(" anthropic ") {
+		t.Errorf("after switching, anthropic chip = %q, want the active style", layout.parts[1])
+	}
+}
+
+// TestResetStatsSendsOnChannel proves the c -> y confirm path delivers a
+// signal on the model's reset channel (Task 6: the channel is drained by
+// main, which calls Collector.Reset for every provider).
+func TestResetStatsSendsOnChannel(t *testing.T) {
+	m := NewModel(4)
+	m.width = 80
+	m.height = 24
+
+	// "c" opens the confirm overlay; anything other than "y" must dismiss
+	// without signalling.
+	m = update(m, key('n'))
+	if m.mode != modeBrowse {
+		t.Fatalf("after n: mode = %v, want modeBrowse", m.mode)
+	}
+	select {
+	case <-m.resetCh:
+		t.Fatal("n must not signal reset")
+	default:
+	}
+
+	// c then y signals reset exactly once and returns to browse mode.
+	m = update(m, key('c'))
+	if m.mode != modeConfirm {
+		t.Fatalf("after c: mode = %v, want modeConfirm", m.mode)
+	}
+	next, cmd := m.Update(key('y'))
+	m2, ok := next.(Model)
+	if !ok {
+		t.Fatalf("Update returned %T, want Model", next)
+	}
+	m = m2
+	if m.mode != modeBrowse {
+		t.Fatalf("after y: mode = %v, want modeBrowse", m.mode)
+	}
+	if cmd == nil {
+		t.Fatal("y must return the reset command")
+	}
+	// The command yields resetMsg; feeding it back through Update performs
+	// the non-blocking send onto the reset channel.
+	m = update(m, cmd())
+	select {
+	case <-m.resetCh:
+	default:
+		t.Fatal("c then y must signal reset")
+	}
+	select {
+	case <-m.resetCh:
+		t.Fatal("reset signal must not duplicate")
+	default:
+	}
+}
+
+// TestResetStatsSendNeverBlocks proves a second confirm while the buffer is
+// still occupied is dropped, not deadlocked: the model's send is
+// non-blocking and the channel is capped at one pending request.
+func TestResetStatsSendNeverBlocks(t *testing.T) {
+	m := NewModel(4)
+	m.resetCh = make(chan struct{}, 1)
+	m.resetCh <- struct{}{} // occupy the buffer as main might lag
+
+	done := make(chan Model, 1)
+	go func() {
+		m = update(m, key('c'))
+		m = update(m, key('y'))
+		done <- m
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("update with a full reset channel must not block")
+	}
 }

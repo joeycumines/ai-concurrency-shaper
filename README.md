@@ -22,51 +22,58 @@ go install github.com/joeycumines/ai-concurrency-shaper@latest
 ai-concurrency-shaper -upstream https://api.anthropic.com
 ```
 
+That's the whole surface for a single upstream: every tuning flag below applies to it, top-level. To front several upstreams through one port instead, see [Multiple Providers](#multiple-providers) — the same flags apply per `--provider` section.
+
 ### Flags
 
-#### Core
+Every flag lives in one of two scopes. **Server-scope** flags configure the listener itself; **provider-scope** flags configure one upstream's behavior (limiting, retry, breaker, cooldowns). In the single-upstream invocation above the two scopes are flattened onto one command line — that form keeps working exactly as before. With `--provider` sections, each flag must appear in the section it configures.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-upstream` | _(required)_ | Upstream base URL |
-| `-bind` | `:8080` | Listen address |
-| `-limit` | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
-| `-concurrency` | `4` | Max concurrent limited requests |
-| `-global-concurrency` | `0` | Global concurrency limit (0 = disabled) |
-| `-queue-timeout` | `30s` | Max wait for a concurrency slot |
-| `-upstream-disable-keep-alives` | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
-| `-retry` | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
-| `-retry-max-body-mb` | `5` | Max request body size (MB) eligible for retry |
-| `-tui` | `false` | Enable terminal dashboard |
-| `-version` | | Print version and exit |
+Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider=acme -h`) for the complete flag reference. Usage errors — unknown flags, malformed sections — exit 2 with a hint pointing at `-h`; semantic failures (bad values, missing upstream) exit 1.
+
+| Flag | Scope | Default | Description |
+|------|-------|---------|-------------|
+| `-upstream` | provider | _(required)_ | Upstream base URL |
+| `-bind` | server | `:8080` | Listen address |
+| `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
+| `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
+| `-concurrency` | provider | `4` | Max concurrent limited requests |
+| `-global-concurrency` | provider | `0` | Global concurrency limit (0 = disabled) |
+| `-queue-timeout` | provider | `30s` | Max wait for a concurrency slot |
+| `-upstream-disable-keep-alives` | provider | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
+| `-retry` | provider | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
+| `-retry-max-body-mb` | provider | `5` | Max request body size (MB) eligible for retry |
+| `-tui` | server | `false` | Enable terminal dashboard |
+| `-version` | server | | Print version and exit |
+
+The tables in [Concurrency Protection](#concurrency-protection), [Circuit Breaker](#circuit-breaker), and [Retry Tuning](#retry-tuning) are all provider-scope.
 
 #### Concurrency Protection
 
 The proxy's internal semaphore limits how many tokens are held concurrently. What the downstream actually observes depends on its own accounting: providers differ in how they measure concurrency (active connections, in-flight requests, token usage windows, etc.), and most have some lag between completing a response and decrementing their counter. These flags insert delays after slot release to reduce the risk that the downstream observes N+1 or higher concurrency, at the cost of throughput. They are configurable because the right tradeoff depends on the upstream's accounting behavior. Defaults are conservative.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-release-cooldown` | `200ms` | Delay after releasing a slot before re-admission. Reduces the chance the next request arrives while the downstream is still cleaning up. |
-| `-cancel-cooldown` | `200ms` | Hold the slot after a client disconnects once an upstream attempt has started. Mitigates N+1 from rapid connect/disconnect cycles. |
-| `-failure-hold` | `2s` | Hold the slot after an upstream failure (5xx, 429, or rate-limit-signaled 403) when the circuit breaker is disabled or its penalty is zero. When the breaker is enabled with a non-zero penalty, the phantom penalty takes precedence instead. |
-| `-retry-min-delay` | `1s` | Minimum delay before retrying. Reduces the chance the retry arrives before the downstream has finished accounting. |
-| `-retry-skip-429` | `true` | Do not retry 429 responses. Avoids the feedback loop where retries amplify concurrency at the downstream. |
-| `-adaptive-headroom` | `false` | Reduce effective concurrency by one slot after a 429, restoring after a quiet window. Use when the provider can see N+1 concurrent requests due to connection teardown or CDN accounting lag. |
-| `-adaptive-headroom-window` | `30s` | How long the one-slot 429 headroom is held. Each new 429 resets this window. |
+| Flag | Scope | Default | Description |
+|------|-------|---------|-------------|
+| `-release-cooldown` | provider | `200ms` | Delay after releasing a slot before re-admission. Reduces the chance the next request arrives while the downstream is still cleaning up. |
+| `-cancel-cooldown` | provider | `200ms` | Hold the slot after a client disconnects once an upstream attempt has started. Mitigates N+1 from rapid connect/disconnect cycles. |
+| `-failure-hold` | provider | `2s` | Hold the slot after an upstream failure (5xx, 429, or rate-limit-signaled 403) when the circuit breaker is disabled or its penalty is zero. When the breaker is enabled with a non-zero penalty, the phantom penalty takes precedence instead. |
+| `-retry-min-delay` | provider | `1s` | Minimum delay before retrying. Reduces the chance the retry arrives before the downstream has finished accounting. |
+| `-retry-skip-429` | provider | `true` | Do not retry 429 responses. Avoids the feedback loop where retries amplify concurrency at the downstream. |
+| `-adaptive-headroom` | provider | `false` | Reduce effective concurrency by one slot after a 429, restoring after a quiet window. Use when the provider can see N+1 concurrent requests due to connection teardown or CDN accounting lag. |
+| `-adaptive-headroom-window` | provider | `30s` | How long the one-slot 429 headroom is held. Each new 429 resets this window. |
 
 The upstream HTTP transport sizes `MaxIdleConnsPerHost` to the sum of configured route/global concurrency caps, with a per-host minimum floor of 20 applied after the global cap. This avoids closing a large burst of healthy keep-alive connections when multiple route limiters or groups share the same upstream host. Use `-upstream-disable-keep-alives` only when the upstream counts idle/open connections as concurrent.
 
 #### Circuit Breaker
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-circuit-breaker` | `true` | Enable circuit breaker |
-| `-cb-threshold` | `5` | Failures within window to trip the breaker |
-| `-cb-window` | `30s` | Failure counting window |
-| `-cb-open-timeout` | `10s` | Time before the breaker probes (half-open) |
-| `-cb-max-open-timeout` | `120s` | Max open timeout after backoff |
-| `-cb-penalty` | `2s` | Base phantom concurrency hold time |
-| `-cb-max-penalty` | `60s` | Max phantom concurrency hold time |
+| Flag | Scope | Default | Description |
+|------|-------|---------|-------------|
+| `-circuit-breaker` | provider | `true` | Enable circuit breaker |
+| `-cb-threshold` | provider | `5` | Failures within window to trip the breaker |
+| `-cb-window` | provider | `30s` | Failure counting window |
+| `-cb-open-timeout` | provider | `10s` | Time before the breaker probes (half-open) |
+| `-cb-max-open-timeout` | provider | `120s` | Max open timeout after backoff |
+| `-cb-penalty` | provider | `2s` | Base phantom concurrency hold time |
+| `-cb-max-penalty` | provider | `60s` | Max phantom concurrency hold time |
 
 The circuit breaker treats 5xx, 429, transport errors, and rate-limit-signaled 403s as upstream failures. A bare 403 without `Retry-After` or `x-ratelimit-*` headers is treated as an authentication/authorization client error and is passed through, avoiding the trap where a bad API key is masked by a proxy-generated 503 after the breaker opens.
 
@@ -78,10 +85,47 @@ For `101 Switching Protocols`, local inability to complete the requested upgrade
 
 #### Retry Tuning
 
+| Flag | Scope | Default | Description |
+|------|-------|---------|-------------|
+| `-retry-wait-min` | provider | `500ms` | Minimum retry wait |
+| `-retry-wait-max` | provider | `30s` | Maximum retry wait |
+
+### Multiple Providers
+
+Front several upstreams through one port with `--provider` sections. A `--provider[=name]` marker starts a new section; every provider-scope flag after it — until the next marker — configures that upstream only. Server-scope flags (`-bind`, `-tui`, `-version`) belong before the first marker.
+
+```sh
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8080 \
+  -tui \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -concurrency 4 \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -concurrency 8 \
+    -retry 2
+```
+
+A client targeting `http://127.0.0.1:8080/anthropic/v1/messages` reaches Anthropic's `/v1/messages`; `-concurrency 4` bounds only the Anthropic section, while OpenAI gets its own limiter (8) and retry budget (2). Without `-name` on the marker, the display name derives from the upstream host (`api.anthropic.com` → `anthropic`); an explicit `-name` inside the section overrides the marker.
+
+Two provider-only flags join the surface in sectioned mode:
+
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-retry-wait-min` | `500ms` | Minimum retry wait |
-| `-retry-wait-max` | `30s` | Maximum retry wait |
+| `-prefix` | _(required in multi mode)_ | Mount path for the provider, stripped before forwarding |
+| `-name` | _(derived from upstream host)_ | Display name in logs and the TUI header |
+
+Mount semantics:
+
+- The prefix is a true mount: `/anthropic/v1/messages` is forwarded upstream as `/v1/messages`. A request equal to the mount (`/anthropic`) forwards as `/`.
+- With more than one provider, requests matching no prefix get `404 Not Found` — nothing leaks to a default upstream. A single bare provider (no `--provider` markers, no prefix) still serves every path from the root, exactly as before.
+- Prefixes must not overlap: `/anthropic` and `/anthropic/v1` cannot coexist. Overlapping configurations are rejected at startup, before the listener binds.
+- Providers are matched on whole path segments, so `/anthropic2` never matches the `/anthropic` prefix.
+
+In the TUI, each provider keeps its own dashboard. The header shows one chip per provider (the active one highlighted), filled by the provider name instead of the `⚡ shaper` brand; `Tab`/`Shift+Tab` cycle providers, chips are clickable, and the number keys `1-6` still switch content tabs. The in-TUI help (`?`) lists the switch binding whenever the switcher is shown.
 
 ### Examples
 
@@ -109,6 +153,21 @@ ai-concurrency-shaper \
   -upstream https://api.anthropic.com \
   -limit "POST /messages:3@messages" \
   -limit "POST /messages/batches:3@messages"
+```
+
+Two upstreams behind one port (see [Multiple Providers](#multiple-providers) for the mount and switcher details):
+
+```sh
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8080 \
+  -tui \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -limit "POST /chat/completions:8"
 ```
 
 Maximum throughput (disable all protections; only safe if the upstream has no accounting lag):

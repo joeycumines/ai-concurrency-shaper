@@ -2420,3 +2420,50 @@ func (w *switchingProtocolsHandshakeWriter) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
+
+// MaxIdleConnsPerHost sizes the upstream transport's per-host idle connection
+// pool to fit the requested limiters.
+//
+// routeLimiters is keyed exactly as the proxy expects: by group name, or by the
+// raw pattern when the pattern has no group. The returned value counts every route
+// limiter's capacity, plus the default pool whenever it is actually used (a pattern
+// with no group and no limit; a group-less unlimited pattern; a grouped pattern
+// whose group resolves to no limiter; or -limit-all), capped by the global
+// concurrency pool when one exists not to exceed the global concurrency. A floor of
+// 20 keeps the shared transport healthy.
+//
+// This is the connection pool for admission, not a hard cap: the proxy stays
+// transparent and never varies from the limiters.
+func MaxIdleConnsPerHost(globalConcurrency, concurrency int, patterns []route.Pattern, routeLimiters map[string]*queue.Limiter, limitAll bool) int {
+	routePoolMax := 0
+	for _, lim := range routeLimiters {
+		routePoolMax += lim.Limit()
+	}
+
+	defaultPoolUsed := limitAll
+	for _, p := range patterns {
+		key := p.Group
+		if key == "" {
+			key = p.Raw
+		}
+		if p.Limit == 0 {
+			if p.Group == "" {
+				defaultPoolUsed = true
+				continue
+			}
+			if _, ok := routeLimiters[key]; !ok {
+				defaultPoolUsed = true
+			}
+		}
+	}
+	if defaultPoolUsed {
+		routePoolMax += concurrency
+	}
+	if globalConcurrency > 0 && routePoolMax > globalConcurrency {
+		routePoolMax = globalConcurrency
+	}
+	if routePoolMax < 20 {
+		return 20
+	}
+	return routePoolMax
+}

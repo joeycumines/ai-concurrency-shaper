@@ -10929,3 +10929,110 @@ func TestProxy_ErrAbortHandler_NoBreakerFailure(t *testing.T) {
 		t.Errorf("breaker ConsecutiveFailures = %d, want 0", stats.ConsecutiveFailures)
 	}
 }
+
+// TestMaxIdleConnsPerHost verifies the upstream transport idle-connection pool
+// sizing across the supported route/global/limit-all configurations. The body
+// is byte-identical to the function it exercises: proxy.MaxIdleConnsPerHost.
+func TestMaxIdleConnsPerHost(t *testing.T) {
+	parsePatterns := func(t *testing.T, specs ...string) []route.Pattern {
+		t.Helper()
+		patterns := make([]route.Pattern, 0, len(specs))
+		for _, spec := range specs {
+			p, err := route.Parse(spec)
+			if err != nil {
+				t.Fatalf("parse pattern %q: %v", spec, err)
+			}
+			patterns = append(patterns, p)
+		}
+		return patterns
+	}
+
+	tests := []struct {
+		name            string
+		global          int
+		concurrency     int
+		patterns        []route.Pattern
+		routeLimiters   map[string]*queue.Limiter
+		limitAll        bool
+		wantIdlePerHost int
+	}{
+		{
+			name:            "default pool floors at legacy value",
+			concurrency:     4,
+			patterns:        route.DefaultPatterns(),
+			wantIdlePerHost: 20,
+		},
+		{
+			name:            "zero concurrency floors at legacy value",
+			concurrency:     0,
+			patterns:        route.DefaultPatterns(),
+			wantIdlePerHost: 20,
+		},
+		{
+			name:            "independent route limiters are summed",
+			concurrency:     4,
+			patterns:        parsePatterns(t, "POST /v1/chat/completions:20", "POST /v1/embeddings:20"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/chat/completions:20": queue.NewLimiterWithCooldown(20, 0), "POST /v1/embeddings:20": queue.NewLimiterWithCooldown(20, 0)},
+			wantIdlePerHost: 40,
+		},
+		{
+			name:            "grouped route limiters are summed once",
+			concurrency:     4,
+			patterns:        parsePatterns(t, "POST /v1/messages:20@messages", "POST /v1/messages/batches:20@messages"),
+			routeLimiters:   map[string]*queue.Limiter{"messages": queue.NewLimiterWithCooldown(20, 0)},
+			wantIdlePerHost: 20,
+		},
+		{
+			name:            "default pool and route limiter are combined",
+			concurrency:     4,
+			patterns:        parsePatterns(t, "POST /v1/messages", "POST /v1/embeddings:30"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/embeddings:30": queue.NewLimiterWithCooldown(30, 0)},
+			wantIdlePerHost: 34,
+		},
+		{
+			name:            "global caps summed route pool",
+			global:          25,
+			concurrency:     4,
+			patterns:        parsePatterns(t, "POST /v1/chat/completions:20", "POST /v1/embeddings:20"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/chat/completions:20": queue.NewLimiterWithCooldown(20, 0), "POST /v1/embeddings:20": queue.NewLimiterWithCooldown(20, 0)},
+			wantIdlePerHost: 25,
+		},
+		{
+			name:            "global cap does not reduce below default floor",
+			global:          0,
+			concurrency:     0,
+			patterns:        route.DefaultPatterns(),
+			wantIdlePerHost: 20,
+		},
+		{
+			// limitAll routes every non-matching request through the default
+			// limiter, so the default pool's capacity must be counted even when
+			// every configured pattern carries an explicit route limit.
+			name:            "limit-all counts default pool when all routes have explicit limits",
+			concurrency:     100,
+			patterns:        parsePatterns(t, "POST /v1/messages:5"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/messages:5": queue.NewLimiterWithCooldown(5, 0)},
+			limitAll:        true,
+			wantIdlePerHost: 105,
+		},
+		{
+			// Without limitAll the default pool is NOT used (the only pattern
+			// has its own limiter), so concurrency does not contribute.
+			name:            "without limit-all default pool is unused when routes have explicit limits",
+			concurrency:     100,
+			patterns:        parsePatterns(t, "POST /v1/messages:5"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/messages:5": queue.NewLimiterWithCooldown(5, 0)},
+			limitAll:        false,
+			wantIdlePerHost: 20,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MaxIdleConnsPerHost(tt.global, tt.concurrency, tt.patterns, tt.routeLimiters, tt.limitAll)
+			if got != tt.wantIdlePerHost {
+				t.Fatalf("MaxIdleConnsPerHost() = %d, want %d", got, tt.wantIdlePerHost)
+			}
+		})
+	}
+}

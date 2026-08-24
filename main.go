@@ -19,12 +19,11 @@ package main
 
 import (
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -33,12 +32,13 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/config"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/router"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
 )
 
@@ -51,181 +51,28 @@ func main() {
 		// redirected the global log writer into the on-screen buffer, so the
 		// error must be emitted explicitly to remain visible to the operator.
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		// GNU convention: usage errors (unknown flag, malformed command line)
+		// exit 2 so callers can distinguish "bad invocation" from "runtime
+		// failure", matching the pre-sectioned binary where the flag package
+		// itself exited 2 on unparseable arguments.
+		if errors.Is(err, config.ErrUsage) {
+			fmt.Fprintf(os.Stderr, "run with -h for usage\n")
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	var (
-		bindAddr          string
-		upstreamURL       string
-		limitList         limitFlags
-		concurrency       int
-		globalConcurrency int
-		limitAll          bool
-		queueTimeout      time.Duration
-		useTUI            bool
-		retryMax          int
-		retryMaxBodyMB    int64
-		showVersion       bool
-
-		// Circuit breaker flags.
-		cbEnabled     bool
-		cbThreshold   int
-		cbWindow      time.Duration
-		cbOpenTimeout time.Duration
-		cbMaxOpen     time.Duration
-		cbPenalty     time.Duration
-		cbMaxPenalty  time.Duration
-
-		// Enhanced retry flags.
-		retryWaitMin   time.Duration
-		retryWaitMax   time.Duration
-		retryMinDelay  time.Duration
-		retrySkipOn429 bool
-
-		// Concurrency protection flags.
-		releaseCooldown time.Duration
-		cancelCooldown  time.Duration
-		failureHold     time.Duration
-
-		// Adaptive headroom.
-		adaptiveHeadroom       bool
-		adaptiveHeadroomWindow time.Duration
-
-		// Transport tuning.
-		upstreamDisableKeepAlives bool
-	)
-
-	flag.StringVar(&bindAddr, "bind", ":8080", "listen address")
-	flag.StringVar(&upstreamURL, "upstream", "", "upstream base URL (required)")
-	flag.Var(&limitList, "limit", "route pattern to limit, matched by trailing path segments (repeatable)")
-	flag.IntVar(&concurrency, "concurrency", 4, "max concurrent limited requests")
-	flag.IntVar(&globalConcurrency, "global-concurrency", 0, "global concurrency limit (0 = disabled)")
-	flag.BoolVar(&limitAll, "limit-all", false, "bound every request with the default limiter, not just matching limited routes")
-	flag.DurationVar(&queueTimeout, "queue-timeout", 30*time.Second, "max wait for a concurrency slot (0 = use request context)")
-	flag.IntVar(&retryMax, "retry", -1, "max retry attempts (-1 = unlimited, 0 = disabled)")
-	flag.Int64Var(&retryMaxBodyMB, "retry-max-body-mb", 5, "max request body size (MB) eligible for retry")
-	flag.BoolVar(&useTUI, "tui", false, "enable terminal dashboard")
-	flag.BoolVar(&showVersion, "version", false, "print version and exit")
-
-	// Circuit breaker.
-	flag.BoolVar(&cbEnabled, "circuit-breaker", true, "enable circuit breaker (default: true)")
-	flag.IntVar(&cbThreshold, "cb-threshold", 5, "failures within window to trip circuit breaker")
-	flag.DurationVar(&cbWindow, "cb-window", 30*time.Second, "circuit breaker failure counting window")
-	flag.DurationVar(&cbOpenTimeout, "cb-open-timeout", 10*time.Second, "time before circuit breaker probes (half-open)")
-	flag.DurationVar(&cbMaxOpen, "cb-max-open-timeout", 120*time.Second, "max circuit breaker open timeout after backoff")
-	flag.DurationVar(&cbPenalty, "cb-penalty", 2*time.Second, "base phantom concurrency hold time")
-	flag.DurationVar(&cbMaxPenalty, "cb-max-penalty", 60*time.Second, "max phantom concurrency hold time")
-
-	// Enhanced retry.
-	flag.DurationVar(&retryWaitMin, "retry-wait-min", 500*time.Millisecond, "minimum retry wait")
-	flag.DurationVar(&retryWaitMax, "retry-wait-max", 30*time.Second, "maximum retry wait")
-	flag.DurationVar(&retryMinDelay, "retry-min-delay", 1*time.Second, "minimum delay before retrying (0 = use backoff only)")
-	flag.BoolVar(&retrySkipOn429, "retry-skip-429", true, "skip retrying 429 responses to prevent concurrency amplification")
-	flag.DurationVar(&releaseCooldown, "release-cooldown", 200*time.Millisecond, "delay after slot release before re-admission (0 = immediate)")
-	flag.DurationVar(&cancelCooldown, "cancel-cooldown", 200*time.Millisecond, "hold slot after client cancel once an upstream attempt started (0 = immediate)")
-	flag.DurationVar(&failureHold, "failure-hold", 2*time.Second, "hold slot after upstream failure even without circuit breaker (0 = disabled)")
-	flag.BoolVar(&adaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
-	flag.DurationVar(&adaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")
-	flag.BoolVar(&upstreamDisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream; avoids provider-side connection-count concurrency violations")
-
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "ai-concurrency-shaper %s\n\n", version)
-		fmt.Fprintf(os.Stderr, "Usage: ai-concurrency-shaper [flags]\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-
-	if showVersion {
-		fmt.Println(version)
-		return nil
-	}
-
-	if upstreamURL == "" {
-		return fmt.Errorf("-upstream is required")
-	}
-
-	upstream, err := url.Parse(upstreamURL)
-	if err != nil {
-		return fmt.Errorf("invalid -upstream URL: %w", err)
-	}
-	if upstream.Scheme == "" {
-		return fmt.Errorf("-upstream URL must include scheme (http or https)")
-	}
-
-	// In TUI mode, capture output of the global stdlib logger and slog.Default()
-	// into an on-screen bounded buffer instead of letting it degrade the terminal
-	// dashboard. The buffer is created here — before route parsing and the config
-	// summaries below — so even config warnings (e.g. a conflicting @group limit)
-	// and startup messages appear in the Logs tab. Direct os.Stderr writes,
-	// standalone log.Logger/slog.Logger instances, and anything emitted before
-	// this wiring are NOT captured. Fatal errors are written to stderr explicitly
-	// by main() and are never swallowed by this redirect; once the TUI exits the
-	// buffer is redirected back to stderr so shutdown logging stays visible.
-	// Only TUI mode is affected; non-TUI runs keep normal stderr logging.
-	//
-	// Order is load-bearing: slog.SetDefault rewires the standard logger
-	// through its handler at INFO level, so installing log.SetOutput before it
-	// would silently demote every stdlib line (including the route-group config
-	// WARNING) into structured level=INFO records that the Logs tab correctly
-	// treats as non-actionable — suppressing their toast. Restoring the stdlib
-	// writer afterwards keeps those lines in their timestamped identity, which
-	// the actionable-keyword heuristics classify as intended.
-	var logBuf *tui.LogBuffer
-	if useTUI {
-		logBuf = tui.NewLogBuffer(tui.LogBufferCapacity)
-		slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, nil)))
-		log.SetFlags(log.LstdFlags)
-		log.SetOutput(logBuf)
-	}
-
-	var patterns []route.Pattern
-	routeLimiters := make(map[string]*queue.Limiter)
-
-	if len(limitList) > 0 {
-		for _, s := range limitList {
-			p, err := route.Parse(s)
-			if err != nil {
-				return fmt.Errorf("invalid -limit %q: %w", s, err)
-			}
-			patterns = append(patterns, p)
-			if p.Limit > 0 {
-				if p.Group != "" {
-					// Routes in the same @group share one limiter.
-					if existing, exists := routeLimiters[p.Group]; exists {
-						if existing.Limit() != p.Limit {
-							log.Printf("WARNING: route %q specifies group %q with limit %d, but group already has limit %d. Using %d.",
-								p.Raw, p.Group, p.Limit, existing.Limit(), existing.Limit())
-						}
-					} else {
-						routeLimiters[p.Group] = queue.NewLimiterWithCooldown(p.Limit, releaseCooldown)
-					}
-				} else {
-					routeLimiters[p.Raw] = queue.NewLimiterWithCooldown(p.Limit, releaseCooldown)
-				}
-			}
-		}
-	} else {
-		patterns = route.DefaultPatterns()
-	}
-	matcher := route.NewMatcher(patterns)
-
-	met := metrics.NewCollector()
-	limiter := queue.NewLimiterWithCooldown(concurrency, releaseCooldown)
-
-	var globalLimiter *queue.Limiter
-	if globalConcurrency > 0 {
-		globalLimiter = queue.NewLimiterWithCooldown(globalConcurrency, releaseCooldown)
-	}
-
-	// Create the shared request journal. This is the single source of truth
-	// for both retry body replay and the TUI's Network inspection panel.
-	// We scale capacity inversely with the body limit so the default
-	// worst-case memory footprint stays roughly bounded (~512 MiB)
-	// regardless of how large retry-max-body-mb is configured.
-	maxBody := int64(retryMaxBodyMB) << 20
+// buildProvider assembles one provider's proxy from its resolved configuration:
+// the per-provider request journal, metrics collector and upstream transport, plus
+// the proxy itself wired onto them.
+//
+// The journal is shared between retry body replay and the TUI's Network
+// inspection panel. Its capacity scales inversely with the body limit so the
+// default worst-case memory footprint stays roughly bounded (~512 MiB) regardless
+// of how large -retry-max-body-mb is configured.
+func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journal.Journal, error) {
+	maxBody := int64(p.RetryMaxBodyMB) << 20
 	journalCap := 512
 	if maxBody > 0 {
 		if c := int((512 << 20) / (maxBody * 2)); c < journalCap {
@@ -237,108 +84,235 @@ func run() error {
 	}
 	j := journal.New(journalCap, maxBody)
 
-	// Create the circuit breaker when enabled.
-	var breaker *circuitbreaker.Breaker
-	if cbEnabled {
-		var err error
-		breaker, err = circuitbreaker.New(
-			circuitbreaker.WithFailureThreshold(cbThreshold),
-			circuitbreaker.WithWindow(cbWindow),
-			circuitbreaker.WithOpenTimeout(cbOpenTimeout),
-			circuitbreaker.WithMaxOpenTimeout(cbMaxOpen),
-			circuitbreaker.WithBasePenalty(cbPenalty),
-			circuitbreaker.WithMaxPenalty(cbMaxPenalty),
-		)
-		if err != nil {
-			return fmt.Errorf("circuit breaker config: %w", err)
-		}
-	}
-
-	effectiveMaxConcurrency := upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency, patterns, routeLimiters, limitAll)
+	met := metrics.NewCollector()
 	transport := &http.Transport{
 		MaxIdleConns:        200,
-		MaxIdleConnsPerHost: effectiveMaxConcurrency,
+		MaxIdleConnsPerHost: p.MaxIdleConnsPerHost(),
 		IdleConnTimeout:     120 * time.Second,
-		DisableKeepAlives:   upstreamDisableKeepAlives,
+		DisableKeepAlives:   p.DisableKeepAlives,
 	}
 
-	p, err := proxy.New(
-		proxy.WithUpstream(upstream),
-		proxy.WithMatcher(matcher),
-		proxy.WithLimiter(limiter),
+	prx, err := proxy.New(
+		proxy.WithUpstream(p.UpstreamURL()),
+		proxy.WithMatcher(p.Matcher()),
+		proxy.WithLimiter(p.DefaultLimiter()),
 		proxy.WithMetrics(met),
-		proxy.WithQueueTimeout(queueTimeout),
-		proxy.WithGlobalLimiter(globalLimiter),
-		proxy.WithRouteLimiters(routeLimiters),
-		proxy.WithMaxRetries(retryMax),
-		proxy.WithMaxBodyBytes(int64(retryMaxBodyMB)<<20),
-		proxy.WithRetryWaitMin(retryWaitMin),
-		proxy.WithRetryWaitMax(retryWaitMax),
-		proxy.WithRetryMinDelay(retryMinDelay),
-		proxy.WithRetrySkipOn429(retrySkipOn429),
-		proxy.WithCancelCooldown(cancelCooldown),
-		proxy.WithFailureHold(failureHold),
-		proxy.WithAdaptiveHeadroom(adaptiveHeadroom),
-		proxy.WithAdaptiveHeadroomWindow(adaptiveHeadroomWindow),
-		proxy.WithLimitAll(limitAll),
+		proxy.WithQueueTimeout(p.QueueTimeout),
+		proxy.WithGlobalLimiter(p.GlobalLimiter()),
+		proxy.WithRouteLimiters(p.RouteLimiters()),
+		proxy.WithMaxRetries(p.RetryMax),
+		proxy.WithMaxBodyBytes(maxBody),
+		proxy.WithRetryWaitMin(p.RetryWaitMin),
+		proxy.WithRetryWaitMax(p.RetryWaitMax),
+		proxy.WithRetryMinDelay(p.RetryMinDelay),
+		proxy.WithRetrySkipOn429(p.RetrySkipOn429),
+		proxy.WithCancelCooldown(p.CancelCooldown),
+		proxy.WithFailureHold(p.FailureHold),
+		proxy.WithAdaptiveHeadroom(p.AdaptiveHeadroom),
+		proxy.WithAdaptiveHeadroomWindow(p.AdaptiveHeadroomWindow),
+		proxy.WithLimitAll(p.LimitAll),
 		proxy.WithTransport(transport),
 		proxy.WithJournal(j),
-		proxy.WithBreaker(breaker),
+		proxy.WithBreaker(p.Breaker()),
 	)
 	if err != nil {
-		return fmt.Errorf("proxy config: %w", err)
+		return nil, nil, nil, fmt.Errorf("proxy config: %w", err)
+	}
+	return prx, met, j, nil
+}
+
+// upstreamMaxIdleConnsPerHost returns the minimum number of idle connections
+// the upstream transport should keep open per host. It is derived from the
+// configured route/global concurrency limiters so that multi-route or grouped
+// configurations do not thrash TCP connections after bursts, while still
+// honoring the global concurrency cap and a safe default floor.
+//
+// limitAll indicates that every non-matching request is routed through the
+// default limiter (the same one set by WithLimiter/-concurrency). In that mode
+// the default pool always gates non-matching traffic, so its capacity must be
+// counted toward the idle-connection pool regardless of whether any pattern
+// itself falls through to it.
+//
+// This helper is pinned by upstreamMaxIdleConnsPerHost() in main_test.go and
+// is kept alongside the config-provider's MaxIdleConnsPerHost derivation for
+// cross-checking in the non-sectioned (legacy) construction path.
+func upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency int, patterns []route.Pattern, routeLimiters map[string]*queue.Limiter, limitAll bool) int {
+	routePoolMax := 0
+	for _, lim := range routeLimiters {
+		routePoolMax += lim.Limit()
 	}
 
-	if len(limitList) > 0 {
+	defaultPoolUsed := limitAll
+	for _, p := range patterns {
+		key := p.Group
+		if key == "" {
+			key = p.Raw
+		}
+		if p.Limit == 0 {
+			if p.Group == "" {
+				defaultPoolUsed = true
+				continue
+			}
+			if _, ok := routeLimiters[key]; !ok {
+				defaultPoolUsed = true
+			}
+		}
+	}
+	if defaultPoolUsed {
+		routePoolMax += concurrency
+	}
+	if globalConcurrency > 0 && routePoolMax > globalConcurrency {
+		routePoolMax = globalConcurrency
+	}
+	if routePoolMax < 20 {
+		return 20
+	}
+	return routePoolMax
+}
+
+// logProviderConfig prints the resolved startup configuration for one provider.
+// For a single provider this reproduces the legacy startup log lines exactly.
+func logProviderConfig(pr *config.Provider) {
+	patterns := pr.Patterns()
+	if len(pr.Limits) > 0 {
 		var parts []string
-		for _, p := range patterns {
-			parts = append(parts, p.String())
+		for _, pat := range patterns {
+			parts = append(parts, pat.String())
 		}
 		log.Printf("limiting %d route(s) at concurrency %d: %s",
-			len(patterns), concurrency, strings.Join(parts, ", "))
+			len(patterns), pr.Concurrency, strings.Join(parts, ", "))
 	} else {
 		log.Printf("auto-detecting LLM endpoints (%d patterns) at concurrency %d",
-			len(patterns), concurrency)
+			len(patterns), pr.Concurrency)
 	}
-	if globalConcurrency > 0 {
-		log.Printf("global concurrency limit: %d", globalConcurrency)
+	if pr.GlobalConcurrency > 0 {
+		log.Printf("global concurrency limit: %d", pr.GlobalConcurrency)
 	}
-	if retryMax != 0 {
-		if retryMax < 0 {
-			log.Printf("retry: unlimited (backoff %s–%s)", retryWaitMin, retryWaitMax)
+	if pr.RetryMax != 0 {
+		if pr.RetryMax < 0 {
+			log.Printf("retry: unlimited (backoff %s–%s)", pr.RetryWaitMin, pr.RetryWaitMax)
 		} else {
-			log.Printf("retry: max %d attempts (backoff %s–%s)", retryMax, retryWaitMin, retryWaitMax)
+			log.Printf("retry: max %d attempts (backoff %s–%s)", pr.RetryMax, pr.RetryWaitMin, pr.RetryWaitMax)
 		}
 	}
-	if breaker != nil {
+	if breaker := pr.Breaker(); breaker != nil {
 		log.Printf("circuit breaker: threshold=%d window=%s open-timeout=%s penalty=%s max-penalty=%s",
-			cbThreshold, cbWindow, cbOpenTimeout, cbPenalty, cbMaxPenalty)
+			pr.CBThreshold, pr.CBWindow, pr.CBOpenTimeout, pr.CBPenalty, pr.CBMaxPenalty)
 	}
-	if retryMinDelay > 0 {
-		log.Printf("retry min delay: %s", retryMinDelay)
+	if pr.RetryMinDelay > 0 {
+		log.Printf("retry min delay: %s", pr.RetryMinDelay)
 	}
-	if retrySkipOn429 {
+	if pr.RetrySkipOn429 {
 		log.Printf("retry skip 429: enabled")
 	}
-	if releaseCooldown > 0 {
-		log.Printf("release cooldown: %s", releaseCooldown)
+	if pr.ReleaseCooldown > 0 {
+		log.Printf("release cooldown: %s", pr.ReleaseCooldown)
 	}
-	if cancelCooldown > 0 {
-		log.Printf("cancel cooldown: %s", cancelCooldown)
+	if pr.CancelCooldown > 0 {
+		log.Printf("cancel cooldown: %s", pr.CancelCooldown)
 	}
-	if failureHold > 0 {
+	if pr.FailureHold > 0 {
 		// Hyphen-bound on purpose: the Logs tab's actionable-line heuristic
 		// toasts whole-word "failure". "failure-hold" is one identifier (like
 		// open-timeout=10s), which the classifier ignores — a space-separated
 		// "failure hold: 2s" reads like prose and raised a false toast on every
 		// TUI start. Keep the summary hyphen-bound.
-		log.Printf("failure-hold: %s", failureHold)
+		log.Printf("failure-hold: %s", pr.FailureHold)
 	}
-	if adaptiveHeadroom {
-		log.Printf("adaptive headroom: enabled (window %s)", adaptiveHeadroomWindow)
+	if pr.AdaptiveHeadroom {
+		log.Printf("adaptive headroom: enabled (window %s)", pr.AdaptiveHeadroomWindow)
+	}
+}
+
+// drainResetSignals empties the buffered reset channel so a burst of "Reset
+// Stats" confirmations collapses into the single fleet-wide reset that
+// follows it. It never blocks: the channel is buffered (cap 1) and the
+// model's sends are non-blocking, so at most a few signals can pend.
+func drainResetSignals(resetCh <-chan struct{}) {
+	for {
+		select {
+		case <-resetCh:
+			continue
+		default:
+			return
+		}
+	}
+}
+
+func run() error {
+	cfg, err := config.Parse(os.Args[1:])
+	if err != nil {
+		if errors.Is(err, config.ErrHelp) {
+			// -h/-help at any scope: print the full sectioned usage to stdout
+			// and exit 0, before any validation or logging setup.
+			config.PrintUsage(os.Stdout)
+			return nil
+		}
+		return err
 	}
 
-	srv := &http.Server{Addr: bindAddr, Handler: p}
+	if cfg.Server.Version {
+		fmt.Println(version)
+		return nil
+	}
+
+	// In TUI mode, capture output of the global stdlib logger and slog.Default()
+	// into an on-screen bounded buffer instead of letting it degrade the terminal
+	// dashboard. The buffer is created here — before ResolveAndValidate (whose
+	// route-limiter construction emits group-conflict warnings) and before the
+	// per-provider config summaries below — so even config warnings and startup
+	// messages appear in the Logs tab. Direct
+	// os.Stderr writes, standalone log.Logger/slog.Logger instances, and anything
+	// emitted before this wiring are NOT captured. Fatal errors are written to
+	// stderr explicitly by main() and are never swallowed by this redirect; once
+	// the TUI exits the buffer is redirected back to stderr so shutdown logging
+	// stays visible. Only TUI mode is affected; non-TUI runs keep normal stderr
+	// logging.
+	//
+	// Order is load-bearing: slog.SetDefault rewires the standard logger
+	// through its handler at INFO level, so installing log.SetOutput before it
+	// would silently demote every stdlib line (including a config WARNING)
+	// into structured level=INFO records that the Logs tab correctly
+	// treats as non-actionable — suppressing their toast. Restoring the stdlib
+	// writer afterwards keeps those lines in their timestamped identity, which
+	// the actionable-keyword heuristics classify as intended.
+	var logBuf *tui.LogBuffer
+	if cfg.Server.TUI {
+		logBuf = tui.NewLogBuffer(tui.LogBufferCapacity)
+		slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, nil)))
+		log.SetFlags(log.LstdFlags)
+		log.SetOutput(logBuf)
+	}
+
+	if err := cfg.ResolveAndValidate(); err != nil {
+		return err
+	}
+
+	// Build a proxy for every provider and mount each at its prefix on the
+	// shared dispatcher. With a single (legacy) bare-root provider this is a
+	// transparent pass-through, so startup output is byte-identical to before.
+	var (
+		entries []router.Provider
+		mets    []*metrics.Collector
+		js      []*journal.Journal
+	)
+	for _, pr := range cfg.Providers {
+		p, met, j, err := buildProvider(pr)
+		if err != nil {
+			return err
+		}
+		mets = append(mets, met)
+		js = append(js, j)
+		entries = append(entries, router.Provider{Name: pr.Name, Prefix: pr.Prefix, Proxy: p})
+		logProviderConfig(pr)
+	}
+
+	h, err := router.New(entries)
+	if err != nil {
+		return err
+	}
+
+	srv := &http.Server{Addr: cfg.Server.Bind, Handler: h}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -353,16 +327,27 @@ func run() error {
 	var tuiProgram *tea.Program
 	tuiDone := make(chan struct{})
 
-	if useTUI {
+	if cfg.Server.TUI {
 		log.Println("TUI dashboard enabled")
-		snapCh := make(chan metrics.Snapshot, 16)
+		metas := make([]tui.ProviderMeta, len(cfg.Providers))
+		for i, pr := range cfg.Providers {
+			metas[i] = tui.ProviderMeta{
+				Name:        pr.Name,
+				Concurrency: pr.Concurrency,
+				Journal:     js[i],
+			}
+		}
+		updCh := make(chan tui.ProviderUpdate, 16)
 		progCh := make(chan *tea.Program, 1)
+		resetCh := make(chan struct{}, 1)
 		go func() {
-			tui.Run(snapCh, concurrency, j, progCh, logBuf)
+			tui.Run(updCh, metas, progCh, resetCh, logBuf)
 			// The dashboard is gone and its poller with it: stream any further
 			// logging (the shutdown sequence below) straight to stderr rather
 			// than parking it in a buffer nobody drains.
-			logBuf.RedirectTo(os.Stderr)
+			if logBuf != nil {
+				logBuf.RedirectTo(os.Stderr)
+			}
 			close(tuiDone)
 			stop() // trigger graceful shutdown when TUI exits
 		}()
@@ -370,29 +355,42 @@ func run() error {
 		go func() {
 			ticker := time.NewTicker(250 * time.Millisecond)
 			defer ticker.Stop()
-			defer close(snapCh) // unblocks the snapshot reader goroutine in tui.Run()
+			defer close(updCh) // unblocks the snapshot reader goroutine in tui.Run()
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case <-ticker.C:
-					snap := met.Snapshot()
-					if breaker != nil {
-						s := breaker.Stats()
-						snap.CircuitBreaker = &metrics.CBStats{
-							State:               s.State.String(),
-							Failures:            s.Failures,
-							ConsecutiveFailures: s.ConsecutiveFailures,
-							TotalFailures:       s.TotalFailures,
-							TotalSuccesses:      s.TotalSuccesses,
-							CurrentPenalty:      s.CurrentPenalty,
-							NextRetry:           s.NextRetry,
-						}
+				case <-resetCh:
+					// "Reset Stats": drain any coalesced requests, then
+					// zero every provider's cumulative counters (the
+					// overlay promises "all cumulative counters", so the
+					// reset is fleet-wide, not per-view).
+					drainResetSignals(resetCh)
+					for _, mc := range mets {
+						mc.Reset()
 					}
-					select {
-					case snapCh <- snap:
-					case <-ctx.Done():
-						return
+				case <-ticker.C:
+					// Snapshot every provider's collector and merge that
+					// provider's breaker stats (as before) before sending.
+					for i, pr := range cfg.Providers {
+						snap := mets[i].Snapshot()
+						if breaker := pr.Breaker(); breaker != nil {
+							s := breaker.Stats()
+							snap.CircuitBreaker = &metrics.CBStats{
+								State:               s.State.String(),
+								Failures:            s.Failures,
+								ConsecutiveFailures: s.ConsecutiveFailures,
+								TotalFailures:       s.TotalFailures,
+								TotalSuccesses:      s.TotalSuccesses,
+								CurrentPenalty:      s.CurrentPenalty,
+								NextRetry:           s.NextRetry,
+							}
+						}
+						select {
+						case updCh <- tui.ProviderUpdate{Index: i, Snapshot: snap}:
+						case <-ctx.Done():
+							return
+						}
 					}
 				}
 			}
@@ -436,58 +434,4 @@ func run() error {
 	case err := <-errCh:
 		return err
 	}
-}
-
-// upstreamMaxIdleConnsPerHost returns the minimum number of idle connections
-// the upstream transport should keep open per host. It is derived from the
-// configured route/global concurrency limiters so that multi-route or grouped
-// configurations do not thrash TCP connections after bursts, while still
-// honoring the global concurrency cap and a safe default floor.
-//
-// limitAll indicates that every non-matching request is routed through the
-// default limiter (the same one set by WithLimiter/-concurrency). In that mode
-// the default pool always gates non-matching traffic, so its capacity must be
-// counted toward the idle-connection pool regardless of whether any pattern
-// itself falls through to it.
-func upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency int, patterns []route.Pattern, routeLimiters map[string]*queue.Limiter, limitAll bool) int {
-	routePoolMax := 0
-	for _, lim := range routeLimiters {
-		routePoolMax += lim.Limit()
-	}
-
-	defaultPoolUsed := limitAll
-	for _, p := range patterns {
-		key := p.Group
-		if key == "" {
-			key = p.Raw
-		}
-		if p.Limit == 0 {
-			if p.Group == "" {
-				defaultPoolUsed = true
-				continue
-			}
-			if _, ok := routeLimiters[key]; !ok {
-				defaultPoolUsed = true
-			}
-		}
-	}
-	if defaultPoolUsed {
-		routePoolMax += concurrency
-	}
-	if globalConcurrency > 0 && routePoolMax > globalConcurrency {
-		routePoolMax = globalConcurrency
-	}
-	if routePoolMax < 20 {
-		return 20
-	}
-	return routePoolMax
-}
-
-// limitFlags implements flag.Value for repeatable -limit flags.
-type limitFlags []string
-
-func (f limitFlags) String() string { return strings.Join(f, ", ") }
-func (f *limitFlags) Set(v string) error {
-	*f = append(*f, v)
-	return nil
 }
