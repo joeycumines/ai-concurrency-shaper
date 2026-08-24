@@ -432,3 +432,231 @@ func TestReplayQwenReasoningContentNonStream(t *testing.T) {
 		t.Fatalf("upstream body missing the converted user message: %s", body)
 	}
 }
+
+// matchedStopStreamUpstream replays the observed yolo/qwen streaming behavior
+// (field regression 2026-08-24): content deltas, then a finish chunk whose
+// choice carries the opaque `matched_stop` extension alongside finish_reason,
+// then the [DONE] sentinel.
+func matchedStopStreamUpstream(t *testing.T) (*httptest.Server, *int) {
+	t.Helper()
+	hits := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		frame := func(data string) {
+			_, _ = w.Write([]byte("data: " + data + "\n\n"))
+		}
+		frame(`{"id":"chatcmpl-ms","object":"chat.completion.chunk","created":1710000000,"model":"qwen","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}`)
+		frame(`{"id":"chatcmpl-ms","object":"chat.completion.chunk","created":1710000000,"model":"qwen","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null,"matched_stop":null}]}`)
+		frame(`{"id":"chatcmpl-ms","object":"chat.completion.chunk","created":1710000000,"model":"qwen","choices":[{"index":0,"delta":{},"finish_reason":"stop","matched_stop":"<|im_end|>"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream, &hits
+}
+
+// TestReplayMatchedStopMessagesStream proves the 2026-08-24 regression is dead
+// end-to-end on the Messages dialect: a streaming Claude Code request whose
+// upstream finish chunk carries choices[].matched_stop yields a 200 SSE
+// exchange with NO error event and a complete terminal lifecycle. Pre-fix this
+// exact upstream shape died at TTFB with the captured
+// 'chat stream chunk: wire: unknown_field: json: unknown field "matched_stop"'.
+func TestReplayMatchedStopMessagesStream(t *testing.T) {
+	upstream, hits := matchedStopStreamUpstream(t)
+
+	breaker := j2Breaker(t)
+	u, _ := url.Parse(upstream.URL)
+	pattern, err := route.Parse("POST /v1/messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(transcodeMapping(qwenMessagesMapping(t))),
+		WithBreaker(breaker),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages?beta=true",
+		strings.NewReader(`{"model":"qwen","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hello"}]}`),
+	)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if rec.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("content type = %q, want text/event-stream", rec.Header().Get("Content-Type"))
+	}
+	if strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("downstream stream carries an error event: %s", body)
+	}
+	if !strings.Contains(body, `"type":"message_stop"`) {
+		t.Fatalf("message_stop missing from the downstream stream: %s", body)
+	}
+	for _, want := range []string{"hello", "world"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("downstream stream missing %q: %s", want, body)
+		}
+	}
+	// The extension field name never leaks into the client dialect.
+	if strings.Contains(body, "matched_stop") {
+		t.Fatalf("client stream leaks the extension field name: %s", body)
+	}
+	// The opaque extension is not an upstream health signal: the exchange
+	// succeeded, so the breaker stays clean.
+	if got := breaker.Stats().ConsecutiveFailures; got != 0 {
+		t.Fatalf("breaker consecutive failures = %d, want 0", got)
+	}
+	if *hits != 1 {
+		t.Fatalf("upstream hits = %d, want exactly 1", *hits)
+	}
+}
+
+// TestReplayMatchedStopResponsesStream proves the same on the Responses
+// dialect — the exact Codex symptom: 'Stream disconnected before completion:
+// stream closed before response.completed' must be dead; the stream reaches
+// response.completed with the converted usage.
+func TestReplayMatchedStopResponsesStream(t *testing.T) {
+	upstream, _ := matchedStopStreamUpstream(t)
+
+	u, _ := url.Parse(upstream.URL)
+	pattern, err := route.Parse("POST /v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(transcodeMapping(testResponsesMapping(t))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"qwen","input":"hello","stream":true}`),
+	)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("downstream stream carries an error event: %s", body)
+	}
+	if !strings.Contains(body, `"type":"response.completed"`) {
+		t.Fatalf("response.completed missing from the downstream stream: %s", body)
+	}
+	for _, want := range []string{"hello", "world"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("downstream stream missing %q: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "matched_stop") {
+		t.Fatalf("client stream leaks the extension field name: %s", body)
+	}
+}
+
+// TestReplayMatchedStopNonStream proves the non-streaming half: a completion
+// whose choice carries matched_stop returns 200 with the content intact — the
+// log's 'chat response: wire: unknown_field' variant is dead too.
+func TestReplayMatchedStopNonStream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-n","object":"chat.completion","created":1710000000,"model":"qwen","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"answer"},"matched_stop":"<|im_end|>"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	u, _ := url.Parse(upstream.URL)
+	// The non-stream leak pin runs on BOTH client dialects (gate run 5,
+	// finding 4): the Responses renderer is a distinct render path from the
+	// Messages one, so each must independently prove the extension never
+	// reaches the client body.
+	tests := []struct {
+		name    string
+		pattern string
+		path    string
+		body    string
+		mapping func(*testing.T) transcode.Mapping
+	}{
+		{
+			name:    "messages",
+			pattern: "POST /v1/messages",
+			path:    "/v1/messages?beta=true",
+			body:    `{"model":"qwen","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`,
+			mapping: qwenMessagesMapping,
+		},
+		{
+			name:    "responses",
+			pattern: "POST /v1/responses",
+			path:    "/v1/responses",
+			body:    `{"model":"qwen","input":"hello"}`,
+			mapping: testResponsesMapping,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern, err := route.Parse(tt.pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := New(
+				WithUpstream(u),
+				WithMatcher(route.NewMatcher([]route.Pattern{pattern})),
+				WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+				WithMetrics(metrics.NewCollector()),
+				WithTranscodeMapping(transcodeMapping(tt.mapping(t))),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req := httptest.NewRequest(
+				http.MethodPost,
+				tt.path,
+				strings.NewReader(tt.body),
+			)
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, "answer") {
+				t.Fatalf("answer missing from the client body: %s", body)
+			}
+			// Assert each dialect was actually rendered — not just that
+			// matched_stop is absent. The Messages body carries a top-level
+			// "content" array; the Responses body carries an "output" array
+			// of output_text items (and object:"response"). This proves the
+			// leak check ran against the real Responses renderer, not a
+			// transparent passthrough that never decoded the upstream body.
+			dialectMarker := map[string]string{
+				"messages":  `"content"`,
+				"responses": `"output"`,
+			}[tt.name]
+			if !strings.Contains(body, dialectMarker) {
+				t.Fatalf("%s dialect marker %s missing; body may be a passthrough: %s", tt.name, dialectMarker, body)
+			}
+			if strings.Contains(body, "matched_stop") {
+				t.Fatalf("client body leaks the extension field name: %s", body)
+			}
+		})
+	}
+}

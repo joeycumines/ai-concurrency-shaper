@@ -1993,3 +1993,44 @@ func TestRenderChatRequestSystemAnywhereCapability(t *testing.T) {
 		t.Fatalf("report entries = %+v, want none", report.Losses)
 	}
 }
+
+// TestDecodeResponsesRequestPreviousOutputEmptyStatus (field regression
+// 2026-08-24, task 30): codex resume traffic carries previous-output history
+// items with "status": "" (observed live against the yolo gateway: 'convert
+// request: responses request: wire: malformed: input item 3: invalid previous
+// output status ""'). The sibling input items treat an absent status as
+// optional, and the item identity is carried by the id; status is not read
+// downstream. An empty status must decode; a bogus non-empty status still
+// rejects.
+func TestDecodeResponsesRequestPreviousOutputEmptyStatus(t *testing.T) {
+	body := []byte(`{
+		"model":"qwen3.8-27b",
+		"input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 1"}]},
+			{"type":"message","id":"msg_9","role":"assistant","status":"","content":[{"type":"output_text","text":"hi","annotations":[]}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"turn 2"}]}
+		]
+	}`)
+	result, _, err := DecodeResponsesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(result.Request.Turns) != 3 {
+		t.Fatalf("turns = %d", len(result.Request.Turns))
+	}
+	if result.Request.Turns[1].Role != CanonicalAssistant {
+		t.Fatalf("turn 1 role = %q", result.Request.Turns[1].Role)
+	}
+
+	// Strictness pin: a malformed non-empty status is still a typed
+	// rejection on the same surface.
+	bogus := []byte(`{
+		"model":"qwen3.8-27b",
+		"input":[
+			{"type":"message","id":"msg_9","role":"assistant","status":"bogus","content":[{"type":"output_text","text":"hi","annotations":[]}]}
+		]
+	}`)
+	if _, _, err := DecodeResponsesRequest(bogus, StrictLossPolicy()); err == nil {
+		t.Fatal("bogus status accepted")
+	}
+}

@@ -439,7 +439,12 @@ func (m *PreviousOutputMessage) Validate() error {
 	if m.Role != "assistant" {
 		return fmt.Errorf("previous output message role = %q", m.Role)
 	}
-	if !ValidStatus(m.Status) {
+	// Status is optional on a previous-output history item: real codex resume
+	// traffic sends "status": "" (field 2026-08-24, task 30). The three sibling
+	// input items (FunctionCallInput, FunctionCallOutputInput, ReasoningInput)
+	// treat an absent status as legal; a non-empty value that is not a known
+	// status is still a typed rejection.
+	if m.Status != "" && !ValidStatus(m.Status) {
 		return fmt.Errorf("invalid previous output status %q", m.Status)
 	}
 	return m.Content.Validate()

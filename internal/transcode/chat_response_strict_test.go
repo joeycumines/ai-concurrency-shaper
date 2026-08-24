@@ -257,3 +257,87 @@ func TestChatStreamChunkObjectDiscriminator(t *testing.T) {
 		}
 	}
 }
+
+// TestChatResponseDecodesMatchedStopExtension proves the choice-level
+// `matched_stop` provider extension (observed in the field 2026-08-24 on the
+// yolo/qwen chat gateway) decodes on the strict non-streaming surface in both
+// its string and null forms, while a genuinely unknown choice field is still
+// rejected — streaming/non-streaming parity of the opaque-extension surface.
+func TestChatResponseDecodesMatchedStopExtension(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "string",
+			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"},"matched_stop":"<|im_end|>"}]}`,
+		},
+		{
+			name: "null",
+			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"},"matched_stop":null}]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy())
+			if err != nil {
+				t.Fatalf("matched_stop response rejected: %v", err)
+			}
+			if len(response.Items) != 1 {
+				t.Fatalf("response = %+v", response)
+			}
+		})
+	}
+
+	bogus := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"},"bogus_field":1}]}`
+	_, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy())
+	var wireErr *UpstreamWireError
+	if !errors.As(err, &wireErr) {
+		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	}
+}
+
+// TestChatResponseDecodesMatchedStopMessageExtension pins the defensive
+// message-level mirror of the choice-level matched_stop regression
+// (2026-08-24): matched_stop is observed at choice level, but the captured
+// error text ("unknown field \"matched_stop\"") is level-ambiguous between
+// choice and message, so the message surface mirrors Choice's opaque
+// extensions (token_ids/routed_experts/stop_reason are modeled at message
+// level per the task-12 F1 pattern) to keep the strict decode from failing
+// if a gateway also rides matched_stop there. The strict non-streaming
+// decode surface must accept matched_stop inside choices[].message in both
+// string and null forms, while a genuinely unknown message field stays
+// rejected. Pre-fix this surface rejected matched_stop with unknown_field.
+func TestChatResponseDecodesMatchedStopMessageExtension(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "string",
+			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x","matched_stop":"<|im_end|>"}}]}`,
+		},
+		{
+			name: "null",
+			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x","matched_stop":null}}]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy())
+			if err != nil {
+				t.Fatalf("message-level matched_stop response rejected: %v", err)
+			}
+			if len(response.Items) != 1 {
+				t.Fatalf("response = %+v", response)
+			}
+		})
+	}
+
+	bogus := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x","bogus_field":1}}]}`
+	_, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy())
+	var wireErr *UpstreamWireError
+	if !errors.As(err, &wireErr) {
+		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	}
+}

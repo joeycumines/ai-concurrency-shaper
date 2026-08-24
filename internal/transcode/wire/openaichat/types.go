@@ -343,14 +343,17 @@ type ChatAssistantMessage struct {
 	// non-empty spellings at once is a contradiction, never a merge.
 	ReasoningContent *string `json:"reasoning_content,omitempty"`
 
-	// Opaque provider-extension fields present on real assistant messages
-	// (e.g. the yolo gateway's token_ids, routed_experts, stop_reason):
-	// decoded so strict wire decoding never fails on a current provider,
-	// never forwarded — mirroring Choice so the message and choice surfaces
-	// agree.
+	// Opaque provider-extension fields observed on real assistant messages
+	// (e.g. the yolo gateway's token_ids, routed_experts, stop_reason) plus
+	// matched_stop — observed at choice level only, mirrored here
+	// defensively because the captured "unknown field" error text is
+	// level-ambiguous: decoded so strict wire decoding never fails on a
+	// current provider, never forwarded — mirroring Choice so the message
+	// and choice surfaces agree.
 	TokenIDs      any     `json:"token_ids,omitempty"`
 	RoutedExperts any     `json:"routed_experts,omitempty"`
 	StopReason    *string `json:"stop_reason,omitempty"`
+	MatchedStop   any     `json:"matched_stop,omitempty"`
 }
 
 // Message is a message in a chat conversation. Assistant messages flatten
@@ -621,11 +624,12 @@ type Choice struct {
 
 	// Opaque provider-extension fields present on real streaming and
 	// non-streaming chat responses (e.g. the yolo gateway's token_ids,
-	// routed_experts, stop_reason): decoded so strict wire decoding never
-	// fails on a current provider, never forwarded.
+	// routed_experts, stop_reason, matched_stop): decoded so strict wire
+	// decoding never fails on a current provider, never forwarded.
 	TokenIDs      any     `json:"token_ids,omitempty"`
 	RoutedExperts any     `json:"routed_experts,omitempty"`
 	StopReason    *string `json:"stop_reason,omitempty"`
+	MatchedStop   any     `json:"matched_stop,omitempty"`
 }
 
 // Response is a chat completions response (the non-streaming shape). Opaque

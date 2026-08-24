@@ -1278,6 +1278,11 @@ type chatStreamChoiceShadow struct {
 	TokenIDs      any     `json:"token_ids,omitempty"`
 	RoutedExperts any     `json:"routed_experts,omitempty"`
 	StopReason    *string `json:"stop_reason,omitempty"`
+	// MatchedStop mirrors the wire Choice extension (2026-08-24, task 27);
+	// delta level is unobserved — the raw-upstream probe places the field on
+	// the choice of every chunk — so ChatStreamDelta deliberately carries no
+	// twin (gate record run 5, finding 5).
+	MatchedStop any `json:"matched_stop,omitempty"`
 }
 
 // chatStreamChunkFromSSE parses one upstream SSE frame into a Chat stream

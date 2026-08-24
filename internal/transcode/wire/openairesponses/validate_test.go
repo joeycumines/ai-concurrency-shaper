@@ -518,3 +518,24 @@ func TestFunctionCallOutputResultBranches(t *testing.T) {
 		t.Fatal("empty output accepted")
 	}
 }
+
+// TestPreviousOutputMessageEmptyStatus (field regression 2026-08-24, task 30):
+// real codex resume traffic sends a previous-output history item carrying
+// "status": "" — the sibling input items (FunctionCallInput,
+// FunctionCallOutputInput, ReasoningInput) treat an absent status as optional
+// and the decode-level twin pins the same acceptance for the full request. An
+// empty status must decode and validate; a malformed non-empty value still
+// rejects.
+func TestPreviousOutputMessageEmptyStatus(t *testing.T) {
+	output := OutputContentParts{&OutputText{Type: "output_text", Text: "x", Annotations: []Annotation{}}}
+	if err := (&PreviousOutputMessage{
+		ID: "msg_1", Type: "message", Role: "assistant", Status: "", Content: output,
+	}).Validate(); err != nil {
+		t.Fatalf("empty status rejected: %v", err)
+	}
+	if err := (&PreviousOutputMessage{
+		ID: "msg_1", Type: "message", Role: "assistant", Status: "bogus", Content: output,
+	}).Validate(); err == nil {
+		t.Fatal("bogus status accepted")
+	}
+}

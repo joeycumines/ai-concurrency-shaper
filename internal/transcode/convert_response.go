@@ -48,6 +48,7 @@ type chatChoiceShadow struct {
 	TokenIDs      any     `json:"token_ids,omitempty"`
 	RoutedExperts any     `json:"routed_experts,omitempty"`
 	StopReason    *string `json:"stop_reason,omitempty"`
+	MatchedStop   any     `json:"matched_stop,omitempty"`
 }
 
 // chatMessageShadow mirrors ChatMessage with a pointer role so an absent
@@ -69,6 +70,11 @@ type chatMessageShadow struct {
 	TokenIDs      any     `json:"token_ids,omitempty"`
 	RoutedExperts any     `json:"routed_experts,omitempty"`
 	StopReason    *string `json:"stop_reason,omitempty"`
+	// MatchedStop mirrors the wire ChatAssistantMessage extension
+	// (matched_stop is observed at choice level; the message-level mirror
+	// is defensive — the captured error text is level-ambiguous);
+	// shadow-mirrors-wire per the task-12 F1 pattern.
+	MatchedStop any `json:"matched_stop,omitempty"`
 }
 
 // chatToolCallShadow mirrors ChatMessageToolCall with a pointer arguments

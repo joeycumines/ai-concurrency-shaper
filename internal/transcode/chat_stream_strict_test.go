@@ -670,3 +670,45 @@ func TestChatStreamReviewMalformedStreamIsUpstreamFailure(t *testing.T) {
 		t.Fatalf("classification = %v, want upstream failure", got)
 	}
 }
+
+// TestChatStreamDecodesMatchedStopExtension proves the choice-level
+// `matched_stop` provider extension (observed in the field 2026-08-24 on the
+// yolo/qwen chat gateway: the opaque spelling of the stop signal that
+// finish_reason already carries) decodes on the strict streaming surface in
+// both its string and null forms — a current provider must never fail the
+// strict chunk decode — while a genuinely unknown field is still rejected.
+func TestChatStreamDecodesMatchedStopExtension(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "string",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null,"matched_stop":"<|im_end|>"}]}`,
+		},
+		{
+			name: "null",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null,"matched_stop":null}]}`,
+		},
+		{
+			name: "finish chunk",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop","matched_stop":"<|im_end|>"}]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunk, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(tt.body)})
+			if err != nil {
+				t.Fatalf("matched_stop chunk rejected: %v", err)
+			}
+			if len(chunk.Choices) != 1 {
+				t.Fatalf("chunk = %+v", chunk)
+			}
+		})
+	}
+
+	// A genuinely unknown choice field is still corrupt upstream wire.
+	bogus := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null,"bogus_field":1}]}`
+	_, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(bogus)})
+	assertChatStreamChunkWireError(t, err)
+}
