@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1930,4 +1931,123 @@ func TestE2E_AuthDisabledPassthrough(t *testing.T) {
 	if got := strings.Join(seen["X-Api-Key"], ", "); got != "verbatim-client-key" {
 		t.Errorf("X-Api-Key = %q, want forwarded verbatim", got)
 	}
+}
+
+// TestE2E_ConfigFileDriven proves an external catalog can drive the whole
+// gateway from a committed JSON file: providers load with ${ENV} references
+// resolved fail-closed, compose under the same validation rules, and route
+// end-to-end through the real binary.
+func TestE2E_ConfigFileDriven(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	upA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	t.Cleanup(upA.Close)
+	upB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	t.Cleanup(upB.Close)
+
+	const keyRef = "SHAPER_CONFIG_FILE_KEY"
+	t.Setenv(keyRef, "file-secret")
+
+	newAddr := func() string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		return addr
+	}
+
+	cfgPath := writeFileTemp(t, `{
+	  "providers": [
+	    {"name": "alpha", "upstream": "`+upA.URL+`", "prefix": "/alpha",
+	     "auth_source": "env:`+keyRef+`", "concurrency": 3},
+	    {"name": "bravo", "upstream": "`+upB.URL+`", "prefix": "/bravo"}
+	  ]
+	}`)
+
+	proxyAddr := newAddr()
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"-config", cfgPath,
+		"--provider=gamma",
+		"-upstream", upA.URL,
+		"-prefix", "/gamma",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+	runErr := make(chan error, 1)
+	go func() { runErr <- cmd.Wait() }()
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-runErr:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-runErr
+		}
+		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	for _, mount := range []string{"/alpha/ping", "/bravo/ping", "/gamma/ping"} {
+		resp, err := client.Post("http://"+proxyAddr+mount, "text/plain", nil)
+		if err != nil {
+			t.Fatalf("POST %s: %v", mount, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("POST %s: status %d, want 200", mount, resp.StatusCode)
+		}
+	}
+
+	// Inspect output only AFTER Wait(): cmd.Wait joins os/exec's copying
+	// goroutines, so reading earlier races the writer.
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-runErr:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-runErr
+	}
+
+	logged := out.String()
+	if !strings.Contains(logged, "auth-source=env:"+keyRef) {
+		t.Errorf("file provider auth not active:\n%s", logged)
+	}
+	if strings.Contains(logged, "file-secret") {
+		t.Errorf("log leaked the secret:\n%s", logged)
+	}
+}
+
+// writeFileTemp writes content to a temp file and returns its path.
+func writeFileTemp(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "providers.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

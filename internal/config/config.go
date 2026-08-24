@@ -75,6 +75,12 @@ func (s Scope) String() string {
 type Config struct {
 	Server    Server
 	Providers []*Provider
+
+	// sectioned records that the command line used --provider markers
+	// rather than legacy flat form. It decides how LoadFile merges: a
+	// configured legacy provider plus -config is ambiguous and rejected,
+	// while file entries compose with CLI sections.
+	sectioned bool
 }
 
 // Server holds the server/global section settings (legacy -bind/-tui/-version).
@@ -82,6 +88,9 @@ type Server struct {
 	Bind    string
 	TUI     bool
 	Version bool
+	// ConfigPath names a JSON file of provider definitions to load (the
+	// -config flag). Empty means no file.
+	ConfigPath string
 	// Help is set by -h/-help at server scope (or legacy top level): the
 	// caller prints usage and exits 0 instead of running the proxy.
 	Help bool

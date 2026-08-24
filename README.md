@@ -176,6 +176,43 @@ Where secrets can and cannot appear: a referenced variable's *value* is never lo
 
 A multi-provider configuration with no auth on some providers prints one startup note (`N of M providers configured without upstream auth`) so an open relay is never silent.
 
+#### Configuration File
+
+For catalogs too large for a command line, `-config` loads provider definitions from a JSON file. The file holds **providers only** — server flags (`-bind`, `-tui`, …) stay on the command line, so there is exactly one place each kind of setting lives:
+
+```json
+{
+  "providers": [
+    {
+      "name": "anthropic",
+      "upstream": "https://api.anthropic.com",
+      "prefix": "/anthropic",
+      "limits": ["POST /v1/messages:3@messages"],
+      "concurrency": 2,
+      "auth_source": "env:SHAPER_PROVIDER_ANTHROPIC_API_KEY"
+    },
+    {
+      "name": "openai",
+      "upstream": "https://api.openai.com",
+      "prefix": "/openai",
+      "queue_timeout": "45s",
+      "retry_skip_429": false
+    }
+  ]
+}
+```
+
+```sh
+ai-concurrency-shaper -bind 127.0.0.1:8080 -config providers.json
+```
+
+Rules:
+
+- Field names mirror the flags in snake_case; durations are Go strings (`"45s"`). Absent fields take exactly the CLI flag defaults.
+- Every string value may reference environment variables as `${VAR}`; an unset variable fails the load (fail-closed). Keep credential values out of the file — `auth_source` carries an `env:VAR` *reference*, so the committed file stays secret-free.
+- Unknown fields are rejected, so a typo'd key can't silently drop configuration.
+- File providers compose with `--provider` sections (file entries first); everything flows through the same validation as CLI-defined providers — prefix overlap, name uniqueness, value backstops, and auth grammar included.
+
 #### Scope & Limitations
 
 Routing is **path-prefix only**: there is no model-ID translation or request-body inspection today. Clients choose a provider by targeting its mount (`/anthropic/...`, `/openai/...`); a single base URL with body-aware model routing is future work. Other current limitations: there is no downstream client authentication (anything that can reach the port can use every mounted provider), readiness is TCP-connect only, and configuration changes require a restart.

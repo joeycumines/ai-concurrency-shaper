@@ -282,6 +282,16 @@ func run() error {
 		return nil
 	}
 
+	// Load the providers-only JSON file (if any) before validation so file
+	// entries flow through the exact same ResolveAndValidate rules as CLI
+	// sections. Errors here are fatal config errors and go to real stderr —
+	// deliberately before any TUI log capture below.
+	if cfg.Server.ConfigPath != "" {
+		if err := cfg.LoadFile(cfg.Server.ConfigPath); err != nil {
+			return err
+		}
+	}
+
 	// In TUI mode, capture output of the global stdlib logger and slog.Default()
 	// into an on-screen bounded buffer instead of letting it degrade the terminal
 	// dashboard. The buffer is created here — before ResolveAndValidate (whose
