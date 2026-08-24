@@ -1667,3 +1667,267 @@ func TestCLI_AuthStartupLines(t *testing.T) {
 		t.Errorf("log leaked the secret value:\n%s", logged)
 	}
 }
+
+// TestE2E_ProviderAuth proves per-provider strip-then-inject end-to-end
+// through the real binary: hostile client credentials and cloud decoys sent
+// to either mount never reach either upstream, and each upstream sees exactly
+// its own provider's credential form.
+func TestE2E_ProviderAuth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	// Each upstream records the headers it received and answers 200.
+	newCapturingUpstream := func() (*httptest.Server, func() map[string][]string) {
+		var mu sync.Mutex
+		seen := map[string][]string{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			for name, values := range r.Header {
+				seen[name] = values
+			}
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+		return srv, func() map[string][]string {
+			mu.Lock()
+			defer mu.Unlock()
+			cp := make(map[string][]string, len(seen))
+			for name, values := range seen {
+				cp[name] = values
+			}
+			return cp
+		}
+	}
+
+	upAcme, acmeSeen := newCapturingUpstream()
+	upBeta, betaSeen := newCapturingUpstream()
+
+	const (
+		acmeRef = "SHAPER_PROVIDER_ACME_API_KEY"
+		acmeVal = "acme-upstream-secret"
+		betaRef = "SHAPER_PROVIDER_BETA_API_KEY"
+		betaVal = "beta-upstream-secret"
+	)
+	t.Setenv(acmeRef, acmeVal)
+	t.Setenv(betaRef, betaVal)
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyAddr := proxyLn.Addr().String()
+	proxyLn.Close()
+
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"--provider=acme",
+		"-upstream", upAcme.URL,
+		"-prefix", "/acme",
+		"-auth-source", "env:"+acmeRef,
+		"-auth-mode", "x-api-key", // explicit override of host-derived bearer
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=beta",
+		"-upstream", upBeta.URL,
+		"-prefix", "/beta",
+		"-auth-source", "env:"+betaRef,
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+	runErr := make(chan error, 1)
+	go func() { runErr <- cmd.Wait() }()
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-runErr:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-runErr
+		}
+		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	fire := func(mount string) {
+		req, err := http.NewRequest(http.MethodPost, "http://"+proxyAddr+mount+"/v1/messages", nil)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		// A hostile client carries BOTH providers' credentials plus cloud
+		// decoys and a stale Anthropic version on every request.
+		req.Header.Set("Authorization", "Bearer client-bearer-token")
+		req.Header.Set("X-Api-Key", "client-anthropic-key")
+		req.Header.Set("X-Goog-Api-Key", "client-google-key")
+		req.Header.Set("Anthropic-Version", "1999-01-01")
+		req.Header.Set("X-Amz-Date", "19990101T000000Z")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", mount, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST %s: status %d", mount, resp.StatusCode)
+		}
+	}
+	fire("/acme")
+	fire("/beta")
+
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-runErr:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-runErr
+		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
+	}
+
+	assertOnly := func(name string, got map[string][]string, want map[string]string) {
+		t.Helper()
+		banned := map[string]bool{
+			"Authorization": true, "X-Api-Key": true, "Api-Key": true,
+			"X-Goog-Api-Key": true, "Anthropic-Version": true,
+			"Anthropic-Beta": true, "X-Amz-Date": true,
+		}
+		for injected := range want {
+			delete(banned, injected)
+		}
+		for name2 := range banned {
+			if values, ok := got[name2]; ok {
+				t.Errorf("%s upstream saw stripped header %s: %v", name, name2, values)
+			}
+		}
+		for name2, wantValue := range want {
+			gotValue := strings.Join(got[name2], ", ")
+			if gotValue != wantValue {
+				t.Errorf("%s upstream %s = %q, want %q", name, name2, gotValue, wantValue)
+			}
+		}
+	}
+
+	assertOnly("acme", acmeSeen(), map[string]string{
+		"X-Api-Key":         acmeVal,
+		"Anthropic-Version": "2023-06-01",
+	})
+	assertOnly("beta", betaSeen(), map[string]string{
+		"Authorization": "Bearer " + betaVal,
+	})
+
+	if logged := out.String(); strings.Contains(logged, acmeVal) || strings.Contains(logged, betaVal) {
+		t.Errorf("process logs leaked a secret:\n%s", logged)
+	}
+}
+
+// TestE2E_AuthDisabledPassthrough pins the backward-compat contract: with no
+// auth flags the binary forwards client credentials VERBATIM to the upstream.
+func TestE2E_AuthDisabledPassthrough(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	var mu sync.Mutex
+	seen := map[string][]string{}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		for name, values := range r.Header {
+			seen[name] = values
+		}
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(up.Close)
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyAddr := proxyLn.Addr().String()
+	proxyLn.Close()
+
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"-upstream", up.URL,
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+	runErr := make(chan error, 1)
+	go func() { runErr <- cmd.Wait() }()
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		<-runErr
+		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+	}
+
+	req, err := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/v1/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer verbatim-client-token")
+	req.Header.Set("X-Api-Key", "verbatim-client-key")
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-runErr:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-runErr
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(seen["Authorization"], ", "); got != "Bearer verbatim-client-token" {
+		t.Errorf("Authorization = %q, want forwarded verbatim", got)
+	}
+	if got := strings.Join(seen["X-Api-Key"], ", "); got != "verbatim-client-key" {
+		t.Errorf("X-Api-Key = %q, want forwarded verbatim", got)
+	}
+}

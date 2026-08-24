@@ -34,6 +34,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
@@ -73,6 +74,7 @@ type proxyConfig struct {
 	adaptiveHeadroom       bool
 	adaptiveHeadroomWindow time.Duration
 	limitAll               bool
+	authPolicy             *auth.AuthPolicy
 }
 
 // --- Concrete Options ---
@@ -477,6 +479,25 @@ func (o *LimitAllOption) applyProxyOption(cfg *proxyConfig) error {
 	return nil
 }
 
+// AuthPolicyOption attaches an upstream authentication policy.
+type AuthPolicyOption struct {
+	value *auth.AuthPolicy
+}
+
+// WithAuthPolicy returns an option that sets the upstream authentication
+// policy. When set, every proxied request has client credential and protocol
+// headers stripped and the policy's upstream credential attached inside the
+// Rewrite hook; when nil (the default) requests are forwarded verbatim with no
+// mutation at all.
+func WithAuthPolicy(policy *auth.AuthPolicy) *AuthPolicyOption {
+	return &AuthPolicyOption{value: policy}
+}
+
+func (o *AuthPolicyOption) applyProxyOption(cfg *proxyConfig) error {
+	cfg.authPolicy = o.value
+	return nil
+}
+
 // --- Compile-Time Compliance Checks ---
 
 var (
@@ -501,6 +522,7 @@ var (
 	_ Option = (*AdaptiveHeadroomOption)(nil)
 	_ Option = (*AdaptiveHeadroomWindowOption)(nil)
 	_ Option = (*LimitAllOption)(nil)
+	_ Option = (*AuthPolicyOption)(nil)
 )
 
 // --- Factory ---
@@ -543,6 +565,11 @@ type Proxy struct {
 	// limitAll routes every request through the default limiter, not just
 	// requests matching a limited route.
 	limitAll bool
+
+	// authPolicy, when non-nil, strips client credential/protocol headers
+	// and attaches the upstream credential inside the Rewrite hook. nil
+	// forwards requests verbatim.
+	authPolicy *auth.AuthPolicy
 }
 
 // New creates a Proxy from the given options.
@@ -640,17 +667,32 @@ func New(opts ...Option) (*Proxy, error) {
 		adaptiveHeadroom:       cfg.adaptiveHeadroom,
 		adaptiveHeadroomWindow: cfg.adaptiveHeadroomWindow,
 		limitAll:               cfg.limitAll,
+		authPolicy:             cfg.authPolicy,
 	}
 
 	rp := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			req.URL.Scheme = cfg.upstream.Scheme
-			req.URL.Host = cfg.upstream.Host
-			req.URL.Path = cfg.upstream.Path + req.URL.Path
-			req.Host = cfg.upstream.Host
-			req.Header.Del("X-Forwarded-For")
-			req.Header.Del("X-Forwarded-Host")
-			req.Header.Del("X-Forwarded-Proto")
+		// Rewrite (not the deprecated Director) is load-bearing for auth
+		// safety: stdlib strips hop-by-hop headers from the outbound clone
+		// BEFORE this hook runs, so headers injected here cannot be removed
+		// by a client Connection list (golang/go#50580). stdlib also deletes
+		// Forwarded/X-Forwarded-* before calling us, preserving the stealth
+		// posture; we never call SetXForwarded.
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = cfg.upstream.Scheme
+			pr.Out.URL.Host = cfg.upstream.Host
+			pr.Out.URL.Path = cfg.upstream.Path + pr.Out.URL.Path
+			pr.Out.Host = cfg.upstream.Host
+			if cfg.authPolicy != nil {
+				// Unreachable error for validated policies whose secret was
+				// resolved at startup: stripping is unconditional and
+				// injection only fails if the secret source fails at call
+				// time. Fall back to strip-only rather than forwarding an
+				// unauthenticated or client-credentialed request.
+				if err := auth.ApplyUpstreamAuthentication(pr.Out.Context(), pr.Out, cfg.authPolicy); err != nil {
+					slog.Error("upstream auth failed; forwarding stripped-only", "error", err)
+					auth.StripCredentials(pr.Out.Header)
+				}
+			}
 		},
 		Transport: p,
 		ModifyResponse: func(res *http.Response) error {
@@ -953,12 +995,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Create journal entry for this request.
+	// Create journal entry for this request. Credential-bearing header values
+	// are redacted at capture so the TUI Network panel and stored entries can
+	// never disclose them (client credentials are secrets regardless of
+	// whether this proxy attaches upstream credentials).
 	if p.journal != nil {
 		entry = &journal.Entry{
 			Method:         r.Method,
 			URL:            r.URL,
-			RequestHeaders: r.Header.Clone(),
+			RequestHeaders: auth.RedactSensitiveHeaders(r.Header.Clone()),
 			Limited:        limited,
 			Timing: journal.Timing{
 				QueueStart: time.Now(),

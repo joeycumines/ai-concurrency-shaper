@@ -111,6 +111,7 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 		proxy.WithAdaptiveHeadroom(p.AdaptiveHeadroom),
 		proxy.WithAdaptiveHeadroomWindow(p.AdaptiveHeadroomWindow),
 		proxy.WithLimitAll(p.LimitAll),
+		proxy.WithAuthPolicy(p.AuthPolicy()),
 		proxy.WithTransport(transport),
 		proxy.WithJournal(j),
 		proxy.WithBreaker(p.Breaker()),

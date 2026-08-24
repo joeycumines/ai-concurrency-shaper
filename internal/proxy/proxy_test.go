@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +37,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
@@ -11032,6 +11035,254 @@ func TestMaxIdleConnsPerHost(t *testing.T) {
 			got := MaxIdleConnsPerHost(tt.global, tt.concurrency, tt.patterns, tt.routeLimiters, tt.limitAll)
 			if got != tt.wantIdlePerHost {
 				t.Fatalf("MaxIdleConnsPerHost() = %d, want %d", got, tt.wantIdlePerHost)
+			}
+		})
+	}
+}
+
+// newHeaderEchoUpstream returns a server that replies with a JSON document of
+// the received Host and every received header, so assertions can compare the
+// exact wire image each mode produces.
+func newHeaderEchoUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Helper()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"host":    r.Host,
+			"path":    r.URL.Path,
+			"query":   r.URL.RawQuery,
+			"headers": r.Header,
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newAuthTestProxy assembles a Proxy against upstreamURL with the given
+// policy and journal.
+func newAuthTestProxy(t *testing.T, upstreamURL string, policy *auth.AuthPolicy, j *journal.Journal) *Proxy {
+	t.Helper()
+	u, err := url.Parse(upstreamURL)
+	if err != nil {
+		t.Fatalf("parse upstream: %v", err)
+	}
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithJournal(j),
+		WithAuthPolicy(policy),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	return p
+}
+
+// capturedHeader decodes the echo upstream's reply into a plain map.
+func capturedHeader(t *testing.T, body io.Reader) (map[string]string, string, string) {
+	t.Helper()
+	var doc struct {
+		Host    string              `json:"host"`
+		Path    string              `json:"path"`
+		Query   string              `json:"query"`
+		Headers map[string][]string `json:"headers"`
+	}
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode echo %q: %v", string(raw), err)
+	}
+	flat := make(map[string]string, len(doc.Headers))
+	for name, values := range doc.Headers {
+		flat[name] = strings.Join(values, ", ")
+	}
+	return flat, doc.Path + "?" + doc.Query, doc.Host
+}
+
+// TestProxy_RewriteParity pins the Director->Rewrite migration's wire parity:
+// path joining (including upstream base paths), Host override, forwarding-
+// header suppression, and query preservation.
+func TestProxy_RewriteParity(t *testing.T) {
+	cases := []struct {
+		name        string
+		upstreamURL string // replaced per-case below
+	}{
+		{name: "bare host", upstreamURL: ""},
+		{name: "base path", upstreamURL: ""},
+	}
+
+	build := func(base string) (*httptest.Server, string) {
+		echo := newHeaderEchoUpstream(t)
+		target := echo.URL
+		if base != "" {
+			target += base
+		}
+		return echo, target
+	}
+
+	for _, tc := range cases {
+		base := ""
+		if tc.name == "base path" {
+			base = "/apibase"
+		}
+		echo, target := build(base)
+		wantHost := strings.TrimPrefix(echo.URL, "http://")
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages?stream=true", nil)
+		rec := httptest.NewRecorder()
+
+		p := newAuthTestProxy(t, target, nil, nil)
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", tc.name, rec.Code)
+		}
+		headers0, _, gotHost := capturedHeader(t, rec.Result().Body)
+		_ = headers0
+		if gotHost != wantHost {
+			t.Errorf("%s: upstream Host = %q, want %q", tc.name, gotHost, wantHost)
+		}
+		// Re-run against a fresh recorder for the remaining assertions below.
+		req = httptest.NewRequest(http.MethodPost, "/v1/messages?stream=true", nil)
+		rec = httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		headers, pathQuery, _ := capturedHeader(t, rec.Result().Body)
+		wantPath := "/apibase/v1/messages"
+		if base == "" {
+			wantPath = "/v1/messages"
+		}
+		if pathQuery != wantPath+"?stream=true" {
+			t.Errorf("%s: upstream saw %q, want %q", tc.name, pathQuery, wantPath+"?stream=true")
+		}
+		for _, fwd := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"} {
+			if got := headers[fwd]; got != "" {
+				t.Errorf("%s: upstream saw %s: %q, want suppressed", tc.name, fwd, got)
+			}
+		}
+	}
+}
+
+// TestProxy_AuthInjectionThroughServeHTTP drives strip-then-inject through the
+// full ServeHTTP stack for every mode, proving hostile client credentials and
+// cloud decoys never reach the upstream while the configured credential does.
+func TestProxy_AuthInjectionThroughServeHTTP(t *testing.T) {
+	newReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		req.Header.Set("Authorization", "Bearer client-token")
+		req.Header.Set("X-Api-Key", "client-anthropic")
+		req.Header.Set("Api-Key", "client-azure")
+		req.Header.Set("X-Goog-Api-Key", "client-google")
+		req.Header.Set("Anthropic-Version", "1999-01-01")
+		req.Header.Set("Anthropic-Beta", "client-beta")
+		req.Header.Set("x-amz-date", "19990101T000000Z")
+		req.Header.Set("Content-Type", "application/json")
+		return req
+	}
+
+	assertClean := func(t *testing.T, headers map[string]string, injects map[string]string) {
+		t.Helper()
+		for _, leaked := range []string{
+			"Authorization", "X-Api-Key", "Api-Key", "X-Goog-Api-Key",
+			"Anthropic-Version", "Anthropic-Beta", "X-Amz-Date",
+		} {
+			if _, injected := injects[leaked]; injected {
+				continue
+			}
+			if got := headers[leaked]; got != "" {
+				t.Errorf("upstream saw stripped header %s: %q", leaked, got)
+			}
+		}
+		for name, want := range injects {
+			if got := headers[name]; got != want {
+				t.Errorf("upstream %s = %q, want %q", name, got, want)
+			}
+		}
+	}
+
+	t.Run("bearer", func(t *testing.T) {
+		echo := newHeaderEchoUpstream(t)
+		policy := &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: auth.NewStaticSecretSource("cfg-bearer")}
+		p := newAuthTestProxy(t, echo.URL, policy, nil)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, newReq())
+		headers, _, _ := capturedHeader(t, rec.Result().Body)
+		assertClean(t, headers, map[string]string{"Authorization": "Bearer cfg-bearer"})
+	})
+
+	t.Run("x-api-key with version", func(t *testing.T) {
+		echo := newHeaderEchoUpstream(t)
+		policy := &auth.AuthPolicy{Mode: auth.AuthXAPIKey, Secret: auth.NewStaticSecretSource("sk"),
+			AnthropicVersion: "2023-06-01"}
+		p := newAuthTestProxy(t, echo.URL, policy, nil)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, newReq())
+		headers, _, _ := capturedHeader(t, rec.Result().Body)
+		assertClean(t, headers, map[string]string{"X-Api-Key": "sk", "Anthropic-Version": "2023-06-01"})
+	})
+
+	t.Run("none strips without injecting", func(t *testing.T) {
+		echo := newHeaderEchoUpstream(t)
+		p := newAuthTestProxy(t, echo.URL, &auth.AuthPolicy{Mode: auth.AuthNone}, nil)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, newReq())
+		headers, _, _ := capturedHeader(t, rec.Result().Body)
+		assertClean(t, headers, nil)
+		if got := headers["Content-Type"]; got != "application/json" {
+			t.Errorf("Content-Type = %q, want untouched passthrough", got)
+		}
+	})
+}
+
+// TestProxy_JournalRequestHeadersRedacted proves credential VALUES never
+// enter the journal (and therefore the TUI Network panel), with or without an
+// auth policy, while non-sensitive headers stay inspectable.
+func TestProxy_JournalRequestHeadersRedacted(t *testing.T) {
+	for _, withPolicy := range []bool{false, true} {
+		name := "no policy"
+		if withPolicy {
+			name = "with policy"
+		}
+		t.Run(name, func(t *testing.T) {
+			echo := newHeaderEchoUpstream(t)
+			j := journal.New(8, 1<<20)
+			var policy *auth.AuthPolicy
+			if withPolicy {
+				policy = &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: auth.NewStaticSecretSource("cfg-secret")}
+			}
+			p := newAuthTestProxy(t, echo.URL, policy, j)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			req.Header.Set("Authorization", "Bearer client-secret-value")
+			req.Header.Set("Cookie", "session=abc")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			entries := j.Entries()
+			if len(entries) != 1 {
+				t.Fatalf("journal entries = %d, want 1", len(entries))
+			}
+			h := entries[0].RequestHeaders
+			if h == nil {
+				t.Fatal("journal entry has no request headers")
+			}
+			for name, values := range map[string][]string{
+				"Authorization": {"[REDACTED]"},
+				"Cookie":        {"[REDACTED]"},
+			} {
+				if got := h.Values(name); !reflect.DeepEqual(got, values) {
+					t.Errorf("journal %s = %q, want %q", name, got, values)
+				}
+			}
+			if got := h.Get("Content-Type"); got != "application/json" {
+				t.Errorf("journal Content-Type = %q, want untouched", got)
+			}
+			if strings.Contains(fmt.Sprint(h), "client-secret-value") {
+				t.Errorf("journal leaked credential value: %v", h)
 			}
 		})
 	}
