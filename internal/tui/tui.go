@@ -77,6 +77,12 @@ const (
 	numTabs
 )
 
+// tabNames is the single source of truth for tab labels used both for rendering
+// and for mouse hit-testing. Each entry is rendered as " "+name+" " with
+// PaddingLeft(1) PaddingRight(1) in the theme, so the visible cell width is
+// len-agnostic and measured via style rendering in tabAt().
+var tabNames = []string{"1 Overview", "2 Requests", "3 Network", "4 Logs", "5 Concurrency", "6 Routes"}
+
 // networkFilterType controls which content types are shown in the Network tab.
 type networkFilterType int
 
@@ -1591,18 +1597,19 @@ func (m *Model) canInspect() bool {
 }
 
 func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
-	if m.tab == tabLogs {
-		m.followLogs = false
-	}
 	mx := msg.Mouse().X
 	my := msg.Mouse().Y
 
 	// Tab bar (row 1).
 	if my == 1 {
-		tabWidth := m.width / int(numTabs)
-		clickedTab := mx / tabWidth
-		if int(clickedTab) < int(numTabs) {
-			m.switchTab(tabID(clickedTab))
+		// Clicks beyond the terminal width land on non-existent cells and
+		// must not switch tabs. tabAt deliberately ignores m.width, so this
+		// guard is the boundary between rendered and unrendered columns.
+		if mx >= m.width {
+			return m, nil
+		}
+		if clickedTab, ok := m.tabAt(mx); ok {
+			m.switchTab(clickedTab)
 		}
 		return m, nil
 	}
@@ -1611,6 +1618,14 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 	contentEndRow := contentStartRow + m.visibleRows()
 	if my < contentStartRow || my >= contentEndRow {
 		return m, nil
+	}
+
+	// A genuine content-area click (below the tab bar) pauses tail-following
+	// on the Logs tab. Tab-bar clicks — including empty space and tab
+	// switches — do NOT affect followLogs here, so switching to Logs via the
+	// tab header keeps following enabled (see switchTab).
+	if m.tab == tabLogs {
+		m.followLogs = false
 	}
 
 	// Scrollbar column (rightmost): jump scroll and begin drag. The scrollbar
@@ -1845,19 +1860,59 @@ func (m Model) renderHeader() string {
 	)
 }
 
+// renderTab renders a single tab label using the theme. The selected tab
+// (tabID(i) == m.tab) uses tabActiveStyle; all others use tabInactiveStyle.
+// Both styles share the same horizontal box model (PaddingLeft(1).PaddingRight(1)),
+// differing only in color and weight, so the rendered widths are equal for a
+// given label — but the measurement MUST come from the same code path that
+// renderTabBar uses, so hit-testing (tabAt) tracks the exact pixels on screen.
+func (m Model) renderTab(i int, name string) string {
+	if tabID(i) == m.tab {
+		return m.styles.tabActiveStyle.Render(" " + name + " ")
+	}
+	return m.styles.tabInactiveStyle.Render(" " + name + " ")
+}
+
 func (m Model) renderTabBar() string {
-	names := []string{"1 Overview", "2 Requests", "3 Network", "4 Logs", "5 Concurrency", "6 Routes"}
-	parts := make([]string, len(names))
-	for i, name := range names {
-		if tabID(i) == m.tab {
-			parts[i] = m.styles.tabActiveStyle.Render(" " + name + " ")
-		} else {
-			parts[i] = m.styles.tabInactiveStyle.Render(" " + name + " ")
-		}
+	parts := make([]string, len(tabNames))
+	for i, name := range tabNames {
+		parts[i] = m.renderTab(i, name)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 }
 
+// tabAt returns which tab, if any, occupies cell x on the tab bar row.
+// It measures each tab's visible cell width as rendered by the current theme
+// (padding included) so hit-testing tracks the exact pixels the user sees,
+// not a ratio of terminal width. The tab bar is left-aligned at x=0 with no
+// reflow; cells beyond the total bar width are empty space and return !ok.
+func (m Model) tabAt(x int) (tabID, bool) {
+	if x < 0 {
+		return 0, false
+	}
+	offset := 0
+	for i, name := range tabNames {
+		// Measure using renderTab so hit-testing tracks the exact rendered
+		// geometry — the selected tab uses tabActiveStyle, others use
+		// tabInactiveStyle. Both share the same padding, but rendering must
+		// never hard-code one style for all tabs.
+		rendered := m.renderTab(i, name)
+		w := uniseg.StringWidth(stripANSI(rendered))
+		if w <= 0 {
+			// Defensive fallback: if a style is zero-value (Render returns the
+			// raw input), the width is len(content)+2 padding = name+4.
+			// This branch is effectively unreachable because " "+name+" " is
+			// always at least 3 cells, but guards against impossible states.
+			w = uniseg.StringWidth(name) + 4
+		}
+
+		if x >= offset && x < offset+w {
+			return tabID(i), true
+		}
+		offset += w
+	}
+	return 0, false
+}
 func (m Model) renderContent() string {
 	switch m.tab {
 	case tabDashboard:
