@@ -42,6 +42,10 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-upstream-disable-keep-alives` | provider | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
 | `-retry` | provider | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
 | `-retry-max-body-mb` | provider | `5` | Max request body size (MB) eligible for retry |
+| `-auth-source` | provider | _(unset)_ | Upstream credential source: `env:VAR`, `file:PATH`, or `none` (strip-only). Unset disables upstream auth entirely — requests are forwarded verbatim |
+| `-auth-mode` | provider | `auto` | How the credential is attached: `auto` (derived from the upstream host), `bearer`, `x-api-key`, `api-key`, or `header:NAME`. `none` strips client credentials without injecting anything |
+| `-auth-header` | provider | _(required by `header:` mode)_ | Custom upstream auth header name (e.g. `X-Goog-Api-Key`) |
+| `-anthropic-version` | provider | `2023-06-01` | `Anthropic-Version` header value applied when the resolved mode is `x-api-key` |
 | `-tui` | server | `false` | Enable terminal dashboard |
 | `-version` | server | | Print version and exit |
 
@@ -126,6 +130,55 @@ Mount semantics:
 - Providers are matched on whole path segments, so `/anthropic2` never matches the `/anthropic` prefix.
 
 In the TUI, each provider keeps its own dashboard. The header shows one chip per provider (the active one highlighted), filled by the provider name instead of the `⚡ shaper` brand; `Tab`/`Shift+Tab` cycle providers, chips are clickable, and the number keys `1-6` still switch content tabs. The in-TUI help (`?`) lists the switch binding whenever the switcher is shown.
+
+#### Upstream Authentication
+
+Each provider can carry its own upstream credential, so clients no longer need to know provider secrets at all. Credentials live in the **environment** (resolved once at startup) or a file; they never appear in command lines, config files, logs, or the TUI.
+
+```sh
+export SHAPER_PROVIDER_ANTHROPIC_API_KEY=sk-ant-...   # resolved by the proxy at startup
+export SHAPER_PROVIDER_OPENAI_API_KEY=sk-...
+
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8080 \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -auth-source env:SHAPER_PROVIDER_ANTHROPIC_API_KEY \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -auth-source env:SHAPER_PROVIDER_OPENAI_API_KEY
+```
+
+With auth enabled, every proxied request has all client credential headers (`Authorization`, `X-Api-Key`, `Api-Key`, `X-Goog-Api-Key`) plus protocol headers (`Anthropic-Version`, `Anthropic-Beta`) and cloud signature families (`x-amz-*`, `x-goog-*`) stripped first — then exactly one upstream credential is attached. A client that sends OpenAI's token to the Anthropic mount cannot leak it to Anthropic, and vice versa: cross-provider leakage is structurally impossible, not merely discouraged. The injection happens inside Go's `Rewrite` hook, where hop-by-hop headers have already been removed, so a malicious `Connection` header list cannot strip the injected credential.
+
+Modes:
+
+| `-auth-mode` | Upstream sees | Typical provider |
+|--------------|---------------|------------------|
+| `auto` _(default)_ | `x-api-key` for `api.anthropic.com`/`*.anthropic.com`, otherwise `Authorization: Bearer` | any |
+| `bearer` | `Authorization: Bearer <secret>` | OpenAI-compatible |
+| `x-api-key` | `X-Api-Key: <secret>` + configured `-anthropic-version` | Anthropic Messages |
+| `api-key` | `Api-Key: <secret>` | Azure key-based |
+| `header:NAME` | `NAME: <secret>` | Gemini-style custom headers (set `NAME` via `-auth-header NAME` instead if you prefer) |
+
+Sources:
+
+| `-auth-source` | Behavior |
+|----------------|----------|
+| `env:VAR` | Read `VAR` from the environment once at startup. Unset or blank → startup fails naming the variable |
+| `file:PATH` | Read the secret from `PATH` once at startup. Unreadable or blank → startup fails naming the path |
+| `none` | Strip-only hygiene: client credentials are removed, nothing is injected |
+| _(unset)_ | Auth disabled entirely — requests are forwarded verbatim, exactly as before this feature existed |
+
+Where secrets can and cannot appear: a referenced variable's *value* is never logged, printed, or written anywhere by the proxy — startup logs name only the *reference* (`env:SHAPER_PROVIDER_ACME_API_KEY`). Journal entries and the TUI Network panel show `[REDACTED]` in place of credential header values (client credentials included). Passing secrets as literal argv values would expose them in `ps`/`/proc`; use env references instead.
+
+A multi-provider configuration with no auth on some providers prints one startup note (`N of M providers configured without upstream auth`) so an open relay is never silent.
+
+#### Scope & Limitations
+
+Routing is **path-prefix only**: there is no model-ID translation or request-body inspection today. Clients choose a provider by targeting its mount (`/anthropic/...`, `/openai/...`); a single base URL with body-aware model routing is future work. Other current limitations: there is no downstream client authentication (anything that can reach the port can use every mounted provider), readiness is TCP-connect only, and configuration changes require a restart.
 
 ### Examples
 
