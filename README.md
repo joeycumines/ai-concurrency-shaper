@@ -34,6 +34,7 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 |------|-------|---------|-------------|
 | `-upstream` | provider | _(required)_ | Upstream base URL |
 | `-bind` | server | `:8080` | Listen address |
+| `-config` | server | _(unset)_ | Load provider definitions from a JSON file (providers array; see [Configuration File](#configuration-file)). File providers compose with `--provider` sections |
 | `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
 | `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
 | `-concurrency` | provider | `4` | Max concurrent limited requests |
@@ -151,7 +152,11 @@ ai-concurrency-shaper \
     -auth-source env:SHAPER_PROVIDER_OPENAI_API_KEY
 ```
 
-With auth enabled, every proxied request has all client credential headers (`Authorization`, `X-Api-Key`, `Api-Key`, `X-Goog-Api-Key`) plus protocol headers (`Anthropic-Version`, `Anthropic-Beta`) and cloud signature families (`x-amz-*`, `x-goog-*`) stripped first — then exactly one upstream credential is attached. A client that sends OpenAI's token to the Anthropic mount cannot leak it to Anthropic, and vice versa: cross-provider leakage is structurally impossible, not merely discouraged. The injection happens inside Go's `Rewrite` hook, where hop-by-hop headers have already been removed, so a malicious `Connection` header list cannot strip the injected credential.
+With auth enabled, every proxied request has all client HTTP credential headers (`Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key`, `X-Goog-Api-Key`) plus protocol headers (`Anthropic-Version`, `Anthropic-Beta`) and cloud signature families (`x-amz-*`, `x-goog-*`) stripped first — then exactly one upstream credential is attached. A client that sends OpenAI's token to the Anthropic mount cannot leak it to Anthropic, and vice versa: leakage of these credential headers is structurally impossible, not merely discouraged. The injection happens inside Go's `Rewrite` hook, where hop-by-hop headers have already been removed, so a malicious `Connection` header list cannot strip the injected credential.
+
+One deliberate exception: **`Cookie` headers are forwarded verbatim** to whichever mount receives the request, even with auth enabled — stripping them unconditionally would break cookie-authenticated upstreams. Cookies are still treated as secrets for display: journal entries and the TUI Network panel show `[REDACTED]` in place of their values. If your clients send cookies you do not want forwarded, strip them before they reach the gateway.
+
+The gateway never sends `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, or `Forwarded` upstream — client-supplied forwarding headers are removed and no client IP is injected (the gateway is a stealth hop). This is also true when auth is disabled.
 
 Modes:
 

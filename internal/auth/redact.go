@@ -76,9 +76,13 @@ func sensitive(canonical string) bool {
 }
 
 // StripCredentials removes every client-supplied credential and provider
-// protocol header from h so no credential crosses a provider boundary: the
+// protocol header from h so none of them cross a provider boundary: the
 // named credential and protocol families plus case-insensitive X-Amz-*/X-Goog-*
-// prefixed keys. It mutates h in place.
+// prefixed keys. Cookie is deliberately NOT stripped (it is only
+// display-redacted — see displayOnlyCredentialNames) because stripping it
+// unconditionally would break cookie-authenticated upstreams; it therefore
+// does cross boundaries and must not be treated as contained. It mutates h
+// in place.
 func StripCredentials(h http.Header) {
 	for _, name := range credentialHeaderNames {
 		h.Del(name)

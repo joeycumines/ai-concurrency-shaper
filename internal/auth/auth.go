@@ -14,16 +14,22 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 // Package auth implements per-provider upstream authentication: it strips
-// every client-supplied credential and protocol header from a request before
-// it crosses a provider boundary, then attaches exactly one configured
+// every client-supplied HTTP credential and protocol header from a request
+// before it crosses a provider boundary, then attaches exactly one configured
 // upstream credential.
 //
 // The threat model is a multi-provider gateway: different upstreams speak
 // different auth schemes (Anthropic x-api-key plus anthropic-version, OpenAI
 // bearer, Azure api-key, arbitrary custom headers), and verbatim forwarding
 // would leak one provider's credential to another. Strip-then-inject makes
-// cross-provider leakage structural impossible whenever a policy is applied;
-// with no policy the caller performs no mutation at all.
+// cross-provider leakage of those credentials structurally impossible
+// whenever a policy is applied; with no policy the caller performs no
+// mutation at all.
+//
+// One credential class is deliberately exempt: Cookie values are forwarded
+// verbatim (stripping them would break cookie-authenticated upstreams) and
+// are instead display-redacted by RedactSensitiveHeaders so they never reach
+// journal entries or the TUI. See displayOnlyCredentialNames in redact.go.
 package auth
 
 import (
@@ -43,8 +49,9 @@ const (
 	// resolved to a concrete mode via ResolveMode before a policy is built;
 	// Validate rejects it so an unresolved mode can never reach requests.
 	AuthAuto AuthMode = "auto"
-	// AuthNone strips every credential and protocol header without injecting
-	// anything: credential hygiene without custody.
+	// AuthNone strips every credential and protocol header (Cookie exempt;
+	// see StripCredentials) without injecting anything: credential hygiene
+	// without custody.
 	AuthNone AuthMode = "none"
 	// AuthBearer injects "Authorization: Bearer <secret>" (OpenAI-compatible).
 	AuthBearer AuthMode = "bearer"
@@ -160,11 +167,12 @@ func validHeaderName(name string) bool {
 }
 
 // ApplyUpstreamAuthentication strips every client credential and protocol
-// header from req and attaches exactly the policy's upstream credential. It
-// must run after the outbound URL and Host are final and before the request
-// is sent - inside httputil.ReverseProxy's Rewrite hook, where stdlib has
-// already removed hop-by-hop headers from the outbound clone, so headers set
-// here cannot be stripped by a client Connection list.
+// header from req (Cookie exempt — see StripCredentials) and attaches exactly
+// the policy's upstream credential. It must run after the outbound URL and
+// Host are final and before the request is sent - inside
+// httputil.ReverseProxy's Rewrite hook, where stdlib has already removed
+// hop-by-hop headers from the outbound clone, so headers set here cannot be
+// stripped by a client Connection list.
 //
 // Apply never returns an error for validated policies whose Secret was
 // resolved at startup: stripping is unconditional and injection only fails if

@@ -1909,6 +1909,11 @@ func TestE2E_AuthDisabledPassthrough(t *testing.T) {
 	}
 	req.Header.Set("Authorization", "Bearer verbatim-client-token")
 	req.Header.Set("X-Api-Key", "verbatim-client-key")
+	// Client-supplied forwarding headers must be suppressed even in verbatim
+	// passthrough mode, and the gateway never injects its own client IP
+	// (stealth posture; intentional wire delta vs pre-Rewrite binaries).
+	req.Header.Set("X-Forwarded-For", "203.0.113.7")
+	req.Header.Set("X-Forwarded-Proto", "https")
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -1930,6 +1935,11 @@ func TestE2E_AuthDisabledPassthrough(t *testing.T) {
 	}
 	if got := strings.Join(seen["X-Api-Key"], ", "); got != "verbatim-client-key" {
 		t.Errorf("X-Api-Key = %q, want forwarded verbatim", got)
+	}
+	for _, fwd := range []string{"X-Forwarded-For", "X-Forwarded-Proto", "Forwarded"} {
+		if got, ok := seen[fwd]; ok {
+			t.Errorf("%s reached upstream: %v, want suppressed (stealth posture)", fwd, got)
+		}
 	}
 }
 

@@ -683,10 +683,11 @@ func New(opts ...Option) (*Proxy, error) {
 			pr.Out.URL.Path = cfg.upstream.Path + pr.Out.URL.Path
 			pr.Out.Host = cfg.upstream.Host
 			if cfg.authPolicy != nil {
-				// Unreachable error for validated policies whose secret was
-				// resolved at startup: stripping is unconditional and
-				// injection only fails if the secret source fails at call
-				// time. Fall back to strip-only rather than forwarding an
+				// Effectively unreachable for config-built policies: their
+				// sources reject blank credentials at construction time, and
+				// Validate ran at startup. Kept defensive for direct callers
+				// and future SecretSource implementations. On failure, fall
+				// back to strip-only rather than forwarding an
 				// unauthenticated or client-credentialed request.
 				if err := auth.ApplyUpstreamAuthentication(pr.Out.Context(), pr.Out, cfg.authPolicy); err != nil {
 					slog.Error("upstream auth failed; forwarding stripped-only", "error", err)

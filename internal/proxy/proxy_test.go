@@ -11147,7 +11147,13 @@ func TestProxy_RewriteParity(t *testing.T) {
 			t.Errorf("%s: upstream Host = %q, want %q", tc.name, gotHost, wantHost)
 		}
 		// Re-run against a fresh recorder for the remaining assertions below.
+		// The client this time SUPPLIES forwarding headers: stdlib deletes
+		// Forwarded/X-Forwarded-* from the outbound clone before Rewrite, so
+		// even client-supplied values must never reach the upstream.
 		req = httptest.NewRequest(http.MethodPost, "/v1/messages?stream=true", nil)
+		req.Header.Set("X-Forwarded-For", "203.0.113.7")
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("Forwarded", "for=203.0.113.7")
 		rec = httptest.NewRecorder()
 		p.ServeHTTP(rec, req)
 		headers, pathQuery, _ := capturedHeader(t, rec.Result().Body)
@@ -11285,5 +11291,56 @@ func TestProxy_JournalRequestHeadersRedacted(t *testing.T) {
 				t.Errorf("journal leaked credential value: %v", h)
 			}
 		})
+	}
+}
+
+// TestProxy_ConnectionListCannotStripInjectedAuth pins the go#50580 property
+// at this layer: a client listing an injected header as hop-by-hop
+// ("Connection: authorization") must NOT prevent the policy credential from
+// reaching the upstream, because stdlib removes hop-by-hop headers from the
+// outbound clone BEFORE the Rewrite hook runs. If this test ever fails, the
+// injection moved out of Rewrite (or stdlib changed ordering) and the
+// security posture regressed.
+func TestProxy_ConnectionListCannotStripInjectedAuth(t *testing.T) {
+	echo := newHeaderEchoUpstream(t)
+	policy := &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: auth.NewStaticSecretSource("cfg-bearer")}
+	p := newAuthTestProxy(t, echo.URL, policy, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Connection", "authorization") // hostile: try to de-hop the injected name
+	req.Header.Set("Authorization", "Bearer client-token")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	headers, _, _ := capturedHeader(t, rec.Result().Body)
+	if got := headers["Authorization"]; got != "Bearer cfg-bearer" {
+		t.Fatalf("Authorization = %q, want injected value surviving the Connection list", got)
+	}
+}
+
+// TestProxy_CookieForwardsButIsDisplayRedacted pins the documented Cookie
+// contract: cookies are NOT stripped by auth policies (stripping would break
+// cookie-authenticated upstreams) but they never reach the journal display.
+func TestProxy_CookieForwardsButIsDisplayRedacted(t *testing.T) {
+	echo := newHeaderEchoUpstream(t)
+	j := journal.New(8, 1<<20)
+	policy := &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: auth.NewStaticSecretSource("cfg-secret")}
+	p := newAuthTestProxy(t, echo.URL, policy, j)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Cookie", "session=abc")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	headers, _, _ := capturedHeader(t, rec.Result().Body)
+	if got := headers["Cookie"]; got != "session=abc" {
+		t.Errorf("upstream Cookie = %q, want forwarded verbatim (documented contract)", got)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(entries))
+	}
+	if got := entries[0].RequestHeaders.Get("Cookie"); got != "[REDACTED]" {
+		t.Errorf("journal Cookie = %q, want [REDACTED]", got)
 	}
 }
