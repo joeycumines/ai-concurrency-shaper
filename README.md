@@ -462,8 +462,8 @@ make field-recapture-stop     # stop it by exact PID
 ```
 
 The bearer credential is read from the environment at runtime and fed to
-curl on stdin, so it never appears in `make -n`, the process list, or on
-disk. Refresh the fixtures from the captured bytes, add the extension to
+curl on stdin, so it never appears in `make -n` or the process list.
+Refresh the fixtures from the captured bytes, add the extension to
 the strict wire shadows alongside its siblings, and extend the corpus
 test — the regression harness then holds the shape permanently.
 

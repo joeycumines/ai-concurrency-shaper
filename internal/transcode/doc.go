@@ -12,7 +12,13 @@
 //     chained through another dialect.
 //   - The supported surface is a strict subset. Every unsupported field or
 //     variant produces a typed error in the client dialect; nothing is
-//     silently dropped, defaulted, merged, or reinterpreted.
+//     silently dropped, defaulted, merged, or reinterpreted. The modeled
+//     opaque provider extensions of the Chat dialect — off-schema fields
+//     real gateways emit, inventoried with their decode fates in pins.md's
+//     "Modeled opaque provider extensions" table — are a deliberate,
+//     documented exception to strictness, pinned by committed unit tests
+//     and, for the spellings that caused live field regressions, replayed
+//     by the field-capture corpus (testcorpus/testdata/field/).
 //   - Anthropic thinking blocks are preserved byte-for-byte only for the same
 //     protocol; they are never synthesized, and OpenAI reasoning is never
 //     relabeled as authenticated thinking.
