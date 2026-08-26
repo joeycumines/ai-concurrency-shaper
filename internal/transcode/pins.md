@@ -407,3 +407,40 @@ Implemented J4/J5/J6/J7/J11:
 All deltas identified at J1 are implemented (J4-J11); see the implemented
 section above. Future pin bumps must re-run the inventory extraction and
 review the schema diff per the update procedure.
+
+## Modeled opaque provider extensions
+
+The pins above cover the official schemas. Real chat gateways additionally
+emit fields outside them; the strict decoders model every observed spelling
+as a shadow field so its presence is not an unknown-field failure. They
+live in the OpenAI Chat dialect only. The table below is exhaustive: every
+spelling the wire shadows accept is listed, each with its fate after
+decode, and each is pinned by a committed unit test (spread across
+`chat_schema_test.go`, `chat_response_strict_test.go`,
+`chat_stream_strict_test.go`, `chat_reasoning_content_test.go`, and
+`modern_client_test.go`). The field-capture corpus
+(`testcorpus/testdata/field/`, exercised by
+`field_capture_replay_test.go` through the production decode functions)
+replays the subset that caused live field regressions, plus several sibling
+spellings that ride the same captures; the remaining spellings are pinned by
+those unit tests.
+
+| Placement | Extension | Fate |
+| --- | --- | --- |
+| chat envelope (stream + non-stream) | `prompt_token_ids`, `prompt_text` | inert — decoded, never forwarded |
+| chat choice | `token_ids`, `routed_experts`, `stop_reason`, `matched_stop` | inert — decoded, never forwarded |
+| chat message | `token_ids`, `routed_experts`, `stop_reason`, `matched_stop` (defensive mirror), `reasoning`, `reasoning_content` | `reasoning`/`reasoning_content` map to capability-gated ordinary text; the rest are inert |
+| chat stream delta | `reasoning`, `reasoning_content` | capability-gated ordinary text |
+| chat usage (top level) | `reasoning_tokens`, `cached_tokens`, `prompt_cache_hit_tokens`, `prompt_cache_miss_tokens` | mapped to canonical usage (`CacheRead`, `ReasoningTokens`); `prompt_cache_miss_tokens` has no canonical home |
+| chat `prompt_tokens_details` | `created_cache_tokens`, `multimodal_tokens` | `created_cache_tokens` maps to canonical `CacheWrite`; `multimodal_tokens` is inert |
+
+None of these spellings is forwarded or re-rendered verbatim. Several
+feed the canonical model instead: `reasoning`/`reasoning_content` become
+capability-gated ordinary text, and the usage spellings become canonical
+usage breakdowns (`CacheRead`, `CacheWrite`, `ReasoningTokens`). A new
+provider spelling belongs here, in the wire shadows next to its siblings,
+and in the corpus as a fixture —
+capture real bytes first (`make field-recapture` in the top-level
+`project.mk`; see the README section on provider extensions). An extension
+absent from this table is an unknown-field failure by design; that failure
+is the signal to model it.

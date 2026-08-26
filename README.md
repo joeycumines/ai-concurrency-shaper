@@ -424,6 +424,49 @@ loop persists. Every non-streaming upstream-response wire-decode failure
 is logged server-side (`transcode: METHOD /path: …`) alongside the bounded
 client-facing error.
 
+### Provider extensions and the field-capture corpus
+
+The pinned wire contract covers the official schemas, but real gateways also
+emit their own opaque extensions — `prompt_token_ids`, `prompt_text`,
+`reasoning_content`, `matched_stop`, `stop_reason`, `routed_experts`,
+`token_ids`, the top-level usage extensions (`reasoning_tokens`,
+`cached_tokens`, `prompt_cache_hit_tokens`, `prompt_cache_miss_tokens`),
+and `prompt_tokens_details.created_cache_tokens`; the exhaustive table lives in
+`internal/transcode/pins.md`. Four field regressions — three of them
+spellings from this list, plus an empty `status` string on Responses
+history items — caused live field failures before they were modeled; every
+one passed the synthetic test suite, because synthetic fixtures encode the
+same assumptions as the decoders.
+
+The defense is a committed corpus of sanitized fixtures reconstructed from
+the four field regressions: `internal/transcode/testcorpus/testdata/field/`
+holds stream, non-stream, and request fixtures carrying the exact spellings
+and null-vs-value placement real providers use. The field-capture tests
+replay them through the production decode functions — not a test-only
+copy — so a newly captured extension the shadows do not yet model fails
+`go test` with the field name, not a user session:
+
+```sh
+go test ./internal/transcode/ -run TestFieldCapture
+```
+
+To teach the transcoder a new provider shape, capture real gateway bytes
+first. Manual recapture targets exist in `project.mk` for this (never run
+against a shared instance; they cost real tokens and need a gateway you
+are authorized to use):
+
+```sh
+make field-recapture          # boot a throwaway shaper (FIELD_UPSTREAM=…)
+make field-recapture-probe    # save raw stream + non-stream bytes
+make field-recapture-stop     # stop it by exact PID
+```
+
+The bearer credential is read from the environment at runtime and fed to
+curl on stdin, so it never appears in `make -n`, the process list, or on
+disk. Refresh the fixtures from the captured bytes, add the extension to
+the strict wire shadows alongside its siblings, and extend the corpus
+test — the regression harness then holds the shape permanently.
+
 ## How Concurrency Protection Works
 
 The proxy uses a token-bucket channel to enforce the concurrency limit. Each limited request acquires a token; the token is returned when the request completes. This bounds the proxy's internal concurrency, but the downstream may still observe more due to accounting lag (see above).
