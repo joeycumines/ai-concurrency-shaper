@@ -177,7 +177,9 @@ Sources:
 | `none` | Strip-only hygiene: client credentials are removed, nothing is injected |
 | _(unset)_ | Auth disabled entirely — requests are forwarded verbatim, exactly as before this feature existed |
 
-Where secrets can and cannot appear: a referenced variable's *value* is never logged, printed, or written anywhere by the proxy — startup logs name only the *reference* (`env:SHAPER_PROVIDER_ACME_API_KEY`). Journal entries and the TUI Network panel show `[REDACTED]` in place of credential header values (client credentials included). Passing secrets as literal argv values would expose them in `ps`/`/proc`; use env references instead.
+Where secrets can and cannot appear: a referenced variable's *value* is never logged, printed, or written anywhere by the proxy — startup logs name only the *reference* (`env:SHAPER_PROVIDER_ACME_API_KEY`). Journal entries and the TUI Network panel show `[REDACTED]` in place of credential header values — client credential headers and upstream `Set-Cookie` response headers alike. Recognized credential query parameters (`key`, `api_key`, `apikey`, `access_token`, `token`, `sig`, `*signature`) are likewise redacted in the journal and TUI display, while the request itself is forwarded byte-for-byte unchanged. Transport-error log lines carry no request URL at all. Passing secrets as literal argv values would expose them in `ps`/`/proc`; use env references instead.
+
+Other credential channels exist outside header/query display scope and are your responsibility: credentials embedded in path segments are forwarded by design and appear in route labels and request listings; request bodies captured for the TUI preview may contain whatever the client sent; custom secret headers not in the strip list above are forwarded verbatim and shown unredacted. If clients send secrets through these channels that you do not want stored or displayed locally, strip them before they reach the gateway.
 
 A multi-provider configuration with no auth on some providers prints one startup note (`N of M providers configured without upstream auth`) so an open relay is never silent.
 

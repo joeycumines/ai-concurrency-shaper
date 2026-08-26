@@ -17,6 +17,7 @@ package auth
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -44,9 +45,12 @@ var protocolHeaderNames = []string{
 // displayOnlyCredentialNames carry values too sensitive to render but NOT
 // safe to strip unconditionally (stripping would break legitimate
 // cookie-authenticated upstreams). They are redacted from journal/TUI display
-// only.
+// only. Set-Cookie belongs here for the response direction: the gateway never
+// re-sends one, but upstream responses that set cookies must not disclose the
+// session value into the journal ring or the TUI detail panel.
 var displayOnlyCredentialNames = []string{
 	"Cookie",
+	"Set-Cookie",
 }
 
 // isCloudSignaturePrefix reports whether a canonical header name belongs to a
@@ -120,4 +124,74 @@ func RedactSensitiveHeaders(h http.Header) http.Header {
 		h[name] = redacted
 	}
 	return h
+}
+
+// sensitiveQueryParams are the recognized credential-carrying query parameter
+// names (compared case-insensitively). They cover the documented conventions
+// of major providers (Gemini ?key=, OAuth access_token/token) and signed-URL
+// signatures. The list is deliberately narrow: an unrecognized parameter is
+// forwarded and displayed untouched rather than guessed at.
+var sensitiveQueryParams = map[string]struct{}{
+	"access_token": {},
+	"api_key":      {},
+	"apikey":       {},
+	"key":          {},
+	"sig":          {},
+	"signature":    {},
+	"token":        {},
+}
+
+// RedactSensitiveURL returns a copy of u whose RawQuery has the values of
+// sensitiveQueryParams replaced with an escaped "[REDACTED]" placeholder.
+// A parameter also matches when its name ends in "signature" (signed-URL
+// conventions such as X-Goog-Signature). Pair order, key spellings, separators,
+// and every non-matching pair are preserved byte-for-byte; forwarding never
+// sees this copy - it exists solely for journal entries, TUI rendering, and
+// error-log scrubbing. A nil URL or one without a query returns u unchanged.
+func RedactSensitiveURL(u *url.URL) *url.URL {
+	if u == nil || u.RawQuery == "" {
+		return u
+	}
+	const placeholder = "%5BREDACTED%5D"
+	raw := u.RawQuery
+	var pairs []string
+	var delims []string
+	start := 0
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '&' || raw[i] == ';' {
+			pairs = append(pairs, raw[start:i])
+			delims = append(delims, raw[i:i+1])
+			start = i + 1
+		}
+	}
+	pairs = append(pairs, raw[start:])
+	for i, pair := range pairs {
+		rawKey, _, found := strings.Cut(pair, "=")
+		if !found {
+			continue
+		}
+		matchKey := rawKey
+		if unescaped, err := url.QueryUnescape(rawKey); err == nil {
+			matchKey = unescaped
+		}
+		matchKey = strings.ToLower(matchKey)
+		if _, ok := sensitiveQueryParams[matchKey]; ok || strings.HasSuffix(matchKey, "signature") {
+			pairs[i] = rawKey + "=" + placeholder
+		}
+	}
+	redacted := *u
+	if len(delims) == 0 {
+		redacted.RawQuery = strings.Join(pairs, "&")
+	} else {
+		var b strings.Builder
+		b.Grow(len(raw) + len(placeholder)*len(pairs))
+		for i, p := range pairs {
+			if i > 0 {
+				b.WriteString(delims[i-1])
+			}
+			b.WriteString(p)
+		}
+		redacted.RawQuery = b.String()
+	}
+	return &redacted
 }

@@ -19,8 +19,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -435,4 +437,77 @@ func TestStaticSecretSource(t *testing.T) {
 	if err != nil || got != "startup-resolved" {
 		t.Fatalf("Secret() = %q, %v", got, err)
 	}
+}
+
+func TestStripCredentialsKeepsDisplayOnlyResponseHeaders(t *testing.T) {
+	h := http.Header{}
+	h.Set("Set-Cookie", "session=abc")
+	StripCredentials(h)
+	if got := h.Get("Set-Cookie"); got != "session=abc" {
+		t.Errorf("StripCredentials removed Set-Cookie: %q", got)
+	}
+}
+
+func TestRedactSensitiveHeadersRedactsSetCookie(t *testing.T) {
+	h := http.Header{}
+	h.Set("Set-Cookie", "session=abc123")
+	h.Set("Content-Type", "application/json")
+	got := RedactSensitiveHeaders(h)
+	if values := got.Values("Set-Cookie"); !reflect.DeepEqual(values, []string{"[REDACTED]"}) {
+		t.Errorf("Set-Cookie = %q, want [REDACTED]", values)
+	}
+	if got.Get("Content-Type") != "application/json" {
+		t.Errorf("Content-Type = %q, want untouched", got.Get("Content-Type"))
+	}
+}
+
+func TestRedactSensitiveURL(t *testing.T) {
+	t.Run("nil is nil", func(t *testing.T) {
+		if got := RedactSensitiveURL(nil); got != nil {
+			t.Errorf("RedactSensitiveURL(nil) = %v, want nil", got)
+		}
+	})
+	t.Run("no query returns input unchanged", func(t *testing.T) {
+		u := mustParseURL(t, "http://up/v1/messages")
+		if got := RedactSensitiveURL(u); got != u {
+			t.Errorf("want same *url.URL for queryless input")
+		}
+	})
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"gemini key", "/v1/models?key=topsecret", "/v1/models?key=%5BREDACTED%5D"},
+		{"oauth token", "/p?access_token=tok&x=1", "/p?access_token=%5BREDACTED%5D&x=1"},
+		{"case-insensitive key name preserved", "/p?KEY=abc&b=2", "/p?KEY=%5BREDACTED%5D&b=2"},
+		{"order and unknowns preserved", "/p?a=1&api_key=k&b=2&apikey=j&c=3", "/p?a=1&api_key=%5BREDACTED%5D&b=2&apikey=%5BREDACTED%5D&c=3"},
+		{"repeated keys all redacted", "/p?key=1&key=2", "/p?key=%5BREDACTED%5D&key=%5BREDACTED%5D"},
+		{"signature family", "/p?X-Goog-Signature=z&sig=s", "/p?X-Goog-Signature=%5BREDACTED%5D&sig=%5BREDACTED%5D"},
+		{"unknown params untouched", "/p?foo=secretvalue&bar=baz", "/p?foo=secretvalue&bar=baz"},
+		{"valueless param untouched", "/p?flag&token=t", "/p?flag&token=%5BREDACTED%5D"},
+		{"encoded key spelling preserved", "/p?api%5Fkey=x", "/p?api%5Fkey=%5BREDACTED%5D"},
+		{"semicolon delimiter", "/p?key=s1;token=s2&x=1", "/p?key=%5BREDACTED%5D;token=%5BREDACTED%5D&x=1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := mustParseURL(t, "http://up"+tt.raw)
+			got := RedactSensitiveURL(u)
+			if got.String() != "http://up"+tt.want {
+				t.Errorf("RedactSensitiveURL(%q).String() = %q, want %q", tt.raw, got.String(), "http://up"+tt.want)
+			}
+			if got == u && got.RawQuery != u.RawQuery {
+				t.Errorf("mutated the input URL in place")
+			}
+		})
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return u
 }

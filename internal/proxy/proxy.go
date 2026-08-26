@@ -733,7 +733,7 @@ func New(opts ...Option) (*Proxy, error) {
 			if isContextCancellation(r.Context().Err()) && isContextCancellation(err) {
 				return
 			}
-			slog.Error("proxy transport error", "error", err)
+			slog.Error("proxy transport error", "error", sanitizeTransportError(err))
 			if rec, ok := w.(*statusRecorder); ok {
 				if !rec.terminalWritten {
 					rec.proxyGeneratedError = true
@@ -932,7 +932,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			entry.Aborted = aborted
 			if recPtr != nil && recPtr.hijacked && recPtr.status == http.StatusSwitchingProtocols {
 				entry.StatusCode = http.StatusSwitchingProtocols
-				entry.ResponseHeaders = recPtr.ResponseWriter.Header().Clone()
+				entry.ResponseHeaders = auth.RedactSensitiveHeaders(recPtr.ResponseWriter.Header().Clone())
 				entry.ContentType = recPtr.ResponseWriter.Header().Get("Content-Type")
 			}
 			if recPtr != nil && !recPtr.hijacked && !aborted {
@@ -999,11 +999,13 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Create journal entry for this request. Credential-bearing header values
 	// are redacted at capture so the TUI Network panel and stored entries can
 	// never disclose them (client credentials are secrets regardless of
-	// whether this proxy attaches upstream credentials).
+	// whether this proxy attaches upstream credentials). The URL copy is
+	// query-redacted the same way: recognized credential parameters (e.g.
+	// Gemini's ?key=) are display-redacted while forwarding stays verbatim.
 	if p.journal != nil {
 		entry = &journal.Entry{
 			Method:         r.Method,
-			URL:            r.URL,
+			URL:            auth.RedactSensitiveURL(r.URL),
 			RequestHeaders: auth.RedactSensitiveHeaders(r.Header.Clone()),
 			Limited:        limited,
 			Timing: journal.Timing{
@@ -1689,6 +1691,24 @@ func isContextCancellation(err error) bool {
 
 var errLocalSwitchingProtocolsFailure = errors.New("proxy: local switching protocols failure")
 
+// sanitizeTransportError rewrites *url.Error values so their embedded target
+// URL carries redacted credential query parameters before the error reaches
+// logs: http.Transport wraps failures in url.Error with the full outbound
+// URL, and its Error() text would otherwise echo ?key=... secrets verbatim.
+// Non-url.Error values carry no URL and pass through unchanged. Wrapped
+// chains via %w are handled via errors.As so fmt.Errorf("%w", urlErr) is
+// still scrubbed.
+func sanitizeTransportError(err error) error {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return err
+	}
+	if parsed, perr := url.Parse(urlErr.URL); perr == nil {
+		return &url.Error{Op: urlErr.Op, URL: auth.RedactSensitiveURL(parsed).String(), Err: urlErr.Err}
+	}
+	return err
+}
+
 func localSwitchingProtocolsFailure(msg string) error {
 	return fmt.Errorf("%w: %s", errLocalSwitchingProtocolsFailure, msg)
 }
@@ -2282,7 +2302,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.responseAt = now
 	if r.entry != nil {
 		r.entry.StatusCode = code
-		r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
+		r.entry.ResponseHeaders = auth.RedactSensitiveHeaders(r.ResponseWriter.Header().Clone())
 		r.entry.Timing.ResponseHeaders = now
 		r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
 		if cl := r.ResponseWriter.Header().Get("Content-Length"); cl != "" {
@@ -2381,7 +2401,7 @@ func (r *statusRecorder) recordImplicitOK(sample []byte) {
 	r.responseAt = now
 	if r.entry != nil {
 		r.entry.StatusCode = http.StatusOK
-		r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
+		r.entry.ResponseHeaders = auth.RedactSensitiveHeaders(r.ResponseWriter.Header().Clone())
 		r.entry.Timing.ResponseHeaders = now
 		r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
 		// If the handler never set Content-Type, Go runs MIME sniffing during
@@ -2423,7 +2443,7 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		r.terminalWritten = true
 		if r.entry != nil {
 			r.entry.StatusCode = http.StatusSwitchingProtocols
-			r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
+			r.entry.ResponseHeaders = auth.RedactSensitiveHeaders(r.ResponseWriter.Header().Clone())
 			r.entry.Timing.ResponseHeaders = now
 			r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
 		}

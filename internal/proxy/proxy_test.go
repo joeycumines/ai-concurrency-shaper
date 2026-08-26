@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -11343,4 +11344,157 @@ func TestProxy_CookieForwardsButIsDisplayRedacted(t *testing.T) {
 	if got := entries[0].RequestHeaders.Get("Cookie"); got != "[REDACTED]" {
 		t.Errorf("journal Cookie = %q, want [REDACTED]", got)
 	}
+}
+
+func TestProxy_JournalResponseHeadersRedacted(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "session=abc123")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	j := journal.New(8, 1<<20)
+	p := newAuthTestProxy(t, upstream.URL, nil, j)
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/messages", nil))
+
+	entries := j.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(entries))
+	}
+	h := entries[0].ResponseHeaders
+	if h == nil {
+		t.Fatal("journal entry has no response headers")
+	}
+	if values := h.Values("Set-Cookie"); !reflect.DeepEqual(values, []string{"[REDACTED]"}) {
+		t.Errorf("journal Set-Cookie = %q, want [REDACTED]", values)
+	}
+	if got := h.Get("Content-Type"); got != "application/json" {
+		t.Errorf("journal Content-Type = %q, want untouched", got)
+	}
+	if strings.Contains(fmt.Sprint(h), "abc123") {
+		t.Errorf("journal leaked Set-Cookie value: %v", h)
+	}
+}
+
+func TestProxy_JournalURLQueryRedactedWhileForwardingStaysVerbatim(t *testing.T) {
+	type echo struct {
+		Query string `json:"query"`
+	}
+	var mu sync.Mutex
+	var seen []echo
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, echo{Query: r.URL.RawQuery})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	j := journal.New(8, 1<<20)
+	p := newAuthTestProxy(t, upstream.URL, nil, j)
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models?key=topsecret&x=1", nil))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 {
+		t.Fatalf("upstream requests = %d, want 1", len(seen))
+	}
+	if seen[0].Query != "key=topsecret&x=1" {
+		t.Errorf("upstream RawQuery = %q, want verbatim forwarding", seen[0].Query)
+	}
+
+	entries := j.Entries()
+	if len(entries) != 1 || entries[0].URL == nil {
+		t.Fatalf("journal entries = %d, want 1 with URL", len(entries))
+	}
+	got := entries[0].URL.String()
+	if strings.Contains(got, "topsecret") {
+		t.Errorf("journal URL leaked query credential: %q", got)
+	}
+	if !strings.Contains(got, "key=%5BREDACTED%5D") || !strings.Contains(got, "x=1") {
+		t.Errorf("journal URL = %q, want key redacted and x=1 preserved", got)
+	}
+}
+
+func TestProxy_TransportErrorLogCarriesNoURL(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	j := journal.New(8, 1<<20)
+	p := newAuthTestProxy(t, deadURL, nil, j)
+
+	var buf bytes.Buffer
+	prevLog := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() {
+		log.SetOutput(prevLog)
+		log.SetFlags(prevFlags)
+		slog.SetDefault(slog.Default())
+	})
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models?key=topsecret&x=1", nil))
+
+	out := buf.String()
+	if out == "" {
+		t.Fatal("no transport-error output captured")
+	}
+	// Go's Transport.RoundTrip returns a bare *net.OpError (no URL text), so
+	// the log line must contain neither the query credential nor any URL.
+	if strings.Contains(out, "topsecret") {
+		t.Errorf("transport-error log leaked query credential: %q", out)
+	}
+	if strings.Contains(out, "/v1/models") {
+		t.Errorf("transport-error log unexpectedly embeds the request URL: %q", out)
+	}
+}
+
+func TestSanitizeTransportErrorRedactsURLErrors(t *testing.T) {
+	u := mustParseURL(t, "http://up/v1/models?key=topsecret&x=1")
+	err := &url.Error{Op: "Get", URL: u.String(), Err: context.DeadlineExceeded}
+	got := sanitizeTransportError(err)
+	urlErr, ok := got.(*url.Error)
+	if !ok {
+		t.Fatalf("sanitizeTransportError type = %T, want *url.Error", got)
+	}
+	if strings.Contains(urlErr.URL, "topsecret") {
+		t.Errorf("sanitized URL leaked credential: %q", urlErr.URL)
+	}
+	if !strings.Contains(urlErr.URL, "key=%5BREDACTED%5D") || !strings.Contains(urlErr.URL, "x=1") {
+		t.Errorf("sanitized URL = %q, want key redacted, x preserved", urlErr.URL)
+	}
+
+	plain := context.DeadlineExceeded
+	if got := sanitizeTransportError(plain); got != plain {
+		t.Errorf("non-url.Error passed through changed: %v", got)
+	}
+
+	wrapped := fmt.Errorf("wrap: %w", err)
+	gotWrapped := sanitizeTransportError(wrapped)
+	var gotURL *url.Error
+	if !errors.As(gotWrapped, &gotURL) {
+		t.Fatalf("wrapped sanitize type = %T, want *url.Error via errors.As", gotWrapped)
+	}
+	if strings.Contains(gotURL.URL, "topsecret") {
+		t.Errorf("wrapped sanitized URL leaked credential: %q", gotURL.URL)
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return u
 }
