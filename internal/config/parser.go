@@ -94,7 +94,6 @@ func Parse(args []string) (*Config, error) {
 		cfg.Providers = []*Provider{p0}
 		return cfg, nil
 	}
-	cfg.sectioned = true
 
 	// Sectioned mode.
 

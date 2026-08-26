@@ -34,7 +34,6 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 |------|-------|---------|-------------|
 | `-upstream` | provider | _(required)_ | Upstream base URL |
 | `-bind` | server | `:8080` | Listen address |
-| `-config` | server | _(unset)_ | Load provider definitions from a JSON file (providers array; see [Configuration File](#configuration-file)). File providers compose with `--provider` sections |
 | `-metrics-bind` | server | _(unset)_ | Dedicated listen address for the Prometheus `/metrics` endpoint (see [Metrics Export](#metrics-export)); empty disables it |
 | `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
 | `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
@@ -139,7 +138,7 @@ In the TUI, each provider keeps its own dashboard. The header shows one chip per
 
 #### Upstream Authentication
 
-Each provider can carry its own upstream credential, so clients no longer need to know provider secrets at all. Credentials live in the **environment** (resolved once at startup) or a file; they never appear in command lines, config files, logs, or the TUI.
+Each provider can carry its own upstream credential, so clients no longer need to know provider secrets at all. Credentials live in the **environment**, resolved once at startup; they never appear in command lines, logs, or the TUI.
 
 ```sh
 export SHAPER_PROVIDER_ANTHROPIC_API_KEY=sk-ant-...   # resolved by the proxy at startup
@@ -187,43 +186,6 @@ Where secrets can and cannot appear: a referenced variable's *value* is never lo
 Other credential channels outside the header allowlist are your responsibility: credentials embedded in path segments are forwarded by design and appear in route labels and request listings; request bodies captured for the TUI preview may contain whatever the client sent; custom secret headers not in the strip list above are forwarded verbatim and shown unredacted. If clients send secrets through these channels that you do not want stored or displayed locally, strip them before they reach the gateway.
 
 A multi-provider configuration with no auth on some providers prints one startup note (`N of M providers configured without upstream auth`) so an open relay is never silent.
-
-#### Configuration File
-
-For catalogs too large for a command line, `-config` loads provider definitions from a JSON file. The file holds **providers only** — server flags (`-bind`, `-tui`, …) stay on the command line, so there is exactly one place each kind of setting lives:
-
-```json
-{
-  "providers": [
-    {
-      "name": "anthropic",
-      "upstream": "https://api.anthropic.com",
-      "prefix": "/anthropic",
-      "limits": ["POST /v1/messages:3@messages"],
-      "concurrency": 2,
-      "auth_source": "env:SHAPER_PROVIDER_ANTHROPIC_API_KEY"
-    },
-    {
-      "name": "openai",
-      "upstream": "https://api.openai.com",
-      "prefix": "/openai",
-      "queue_timeout": "45s",
-      "retry_skip_429": false
-    }
-  ]
-}
-```
-
-```sh
-ai-concurrency-shaper -bind 127.0.0.1:8080 -config providers.json
-```
-
-Rules:
-
-- Field names mirror the flags in snake_case; durations are Go strings (`"45s"`). Absent fields take exactly the CLI flag defaults.
-- Every string value may reference environment variables as `${VAR}`; an unset variable fails the load (fail-closed). Keep credential values out of the file — `auth_source` carries an `env:VAR` *reference*, so the committed file stays secret-free.
-- Unknown fields are rejected, so a typo'd key can't silently drop configuration.
-- File providers compose with `--provider` sections (file entries first); everything flows through the same validation as CLI-defined providers — prefix overlap, name uniqueness, value backstops, and auth grammar included.
 
 #### Scope & Limitations
 

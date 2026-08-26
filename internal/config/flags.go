@@ -91,9 +91,8 @@ func (s *stringList) Set(v string) error {
 }
 
 // Provider flag defaults. They live here as named constants rather than
-// inline literals so the JSON file loader (newFileProvider) can apply exactly
-// the same defaults the CLI flags do — one source of truth for both input
-// paths.
+// inline literals so each default reads as a single named value at its
+// registration site and cannot drift between flag sets.
 const (
 	defaultBind                  = ":8080"
 	defaultConcurrency           = 4
@@ -127,7 +126,6 @@ func registerServerFlags(r *registrar, s *Server) {
 	r.stringVar(&s.Bind, "bind", defaultBind, "listen address")
 	r.boolVar(&s.TUI, "tui", false, "enable terminal dashboard")
 	r.boolVar(&s.Version, "version", false, "print version and exit")
-	r.stringVar(&s.ConfigPath, "config", "", "load provider definitions from a JSON file (providers array; server scope)")
 	r.stringVar(&s.MetricsBind, "metrics-bind", "", "dedicated listen address for the Prometheus /metrics endpoint (empty = disabled; server scope)")
 	registerHelp(r, &s.Help)
 }

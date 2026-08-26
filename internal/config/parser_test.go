@@ -446,27 +446,3 @@ func TestParse_AuthModeDefault(t *testing.T) {
 		t.Errorf("default AnthropicVersion = %q, want 2023-06-01", got)
 	}
 }
-
-// TestParse_ConfigFlagScope pins -config as server scope: legal at top level
-// and before sections, rejected inside a --provider section.
-func TestParse_ConfigFlagScope(t *testing.T) {
-	cfg, err := Parse([]string{"-config", "/tmp/providers.json"})
-	if err != nil {
-		t.Fatalf("Parse legacy: %v", err)
-	}
-	if cfg.Server.ConfigPath != "/tmp/providers.json" {
-		t.Errorf("ConfigPath = %q", cfg.Server.ConfigPath)
-	}
-
-	cfg, err = Parse([]string{"-config", "/tmp/p.json", "--provider=a", "-upstream", "https://x"})
-	if err != nil {
-		t.Fatalf("Parse sectioned with -config first: %v", err)
-	}
-	if !cfg.sectioned || cfg.Server.ConfigPath != "/tmp/p.json" {
-		t.Errorf("sectioned ConfigPath = %q sectioned=%v", cfg.Server.ConfigPath, cfg.sectioned)
-	}
-
-	if _, err := Parse([]string{"--provider=a", "-config", "/tmp/p.json"}); err == nil {
-		t.Error("-config inside a provider section must be rejected")
-	}
-}
