@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -349,9 +350,58 @@ func run() error {
 		return err
 	}
 
-	srv := &http.Server{Addr: cfg.Server.Bind, Handler: h}
-
 	errCh := make(chan error, 1)
+
+	// Opt-in Prometheus endpoint on a DEDICATED listener: it never shares the
+	// proxy port, so a provider mounted at bare root keeps every path, and
+	// scraping cannot be mistaken for proxied traffic. Bound before the proxy
+	// listener so a bad -metrics-bind fails closed at startup.
+	var metricsSrv *http.Server
+	if cfg.Server.MetricsBind != "" {
+		metricsLn, err := net.Listen("tcp", cfg.Server.MetricsBind)
+		if err != nil {
+			return fmt.Errorf("-metrics-bind %s: %w", cfg.Server.MetricsBind, err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			for i, pr := range cfg.Providers {
+				snap := mets[i].Snapshot()
+				if breaker := pr.Breaker(); breaker != nil {
+					s := breaker.Stats()
+					snap.CircuitBreaker = &metrics.CBStats{
+						State:               s.State.String(),
+						Failures:            s.Failures,
+						ConsecutiveFailures: s.ConsecutiveFailures,
+						TotalFailures:       s.TotalFailures,
+						TotalSuccesses:      s.TotalSuccesses,
+						CurrentPenalty:      s.CurrentPenalty,
+						NextRetry:           s.NextRetry,
+					}
+				}
+				name := pr.Name
+				if name == "" {
+					name = "default"
+				}
+				if err := metrics.WritePrometheus(w, name, snap); err != nil {
+					return
+				}
+			}
+		})
+		metricsSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := metricsSrv.Serve(metricsLn); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}()
+		log.Printf("metrics endpoint listening on %s/metrics", cfg.Server.MetricsBind)
+	}
+
+	srv := &http.Server{Addr: cfg.Server.Bind, Handler: h}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
@@ -466,6 +516,9 @@ func run() error {
 		log.Println("shutting down...")
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if metricsSrv != nil {
+			metricsSrv.Shutdown(sctx)
+		}
 		srv.Shutdown(sctx)
 		return nil
 	case err := <-errCh:

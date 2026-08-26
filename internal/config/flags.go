@@ -128,6 +128,7 @@ func registerServerFlags(r *registrar, s *Server) {
 	r.boolVar(&s.TUI, "tui", false, "enable terminal dashboard")
 	r.boolVar(&s.Version, "version", false, "print version and exit")
 	r.stringVar(&s.ConfigPath, "config", "", "load provider definitions from a JSON file (providers array; server scope)")
+	r.stringVar(&s.MetricsBind, "metrics-bind", "", "dedicated listen address for the Prometheus /metrics endpoint (empty = disabled; server scope)")
 	registerHelp(r, &s.Help)
 }
 

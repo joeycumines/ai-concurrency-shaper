@@ -36,6 +36,7 @@ import (
 
 	"github.com/charmbracelet/x/term"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/config"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
@@ -2060,4 +2061,169 @@ func writeFileTemp(t *testing.T, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestE2E_MetricsEndpoint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	newEcho := func() *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	upA, upB := newEcho(), newEcho()
+
+	newAddr := func() string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		return addr
+	}
+
+	proxyAddr := newAddr()
+	metricsAddr := newAddr()
+
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"-metrics-bind", metricsAddr,
+		"--provider=acme",
+		"-upstream", upA.URL,
+		"-prefix", "/acme",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=beta",
+		"-upstream", upB.URL,
+		"-prefix", "/beta",
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		t.Fatalf("proxy addr: %v\noutput:\n%s", err, out.String())
+	}
+	if err := waitTCPReady(metricsAddr, 5*time.Second); err != nil {
+		t.Fatalf("metrics addr: %v\noutput:\n%s", err, out.String())
+	}
+
+	fire := func(path string) {
+		resp, err := http.Get("http://" + proxyAddr + path)
+		if err != nil {
+			t.Fatalf("fire %s: %v", path, err)
+		}
+		resp.Body.Close()
+	}
+	fire("/acme/v1/messages")
+	fire("/acme/v1/messages")
+	fire("/beta/v1/messages")
+
+	// Counts land in the collector during the proxy's deferred finalize, which
+	// can run a tick after the client sees the response. Poll rather than
+	// sleep so the test stays fast and deterministic under load.
+	waitForMetricsLine := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			resp, err := http.Get("http://" + metricsAddr + "/metrics")
+			if err != nil {
+				t.Fatalf("scrape while waiting for %q: %v", want, err)
+			}
+			bodyBytes, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			if resp.StatusCode == http.StatusOK && strings.Contains(string(bodyBytes), want+"\n") {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("metrics output never contained %q; last body:\n%s", want, bodyBytes)
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+	waitForMetricsLine(`shaper_requests_total{provider="acme",status="2xx"} 2`)
+	waitForMetricsLine(`shaper_requests_total{provider="beta",status="2xx"} 1`)
+
+	scrape := func(path string) (int, string, string) {
+		resp, err := http.Get("http://" + metricsAddr + path)
+		if err != nil {
+			t.Fatalf("scrape %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		return resp.StatusCode, resp.Header.Get("Content-Type"), string(body)
+	}
+
+	status, contentType, body := scrape("/metrics")
+	if status != http.StatusOK {
+		t.Errorf("GET /metrics status = %d, want 200", status)
+	}
+	if !strings.HasPrefix(contentType, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain*", contentType)
+	}
+	for _, want := range []string{
+		`shaper_requests_total{provider="acme",status="2xx"} 2`,
+		`shaper_requests_total{provider="beta",status="2xx"} 1`,
+		`shaper_active{provider="acme"} 0`,
+		`shaper_queued{provider="beta"} 0`,
+	} {
+		if !strings.Contains(body, want+"\n") {
+			t.Errorf("metrics output missing %q:\n%s", want, body)
+		}
+	}
+
+	if status, _, _ = scrape("/other"); status != http.StatusNotFound {
+		t.Errorf("GET /other status = %d, want 404", status)
+	}
+	if status, _, _ = scrape(""); status != http.StatusNotFound {
+		t.Errorf("GET / status = %d, want 404", status)
+	}
+}
+
+func TestConfigMetricsBindFlag(t *testing.T) {
+	cfg, err := config.Parse([]string{"-upstream", "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("legacy parse: %v", err)
+	}
+	if cfg.Server.MetricsBind != "" {
+		t.Errorf("default MetricsBind = %q, want empty (disabled)", cfg.Server.MetricsBind)
+	}
+	cfg, err = config.Parse([]string{"-metrics-bind", "127.0.0.1:2112", "-upstream", "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("parse with -metrics-bind: %v", err)
+	}
+	if cfg.Server.MetricsBind != "127.0.0.1:2112" {
+		t.Errorf("MetricsBind = %q, want 127.0.0.1:2112", cfg.Server.MetricsBind)
+	}
+	if _, err = config.Parse([]string{"--provider=a", "-upstream", "http://127.0.0.1:1", "-prefix", "/a", "-metrics-bind", ":2112"}); err == nil {
+		t.Error("provider-scoped -metrics-bind must be rejected (server-scope flag)")
+	}
 }

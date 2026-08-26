@@ -91,6 +91,9 @@ type Server struct {
 	// ConfigPath names a JSON file of provider definitions to load (the
 	// -config flag). Empty means no file.
 	ConfigPath string
+	// MetricsBind is the dedicated listen address for the Prometheus
+	// /metrics endpoint (-metrics-bind). Empty disables the endpoint.
+	MetricsBind string
 	// Help is set by -h/-help at server scope (or legacy top level): the
 	// caller prints usage and exits 0 instead of running the proxy.
 	Help bool

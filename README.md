@@ -35,6 +35,7 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-upstream` | provider | _(required)_ | Upstream base URL |
 | `-bind` | server | `:8080` | Listen address |
 | `-config` | server | _(unset)_ | Load provider definitions from a JSON file (providers array; see [Configuration File](#configuration-file)). File providers compose with `--provider` sections |
+| `-metrics-bind` | server | _(unset)_ | Dedicated listen address for the Prometheus `/metrics` endpoint (see [Metrics Export](#metrics-export)); empty disables it |
 | `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
 | `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
 | `-concurrency` | provider | `4` | Max concurrent limited requests |
@@ -81,6 +82,10 @@ The upstream HTTP transport sizes `MaxIdleConnsPerHost` to the sum of configured
 | `-cb-max-penalty` | provider | `60s` | Max phantom concurrency hold time |
 
 The circuit breaker treats 5xx, 429, transport errors, and rate-limit-signaled 403s as upstream failures. A bare 403 without `Retry-After` or `x-ratelimit-*` headers is treated as an authentication/authorization client error and is passed through, avoiding the trap where a bad API key is masked by a proxy-generated 503 after the breaker opens.
+
+#### Metrics Export
+
+Pass `-metrics-bind 127.0.0.1:2112` to expose a Prometheus text-format `/metrics` endpoint on a dedicated listener — it never shares the proxy port, so a bare-root provider keeps every path and scraping is never mistaken for proxied traffic. Every series carries a `provider` label (an unnamed single provider exports as `provider="default"`): `shaper_active`, `shaper_queued`, `shaper_retries_in_flight`, `shaper_clean_proxied_total`, `shaper_clean_passthrough_total`, `shaper_aborted_total`, `shaper_circuit_rejected_total`, `shaper_requests_total{status="1xx"…"5xx"}`, and `shaper_breaker_state` (0 closed / 1 half-open / 2 open, current state in the `state` label; omitted when the provider's breaker is disabled). The endpoint is off by default and binds before the proxy listener, so a bad address fails at startup. Bind it to loopback unless you know what you are exposing.
 
 #### Observability Semantics
 
