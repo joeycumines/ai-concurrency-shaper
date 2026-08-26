@@ -11244,10 +11244,11 @@ func TestProxy_AuthInjectionThroughServeHTTP(t *testing.T) {
 	})
 }
 
-// TestProxy_JournalRequestHeadersRedacted proves credential VALUES never
-// enter the journal (and therefore the TUI Network panel), with or without an
-// auth policy, while non-sensitive headers stay inspectable.
-func TestProxy_JournalRequestHeadersRedacted(t *testing.T) {
+// TestProxy_JournalShowsRawRequestHeaders pins the TUI Redaction Constraint:
+// credential VALUES appear raw in the journal (and therefore the TUI Network
+// panel), with or without an auth policy, while non-sensitive headers stay
+// inspectable.
+func TestProxy_JournalShowsRawRequestHeaders(t *testing.T) {
 	for _, withPolicy := range []bool{false, true} {
 		name := "no policy"
 		if withPolicy {
@@ -11278,8 +11279,8 @@ func TestProxy_JournalRequestHeadersRedacted(t *testing.T) {
 				t.Fatal("journal entry has no request headers")
 			}
 			for name, values := range map[string][]string{
-				"Authorization": {"[REDACTED]"},
-				"Cookie":        {"[REDACTED]"},
+				"Authorization": {"Bearer client-secret-value"},
+				"Cookie":        {"session=abc"},
 			} {
 				if got := h.Values(name); !reflect.DeepEqual(got, values) {
 					t.Errorf("journal %s = %q, want %q", name, got, values)
@@ -11288,8 +11289,8 @@ func TestProxy_JournalRequestHeadersRedacted(t *testing.T) {
 			if got := h.Get("Content-Type"); got != "application/json" {
 				t.Errorf("journal Content-Type = %q, want untouched", got)
 			}
-			if strings.Contains(fmt.Sprint(h), "client-secret-value") {
-				t.Errorf("journal leaked credential value: %v", h)
+			if !strings.Contains(fmt.Sprint(h), "client-secret-value") {
+				t.Errorf("journal should show raw per TUI constraint: %v", h)
 			}
 		})
 	}
@@ -11319,10 +11320,11 @@ func TestProxy_ConnectionListCannotStripInjectedAuth(t *testing.T) {
 	}
 }
 
-// TestProxy_CookieForwardsButIsDisplayRedacted pins the documented Cookie
+// TestProxy_CookieForwardsAndDisplaysRaw pins the documented Cookie
 // contract: cookies are NOT stripped by auth policies (stripping would break
-// cookie-authenticated upstreams) but they never reach the journal display.
-func TestProxy_CookieForwardsButIsDisplayRedacted(t *testing.T) {
+// cookie-authenticated upstreams) and they display raw per the TUI Redaction
+// Constraint in AGENTS.md.
+func TestProxy_CookieForwardsAndDisplaysRaw(t *testing.T) {
 	echo := newHeaderEchoUpstream(t)
 	j := journal.New(8, 1<<20)
 	policy := &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: auth.NewStaticSecretSource("cfg-secret")}
@@ -11341,12 +11343,12 @@ func TestProxy_CookieForwardsButIsDisplayRedacted(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("journal entries = %d, want 1", len(entries))
 	}
-	if got := entries[0].RequestHeaders.Get("Cookie"); got != "[REDACTED]" {
-		t.Errorf("journal Cookie = %q, want [REDACTED]", got)
+	if got := entries[0].RequestHeaders.Get("Cookie"); got != "session=abc" {
+		t.Errorf("journal Cookie = %q, want raw per TUI constraint", got)
 	}
 }
 
-func TestProxy_JournalResponseHeadersRedacted(t *testing.T) {
+func TestProxy_JournalShowsRawResponseHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Set-Cookie", "session=abc123")
 		w.Header().Set("Content-Type", "application/json")
@@ -11369,18 +11371,18 @@ func TestProxy_JournalResponseHeadersRedacted(t *testing.T) {
 	if h == nil {
 		t.Fatal("journal entry has no response headers")
 	}
-	if values := h.Values("Set-Cookie"); !reflect.DeepEqual(values, []string{"[REDACTED]"}) {
-		t.Errorf("journal Set-Cookie = %q, want [REDACTED]", values)
+	if values := h.Values("Set-Cookie"); !reflect.DeepEqual(values, []string{"session=abc123"}) {
+		t.Errorf("journal Set-Cookie = %q, want raw per TUI constraint", values)
 	}
 	if got := h.Get("Content-Type"); got != "application/json" {
 		t.Errorf("journal Content-Type = %q, want untouched", got)
 	}
-	if strings.Contains(fmt.Sprint(h), "abc123") {
-		t.Errorf("journal leaked Set-Cookie value: %v", h)
+	if !strings.Contains(fmt.Sprint(h), "abc123") {
+		t.Errorf("journal should show raw Set-Cookie per TUI constraint: %v", h)
 	}
 }
 
-func TestProxy_JournalURLQueryRedactedWhileForwardingStaysVerbatim(t *testing.T) {
+func TestProxy_JournalShowsRawQueryWhileForwardingStaysVerbatim(t *testing.T) {
 	type echo struct {
 		Query string `json:"query"`
 	}
@@ -11414,11 +11416,11 @@ func TestProxy_JournalURLQueryRedactedWhileForwardingStaysVerbatim(t *testing.T)
 		t.Fatalf("journal entries = %d, want 1 with URL", len(entries))
 	}
 	got := entries[0].URL.String()
-	if strings.Contains(got, "topsecret") {
-		t.Errorf("journal URL leaked query credential: %q", got)
+	if !strings.Contains(got, "topsecret") {
+		t.Errorf("journal URL = %q, want raw per TUI constraint (should contain topsecret)", got)
 	}
-	if !strings.Contains(got, "key=%5BREDACTED%5D") || !strings.Contains(got, "x=1") {
-		t.Errorf("journal URL = %q, want key redacted and x=1 preserved", got)
+	if !strings.Contains(got, "key=topsecret") || !strings.Contains(got, "x=1") {
+		t.Errorf("journal URL = %q, want raw key and x=1 preserved", got)
 	}
 }
 

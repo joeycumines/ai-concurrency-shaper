@@ -22,7 +22,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 )
@@ -448,13 +447,13 @@ func TestStripCredentialsKeepsDisplayOnlyResponseHeaders(t *testing.T) {
 	}
 }
 
-func TestRedactSensitiveHeadersRedactsSetCookie(t *testing.T) {
+func TestRedactSensitiveHeadersDoesNotRedactSetCookie(t *testing.T) {
 	h := http.Header{}
 	h.Set("Set-Cookie", "session=abc123")
 	h.Set("Content-Type", "application/json")
 	got := RedactSensitiveHeaders(h)
-	if values := got.Values("Set-Cookie"); !reflect.DeepEqual(values, []string{"[REDACTED]"}) {
-		t.Errorf("Set-Cookie = %q, want [REDACTED]", values)
+	if got.Get("Set-Cookie") != "session=abc123" {
+		t.Errorf("Set-Cookie = %q, want raw per TUI constraint", got.Get("Set-Cookie"))
 	}
 	if got.Get("Content-Type") != "application/json" {
 		t.Errorf("Content-Type = %q, want untouched", got.Get("Content-Type"))

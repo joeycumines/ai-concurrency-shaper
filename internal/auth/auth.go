@@ -27,9 +27,12 @@
 // mutation at all.
 //
 // One credential class is deliberately exempt: Cookie values are forwarded
-// verbatim (stripping them would break cookie-authenticated upstreams) and
-// are instead display-redacted by RedactSensitiveHeaders so they never reach
-// journal entries or the TUI. See displayOnlyCredentialNames in redact.go.
+// verbatim (stripping them would break cookie-authenticated upstreams) and,
+// per the TUI Redaction Constraint in AGENTS.md, are displayed raw — journal
+// and TUI output is not captured and is visible only to the local operator.
+// The only scrub applied on a captured path is sanitizeTransportError's use
+// of RedactSensitiveURL for transport-error logs. See displayOnlyCredentialNames
+// in redact.go.
 package auth
 
 import (

@@ -42,15 +42,13 @@ var protocolHeaderNames = []string{
 	"Anthropic-Beta",
 }
 
-// displayOnlyCredentialNames carry values too sensitive to render but NOT
-// safe to strip unconditionally (stripping would break legitimate
-// cookie-authenticated upstreams). They are redacted from journal/TUI display
-// only. Set-Cookie belongs here for the response direction: the gateway never
-// re-sends one, but upstream responses that set cookies must not disclose the
-// session value into the journal ring or the TUI detail panel.
+// displayOnlyCredentialNames carry values too sensitive to strip unconditionally
+// (stripping would break legitimate cookie-authenticated upstreams) but that
+// are displayed raw per the TUI Redaction Constraint in AGENTS.md. No live
+// path currently applies them for display; they remain library surface so a
+// captured-output scrubber can reuse the classification.
 var displayOnlyCredentialNames = []string{
 	"Cookie",
-	"Set-Cookie",
 }
 
 // isCloudSignaturePrefix reports whether a canonical header name belongs to a
@@ -82,11 +80,10 @@ func sensitive(canonical string) bool {
 // StripCredentials removes every client-supplied credential and provider
 // protocol header from h so none of them cross a provider boundary: the
 // named credential and protocol families plus case-insensitive X-Amz-*/X-Goog-*
-// prefixed keys. Cookie is deliberately NOT stripped (it is only
-// display-redacted — see displayOnlyCredentialNames) because stripping it
-// unconditionally would break cookie-authenticated upstreams; it therefore
-// does cross boundaries and must not be treated as contained. It mutates h
-// in place.
+// prefixed keys. Cookie is deliberately NOT stripped (see
+// displayOnlyCredentialNames) because stripping it unconditionally would break
+// cookie-authenticated upstreams; it therefore does cross boundaries and must
+// not be treated as contained. It mutates h in place.
 func StripCredentials(h http.Header) {
 	for _, name := range credentialHeaderNames {
 		h.Del(name)

@@ -932,7 +932,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			entry.Aborted = aborted
 			if recPtr != nil && recPtr.hijacked && recPtr.status == http.StatusSwitchingProtocols {
 				entry.StatusCode = http.StatusSwitchingProtocols
-				entry.ResponseHeaders = auth.RedactSensitiveHeaders(recPtr.ResponseWriter.Header().Clone())
+				entry.ResponseHeaders = recPtr.ResponseWriter.Header().Clone()
 				entry.ContentType = recPtr.ResponseWriter.Header().Get("Content-Type")
 			}
 			if recPtr != nil && !recPtr.hijacked && !aborted {
@@ -996,17 +996,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Create journal entry for this request. Credential-bearing header values
-	// are redacted at capture so the TUI Network panel and stored entries can
-	// never disclose them (client credentials are secrets regardless of
-	// whether this proxy attaches upstream credentials). The URL copy is
-	// query-redacted the same way: recognized credential parameters (e.g.
-	// Gemini's ?key=) are display-redacted while forwarding stays verbatim.
+	// Create journal entry for this request. Per AGENTS.md TUI Redaction
+	// Constraint, the journal and TUI may show raw credential headers and URLs
+	// — TUI output is not captured and is visible only to the local operator.
 	if p.journal != nil {
 		entry = &journal.Entry{
 			Method:         r.Method,
-			URL:            auth.RedactSensitiveURL(r.URL),
-			RequestHeaders: auth.RedactSensitiveHeaders(r.Header.Clone()),
+			URL:            r.URL,
+			RequestHeaders: r.Header.Clone(),
 			Limited:        limited,
 			Timing: journal.Timing{
 				QueueStart: time.Now(),
@@ -2302,7 +2299,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.responseAt = now
 	if r.entry != nil {
 		r.entry.StatusCode = code
-		r.entry.ResponseHeaders = auth.RedactSensitiveHeaders(r.ResponseWriter.Header().Clone())
+		r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
 		r.entry.Timing.ResponseHeaders = now
 		r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
 		if cl := r.ResponseWriter.Header().Get("Content-Length"); cl != "" {
@@ -2401,7 +2398,7 @@ func (r *statusRecorder) recordImplicitOK(sample []byte) {
 	r.responseAt = now
 	if r.entry != nil {
 		r.entry.StatusCode = http.StatusOK
-		r.entry.ResponseHeaders = auth.RedactSensitiveHeaders(r.ResponseWriter.Header().Clone())
+		r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
 		r.entry.Timing.ResponseHeaders = now
 		r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
 		// If the handler never set Content-Type, Go runs MIME sniffing during
@@ -2443,7 +2440,7 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		r.terminalWritten = true
 		if r.entry != nil {
 			r.entry.StatusCode = http.StatusSwitchingProtocols
-			r.entry.ResponseHeaders = auth.RedactSensitiveHeaders(r.ResponseWriter.Header().Clone())
+			r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
 			r.entry.Timing.ResponseHeaders = now
 			r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
 		}

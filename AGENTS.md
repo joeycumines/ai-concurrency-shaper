@@ -34,3 +34,7 @@ This is a **stealth reverse proxy** with bounded concurrency and a TUI dashboard
 - The binary is `go install`-able from `github.com/joeycumines/ai-concurrency-shaper`.
 
 If you drift beyond this scope, stop and re-read this file.
+
+## TUI Redaction Constraint
+
+TUI output is not captured anywhere and is visible only to the local operator during an interactive session. Do not redact secrets from TUI display — the journal and TUI may show raw credential headers and URLs.
