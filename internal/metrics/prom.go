@@ -41,45 +41,105 @@ func escapeLabelValue(v string) string {
 	return r.Replace(v)
 }
 
-// WritePrometheus writes one provider's snapshot as Prometheus text-format
-// exposition lines, every series carrying a provider label so one /metrics
-// endpoint can fan out over the whole fleet. Lines are stable and sorted by
-// construction; no timestamps are emitted (scrape time is scrape time).
-// When snap.CircuitBreaker is nil (breaker disabled or not merged) the breaker
-// series is omitted rather than guessed.
-func WritePrometheus(w io.Writer, provider string, snap Snapshot) error {
-	label := `provider="` + escapeLabelValue(provider) + `"`
-	lines := []string{
-		fmt.Sprintf("shaper_active{%s} %d", label, snap.Active),
-		fmt.Sprintf("shaper_queued{%s} %d", label, snap.Queued),
-		fmt.Sprintf("shaper_retries_in_flight{%s} %d", label, snap.RetriesInFlight),
-		fmt.Sprintf("shaper_clean_proxied_total{%s} %d", label, snap.TotalProxied),
-		fmt.Sprintf("shaper_clean_passthrough_total{%s} %d", label, snap.TotalPassThrough),
-		fmt.Sprintf("shaper_aborted_total{%s} %d", label, snap.TotalAborted),
-		fmt.Sprintf("shaper_circuit_rejected_total{%s} %d", label, snap.TotalCircuitRejected),
+// ProviderSnapshot pairs one provider's display name with its collected
+// snapshot for fleet-wide exposition. An empty Name exports under the
+// provider label "default".
+type ProviderSnapshot struct {
+	Name     string
+	Snapshot Snapshot
+}
+
+// breakerSeriesValue maps a circuit-breaker state name onto its numeric gauge
+// value: closed=0, half_open=1, open=2 (anything else is closed).
+func breakerSeriesValue(state string) int64 {
+	switch state {
+	case "HALF_OPEN":
+		return 1
+	case "OPEN":
+		return 2
+	default:
+		return 0
 	}
-	for i := 1; i < int(statusBuckets); i++ {
-		lines = append(lines, fmt.Sprintf("shaper_requests_total{%s,status=%q} %d", label, statusBucketNames[i], snap.StatusCounts[i]))
-	}
-	if cb := snap.CircuitBreaker; cb != nil {
-		state := "closed"
-		switch cb.State {
-		case "HALF_OPEN":
-			state = "half_open"
-		case "OPEN":
-			state = "open"
+}
+
+// WritePrometheusFleet writes every provider's snapshot as Prometheus
+// text-format exposition lines, every series carrying a provider label so one
+// /metrics endpoint can fan out over the whole fleet.
+//
+// Series are GROUPED BY METRIC NAME: each family forms exactly one contiguous
+// block across all providers that carry it. The text format requires all
+// lines for a metric to be provided as a single group, so interleaving
+// families per provider would violate the contract as soon as any HELP/TYPE
+// metadata line is added - even though samples-only output happens to parse
+// on tolerant implementations today. When snap.CircuitBreaker is nil (breaker
+// disabled or not merged) the breaker series is omitted for that provider
+// rather than guessed. Lines are stable and sorted by construction; no
+// timestamps are emitted (scrape time is scrape time).
+func WritePrometheusFleet(w io.Writer, providers []ProviderSnapshot) error {
+	labels := make([]string, len(providers))
+	for i, p := range providers {
+		name := p.Name
+		if name == "" {
+			name = "default"
 		}
-		value := 0
-		switch state {
-		case "half_open":
-			value = 1
-		case "open":
-			value = 2
-		}
-		lines = append(lines, fmt.Sprintf("shaper_breaker_state{%s,state=%q} %d", label, state, value))
+		labels[i] = `provider="` + escapeLabelValue(name) + `"`
 	}
-	for _, line := range lines {
-		if _, err := io.WriteString(w, line+"\n"); err != nil {
+
+	// group renders one series body per provider that carries it, in input
+	// order, producing a contiguous block for its family.
+	group := func(render func(i int) (body string, ok bool)) []string {
+		var out []string
+		for i := range providers {
+			if body, ok := render(i); ok {
+				out = append(out, body)
+			}
+		}
+		return out
+	}
+	writeGroup := func(lines []string) error {
+		for _, line := range lines {
+			if _, err := io.WriteString(w, line); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	gauge := func(name string, pick func(*Snapshot) int64) []string {
+		return group(func(i int) (string, bool) {
+			return fmt.Sprintf("%s{%s} %d\n", name, labels[i], pick(&providers[i].Snapshot)), true
+		})
+	}
+
+	families := [][]string{
+		gauge("shaper_active", func(s *Snapshot) int64 { return s.Active }),
+		gauge("shaper_queued", func(s *Snapshot) int64 { return s.Queued }),
+		gauge("shaper_retries_in_flight", func(s *Snapshot) int64 { return s.RetriesInFlight }),
+		gauge("shaper_clean_proxied_total", func(s *Snapshot) int64 { return s.TotalProxied }),
+		gauge("shaper_clean_passthrough_total", func(s *Snapshot) int64 { return s.TotalPassThrough }),
+		gauge("shaper_aborted_total", func(s *Snapshot) int64 { return s.TotalAborted }),
+		gauge("shaper_circuit_rejected_total", func(s *Snapshot) int64 { return s.TotalCircuitRejected }),
+	}
+	for bucket := 1; bucket < int(statusBuckets); bucket++ {
+		b := bucket
+		families = append(families, group(func(i int) (string, bool) {
+			return fmt.Sprintf("shaper_requests_total{%s,status=%q} %d\n",
+				labels[i], statusBucketNames[b], providers[i].Snapshot.StatusCounts[b]), true
+		}))
+	}
+	// Breaker state exports as ONE stable series per provider with the state
+	// encoded in the value alone (closed=0, half_open=1, open=2): a mutating
+	// state label would churn time series on every transition while
+	// redundantly re-encoding what the value already says.
+	families = append(families, group(func(i int) (string, bool) {
+		cb := providers[i].Snapshot.CircuitBreaker
+		if cb == nil {
+			return "", false
+		}
+		return fmt.Sprintf("shaper_breaker_state{%s} %d\n", labels[i], breakerSeriesValue(cb.State)), true
+	}))
+
+	for _, lines := range families {
+		if err := writeGroup(lines); err != nil {
 			return err
 		}
 	}

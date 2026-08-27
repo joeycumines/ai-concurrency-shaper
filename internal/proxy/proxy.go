@@ -1688,22 +1688,78 @@ func isContextCancellation(err error) bool {
 
 var errLocalSwitchingProtocolsFailure = errors.New("proxy: local switching protocols failure")
 
-// sanitizeTransportError rewrites *url.Error values so their embedded target
-// URL carries redacted credential query parameters before the error reaches
-// logs: http.Transport wraps failures in url.Error with the full outbound
-// URL, and its Error() text would otherwise echo ?key=... secrets verbatim.
-// Non-url.Error values carry no URL and pass through unchanged. Wrapped
-// chains via %w are handled via errors.As so fmt.Errorf("%w", urlErr) is
-// still scrubbed.
+// sanitizedTransportError preserves the rendered message of an error chain
+// whose embedded URLs have been scrubbed, while Unwrap keeps the REDACTED
+// clone reachable: logs see the full original context (including any outer %w
+// wrapping prefixes) with no secret substrings, and errors.Is/errors.As
+// traverse to a *url.Error whose URL field is itself clean.
+type sanitizedTransportError struct {
+	msg      string
+	redacted error
+}
+
+func (e *sanitizedTransportError) Error() string { return e.msg }
+
+func (e *sanitizedTransportError) Unwrap() error { return e.redacted }
+
+// sanitizeTransportError rewrites transport errors so no embedded target URL
+// echoes credential query parameters into logs: http.Transport wraps failures
+// in url.Error with the full outbound URL, and its Error() text would
+// otherwise leak ?key=... secrets verbatim.
+//
+// Fidelity contract:
+//   - A bare *url.Error input yields a redacted *url.Error clone (same shape
+//     as before sanitization existed).
+//   - A wrapped chain yields a sanitizedTransportError whose Error() is the
+//     ORIGINAL message with every collected *url.Error URL replaced by its
+//     RedactSensitiveURL counterpart (raw and %q-quoted spellings both
+//     covered), so outer wrapping context survives into log lines.
+//   - Directly nested url.Error subtrees (net/http redirect chains) are
+//     cloned recursively with each level's URL scrubbed; errors.Is and
+//     errors.As keep working through Unwrap.
+//
+// Non-url.Error values carry no URL and pass through unchanged. When the
+// outermost URL cannot be parsed there is nothing safe to rewrite and the
+// original error is returned unchanged (historical fallback).
 func sanitizeTransportError(err error) error {
-	var urlErr *url.Error
-	if !errors.As(err, &urlErr) {
+	var outer *url.Error
+	if !errors.As(err, &outer) {
 		return err
 	}
-	if parsed, perr := url.Parse(urlErr.URL); perr == nil {
-		return &url.Error{Op: urlErr.Op, URL: auth.RedactSensitiveURL(parsed).String(), Err: urlErr.Err}
+	parsed, perr := url.Parse(outer.URL)
+	if perr != nil {
+		return err
 	}
-	return err
+	var replacements []string
+	clone := redactURLError(outer, parsed, &replacements)
+	if _, direct := err.(*url.Error); direct {
+		return clone
+	}
+	return &sanitizedTransportError{
+		msg:      strings.NewReplacer(replacements...).Replace(err.Error()),
+		redacted: clone,
+	}
+}
+
+// redactURLError clones e with its URL replaced by the redacted form of
+// parsed and its Err subtree recursively scrubbed when it nests another
+// *url.Error directly (as http.Client redirect chains do). Every URL seen is
+// appended to replacements as %q-quoted and raw old/new pairs - quoted first,
+// because a quoted rendering must be rewritten atomically to stay correctly
+// escaped.
+func redactURLError(e *url.Error, parsed *url.URL, replacements *[]string) *url.Error {
+	redacted := auth.RedactSensitiveURL(parsed).String()
+	if e.URL != "" && e.URL != redacted {
+		*replacements = append(*replacements, strconv.Quote(e.URL), strconv.Quote(redacted), e.URL, redacted)
+	}
+	clone := *e
+	clone.URL = redacted
+	if inner, ok := e.Err.(*url.Error); ok {
+		if innerParsed, perr := url.Parse(inner.URL); perr == nil {
+			clone.Err = redactURLError(inner, innerParsed, replacements)
+		}
+	}
+	return &clone
 }
 
 func localSwitchingProtocolsFailure(msg string) error {

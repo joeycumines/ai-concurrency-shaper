@@ -11461,6 +11461,60 @@ func TestProxy_TransportErrorLogCarriesNoURL(t *testing.T) {
 	}
 }
 
+func TestSanitizeTransportErrorPreservesOuterContext(t *testing.T) {
+	u := mustParseURL(t, "http://up/v1/models?key=topsecret&x=1")
+	inner := &url.Error{Op: "Get", URL: u.String(), Err: context.DeadlineExceeded}
+	wrapped := fmt.Errorf("proxy timeout: %w", inner)
+
+	got := sanitizeTransportError(wrapped)
+
+	msg := got.Error()
+	if !strings.Contains(msg, "proxy timeout:") {
+		t.Errorf("outer wrapping context lost from sanitized message: %q", msg)
+	}
+	if strings.Contains(msg, "topsecret") {
+		t.Errorf("sanitized message leaked credential: %q", msg)
+	}
+	if !strings.Contains(msg, "key=%5BREDACTED%5D") || !strings.Contains(msg, "x=1") {
+		t.Errorf("sanitized message = %q, want key redacted, x preserved", msg)
+	}
+	var ue *url.Error
+	if !errors.As(got, &ue) {
+		t.Fatalf("sanitizeTransportError type = %T, want resolvable *url.Error via errors.As", got)
+	}
+	if strings.Contains(ue.URL, "topsecret") {
+		t.Errorf("reachable *url.Error field leaked credential: %q", ue.URL)
+	}
+	if !errors.Is(got, context.DeadlineExceeded) {
+		t.Error("sentinel identity lost through sanitized wrapper")
+	}
+}
+
+func TestSanitizeTransportErrorScrubsNestedChainURLs(t *testing.T) {
+	inner := &url.Error{Op: "Get", URL: "http://b.internal/v2?token=betasecret", Err: io.EOF}
+	outer := &url.Error{Op: "Post", URL: "http://a.internal/v1?key=alphasecret", Err: inner}
+
+	got := sanitizeTransportError(outer)
+
+	ue, ok := got.(*url.Error)
+	if !ok {
+		t.Fatalf("type = %T, want *url.Error for direct url.Error input", got)
+	}
+	if strings.Contains(ue.URL, "alphasecret") || !strings.Contains(ue.URL, "key=%5BREDACTED%5D") {
+		t.Errorf("outer URL not scrubbed: %q", ue.URL)
+	}
+	nested, ok := ue.Err.(*url.Error)
+	if !ok {
+		t.Fatalf("nested chain flattened away: %T (want preserved *url.Error)", ue.Err)
+	}
+	if strings.Contains(nested.URL, "betasecret") || !strings.Contains(nested.URL, "token=%5BREDACTED%5D") {
+		t.Errorf("nested URL not scrubbed: %q", nested.URL)
+	}
+	if !errors.Is(nested.Err, io.EOF) {
+		t.Errorf("nested leaf changed: %v", nested.Err)
+	}
+}
+
 func TestSanitizeTransportErrorRedactsURLErrors(t *testing.T) {
 	u := mustParseURL(t, "http://up/v1/models?key=topsecret&x=1")
 	err := &url.Error{Op: "Get", URL: u.String(), Err: context.DeadlineExceeded}

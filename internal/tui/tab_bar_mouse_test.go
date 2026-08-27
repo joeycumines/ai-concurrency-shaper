@@ -1,3 +1,18 @@
+// Copyright (C) 2026 Joseph Cumines
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package tui
 
 import (
@@ -47,11 +62,11 @@ func TestMouseClickTabBarGeometry(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = tc.width
 			m.height = 24
 			m.tab = tc.startTab
-			// ensure styles are set (NewModel does)
+			// ensure styles are set (NewModelForProviders does)
 			// call Update with MouseClickMsg
 			m2 := update(m, tea.MouseClickMsg{X: tc.x, Y: 1})
 			if tc.wantNoChange {
@@ -68,7 +83,7 @@ func TestMouseClickTabBarGeometry(t *testing.T) {
 }
 
 func TestTabAtBoundaries(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	// Check total width is 80 via rendered tab bar.
@@ -103,7 +118,7 @@ func TestTabAtBoundaries(t *testing.T) {
 }
 
 func TestMouseClickTabBarOffRowNoChange(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	// Start on tabDashboard (NOT tabRequests) on purpose. X=15 falls inside the
@@ -132,7 +147,7 @@ func TestMouseClickTabBarEmptySpaceNoOpAcrossWidths(t *testing.T) {
 	// Regardless of starting tab, clicking there must be no-op.
 	for _, width := range []int{80, 90, 120, 200} {
 		for _, start := range []tabID{tabDashboard, tabRequests, tabNetwork, tabLogs, tabConcurrency, tabRoutes} {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = width
 			m.height = 24
 			m.tab = start
@@ -155,7 +170,7 @@ func TestMouseClickTabBarEmptySpaceNoOpAcrossWidths(t *testing.T) {
 
 func TestMouseClickTabBarNarrowStillGeometry(t *testing.T) {
 	// Even when terminal is narrow (40), hit-test still uses fixed geometry, not ratio.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 40
 	m.height = 24
 	cases := []struct {
@@ -195,7 +210,7 @@ func TestTabAtActiveStyleConsistency(t *testing.T) {
 	}
 	for active := range numTabs {
 		t.Run(fmt.Sprintf("active=%d", active), func(t *testing.T) {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = 80
 			m.height = 24
 			m.tab = active
@@ -231,7 +246,7 @@ func TestTabAtActiveStyleConsistency(t *testing.T) {
 // tabAt measures the selected tab with the active style (width 20), shifting
 // Logs to [41,61) so x=55 hits Logs — matching what renderTabBar actually draws.
 func TestTabAtUsesActiveStyleWidth(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabLogs
@@ -265,7 +280,7 @@ func TestTabAtUsesActiveStyleWidth(t *testing.T) {
 // the top, so an inadvertent click on the empty tab-bar margin silently killed
 // tail-following until the user manually re-enabled it with G.
 func TestMouseClickTabBarEmptySpaceKeepsFollowLogs(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 120
 	m.height = 24
 	m.switchTab(tabLogs)
@@ -288,7 +303,7 @@ func TestMouseClickTabBarEmptySpaceKeepsFollowLogs(t *testing.T) {
 // area click (below the tab bar) on the Logs tab still pauses followLogs.
 // This is the intended behaviour that T3 preserves.
 func TestMouseClickContentAreaPausesFollowLogs(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.switchTab(tabLogs)

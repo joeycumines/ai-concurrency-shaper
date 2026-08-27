@@ -85,7 +85,7 @@ func (b *safeBuffer) String() string {
 func scrollbarTop(m Model) int { return contentStartRow + m.contentHeaderRows() }
 
 func TestViewRenders(t *testing.T) {
-	m := NewModel(10)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 10}})
 	m.width = 80
 	m.height = 24
 	v := m.View()
@@ -98,7 +98,7 @@ func TestViewRenders(t *testing.T) {
 }
 
 func TestViewContainsAllTabs(t *testing.T) {
-	m := NewModel(8)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 8}})
 	m.width = 80
 	m.height = 24
 	v := m.View()
@@ -110,7 +110,7 @@ func TestViewContainsAllTabs(t *testing.T) {
 }
 
 func TestViewContainsKeybindings(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	v := m.View()
@@ -122,7 +122,7 @@ func TestViewContainsKeybindings(t *testing.T) {
 }
 
 func TestViewWithEmptySnapshot(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -137,7 +137,7 @@ func TestViewWithEmptySnapshot(t *testing.T) {
 }
 
 func TestTabSwitching(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 
@@ -173,7 +173,7 @@ func TestTabSwitching(t *testing.T) {
 }
 
 func TestScrollDown(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -194,7 +194,7 @@ func TestScrollDown(t *testing.T) {
 }
 
 func TestScrollUp(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -208,7 +208,7 @@ func TestScrollUp(t *testing.T) {
 }
 
 func TestScrollStaysInBounds(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -220,7 +220,7 @@ func TestScrollStaysInBounds(t *testing.T) {
 }
 
 func TestGoToTop(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -235,7 +235,7 @@ func TestGoToTop(t *testing.T) {
 }
 
 func TestGoToBottom(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -248,7 +248,7 @@ func TestGoToBottom(t *testing.T) {
 }
 
 func TestDetailOverlayRequests(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -321,7 +321,7 @@ func TestDetailOverlayRequests(t *testing.T) {
 }
 
 func TestDetailOverlayConcurrency(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabConcurrency
@@ -487,7 +487,7 @@ func TestToastToastWidth_Fallback(t *testing.T) {
 }
 
 func TestSnapshotUpdate(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 
@@ -506,7 +506,7 @@ func TestSnapshotUpdate(t *testing.T) {
 }
 
 func TestWindowSize(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	if m.width != 120 || m.height != 40 {
 		t.Errorf("size = %dx%d, want 120x40", m.width, m.height)
@@ -514,7 +514,7 @@ func TestWindowSize(t *testing.T) {
 }
 
 func TestRenderGaugeBar(t *testing.T) {
-	m := NewModel(10)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 10}})
 	m.width = 80
 	g := m.renderGaugeBar(5, 10, 20)
 	if !strings.Contains(g, "█") {
@@ -533,7 +533,7 @@ func TestRenderGaugeBar(t *testing.T) {
 }
 
 func TestRenderGaugeBarOverflow(t *testing.T) {
-	m := NewModel(10)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 10}})
 	m.width = 80
 	g := m.renderGaugeBar(100, 10, 20)
 	if strings.Contains(g, "%") {
@@ -549,7 +549,7 @@ func TestRenderGaugeBarOverflow(t *testing.T) {
 }
 
 func TestRenderGaugeBarEmpty(t *testing.T) {
-	m := NewModel(10)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 10}})
 	m.width = 80
 	g := m.renderGaugeBar(0, 10, 20)
 	if strings.Contains(g, "█") && !strings.Contains(g, "░") {
@@ -562,7 +562,7 @@ func TestRenderGaugeBarEmpty(t *testing.T) {
 }
 
 func TestRenderHBar_Padding(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	g := stripANSI(m.renderHBar(5, 10, 20, m.queueFillStyle(5, 10)))
 	if !strings.HasPrefix(g, "  [") {
@@ -615,7 +615,7 @@ func contrastRatio(a, b color.Color) float64 {
 // (tea.BackgroundColorMsg), then back to dark on a dark report. The swaps
 // cover the whole theme, including the per-tab scrollbar thumb/track.
 func TestBackgroundColorMsgSwitchesTheme(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	if got, want := hexString(m.styles.rowStyle.GetForeground()), "#E6EDF3"; got != want {
 		t.Fatalf("default row foreground = %s, want dark default %s", got, want)
 	}
@@ -751,7 +751,7 @@ func TestQueueFillStyleSeverity(t *testing.T) {
 }
 
 func TestGaugeBarWidth(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	if got, want := m.gaugeBarWidth(), m.hBarWidth(); got != want {
@@ -760,7 +760,7 @@ func TestGaugeBarWidth(t *testing.T) {
 }
 
 func TestAltScreenEnabled(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	v := m.View()
@@ -770,7 +770,7 @@ func TestAltScreenEnabled(t *testing.T) {
 }
 
 func TestMouseModeEnabled(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	v := m.View()
@@ -780,7 +780,7 @@ func TestMouseModeEnabled(t *testing.T) {
 }
 
 func TestRoutesTabSortedByTotal(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRoutes
@@ -804,7 +804,7 @@ func TestRoutesTabSortedByTotal(t *testing.T) {
 func TestRoutesTabDeterministicSort(t *testing.T) {
 	// Three routes with the same total — must sort alphabetically every time.
 	for iter := range 10 {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = 80
 		m.height = 24
 		m.tab = tabRoutes
@@ -832,7 +832,7 @@ func TestRoutesTabDeterministicSort(t *testing.T) {
 }
 
 func TestMouseClickTabBar(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 
@@ -851,7 +851,7 @@ func TestStatusStyle(t *testing.T) {
 }
 
 func TestDashboardShowsSparkline(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabDashboard
@@ -885,7 +885,7 @@ func TestSparklineFillStyleSeverity(t *testing.T) {
 }
 
 func TestSparklineEmptyState(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabDashboard
@@ -897,7 +897,7 @@ func TestSparklineEmptyState(t *testing.T) {
 }
 
 func TestQuit(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	_, cmd := m.Update(key('q'))
 	if cmd == nil {
 		t.Fatal("quit should return a command")
@@ -910,13 +910,13 @@ func TestQuit(t *testing.T) {
 }
 
 func TestInitStartsResyncLoop(t *testing.T) {
-	if cmd := NewModel(4).Init(); cmd == nil {
+	if cmd := NewModelForProviders([]ProviderMeta{{Concurrency: 4}}).Init(); cmd == nil {
 		t.Fatal("Init should start the periodic resync loop")
 	}
 }
 
 func TestUpdateResyncTickSchedulesClearThenDraw(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	updated, cmd := m.Update(resyncTickMsg{})
 	if cmd == nil {
 		t.Fatal("resync tick should schedule clear-then-draw")
@@ -928,7 +928,7 @@ func TestUpdateResyncTickSchedulesClearThenDraw(t *testing.T) {
 }
 
 func TestUpdateResyncDrawTogglesInvisibleMarker(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	before := m.View()
@@ -952,7 +952,7 @@ func TestUpdateResyncDrawTogglesInvisibleMarker(t *testing.T) {
 }
 
 func TestResyncDoesNotInvalidateDashboardCache(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.tab = tabDashboard
 	m.dashboardLinesCache = []string{"cached"}
 
@@ -968,7 +968,7 @@ func TestResyncDoesNotInvalidateDashboardCache(t *testing.T) {
 }
 
 func TestProgramResyncClearsThenRedraws(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 
@@ -1050,7 +1050,7 @@ func secondClearIndex(output string) (int, bool) {
 }
 
 func TestArrowKeyScrolling(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1068,7 +1068,7 @@ func TestArrowKeyScrolling(t *testing.T) {
 }
 
 func TestConcurrencyTabInFlight(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabConcurrency
@@ -1087,7 +1087,7 @@ func TestConcurrencyTabInFlight(t *testing.T) {
 }
 
 func TestDashboardSummary(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 	m.tab = tabDashboard
@@ -1111,7 +1111,7 @@ func TestDashboardSummary(t *testing.T) {
 }
 
 func TestDashboardSummaryShowsAborted(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 100
 	m.height = 40
 	m.tab = tabDashboard
@@ -1132,7 +1132,7 @@ func TestDashboardSummaryShowsAborted(t *testing.T) {
 }
 
 func TestRenderStatusBarShowsAbortedWhenNoStatusCommitted(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 100
 	m.height = 24
 	m.snap.TotalAborted = 3
@@ -1147,7 +1147,7 @@ func TestRenderStatusBarShowsAbortedWhenNoStatusCommitted(t *testing.T) {
 }
 
 func TestConcurrencyTabInFlightEmptyIsDim(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabConcurrency
@@ -1158,7 +1158,7 @@ func TestConcurrencyTabInFlightEmptyIsDim(t *testing.T) {
 }
 
 func TestHelpOverlayToggle(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 
@@ -1186,7 +1186,7 @@ func TestHelpOverlayToggle(t *testing.T) {
 }
 
 func TestHelpOverlayDismissWithAnyKey(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 
@@ -1206,7 +1206,7 @@ func TestHelpOverlayDismissWithAnyKey(t *testing.T) {
 // multi-provider mode (or with a single named provider). A single unnamed
 // provider must keep the legacy overlay byte-identical.
 func TestHelpOverlaySingleProviderOmitsSwitchProvider(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 
@@ -1253,7 +1253,7 @@ func TestHelpOverlaySingleNamedProviderShowsSwitchProvider(t *testing.T) {
 }
 
 func TestFilterModeToggle(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1269,7 +1269,7 @@ func TestFilterModeToggle(t *testing.T) {
 }
 
 func TestFilterModeAccumulate(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1286,7 +1286,7 @@ func TestFilterModeAccumulate(t *testing.T) {
 }
 
 func TestFilterModeEnterAccepts(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1304,7 +1304,7 @@ func TestFilterModeEnterAccepts(t *testing.T) {
 }
 
 func TestFilterModeEscClears(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1322,7 +1322,7 @@ func TestFilterModeEscClears(t *testing.T) {
 }
 
 func TestFilterModeBackspace(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1341,7 +1341,7 @@ func TestFilterModeBackspace(t *testing.T) {
 func TestFilterModeBackspaceMultiByte(t *testing.T) {
 	// Verify that backspace removes a full rune, not just one byte.
 	// The Japanese character '日' is 3 bytes in UTF-8.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1375,7 +1375,7 @@ func TestFilterModeBackspaceMultiByte(t *testing.T) {
 }
 
 func TestFilterFiltersEntries(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1419,7 +1419,7 @@ func TestFilterFiltersEntries(t *testing.T) {
 }
 
 func TestFilterByMethod(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1446,7 +1446,7 @@ func TestFilterByMethod(t *testing.T) {
 }
 
 func TestFilterByStatus(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1480,7 +1480,7 @@ func TestFilterByStatus(t *testing.T) {
 }
 
 func TestAdjustViewportClampsOnFilterShrink(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1598,7 +1598,7 @@ func TestFilterModeArrowKeysIgnored(t *testing.T) {
 	// do NOT corrupt the filter text. In Bubble Tea v2, these keys
 	// have Key.Text == "" (no printable characters), so they must
 	// be silently discarded in the filter default handler.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1637,7 +1637,7 @@ func TestFilterModeArrowKeysIgnored(t *testing.T) {
 }
 
 func TestAddToast_DefaultDuration(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	tt := &toast.Toast{Message: "test"}
@@ -1648,7 +1648,7 @@ func TestAddToast_DefaultDuration(t *testing.T) {
 }
 
 func TestAddToast_AppendsToSlice(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.AddToast(&toast.Toast{Message: "first"})
@@ -1662,7 +1662,7 @@ func TestAddToast_AppendsToSlice(t *testing.T) {
 }
 
 func TestToastExpired_PurgedInUpdate(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	tt := &toast.Toast{Message: "expires", Duration: 1 * time.Millisecond}
@@ -1675,7 +1675,7 @@ func TestToastExpired_PurgedInUpdate(t *testing.T) {
 }
 
 func TestToastNotExpired_KeptInUpdate(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	tt := &toast.Toast{Message: "alive", Duration: 5 * time.Second}
@@ -1687,7 +1687,7 @@ func TestToastNotExpired_KeptInUpdate(t *testing.T) {
 }
 
 func TestToastStacking_ShowsMultipleToasts(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.AddToast(&toast.Toast{Message: "first", Duration: 5 * time.Second})
@@ -1703,7 +1703,7 @@ func TestToastStacking_ShowsMultipleToasts(t *testing.T) {
 }
 
 func TestToastStacking_LimitsToThree(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.AddToast(&toast.Toast{Message: "t1", Duration: 5 * time.Second})
@@ -1723,7 +1723,7 @@ func TestToastStacking_LimitsToThree(t *testing.T) {
 }
 
 func TestToastStacking_MostRecentAtBottom(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.AddToast(&toast.Toast{Message: "older", Duration: 5 * time.Second})
@@ -1741,7 +1741,7 @@ func TestToastStacking_MostRecentAtBottom(t *testing.T) {
 }
 
 func TestToastStacking_NoToastsRendersNothing(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	v := m.View()
@@ -1752,7 +1752,7 @@ func TestToastStacking_NoToastsRendersNothing(t *testing.T) {
 }
 
 func TestToastNotShownInDetailMode(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1770,7 +1770,7 @@ func TestToastNotShownInDetailMode(t *testing.T) {
 }
 
 func TestRequestsTabMarksAbortedRows(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 100
 	m.height = 24
 	m.tab = tabRequests
@@ -1787,7 +1787,7 @@ func TestRequestsTabMarksAbortedRows(t *testing.T) {
 // ─── TUI-06: Scroll / Viewport Behavior ───
 
 func TestVisibleRows_NormalTab(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1798,7 +1798,7 @@ func TestVisibleRows_NormalTab(t *testing.T) {
 }
 
 func TestVisibleRows_FilterTab(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1811,7 +1811,7 @@ func TestVisibleRows_FilterTab(t *testing.T) {
 }
 
 func TestVisibleRows_ToastOverlay(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1824,7 +1824,7 @@ func TestVisibleRows_ToastOverlay(t *testing.T) {
 }
 
 func TestVisibleRows_ConcurrencyTab(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabConcurrency
@@ -1835,7 +1835,7 @@ func TestVisibleRows_ConcurrencyTab(t *testing.T) {
 }
 
 func TestDataRows_PerTab(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 
@@ -1873,7 +1873,7 @@ func TestDataRows_PerTab(t *testing.T) {
 func TestVisibleRows_MatchesHeightLessChrome(t *testing.T) {
 	// visibleRows is the space between chrome and footer; it may be zero at
 	// the documented minimum height of 4.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 4
 	if got, want := m.visibleRows(), 0; got != want {
@@ -1886,7 +1886,7 @@ func TestVisibleRows_MatchesHeightLessChrome(t *testing.T) {
 }
 
 func TestMaxCursor_Dashboard(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabDashboard
@@ -1898,7 +1898,7 @@ func TestMaxCursor_Dashboard(t *testing.T) {
 }
 
 func TestMaxCursor_Requests(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1909,7 +1909,7 @@ func TestMaxCursor_Requests(t *testing.T) {
 }
 
 func TestMaxCursor_Logs(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabLogs
@@ -1920,7 +1920,7 @@ func TestMaxCursor_Logs(t *testing.T) {
 }
 
 func TestMaxCursor_Concurrency(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabConcurrency
@@ -1931,7 +1931,7 @@ func TestMaxCursor_Concurrency(t *testing.T) {
 }
 
 func TestMaxCursor_Routes(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRoutes
@@ -1945,7 +1945,7 @@ func TestMaxCursor_Routes(t *testing.T) {
 }
 
 func TestMaxScroll(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1957,7 +1957,7 @@ func TestMaxScroll(t *testing.T) {
 }
 
 func TestAdjustViewport_ScrollFollowsCursor(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1971,7 +1971,7 @@ func TestAdjustViewport_ScrollFollowsCursor(t *testing.T) {
 }
 
 func TestAdjustViewport_CursorClampedToMax(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1984,7 +1984,7 @@ func TestAdjustViewport_CursorClampedToMax(t *testing.T) {
 }
 
 func TestAdjustViewport_ScrollClampedToMax(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -1997,7 +1997,7 @@ func TestAdjustViewport_ScrollClampedToMax(t *testing.T) {
 }
 
 func TestMoveCursor_ClampsAtZero(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -2008,7 +2008,7 @@ func TestMoveCursor_ClampsAtZero(t *testing.T) {
 }
 
 func TestMoveCursor_ClampsAtMax(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -2020,7 +2020,7 @@ func TestMoveCursor_ClampsAtMax(t *testing.T) {
 }
 
 func TestSwitchTab_ResetsCursorAndScroll(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -2036,7 +2036,7 @@ func TestSwitchTab_ResetsCursorAndScroll(t *testing.T) {
 }
 
 func TestPageDown_TUI06(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -2048,7 +2048,7 @@ func TestPageDown_TUI06(t *testing.T) {
 }
 
 func TestPageUp_TUI06(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -2061,7 +2061,7 @@ func TestPageUp_TUI06(t *testing.T) {
 }
 
 func TestHomeKey_TUI06(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -2074,7 +2074,7 @@ func TestHomeKey_TUI06(t *testing.T) {
 }
 
 func TestEndKey_TUI06(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -2086,7 +2086,7 @@ func TestEndKey_TUI06(t *testing.T) {
 }
 
 func TestCtrlU_TUI06(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -2099,7 +2099,7 @@ func TestCtrlU_TUI06(t *testing.T) {
 }
 
 func TestCtrlD_TUI06(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -2204,7 +2204,7 @@ func TestLogRing_ConcurrentWrite(t *testing.T) {
 // ─── TUI-08: visibleLogLines / renderLogs ───
 
 func TestVisibleLogLines_NoFilter(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabLogs
@@ -2216,7 +2216,7 @@ func TestVisibleLogLines_NoFilter(t *testing.T) {
 }
 
 func TestVisibleLogLines_WithFilter(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabLogs
@@ -2232,7 +2232,7 @@ func TestVisibleLogLines_WithFilter(t *testing.T) {
 }
 
 func TestVisibleLogLines_EmptyRing(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabLogs
@@ -2243,7 +2243,7 @@ func TestVisibleLogLines_EmptyRing(t *testing.T) {
 }
 
 func TestRenderLogs_NoOutput(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabLogs
@@ -2254,7 +2254,7 @@ func TestRenderLogs_NoOutput(t *testing.T) {
 }
 
 func TestRenderLogs_WithOutput(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabLogs
@@ -2266,7 +2266,7 @@ func TestRenderLogs_WithOutput(t *testing.T) {
 }
 
 func TestRenderLogs_WithFilter(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabLogs
@@ -2289,7 +2289,7 @@ func mustParseURL(s string) *url.URL {
 }
 
 func TestNetworkFilterType_Cycle(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabNetwork
@@ -2309,7 +2309,7 @@ func TestNetworkFilterType_Cycle(t *testing.T) {
 }
 
 func TestNetworkFilterStatus_Cycle(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabNetwork
@@ -2329,7 +2329,7 @@ func TestNetworkFilterStatus_Cycle(t *testing.T) {
 }
 
 func TestComputeVisibleNetworkEntries_NoJournal(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabNetwork
@@ -2340,7 +2340,7 @@ func TestComputeVisibleNetworkEntries_NoJournal(t *testing.T) {
 }
 
 func TestComputeVisibleNetworkEntries_WithTypeFilter(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabNetwork
@@ -2356,7 +2356,7 @@ func TestComputeVisibleNetworkEntries_WithTypeFilter(t *testing.T) {
 }
 
 func TestComputeVisibleNetworkEntries_WithStatusFilter(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabNetwork
@@ -2372,7 +2372,7 @@ func TestComputeVisibleNetworkEntries_WithStatusFilter(t *testing.T) {
 }
 
 func TestComputeVisibleNetworkEntries_WithTextFilter(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabNetwork
@@ -2388,7 +2388,7 @@ func TestComputeVisibleNetworkEntries_WithTextFilter(t *testing.T) {
 }
 
 func TestRenderNetwork_EmptyEntries(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabNetwork
@@ -2399,7 +2399,7 @@ func TestRenderNetwork_EmptyEntries(t *testing.T) {
 }
 
 func TestRenderNetworkMarksAbortedEntries(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 100
 	m.height = 24
 	m.tab = tabNetwork
@@ -2420,7 +2420,7 @@ func TestRenderNetworkMarksAbortedEntries(t *testing.T) {
 }
 
 func TestRenderNetwork_WithFilterIndicators(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabNetwork
@@ -2438,7 +2438,7 @@ func TestRenderNetwork_WithFilterIndicators(t *testing.T) {
 // ─── TUI-10: Scrollbar, Status Bar, canInspect, Overlays ───
 
 func TestRenderContentWithScrollbar_ContainsScrollbarChars(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -2452,7 +2452,7 @@ func TestRenderContentWithScrollbar_ContainsScrollbarChars(t *testing.T) {
 }
 
 func TestRenderStatusBar_NoResponses(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	s := stripANSI(strings.Join(m.renderStatusBar(m.hBarWidth()), " "))
@@ -2470,7 +2470,7 @@ func TestRenderStatusBar_NoResponses(t *testing.T) {
 }
 
 func TestRenderStatusBar_WithResponses(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.snap.StatusCounts = [6]int64{0, 0, 90, 5, 8, 3}
@@ -2481,7 +2481,7 @@ func TestRenderStatusBar_WithResponses(t *testing.T) {
 }
 
 func TestRenderStatusBar_EmptyBarWidth(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	s := stripANSI(strings.Join(m.renderStatusBar(m.hBarWidth()), " "))
@@ -2493,7 +2493,7 @@ func TestRenderStatusBar_EmptyBarWidth(t *testing.T) {
 }
 
 func TestRenderStatusBar_ColoredLabels(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.snap.StatusCounts = [6]int64{0, 1, 20, 3, 4, 5}
@@ -2532,7 +2532,7 @@ func composedStatusLines(m Model) []string {
 }
 
 func TestRenderStatusBar_FitsViewport(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.snap.StatusCounts = [6]int64{0, 1, 20, 3, 4, 5}
@@ -2556,7 +2556,7 @@ func TestRenderStatusBar_FitsViewport(t *testing.T) {
 }
 
 func TestRenderStatusBar_FitsNarrowViewport(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 40
 	m.height = 24
 	m.snap.StatusCounts = [6]int64{0, 1, 20, 3, 4, 5}
@@ -2588,7 +2588,7 @@ func TestRenderStatusBar_FitsNarrowViewport(t *testing.T) {
 }
 
 func TestRenderStatusBar_OmitsZeroCounts(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.snap.StatusCounts = [6]int64{0, 0, 5, 0, 0, 0}
@@ -2611,7 +2611,7 @@ func TestRenderStatusBar_OmitsZeroCounts(t *testing.T) {
 }
 
 func TestRenderStatusBar_MultiDigitSparseFitsAt80(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.snap.StatusCounts = [6]int64{0, 0, 10_000_000, 0, 123, 12}
@@ -2638,7 +2638,7 @@ func TestRenderStatusBar_MultiDigitSparseFitsAt80(t *testing.T) {
 // ("2xx:12.3B" style) and the composed line still fits, while ordinary
 // counts below 10^7 render exactly as before.
 func TestRenderStatusBar_AbbreviatesLargeCounts(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.snap.StatusCounts = [6]int64{0, 0, 12_345_678_901, 0, 0, 0}
@@ -2661,7 +2661,7 @@ func TestRenderStatusBar_AbbreviatesLargeCounts(t *testing.T) {
 }
 
 func TestRenderStatusBar_WrapsAbortedOnNarrowViewport(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 27
 	m.height = 24
 	m.snap.TotalAborted = 99_999_999_999_999
@@ -2718,7 +2718,7 @@ func TestRenderStatusBar_WrapsLabelsMultiRow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = 40
 			m.height = 40
 			m.snap.StatusCounts = tc.counts
@@ -2756,7 +2756,7 @@ func TestRenderDualBars_WidthsAndClamps(t *testing.T) {
 			t.Run(fmt.Sprintf("conc=%d/width=%d", conc, width), func(t *testing.T) {
 				for _, active := range values {
 					for _, queued := range values {
-						m := NewModel(conc)
+						m := NewModelForProviders([]ProviderMeta{{Concurrency: conc}})
 						m.width = width
 						m.height = 40
 						m.snap.Active = active
@@ -2786,7 +2786,7 @@ func TestRenderDualBars_NoPanicNarrowViewport(t *testing.T) {
 	for _, width := range []int{1, 20, 27} { // viewports 1, 19, 26
 		for _, active := range []int64{0, -1, 100} {
 			for _, queued := range []int64{0, -1, 100} {
-				m := NewModel(4)
+				m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 				m.width = width
 				m.height = 40
 				m.snap.Active = active
@@ -2884,7 +2884,7 @@ func TestDashboard_SummaryFitsViewport(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = tt.width
 			m.height = 40
 			if tt.set != nil {
@@ -2957,7 +2957,7 @@ func TestDashboard_InFlightSummaryFitsViewport(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s/width=%d", tt.name, tt.width), func(t *testing.T) {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = tt.width
 			m.height = 40
 			m.snap.InFlight = make([]metrics.InFlightEntry, tt.flights)
@@ -3012,7 +3012,7 @@ func TestDashboard_InFlightRowsFitViewport(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%s/width=%d", tt.name, tt.width), func(t *testing.T) {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = tt.width
 			m.height = 40
 			m.snap.InFlight = []metrics.InFlightEntry{{
@@ -3136,7 +3136,7 @@ func TestDashboard_AllLinesFitViewport(t *testing.T) {
 	for _, width := range []int{40, 80, 120} {
 		for _, tt := range tests {
 			t.Run(fmt.Sprintf("width=%d/%s", width, tt.name), func(t *testing.T) {
-				m := NewModel(4)
+				m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 				m.width = width
 				m.height = 40
 				if tt.set != nil {
@@ -3326,7 +3326,7 @@ func TestDashboard_StatusLineFitsViewport(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = tt.width
 			m.height = 40
 			m.snap.StatusCounts = tt.counts
@@ -3354,7 +3354,7 @@ func TestDashboard_StatusLineFitsViewport(t *testing.T) {
 func TestRenderDashboard_CircuitBreakerColors(t *testing.T) {
 	for _, state := range []string{"CLOSED", "OPEN", "HALF_OPEN"} {
 		t.Run(state, func(t *testing.T) {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = 80
 			m.height = 40
 			m.snap.CircuitBreaker = &metrics.CBStats{State: state}
@@ -3366,7 +3366,7 @@ func TestRenderDashboard_CircuitBreakerColors(t *testing.T) {
 	}
 
 	// Color assertions: CLOSED green, OPEN red, HALF_OPEN amber.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 	m.snap.CircuitBreaker = &metrics.CBStats{State: "CLOSED"}
@@ -3389,7 +3389,7 @@ func TestRenderDashboard_CircuitBreakerColors(t *testing.T) {
 }
 
 func TestRenderDashboard_CircuitBreakerSingleLine(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 	m.snap.CircuitBreaker = &metrics.CBStats{
@@ -3409,7 +3409,7 @@ func TestRenderDashboard_CircuitBreakerSingleLine(t *testing.T) {
 }
 
 func TestCanInspect_Dashboard(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabDashboard
@@ -3419,7 +3419,7 @@ func TestCanInspect_Dashboard(t *testing.T) {
 }
 
 func TestCanInspect_Requests(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3430,7 +3430,7 @@ func TestCanInspect_Requests(t *testing.T) {
 }
 
 func TestCanInspect_Logs(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabLogs
@@ -3441,7 +3441,7 @@ func TestCanInspect_Logs(t *testing.T) {
 }
 
 func TestCanInspect_Concurrency(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabConcurrency
@@ -3452,7 +3452,7 @@ func TestCanInspect_Concurrency(t *testing.T) {
 }
 
 func TestCanInspect_Default(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRoutes
@@ -3462,7 +3462,7 @@ func TestCanInspect_Default(t *testing.T) {
 }
 
 func TestRenderConfirmOverlay_ContainsPrompt(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	s := m.renderConfirmOverlay()
@@ -3473,7 +3473,7 @@ func TestRenderConfirmOverlay_ContainsPrompt(t *testing.T) {
 }
 
 func TestRenderHelpOverlay_ContainsKeybindings(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	s := m.renderHelpOverlay()
@@ -3488,7 +3488,7 @@ func TestRenderHelpOverlay_ContainsKeybindings(t *testing.T) {
 // TestFooterMentionsReset pins the footer's c:reset hint so the binding stays
 // discoverable from every tab.
 func TestFooterMentionsReset(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 100
 	m.height = 24
 	s := stripANSI(m.renderFooter())
@@ -3498,7 +3498,7 @@ func TestFooterMentionsReset(t *testing.T) {
 }
 
 func TestSwitchTab_SetsModeBrowse(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.mode = modeHelp
@@ -3509,7 +3509,7 @@ func TestSwitchTab_SetsModeBrowse(t *testing.T) {
 }
 
 func TestPerRouteRate_TUI10(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.snap.LogEntries = []metrics.RequestLogEntry{
@@ -3531,7 +3531,7 @@ func TestPerRouteRate_TUI10(t *testing.T) {
 }
 
 func TestMouseClickContentArea_SetsCursor(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3544,7 +3544,7 @@ func TestMouseClickContentArea_SetsCursor(t *testing.T) {
 }
 
 func TestMouseClickContentArea_ClampsToMaxCursor(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3556,7 +3556,7 @@ func TestMouseClickContentArea_ClampsToMaxCursor(t *testing.T) {
 }
 
 func TestMouseClickContentArea_DashboardSetsCursor(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabDashboard
@@ -3570,7 +3570,7 @@ func TestMouseClickContentArea_DashboardSetsCursor(t *testing.T) {
 func TestMouseClickContentArea_LogsTabNoHeader(t *testing.T) {
 	// The Logs tab has no header row (line numbers are embedded in data rows),
 	// so clicking the first content row should set cursor=0, not be ignored.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabLogs
@@ -3589,7 +3589,7 @@ func TestMouseClickContentArea_LogsTabNoHeader(t *testing.T) {
 }
 
 func TestScrollbarClick_SetsDragging(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3601,7 +3601,7 @@ func TestScrollbarClick_SetsDragging(t *testing.T) {
 }
 
 func TestScrollbarClick_JumpsScroll(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3613,7 +3613,7 @@ func TestScrollbarClick_JumpsScroll(t *testing.T) {
 }
 
 func TestMouseDrag_MotionUpdatesScroll(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3626,7 +3626,7 @@ func TestMouseDrag_MotionUpdatesScroll(t *testing.T) {
 }
 
 func TestMouseDrag_MotionWithoutDragIgnored(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3641,7 +3641,7 @@ func TestMouseDrag_MotionWithoutDragIgnored(t *testing.T) {
 }
 
 func TestMouseRelease_ClearsDragging(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3658,7 +3658,7 @@ func TestMouseRelease_ClearsDragging(t *testing.T) {
 func TestView_NarrowTerminal(t *testing.T) {
 	// View should render without panic at various narrow widths.
 	for w := 1; w <= 80; w++ {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		m.tab = tabRequests
@@ -3672,7 +3672,7 @@ func TestView_NarrowTerminal(t *testing.T) {
 
 func TestView_TinyTerminal(t *testing.T) {
 	// Very small terminal: 10x5.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 10
 	m.height = 5
 	m.tab = tabRequests
@@ -3685,7 +3685,7 @@ func TestView_TinyTerminal(t *testing.T) {
 
 func TestView_Height4Minimum(t *testing.T) {
 	// Minimum viable terminal: header(1) + tabbar(1) + separator(1) + footer(1) = 4.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 40
 	m.height = 4
 	m.tab = tabDashboard
@@ -3697,7 +3697,7 @@ func TestView_Height4Minimum(t *testing.T) {
 
 func TestView_Height3TooSmall(t *testing.T) {
 	// Height 3 is below minimum — should return empty.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 40
 	m.height = 3
 	v := m.View()
@@ -3707,7 +3707,7 @@ func TestView_Height3TooSmall(t *testing.T) {
 }
 
 func TestView_ZeroSize(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	v := m.View()
 	if v.Content != "" {
 		t.Error("View should return empty for zero size")
@@ -3719,7 +3719,7 @@ func TestView_ZeroSize(t *testing.T) {
 func TestScrollbar_NarrowTerminal(t *testing.T) {
 	// Scrollbar should render at narrow widths.
 	for w := 5; w <= 40; w++ {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		m.tab = tabRequests
@@ -3735,7 +3735,7 @@ func TestScrollbar_NarrowTerminal(t *testing.T) {
 func TestScrollbar_VariousHeights(t *testing.T) {
 	// Scrollbar should work at various terminal heights.
 	for h := 4; h <= 40; h++ {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = 80
 		m.height = h
 		m.tab = tabRequests
@@ -3750,7 +3750,7 @@ func TestScrollbar_VariousHeights(t *testing.T) {
 // ─── Viewport: Mouse Click Precision ───
 
 func TestMouseClickScrollbar_TopJumpsToTop(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3763,7 +3763,7 @@ func TestMouseClickScrollbar_TopJumpsToTop(t *testing.T) {
 }
 
 func TestMouseClickScrollbar_BottomJumpsNearBottom(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3775,7 +3775,7 @@ func TestMouseClickScrollbar_BottomJumpsNearBottom(t *testing.T) {
 }
 
 func TestMouseClickScrollbar_MiddleJumpsNearMiddle(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3788,7 +3788,7 @@ func TestMouseClickScrollbar_MiddleJumpsNearMiddle(t *testing.T) {
 }
 
 func TestMouseClickContentArea_CursorFollowsClick(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3802,7 +3802,7 @@ func TestMouseClickContentArea_CursorFollowsClick(t *testing.T) {
 }
 
 func TestMouseClickContentArea_ClampedAtEnd(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3818,7 +3818,7 @@ func TestMouseClickContentArea_ClampedAtEnd(t *testing.T) {
 // ─── Viewport: Mouse Drag Precision ───
 
 func TestMouseDrag_TopToBottom(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3839,7 +3839,7 @@ func TestMouseDrag_TopToBottom(t *testing.T) {
 
 func TestMouseDrag_Monotonic(t *testing.T) {
 	// Dragging from top to bottom should produce monotonically increasing scroll.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3858,7 +3858,7 @@ func TestMouseDrag_Monotonic(t *testing.T) {
 
 func TestMouseDrag_Proportional(t *testing.T) {
 	// Dragging to 25%, 50%, 75% of track should produce proportional scroll.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3892,7 +3892,7 @@ func TestMouseDrag_Proportional(t *testing.T) {
 func TestMouseDrag_ReachBottom(t *testing.T) {
 	// Dragging from the very top to the very bottom of the scrollbar track
 	// must reach scrollMax, proving the user can scroll to the last line.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -3910,7 +3910,7 @@ func TestMouseDrag_ReachBottom(t *testing.T) {
 
 func TestKeyboardScroll_NarrowTerminal(t *testing.T) {
 	for w := 10; w <= 80; w += 10 {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		m.tab = tabRequests
@@ -3923,7 +3923,7 @@ func TestKeyboardScroll_NarrowTerminal(t *testing.T) {
 }
 
 func TestKeyboardScroll_TinyTerminal(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 10
 	m.height = 6
 	m.tab = tabRequests
@@ -3938,7 +3938,7 @@ func TestKeyboardScroll_TinyTerminal(t *testing.T) {
 }
 
 func TestGoToTop_NarrowTerminal(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 15
 	m.height = 24
 	m.tab = tabRequests
@@ -3952,7 +3952,7 @@ func TestGoToTop_NarrowTerminal(t *testing.T) {
 }
 
 func TestGoToBottom_NarrowTerminal(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 15
 	m.height = 24
 	m.tab = tabRequests
@@ -3967,7 +3967,7 @@ func TestGoToBottom_NarrowTerminal(t *testing.T) {
 
 func TestRenderContent_NarrowWidth(t *testing.T) {
 	for w := 5; w <= 80; w++ {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		m.tab = tabRequests
@@ -3983,7 +3983,7 @@ func TestRenderContent_NarrowWidth(t *testing.T) {
 
 func TestRenderDashboard_NarrowWidth(t *testing.T) {
 	for w := 10; w <= 80; w += 5 {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		m.tab = tabDashboard
@@ -3996,7 +3996,7 @@ func TestRenderDashboard_NarrowWidth(t *testing.T) {
 
 func TestRenderNetwork_NarrowWidth(t *testing.T) {
 	for w := 10; w <= 80; w += 5 {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		m.tab = tabNetwork
@@ -4008,7 +4008,7 @@ func TestRenderNetwork_NarrowWidth(t *testing.T) {
 
 func TestRenderLogs_NarrowWidth(t *testing.T) {
 	for w := 10; w <= 80; w += 5 {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		m.tab = tabLogs
@@ -4022,7 +4022,7 @@ func TestRenderLogs_NarrowWidth(t *testing.T) {
 
 func TestRenderConcurrency_NarrowWidth(t *testing.T) {
 	for w := 10; w <= 80; w += 5 {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		m.tab = tabConcurrency
@@ -4038,7 +4038,7 @@ func TestRenderConcurrency_NarrowWidth(t *testing.T) {
 
 func TestRenderRoutes_NarrowWidth(t *testing.T) {
 	for w := 10; w <= 80; w += 5 {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		m.tab = tabRoutes
@@ -4057,7 +4057,7 @@ func TestRenderRoutes_NarrowWidth(t *testing.T) {
 func TestUpdateScrollbars_AtVariousSizes(t *testing.T) {
 	for w := 5; w <= 120; w += 5 {
 		for h := 4; h <= 40; h += 4 {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = w
 			m.height = h
 			m.tab = tabRequests
@@ -4078,7 +4078,7 @@ func TestUpdateScrollbars_AtVariousSizes(t *testing.T) {
 
 func TestRenderContentWithScrollbar_NarrowWidth(t *testing.T) {
 	for w := 5; w <= 80; w++ {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		m.tab = tabRequests
@@ -4094,7 +4094,7 @@ func TestRenderContentWithScrollbar_NarrowWidth(t *testing.T) {
 
 func TestViewport_SingleRow(t *testing.T) {
 	// Content has exactly 1 row.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -4107,7 +4107,7 @@ func TestViewport_SingleRow(t *testing.T) {
 
 func TestViewport_ExactFit(t *testing.T) {
 	// Content exactly fits the data row area.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -4124,7 +4124,7 @@ func TestViewport_ExactFit(t *testing.T) {
 
 func TestViewport_OnePastFit(t *testing.T) {
 	// Content is exactly one more than the data row area.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -4140,7 +4140,7 @@ func TestViewport_OnePastFit(t *testing.T) {
 }
 
 func TestViewport_EmptyAfterFilter(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -4156,7 +4156,7 @@ func TestViewport_EmptyAfterFilter(t *testing.T) {
 
 func TestViewport_CursorPreservedOnScroll(t *testing.T) {
 	// After scrolling, cursor should stay at same content position.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -4174,7 +4174,7 @@ func TestViewport_CursorPreservedOnScroll(t *testing.T) {
 
 func TestFooter_AnchoredAtBottom(t *testing.T) {
 	for _, tab := range []tabID{tabDashboard, tabRequests, tabNetwork, tabLogs, tabConcurrency, tabRoutes} {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = 80
 		m.height = 24
 		m.tab = tab
@@ -4232,7 +4232,7 @@ func TestView_ViewportClampsOverflow(t *testing.T) {
 	// while the footer stays anchored at the bottom.
 	for _, tab := range []tabID{tabDashboard, tabRequests, tabNetwork, tabLogs, tabConcurrency, tabRoutes} {
 		for _, h := range []int{8, 14, 50} {
-			m := NewModel(4)
+			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = 80
 			m.height = h
 			m = update(m, tea.WindowSizeMsg{Width: 80, Height: h})
@@ -4272,7 +4272,7 @@ func TestView_ViewportClampsOverflow(t *testing.T) {
 }
 
 func TestFooter_FilterPromptOnOwnLine(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -4301,7 +4301,7 @@ func TestFooter_FilterPromptOnOwnLine(t *testing.T) {
 }
 
 func TestDashboardScrollsWithKeyboard(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabDashboard
@@ -4337,7 +4337,7 @@ func TestDashboardScrollbarNotFullWhenOverflow(t *testing.T) {
 	// Force dashboard overflow by shrinking the terminal so dashboard lines
 	// exceed visibleRows. A 15-row terminal gives visibleRows=11 (height-4),
 	// which is smaller than the default dashboard line count (~18).
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 15
 	m.tab = tabDashboard
@@ -4357,7 +4357,7 @@ func TestDashboardScrollbarNotFullWhenOverflow(t *testing.T) {
 }
 
 func TestUpdateScrollbars_PerTab(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -4382,7 +4382,7 @@ func TestUpdateScrollbars_PerTab(t *testing.T) {
 }
 
 func TestScrollbarDrag_GrabOffsetNoJump(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -4414,7 +4414,7 @@ func TestScrollbarDrag_GrabOffsetNoJump(t *testing.T) {
 // ─── TUI-REVIEW-01: scratch/review-01.md fixes ───
 
 func dashboardWithOverflow(conc, height, flights int) Model {
-	m := NewModel(conc)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: conc}})
 	m.width = 80
 	m.height = height
 	m.tab = tabDashboard
@@ -4514,7 +4514,7 @@ func TestDashboardScrollGKeys(t *testing.T) {
 }
 
 func TestDashboardScrollDoesNotAffectRequestsTab(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -4530,7 +4530,7 @@ func TestDashboardScrollDoesNotAffectRequestsTab(t *testing.T) {
 }
 
 func TestDashboardCacheLazyEvaluation(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabRequests
@@ -4549,7 +4549,7 @@ func TestDashboardCacheLazyEvaluation(t *testing.T) {
 }
 
 func TestDashboardCacheInvalidation(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabDashboard
@@ -4666,7 +4666,7 @@ func TestTruncateANSI(t *testing.T) {
 }
 
 func TestRenderContentWithScrollbar_RespectsCellWidth(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 40
 	m.height = 24
 	m.tab = tabRequests
@@ -4700,7 +4700,7 @@ func TestRenderContentWithScrollbar_RespectsCellWidth(t *testing.T) {
 func TestScrollbar_AlignedWithDataRows(t *testing.T) {
 	// The Concurrency tab has 10 fixed header rows and 10 data rows. The
 	// scrollbar should appear alongside the data rows, not the header rows.
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.tab = tabConcurrency
@@ -4740,7 +4740,7 @@ func TestScrollbar_AlignedWithDataRows(t *testing.T) {
 }
 
 func TestRenderContentWithScrollbar_PreservesANSIWhenTruncated(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	// contentWidth is max(width-1, 1) = 37. The row is longer than that, so
 	// truncation occurs in the path. The visible portion still contains the
 	// green 2xx status style from the row, proving the row's own styling
@@ -4763,7 +4763,7 @@ func TestRenderContentWithScrollbar_PreservesANSIWhenTruncated(t *testing.T) {
 }
 
 func TestRenderContentWithScrollbar_NoCellUnderflow(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	// contentWidth is max(width-1, 1) = 36. A request row has a fixed ASCII
 	// prefix of 35 visible cells (two leading spaces + time/method/status/
 	// duration/double-space), so appending a single CJK character makes the
@@ -4915,7 +4915,7 @@ func TestProviderSwitcherChipClick(t *testing.T) {
 }
 
 func TestSingleProviderHeaderKeepsShaper(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 
@@ -5035,7 +5035,7 @@ func TestHeaderWidthBudget(t *testing.T) {
 	// at every width the legacy row fits (no switcher, no budgeting), and
 	// truncated — never wrapping — below that. The legacy natural row is 67
 	// content cells + 2 padding = 69 total.
-	single := NewModel(4)
+	single := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	single.width = 80
 	single.height = 24
 	want := single.renderHeader()
@@ -5043,7 +5043,7 @@ func TestHeaderWidthBudget(t *testing.T) {
 		t.Fatalf("legacy single-provider header width = %d, want the 69-cell baseline this test pins", w)
 	}
 	for _, w := range widths {
-		m := NewModel(4)
+		m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 		m.width = w
 		m.height = 24
 		got := m.renderHeader()
@@ -5116,7 +5116,7 @@ func TestMultiProviderHeaderShowsNames(t *testing.T) {
 // signal on the model's reset channel (Task 6: the channel is drained by
 // main, which calls Collector.Reset for every provider).
 func TestResetStatsSendsOnChannel(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 
@@ -5168,7 +5168,7 @@ func TestResetStatsSendsOnChannel(t *testing.T) {
 // still occupied is dropped, not deadlocked: the model's send is
 // non-blocking and the channel is capped at one pending request.
 func TestResetStatsSendNeverBlocks(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.resetCh = make(chan struct{}, 1)
 	m.resetCh <- struct{}{} // occupy the buffer as main might lag
 

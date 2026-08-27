@@ -26,3 +26,7 @@ GO_MODULE_SLUGS_USE_DEADCODE ?= $(GO_MODULE_SLUGS)
 
 # Use .deadcodeignore file for deadcode false-positive filtering
 DEADCODE_IGNORE_PATTERNS_FILE ?= .deadcodeignore
+
+# Treat any unignored deadcode finding as a lint error (Hana-san directive
+# 2026-08-26): unreachable code is a defect to remove, not a note to file.
+DEADCODE_ERROR_ON_UNIGNORED ?= true

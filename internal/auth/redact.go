@@ -18,6 +18,7 @@ package auth
 import (
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -42,15 +43,6 @@ var protocolHeaderNames = []string{
 	"Anthropic-Beta",
 }
 
-// displayOnlyCredentialNames carry values too sensitive to strip unconditionally
-// (stripping would break legitimate cookie-authenticated upstreams) but that
-// are displayed raw per the TUI Redaction Constraint in AGENTS.md. No live
-// path currently applies them for display; they remain library surface so a
-// captured-output scrubber can reuse the classification.
-var displayOnlyCredentialNames = []string{
-	"Cookie",
-}
-
 // isCloudSignaturePrefix reports whether a canonical header name belongs to a
 // cloud-provider signature family (AWS X-Amz-*, Google X-Goog-*). Such
 // headers sign one specific request for one specific provider and are removed
@@ -60,19 +52,16 @@ func isCloudSignaturePrefix(canonical string) bool {
 		strings.HasPrefix(canonical, "X-Goog-")
 }
 
-// sensitive reports whether a header NAME carries values too sensitive to
-// display. Protocol headers are not sensitive: values like "2023-06-01" are
-// configuration, not credentials.
-func sensitive(canonical string) bool {
-	for _, name := range credentialHeaderNames {
-		if name == canonical {
-			return true
-		}
+// strippable reports whether a canonical header name belongs to one of the
+// families StripCredentials removes: the credential list, the protocol list,
+// or a cloud-signature prefix. Cookie is deliberately absent — those headers
+// cross provider boundaries by design.
+func strippable(canonical string) bool {
+	if slices.Contains(credentialHeaderNames, canonical) {
+		return true
 	}
-	for _, name := range displayOnlyCredentialNames {
-		if name == canonical {
-			return true
-		}
+	if slices.Contains(protocolHeaderNames, canonical) {
+		return true
 	}
 	return isCloudSignaturePrefix(canonical)
 }
@@ -80,47 +69,23 @@ func sensitive(canonical string) bool {
 // StripCredentials removes every client-supplied credential and provider
 // protocol header from h so none of them cross a provider boundary: the
 // named credential and protocol families plus case-insensitive X-Amz-*/X-Goog-*
-// prefixed keys. Cookie is deliberately NOT stripped (see
-// displayOnlyCredentialNames) because stripping it unconditionally would break
-// cookie-authenticated upstreams; it therefore does cross boundaries and must
-// not be treated as contained. It mutates h in place.
+// prefixed keys. Cookie is deliberately NOT stripped because stripping it
+// unconditionally would break cookie-authenticated upstreams; it therefore does
+// cross boundaries and must not be treated as contained. It mutates h in place.
+//
+// Classification runs on the canonical form of each STORED key so any spelling
+// behaves identically ("x-amz-date" and "X-Amz-Date" are equally stripped),
+// but deletion uses delete(h, name) with the exact stored spelling:
+// http.Header.Del canonicalizes ITS argument, so it would silently miss
+// non-canonical entries in hand-built header maps and let their credentials
+// leak to the upstream. Deleting the current key during range is safe per the
+// Go spec.
 func StripCredentials(h http.Header) {
-	for _, name := range credentialHeaderNames {
-		h.Del(name)
-	}
-	for _, name := range protocolHeaderNames {
-		h.Del(name)
-	}
-	// http.Header range yields the stored spelling, which may be
-	// non-canonical for hand-built headers; classify on the canonical form so
-	// "x-amz-date" and "X-Amz-Date" behave identically. Del itself is
-	// case-insensitive.
 	for name := range h {
-		if isCloudSignaturePrefix(http.CanonicalHeaderKey(name)) {
-			h.Del(name)
+		if strippable(http.CanonicalHeaderKey(name)) {
+			delete(h, name)
 		}
 	}
-}
-
-// RedactSensitiveHeaders replaces the VALUES of every credential-carrying
-// header with "[REDACTED]", preserving key names, ordering, and multi-value
-// structure so journal entries and TUI panels stay useful for debugging
-// without disclosing secrets. Non-sensitive headers pass through untouched;
-// protocol headers (e.g. Anthropic-Version) stay visible because they carry
-// configuration, not credentials. It mutates h in place and returns it.
-func RedactSensitiveHeaders(h http.Header) http.Header {
-	const placeholder = "[REDACTED]"
-	for name, values := range h {
-		if !sensitive(http.CanonicalHeaderKey(name)) {
-			continue
-		}
-		redacted := make([]string, len(values))
-		for i := range values {
-			redacted[i] = placeholder
-		}
-		h[name] = redacted
-	}
-	return h
 }
 
 // sensitiveQueryParams are the recognized credential-carrying query parameter

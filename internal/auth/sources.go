@@ -30,13 +30,6 @@ type SecretSource interface {
 	Secret(ctx context.Context) (string, error)
 }
 
-// SecretSourceFunc adapts a function to the SecretSource interface.
-type SecretSourceFunc func(ctx context.Context) (string, error)
-
-func (f SecretSourceFunc) Secret(ctx context.Context) (string, error) {
-	return f(ctx)
-}
-
 // staticSecretSource holds a value resolved once at startup. Configurations
 // resolve env/file references eagerly so a missing or empty credential fails
 // before the listener binds instead of on the first request.

@@ -76,6 +76,49 @@ func TestStripCredentials(t *testing.T) {
 	}
 }
 
+func TestStripCredentialsNonCanonicalKeys(t *testing.T) {
+	// http.Header.Set canonicalizes its argument, so a test populated via
+	// Set can never exercise non-canonical map keys. Hand-built headers
+	// (raw map assignment, middleware, future transports) can carry them,
+	// and Header.Del canonicalizes ITS argument too - so every stored
+	// spelling below must be deleted by exact key. Cookie survives by
+	// design; Content-Type proves unrelated headers are untouched.
+	h := http.Header{
+		"authorization":        {"Bearer client-secret"},
+		"PROXY-AUTHORIZATION":  {"Basic z"},
+		"x-api-key":            {"sk-client"},
+		"API-KEY":              {"az-client"},
+		"x-goog-api-key":       {"goog-client"},
+		"anthropic-version":    {"1999-01-01"},
+		"ANTHROPIC-BETA":       {"beta-feature"},
+		"x-amz-date":           {"20260101T000000Z"},
+		"x-amz-security-token": {"aws-token"},
+		"x-goog-signature":     {"sig-value"},
+		// Canonical spellings stored alongside must also go.
+		"Authorization": {"Bearer canonical-secret"},
+		"X-Amz-Date":    {"20260102T000000Z"},
+		// Non-credential survivors.
+		"Content-Type": {"application/json"},
+		"Cookie":       {"session=1"},
+	}
+
+	StripCredentials(h)
+
+	for name := range h {
+		switch name {
+		case "Content-Type", "Cookie":
+			continue
+		}
+		t.Errorf("%q survived StripCredentials (stored spelling must be deleted exactly)", name)
+	}
+	if got := h.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want untouched", got)
+	}
+	if got := h.Get("Cookie"); got != "session=1" {
+		t.Errorf("Cookie = %q, want preserved (never stripped)", got)
+	}
+}
+
 func TestAuthPolicyValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -181,6 +224,12 @@ func TestResolveMode(t *testing.T) {
 		t.Fatal("auto with empty host must error")
 	}
 }
+
+// failingSecretSource is a SecretSource whose Secret always returns err, used
+// to exercise resolveSecret's source-error branch without a real source.
+type failingSecretSource struct{ err error }
+
+func (f failingSecretSource) Secret(context.Context) (string, error) { return "", f.err }
 
 func TestApplyUpstreamAuthentication(t *testing.T) {
 	newReq := func(t *testing.T) *http.Request {
@@ -299,18 +348,6 @@ func TestApplyUpstreamAuthentication(t *testing.T) {
 		}
 	})
 
-	t.Run("failing secret source surfaces its error", func(t *testing.T) {
-		req := newReq(t)
-		source := SecretSourceFunc(func(context.Context) (string, error) {
-			return "", errors.New("vault sealed")
-		})
-		policy := &AuthPolicy{Mode: AuthBearer, Secret: source}
-		err := ApplyUpstreamAuthentication(context.Background(), req, policy)
-		if err == nil || !strings.Contains(err.Error(), "vault sealed") {
-			t.Fatalf("err = %v, want wrapped source failure", err)
-		}
-	})
-
 	t.Run("unresolved auto rejected", func(t *testing.T) {
 		req := newReq(t)
 		policy := &AuthPolicy{Mode: AuthAuto, Secret: NewStaticSecretSource("s")}
@@ -318,43 +355,15 @@ func TestApplyUpstreamAuthentication(t *testing.T) {
 			t.Fatal("expected unresolved auto mode error")
 		}
 	})
-}
 
-func TestRedactSensitiveHeaders(t *testing.T) {
-	h := http.Header{}
-	h.Set("Authorization", "Bearer super-secret")
-	h.Add("Authorization", "Bearer second-value") // multi-value preserved
-	h.Set("X-Api-Key", "sk-secret")
-	h.Set("Cookie", "session=abc")
-	h.Set("x-amz-date", "20260101T000000Z")
-	h.Set("Anthropic-Version", "2023-06-01")
-	h.Set("Content-Type", "application/json")
-	h.Set("X-Request-Id", "abc")
-
-	got := RedactSensitiveHeaders(h)
-
-	if v := got.Values("Authorization"); len(v) != 2 || v[0] != "[REDACTED]" || v[1] != "[REDACTED]" {
-		t.Fatalf("Authorization = %q, want both values redacted", v)
-	}
-	if v := got.Get("X-Api-Key"); v != "[REDACTED]" {
-		t.Fatalf("X-Api-Key = %q", v)
-	}
-	if v := got.Get("Cookie"); v != "[REDACTED]" {
-		t.Fatalf("Cookie = %q", v)
-	}
-	if v := got.Get("X-Amz-Date"); v != "[REDACTED]" {
-		t.Fatalf("x-amz-date = %q", v)
-	}
-	// Protocol and ordinary headers stay visible for debugging.
-	if v := got.Get("Anthropic-Version"); v != "2023-06-01" {
-		t.Fatalf("Anthropic-Version = %q, want untouched", v)
-	}
-	if v := got.Get("Content-Type"); v != "application/json" {
-		t.Fatalf("Content-Type = %q, want untouched", v)
-	}
-	if v := got.Get("X-Request-Id"); v != "abc" {
-		t.Fatalf("X-Request-Id = %q, want untouched", v)
-	}
+	t.Run("failing secret source surfaces its error", func(t *testing.T) {
+		req := newReq(t)
+		want := errors.New("secret source exploded")
+		policy := &AuthPolicy{Mode: AuthBearer, Secret: failingSecretSource{err: want}}
+		if err := ApplyUpstreamAuthentication(context.Background(), req, policy); !errors.Is(err, want) {
+			t.Fatalf("ApplyUpstreamAuthentication = %v, want %v", err, want)
+		}
+	})
 }
 
 func TestEnvSecretSource(t *testing.T) {
@@ -444,19 +453,6 @@ func TestStripCredentialsKeepsDisplayOnlyResponseHeaders(t *testing.T) {
 	StripCredentials(h)
 	if got := h.Get("Set-Cookie"); got != "session=abc" {
 		t.Errorf("StripCredentials removed Set-Cookie: %q", got)
-	}
-}
-
-func TestRedactSensitiveHeadersDoesNotRedactSetCookie(t *testing.T) {
-	h := http.Header{}
-	h.Set("Set-Cookie", "session=abc123")
-	h.Set("Content-Type", "application/json")
-	got := RedactSensitiveHeaders(h)
-	if got.Get("Set-Cookie") != "session=abc123" {
-		t.Errorf("Set-Cookie = %q, want raw per TUI constraint", got.Get("Set-Cookie"))
-	}
-	if got.Get("Content-Type") != "application/json" {
-		t.Errorf("Content-Type = %q, want untouched", got.Get("Content-Type"))
 	}
 }
 
