@@ -34,6 +34,7 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 |------|-------|---------|-------------|
 | `-upstream` | provider | _(required)_ | Upstream base URL |
 | `-bind` | server | `:8080` | Listen address |
+| `-metrics-bind` | server | _(unset)_ | Dedicated listen address for the Prometheus `/metrics` endpoint (see [Metrics Export](#metrics-export)); empty disables it |
 | `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
 | `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
 | `-concurrency` | provider | `4` | Max concurrent limited requests |
@@ -42,6 +43,10 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-upstream-disable-keep-alives` | provider | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
 | `-retry` | provider | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
 | `-retry-max-body-mb` | provider | `5` | Max request body size (MB) eligible for retry |
+| `-auth-source` | provider | _(unset)_ | Upstream credential source: `env:VAR`, `file:PATH`, or `none` (strip-only). Unset disables upstream auth entirely — requests are forwarded verbatim |
+| `-auth-mode` | provider | `auto` | How the credential is attached: `auto` (derived from the upstream host), `bearer`, `x-api-key`, `api-key`, or `header:NAME`. `none` strips client credentials without injecting anything |
+| `-auth-header` | provider | _(required by `header:` mode)_ | Custom upstream auth header name (e.g. `X-Goog-Api-Key`) |
+| `-anthropic-version` | provider | `2023-06-01` | `Anthropic-Version` header value applied when the resolved mode is `x-api-key` |
 | `-tui` | server | `false` | Enable terminal dashboard |
 | `-version` | server | | Print version and exit |
 
@@ -76,6 +81,10 @@ The upstream HTTP transport sizes `MaxIdleConnsPerHost` to the sum of configured
 | `-cb-max-penalty` | provider | `60s` | Max phantom concurrency hold time |
 
 The circuit breaker treats 5xx, 429, transport errors, and rate-limit-signaled 403s as upstream failures. A bare 403 without `Retry-After` or `x-ratelimit-*` headers is treated as an authentication/authorization client error and is passed through, avoiding the trap where a bad API key is masked by a proxy-generated 503 after the breaker opens.
+
+#### Metrics Export
+
+Pass `-metrics-bind 127.0.0.1:2112` to expose a Prometheus text-format `/metrics` endpoint on a dedicated listener — it never shares the proxy port, so a bare-root provider keeps every path and scraping is never mistaken for proxied traffic. Every series carries a `provider` label (an unnamed single provider exports as `provider="default"`): `shaper_active`, `shaper_queued`, `shaper_retries_in_flight`, `shaper_clean_proxied_total`, `shaper_clean_passthrough_total`, `shaper_aborted_total`, `shaper_circuit_rejected_total`, `shaper_requests_total{status="1xx"…"5xx"}`, and `shaper_breaker_state` (0 closed / 1 half-open / 2 open; omitted when the provider's breaker is disabled). Series are grouped by metric name — each family forms one contiguous block across all providers — as the exposition format's grouping rule requires. The endpoint is off by default and binds before the proxy listener, so a bad address fails at startup. Bind it to loopback unless you know what you are exposing.
 
 #### Observability Semantics
 
@@ -126,6 +135,61 @@ Mount semantics:
 - Providers are matched on whole path segments, so `/anthropic2` never matches the `/anthropic` prefix.
 
 In the TUI, each provider keeps its own dashboard. The header shows one chip per provider (the active one highlighted), filled by the provider name instead of the `⚡ shaper` brand; `Tab`/`Shift+Tab` cycle providers, chips are clickable, and the number keys `1-6` still switch content tabs. The in-TUI help (`?`) lists the switch binding whenever the switcher is shown.
+
+#### Upstream Authentication
+
+Each provider can carry its own upstream credential, so clients no longer need to know provider secrets at all. Credentials live in the **environment**, resolved once at startup; they never appear in command lines, logs, or the TUI.
+
+```sh
+export SHAPER_PROVIDER_ANTHROPIC_API_KEY=sk-ant-...   # resolved by the proxy at startup
+export SHAPER_PROVIDER_OPENAI_API_KEY=sk-...
+
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8080 \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -auth-source env:SHAPER_PROVIDER_ANTHROPIC_API_KEY \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -auth-source env:SHAPER_PROVIDER_OPENAI_API_KEY
+```
+
+With auth enabled, every proxied request has all client HTTP credential headers (`Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key`, `X-Goog-Api-Key`) plus protocol headers (`Anthropic-Version`, `Anthropic-Beta`) and cloud signature families (`x-amz-*`, `x-goog-*`) stripped first — then exactly one upstream credential is attached. A client that sends OpenAI's token to the Anthropic mount cannot leak it to Anthropic, and vice versa: leakage of these credential headers is structurally impossible, not merely discouraged. The injection happens inside Go's `Rewrite` hook, where hop-by-hop headers have already been removed, so a malicious `Connection` header list cannot strip the injected credential.
+
+One deliberate exception: **`Cookie` headers are forwarded verbatim** to whichever mount receives the request, even with auth enabled — stripping them unconditionally would break cookie-authenticated upstreams. Per the TUI Redaction Constraint (see AGENTS.md), the journal and TUI display raw headers and URLs — including `Cookie` — because TUI output is not captured anywhere and is visible only to the local operator during an interactive session. If your clients send cookies you do not want forwarded, strip them before they reach the gateway.
+
+The gateway never sends `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, or `Forwarded` upstream — client-supplied forwarding headers are removed and no client IP is injected (the gateway is a stealth hop). This is also true when auth is disabled.
+
+Modes:
+
+| `-auth-mode` | Upstream sees | Typical provider |
+|--------------|---------------|------------------|
+| `auto` _(default)_ | `x-api-key` for `api.anthropic.com`/`*.anthropic.com`, otherwise `Authorization: Bearer` | any |
+| `bearer` | `Authorization: Bearer <secret>` | OpenAI-compatible |
+| `x-api-key` | `X-Api-Key: <secret>` + configured `-anthropic-version` | Anthropic Messages |
+| `api-key` | `Api-Key: <secret>` | Azure key-based |
+| `header:NAME` | `NAME: <secret>` | Gemini-style custom headers (set `NAME` via `-auth-header NAME` instead if you prefer) |
+
+Sources:
+
+| `-auth-source` | Behavior |
+|----------------|----------|
+| `env:VAR` | Read `VAR` from the environment once at startup. Unset or blank → startup fails naming the variable |
+| `file:PATH` | Read the secret from `PATH` once at startup. Unreadable or blank → startup fails naming the path |
+| `none` | Strip-only hygiene: client credentials are removed, nothing is injected |
+| _(unset)_ | Auth disabled entirely — requests are forwarded verbatim, exactly as before this feature existed |
+
+Where secrets can and cannot appear: a referenced variable's *value* is never logged, printed, or written anywhere by the proxy — startup logs name only the *reference* (`env:SHAPER_PROVIDER_ACME_API_KEY`). Per AGENTS.md TUI Redaction Constraint, the journal and TUI may show raw credential headers and URLs (including upstream `Set-Cookie` and `?key=` query strings) — TUI output is not captured and is visible only to the local operator during an interactive session. Requests are still forwarded byte-for-byte unchanged, and transport-error log lines are scrubbed via `sanitizeTransportError` (any `*url.Error` query is redacted) as defense-in-depth for captured logs. Passing secrets as literal argv values would expose them in `ps`/`/proc`; use env references instead.
+
+Other credential channels outside the header allowlist are your responsibility: credentials embedded in path segments are forwarded by design and appear in route labels and request listings; request bodies captured for the TUI preview may contain whatever the client sent; custom secret headers not in the strip list above are forwarded verbatim and shown unredacted. If clients send secrets through these channels that you do not want stored or displayed locally, strip them before they reach the gateway.
+
+A multi-provider configuration with no auth on some providers prints one startup note (`N of M providers configured without upstream auth`) so an open relay is never silent.
+
+#### Scope & Limitations
+
+Routing is **path-prefix only**: there is no model-ID translation or request-body inspection today. Clients choose a provider by targeting its mount (`/anthropic/...`, `/openai/...`); a single base URL with body-aware model routing is future work. Other current limitations: there is no downstream client authentication (anything that can reach the port can use every mounted provider), readiness is TCP-connect only, and configuration changes require a restart.
 
 ### Examples
 

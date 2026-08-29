@@ -90,13 +90,43 @@ func (s *stringList) Set(v string) error {
 	return nil
 }
 
+// Provider flag defaults. They live here as named constants rather than
+// inline literals so each default reads as a single named value at its
+// registration site and cannot drift between flag sets.
+const (
+	defaultBind                  = ":8080"
+	defaultConcurrency           = 4
+	defaultQueueTimeout          = 30 * time.Second
+	defaultRetryMax              = -1
+	defaultRetryMaxBodyMB        = 5
+	defaultRetryWaitMin          = 500 * time.Millisecond
+	defaultRetryWaitMax          = 30 * time.Second
+	defaultRetryMinDelay         = 1 * time.Second
+	defaultRetrySkipOn429        = true
+	defaultReleaseCooldown       = 200 * time.Millisecond
+	defaultCancelCooldown        = 200 * time.Millisecond
+	defaultFailureHold           = 2 * time.Second
+	defaultAdaptiveHeadroom      = false
+	defaultAdaptiveHeadroomWin   = 30 * time.Second
+	defaultDisableKeepAlives     = false
+	defaultCBEnabled             = true
+	defaultCBThreshold           = 5
+	defaultCBWindow              = 30 * time.Second
+	defaultCBOpenTimeout         = 10 * time.Second
+	defaultCBMaxOpen             = 120 * time.Second
+	defaultCBPenalty             = 2 * time.Second
+	defaultCBMaxPenalty          = 60 * time.Second
+	defaultAnthropicVersionValue = "2023-06-01"
+)
+
 // registerServerFlags registers the server/global-section flags (legacy
 // -bind/-tui/-version) bounded to s.
 func registerServerFlags(r *registrar, s *Server) {
 	r.scope = scopeServer
-	r.stringVar(&s.Bind, "bind", ":8080", "listen address")
+	r.stringVar(&s.Bind, "bind", defaultBind, "listen address")
 	r.boolVar(&s.TUI, "tui", false, "enable terminal dashboard")
 	r.boolVar(&s.Version, "version", false, "print version and exit")
+	r.stringVar(&s.MetricsBind, "metrics-bind", "", "dedicated listen address for the Prometheus /metrics endpoint (empty = disabled; server scope)")
 	registerHelp(r, &s.Help)
 }
 
@@ -132,39 +162,45 @@ func registerProviderFlags(r *registrar, p *Provider) {
 
 	// Route limiting.
 	r.stringListVar(&p.Limits, "limit", "route pattern to limit, matched by trailing path segments (repeatable)")
-	r.intVar(&p.Concurrency, "concurrency", 4, "max concurrent limited requests")
+	r.intVar(&p.Concurrency, "concurrency", defaultConcurrency, "max concurrent limited requests")
 	r.intVar(&p.GlobalConcurrency, "global-concurrency", 0, "global concurrency limit (0 = disabled)")
 	r.boolVar(&p.LimitAll, "limit-all", false, "limit all requests, not just matching routes")
-	r.durationVar(&p.QueueTimeout, "queue-timeout", 30*time.Second, "max time a request waits in the queue (0 = wait indefinitely)")
+	r.durationVar(&p.QueueTimeout, "queue-timeout", defaultQueueTimeout, "max time a request waits in the queue (0 = wait indefinitely)")
 
 	// Retry.
-	r.intVar(&p.RetryMax, "retry", -1, "max retries for limited requests (negative = unlimited)")
-	r.int64Var(&p.RetryMaxBodyMB, "retry-max-body-mb", 5, "max request body size retained for retry/anatomy, in MiB")
-	r.durationVar(&p.RetryWaitMin, "retry-wait-min", 500*time.Millisecond, "minimum retry backoff")
-	r.durationVar(&p.RetryWaitMax, "retry-wait-max", 30*time.Second, "maximum retry backoff")
-	r.durationVar(&p.RetryMinDelay, "retry-min-delay", 1*time.Second, "minimum delay before retrying (0 = use backoff only)")
-	r.boolVar(&p.RetrySkipOn429, "retry-skip-429", true, "skip retrying 429 responses to prevent concurrency amplification")
+	r.intVar(&p.RetryMax, "retry", defaultRetryMax, "max retries for limited requests (negative = unlimited)")
+	r.int64Var(&p.RetryMaxBodyMB, "retry-max-body-mb", defaultRetryMaxBodyMB, "max request body size retained for retry/anatomy, in MiB")
+	r.durationVar(&p.RetryWaitMin, "retry-wait-min", defaultRetryWaitMin, "minimum retry backoff")
+	r.durationVar(&p.RetryWaitMax, "retry-wait-max", defaultRetryWaitMax, "maximum retry backoff")
+	r.durationVar(&p.RetryMinDelay, "retry-min-delay", defaultRetryMinDelay, "minimum delay before retrying (0 = use backoff only)")
+	r.boolVar(&p.RetrySkipOn429, "retry-skip-429", defaultRetrySkipOn429, "skip retrying 429 responses to prevent concurrency amplification")
 
 	// Concurrency protection.
-	r.durationVar(&p.ReleaseCooldown, "release-cooldown", 200*time.Millisecond, "delay after slot release before re-admission (0 = immediate)")
-	r.durationVar(&p.CancelCooldown, "cancel-cooldown", 200*time.Millisecond, "hold slot after client cancel once an upstream attempt started (0 = immediate)")
-	r.durationVar(&p.FailureHold, "failure-hold", 2*time.Second, "hold slot after upstream failure even without circuit breaker (0 = disabled)")
+	r.durationVar(&p.ReleaseCooldown, "release-cooldown", defaultReleaseCooldown, "delay after slot release before re-admission (0 = immediate)")
+	r.durationVar(&p.CancelCooldown, "cancel-cooldown", defaultCancelCooldown, "hold slot after client cancel once an upstream attempt started (0 = immediate)")
+	r.durationVar(&p.FailureHold, "failure-hold", defaultFailureHold, "hold slot after upstream failure even without circuit breaker (0 = disabled)")
 
 	// Adaptive headroom.
-	r.boolVar(&p.AdaptiveHeadroom, "adaptive-headroom", false, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
-	r.durationVar(&p.AdaptiveHeadroomWindow, "adaptive-headroom-window", 30*time.Second, "duration to hold the one-slot 429 headroom")
+	r.boolVar(&p.AdaptiveHeadroom, "adaptive-headroom", defaultAdaptiveHeadroom, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
+	r.durationVar(&p.AdaptiveHeadroomWindow, "adaptive-headroom-window", defaultAdaptiveHeadroomWin, "duration to hold the one-slot 429 headroom")
 
 	// Transport tuning.
-	r.boolVar(&p.DisableKeepAlives, "upstream-disable-keep-alives", false, "disable HTTP keep-alives to upstream")
+	r.boolVar(&p.DisableKeepAlives, "upstream-disable-keep-alives", defaultDisableKeepAlives, "disable HTTP keep-alives to upstream")
+
+	// Upstream authentication.
+	r.stringVar(&p.AuthMode, "auth-mode", "", "upstream auth mode: auto | none | bearer | x-api-key | api-key | header:NAME (default: auto-derived from the upstream host when -auth-source is set)")
+	r.stringVar(&p.AuthSource, "auth-source", "", "upstream credential source: env:VAR | file:PATH | none (empty disables upstream auth entirely; requests are forwarded verbatim)")
+	r.stringVar(&p.AuthHeader, "auth-header", "", "custom upstream auth header name (required by -auth-mode header:<NAME>)")
+	r.stringVar(&p.AnthropicVersion, "anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value applied when the auth mode resolves to x-api-key")
 
 	// Circuit breaker.
-	r.boolVar(&p.CBEnabled, "circuit-breaker", true, "enable the circuit breaker")
-	r.intVar(&p.CBThreshold, "cb-threshold", 5, "failures within window to trip circuit breaker")
-	r.durationVar(&p.CBWindow, "cb-window", 30*time.Second, "circuit breaker failure counting window")
-	r.durationVar(&p.CBOpenTimeout, "cb-open-timeout", 10*time.Second, "time before circuit breaker probes (half-open)")
-	r.durationVar(&p.CBMaxOpen, "cb-max-open-timeout", 120*time.Second, "max circuit breaker open timeout after backoff")
-	r.durationVar(&p.CBPenalty, "cb-penalty", 2*time.Second, "base phantom concurrency hold time")
-	r.durationVar(&p.CBMaxPenalty, "cb-max-penalty", 60*time.Second, "max phantom concurrency hold time")
+	r.boolVar(&p.CBEnabled, "circuit-breaker", defaultCBEnabled, "enable the circuit breaker")
+	r.intVar(&p.CBThreshold, "cb-threshold", defaultCBThreshold, "failures within window to trip circuit breaker")
+	r.durationVar(&p.CBWindow, "cb-window", defaultCBWindow, "circuit breaker failure counting window")
+	r.durationVar(&p.CBOpenTimeout, "cb-open-timeout", defaultCBOpenTimeout, "time before circuit breaker probes (half-open)")
+	r.durationVar(&p.CBMaxOpen, "cb-max-open-timeout", defaultCBMaxOpen, "max circuit breaker open timeout after backoff")
+	r.durationVar(&p.CBPenalty, "cb-penalty", defaultCBPenalty, "base phantom concurrency hold time")
+	r.durationVar(&p.CBMaxPenalty, "cb-max-penalty", defaultCBMaxPenalty, "max phantom concurrency hold time")
 }
 
 // newFlagSet returns a FlagSet configured for our controlled error reporting:

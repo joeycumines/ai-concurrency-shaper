@@ -38,6 +38,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -406,9 +407,10 @@ type Model struct {
 	filterText    string
 
 	// styles is the active color/style set. It defaults to the dark palette
-	// (NewModel) and is swapped to the light palette when the program receives
-	// a tea.BackgroundColorMsg reporting a light terminal background (see
-	// Init / Update). All render paths resolve styles through this field.
+	// (set by NewModelForProviders) and is swapped to the light palette when
+	// the program receives a tea.BackgroundColorMsg reporting a light
+	// terminal background (see Init / Update). All render paths resolve
+	// styles through this field.
 	styles tuiTheme
 
 	resetCh chan struct{}
@@ -513,13 +515,6 @@ type providerState struct {
 	conc    int
 	snap    metrics.Snapshot
 	journal *journal.Journal
-}
-
-// NewModel creates a dashboard for a single unnamed provider: the legacy model.
-// The header shows the "⚡ shaper" brand and no provider switcher chips, so
-// existing single-provider rendering is preserved byte-for-byte.
-func NewModel(conc int) Model {
-	return NewModelForProviders([]ProviderMeta{{Concurrency: conc}})
 }
 
 // NewModelForProviders creates a dashboard for one or more providers. Each
@@ -1436,8 +1431,9 @@ func (m *Model) visibleLogLines() []string {
 }
 
 // applyScrollbarTheme paints every per-tab scrollbar with the active theme's
-// thumb/track colors. Called from NewModel and on theme swaps (and re-applied
-// on each updateScrollbars) so a background change repaints the scrollbars too.
+// thumb/track colors. Called from NewModelForProviders and on theme swaps (and
+// re-applied on each updateScrollbars) so a background change repaints the
+// scrollbars too.
 func (m *Model) applyScrollbarTheme() {
 	for i := range m.scrollbars {
 		m.scrollbars[i].ThumbStyle = m.styles.scrollbarThumb
@@ -2075,10 +2071,7 @@ func (m Model) headerBody(reserveForSwitcher bool) string {
 	body := fmt.Sprintf("%s │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
 		m.providerName(), m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput,
 		m.snap.TotalTimeout, uptime)
-	usable := m.width - 2
-	if usable < 1 {
-		usable = 1
-	}
+	usable := max(m.width-2, 1)
 	cap := usable
 	if reserveForSwitcher && m.hasSwitcher() {
 		// 1 gap + the active chip's floor. Any chip that fits beyond the
@@ -2179,12 +2172,7 @@ func (m Model) budgetedChips() chipLayout {
 		return out
 	}
 	kept := func(i int) bool {
-		for _, k := range keep {
-			if k == i {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(keep, i)
 	}
 	for i := len(labels) - 1; i >= 0; i-- {
 		candidate := prefix(i, keep)

@@ -20,7 +20,7 @@ import (
 )
 
 func TestSmokeView(t *testing.T) {
-	m := NewModel(10)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 10}})
 	m.width = 80
 	m.height = 24
 	v := m.View()

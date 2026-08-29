@@ -23,10 +23,12 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,8 +38,6 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
-	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
-	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/router"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
 )
@@ -111,6 +111,7 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 		proxy.WithAdaptiveHeadroom(p.AdaptiveHeadroom),
 		proxy.WithAdaptiveHeadroomWindow(p.AdaptiveHeadroomWindow),
 		proxy.WithLimitAll(p.LimitAll),
+		proxy.WithAuthPolicy(p.AuthPolicy()),
 		proxy.WithTransport(transport),
 		proxy.WithJournal(j),
 		proxy.WithBreaker(p.Breaker()),
@@ -119,55 +120,6 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 		return nil, nil, nil, fmt.Errorf("proxy config: %w", err)
 	}
 	return prx, met, j, nil
-}
-
-// upstreamMaxIdleConnsPerHost returns the minimum number of idle connections
-// the upstream transport should keep open per host. It is derived from the
-// configured route/global concurrency limiters so that multi-route or grouped
-// configurations do not thrash TCP connections after bursts, while still
-// honoring the global concurrency cap and a safe default floor.
-//
-// limitAll indicates that every non-matching request is routed through the
-// default limiter (the same one set by WithLimiter/-concurrency). In that mode
-// the default pool always gates non-matching traffic, so its capacity must be
-// counted toward the idle-connection pool regardless of whether any pattern
-// itself falls through to it.
-//
-// This helper is pinned by upstreamMaxIdleConnsPerHost() in main_test.go and
-// is kept alongside the config-provider's MaxIdleConnsPerHost derivation for
-// cross-checking in the non-sectioned (legacy) construction path.
-func upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency int, patterns []route.Pattern, routeLimiters map[string]*queue.Limiter, limitAll bool) int {
-	routePoolMax := 0
-	for _, lim := range routeLimiters {
-		routePoolMax += lim.Limit()
-	}
-
-	defaultPoolUsed := limitAll
-	for _, p := range patterns {
-		key := p.Group
-		if key == "" {
-			key = p.Raw
-		}
-		if p.Limit == 0 {
-			if p.Group == "" {
-				defaultPoolUsed = true
-				continue
-			}
-			if _, ok := routeLimiters[key]; !ok {
-				defaultPoolUsed = true
-			}
-		}
-	}
-	if defaultPoolUsed {
-		routePoolMax += concurrency
-	}
-	if globalConcurrency > 0 && routePoolMax > globalConcurrency {
-		routePoolMax = globalConcurrency
-	}
-	if routePoolMax < 20 {
-		return 20
-	}
-	return routePoolMax
 }
 
 // logProviderConfig prints the resolved startup configuration for one provider.
@@ -221,6 +173,31 @@ func logProviderConfig(pr *config.Provider) {
 	}
 	if pr.AdaptiveHeadroom {
 		log.Printf("adaptive headroom: enabled (window %s)", pr.AdaptiveHeadroomWindow)
+	}
+	if policy := pr.AuthPolicy(); policy != nil {
+		// Hyphen-bound "auth-source"/"auth-mode" tokens keep the Logs-tab
+		// classifier from reading these as actionable prose (same discipline
+		// as failure-hold above). Only references are logged - never values.
+		source := pr.AuthSource
+		if source == "" {
+			source = "none"
+		}
+		log.Printf("upstream auth: auth-mode=%s auth-source=%s", policy.Mode, source)
+	}
+}
+
+// warnNoUpstreamAuth emits one honest startup line when multiple providers
+// are configured without any upstream authentication: requests are forwarded
+// verbatim, so each client must supply the correct provider credential.
+// The wording deliberately avoids standalone warn/error/fail/timeout words so
+// the Logs tab's actionable-line heuristic never toasts on it.
+func warnNoUpstreamAuth(cfg *config.Config) {
+	total := len(cfg.Providers)
+	if total <= 1 {
+		return
+	}
+	if unprotected := cfg.UnprotectedProviderCount(); unprotected > 0 {
+		log.Printf("note: %d of %d providers configured without upstream auth (requests forwarded verbatim)", unprotected, total)
 	}
 }
 
@@ -306,15 +283,65 @@ func run() error {
 		entries = append(entries, router.Provider{Name: pr.Name, Prefix: pr.Prefix, Proxy: p})
 		logProviderConfig(pr)
 	}
+	warnNoUpstreamAuth(cfg)
 
 	h, err := router.New(entries)
 	if err != nil {
 		return err
 	}
 
-	srv := &http.Server{Addr: cfg.Server.Bind, Handler: h}
-
 	errCh := make(chan error, 1)
+
+	// Opt-in Prometheus endpoint on a DEDICATED listener: it never shares the
+	// proxy port, so a provider mounted at bare root keeps every path, and
+	// scraping cannot be mistaken for proxied traffic. Bound before the proxy
+	// listener so a bad -metrics-bind fails closed at startup.
+	var metricsSrv *http.Server
+	if cfg.Server.MetricsBind != "" {
+		metricsLn, err := net.Listen("tcp", cfg.Server.MetricsBind)
+		if err != nil {
+			return fmt.Errorf("-metrics-bind %s: %w", cfg.Server.MetricsBind, err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			snaps := make([]metrics.ProviderSnapshot, len(cfg.Providers))
+			for i, pr := range cfg.Providers {
+				snap := mets[i].Snapshot()
+				if breaker := pr.Breaker(); breaker != nil {
+					s := breaker.Stats()
+					snap.CircuitBreaker = &metrics.CBStats{
+						State:               s.State.String(),
+						Failures:            s.Failures,
+						ConsecutiveFailures: s.ConsecutiveFailures,
+						TotalFailures:       s.TotalFailures,
+						TotalSuccesses:      s.TotalSuccesses,
+						CurrentPenalty:      s.CurrentPenalty,
+						NextRetry:           s.NextRetry,
+					}
+				}
+				snaps[i] = metrics.ProviderSnapshot{Name: pr.Name, Snapshot: snap}
+			}
+			// One grouped write: every metric family forms a single
+			// contiguous block across all providers, as the text format's
+			// grouping rule requires. A scrape that walked away cannot be
+			// written to anyway, so the error is deliberately discarded.
+			_ = metrics.WritePrometheusFleet(w, snaps)
+		})
+		metricsSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := metricsSrv.Serve(metricsLn); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}()
+		log.Printf("metrics endpoint listening on %s/metrics", cfg.Server.MetricsBind)
+	}
+
+	srv := &http.Server{Addr: cfg.Server.Bind, Handler: h}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
@@ -427,11 +454,42 @@ func run() error {
 	select {
 	case <-ctx.Done():
 		log.Println("shutting down...")
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(sctx)
+		var servers []*http.Server
+		if metricsSrv != nil {
+			servers = append(servers, metricsSrv)
+		}
+		servers = append(servers, srv)
+		if err := shutdownServers(5*time.Second, servers...); err != nil {
+			slog.Warn("graceful shutdown incomplete", "err", err)
+		}
 		return nil
 	case err := <-errCh:
 		return err
 	}
+}
+
+// shutdownServers gracefully stops every server within the shared grace
+// budget, each with its OWN full-length context and all Shutdown calls running
+// concurrently: http.Server.Shutdown blocks until its connections drain or its
+// context expires, so a sequential hand-down of one shared context would let a
+// single stalled server (e.g. a slow /metrics scraper holding a connection)
+// starve the others - stdlib answers an already-expired context after one
+// idle-conn poll, abandoning active proxy connections instead of draining
+// them. Concurrency keeps the wall-clock ceiling at max(individual) <= grace.
+// The joined result reports which servers (if any) failed to drain cleanly.
+func shutdownServers(grace time.Duration, servers ...*http.Server) error {
+	errs := make([]error, len(servers))
+	var wg sync.WaitGroup
+	for i, srv := range servers {
+		if srv == nil {
+			continue
+		}
+		wg.Go(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), grace)
+			defer cancel()
+			errs[i] = srv.Shutdown(ctx)
+		})
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }

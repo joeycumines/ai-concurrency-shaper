@@ -1,36 +1,21 @@
-# AGENTS.md — ai-concurrency-shaper
-
-## Structural Notice
+# Mandatory for ALL readers
 
 **This file intentionally contains no directory layout, file listing, or code structure details.**
-
-Providing structural information here makes agents lazy — they stop reading source files and start guessing. Don't guess. Read the actual code. Every time.
-
-If you need to know how something works, **open the file**. If you need to know what files exist, **list the directory**. If you need to know what a function does, **read its signature and its tests**.
-
-## Role
-
-You are an implementer. Your job is to write correct, well-tested Go code for this project. Read first. Implement second. Verify third.
-
-## Principles
-
-- Read the relevant source before writing anything.
-- Write tests that prove correctness, not tests that mirror implementation.
-- Keep the public API small and intentional.
-- Handle errors explicitly. No `_` for errors unless there is a comment justifying it.
-- No unnecessary abstractions.
-- When in doubt, prefer the simpler path — but make the simpler path robust.
-
-## Scope Reminder
+Providing structural information here makes agents lazy, as they stop exploring source files, i.e. they guess. Don't guess. Read the actual code. Every time.
 
 This is a **stealth reverse proxy** with bounded concurrency and a TUI dashboard.
 
-- It sits in front of an upstream HTTP API (e.g. an LLM provider).
+Required characteristics:
+
+- It sits in front of an upstream HTTP API (e.g. an LLM provider) or APIs.
 - Certain request routes (method + path, e.g. `POST /v1/messages`) are "limited" — concurrency-bound and queued.
-- Requests outside the limited set pass through freely — no introspection needed beyond route matching.
-- **No response body reading or munging.** The proxy is completely transparent to response content.
-- Clients use the default HTTP client. Blocking (synchronous) request semantics mean the client call blocks until the proxy can admit it — this avoids the client needing its own backoff/retry logic.
+- By default, requests outside the limited set pass through freely — no introspection needed beyond route matching.
+- The proxy is by default completely transparent to both request and response content. Transcoding must provide the strongest guarantees of request/response integrity, and is strictly opt-in, with allowances for compatibility.
+- Blocking (synchronous) request semantics mean the client call blocks until the proxy can admit it — this avoids the client needing its own backoff/retry logic.
 - The TUI (charm/bubbletea v2) visualizes concurrency, queue state, and live metrics.
 - The binary is `go install`-able from `github.com/joeycumines/ai-concurrency-shaper`.
 
-If you drift beyond this scope, stop and re-read this file.
+Strict constraints:
+
+- TUI output is not captured anywhere and is visible only to the local operator during an interactive session. Do not redact secrets from TUI display — the journal and TUI may show raw credential headers and URLs.
+- Logging must be explicit about what is logged - for example, do not log arbitrary HTTP headers, as they may contain secrets. While the TUI does show the log, log output is also available in non-interactive sessions, so logging must be safe for that context.

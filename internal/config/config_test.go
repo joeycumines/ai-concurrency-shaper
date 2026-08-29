@@ -19,6 +19,8 @@ import (
 	"bytes"
 	"log"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -826,5 +828,304 @@ func TestRouteLimiters_GroupConflictWarn(t *testing.T) {
 	wantSub := `group "anthropic" with limit 8, but group already has limit 30. Using 30.`
 	if !strings.Contains(got, wantSub) {
 		t.Errorf("stderr log = %q, want it to contain %q", got, wantSub)
+	}
+}
+
+// TestResolveAndValidate_AuthDisabledByDefault pins the backward-compat
+// contract: with no -auth-* flags the resolved policy is nil (verbatim
+// forwarding, no stripping, no injection) and the startup summary is
+// unchanged.
+func TestResolveAndValidate_AuthDisabledByDefault(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	cfg, err := Parse([]string{"-upstream", "https://x"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	if p := cfg.Providers[0]; p.AuthPolicy() != nil {
+		t.Fatalf("AuthPolicy() = %+v, want nil without auth flags", p.AuthPolicy())
+	}
+	out := buf.String()
+	if strings.Contains(out, "upstream auth") || strings.Contains(out, "without upstream auth") {
+		t.Errorf("startup log mentions auth without auth flags:\n%s", out)
+	}
+}
+
+// TestResolveAndValidate_AuthGrammar walks every malformed auth
+// configuration through ResolveAndValidate and pins the error text.
+func TestResolveAndValidate_AuthGrammar(t *testing.T) {
+	cases := []struct {
+		name    string
+		authSrc string
+		authMd  string
+		header  string
+		want    string
+	}{
+		{name: "bad source form", authSrc: "secret-in-argv",
+			want: `-auth-source "secret-in-argv" must be env:VAR, file:PATH, or none`},
+		{name: "empty env var name", authSrc: "env:",
+			want: "environment variable name must match"},
+		{name: "bad env var name", authSrc: "env:MY KEY",
+			want: "environment variable name must match"},
+		{name: "empty file path", authSrc: "file:",
+			want: "file path must not be empty"},
+		{name: "unknown mode", authMd: "hmac",
+			want: `-auth-mode "hmac" must be auto|none|bearer|x-api-key|api-key|header:NAME`},
+		{name: "bearer without source", authMd: "bearer",
+			want: `-auth-mode "bearer" requires -auth-source`},
+		{name: "x-api-key without source", authMd: "x-api-key",
+			want: `-auth-mode "x-api-key" requires -auth-source`},
+		{name: "header without source", authMd: "header",
+			want: "-auth-mode header requires -auth-source"},
+		{name: "header without name", authSrc: "env:X", authMd: "header",
+			want: "-auth-header NAME"},
+		{name: "source none with mode", authSrc: "none", authMd: "bearer",
+			want: `-auth-source none cannot be combined with -auth-mode "bearer"`},
+		{name: "mode none with source", authSrc: "env:X", authMd: "none",
+			want: "-auth-mode none does not use -auth-source"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Provider{Name: "a", Upstream: "https://x", Concurrency: 4,
+				AuthSource: tc.authSrc, AuthMode: tc.authMd, AuthHeader: tc.header}
+			err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate()
+			if err == nil {
+				t.Fatalf("ResolveAndValidate: nil error, want %q rejection", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveAndValidate_AuthDerivation pins the host-based auto rule and the
+// explicit override.
+func TestResolveAndValidate_AuthDerivation(t *testing.T) {
+	t.Run("anthropic host derives x-api-key with default version", func(t *testing.T) {
+		p := &Provider{Name: "a", Upstream: "https://api.anthropic.com", Concurrency: 4}
+		t.Setenv("SHAPER_PROVIDER_A_API_KEY", "sekrit")
+		p.AuthSource = "env:SHAPER_PROVIDER_A_API_KEY"
+		// Parse registers this flag default; direct struct literals must
+		// mirror it (pinned by TestParse_AuthModeDefault).
+		p.AnthropicVersion = "2023-06-01"
+		if err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		policy := p.AuthPolicy()
+		if policy == nil {
+			t.Fatal("AuthPolicy() = nil, want resolved policy")
+		}
+		if policy.Mode != "x-api-key" {
+			t.Errorf("Mode = %q, want x-api-key", policy.Mode)
+		}
+	})
+
+	t.Run("openai host derives bearer", func(t *testing.T) {
+		p := &Provider{Name: "b", Upstream: "https://api.openai.com/v1", Concurrency: 4}
+		t.Setenv("SHAPER_PROVIDER_B_KEY", "sekrit")
+		p.AuthSource = "env:SHAPER_PROVIDER_B_KEY"
+		if err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		if got := p.AuthPolicy().Mode; got != "bearer" {
+			t.Errorf("Mode = %q, want bearer", got)
+		}
+	})
+
+	t.Run("explicit mode overrides derivation", func(t *testing.T) {
+		p := &Provider{Name: "c", Upstream: "https://internal.corp", Concurrency: 4,
+			AuthSource: "env:C_KEY", AuthMode: "api-key"}
+		t.Setenv("C_KEY", "azure-ish")
+		if err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		if got := p.AuthPolicy().Mode; got != "api-key" {
+			t.Errorf("Mode = %q, want api-key", got)
+		}
+	})
+}
+
+// TestResolveAndValidate_AuthFailClosedEnv proves credential resolution fails
+// at startup (never per-request), names the offending reference, and never
+// leaks the value into logs.
+func TestResolveAndValidate_AuthFailClosedEnv(t *testing.T) {
+	const ref = "SHAPER_PROVIDER_MISSING_KEY"
+
+	t.Run("unset variable named in error", func(t *testing.T) {
+		os.Unsetenv(ref)
+		p := &Provider{Name: "a", Upstream: "https://x", Concurrency: 4, AuthSource: "env:" + ref}
+		err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate()
+		if err == nil || !strings.Contains(err.Error(), ref) {
+			t.Fatalf("err = %v, want failure naming %s", err, ref)
+		}
+		if p.AuthPolicy() != nil {
+			t.Error("policy must stay nil after failed resolution")
+		}
+	})
+
+	t.Run("empty variable rejected", func(t *testing.T) {
+		t.Setenv(ref, "   ")
+		p := &Provider{Name: "a", Upstream: "https://x", Concurrency: 4, AuthSource: "env:" + ref}
+		err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate()
+		if err == nil || !strings.Contains(err.Error(), ref) {
+			t.Fatalf("err = %v, want empty-variable failure naming %s", err, ref)
+		}
+	})
+
+	t.Run("resolved once and value never logged", func(t *testing.T) {
+		t.Setenv(ref, "sekrit-value")
+		var buf bytes.Buffer
+		log.SetOutput(&buf)
+		t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+		p := &Provider{Name: "a", Upstream: "https://api.openai.com", Concurrency: 4, AuthSource: "env:" + ref}
+		if err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		if p.AuthPolicy() == nil {
+			t.Fatal("AuthPolicy() = nil, want resolved policy")
+		}
+		log.Printf("upstream auth: auth-mode=%s auth-source=%s", p.AuthPolicy().Mode, p.AuthSource)
+		if out := buf.String(); strings.Contains(out, "sekrit-value") {
+			t.Errorf("log leaked the secret value:\n%s", out)
+		}
+	})
+}
+
+// TestResolveAndValidate_AuthFailClosedFile covers the opt-in file source.
+func TestResolveAndValidate_AuthFailClosedFile(t *testing.T) {
+	t.Run("missing file named in error", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "absent")
+		p := &Provider{Name: "a", Upstream: "https://x", Concurrency: 4, AuthSource: "file:" + path}
+		err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate()
+		if err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("err = %v, want failure naming %s", err, path)
+		}
+	})
+
+	t.Run("blank file rejected", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "blank")
+		if err := os.WriteFile(path, []byte(" \n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p := &Provider{Name: "a", Upstream: "https://x", Concurrency: 4, AuthSource: "file:" + path}
+		if err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate(); err == nil {
+			t.Fatal("nil error, want blank-file rejection")
+		}
+	})
+
+	t.Run("valid file resolves", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "key")
+		if err := os.WriteFile(path, []byte("from-file\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p := &Provider{Name: "a", Upstream: "https://api.openai.com", Concurrency: 4,
+			AuthSource: "file:" + path, AuthMode: "bearer"}
+		if err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		if p.AuthPolicy() == nil {
+			t.Fatal("AuthPolicy() = nil, want resolved policy")
+		}
+	})
+}
+
+// TestResolveAndValidate_AuthSourceNone pins strip-only hygiene: a policy
+// that removes client credentials but injects nothing, requiring no secret.
+func TestResolveAndValidate_AuthSourceNone(t *testing.T) {
+	for _, src := range []string{"", "none"} {
+		p := &Provider{Name: "a", Upstream: "https://x", Concurrency: 4, AuthSource: src, AuthMode: "none"}
+		if err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate(); err != nil {
+			t.Fatalf("source %q mode none: %v", src, err)
+		}
+		policy := p.AuthPolicy()
+		if policy == nil {
+			t.Fatalf("source %q: AuthPolicy() = nil, want none policy", src)
+		}
+		if policy.Mode != "none" || policy.Secret != nil {
+			t.Errorf("source %q: policy = %+v, want none/secretless", src, policy)
+		}
+	}
+}
+
+// TestResolveAndValidate_AuthHeaderSpellings covers both custom-header
+// spellings and their conflict rule.
+func TestResolveAndValidate_AuthHeaderSpellings(t *testing.T) {
+	t.Run("flag spelling", func(t *testing.T) {
+		p := &Provider{Name: "a", Upstream: "https://gemini.example.com", Concurrency: 4,
+			AuthSource: "env:G_KEY", AuthMode: "header", AuthHeader: "X-Goog-Api-Key"}
+		t.Setenv("G_KEY", "g")
+		if err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		if got := p.AuthPolicy().CustomHeader; got != "X-Goog-Api-Key" {
+			t.Errorf("CustomHeader = %q", got)
+		}
+	})
+
+	t.Run("inline spelling", func(t *testing.T) {
+		p := &Provider{Name: "a", Upstream: "https://gemini.example.com", Concurrency: 4,
+			AuthSource: "env:G_KEY", AuthMode: "header:X-Custom-Key"}
+		t.Setenv("G_KEY", "g")
+		if err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		if got := p.AuthPolicy().CustomHeader; got != "X-Custom-Key" {
+			t.Errorf("CustomHeader = %q", got)
+		}
+	})
+
+	t.Run("conflicting spellings rejected", func(t *testing.T) {
+		p := &Provider{Name: "a", Upstream: "https://x", Concurrency: 4,
+			AuthSource: "env:G_KEY", AuthMode: "header:X-A", AuthHeader: "X-B"}
+		t.Setenv("G_KEY", "g")
+		err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate()
+		if err == nil || !strings.Contains(err.Error(), "conflicts") {
+			t.Fatalf("err = %v, want conflict rejection", err)
+		}
+	})
+
+	t.Run("invalid header token rejected", func(t *testing.T) {
+		p := &Provider{Name: "a", Upstream: "https://x", Concurrency: 4,
+			AuthSource: "env:G_KEY", AuthMode: "header", AuthHeader: "Bad Header"}
+		t.Setenv("G_KEY", "g")
+		err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate()
+		if err == nil || !strings.Contains(err.Error(), "not a valid HTTP header name") {
+			t.Fatalf("err = %v, want invalid-header-name rejection", err)
+		}
+	})
+}
+
+// TestConfigUnprotectedProviderCount pins the count the multi-provider
+// startup notice is built from: providers without a resolved auth policy.
+func TestConfigUnprotectedProviderCount(t *testing.T) {
+	mk := func(name string, authed bool) *Provider {
+		if authed {
+			return &Provider{Name: name, Upstream: "https://api.openai.com", Prefix: "/" + name,
+				Concurrency: 1, AuthSource: "none"}
+		}
+		return &Provider{Name: name, Upstream: "https://api.openai.com", Prefix: "/" + name, Concurrency: 1}
+	}
+
+	cfg := &Config{Providers: []*Provider{mk("a", false), mk("b", true)}}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.UnprotectedProviderCount(); got != 1 {
+		t.Errorf("UnprotectedProviderCount() = %d, want 1", got)
+	}
+
+	allProtected := &Config{Providers: []*Provider{mk("a", true), mk("b", true)}}
+	if err := allProtected.ResolveAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := allProtected.UnprotectedProviderCount(); got != 0 {
+		t.Errorf("UnprotectedProviderCount() = %d, want 0", got)
 	}
 }
