@@ -19,15 +19,18 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,6 +38,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
@@ -10948,4 +10952,625 @@ func TestProxy_ErrAbortHandler_NoBreakerFailure(t *testing.T) {
 	if stats.ConsecutiveFailures != 0 {
 		t.Errorf("breaker ConsecutiveFailures = %d, want 0", stats.ConsecutiveFailures)
 	}
+}
+
+// TestMaxIdleConnsPerHost verifies the upstream transport idle-connection pool
+// sizing across the supported route/global/limit-all configurations. The body
+// is byte-identical to the function it exercises: proxy.MaxIdleConnsPerHost.
+func TestMaxIdleConnsPerHost(t *testing.T) {
+	parsePatterns := func(t *testing.T, specs ...string) []route.Pattern {
+		t.Helper()
+		patterns := make([]route.Pattern, 0, len(specs))
+		for _, spec := range specs {
+			p, err := route.Parse(spec)
+			if err != nil {
+				t.Fatalf("parse pattern %q: %v", spec, err)
+			}
+			patterns = append(patterns, p)
+		}
+		return patterns
+	}
+
+	tests := []struct {
+		name            string
+		global          int
+		concurrency     int
+		patterns        []route.Pattern
+		routeLimiters   map[string]*queue.Limiter
+		limitAll        bool
+		wantIdlePerHost int
+	}{
+		{
+			name:            "default pool floors at legacy value",
+			concurrency:     4,
+			patterns:        route.DefaultPatterns(),
+			wantIdlePerHost: 20,
+		},
+		{
+			name:            "zero concurrency floors at legacy value",
+			concurrency:     0,
+			patterns:        route.DefaultPatterns(),
+			wantIdlePerHost: 20,
+		},
+		{
+			name:            "independent route limiters are summed",
+			concurrency:     4,
+			patterns:        parsePatterns(t, "POST /v1/chat/completions:20", "POST /v1/embeddings:20"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/chat/completions:20": queue.NewLimiterWithCooldown(20, 0), "POST /v1/embeddings:20": queue.NewLimiterWithCooldown(20, 0)},
+			wantIdlePerHost: 40,
+		},
+		{
+			name:            "grouped route limiters are summed once",
+			concurrency:     4,
+			patterns:        parsePatterns(t, "POST /v1/messages:20@messages", "POST /v1/messages/batches:20@messages"),
+			routeLimiters:   map[string]*queue.Limiter{"messages": queue.NewLimiterWithCooldown(20, 0)},
+			wantIdlePerHost: 20,
+		},
+		{
+			name:            "default pool and route limiter are combined",
+			concurrency:     4,
+			patterns:        parsePatterns(t, "POST /v1/messages", "POST /v1/embeddings:30"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/embeddings:30": queue.NewLimiterWithCooldown(30, 0)},
+			wantIdlePerHost: 34,
+		},
+		{
+			name:            "global caps summed route pool",
+			global:          25,
+			concurrency:     4,
+			patterns:        parsePatterns(t, "POST /v1/chat/completions:20", "POST /v1/embeddings:20"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/chat/completions:20": queue.NewLimiterWithCooldown(20, 0), "POST /v1/embeddings:20": queue.NewLimiterWithCooldown(20, 0)},
+			wantIdlePerHost: 25,
+		},
+		{
+			name:            "global cap does not reduce below default floor",
+			global:          0,
+			concurrency:     0,
+			patterns:        route.DefaultPatterns(),
+			wantIdlePerHost: 20,
+		},
+		{
+			// limitAll routes every non-matching request through the default
+			// limiter, so the default pool's capacity must be counted even when
+			// every configured pattern carries an explicit route limit.
+			name:            "limit-all counts default pool when all routes have explicit limits",
+			concurrency:     100,
+			patterns:        parsePatterns(t, "POST /v1/messages:5"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/messages:5": queue.NewLimiterWithCooldown(5, 0)},
+			limitAll:        true,
+			wantIdlePerHost: 105,
+		},
+		{
+			// Without limitAll the default pool is NOT used (the only pattern
+			// has its own limiter), so concurrency does not contribute.
+			name:            "without limit-all default pool is unused when routes have explicit limits",
+			concurrency:     100,
+			patterns:        parsePatterns(t, "POST /v1/messages:5"),
+			routeLimiters:   map[string]*queue.Limiter{"POST /v1/messages:5": queue.NewLimiterWithCooldown(5, 0)},
+			limitAll:        false,
+			wantIdlePerHost: 20,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MaxIdleConnsPerHost(tt.global, tt.concurrency, tt.patterns, tt.routeLimiters, tt.limitAll)
+			if got != tt.wantIdlePerHost {
+				t.Fatalf("MaxIdleConnsPerHost() = %d, want %d", got, tt.wantIdlePerHost)
+			}
+		})
+	}
+}
+
+// newHeaderEchoUpstream returns a server that replies with a JSON document of
+// the received Host and every received header, so assertions can compare the
+// exact wire image each mode produces.
+func newHeaderEchoUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Helper()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"host":    r.Host,
+			"path":    r.URL.Path,
+			"query":   r.URL.RawQuery,
+			"headers": r.Header,
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// newAuthTestProxy assembles a Proxy against upstreamURL with the given
+// policy and journal.
+func newAuthTestProxy(t *testing.T, upstreamURL string, policy *auth.AuthPolicy, j *journal.Journal) *Proxy {
+	t.Helper()
+	u, err := url.Parse(upstreamURL)
+	if err != nil {
+		t.Fatalf("parse upstream: %v", err)
+	}
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithJournal(j),
+		WithAuthPolicy(policy),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+	return p
+}
+
+// capturedHeader decodes the echo upstream's reply into a plain map.
+func capturedHeader(t *testing.T, body io.Reader) (map[string]string, string, string) {
+	t.Helper()
+	var doc struct {
+		Host    string              `json:"host"`
+		Path    string              `json:"path"`
+		Query   string              `json:"query"`
+		Headers map[string][]string `json:"headers"`
+	}
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatalf("read echo: %v", err)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode echo %q: %v", string(raw), err)
+	}
+	flat := make(map[string]string, len(doc.Headers))
+	for name, values := range doc.Headers {
+		flat[name] = strings.Join(values, ", ")
+	}
+	return flat, doc.Path + "?" + doc.Query, doc.Host
+}
+
+// TestProxy_RewriteParity pins the Director->Rewrite migration's wire parity:
+// path joining (including upstream base paths), Host override, forwarding-
+// header suppression, and query preservation.
+func TestProxy_RewriteParity(t *testing.T) {
+	cases := []struct {
+		name        string
+		upstreamURL string // replaced per-case below
+	}{
+		{name: "bare host", upstreamURL: ""},
+		{name: "base path", upstreamURL: ""},
+	}
+
+	build := func(base string) (*httptest.Server, string) {
+		echo := newHeaderEchoUpstream(t)
+		target := echo.URL
+		if base != "" {
+			target += base
+		}
+		return echo, target
+	}
+
+	for _, tc := range cases {
+		base := ""
+		if tc.name == "base path" {
+			base = "/apibase"
+		}
+		echo, target := build(base)
+		wantHost := strings.TrimPrefix(echo.URL, "http://")
+		req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages?stream=true", nil)
+		rec := httptest.NewRecorder()
+
+		p := newAuthTestProxy(t, target, nil, nil)
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", tc.name, rec.Code)
+		}
+		headers0, _, gotHost := capturedHeader(t, rec.Result().Body)
+		_ = headers0
+		if gotHost != wantHost {
+			t.Errorf("%s: upstream Host = %q, want %q", tc.name, gotHost, wantHost)
+		}
+		// Re-run against a fresh recorder for the remaining assertions below.
+		// The client this time SUPPLIES forwarding headers: stdlib deletes
+		// Forwarded/X-Forwarded-* from the outbound clone before Rewrite, so
+		// even client-supplied values must never reach the upstream.
+		req = httptest.NewRequest(http.MethodPost, "/v1/messages?stream=true", nil)
+		req.Header.Set("X-Forwarded-For", "203.0.113.7")
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("Forwarded", "for=203.0.113.7")
+		rec = httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		headers, pathQuery, _ := capturedHeader(t, rec.Result().Body)
+		wantPath := "/apibase/v1/messages"
+		if base == "" {
+			wantPath = "/v1/messages"
+		}
+		if pathQuery != wantPath+"?stream=true" {
+			t.Errorf("%s: upstream saw %q, want %q", tc.name, pathQuery, wantPath+"?stream=true")
+		}
+		for _, fwd := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"} {
+			if got := headers[fwd]; got != "" {
+				t.Errorf("%s: upstream saw %s: %q, want suppressed", tc.name, fwd, got)
+			}
+		}
+	}
+}
+
+// TestProxy_AuthInjectionThroughServeHTTP drives strip-then-inject through the
+// full ServeHTTP stack for every mode, proving hostile client credentials and
+// cloud decoys never reach the upstream while the configured credential does.
+func TestProxy_AuthInjectionThroughServeHTTP(t *testing.T) {
+	newReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		req.Header.Set("Authorization", "Bearer client-token")
+		req.Header.Set("X-Api-Key", "client-anthropic")
+		req.Header.Set("Api-Key", "client-azure")
+		req.Header.Set("X-Goog-Api-Key", "client-google")
+		req.Header.Set("Anthropic-Version", "1999-01-01")
+		req.Header.Set("Anthropic-Beta", "client-beta")
+		req.Header.Set("x-amz-date", "19990101T000000Z")
+		req.Header.Set("Content-Type", "application/json")
+		return req
+	}
+
+	assertClean := func(t *testing.T, headers map[string]string, injects map[string]string) {
+		t.Helper()
+		for _, leaked := range []string{
+			"Authorization", "X-Api-Key", "Api-Key", "X-Goog-Api-Key",
+			"Anthropic-Version", "Anthropic-Beta", "X-Amz-Date",
+		} {
+			if _, injected := injects[leaked]; injected {
+				continue
+			}
+			if got := headers[leaked]; got != "" {
+				t.Errorf("upstream saw stripped header %s: %q", leaked, got)
+			}
+		}
+		for name, want := range injects {
+			if got := headers[name]; got != want {
+				t.Errorf("upstream %s = %q, want %q", name, got, want)
+			}
+		}
+	}
+
+	t.Run("bearer", func(t *testing.T) {
+		echo := newHeaderEchoUpstream(t)
+		policy := &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: auth.NewStaticSecretSource("cfg-bearer")}
+		p := newAuthTestProxy(t, echo.URL, policy, nil)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, newReq())
+		headers, _, _ := capturedHeader(t, rec.Result().Body)
+		assertClean(t, headers, map[string]string{"Authorization": "Bearer cfg-bearer"})
+	})
+
+	t.Run("x-api-key with version", func(t *testing.T) {
+		echo := newHeaderEchoUpstream(t)
+		policy := &auth.AuthPolicy{Mode: auth.AuthXAPIKey, Secret: auth.NewStaticSecretSource("sk"),
+			AnthropicVersion: "2023-06-01"}
+		p := newAuthTestProxy(t, echo.URL, policy, nil)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, newReq())
+		headers, _, _ := capturedHeader(t, rec.Result().Body)
+		assertClean(t, headers, map[string]string{"X-Api-Key": "sk", "Anthropic-Version": "2023-06-01"})
+	})
+
+	t.Run("none strips without injecting", func(t *testing.T) {
+		echo := newHeaderEchoUpstream(t)
+		p := newAuthTestProxy(t, echo.URL, &auth.AuthPolicy{Mode: auth.AuthNone}, nil)
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, newReq())
+		headers, _, _ := capturedHeader(t, rec.Result().Body)
+		assertClean(t, headers, nil)
+		if got := headers["Content-Type"]; got != "application/json" {
+			t.Errorf("Content-Type = %q, want untouched passthrough", got)
+		}
+	})
+}
+
+// TestProxy_JournalShowsRawRequestHeaders pins the TUI Redaction Constraint:
+// credential VALUES appear raw in the journal (and therefore the TUI Network
+// panel), with or without an auth policy, while non-sensitive headers stay
+// inspectable.
+func TestProxy_JournalShowsRawRequestHeaders(t *testing.T) {
+	for _, withPolicy := range []bool{false, true} {
+		name := "no policy"
+		if withPolicy {
+			name = "with policy"
+		}
+		t.Run(name, func(t *testing.T) {
+			echo := newHeaderEchoUpstream(t)
+			j := journal.New(8, 1<<20)
+			var policy *auth.AuthPolicy
+			if withPolicy {
+				policy = &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: auth.NewStaticSecretSource("cfg-secret")}
+			}
+			p := newAuthTestProxy(t, echo.URL, policy, j)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			req.Header.Set("Authorization", "Bearer client-secret-value")
+			req.Header.Set("Cookie", "session=abc")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			p.ServeHTTP(rec, req)
+
+			entries := j.Entries()
+			if len(entries) != 1 {
+				t.Fatalf("journal entries = %d, want 1", len(entries))
+			}
+			h := entries[0].RequestHeaders
+			if h == nil {
+				t.Fatal("journal entry has no request headers")
+			}
+			for name, values := range map[string][]string{
+				"Authorization": {"Bearer client-secret-value"},
+				"Cookie":        {"session=abc"},
+			} {
+				if got := h.Values(name); !reflect.DeepEqual(got, values) {
+					t.Errorf("journal %s = %q, want %q", name, got, values)
+				}
+			}
+			if got := h.Get("Content-Type"); got != "application/json" {
+				t.Errorf("journal Content-Type = %q, want untouched", got)
+			}
+			if !strings.Contains(fmt.Sprint(h), "client-secret-value") {
+				t.Errorf("journal should show raw per TUI constraint: %v", h)
+			}
+		})
+	}
+}
+
+// TestProxy_ConnectionListCannotStripInjectedAuth pins the go#50580 property
+// at this layer: a client listing an injected header as hop-by-hop
+// ("Connection: authorization") must NOT prevent the policy credential from
+// reaching the upstream, because stdlib removes hop-by-hop headers from the
+// outbound clone BEFORE the Rewrite hook runs. If this test ever fails, the
+// injection moved out of Rewrite (or stdlib changed ordering) and the
+// security posture regressed.
+func TestProxy_ConnectionListCannotStripInjectedAuth(t *testing.T) {
+	echo := newHeaderEchoUpstream(t)
+	policy := &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: auth.NewStaticSecretSource("cfg-bearer")}
+	p := newAuthTestProxy(t, echo.URL, policy, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Connection", "authorization") // hostile: try to de-hop the injected name
+	req.Header.Set("Authorization", "Bearer client-token")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	headers, _, _ := capturedHeader(t, rec.Result().Body)
+	if got := headers["Authorization"]; got != "Bearer cfg-bearer" {
+		t.Fatalf("Authorization = %q, want injected value surviving the Connection list", got)
+	}
+}
+
+// TestProxy_CookieForwardsAndDisplaysRaw pins the documented Cookie
+// contract: cookies are NOT stripped by auth policies (stripping would break
+// cookie-authenticated upstreams) and they display raw per the TUI Redaction
+// Constraint in AGENTS.md.
+func TestProxy_CookieForwardsAndDisplaysRaw(t *testing.T) {
+	echo := newHeaderEchoUpstream(t)
+	j := journal.New(8, 1<<20)
+	policy := &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: auth.NewStaticSecretSource("cfg-secret")}
+	p := newAuthTestProxy(t, echo.URL, policy, j)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Cookie", "session=abc")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	headers, _, _ := capturedHeader(t, rec.Result().Body)
+	if got := headers["Cookie"]; got != "session=abc" {
+		t.Errorf("upstream Cookie = %q, want forwarded verbatim (documented contract)", got)
+	}
+	entries := j.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(entries))
+	}
+	if got := entries[0].RequestHeaders.Get("Cookie"); got != "session=abc" {
+		t.Errorf("journal Cookie = %q, want raw per TUI constraint", got)
+	}
+}
+
+func TestProxy_JournalShowsRawResponseHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "session=abc123")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	j := journal.New(8, 1<<20)
+	p := newAuthTestProxy(t, upstream.URL, nil, j)
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/messages", nil))
+
+	entries := j.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("journal entries = %d, want 1", len(entries))
+	}
+	h := entries[0].ResponseHeaders
+	if h == nil {
+		t.Fatal("journal entry has no response headers")
+	}
+	if values := h.Values("Set-Cookie"); !reflect.DeepEqual(values, []string{"session=abc123"}) {
+		t.Errorf("journal Set-Cookie = %q, want raw per TUI constraint", values)
+	}
+	if got := h.Get("Content-Type"); got != "application/json" {
+		t.Errorf("journal Content-Type = %q, want untouched", got)
+	}
+	if !strings.Contains(fmt.Sprint(h), "abc123") {
+		t.Errorf("journal should show raw Set-Cookie per TUI constraint: %v", h)
+	}
+}
+
+func TestProxy_JournalShowsRawQueryWhileForwardingStaysVerbatim(t *testing.T) {
+	type echo struct {
+		Query string `json:"query"`
+	}
+	var mu sync.Mutex
+	var seen []echo
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, echo{Query: r.URL.RawQuery})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	j := journal.New(8, 1<<20)
+	p := newAuthTestProxy(t, upstream.URL, nil, j)
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models?key=topsecret&x=1", nil))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 {
+		t.Fatalf("upstream requests = %d, want 1", len(seen))
+	}
+	if seen[0].Query != "key=topsecret&x=1" {
+		t.Errorf("upstream RawQuery = %q, want verbatim forwarding", seen[0].Query)
+	}
+
+	entries := j.Entries()
+	if len(entries) != 1 || entries[0].URL == nil {
+		t.Fatalf("journal entries = %d, want 1 with URL", len(entries))
+	}
+	got := entries[0].URL.String()
+	if !strings.Contains(got, "topsecret") {
+		t.Errorf("journal URL = %q, want raw per TUI constraint (should contain topsecret)", got)
+	}
+	if !strings.Contains(got, "key=topsecret") || !strings.Contains(got, "x=1") {
+		t.Errorf("journal URL = %q, want raw key and x=1 preserved", got)
+	}
+}
+
+func TestProxy_TransportErrorLogCarriesNoURL(t *testing.T) {
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	j := journal.New(8, 1<<20)
+	p := newAuthTestProxy(t, deadURL, nil, j)
+
+	var buf bytes.Buffer
+	prevLog := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() {
+		log.SetOutput(prevLog)
+		log.SetFlags(prevFlags)
+		slog.SetDefault(slog.Default())
+	})
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models?key=topsecret&x=1", nil))
+
+	out := buf.String()
+	if out == "" {
+		t.Fatal("no transport-error output captured")
+	}
+	// Go's Transport.RoundTrip returns a bare *net.OpError (no URL text), so
+	// the log line must contain neither the query credential nor any URL.
+	if strings.Contains(out, "topsecret") {
+		t.Errorf("transport-error log leaked query credential: %q", out)
+	}
+	if strings.Contains(out, "/v1/models") {
+		t.Errorf("transport-error log unexpectedly embeds the request URL: %q", out)
+	}
+}
+
+func TestSanitizeTransportErrorPreservesOuterContext(t *testing.T) {
+	u := mustParseURL(t, "http://up/v1/models?key=topsecret&x=1")
+	inner := &url.Error{Op: "Get", URL: u.String(), Err: context.DeadlineExceeded}
+	wrapped := fmt.Errorf("proxy timeout: %w", inner)
+
+	got := sanitizeTransportError(wrapped)
+
+	msg := got.Error()
+	if !strings.Contains(msg, "proxy timeout:") {
+		t.Errorf("outer wrapping context lost from sanitized message: %q", msg)
+	}
+	if strings.Contains(msg, "topsecret") {
+		t.Errorf("sanitized message leaked credential: %q", msg)
+	}
+	if !strings.Contains(msg, "key=%5BREDACTED%5D") || !strings.Contains(msg, "x=1") {
+		t.Errorf("sanitized message = %q, want key redacted, x preserved", msg)
+	}
+	var ue *url.Error
+	if !errors.As(got, &ue) {
+		t.Fatalf("sanitizeTransportError type = %T, want resolvable *url.Error via errors.As", got)
+	}
+	if strings.Contains(ue.URL, "topsecret") {
+		t.Errorf("reachable *url.Error field leaked credential: %q", ue.URL)
+	}
+	if !errors.Is(got, context.DeadlineExceeded) {
+		t.Error("sentinel identity lost through sanitized wrapper")
+	}
+}
+
+func TestSanitizeTransportErrorScrubsNestedChainURLs(t *testing.T) {
+	inner := &url.Error{Op: "Get", URL: "http://b.internal/v2?token=betasecret", Err: io.EOF}
+	outer := &url.Error{Op: "Post", URL: "http://a.internal/v1?key=alphasecret", Err: inner}
+
+	got := sanitizeTransportError(outer)
+
+	ue, ok := got.(*url.Error)
+	if !ok {
+		t.Fatalf("type = %T, want *url.Error for direct url.Error input", got)
+	}
+	if strings.Contains(ue.URL, "alphasecret") || !strings.Contains(ue.URL, "key=%5BREDACTED%5D") {
+		t.Errorf("outer URL not scrubbed: %q", ue.URL)
+	}
+	nested, ok := ue.Err.(*url.Error)
+	if !ok {
+		t.Fatalf("nested chain flattened away: %T (want preserved *url.Error)", ue.Err)
+	}
+	if strings.Contains(nested.URL, "betasecret") || !strings.Contains(nested.URL, "token=%5BREDACTED%5D") {
+		t.Errorf("nested URL not scrubbed: %q", nested.URL)
+	}
+	if !errors.Is(nested.Err, io.EOF) {
+		t.Errorf("nested leaf changed: %v", nested.Err)
+	}
+}
+
+func TestSanitizeTransportErrorRedactsURLErrors(t *testing.T) {
+	u := mustParseURL(t, "http://up/v1/models?key=topsecret&x=1")
+	err := &url.Error{Op: "Get", URL: u.String(), Err: context.DeadlineExceeded}
+	got := sanitizeTransportError(err)
+	urlErr, ok := got.(*url.Error)
+	if !ok {
+		t.Fatalf("sanitizeTransportError type = %T, want *url.Error", got)
+	}
+	if strings.Contains(urlErr.URL, "topsecret") {
+		t.Errorf("sanitized URL leaked credential: %q", urlErr.URL)
+	}
+	if !strings.Contains(urlErr.URL, "key=%5BREDACTED%5D") || !strings.Contains(urlErr.URL, "x=1") {
+		t.Errorf("sanitized URL = %q, want key redacted, x preserved", urlErr.URL)
+	}
+
+	plain := context.DeadlineExceeded
+	if got := sanitizeTransportError(plain); got != plain {
+		t.Errorf("non-url.Error passed through changed: %v", got)
+	}
+
+	wrapped := fmt.Errorf("wrap: %w", err)
+	gotWrapped := sanitizeTransportError(wrapped)
+	var gotURL *url.Error
+	if !errors.As(gotWrapped, &gotURL) {
+		t.Fatalf("wrapped sanitize type = %T, want *url.Error via errors.As", gotWrapped)
+	}
+	if strings.Contains(gotURL.URL, "topsecret") {
+		t.Errorf("wrapped sanitized URL leaked credential: %q", gotURL.URL)
+	}
+}
+
+func mustParseURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %q: %v", raw, err)
+	}
+	return u
 }

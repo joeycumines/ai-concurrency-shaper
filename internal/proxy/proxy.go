@@ -35,6 +35,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
@@ -76,6 +77,7 @@ type proxyConfig struct {
 	adaptiveHeadroomWindow time.Duration
 	limitAll               bool
 	transcodeMappings      []TranscodeMapping
+	authPolicy             *auth.AuthPolicy
 }
 
 // TranscodeMapping configures one transcoded route. The embedded
@@ -520,6 +522,25 @@ func (o *LimitAllOption) applyProxyOption(cfg *proxyConfig) error {
 	return nil
 }
 
+// AuthPolicyOption attaches an upstream authentication policy.
+type AuthPolicyOption struct {
+	value *auth.AuthPolicy
+}
+
+// WithAuthPolicy returns an option that sets the upstream authentication
+// policy. When set, every proxied request has client credential and protocol
+// headers stripped and the policy's upstream credential attached inside the
+// Rewrite hook; when nil (the default) requests are forwarded verbatim with no
+// mutation at all.
+func WithAuthPolicy(policy *auth.AuthPolicy) *AuthPolicyOption {
+	return &AuthPolicyOption{value: policy}
+}
+
+func (o *AuthPolicyOption) applyProxyOption(cfg *proxyConfig) error {
+	cfg.authPolicy = o.value
+	return nil
+}
+
 // --- Compile-Time Compliance Checks ---
 
 var (
@@ -544,6 +565,7 @@ var (
 	_ Option = (*AdaptiveHeadroomOption)(nil)
 	_ Option = (*AdaptiveHeadroomWindowOption)(nil)
 	_ Option = (*LimitAllOption)(nil)
+	_ Option = (*AuthPolicyOption)(nil)
 )
 
 // --- Factory ---
@@ -593,6 +615,11 @@ type Proxy struct {
 	// transcodeHandlerMap provides O(1) lookup of transcode handlers by
 	// method+path route key, built once at construction.
 	transcodeHandlerMap map[transcode.RouteKey]http.Handler
+
+	// authPolicy, when non-nil, strips client credential/protocol headers
+	// and attaches the upstream credential inside the Rewrite hook. nil
+	// forwards requests verbatim.
+	authPolicy *auth.AuthPolicy
 }
 
 // New creates a Proxy from the given options.
@@ -764,6 +791,7 @@ func New(opts ...Option) (*Proxy, error) {
 		adaptiveHeadroom:       cfg.adaptiveHeadroom,
 		adaptiveHeadroomWindow: cfg.adaptiveHeadroomWindow,
 		limitAll:               cfg.limitAll,
+		authPolicy:             cfg.authPolicy,
 	}
 
 	// Build one transcode handler per mapping, each forwarding through the
@@ -794,14 +822,29 @@ func New(opts ...Option) (*Proxy, error) {
 	}
 
 	rp := &httputil.ReverseProxy{
-		Director: func(req *http.Request) {
-			req.URL.Scheme = cfg.upstream.Scheme
-			req.URL.Host = cfg.upstream.Host
-			req.URL.Path = cfg.upstream.Path + req.URL.Path
-			req.Host = cfg.upstream.Host
-			req.Header.Del("X-Forwarded-For")
-			req.Header.Del("X-Forwarded-Host")
-			req.Header.Del("X-Forwarded-Proto")
+		// Rewrite (not the deprecated Director) is load-bearing for auth
+		// safety: stdlib strips hop-by-hop headers from the outbound clone
+		// BEFORE this hook runs, so headers injected here cannot be removed
+		// by a client Connection list (golang/go#50580). stdlib also deletes
+		// Forwarded/X-Forwarded-* before calling us, preserving the stealth
+		// posture; we never call SetXForwarded.
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = cfg.upstream.Scheme
+			pr.Out.URL.Host = cfg.upstream.Host
+			pr.Out.URL.Path = cfg.upstream.Path + pr.Out.URL.Path
+			pr.Out.Host = cfg.upstream.Host
+			if cfg.authPolicy != nil {
+				// Effectively unreachable for config-built policies: their
+				// sources reject blank credentials at construction time, and
+				// Validate ran at startup. Kept defensive for direct callers
+				// and future SecretSource implementations. On failure, fall
+				// back to strip-only rather than forwarding an
+				// unauthenticated or client-credentialed request.
+				if err := auth.ApplyUpstreamAuthentication(pr.Out.Context(), pr.Out, cfg.authPolicy); err != nil {
+					slog.Error("upstream auth failed; forwarding stripped-only", "error", err)
+					auth.StripCredentials(pr.Out.Header)
+				}
+			}
 		},
 		Transport: p,
 		ModifyResponse: func(res *http.Response) error {
@@ -841,7 +884,7 @@ func New(opts ...Option) (*Proxy, error) {
 			if isContextCancellation(r.Context().Err()) && isContextCancellation(err) {
 				return
 			}
-			slog.Error("proxy transport error", "error", err)
+			slog.Error("proxy transport error", "error", sanitizeTransportError(err))
 			if rec, ok := w.(*statusRecorder); ok {
 				if !rec.terminalWritten {
 					rec.proxyGeneratedError = true
@@ -1104,7 +1147,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Create journal entry for this request.
+	// Create journal entry for this request. Per AGENTS.md TUI Redaction
+	// Constraint, the journal and TUI may show raw credential headers and URLs
+	// — TUI output is not captured and is visible only to the local operator.
 	if p.journal != nil {
 		entry = &journal.Entry{
 			Method:         r.Method,
@@ -2107,6 +2152,80 @@ func isContextCancellation(err error) bool {
 
 var errLocalSwitchingProtocolsFailure = errors.New("proxy: local switching protocols failure")
 
+// sanitizedTransportError preserves the rendered message of an error chain
+// whose embedded URLs have been scrubbed, while Unwrap keeps the REDACTED
+// clone reachable: logs see the full original context (including any outer %w
+// wrapping prefixes) with no secret substrings, and errors.Is/errors.As
+// traverse to a *url.Error whose URL field is itself clean.
+type sanitizedTransportError struct {
+	msg      string
+	redacted error
+}
+
+func (e *sanitizedTransportError) Error() string { return e.msg }
+
+func (e *sanitizedTransportError) Unwrap() error { return e.redacted }
+
+// sanitizeTransportError rewrites transport errors so no embedded target URL
+// echoes credential query parameters into logs: http.Transport wraps failures
+// in url.Error with the full outbound URL, and its Error() text would
+// otherwise leak ?key=... secrets verbatim.
+//
+// Fidelity contract:
+//   - A bare *url.Error input yields a redacted *url.Error clone (same shape
+//     as before sanitization existed).
+//   - A wrapped chain yields a sanitizedTransportError whose Error() is the
+//     ORIGINAL message with every collected *url.Error URL replaced by its
+//     RedactSensitiveURL counterpart (raw and %q-quoted spellings both
+//     covered), so outer wrapping context survives into log lines.
+//   - Directly nested url.Error subtrees (net/http redirect chains) are
+//     cloned recursively with each level's URL scrubbed; errors.Is and
+//     errors.As keep working through Unwrap.
+//
+// Non-url.Error values carry no URL and pass through unchanged. When the
+// outermost URL cannot be parsed there is nothing safe to rewrite and the
+// original error is returned unchanged (historical fallback).
+func sanitizeTransportError(err error) error {
+	var outer *url.Error
+	if !errors.As(err, &outer) {
+		return err
+	}
+	parsed, perr := url.Parse(outer.URL)
+	if perr != nil {
+		return err
+	}
+	var replacements []string
+	clone := redactURLError(outer, parsed, &replacements)
+	if _, direct := err.(*url.Error); direct {
+		return clone
+	}
+	return &sanitizedTransportError{
+		msg:      strings.NewReplacer(replacements...).Replace(err.Error()),
+		redacted: clone,
+	}
+}
+
+// redactURLError clones e with its URL replaced by the redacted form of
+// parsed and its Err subtree recursively scrubbed when it nests another
+// *url.Error directly (as http.Client redirect chains do). Every URL seen is
+// appended to replacements as %q-quoted and raw old/new pairs - quoted first,
+// because a quoted rendering must be rewritten atomically to stay correctly
+// escaped.
+func redactURLError(e *url.Error, parsed *url.URL, replacements *[]string) *url.Error {
+	redacted := auth.RedactSensitiveURL(parsed).String()
+	if e.URL != "" && e.URL != redacted {
+		*replacements = append(*replacements, strconv.Quote(e.URL), strconv.Quote(redacted), e.URL, redacted)
+	}
+	clone := *e
+	clone.URL = redacted
+	if inner, ok := e.Err.(*url.Error); ok {
+		if innerParsed, perr := url.Parse(inner.URL); perr == nil {
+			clone.Err = redactURLError(inner, innerParsed, replacements)
+		}
+	}
+	return &clone
+}
+
 func localSwitchingProtocolsFailure(msg string) error {
 	return fmt.Errorf("%w: %s", errLocalSwitchingProtocolsFailure, msg)
 }
@@ -2970,4 +3089,51 @@ func cloneURL(u *url.URL) *url.URL {
 	}
 	cloned := *u
 	return &cloned
+}
+
+// MaxIdleConnsPerHost sizes the upstream transport's per-host idle connection
+// pool to fit the requested limiters.
+//
+// routeLimiters is keyed exactly as the proxy expects: by group name, or by the
+// raw pattern when the pattern has no group. The returned value counts every route
+// limiter's capacity, plus the default pool whenever it is actually used (a pattern
+// with no group and no limit; a group-less unlimited pattern; a grouped pattern
+// whose group resolves to no limiter; or -limit-all), capped by the global
+// concurrency pool when one exists not to exceed the global concurrency. A floor of
+// 20 keeps the shared transport healthy.
+//
+// This is the connection pool for admission, not a hard cap: the proxy stays
+// transparent and never varies from the limiters.
+func MaxIdleConnsPerHost(globalConcurrency, concurrency int, patterns []route.Pattern, routeLimiters map[string]*queue.Limiter, limitAll bool) int {
+	routePoolMax := 0
+	for _, lim := range routeLimiters {
+		routePoolMax += lim.Limit()
+	}
+
+	defaultPoolUsed := limitAll
+	for _, p := range patterns {
+		key := p.Group
+		if key == "" {
+			key = p.Raw
+		}
+		if p.Limit == 0 {
+			if p.Group == "" {
+				defaultPoolUsed = true
+				continue
+			}
+			if _, ok := routeLimiters[key]; !ok {
+				defaultPoolUsed = true
+			}
+		}
+	}
+	if defaultPoolUsed {
+		routePoolMax += concurrency
+	}
+	if globalConcurrency > 0 && routePoolMax > globalConcurrency {
+		routePoolMax = globalConcurrency
+	}
+	if routePoolMax < 20 {
+		return 20
+	}
+	return routePoolMax
 }

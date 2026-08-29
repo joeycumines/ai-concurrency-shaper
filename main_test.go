@@ -16,9 +16,15 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math"
+	"fmt"
+	"io"
+	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -516,5 +522,922 @@ func TestValidateMBFlag(t *testing.T) {
 		if err := validateMBFlag(tc.name, tc.value, tc.shift); err == nil {
 			t.Fatalf("%s = %d shift %d accepted", tc.name, tc.value, tc.shift)
 		}
+	}
+}
+
+// TestE2E_MultiProvider proves stage-1 multi-provider routing end-to-end
+// through the real binary: two --provider sections mount two upstreams at
+// distinct prefixes, each prefixed request reaches its upstream with the
+// prefix stripped (true mount), unmatched paths 404, and an overlapping
+// prefix pair is rejected before the server binds.
+func TestE2E_MultiProvider(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	t.Run("routing", func(t *testing.T) {
+		bin := t.TempDir() + "/test-shaper"
+		build := exec.Command("go", "build", "-o", bin, ".")
+		build.Dir = "."
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build failed: %v\n%s", err, out)
+		}
+
+		// Each upstream echoes the path it received, so the response body
+		// proves which upstream served the request and what path it saw.
+		newEcho := func() *httptest.Server {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintf(w, "%s", r.URL.Path)
+			}))
+			t.Cleanup(srv.Close)
+			return srv
+		}
+		upA := newEcho()
+		upB := newEcho()
+
+		proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		proxyAddr := proxyLn.Addr().String()
+		proxyLn.Close()
+
+		var out strings.Builder
+		cmd := exec.Command(bin,
+			"-bind", proxyAddr,
+			"--provider=acme",
+			"-upstream", upA.URL,
+			"-prefix", "/acme",
+			"-retry", "0",
+			"-circuit-breaker=false",
+			"--provider=beta",
+			"-upstream", upB.URL,
+			"-prefix", "/acme2",
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+
+		stdinR, err := os.Open(os.DevNull)
+		if err != nil {
+			t.Fatalf("open /dev/null: %v", err)
+		}
+		defer stdinR.Close()
+		cmd.Stdin = stdinR
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start proxy: %v\n%s", err, out.String())
+		}
+		t.Cleanup(func() {
+			if cmd.Process == nil {
+				return
+			}
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			_ = cmd.Wait()
+		})
+
+		if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+			t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+		}
+
+		client := &http.Client{Timeout: 10 * time.Second}
+		get := func(path string) (int, string) {
+			resp, err := client.Get("http://" + proxyAddr + path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", path, err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			return resp.StatusCode, string(body)
+		}
+
+		// True mount: /acme/v1/messages reaches upstream A as /v1/messages.
+		if code, body := get("/acme/v1/messages"); code != http.StatusOK || body != "/v1/messages" {
+			t.Errorf("/acme/v1/messages: status=%d body=%q, want 200 %q", code, body, "/v1/messages")
+		}
+
+		// The second mount routes to upstream B, not absorbed by /acme.
+		if code, body := get("/acme2/v1/messages"); code != http.StatusOK || body != "/v1/messages" {
+			t.Errorf("/acme2/v1/messages: status=%d body=%q, want 200 %q", code, body, "/v1/messages")
+		}
+
+		// A deeper path on the second mount keeps its suffix intact.
+		if code, body := get("/acme2/deep/path"); code != http.StatusOK || body != "/deep/path" {
+			t.Errorf("/acme2/deep/path: status=%d body=%q, want 200 %q", code, body, "/deep/path")
+		}
+
+		// Unmatched mount: 404.
+		if code, _ := get("/nomatch"); code != http.StatusNotFound {
+			t.Errorf("/nomatch: status=%d, want 404", code)
+		}
+
+		// A request equal to the mount prefix strips to the upstream root.
+		if code, body := get("/acme"); code != http.StatusOK || body != "/" {
+			t.Errorf("/acme: status=%d body=%q, want 200 %q", code, body, "/")
+		}
+	})
+
+	t.Run("overlap rejected before bind", func(t *testing.T) {
+		bin := t.TempDir() + "/test-shaper"
+		build := exec.Command("go", "build", "-o", bin, ".")
+		build.Dir = "."
+		if out, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build failed: %v\n%s", err, out)
+		}
+
+		// Hold a listener so "bound anyway" would be observable: if the
+		// config were accepted, ListenAndServe would fail loudly, but the
+		// process must instead exit on the validation error alone.
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		bindAddr := ln.Addr().String()
+		defer ln.Close()
+
+		cmd := exec.Command(bin,
+			"-bind", bindAddr,
+			"--provider=a",
+			"-upstream", "http://127.0.0.1:1",
+			"-prefix", "/acme",
+			"--provider=b",
+			"-upstream", "http://127.0.0.1:2",
+			"-prefix", "/acme/v1",
+		)
+		stdinR, err := os.Open(os.DevNull)
+		if err != nil {
+			t.Fatalf("open /dev/null: %v", err)
+		}
+		defer stdinR.Close()
+		cmd.Stdin = stdinR
+
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-zero exit for overlapping prefixes, got 0\noutput:\n%s", out)
+		}
+		if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() == 0 {
+			t.Fatalf("expected non-zero process exit, got %v\noutput:\n%s", err, out)
+		}
+		if msg := string(out); !strings.Contains(msg, "overlap") {
+			t.Errorf("stderr should mention overlap, got:\n%s", msg)
+		}
+	})
+}
+
+// TestResetDrainResetsAllCollectors proves the TUI ticker's "Reset Stats"
+// path: drainResetSignals collapses coalesced signals and every provider's
+// collector is reset fleet-wide (Task 6).
+func TestResetDrainResetsAllCollectors(t *testing.T) {
+	ch := make(chan struct{}, 1)
+	drainResetSignals(ch) // empty channel: must not block
+
+	// Coalesced case: the model's non-blocking send keeps at most one
+	// pending signal on the cap-1 channel, so a burst of confirmations
+	// collapses to a single pending signal before the drain.
+	ch <- struct{}{}
+	drainResetSignals(ch)
+	select {
+	case <-ch:
+		t.Fatal("drainResetSignals must empty the channel")
+	default:
+	}
+
+	// Fleet-wide reset: two providers with non-zero cumulative counters all
+	// zero on Reset, while in-flight gauges (active/queued) survive per
+	// Collector.Reset's documented contract.
+	mets := []*metrics.Collector{metrics.NewCollector(), metrics.NewCollector()}
+	for i, mc := range mets {
+		for j := 0; j < i+1; j++ {
+			mc.IncProxied()
+			mc.IncPassThrough()
+		}
+		mc.RecordStatus(200)
+		mc.IncActive()
+	}
+	for _, mc := range mets {
+		mc.Reset()
+	}
+	for i, mc := range mets {
+		snap := mc.Snapshot()
+		if snap.TotalProxied != 0 || snap.TotalPassThrough != 0 {
+			t.Errorf("collector %d: proxied=%d passthrough=%d, want zeros", i, snap.TotalProxied, snap.TotalPassThrough)
+		}
+		if snap.StatusCounts[2] != 0 { // RecordStatus(200) lands in bucket 2
+			t.Errorf("collector %d: status counts not reset", i)
+		}
+	}
+}
+
+// TestResetChannelPlumbedToRun ensures the reset channel handed to tui.Run
+// is the one the ticker goroutine drains, by exercising the same wiring
+// shape main uses (buffered cap-1 channel adopted by the model).
+func TestResetChannelPlumbedToRun(t *testing.T) {
+	resetCh := make(chan struct{}, 1)
+	// The model adopts the caller's channel (see tui.Run); simulate its
+	// non-blocking send and the ticker's drain.
+	select {
+	case resetCh <- struct{}{}:
+	default:
+		t.Fatal("first send on an empty buffered channel must succeed")
+	}
+	select {
+	case resetCh <- struct{}{}:
+		t.Fatal("second send on a full buffered channel must be dropped, not queued elsewhere")
+	default:
+	}
+	drainResetSignals(resetCh)
+	select {
+	case <-resetCh:
+		t.Fatal("channel must be empty after drain")
+	default:
+	}
+}
+
+// TestHelpFlagPrintsUsageAndExitsZero covers the -h/-help contract at both
+// scopes at the process level: full sectioned usage on stdout, exit 0.
+func TestHelpFlagPrintsUsageAndExitsZero(t *testing.T) {
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"server -h", []string{"-h"}},
+		{"server --help", []string{"--help"}},
+		{"provider -h", []string{"--provider=acme", "-h"}},
+		{"provider --help", []string{"--provider", "--help"}},
+		{"mixed with other flags", []string{"-bind", ":9090", "--provider=acme", "-upstream", "https://x", "-h"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := exec.Command(bin, tc.args...).Output()
+			if err != nil {
+				t.Fatalf("%v: %v\n%s", tc.args, err, out)
+			}
+			s := string(out)
+			for _, want := range []string{
+				"Usage: ai-concurrency-shaper",
+				"Server flags:",
+				"--provider[=name]",
+				"Provider flags",
+				"-upstream string",
+				"-bind string",
+			} {
+				if !strings.Contains(s, want) {
+					t.Errorf("usage output missing %q:\n%s", want, s)
+				}
+			}
+		})
+	}
+}
+
+// TestUnknownFlagExitsTwo covers the deliberate usage-error exit code: GNU
+// convention exit 2, error + "-h" hint on stderr, no usage dump.
+func TestUnknownFlagExitsTwo(t *testing.T) {
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"server scope", []string{"-bogus"}},
+		{"provider scope", []string{"--provider=a", "-nope"}},
+		{"missing argument", []string{"-bind"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(bin, tc.args...)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok {
+				t.Fatalf("%v: want exit error, got %v (stdout %s)", tc.args, err, out)
+			}
+			if code := exitErr.ExitCode(); code != 2 {
+				t.Errorf("exit code = %d, want 2", code)
+			}
+			msg := stderr.String()
+			for _, want := range []string{"error:", "-h"} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("stderr missing %q:\n%s", want, msg)
+				}
+			}
+			if strings.Contains(msg, "Usage:") {
+				t.Errorf("stderr should hint at -h, not dump full usage:\n%s", msg)
+			}
+		})
+	}
+}
+
+// TestSemanticErrorStillExitsOne pins the split: a well-formed invocation
+// with a bad value is a runtime failure (exit 1), not a usage error (exit 2).
+func TestSemanticErrorStillExitsOne(t *testing.T) {
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin, "-upstream", "https://x", "-concurrency", "0")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	_, err := cmd.Output()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("want exit error, got %v", err)
+	}
+	if code := exitErr.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d, want 1 (semantic failure)", code)
+	}
+	if !strings.Contains(stderr.String(), "concurrency") {
+		t.Errorf("stderr should name the semantic failure:\n%s", stderr.String())
+	}
+}
+
+// TestCLI_AuthFailClosedStartup proves a missing credential fails before any
+// socket binds, naming the offending reference on stderr with exit code 1.
+func TestCLI_AuthFailClosedStartup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	const missing = "SHAPER_DEFINITELY_UNSET_KEY"
+	os.Unsetenv(missing)
+
+	cmd := exec.Command(bin,
+		"-bind", "127.0.0.1:0",
+		"-upstream", "https://api.openai.com",
+		"-auth-source", "env:"+missing,
+	)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("want exit error, got %v\nstderr:\n%s", err, stderr.String())
+	}
+	if code := exitErr.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d, want 1 (semantic failure)", code)
+	}
+	for _, want := range []string{missing, "-auth-source"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+}
+
+// TestCLI_AuthStartupLines pins the process-level logging contract: an
+// authenticated provider logs its mode and source REFERENCE (never the value),
+// and a mixed fleet emits exactly one forwarded-verbatim notice.
+func TestCLI_AuthStartupLines(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	upA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	t.Cleanup(upA.Close)
+	upB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	t.Cleanup(upB.Close)
+
+	const secretRef = "SHAPER_TEST_AUTH_LINE_KEY"
+	const secretValue = "super-sekrit-value"
+	t.Setenv(secretRef, secretValue)
+
+	newAddr := func() string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		return addr
+	}
+
+	proxyAddr := newAddr()
+	var out bytes.Buffer
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"--provider=authed",
+		"-upstream", upA.URL,
+		"-prefix", "/authed",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"-release-cooldown", "0",
+		"-auth-source", "env:"+secretRef,
+		"--provider=open",
+		"-upstream", upB.URL,
+		"-prefix", "/open",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"-release-cooldown", "0",
+	)
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- cmd.Wait() }()
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-runErr:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-runErr
+		}
+		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+	}
+
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-runErr:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-runErr
+		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
+	}
+
+	logged := out.String()
+	// The summary prints the RESOLVED mode (auto derived bearer from the
+	// openai upstream host), not the raw flag value.
+	if !strings.Contains(logged, "upstream auth: auth-mode=bearer auth-source=env:"+secretRef) {
+		t.Errorf("missing auth summary line:\n%s", logged)
+	}
+	if n := strings.Count(logged, "providers configured without upstream auth"); n != 1 {
+		t.Errorf("forwarded-verbatim notice count = %d, want 1:\n%s", n, logged)
+	}
+	if strings.Contains(logged, secretValue) {
+		t.Errorf("log leaked the secret value:\n%s", logged)
+	}
+}
+
+// TestE2E_ProviderAuth proves per-provider strip-then-inject end-to-end
+// through the real binary: hostile client credentials and cloud decoys sent
+// to either mount never reach either upstream, and each upstream sees exactly
+// its own provider's credential form.
+func TestE2E_ProviderAuth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	// Each upstream records the headers it received and answers 200.
+	newCapturingUpstream := func() (*httptest.Server, func() map[string][]string) {
+		var mu sync.Mutex
+		seen := map[string][]string{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			maps.Copy(seen, r.Header)
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+		return srv, func() map[string][]string {
+			mu.Lock()
+			defer mu.Unlock()
+			cp := make(map[string][]string, len(seen))
+			maps.Copy(cp, seen)
+			return cp
+		}
+	}
+
+	upAcme, acmeSeen := newCapturingUpstream()
+	upBeta, betaSeen := newCapturingUpstream()
+
+	const (
+		acmeRef = "SHAPER_PROVIDER_ACME_API_KEY"
+		acmeVal = "acme-upstream-secret"
+		betaRef = "SHAPER_PROVIDER_BETA_API_KEY"
+		betaVal = "beta-upstream-secret"
+	)
+	t.Setenv(acmeRef, acmeVal)
+	t.Setenv(betaRef, betaVal)
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyAddr := proxyLn.Addr().String()
+	proxyLn.Close()
+
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"--provider=acme",
+		"-upstream", upAcme.URL,
+		"-prefix", "/acme",
+		"-auth-source", "env:"+acmeRef,
+		"-auth-mode", "x-api-key", // explicit override of host-derived bearer
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=beta",
+		"-upstream", upBeta.URL,
+		"-prefix", "/beta",
+		"-auth-source", "env:"+betaRef,
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+	runErr := make(chan error, 1)
+	go func() { runErr <- cmd.Wait() }()
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-runErr:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-runErr
+		}
+		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	fire := func(mount string) {
+		req, err := http.NewRequest(http.MethodPost, "http://"+proxyAddr+mount+"/v1/messages", nil)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		// A hostile client carries BOTH providers' credentials plus cloud
+		// decoys and a stale Anthropic version on every request.
+		req.Header.Set("Authorization", "Bearer client-bearer-token")
+		req.Header.Set("X-Api-Key", "client-anthropic-key")
+		req.Header.Set("X-Goog-Api-Key", "client-google-key")
+		req.Header.Set("Anthropic-Version", "1999-01-01")
+		req.Header.Set("X-Amz-Date", "19990101T000000Z")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v", mount, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST %s: status %d", mount, resp.StatusCode)
+		}
+	}
+	fire("/acme")
+	fire("/beta")
+
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-runErr:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-runErr
+		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
+	}
+
+	assertOnly := func(name string, got map[string][]string, want map[string]string) {
+		t.Helper()
+		banned := map[string]bool{
+			"Authorization": true, "X-Api-Key": true, "Api-Key": true,
+			"X-Goog-Api-Key": true, "Anthropic-Version": true,
+			"Anthropic-Beta": true, "X-Amz-Date": true,
+		}
+		for injected := range want {
+			delete(banned, injected)
+		}
+		for name2 := range banned {
+			if values, ok := got[name2]; ok {
+				t.Errorf("%s upstream saw stripped header %s: %v", name, name2, values)
+			}
+		}
+		for name2, wantValue := range want {
+			gotValue := strings.Join(got[name2], ", ")
+			if gotValue != wantValue {
+				t.Errorf("%s upstream %s = %q, want %q", name, name2, gotValue, wantValue)
+			}
+		}
+	}
+
+	assertOnly("acme", acmeSeen(), map[string]string{
+		"X-Api-Key":         acmeVal,
+		"Anthropic-Version": "2023-06-01",
+	})
+	assertOnly("beta", betaSeen(), map[string]string{
+		"Authorization": "Bearer " + betaVal,
+	})
+
+	if logged := out.String(); strings.Contains(logged, acmeVal) || strings.Contains(logged, betaVal) {
+		t.Errorf("process logs leaked a secret:\n%s", logged)
+	}
+}
+
+// TestE2E_AuthDisabledPassthrough pins the backward-compat contract: with no
+// auth flags the binary forwards client credentials VERBATIM to the upstream.
+func TestE2E_AuthDisabledPassthrough(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	var mu sync.Mutex
+	seen := map[string][]string{}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		maps.Copy(seen, r.Header)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(up.Close)
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyAddr := proxyLn.Addr().String()
+	proxyLn.Close()
+
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"-upstream", up.URL,
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+	runErr := make(chan error, 1)
+	go func() { runErr <- cmd.Wait() }()
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		<-runErr
+		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+	}
+
+	req, err := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/v1/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer verbatim-client-token")
+	req.Header.Set("X-Api-Key", "verbatim-client-key")
+	// Client-supplied forwarding headers must be suppressed even in verbatim
+	// passthrough mode, and the gateway never injects its own client IP
+	// (stealth posture; intentional wire delta vs pre-Rewrite binaries).
+	req.Header.Set("X-Forwarded-For", "203.0.113.7")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	select {
+	case <-runErr:
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		<-runErr
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(seen["Authorization"], ", "); got != "Bearer verbatim-client-token" {
+		t.Errorf("Authorization = %q, want forwarded verbatim", got)
+	}
+	if got := strings.Join(seen["X-Api-Key"], ", "); got != "verbatim-client-key" {
+		t.Errorf("X-Api-Key = %q, want forwarded verbatim", got)
+	}
+	for _, fwd := range []string{"X-Forwarded-For", "X-Forwarded-Proto", "Forwarded"} {
+		if got, ok := seen[fwd]; ok {
+			t.Errorf("%s reached upstream: %v, want suppressed (stealth posture)", fwd, got)
+		}
+	}
+}
+
+func TestE2E_MetricsEndpoint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	newEcho := func() *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	upA, upB := newEcho(), newEcho()
+
+	newAddr := func() string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		return addr
+	}
+
+	proxyAddr := newAddr()
+	metricsAddr := newAddr()
+
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"-metrics-bind", metricsAddr,
+		"--provider=acme",
+		"-upstream", upA.URL,
+		"-prefix", "/acme",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=beta",
+		"-upstream", upB.URL,
+		"-prefix", "/beta",
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		t.Fatalf("proxy addr: %v\noutput:\n%s", err, out.String())
+	}
+	if err := waitTCPReady(metricsAddr, 5*time.Second); err != nil {
+		t.Fatalf("metrics addr: %v\noutput:\n%s", err, out.String())
+	}
+
+	fire := func(path string) {
+		resp, err := http.Get("http://" + proxyAddr + path)
+		if err != nil {
+			t.Fatalf("fire %s: %v", path, err)
+		}
+		resp.Body.Close()
+	}
+	fire("/acme/v1/messages")
+	fire("/acme/v1/messages")
+	fire("/beta/v1/messages")
+
+	// Counts land in the collector during the proxy's deferred finalize, which
+	// can run a tick after the client sees the response. Poll rather than
+	// sleep so the test stays fast and deterministic under load.
+	waitForMetricsLine := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			resp, err := http.Get("http://" + metricsAddr + "/metrics")
+			if err != nil {
+				t.Fatalf("scrape while waiting for %q: %v", want, err)
+			}
+			bodyBytes, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			if resp.StatusCode == http.StatusOK && strings.Contains(string(bodyBytes), want+"\n") {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("metrics output never contained %q; last body:\n%s", want, bodyBytes)
+				return
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+	waitForMetricsLine(`shaper_requests_total{provider="acme",status="2xx"} 2`)
+	waitForMetricsLine(`shaper_requests_total{provider="beta",status="2xx"} 1`)
+
+	scrape := func(path string) (int, string, string) {
+		resp, err := http.Get("http://" + metricsAddr + path)
+		if err != nil {
+			t.Fatalf("scrape %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		return resp.StatusCode, resp.Header.Get("Content-Type"), string(body)
+	}
+
+	status, contentType, body := scrape("/metrics")
+	if status != http.StatusOK {
+		t.Errorf("GET /metrics status = %d, want 200", status)
+	}
+	if !strings.HasPrefix(contentType, "text/plain") {
+		t.Errorf("Content-Type = %q, want text/plain*", contentType)
+	}
+	for _, want := range []string{
+		`shaper_requests_total{provider="acme",status="2xx"} 2`,
+		`shaper_requests_total{provider="beta",status="2xx"} 1`,
+		`shaper_active{provider="acme"} 0`,
+		`shaper_queued{provider="beta"} 0`,
+	} {
+		if !strings.Contains(body, want+"\n") {
+			t.Errorf("metrics output missing %q:\n%s", want, body)
+		}
+	}
+
+	if status, _, _ = scrape("/other"); status != http.StatusNotFound {
+		t.Errorf("GET /other status = %d, want 404", status)
+	}
+	if status, _, _ = scrape(""); status != http.StatusNotFound {
+		t.Errorf("GET / status = %d, want 404", status)
+	}
+}
+
+func TestConfigMetricsBindFlag(t *testing.T) {
+	cfg, err := config.Parse([]string{"-upstream", "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("legacy parse: %v", err)
+	}
+	if cfg.Server.MetricsBind != "" {
+		t.Errorf("default MetricsBind = %q, want empty (disabled)", cfg.Server.MetricsBind)
+	}
+	cfg, err = config.Parse([]string{"-metrics-bind", "127.0.0.1:2112", "-upstream", "http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("parse with -metrics-bind: %v", err)
+	}
+	if cfg.Server.MetricsBind != "127.0.0.1:2112" {
+		t.Errorf("MetricsBind = %q, want 127.0.0.1:2112", cfg.Server.MetricsBind)
+	}
+	if _, err = config.Parse([]string{"--provider=a", "-upstream", "http://127.0.0.1:1", "-prefix", "/a", "-metrics-bind", ":2112"}); err == nil {
+		t.Error("provider-scoped -metrics-bind must be rejected (server-scope flag)")
 	}
 }

@@ -38,6 +38,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,6 +77,12 @@ const (
 	tabRoutes
 	numTabs
 )
+
+// tabNames is the single source of truth for tab labels used both for rendering
+// and for mouse hit-testing. Each entry is rendered as " "+name+" " with
+// PaddingLeft(1) PaddingRight(1) in the theme, so the visible cell width is
+// len-agnostic and measured via style rendering in tabAt().
+var tabNames = []string{"1 Overview", "2 Requests", "3 Network", "4 Logs", "5 Concurrency", "6 Routes"}
 
 // networkFilterType controls which content types are shown in the Network tab.
 type networkFilterType int
@@ -400,9 +407,10 @@ type Model struct {
 	filterText    string
 
 	// styles is the active color/style set. It defaults to the dark palette
-	// (NewModel) and is swapped to the light palette when the program receives
-	// a tea.BackgroundColorMsg reporting a light terminal background (see
-	// Init / Update). All render paths resolve styles through this field.
+	// (set by NewModelForProviders) and is swapped to the light palette when
+	// the program receives a tea.BackgroundColorMsg reporting a light
+	// terminal background (see Init / Update). All render paths resolve
+	// styles through this field.
 	styles tuiTheme
 
 	resetCh chan struct{}
@@ -475,11 +483,47 @@ type Model struct {
 	// visible text. It is paired with ClearScreen so Bubble Tea's renderer
 	// cannot skip the repaint after tmux or terminal state changes.
 	redrawEpoch int
+
+	// providers holds the per-provider state for a multi-provider dashboard,
+	// and active is the index of the provider currently shown. With a single
+	// unnamed provider the dashboard behaves exactly like the legacy model: the
+	// flat conc/snap/journal fields below mirror the active provider's state.
+	providers []providerState
+	active    int
 }
 
-func NewModel(conc int) Model {
+// ProviderMeta describes one upstream provider for a multi-provider dashboard.
+// A single ProviderMeta with an empty Name reproduces the legacy single-provider
+// header (the "⚡ shaper" brand, no switcher chips).
+type ProviderMeta struct {
+	Name        string
+	Concurrency int
+	Journal     *journal.Journal
+}
+
+// ProviderUpdate carries the latest metrics snapshot for one provider, tagged
+// with the provider's index in the metas slice passed to Run.
+type ProviderUpdate struct {
+	Index    int
+	Snapshot metrics.Snapshot
+}
+
+// providerState is the live state kept for a single provider in a dashboard
+// model: its display name, concurrency limit, journal and latest snapshot.
+type providerState struct {
+	name    string
+	conc    int
+	snap    metrics.Snapshot
+	journal *journal.Journal
+}
+
+// NewModelForProviders creates a dashboard for one or more providers. Each
+// provider is addressed by index everywhere: ProviderUpdate messages, the Tab /
+// Shift+Tab cycle keys handled in handleKey, and the chips on header row 0.
+// The active provider's fields are mirrored into m.conc/m.snap/m.journal so
+// all existing renderers keep working against a single Provider.
+func NewModelForProviders(metas []ProviderMeta) Model {
 	m := Model{
-		conc:       conc,
 		startTime:  time.Now(),
 		resetCh:    make(chan struct{}, 1),
 		logRing:    newLogRing(logRingCapacity),
@@ -487,11 +531,67 @@ func NewModel(conc int) Model {
 		toastSeen:  make(map[string]struct{}),
 		styles:     newTheme(true),
 	}
+	for _, meta := range metas {
+		m.providers = append(m.providers, providerState{
+			name:    meta.Name,
+			conc:    meta.Concurrency,
+			journal: meta.Journal,
+		})
+	}
+	m.syncActive()
 	for i := range m.scrollbars {
 		m.scrollbars[i] = *scrollbar.New()
 	}
 	m.applyScrollbarTheme()
 	return m
+}
+
+// syncActive mirrors the active provider's per-provider state (concurrency
+// limit, journal, snapshot) into the flat fields the renderers read.
+func (m *Model) syncActive() {
+	if m.active < 0 || m.active >= len(m.providers) {
+		return
+	}
+	ps := &m.providers[m.active]
+	m.conc = ps.conc
+	m.journal = ps.journal
+	m.snap = ps.snap
+	m.dashboardLinesCache = nil
+}
+
+// switchProvider makes provider i the active one, clamping i to bounds. It
+// resets the per-tab navigation state and drops the dashboard line cache so the
+// next frame renders for the newly active provider.
+func (m *Model) switchProvider(i int) {
+	if len(m.providers) == 0 {
+		return
+	}
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(m.providers) {
+		i = len(m.providers) - 1
+	}
+	m.active = i
+	m.syncActive()
+	m.tab = tabDashboard
+	m.cursor = 0
+	m.scroll = 0
+	m.mode = modeBrowse
+	m.filterText = ""
+	m.dashboardLinesCache = nil
+}
+
+// cycleProvider moves the active provider by delta, wrapping at either end. Tab
+// (delta +1) and Shift+Tab (delta -1) are wired to it in handleKey.
+func (m *Model) cycleProvider(delta int) {
+	if n := len(m.providers); n > 0 {
+		next := (m.active + delta) % n
+		if next < 0 {
+			next += n
+		}
+		m.switchProvider(next)
+	}
 }
 
 func (m *Model) LogWriter() io.Writer { return &logWriter{ring: m.logRing} }
@@ -777,8 +877,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.redrawEpoch++
 		return m, m.resyncTickCmd()
 	case metrics.Snapshot:
+		// Sugar for the single-provider case: treat it as an update for the
+		// active provider so Run() callers that don't tag updates keep working.
+		// Guarded like the ProviderUpdate case below: a model with no
+		// providers must not index into the empty slice.
+		if len(m.providers) == 0 {
+			return m, cmd
+		}
+		m.providers[m.active].snap = msg
 		m.snap = msg
 		m.dashboardLinesCache = nil
+	case ProviderUpdate:
+		if msg.Index < 0 || msg.Index >= len(m.providers) {
+			return m, cmd
+		}
+		m.providers[msg.Index].snap = msg.Snapshot
+		if msg.Index == m.active {
+			// Mirror into the flat snapshot so the renderers (and the
+			// legacy case above) stay in sync with the active provider.
+			m.snap = msg.Snapshot
+			m.dashboardLinesCache = nil
+		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -941,6 +1060,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		} else {
 			m.cursor = m.maxCursor()
 			m.adjustViewport()
+		}
+		return m, nil
+	}
+
+	// Provider switching (multi-provider): Tab cycles to the next provider,
+	// Shift+Tab to the previous; both wrap. bubbletea decodes Shift+Tab as
+	// the Tab key code with a Shift modifier rather than a distinct key
+	// constant, so the modifier tells the two apart.
+	if keyCode == tea.KeyTab {
+		if msg.Key().Mod != 0 {
+			m.cycleProvider(-1)
+		} else {
+			m.cycleProvider(1)
 		}
 		return m, nil
 	}
@@ -1299,8 +1431,9 @@ func (m *Model) visibleLogLines() []string {
 }
 
 // applyScrollbarTheme paints every per-tab scrollbar with the active theme's
-// thumb/track colors. Called from NewModel and on theme swaps (and re-applied
-// on each updateScrollbars) so a background change repaints the scrollbars too.
+// thumb/track colors. Called from NewModelForProviders and on theme swaps (and
+// re-applied on each updateScrollbars) so a background change repaints the
+// scrollbars too.
 func (m *Model) applyScrollbarTheme() {
 	for i := range m.scrollbars {
 		m.scrollbars[i].ThumbStyle = m.styles.scrollbarThumb
@@ -1324,6 +1457,25 @@ func (m *Model) updateScrollbars() {
 // trailing padding. It intentionally does not handle OSC/DCS/APC/SOS
 // sequences because the TUI only emits SGR styling.
 func truncateANSI(line string, width int) string {
+	return truncateGraphemes(line, width, true)
+}
+
+// truncatePlain truncates a plain, unstyled string to at most width terminal
+// cells using the same grapheme-cluster semantics as truncateANSI. It never
+// emits escape sequences: the callers feed the result into a surrounding
+// lipgloss style, where an embedded reset would strip that style's background
+// from the rest of the rendered row.
+func truncatePlain(s string, width int) string {
+	return truncateGraphemes(s, width, false)
+}
+
+// truncateGraphemes is the shared core of truncateANSI and truncatePlain: it
+// walks grapheme clusters, counting cells, and stops once the next cluster
+// would exceed width. When keepEscapes is set, ANSI escape sequences pass
+// through without consuming width (truncateANSI); otherwise any escape bytes
+// are treated as ordinary text (truncatePlain — its callers guarantee plain
+// input).
+func truncateGraphemes(line string, width int, keepEscapes bool) string {
 	if width <= 0 {
 		return ""
 	}
@@ -1332,7 +1484,7 @@ func truncateANSI(line string, width int) string {
 	truncated := false
 	state := -1
 	for i := 0; i < len(line); {
-		if line[i] == '\x1b' {
+		if keepEscapes && line[i] == '\x1b' {
 			j := i + 1
 			if j < len(line) && line[j] == '[' {
 				j++
@@ -1362,7 +1514,7 @@ func truncateANSI(line string, width int) string {
 		i += len(cluster)
 		state = newState
 	}
-	if truncated {
+	if truncated && keepEscapes {
 		b.WriteString("\x1b[0m")
 	}
 	return b.String()
@@ -1591,18 +1743,29 @@ func (m *Model) canInspect() bool {
 }
 
 func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
-	if m.tab == tabLogs {
-		m.followLogs = false
-	}
 	mx := msg.Mouse().X
 	my := msg.Mouse().Y
 
+	// Provider switcher chips (row 0). chipAt does the same right-aligned
+	// cumulative-width hit test that renderHeader uses to position the chips, so a
+	// click lands on whichever chip the user sees under the cursor.
+	if my == 0 {
+		if i, ok := m.chipAt(mx); ok {
+			m.switchProvider(i)
+		}
+		return m, nil
+	}
+
 	// Tab bar (row 1).
 	if my == 1 {
-		tabWidth := m.width / int(numTabs)
-		clickedTab := mx / tabWidth
-		if int(clickedTab) < int(numTabs) {
-			m.switchTab(tabID(clickedTab))
+		// Clicks beyond the terminal width land on non-existent cells and
+		// must not switch tabs. tabAt deliberately ignores m.width, so this
+		// guard is the boundary between rendered and unrendered columns.
+		if mx >= m.width {
+			return m, nil
+		}
+		if clickedTab, ok := m.tabAt(mx); ok {
+			m.switchTab(clickedTab)
 		}
 		return m, nil
 	}
@@ -1611,6 +1774,14 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 	contentEndRow := contentStartRow + m.visibleRows()
 	if my < contentStartRow || my >= contentEndRow {
 		return m, nil
+	}
+
+	// A genuine content-area click (below the tab bar) pauses tail-following
+	// on the Logs tab. Tab-bar clicks — including empty space and tab
+	// switches — do NOT affect followLogs here, so switching to Logs via the
+	// tab header keeps following enabled (see switchTab).
+	if m.tab == tabLogs {
+		m.followLogs = false
 	}
 
 	// Scrollbar column (rightmost): jump scroll and begin drag. The scrollbar
@@ -1836,28 +2007,347 @@ func builderEndsWithNewline(b *strings.Builder) bool {
 	return b.String()[b.Len()-1] == '\n'
 }
 
-func (m Model) renderHeader() string {
+// providerName returns the display name for the active provider, prefixed with a
+// single leading space. A single unnamed provider (and the zero Model) keep the
+// legacy " ⚡ shaper" brand in the header.
+func (m Model) providerName() string {
+	if len(m.providers) == 0 {
+		return " ⚡ shaper"
+	}
+	if len(m.providers) == 1 && m.providers[0].name == "" {
+		return " ⚡ shaper"
+	}
+	return " " + m.providerLabel(m.active)
+}
+
+// providerLabel returns the bare display name of provider i, falling back to a
+// stable "provider-N" label when it has no name.
+func (m Model) providerLabel(i int) string {
+	if i < 0 || i >= len(m.providers) {
+		return ""
+	}
+	if name := m.providers[i].name; name != "" {
+		return name
+	}
+	return fmt.Sprintf("provider-%d", i+1)
+}
+
+// hasSwitcher reports whether the header row renders provider chips: more than
+// one provider, or a single provider with a name.
+func (m Model) hasSwitcher() bool {
+	return len(m.providers) > 1 || (len(m.providers) == 1 && m.providers[0].name != "")
+}
+
+// renderProviderSwitcher renders the provider chips shown on the right of the
+// header in multi-provider mode. It returns "" when there is no switcher (the
+// single unnamed provider — preserving the legacy header exactly — or when the
+// width budget cannot fit even the active chip). The rendered string is exactly
+// strings.Join(budgetedChips().parts, " ") — the same parts chipAt hit-tests,
+// so what the user sees is what the user clicks.
+func (m Model) renderProviderSwitcher() string {
+	if !m.hasSwitcher() {
+		return ""
+	}
+	layout := m.budgetedChips()
+	return strings.Join(layout.parts, " ")
+}
+
+// headerBody renders the header's left side: provider identity and live
+// counters, truncated to never exceed the usable row width on its own. It is
+// shared by renderHeader and budgetedChips so the budget the chips degrade
+// against is computed from the exact body the row displays. The '✗' (U+2717)
+// and '⚡' (U+26A1) glyphs occupy 1 and 2 cells respectively.
+//
+// The truncation happens on the plain string, BEFORE headerStyle wraps it:
+// truncateANSI would append ESC[0m inside the styled row and kill
+// headerStyle's background for the remainder of the line.
+//
+// reserveForSwitcher reserves cells on the right for the switcher when one
+// will be rendered: 1 for the gap plus 3 per chip at floor width up to the
+// chips that could be displayed — in practice the active chip's floor is
+// always enough, since chips beyond the budget are dropped anyway.
+func (m Model) headerBody(reserveForSwitcher bool) string {
 	uptime := time.Since(m.startTime).Truncate(time.Second)
-	return m.styles.headerStyle.Render(
-		fmt.Sprintf(" ⚡ shaper │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
-			m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput,
-			m.snap.TotalTimeout, uptime),
-	)
+	body := fmt.Sprintf("%s │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
+		m.providerName(), m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput,
+		m.snap.TotalTimeout, uptime)
+	usable := max(m.width-2, 1)
+	cap := usable
+	if reserveForSwitcher && m.hasSwitcher() {
+		// 1 gap + the active chip's floor. Any chip that fits beyond the
+		// active one only shrinks this body further via budgetedChips'
+		// budget computation, which uses this same reserve.
+		cap -= 1 + chipFloor
+		if cap < 1 {
+			cap = 1
+		}
+	}
+	if lipgloss.Width(body) > cap {
+		body = truncatePlain(body, cap)
+	}
+	return body
+}
+
+// chipFloor is the smallest usable chip width: one visible label character
+// plus the one-cell padding on each side of it.
+const chipFloor = 3
+
+// chipLayout is the outcome of one width-budgeting decision: the rendered chip
+// parts in display (provider) order and, in lockstep, the provider index each
+// part belongs to. parts and providers always have equal length; a nil parts
+// means the switcher is elided for this width.
+type chipLayout struct {
+	parts     []string
+	providers []int
+}
+
+// budgetedChips is the single source of truth for the provider switcher at a
+// given width: renderHeader displays its parts and chipAt hit-tests exactly
+// those parts, so the visible layout and the click targets cannot disagree.
+//
+// Chips are joined with single spaces and right-aligned in renderHeader; the
+// usable content width is m.width-2 (headerStyle pads 1 cell each side) and 1
+// more cell is reserved as the visual gap before the switcher:
+//
+//	budget := m.width - 2 - lipgloss.Width(headerBody(true)) - 1
+//
+// headerBody(true) itself reserves 1+chipFloor cells for the active chip, so
+// budget >= chipFloor holds whenever the width can host any chip at all; a
+// smaller budget elides the switcher (rule 3 below) and providerName carries
+// the identity.
+//
+// Chips degrade to fit that budget, in order:
+//
+//  1. Shorten: chip labels are truncated to their allotted cells via
+//     truncateANSI, preserving chip styling (the appended reset cannot leak
+//     past the chip because each chip's styles re-open on the next chip).
+//  2. Drop: trailing (leftmost-displayed) chips are dropped entirely.
+//     Providers are never removed from the model — only from this row — and
+//     Tab/Shift+Tab keep cycling the full set. The ACTIVE chip is never
+//     dropped, so the user always sees which dashboard they are on; under a
+//     tight budget that can mean evicting inactive chips that would otherwise
+//     fit to its left.
+//  3. Elide: if even the active chip at its floor width exceeds the budget,
+//     the whole switcher is dropped and providerName carries the identity.
+//
+// Slack left after the floor widths are covered is restored to the chips'
+// full rendered widths — active chip first, then the rest left-to-right — so
+// the active chip's label is the most legible one on the row. A chip whose
+// slack is fully restored renders byte-identically to an unbudgeted chip.
+func (m Model) budgetedChips() chipLayout {
+	if !m.hasSwitcher() {
+		return chipLayout{}
+	}
+	budget := m.width - 2 - lipgloss.Width(m.headerBody(true)) - 1
+	if budget < chipFloor {
+		return chipLayout{}
+	}
+
+	labels := make([]string, len(m.providers))
+	natural := make([]int, len(m.providers))
+	for i := range m.providers {
+		labels[i] = " " + m.providerLabel(i) + " "
+		// natural is the chip's full RENDERED width — label plus the chip
+		// style's 1+1 padding cells — not the bare label width, so a chip
+		// whose slack is fully restored renders byte-identically to an
+		// unbudgeted chip instead of being permanently truncated by the
+		// two padding cells. Either chip style yields the same width here:
+		// both add exactly one padding cell per side, and bold/colour
+		// sequences carry no width.
+		natural[i] = lipgloss.Width(m.styles.chipActiveStyle.Render(labels[i]))
+	}
+
+	// total returns the floor cost of exactly these providers as a chip row:
+	// chipFloor per chip plus one gap between adjacent chips.
+	total := func(keep []int) int {
+		return len(keep)*chipFloor + (len(keep) - 1)
+	}
+
+	// Select kept chips right-to-left at floor width.
+	keep := make([]int, 0, len(labels))
+	prefix := func(i int, rest []int) []int {
+		out := make([]int, 0, len(rest)+1)
+		out = append(out, i)
+		out = append(out, rest...)
+		return out
+	}
+	kept := func(i int) bool {
+		return slices.Contains(keep, i)
+	}
+	for i := len(labels) - 1; i >= 0; i-- {
+		candidate := prefix(i, keep)
+		if total(candidate) <= budget {
+			keep = candidate
+			continue
+		}
+		if i != m.active {
+			break // rule 2: trailing chip does not fit, stop walking left
+		}
+		// The active chip must be kept: evict the leftmost kept chips until
+		// the row fits (the active chip wins over any number of inactive
+		// ones to its left).
+		for len(keep) > 0 && total(candidate) > budget {
+			keep = keep[1:]
+			candidate = prefix(i, keep)
+		}
+		if total(candidate) > budget {
+			return chipLayout{} // unreachable: budget >= chipFloor
+		}
+		keep = candidate
+	}
+	// The walk can stop left of the active chip's position (rule 2 break),
+	// leaving the ACTIVE provider unkept; insert it at its display position,
+	// then evict inactive chips (from either end) until the row fits — the
+	// active chip always wins.
+	if !kept(m.active) {
+		pos := 0
+		for pos < len(keep) && keep[pos] < m.active {
+			pos++
+		}
+		keep = append(keep[:pos], append([]int{m.active}, keep[pos:]...)...)
+		for len(keep) > 1 && total(keep) > budget {
+			// Evict the rightmost inactive chip; the active chip is never
+			// dropped.
+			last := len(keep) - 1
+			if keep[last] == m.active {
+				last = 0 // only the leftmost remains to evict
+			}
+			keep = append(keep[:last], keep[last+1:]...)
+		}
+		if total(keep) > budget {
+			return chipLayout{} // unreachable: budget >= chipFloor
+		}
+	}
+
+	// Restore slack toward natural widths: the active chip first, then the
+	// remaining kept chips left-to-right.
+	widths := make([]int, len(keep))
+	for k := range keep {
+		widths[k] = chipFloor
+	}
+	slack := budget - total(keep)
+	order := make([]int, 0, len(keep))
+	for k, i := range keep {
+		if i == m.active {
+			order = append(order, k)
+		}
+	}
+	for k := range keep {
+		if keep[k] != m.active {
+			order = append(order, k)
+		}
+	}
+	for _, k := range order {
+		for slack > 0 && widths[k] < natural[keep[k]] {
+			widths[k]++
+			slack--
+		}
+	}
+
+	parts := make([]string, len(keep))
+	for k, i := range keep {
+		if i == m.active {
+			parts[k] = truncateANSI(m.styles.chipActiveStyle.Render(labels[i]), widths[k])
+		} else {
+			parts[k] = truncateANSI(m.styles.chipInactiveStyle.Render(labels[i]), widths[k])
+		}
+	}
+	return chipLayout{parts: parts, providers: keep}
+}
+
+// chipAt maps a click column on header row 0 to a provider chip index,
+// following the same right-aligned layout renderHeader displays: the row's
+// content spans m.width-2 usable cells, so the last chip ends at column
+// m.width-2 and each chip occupies [x-w+1, x] for its rendered width w. Only
+// chips that survive the width budget are hit-testable — a dropped chip is
+// invisible and must not be clickable.
+func (m Model) chipAt(mx int) (int, bool) {
+	if !m.hasSwitcher() {
+		return 0, false
+	}
+	layout := m.budgetedChips()
+	right := m.width - 2
+	for i := len(layout.parts) - 1; i >= 0; i-- {
+		w := lipgloss.Width(layout.parts[i])
+		if mx >= right-w+1 && mx <= right {
+			return layout.providers[i], true
+		}
+		right -= w + 1
+	}
+	return 0, false
+}
+
+func (m Model) renderHeader() string {
+	// With a switcher, render with the reserved body so the truncated body
+	// the chips were budgeted against is the one displayed; without one,
+	// render the natural body capped at the usable width (single-provider
+	// rows keep their legacy content; only a too-narrow terminal truncates).
+	body := m.headerBody(m.hasSwitcher())
+	if switcher := m.renderProviderSwitcher(); switcher != "" {
+		// Right-align the switcher inside the header content: headerStyle
+		// adds 1 cell of padding on each side, so the usable body width is
+		// m.width-2; the extra cell is a visual gap before the chips.
+		if pad := m.width - lipgloss.Width(body) - lipgloss.Width(switcher) - 3; pad > 0 {
+			body += strings.Repeat(" ", pad)
+		}
+		body += " " + switcher
+	}
+	return m.styles.headerStyle.Render(body)
+}
+
+// renderTab renders a single tab label using the theme. The selected tab
+// (tabID(i) == m.tab) uses tabActiveStyle; all others use tabInactiveStyle.
+// Both styles share the same horizontal box model (PaddingLeft(1).PaddingRight(1)),
+// differing only in color and weight, so the rendered widths are equal for a
+// given label — but the measurement MUST come from the same code path that
+// renderTabBar uses, so hit-testing (tabAt) tracks the exact pixels on screen.
+func (m Model) renderTab(i int, name string) string {
+	if tabID(i) == m.tab {
+		return m.styles.tabActiveStyle.Render(" " + name + " ")
+	}
+	return m.styles.tabInactiveStyle.Render(" " + name + " ")
 }
 
 func (m Model) renderTabBar() string {
-	names := []string{"1 Overview", "2 Requests", "3 Network", "4 Logs", "5 Concurrency", "6 Routes"}
-	parts := make([]string, len(names))
-	for i, name := range names {
-		if tabID(i) == m.tab {
-			parts[i] = m.styles.tabActiveStyle.Render(" " + name + " ")
-		} else {
-			parts[i] = m.styles.tabInactiveStyle.Render(" " + name + " ")
-		}
+	parts := make([]string, len(tabNames))
+	for i, name := range tabNames {
+		parts[i] = m.renderTab(i, name)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 }
 
+// tabAt returns which tab, if any, occupies cell x on the tab bar row.
+// It measures each tab's visible cell width as rendered by the current theme
+// (padding included) so hit-testing tracks the exact pixels the user sees,
+// not a ratio of terminal width. The tab bar is left-aligned at x=0 with no
+// reflow; cells beyond the total bar width are empty space and return !ok.
+func (m Model) tabAt(x int) (tabID, bool) {
+	if x < 0 {
+		return 0, false
+	}
+	offset := 0
+	for i, name := range tabNames {
+		// Measure using renderTab so hit-testing tracks the exact rendered
+		// geometry — the selected tab uses tabActiveStyle, others use
+		// tabInactiveStyle. Both share the same padding, but rendering must
+		// never hard-code one style for all tabs.
+		rendered := m.renderTab(i, name)
+		w := uniseg.StringWidth(stripANSI(rendered))
+		if w <= 0 {
+			// Defensive fallback: if a style is zero-value (Render returns the
+			// raw input), the width is len(content)+2 padding = name+4.
+			// This branch is effectively unreachable because " "+name+" " is
+			// always at least 3 cells, but guards against impossible states.
+			w = uniseg.StringWidth(name) + 4
+		}
+
+		if x >= offset && x < offset+w {
+			return tabID(i), true
+		}
+		offset += w
+	}
+	return 0, false
+}
 func (m Model) renderContent() string {
 	switch m.tab {
 	case tabDashboard:
@@ -2852,6 +3342,13 @@ func (m Model) renderDetailWaterfall(e *journal.Entry, width int) string {
 }
 
 func (m Model) renderHelpOverlay() string {
+	// The provider-switch binding exists only when the header renders the
+	// switcher (multi-provider, or a single named provider). A single
+	// unnamed provider keeps the legacy overlay byte-identical.
+	switcher := ""
+	if m.hasSwitcher() {
+		switcher = " Tab/Shift+Tab  Switch provider\n"
+	}
 	return m.styles.overlayStyle.Render(" Keybindings \n\n"+
 		" 1-6          Switch tab (Overview/Requests/Network/Logs/Concurrency/Routes)\n"+
 		" j/k or ↑/↓   Scroll down/up\n"+
@@ -2863,6 +3360,8 @@ func (m Model) renderHelpOverlay() string {
 		" /             Filter entries (Requests/Network/Logs tabs)\n"+
 		" t             Cycle type filter (Network tab)\n"+
 		" s             Cycle status filter (Network tab)\n"+
+		" c             Reset Stats (y confirms, n/Esc cancels)\n"+
+		switcher+
 		" Esc           Close overlay / Clear filter\n"+
 		" ?             Show this help\n"+
 		" q / Ctrl+C    Quit\n\n"+
@@ -2871,7 +3370,7 @@ func (m Model) renderHelpOverlay() string {
 }
 
 func (m Model) renderFooter() string {
-	keys := " 1-6:tab │ j/k:scroll │ PgUp/PgDn │ Home/End │ Ctrl-U/D │ /:filter │ t:type │ s:status │ ?:help │ q:quit "
+	keys := " 1-6:tab │ j/k:scroll │ PgUp/PgDn │ Home/End │ Ctrl-U/D │ /:filter │ t:type │ s:status │ c:reset │ ?:help │ q:quit "
 	return m.styles.footerStyle.Render(keys)
 }
 
@@ -3079,20 +3578,22 @@ func sortedHeaderKeys(h http.Header) []string {
 // The returned *tea.Program may be used by the caller to shut down the
 // TUI and restore terminal state (see Kill / RestoreTerminal).
 // logPollInterval is how often the Logs tab poller checks the shared LogBuffer
-// for freshly captured lines.
+// for freshly captured log lines.
 const logPollInterval = 100 * time.Millisecond
 
-// Run starts the TUI program. When logBuf is non-nil it installs a ticker that
-// wakes the model to drain captured log lines; lines already buffered before
-// the TUI starts (e.g. startup config summaries) are replayed in order. The
-// ticker carries no data — the model reads the buffer inside Update — so log
-// delivery is sequential with quit handling and cannot lose an in-flight batch.
-func Run(snapCh <-chan metrics.Snapshot, conc int, j *journal.Journal, progCh chan<- *tea.Program, logBuf *LogBuffer) *tea.Program {
-	m := NewModel(conc)
-	m.journal = j
-
+// Run (multi-provider form): see the doc comment above the signature.
+// resetCh is the channel the model's "Reset Stats" action signals on; main
+// owns it, drains it, and resets every provider's metrics collector on
+// receipt. It must be buffered (cap >= 1) so the model's non-blocking send
+// never drops the very first request. A nil resetCh disables the signal.
+func Run(updates <-chan ProviderUpdate, metas []ProviderMeta, progCh chan<- *tea.Program, resetCh chan struct{}, logBuf *LogBuffer) *tea.Program {
+	m := NewModelForProviders(metas)
+	if resetCh != nil {
+		m.resetCh = resetCh
+	}
 	if logBuf != nil {
 		m.logBuf = logBuf
+
 	}
 	p := tea.NewProgram(m)
 
@@ -3130,8 +3631,8 @@ func Run(snapCh <-chan metrics.Snapshot, conc int, j *journal.Journal, progCh ch
 
 	go func() {
 		defer func() { recover() }()
-		for snap := range snapCh {
-			p.Send(snap)
+		for upd := range updates {
+			p.Send(upd)
 		}
 	}()
 

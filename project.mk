@@ -32,8 +32,11 @@ GO_MODULE_SLUGS_USE_DEADCODE ?= $(GO_MODULE_SLUGS)
 
 # Use .deadcodeignore file for deadcode false-positive filtering
 # N.B. relative to the go module it applies to
-DEADCODE_IGNORE_PATTERNS_FILE = .deadcodeignore
-DEADCODE_ERROR_ON_UNIGNORED = true
+DEADCODE_IGNORE_PATTERNS_FILE ?= .deadcodeignore
+
+# Treat any unignored deadcode finding as a lint error (Hana-san directive
+# 2026-08-26): unreachable code is a defect to remove, not a note to file.
+DEADCODE_ERROR_ON_UNIGNORED ?= true
 
 # Preserve the Makefile's own default goal. project.mk is included (line ~161)
 # before the Makefile defines `all` (~line 382), so without this the first
@@ -174,3 +177,4 @@ field-recapture-stop: ## [manual] Stop the field-recapture shaper by exact PID +
 	else \
 		echo "field-recapture-stop: no pid file at $(FIELD_DIR)/proxy.pid"; \
 	fi
+

@@ -71,7 +71,7 @@ func TestLogWiring_StdlibWarningToasts(t *testing.T) {
 		t.Fatalf("stdlib warning lost its text: %q", lines[0])
 	}
 
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 	m.handleLogLines(lines)
@@ -285,7 +285,7 @@ func TestLogRing_Len(t *testing.T) {
 }
 
 func TestFollowLogs_TailFollowPinsBottom(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.switchTab(tabLogs)
@@ -322,7 +322,7 @@ func TestFollowLogs_TailFollowPinsBottom(t *testing.T) {
 }
 
 func TestFollowLogs_ArrowKeysPauseFollowing(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.switchTab(tabLogs)
@@ -337,7 +337,7 @@ func TestFollowLogs_ArrowKeysPauseFollowing(t *testing.T) {
 }
 
 func TestHandleLogLines_ToastsActionableAndDedups(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 
@@ -361,7 +361,7 @@ func TestHandleLogLines_ToastsActionableAndDedups(t *testing.T) {
 }
 
 func TestToastAnimCmd_WhileAnimating(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.AddToast(&toast.Toast{Message: "alert", Duration: 5 * time.Second})
 	if m.toastAnimCmd() == nil {
 		t.Fatal("toastAnimCmd should be non-nil while a toast is live")
@@ -371,7 +371,7 @@ func TestToastAnimCmd_WhileAnimating(t *testing.T) {
 	// stay armed so the slide-out window is actually rendered (the 250ms metric
 	// redraw cadence can otherwise skip it entirely). It arms a one-shot at
 	// SlideOutStart rather than idle 30ms ticks.
-	m2 := NewModel(4)
+	m2 := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m2.AddToast(&toast.Toast{Message: "settled", Duration: 25 * time.Second})
 	prev := m2.toasts[0]
 	prev.CreatedAt = time.Now().Add(-5 * time.Second)
@@ -385,7 +385,7 @@ func TestToastAnimCmd_WhileAnimating(t *testing.T) {
 	// re-render identical content at toastAnimInterval for its whole lifetime. It is
 	// refreshed on the metrics redraw cadence instead. An already-expired toast in
 	// the slice is skipped the same way.
-	m4 := NewModel(4)
+	m4 := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m4.toasts = []*toast.Toast{
 		{Message: "pinned", Duration: 0, CreatedAt: time.Now().Add(-2 * time.Second)},
 		{Message: "gone", Duration: 1 * time.Second, CreatedAt: time.Now().Add(-2 * time.Second)},
@@ -395,7 +395,7 @@ func TestToastAnimCmd_WhileAnimating(t *testing.T) {
 	}
 
 	// An expired toast must not keep the ticker armed.
-	m3 := NewModel(4)
+	m3 := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m3.AddToast(&toast.Toast{Message: "done", Duration: 1 * time.Second})
 	m3.toasts[0].CreatedAt = time.Now().Add(-2 * time.Second)
 	m3.toasts = toast.VisibleToasts(m3.toasts)
@@ -410,7 +410,7 @@ func TestToastAnimCmd_WhileAnimating(t *testing.T) {
 // exactly once — later updates neither stack a second tick nor advance the
 // armed deadline.
 func TestToastAnimSingleOwner_SettledDoesNotStack(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.AddToast(&toast.Toast{Message: "settled", Duration: 25 * time.Second})
@@ -440,7 +440,7 @@ func TestToastAnimSingleOwner_SettledDoesNotStack(t *testing.T) {
 // per update. At most one natural re-arm is tolerated in case the armed
 // interval elapses mid-burst on a very slow machine.
 func TestToastAnimSingleOwner_AnimatingArmsOnce(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.AddToast(&toast.Toast{Message: "alert", Duration: 5 * time.Second})
@@ -479,7 +479,7 @@ func TestToastAnimSingleOwner_AnimatingArmsOnce(t *testing.T) {
 // already armed for an older toast's future slide-out, so the new toast's
 // slide-in re-arms promptly instead of waiting out the stale deadline.
 func TestAddToast_ClearsArmedAnimTick(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.AddToast(&toast.Toast{Message: "old", Duration: 25 * time.Second})
@@ -501,7 +501,7 @@ func TestAddToast_ClearsArmedAnimTick(t *testing.T) {
 // two identical slog errors separated by timestamps produce one toast, a
 // distinct warning produces another.
 func TestHandleLogLines_DedupAcrossTimestamps(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 	m.handleLogLines([]string{
@@ -518,7 +518,7 @@ func TestHandleLogLines_DedupAcrossTimestamps(t *testing.T) {
 // warning (a stdlib log.Printf at startup, captured into the Logs tab) is
 // actionable prose under the widened keyword set.
 func TestHandleLogLines_WarningConfigLineToasts(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 	line := `2026/08/19 07:38:15 WARNING: route "POST /v1/messages" specifies group "llm" with limit 5, but group already has limit 10. Using 10.`
@@ -604,7 +604,7 @@ func TestLogBuffer_CompleteLineLongerThanCapPublishedWhole(t *testing.T) {
 }
 
 func TestQuitFlushesPendingLogFragment(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.logBuf = NewLogBuffer(8)
 
 	m.logBuf.Write([]byte("shutting dow"))
@@ -615,7 +615,7 @@ func TestQuitFlushesPendingLogFragment(t *testing.T) {
 	}
 
 	// Models without buffer wiring quit cleanly as before.
-	if _, cmd := NewModel(4).handleKey(tea.KeyPressMsg{Text: "q"}); cmd == nil {
+	if _, cmd := NewModelForProviders([]ProviderMeta{{Concurrency: 4}}).handleKey(tea.KeyPressMsg{Text: "q"}); cmd == nil {
 		t.Fatal("quit key did not return the quit command on an unwired model")
 	}
 }
@@ -627,7 +627,7 @@ func TestQuitFlushesPendingLogFragment(t *testing.T) {
 // inside Update, the previously-polled batch can neither be lost to an
 // in-flight send nor delivered twice.
 func TestLogDrain_TickThenQuitDeliversExactlyOnce(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.logBuf = NewLogBuffer(8)
 
 	m.logBuf.Write([]byte("one\ntwo\n"))
@@ -659,7 +659,7 @@ func TestLogDrain_TickThenQuitDeliversExactlyOnce(t *testing.T) {
 // TestLogDrain_QuitDeliversNeverPolledLines pins that quitting delivers lines
 // no tick ever extracted — complete lines as well as the torn fragment.
 func TestLogDrain_QuitDeliversNeverPolledLines(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.logBuf = NewLogBuffer(8)
 
 	m.logBuf.Write([]byte("complete\n"))
@@ -672,7 +672,7 @@ func TestLogDrain_QuitDeliversNeverPolledLines(t *testing.T) {
 }
 
 func TestToastSeenOldestFirstEviction(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	const total = toastSeenMax + 2
 	keys := make([]string, total)
 	for i := range total {
@@ -916,7 +916,7 @@ func TestLogBuffer_RedirectToConcurrentExactlyOneSink(t *testing.T) {
 // actionable line whose dedup key is empty (e.g. slog's msg="") must toast —
 // every occurrence, since it cannot be deduplicated — never be silently dropped.
 func TestHandleLogLines_EmptyMsgStillToasts(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 	line := `time=2026-08-22T10:00:00.000Z level=ERROR msg=""`
@@ -938,7 +938,7 @@ func TestHandleLogLines_EmptyMsgStillToasts(t *testing.T) {
 // TestHandleLogLines_DistinctAttributesToastSeparately exercises the T20 fix end
 // to end through the toast path.
 func TestHandleLogLines_DistinctAttributesToastSeparately(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 	m.handleLogLines([]string{
@@ -954,7 +954,7 @@ func TestHandleLogLines_DistinctAttributesToastSeparately(t *testing.T) {
 // captured lines are stripped before they reach the ring or a toast message, so
 // logged text can never inject terminal control output.
 func TestHandleLogLines_StripsANSI(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 	line := "\x1b[31mproxy transport error\x1b[0m: boom"
@@ -978,7 +978,7 @@ func TestHandleLogLines_StripsANSI(t *testing.T) {
 // distinct actionable errors cannot grow the live-toast slice without bound;
 // only the newest toastLiveMax survive and the Logs tab keeps everything.
 func TestToastLiveCap_UnderSustainedUniqueErrors(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 40
 	for i := range 450 {
@@ -1011,7 +1011,7 @@ func TestToastLiveCap_UnderSustainedUniqueErrors(t *testing.T) {
 // the stale arrival's deadline is forced into the past instead of racing wall
 // clocks.
 func TestAnimTick_StaleGenerationIgnored(t *testing.T) {
-	m := NewModel(4)
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.AddToast(&toast.Toast{Message: "alert", Duration: 5 * time.Second})

@@ -22,53 +22,69 @@ go install github.com/joeycumines/ai-concurrency-shaper@latest
 ai-concurrency-shaper -upstream https://api.anthropic.com
 ```
 
+That's the whole surface for a single upstream: every tuning flag below applies to it, top-level. To front several upstreams through one port instead, see [Multiple Providers](#multiple-providers) — the same flags apply per `--provider` section.
+
 ### Flags
 
-#### Core
+Every flag lives in one of two scopes. **Server-scope** flags configure the listener itself; **provider-scope** flags configure one upstream's behavior (limiting, retry, breaker, cooldowns). In the single-upstream invocation above the two scopes are flattened onto one command line — that form keeps working exactly as before. With `--provider` sections, each flag must appear in the section it configures.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-upstream` | _(required)_ | Upstream base URL |
-| `-bind` | `:8080` | Listen address |
-| `-limit` | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
-| `-concurrency` | `4` | Max concurrent limited requests |
-| `-global-concurrency` | `0` | Global concurrency limit (0 = disabled) |
-| `-queue-timeout` | `30s` | Max wait for a concurrency slot |
-| `-upstream-disable-keep-alives` | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
-| `-retry` | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
-| `-retry-max-body-mb` | `5` | Max request body size (MB) eligible for retry |
-| `-tui` | `false` | Enable terminal dashboard |
-| `-version` | | Print version and exit |
+Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider=acme -h`) for the complete flag reference. Usage errors — unknown flags, malformed sections — exit 2 with a hint pointing at `-h`; semantic failures (bad values, missing upstream) exit 1.
+
+| Flag | Scope | Default | Description |
+|------|-------|---------|-------------|
+| `-upstream` | provider | _(required)_ | Upstream base URL |
+| `-bind` | server | `:8080` | Listen address |
+| `-metrics-bind` | server | _(unset)_ | Dedicated listen address for the Prometheus `/metrics` endpoint (see [Metrics Export](#metrics-export)); empty disables it |
+| `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
+| `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
+| `-concurrency` | provider | `4` | Max concurrent limited requests |
+| `-global-concurrency` | provider | `0` | Global concurrency limit (0 = disabled) |
+| `-queue-timeout` | provider | `30s` | Max wait for a concurrency slot |
+| `-upstream-disable-keep-alives` | provider | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
+| `-retry` | provider | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
+| `-retry-max-body-mb` | provider | `5` | Max request body size (MB) eligible for retry |
+| `-auth-source` | provider | _(unset)_ | Upstream credential source: `env:VAR`, `file:PATH`, or `none` (strip-only). Unset disables upstream auth entirely — requests are forwarded verbatim |
+| `-auth-mode` | provider | `auto` | How the credential is attached: `auto` (derived from the upstream host), `bearer`, `x-api-key`, `api-key`, or `header:NAME`. `none` strips client credentials without injecting anything |
+| `-auth-header` | provider | _(required by `header:` mode)_ | Custom upstream auth header name (e.g. `X-Goog-Api-Key`) |
+| `-anthropic-version` | provider | `2023-06-01` | `Anthropic-Version` header value applied when the resolved mode is `x-api-key` |
+| `-tui` | server | `false` | Enable terminal dashboard |
+| `-version` | server | | Print version and exit |
+
+The tables in [Concurrency Protection](#concurrency-protection), [Circuit Breaker](#circuit-breaker), and [Retry Tuning](#retry-tuning) are all provider-scope.
 
 #### Concurrency Protection
 
 The proxy's internal semaphore limits how many tokens are held concurrently. What the downstream actually observes depends on its own accounting: providers differ in how they measure concurrency (active connections, in-flight requests, token usage windows, etc.), and most have some lag between completing a response and decrementing their counter. These flags insert delays after slot release to reduce the risk that the downstream observes N+1 or higher concurrency, at the cost of throughput. They are configurable because the right tradeoff depends on the upstream's accounting behavior. Defaults are conservative.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-release-cooldown` | `200ms` | Delay after releasing a slot before re-admission. Reduces the chance the next request arrives while the downstream is still cleaning up. |
-| `-cancel-cooldown` | `200ms` | Hold the slot after a client disconnects once an upstream attempt has started. Mitigates N+1 from rapid connect/disconnect cycles. |
-| `-failure-hold` | `2s` | Hold the slot after an upstream failure (5xx, 429, or rate-limit-signaled 403) when the circuit breaker is disabled or its penalty is zero. When the breaker is enabled with a non-zero penalty, the phantom penalty takes precedence instead. |
-| `-retry-min-delay` | `1s` | Minimum delay before retrying. Reduces the chance the retry arrives before the downstream has finished accounting. |
-| `-retry-skip-429` | `true` | Do not retry 429 responses. Avoids the feedback loop where retries amplify concurrency at the downstream. |
-| `-adaptive-headroom` | `false` | Reduce effective concurrency by one slot after a 429, restoring after a quiet window. Use when the provider can see N+1 concurrent requests due to connection teardown or CDN accounting lag. |
-| `-adaptive-headroom-window` | `30s` | How long the one-slot 429 headroom is held. Each new 429 resets this window. |
+| Flag | Scope | Default | Description |
+|------|-------|---------|-------------|
+| `-release-cooldown` | provider | `200ms` | Delay after releasing a slot before re-admission. Reduces the chance the next request arrives while the downstream is still cleaning up. |
+| `-cancel-cooldown` | provider | `200ms` | Hold the slot after a client disconnects once an upstream attempt has started. Mitigates N+1 from rapid connect/disconnect cycles. |
+| `-failure-hold` | provider | `2s` | Hold the slot after an upstream failure (5xx, 429, or rate-limit-signaled 403) when the circuit breaker is disabled or its penalty is zero. When the breaker is enabled with a non-zero penalty, the phantom penalty takes precedence instead. |
+| `-retry-min-delay` | provider | `1s` | Minimum delay before retrying. Reduces the chance the retry arrives before the downstream has finished accounting. |
+| `-retry-skip-429` | provider | `true` | Do not retry 429 responses. Avoids the feedback loop where retries amplify concurrency at the downstream. |
+| `-adaptive-headroom` | provider | `false` | Reduce effective concurrency by one slot after a 429, restoring after a quiet window. Use when the provider can see N+1 concurrent requests due to connection teardown or CDN accounting lag. |
+| `-adaptive-headroom-window` | provider | `30s` | How long the one-slot 429 headroom is held. Each new 429 resets this window. |
 
 The upstream HTTP transport sizes `MaxIdleConnsPerHost` to the sum of configured route/global concurrency caps, with a per-host minimum floor of 20 applied after the global cap. This avoids closing a large burst of healthy keep-alive connections when multiple route limiters or groups share the same upstream host. Use `-upstream-disable-keep-alives` only when the upstream counts idle/open connections as concurrent.
 
 #### Circuit Breaker
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-circuit-breaker` | `true` | Enable circuit breaker |
-| `-cb-threshold` | `5` | Failures within window to trip the breaker |
-| `-cb-window` | `30s` | Failure counting window |
-| `-cb-open-timeout` | `10s` | Time before the breaker probes (half-open) |
-| `-cb-max-open-timeout` | `120s` | Max open timeout after backoff |
-| `-cb-penalty` | `2s` | Base phantom concurrency hold time |
-| `-cb-max-penalty` | `60s` | Max phantom concurrency hold time |
+| Flag | Scope | Default | Description |
+|------|-------|---------|-------------|
+| `-circuit-breaker` | provider | `true` | Enable circuit breaker |
+| `-cb-threshold` | provider | `5` | Failures within window to trip the breaker |
+| `-cb-window` | provider | `30s` | Failure counting window |
+| `-cb-open-timeout` | provider | `10s` | Time before the breaker probes (half-open) |
+| `-cb-max-open-timeout` | provider | `120s` | Max open timeout after backoff |
+| `-cb-penalty` | provider | `2s` | Base phantom concurrency hold time |
+| `-cb-max-penalty` | provider | `60s` | Max phantom concurrency hold time |
 
 The circuit breaker treats 5xx, 429, transport errors, and rate-limit-signaled 403s as upstream failures. A bare 403 without `Retry-After` or `x-ratelimit-*` headers is treated as an authentication/authorization client error and is passed through, avoiding the trap where a bad API key is masked by a proxy-generated 503 after the breaker opens.
+
+#### Metrics Export
+
+Pass `-metrics-bind 127.0.0.1:2112` to expose a Prometheus text-format `/metrics` endpoint on a dedicated listener — it never shares the proxy port, so a bare-root provider keeps every path and scraping is never mistaken for proxied traffic. Every series carries a `provider` label (an unnamed single provider exports as `provider="default"`): `shaper_active`, `shaper_queued`, `shaper_retries_in_flight`, `shaper_clean_proxied_total`, `shaper_clean_passthrough_total`, `shaper_aborted_total`, `shaper_circuit_rejected_total`, `shaper_requests_total{status="1xx"…"5xx"}`, and `shaper_breaker_state` (0 closed / 1 half-open / 2 open; omitted when the provider's breaker is disabled). Series are grouped by metric name — each family forms one contiguous block across all providers — as the exposition format's grouping rule requires. The endpoint is off by default and binds before the proxy listener, so a bad address fails at startup. Bind it to loopback unless you know what you are exposing.
 
 #### Observability Semantics
 
@@ -78,10 +94,102 @@ For `101 Switching Protocols`, local inability to complete the requested upgrade
 
 #### Retry Tuning
 
+| Flag | Scope | Default | Description |
+|------|-------|---------|-------------|
+| `-retry-wait-min` | provider | `500ms` | Minimum retry wait |
+| `-retry-wait-max` | provider | `30s` | Maximum retry wait |
+
+### Multiple Providers
+
+Front several upstreams through one port with `--provider` sections. A `--provider[=name]` marker starts a new section; every provider-scope flag after it — until the next marker — configures that upstream only. Server-scope flags (`-bind`, `-tui`, `-version`) belong before the first marker.
+
+```sh
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8080 \
+  -tui \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -concurrency 4 \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -concurrency 8 \
+    -retry 2
+```
+
+A client targeting `http://127.0.0.1:8080/anthropic/v1/messages` reaches Anthropic's `/v1/messages`; `-concurrency 4` bounds only the Anthropic section, while OpenAI gets its own limiter (8) and retry budget (2). Without `-name` on the marker, the display name derives from the upstream host (`api.anthropic.com` → `anthropic`); an explicit `-name` inside the section overrides the marker.
+
+Two provider-only flags join the surface in sectioned mode:
+
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-retry-wait-min` | `500ms` | Minimum retry wait |
-| `-retry-wait-max` | `30s` | Maximum retry wait |
+| `-prefix` | _(required in multi mode)_ | Mount path for the provider, stripped before forwarding |
+| `-name` | _(derived from upstream host)_ | Display name in logs and the TUI header |
+
+Mount semantics:
+
+- The prefix is a true mount: `/anthropic/v1/messages` is forwarded upstream as `/v1/messages`. A request equal to the mount (`/anthropic`) forwards as `/`.
+- With more than one provider, requests matching no prefix get `404 Not Found` — nothing leaks to a default upstream. A single bare provider (no `--provider` markers, no prefix) still serves every path from the root, exactly as before.
+- Prefixes must not overlap: `/anthropic` and `/anthropic/v1` cannot coexist. Overlapping configurations are rejected at startup, before the listener binds.
+- Providers are matched on whole path segments, so `/anthropic2` never matches the `/anthropic` prefix.
+
+In the TUI, each provider keeps its own dashboard. The header shows one chip per provider (the active one highlighted), filled by the provider name instead of the `⚡ shaper` brand; `Tab`/`Shift+Tab` cycle providers, chips are clickable, and the number keys `1-6` still switch content tabs. The in-TUI help (`?`) lists the switch binding whenever the switcher is shown.
+
+#### Upstream Authentication
+
+Each provider can carry its own upstream credential, so clients no longer need to know provider secrets at all. Credentials live in the **environment**, resolved once at startup; they never appear in command lines, logs, or the TUI.
+
+```sh
+export SHAPER_PROVIDER_ANTHROPIC_API_KEY=sk-ant-...   # resolved by the proxy at startup
+export SHAPER_PROVIDER_OPENAI_API_KEY=sk-...
+
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8080 \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -auth-source env:SHAPER_PROVIDER_ANTHROPIC_API_KEY \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -auth-source env:SHAPER_PROVIDER_OPENAI_API_KEY
+```
+
+With auth enabled, every proxied request has all client HTTP credential headers (`Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key`, `X-Goog-Api-Key`) plus protocol headers (`Anthropic-Version`, `Anthropic-Beta`) and cloud signature families (`x-amz-*`, `x-goog-*`) stripped first — then exactly one upstream credential is attached. A client that sends OpenAI's token to the Anthropic mount cannot leak it to Anthropic, and vice versa: leakage of these credential headers is structurally impossible, not merely discouraged. The injection happens inside Go's `Rewrite` hook, where hop-by-hop headers have already been removed, so a malicious `Connection` header list cannot strip the injected credential.
+
+One deliberate exception: **`Cookie` headers are forwarded verbatim** to whichever mount receives the request, even with auth enabled — stripping them unconditionally would break cookie-authenticated upstreams. Per the TUI Redaction Constraint (see AGENTS.md), the journal and TUI display raw headers and URLs — including `Cookie` — because TUI output is not captured anywhere and is visible only to the local operator during an interactive session. If your clients send cookies you do not want forwarded, strip them before they reach the gateway.
+
+The gateway never sends `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, or `Forwarded` upstream — client-supplied forwarding headers are removed and no client IP is injected (the gateway is a stealth hop). This is also true when auth is disabled.
+
+Modes:
+
+| `-auth-mode` | Upstream sees | Typical provider |
+|--------------|---------------|------------------|
+| `auto` _(default)_ | `x-api-key` for `api.anthropic.com`/`*.anthropic.com`, otherwise `Authorization: Bearer` | any |
+| `bearer` | `Authorization: Bearer <secret>` | OpenAI-compatible |
+| `x-api-key` | `X-Api-Key: <secret>` + configured `-anthropic-version` | Anthropic Messages |
+| `api-key` | `Api-Key: <secret>` | Azure key-based |
+| `header:NAME` | `NAME: <secret>` | Gemini-style custom headers (set `NAME` via `-auth-header NAME` instead if you prefer) |
+
+Sources:
+
+| `-auth-source` | Behavior |
+|----------------|----------|
+| `env:VAR` | Read `VAR` from the environment once at startup. Unset or blank → startup fails naming the variable |
+| `file:PATH` | Read the secret from `PATH` once at startup. Unreadable or blank → startup fails naming the path |
+| `none` | Strip-only hygiene: client credentials are removed, nothing is injected |
+| _(unset)_ | Auth disabled entirely — requests are forwarded verbatim, exactly as before this feature existed |
+
+Where secrets can and cannot appear: a referenced variable's *value* is never logged, printed, or written anywhere by the proxy — startup logs name only the *reference* (`env:SHAPER_PROVIDER_ACME_API_KEY`). Per AGENTS.md TUI Redaction Constraint, the journal and TUI may show raw credential headers and URLs (including upstream `Set-Cookie` and `?key=` query strings) — TUI output is not captured and is visible only to the local operator during an interactive session. Requests are still forwarded byte-for-byte unchanged, and transport-error log lines are scrubbed via `sanitizeTransportError` (any `*url.Error` query is redacted) as defense-in-depth for captured logs. Passing secrets as literal argv values would expose them in `ps`/`/proc`; use env references instead.
+
+Other credential channels outside the header allowlist are your responsibility: credentials embedded in path segments are forwarded by design and appear in route labels and request listings; request bodies captured for the TUI preview may contain whatever the client sent; custom secret headers not in the strip list above are forwarded verbatim and shown unredacted. If clients send secrets through these channels that you do not want stored or displayed locally, strip them before they reach the gateway.
+
+A multi-provider configuration with no auth on some providers prints one startup note (`N of M providers configured without upstream auth`) so an open relay is never silent.
+
+#### Scope & Limitations
+
+Routing is **path-prefix only**: there is no model-ID translation or request-body inspection today. Clients choose a provider by targeting its mount (`/anthropic/...`, `/openai/...`); a single base URL with body-aware model routing is future work. Other current limitations: there is no downstream client authentication (anything that can reach the port can use every mounted provider), readiness is TCP-connect only, and configuration changes require a restart.
 
 ### Examples
 
@@ -109,6 +217,21 @@ ai-concurrency-shaper \
   -upstream https://api.anthropic.com \
   -limit "POST /messages:3@messages" \
   -limit "POST /messages/batches:3@messages"
+```
+
+Two upstreams behind one port (see [Multiple Providers](#multiple-providers) for the mount and switcher details):
+
+```sh
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8080 \
+  -tui \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -limit "POST /chat/completions:8"
 ```
 
 Maximum throughput (disable all protections; only safe if the upstream has no accounting lag):

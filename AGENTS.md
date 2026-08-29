@@ -82,3 +82,9 @@ All streaming request/response proxying inside `TranscodeHandler` uses `stream.P
 The handler translates SSE incrementally: it parses upstream `data:` frames, converts each event through the direction-specific state machine, writes the translated frame, and flushes it. A held terminal event is released by the `[DONE]` sentinel or upstream EOF, after which the reader stops so the limiter slot and upstream connection are released even when the upstream keeps the connection open. Malformed frames are skipped only where the remaining stream can still produce a valid lifecycle; a stream that ends before a terminal condition emits a client-dialect error event rather than a silent clean EOF.
 
 `stream.Proxy` aborts and returns as soon as the passed context is cancelled; it does not itself close the remote side in that case. The handler therefore cancels the upstream request context on `r.Context().Done()`, which releases the upstream connection.
+
+Strict constraints:
+
+
+- TUI output is not captured anywhere and is visible only to the local operator during an interactive session. Do not redact secrets from TUI display — the journal and TUI may show raw credential headers and URLs.
+- Logging must be explicit about what is logged - for example, do not log arbitrary HTTP headers, as they may contain secrets. While the TUI does show the log, log output is also available in non-interactive sessions, so logging must be safe for that context.
