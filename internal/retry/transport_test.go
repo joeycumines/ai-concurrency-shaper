@@ -2835,3 +2835,73 @@ func TestRetry_InFlightRetriesCounter_MultiRequestConcurrency(t *testing.T) {
 			counter.Load(), numRequests, tr.MaxRetries)
 	}
 }
+
+// nonRetryableTestError is a local non-retryable defect (the retry package
+// cannot import the transcode SigningError; this type is equivalent).
+type nonRetryableTestError struct{ err error }
+
+func (e *nonRetryableTestError) Error() string { return e.err.Error() }
+func (e *nonRetryableTestError) Unwrap() error { return e.err }
+func (e *nonRetryableTestError) IsNonRetryable() bool {
+	return true
+}
+
+// TestIsNonRetryableTraversesMultiUnwrap pins the multi-error unwrap form:
+// a non-retryable marker nested inside errors.Join / a multi-%w tree must be
+// detected, exactly as errors.Is traverses Unwrap() []error. A missed marker
+// would cause a local defect to be retried and falsely trip the breaker.
+func TestIsNonRetryableTraversesMultiUnwrap(t *testing.T) {
+	marker := &nonRetryableTestError{err: errors.New("signing failed")}
+	// Multi-error unwrap (errors.Join / fmt.Errorf with multiple %w).
+	joined := errors.Join(errors.New("transport: connection reset"), marker)
+	if !IsNonRetryable(joined) {
+		t.Fatal("a non-retryable marker joined with other errors must be detected")
+	}
+	// Single-error unwrap still detected.
+	if !IsNonRetryable(marker) {
+		t.Fatal("a directly-marked error must be detected")
+	}
+	// A retryable transport error (no marker anywhere) must not be.
+	if IsNonRetryable(errors.Join(errors.New("transport: reset"), errors.New("upstream 500"))) {
+		t.Fatal("a plain retryable transport error must not be treated as non-retryable")
+	}
+	if IsNonRetryable(nil) {
+		t.Fatal("nil must not be non-retryable")
+	}
+}
+
+// TestSignerErrorBodyTooLargeReturnsTypedError pins the body-too-large
+// branch: a non-retryable local defect (e.g. a signing failure) must return
+// its own typed error, never a fabricated context.Canceled, and must not
+// open the circuit breaker (review-z commit 4).
+func TestSignerErrorBodyTooLargeReturnsTypedError(t *testing.T) {
+	signerErr := &nonRetryableTestError{err: errors.New("signing failed")}
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, signerErr
+	})
+	breaker, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(2),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(1*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("breaker: %v", err)
+	}
+	tr := Transport{Inner: inner, MaxRetries: 3, MaxBodyBytes: 100, Breaker: breaker}
+	big := bytes.Repeat([]byte("x"), 200)
+	req := httptest.NewRequest(http.MethodPost, "http://x/", bytes.NewReader(big))
+
+	resp, err := tr.RoundTrip(req)
+	if resp != nil {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if !errors.Is(err, signerErr) {
+		t.Fatalf("err = %v, want the typed signing error (not a fabricated context.Canceled)", err)
+	}
+	if isContextCancellation(err) {
+		t.Fatal("signing error was masked as a context cancellation")
+	}
+	if stats := breaker.Stats(); stats.TotalFailures != 0 {
+		t.Fatalf("breaker failures = %d, want 0 for a local signing failure", stats.TotalFailures)
+	}
+}

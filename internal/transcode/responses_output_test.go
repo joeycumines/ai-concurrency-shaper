@@ -1,0 +1,342 @@
+package transcode
+
+import (
+	"encoding/json"
+	"fmt"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
+	"testing"
+)
+
+func TestResponsesOutputMessageContent(t *testing.T) {
+	data := `[
+		{"type":"output_text","text":"hello","annotations":[]},
+		{"type":"refusal","refusal":"I cannot help"}
+	]`
+	var parts ResponsesOutputContentParts
+	if err := json.Unmarshal([]byte(data), &parts); err != nil {
+		t.Fatal(err)
+	}
+	if err := parts.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d", len(parts))
+	}
+	text, ok := parts[0].(*ResponsesOutputText)
+	if !ok {
+		t.Fatalf("part 0 = %T", parts[0])
+	}
+	if text.Annotations == nil {
+		t.Fatal("annotations must be present")
+	}
+	refusal, ok := parts[1].(*ResponsesOutputRefusal)
+	if !ok {
+		t.Fatalf("part 1 = %T", parts[1])
+	}
+	if refusal.Refusal != "I cannot help" {
+		t.Fatalf("refusal = %q", refusal.Refusal)
+	}
+}
+
+func TestResponsesOutputTextRequiresAnnotations(t *testing.T) {
+	var part ResponsesOutputText
+	decodeJSON(t, `{"type":"output_text","text":"x"}`, &part)
+	if err := part.Validate(); err == nil {
+		t.Fatal("expected error for missing annotations")
+	}
+	part.Annotations = []ResponsesAnnotation{}
+	if err := part.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResponsesOutputContentUnsupportedPart(t *testing.T) {
+	// The wire-layer union dispatch reports the unsupported arm as the
+	// typed wire.UnsupportedTypeError; the transcode request/response
+	// boundaries translate it into UnsupportedFeatureError (covered by the
+	// classification tests). At the direct decode level the wire type is the
+	// contract.
+	var parts ResponsesOutputContentParts
+	err := json.Unmarshal([]byte(`[{"type":"output_audio","audio":"x"}]`), &parts)
+	if err == nil {
+		t.Fatal("expected error for output_audio")
+	}
+	asWireUnsupportedTypeError(t, err)
+}
+
+func TestResponsesOutputMessage(t *testing.T) {
+	data := `{
+		"id":"msg_1",
+		"type":"message",
+		"role":"assistant",
+		"status":"completed",
+		"content":[{"type":"output_text","text":"hi","annotations":[]}]
+	}`
+	item, err := openairesponses.DecodeOutputItem([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, ok := item.(*ResponsesOutputMessage)
+	if !ok {
+		t.Fatalf("item = %T", item)
+	}
+	if message.ID != "msg_1" || message.Status != ResponsesItemCompleted {
+		t.Fatalf("message = %+v", message)
+	}
+}
+
+func TestResponsesOutputFunctionCall(t *testing.T) {
+	data := `{
+		"id":"fc_1",
+		"type":"function_call",
+		"status":"completed",
+		"call_id":"call_1",
+		"name":"f",
+		"arguments":"{\"x\":1}"
+	}`
+	item, err := openairesponses.DecodeOutputItem([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, ok := item.(*ResponsesFunctionCallOutputItem)
+	if !ok {
+		t.Fatalf("item = %T", item)
+	}
+	if call.Name != "f" || call.CallID != "call_1" {
+		t.Fatalf("call = %+v", call)
+	}
+}
+
+func TestResponsesOutputReasoning(t *testing.T) {
+	data := `{
+		"id":"rs_1",
+		"type":"reasoning",
+		"status":"completed",
+		"summary":[{"type":"summary_text","text":"thinking"}]
+	}`
+	item, err := openairesponses.DecodeOutputItem([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason, ok := item.(*ResponsesReasoningOutputItem)
+	if !ok {
+		t.Fatalf("item = %T", item)
+	}
+	if len(reason.Summary) != 1 || reason.Summary[0].Text != "thinking" {
+		t.Fatalf("reason = %+v", reason)
+	}
+}
+
+func TestResponsesOutputUnsupportedItem(t *testing.T) {
+	_, err := openairesponses.DecodeOutputItem([]byte(`{"type":"web_search_call"}`))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	ue := asWireUnsupportedTypeError(t, err)
+	if ue.Type != "web_search_call" || ue.Path != "output[].type" {
+		t.Fatalf("ue = %+v", ue)
+	}
+}
+
+func TestResponsesOutputInvalid(t *testing.T) {
+	tests := []string{
+		`{"type":"message","role":"assistant","status":"completed","content":[]}`,      // no id
+		`{"type":"message","id":"m","role":"user","status":"completed","content":[]}`,  // wrong role
+		`{"type":"message","id":"m","role":"assistant","status":"bogus","content":[]}`, // bad status
+	}
+	for _, data := range tests {
+		_, err := openairesponses.DecodeOutputItem([]byte(data))
+		if err == nil {
+			t.Errorf("accepted invalid output %s", data)
+		}
+	}
+}
+
+func TestResponsesEnvelopeRoundTrip(t *testing.T) {
+	item := &ResponsesOutputMessage{
+		ID:     "msg_1",
+		Type:   "message",
+		Role:   "assistant",
+		Status: ResponsesItemCompleted,
+		Content: ResponsesOutputContentParts{
+			&ResponsesOutputText{Type: "output_text", Text: "hi", Annotations: []ResponsesAnnotation{}},
+		},
+	}
+	envelope := ResponseEnvelope{
+		ID:        "resp_1",
+		Object:    "response",
+		CreatedAt: 1710000000,
+		Status:    "completed",
+		Model:     "gpt-4.1",
+		Output:    []ResponsesOutputItem{item},
+	}
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var again ResponseEnvelope
+	if err := json.Unmarshal(data, &again); err != nil {
+		t.Fatalf("decode own encoding: %v\n%s", err, data)
+	}
+	if err := again.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Output) != 1 {
+		t.Fatalf("output = %d", len(again.Output))
+	}
+}
+
+func TestResponsesEnvelopeValidate(t *testing.T) {
+	base := ResponseEnvelope{
+		ID:        "resp_1",
+		Object:    "response",
+		CreatedAt: 1,
+		Status:    "completed",
+		Model:     "m",
+		Output:    []ResponsesOutputItem{},
+	}
+	if err := base.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (ResponseEnvelope{Object: "response", Model: "m", Output: []ResponsesOutputItem{}}).Validate(); err == nil {
+		t.Fatal("expected error for missing id")
+	}
+	if err := (ResponseEnvelope{ID: "r", Model: "m", Output: []ResponsesOutputItem{}}).Validate(); err == nil {
+		t.Fatal("expected error for missing object")
+	}
+	if err := (ResponseEnvelope{ID: "r", Object: "response", Output: []ResponsesOutputItem{}}).Validate(); err == nil {
+		t.Fatal("expected error for missing model")
+	}
+	if err := (ResponseEnvelope{ID: "r", Object: "response", Model: "m"}).Validate(); err == nil {
+		t.Fatal("expected error for nil output")
+	}
+}
+
+func TestResponsesToolChoice(t *testing.T) {
+	var choice ResponsesToolChoice
+	decodeJSON(t, `"auto"`, &choice)
+	if err := choice.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if choice.Str == nil || *choice.Str != "auto" {
+		t.Fatalf("choice = %+v", choice)
+	}
+	decodeJSON(t, `{"type":"function","name":"f"}`, &choice)
+	if err := choice.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if choice.Named == nil || choice.Named.Name != "f" {
+		t.Fatalf("choice = %+v", choice)
+	}
+	// Invalid string values are rejected at decode time.
+	if err := json.Unmarshal([]byte(`"always"`), &choice); err == nil {
+		t.Fatal("expected error for invalid tool choice string")
+	}
+	// Round trip.
+	decodeJSON(t, `{"type":"function","name":"f"}`, &choice)
+	encoded := mustJSON(t, choice)
+	var again ResponsesToolChoice
+	if err := json.Unmarshal(encoded, &again); err != nil {
+		t.Fatal(err)
+	}
+	if again.Named == nil || again.Named.Name != "f" {
+		t.Fatalf("round trip = %+v", again)
+	}
+}
+
+func TestResponsesToolValidate(t *testing.T) {
+	// strict is required on the wire per the pinned function-tool contract:
+	// a tool without an explicit strict value is malformed.
+	tool := ResponsesTool{
+		Type:       "function",
+		Name:       "f",
+		Parameters: json.RawMessage(`{"type":"object"}`),
+		Strict:     wire.Field[bool]{Value: true, Present: true},
+	}
+	if err := tool.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (ResponsesTool{Type: "function", Name: "f"}).Validate(); err == nil {
+		t.Fatal("expected error for missing strict")
+	}
+	// Non-function (built-in) tool types decode and validate; the
+	// builtin_tools loss/reject decision happens at the transcode boundary.
+	if err := (ResponsesTool{Type: "web_search", Name: "ws"}).Validate(); err != nil {
+		t.Fatalf("built-in tool validate: %v", err)
+	}
+	tool = ResponsesTool{Type: "function"}
+	if err := tool.Validate(); err == nil {
+		t.Fatal("expected error for empty name")
+	}
+}
+
+func TestCanonicalizeResponsesToolChoice(t *testing.T) {
+	choice := ResponsesToolChoice{Str: new("auto")}
+	out, err := canonicalizeResponsesToolChoice(choice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Mode != "auto" {
+		t.Fatalf("mode = %q", out.Mode)
+	}
+	choice = ResponsesToolChoice{Named: &ResponsesToolChoiceNamed{Type: "function", Name: "f"}}
+	out, err = canonicalizeResponsesToolChoice(choice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Mode != "named" || out.Name != "f" {
+		t.Fatalf("out = %+v", out)
+	}
+	// "required" is part of the official contract and canonicalizes as-is.
+	choice = ResponsesToolChoice{Str: new("required")}
+	requiredOut, err := canonicalizeResponsesToolChoice(choice)
+	if err != nil {
+		t.Fatalf("required tool choice rejected: %v", err)
+	}
+	if requiredOut.Mode != "required" {
+		t.Fatalf("mode = %q, want required", requiredOut.Mode)
+	}
+}
+
+func TestSplitImageDataURL(t *testing.T) {
+	mediaType, data, err := splitImageDataURL("data:image/png;base64,AAAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mediaType != "image/png" || data != "AAAA" {
+		t.Fatalf("%q %q", mediaType, data)
+	}
+	mediaType, data, err = splitImageDataURL("https://x/y.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mediaType != "" || data != "" {
+		t.Fatalf("plain URL: %q %q", mediaType, data)
+	}
+	if _, _, err := splitImageDataURL("data:image/svg+xml;base64,AAAA"); err == nil {
+		t.Fatal("expected unsupported media type rejection")
+	}
+	if _, _, err := splitImageDataURL("data:image/png;base64,"); err == nil {
+		t.Fatal("expected empty data rejection")
+	}
+}
+
+func TestExchangeIDs(t *testing.T) {
+	// IDs within one exchange share the random prefix and carry a
+	// monotonic counter (review-08 blocker 6); the prefix shape is 32
+	// lowercase hex characters (128 random bits, review-z commit 5).
+	ids := NewExchangeIDs()
+	first := ids.New("msg_")
+	second := ids.New("fc_")
+	var prefix string
+	if n, err := fmt.Sscanf(first, "msg_%32s_1", &prefix); n != 1 || err != nil {
+		t.Fatalf("first = %q, want the msg_<32 hex>_1 shape", first)
+	}
+	if want := "fc_" + prefix + "_2"; second != want {
+		t.Fatalf("second = %q, want %q (same prefix, next counter)", second, want)
+	}
+	if ids.New("msg_") == first {
+		t.Fatal("third ID equals the first")
+	}
+}

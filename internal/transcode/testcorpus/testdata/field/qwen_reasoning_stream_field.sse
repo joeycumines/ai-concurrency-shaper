@@ -1,0 +1,9 @@
+data: {"id":"chatcmpl-rc","object":"chat.completion.chunk","created":1710000000,"model":"qwen3.8-27b","system_fingerprint":"fp_qwen_field","prompt_token_ids":[1,2,3],"prompt_text":"Remember the number 8463 for later.","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"First, I recall the number from the prior turn."},"finish_reason":null,"matched_stop":null,"token_ids":null,"routed_experts":null,"stop_reason":null}]}
+
+data: {"id":"chatcmpl-rc","object":"chat.completion.chunk","created":1710000000,"model":"qwen3.8-27b","system_fingerprint":"fp_qwen_field","prompt_token_ids":null,"prompt_text":null,"choices":[{"index":0,"delta":{"reasoning_content":"The user asked me to remember 8463."},"finish_reason":null,"matched_stop":null,"token_ids":null,"routed_experts":null,"stop_reason":null}]}
+
+data: {"id":"chatcmpl-rc","object":"chat.completion.chunk","created":1710000000,"model":"qwen3.8-27b","system_fingerprint":"fp_qwen_field","prompt_token_ids":null,"prompt_text":null,"choices":[{"index":0,"delta":{"content":"The number is 8463."},"finish_reason":null,"matched_stop":null,"token_ids":null,"routed_experts":null,"stop_reason":null}]}
+
+data: {"id":"chatcmpl-rc","object":"chat.completion.chunk","created":1710000000,"model":"qwen3.8-27b","system_fingerprint":"fp_qwen_field","prompt_token_ids":null,"prompt_text":null,"choices":[{"index":0,"delta":{},"finish_reason":"stop","matched_stop":"<|im_end|>","token_ids":null,"routed_experts":null,"stop_reason":null}]}
+
+data: [DONE]
