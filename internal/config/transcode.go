@@ -710,7 +710,7 @@ func (p *Provider) resolveTranscode() error {
 		} else if mappings[i].Mapping.Auth.IsZero() {
 			mappings[i].Mapping.Auth = authPolicy
 		}
-		if p.RetryMaxBodyMB > 0 && mappings[i].BodyLimits.RetryReplayBytes == 0 {
+		if p.RetryMax != 0 && p.RetryMaxBodyMB > 0 && mappings[i].BodyLimits.RetryReplayBytes == 0 {
 			mappings[i].BodyLimits.RetryReplayBytes = p.RetryMaxBodyMB << 20
 		}
 		if p.TranscodeMaxRequestMB > 0 {
