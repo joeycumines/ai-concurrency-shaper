@@ -41,6 +41,23 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 )
 
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (n int, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // newTestProxy builds a proxy backed by a fake upstream that tracks
 // concurrency and returns the method+path in the JSON body.
 func newTestProxy(t *testing.T, concurrency int, timeout time.Duration, patterns ...string) (*proxy.Proxy, *httptest.Server, *atomic.Int64) {
@@ -563,7 +580,7 @@ func TestE2E_MultiProvider(t *testing.T) {
 		proxyAddr := proxyLn.Addr().String()
 		proxyLn.Close()
 
-		var out strings.Builder
+		var out safeBuffer
 		cmd := exec.Command(bin,
 			"-bind", proxyAddr,
 			"--provider=acme",
@@ -733,7 +750,7 @@ func TestE2E_MultiProvider_Transcode(t *testing.T) {
 	proxyAddr := proxyLn.Addr().String()
 	proxyLn.Close()
 
-	var out strings.Builder
+	var out safeBuffer
 	cmd := exec.Command(bin,
 		"-bind", proxyAddr,
 		"--provider=anthropic",
@@ -944,7 +961,7 @@ func TestE2E_MultiProvider_Transcode_AuthPrecedence(t *testing.T) {
 	proxyAddr := proxyLn.Addr().String()
 	proxyLn.Close()
 
-	var out strings.Builder
+	var out safeBuffer
 	cmd := exec.Command(bin,
 		"-bind", proxyAddr,
 		"--provider=provider-inherited",

@@ -162,7 +162,7 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	metricsAddr := metricsLn.Addr().String()
 	metricsLn.Close()
 
-	var out strings.Builder
+	var out safeBuffer
 	cmd := exec.Command(bin,
 		"-bind", proxyAddr,
 		"-metrics-bind", metricsAddr,
