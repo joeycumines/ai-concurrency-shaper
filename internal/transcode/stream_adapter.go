@@ -333,8 +333,7 @@ func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 func decodeResponsesSSEEvent(data []byte) (ResponsesSSEEvent, error) {
 	event, err := openairesponses.DecodeEvent(data)
 	if err != nil {
-		var unsupported *wire.UnsupportedTypeError
-		if errors.As(err, &unsupported) {
+		if unsupported, ok := errors.AsType[*wire.UnsupportedTypeError](err); ok {
 			return nil, &UnsupportedFeatureError{
 				Protocol: unsupported.Protocol,
 				Path:     unsupported.Path,

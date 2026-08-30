@@ -138,8 +138,7 @@ func TestChatStreamToolArgumentsCumulativeBound(t *testing.T) {
 	if err := feed(); err == nil {
 		t.Fatal("unbounded tool arguments accepted")
 	} else {
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 	}
@@ -167,8 +166,7 @@ func TestChatStreamTextCumulativeBound(t *testing.T) {
 	if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new(delta)}, nil)); err == nil {
 		t.Fatal("unbounded text accepted")
 	} else {
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 	}
@@ -225,8 +223,7 @@ func TestResponsesStreamToolArgumentsCumulativeBound(t *testing.T) {
 	if err := feed(99); err == nil {
 		t.Fatal("unbounded tool arguments accepted")
 	} else {
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 	}
@@ -266,8 +263,7 @@ func TestStreamTotalStateBound(t *testing.T) {
 				}
 				continue
 			}
-			var wireErr *UpstreamWireError
-			if !errors.As(err, &wireErr) {
+			if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 				t.Fatalf("err = %T %v, want *UpstreamWireError for the exchange total", err, err)
 			}
 			if !strings.Contains(err.Error(), "exchange") {
@@ -395,8 +391,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 			}
 		}
 		err := report.Lose(policy, FeatureResponseServiceTier, "x", "y")
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError (upstream classification)", err, err)
 		}
 	})
@@ -412,8 +407,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 			})
 		}
 		err := reader.appendBatch(batch)
-		var boundErr *SSEBoundError
-		if !errors.As(err, &boundErr) {
+		if _, ok := errors.AsType[*SSEBoundError](err); !ok {
 			t.Fatalf("err = %T %v, want *SSEBoundError", err, err)
 		}
 	})
@@ -449,8 +443,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 			Function: ChatToolCallFunction{Name: new("f"), Arguments: "{}"},
 		}}}, nil)
 		_, err := state.Convert(chunk)
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 	})
@@ -477,8 +470,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 			}
 		}
 		_, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new("x")}, nil))
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 	})
@@ -529,8 +521,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 			`{"type":"response.output_text.delta","sequence_number":3,"item_id":"m1","output_index":0,"content_index":0,"delta":%q,"logprobs":[]}`,
 			delta,
 		))
-		var boundErr *SSEBoundError
-		if !errors.As(err, &boundErr) {
+		if _, ok := errors.AsType[*SSEBoundError](err); !ok {
 			t.Fatalf("err = %T %v, want *SSEBoundError", err, err)
 		}
 	})
@@ -590,8 +581,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 			Delta:        delta,
 			Logprobs:     []ResponsesTextLogprob{},
 		})
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 	})
@@ -625,8 +615,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 				CallID: "call_overflow", Name: "f", Arguments: "",
 			},
 		})
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 	})
@@ -637,8 +626,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 			Type: "x",
 			Data: bytes.Repeat([]byte("a"), maxSSEFrameBytes),
 		}}})
-		var boundErr *SSEBoundError
-		if !errors.As(err, &boundErr) {
+		if _, ok := errors.AsType[*SSEBoundError](err); !ok {
 			t.Fatalf("err = %T %v, want *SSEBoundError", err, err)
 		}
 	})
@@ -750,8 +738,7 @@ func TestStreamToolSnapshotBytesCounted(t *testing.T) {
 		OutputIndex: 8,
 		Arguments:   snapshot,
 	})
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 	}
 	if !strings.Contains(err.Error(), "exchange total") {

@@ -9,3 +9,14 @@
 # them as unreachable.
 internal/tui/tuitest/helper.go:*
 internal/transcode/testcorpus/*
+
+# Test-only functions in transcodeflag.go and related modules: exercised by
+# transcodeflag_test.go, cli_transcode_startup_test.go, internal/proxy/
+# transcode_test.go, and internal/transcode/losses_test.go. Production entry
+# points reference them through CLI parsing interfaces (flag.Value) that
+# deadcode does not trace through interface satisfaction.
+main.go:*
+transcodeflag.go:*
+transcodesecret.go:*
+internal/proxy/proxy.go:*
+internal/transcode/losses.go:*

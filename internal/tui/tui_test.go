@@ -21,6 +21,7 @@ import (
 	"image/color"
 	"math"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -4897,8 +4898,8 @@ func TestProviderSwitcherChipClick(t *testing.T) {
 	if len(parts) != 3 {
 		t.Fatalf("budgetedChips rendered %d chips at width 100, want all 3", len(parts))
 	}
-	for i := len(parts) - 1; i >= 0; i-- {
-		w := lipgloss.Width(parts[i])
+	for i, part := range slices.Backward(parts) {
+		w := lipgloss.Width(part)
 		p = update(p, tea.MouseClickMsg{X: right, Y: 0})
 		if p.active != i {
 			t.Fatalf("click at column %d: active = %d, want %d", right, p.active, i)
@@ -4975,8 +4976,8 @@ func TestHeaderWidthBudget(t *testing.T) {
 					// rendered span. Walk the right-aligned layout the same
 					// way chipAt does.
 					right := m.width - 2
-					for i := len(layout.parts) - 1; i >= 0; i-- {
-						cw := lipgloss.Width(layout.parts[i])
+					for i, v := range slices.Backward(layout.parts) {
+						cw := lipgloss.Width(v)
 						if i == k {
 							if idx, ok := m.chipAt(right); !ok || idx != prov {
 								t.Errorf("width=%d active=%d: chipAt(%d) = (%d,%v), want (%d,true)",
@@ -5017,8 +5018,8 @@ func TestHeaderWidthBudget(t *testing.T) {
 			}
 			// Every rendered chip: each of its columns maps back to itself.
 			right := m.width - 2
-			for i := len(layout.parts) - 1; i >= 0; i-- {
-				cw := lipgloss.Width(layout.parts[i])
+			for i, v := range slices.Backward(layout.parts) {
+				cw := lipgloss.Width(v)
 				prov := layout.providers[i]
 				for x := right - cw + 1; x <= right; x++ {
 					if idx, ok := m.chipAt(x); !ok || idx != prov {

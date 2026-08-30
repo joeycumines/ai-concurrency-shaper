@@ -266,8 +266,7 @@ func (r *convertingReader) appendErrorEvent(err error) error {
 // upstream wire (UpstreamWireError) is always upstream; a StreamConversionError
 // is upstream only when its provenance says so (review-k finding 3).
 func isUpstreamConversionError(err error) bool {
-	var wireErr *UpstreamWireError
-	if errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
 		return true
 	}
 	var convErr *StreamConversionError

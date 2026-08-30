@@ -148,23 +148,19 @@ func assertWireClassification(
 ) {
 	t.Helper()
 	if wantWire {
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
-		var unsupportedErr *UnsupportedFeatureError
-		if errors.As(err, &unsupportedErr) {
+		if _, ok := errors.AsType[*UnsupportedFeatureError](err); ok {
 			t.Fatal("corrupt wire must not be an UnsupportedFeatureError")
 		}
 		return
 	}
 	if wantUnsupported {
-		var unsupportedErr *UnsupportedFeatureError
-		if !errors.As(err, &unsupportedErr) {
+		if _, ok := errors.AsType[*UnsupportedFeatureError](err); !ok {
 			t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 		}
-		var wireErr *UpstreamWireError
-		if errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); ok {
 			t.Fatal("unsupported feature must not be wrapped as corrupt wire")
 		}
 		return

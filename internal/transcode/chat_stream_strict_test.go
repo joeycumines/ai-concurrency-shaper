@@ -235,8 +235,7 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				_, err := state.Convert(chunk(tt.call))
-				var wireErr *UpstreamWireError
-				if !errors.As(err, &wireErr) {
+				if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 					t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 				}
 			})
@@ -334,8 +333,7 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := state.FinalizeEOF()
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 		if !strings.Contains(err.Error(), "[DONE]") {
@@ -413,8 +411,7 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := converter.FinalizeEOF()
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 		if !strings.Contains(err.Error(), "[DONE]") {
@@ -544,8 +541,7 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err := converter.FinalizeEOF()
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 		if !strings.Contains(err.Error(), "[DONE]") {

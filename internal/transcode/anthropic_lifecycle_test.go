@@ -1629,8 +1629,7 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 				CallID: "call_1", Output: ResponsesFunctionOutput{Text: new("ok")},
 			},
 		})
-		var unsupported *UnsupportedFeatureError
-		if !errors.As(err, &unsupported) {
+		if _, ok := errors.AsType[*UnsupportedFeatureError](err); !ok {
 			t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 		}
 	})
@@ -1831,8 +1830,7 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		// Non-object model-generated arguments cannot be represented as
 		// tool_use.input: a LOCAL unrepresentable output, never corrupt
 		// upstream wire (review-z commit 2).
-		var unrepresentable *UnrepresentableError
-		if !errors.As(err, &unrepresentable) {
+		if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
 			t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
 		}
 	})
@@ -2295,8 +2293,7 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 			EventBase: EventBase{Type: "response.completed", SequenceNumber: 3},
 			Response:  envelope,
 		})
-		var unsupported *UnsupportedFeatureError
-		if !errors.As(err, &unsupported) {
+		if _, ok := errors.AsType[*UnsupportedFeatureError](err); !ok {
 			t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 		}
 	})
@@ -2323,8 +2320,7 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 			EventBase: EventBase{Type: "response.completed", SequenceNumber: 1},
 			Response:  envelope,
 		})
-		var unsupported *UnsupportedFeatureError
-		if !errors.As(err, &unsupported) {
+		if _, ok := errors.AsType[*UnsupportedFeatureError](err); !ok {
 			t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 		}
 	})
@@ -2477,8 +2473,7 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		// Non-object terminal-envelope arguments are a LOCAL unrepresentable
 		// output (review-z commit 2); only snapshot-vs-accumulated identity
 		// drift remains corrupt upstream wire.
-		var unrepresentable *UnrepresentableError
-		if !errors.As(err, &unrepresentable) {
+		if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
 			t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
 		}
 	})
@@ -2544,8 +2539,7 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 			EventBase: EventBase{Type: "response.incomplete", SequenceNumber: 3},
 			Response:  envelope,
 		})
-		var unsupported *UnsupportedFeatureError
-		if !errors.As(err, &unsupported) {
+		if _, ok := errors.AsType[*UnsupportedFeatureError](err); !ok {
 			t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 		}
 	})
@@ -2573,8 +2567,7 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 			EventBase: EventBase{Type: "response.incomplete", SequenceNumber: 1},
 			Response:  envelope,
 		})
-		var unsupported *UnsupportedFeatureError
-		if !errors.As(err, &unsupported) {
+		if _, ok := errors.AsType[*UnsupportedFeatureError](err); !ok {
 			t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 		}
 	})

@@ -129,8 +129,7 @@ func fsmComplete(seq int64) ResponseCompletedEvent {
 // assertFSMWire asserts a typed upstream-wire rejection.
 func assertFSMWire(t *testing.T, err error) {
 	t.Helper()
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 	}
 }
@@ -484,8 +483,7 @@ func TestConvertingReaderStagingAtomicity(t *testing.T) {
 			t.Fatal("reader made no progress")
 		}
 	}
-	var boundErr *SSEBoundError
-	if !errors.As(err, &boundErr) {
+	if _, ok := errors.AsType[*SSEBoundError](err); !ok {
 		t.Fatalf("err = %T %v, want *SSEBoundError", err, err)
 	}
 	if strings.Contains(body.String(), `"type":"response.completed"`) {

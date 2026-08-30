@@ -253,19 +253,6 @@ func mustRouteKey(method, path string) transcode.RouteKey {
 	return key
 }
 
-// transcodeModelFlags implements flag.Value for repeatable -transcode-model
-// values of the form client-model=upstream-model.
-type transcodeModelFlags []string
-
-func (f transcodeModelFlags) String() string {
-	return strings.Join(f, ", ")
-}
-
-func (f *transcodeModelFlags) Set(v string) error {
-	*f = append(*f, v)
-	return nil
-}
-
 // parseTranscodeModelMap builds the ModelMap from repeated -transcode-model
 // values. With no mappings, identity fallback is used.
 func parseTranscodeModelMap(values []string) (transcode.ModelMap, error) {
@@ -351,45 +338,6 @@ func secretSource(source string) (transcode.SecretSource, error) {
 			source,
 		)
 	}
-}
-
-// transcodeLossFlags accumulates repeatable -transcode-allow-loss values.
-type transcodeLossFlags []string
-
-func (f transcodeLossFlags) String() string {
-	return strings.Join(f, ",")
-}
-
-func (f *transcodeLossFlags) Set(v string) error {
-	*f = append(*f, v)
-	return nil
-}
-
-// transcodeCapabilityFlags accumulates repeatable -transcode-chat-capability
-// values: the granular chat-provider capabilities a mapping may use.
-type transcodeCapabilityFlags []string
-
-func (f transcodeCapabilityFlags) String() string {
-	return strings.Join(f, ",")
-}
-
-func (f *transcodeCapabilityFlags) Set(v string) error {
-	*f = append(*f, v)
-	return nil
-}
-
-// transcodeClientQueryFlags accumulates repeatable
-// -transcode-allow-client-query values: client query parameters forwarded on
-// transcoded routes.
-type transcodeClientQueryFlags []string
-
-func (f transcodeClientQueryFlags) String() string {
-	return strings.Join(f, ",")
-}
-
-func (f *transcodeClientQueryFlags) Set(v string) error {
-	*f = append(*f, v)
-	return nil
 }
 
 // chatCapabilityNames is the canonical CLI vocabulary for

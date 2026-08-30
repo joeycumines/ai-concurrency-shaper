@@ -2174,7 +2174,7 @@ func (m Model) budgetedChips() chipLayout {
 	kept := func(i int) bool {
 		return slices.Contains(keep, i)
 	}
-	for i := len(labels) - 1; i >= 0; i-- {
+	for i := range slices.Backward(labels) {
 		candidate := prefix(i, keep)
 		if total(candidate) <= budget {
 			keep = candidate
@@ -2267,8 +2267,8 @@ func (m Model) chipAt(mx int) (int, bool) {
 	}
 	layout := m.budgetedChips()
 	right := m.width - 2
-	for i := len(layout.parts) - 1; i >= 0; i-- {
-		w := lipgloss.Width(layout.parts[i])
+	for i, v := range slices.Backward(layout.parts) {
+		w := lipgloss.Width(v)
 		if mx >= right-w+1 && mx <= right {
 			return layout.providers[i], true
 		}

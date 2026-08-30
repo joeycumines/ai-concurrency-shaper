@@ -130,12 +130,10 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 				return
 			}
 			if tt.wantUnsupported {
-				var unsupportedErr *UnsupportedFeatureError
-				if !errors.As(err, &unsupportedErr) {
+				if _, ok := errors.AsType[*UnsupportedFeatureError](err); !ok {
 					t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 				}
-				var wireErr *UpstreamWireError
-				if errors.As(err, &wireErr) {
+				if _, ok := errors.AsType[*UpstreamWireError](err); ok {
 					t.Fatal("unsupported feature must not be wrapped as corrupt wire")
 				}
 				return
@@ -241,8 +239,7 @@ func TestChatStreamChunkObjectDiscriminator(t *testing.T) {
 	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(absent)}); err == nil {
 		t.Fatal("object-absent chunk accepted")
 	} else {
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 	}
@@ -251,8 +248,7 @@ func TestChatStreamChunkObjectDiscriminator(t *testing.T) {
 	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(wrong)}); err == nil {
 		t.Fatal("wrong object discriminator accepted")
 	} else {
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 	}
@@ -291,8 +287,7 @@ func TestChatResponseDecodesMatchedStopExtension(t *testing.T) {
 
 	bogus := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"},"bogus_field":1}]}`
 	_, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy())
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 	}
 }
@@ -336,8 +331,7 @@ func TestChatResponseDecodesMatchedStopMessageExtension(t *testing.T) {
 
 	bogus := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x","bogus_field":1}}]}`
 	_, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy())
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 	}
 }

@@ -232,8 +232,7 @@ func TestDecodeResponsesRequestToolTypeViolations(t *testing.T) {
 				if err == nil {
 					t.Fatalf("%s policy accepted a tool-union shape violation", policyName)
 				}
-				var de *wire.DecodeError
-				if errors.As(err, &de) {
+				if de, ok := errors.AsType[*wire.DecodeError](err); ok {
 					if de.Kind != wire.DecodeMissingRequired && de.Kind != wire.DecodeContradictoryUnion {
 						t.Fatalf("err kind = %s, want missing_required or contradictory_union", de.Kind)
 					}

@@ -17,8 +17,7 @@ func mustUsageError(t *testing.T, err error, context string) {
 	if err == nil {
 		t.Fatalf("%s: usage mismatch accepted", context)
 	}
-	var usageErr *UsageArithmeticError
-	if !errors.As(err, &usageErr) {
+	if _, ok := errors.AsType[*UsageArithmeticError](err); !ok {
 		t.Fatalf("%s: err = %T %v, want *UsageArithmeticError", context, err, err)
 	}
 }
@@ -58,8 +57,7 @@ func TestResponsesUsageExactTotalNonStreaming(t *testing.T) {
 	body := []byte(`{"object":"response","id":"resp_1","created_at":1.0,"model":"m","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":20,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`)
 	_, err := DecodeResponsesResponse(body)
 	mustUsageError(t, err, "non-streaming responses usage")
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %T %v, want *UpstreamWireError wrap (corrupt upstream wire)", err, err)
 	}
 }
@@ -70,8 +68,7 @@ func TestChatUsageExactTotalNonStreaming(t *testing.T) {
 	body := []byte(`{"object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":20}}`)
 	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
 	mustUsageError(t, err, "non-streaming chat usage")
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %T %v, want *UpstreamWireError wrap (corrupt upstream wire)", err, err)
 	}
 }
@@ -199,8 +196,7 @@ func TestStreamResponsesUsageMismatchIsUpstreamWire(t *testing.T) {
 	if err == nil {
 		t.Fatal("contract-violating total accepted")
 	}
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %T %v, want *UpstreamWireError (source-total mismatch is corrupt upstream wire)", err, err)
 	}
 	var usageErr *UsageArithmeticError
@@ -239,8 +235,7 @@ func TestStreamResponsesUsageMismatchAtCreatedIsUpstreamWire(t *testing.T) {
 	if err == nil {
 		t.Fatal("contract-violating total on response.created accepted")
 	}
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %T %v, want *UpstreamWireError at messageStart", err, err)
 	}
 	var usageErr *UsageArithmeticError

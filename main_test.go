@@ -17,23 +17,24 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"fmt"
-	"io"
-	"math"
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/config"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
@@ -1440,4 +1441,17 @@ func TestConfigMetricsBindFlag(t *testing.T) {
 	if _, err = config.Parse([]string{"--provider=a", "-upstream", "http://127.0.0.1:1", "-prefix", "/a", "-metrics-bind", ":2112"}); err == nil {
 		t.Error("provider-scoped -metrics-bind must be rejected (server-scope flag)")
 	}
+}
+
+func waitTCPReady(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return fmt.Errorf("address %s did not become reachable", addr)
 }

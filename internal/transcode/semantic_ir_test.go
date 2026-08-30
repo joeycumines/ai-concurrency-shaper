@@ -71,12 +71,10 @@ func TestRenderChatToolResultMultimodalMatrix(t *testing.T) {
 	if err == nil {
 		t.Fatal("strict policy accepted multimodal tool-result content")
 	}
-	var unrepresentable *UnrepresentableError
-	if !errors.As(err, &unrepresentable) {
+	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
 		t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
 	}
-	var wireErr *UpstreamWireError
-	if errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
 		t.Fatal("invalid model output must never classify as corrupt upstream wire")
 	}
 
@@ -403,12 +401,10 @@ func TestToolArgumentsFidelityAcrossTargets(t *testing.T) {
 	if err == nil {
 		t.Fatal("messages render accepted non-object tool arguments")
 	}
-	var unrepresentable *UnrepresentableError
-	if !errors.As(err, &unrepresentable) {
+	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
 		t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
 	}
-	var wireErr *UpstreamWireError
-	if errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
 		t.Fatal("invalid model arguments must never classify as upstream wire failure")
 	}
 }

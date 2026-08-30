@@ -343,8 +343,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// A signer error is a local construction/auth failure (neutral),
 		// never an upstream transport failure (review-z commit 4).
-		var signingErr *SigningError
-		if errors.As(err, &signingErr) {
+		if signingErr, ok := errors.AsType[*SigningError](err); ok {
 			// The signer failure is logged with detail; the client message
 			// is sanitized (review-j finding 14: local construction errors
 			// never leak details). The code is request-side: the failure
@@ -721,8 +720,7 @@ func (h *TranscodeHandler) jsonResponse(
 		// reports failure) classifies with the UPSTREAM status and
 		// UpstreamFailure=true, matching the streamed classification
 		// (review-j finding 11) — never a local conversion failure.
-		var upstreamFailed *UpstreamSemanticFailureError
-		if errors.As(err, &upstreamFailed) {
+		if _, ok := errors.AsType[*UpstreamSemanticFailureError](err); ok {
 			h.writeUpstreamSemanticFailure(r, w, apiErr, resp.StatusCode)
 			return
 		}
@@ -821,8 +819,7 @@ func (h *TranscodeHandler) checkDecodedRequestSize(rendered []byte) error {
 // loss-policy rejections, and target-render failures stay local (review-k
 // finding 3).
 func conversionProvenance(err error) ExchangeProvenance {
-	var wireErr *UpstreamWireError
-	if errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
 		return ProvenanceUpstreamBodyError
 	}
 	return ProvenanceLocalResponseConversionError

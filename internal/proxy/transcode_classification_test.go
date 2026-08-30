@@ -179,9 +179,9 @@ func TestProxyTranscodeCorruptUpstreamJSONAppliesPhantomHold(t *testing.T) {
 // EXACTLY ONCE per client request while the client sees 502. The
 // field-observed repeat 502s were client-driven retries, not proxy retries.
 func TestProxyTranscodePoisonUsage200IsNeverRetried(t *testing.T) {
-	var hits int64
+	var hits atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt64(&hits, 1)
+		hits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		// A poisonous usage block: an unknown field outside the modeled
@@ -225,7 +225,7 @@ func TestProxyTranscodePoisonUsage200IsNeverRetried(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", rec.Code)
 	}
-	if got := atomic.LoadInt64(&hits); got != 1 {
+	if got := hits.Load(); got != 1 {
 		t.Fatalf("upstream hits = %d, want exactly 1 (the poison body is never re-sent)", got)
 	}
 	// The single decode failure counts once against the breaker.

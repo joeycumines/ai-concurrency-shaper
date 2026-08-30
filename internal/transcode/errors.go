@@ -394,8 +394,7 @@ func (e *UsageArithmeticError) Error() string {
 // result, and the typed error is passed through untouched so no classification
 // point can mistake it for corrupt wire (review-k finding 3).
 func upstreamWireError(protocol UpstreamProtocol, status int, cause error) error {
-	var unsupported *UnsupportedFeatureError
-	if errors.As(cause, &unsupported) {
+	if _, ok := errors.AsType[*UnsupportedFeatureError](cause); ok {
 		return cause
 	}
 	return &UpstreamWireError{Protocol: protocol, Status: status, Cause: cause}

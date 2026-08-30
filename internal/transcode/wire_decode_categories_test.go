@@ -98,8 +98,7 @@ func TestWireDecodeSixCategoriesUpstream(t *testing.T) {
 			}
 			assertWireDecodeKind(t, err, c.kind)
 			// Upstream-side rejections classify as upstream wire errors.
-			var wireErr *UpstreamWireError
-			if !errors.As(err, &wireErr) {
+			if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 				t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 			}
 		})
@@ -142,8 +141,7 @@ func TestWireDecodeSixCategoriesStream(t *testing.T) {
 				t.Fatal("expected decode rejection")
 			}
 			assertWireDecodeKind(t, err, c.kind)
-			var wireErr *UpstreamWireError
-			if !errors.As(err, &wireErr) {
+			if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 				t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 			}
 		})

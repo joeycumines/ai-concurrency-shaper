@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -38,12 +39,64 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/router"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
 )
 
 // version is set via ldflags at build time (e.g. -ldflags -X main.version=1.2.3).
 var version = "dev"
+
+// validateMBFlag rejects a negative or overflowing megabyte flag value
+// before it is shifted to bytes (review-j finding 14): a negative or
+// overflowing shift would otherwise produce a silently wrong limit. shift
+// is the largest byte shift the value undergoes (e.g. 22 for
+// transcode-max-request-mb, whose decoded-request limit is MB << 22).
+func validateMBFlag(name string, value int64, shift uint) error {
+	if value < 0 {
+		return fmt.Errorf("%s must be nonnegative, got %d", name, value)
+	}
+	if shift >= 63 || value > int64(math.MaxInt64)>>uint(shift) {
+		return fmt.Errorf("%s is too large to convert to bytes: %d MiB", name, value)
+	}
+	return nil
+}
+
+// upstreamMaxIdleConnsPerHost returns the minimum number of idle connections
+// the upstream transport should keep open per host.
+func upstreamMaxIdleConnsPerHost(globalConcurrency, concurrency int, patterns []route.Pattern, routeLimiters map[string]*queue.Limiter, limitAll bool) int {
+	routePoolMax := 0
+	for _, lim := range routeLimiters {
+		routePoolMax += lim.Limit()
+	}
+	defaultPoolUsed := limitAll
+	for _, p := range patterns {
+		key := p.Group
+		if key == "" {
+			key = p.Raw
+		}
+		if p.Limit == 0 {
+			if p.Group == "" {
+				defaultPoolUsed = true
+				continue
+			}
+			if _, ok := routeLimiters[key]; !ok {
+				defaultPoolUsed = true
+			}
+		}
+	}
+	if defaultPoolUsed {
+		routePoolMax += concurrency
+	}
+	if globalConcurrency > 0 && routePoolMax > globalConcurrency {
+		routePoolMax = globalConcurrency
+	}
+	if routePoolMax < 20 {
+		return 20
+	}
+	return routePoolMax
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -338,12 +391,19 @@ func run() error {
 				errCh <- err
 			}
 		}()
-		log.Printf("metrics endpoint listening on %s/metrics", cfg.Server.MetricsBind)
+		log.Printf("metrics endpoint listening on %s/metrics", metricsLn.Addr().String())
 	}
 
-	srv := &http.Server{Addr: cfg.Server.Bind, Handler: h}
+	ln, err := net.Listen("tcp", cfg.Server.Bind)
+	if err != nil {
+		return fmt.Errorf("bind %s: %w", cfg.Server.Bind, err)
+	}
+	defer ln.Close()
+	log.Printf("listening on %s", ln.Addr().String())
+
+	srv := &http.Server{Handler: h}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()

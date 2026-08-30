@@ -585,7 +585,7 @@ make field-recapture-stop     # stop it by exact PID
 ```
 
 The bearer credential is read from the environment at runtime and fed to
-curl on stdin, so it never appears in `make -n` or the process list.
+curl on stdin, so it is never persisted: the environment value is never expanded into make arguments, never shown in process listings (`make -n`, `/proc`), and the proxy never writes the secret to disk or to any captured log; only the reference name (`env:VAR`) appears in startup logs and in `project.mk`.
 Refresh the fixtures from the captured bytes, add the extension to
 the strict wire shadows alongside its siblings, and extend the corpus
 test — the regression harness then holds the shape permanently.
