@@ -2062,15 +2062,47 @@ func (m Model) renderProviderSwitcher() string {
 // truncateANSI would append ESC[0m inside the styled row and kill
 // headerStyle's background for the remainder of the line.
 //
-// reserveForSwitcher reserves cells on the right for the switcher when one
-// will be rendered: 1 for the gap plus 3 per chip at floor width up to the
-// chips that could be displayed — in practice the active chip's floor is
-// always enough, since chips beyond the budget are dropped anyway.
+// fleetSummary returns the one-line fleet aggregate observability strip
+// (M6/G8) summarizing active, queued, open breaker counts, and the busiest
+// provider across all configured providers.
+func (m Model) fleetSummary() string {
+	var totalActive, totalQueued int64
+	var openBreakers int
+	var maxActive int64 = -1
+	var maxThroughput float64 = -1
+	var busiest string
+
+	for i, p := range m.providers {
+		totalActive += p.snap.Active
+		totalQueued += p.snap.Queued
+		if p.snap.CircuitBreaker != nil && p.snap.CircuitBreaker.State == "OPEN" {
+			openBreakers++
+		}
+		label := m.providerLabel(i)
+		if p.snap.Active > maxActive || (p.snap.Active == maxActive && p.snap.Throughput > maxThroughput) {
+			maxActive = p.snap.Active
+			maxThroughput = p.snap.Throughput
+			busiest = label
+		}
+	}
+	if busiest == "" && len(m.providers) > 0 {
+		busiest = m.providerLabel(0)
+	}
+
+	return fmt.Sprintf("Fleet: %d active · %d queued · %d OPEN · busiest: %s",
+		totalActive, totalQueued, openBreakers, busiest)
+}
+
 func (m Model) headerBody(reserveForSwitcher bool) string {
-	uptime := time.Since(m.startTime).Truncate(time.Second)
-	body := fmt.Sprintf("%s │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
-		m.providerName(), m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput,
-		m.snap.TotalTimeout, uptime)
+	var body string
+	if len(m.providers) > 1 {
+		body = " " + m.fleetSummary()
+	} else {
+		uptime := time.Since(m.startTime).Truncate(time.Second)
+		body = fmt.Sprintf("%s │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
+			m.providerName(), m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput,
+			m.snap.TotalTimeout, uptime)
+	}
 	usable := max(m.width-2, 1)
 	cap := usable
 	if reserveForSwitcher && m.hasSwitcher() {

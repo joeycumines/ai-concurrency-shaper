@@ -5185,3 +5185,76 @@ func TestResetStatsSendNeverBlocks(t *testing.T) {
 		t.Fatal("update with a full reset channel must not block")
 	}
 }
+
+// TestFleetStrip_AggregateObservability pins the one-line fleet strip atop the
+// TUI in multi-provider mode (M6/G8).
+func TestFleetStrip_AggregateObservability(t *testing.T) {
+	metas := []ProviderMeta{
+		{Name: "openai", Concurrency: 8},
+		{Name: "anthropic", Concurrency: 4},
+		{Name: "gemini", Concurrency: 6},
+	}
+	m := NewModelForProviders(metas)
+	m.width = 80
+	m.height = 24
+
+	// Update snapshots across providers:
+	// - openai: 3 active, 1 queued, circuit breaker CLOSED
+	// - anthropic: 2 active, 1 queued, circuit breaker OPEN
+	// - gemini: 0 active, 0 queued, circuit breaker CLOSED
+	// Total: 5 active · 2 queued · 1 OPEN · busiest: openai
+	m = update(m, ProviderUpdate{
+		Index: 0,
+		Snapshot: metrics.Snapshot{
+			Active: 3,
+			Queued: 1,
+			CircuitBreaker: &metrics.CBStats{
+				State: "CLOSED",
+			},
+		},
+	})
+	m = update(m, ProviderUpdate{
+		Index: 1,
+		Snapshot: metrics.Snapshot{
+			Active: 2,
+			Queued: 1,
+			CircuitBreaker: &metrics.CBStats{
+				State: "OPEN",
+			},
+		},
+	})
+	m = update(m, ProviderUpdate{
+		Index: 2,
+		Snapshot: metrics.Snapshot{
+			Active: 0,
+			Queued: 0,
+			CircuitBreaker: &metrics.CBStats{
+				State: "CLOSED",
+			},
+		},
+	})
+
+	hdr := stripANSI(m.renderHeader())
+	want := "Fleet: 5 active · 2 queued · 1 OPEN · busiest: openai"
+	if !strings.Contains(hdr, want) {
+		t.Fatalf("header missing fleet strip %q; got header: %q", want, hdr)
+	}
+
+	// Provider switcher chips are rendered on the right side of the same row.
+	layout := m.budgetedChips()
+	if len(layout.parts) == 0 {
+		t.Fatal("budgetedChips should fit chips at 80 cols")
+	}
+	// Active provider (index 0) is present
+	foundActive := false
+	for _, p := range layout.providers {
+		if p == 0 {
+			foundActive = true
+			break
+		}
+	}
+	if !foundActive {
+		t.Error("active provider chip must be present in switcher")
+	}
+}
+
