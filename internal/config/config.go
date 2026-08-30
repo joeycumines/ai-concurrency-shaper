@@ -115,7 +115,10 @@ type Provider struct {
 	GlobalConcurrency      int
 	LimitAll               bool
 	QueueTimeout           time.Duration
-	RetryMax               int
+	RetryMax int
+	// RetryMaxBodyMB is the max request body size in MiB retained for replay by
+	// the proxy retry transport. It propagates as the default RetryReplayBytes
+	// for any transcoded route mapping where RetryReplayBytes is unset (zero).
 	RetryMaxBodyMB         int64
 	RetryWaitMin           time.Duration
 	RetryWaitMax           time.Duration
@@ -132,6 +135,9 @@ type Provider struct {
 
 	// AuthSource names where the upstream credential comes from:
 	// "env:VAR", "file:PATH", or the literal "none" (strip-only hygiene).
+	// Credentials from "file:PATH" are resolved once at startup and wrapped
+	// as static secrets across both passthrough and transcoded routes; file
+	// rotation requires a restart today.
 	// Empty disables upstream authentication entirely: requests are
 	// forwarded verbatim, exactly as they always have been.
 	AuthSource string

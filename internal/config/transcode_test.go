@@ -884,3 +884,79 @@ func TestResolveAndValidate_TranscodeAuthInheritance(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveAndValidate_BodyLimits_Propagation verifies that Provider.RetryMaxBodyMB
+// propagates to each TranscodeMapping.BodyLimits.RetryReplayBytes where zero (H2).
+func TestResolveAndValidate_BodyLimits_Propagation(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-retry-max-body-mb", "2",
+		"-transcode-responses-chat",
+		"-transcode-messages-responses",
+		"-transcode-allow-loss", "tool_schema_strictness",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	mappings := cfg.Providers[0].TranscodeMappings()
+	if len(mappings) != 2 {
+		t.Fatalf("mappings count = %d, want 2", len(mappings))
+	}
+	for i, m := range mappings {
+		if got := m.BodyLimits.RetryReplayBytes; got != 2<<20 {
+			t.Errorf("mapping %d (%s %s) RetryReplayBytes = %d, want %d", i, m.ClientRoute.Method, m.ClientRoute.Path, got, 2<<20)
+		}
+	}
+}
+
+// TestResolveAndValidate_FileSecretSource_RotationRequiresRestart proves that
+// file: credentials are resolved once at startup and wrapped as static secrets,
+// so in-place file modifications mid-run do not change the credential on either
+// passthrough or transcoded routes without a restart (H6).
+func TestResolveAndValidate_FileSecretSource_RotationRequiresRestart(t *testing.T) {
+	dir := t.TempDir()
+	secretPath := dir + "/secret.key"
+	if err := os.WriteFile(secretPath, []byte("initial-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-auth-source", "file:" + secretPath,
+		"-transcode-responses-chat",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+
+	// Overwrite the file on disk mid-run
+	if err := os.WriteFile(secretPath, []byte("rotated-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Provider-level auth policy still returns initial-token
+	provAuth := cfg.Providers[0].AuthPolicy()
+	if provAuth == nil || provAuth.Secret == nil {
+		t.Fatal("provider auth policy or secret source is nil")
+	}
+	provSec, err := provAuth.Secret.Secret(context.Background())
+	if err != nil || provSec != "initial-token" {
+		t.Fatalf("provider auth secret after file overwrite = %q, err = %v, want initial-token", provSec, err)
+	}
+
+	// 2. Inherited transcode route auth policy also still returns initial-token
+	mappings := cfg.Providers[0].TranscodeMappings()
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	tcSec, err := mappings[0].Mapping.Auth.Secret.Secret(context.Background())
+	if err != nil || tcSec != "initial-token" {
+		t.Fatalf("transcode auth secret after file overwrite = %q, err = %v, want initial-token", tcSec, err)
+	}
+}
