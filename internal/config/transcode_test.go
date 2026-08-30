@@ -1084,3 +1084,214 @@ func TestResolveAndValidate_Transcode_RetryReplayBytes_ZeroWhenRetriesDisabled(t
 		t.Errorf("RetryReplayBytes = %d, want 0 when retries disabled", got)
 	}
 }
+
+// TestResolveAndValidate_TranscodeMaxBodyMB_DefaultsAndOverrides tests that
+// transcode request and response memory limits default to 10 MiB out of the box
+// and can be customized via flags (Review 19 #A3, Review 20 #1).
+func TestResolveAndValidate_TranscodeMaxBodyMB_DefaultsAndOverrides(t *testing.T) {
+	// 1. Defaults: 10 MiB
+	cfgDefault, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-transcode-responses-chat",
+	})
+	if err != nil {
+		t.Fatalf("Parse (default): %v", err)
+	}
+	if err := cfgDefault.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate (default): %v", err)
+	}
+	pDefault := cfgDefault.Providers[0]
+	if pDefault.TranscodeMaxRequestMB != 10 {
+		t.Errorf("TranscodeMaxRequestMB default = %d, want 10", pDefault.TranscodeMaxRequestMB)
+	}
+	if pDefault.TranscodeMaxResponseMB != 10 {
+		t.Errorf("TranscodeMaxResponseMB default = %d, want 10", pDefault.TranscodeMaxResponseMB)
+	}
+	mappingsDefault := pDefault.TranscodeMappings()
+	if len(mappingsDefault) != 1 {
+		t.Fatalf("mappingsDefault len = %d, want 1", len(mappingsDefault))
+	}
+	if got := mappingsDefault[0].BodyLimits.DecodedRequestBytes; got != 10<<20 {
+		t.Errorf("DecodedRequestBytes = %d, want %d", got, 10<<20)
+	}
+	if got := mappingsDefault[0].BodyLimits.SuccessfulResponseBytes; got != 10<<20 {
+		t.Errorf("SuccessfulResponseBytes = %d, want %d", got, 10<<20)
+	}
+
+	// 2. Custom overrides
+	cfgCustom, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-transcode-responses-chat",
+		"-transcode-max-request-mb", "25",
+		"-transcode-max-response-mb", "40",
+	})
+	if err != nil {
+		t.Fatalf("Parse (custom): %v", err)
+	}
+	if err := cfgCustom.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate (custom): %v", err)
+	}
+	pCustom := cfgCustom.Providers[0]
+	mappingsCustom := pCustom.TranscodeMappings()
+	if got := mappingsCustom[0].BodyLimits.DecodedRequestBytes; got != 25<<20 {
+		t.Errorf("DecodedRequestBytes custom = %d, want %d", got, 25<<20)
+	}
+	if got := mappingsCustom[0].BodyLimits.SuccessfulResponseBytes; got != 40<<20 {
+		t.Errorf("SuccessfulResponseBytes custom = %d, want %d", got, 40<<20)
+	}
+
+	// 3. Negative validation
+	cfgNeg, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-transcode-responses-chat",
+		"-transcode-max-request-mb", "-1",
+	})
+	if err != nil {
+		t.Fatalf("Parse (negative): %v", err)
+	}
+	if err := cfgNeg.ResolveAndValidate(); err == nil {
+		t.Fatal("ResolveAndValidate with negative max-request-mb should fail")
+	}
+}
+
+// TestResolveAndValidate_TranscodeAuth_InvalidModesAndCustomHeaders verifies
+// that invalid auth modes and invalid/reserved custom header names fail startup
+// validation (Review 19 #C1).
+func TestResolveAndValidate_TranscodeAuth_InvalidModesAndCustomHeaders(t *testing.T) {
+	cases := []struct {
+		name    string
+		flags   []string
+		wantErr string
+	}{
+		{
+			name: "unknown_mode",
+			flags: []string{
+				"-upstream", "https://api.openai.com",
+				"-transcode-responses-chat",
+				"-transcode-auth", "bogus",
+			},
+			wantErr: "unknown auth mode",
+		},
+		{
+			name: "colon_syntax_rejected",
+			flags: []string{
+				"-upstream", "https://api.openai.com",
+				"-transcode-responses-chat",
+				"-transcode-auth", "header:X-Custom-Key",
+			},
+			wantErr: "unknown auth mode",
+		},
+		{
+			name: "header_mode_empty_header_name",
+			flags: []string{
+				"-upstream", "https://api.openai.com",
+				"-transcode-responses-chat",
+				"-transcode-auth", "header",
+			},
+			wantErr: "custom auth header is empty",
+		},
+		{
+			name: "header_mode_invalid_header_name",
+			flags: []string{
+				"-upstream", "https://api.openai.com",
+				"-transcode-responses-chat",
+				"-transcode-auth", "header",
+				"-transcode-auth-header", "Invalid Header Name",
+			},
+			wantErr: "not a valid HTTP field name",
+		},
+		{
+			name: "header_mode_reserved_header_name",
+			flags: []string{
+				"-upstream", "https://api.openai.com",
+				"-transcode-responses-chat",
+				"-transcode-auth", "header",
+				"-transcode-auth-header", "Authorization",
+			},
+			wantErr: "reserved by the proxy pipeline",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse(tc.flags)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			err = cfg.ResolveAndValidate()
+			if err == nil {
+				t.Fatal("ResolveAndValidate expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestParseNegatedLosses_AllCanonicalFeatures verifies that every canonical
+// Feature can be passed positively or with '!' negation and is correctly mapped
+// without silent drop (Review 19 #C2).
+func TestParseNegatedLosses_AllCanonicalFeatures(t *testing.T) {
+	for _, feat := range transcode.RegisteredLossKeys() {
+		name := string(feat)
+		// Positive
+		allowed, negated, err := parseNegatedLosses(name)
+		if err != nil {
+			t.Fatalf("parseNegatedLosses(%q): %v", name, err)
+		}
+		if _, ok := allowed[feat]; !ok {
+			t.Errorf("feature %s was not added to allowed map", name)
+		}
+		if len(negated) != 0 {
+			t.Errorf("expected empty negated map for positive feature %s", name)
+		}
+
+		// Negated
+		negName := "!" + name
+		allowed, negated, err = parseNegatedLosses(negName)
+		if err != nil {
+			t.Fatalf("parseNegatedLosses(%q): %v", negName, err)
+		}
+		if _, ok := negated[feat]; !ok {
+			t.Errorf("feature %s was not added to negated map", name)
+		}
+		if len(allowed) != 0 {
+			t.Errorf("expected empty allowed map for negated feature %s", name)
+		}
+	}
+}
+
+// TestResolveAndValidate_MessagesResponses_StrictDefaultsRequiresLoss verifies
+// that -transcode-messages-responses under -transcode-strict-defaults demands
+// explicit -transcode-allow-loss tool_schema_strictness (Review 19 #C3).
+func TestResolveAndValidate_MessagesResponses_StrictDefaultsRequiresLoss(t *testing.T) {
+	// Without explicit loss approval under strict defaults -> fail
+	cfgWithoutLoss, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-transcode-messages-responses",
+		"-transcode-strict-defaults",
+	})
+	if err != nil {
+		t.Fatalf("Parse (without loss): %v", err)
+	}
+	if err := cfgWithoutLoss.ResolveAndValidate(); err == nil {
+		t.Fatal("expected ResolveAndValidate to fail without tool_schema_strictness under strict defaults")
+	} else if !strings.Contains(err.Error(), "tool_schema_strictness") {
+		t.Errorf("expected error mentioning tool_schema_strictness, got: %v", err)
+	}
+
+	// With explicit loss approval -> pass
+	cfgWithLoss, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-transcode-messages-responses",
+		"-transcode-strict-defaults",
+		"-transcode-allow-loss", "tool_schema_strictness",
+	})
+	if err != nil {
+		t.Fatalf("Parse (with loss): %v", err)
+	}
+	if err := cfgWithLoss.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate (with loss): %v", err)
+	}
+}

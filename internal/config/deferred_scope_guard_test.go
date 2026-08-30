@@ -48,7 +48,7 @@ func TestDeferredVisionClauses_TypesRemainAbsent(t *testing.T) {
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if name == ".git" || name == "scratch" || name == "vendor" || name == ".gemini" {
+			if name == ".git" || name == "scratch" || name == "vendor" || name == ".gemini" || name == "testdata" {
 				return filepath.SkipDir
 			}
 			return nil

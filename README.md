@@ -315,9 +315,10 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-allow-loss` | provider | _(repeatable)_ | Approve non-portable semantic loss by granular key (or withdraw `!key`) |
 | `-transcode-strict-defaults` | provider | `false` | Strip all out-of-the-box chat capabilities, query parameters, and loss approvals |
 | `-transcode-model` | provider | _(repeatable)_ | Map client model name to upstream model name (`client=upstream`), identity fallback when omitted |
-| `-transcode-auth` | provider | `auto` | Per-route target auth mode override (`auto`, `bearer`, `x-api-key`, `api-key`, `header:NAME`, `none`) |
-| `-transcode-auth-source` | provider | `inbound` | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`, `none`) |
-| `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header:` |
+| `-transcode-auth` | provider | `auto` | Per-route target auth mode override (`auto`, `bearer`, `x-api-key`, `api-key`, `header`, `none`) |
+| `-transcode-auth-source` | provider | `inbound` | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`) |
+| `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header` |
+| `-transcode-anthropic-version` | provider | `2023-06-01` | Anthropic-Version header value when target auth mode resolves to `x-api-key` |
 | `-transcode-max-request-mb` | provider | `10` | Max unmarshaled request body size (MB) for transcoding |
 | `-transcode-max-response-mb` | provider | `10` | Max unmarshaled non-streaming response body size (MB) for transcoding |
 
@@ -522,8 +523,8 @@ failure, never a silent fallback. The client's stream intent (the
   `x-api-key`, `api-key`, or a custom `header`.
 - `-transcode-auth-source inbound` forwards the single credential from the
   client request; `env:NAME` and `file:PATH` supply the secret from the
-  environment or a bounded file read (64 KiB cap; atomic file replacement
-  rotates the credential without a restart).
+  environment or a bounded file read (64 KiB cap; resolved once at startup,
+  credential rotation requires restart).
 - Secrets are never accepted as command-line arguments. Inbound
   credentials are stripped before the target policy is applied: nothing is
   forwarded across provider boundaries unless the configured policy says

@@ -82,8 +82,8 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 			var chatReq struct {
 				Stream   bool `json:"stream"`
 				Messages []struct {
-					Role    string `json:"role"`
-					Content string `json:"content"`
+					Role    string          `json:"role"`
+					Content json.RawMessage `json:"content"`
 				} `json:"messages"`
 			}
 			_ = json.Unmarshal(body, &chatReq)
@@ -189,7 +189,13 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 		"-retry", "0",
 	)
 
-	cmd.Env = append(os.Environ(),
+	var filteredEnv []string
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(env, "SHAPER_PROVIDER_") {
+			filteredEnv = append(filteredEnv, env)
+		}
+	}
+	cmd.Env = append(filteredEnv,
 		"SHAPER_PROVIDER_ANTHROPIC_KEY=secret-anthropic-key-xyz",
 		"SHAPER_PROVIDER_OPENAI_KEY=secret-openai-key-abc",
 	)
@@ -223,11 +229,12 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	httpClient := &http.Client{Timeout: 5 * time.Second}
 
 	// -------------------------------------------------------------------------
-	// (a) Claude Code Multi-Turn Shape with Mid-Conversation System Turn
+	// (a) Claude Code Multi-Turn Shape with Mid-Conversation System Turn & Thinking Budget
 	// -------------------------------------------------------------------------
 	claudePayload := `{
 		"model": "claude-3-7-sonnet-20250219",
 		"max_tokens": 1024,
+		"thinking": {"type": "enabled", "budget_tokens": 1024},
 		"system": [{"type": "text", "text": "Leading system instruction"}],
 		"messages": [
 			{"role": "user", "content": "turn 1 prompt"},
@@ -273,13 +280,22 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	}
 	var chatBody struct {
 		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
 		} `json:"messages"`
 	}
-	_ = json.Unmarshal(upABodies[0], &chatBody)
+	if err := json.Unmarshal(upABodies[0], &chatBody); err != nil {
+		t.Fatalf("unmarshal upstream A body: %v", err)
+	}
 	upAMu.Unlock()
 
+	if len(chatBody.Messages) == 0 || chatBody.Messages[0].Role != "system" {
+		t.Fatalf("first chat message is not consolidated leading system message: %+v", chatBody.Messages)
+	}
+	if !strings.Contains(string(chatBody.Messages[0].Content), "Leading system instruction") ||
+		!strings.Contains(string(chatBody.Messages[0].Content), "mid-conversation system turn") {
+		t.Errorf("consolidated system message content missing expected turns: %q", string(chatBody.Messages[0].Content))
+	}
 	for i, m := range chatBody.Messages {
 		if i > 0 && m.Role == "system" {
 			t.Errorf("system message at index %d violates Jinja leading system property", i)
@@ -330,11 +346,37 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 		t.Fatalf("unmarshal responses response: %v\n%s", err, bodyCodex)
 	}
 
+	if len(responsesResp.Output) == 0 || responsesResp.Output[0].Role != "assistant" {
+		t.Fatalf("responsesResp output structure invalid: %+v", responsesResp.Output)
+	}
+	if len(responsesResp.Output[0].Content) == 0 || responsesResp.Output[0].Content[0].Text != "codex recall reply: 42" {
+		t.Errorf("responsesResp content text = %q, want 'codex recall reply: 42'", responsesResp.Output[0].Content)
+	}
+
 	upBMu.Lock()
 	if upBAuth != "Bearer secret-openai-key-abc" {
 		t.Errorf("upstream B auth = %q, want Bearer secret-openai-key-abc", upBAuth)
 	}
+	if len(upBBodies) == 0 {
+		t.Fatalf("upstream B received no requests")
+	}
+	var codexChatBody struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(upBBodies[0], &codexChatBody); err != nil {
+		t.Fatalf("unmarshal upstream B body: %v", err)
+	}
 	upBMu.Unlock()
+
+	if len(codexChatBody.Messages) < 4 {
+		t.Fatalf("upstream B received %d messages, want at least 4: %+v", len(codexChatBody.Messages), codexChatBody.Messages)
+	}
+	if !strings.Contains(string(codexChatBody.Messages[0].Content), "You are a helpful assistant.") {
+		t.Errorf("instructions message = %q, want containing 'You are a helpful assistant.'", string(codexChatBody.Messages[0].Content))
+	}
 
 	// -------------------------------------------------------------------------
 	// (c) Streaming SSE Exchange with exactly one terminal event
@@ -358,36 +400,50 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 
 	scanner := bufio.NewScanner(respStream.Body)
 	var eventTypes []string
+	terminalEventsCount := 0
 	for scanner.Scan() {
 		line := scanner.Text()
 		if after, ok := strings.CutPrefix(line, "event: "); ok {
 			eventTypes = append(eventTypes, after)
+			if after == "message_stop" {
+				terminalEventsCount++
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("stream scanner error: %v", err)
 	}
 
-	// Verify terminal event was message_stop
+	// Verify terminal event was message_stop and occurred exactly once
 	if len(eventTypes) == 0 {
 		t.Fatalf("no SSE events received")
+	}
+	if terminalEventsCount != 1 {
+		t.Errorf("message_stop count = %d, want exactly 1 terminal event", terminalEventsCount)
 	}
 	lastEvent := eventTypes[len(eventTypes)-1]
 	if lastEvent != "message_stop" {
 		t.Errorf("last SSE event = %q, want message_stop", lastEvent)
 	}
+	if upAStreamHit.Load() == 0 {
+		t.Errorf("upAStreamHit = 0, want > 0")
+	}
 
 	// Verify WebSocket Upgrade rejected with 400 on transcode route
-	reqWS, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/anthropic/v1/messages", strings.NewReader(`{}`))
+	reqWS, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/anthropic/v1/messages", strings.NewReader(`{"model":"claude-3-7-sonnet-20250219","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}`))
 	reqWS.Header.Set("Upgrade", "websocket")
 	reqWS.Header.Set("Connection", "Upgrade")
 	respWS, err := httpClient.Do(reqWS)
 	if err != nil {
 		t.Fatalf("WS request failed: %v", err)
 	}
+	bodyWS, _ := io.ReadAll(respWS.Body)
 	respWS.Body.Close()
 	if respWS.StatusCode != http.StatusBadRequest {
-		t.Errorf("WS upgrade status = %d, want 400", respWS.StatusCode)
+		t.Errorf("WS upgrade status = %d, want 400: %s", respWS.StatusCode, bodyWS)
+	}
+	if !strings.Contains(string(bodyWS), "websocket") && !strings.Contains(string(bodyWS), "upgrade") && !strings.Contains(string(bodyWS), "Upgrade") {
+		t.Errorf("WS upgrade error body does not attribute rejection to upgrade: %s", bodyWS)
 	}
 
 	// -------------------------------------------------------------------------
@@ -400,8 +456,33 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	}
 
 	// -------------------------------------------------------------------------
-	// (e) Passthrough Mount & Prometheus Metrics Aggregate Accounting
+	// (e) Untranscoded Route Fallback & Passthrough Mount & Prometheus Metrics
 	// -------------------------------------------------------------------------
+	// 1. Untranscoded route on Provider Anthropic
+	reqUnA, _ := http.NewRequest(http.MethodGet, "http://"+proxyAddr+"/anthropic/v1/untranscoded", nil)
+	respUnA, err := httpClient.Do(reqUnA)
+	if err != nil {
+		t.Fatalf("untranscoded A request failed: %v", err)
+	}
+	bodyUnA, _ := io.ReadAll(respUnA.Body)
+	respUnA.Body.Close()
+	if respUnA.StatusCode != http.StatusOK || !strings.Contains(string(bodyUnA), "untranscoded_a") {
+		t.Errorf("untranscoded A status = %d, body = %s", respUnA.StatusCode, bodyUnA)
+	}
+
+	// 2. Untranscoded route on Provider OpenAI
+	reqUnB, _ := http.NewRequest(http.MethodGet, "http://"+proxyAddr+"/openai/v1/untranscoded", nil)
+	respUnB, err := httpClient.Do(reqUnB)
+	if err != nil {
+		t.Fatalf("untranscoded B request failed: %v", err)
+	}
+	bodyUnB, _ := io.ReadAll(respUnB.Body)
+	respUnB.Body.Close()
+	if respUnB.StatusCode != http.StatusOK || !strings.Contains(string(bodyUnB), "untranscoded_b") {
+		t.Errorf("untranscoded B status = %d, body = %s", respUnB.StatusCode, bodyUnB)
+	}
+
+	// 3. Passthrough provider request
 	reqPass, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/passthrough/v1/models", strings.NewReader(`{}`))
 	respPass, err := httpClient.Do(reqPass)
 	if err != nil {
@@ -410,6 +491,9 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	respPass.Body.Close()
 	if respPass.StatusCode != http.StatusOK {
 		t.Errorf("passthrough status = %d, want 200", respPass.StatusCode)
+	}
+	if upCHits.Load() == 0 {
+		t.Errorf("upCHits = 0, want > 0")
 	}
 
 	// Poll metrics endpoint

@@ -94,29 +94,31 @@ func (s *stringList) Set(v string) error {
 // inline literals so each default reads as a single named value at its
 // registration site and cannot drift between flag sets.
 const (
-	defaultBind                  = ":8080"
-	defaultConcurrency           = 4
-	defaultQueueTimeout          = 30 * time.Second
-	defaultRetryMax              = -1
-	defaultRetryMaxBodyMB        = 5
-	defaultRetryWaitMin          = 500 * time.Millisecond
-	defaultRetryWaitMax          = 30 * time.Second
-	defaultRetryMinDelay         = 1 * time.Second
-	defaultRetrySkipOn429        = true
-	defaultReleaseCooldown       = 200 * time.Millisecond
-	defaultCancelCooldown        = 200 * time.Millisecond
-	defaultFailureHold           = 2 * time.Second
-	defaultAdaptiveHeadroom      = false
-	defaultAdaptiveHeadroomWin   = 30 * time.Second
-	defaultDisableKeepAlives     = false
-	defaultCBEnabled             = true
-	defaultCBThreshold           = 5
-	defaultCBWindow              = 30 * time.Second
-	defaultCBOpenTimeout         = 10 * time.Second
-	defaultCBMaxOpen             = 120 * time.Second
-	defaultCBPenalty             = 2 * time.Second
-	defaultCBMaxPenalty          = 60 * time.Second
-	defaultAnthropicVersionValue = "2023-06-01"
+	defaultBind                   = ":8080"
+	defaultConcurrency            = 4
+	defaultQueueTimeout           = 30 * time.Second
+	defaultRetryMax               = -1
+	defaultRetryMaxBodyMB         = 5
+	defaultRetryWaitMin           = 500 * time.Millisecond
+	defaultRetryWaitMax           = 30 * time.Second
+	defaultRetryMinDelay          = 1 * time.Second
+	defaultRetrySkipOn429         = true
+	defaultReleaseCooldown        = 200 * time.Millisecond
+	defaultCancelCooldown         = 200 * time.Millisecond
+	defaultFailureHold            = 2 * time.Second
+	defaultAdaptiveHeadroom       = false
+	defaultAdaptiveHeadroomWin    = 30 * time.Second
+	defaultDisableKeepAlives      = false
+	defaultCBEnabled              = true
+	defaultCBThreshold            = 5
+	defaultCBWindow               = 30 * time.Second
+	defaultCBOpenTimeout          = 10 * time.Second
+	defaultCBMaxOpen              = 120 * time.Second
+	defaultCBPenalty              = 2 * time.Second
+	defaultCBMaxPenalty           = 60 * time.Second
+	defaultAnthropicVersionValue  = "2023-06-01"
+	defaultTranscodeMaxRequestMB  = 10
+	defaultTranscodeMaxResponseMB = 10
 )
 
 // registerServerFlags registers the server/global-section flags (legacy
@@ -203,8 +205,8 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.stringListVar(&p.TranscodeChatCapabilities, "transcode-chat-capability", "enable chat upstream capability or !name to deny (repeatable)")
 	r.stringListVar(&p.TranscodeAllowClientQuery, "transcode-allow-client-query", "forward client query parameter or !name to deny (repeatable)")
 	r.stringListVar(&p.TranscodeModelMap, "transcode-model", "map client model to upstream model: client=upstream (repeatable)")
-	r.int64Var(&p.TranscodeMaxRequestMB, "transcode-max-request-mb", 0, "max request body size retained for transcoding, in MiB")
-	r.int64Var(&p.TranscodeMaxResponseMB, "transcode-max-response-mb", 0, "max response body size retained for transcoding, in MiB")
+	r.int64Var(&p.TranscodeMaxRequestMB, "transcode-max-request-mb", defaultTranscodeMaxRequestMB, "max request body size retained for transcoding, in MiB")
+	r.int64Var(&p.TranscodeMaxResponseMB, "transcode-max-response-mb", defaultTranscodeMaxResponseMB, "max response body size retained for transcoding, in MiB")
 	r.stringVar(&p.TranscodeAuth, "transcode-auth", "", "upstream auth mode for transcode: auto | none | bearer | x-api-key | api-key | header")
 	r.stringVar(&p.TranscodeAuthSource, "transcode-auth-source", "", "upstream auth secret source for transcode: inbound | env:VAR | file:PATH")
 	r.stringVar(&p.TranscodeAuthHeader, "transcode-auth-header", "", "custom upstream auth header name for transcode")
