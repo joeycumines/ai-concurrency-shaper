@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -44,46 +45,75 @@ type Provider struct {
 	Proxy http.Handler
 }
 
-// Handler dispatches requests to the registered providers by prefix mount.
+// Handler dispatches incoming HTTP requests by path prefix to the appropriate
+// provider's proxy.
 type Handler struct {
 	providers []Provider
-	// bare is set exactly when a single provider is mounted at the bare root,
-	// which turns the handler into a transparent pass-through for it.
+	// bare points to the single bare-root provider when exactly one exists,
+	// bypassing the slice scan on the hot path.
 	bare *Provider
 }
 
-// New normalizes the providers' prefixes, rejects multiple bare mounts and
-// segment-wise-overlapping prefixes, and returns a dispatcher. The providers
-// slice is copied; later mutation of the caller's slice has no effect.
+// New constructs a prefix-matching router over the given providers.
 //
-// The overlap check is defensive: the config layer already rejects overlapping
-// mounts before the router is constructed, so this only guards direct callers.
+// Semantics:
+//
+//   - A single provider with Prefix == "" or "/" is a bare-root mount: it receives
+//     every request after normalizing the path to match prefixed mount semantics.
+//   - Multiple providers with Prefix == "" are rejected (they would collide on the
+//     bare root).
+//   - When any provider has a non-empty Prefix, every provider must have a
+//     non-empty prefix (mixing bare and prefixed providers is illegal).
+//   - Overlapping prefixes (where one prefix is a segment-wise prefix of another,
+//     such as /acme and /acme/v1) are rejected at construction.
+//   - Every provider's Proxy handler must not be nil.
+//
+// Prefix values are matched literally (split on '/' only, not ':') matching the
+// segmentation rules of the CLI validator.
 func New(providers []Provider) (*Handler, error) {
-	h := &Handler{providers: make([]Provider, len(providers))}
+	if len(providers) == 0 {
+		return nil, errors.New("router: at least one provider is required")
+	}
+
+	h := &Handler{
+		providers: make([]Provider, len(providers)),
+	}
 	copy(h.providers, providers)
 
+	// Validate handlers and prefixes.
 	bare := -1
 	for i := range h.providers {
-		h.providers[i].Prefix = normalizePrefix(h.providers[i].Prefix)
-		if h.providers[i].Prefix == "" {
+		p := &h.providers[i]
+		if p.Proxy == nil {
+			if p.Name != "" {
+				return nil, fmt.Errorf("router: provider %q has nil Proxy", p.Name)
+			}
+			return nil, fmt.Errorf("router: provider %d (%q) has nil Proxy", i, p.Prefix)
+		}
+		p.Prefix = normalizePrefix(p.Prefix)
+		if p.Prefix == "" {
 			if bare >= 0 {
-				return nil, errors.New("router: at most one provider may be mounted at the bare root")
+				return nil, errors.New("router: only one bare root (empty prefix) provider is allowed")
 			}
 			bare = i
 		}
-		if h.providers[i].Proxy == nil {
-			name := h.providers[i].Name
-			if name == "" {
-				name = fmt.Sprintf("%q", h.providers[i].Prefix)
-			}
-			return nil, fmt.Errorf("router: provider %s has no handler", name)
-		}
 	}
 
-	for a := 0; a < len(h.providers); a++ {
+	// Mixing bare and prefixed mounts is rejected: if there are >1 providers,
+	// every provider must have a non-empty prefix.
+	if len(h.providers) > 1 && bare >= 0 {
+		return nil, fmt.Errorf("router: provider %q has empty prefix, but multiple providers are configured (every provider requires a distinct prefix)", h.providers[bare].Name)
+	}
+
+	// Overlap check (only relevant with >1 providers).
+	for a := range h.providers {
 		for b := a + 1; b < len(h.providers); b++ {
 			if prefixesOverlap(h.providers[a].Prefix, h.providers[b].Prefix) {
-				return nil, fmt.Errorf("router: provider prefixes overlap: %q and %q", h.providers[a].Prefix, h.providers[b].Prefix)
+				return nil, fmt.Errorf(
+					"router: provider prefixes overlap: %q (%s) and %q (%s)",
+					h.providers[a].Prefix, h.providers[a].Name,
+					h.providers[b].Prefix, h.providers[b].Name,
+				)
 			}
 		}
 	}
@@ -99,11 +129,20 @@ func New(providers []Provider) (*Handler, error) {
 // provider (h.bare set) it delegates after normalizing the path through the
 // same traversal-resolved joinSegments / RawPath clearing as prefixed mounts,
 // ensuring route key dispatch parity. No match yields 404.
+//
+// Inbound requests are shallow-cloned before mutating URL path fields, ensuring
+// the caller's request object and URL are never mutated (review-16 finding 1).
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.bare != nil {
-		r.URL.Path = joinSegments(segments(r.URL.Path))
-		r.URL.RawPath = ""
-		h.bare.Proxy.ServeHTTP(w, r)
+		r2 := new(http.Request)
+		*r2 = *r
+		if r.URL != nil {
+			r2.URL = new(url.URL)
+			*r2.URL = *r.URL
+			r2.URL.Path = joinSegments(segments(r.URL.Path))
+			r2.URL.RawPath = ""
+		}
+		h.bare.Proxy.ServeHTTP(w, r2)
 		return
 	}
 
@@ -127,9 +166,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Rebuild the path from the remaining segments. Clearing RawPath lets
 		// the downstream reverse proxy re-encode from the decoded Path.
-		r.URL.Path = joinSegments(segs[len(pre):])
-		r.URL.RawPath = ""
-		p.Proxy.ServeHTTP(w, r)
+		r2 := new(http.Request)
+		*r2 = *r
+		if r.URL != nil {
+			r2.URL = new(url.URL)
+			*r2.URL = *r.URL
+			r2.URL.Path = joinSegments(segs[len(pre):])
+			r2.URL.RawPath = ""
+		}
+		p.Proxy.ServeHTTP(w, r2)
 		return
 	}
 

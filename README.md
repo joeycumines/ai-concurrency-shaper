@@ -314,7 +314,7 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-allow-client-query` | provider | _(repeatable)_ | Forward client query parameter (`name` or withdraw `!name`) |
 | `-transcode-allow-loss` | provider | _(repeatable)_ | Approve non-portable semantic loss by granular key (or withdraw `!key`) |
 | `-transcode-strict-defaults` | provider | `false` | Strip all out-of-the-box chat capabilities, query parameters, and loss approvals |
-| `-transcode-model-map` | provider | `auto` | Map client model name to upstream model name (`client=upstream`), or `auto` for pass-through |
+| `-transcode-model` | provider | _(repeatable)_ | Map client model name to upstream model name (`client=upstream`), identity fallback when omitted |
 | `-transcode-auth` | provider | `auto` | Per-route target auth mode override (`auto`, `bearer`, `x-api-key`, `api-key`, `header:NAME`, `none`) |
 | `-transcode-auth-source` | provider | `inbound` | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`, `none`) |
 | `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header:` |

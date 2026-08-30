@@ -646,13 +646,10 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 		return nil, err
 	}
 
-	// Sound behavior: preserve the request context on the upstream request.
-	outReq = outReq.WithContext(r.Context())
-
 	// Extract the inbound credential from the CLIENT's original headers when
 	// the policy requires inbound credentials, then strip and re-apply per policy.
 	var inbound Credential
-	if h.cfg.Mapping.Auth.Inbound {
+	if h.cfg.Mapping.Auth.Inbound && h.cfg.Mapping.Auth.Mode != AuthNone {
 		var err error
 		inbound, err = ExtractInboundCredential(r.Header)
 		if err != nil {

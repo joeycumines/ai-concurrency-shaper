@@ -2085,9 +2085,6 @@ func (m Model) fleetSummary() string {
 			busiest = label
 		}
 	}
-	if busiest == "" && len(m.providers) > 0 {
-		busiest = m.providerLabel(0)
-	}
 
 	return fmt.Sprintf("Fleet: %d active · %d queued · %d OPEN · busiest: %s",
 		totalActive, totalQueued, openBreakers, busiest)

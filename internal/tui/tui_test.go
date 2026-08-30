@@ -5246,13 +5246,7 @@ func TestFleetStrip_AggregateObservability(t *testing.T) {
 		t.Fatal("budgetedChips should fit chips at 80 cols")
 	}
 	// Active provider (index 0) is present
-	foundActive := false
-	for _, p := range layout.providers {
-		if p == 0 {
-			foundActive = true
-			break
-		}
-	}
+	foundActive := slices.Contains(layout.providers, 0)
 	if !foundActive {
 		t.Error("active provider chip must be present in switcher")
 	}

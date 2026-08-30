@@ -248,10 +248,11 @@ func TestRouter_MultiProviderTranscodeHandlerIsolation(t *testing.T) {
 }
 
 // TestRouter_BareVsPrefixedTrailingSlashParity pins the F-6/H5 class behavior:
-//   - Under a bare mount (Prefix=""), the router delegates r.URL.Path unnormalized
-//     so POST /v1/responses matches the RouteKey, while POST /v1/responses/ does not.
+//   - Under a bare mount (Prefix=""), the router normalizes r.URL.Path through
+//     joinSegments(segments(r.URL.Path)) and clears RawPath so POST /v1/responses/
+//     normalizes to /v1/responses and matches the RouteKey.
 //   - Under a prefixed mount (Prefix="/p"), joinSegments normalizes /p/v1/responses/
-//     to /v1/responses, so it matches the RouteKey.
+//     to /v1/responses, ensuring complete route key dispatch parity.
 func TestRouter_BareVsPrefixedTrailingSlashParity(t *testing.T) {
 	var bareUpstreamPath, prefixedUpstreamPath atomic.Value
 

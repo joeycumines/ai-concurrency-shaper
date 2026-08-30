@@ -248,6 +248,10 @@ func parseTranscodeAuth(
 		AnthropicVersion: anthropicVersion,
 	}
 
+	if policy.Mode == transcode.AuthNone {
+		return transcode.AuthPolicy{Mode: transcode.AuthNone}, nil
+	}
+
 	switch source {
 	case "", "inbound":
 		policy.Inbound = true
@@ -606,7 +610,7 @@ func validateMBFlag(name string, value int64, shift uint) error {
 
 // resolveTranscode resolves and validates all transcode configuration for a Provider.
 func (p *Provider) resolveTranscode() error {
-	if err := validateMBFlag("-transcode-max-request-mb", p.TranscodeMaxRequestMB, 22); err != nil {
+	if err := validateMBFlag("-transcode-max-request-mb", p.TranscodeMaxRequestMB, 20); err != nil {
 		return err
 	}
 	if err := validateMBFlag("-transcode-max-response-mb", p.TranscodeMaxResponseMB, 20); err != nil {
@@ -718,6 +722,10 @@ func (p *Provider) resolveTranscode() error {
 		}
 		if p.TranscodeMaxResponseMB > 0 {
 			mappings[i].BodyLimits.SuccessfulResponseBytes = p.TranscodeMaxResponseMB << 20
+		}
+
+		if err := mappings[i].Mapping.Validate(); err != nil {
+			return fmt.Errorf("transcode mapping %s %s: %w", mappings[i].ClientRoute.Method, mappings[i].ClientRoute.Path, err)
 		}
 	}
 

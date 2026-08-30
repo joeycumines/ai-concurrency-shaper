@@ -1542,6 +1542,66 @@ func TestHandlerAuthApplied(t *testing.T) {
 	}
 }
 
+// TestHandlerAuthNone_MultipleClientAuthHeadersStripped proves that when Mode == AuthNone,
+// any inbound client auth headers (even conflicting or malformed ones) are stripped cleanly
+// and do not trigger an inbound credential extraction failure (review-15 finding 1, review-16 finding 2).
+func TestHandlerAuthNone_MultipleClientAuthHeadersStripped(t *testing.T) {
+	mapping := messagesMapping(t, UpstreamResponses)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureToolSchemaStrictness:   {},
+		FeatureReasoningSummary:       {},
+		FeatureOutputItemBoundaries:   {},
+		FeaturePreviousResponseID:     {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
+	}}
+	mapping.Auth = AuthPolicy{
+		Mode: AuthNone,
+	}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			if got := req.Header.Get("Authorization"); got != "" {
+				t.Fatalf("Authorization = %q, want stripped", got)
+			}
+			if got := req.Header.Get("X-Api-Key"); got != "" {
+				t.Fatalf("X-Api-Key = %q, want stripped", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewReader(testcorpus.ResponsesResponseJSON())),
+			}, nil
+		},
+		nil,
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		strings.NewReader(`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`),
+	)
+	// Send multiple/conflicting client headers that would fail ExtractInboundCredential
+	req.Header.Set("Authorization", "Bearer token-1")
+	req.Header.Set("X-Api-Key", "token-2")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandlerQueryParametersAsConfig(t *testing.T) {
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}

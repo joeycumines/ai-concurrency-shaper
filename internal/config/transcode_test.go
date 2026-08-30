@@ -346,6 +346,17 @@ func TestParseNegatedLosses(t *testing.T) {
 		t.Fatal("negated name leaked into positives")
 	}
 
+	onlyNegatedAllowed, onlyNegated, err := parseNegatedLosses("!builtin_tools")
+	if err != nil {
+		t.Fatalf("parseNegatedLosses(!builtin_tools): %v", err)
+	}
+	if len(onlyNegatedAllowed) != 0 {
+		t.Fatalf("onlyNegatedAllowed = %v, want empty", onlyNegatedAllowed)
+	}
+	if _, ok := onlyNegated[transcode.FeatureBuiltinTools]; !ok {
+		t.Fatal("builtin_tools missing from onlyNegated")
+	}
+
 	if _, _, err := parseNegatedLosses("!bogus"); err == nil {
 		t.Fatal("unknown negated loss accepted")
 	} else if !strings.Contains(err.Error(), "bogus") {
@@ -560,6 +571,23 @@ func TestParseTranscodeAuth(t *testing.T) {
 
 	if _, err := parseTranscodeAuth("auto", "bogus", "", ""); err == nil {
 		t.Fatal("expected invalid source rejection")
+	}
+
+	// AuthNone must NEVER enable inbound credential extraction or require secret resolution (review-15 finding 1, 2)
+	nonePolicy, err := parseTranscodeAuth("none", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nonePolicy.Mode != transcode.AuthNone || nonePolicy.Inbound || nonePolicy.Secret != nil {
+		t.Fatalf("nonePolicy = %+v, want Mode=AuthNone, Inbound=false, Secret=nil", nonePolicy)
+	}
+
+	noneWithSource, err := parseTranscodeAuth("none", "env:UNSET_ENV_KEY", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if noneWithSource.Mode != transcode.AuthNone || noneWithSource.Inbound || noneWithSource.Secret != nil {
+		t.Fatalf("noneWithSource = %+v, want Mode=AuthNone, Inbound=false, Secret=nil", noneWithSource)
 	}
 }
 
@@ -958,5 +986,101 @@ func TestResolveAndValidate_FileSecretSource_RotationRequiresRestart(t *testing.
 	tcSec, err := mappings[0].Mapping.Auth.Secret.Secret(context.Background())
 	if err != nil || tcSec != "initial-token" {
 		t.Fatalf("transcode auth secret after file overwrite = %q, err = %v, want initial-token", tcSec, err)
+	}
+}
+
+// TestResolveAndValidate_TranscodeAuth_NoneWithUnsetEnvVar proves that setting
+// -transcode-auth none skips secret resolution even if -transcode-auth-source specifies
+// an unset environment variable (review-15 finding 2).
+func TestResolveAndValidate_TranscodeAuth_NoneWithUnsetEnvVar(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-transcode-responses-chat",
+		"-transcode-auth", "none",
+		"-transcode-auth-source", "env:DEFINITELY_UNSET_VAR_XYZ_123",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate with -transcode-auth none failed: %v", err)
+	}
+	mappings := cfg.Providers[0].TranscodeMappings()
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	if mappings[0].Mapping.Auth.Mode != transcode.AuthNone {
+		t.Errorf("auth mode = %q, want none", mappings[0].Mapping.Auth.Mode)
+	}
+	if mappings[0].Mapping.Auth.Inbound {
+		t.Error("Inbound = true, want false")
+	}
+	if mappings[0].Mapping.Auth.Secret != nil {
+		t.Error("Secret is not nil, want nil")
+	}
+}
+
+// TestProvider_TranscodeMappings_DeepCopyIsIsolated verifies that mutating maps
+// returned by Provider.TranscodeMappings() does not alter the provider's internal state (review-15 finding 7).
+func TestProvider_TranscodeMappings_DeepCopyIsIsolated(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-transcode-responses-chat",
+		"-transcode-model", "client-m=upstream-m",
+		"-transcode-allow-loss", "top_k",
+		"-transcode-allow-client-query", "custom_param",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+
+	// First copy
+	m1 := cfg.Providers[0].TranscodeMappings()
+	if len(m1) != 1 {
+		t.Fatalf("m1 len = %d, want 1", len(m1))
+	}
+
+	// Mutate maps in m1
+	m1[0].Mapping.ModelMap.Exact["mutated"] = transcode.ModelMapping{UpstreamModel: "hacked"}
+	m1[0].Mapping.LossPolicy.Allowed[transcode.FeatureImageInput] = struct{}{}
+	m1[0].Mapping.AllowedClientQuery["hacked_param"] = struct{}{}
+
+	// Second copy
+	m2 := cfg.Providers[0].TranscodeMappings()
+	if _, ok := m2[0].Mapping.ModelMap.Exact["mutated"]; ok {
+		t.Error("mutation of ModelMap leaked into second copy")
+	}
+	if _, ok := m2[0].Mapping.LossPolicy.Allowed[transcode.FeatureImageInput]; ok {
+		t.Error("mutation of LossPolicy leaked into second copy")
+	}
+	if _, ok := m2[0].Mapping.AllowedClientQuery["hacked_param"]; ok {
+		t.Error("mutation of AllowedClientQuery leaked into second copy")
+	}
+}
+
+// TestResolveAndValidate_Transcode_RetryReplayBytes_ZeroWhenRetriesDisabled proves
+// that when RetryMax is 0, RetryReplayBytes remains 0 even if RetryMaxBodyMB is configured (review-15 finding 4, review-18 finding 4).
+func TestResolveAndValidate_Transcode_RetryReplayBytes_ZeroWhenRetriesDisabled(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-retry", "0",
+		"-retry-max-body-mb", "5",
+		"-transcode-responses-chat",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	mappings := cfg.Providers[0].TranscodeMappings()
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	if got := mappings[0].BodyLimits.RetryReplayBytes; got != 0 {
+		t.Errorf("RetryReplayBytes = %d, want 0 when retries disabled", got)
 	}
 }

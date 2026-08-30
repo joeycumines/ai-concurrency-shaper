@@ -360,8 +360,8 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	var eventTypes []string
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "event: ") {
-			eventTypes = append(eventTypes, strings.TrimPrefix(line, "event: "))
+		if after, ok := strings.CutPrefix(line, "event: "); ok {
+			eventTypes = append(eventTypes, after)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -414,9 +414,10 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 
 	// Poll metrics endpoint
 	waitForMetrics := func(want string) {
+		client := &http.Client{Timeout: 1 * time.Second}
 		deadline := time.Now().Add(2 * time.Second)
 		for {
-			resp, err := http.Get("http://" + metricsAddr + "/metrics")
+			resp, err := client.Get("http://" + metricsAddr + "/metrics")
 			if err == nil {
 				body, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()

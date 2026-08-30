@@ -26,6 +26,13 @@ import (
 	"testing"
 )
 
+// readCloser pairs an io.Reader with an io.Closer to restore body reading
+// while preserving the underlying closer (review-17 finding 1, review-18 finding 3).
+type readCloser struct {
+	io.Reader
+	io.Closer
+}
+
 // extractModelFromBody is the Task 12 prototype helper that reads up to maxBytes
 // from r.Body, extracts the model string, and restores r.Body for downstream consumers.
 func extractModelFromBody(r *http.Request, maxBytes int64) (string, error) {
@@ -42,8 +49,12 @@ func extractModelFromBody(r *http.Request, maxBytes int64) (string, error) {
 		return "", errors.New("request body exceeds maximum model routing buffer")
 	}
 
-	// Restore r.Body so downstream consumers (retry, journal, reverse proxy) can read it
-	r.Body = io.NopCloser(bytes.NewReader(buf))
+	// Restore r.Body preserving the original Closer so downstream consumers closing r.Body
+	// properly release underlying network and file resources.
+	r.Body = &readCloser{
+		Reader: bytes.NewReader(buf),
+		Closer: r.Body,
+	}
 
 	// Fast JSON model extraction
 	var payload struct {
@@ -56,18 +67,30 @@ func extractModelFromBody(r *http.Request, maxBytes int64) (string, error) {
 	return payload.Model, nil
 }
 
+type trackingCloser struct {
+	io.Reader
+	closed bool
+}
+
+func (t *trackingCloser) Close() error {
+	t.closed = true
+	return nil
+}
+
 // TestPrototype_BodyTee_ModelExtractionAndReplaySafety proves the Task 12 spike's
 // body-tee mechanism:
 //  1. Correctly extracts the model identifier from JSON bodies.
 //  2. Fails closed with an error on malformed JSON or bodies exceeding bounds.
 //  3. Restores r.Body so that subsequent downstream reads (simulating proxy forward,
 //     retry replay, and journal preview) receive the exact payload byte-for-byte.
+//  4. Preserves the underlying Closer so closing r.Body releases upstream resources.
 func TestPrototype_BodyTee_ModelExtractionAndReplaySafety(t *testing.T) {
 	const maxBytes = 1024 // 1 KiB for test
 
 	// Case 1: Valid payload with model field
 	payload := `{"model":"claude-3.5-sonnet","messages":[{"role":"user","content":"hello"}]}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(payload))
+	tracker := &trackingCloser{Reader: strings.NewReader(payload)}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", tracker)
 	req.Header.Set("Content-Type", "application/json")
 
 	model, err := extractModelFromBody(req, maxBytes)
@@ -85,6 +108,14 @@ func TestPrototype_BodyTee_ModelExtractionAndReplaySafety(t *testing.T) {
 	}
 	if retryBuf.String() != payload {
 		t.Fatalf("retry buffer got %q, want %q", retryBuf.String(), payload)
+	}
+
+	// Downstream close: verify original closer is called
+	if err := req.Body.Close(); err != nil {
+		t.Fatalf("req.Body.Close failed: %v", err)
+	}
+	if !tracker.closed {
+		t.Fatal("closing restored req.Body did not call underlying Closer")
 	}
 
 	// Downstream read 2: Simulating journal request body capture from restored buffer
