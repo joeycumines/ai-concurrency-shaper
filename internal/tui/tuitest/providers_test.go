@@ -249,4 +249,3 @@ func TestPTY_ThreeProvidersFleetStrip(t *testing.T) {
 	// Fleet strip reflects aggregate active count.
 	awaitRender(t, h, "Fleet: 2 active · 0 queued · 0 OPEN")
 }
-

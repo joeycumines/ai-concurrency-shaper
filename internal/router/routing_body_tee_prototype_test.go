@@ -58,10 +58,10 @@ func extractModelFromBody(r *http.Request, maxBytes int64) (string, error) {
 
 // TestPrototype_BodyTee_ModelExtractionAndReplaySafety proves the Task 12 spike's
 // body-tee mechanism:
-// 1. Correctly extracts the model identifier from JSON bodies.
-// 2. Fails closed with an error on malformed JSON or bodies exceeding bounds.
-// 3. Restores r.Body so that subsequent downstream reads (simulating proxy forward,
-//    retry replay, and journal preview) receive the exact payload byte-for-byte.
+//  1. Correctly extracts the model identifier from JSON bodies.
+//  2. Fails closed with an error on malformed JSON or bodies exceeding bounds.
+//  3. Restores r.Body so that subsequent downstream reads (simulating proxy forward,
+//     retry replay, and journal preview) receive the exact payload byte-for-byte.
 func TestPrototype_BodyTee_ModelExtractionAndReplaySafety(t *testing.T) {
 	const maxBytes = 1024 // 1 KiB for test
 

@@ -72,7 +72,7 @@ func TestProxy_Transcode_PropagatedRetryMaxBodyMB_Success(t *testing.T) {
 		WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
 		WithMetrics(metrics.NewCollector()),
 		WithMaxRetries(3),
-		WithMaxBodyBytes(2 << 20),
+		WithMaxBodyBytes(2<<20),
 		WithTranscodeMapping(
 			TranscodeMapping{
 				Mapping: transcode.Mapping{
@@ -142,7 +142,7 @@ func TestProxy_Transcode_RetryReplayBytes_MismatchRejected(t *testing.T) {
 		WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
 		WithMetrics(metrics.NewCollector()),
 		WithMaxRetries(3),
-		WithMaxBodyBytes(5 << 20), // 5 MiB = 5242880
+		WithMaxBodyBytes(5<<20), // 5 MiB = 5242880
 		WithTranscodeMapping(
 			TranscodeMapping{
 				Mapping: transcode.Mapping{

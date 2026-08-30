@@ -111,11 +111,11 @@ type Provider struct {
 
 	// ---- Upstream-behavior tuning (provider scope) ----
 
-	Concurrency            int
-	GlobalConcurrency      int
-	LimitAll               bool
-	QueueTimeout           time.Duration
-	RetryMax int
+	Concurrency       int
+	GlobalConcurrency int
+	LimitAll          bool
+	QueueTimeout      time.Duration
+	RetryMax          int
 	// RetryMaxBodyMB is the max request body size in MiB retained for replay by
 	// the proxy retry transport. It propagates as the default RetryReplayBytes
 	// for any transcoded route mapping where RetryReplayBytes is unset (zero).

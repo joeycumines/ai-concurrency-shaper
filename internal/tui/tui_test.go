@@ -5257,4 +5257,3 @@ func TestFleetStrip_AggregateObservability(t *testing.T) {
 		t.Error("active provider chip must be present in switcher")
 	}
 }
-

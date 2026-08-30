@@ -58,14 +58,14 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	}
 
 	var (
-		upAMu       sync.Mutex
-		upABodies   [][]byte
-		upAAuth     string
+		upAMu        sync.Mutex
+		upABodies    [][]byte
+		upAAuth      string
 		upAStreamHit atomic.Int64
 
-		upBMu       sync.Mutex
-		upBBodies   [][]byte
-		upBAuth     string
+		upBMu     sync.Mutex
+		upBBodies [][]byte
+		upBAuth   string
 
 		upCHits atomic.Int64
 	)
