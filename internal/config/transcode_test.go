@@ -13,10 +13,12 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-package main
+package config
 
 import (
+	"context"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -78,36 +80,6 @@ func TestParseTranscodeRouteAtInPath(t *testing.T) {
 	}
 }
 
-// TestTranscodeRouteFlagsSet verifies the flag.Value behavior of the
-// repeatable -transcode-route flag.
-func TestTranscodeRouteFlagsSet(t *testing.T) {
-	var routes transcodeRouteFlags
-	if err := routes.Set("messages@/v1/messages=responses@/v1/responses"); err != nil {
-		t.Fatalf("Set: %v", err)
-	}
-	if err := routes.Set("messages@/v1/messages=chat-completions@/v1/chat/completions"); err != nil {
-		t.Fatalf("Set: %v", err)
-	}
-	if len(routes) != 2 {
-		t.Fatalf("routes = %d, want 2", len(routes))
-	}
-	if routes[0].ClientRoute.Path != "/v1/messages" || routes[0].UpstreamProtocol != transcode.UpstreamResponses {
-		t.Errorf("routes[0] = %+v", routes[0])
-	}
-	if routes[1].UpstreamProtocol != transcode.UpstreamChatCompletions {
-		t.Errorf("routes[1] = %+v", routes[1])
-	}
-	if err := routes.Set("garbage"); err == nil {
-		t.Error("Set(garbage): want error")
-	}
-	if err := routes.Set("chat-completions@/x=responses@/y"); err == nil {
-		t.Error("Set(chat client): want error")
-	}
-	if routes.String() == "" {
-		t.Error("String() = empty")
-	}
-}
-
 // TestBuildTranscodeMappings verifies the preset flags expand to the correct
 // route mappings, appended after any explicit -transcode-route values, and
 // that the sensible defaults are applied to every mapping.
@@ -165,8 +137,6 @@ func TestBuildTranscodeMappings(t *testing.T) {
 		}
 	}
 
-	// The messages->chat preset maps the same client route as messages->
-	// responses, so they are mutually exclusive; messages-chat alone works.
 	withChat, err := buildTranscodeMappings(nil, false, true, false, transcodeCLIOptions{lossPolicy: transcode.StrictLossPolicy()})
 	if err != nil {
 		t.Fatalf("messages-chat: %v", err)
@@ -186,15 +156,7 @@ func TestBuildTranscodeMappings(t *testing.T) {
 }
 
 // TestBuildTranscodeMappingsDefaults verifies the sensible out-of-the-box
-// defaults land on every CLI mapping: the maximally compatible chat
-// capability core (parallel_tool_calls + provider_reasoning_text; the
-// fidelity-only reasoning_effort and developer_role knobs are opt-in so
-// generic and open-weights gateways never see parameters or roles they
-// reject), the beta client query for Messages routes, and the default loss
-// set (which now backs those opt-in knobs with observable drops) — with CLI
-// additions merged additively. Intended semantic change (field regression
-// 2026-08-22, user direction): the former default modern surface rendered
-// reasoning_effort and developer roles that generic upstreams reject.
+// defaults land on every CLI mapping.
 func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 	mappings, err := buildTranscodeMappings(
 		nil,
@@ -248,13 +210,7 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 }
 
 // TestBuildTranscodeMappingsNegation proves `!name` negations withdraw the
-// sensible defaults on every CLI mapping (review-11 finding 3): a legacy
-// chat upstream can shed any default capability, the beta query default,
-// and any default loss from the command line alone. Intended semantic
-// change (field regression 2026-08-22): the capability defaults are now the
-// compatible core, so this test negates provider_reasoning_text (a default)
-// and additionally pins that reasoning_effort/developer_role stay OFF by
-// default — negating a non-default is validated but vacuous.
+// sensible defaults on every CLI mapping.
 func TestBuildTranscodeMappingsNegation(t *testing.T) {
 	mappings, err := buildTranscodeMappings(
 		nil,
@@ -300,7 +256,6 @@ func TestBuildTranscodeMappingsNegation(t *testing.T) {
 		}
 	}
 
-	// Explicit positives still apply on top of negations of other names.
 	mappings, err = buildTranscodeMappings(
 		nil,
 		true,
@@ -324,9 +279,7 @@ func TestBuildTranscodeMappingsNegation(t *testing.T) {
 }
 
 // TestBuildTranscodeMappingsStrictDefaults proves -transcode-strict-defaults
-// yields the blank-slate configuration: no default capabilities, no beta
-// query forwarding, no default loss approvals — with explicit positives
-// still applied on top (review-11 finding 3).
+// yields the blank-slate configuration.
 func TestBuildTranscodeMappingsStrictDefaults(t *testing.T) {
 	mappings, err := buildTranscodeMappings(
 		nil,
@@ -374,8 +327,7 @@ func TestBuildTranscodeMappingsStrictDefaults(t *testing.T) {
 }
 
 // TestParseNegatedLosses verifies the -transcode-allow-loss values with
-// `!name` negations: granular names validated in both directions, the
-// conflict rule, and the empty-name rejection.
+// `!name` negations.
 func TestParseNegatedLosses(t *testing.T) {
 	allowed, negated, err := parseNegatedLosses("top_k", "!builtin_tools", "image_input")
 	if err != nil {
@@ -394,31 +346,25 @@ func TestParseNegatedLosses(t *testing.T) {
 		t.Fatal("negated name leaked into positives")
 	}
 
-	// Unknown negation is exactly as fatal as unknown positive.
 	if _, _, err := parseNegatedLosses("!bogus"); err == nil {
 		t.Fatal("unknown negated loss accepted")
 	} else if !strings.Contains(err.Error(), "bogus") {
 		t.Fatalf("error = %v", err)
 	}
-	// Conflict: the same name positively and negated.
 	if _, _, err := parseNegatedLosses("top_k", "!top_k"); err == nil {
 		t.Fatal("conflicting loss accepted")
 	} else if !strings.Contains(err.Error(), "conflicting") {
 		t.Fatalf("error = %v", err)
 	}
-	// A bare "!" is an empty name.
 	if _, _, err := parseNegatedLosses("!"); err == nil {
 		t.Fatal("empty negation accepted")
 	}
-	// The legacy broad names are still rejected in both directions.
 	if _, _, err := parseNegatedLosses("!all"); err == nil {
 		t.Fatal("legacy broad negation accepted")
 	}
 }
 
-// TestParseChatCapabilities verifies the -transcode-chat-capability
-// vocabulary: granular names only, unknown names (positive or negated)
-// rejected at startup.
+// TestParseChatCapabilities verifies the -transcode-chat-capability vocabulary.
 func TestParseChatCapabilities(t *testing.T) {
 	cap, negated, err := parseChatCapabilities([]string{"reasoning_effort", "developer_role parallel_tool_calls"})
 	if err != nil {
@@ -434,7 +380,6 @@ func TestParseChatCapabilities(t *testing.T) {
 		t.Fatalf("negated = %v, want none", negated)
 	}
 
-	// `!name` negations are reported for the merge layer to withdraw.
 	cap, negated, err = parseChatCapabilities([]string{"!reasoning_effort", "stop_sequences"})
 	if err != nil {
 		t.Fatal(err)
@@ -451,13 +396,11 @@ func TestParseChatCapabilities(t *testing.T) {
 	} else if !strings.Contains(err.Error(), "bogus") {
 		t.Fatalf("error = %v", err)
 	}
-	// An unknown negation is exactly as fatal as an unknown positive.
 	if _, _, err := parseChatCapabilities([]string{"!bogus"}); err == nil {
 		t.Fatal("unknown negated capability accepted")
 	} else if !strings.Contains(err.Error(), "bogus") {
 		t.Fatalf("error = %v", err)
 	}
-	// A name given both positively and negated is a conflict.
 	if _, _, err := parseChatCapabilities([]string{"reasoning_effort", "!reasoning_effort"}); err == nil {
 		t.Fatal("conflicting capability accepted")
 	} else if !strings.Contains(err.Error(), "conflicting") {
@@ -466,14 +409,10 @@ func TestParseChatCapabilities(t *testing.T) {
 	if _, _, err := parseChatCapabilities([]string{"all"}); err == nil {
 		t.Fatal("broad legacy name accepted")
 	}
-	// A bare "!" is an empty name, never a valid negation.
 	if _, _, err := parseChatCapabilities([]string{"!"}); err == nil {
 		t.Fatal("empty negation accepted")
 	}
 
-	// system_anywhere is a granular capability in both directions (task
-	// 14): a positive sets the field, an unknown negation fails, and a
-	// negation of the non-default name is a harmless no-op withdrawal.
 	cap, negated, err = parseChatCapabilities([]string{"system_anywhere"})
 	if err != nil {
 		t.Fatal(err)
@@ -496,8 +435,7 @@ func TestParseChatCapabilities(t *testing.T) {
 	}
 }
 
-// TestParseClientQuery verifies the -transcode-allow-client-query parsing,
-// including `!name` negations that withdraw the default beta forwarding.
+// TestParseClientQuery verifies the -transcode-allow-client-query parsing.
 func TestParseClientQuery(t *testing.T) {
 	q, negated, err := parseClientQuery([]string{"beta", "api-version foo"})
 	if err != nil {
@@ -530,8 +468,6 @@ func TestParseClientQuery(t *testing.T) {
 		t.Fatalf("negated = %v, want beta", negated)
 	}
 
-	// An unknown-negation concept does not exist for query names (any
-	// syntactically valid name is legal), but the conflict rule still holds.
 	if _, _, err := parseClientQuery([]string{"beta", "!beta"}); err == nil {
 		t.Fatal("conflicting query name accepted")
 	}
@@ -541,11 +477,9 @@ func TestParseClientQuery(t *testing.T) {
 			t.Errorf("parseClientQuery(%q): want error", bad)
 		}
 	}
-	// A negated name is validated with the same character rule.
 	if _, _, err := parseClientQuery([]string{"!a=b"}); err == nil {
 		t.Error("parseClientQuery(!a=b): want error")
 	}
-	// Whitespace-only input yields an empty set (no parameters), not an error.
 	empty, negated, err := parseClientQuery([]string{" "})
 	if err != nil || len(empty) != 0 || len(negated) != 0 {
 		t.Fatalf("parseClientQuery(whitespace) = %v, %v; want empty sets", empty, err)
@@ -630,9 +564,7 @@ func TestParseTranscodeAuth(t *testing.T) {
 }
 
 // TestParseTranscodeRouteMessagesUpstreamRejected proves the CLI rejects a
-// messages upstream at parse time: no supported direction targets Messages,
-// so accepting it would only defer a guaranteed startup failure (review-j
-// finding 14).
+// messages upstream at parse time.
 func TestParseTranscodeRouteMessagesUpstreamRejected(t *testing.T) {
 	_, err := parseTranscodeRoute("responses@/v1/responses=messages@/v1/messages")
 	if err == nil {
@@ -644,8 +576,7 @@ func TestParseTranscodeRouteMessagesUpstreamRejected(t *testing.T) {
 }
 
 // TestParseTranscodeAuthExternalSignerRejectedAtStartup proves the CLI
-// cannot configure an external signer: the mode fails the mapping validation
-// at construction (review-j finding 14).
+// cannot configure an external signer.
 func TestParseTranscodeAuthExternalSignerRejectedAtStartup(t *testing.T) {
 	policy, err := parseTranscodeAuth("external-signer", "inbound", "", "")
 	if err != nil {
@@ -670,8 +601,7 @@ func TestParseTranscodeAuthExternalSignerRejectedAtStartup(t *testing.T) {
 }
 
 // TestBuildTranscodeMappingsAppliesLossPolicy proves the CLI loss policy is
-// applied to every mapping, so messages-client streaming can approve
-// usage_timing (review-j finding 14 / J15 gate).
+// applied to every mapping.
 func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 	policy := transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
 		transcode.FeatureUsageUnknown: {},
@@ -692,9 +622,7 @@ func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 }
 
 // TestExplicitModelMapRejectsUnknownModel proves identity fallback applies
-// only when no model mappings were supplied: with an explicit mapping, an
-// unknown model must be rejected, and duplicate client models must fail
-// (review-08 additional 1).
+// only when no model mappings were supplied.
 func TestExplicitModelMapRejectsUnknownModel(t *testing.T) {
 	m, err := parseTranscodeModelMap([]string{"client-a=upstream-a"})
 	if err != nil {
@@ -710,7 +638,6 @@ func TestExplicitModelMapRejectsUnknownModel(t *testing.T) {
 		t.Fatal("unknown model passed through an explicit mapping")
 	}
 
-	// No mappings: identity fallback stays.
 	m, err = parseTranscodeModelMap(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -722,8 +649,116 @@ func TestExplicitModelMapRejectsUnknownModel(t *testing.T) {
 		t.Fatalf("identity fallback failed: %v", err)
 	}
 
-	// Duplicate client models are rejected.
 	if _, err := parseTranscodeModelMap([]string{"a=b", "a=c"}); err == nil {
 		t.Fatal("duplicate client model accepted")
 	}
+}
+
+// TestPerProviderTranscodeRouteIsolation verifies that two providers can
+// mount identical client routes without error, while duplicate routes within
+// a single provider fail closed.
+func TestPerProviderTranscodeRouteIsolation(t *testing.T) {
+	// 1. Two providers with identical client route -> valid
+	args := []string{
+		"--provider=anthropic",
+		"-upstream", "https://api.anthropic.com",
+		"-prefix", "/anthropic",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"--provider=openai",
+		"-upstream", "https://api.openai.com",
+		"-prefix", "/openai",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+	}
+	cfg, err := Parse(args)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("providers = %d, want 2", len(cfg.Providers))
+	}
+	for i, p := range cfg.Providers {
+		if len(p.TranscodeMappings()) != 1 {
+			t.Errorf("provider %d mappings = %d, want 1", i, len(p.TranscodeMappings()))
+		}
+	}
+
+	// 2. Duplicate client route within a single provider -> fail closed
+	badArgs := []string{
+		"--provider=anthropic",
+		"-upstream", "https://api.anthropic.com",
+		"-prefix", "/anthropic",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-transcode-responses-chat", // also maps POST /v1/responses
+	}
+	badCfg, err := Parse(badArgs)
+	if err != nil {
+		t.Fatalf("Parse badArgs: %v", err)
+	}
+	err = badCfg.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("expected duplicate route rejection within single provider")
+	}
+	if !strings.Contains(err.Error(), "duplicate transcode mapping") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// TestFileSecretSourceBounded proves the secret file read is bounded at
+// maxSecretFileBytes with one-byte overflow detection, and the file is
+// re-read per request so atomic replacement rotates the credential.
+func TestFileSecretSourceBounded(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("oversized file rejected", func(t *testing.T) {
+		path := dir + "/too-large"
+		if err := os.WriteFile(path, []byte(strings.Repeat("k", maxSecretFileBytes+1)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		source := fileSecretSource(path)
+		if _, err := source.Secret(context.Background()); err == nil {
+			t.Fatal("oversized secret file accepted")
+		} else if !strings.Contains(err.Error(), "byte bound") {
+			t.Fatalf("err = %v, want the bound error", err)
+		}
+	})
+
+	t.Run("at bound accepted and trimmed", func(t *testing.T) {
+		path := dir + "/at-bound"
+		content := strings.Repeat("k", maxSecretFileBytes)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		source := fileSecretSource(path)
+		secret, err := source.Secret(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(secret) != maxSecretFileBytes {
+			t.Fatalf("secret length = %d, want %d", len(secret), maxSecretFileBytes)
+		}
+	})
+
+	t.Run("rotation without restart", func(t *testing.T) {
+		path := dir + "/rotating"
+		if err := os.WriteFile(path, []byte("first\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		source := fileSecretSource(path)
+		if secret, _ := source.Secret(context.Background()); secret != "first" {
+			t.Fatalf("secret = %q", secret)
+		}
+		replacement := dir + "/replacement"
+		if err := os.WriteFile(replacement, []byte("second\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(replacement, path); err != nil {
+			t.Fatal(err)
+		}
+		if secret, _ := source.Secret(context.Background()); secret != "second" {
+			t.Fatalf("rotated secret = %q", secret)
+		}
+	})
 }

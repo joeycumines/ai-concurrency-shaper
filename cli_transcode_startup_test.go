@@ -30,9 +30,6 @@ func runCLIStartup(t *testing.T, args ...string) (string, error) {
 // TestCLIRejectsImpossibleTranscodeConfigs proves the six enumerated
 // startup rejections fire before any traffic is served (review-z commit 6).
 func TestCLIRejectsImpossibleTranscodeConfigs(t *testing.T) {
-	// Pending Task 6 (GAP-B): transcode flags are unwired from the sectioned
-	// CLI until Task 6 wires per-provider TranscodeMappings.
-	t.Skip("skipping global transcode CLI startup tests pending Task 6 per-mount transcode surface (GAP-B)")
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -135,7 +132,7 @@ func TestCLIRejectsImpossibleTranscodeConfigs(t *testing.T) {
 				"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
 				"-transcode-responses-chat",
 			},
-			wantErr: "duplicate transcode client route",
+			wantErr: "duplicate transcode mapping",
 		},
 		{
 			// Unknown chat capability names are rejected at startup, never

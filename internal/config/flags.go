@@ -193,6 +193,23 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.stringVar(&p.AuthHeader, "auth-header", "", "custom upstream auth header name (required by -auth-mode header:<NAME>)")
 	r.stringVar(&p.AnthropicVersion, "anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value applied when the auth mode resolves to x-api-key")
 
+	// Transcoding (provider scope).
+	r.stringListVar(&p.TranscodeRoutes, "transcode-route", "repeatable route mapping: clientProtocol@clientPath=upstreamProtocol@upstreamPath")
+	r.boolVar(&p.TranscodeResponsesChat, "transcode-responses-chat", false, "preset: map POST /v1/responses to upstream /v1/chat/completions")
+	r.boolVar(&p.TranscodeMessagesChat, "transcode-messages-chat", false, "preset: map POST /v1/messages to upstream /v1/chat/completions")
+	r.boolVar(&p.TranscodeMessagesResponses, "transcode-messages-responses", false, "preset: map POST /v1/messages to upstream /v1/responses")
+	r.boolVar(&p.TranscodeStrictDefaults, "transcode-strict-defaults", false, "disable default loss approvals, capabilities, and query forwarding")
+	r.stringListVar(&p.TranscodeAllowLosses, "transcode-allow-loss", "approved non-portable feature or !name to deny (repeatable)")
+	r.stringListVar(&p.TranscodeChatCapabilities, "transcode-chat-capability", "enable chat upstream capability or !name to deny (repeatable)")
+	r.stringListVar(&p.TranscodeAllowClientQuery, "transcode-allow-client-query", "forward client query parameter or !name to deny (repeatable)")
+	r.stringListVar(&p.TranscodeModelMap, "transcode-model", "map client model to upstream model: client=upstream (repeatable)")
+	r.int64Var(&p.TranscodeMaxRequestMB, "transcode-max-request-mb", 0, "max request body size retained for transcoding, in MiB")
+	r.int64Var(&p.TranscodeMaxResponseMB, "transcode-max-response-mb", 0, "max response body size retained for transcoding, in MiB")
+	r.stringVar(&p.TranscodeAuth, "transcode-auth", "", "upstream auth mode for transcode: auto | none | bearer | x-api-key | api-key | header")
+	r.stringVar(&p.TranscodeAuthSource, "transcode-auth-source", "", "upstream auth secret source for transcode: inbound | env:VAR | file:PATH")
+	r.stringVar(&p.TranscodeAuthHeader, "transcode-auth-header", "", "custom upstream auth header name for transcode")
+	r.stringVar(&p.TranscodeAnthropicVersion, "transcode-anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value for transcode x-api-key")
+
 	// Circuit breaker.
 	r.boolVar(&p.CBEnabled, "circuit-breaker", defaultCBEnabled, "enable the circuit breaker")
 	r.intVar(&p.CBThreshold, "cb-threshold", defaultCBThreshold, "failures within window to trip circuit breaker")

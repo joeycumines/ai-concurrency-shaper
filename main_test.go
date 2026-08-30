@@ -686,6 +686,184 @@ func TestE2E_MultiProvider(t *testing.T) {
 	})
 }
 
+// TestE2E_MultiProvider_Transcode proves the composed CLI multi-provider transcoding
+// end-to-end through the real binary: each --provider section can configure its own
+// transcode routes, each mount transcodes only its own configured routes, and unmapped
+// paths on either mount pass through transparently.
+func TestE2E_MultiProvider_Transcode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	var upARequests, upBRequests atomic.Int64
+
+	upA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upARequests.Add(1)
+		if r.URL.Path == "/v1/chat/completions" && r.Method == http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-a","object":"chat.completion","created":1700000000,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello from anthropic chat upstream"},"finish_reason":"stop"}]}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_a":true,"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upA.Close)
+
+	upB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upBRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_b":true,"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upB.Close)
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyAddr := proxyLn.Addr().String()
+	proxyLn.Close()
+
+	var out strings.Builder
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"--provider=anthropic",
+		"-upstream", upA.URL,
+		"-prefix", "/anthropic",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=openai",
+		"-upstream", upB.URL,
+		"-prefix", "/openai",
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+
+	stdinR, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer stdinR.Close()
+	cmd.Stdin = stdinR
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v\n%s", err, out.String())
+	}
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// 1. POST /anthropic/v1/responses -> transcoded via anthropic provider to /v1/chat/completions on upA
+	{
+		resp, err := client.Post(
+			"http://"+proxyAddr+"/anthropic/v1/responses",
+			"application/json",
+			strings.NewReader(`{"model":"m","input":"hello"}`),
+		)
+		if err != nil {
+			t.Fatalf("POST /anthropic/v1/responses: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /anthropic/v1/responses status = %d, want 200: %s", resp.StatusCode, body)
+		}
+		bodyStr := string(body)
+		if !strings.Contains(bodyStr, "hello from anthropic chat upstream") || !strings.Contains(bodyStr, `"object":"response"`) {
+			t.Fatalf("POST /anthropic/v1/responses unexpected body: %s", bodyStr)
+		}
+	}
+
+	// 2. POST /anthropic/unmapped/path -> passthrough without transcoding to upA
+	{
+		resp, err := client.Post(
+			"http://"+proxyAddr+"/anthropic/unmapped/path",
+			"application/json",
+			strings.NewReader(`{"data":123}`),
+		)
+		if err != nil {
+			t.Fatalf("POST /anthropic/unmapped/path: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /anthropic/unmapped/path status = %d, want 200: %s", resp.StatusCode, body)
+		}
+		bodyStr := string(body)
+		if !strings.Contains(bodyStr, `"untranscoded_a":true`) || !strings.Contains(bodyStr, `"/unmapped/path"`) {
+			t.Fatalf("POST /anthropic/unmapped/path unexpected body: %s", bodyStr)
+		}
+	}
+
+	// 3. POST /openai/v1/responses -> passthrough without transcoding to upB (openai has no transcode mapping)
+	{
+		resp, err := client.Post(
+			"http://"+proxyAddr+"/openai/v1/responses",
+			"application/json",
+			strings.NewReader(`{"data":123}`),
+		)
+		if err != nil {
+			t.Fatalf("POST /openai/v1/responses: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /openai/v1/responses status = %d, want 200: %s", resp.StatusCode, body)
+		}
+		bodyStr := string(body)
+		if !strings.Contains(bodyStr, `"untranscoded_b":true`) || !strings.Contains(bodyStr, `"/v1/responses"`) {
+			t.Fatalf("POST /openai/v1/responses unexpected body: %s", bodyStr)
+		}
+	}
+
+	// 4. POST /openai/other/path -> passthrough to upB
+	{
+		resp, err := client.Post(
+			"http://"+proxyAddr+"/openai/other/path",
+			"application/json",
+			strings.NewReader(`{"data":456}`),
+		)
+		if err != nil {
+			t.Fatalf("POST /openai/other/path: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /openai/other/path status = %d, want 200: %s", resp.StatusCode, body)
+		}
+		bodyStr := string(body)
+		if !strings.Contains(bodyStr, `"untranscoded_b":true`) || !strings.Contains(bodyStr, `"/other/path"`) {
+			t.Fatalf("POST /openai/other/path unexpected body: %s", bodyStr)
+		}
+	}
+}
+
 // TestResetDrainResetsAllCollectors proves the TUI ticker's "Reset Stats"
 // path: drainResetSignals collapses coalesced signals and every provider's
 // collector is reset fleet-wide (Task 6).

@@ -446,3 +446,47 @@ func TestParse_AuthModeDefault(t *testing.T) {
 		t.Errorf("default AnthropicVersion = %q, want 2023-06-01", got)
 	}
 }
+
+// TestParse_TranscodeFlags_SectionedMode tests per-provider transcode flag parsing
+// and proves that flags in one provider section do not leak to other providers,
+// and that transcode flags at server scope in sectioned mode are rejected.
+func TestParse_TranscodeFlags_SectionedMode(t *testing.T) {
+	args := []string{
+		"--provider=anthropic",
+		"-upstream", "https://api.anthropic.com",
+		"-prefix", "/anthropic",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"--provider=openai",
+		"-upstream", "https://api.openai.com",
+		"-prefix", "/openai",
+	}
+	cfg, err := Parse(args)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("providers = %d, want 2", len(cfg.Providers))
+	}
+	if len(cfg.Providers[0].TranscodeMappings()) != 1 {
+		t.Errorf("anthropic mappings = %d, want 1", len(cfg.Providers[0].TranscodeMappings()))
+	}
+	if len(cfg.Providers[1].TranscodeMappings()) != 0 {
+		t.Errorf("openai mappings = %d, want 0", len(cfg.Providers[1].TranscodeMappings()))
+	}
+
+	// Transcode flag at server scope in sectioned mode must be rejected as mixed mode.
+	badArgs := []string{
+		"-transcode-responses-chat",
+		"--provider=anthropic",
+		"-upstream", "https://api.anthropic.com",
+		"-prefix", "/anthropic",
+	}
+	if _, err := Parse(badArgs); err == nil {
+		t.Error("expected mixed mode error when transcode flag is at server scope in sectioned mode")
+	} else if !errors.Is(err, ErrUsage) {
+		t.Errorf("err = %v, want ErrUsage", err)
+	}
+}

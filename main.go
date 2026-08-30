@@ -145,7 +145,7 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 		DisableKeepAlives:   p.DisableKeepAlives,
 	}
 
-	prx, err := proxy.New(
+	opts := []proxy.Option{
 		proxy.WithUpstream(p.UpstreamURL()),
 		proxy.WithMatcher(p.Matcher()),
 		proxy.WithLimiter(p.DefaultLimiter()),
@@ -168,7 +168,12 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 		proxy.WithTransport(transport),
 		proxy.WithJournal(j),
 		proxy.WithBreaker(p.Breaker()),
-	)
+	}
+	for _, tm := range p.TranscodeMappings() {
+		opts = append(opts, proxy.WithTranscodeMapping(tm))
+	}
+
+	prx, err := proxy.New(opts...)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("proxy config: %w", err)
 	}
@@ -236,6 +241,15 @@ func logProviderConfig(pr *config.Provider) {
 			source = "none"
 		}
 		log.Printf("upstream auth: auth-mode=%s auth-source=%s", policy.Mode, source)
+	}
+	if mappings := pr.TranscodeMappings(); len(mappings) > 0 {
+		var parts []string
+		for _, m := range mappings {
+			parts = append(parts, fmt.Sprintf("%s@%s=%s@%s",
+				m.ClientProtocol, m.ClientRoute.Path,
+				m.UpstreamProtocol, m.UpstreamPath))
+		}
+		log.Printf("transcode: %d route(s): %s", len(mappings), strings.Join(parts, ", "))
 	}
 }
 

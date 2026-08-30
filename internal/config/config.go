@@ -145,6 +145,24 @@ type Provider struct {
 	// resolved mode is x-api-key.
 	AnthropicVersion string
 
+	// ---- Transcoding (provider scope) ----
+
+	TranscodeRoutes            []string
+	TranscodeResponsesChat     bool
+	TranscodeMessagesChat      bool
+	TranscodeMessagesResponses bool
+	TranscodeStrictDefaults    bool
+	TranscodeAllowLosses       []string
+	TranscodeChatCapabilities  []string
+	TranscodeAllowClientQuery  []string
+	TranscodeModelMap          []string
+	TranscodeMaxRequestMB      int64
+	TranscodeMaxResponseMB     int64
+	TranscodeAuth              string
+	TranscodeAuthSource        string
+	TranscodeAuthHeader        string
+	TranscodeAnthropicVersion  string
+
 	// ---- Circuit breaker (provider scope) ----
 
 	CBEnabled     bool
@@ -157,15 +175,23 @@ type Provider struct {
 
 	// -- resolved state (populated by ResolveAndValidate) --
 
-	upstream       *url.URL
-	patterns       []route.Pattern
-	matcher        *route.Matcher
-	defaultLimiter *queue.Limiter
-	globalLimiter  *queue.Limiter
-	routeLimiters  map[string]*queue.Limiter
-	breaker        *circuitbreaker.Breaker
-	maxIdlePerHost int
-	authPolicy     *auth.AuthPolicy
+	upstream          *url.URL
+	patterns          []route.Pattern
+	matcher           *route.Matcher
+	defaultLimiter    *queue.Limiter
+	globalLimiter     *queue.Limiter
+	routeLimiters     map[string]*queue.Limiter
+	breaker           *circuitbreaker.Breaker
+	maxIdlePerHost    int
+	authPolicy        *auth.AuthPolicy
+	transcodeMappings []proxy.TranscodeMapping
+}
+
+// TranscodeMappings returns the resolved transcode route mappings for this provider.
+func (p *Provider) TranscodeMappings() []proxy.TranscodeMapping {
+	out := make([]proxy.TranscodeMapping, len(p.transcodeMappings))
+	copy(out, p.transcodeMappings)
+	return out
 }
 
 // UpstreamURL returns the parsed upstream URL.
@@ -453,6 +479,10 @@ func (p *Provider) resolve(index int, multi bool) error {
 	}
 
 	if err := p.buildAuthPolicy(); err != nil {
+		return fmt.Errorf("%s%w", ctx(), err)
+	}
+
+	if err := p.resolveTranscode(); err != nil {
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
 
