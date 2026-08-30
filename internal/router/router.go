@@ -96,9 +96,13 @@ func New(providers []Provider) (*Handler, error) {
 
 // ServeHTTP routes the request to the provider whose mount prefix matches the
 // request path, stripping the prefix before delegating. With a single bare
-// provider (h.bare set) it delegates unchanged. No match yields 404.
+// provider (h.bare set) it delegates after normalizing the path through the
+// same traversal-resolved joinSegments / RawPath clearing as prefixed mounts,
+// ensuring route key dispatch parity. No match yields 404.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.bare != nil {
+		r.URL.Path = joinSegments(segments(r.URL.Path))
+		r.URL.RawPath = ""
 		h.bare.Proxy.ServeHTTP(w, r)
 		return
 	}

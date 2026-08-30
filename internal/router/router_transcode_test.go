@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
@@ -341,7 +342,7 @@ func TestRouter_BareVsPrefixedTrailingSlashParity(t *testing.T) {
 		}
 	}
 
-	// Bare mount with trailing slash /v1/responses/ -> unnormalized in router, passes through to upstream as /v1/responses/
+	// Bare mount with trailing slash /v1/responses/ -> normalized in router to /v1/responses -> transcoded (F-6/H5 parity)
 	{
 		resp, err := client.Post(srvBare.URL+"/v1/responses/", "application/json", strings.NewReader(`{"model":"m","input":"x"}`))
 		if err != nil {
@@ -349,11 +350,11 @@ func TestRouter_BareVsPrefixedTrailingSlashParity(t *testing.T) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		if !strings.Contains(string(body), `"passthrough":true`) {
-			t.Fatalf("bare trailing slash path was transcoded unexpectedly: %s", body)
+		if !strings.Contains(string(body), `"object":"response"`) {
+			t.Fatalf("bare trailing slash path not transcoded: %s", body)
 		}
-		if bareUpstreamPath.Load().(string) != "/v1/responses/" {
-			t.Errorf("bare trailing slash upstream path = %v, want /v1/responses/", bareUpstreamPath.Load())
+		if bareUpstreamPath.Load().(string) != "/v1/chat/completions" {
+			t.Errorf("bare trailing slash upstream path = %v, want /v1/chat/completions", bareUpstreamPath.Load())
 		}
 	}
 
@@ -371,5 +372,124 @@ func TestRouter_BareVsPrefixedTrailingSlashParity(t *testing.T) {
 		if prefixedUpstreamPath.Load().(string) != "/v1/chat/completions" {
 			t.Errorf("prefixed trailing slash upstream path = %v, want /v1/chat/completions", prefixedUpstreamPath.Load())
 		}
+	}
+
+	// Unmapped path on bare mount -> transparent passthrough
+	{
+		resp, err := client.Post(srvBare.URL+"/v1/other/", "application/json", strings.NewReader(`{"other":true}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(body), `"passthrough":true`) {
+			t.Fatalf("bare unmapped path did not passthrough: %s", body)
+		}
+	}
+
+	// Unmapped path on prefixed mount -> transparent passthrough
+	{
+		resp, err := client.Post(srvPrefixed.URL+"/p/v1/other/", "application/json", strings.NewReader(`{"other":true}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(body), `"passthrough":true`) {
+			t.Fatalf("prefixed unmapped path did not passthrough: %s", body)
+		}
+	}
+}
+
+// TestRouter_Transcode_HeaderAllowlisting_PerRoute proves that header allowlisting
+// is per-route and never forwards client credentials or arbitrary headers across
+// providers (G5).
+func TestRouter_Transcode_HeaderAllowlisting_PerRoute(t *testing.T) {
+	var upstreamHeader atomic.Value
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHeader.Store(r.Header.Clone())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1700000000,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	u, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mapping := helperResponsesToChatMapping(t)
+	mapping.Auth = transcode.AuthPolicy{
+		Mode:   transcode.AuthBearer,
+		Secret: auth.NewStaticSecretSource("upstream-injected-token"),
+	}
+
+	p, err := proxy.New(
+		proxy.WithUpstream(u),
+		proxy.WithMatcher(route.NewMatcher(nil)),
+		proxy.WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		proxy.WithMetrics(metrics.NewCollector()),
+		proxy.WithTranscodeMapping(proxy.TranscodeMapping{Mapping: mapping}),
+	)
+	if err != nil {
+		t.Fatalf("proxy New: %v", err)
+	}
+
+	r, err := router.New([]router.Provider{{Name: "p1", Prefix: "/p1", Proxy: p}})
+	if err != nil {
+		t.Fatalf("router New: %v", err)
+	}
+	srv := httptest.NewServer(r)
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
+		srv.URL+"/p1/v1/responses",
+		strings.NewReader(`{"model":"m","input":"hello"}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer client-leak-token")
+	req.Header.Set("Cookie", "session=client-leak-cookie")
+	req.Header.Set("X-Custom-Header", "client-leak-custom")
+	req.Header.Set("X-Test", "test-value")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	hdr, ok := upstreamHeader.Load().(http.Header)
+	if !ok || hdr == nil {
+		t.Fatal("upstream never received header")
+	}
+
+	// 1. Injected upstream auth is present
+	if got := hdr.Get("Authorization"); got != "Bearer upstream-injected-token" {
+		t.Errorf("Authorization = %q, want Bearer upstream-injected-token", got)
+	}
+
+	// 2. Client headers are completely scrubbed
+	for _, leaked := range []string{"Cookie", "X-Custom-Header", "X-Test"} {
+		if got := hdr.Get(leaked); got != "" {
+			t.Errorf("header %s leaked to upstream: %q", leaked, got)
+		}
+	}
+
+	// 3. Expected allowlisted headers are present
+	if got := hdr.Get("Accept"); got != "application/json" {
+		t.Errorf("Accept = %q, want application/json", got)
+	}
+	if got := hdr.Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", got)
 	}
 }
