@@ -189,7 +189,13 @@ A multi-provider configuration with no auth on some providers prints one startup
 
 #### Scope & Limitations
 
-Routing is **path-prefix only**: there is no model-ID translation or request-body inspection today. Clients choose a provider by targeting its mount (`/anthropic/...`, `/openai/...`); a single base URL with body-aware model routing is future work. Other current limitations: there is no downstream client authentication (anything that can reach the port can use every mounted provider), readiness is TCP-connect only, and configuration changes require a restart.
+Routing is **path-prefix only**: there is no model-ID translation or request-body inspection today. Clients choose a provider by targeting its mount (`/anthropic/...`, `/openai/...`); a single base URL with body-aware model routing is future work.
+
+Other explicit scope boundaries and deferred capabilities:
+- **No Downstream Client Authentication (M4)**: There is no downstream client authentication (anything that can reach the port can use every mounted provider). Transcoding's inbound credential mode is per-route forwarding/transcoding, not virtual-key admission.
+- **Stateless Inference without Session Stickiness (G6)**: Stateless LLM inference does not require session affinity or stickiness. Per-tool session affinity, if ever needed in the future, would be based on tool HTTP headers, cookies, or hashes.
+- **Provider Resource Isolation vs Client Identity Rotation (G7)**: The proxy intentionally does not implement LocalAddr pooling, User-Agent rotation, TLS fingerprint spoofing, or keypool rotation on 429. Per the Maxim AI caveat, having $N$ API keys in the same organization does not yield $N\times$ quota under modern upstream mitigation policies (providers enforce limits per organization, project, or billing account). The correct and supported architectural pattern is defining distinct organizations, accounts, or regions as distinct `--provider` resources with isolated queue limiters and circuit breakers, rather than per-request identity rotation.
+- **Readiness and Configuration**: Readiness is TCP-connect only, and configuration changes require a restart.
 
 ### Examples
 
