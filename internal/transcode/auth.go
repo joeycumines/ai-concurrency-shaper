@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 )
 
 // Direct OpenAI clients use bearer authentication:
@@ -140,10 +142,45 @@ type AuthPolicy struct {
 	Signer RequestSigner
 }
 
+// IsZero reports whether the AuthPolicy is unconfigured (all zero values).
+func (p AuthPolicy) IsZero() bool {
+	return p.Mode == "" && !p.Inbound && p.Secret == nil && p.Signer == nil && p.CustomHeader == "" && p.AnthropicVersion == ""
+}
+
+// FromProviderAuth converts an internal/auth.AuthPolicy into a transcode.AuthPolicy.
+// When policy is nil or Mode is auth.AuthNone, it returns AuthPolicy{Mode: AuthNone}.
+// When policy is non-nil with a secret source, the resulting transcode.AuthPolicy
+// has Inbound=false and inherits the provider's resolved mode, secret source,
+// custom header, and anthropic version.
+func FromProviderAuth(policy *auth.AuthPolicy) AuthPolicy {
+	if policy == nil || policy.Mode == auth.AuthNone {
+		return AuthPolicy{Mode: AuthNone}
+	}
+	var mode AuthMode
+	switch policy.Mode {
+	case auth.AuthBearer:
+		mode = AuthBearer
+	case auth.AuthXAPIKey:
+		mode = AuthXAPIKey
+	case auth.AuthAPIKey:
+		mode = AuthAPIKey
+	case auth.AuthCustomHeader:
+		mode = AuthCustomHeader
+	default:
+		mode = AuthMode(policy.Mode)
+	}
+	return AuthPolicy{
+		Mode:             mode,
+		Secret:           policy.Secret,
+		CustomHeader:     policy.CustomHeader,
+		AnthropicVersion: policy.AnthropicVersion,
+	}
+}
+
 // Validate checks the policy against the target protocol.
 func (p AuthPolicy) Validate(target UpstreamProtocol) error {
 	switch p.Mode {
-	case AuthAuto, AuthNone, AuthBearer, AuthXAPIKey, AuthAPIKey:
+	case "", AuthAuto, AuthNone, AuthBearer, AuthXAPIKey, AuthAPIKey:
 	case AuthCustomHeader:
 		if strings.TrimSpace(p.CustomHeader) == "" {
 			return errors.New("custom auth header is empty")
@@ -210,7 +247,7 @@ func ApplyTargetAuthentication(
 	}
 
 	mode := policy.Mode
-	if mode == AuthAuto {
+	if mode == AuthAuto || mode == "" {
 		switch target {
 		case UpstreamMessages:
 			// This default makes an OpenAI-compatible client carrying a

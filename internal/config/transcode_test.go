@@ -762,3 +762,125 @@ func TestFileSecretSourceBounded(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveAndValidate_TranscodeAuthInheritance verifies auth policy precedence:
+// 1. Inherits provider auth policy when no per-route auth is declared.
+// 2. Explicit -transcode-auth-source overrides provider auth policy.
+// 3. Explicit -transcode-auth none overrides provider auth policy to AuthNone.
+// 4. Unset or empty env var in -transcode-auth-source fails closed at ResolveAndValidate.
+func TestResolveAndValidate_TranscodeAuthInheritance(t *testing.T) {
+	t.Setenv("PROVIDER_SECRET", "provider-val")
+	t.Setenv("ROUTE_SECRET", "route-val")
+	t.Setenv("EMPTY_SECRET", "  ")
+
+	// 1. Inherited provider auth
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-responses-chat",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		if len(mappings) != 1 {
+			t.Fatalf("mappings = %d, want 1", len(mappings))
+		}
+		authP := mappings[0].Mapping.Auth
+		if authP.Mode != transcode.AuthBearer {
+			t.Errorf("auth mode = %q, want bearer", authP.Mode)
+		}
+		if authP.Secret == nil {
+			t.Fatal("secret source is nil")
+		}
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "provider-val" {
+			t.Errorf("secret = %q, err = %v, want provider-val", sec, err)
+		}
+	}
+
+	// 2. Explicit transcode auth override
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-responses-chat",
+			"-transcode-auth-source", "env:ROUTE_SECRET",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		authP := mappings[0].Mapping.Auth
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "route-val" {
+			t.Errorf("override secret = %q, err = %v, want route-val", sec, err)
+		}
+	}
+
+	// 3. Explicit transcode auth none override
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-responses-chat",
+			"-transcode-auth", "none",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		authP := mappings[0].Mapping.Auth
+		if authP.Mode != transcode.AuthNone {
+			t.Errorf("auth mode = %q, want none", authP.Mode)
+		}
+	}
+
+	// 4. Unset env var fails closed at ResolveAndValidate
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-transcode-responses-chat",
+			"-transcode-auth-source", "env:NONEXISTENT_KEY_XYZ",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Fatal("expected unset env var to fail ResolveAndValidate")
+		}
+		if !strings.Contains(err.Error(), "NONEXISTENT_KEY_XYZ") {
+			t.Fatalf("err = %v, want mentioning NONEXISTENT_KEY_XYZ", err)
+		}
+	}
+
+	// 5. Empty env var fails closed at ResolveAndValidate
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-transcode-responses-chat",
+			"-transcode-auth-source", "env:EMPTY_SECRET",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Fatal("expected empty env var to fail ResolveAndValidate")
+		}
+		if !strings.Contains(err.Error(), "empty") {
+			t.Fatalf("err = %v, want mentioning empty", err)
+		}
+	}
+}

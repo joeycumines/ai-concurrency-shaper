@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
@@ -39,7 +40,13 @@ const maxSecretFileBytes = 64 << 10
 type envSecretSource string
 
 func (s envSecretSource) Secret(context.Context) (string, error) {
-	value := os.Getenv(string(s))
+	value, ok := os.LookupEnv(string(s))
+	if !ok {
+		return "", fmt.Errorf("environment variable %s is not set", string(s))
+	}
+	if strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("environment variable %s is empty", string(s))
+	}
 	return strings.TrimSpace(value), nil
 }
 
@@ -48,14 +55,17 @@ func (s envSecretSource) Secret(context.Context) (string, error) {
 type fileSecretSource string
 
 func (s fileSecretSource) Secret(_ context.Context) (string, error) {
+	if string(s) == "" {
+		return "", fmt.Errorf("file secret source has no path")
+	}
 	file, err := os.Open(string(s))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read secret file: %w", err)
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, maxSecretFileBytes+1))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read secret file: %w", err)
 	}
 	if len(data) > maxSecretFileBytes {
 		return "", fmt.Errorf(
@@ -64,7 +74,11 @@ func (s fileSecretSource) Secret(_ context.Context) (string, error) {
 			maxSecretFileBytes,
 		)
 	}
-	return strings.TrimSpace(string(data)), nil
+	val := strings.TrimSpace(string(data))
+	if val == "" {
+		return "", fmt.Errorf("secret file %s is empty", string(s))
+	}
+	return val, nil
 }
 
 // secretSource resolves an env:NAME or file:PATH source.
@@ -609,6 +623,7 @@ func (p *Provider) resolveTranscode() error {
 	}
 
 	var authPolicy transcode.AuthPolicy
+	var hasExplicitTranscodeAuth bool
 	if p.TranscodeAuth != "" || p.TranscodeAuthSource != "" || p.TranscodeAuthHeader != "" {
 		var err error
 		authPolicy, err = parseTranscodeAuth(
@@ -620,6 +635,18 @@ func (p *Provider) resolveTranscode() error {
 		if err != nil {
 			return err
 		}
+		if authPolicy.Secret != nil {
+			val, err := authPolicy.Secret.Secret(context.Background())
+			if err != nil {
+				return fmt.Errorf("-transcode-auth-source %s: %w", p.TranscodeAuthSource, err)
+			}
+			authPolicy.Secret = auth.NewStaticSecretSource(strings.TrimSpace(val))
+		}
+		hasExplicitTranscodeAuth = true
+	} else if p.authPolicy != nil {
+		authPolicy = transcode.FromProviderAuth(p.authPolicy)
+	} else {
+		authPolicy = transcode.AuthPolicy{Mode: transcode.AuthNone}
 	}
 
 	modelMap, err := parseTranscodeModelMap(p.TranscodeModelMap)
@@ -678,7 +705,9 @@ func (p *Provider) resolveTranscode() error {
 		if len(modelMap.Exact) > 0 || !modelMap.AllowIdentity {
 			mappings[i].Mapping.ModelMap = modelMap
 		}
-		if authPolicy.Mode != "" || authPolicy.Secret != nil || authPolicy.Inbound {
+		if hasExplicitTranscodeAuth || p.authPolicy != nil {
+			mappings[i].Mapping.Auth = authPolicy
+		} else if mappings[i].Mapping.Auth.IsZero() {
 			mappings[i].Mapping.Auth = authPolicy
 		}
 		if p.TranscodeMaxRequestMB > 0 {

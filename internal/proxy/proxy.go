@@ -805,6 +805,16 @@ func New(opts ...Option) (*Proxy, error) {
 		mapping.ModelMap = cloneModelMap(m.ModelMap)
 		mapping.LossPolicy = cloneLossPolicy(m.LossPolicy)
 		mapping.AllowedClientQuery = cloneStringSet(m.AllowedClientQuery)
+		if mapping.Auth.IsZero() {
+			if cfg.authPolicy != nil {
+				mapping.Auth = transcode.FromProviderAuth(cfg.authPolicy)
+			} else {
+				mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthNone}
+			}
+		}
+		if err := mapping.Validate(); err != nil {
+			return nil, fmt.Errorf("proxy: invalid transcode mapping: %w", err)
+		}
 		h := transcode.NewTranscodeHandler(
 			transcode.HandlerConfig{
 				Mapping:    mapping,

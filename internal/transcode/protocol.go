@@ -158,8 +158,10 @@ func (m Mapping) Validate() error {
 		)
 	}
 
-	if err := m.Auth.Validate(m.UpstreamProtocol); err != nil {
-		return fmt.Errorf("auth policy: %w", err)
+	if !m.Auth.IsZero() {
+		if err := m.Auth.Validate(m.UpstreamProtocol); err != nil {
+			return fmt.Errorf("auth policy: %w", err)
+		}
 	}
 	if m.Auth.Mode == AuthCustomHeader {
 		// The custom header name must be a valid HTTP field name and must

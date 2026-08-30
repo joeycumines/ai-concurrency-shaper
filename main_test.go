@@ -864,6 +864,284 @@ func TestE2E_MultiProvider_Transcode(t *testing.T) {
 	}
 }
 
+// TestE2E_MultiProvider_Transcode_AuthPrecedence tests auth inheritance, override,
+// and unprotected handling across multiple providers with transcoding:
+// 1. Inherited provider auth: -auth-source env:SHAPER_PROVIDER_FOO_API_KEY with no per-route auth forwards the provider credential.
+// 2. Route override: -transcode-auth-source env:OTHER_KEY overrides provider auth.
+// 3. Unprotected provider: neither source configured reaches upstream without credentials and logs the N>1 warning.
+// 4. Client credentials are scrubbed exactly once on transcoded routes.
+func TestE2E_MultiProvider_Transcode_AuthPrecedence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper-auth"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	var (
+		mu         sync.Mutex
+		headersUpA = make(map[string]http.Header)
+		headersUpB = make(map[string]http.Header)
+		headersUpC = make(map[string]http.Header)
+	)
+
+	upA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		headersUpA[r.URL.Path] = r.Header.Clone()
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-a","object":"chat.completion","created":1700000000,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello from a"},"finish_reason":"stop"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_a":true,"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upA.Close)
+
+	upB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		headersUpB[r.URL.Path] = r.Header.Clone()
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-b","object":"chat.completion","created":1700000000,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello from b"},"finish_reason":"stop"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_b":true,"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upB.Close)
+
+	upC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		headersUpC[r.URL.Path] = r.Header.Clone()
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-c","object":"chat.completion","created":1700000000,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello from c"},"finish_reason":"stop"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_c":true,"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upC.Close)
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyAddr := proxyLn.Addr().String()
+	proxyLn.Close()
+
+	var out strings.Builder
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"--provider=provider-inherited",
+		"-upstream", upA.URL,
+		"-prefix", "/provider-a",
+		"-auth-mode", "bearer",
+		"-auth-source", "env:SHAPER_PROVIDER_FOO_API_KEY",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=provider-override",
+		"-upstream", upB.URL,
+		"-prefix", "/provider-b",
+		"-auth-mode", "bearer",
+		"-auth-source", "env:SHAPER_PROVIDER_FOO_API_KEY",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-transcode-auth-source", "env:OTHER_KEY",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=provider-unprotected",
+		"-upstream", upC.URL,
+		"-prefix", "/provider-c",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	cmd.Env = append(os.Environ(),
+		"SHAPER_PROVIDER_FOO_API_KEY=foo-api-key-12345",
+		"OTHER_KEY=other-api-key-67890",
+	)
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start binary: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	// Wait for the proxy listener to bind.
+	ready := false
+	for range 100 {
+		time.Sleep(50 * time.Millisecond)
+		conn, err := net.DialTimeout("tcp", proxyAddr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			ready = true
+			break
+		}
+	}
+	if !ready {
+		t.Fatalf("proxy did not start at %s\nOutput:\n%s", proxyAddr, out.String())
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// 1. Inherited provider auth: POST /provider-a/v1/responses
+	{
+		req, err := http.NewRequest(
+			http.MethodPost,
+			"http://"+proxyAddr+"/provider-a/v1/responses",
+			strings.NewReader(`{"model":"m","input":"hello"}`),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer client-secret-to-be-scrubbed")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /provider-a/v1/responses: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /provider-a/v1/responses status = %d: %s", resp.StatusCode, body)
+		}
+
+		mu.Lock()
+		hdr := headersUpA["/v1/chat/completions"]
+		mu.Unlock()
+
+		if got := hdr.Get("Authorization"); got != "Bearer foo-api-key-12345" {
+			t.Errorf("inherited route Authorization = %q, want Bearer foo-api-key-12345", got)
+		}
+	}
+
+	// 2. Inherited passthrough: POST /provider-a/unmapped
+	{
+		req, err := http.NewRequest(
+			http.MethodPost,
+			"http://"+proxyAddr+"/provider-a/unmapped",
+			strings.NewReader(`{"data":1}`),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer client-secret-to-be-scrubbed")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /provider-a/unmapped: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /provider-a/unmapped status = %d: %s", resp.StatusCode, body)
+		}
+
+		mu.Lock()
+		hdr := headersUpA["/unmapped"]
+		mu.Unlock()
+
+		if got := hdr.Get("Authorization"); got != "Bearer foo-api-key-12345" {
+			t.Errorf("passthrough route Authorization = %q, want Bearer foo-api-key-12345", got)
+		}
+	}
+
+	// 3. Route override auth: POST /provider-b/v1/responses
+	{
+		req, err := http.NewRequest(
+			http.MethodPost,
+			"http://"+proxyAddr+"/provider-b/v1/responses",
+			strings.NewReader(`{"model":"m","input":"hello"}`),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer client-secret-to-be-scrubbed")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /provider-b/v1/responses: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /provider-b/v1/responses status = %d: %s", resp.StatusCode, body)
+		}
+
+		mu.Lock()
+		hdr := headersUpB["/v1/chat/completions"]
+		mu.Unlock()
+
+		if got := hdr.Get("Authorization"); got != "Bearer other-api-key-67890" {
+			t.Errorf("override route Authorization = %q, want Bearer other-api-key-67890", got)
+		}
+	}
+
+	// 4. Unprotected provider: POST /provider-c/v1/responses (client auth scrubbed, reached upstream unauthenticated)
+	{
+		req, err := http.NewRequest(
+			http.MethodPost,
+			"http://"+proxyAddr+"/provider-c/v1/responses",
+			strings.NewReader(`{"model":"m","input":"hello"}`),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer client-secret-to-be-scrubbed")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /provider-c/v1/responses: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /provider-c/v1/responses status = %d: %s", resp.StatusCode, body)
+		}
+
+		mu.Lock()
+		hdr := headersUpC["/v1/chat/completions"]
+		mu.Unlock()
+
+		if got := hdr.Get("Authorization"); got != "" {
+			t.Errorf("unprotected transcoded route Authorization = %q, want empty (scrubbed)", got)
+		}
+	}
+
+	// 5. Verify the N>1 unprotected provider startup warning was emitted in the log
+	output := out.String()
+	if !strings.Contains(output, "note: 1 of 3 providers configured without upstream auth") {
+		t.Errorf("expected N>1 no-auth note in startup log, got:\n%s", output)
+	}
+}
+
 // TestResetDrainResetsAllCollectors proves the TUI ticker's "Reset Stats"
 // path: drainResetSignals collapses coalesced signals and every provider's
 // collector is reset fleet-wide (Task 6).
