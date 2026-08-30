@@ -300,6 +300,27 @@ transcoded route is **method + path** scoped and intercepts only the
 configured client route; every other route stays a transparent passthrough.
 Transcoding is **off by default** — no mapping, no interception.
 
+### Transcoding Flags
+
+All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), each flag configures that specific provider's transcode mappings.
+
+| Flag | Scope | Default | Description |
+|------|-------|---------|-------------|
+| `-transcode-route` | provider | _(repeatable)_ | Explicit transcode route mapping (`client-proto@client-path=upstream-proto@upstream-path`) |
+| `-transcode-responses-chat` | provider | `false` | Preset: Responses client (`POST /v1/responses`) → Chat upstream (`POST /v1/chat/completions`) |
+| `-transcode-messages-chat` | provider | `false` | Preset: Messages client (`POST /v1/messages`) → Chat upstream (`POST /v1/chat/completions`) |
+| `-transcode-messages-responses` | provider | `false` | Preset: Messages client (`POST /v1/messages`) → Responses upstream (`POST /v1/responses`) |
+| `-transcode-chat-capability` | provider | _(repeatable)_ | Enable or withdraw (`!name`) an optional chat upstream capability |
+| `-transcode-allow-client-query` | provider | _(repeatable)_ | Forward client query parameter (`name` or withdraw `!name`) |
+| `-transcode-allow-loss` | provider | _(repeatable)_ | Approve non-portable semantic loss by granular key (or withdraw `!key`) |
+| `-transcode-strict-defaults` | provider | `false` | Strip all out-of-the-box chat capabilities, query parameters, and loss approvals |
+| `-transcode-model-map` | provider | `auto` | Map client model name to upstream model name (`client=upstream`), or `auto` for pass-through |
+| `-transcode-auth` | provider | `auto` | Per-route target auth mode override (`auto`, `bearer`, `x-api-key`, `api-key`, `header:NAME`, `none`) |
+| `-transcode-auth-source` | provider | `inbound` | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`, `none`) |
+| `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header:` |
+| `-transcode-max-request-mb` | provider | `10` | Max unmarshaled request body size (MB) for transcoding |
+| `-transcode-max-response-mb` | provider | `10` | Max unmarshaled non-streaming response body size (MB) for transcoding |
+
 ### Route examples
 
 ```sh
