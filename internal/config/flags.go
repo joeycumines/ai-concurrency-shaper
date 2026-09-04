@@ -94,29 +94,31 @@ func (s *stringList) Set(v string) error {
 // inline literals so each default reads as a single named value at its
 // registration site and cannot drift between flag sets.
 const (
-	defaultBind                  = ":8080"
-	defaultConcurrency           = 4
-	defaultQueueTimeout          = 30 * time.Second
-	defaultRetryMax              = -1
-	defaultRetryMaxBodyMB        = 5
-	defaultRetryWaitMin          = 500 * time.Millisecond
-	defaultRetryWaitMax          = 30 * time.Second
-	defaultRetryMinDelay         = 1 * time.Second
-	defaultRetrySkipOn429        = true
-	defaultReleaseCooldown       = 200 * time.Millisecond
-	defaultCancelCooldown        = 200 * time.Millisecond
-	defaultFailureHold           = 2 * time.Second
-	defaultAdaptiveHeadroom      = false
-	defaultAdaptiveHeadroomWin   = 30 * time.Second
-	defaultDisableKeepAlives     = false
-	defaultCBEnabled             = true
-	defaultCBThreshold           = 5
-	defaultCBWindow              = 30 * time.Second
-	defaultCBOpenTimeout         = 10 * time.Second
-	defaultCBMaxOpen             = 120 * time.Second
-	defaultCBPenalty             = 2 * time.Second
-	defaultCBMaxPenalty          = 60 * time.Second
-	defaultAnthropicVersionValue = "2023-06-01"
+	defaultBind                   = ":8080"
+	defaultConcurrency            = 4
+	defaultQueueTimeout           = 30 * time.Second
+	defaultRetryMax               = -1
+	defaultRetryMaxBodyMB         = 5
+	defaultRetryWaitMin           = 500 * time.Millisecond
+	defaultRetryWaitMax           = 30 * time.Second
+	defaultRetryMinDelay          = 1 * time.Second
+	defaultRetrySkipOn429         = true
+	defaultReleaseCooldown        = 200 * time.Millisecond
+	defaultCancelCooldown         = 200 * time.Millisecond
+	defaultFailureHold            = 2 * time.Second
+	defaultAdaptiveHeadroom       = false
+	defaultAdaptiveHeadroomWin    = 30 * time.Second
+	defaultDisableKeepAlives      = false
+	defaultCBEnabled              = true
+	defaultCBThreshold            = 5
+	defaultCBWindow               = 30 * time.Second
+	defaultCBOpenTimeout          = 10 * time.Second
+	defaultCBMaxOpen              = 120 * time.Second
+	defaultCBPenalty              = 2 * time.Second
+	defaultCBMaxPenalty           = 60 * time.Second
+	defaultAnthropicVersionValue  = "2023-06-01"
+	defaultTranscodeMaxRequestMB  = 10
+	defaultTranscodeMaxResponseMB = 10
 )
 
 // registerServerFlags registers the server/global-section flags (legacy
@@ -192,6 +194,23 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.stringVar(&p.AuthSource, "auth-source", "", "upstream credential source: env:VAR | file:PATH | none (empty disables upstream auth entirely; requests are forwarded verbatim)")
 	r.stringVar(&p.AuthHeader, "auth-header", "", "custom upstream auth header name (required by -auth-mode header:<NAME>)")
 	r.stringVar(&p.AnthropicVersion, "anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value applied when the auth mode resolves to x-api-key")
+
+	// Transcoding (provider scope).
+	r.stringListVar(&p.TranscodeRoutes, "transcode-route", "repeatable route mapping: clientProtocol@clientPath=upstreamProtocol@upstreamPath")
+	r.boolVar(&p.TranscodeResponsesChat, "transcode-responses-chat", false, "preset: map POST /v1/responses to upstream /v1/chat/completions")
+	r.boolVar(&p.TranscodeMessagesChat, "transcode-messages-chat", false, "preset: map POST /v1/messages to upstream /v1/chat/completions")
+	r.boolVar(&p.TranscodeMessagesResponses, "transcode-messages-responses", false, "preset: map POST /v1/messages to upstream /v1/responses")
+	r.boolVar(&p.TranscodeStrictDefaults, "transcode-strict-defaults", false, "disable default loss approvals, capabilities, and query forwarding")
+	r.stringListVar(&p.TranscodeAllowLosses, "transcode-allow-loss", "approved non-portable feature or !name to deny (repeatable)")
+	r.stringListVar(&p.TranscodeChatCapabilities, "transcode-chat-capability", "enable chat upstream capability or !name to deny (repeatable)")
+	r.stringListVar(&p.TranscodeAllowClientQuery, "transcode-allow-client-query", "forward client query parameter or !name to deny (repeatable)")
+	r.stringListVar(&p.TranscodeModelMap, "transcode-model", "map client model to upstream model: client=upstream (repeatable)")
+	r.int64Var(&p.TranscodeMaxRequestMB, "transcode-max-request-mb", defaultTranscodeMaxRequestMB, "max request body size retained for transcoding, in MiB")
+	r.int64Var(&p.TranscodeMaxResponseMB, "transcode-max-response-mb", defaultTranscodeMaxResponseMB, "max response body size retained for transcoding, in MiB")
+	r.stringVar(&p.TranscodeAuth, "transcode-auth", "", "upstream auth mode for transcode: auto | none | bearer | x-api-key | api-key | header")
+	r.stringVar(&p.TranscodeAuthSource, "transcode-auth-source", "", "upstream auth secret source for transcode: inbound | env:VAR | file:PATH")
+	r.stringVar(&p.TranscodeAuthHeader, "transcode-auth-header", "", "custom upstream auth header name for transcode")
+	r.stringVar(&p.TranscodeAnthropicVersion, "transcode-anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value for transcode x-api-key")
 
 	// Circuit breaker.
 	r.boolVar(&p.CBEnabled, "circuit-breaker", defaultCBEnabled, "enable the circuit breaker")

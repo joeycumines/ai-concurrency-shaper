@@ -21,6 +21,7 @@ import (
 	"image/color"
 	"math"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -4897,8 +4898,8 @@ func TestProviderSwitcherChipClick(t *testing.T) {
 	if len(parts) != 3 {
 		t.Fatalf("budgetedChips rendered %d chips at width 100, want all 3", len(parts))
 	}
-	for i := len(parts) - 1; i >= 0; i-- {
-		w := lipgloss.Width(parts[i])
+	for i, part := range slices.Backward(parts) {
+		w := lipgloss.Width(part)
 		p = update(p, tea.MouseClickMsg{X: right, Y: 0})
 		if p.active != i {
 			t.Fatalf("click at column %d: active = %d, want %d", right, p.active, i)
@@ -4975,8 +4976,8 @@ func TestHeaderWidthBudget(t *testing.T) {
 					// rendered span. Walk the right-aligned layout the same
 					// way chipAt does.
 					right := m.width - 2
-					for i := len(layout.parts) - 1; i >= 0; i-- {
-						cw := lipgloss.Width(layout.parts[i])
+					for i, v := range slices.Backward(layout.parts) {
+						cw := lipgloss.Width(v)
 						if i == k {
 							if idx, ok := m.chipAt(right); !ok || idx != prov {
 								t.Errorf("width=%d active=%d: chipAt(%d) = (%d,%v), want (%d,true)",
@@ -5017,8 +5018,8 @@ func TestHeaderWidthBudget(t *testing.T) {
 			}
 			// Every rendered chip: each of its columns maps back to itself.
 			right := m.width - 2
-			for i := len(layout.parts) - 1; i >= 0; i-- {
-				cw := lipgloss.Width(layout.parts[i])
+			for i, v := range slices.Backward(layout.parts) {
+				cw := lipgloss.Width(v)
 				prov := layout.providers[i]
 				for x := right - cw + 1; x <= right; x++ {
 					if idx, ok := m.chipAt(x); !ok || idx != prov {
@@ -5182,5 +5183,71 @@ func TestResetStatsSendNeverBlocks(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("update with a full reset channel must not block")
+	}
+}
+
+// TestFleetStrip_AggregateObservability pins the one-line fleet strip atop the
+// TUI in multi-provider mode (M6/G8).
+func TestFleetStrip_AggregateObservability(t *testing.T) {
+	metas := []ProviderMeta{
+		{Name: "openai", Concurrency: 8},
+		{Name: "anthropic", Concurrency: 4},
+		{Name: "gemini", Concurrency: 6},
+	}
+	m := NewModelForProviders(metas)
+	m.width = 80
+	m.height = 24
+
+	// Update snapshots across providers:
+	// - openai: 3 active, 1 queued, circuit breaker CLOSED
+	// - anthropic: 2 active, 1 queued, circuit breaker OPEN
+	// - gemini: 0 active, 0 queued, circuit breaker CLOSED
+	// Total: 5 active · 2 queued · 1 OPEN · busiest: openai
+	m = update(m, ProviderUpdate{
+		Index: 0,
+		Snapshot: metrics.Snapshot{
+			Active: 3,
+			Queued: 1,
+			CircuitBreaker: &metrics.CBStats{
+				State: "CLOSED",
+			},
+		},
+	})
+	m = update(m, ProviderUpdate{
+		Index: 1,
+		Snapshot: metrics.Snapshot{
+			Active: 2,
+			Queued: 1,
+			CircuitBreaker: &metrics.CBStats{
+				State: "OPEN",
+			},
+		},
+	})
+	m = update(m, ProviderUpdate{
+		Index: 2,
+		Snapshot: metrics.Snapshot{
+			Active: 0,
+			Queued: 0,
+			CircuitBreaker: &metrics.CBStats{
+				State: "CLOSED",
+			},
+		},
+	})
+
+	hdr := stripANSI(m.renderHeader())
+	want := "Fleet: 5 active · 2 queued · 1 OPEN · busiest: openai"
+	if !strings.Contains(hdr, want) {
+		t.Fatalf("header missing fleet strip %q; got header: %q", want, hdr)
+	}
+
+	// Provider switcher chips are rendered on the right side of the same row.
+	layout := m.budgetedChips()
+	if len(layout.parts) == 0 {
+		t.Fatal("budgetedChips should fit chips at 80 cols")
+	}
+	// Active provider (index 0) is present
+	foundActive := slices.Contains(layout.providers, 0)
+	if !foundActive {
+		t.Error("active provider chip must be present in switcher")
 	}
 }

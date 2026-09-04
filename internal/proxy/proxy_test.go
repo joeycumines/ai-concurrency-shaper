@@ -889,7 +889,7 @@ func TestResponseWriterCanHijackUnwrapsAndIgnoresRecorderItself(t *testing.T) {
 }
 
 func TestStatusRecorderDefaultStatusZero(t *testing.T) {
-	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder()}
+	rec := &statusRecorder{}
 	if rec.status != 0 {
 		t.Errorf("default status = %d, want 0", rec.status)
 	}
@@ -4465,9 +4465,14 @@ func TestProxy_PanicRecoveryMetricsComplete(t *testing.T) {
 		t.Errorf("StatusCounts[5] = %d, want 1", snap.StatusCounts[5])
 	}
 
-	// TotalProxied must be 1 — the panic request counts as proxied.
-	if snap.TotalProxied != 1 {
-		t.Errorf("TotalProxied = %d, want 1 (panic request must be counted)", snap.TotalProxied)
+	// A recovered panic is an aborted exchange, never a clean completion
+	// (review-08 blocker 12): the proxied counter stays zero and the
+	// request is recorded as aborted.
+	if snap.TotalProxied != 0 {
+		t.Errorf("TotalProxied = %d, want 0 (panic request must not be a clean completion)", snap.TotalProxied)
+	}
+	if snap.TotalAborted != 1 {
+		t.Errorf("TotalAborted = %d, want 1", snap.TotalAborted)
 	}
 
 	// The request log must have an entry for the panic request.
@@ -4486,13 +4491,16 @@ func TestProxy_PanicRecoveryMetricsComplete(t *testing.T) {
 	if !snap.LogEntries[0].Limited {
 		t.Error("LogEntries[0].Limited = false, want true")
 	}
+	if !snap.LogEntries[0].Aborted {
+		t.Error("LogEntries[0].Aborted = false, want true")
+	}
 
 	// Consistency check: sum of all status counts must equal total requests.
 	var statusTotal int64
 	for _, v := range snap.StatusCounts {
 		statusTotal += v
 	}
-	reqTotal := snap.TotalProxied + snap.TotalPassThrough + snap.TotalTimeout + snap.TotalCancelled + snap.TotalCircuitRejected
+	reqTotal := snap.TotalProxied + snap.TotalPassThrough + snap.TotalTimeout + snap.TotalCancelled + snap.TotalCircuitRejected + snap.TotalAborted
 	if statusTotal != reqTotal {
 		t.Errorf("metrics drift: status total = %d, request total = %d (should be equal)", statusTotal, reqTotal)
 	}
@@ -4538,12 +4546,17 @@ func TestProxy_PanicRecoveryMetricsComplete_Passthrough(t *testing.T) {
 		t.Errorf("StatusCounts[5] = %d, want 1", snap.StatusCounts[5])
 	}
 
-	// TotalPassThrough must be 1 (not TotalProxied — this is passthrough).
-	if snap.TotalPassThrough != 1 {
-		t.Errorf("TotalPassThrough = %d, want 1 (panic passthrough must be counted)", snap.TotalPassThrough)
+	// A recovered panic is an aborted exchange, never a clean completion
+	// (review-08 blocker 12): neither completion counter moves and the
+	// request is recorded as aborted.
+	if snap.TotalPassThrough != 0 {
+		t.Errorf("TotalPassThrough = %d, want 0 (panic passthrough must not be a clean completion)", snap.TotalPassThrough)
 	}
 	if snap.TotalProxied != 0 {
 		t.Errorf("TotalProxied = %d, want 0 (this was passthrough)", snap.TotalProxied)
+	}
+	if snap.TotalAborted != 1 {
+		t.Errorf("TotalAborted = %d, want 1", snap.TotalAborted)
 	}
 
 	if len(snap.LogEntries) != 1 {
@@ -4561,7 +4574,7 @@ func TestProxy_PanicRecoveryMetricsComplete_Passthrough(t *testing.T) {
 	for _, v := range snap.StatusCounts {
 		statusTotal += v
 	}
-	reqTotal := snap.TotalProxied + snap.TotalPassThrough + snap.TotalTimeout + snap.TotalCancelled + snap.TotalCircuitRejected
+	reqTotal := snap.TotalProxied + snap.TotalPassThrough + snap.TotalTimeout + snap.TotalCancelled + snap.TotalCircuitRejected + snap.TotalAborted
 	if statusTotal != reqTotal {
 		t.Errorf("metrics drift: status total = %d, request total = %d (should be equal)", statusTotal, reqTotal)
 	}
@@ -4807,13 +4820,20 @@ func TestProxy_PanicRecovery_JournalRecorded(t *testing.T) {
 		t.Error("journal entry limited = false, want true")
 	}
 
-	// Metrics must also be complete.
+	// Metrics must also be complete: a recovered panic is an aborted
+	// exchange, never a clean completion (review-08 blocker 12).
 	snap := met.Snapshot()
-	if snap.TotalProxied != 1 {
-		t.Errorf("TotalProxied = %d, want 1", snap.TotalProxied)
+	if snap.TotalProxied != 0 {
+		t.Errorf("TotalProxied = %d, want 0", snap.TotalProxied)
+	}
+	if snap.TotalAborted != 1 {
+		t.Errorf("TotalAborted = %d, want 1", snap.TotalAborted)
 	}
 	if snap.StatusCounts[5] != 1 {
 		t.Errorf("StatusCounts[5] = %d, want 1", snap.StatusCounts[5])
+	}
+	if !entries[0].Aborted {
+		t.Error("journal entry must be marked aborted")
 	}
 }
 

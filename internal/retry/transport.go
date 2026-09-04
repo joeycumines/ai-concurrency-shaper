@@ -23,6 +23,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -34,10 +35,41 @@ import (
 // CheckRetry decides whether a failed attempt should be retried.
 type CheckRetry func(resp *http.Response, err error) bool
 
-// DefaultCheckRetry retries on 5xx, 429, and transport errors.
+// nonRetryableError is implemented by errors that must never be retried and
+// never count as upstream failures: local construction/auth defects that
+// will fail identically on every attempt (e.g. request signing failures,
+// review-z commit 4).
+type nonRetryableError interface {
+	IsNonRetryable() bool
+}
+
+// IsNonRetryable reports whether the error (or anything it wraps) must not
+// be retried. Both single-error and multi-error unwrap forms are followed
+// (Unwrap() error and Unwrap() []error), so a non-retryable marker nested
+// inside errors.Join / a multi-%w tree is detected — mirroring errors.Is.
+func IsNonRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if marker, ok := err.(nonRetryableError); ok && marker.IsNonRetryable() {
+		return true
+	}
+	switch u := err.(type) {
+	case interface{ Unwrap() []error }:
+		if slices.ContainsFunc(u.Unwrap(), IsNonRetryable) {
+			return true
+		}
+	case interface{ Unwrap() error }:
+		return IsNonRetryable(u.Unwrap())
+	}
+	return false
+}
+
+// DefaultCheckRetry retries on 5xx, 429, and transport errors. Non-retryable
+// local errors (IsNonRetryable) are never retried.
 var DefaultCheckRetry CheckRetry = func(resp *http.Response, err error) bool {
 	if err != nil {
-		return true
+		return !IsNonRetryable(err)
 	}
 	if resp == nil {
 		return false
@@ -169,6 +201,21 @@ func isRequestContextCancellation(req *http.Request) bool {
 }
 
 func suppressBreakerFailureForError(req *http.Request, err error) bool {
+	// A local non-retryable defect (e.g. a signing failure) is never an
+	// upstream failure and never opens the breaker (review-z commit 4).
+	if IsNonRetryable(err) {
+		return true
+	}
+	return isRequestContextCancellation(req) && isContextCancellation(err)
+}
+
+// isTerminalCancellation reports whether the error is a request-context
+// cancellation that must terminate this RoundTrip without retrying. Only a
+// REAL context cancellation qualifies: a non-retryable local defect (e.g. a
+// signing failure) is terminal for DIFFERENT reasons and must return its own
+// typed error to the caller, never a fabricated context.Canceled (review-z
+// commit 4).
+func isTerminalCancellation(req *http.Request, err error) bool {
 	return isRequestContextCancellation(req) && isContextCancellation(err)
 }
 
@@ -326,7 +373,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			} else if t.Breaker != nil && err == nil && !deferSuccess && resp != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				t.Breaker.RecordSuccess(attemptStart, breakerEpoch)
 			}
-			if err != nil && suppressBreakerFailureForError(req, err) {
+			if err != nil && isTerminalCancellation(req, err) {
 				return t.finishRequestCancellation(req, resp, nil, breakerEpoch)
 			}
 			return resp, err
@@ -486,7 +533,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// already suppresses the cancellation as a non-upstream failure while still
 		// preserving definitive response-status failures, so return the context error
 		// without entering the retry path.
-		if err != nil && suppressBreakerFailureForError(req, err) {
+		if err != nil && isTerminalCancellation(req, err) {
 			return t.finishRequestCancellation(req, resp, bodyBuf, breakerEpoch)
 		}
 

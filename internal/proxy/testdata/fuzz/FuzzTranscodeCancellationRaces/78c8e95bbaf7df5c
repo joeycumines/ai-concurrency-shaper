@@ -1,0 +1,4 @@
+go test fuzz v1
+byte('V')
+uint16(107)
+uint16(33)

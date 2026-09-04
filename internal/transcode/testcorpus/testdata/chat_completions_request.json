@@ -1,0 +1,64 @@
+{
+  "model": "gpt-4.1",
+  "messages": [
+    {
+      "role": "developer",
+      "content": "You are a helpful assistant with access to a weather tool."
+    },
+    {
+      "role": "user",
+      "content": "What is the weather in Tokyo? Use the weather tool."
+    },
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "call_abc123",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"location\":\"Tokyo\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_abc123",
+      "content": "{\"temperature\": 21, \"conditions\": \"sunny\"}"
+    }
+  ],
+  "max_completion_tokens": 256,
+  "temperature": 0.7,
+  "top_p": 1.0,
+  "stream": false,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a location",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "description": "City name"
+            }
+          },
+          "required": [
+            "location"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "parallel_tool_calls": true,
+  "metadata": {
+    "session_id": "sess_123"
+  },
+  "reasoning_effort": "medium"
+}

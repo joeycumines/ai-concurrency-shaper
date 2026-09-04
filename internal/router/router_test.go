@@ -384,3 +384,47 @@ func TestDispatchEncodedSlashAndDotSegments(t *testing.T) {
 		})
 	}
 }
+
+// TestRouter_DoesNotMutateInboundRequest proves that delegating through router.ServeHTTP
+// does not mutate the caller's *http.Request or *url.URL pointers or fields (review-16 finding 1).
+func TestRouter_DoesNotMutateInboundRequest(t *testing.T) {
+	up, _ := echo(t)
+
+	// 1. Prefixed provider
+	{
+		h, err := New([]Provider{{Name: "acme", Prefix: "/acme", Proxy: up}})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "http://example.com/acme/v1/messages", nil)
+		req.URL.RawPath = "/acme/v1/messages"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if req.URL.Path != "/acme/v1/messages" {
+			t.Errorf("prefixed mount mutated caller's req.URL.Path: got %q, want %q", req.URL.Path, "/acme/v1/messages")
+		}
+		if req.URL.RawPath != "/acme/v1/messages" {
+			t.Errorf("prefixed mount mutated caller's req.URL.RawPath: got %q, want %q", req.URL.RawPath, "/acme/v1/messages")
+		}
+	}
+
+	// 2. Bare provider
+	{
+		h, err := New([]Provider{{Name: "bare", Prefix: "", Proxy: up}})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodGet, "http://example.com/v1/messages/", nil)
+		req.URL.RawPath = "/v1/messages/"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if req.URL.Path != "/v1/messages/" {
+			t.Errorf("bare mount mutated caller's req.URL.Path: got %q, want %q", req.URL.Path, "/v1/messages/")
+		}
+		if req.URL.RawPath != "/v1/messages/" {
+			t.Errorf("bare mount mutated caller's req.URL.RawPath: got %q, want %q", req.URL.RawPath, "/v1/messages/")
+		}
+	}
+}

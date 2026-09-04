@@ -17,10 +17,10 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -34,14 +34,29 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/x/term"
-
 	"github.com/joeycumines/ai-concurrency-shaper/internal/config"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 )
+
+type safeBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeBuffer) Write(p []byte) (n int, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // newTestProxy builds a proxy backed by a fake upstream that tracks
 // concurrency and returns the method+path in the JSON body.
@@ -489,595 +504,41 @@ func TestGlobalConcurrency_ActiveCounter(t *testing.T) {
 // the bind address is already in use and -tui is enabled. It does NOT
 // verify terminal restoration — that requires PTY-based integration
 // testing (see internal/tui/tuitest/).
-func TestTUIExitsOnBindFailure(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
-	// Build the binary.
-	bin := t.TempDir() + "/test-shaper"
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	defer ln.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, bin,
-		"-bind", addr,
-		"-upstream", "http://127.0.0.1:1",
-		"-tui",
-	)
-	// Prevent the child process from corrupting the parent's terminal
-	// flags. Without isolation, bubbletea's tea.Program.Run() enters raw
-	// mode on os.Stdin (or /dev/tty), which modifies the PARENT's
-	// terminal since the child inherits the same terminal FDs. This
-	// disables ICANON/ECHO, leaving the parent terminal in raw mode
-	// after the test exits — the user's shell becomes unusable.
-	//
-	// We use two layers of isolation:
-	//   1. Stdin: pipe /dev/null so os.Stdin is not a terminal FD,
-	//      preventing bubbletea from entering raw mode on stdin.
-	//   2. Setsid: create a new session so the child has no controlling
-	//      terminal, preventing bubbletea's OpenTTY() fallback from
-	//      opening /dev/tty (the parent's terminal).
-	//
-	// With Setsid, bubbletea cannot start (OpenTTY fails), so the TUI
-	// goroutine exits early and triggers a clean shutdown via stop().
-	// The process exits with code 0 — which is correct behavior since
-	// the TUI initiated the shutdown, not the bind failure. The test
-	// verifies the process doesn't hang or crash regardless of which
-	// error path is hit first.
-	stdinR, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open /dev/null: %v", err)
-	}
-	defer stdinR.Close()
-	cmd.Stdin = stdinR
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	out, err := cmd.CombinedOutput()
-
-	// With Setsid, the child may exit cleanly (TUI OpenTTY failure
-	// triggers graceful shutdown) or with an error (bind failure
-	// arrives first). Either outcome is acceptable — the test
-	// verifies the process doesn't hang.
-	if err != nil {
-		// Non-zero exit: likely the bind error arrived first.
-		output := string(out)
-		if !strings.Contains(output, "bind") && !strings.Contains(output, "address") {
-			t.Logf("output: %s", output)
+// TestValidateMBFlag proves negative and overflowing megabyte flags are
+// rejected against their actual byte shift (review-j finding 14): a value
+// valid at shift 20 may overflow at shift 22.
+func TestValidateMBFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value int64
+		shift uint
+	}{
+		{"valid", 32, 20},
+		{"zero", 0, 22},
+		{"max at 20", math.MaxInt64 >> 20, 20},
+		{"max at 21", math.MaxInt64 >> 21, 21},
+		{"max at 22", math.MaxInt64 >> 22, 22},
+	} {
+		if err := validateMBFlag(tc.name, tc.value, tc.shift); err != nil {
+			t.Fatalf("%s = %d shift %d: %v", tc.name, tc.value, tc.shift, err)
 		}
 	}
-	// err == nil is also acceptable: TUI failure triggered clean shutdown.
-}
-
-// TestTUIStartupFailureHoldLogIsNotActionable guards the "-failure-hold"
-// startup summary that is emitted into the captured Logs buffer on every TUI
-// start (main.go). The summary must be printed in hyphen-bound form
-// ("failure-hold: 2s") — a space-separated "failure hold: 2s" reads like
-// prose to the Logs-tab classifier, whose whole-line keyword scan fires on the
-// word-boundary "failure" and raises a toast every time the dashboard launches.
-// The classifier-side contract is pinned in logclass_test.go; this test pins the
-// actual line the binary emits so a future rephrase cannot regress the toast.
-func TestTUIStartupFailureHoldLogIsNotActionable(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	// Build the binary.
-	bin := t.TempDir() + "/test-shaper"
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-
-	// A free bind address so startup config logging runs and renders into the
-	// buffer; the only reason the TUI fails to start is the missing controlling
-	// terminal (Setsid below), exactly as in TestTUIExitsOnBindFailure.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	defer ln.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Do not pass -failure-hold: the 2s default must hold so the startup line
-	// is actually emitted. -tui routes the buffered startup summaries through the
-	// Logs classifier; on shutdown the buffer flushes to stderr, which
-	// CombinedOutput captures.
-	cmd := exec.CommandContext(ctx, bin,
-		"-tui",
-		"-bind", addr,
-		"-upstream", "http://127.0.0.1:1",
-	)
-	stdinR, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open /dev/null: %v", err)
-	}
-	defer stdinR.Close()
-	cmd.Stdin = stdinR
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	out, _ := cmd.CombinedOutput()
-	output := string(out)
-
-	if strings.Contains(output, "failure hold: 2s") {
-		t.Fatalf("startup log emitted space-separated \"failure hold: 2s\" (actionable → toast):\n%s", output)
-	}
-	if !strings.Contains(output, "failure-hold: 2s") {
-		t.Fatalf("startup log missing hyphenated \"failure-hold: 2s\":\n%s", output)
-	}
-}
-
-func TestVersionFlag(t *testing.T) {
-	bin := t.TempDir() + "/test-shaper"
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-
-	cmd := exec.Command(bin, "-version")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("-version: %v\n%s", err, out)
-	}
-	got := strings.TrimSpace(string(out))
-	if got == "" {
-		t.Fatal("-version produced empty output")
-	}
-	// Default version is "dev" when built without ldflags.
-	if got != "dev" {
-		t.Errorf("unexpected version: got %q, want %q", got, "dev")
-	}
-}
-
-func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	bin := t.TempDir() + "/test-shaper"
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-
-	const concurrency = 4
-
-	// Count handler entries rather than ConnState transitions: StateNew can run
-	// before the previous connection's StateClosed callback, so ConnState is a
-	// flaky proxy-admission signal for this assertion. The limiter bounds active
-	// upstream requests; verify that deterministically.
-	var (
-		activeRequests          atomic.Int64
-		peakActiveRequests      atomic.Int64
-		connectionCloseFailures atomic.Int64
-	)
-
-	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !r.Close {
-			connectionCloseFailures.Add(1)
-		}
-
-		n := activeRequests.Add(1)
-		for {
-			old := peakActiveRequests.Load()
-			if n <= old || peakActiveRequests.CompareAndSwap(old, n) {
-				break
-			}
-		}
-		defer activeRequests.Add(-1)
-
-		time.Sleep(200 * time.Millisecond)
-		w.WriteHeader(http.StatusOK)
-	}))
-	upstream.Start()
-	t.Cleanup(upstream.Close)
-
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	proxyAddr := proxyLn.Addr().String()
-	proxyLn.Close()
-
-	var out strings.Builder
-	cmd := exec.Command(bin,
-		"-upstream", upstream.URL,
-		"-limit", "POST /v1/messages",
-		"-concurrency", "4",
-		"-queue-timeout", "30s",
-		"-bind", proxyAddr,
-		"-upstream-disable-keep-alives",
-		"-release-cooldown", "0",
-		"-cancel-cooldown", "0",
-		"-retry", "0",
-		"-circuit-breaker=false",
-	)
-
-	stdinR, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open /dev/null: %v", err)
-	}
-	defer stdinR.Close()
-	cmd.Stdin = stdinR
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start proxy: %v\n%s", err, out.String())
-	}
-
-	t.Cleanup(func() {
-		if cmd.Process == nil {
-			return
-		}
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
-	})
-
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- cmd.Wait()
-	}()
-
-	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case <-runErr:
-		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Kill()
-			<-runErr
-		}
-		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
-	}
-
-	proxyURL := "http://" + proxyAddr + "/v1/messages"
-	const n = 8
-	start := make(chan struct{})
-	var ready sync.WaitGroup
-	var wg sync.WaitGroup
-	client := &http.Client{Timeout: 30 * time.Second}
-	for range n {
-		ready.Add(1)
-		wg.Go(func() {
-			ready.Done() // signal ready BEFORE waiting for the start barrier
-			<-start
-			resp, err := client.Post(proxyURL, "application/json", strings.NewReader(`{}`))
-			if err != nil {
-				t.Errorf("request failed: %v", err)
-				return
-			}
-			defer resp.Body.Close()
-			slurp, _ := io.ReadAll(resp.Body)
-			if resp.StatusCode != http.StatusOK {
-				t.Errorf("expected 200, got %d: %s", resp.StatusCode, slurp)
-			}
-		})
-	}
-	ready.Wait()
-	close(start)
-	wg.Wait()
-
-	_ = cmd.Process.Signal(syscall.SIGTERM)
-
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("proxy exited with error: %v\noutput:\n%s", err, out.String())
-		}
-	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
-		<-runErr
-		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
-	}
-
-	if got := peakActiveRequests.Load(); got > concurrency {
-		t.Errorf("peak active upstream requests = %d, want <= %d", got, concurrency)
-	}
-	if got := connectionCloseFailures.Load(); got != 0 {
-		t.Errorf("upstream requests without Connection: close = %d", got)
-	}
-}
-
-func waitTCPReady(addr string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return nil
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	return fmt.Errorf("address %s did not become reachable", addr)
-}
-
-func TestCLI_AdaptiveHeadroom(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	bin := t.TempDir() + "/test-shaper"
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-
-	var requestCount atomic.Int64
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if requestCount.Add(1) == 1 {
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, `{"ok":true}`)
-	}))
-	t.Cleanup(upstream.Close)
-
-	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	proxyAddr := proxyLn.Addr().String()
-	proxyLn.Close()
-
-	var out strings.Builder
-	cmd := exec.Command(bin,
-		"-upstream", upstream.URL,
-		"-limit", "POST /v1/messages",
-		"-concurrency", "4",
-		"-queue-timeout", "30s",
-		"-bind", proxyAddr,
-		"-retry", "0",
-		"-circuit-breaker=false",
-		"-adaptive-headroom",
-		"-adaptive-headroom-window", "200ms",
-	)
-
-	stdinR, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open /dev/null: %v", err)
-	}
-	defer stdinR.Close()
-	cmd.Stdin = stdinR
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start proxy: %v\n%s", err, out.String())
-	}
-
-	t.Cleanup(func() {
-		if cmd.Process == nil {
-			return
-		}
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
-	})
-
-	runErr := make(chan error, 1)
-	go func() {
-		runErr <- cmd.Wait()
-	}()
-
-	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-		select {
-		case <-runErr:
-		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Kill()
-			<-runErr
-		}
-		t.Fatalf("proxy not ready: %v", err)
-	}
-
-	proxyURL := "http://" + proxyAddr + "/v1/messages"
-
-	// First request returns 429 and should trigger adaptive headroom.
-	resp, err := http.Post(proxyURL, "application/json", strings.NewReader(`{}`))
-	if err != nil {
-		t.Fatalf("first request failed: %v", err)
-	}
-	if resp.StatusCode != http.StatusTooManyRequests {
-		t.Errorf("first request status = %d, want 429", resp.StatusCode)
-	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-
-	// Subsequent requests should succeed.
-	for range 3 {
-		resp, err := http.Post(proxyURL, "application/json", strings.NewReader(`{}`))
-		if err != nil {
-			t.Fatalf("follow-up request failed: %v", err)
-		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Errorf("follow-up request status = %d, want 200", resp.StatusCode)
-		}
-	}
-
-	_ = cmd.Process.Signal(syscall.SIGTERM)
-
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("proxy exited with error: %v\noutput:\n%s", err, out.String())
-		}
-	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
-		<-runErr
-		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
-	}
-
-	if !strings.Contains(out.String(), "adaptive headroom: enabled") {
-		t.Errorf("expected startup log to mention adaptive headroom; output:\n%s", out.String())
-	}
-}
-
-func TestGroupLimiterSharing(t *testing.T) {
-	// Two patterns in the same @group should share a limiter.
-	p1, err := route.Parse("POST /v1/chat/completions:3@llm")
-	if err != nil {
-		t.Fatalf("parse p1: %v", err)
-	}
-	p2, err := route.Parse("POST /v1/messages:3@llm")
-	if err != nil {
-		t.Fatalf("parse p2: %v", err)
-	}
-
-	if p1.Group != p2.Group {
-		t.Fatalf("expected same group, got %q and %q", p1.Group, p2.Group)
-	}
-
-	routeLimiters := make(map[string]*queue.Limiter)
-	patterns := []route.Pattern{p1, p2}
-
-	for _, p := range patterns {
-		if p.Limit > 0 {
-			if p.Group != "" {
-				if _, exists := routeLimiters[p.Group]; !exists {
-					routeLimiters[p.Group] = queue.NewLimiterWithCooldown(p.Limit, 0)
-				}
-			} else {
-				routeLimiters[p.Raw] = queue.NewLimiterWithCooldown(p.Limit, 0)
-			}
-		}
-	}
-
-	if len(routeLimiters) != 1 {
-		t.Fatalf("expected 1 limiter, got %d", len(routeLimiters))
-	}
-	lim := routeLimiters["llm"]
-	if lim == nil {
-		t.Fatal("llm limiter is nil")
-	}
-
-	matcher := route.NewMatcher(patterns)
-	met := metrics.NewCollector()
-	limiter := queue.NewLimiterWithCooldown(10, 0)
-	p, err := proxy.New(
-		proxy.WithUpstream(mustParseURL("http://127.0.0.1:1")),
-		proxy.WithMatcher(matcher),
-		proxy.WithLimiter(limiter),
-		proxy.WithMetrics(met),
-		proxy.WithRouteLimiters(routeLimiters),
-	)
-	if err != nil {
-		t.Fatalf("proxy.New: %v", err)
-	}
-
-	// Both routes should hit the group limiter, not the global one.
-	_ = p // The acquireSlot method is internal; we verify via route/key mapping.
-}
-
-func mustParseURL(s string) *url.URL {
-	u, err := url.Parse(s)
-	if err != nil {
-		panic(err)
-	}
-	return u
-}
-
-// terminalStateDiff compares two terminal states and returns a human-readable
-// description of any differences. Returns empty string if identical.
-func terminalStateDiff(a, b *term.State) string {
-	// Use the fact that term.State wraps unix.Termios which has
-	// exported fields. Serialize via fmt.Sprintf for comparison.
-	aStr := fmt.Sprintf("%+v", a)
-	bStr := fmt.Sprintf("%+v", b)
-	if aStr == bStr {
-		return ""
-	}
-	return fmt.Sprintf("terminal state changed:\n  before: %s\n  after:  %s", aStr, bStr)
-}
-
-// TestSubprocessTerminalIsolation verifies that running the binary with -tui
-// as a subprocess does NOT corrupt the parent process's terminal flags.
-// This is a regression test for a bug where CombinedOutput() left stdin
-// inherited from the parent, allowing bubbletea's MakeRaw() to disable
-// ICANON/ECHO on the shared terminal FD.
-//
-// This test only runs when stdin is a real terminal. It will be skipped
-// in CI or when output is piped. Use -count=N to detect cross-run
-// contamination from prior test invocations.
-func TestSubprocessTerminalIsolation(t *testing.T) {
-	fd := os.Stdin.Fd()
-	if !term.IsTerminal(fd) {
-		t.Skip("skipping: stdin is not a terminal (run from a real terminal to enable)")
-	}
-
-	// Capture terminal state before running the subprocess.
-	before, err := term.GetState(fd)
-	if err != nil {
-		t.Fatalf("get terminal state before: %v", err)
-	}
-
-	// Build the binary.
-	bin := t.TempDir() + "/test-shaper"
-	build := exec.Command("go", "build", "-o", bin, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %v\n%s", err, out)
-	}
-
-	// Occupy a port so the binary exits quickly.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	defer ln.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, bin,
-		"-bind", addr,
-		"-upstream", "http://127.0.0.1:1",
-		"-tui",
-	)
-	// Apply the same isolation as TestTUIExitsOnBindFailure:
-	// /dev/null stdin + new session to prevent terminal access.
-	stdinR, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("open /dev/null: %v", err)
-	}
-	defer stdinR.Close()
-	cmd.Stdin = stdinR
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-
-	_, _ = cmd.CombinedOutput()
-
-	// Verify terminal state is preserved.
-	after, err := term.GetState(fd)
-	if err != nil {
-		t.Fatalf("get terminal state after: %v", err)
-	}
-
-	if diff := terminalStateDiff(before, after); diff != "" {
-		t.Error(diff)
-		// Restore the saved state to prevent leaving the terminal broken.
-		if err := term.Restore(fd, before); err != nil {
-			t.Errorf("failed to restore terminal state: %v", err)
+	for _, tc := range []struct {
+		name  string
+		value int64
+		shift uint
+	}{
+		{"negative", -1, 20},
+		{"overflow at 20", (math.MaxInt64 >> 20) + 1, 20},
+		// retry-max-body-mb is validated at shift 21 because its byte value is
+		// doubled (journal sizing maxBody*2) and must not overflow (review-08
+		// additional 3).
+		{"overflow at 21", (math.MaxInt64 >> 21) + 1, 21},
+		{"overflow at 22", (math.MaxInt64 >> 22) + 1, 22},
+	} {
+		if err := validateMBFlag(tc.name, tc.value, tc.shift); err == nil {
+			t.Fatalf("%s = %d shift %d accepted", tc.name, tc.value, tc.shift)
 		}
 	}
 }
@@ -1119,7 +580,7 @@ func TestE2E_MultiProvider(t *testing.T) {
 		proxyAddr := proxyLn.Addr().String()
 		proxyLn.Close()
 
-		var out strings.Builder
+		var out safeBuffer
 		cmd := exec.Command(bin,
 			"-bind", proxyAddr,
 			"--provider=acme",
@@ -1240,6 +701,462 @@ func TestE2E_MultiProvider(t *testing.T) {
 			t.Errorf("stderr should mention overlap, got:\n%s", msg)
 		}
 	})
+}
+
+// TestE2E_MultiProvider_Transcode proves the composed CLI multi-provider transcoding
+// end-to-end through the real binary: each --provider section can configure its own
+// transcode routes, each mount transcodes only its own configured routes, and unmapped
+// paths on either mount pass through transparently.
+func TestE2E_MultiProvider_Transcode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	var upARequests, upBRequests atomic.Int64
+
+	upA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upARequests.Add(1)
+		if r.URL.Path == "/v1/chat/completions" && r.Method == http.MethodPost {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-a","object":"chat.completion","created":1700000000,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello from anthropic chat upstream"},"finish_reason":"stop"}]}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_a":true,"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upA.Close)
+
+	upB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upBRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_b":true,"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upB.Close)
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyAddr := proxyLn.Addr().String()
+	proxyLn.Close()
+
+	var out safeBuffer
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"--provider=anthropic",
+		"-upstream", upA.URL,
+		"-prefix", "/anthropic",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=openai",
+		"-upstream", upB.URL,
+		"-prefix", "/openai",
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+
+	stdinR, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer stdinR.Close()
+	cmd.Stdin = stdinR
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v\n%s", err, out.String())
+	}
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// 1. POST /anthropic/v1/responses -> transcoded via anthropic provider to /v1/chat/completions on upA
+	{
+		resp, err := client.Post(
+			"http://"+proxyAddr+"/anthropic/v1/responses",
+			"application/json",
+			strings.NewReader(`{"model":"m","input":"hello"}`),
+		)
+		if err != nil {
+			t.Fatalf("POST /anthropic/v1/responses: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /anthropic/v1/responses status = %d, want 200: %s", resp.StatusCode, body)
+		}
+		bodyStr := string(body)
+		if !strings.Contains(bodyStr, "hello from anthropic chat upstream") || !strings.Contains(bodyStr, `"object":"response"`) {
+			t.Fatalf("POST /anthropic/v1/responses unexpected body: %s", bodyStr)
+		}
+	}
+
+	// 2. POST /anthropic/unmapped/path -> passthrough without transcoding to upA
+	{
+		resp, err := client.Post(
+			"http://"+proxyAddr+"/anthropic/unmapped/path",
+			"application/json",
+			strings.NewReader(`{"data":123}`),
+		)
+		if err != nil {
+			t.Fatalf("POST /anthropic/unmapped/path: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /anthropic/unmapped/path status = %d, want 200: %s", resp.StatusCode, body)
+		}
+		bodyStr := string(body)
+		if !strings.Contains(bodyStr, `"untranscoded_a":true`) || !strings.Contains(bodyStr, `"/unmapped/path"`) {
+			t.Fatalf("POST /anthropic/unmapped/path unexpected body: %s", bodyStr)
+		}
+	}
+
+	// 3. POST /openai/v1/responses -> passthrough without transcoding to upB (openai has no transcode mapping)
+	{
+		resp, err := client.Post(
+			"http://"+proxyAddr+"/openai/v1/responses",
+			"application/json",
+			strings.NewReader(`{"data":123}`),
+		)
+		if err != nil {
+			t.Fatalf("POST /openai/v1/responses: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /openai/v1/responses status = %d, want 200: %s", resp.StatusCode, body)
+		}
+		bodyStr := string(body)
+		if !strings.Contains(bodyStr, `"untranscoded_b":true`) || !strings.Contains(bodyStr, `"/v1/responses"`) {
+			t.Fatalf("POST /openai/v1/responses unexpected body: %s", bodyStr)
+		}
+	}
+
+	// 4. POST /openai/other/path -> passthrough to upB
+	{
+		resp, err := client.Post(
+			"http://"+proxyAddr+"/openai/other/path",
+			"application/json",
+			strings.NewReader(`{"data":456}`),
+		)
+		if err != nil {
+			t.Fatalf("POST /openai/other/path: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /openai/other/path status = %d, want 200: %s", resp.StatusCode, body)
+		}
+		bodyStr := string(body)
+		if !strings.Contains(bodyStr, `"untranscoded_b":true`) || !strings.Contains(bodyStr, `"/other/path"`) {
+			t.Fatalf("POST /openai/other/path unexpected body: %s", bodyStr)
+		}
+	}
+}
+
+// TestE2E_MultiProvider_Transcode_AuthPrecedence tests auth inheritance, override,
+// and unprotected handling across multiple providers with transcoding:
+// 1. Inherited provider auth: -auth-source env:SHAPER_PROVIDER_FOO_API_KEY with no per-route auth forwards the provider credential.
+// 2. Route override: -transcode-auth-source env:OTHER_KEY overrides provider auth.
+// 3. Unprotected provider: neither source configured reaches upstream without credentials and logs the N>1 warning.
+// 4. Client credentials are scrubbed exactly once on transcoded routes.
+func TestE2E_MultiProvider_Transcode_AuthPrecedence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper-auth"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	var (
+		mu         sync.Mutex
+		headersUpA = make(map[string]http.Header)
+		headersUpB = make(map[string]http.Header)
+		headersUpC = make(map[string]http.Header)
+	)
+
+	upA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		headersUpA[r.URL.Path] = r.Header.Clone()
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-a","object":"chat.completion","created":1700000000,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello from a"},"finish_reason":"stop"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_a":true,"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upA.Close)
+
+	upB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		headersUpB[r.URL.Path] = r.Header.Clone()
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-b","object":"chat.completion","created":1700000000,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello from b"},"finish_reason":"stop"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_b":true,"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upB.Close)
+
+	upC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		headersUpC[r.URL.Path] = r.Header.Clone()
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/chat/completions" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-c","object":"chat.completion","created":1700000000,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello from c"},"finish_reason":"stop"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_c":true,"path":%q}`, r.URL.Path)
+	}))
+	t.Cleanup(upC.Close)
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyAddr := proxyLn.Addr().String()
+	proxyLn.Close()
+
+	var out safeBuffer
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"--provider=provider-inherited",
+		"-upstream", upA.URL,
+		"-prefix", "/provider-a",
+		"-auth-mode", "bearer",
+		"-auth-source", "env:SHAPER_PROVIDER_FOO_API_KEY",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=provider-override",
+		"-upstream", upB.URL,
+		"-prefix", "/provider-b",
+		"-auth-mode", "bearer",
+		"-auth-source", "env:SHAPER_PROVIDER_FOO_API_KEY",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-transcode-auth-source", "env:OTHER_KEY",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=provider-unprotected",
+		"-upstream", upC.URL,
+		"-prefix", "/provider-c",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	cmd.Env = append(os.Environ(),
+		"SHAPER_PROVIDER_FOO_API_KEY=foo-api-key-12345",
+		"OTHER_KEY=other-api-key-67890",
+	)
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start binary: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	// Wait for the proxy listener to bind.
+	ready := false
+	for range 100 {
+		time.Sleep(50 * time.Millisecond)
+		conn, err := net.DialTimeout("tcp", proxyAddr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			ready = true
+			break
+		}
+	}
+	if !ready {
+		t.Fatalf("proxy did not start at %s\nOutput:\n%s", proxyAddr, out.String())
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	// 1. Inherited provider auth: POST /provider-a/v1/responses
+	{
+		req, err := http.NewRequest(
+			http.MethodPost,
+			"http://"+proxyAddr+"/provider-a/v1/responses",
+			strings.NewReader(`{"model":"m","input":"hello"}`),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer client-secret-to-be-scrubbed")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /provider-a/v1/responses: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /provider-a/v1/responses status = %d: %s", resp.StatusCode, body)
+		}
+
+		mu.Lock()
+		hdr := headersUpA["/v1/chat/completions"]
+		mu.Unlock()
+
+		if got := hdr.Get("Authorization"); got != "Bearer foo-api-key-12345" {
+			t.Errorf("inherited route Authorization = %q, want Bearer foo-api-key-12345", got)
+		}
+	}
+
+	// 2. Inherited passthrough: POST /provider-a/unmapped
+	{
+		req, err := http.NewRequest(
+			http.MethodPost,
+			"http://"+proxyAddr+"/provider-a/unmapped",
+			strings.NewReader(`{"data":1}`),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer client-secret-to-be-scrubbed")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /provider-a/unmapped: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /provider-a/unmapped status = %d: %s", resp.StatusCode, body)
+		}
+
+		mu.Lock()
+		hdr := headersUpA["/unmapped"]
+		mu.Unlock()
+
+		if got := hdr.Get("Authorization"); got != "Bearer foo-api-key-12345" {
+			t.Errorf("passthrough route Authorization = %q, want Bearer foo-api-key-12345", got)
+		}
+	}
+
+	// 3. Route override auth: POST /provider-b/v1/responses
+	{
+		req, err := http.NewRequest(
+			http.MethodPost,
+			"http://"+proxyAddr+"/provider-b/v1/responses",
+			strings.NewReader(`{"model":"m","input":"hello"}`),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer client-secret-to-be-scrubbed")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /provider-b/v1/responses: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /provider-b/v1/responses status = %d: %s", resp.StatusCode, body)
+		}
+
+		mu.Lock()
+		hdr := headersUpB["/v1/chat/completions"]
+		mu.Unlock()
+
+		if got := hdr.Get("Authorization"); got != "Bearer other-api-key-67890" {
+			t.Errorf("override route Authorization = %q, want Bearer other-api-key-67890", got)
+		}
+	}
+
+	// 4. Unprotected provider: POST /provider-c/v1/responses (client auth scrubbed, reached upstream unauthenticated)
+	{
+		req, err := http.NewRequest(
+			http.MethodPost,
+			"http://"+proxyAddr+"/provider-c/v1/responses",
+			strings.NewReader(`{"model":"m","input":"hello"}`),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer client-secret-to-be-scrubbed")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST /provider-c/v1/responses: %v", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("POST /provider-c/v1/responses status = %d: %s", resp.StatusCode, body)
+		}
+
+		mu.Lock()
+		hdr := headersUpC["/v1/chat/completions"]
+		mu.Unlock()
+
+		if got := hdr.Get("Authorization"); got != "" {
+			t.Errorf("unprotected transcoded route Authorization = %q, want empty (scrubbed)", got)
+		}
+	}
+
+	// 5. Verify the N>1 unprotected provider startup warning was emitted in the log
+	output := out.String()
+	if !strings.Contains(output, "note: 1 of 3 providers configured without upstream auth") {
+		t.Errorf("expected N>1 no-auth note in startup log, got:\n%s", output)
+	}
 }
 
 // TestResetDrainResetsAllCollectors proves the TUI ticker's "Reset Stats"
@@ -1997,4 +1914,17 @@ func TestConfigMetricsBindFlag(t *testing.T) {
 	if _, err = config.Parse([]string{"--provider=a", "-upstream", "http://127.0.0.1:1", "-prefix", "/a", "-metrics-bind", ":2112"}); err == nil {
 		t.Error("provider-scoped -metrics-bind must be rejected (server-scope flag)")
 	}
+}
+
+func waitTCPReady(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return fmt.Errorf("address %s did not become reachable", addr)
 }

@@ -1,0 +1,28 @@
+{
+  "id": "chatcmpl_8xyz",
+  "object": "chat.completion",
+  "created": 1710000000,
+  "model": "gpt-4.1",
+  "system_fingerprint": "fp_44709d6fcb",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "The weather in Tokyo is 21\u00b0C and sunny."
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 42,
+    "completion_tokens": 18,
+    "total_tokens": 60,
+    "prompt_tokens_details": {
+      "cached_tokens": 5
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 12
+    }
+  }
+}

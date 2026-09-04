@@ -130,25 +130,25 @@ func TestPTY_MultiProviderTabSwitch(t *testing.T) {
 			t.Fatalf("header should show chip %q; got: %q", name, out)
 		}
 	}
-	if !strings.Contains(out, "prov1 │ 0/4 active") {
-		t.Fatalf("initial header should show prov1 with 0/4 active; got: %q", headerLine(out))
+	if !strings.Contains(out, "Fleet: 0 active · 0 queued · 0 OPEN · busiest: prov1") {
+		t.Fatalf("initial header should show fleet summary 0 active; got: %q", headerLine(out))
 	}
 
 	// One parked request at prov1's mount: /v1/messages is a limited route by
 	// default, so it enters prov1's limiter and holds its counter at 1.
 	fireRequest(t, &fired, h.ProviderURL(0)+"/v1/messages")
-	awaitRender(t, h, "prov1 │ 1/4 active")
+	awaitRender(t, h, "Fleet: 1 active · 0 queued · 0 OPEN · busiest: prov1")
 
 	// Tab switches the visible dashboard to prov2 (which still has zero
 	// in-flight — its counter must not have been moved by prov1's request).
 	if _, err := h.Console().WriteString("\t"); err != nil {
 		t.Fatalf("WriteString tab: %v", err)
 	}
-	awaitRender(t, h, "prov2 │ 0/4 active")
+	awaitRender(t, h, "Fleet: 1 active · 0 queued · 0 OPEN · busiest: prov1")
 
 	// A parked request at prov2's mount drives the now-active view's counter.
 	fireRequest(t, &fired, h.ProviderURL(1)+"/v1/messages")
-	awaitRender(t, h, "prov2 │ 1/4 active")
+	awaitRender(t, h, "Fleet: 2 active · 0 queued · 0 OPEN")
 
 	// The dashboard body follows the switch: the Concurrency view (key 5)
 	// renders the active provider's gauge line.
@@ -170,14 +170,14 @@ func TestPTY_MultiProviderShiftTabRawEscape(t *testing.T) {
 	if _, err := h.Console().WriteString("\t"); err != nil {
 		t.Fatalf("WriteString tab: %v", err)
 	}
-	awaitRender(t, h, "prov2 │ 0/4 active")
+	awaitRender(t, h, "prov2")
 
 	// Send the raw backward-cycle sequence. With two providers it must wrap
 	// from prov2 back to prov1, not advance to a nonexistent third provider.
 	if _, err := h.Console().WriteString("\x1b[Z"); err != nil {
 		t.Fatalf("WriteString ESC[Z: %v", err)
 	}
-	awaitRender(t, h, "prov1 │ 0/4 active")
+	awaitRender(t, h, "prov1")
 }
 
 // TestPTY_MultiProviderTeardown probes shutdown while BOTH providers hold
@@ -195,7 +195,7 @@ func TestPTY_MultiProviderTeardown(t *testing.T) {
 
 	// One parked request at prov1's mount holds its counter at 1.
 	fireRequest(t, &fired, h.ProviderURL(0)+"/v1/messages")
-	awaitRender(t, h, "prov1 │ 1/4 active")
+	awaitRender(t, h, "Fleet: 1 active · 0 queued · 0 OPEN · busiest: prov1")
 
 	// Switch to prov2 and hold a request there too: both providers must
 	// carry an in-flight request at the same time.
@@ -203,7 +203,7 @@ func TestPTY_MultiProviderTeardown(t *testing.T) {
 		t.Fatalf("WriteString tab: %v", err)
 	}
 	fireRequest(t, &fired, h.ProviderURL(1)+"/v1/messages")
-	awaitRender(t, h, "prov2 │ 1/4 active")
+	awaitRender(t, h, "Fleet: 2 active · 0 queued · 0 OPEN")
 
 	// Ctrl+C: the TUI exits, main's shutdown runs, the server drain (5s
 	// grace) expires with the parked handlers, and the process exits cleanly.
@@ -228,4 +228,24 @@ func TestPTY_MultiProviderTeardown(t *testing.T) {
 	if out := h.Console().String(); !strings.Contains(out, "\x1b[?1049l") {
 		t.Errorf("terminal was not restored: no alt-screen exit sequence in output\nFull output: %s", out)
 	}
+}
+
+// TestPTY_ThreeProvidersFleetStrip proves the fleet aggregate observability strip (M6/G8)
+// with 3 providers in a real terminal at 80-col.
+func TestPTY_ThreeProvidersFleetStrip(t *testing.T) {
+	up1, up2, up3 := gatedUpstream(t), gatedUpstream(t), gatedUpstream(t)
+	h := LaunchMulti(t, []*httptest.Server{up1, up2, up3}, WithTermSize(24, 80))
+	var fired sync.WaitGroup
+	defer fired.Wait()
+	defer h.Close()
+
+	// Initial fleet strip: 0 active, 0 queued, 0 OPEN.
+	awaitRender(t, h, "Fleet: 0 active · 0 queued · 0 OPEN")
+
+	// Fire request at prov1 and prov2.
+	fireRequest(t, &fired, h.ProviderURL(0)+"/v1/messages")
+	fireRequest(t, &fired, h.ProviderURL(1)+"/v1/messages")
+
+	// Fleet strip reflects aggregate active count.
+	awaitRender(t, h, "Fleet: 2 active · 0 queued · 0 OPEN")
 }

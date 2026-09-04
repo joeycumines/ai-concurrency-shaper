@@ -13,7 +13,11 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+//go:build unix
+
 // Package tuitest provides PTY-based integration tests for the TUI dashboard.
+// The PTY console APIs (termtest.Console) are unix-only; every test file in
+// this package carries the same constraint.
 package tuitest
 
 import (

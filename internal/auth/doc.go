@@ -22,9 +22,9 @@
 // different auth schemes (Anthropic x-api-key plus anthropic-version, OpenAI
 // bearer, Azure api-key, arbitrary custom headers), and verbatim forwarding
 // would leak one provider's credential to another. Strip-then-inject makes
-// cross-provider leakage of those credentials structurally impossible
-// whenever a policy is applied; with no policy the caller performs no
-// mutation at all.
+// cross-provider leakage of those client-supplied HTTP credential headers
+// structurally impossible whenever a policy is applied; with no policy the
+// caller performs no mutation at all.
 //
 // One credential class is deliberately exempt: Cookie values are forwarded
 // verbatim (stripping them would break cookie-authenticated upstreams) and,

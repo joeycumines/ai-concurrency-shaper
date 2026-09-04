@@ -1,0 +1,17 @@
+{
+  "openai_responses": {
+    "source": "openai-go",
+    "version": "v1.12.0",
+    "snapshot_sha256": "bbd67c90691efe37097affc8cd3200b2360f14426ae0d60b2d59e444a7f87186"
+  },
+  "openai_chat_completions": {
+    "source": "openai-go",
+    "version": "v1.12.0",
+    "snapshot_sha256": "bde5294743898ff93efee09fe80eb59c07599c252cb591d532205fbde1aeb53c"
+  },
+  "anthropic_messages": {
+    "source": "anthropic-api",
+    "version": "2023-06-01",
+    "snapshot_sha256": "7904599c41df8745b57614322d73e970c8bf54bb48563829d8ec3a2381920ce5"
+  }
+}

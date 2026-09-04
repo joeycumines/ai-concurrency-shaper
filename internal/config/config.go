@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/url"
 	"strings"
 	"time"
@@ -40,6 +41,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
 // Scope identifies a configuration section type. Section scopes are the parser's
@@ -111,11 +113,14 @@ type Provider struct {
 
 	// ---- Upstream-behavior tuning (provider scope) ----
 
-	Concurrency            int
-	GlobalConcurrency      int
-	LimitAll               bool
-	QueueTimeout           time.Duration
-	RetryMax               int
+	Concurrency       int
+	GlobalConcurrency int
+	LimitAll          bool
+	QueueTimeout      time.Duration
+	RetryMax          int
+	// RetryMaxBodyMB is the max request body size in MiB retained for replay by
+	// the proxy retry transport. It propagates as the default RetryReplayBytes
+	// for any transcoded route mapping where RetryReplayBytes is unset (zero).
 	RetryMaxBodyMB         int64
 	RetryWaitMin           time.Duration
 	RetryWaitMax           time.Duration
@@ -132,6 +137,9 @@ type Provider struct {
 
 	// AuthSource names where the upstream credential comes from:
 	// "env:VAR", "file:PATH", or the literal "none" (strip-only hygiene).
+	// Credentials from "file:PATH" are resolved once at startup and wrapped
+	// as static secrets across both passthrough and transcoded routes; file
+	// rotation requires a restart today.
 	// Empty disables upstream authentication entirely: requests are
 	// forwarded verbatim, exactly as they always have been.
 	AuthSource string
@@ -145,6 +153,24 @@ type Provider struct {
 	// resolved mode is x-api-key.
 	AnthropicVersion string
 
+	// ---- Transcoding (provider scope) ----
+
+	TranscodeRoutes            []string
+	TranscodeResponsesChat     bool
+	TranscodeMessagesChat      bool
+	TranscodeMessagesResponses bool
+	TranscodeStrictDefaults    bool
+	TranscodeAllowLosses       []string
+	TranscodeChatCapabilities  []string
+	TranscodeAllowClientQuery  []string
+	TranscodeModelMap          []string
+	TranscodeMaxRequestMB      int64
+	TranscodeMaxResponseMB     int64
+	TranscodeAuth              string
+	TranscodeAuthSource        string
+	TranscodeAuthHeader        string
+	TranscodeAnthropicVersion  string
+
 	// ---- Circuit breaker (provider scope) ----
 
 	CBEnabled     bool
@@ -157,15 +183,46 @@ type Provider struct {
 
 	// -- resolved state (populated by ResolveAndValidate) --
 
-	upstream       *url.URL
-	patterns       []route.Pattern
-	matcher        *route.Matcher
-	defaultLimiter *queue.Limiter
-	globalLimiter  *queue.Limiter
-	routeLimiters  map[string]*queue.Limiter
-	breaker        *circuitbreaker.Breaker
-	maxIdlePerHost int
-	authPolicy     *auth.AuthPolicy
+	upstream          *url.URL
+	patterns          []route.Pattern
+	matcher           *route.Matcher
+	defaultLimiter    *queue.Limiter
+	globalLimiter     *queue.Limiter
+	routeLimiters     map[string]*queue.Limiter
+	breaker           *circuitbreaker.Breaker
+	maxIdlePerHost    int
+	authPolicy        *auth.AuthPolicy
+	transcodeMappings []proxy.TranscodeMapping
+}
+
+// TranscodeMappings returns the resolved transcode route mappings for this provider,
+// deep-cloning internal maps to prevent caller mutations (review-15 finding 7).
+func (p *Provider) TranscodeMappings() []proxy.TranscodeMapping {
+	out := make([]proxy.TranscodeMapping, len(p.transcodeMappings))
+	for i, m := range p.transcodeMappings {
+		out[i] = cloneTranscodeMapping(m)
+	}
+	return out
+}
+
+func cloneTranscodeMapping(m proxy.TranscodeMapping) proxy.TranscodeMapping {
+	cloned := m
+	if m.Mapping.ModelMap.Exact != nil {
+		exact := make(map[string]transcode.ModelMapping, len(m.Mapping.ModelMap.Exact))
+		maps.Copy(exact, m.Mapping.ModelMap.Exact)
+		cloned.Mapping.ModelMap.Exact = exact
+	}
+	if m.Mapping.LossPolicy.Allowed != nil {
+		allowed := make(map[transcode.Feature]struct{}, len(m.Mapping.LossPolicy.Allowed))
+		maps.Copy(allowed, m.Mapping.LossPolicy.Allowed)
+		cloned.Mapping.LossPolicy.Allowed = allowed
+	}
+	if m.Mapping.AllowedClientQuery != nil {
+		query := make(map[string]struct{}, len(m.Mapping.AllowedClientQuery))
+		maps.Copy(query, m.Mapping.AllowedClientQuery)
+		cloned.Mapping.AllowedClientQuery = query
+	}
+	return cloned
 }
 
 // UpstreamURL returns the parsed upstream URL.
@@ -453,6 +510,10 @@ func (p *Provider) resolve(index int, multi bool) error {
 	}
 
 	if err := p.buildAuthPolicy(); err != nil {
+		return fmt.Errorf("%s%w", ctx(), err)
+	}
+
+	if err := p.resolveTranscode(); err != nil {
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
 

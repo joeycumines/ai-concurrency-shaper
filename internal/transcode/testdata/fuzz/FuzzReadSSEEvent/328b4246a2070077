@@ -1,0 +1,3 @@
+go test fuzz v1
+[]byte("data:00\n\ndata:0")
+byte('\x1d')
