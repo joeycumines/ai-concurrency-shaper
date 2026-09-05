@@ -450,9 +450,9 @@ func TestUpstreamMaxIdleConnsPerHost(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := upstreamMaxIdleConnsPerHost(tt.global, tt.concurrency, tt.patterns, tt.routeLimiters, tt.limitAll)
+			got := proxy.MaxIdleConnsPerHost(tt.global, tt.concurrency, tt.patterns, tt.routeLimiters, tt.limitAll)
 			if got != tt.wantIdlePerHost {
-				t.Fatalf("upstreamMaxIdleConnsPerHost() = %d, want %d", got, tt.wantIdlePerHost)
+				t.Fatalf("MaxIdleConnsPerHost() = %d, want %d", got, tt.wantIdlePerHost)
 			}
 		})
 	}

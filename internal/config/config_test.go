@@ -18,6 +18,7 @@ package config
 import (
 	"bytes"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -1127,5 +1128,43 @@ func TestConfigUnprotectedProviderCount(t *testing.T) {
 	}
 	if got := allProtected.UnprotectedProviderCount(); got != 0 {
 		t.Errorf("UnprotectedProviderCount() = %d, want 0", got)
+	}
+}
+
+// TestValidateMBFlag proves negative and overflowing megabyte flags are
+// rejected against their actual byte shift (review-j finding 14): a value
+// valid at shift 20 may overflow at shift 22.
+func TestValidateMBFlag(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value int64
+		shift uint
+	}{
+		{"valid", 32, 20},
+		{"zero", 0, 22},
+		{"max at 20", math.MaxInt64 >> 20, 20},
+		{"max at 21", math.MaxInt64 >> 21, 21},
+		{"max at 22", math.MaxInt64 >> 22, 22},
+	} {
+		if err := validateMBFlag(tc.name, tc.value, tc.shift); err != nil {
+			t.Fatalf("%s = %d shift %d: %v", tc.name, tc.value, tc.shift, err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		value int64
+		shift uint
+	}{
+		{"negative", -1, 20},
+		{"overflow at 20", (math.MaxInt64 >> 20) + 1, 20},
+		// retry-max-body-mb is validated at shift 21 because its byte value is
+		// doubled (journal sizing maxBody*2) and must not overflow (review-08
+		// additional 3).
+		{"overflow at 21", (math.MaxInt64 >> 21) + 1, 21},
+		{"overflow at 22", (math.MaxInt64 >> 22) + 1, 22},
+	} {
+		if err := validateMBFlag(tc.name, tc.value, tc.shift); err == nil {
+			t.Fatalf("%s = %d shift %d accepted", tc.name, tc.value, tc.shift)
+		}
 	}
 }
