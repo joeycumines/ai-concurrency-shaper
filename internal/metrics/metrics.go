@@ -280,8 +280,11 @@ func (c *Collector) RecordRequest(method, path string, status int, duration time
 // separate from RecordRequest so the TUI/log consumers can distinguish a
 // committed status from a cleanly completed exchange.
 func (c *Collector) RecordAbortedRequest(method, path string, status int, duration time.Duration, limited bool) {
-	c.totalAborted.Add(1)
+	// Publish the request log entry before the aborted counter: a consumer
+	// that observes TotalAborted==1 must be able to read the matching log
+	// entry without a window where the two views disagree.
 	c.recordRequest(method, path, status, duration, limited, true)
+	c.totalAborted.Add(1)
 }
 
 func (c *Collector) recordRequest(method, path string, status int, duration time.Duration, limited bool, aborted bool) {
