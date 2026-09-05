@@ -17,9 +17,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -126,6 +128,107 @@ func TestShutdownServersDrainsBothUnderStall(t *testing.T) {
 		}
 	case <-time.After(grace + 3*time.Second):
 		t.Fatal("shutdownServers did not finish within the grace window")
+	}
+}
+
+// TestRunServerLifecycleFatalErrorShutsDownBoth pins the GAP-009 contract:
+// a fatal server error (a Serve that ends with an unexpected error) must
+// stop() the signal context, gracefully shut down every server (their
+// listeners are released), and return the ORIGINAL server error — never a
+// nil, never a substituted shutdown error.
+func TestRunServerLifecycleFatalErrorShutsDownBoth(t *testing.T) {
+	// A listener that is already closed makes srv.Serve fail immediately
+	// and deterministically (not ErrServerClosed).
+	failLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failAddr := failLn.Addr().String()
+	_ = failLn.Close()
+
+	// A healthy metrics server; its listener address must become free again
+	// after the coordinator shuts it down.
+	metricsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	metricsAddr := metricsLn.Addr().String()
+
+	var stopCalled atomic.Bool
+	errCh := make(chan error, 2)
+	err = runServerLifecycle(
+		context.Background(),
+		func() { stopCalled.Store(true) },
+		errCh,
+		&http.Server{}, // metrics
+		metricsLn,
+		&http.Server{}, // proxy
+		failLn,
+	)
+	if err == nil {
+		t.Fatal("runServerLifecycle = nil, want the failing server's error")
+	}
+	if !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("runServerLifecycle = %v, want the original Serve error (net.ErrClosed)", err)
+	}
+	if !stopCalled.Load() {
+		t.Fatal("stop was not called on the fatal-error path")
+	}
+	// Both servers were shut down gracefully: their listeners are released.
+	for _, addr := range []string{failAddr, metricsAddr} {
+		if ln, err := net.Listen("tcp", addr); err != nil {
+			t.Errorf("address %s still bound after shutdown: %v", addr, err)
+		} else {
+			_ = ln.Close()
+		}
+	}
+}
+
+// TestRunServerLifecycleSignalShutdown pins the signal path: cancellation of
+// the context gracefully shuts down the servers (listener released) and
+// returns nil; stop is not required on this path (the context is already
+// canceled).
+func TestRunServerLifecycleSignalShutdown(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stopCalled atomic.Bool
+	errCh := make(chan error, 2)
+	done := make(chan error, 1)
+	go func() {
+		done <- runServerLifecycle(
+			ctx,
+			func() { stopCalled.Store(true) },
+			errCh,
+			nil, nil,
+			&http.Server{},
+			ln,
+		)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel() // simulate the signal
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runServerLifecycle = %v, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runServerLifecycle did not return after context cancellation")
+	}
+	if stopCalled.Load() {
+		t.Fatal("stop must not be called on the signal path (context is already canceled)")
+	}
+	if ln, err := net.Listen("tcp", addr); err != nil {
+		t.Errorf("address %s still bound after shutdown: %v", addr, err)
+	} else {
+		_ = ln.Close()
 	}
 }
 

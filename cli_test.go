@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -479,6 +480,111 @@ func TestVersionFlag(t *testing.T) {
 	if got != "dev" {
 		t.Errorf("unexpected version: got %q, want %q", got, "dev")
 	}
+}
+
+// freePort returns an ephemeral loopback port that is free at call time.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port
+}
+
+// TestRunProxyBindFailureDoesNotStartMetricsListener pins GAP-007 in-process:
+// run() binds the proxy listener FIRST, so when the proxy bind fails the
+// metrics server is never created and its address stays free after run()
+// returns. With the old metrics-first ordering the metrics listener survived
+// past run()'s return, holding the port and running its Serve goroutine —
+// invisible to a subprocess test (process exit releases every FD), but a
+// real leak for in-process callers.
+func TestRunProxyBindFailureDoesNotStartMetricsListener(t *testing.T) {
+	proxyPort := freePort(t)
+	metricsPort := freePort(t)
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(proxyPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxyLn.Close()
+
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{
+		"test",
+		"-upstream", "http://127.0.0.1:1",
+		"-bind", "127.0.0.1:" + strconv.Itoa(proxyPort),
+		"-metrics-bind", "127.0.0.1:" + strconv.Itoa(metricsPort),
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- run() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("run() = nil, want the proxy bind error")
+		}
+		if !strings.Contains(err.Error(), "bind") {
+			t.Fatalf("run() = %v, want the proxy bind failure", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("run() did not return after the proxy bind failure")
+	}
+
+	// The metrics address must be free: a metrics listener was never created.
+	metricsLn, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(metricsPort))
+	if err != nil {
+		t.Fatalf("metrics address %d still bound after proxy bind failure: %v", metricsPort, err)
+	}
+	_ = metricsLn.Close()
+}
+
+// TestRunMetricsBindFailureReleasesProxyListener pins the proxy-first
+// ordering's other half in-process: when the metrics bind fails, the proxy
+// listener (bound first) is released by its deferred Close, so the proxy
+// address is free once run() returns.
+func TestRunMetricsBindFailureReleasesProxyListener(t *testing.T) {
+	proxyPort := freePort(t)
+	metricsPort := freePort(t)
+
+	metricsLn, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(metricsPort))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metricsLn.Close()
+
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+	os.Args = []string{
+		"test",
+		"-upstream", "http://127.0.0.1:1",
+		"-bind", "127.0.0.1:" + strconv.Itoa(proxyPort),
+		"-metrics-bind", "127.0.0.1:" + strconv.Itoa(metricsPort),
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- run() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("run() = nil, want the metrics bind error")
+		}
+		if !strings.Contains(err.Error(), "-metrics-bind") {
+			t.Fatalf("run() = %v, want the metrics bind failure", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("run() did not return after the metrics bind failure")
+	}
+
+	// The proxy address must be free again: its listener was released.
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(proxyPort))
+	if err != nil {
+		t.Fatalf("proxy address %d still bound after metrics bind failure: %v", proxyPort, err)
+	}
+	_ = proxyLn.Close()
 }
 
 func TestCLI_UpstreamDisableKeepAlives(t *testing.T) {

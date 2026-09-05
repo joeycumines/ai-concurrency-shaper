@@ -304,18 +304,32 @@ func run() error {
 		return err
 	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
+
+	// Bind the proxy listener FIRST: a bind failure returns immediately,
+	// before any metrics server exists, so the metrics listener can never
+	// leak on this path (GAP-007). If the metrics bind fails afterwards,
+	// the deferred Close releases the proxy listener.
+	ln, err := net.Listen("tcp", cfg.Server.Bind)
+	if err != nil {
+		return fmt.Errorf("bind %s: %w", cfg.Server.Bind, err)
+	}
+	defer ln.Close()
+	log.Printf("listening on %s", ln.Addr().String())
 
 	// Opt-in Prometheus endpoint on a DEDICATED listener: it never shares the
 	// proxy port, so a provider mounted at bare root keeps every path, and
-	// scraping cannot be mistaken for proxied traffic. Bound before the proxy
-	// listener so a bad -metrics-bind fails closed at startup.
+	// scraping cannot be mistaken for proxied traffic. A bad -metrics-bind
+	// fails after the proxy listener is bound; the deferred proxy Close
+	// releases it.
 	var metricsSrv *http.Server
+	var metricsLn net.Listener
 	if cfg.Server.MetricsBind != "" {
-		metricsLn, err := net.Listen("tcp", cfg.Server.MetricsBind)
+		metricsLn, err = net.Listen("tcp", cfg.Server.MetricsBind)
 		if err != nil {
 			return fmt.Errorf("-metrics-bind %s: %w", cfg.Server.MetricsBind, err)
 		}
+		defer metricsLn.Close()
 		mux := http.NewServeMux()
 		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
@@ -347,27 +361,10 @@ func run() error {
 			_ = metrics.WritePrometheusFleet(w, snaps)
 		})
 		metricsSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-		go func() {
-			if err := metricsSrv.Serve(metricsLn); err != nil && err != http.ErrServerClosed {
-				errCh <- err
-			}
-		}()
 		log.Printf("metrics endpoint listening on %s/metrics", metricsLn.Addr().String())
 	}
 
-	ln, err := net.Listen("tcp", cfg.Server.Bind)
-	if err != nil {
-		return fmt.Errorf("bind %s: %w", cfg.Server.Bind, err)
-	}
-	defer ln.Close()
-	log.Printf("listening on %s", ln.Addr().String())
-
 	srv := &http.Server{Handler: h}
-	go func() {
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -472,8 +469,51 @@ func run() error {
 		}
 	}()
 
-	select {
-	case <-ctx.Done():
+	return runServerLifecycle(ctx, stop, errCh, metricsSrv, metricsLn, srv, ln)
+}
+
+// runServerLifecycle serves srv (and metricsSrv when both it and its listener
+// are non-nil) until the signal context is canceled or either server fails,
+// then gracefully shuts down every server and reports the outcome: nil for a
+// signal-initiated shutdown, otherwise the failing server's error.
+//
+// The servers' listeners are already bound by the caller. Serve failures are
+// reported non-blockingly so one failing server can never wedge the
+// coordinator behind a full channel. stop cancels the signal context,
+// releasing downstream context consumers (the TUI poller) on the
+// fatal-error path; it is idempotent, so the signal path needs no explicit
+// call. On a server failure the original error is preserved and returned;
+// a shutdown that cannot complete within its grace is logged, never
+// substituted for the server error.
+func runServerLifecycle(
+	ctx context.Context,
+	stop func(),
+	errCh chan error,
+	metricsSrv *http.Server,
+	metricsLn net.Listener,
+	srv *http.Server,
+	ln net.Listener,
+) error {
+	reportErr := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			reportErr(err)
+		}
+	}()
+	if metricsSrv != nil && metricsLn != nil {
+		go func() {
+			if err := metricsSrv.Serve(metricsLn); err != nil && err != http.ErrServerClosed {
+				reportErr(err)
+			}
+		}()
+	}
+
+	shutdown := func() {
 		log.Println("shutting down...")
 		var servers []*http.Server
 		if metricsSrv != nil {
@@ -483,8 +523,15 @@ func run() error {
 		if err := shutdownServers(5*time.Second, servers...); err != nil {
 			slog.Warn("graceful shutdown incomplete", "err", err)
 		}
+	}
+
+	select {
+	case <-ctx.Done():
+		shutdown()
 		return nil
 	case err := <-errCh:
+		stop()
+		shutdown()
 		return err
 	}
 }
