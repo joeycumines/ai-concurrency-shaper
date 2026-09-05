@@ -7,3 +7,33 @@
 # Test-only packages + CONFIRMED false positives. Read the deadcode tool's `go doc` for details re: false positives.
 internal/tui/tuitest/helper.go:*
 internal/transcode/testcorpus/*
+
+# Pinned wire-package API exercised only by tests or external callers: the
+# deadcode tool analyzes reachability from THIS module's binary entry, so
+# exported methods that only tests (and programmatic API consumers) use are
+# flagged even though they are load-bearing public surface. Wire types here
+# deliberately carry Validate/MarshalJSON/UnmarshalJSON methods pinned by
+# committed tests; production never calls these exact symbols.
+*unreachable func: Tool.Validate*
+*unreachable func: ToolChoice.Validate*
+*unreachable func: ToolChoice.MarshalJSON*
+*unreachable func: ToolChoice.UnmarshalJSON*
+*unreachable func: Message.Validate*
+*unreachable func: Stop.Validate*
+*unreachable func: Stop.MarshalJSON*
+*unreachable func: Stop.UnmarshalJSON*
+*unreachable func: Tool.UnmarshalJSON*
+*unreachable func: InputMessageContent.MarshalJSON*
+*unreachable func: InputMessageContent.UnmarshalJSON*
+
+# EventBuilder stream-event builders used only by tests: production emits
+# reasoning from chat upstreams as ordinary text and terminates streams with
+# response.completed (via s.builder.Completed), never with the
+# reasoning-summary events or response.failed/error builder methods.
+# Decode-side support and tests pin these builders (events_test.go).
+*unreachable func: EventBuilder.Error*
+*unreachable func: EventBuilder.Failed*
+*unreachable func: EventBuilder.ReasoningSummaryPartAdded*
+*unreachable func: EventBuilder.ReasoningSummaryTextDelta*
+*unreachable func: EventBuilder.ReasoningSummaryTextDone*
+*unreachable func: EventBuilder.ReasoningSummaryPartDone*

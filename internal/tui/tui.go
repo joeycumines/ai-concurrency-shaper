@@ -3279,7 +3279,6 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 	if len(e.RequestBody) > 0 && usedReq < reqBudget {
 		preview := truncateBytes(e.RequestBody, 256)
 		fmt.Fprintf(&b, " Body:     %s\n", preview)
-		usedReq++
 	}
 	b.WriteByte('\n')
 
@@ -3316,7 +3315,6 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 	if len(e.ResponseBody) > 0 && usedResp < respBudget {
 		preview := truncateBytes(e.ResponseBody, 256)
 		fmt.Fprintf(&b, " Body:     %s\n", preview)
-		usedResp++
 	}
 	b.WriteByte('\n')
 
