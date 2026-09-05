@@ -315,8 +315,8 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-allow-loss` | provider | _(repeatable)_ | Approve non-portable semantic loss by granular key (or withdraw `!key`) |
 | `-transcode-strict-defaults` | provider | `false` | Strip all out-of-the-box chat capabilities, query parameters, and loss approvals |
 | `-transcode-model` | provider | _(repeatable)_ | Map client model name to upstream model name (`client=upstream`), identity fallback when omitted |
-| `-transcode-auth` | provider | `auto` | Per-route target auth mode override (`auto`, `bearer`, `x-api-key`, `api-key`, `header`, `none`) |
-| `-transcode-auth-source` | provider | `inbound` | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`) |
+| `-transcode-auth` | provider | _(unset — inherits provider auth, else none)_ | Per-route target auth mode override (`auto`, `none`, `bearer`, `x-api-key`, `api-key`, `header`) |
+| `-transcode-auth-source` | provider | _(unset — inherits provider auth, else none)_ | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`, `provider`) |
 | `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header` |
 | `-transcode-anthropic-version` | provider | `2023-06-01` | Anthropic-Version header value when target auth mode resolves to `x-api-key` |
 | `-transcode-max-request-mb` | provider | `10` | Max unmarshaled request body size (MB) for transcoding |
@@ -520,11 +520,24 @@ failure, never a silent fallback. The client's stream intent (the
 ### Authentication
 
 - `-transcode-auth` selects the target policy: `auto`, `none`, `bearer`,
-  `x-api-key`, `api-key`, or a custom `header`.
-- `-transcode-auth-source inbound` forwards the single credential from the
-  client request; `env:NAME` and `file:PATH` supply the secret from the
-  environment or a bounded file read (64 KiB cap; resolved once at startup,
-  credential rotation requires restart).
+  `x-api-key`, `api-key`, or a custom `header`. Unset, the transcoded
+  route inherits the provider's resolved auth policy (as configured by
+  the provider-scope `-auth-source`/`-auth-mode`); a provider with no
+  auth configured yields a strip-only `none` policy. The documented
+  defaults are therefore *inheritance-then-none*, not `auto`/`inbound`.
+- `-transcode-auth-source` selects the credential: unset (or `provider`)
+  inherits the provider auth policy; `inbound` forwards the single
+  credential from the client request; `env:NAME` and `file:PATH` supply
+  the secret from the environment or a bounded file read (64 KiB cap;
+  resolved once at startup, credential rotation requires restart).
+  `-transcode-auth-source provider` is the explicit spelling of the
+  implicit inheritance and requires the provider to have a configured
+  auth source; it cannot be combined with `-transcode-auth` or
+  `-transcode-auth-header`.
+- With no transcode auth flags and no provider auth, client credentials
+  are stripped and nothing is injected (`none`) — a visible 401/403 from
+  a missing credential is preferable to silently exporting a client
+  credential across a provider boundary.
 - Secrets are never accepted as command-line arguments. Inbound
   credentials are stripped before the target policy is applied: nothing is
   forwarded across provider boundaries unless the configured policy says

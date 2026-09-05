@@ -629,22 +629,35 @@ func (p *Provider) resolveTranscode() error {
 	var authPolicy transcode.AuthPolicy
 	var hasExplicitTranscodeAuth bool
 	if p.TranscodeAuth != "" || p.TranscodeAuthSource != "" || p.TranscodeAuthHeader != "" {
-		var err error
-		authPolicy, err = parseTranscodeAuth(
-			p.TranscodeAuth,
-			p.TranscodeAuthSource,
-			p.TranscodeAuthHeader,
-			p.TranscodeAnthropicVersion,
-		)
-		if err != nil {
-			return err
-		}
-		if authPolicy.Secret != nil {
-			val, err := authPolicy.Secret.Secret(context.Background())
-			if err != nil {
-				return fmt.Errorf("-transcode-auth-source %s: %w", p.TranscodeAuthSource, err)
+		if p.TranscodeAuthSource == "provider" {
+			// Explicit opt-in to provider-auth inheritance, distinct from
+			// the implicit inheritance below so -transcode-auth-source=inbound
+			// never silently forwards a client credential.
+			if p.TranscodeAuth != "" || p.TranscodeAuthHeader != "" {
+				return fmt.Errorf("-transcode-auth-source provider cannot be combined with -transcode-auth or -transcode-auth-header")
 			}
-			authPolicy.Secret = auth.NewStaticSecretSource(strings.TrimSpace(val))
+			if p.authPolicy == nil {
+				return fmt.Errorf("-transcode-auth-source provider requires a configured -auth-source on the provider")
+			}
+			authPolicy = transcode.FromProviderAuth(p.authPolicy)
+		} else {
+			var err error
+			authPolicy, err = parseTranscodeAuth(
+				p.TranscodeAuth,
+				p.TranscodeAuthSource,
+				p.TranscodeAuthHeader,
+				p.TranscodeAnthropicVersion,
+			)
+			if err != nil {
+				return err
+			}
+			if authPolicy.Secret != nil {
+				val, err := authPolicy.Secret.Secret(context.Background())
+				if err != nil {
+					return fmt.Errorf("-transcode-auth-source %s: %w", p.TranscodeAuthSource, err)
+				}
+				authPolicy.Secret = auth.NewStaticSecretSource(strings.TrimSpace(val))
+			}
 		}
 		hasExplicitTranscodeAuth = true
 	} else if p.authPolicy != nil {

@@ -933,6 +933,138 @@ func TestResolveAndValidate_TranscodeAuthInheritance(t *testing.T) {
 	}
 }
 
+// TestResolveAndValidate_TranscodeAuthDefaultsDocumented pins the DOCUMENTED
+// transcode auth contract (GAP-005 adjudication): with no transcode auth
+// flags the route inherits the provider auth when configured and strips to
+// AuthNone otherwise — never auto/inbound; inbound credential forwarding and
+// provider inheritance are both explicit opt-ins.
+func TestResolveAndValidate_TranscodeAuthDefaultsDocumented(t *testing.T) {
+	t.Setenv("PROVIDER_SECRET", "provider-val")
+
+	// 1. No transcode auth flags + no provider auth -> AuthNone (strips)
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-transcode-responses-chat",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		authP := cfg.Providers[0].TranscodeMappings()[0].Mapping.Auth
+		if authP.Mode != transcode.AuthNone || authP.Inbound || authP.Secret != nil {
+			t.Fatalf("auth = %+v, want AuthNone without inbound or secret", authP)
+		}
+	}
+
+	// 2. No transcode auth flags + provider auth -> inherits, not inbound
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-responses-chat",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		authP := cfg.Providers[0].TranscodeMappings()[0].Mapping.Auth
+		if authP.Inbound {
+			t.Fatal("implicit inheritance must not set Inbound (no client credential forwarding)")
+		}
+		if authP.Mode != transcode.AuthBearer {
+			t.Fatalf("mode = %q, want bearer", authP.Mode)
+		}
+	}
+
+	// 3. Explicit -transcode-auth-source inbound -> forwards the client credential
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-transcode-responses-chat",
+			"-transcode-auth-source", "inbound",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		authP := cfg.Providers[0].TranscodeMappings()[0].Mapping.Auth
+		if !authP.Inbound {
+			t.Fatalf("auth = %+v, want Inbound=true", authP)
+		}
+	}
+
+	// 4. Explicit -transcode-auth-source provider -> inherits provider auth
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-responses-chat",
+			"-transcode-auth-source", "provider",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		authP := cfg.Providers[0].TranscodeMappings()[0].Mapping.Auth
+		if authP.Inbound {
+			t.Fatal("provider source must not set Inbound")
+		}
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "provider-val" {
+			t.Fatalf("secret = %q, err = %v, want provider-val", sec, err)
+		}
+	}
+
+	// 5. -transcode-auth-source provider without provider auth -> startup error
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-transcode-responses-chat",
+			"-transcode-auth-source", "provider",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Fatal("expected error for provider source without provider auth")
+		}
+		if !strings.Contains(err.Error(), "-auth-source on the provider") {
+			t.Fatalf("err = %v", err)
+		}
+	}
+
+	// 6. -transcode-auth-source provider + -transcode-auth -> conflict
+	{
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.openai.com",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-responses-chat",
+			"-transcode-auth-source", "provider",
+			"-transcode-auth", "none",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Fatal("expected conflict error for provider source with -transcode-auth")
+		}
+		if !strings.Contains(err.Error(), "cannot be combined") {
+			t.Fatalf("err = %v", err)
+		}
+	}
+}
+
 // TestResolveAndValidate_BodyLimits_Propagation verifies that Provider.RetryMaxBodyMB
 // propagates to each TranscodeMapping.BodyLimits.RetryReplayBytes where zero (H2).
 func TestResolveAndValidate_BodyLimits_Propagation(t *testing.T) {
