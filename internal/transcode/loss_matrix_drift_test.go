@@ -32,7 +32,6 @@ func TestLossMatrixDrift(t *testing.T) {
 	for _, key := range RegisteredLossKeys() {
 		b.WriteString("| `" + string(key) + "` | " + LossKeyDescription(key) + " |\n")
 	}
-	b.WriteString("\n")
 	if string(matrix) != b.String() {
 		t.Fatal("LOSS_MATRIX.md is not generated from the loss registry; run `go generate ./internal/transcode`")
 	}

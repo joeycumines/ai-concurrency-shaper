@@ -33,7 +33,6 @@ func main() {
 	for _, key := range transcode.RegisteredLossKeys() {
 		fmt.Fprintf(&b, "| `%s` | %s |\n", key, transcode.LossKeyDescription(key))
 	}
-	b.WriteString("\n")
 	if err := os.WriteFile("LOSS_MATRIX.md", []byte(b.String()), 0o644); err != nil {
 		fatal(fmt.Errorf("write LOSS_MATRIX.md: %w", err))
 	}

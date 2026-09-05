@@ -43,4 +43,3 @@ individual keys via `-transcode-allow-loss`.
 | `anthropic_controls` | the Anthropic Messages client-side envelope controls (context_management, output_config) have no representation in the target request; an approved loss drops them observably |
 | `builtin_tools` | Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject) |
 | `response_service_tier` | the upstream chat service tier actually served cannot be reproduced in the target |
-
