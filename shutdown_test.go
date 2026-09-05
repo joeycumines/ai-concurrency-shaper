@@ -132,10 +132,10 @@ func TestShutdownServersDrainsBothUnderStall(t *testing.T) {
 }
 
 // TestRunServerLifecycleFatalErrorShutsDownBoth pins the GAP-009 contract:
-// a fatal server error (a Serve that ends with an unexpected error) must
-// stop() the signal context, gracefully shut down every server (their
-// listeners are released), and return the ORIGINAL server error — never a
-// nil, never a substituted shutdown error.
+// a server Serve ending with an unexpected error must stop() the signal
+// context, gracefully shut down every server (their listeners are
+// released), and return the ORIGINAL server error — never a nil, never a
+// substituted shutdown error.
 func TestRunServerLifecycleFatalErrorShutsDownBoth(t *testing.T) {
 	// A listener that is already closed makes srv.Serve fail immediately
 	// and deterministically (not ErrServerClosed).
