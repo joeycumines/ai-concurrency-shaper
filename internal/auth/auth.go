@@ -210,3 +210,27 @@ func resolveSecret(ctx context.Context, source SecretSource) (string, error) {
 	}
 	return trimmed, nil
 }
+
+// FreezeAuthPolicy returns a copy of policy whose credential is resolved once
+// and pinned, so a mutable custom SecretSource or caller mutation of the
+// original policy cannot change behavior after construction. AuthNone needs
+// no secret and keeps Secret nil; every authenticated mode resolves the
+// secret eagerly through resolveSecret and wraps it in a static source, so a
+// missing or failing credential surfaces here, at construction time, instead
+// of on the first request. A nil policy returns nil.
+func FreezeAuthPolicy(ctx context.Context, policy *AuthPolicy) (*AuthPolicy, error) {
+	if policy == nil {
+		return nil, nil
+	}
+	frozen := *policy
+	if frozen.Mode == AuthNone {
+		frozen.Secret = nil
+		return &frozen, nil
+	}
+	secret, err := resolveSecret(ctx, frozen.Secret)
+	if err != nil {
+		return nil, err
+	}
+	frozen.Secret = NewStaticSecretSource(secret)
+	return &frozen, nil
+}

@@ -655,6 +655,25 @@ func New(opts ...Option) (*Proxy, error) {
 	// (review-08 additional 2).
 	cfg.upstream = cloneURL(cfg.upstream)
 
+	// Freeze the auth policy: the credential is resolved once and pinned, so
+	// a mutable custom SecretSource or caller mutation of the policy after
+	// New cannot change live behavior, and source failures surface here
+	// (review-08 additional 2).
+	if cfg.authPolicy != nil {
+		frozen, err := auth.FreezeAuthPolicy(context.Background(), cfg.authPolicy)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: freeze auth policy: %w", err)
+		}
+		cfg.authPolicy = frozen
+	}
+
+	// Copy the caller's route-limiters map and matcher: mutation of the
+	// originals after New must not change live routing or limiter behavior
+	// (review-08 additional 2). The limiter values stay shared — they are
+	// live synchronization objects.
+	cfg.routeLimiters = cloneLimiterMap(cfg.routeLimiters)
+	cfg.matcher = cloneMatcher(cfg.matcher)
+
 	// Reject duplicate transcode client routes: the first matching handler
 	// would silently win. The key is method+path. A mapping that declares a
 	// RetryReplayBytes bound must equal the proxy's retry transport body cap
@@ -3101,6 +3120,36 @@ func cloneURL(u *url.URL) *url.URL {
 	}
 	cloned := *u
 	return &cloned
+}
+
+// cloneLimiterMap copies the route-limiters map (the limiter pointers stay
+// shared: they are live synchronization objects) so caller mutation of the
+// original map after New cannot change live routing (review-08 additional 2).
+func cloneLimiterMap(m map[string]*queue.Limiter) map[string]*queue.Limiter {
+	if m == nil {
+		return nil
+	}
+	cloned := make(map[string]*queue.Limiter, len(m))
+	maps.Copy(cloned, m)
+	return cloned
+}
+
+// cloneMatcher deep-copies the caller's matcher — including every
+// Pattern.Segments slice — so caller mutation of the original after New
+// cannot change live route matching (review-08 additional 2).
+func cloneMatcher(m *route.Matcher) *route.Matcher {
+	if m == nil {
+		return nil
+	}
+	patterns := m.Patterns()
+	cloned := make([]route.Pattern, len(patterns))
+	for i, p := range patterns {
+		cloned[i] = p
+		if p.Segments != nil {
+			cloned[i].Segments = append([]string(nil), p.Segments...)
+		}
+	}
+	return route.NewMatcher(cloned)
 }
 
 // MaxIdleConnsPerHost sizes the upstream transport's per-host idle connection

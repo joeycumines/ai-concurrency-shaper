@@ -149,6 +149,38 @@ func TestMatcher(t *testing.T) {
 	}
 }
 
+// TestMatcherSegmentAliasing pins the deep-copy contract: a caller's
+// Pattern.Segments slice must never be aliased by NewMatcher, AddPattern, or
+// Patterns, so caller mutation of the original pattern cannot change the
+// matcher's live matching behavior.
+func TestMatcherSegmentAliasing(t *testing.T) {
+	mutate := func(p *Pattern) {
+		for i := range p.Segments {
+			p.Segments[i] = "MUTATED"
+		}
+	}
+
+	original := MustParse("POST /v1/messages")
+	m := NewMatcher([]Pattern{original})
+	mutate(&original)
+	if !m.IsLimited("POST", "/v1/messages") {
+		t.Fatal("NewMatcher aliases the caller's Segments slice")
+	}
+
+	added := MustParse("POST /v1/responses")
+	m.AddPattern(added)
+	mutate(&added)
+	if !m.IsLimited("POST", "/v1/responses") {
+		t.Fatal("AddPattern aliases the caller's Segments slice")
+	}
+
+	got := m.Patterns()
+	mutate(&got[0])
+	if !m.IsLimited("POST", "/v1/messages") {
+		t.Fatal("Patterns aliases the matcher's internal Segments slice")
+	}
+}
+
 func MustParse(s string) Pattern {
 	p, err := Parse(s)
 	if err != nil {

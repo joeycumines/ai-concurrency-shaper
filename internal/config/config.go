@@ -244,8 +244,16 @@ func (p *Provider) DefaultLimiter() *queue.Limiter { return p.defaultLimiter }
 // GlobalLimiter returns the provider's global limiter, or nil when disabled.
 func (p *Provider) GlobalLimiter() *queue.Limiter { return p.globalLimiter }
 
-// RouteLimiters returns the provider's per-route/group limiters.
-func (p *Provider) RouteLimiters() map[string]*queue.Limiter { return p.routeLimiters }
+// RouteLimiters returns a copy of the provider's per-route/group limiters,
+// so caller mutation cannot change live provider behavior.
+func (p *Provider) RouteLimiters() map[string]*queue.Limiter {
+	if p.routeLimiters == nil {
+		return nil
+	}
+	out := make(map[string]*queue.Limiter, len(p.routeLimiters))
+	maps.Copy(out, p.routeLimiters)
+	return out
+}
 
 // Breaker returns the provider's circuit breaker, or nil when disabled.
 func (p *Provider) Breaker() *circuitbreaker.Breaker { return p.breaker }

@@ -169,11 +169,21 @@ type Matcher struct {
 
 func NewMatcher(patterns []Pattern) *Matcher {
 	cp := make([]Pattern, len(patterns))
-	copy(cp, patterns)
+	for i, p := range patterns {
+		cp[i] = p
+		if p.Segments != nil {
+			cp[i].Segments = append([]string(nil), p.Segments...)
+		}
+	}
 	return &Matcher{patterns: cp}
 }
 
-func (m *Matcher) AddPattern(p Pattern) { m.patterns = append(m.patterns, p) }
+func (m *Matcher) AddPattern(p Pattern) {
+	if p.Segments != nil {
+		p.Segments = append([]string(nil), p.Segments...)
+	}
+	m.patterns = append(m.patterns, p)
+}
 
 // IsLimited returns true if the request matches any known LLM endpoint pattern.
 func (m *Matcher) IsLimited(method, path string) bool {
@@ -198,7 +208,12 @@ func (m *Matcher) FindMatch(method, path string) *Pattern {
 
 func (m *Matcher) Patterns() []Pattern {
 	cp := make([]Pattern, len(m.patterns))
-	copy(cp, m.patterns)
+	for i, p := range m.patterns {
+		cp[i] = p
+		if p.Segments != nil {
+			cp[i].Segments = append([]string(nil), p.Segments...)
+		}
+	}
 	return cp
 }
 

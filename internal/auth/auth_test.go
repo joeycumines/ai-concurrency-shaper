@@ -231,6 +231,91 @@ type failingSecretSource struct{ err error }
 
 func (f failingSecretSource) Secret(context.Context) (string, error) { return "", f.err }
 
+// mutableSecretSource is a SecretSource whose value can be changed after
+// FreezeAuthPolicy, proving the frozen policy no longer consults it.
+type mutableSecretSource struct{ value string }
+
+func (s *mutableSecretSource) Secret(context.Context) (string, error) { return s.value, nil }
+
+// TestFreezeAuthPolicy pins the freeze contract: AuthNone keeps Secret nil
+// without consulting a source; authenticated modes resolve the secret once
+// into a static source so later source mutation cannot change the frozen
+// policy; source failures surface at freeze time; nil returns nil.
+func TestFreezeAuthPolicy(t *testing.T) {
+	t.Run("nil policy", func(t *testing.T) {
+		frozen, err := FreezeAuthPolicy(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if frozen != nil {
+			t.Fatalf("frozen = %+v, want nil", frozen)
+		}
+	})
+
+	t.Run("auth none keeps secret nil", func(t *testing.T) {
+		policy := &AuthPolicy{Mode: AuthNone, Secret: NewStaticSecretSource("never-read")}
+		frozen, err := FreezeAuthPolicy(context.Background(), policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if frozen.Mode != AuthNone || frozen.Secret != nil {
+			t.Fatalf("frozen = %+v, want AuthNone with nil Secret", frozen)
+		}
+		if policy.Secret == nil {
+			t.Fatal("original policy must not be mutated")
+		}
+	})
+
+	t.Run("mutable source pinned at freeze", func(t *testing.T) {
+		src := &mutableSecretSource{value: "original"}
+		policy := &AuthPolicy{Mode: AuthBearer, Secret: src}
+		frozen, err := FreezeAuthPolicy(context.Background(), policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.value = "mutated-after-new"
+		secret, err := frozen.Secret.Secret(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if secret != "original" {
+			t.Fatalf("frozen secret = %q, want original (source mutation must not leak)", secret)
+		}
+	})
+
+	t.Run("preserves mode and custom fields", func(t *testing.T) {
+		policy := &AuthPolicy{
+			Mode:             AuthCustomHeader,
+			Secret:           NewStaticSecretSource("k"),
+			CustomHeader:     "X-Goog-Api-Key",
+			AnthropicVersion: "2023-06-01",
+		}
+		frozen, err := FreezeAuthPolicy(context.Background(), policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if frozen.Mode != AuthCustomHeader || frozen.CustomHeader != "X-Goog-Api-Key" ||
+			frozen.AnthropicVersion != "2023-06-01" {
+			t.Fatalf("frozen = %+v, want fields preserved", frozen)
+		}
+	})
+
+	t.Run("source failure surfaces at freeze", func(t *testing.T) {
+		wantErr := errors.New("source boom")
+		policy := &AuthPolicy{Mode: AuthBearer, Secret: failingSecretSource{err: wantErr}}
+		if _, err := FreezeAuthPolicy(context.Background(), policy); !errors.Is(err, wantErr) {
+			t.Fatalf("FreezeAuthPolicy error = %v, want %v", err, wantErr)
+		}
+	})
+
+	t.Run("missing source fails", func(t *testing.T) {
+		policy := &AuthPolicy{Mode: AuthBearer}
+		if _, err := FreezeAuthPolicy(context.Background(), policy); err == nil {
+			t.Fatal("FreezeAuthPolicy with nil Secret must fail")
+		}
+	})
+}
+
 func TestApplyUpstreamAuthentication(t *testing.T) {
 	newReq := func(t *testing.T) *http.Request {
 		t.Helper()

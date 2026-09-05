@@ -11575,3 +11575,181 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 	}
 	return u
 }
+
+// mutableAuthSecret is a SecretSource whose value can be changed after
+// proxy.New, proving the frozen policy no longer consults it.
+type mutableAuthSecret struct{ value string }
+
+func (s *mutableAuthSecret) Secret(context.Context) (string, error) { return s.value, nil }
+
+// TestProxy_AuthPolicyFrozen proves auth.FreezeAuthPolicy is applied at
+// construction: mutating the caller's policy (mode, secret source, source
+// value) after New cannot change the credential the proxy injects.
+func TestProxy_AuthPolicyFrozen(t *testing.T) {
+	upstream := newHeaderEchoUpstream(t)
+	u, _ := url.Parse(upstream.URL)
+
+	src := &mutableAuthSecret{value: "original"}
+	callerPolicy := &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: src}
+
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithAuthPolicy(callerPolicy),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mutate everything the caller could touch after construction.
+	src.value = "mutated-source"
+	callerPolicy.Mode = auth.AuthNone
+	callerPolicy.Secret = auth.NewStaticSecretSource("mutated-policy")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	headers, _, _ := capturedHeader(t, rec.Result().Body)
+	if got := headers["Authorization"]; got != "Bearer original" {
+		t.Fatalf("upstream Authorization = %q, want %q (policy must be frozen at New)", got, "Bearer original")
+	}
+}
+
+// TestProxy_RouteLimitersAndMatcherFrozen proves New copies the caller's
+// route-limiters map and matcher: mutating either after construction cannot
+// change the proxy's live routing and limiting state.
+func TestProxy_RouteLimitersAndMatcherFrozen(t *testing.T) {
+	upstream := newHeaderEchoUpstream(t)
+	u, _ := url.Parse(upstream.URL)
+
+	pat, err := route.Parse("POST /v1/messages:2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeLimiter := queue.NewLimiterWithCooldown(2, 0)
+	callerLimiters := map[string]*queue.Limiter{"POST /v1/messages:2": routeLimiter}
+	callerMatcher := route.NewMatcher([]route.Pattern{pat})
+
+	p, err := New(
+		WithUpstream(u),
+		WithMatcher(callerMatcher),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithRouteLimiters(callerLimiters),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wipe and repopulate the caller-owned map and matcher, including the
+	// pattern's Segments slice.
+	delete(callerLimiters, "POST /v1/messages:2")
+	callerLimiters["POST /v1/messages:2"] = queue.NewLimiterWithCooldown(99, 0)
+	for i := range pat.Segments {
+		pat.Segments[i] = "MUTATED"
+	}
+	other, err := route.Parse("POST /v1/responses:9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	callerMatcher.AddPattern(other) // caller's matcher only
+	callerLimiters["POST /v1/responses:9"] = queue.NewLimiterWithCooldown(9, 0)
+
+	if got := p.routeLimiters["POST /v1/messages:2"]; got != routeLimiter {
+		t.Fatal("proxy route-limiters map must be a copy of the caller's")
+	}
+	if _, ok := p.routeLimiters["POST /v1/responses:9"]; ok {
+		t.Fatal("caller map additions must not leak into the proxy")
+	}
+	if !p.matcher.IsLimited("POST", "/v1/messages") {
+		t.Fatal("proxy matcher must be a copy unaffected by caller mutation")
+	}
+	if p.matcher.IsLimited("POST", "/v1/responses") {
+		t.Fatal("caller matcher additions must not leak into the proxy")
+	}
+	got := p.matcher.Patterns()
+	if got[0].Segments[0] == "MUTATED" {
+		t.Fatal("proxy matcher must deep-copy Pattern.Segments")
+	}
+}
+
+// TestProxy_ConfigFrozenConcurrent proves the construction-time copies hold
+// under concurrent caller mutation: mutate the caller-owned config (upstream
+// URL, auth policy, limiters map, matcher) from multiple goroutines while
+// serving requests. Without the freeze the aliasing shows up as data races
+// under go test -race; with it, no shared state exists.
+func TestProxy_ConfigFrozenConcurrent(t *testing.T) {
+	upstream := newHeaderEchoUpstream(t)
+	callerURL, _ := url.Parse(upstream.URL)
+
+	pat, err := route.Parse("POST /v1/messages:2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	callerMatcher := route.NewMatcher([]route.Pattern{pat})
+	callerLimiters := map[string]*queue.Limiter{"POST /v1/messages:2": queue.NewLimiterWithCooldown(2, 0)}
+	callerSrc := &mutableAuthSecret{value: "s"}
+	callerPolicy := &auth.AuthPolicy{Mode: auth.AuthBearer, Secret: callerSrc}
+
+	p, err := New(
+		WithUpstream(callerURL),
+		WithMatcher(callerMatcher),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithRouteLimiters(callerLimiters),
+		WithAuthPolicy(callerPolicy),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	// One mutator goroutine churns the caller-owned config: the proxy's
+	// construction-time copies must isolate serving from these writes.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			callerLimiters["churn"] = queue.NewLimiterWithCooldown(3, 0)
+			delete(callerLimiters, "churn")
+			if other, perr := route.Parse("POST /v1/other:3"); perr == nil {
+				callerMatcher.AddPattern(other)
+			}
+			callerURL.Path = "/mutated"
+			callerURL.RawQuery = "x=1"
+			callerSrc.value = "mutated"
+			callerPolicy.Mode = auth.AuthNone
+		}
+	}()
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+				rec := httptest.NewRecorder()
+				p.ServeHTTP(rec, req)
+			}
+		}()
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
