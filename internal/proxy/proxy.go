@@ -839,9 +839,11 @@ func New(opts ...Option) (*Proxy, error) {
 		// Forwarded/X-Forwarded-* before calling us, preserving the stealth
 		// posture; we never call SetXForwarded.
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL.Scheme = cfg.upstream.Scheme
-			pr.Out.URL.Host = cfg.upstream.Host
-			pr.Out.URL.Path = cfg.upstream.Path + pr.Out.URL.Path
+			// SetURL joins the upstream base path with the client path at
+			// the slash boundary only (no dot-segment cleaning, preserving
+			// the escaped path) and merges the base query with the client
+			// query by raw concatenation — the transparent-proxy contract.
+			pr.SetURL(cfg.upstream)
 			pr.Out.Host = cfg.upstream.Host
 			if cfg.authPolicy != nil {
 				// Effectively unreachable for config-built policies: their

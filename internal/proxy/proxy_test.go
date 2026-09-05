@@ -11130,11 +11130,14 @@ func capturedHeader(t *testing.T, body io.Reader) (map[string]string, string, st
 // header suppression, and query preservation.
 func TestProxy_RewriteParity(t *testing.T) {
 	cases := []struct {
-		name        string
-		upstreamURL string // replaced per-case below
+		name     string
+		base     string // suffix appended to the echo target (path and/or query)
+		wantPath string // upstream path expected for client /v1/messages?stream=true
 	}{
-		{name: "bare host", upstreamURL: ""},
-		{name: "base path", upstreamURL: ""},
+		{name: "bare host", wantPath: "/v1/messages"},
+		{name: "base path", base: "/apibase", wantPath: "/apibase/v1/messages"},
+		{name: "base path and query", base: "/apibase?base=1", wantPath: "/apibase/v1/messages"},
+		{name: "base trailing slash", base: "/apibase/", wantPath: "/apibase/v1/messages"},
 	}
 
 	build := func(base string) (*httptest.Server, string) {
@@ -11147,11 +11150,7 @@ func TestProxy_RewriteParity(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		base := ""
-		if tc.name == "base path" {
-			base = "/apibase"
-		}
-		echo, target := build(base)
+		echo, target := build(tc.base)
 		wantHost := strings.TrimPrefix(echo.URL, "http://")
 		req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages?stream=true", nil)
 		rec := httptest.NewRecorder()
@@ -11178,12 +11177,14 @@ func TestProxy_RewriteParity(t *testing.T) {
 		rec = httptest.NewRecorder()
 		p.ServeHTTP(rec, req)
 		headers, pathQuery, _ := capturedHeader(t, rec.Result().Body)
-		wantPath := "/apibase/v1/messages"
-		if base == "" {
-			wantPath = "/v1/messages"
+		wantQuery := "stream=true"
+		if strings.Contains(tc.base, "?") {
+			// The upstream base query merges before the client query, raw.
+			wantQuery = "base=1&" + wantQuery
 		}
-		if pathQuery != wantPath+"?stream=true" {
-			t.Errorf("%s: upstream saw %q, want %q", tc.name, pathQuery, wantPath+"?stream=true")
+		wantPathQuery := tc.wantPath + "?" + wantQuery
+		if pathQuery != wantPathQuery {
+			t.Errorf("%s: upstream saw %q, want %q", tc.name, pathQuery, wantPathQuery)
 		}
 		for _, fwd := range []string{"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "Forwarded"} {
 			if got := headers[fwd]; got != "" {
