@@ -572,6 +572,11 @@ type LLMUsage struct {
 	PromptCacheMissTokens   *int                     `json:"prompt_cache_miss_tokens,omitempty"`
 	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+
+	// CacheCost is an opaque provider extension (the Verboo gateway's
+	// billing field). Preserve raw JSON so strict decoding accepts the
+	// provider field without coercing or forwarding it.
+	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
 }
 
 // StreamDelta is the delta payload of a streaming chat completion chunk.
@@ -648,6 +653,11 @@ type Response struct {
 
 	PromptTokenIDs any     `json:"prompt_token_ids,omitempty"`
 	PromptText     *string `json:"prompt_text,omitempty"`
+
+	// CacheCost is an opaque provider extension (the Verboo gateway's
+	// billing field). Preserve raw JSON so strict decoding accepts the
+	// provider field without coercing or forwarding it.
+	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
 }
 
 // StreamChunk is one SSE frame of a streaming chat completion: the chunk
@@ -666,4 +676,9 @@ type StreamChunk struct {
 
 	PromptTokenIDs any     `json:"prompt_token_ids,omitempty"`
 	PromptText     *string `json:"prompt_text,omitempty"`
+
+	// CacheCost is an opaque provider extension (the Verboo gateway's
+	// billing field). Preserve raw JSON so strict decoding accepts the
+	// provider field without coercing or forwarding it.
+	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
 }

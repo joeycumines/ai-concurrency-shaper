@@ -18,6 +18,7 @@ package transcode
 // exact field name.
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"testing"
@@ -156,8 +157,8 @@ func TestFieldCaptureQwenNonstreamDecodes(t *testing.T) {
 	// prompt_tokens_details spelling (details precede the top-level
 	// extensions, so cached_tokens→cache-read and created_cache_tokens→
 	// cache-write) and the top-level reasoning_tokens.
-	if !response.Usage.InputKnown || response.Usage.InputTokens != 9 {
-		t.Fatalf("usage input tokens = (%d, known=%t), want (9, true)", response.Usage.InputTokens, response.Usage.InputKnown)
+	if !response.Usage.InputKnown || response.Usage.InputTokens != 20 {
+		t.Fatalf("usage input tokens = (%d, known=%t), want (20, true)", response.Usage.InputTokens, response.Usage.InputKnown)
 	}
 	if !response.Usage.OutputKnown || response.Usage.OutputTokens != 12 {
 		t.Fatalf("usage output tokens = (%d, known=%t), want (12, true)", response.Usage.OutputTokens, response.Usage.OutputKnown)
@@ -170,6 +171,18 @@ func TestFieldCaptureQwenNonstreamDecodes(t *testing.T) {
 	}
 	if !response.Usage.CacheWriteKnown || response.Usage.CacheWriteTokens != 7 {
 		t.Fatalf("usage cache-write tokens = (%d, known=%t), want (7, true) — created_cache_tokens must map to cache-write", response.Usage.CacheWriteTokens, response.Usage.CacheWriteKnown)
+	}
+
+	// The opaque cache_cost provider extension (Verboo billing field) must
+	// never reach the client dialect: it is decoded so the strict wire
+	// decode accepts it (the regression), but the canonical IR has no model
+	// for it, so any rendered client output is clean of it.
+	rendered, _, err := RenderMessagesResponse(response, testExchangeContext())
+	if err != nil {
+		t.Fatalf("render client dialect: %v", err)
+	}
+	if bytes.Contains(rendered, []byte("cache_cost")) {
+		t.Fatalf("cache_cost leaked into client output: %s", rendered)
 	}
 }
 

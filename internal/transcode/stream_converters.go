@@ -1261,6 +1261,11 @@ type chatStreamChunkShadow struct {
 	// wire decoding never fails on a current provider; never forwarded.
 	PromptTokenIDs any     `json:"prompt_token_ids,omitempty"`
 	PromptText     *string `json:"prompt_text,omitempty"`
+
+	// CacheCost is an opaque provider extension (the Verboo gateway's
+	// billing field). Preserve raw JSON so strict decoding accepts the
+	// provider field without coercing or forwarding it.
+	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
 }
 
 // chatStreamChoiceShadow mirrors the pinned streaming choice: index and

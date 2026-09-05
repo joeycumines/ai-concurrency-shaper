@@ -427,11 +427,12 @@ those unit tests.
 
 | Placement | Extension | Fate |
 | --- | --- | --- |
-| chat envelope (stream + non-stream) | `prompt_token_ids`, `prompt_text` | inert — decoded, never forwarded |
+| chat envelope (stream + non-stream) | `prompt_token_ids`, `prompt_text`, `cache_cost` | inert — decoded, never forwarded |
 | chat choice | `token_ids`, `routed_experts`, `stop_reason`, `matched_stop` | inert — decoded, never forwarded |
 | chat message | `token_ids`, `routed_experts`, `stop_reason`, `matched_stop` (defensive mirror), `reasoning`, `reasoning_content` | `reasoning`/`reasoning_content` map to capability-gated ordinary text; the rest are inert |
 | chat stream delta | `reasoning`, `reasoning_content` | capability-gated ordinary text |
 | chat usage (top level) | `reasoning_tokens`, `cached_tokens`, `prompt_cache_hit_tokens`, `prompt_cache_miss_tokens` | mapped to canonical usage (`CacheRead`, `ReasoningTokens`); `prompt_cache_miss_tokens` has no canonical home |
+| chat usage (top level) | `cache_cost` | inert — decoded, never forwarded |
 | chat `prompt_tokens_details` | `created_cache_tokens`, `multimodal_tokens` | `created_cache_tokens` maps to canonical `CacheWrite`; `multimodal_tokens` is inert |
 
 None of these spellings is forwarded or re-rendered verbatim. Several

@@ -36,6 +36,11 @@ type chatResponseShadow struct {
 	// forwarded.
 	PromptTokenIDs any     `json:"prompt_token_ids,omitempty"`
 	PromptText     *string `json:"prompt_text,omitempty"`
+
+	// CacheCost is an opaque provider extension (the Verboo gateway's
+	// billing field). Preserve raw JSON so strict decoding accepts the
+	// provider field without coercing or forwarding it.
+	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
 }
 
 type chatChoiceShadow struct {
@@ -106,6 +111,11 @@ type chatUsageShadow struct {
 	PromptCacheMissTokens   *int                         `json:"prompt_cache_miss_tokens,omitempty"`
 	PromptTokensDetails     *ChatPromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *ChatCompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+
+	// CacheCost is an opaque provider extension (the Verboo gateway's
+	// billing field). Preserve raw JSON so strict decoding accepts the
+	// provider field without coercing or forwarding it.
+	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
 }
 
 // DecodeChatResponseWithPolicy decodes a non-streaming Chat Completions
