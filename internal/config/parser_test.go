@@ -292,6 +292,72 @@ func TestParse_HelpNegationNotHelp(t *testing.T) {
 	}
 }
 
+// TestParse_HelpValueConsumedNotHelp: a -h/-help lexeme consumed as the VALUE
+// of a preceding value-taking flag is a value, not a help request. Both the
+// server scope (legacy single-provider) and the provider scope must reach
+// ordinary semantic validation (exit-1 territory) instead of ErrHelp.
+func TestParse_HelpValueConsumedNotHelp(t *testing.T) {
+	t.Run("server scope -upstream -h", func(t *testing.T) {
+		cfg, err := Parse([]string{"-upstream", "-h"})
+		if errors.Is(err, ErrHelp) {
+			t.Fatalf("Parse(-upstream -h) = ErrHelp; -h is the upstream VALUE")
+		}
+		if err != nil {
+			t.Fatalf("Parse(-upstream -h): %v", err)
+		}
+		if cfg == nil {
+			t.Fatal("cfg is nil")
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Fatal("ResolveAndValidate: want error (upstream -h is not a URL), got nil")
+		}
+	})
+
+	t.Run("server scope -upstream --help", func(t *testing.T) {
+		cfg, err := Parse([]string{"-upstream", "--help"})
+		if errors.Is(err, ErrHelp) {
+			t.Fatalf("Parse(-upstream --help) = ErrHelp; --help is the upstream VALUE")
+		}
+		if err != nil {
+			t.Fatalf("Parse(-upstream --help): %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err == nil {
+			t.Fatal("ResolveAndValidate: want error, got nil")
+		}
+	})
+
+	t.Run("provider scope -upstream -h", func(t *testing.T) {
+		cfg, err := Parse([]string{"--provider=acme", "-upstream", "-h"})
+		if errors.Is(err, ErrHelp) {
+			t.Fatalf("Parse(--provider=acme -upstream -h) = ErrHelp; -h is the upstream VALUE")
+		}
+		if err != nil {
+			t.Fatalf("Parse(--provider=acme -upstream -h): %v", err)
+		}
+		if len(cfg.Providers) != 1 || cfg.Providers[0].Upstream != "-h" {
+			t.Fatalf("providers = %+v, want upstream -h", cfg.Providers)
+		}
+		if err := cfg.ResolveAndValidate(); err == nil {
+			t.Fatal("ResolveAndValidate: want error, got nil")
+		}
+	})
+
+	t.Run("real help still works after a consumed value", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"-h"},
+			{"--help"},
+			{"-bind", ":8080", "-h"},
+			{"--provider=acme", "-h"},
+			{"-upstream", "x", "-h"},
+		} {
+			if _, err := Parse(args); !errors.Is(err, ErrHelp) {
+				t.Errorf("Parse(%q) err = %v, want ErrHelp", args, err)
+			}
+		}
+	})
+}
+
 // TestParse_UnknownFlagIsUsageError: the unknown-flag error wraps ErrUsage so
 // main can exit 2, and it names the offending token.
 func TestParse_UnknownFlagIsUsageError(t *testing.T) {

@@ -140,10 +140,22 @@ func Parse(args []string) (*Config, error) {
 // otherwise fail validation first (e.g. "--provider=acme -h" with no
 // -upstream anywhere).
 func serverHelpRequested(sections []section) bool {
+	meta := flagMetadata()
 	for _, s := range sections {
-		for _, tok := range s.lex {
-			m, ok := flagMetadata()[flagTokenName(tok)]
-			if !ok || !m.isHelp {
+		for i := 0; i < len(s.lex); i++ {
+			tok := s.lex[i]
+			m, ok := meta[flagTokenName(tok)]
+			if !ok {
+				continue
+			}
+			// A value-taking flag without '=' consumes the next lexeme as
+			// its value (mirroring tokenize); a consumed value is never a
+			// help request, so skip it exactly like tokenize does.
+			if !strings.Contains(tok, "=") && !m.isBool {
+				i++
+				continue
+			}
+			if !m.isHelp {
 				continue
 			}
 			// Reject "-h=false" style negations: only an affirmative request
