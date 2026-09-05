@@ -62,7 +62,47 @@ func NewRouteKey(method, path string) (RouteKey, error) {
 			path,
 		)
 	}
+	// Canonicalize the path the same way the router canonicalizes inbound
+	// request paths (internal/router: segment traversal resolution, dot
+	// segments removed, trailing slashes removed), so route keys and request
+	// paths are always in the same canonical form — a mapping configured as
+	// /v1/responses/ must match an incoming POST /v1/responses.
+	path = canonicalizeRoutePath(path)
 	return RouteKey{Method: method, Path: path}, nil
+}
+
+// canonicalizeRoutePath resolves a path into its traversal-resolved
+// "/"-separated form, removing empty and "." segments, resolving ".." by
+// popping, and removing trailing slashes — the same algorithm the router
+// applies to inbound request paths (internal/router segments/joinSegments).
+// It must stay behaviorally equivalent: route keys and request paths
+// otherwise drift apart and mapped requests silently fall through to native
+// passthrough. Unlike path.Clean it never collapses interior repeated
+// slashes beyond segment skipping, and an empty result maps to "/".
+func canonicalizeRoutePath(path string) string {
+	var out []string
+	for seg := range strings.SplitSeq(path, "/") {
+		if seg == "" || seg == "." {
+			continue
+		}
+		if seg == ".." {
+			if len(out) > 0 {
+				out = out[:len(out)-1]
+			}
+			continue
+		}
+		out = append(out, seg)
+	}
+	if len(out) == 0 {
+		return "/"
+	}
+	var b strings.Builder
+	b.Grow(len(out) * 2)
+	for _, s := range out {
+		b.WriteByte('/')
+		b.WriteString(s)
+	}
+	return b.String()
 }
 
 // ChatCapabilities describes only independently verified upstream behavior.

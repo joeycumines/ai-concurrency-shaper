@@ -731,6 +731,27 @@ func TestPerProviderTranscodeRouteIsolation(t *testing.T) {
 	if !strings.Contains(err.Error(), "duplicate transcode mapping") {
 		t.Fatalf("error = %v", err)
 	}
+
+	// 3. Canonically-equivalent client routes are duplicates too: the route
+	// key is canonicalized, so /v1/responses and /v1/responses/ collide.
+	canonicalArgs := []string{
+		"--provider=anthropic",
+		"-upstream", "https://api.anthropic.com",
+		"-prefix", "/anthropic",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-transcode-route", "responses@/v1/responses/=chat-completions@/v1/chat/completions",
+	}
+	canonicalCfg, err := Parse(canonicalArgs)
+	if err != nil {
+		t.Fatalf("Parse canonicalArgs: %v", err)
+	}
+	err = canonicalCfg.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("expected canonical duplicate route rejection")
+	}
+	if !strings.Contains(err.Error(), "duplicate transcode mapping") {
+		t.Fatalf("canonical error = %v", err)
+	}
 }
 
 // TestFileSecretSourceBounded proves the secret file read is bounded at

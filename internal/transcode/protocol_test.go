@@ -18,6 +18,13 @@ func TestNewRouteKey(t *testing.T) {
 		{"empty method", " ", "/v1/x", RouteKey{}, true},
 		{"relative path", "POST", "v1/x", RouteKey{}, true},
 		{"absolute path", "GET", "/v1/x", RouteKey{Method: "GET", Path: "/v1/x"}, false},
+		{"trailing slash", "POST", "/v1/responses/", RouteKey{Method: "POST", Path: "/v1/responses"}, false},
+		{"dot segment", "POST", "/v1/./responses", RouteKey{Method: "POST", Path: "/v1/responses"}, false},
+		{"parent traversal", "POST", "/v1/../v1/responses", RouteKey{Method: "POST", Path: "/v1/responses"}, false},
+		{"repeated slashes", "POST", "/v1//responses", RouteKey{Method: "POST", Path: "/v1/responses"}, false},
+		{"root", "POST", "/", RouteKey{Method: "POST", Path: "/"}, false},
+		{"root trailing", "POST", "///", RouteKey{Method: "POST", Path: "/"}, false},
+		{"over-popping", "POST", "/../v1/responses", RouteKey{Method: "POST", Path: "/v1/responses"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -46,6 +53,38 @@ func TestNewRouteKeyRejectsQueryFragment(t *testing.T) {
 	} {
 		if _, err := NewRouteKey(http.MethodPost, path); err == nil {
 			t.Fatalf("NewRouteKey(%q): want error, got nil", path)
+		}
+	}
+}
+
+// TestCanonicalizeRoutePathPinsRouterEquivalence pins canonicalizeRoutePath
+// against the router's inbound-path normalization (internal/router
+// segments/joinSegments): the route key must land in the same canonical form
+// as a request path the router has normalized, or mapped requests silently
+// fall through to native passthrough. The vectors mirror the router's
+// documented behavior (traversal resolution, dot-segment removal,
+// trailing-slash removal, ".." popping without escaping the root, empty →
+// "/"). A change here that diverges from the router is a drift bug.
+func TestCanonicalizeRoutePathPinsRouterEquivalence(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"/v1/responses", "/v1/responses"},
+		{"/v1/responses/", "/v1/responses"},
+		{"/v1/responses//", "/v1/responses"},
+		{"/v1/./responses", "/v1/responses"},
+		{"/v1/../v1/responses", "/v1/responses"},
+		{"/v1/responses/..", "/v1"},
+		{"/p/v1/responses/", "/p/v1/responses"},
+		{"/../v1/responses", "/v1/responses"},
+		{"/", "/"},
+		{"///", "/"},
+		{"/v1//models/gemini-pro:generateContent", "/v1/models/gemini-pro:generateContent"},
+	}
+	for _, tt := range tests {
+		if got := canonicalizeRoutePath(tt.in); got != tt.want {
+			t.Errorf("canonicalizeRoutePath(%q) = %q, want %q", tt.in, got, tt.want)
 		}
 	}
 }

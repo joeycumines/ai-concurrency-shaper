@@ -247,6 +247,86 @@ func TestRouter_MultiProviderTranscodeHandlerIsolation(t *testing.T) {
 	}
 }
 
+// TestRouter_TranscodeDispatchCanonicalizedRouteKey proves route-key
+// canonicalization end-to-end: a mapping configured with a trailing slash or
+// dot segments canonicalizes to the same RouteKey as the router's normalized
+// incoming path, so POST /v1/responses dispatches to the transcode handler
+// (upstream /v1/chat/completions) instead of falling through to native
+// passthrough.
+func TestRouter_TranscodeDispatchCanonicalizedRouteKey(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if r.URL.Path == "/v1/chat/completions" {
+			_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"transcoded"},"finish_reason":"stop"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"passthrough":true}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	newProxy := func(t *testing.T, keyPath string) *proxy.Proxy {
+		t.Helper()
+		u, _ := url.Parse(upstream.URL)
+		p, err := proxy.New(
+			proxy.WithUpstream(u),
+			proxy.WithMatcher(route.NewMatcher(nil)),
+			proxy.WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+			proxy.WithMetrics(metrics.NewCollector()),
+			proxy.WithTranscodeMapping(proxy.TranscodeMapping{Mapping: mappingWithRouteKey(t, keyPath)}),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	for _, tc := range []struct {
+		name        string
+		keyPath     string
+		wantBodySub string
+	}{
+		{"canonical", "/v1/responses", `"object":"response"`},
+		{"trailing slash", "/v1/responses/", `"object":"response"`},
+		{"dot segment", "/v1/./responses", `"object":"response"`},
+		{"parent traversal", "/v1/../v1/responses", `"object":"response"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := router.New([]router.Provider{{Name: "p", Prefix: "/p", Proxy: newProxy(t, tc.keyPath)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(r)
+			t.Cleanup(srv.Close)
+
+			resp, err := http.Post(srv.URL+"/p/v1/responses", "application/json", strings.NewReader(`{"model":"m","input":"x"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if !strings.Contains(string(body), tc.wantBodySub) {
+				t.Fatalf("not transcoded: %s", body)
+			}
+		})
+	}
+}
+
+// mappingWithRouteKey returns a valid Responses->Chat transcode.Mapping whose
+// client route is built from keyPath via transcode.NewRouteKey — the exact
+// construction path parseTranscodeRoute uses — so a non-canonical keyPath
+// (trailing slash, dot segments) exercises NewRouteKey's canonicalization.
+func mappingWithRouteKey(t *testing.T, keyPath string) transcode.Mapping {
+	t.Helper()
+	m := helperResponsesToChatMapping(t)
+	key, err := transcode.NewRouteKey(http.MethodPost, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ClientRoute = key
+	return m
+}
+
 // TestRouter_BareVsPrefixedTrailingSlashParity pins the F-6/H5 class behavior:
 //   - Under a bare mount (Prefix=""), the router normalizes r.URL.Path through
 //     joinSegments(segments(r.URL.Path)) and clears RawPath so POST /v1/responses/
