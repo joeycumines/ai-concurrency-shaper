@@ -404,14 +404,14 @@ func TestGeneratedFrameBoundAfterJSONEscaping(t *testing.T) {
 	}
 }
 
-// TestGeneratedFrameBoundExceededByRepeatedParts proves the generated-frame
-// bound stays load-bearing after the M1 re-anchor: per-part acceptance with
-// per-part accumulation resets lets an item's terminal envelope carry up to
-// the item-total semantics; a part sequence whose terminal envelope escapes
-// past maxGeneratedSSEFrameBytes is rejected at marshal time with the typed
-// frame error. Use the Responses→Anthropic converter, whose part structure
-// resets the accumulated text per content part.
-func TestGeneratedFrameBoundExceededByRepeatedParts(t *testing.T) {
+// TestResponsesMaximalPartAcceptedAndReleasable pins the M1 contract on the
+// Responses→Anthropic direction: an exactly-maximal accepted part (the
+// accumulated bound) must be accepted AND releasable — the generated-frame
+// bound derives from the exchange total, so an accepted accumulation can
+// never be a frame violation (autopsy 2026-09-06 M1 rounds 1-2). The
+// structural frame-bound enforcement is pinned separately by
+// TestGeneratedFrameBoundEnforced and append_batch_frame_bound.
+func TestResponsesMaximalPartAcceptedAndReleasable(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
@@ -432,31 +432,10 @@ func TestGeneratedFrameBoundExceededByRepeatedParts(t *testing.T) {
 		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"m1","type":"message","role":"assistant","status":"in_progress","content":[]}}`); err != nil {
 		t.Fatal(err)
 	}
-	// Four parts of 600 KiB '<' each: each part accumulates 600 KiB (under
-	// the 1 MiB per-part bound; the accumulator resets per part), the item
-	// total is 2.4 MiB (under the 4 MiB exchange total), and each delta
-	// escapes to 3.6 MiB — under the generated-frame bound per frame. The
-	// terminal batch carries the full text repeated per terminal event;
-	// the batch bound (32 MiB) still accommodates it, so this exchange
-	// completes — proving per-part acceptance no longer deterministically
-	// fails (the M1 defect). The generated-frame bound therefore only
-	// fires on a single frame exceeding 7 MiB: feed one part of 1 MiB +
-	// envelope overhead — exactly the accepted maximum — whose terminal
-	// block escapes to 6 MiB + envelope, still under the bound. So the
-	// frame bound's surviving role isdefense against wrapper-heavy frames;
-	// pin THAT with an oversized tool-arguments accumulation: 1 MiB of
-	// escaped-quote-heavy arguments (backslash quotes escape 2x, but
-	// control chars escape 6x) is accepted at the accumulated bound and
-	// its arguments.done envelope with escaping stays under 7 MiB.
-	//
-	// The strongest surviving bound probe: a single upstream frame ALREADY
-	// at the 1 MiB wire bound full of '<' (escapes 6x to 6 MiB) plus
-	// terminal repetition — all under the new bound. The frame bound is
-	// therefore asserted structurally: a hand-built terminal batch whose
-	// single event exceeds the bound is rejected by appendBatch (covered
-	// by TestStreamBoundaryHelpers/append_batch_frame_bound). This test
-	// pins the M1 behavioral contract instead: an accepted maximum part
-	// completes its release.
+	// An exactly-maximal part (1 MiB of '<', escaping to ~6 MiB) is
+	// accepted and must release: the generated-frame bound derives from
+	// the exchange total (40 MiB + echo headroom), so the accepted maximum
+	// is never a frame violation (the M1 defect).
 	if err := feed("response.content_part.added",
 		`{"type":"response.content_part.added","sequence_number":2,"item_id":"m1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}`); err != nil {
 		t.Fatal(err)

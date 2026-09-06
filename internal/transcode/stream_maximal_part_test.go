@@ -53,14 +53,14 @@ func TestChatStreamMaximalPartCompletesRelease(t *testing.T) {
 	}
 }
 
-// TestChatStreamMaximalExchangeCompletesRelease pins the round-2 M1
+// TestChatStreamMaximalExchangeCompletesRelease pins the round-2/3 M1
 // derivation: the terminal envelope aggregates EVERY accepted accumulator
 // (output items, tool arguments) plus the request echo, so the
 // generated-frame/batch/generated-total bounds derive from the EXCHANGE
-// total (maxStreamTotalAccumulatedBytes), not one accumulator. Two tool
-// calls each accumulating exactly the per-item maximum must complete their
-// [DONE] release; pre-round-2 this failed with "SSE frame exceeds the
-// maximum size of 7340032 bytes".
+// total (maxStreamTotalAccumulatedBytes), not one accumulator — and the
+// payloads use '<' so the 6x JSON-escaping worst case is pinned, not just
+// 1x. Two tool calls each accumulating exactly the per-item maximum of
+// escaping-heavy text must complete their [DONE] release.
 func TestChatStreamMaximalExchangeCompletesRelease(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -73,7 +73,7 @@ func TestChatStreamMaximalExchangeCompletesRelease(t *testing.T) {
 	)
 	converter := newChatToResponsesConverter(state)
 
-	maxArgs := strings.Repeat("x", maxStreamAccumulatedBytes)
+	maxArgs := strings.Repeat("<", maxStreamAccumulatedBytes)
 	// Tool call A: identity, then arguments accumulating to exactly the
 	// per-item maximum across two deltas.
 	a := `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_A","type":"function","function":{"name":"f","arguments":""}}]},"finish_reason":null}]}`
@@ -101,7 +101,9 @@ func TestChatStreamMaximalExchangeCompletesRelease(t *testing.T) {
 		}
 	}
 	// Finish, then [DONE]: the terminal envelope carries BOTH completed
-	// function calls (2 MiB total semantics) and must release.
+	// function calls (2 MiB total semantics, 12 MiB escaped at 6x) and must
+	// release. Every release bound (frame 56 MiB, batch 128 MiB, generated
+	// total) is derived above this worst case.
 	if _, err := converter.Convert(SSEEvent{Data: []byte(
 		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)}); err != nil {
