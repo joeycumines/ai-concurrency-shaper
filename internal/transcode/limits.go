@@ -10,6 +10,19 @@ import "fmt"
 // (review-k finding 9). Aligned with the default SSE frame bound.
 const maxStreamAccumulatedBytes = 1 << 20
 
+// maxGeneratedSSEFrameBytes bounds one GENERATED downstream SSE frame (the
+// marshaled conversion output, as opposed to an upstream frame read off the
+// wire, which stays at maxSSEFrameBytes). It must strictly accommodate the
+// worst case for an accepted accumulation: JSON escaping amplifies up to 6
+// bytes per input byte (HTML/control escaping), and the envelope wrapper
+// adds a small constant. Derivation: 6*maxStreamAccumulatedBytes + 1 MiB
+// headroom. An accumulation accepted at maxStreamAccumulatedBytes can
+// therefore never deterministically fail the generated-frame bound at its
+// release — a completed upstream conversation must not error at its
+// terminal (autopsy 2026-09-06 M1: the previous equal 1 MiB bounds
+// collided).
+const maxGeneratedSSEFrameBytes = 6*maxStreamAccumulatedBytes + 1<<20
+
 // Exchange-level stream budgets (review-08 blocker 7): the per-item/part
 // bounds above limit a single accumulator; these budgets bound the whole
 // exchange so a corrupt upstream cannot grow memory without limit across
@@ -62,8 +75,15 @@ const (
 	// (stream error frames and dialect error bodies).
 	DefaultErrorMessageBytes int = 4 << 10
 	// DefaultGeneratedSSEFrameBytes bounds one generated downstream SSE
-	// frame (the outbound counterpart of SSEFrameBytes).
-	DefaultGeneratedSSEFrameBytes int = 1 << 20
+	// frame (the outbound counterpart of SSEFrameBytes). It must strictly
+	// accommodate the worst case for an accepted stream accumulation:
+	// JSON escaping amplifies up to 6 bytes per input byte and the event
+	// envelope adds a small constant — 6*maxStreamAccumulatedBytes + 1 MiB
+	// headroom (autopsy 2026-09-06 M1: the previous 1 MiB default equaled
+	// the accumulated bound, so a part accepted at exactly the accumulated
+	// bound deterministically failed its release, erroring a completed
+	// upstream conversation).
+	DefaultGeneratedSSEFrameBytes int = 6*maxStreamAccumulatedBytes + 1<<20
 	// The minimum legal output sizes (review-z commit 6): a generated SSE
 	// frame, terminal batch, or rendered JSON response smaller than these
 	// could never carry even the smallest legal terminal/error/created

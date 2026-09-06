@@ -94,8 +94,8 @@ func marshalResponsesEvents(
 		if err != nil {
 			return convertedBatch{}, err
 		}
-		if len(data) > maxSSEFrameBytes {
-			return convertedBatch{}, &SSEBoundError{Bound: maxSSEFrameBytes}
+		if len(data) > maxGeneratedSSEFrameBytes {
+			return convertedBatch{}, &SSEBoundError{Bound: maxGeneratedSSEFrameBytes}
 		}
 		batch.Events = append(batch.Events, frameEvent{
 			Type: event.EventType(),
@@ -201,8 +201,8 @@ func marshalAnthropicEvents(
 		if err != nil {
 			return convertedBatch{}, err
 		}
-		if len(data) > maxSSEFrameBytes {
-			return convertedBatch{}, &SSEBoundError{Bound: maxSSEFrameBytes}
+		if len(data) > maxGeneratedSSEFrameBytes {
+			return convertedBatch{}, &SSEBoundError{Bound: maxGeneratedSSEFrameBytes}
 		}
 		batch.Events = append(batch.Events, frameEvent{
 			Type: string(event.Type),
