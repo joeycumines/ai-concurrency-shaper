@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 )
 
@@ -395,11 +396,19 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}, ProvenanceLocalRequestConversionError)
 			return
 		}
+		// The transport error may embed the full outbound URL (a custom
+		// http.Client-based transport produces *url.Error with the complete
+		// request URL, including a credential-bearing upstream base query).
+		// The detail is logged server-side with sensitive URL query values
+		// redacted; the client message is neutral (the native passthrough
+		// path likewise sends a fixed body — autopsy 2026-09-06 H1;
+		// review-j finding 14 precedent).
+		h.logRequestError(r, sanitizeUpstreamTransportError(err))
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadGateway,
 			Type:    "api_error",
 			Code:    "upstream_transport_error",
-			Message: "upstream request failed: " + err.Error(),
+			Message: "upstream request failed",
 		}, ProvenanceUpstreamTransportError)
 		return
 	}
@@ -1692,4 +1701,55 @@ func (h *TranscodeHandler) boundErrorMessage(message string) string {
 // pins the conversion-failure path for operator observability).
 func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
 	log.Printf("transcode: %s %s: %v", r.Method, r.URL.Path, err)
+}
+
+// sanitizeUpstreamTransportError redacts credential-bearing URL query values
+// from a RoundTrip transport error before it reaches any log sink. A custom
+// http.Client-based transport produces *url.Error values carrying the full
+// outbound request URL (including the upstream base query preserved by the
+// route mapping), so the error string is scrubbed with the same sensitive
+// parameter redaction the native passthrough path applies to its log line,
+// recursing through nested url.Error chains the way the native sanitizer
+// does (autopsy 2026-09-06 H1).
+func sanitizeUpstreamTransportError(err error) error {
+	var outer *url.Error
+	if !errors.As(err, &outer) {
+		return err
+	}
+	parsed, perr := url.Parse(outer.URL)
+	if perr != nil {
+		return err
+	}
+	var replacements []string
+	redacted := redactURLErrorChain(outer, parsed, &replacements)
+	if _, direct := err.(*url.Error); !direct {
+		// Preserve the original error's own formatting for non-url.Error
+		// wrappers: replace every raw/redacted URL pair in the rendered
+		// string so nested chains are scrubbed too.
+		msg := err.Error()
+		for i := 0; i+1 < len(replacements); i += 2 {
+			msg = strings.ReplaceAll(msg, replacements[i], replacements[i+1])
+		}
+		return errors.New(msg)
+	}
+	return redacted
+}
+
+// redactURLErrorChain clones e with its URL redacted and recurses into
+// directly nested url.Error subtrees (http.Client redirect chains), so every
+// URL in the chain is scrubbed. Each raw/redacted pair is appended to
+// replacements for callers that must scrub a rendered wrapper string.
+func redactURLErrorChain(e *url.Error, parsed *url.URL, replacements *[]string) *url.Error {
+	clone := *e
+	redactedURL := auth.RedactSensitiveURL(parsed).String()
+	if e.URL != "" && e.URL != redactedURL {
+		*replacements = append(*replacements, e.URL, redactedURL)
+	}
+	clone.URL = redactedURL
+	if inner, ok := e.Err.(*url.Error); ok {
+		if innerParsed, perr := url.Parse(inner.URL); perr == nil {
+			clone.Err = redactURLErrorChain(inner, innerParsed, replacements)
+		}
+	}
+	return &clone
 }
