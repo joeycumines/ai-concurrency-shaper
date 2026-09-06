@@ -11,7 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -158,7 +158,7 @@ func NewTranscodeHandler(
 	for k := range cfg.Mapping.LossPolicy.Allowed {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	slices.Sort(keys)
 	if len(keys) == 0 {
 		log.Printf(
 			"transcode: %s %s: loss policy approves: none (strict)",

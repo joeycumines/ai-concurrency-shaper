@@ -398,8 +398,7 @@ func TestGeneratedFrameBoundAfterJSONEscaping(t *testing.T) {
 	_, err = converter.Convert(SSEEvent{Data: []byte(
 		"{\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" + delta + "\"},\"finish_reason\":null}]}",
 	)})
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("second delta err = %T %v, want accumulated-bound UpstreamWireError", err, err)
 	}
 }

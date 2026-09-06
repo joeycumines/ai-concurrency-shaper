@@ -29,7 +29,7 @@ func TestChatStreamMaximalPartCompletesRelease(t *testing.T) {
 	// Two legal 512 KiB text deltas: the part accumulates to exactly the
 	// accepted maximum.
 	half := strings.Repeat("a", maxStreamAccumulatedBytes/2)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := converter.Convert(SSEEvent{Data: []byte(
 			`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"` + half + `"},"finish_reason":null}]}`,
 		)}); err != nil {
@@ -81,7 +81,7 @@ func TestChatStreamMaximalExchangeCompletesRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	half := maxStreamAccumulatedBytes / 2
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := converter.Convert(SSEEvent{Data: []byte(
 			`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"` + maxArgs[:half] + `"}}]},"finish_reason":null}]}`,
 		)}); err != nil {
@@ -93,7 +93,7 @@ func TestChatStreamMaximalExchangeCompletesRelease(t *testing.T) {
 	if _, err := converter.Convert(SSEEvent{Data: []byte(b)}); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := converter.Convert(SSEEvent{Data: []byte(
 			`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"` + maxArgs[:half] + `"}}]},"finish_reason":null}]}`,
 		)}); err != nil {

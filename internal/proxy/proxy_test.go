@@ -11712,9 +11712,7 @@ func TestProxy_ConfigFrozenConcurrent(t *testing.T) {
 	var wg sync.WaitGroup
 	// One mutator goroutine churns the caller-owned config: the proxy's
 	// construction-time copies must isolate serving from these writes.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -11731,11 +11729,9 @@ func TestProxy_ConfigFrozenConcurrent(t *testing.T) {
 			callerSrc.value = "mutated"
 			callerPolicy.Mode = auth.AuthNone
 		}
-	}()
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	})
+	for range 4 {
+		wg.Go(func() {
 			for {
 				select {
 				case <-stop:
@@ -11746,7 +11742,7 @@ func TestProxy_ConfigFrozenConcurrent(t *testing.T) {
 				rec := httptest.NewRecorder()
 				p.ServeHTTP(rec, req)
 			}
-		}()
+		})
 	}
 
 	time.Sleep(150 * time.Millisecond)
