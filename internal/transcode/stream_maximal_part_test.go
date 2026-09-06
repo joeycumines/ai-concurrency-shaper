@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -49,5 +50,91 @@ func TestChatStreamMaximalPartCompletesRelease(t *testing.T) {
 	}
 	if !terminalBatch.Terminal {
 		t.Fatal("[DONE] batch is not terminal")
+	}
+}
+
+// TestChatStreamMaximalExchangeCompletesRelease pins the round-2 M1
+// derivation: the terminal envelope aggregates EVERY accepted accumulator
+// (output items, tool arguments) plus the request echo, so the
+// generated-frame/batch/generated-total bounds derive from the EXCHANGE
+// total (maxStreamTotalAccumulatedBytes), not one accumulator. Two tool
+// calls each accumulating exactly the per-item maximum must complete their
+// [DONE] release; pre-round-2 this failed with "SSE frame exceeds the
+// maximum size of 7340032 bytes".
+func TestChatStreamMaximalExchangeCompletesRelease(t *testing.T) {
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		ChatCapabilities{},
+		"resp_1",
+		"gpt-4.1",
+		1710000000,
+		nil,
+	)
+	converter := newChatToResponsesConverter(state)
+
+	maxArgs := strings.Repeat("x", maxStreamAccumulatedBytes)
+	// Tool call A: identity, then arguments accumulating to exactly the
+	// per-item maximum across two deltas.
+	a := `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_A","type":"function","function":{"name":"f","arguments":""}}]},"finish_reason":null}]}`
+	if _, err := converter.Convert(SSEEvent{Data: []byte(a)}); err != nil {
+		t.Fatal(err)
+	}
+	half := maxStreamAccumulatedBytes / 2
+	for i := 0; i < 2; i++ {
+		if _, err := converter.Convert(SSEEvent{Data: []byte(
+			`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"` + maxArgs[:half] + `"}}]},"finish_reason":null}]}`,
+		)}); err != nil {
+			t.Fatalf("call A delta %d rejected: %v", i+1, err)
+		}
+	}
+	// Tool call B: same, on index 1.
+	b := `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_B","type":"function","function":{"name":"g","arguments":""}}]},"finish_reason":null}]}`
+	if _, err := converter.Convert(SSEEvent{Data: []byte(b)}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := converter.Convert(SSEEvent{Data: []byte(
+			`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"` + maxArgs[:half] + `"}}]},"finish_reason":null}]}`,
+		)}); err != nil {
+			t.Fatalf("call B delta %d rejected: %v", i+1, err)
+		}
+	}
+	// Finish, then [DONE]: the terminal envelope carries BOTH completed
+	// function calls (2 MiB total semantics) and must release.
+	if _, err := converter.Convert(SSEEvent{Data: []byte(
+		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+	)}); err != nil {
+		t.Fatal(err)
+	}
+	terminalBatch, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")})
+	if err != nil {
+		t.Fatalf("maximal two-accumulator exchange release failed (M1 round 2): %v", err)
+	}
+	if !terminalBatch.Terminal {
+		t.Fatal("[DONE] batch is not terminal")
+	}
+}
+
+// TestGeneratedFrameBoundEnforced proves the generated-frame bound is
+// load-bearing at the converting reader (mutation target: disabling the
+// reader frame check must fail this test). A frame one byte over the
+// configured generated-frame bound is a typed SSEBoundError.
+func TestGeneratedFrameBoundEnforced(t *testing.T) {
+	reader := newConvertingReaderWithLimits(
+		NewSSEReaderWithLimits(strings.NewReader(""), 0, 0),
+		&fixedConverter{},
+		1024, 0, 0,
+	)
+	err := reader.appendBatch(convertedBatch{Events: []frameEvent{{
+		Type: "x",
+		Data: make([]byte, 1025),
+	}}})
+	var boundErr *SSEBoundError
+	if !errors.As(err, &boundErr) {
+		t.Fatalf("err = %T %v, want *SSEBoundError", err, err)
+	}
+	if boundErr.Line {
+		t.Fatal("bound error must be a frame violation, not a line violation")
 	}
 }

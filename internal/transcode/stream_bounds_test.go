@@ -491,13 +491,15 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 	})
 
 	t.Run("terminal batch bound", func(t *testing.T) {
+		// Anchor the batch-bound probe at the operative derived default
+		// (autopsy 2026-09-06 M1 round 2 joint derivation).
 		reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(strings.NewReader(""), 0, 0), &fixedConverter{}, 0, 0, 0)
-		frames := (maxStreamTerminalBatchBytes / (maxSSEFrameBytes - 64)) + 2
+		frames := (DefaultGeneratedSSEBatchBytes / (DefaultGeneratedSSEFrameBytes - 64)) + 2
 		batch := convertedBatch{}
 		for range frames {
 			batch.Events = append(batch.Events, frameEvent{
 				Type: "x",
-				Data: bytes.Repeat([]byte("a"), maxSSEFrameBytes-64),
+				Data: bytes.Repeat([]byte("a"), DefaultGeneratedSSEFrameBytes-64),
 			})
 		}
 		err := reader.appendBatch(batch)

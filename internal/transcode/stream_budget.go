@@ -132,6 +132,10 @@ const (
 	// tool bookkeeping) one exchange may allocate.
 	maxStreamStateEntries = 1 << 16
 	// maxStreamGeneratedBytes bounds the total generated downstream bytes of
-	// one exchange.
-	maxStreamGeneratedBytes = 64 << 20
+	// one exchange. Derived jointly with the terminal-release bounds
+	// (autopsy 2026-09-06 M1 round 2): the worst-case accepted release
+	// emits the streamed deltas (up to 6x the escaped exchange total) PLUS
+	// the terminal batch (DefaultGeneratedSSEBatchBytes), so the exchange
+	// generated-total must exceed their sum.
+	maxStreamGeneratedBytes = int64(DefaultGeneratedSSEBatchBytes) + 6*int64(maxStreamTotalAccumulatedBytes) + 1<<20
 )

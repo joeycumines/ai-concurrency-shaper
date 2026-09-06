@@ -304,7 +304,7 @@ func (r *convertingReader) appendBatch(batch convertedBatch) error {
 		return &SSEBoundError{Bound: r.generatedBatchMax}
 	}
 	if r.generatedTotal+int64(staged.Len()) > maxStreamGeneratedBytes {
-		return &SSEBoundError{Bound: maxStreamGeneratedBytes}
+		return &SSEBoundError{Bound: int(maxStreamGeneratedBytes)}
 	}
 	r.generatedTotal += int64(staged.Len())
 	_, _ = r.buf.Write(staged.Bytes())

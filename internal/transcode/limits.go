@@ -7,7 +7,7 @@ import "fmt"
 // before the exchange is rejected as corrupt upstream wire: individually
 // bounded SSE frames could otherwise accumulate without limit and be emitted
 // as one generated downstream frame, amplifying memory without bound
-// (review-k finding 9). Aligned with the default SSE frame bound.
+// (review-k finding 9).
 const maxStreamAccumulatedBytes = 1 << 20
 
 // maxGeneratedSSEFrameBytes bounds one GENERATED downstream SSE frame (the
@@ -20,7 +20,9 @@ const maxStreamAccumulatedBytes = 1 << 20
 // therefore never deterministically fail the generated-frame bound at its
 // release — a completed upstream conversation must not error at its
 // terminal (autopsy 2026-09-06 M1: the previous equal 1 MiB bounds
-// collided).
+// collided). The converter-level checks are a package-default backstop;
+// the configured BodyLimits.GeneratedSSEFrameBytes bound is enforced by the
+// converting reader on every outbound frame.
 const maxGeneratedSSEFrameBytes = 6*maxStreamAccumulatedBytes + 1<<20
 
 // Exchange-level stream budgets (review-08 blocker 7): the per-item/part
@@ -41,11 +43,6 @@ const (
 	maxStreamPartsPerItem = 4096
 	// maxStreamToolCalls bounds the tool calls one exchange may open.
 	maxStreamToolCalls = 4096
-	// maxStreamTerminalBatchBytes bounds the terminal batch buffered in the
-	// converting reader: the released item-closing events and the terminal
-	// envelope repeat the accumulated content several times, and JSON
-	// escaping can amplify each copy.
-	maxStreamTerminalBatchBytes = 32 << 20
 	// maxStreamConversionReportEntries bounds the accumulated losses and
 	// notes of one exchange.
 	maxStreamConversionReportEntries = 4096
@@ -75,15 +72,22 @@ const (
 	// (stream error frames and dialect error bodies).
 	DefaultErrorMessageBytes int = 4 << 10
 	// DefaultGeneratedSSEFrameBytes bounds one generated downstream SSE
-	// frame (the outbound counterpart of SSEFrameBytes). It must strictly
-	// accommodate the worst case for an accepted stream accumulation:
-	// JSON escaping amplifies up to 6 bytes per input byte and the event
-	// envelope adds a small constant — 6*maxStreamAccumulatedBytes + 1 MiB
-	// headroom (autopsy 2026-09-06 M1: the previous 1 MiB default equaled
-	// the accumulated bound, so a part accepted at exactly the accumulated
-	// bound deterministically failed its release, erroring a completed
-	// upstream conversation).
-	DefaultGeneratedSSEFrameBytes int = 6*maxStreamAccumulatedBytes + 1<<20
+	// frame (the outbound counterpart of SSEFrameBytes). The terminal
+	// envelope repeats EVERY accepted accumulator of the exchange (output
+	// items, tool arguments) plus the request echo, so the bound derives
+	// from the EXCHANGE total, not one accumulator: 6x escaping of
+	// maxStreamTotalAccumulatedBytes + 16 MiB echo/envelope headroom
+	// (autopsy 2026-09-06 M1 round 2: the first derivation anchored on the
+	// per-item bound and still failed accepted multi-accumulator exchanges,
+	// e.g. 2 x 1 MiB tool arguments; the request echo — Instructions/Tools
+	// — is bounded by AcceptedRequestBytes, so the headroom covers its
+	// streamed-terminal share). The default terminal batch and generated
+	// total (32/64 MiB) are re-derived to stay strictly above the
+	// worst-case accepted release: the terminal batch carries the
+	// item-closing events plus the envelope (content ~3x escaped across
+	// copies) and DefaultGeneratedResponseBytes (32 MiB) bounds the
+	// non-stream JSON response of the same shape.
+	DefaultGeneratedSSEFrameBytes int = 6*maxStreamTotalAccumulatedBytes + 16<<20
 	// The minimum legal output sizes (review-z commit 6): a generated SSE
 	// frame, terminal batch, or rendered JSON response smaller than these
 	// could never carry even the smallest legal terminal/error/created
@@ -97,7 +101,11 @@ const (
 	MinGeneratedResponseBytes int64 = 1 << 10
 	// DefaultGeneratedSSEBatchBytes bounds one generated terminal batch
 	// (the released item-closing events plus the terminal envelope).
-	DefaultGeneratedSSEBatchBytes int = 32 << 20
+	// Derived jointly with DefaultGeneratedSSEFrameBytes: the batch repeats
+	// the exchange semantics ~3x escaped (arguments.done + output_item.done
+	// + envelope copies), so it is 3x the frame derivation's semantic term
+	// plus the full frame bound (autopsy 2026-09-06 M1 round 2).
+	DefaultGeneratedSSEBatchBytes int = 6*3*maxStreamTotalAccumulatedBytes + DefaultGeneratedSSEFrameBytes
 )
 
 // BodyLimits holds the independent body limits of a transcoded route. The
