@@ -234,6 +234,23 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
+			key: FeatureToolResultTextJoin,
+			perm: []Feature{
+				FeatureToolResultTextJoin,
+			},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				var report ConversionReport
+				_, err := renderChatToolResult(CanonicalFunctionResult{
+					CallID: "call_1",
+					Parts: []CanonicalPart{
+						CanonicalText{Text: "alpha"},
+						CanonicalText{Text: "beta"},
+					},
+				}, policy, &report)
+				return report, err
+			},
+		},
+		{
 			key: FeatureToolResultJSONEnvelope,
 			perm: []Feature{
 				FeatureToolResultMultimodalContent,

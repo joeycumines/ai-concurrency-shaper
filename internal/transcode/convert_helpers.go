@@ -579,8 +579,24 @@ func renderChatToolResult(
 	}
 
 	// Exact text results stay exact text: the string arm of the Chat
-	// message content union.
+	// message content union. A single text part renders byte-exact; a
+	// multi-part all-text result is joined with '\n' under the named
+	// tool_result_text_join decision (autopsy 2026-09-06 H2: the join is
+	// observably reported, never silent). The count is over the
+	// client-supplied parts only — the synthetic error_status_prefix part
+	// is not a client part boundary (its own encoding is reported under
+	// tool_result_error_status).
 	if allTextParts(parts) {
+		if len(result.Parts) > 1 {
+			if err := report.Lose(
+				policy,
+				FeatureToolResultTextJoin,
+				"messages[].tool_result.content",
+				"the multi-part all-text tool result is joined into one '\\n'-separated string; the chat tool message cannot carry part boundaries",
+			); err != nil {
+				return ChatMessage{}, err
+			}
+		}
 		var builder strings.Builder
 		for i, part := range parts {
 			if i > 0 {
