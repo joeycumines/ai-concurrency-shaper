@@ -5,6 +5,14 @@ package transcode
 // never reach the converters. Each category is exercised through the real
 // entry points (request decode, upstream response decode, upstream stream
 // decode) and the typed Kind is asserted on the error chain.
+//
+// Contract-role note (2026-09-06): the unknown-field category is rejected on
+// the CLIENT REQUEST decode (a consequence of the lossless-transcoding
+// invariant) but TOLERATED on the upstream response/stream decode (the
+// subject-to-change provider contract). The remaining five categories —
+// duplicate_key, missing_required, illegal_null, trailing_value, and
+// contradictory_union — are rejected on every surface. See AGENTS.md
+// 'Contract-role strictness and the directional loss model'.
 
 import (
 	"errors"
@@ -49,8 +57,10 @@ func TestWireDecodeSixCategoriesClientRequest(t *testing.T) {
 }
 
 // TestWireDecodeSixCategoriesUpstream proves the upstream response decode
-// rejects all six categories with typed decode errors (wrapped in the
-// upstream-wire classification, never converted).
+// rejects the five remaining categories with typed decode errors (wrapped in
+// the upstream-wire classification, never converted). The unknown-field
+// category is TOLERATED on the upstream envelope (contract-role strictness),
+// so it is not in this matrix; see the file-header note.
 func TestWireDecodeSixCategoriesUpstream(t *testing.T) {
 	cases := []struct {
 		name string
@@ -61,11 +71,6 @@ func TestWireDecodeSixCategoriesUpstream(t *testing.T) {
 			"duplicate_key",
 			`{"id":"r","id":"r2","object":"response","created_at":1,"status":"completed","model":"m","output":[]}`,
 			wire.DecodeDuplicateKey,
-		},
-		{
-			"unknown_field",
-			`{"id":"r","object":"response","created_at":1,"status":"completed","model":"m","output":[],"bogus":1}`,
-			wire.DecodeUnknownField,
 		},
 		{
 			"missing_required",
@@ -119,11 +124,6 @@ func TestWireDecodeSixCategoriesStream(t *testing.T) {
 			wire.DecodeDuplicateKey,
 		},
 		{
-			"unknown_field",
-			`{"type":"response.created","sequence_number":0,"response":{"id":"r","object":"response","created_at":1,"status":"in_progress","model":"m","output":[]},"bogus":1}`,
-			wire.DecodeUnknownField,
-		},
-		{
 			"illegal_null",
 			`{"type":null,"sequence_number":0}`,
 			wire.DecodeIllegalNull,
@@ -171,11 +171,6 @@ func TestWireDecodeSixCategoriesChat(t *testing.T) {
 			"duplicate_key",
 			`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"}}],"model":"m2"}`,
 			wire.DecodeDuplicateKey,
-		},
-		{
-			"unknown_field",
-			`{"id":"c","object":"chat.completion","created":1,"model":"m","bogus":1,"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"}}]}`,
-			wire.DecodeUnknownField,
 		},
 		{
 			"illegal_null",

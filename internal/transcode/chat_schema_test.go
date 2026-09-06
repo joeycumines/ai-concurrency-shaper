@@ -9,7 +9,6 @@ package transcode
 import (
 	"bytes"
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/testcorpus"
@@ -391,16 +390,41 @@ func TestChatUsageDeepSeekCacheConvention(t *testing.T) {
 	}
 }
 
-// TestChatUsageUnknownFieldStillRejected pins the strict wire contract: an
-// unknown usage field that is NOT one of the four decoded extensions still
-// fails decode — the leniency ends exactly at the modeled surface.
-func TestChatUsageUnknownFieldStillRejected(t *testing.T) {
+// TestChatUsageUnknownFieldTolerated pins the contract-role change
+// (2026-09-06): an unknown usage field on the upstream response envelope is
+// a provider extension and is TOLERATED — it must never fail the request
+// and must never be forwarded to the client.
+func TestChatUsageUnknownFieldTolerated(t *testing.T) {
 	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"bogus_tokens":1}}`
-	_, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy())
-	if err == nil {
-		t.Fatal("decode accepted unknown usage field bogus_tokens")
+	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("unknown usage field tolerated decode = %v, want success", err)
 	}
-	if !strings.Contains(err.Error(), "bogus_tokens") {
-		t.Fatalf("err = %v, want the offending field named", err)
+	if len(response.Items) != 1 {
+		t.Fatalf("response = %+v", response)
+	}
+	// The unknown extension must never reach the client dialect. Render with
+	// a policy that approves the usage breakdown losses (the fixture usage
+	// carries no cache/reasoning breakdown, which the Messages dialect
+	// requires).
+	allowed, err := ParseLossFeatures(
+		"usage_unknown",
+		"usage_cache_read_unknown",
+		"usage_cache_write_unknown",
+		"usage_reasoning_unknown",
+	)
+	if err != nil {
+		t.Fatalf("parse loss features: %v", err)
+	}
+	ctx := &ExchangeContext{
+		IDs:        NewExchangeIDs(),
+		LossPolicy: LossPolicy{Allowed: allowed},
+	}
+	rendered, _, err := RenderMessagesResponse(response, ctx)
+	if err != nil {
+		t.Fatalf("render client dialect: %v", err)
+	}
+	if bytes.Contains(rendered, []byte("bogus_tokens")) {
+		t.Fatalf("bogus_tokens leaked into client output: %s", rendered)
 	}
 }

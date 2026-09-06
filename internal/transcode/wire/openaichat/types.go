@@ -574,9 +574,14 @@ type LLMUsage struct {
 	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 
 	// CacheCost is an opaque provider extension (the Verboo gateway's
-	// billing field). Preserve raw JSON so strict decoding accepts the
-	// provider field without coercing or forwarding it.
+	// billing field). Modeled as an opaque provider extension; captured as
+	// raw JSON and never forwarded (the envelope decode is tolerant regardless).
 	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
+
+	// CompletionCost is an opaque provider extension (the LiteLLM gateway's
+	// cost-accounting field). Modeled as an opaque provider extension; captured
+	// as raw JSON and never forwarded (the envelope decode is tolerant regardless).
+	CompletionCost json.RawMessage `json:"completion_cost,omitempty"`
 }
 
 // StreamDelta is the delta payload of a streaming chat completion chunk.
@@ -591,6 +596,11 @@ type StreamDelta struct {
 	// a contradiction, never a merge.
 	ReasoningContent *string         `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCallDelta `json:"tool_calls,omitempty"`
+
+	// FunctionCall is the legacy non-tool_calls tool-call fragment spelling
+	// (a KNOWN official field, pinned in pins.md). It is modeled so a delta
+	// carrying it is structurally REJECTED — never silently dropped.
+	FunctionCall json.RawMessage `json:"function_call,omitempty"`
 }
 
 // TopLogprob is one alternative token of a token log-probability entry.
@@ -655,9 +665,14 @@ type Response struct {
 	PromptText     *string `json:"prompt_text,omitempty"`
 
 	// CacheCost is an opaque provider extension (the Verboo gateway's
-	// billing field). Preserve raw JSON so strict decoding accepts the
-	// provider field without coercing or forwarding it.
+	// billing field). Modeled as an opaque provider extension; captured as
+	// raw JSON and never forwarded (the envelope decode is tolerant regardless).
 	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
+
+	// CompletionCost is an opaque provider extension (the LiteLLM gateway's
+	// cost-accounting field). Modeled as an opaque provider extension; captured
+	// as raw JSON and never forwarded (the envelope decode is tolerant regardless).
+	CompletionCost json.RawMessage `json:"completion_cost,omitempty"`
 }
 
 // StreamChunk is one SSE frame of a streaming chat completion: the chunk
@@ -678,7 +693,12 @@ type StreamChunk struct {
 	PromptText     *string `json:"prompt_text,omitempty"`
 
 	// CacheCost is an opaque provider extension (the Verboo gateway's
-	// billing field). Preserve raw JSON so strict decoding accepts the
-	// provider field without coercing or forwarding it.
+	// billing field). Modeled as an opaque provider extension; captured as
+	// raw JSON and never forwarded (the envelope decode is tolerant regardless).
 	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
+
+	// CompletionCost is an opaque provider extension (the LiteLLM gateway's
+	// cost-accounting field). Modeled as an opaque provider extension; captured
+	// as raw JSON and never forwarded (the envelope decode is tolerant regardless).
+	CompletionCost json.RawMessage `json:"completion_cost,omitempty"`
 }

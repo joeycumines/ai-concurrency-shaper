@@ -13,9 +13,10 @@ package transcode
 // usage top-level extensions, reasoning_content, matched_stop, empty-status
 // history — all passed the synthetic suite while failing live sessions).
 //
-// The regression proof is recorded in WIP.md: temporarily deleting any one
-// modeled extension from the wire shadows makes this test fail with the
-// exact field name.
+// The regression proof: the fixture carries real provider-extension spellings
+// (cache_cost, completion_cost, reasoning_content, matched_stop, usage
+// extensions) and the production decode accepts them without leaking them to
+// the rendered client output.
 
 import (
 	"bytes"
@@ -173,16 +174,20 @@ func TestFieldCaptureQwenNonstreamDecodes(t *testing.T) {
 		t.Fatalf("usage cache-write tokens = (%d, known=%t), want (7, true) — created_cache_tokens must map to cache-write", response.Usage.CacheWriteTokens, response.Usage.CacheWriteKnown)
 	}
 
-	// The opaque cache_cost provider extension (Verboo billing field) must
-	// never reach the client dialect: it is decoded so the strict wire
-	// decode accepts it (the regression), but the canonical IR has no model
-	// for it, so any rendered client output is clean of it.
+	// The opaque cache_cost and completion_cost provider extensions (Verboo /
+	// LiteLLM billing fields) must never reach the client dialect: they are
+	// decoded so the tolerant upstream-response decode accepts them (the
+	// regression), but the canonical IR has no model for them, so any
+	// rendered client output is clean of them.
 	rendered, _, err := RenderMessagesResponse(response, testExchangeContext())
 	if err != nil {
 		t.Fatalf("render client dialect: %v", err)
 	}
 	if bytes.Contains(rendered, []byte("cache_cost")) {
 		t.Fatalf("cache_cost leaked into client output: %s", rendered)
+	}
+	if bytes.Contains(rendered, []byte("completion_cost")) {
+		t.Fatalf("completion_cost leaked into client output: %s", rendered)
 	}
 }
 

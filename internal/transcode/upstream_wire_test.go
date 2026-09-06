@@ -62,9 +62,12 @@ func TestUpstreamWireDecodeMatrix(t *testing.T) {
 			wantAccept: true,
 		},
 		{
-			name:     "chat unknown field",
-			body:     `{"id":"c","object":"chat.completion","created":1,"model":"m","bogus":1,"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"}}]}`,
-			wantWire: true,
+			// Contract-role note (2026-09-06): an unknown field on the
+			// upstream response envelope is a provider extension and is
+			// TOLERATED, not a wire failure.
+			name:       "chat unknown field",
+			body:       `{"id":"c","object":"chat.completion","created":1,"model":"m","bogus":1,"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"}}]}`,
+			wantAccept: true,
 		},
 		{
 			name:            "chat unsupported finish reason",

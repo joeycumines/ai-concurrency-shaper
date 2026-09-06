@@ -189,7 +189,8 @@ func TestChatResponseOfficialShapesStillDecode(t *testing.T) {
 			name: "function call legacy reason",
 			// The legacy finish_reason value is in the supported enum. The
 			// legacy message.function_call FIELD is not part of the modeled
-			// surface (an unknown-field rejection), so it is not used here.
+			// surface (tolerated and discarded on the upstream envelope), so
+			// it is not used here.
 			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"function_call","message":{"role":"assistant","content":"x"}}]}`,
 		},
 		{
@@ -257,8 +258,8 @@ func TestChatStreamChunkObjectDiscriminator(t *testing.T) {
 // TestChatResponseDecodesMatchedStopExtension proves the choice-level
 // `matched_stop` provider extension (observed in the field 2026-08-24 on the
 // yolo/qwen chat gateway) decodes on the strict non-streaming surface in both
-// its string and null forms, while a genuinely unknown choice field is still
-// rejected — streaming/non-streaming parity of the opaque-extension surface.
+// its string and null forms, while a genuinely unknown choice field is now
+// TOLERATED — streaming/non-streaming parity of the opaque-extension surface.
 func TestChatResponseDecodesMatchedStopExtension(t *testing.T) {
 	tests := []struct {
 		name string
@@ -285,10 +286,13 @@ func TestChatResponseDecodesMatchedStopExtension(t *testing.T) {
 		})
 	}
 
+	// Contract-role note (2026-09-06): a genuinely unknown choice-level
+	// field on the upstream response envelope is a provider extension and is
+	// now TOLERATED (never a failure), not rejected. The modeled
+	// matched_stop extension above still decodes.
 	bogus := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"},"bogus_field":1}]}`
-	_, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy())
-	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
-		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	if _, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy()); err != nil {
+		t.Fatalf("unknown choice field tolerated decode = %v, want success", err)
 	}
 }
 
@@ -329,9 +333,11 @@ func TestChatResponseDecodesMatchedStopMessageExtension(t *testing.T) {
 		})
 	}
 
+	// Contract-role note (2026-09-06): a genuinely unknown message-level
+	// field on the upstream response envelope is a provider extension and is
+	// now TOLERATED (never a failure), not rejected.
 	bogus := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x","bogus_field":1}}]}`
-	_, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy())
-	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
-		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	if _, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy()); err != nil {
+		t.Fatalf("unknown message field tolerated decode = %v, want success", err)
 	}
 }

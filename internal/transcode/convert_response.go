@@ -16,10 +16,10 @@ import (
 // chatResponseShadow is the presence-aware decode shadow of ChatResponse:
 // every presence-sensitive field is a pointer so absent-vs-zero is
 // distinguishable, while the full surface is modeled (reusing the wire types
-// for non-presence-sensitive payloads) so the strict decode's unknown-field
-// rejection is preserved. The shadow enforces the pinned required fields of
-// the Chat response contract (review-k finding 4) and its usage presence is
-// consumed by the usage Known-flag decode (review-k finding 6).
+// for non-presence-sensitive payloads) so the tolerant decode's modeled
+// surface covers the full pinned contract. The shadow enforces the pinned
+// required fields of the Chat response contract (review-k finding 4) and its
+// usage presence is consumed by the usage Known-flag decode (review-k finding 6).
 type chatResponseShadow struct {
 	ID                string             `json:"id"`
 	Object            *string            `json:"object"`
@@ -38,9 +38,14 @@ type chatResponseShadow struct {
 	PromptText     *string `json:"prompt_text,omitempty"`
 
 	// CacheCost is an opaque provider extension (the Verboo gateway's
-	// billing field). Preserve raw JSON so strict decoding accepts the
-	// provider field without coercing or forwarding it.
+	// billing field). Modeled as an opaque provider extension; captured as
+	// raw JSON and never forwarded (the envelope decode is tolerant regardless).
 	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
+
+	// CompletionCost is an opaque provider extension (the LiteLLM gateway's
+	// cost-accounting field). Modeled as an opaque provider extension; captured
+	// as raw JSON and never forwarded (the envelope decode is tolerant regardless).
+	CompletionCost json.RawMessage `json:"completion_cost,omitempty"`
 }
 
 type chatChoiceShadow struct {
@@ -67,6 +72,12 @@ type chatMessageShadow struct {
 	Refusal    *string              `json:"refusal,omitempty"`
 	ToolCalls  []chatToolCallShadow `json:"tool_calls,omitempty"`
 	Reasoning  *string              `json:"reasoning,omitempty"`
+
+	// FunctionCall is the legacy non-tool_calls tool-call spelling (a KNOWN
+	// official field, pinned in pins.md). It is modeled so a message carrying
+	// it is structurally REJECTED — never silently dropped (a silent drop
+	// would leave the client with a tool_use stop reason and no tool call).
+	FunctionCall json.RawMessage `json:"function_call,omitempty"`
 	// ReasoningContent mirrors the wire ChatAssistantMessage extension (the
 	// DeepSeek/Qwen spelling); shadow-mirrors-wire per the task-12 F1
 	// pattern.
@@ -113,15 +124,22 @@ type chatUsageShadow struct {
 	CompletionTokensDetails *ChatCompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 
 	// CacheCost is an opaque provider extension (the Verboo gateway's
-	// billing field). Preserve raw JSON so strict decoding accepts the
-	// provider field without coercing or forwarding it.
+	// billing field). Modeled as an opaque provider extension; captured as
+	// raw JSON and never forwarded (the envelope decode is tolerant regardless).
 	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
+
+	// CompletionCost is an opaque provider extension (the LiteLLM gateway's
+	// cost-accounting field). Modeled as an opaque provider extension; captured
+	// as raw JSON and never forwarded (the envelope decode is tolerant regardless).
+	CompletionCost json.RawMessage `json:"completion_cost,omitempty"`
 }
 
 // DecodeChatResponseWithPolicy decodes a non-streaming Chat Completions
 // response into the canonical IR, applying the exchange loss policy to the
-// provider plaintext reasoning decision. The decode is strict on the pinned
-// wire contract: the required fields (object, one choice, choice index 0,
+// provider plaintext reasoning decision. The decode enforces the pinned wire
+// contract's semantic presence strictly (the upstream envelope is a
+// subject-to-change contract, so unknown provider-extension fields are
+// TOLERATED, but): the required fields (object, one choice, choice index 0,
 // finish_reason, message with role assistant, and complete tool-call identity)
 // must be explicitly present — absent or null is rejected, never defaulted
 // (review-k finding 4); corrupt upstream wire is an upstream failure. Provider
@@ -137,9 +155,9 @@ func DecodeChatResponseWithPolicy(
 ) (CanonicalResponse, ConversionReport, error) {
 	// Presence-aware shadow decode: absent-vs-zero is distinguishable.
 	var shadow chatResponseShadow
-	if err := wire.Decode(body, &shadow); err != nil {
-		// A strict decode failure — malformed JSON, a type-corrupt value, or
-		// data outside the modeled surface — is corrupt upstream wire, an
+	if err := wire.DecodeTolerant(body, &shadow); err != nil {
+		// A decode failure — malformed JSON or a type-corrupt modeled value —
+		// is corrupt upstream wire, an
 		// upstream failure (review-k finding 3). Valid features the
 		// transcoder knows but does not support are rejected as
 		// UnsupportedFeatureError (local) instead.
@@ -183,6 +201,19 @@ func DecodeChatResponseWithPolicy(
 			fmt.Errorf("chat response choice index = %v; n=1 requires index 0", indexOrZero(shadowChoice.Index)),
 		)
 	}
+	// A non-streaming chat.completion choice carrying the streaming-only
+	// delta arm is corrupt upstream wire: the non-streaming surface carries
+	// only message, not delta. This is a KNOWN field, not a provider
+	// extension, so rejecting it does not weaken the envelope's
+	// unknown-field tolerance, and it prevents the delta content from being
+	// silently dropped (GAP-012 parity).
+	if shadowChoice.Delta != nil {
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			errors.New("chat response choice carries a streaming delta arm; the non-streaming surface carries only message"),
+		)
+	}
 	if shadowChoice.FinishReason == nil {
 		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
@@ -202,6 +233,18 @@ func DecodeChatResponseWithPolicy(
 			UpstreamChatCompletions,
 			0,
 			fmt.Errorf("chat response message role = %q, want assistant", derefRole(shadowChoice.Message.Role)),
+		)
+	}
+	// The legacy non-tool_calls function_call spelling is a KNOWN official
+	// field (pinned in pins.md), not a provider extension: the transcoder
+	// cannot represent it, so it is a structural rejection — never a silent
+	// drop (which would leave the client with a tool_use stop reason and no
+	// tool call).
+	if len(shadowChoice.Message.FunctionCall) > 0 {
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			errors.New("chat response message carries the legacy function_call spelling; only tool_calls is supported"),
 		)
 	}
 	// tool_call_id is a tool-only field: on an assistant response message it
@@ -251,14 +294,14 @@ func DecodeChatResponseWithPolicy(
 	}
 
 	// The wire decode may reject what the shadow accepted: the shadow's
-	// pointer fields tolerate nulls that wire.Decode rejects as illegal
+	// pointer fields tolerate nulls that the wire decode rejects as illegal
 	// (e.g. usage.total_tokens:null into a plain value field). Both decode
-	// the same modeled surface with the same strictness otherwise; the
-	// shadow's presence checks above reject every null that matters before
-	// the conversion path runs, and any rejection here is corrupt upstream
-	// wire either way.
+	// the same modeled surface otherwise; the shadow's presence checks above
+	// reject every null that matters before the conversion path runs, and
+	// any rejection here is corrupt upstream wire either way. Both passes
+	// are tolerant to unknown provider-extension fields on the envelope.
 	var chat ChatResponse
-	if err := wire.Decode(body, &chat); err != nil {
+	if err := wire.DecodeTolerant(body, &chat); err != nil {
 		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
 			0,
@@ -566,9 +609,9 @@ func DecodeResponsesResponse(
 	body []byte,
 ) (CanonicalResponse, error) {
 	var envelope ResponseEnvelope
-	if err := wire.Decode(body, &envelope); err != nil {
-		// A strict decode failure — malformed JSON, a type-corrupt value, or
-		// data outside the modeled surface — is corrupt upstream wire, an
+	if err := wire.DecodeTolerant(body, &envelope); err != nil {
+		// A decode failure — malformed JSON or a type-corrupt modeled value —
+		// is corrupt upstream wire, an
 		// upstream failure (review-k finding 3). Valid features the
 		// transcoder knows but does not support are rejected as
 		// UnsupportedFeatureError (local) instead: the wire layer reports

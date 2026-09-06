@@ -147,6 +147,28 @@ func (e *UnsupportedTypeError) Error() string {
 // decisions made by the per-type Validate methods (Field[T] records the
 // presence the contract needs); both report *DecodeError.
 func Decode(data []byte, dst any) error {
+	return decode(data, dst, true)
+}
+
+// DecodeTolerant decodes exactly one JSON value into dst with the same
+// malformed-wire rejections as Decode (duplicate keys, illegal nulls,
+// trailing values, malformed syntax, missing-required, contradictory-union)
+// but WITHOUT the unknown-field rejection: an unknown field is skipped,
+// never a failure. It is the decode posture for the UPSTREAM provider
+// response envelope — a "subject to change" contract the transcoder does not
+// control. It is never used for the CLIENT contract (whose unknown fields
+// must be rejected to preserve the lossless-transcoding invariant) nor for
+// the content-block unions (whose per-arm strictness is structural contract
+// validation).
+func DecodeTolerant(data []byte, dst any) error {
+	return decode(data, dst, false)
+}
+
+// decode is the shared strict/tolerant decoder. When disallowUnknown is
+// true, encoding/json rejects unknown fields; when false, an unknown field
+// is skipped (and, during the null walk, its value is skipped wholesale via
+// checkNullObject's not-found branch).
+func decode(data []byte, dst any, disallowUnknown bool) error {
 	if err := checkDuplicateKeys(data); err != nil {
 		return &DecodeError{Kind: DecodeDuplicateKey, Message: err.Error()}
 	}
@@ -154,7 +176,9 @@ func Decode(data []byte, dst any) error {
 		return err
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
+	if disallowUnknown {
+		dec.DisallowUnknownFields()
+	}
 	if err := dec.Decode(dst); err != nil {
 		// A typed rejection from a nested decode or a custom unmarshaler
 		// passes through untouched: it is more specific than "malformed".

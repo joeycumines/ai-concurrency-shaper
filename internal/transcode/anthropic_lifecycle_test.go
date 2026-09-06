@@ -2933,19 +2933,19 @@ func TestResponsesStreamDeltaPartTypeMatching(t *testing.T) {
 	})
 }
 
-// TestResponsesFunctionArgumentsDoneRejectsName proves an inbound
+// TestResponsesFunctionArgumentsDoneToleratesName proves an inbound
 // function_call_arguments.done carrying the private superset name field is
-// corrupt upstream wire (review-08 blocker 5).
-func TestResponsesFunctionArgumentsDoneRejectsName(t *testing.T) {
-	_, err := decodeResponsesSSEEvent([]byte(
+// TOLERATED under the contract-role strategy (2026-09-06): the upstream
+// event envelope is a subject-to-change contract, so an unknown field is a
+// provider extension and never a failure. The official shape without name
+// still decodes.
+func TestResponsesFunctionArgumentsDoneToleratesName(t *testing.T) {
+	// With the name field present, the event still decodes (name is an
+	// unknown envelope field, skipped by the tolerant decode).
+	if _, err := decodeResponsesSSEEvent([]byte(
 		`{"type":"response.function_call_arguments.done","sequence_number":1,"item_id":"fc_1","output_index":0,"arguments":"{}","name":"f"}`,
-	))
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
-		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
-	}
-	if wireErr.Protocol != UpstreamResponses {
-		t.Fatalf("protocol = %v, want responses", wireErr.Protocol)
+	)); err != nil {
+		t.Fatalf("done with name tolerated decode = %v, want success", err)
 	}
 	// The official shape without name still decodes.
 	if _, err := decodeResponsesSSEEvent([]byte(

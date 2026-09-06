@@ -725,14 +725,14 @@ func TestHandlerDecodeFailure502IsLogged(t *testing.T) {
 			},
 		},
 		func(req *http.Request) (*http.Response, error) {
-			// A poisonous usage block: an unknown field outside the modeled
-			// surface still fails decode after the autopsy-03 extensions
-			// landed — by design (strictness pin).
+			// A poisonous usage block: a TYPE-CORRUPT modeled field
+			// (total_tokens as a string) still fails decode — DecodeTolerant
+			// skips unknown fields, never a type error on a modeled field.
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
 				Body: io.NopCloser(strings.NewReader(
-					`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"bogus_tokens":1}}`,
+					`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":"two"}}`,
 				)),
 			}, nil
 		},
@@ -757,7 +757,7 @@ func TestHandlerDecodeFailure502IsLogged(t *testing.T) {
 	logged := logBuf.String()
 	for _, want := range []string{
 		"transcode: POST /v1/responses",
-		"bogus_tokens",
+		"total_tokens",
 	} {
 		if !strings.Contains(logged, want) {
 			t.Fatalf("server log missing %q; got %q", want, logged)

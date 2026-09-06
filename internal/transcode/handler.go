@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -145,6 +146,42 @@ func NewTranscodeHandler(
 	cfg.Mapping = cloneMapping(cfg.Mapping)
 	upstream := *cfg.Upstream
 	cfg.Upstream = &upstream
+	// Startup observability (GAP-011, operator choice: aggregate + startup
+	// summary): log the route's approved-loss profile once at construction,
+	// so the operator sees what this route will observably lose. The
+	// per-request approved-loss line (logConversionReport) is the
+	// request-specific signal; this is the route-level reference. A strict
+	// route (empty Allowed) logs 'none (strict)' so the operator knows no
+	// loss is approved.
+	keys := make([]Feature, 0, len(cfg.Mapping.LossPolicy.Allowed))
+	for k := range cfg.Mapping.LossPolicy.Allowed {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	if len(keys) == 0 {
+		log.Printf(
+			"transcode: %s %s: loss policy approves: none (strict)",
+			cfg.Mapping.ClientRoute.Method,
+			cfg.Mapping.ClientRoute.Path,
+		)
+	} else {
+		var b strings.Builder
+		for i, k := range keys {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			b.WriteString(string(k))
+			if d := LossKeyDescription(k); d != "" {
+				fmt.Fprintf(&b, ": %s", d)
+			}
+		}
+		log.Printf(
+			"transcode: %s %s: loss policy approves: %s",
+			cfg.Mapping.ClientRoute.Method,
+			cfg.Mapping.ClientRoute.Path,
+			b.String(),
+		)
+	}
 	return &TranscodeHandler{
 		cfg:       cfg,
 		roundTrip: roundTrip,
@@ -543,7 +580,7 @@ func (h *TranscodeHandler) convertRequest(
 			return nil, nil, err
 		}
 		report.Losses = append(report.Losses, result.Report.Losses...)
-		logConversionReport(report, r)
+		h.logConversionReport(report, r, "request")
 		return rendered, context, nil
 
 	case ClientMessages:
@@ -595,7 +632,7 @@ func (h *TranscodeHandler) convertRequest(
 			return nil, nil, err
 		}
 		report.Losses = append(report.Losses, result.Report.Losses...)
-		logConversionReport(report, r)
+		h.logConversionReport(report, r, "request")
 		return rendered, context, nil
 
 	default:
@@ -854,7 +891,7 @@ func (h *TranscodeHandler) convertResponse(
 			// exchange log as the render's losses (request-side merge
 			// precedent).
 			report.Losses = append(report.Losses, decodeReport.Losses...)
-			logConversionReport(report, r)
+			h.logConversionReport(report, r, "response")
 			return converted, ProvenanceLocalResponseConversionError, nil
 		default:
 			return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
@@ -882,7 +919,7 @@ func (h *TranscodeHandler) convertResponse(
 			// exchange log as the render's losses (request-side merge
 			// precedent).
 			report.Losses = append(report.Losses, decodeReport.Losses...)
-			logConversionReport(report, r)
+			h.logConversionReport(report, r, "response")
 			return converted, ProvenanceLocalResponseConversionError, nil
 
 		case UpstreamResponses:
@@ -894,7 +931,7 @@ func (h *TranscodeHandler) convertResponse(
 			if err != nil {
 				return nil, conversionProvenance(err), err
 			}
-			logConversionReport(report, r)
+			h.logConversionReport(report, r, "response")
 			return converted, ProvenanceLocalResponseConversionError, nil
 
 		default:
@@ -1016,7 +1053,7 @@ func (h *TranscodeHandler) streamResponse(
 	h.recordOutcome(r, outcome)
 	// Response-side approved losses are logged with the same fidelity as
 	// request-side losses (review-j findings 7 and 10).
-	logConversionReport(*converter.ConversionReport(), r)
+	h.logConversionReport(*converter.ConversionReport(), r, "response")
 }
 
 // newFrameConverter builds the direction-specific stream converter.
@@ -1579,18 +1616,55 @@ func derefInt(v *int) int {
 	return *v
 }
 
-// logConversionReport logs approved losses for observability.
-func logConversionReport(report ConversionReport, r *http.Request) {
-	for _, loss := range report.Losses {
-		log.Printf(
-			"transcode: %s %s: approved loss %s at %s: %s",
-			r.Method,
-			r.URL.Path,
-			loss.Feature,
-			loss.Path,
-			loss.Detail,
-		)
+// logConversionReport logs approved losses and notes for observability. It
+// aggregates ALL entries of one conversion into a SINGLE line for the given
+// stage (request/response), so a route whose defaults approve several losses
+// does not flood the log/TUI with one line per loss. Each entry is classified:
+// an approved loss (the policy allows it) is logged as `feature at path`; a
+// Note (a sanctioned encoding recorded WITHOUT a policy decision, losses.go
+// Note) is logged as `note: feature at path: <detail>`, because the startup
+// summary only covers the policy's Allowed set. The header is `approved
+// loss(es)` when every entry is an approved loss, else `loss(es)/note(s)`.
+// Duplicate feature@path entries are deduped preserving first-seen order.
+func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.Request, stage string) {
+	if len(report.Losses) == 0 {
+		return
 	}
+	seen := make(map[string]struct{}, len(report.Losses))
+	var entries []string
+	anyNote := false
+	for _, loss := range report.Losses {
+		key := fmt.Sprintf("%s at %s", loss.Feature, loss.Path)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		if loss.Kind == LossRecord {
+			entries = append(entries, key)
+		} else {
+			anyNote = true
+			if loss.Detail != "" {
+				entries = append(entries, fmt.Sprintf("note: %s: %s", key, loss.Detail))
+			} else {
+				entries = append(entries, fmt.Sprintf("note: %s", key))
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return
+	}
+	header := "approved loss(es)"
+	if anyNote {
+		header = "loss(es)/note(s)"
+	}
+	log.Printf(
+		"transcode: %s %s: %s %s: %s",
+		r.Method,
+		r.URL.Path,
+		stage,
+		header,
+		strings.Join(entries, ", "),
+	)
 }
 
 // boundErrorMessage truncates a client-visible error message to the

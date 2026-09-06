@@ -184,10 +184,10 @@ func TestProxyTranscodePoisonUsage200IsNeverRetried(t *testing.T) {
 		hits.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		// A poisonous usage block: an unknown field outside the modeled
-		// surface still fails decode after the autopsy-03 extensions landed
-		// — by design (strictness pin).
-		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"bogus_tokens":1}}`))
+		// A poisonous usage block: a TYPE-CORRUPT modeled field (total_tokens
+		// as a string) still fails decode — DecodeTolerant skips unknown
+		// fields, never a type error on a modeled field.
+		_, _ = w.Write([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":"two"}}`))
 	}))
 	t.Cleanup(upstream.Close)
 

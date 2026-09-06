@@ -308,12 +308,13 @@ type Usage struct {
 	TotalTokens         int64                     `json:"total_tokens"`
 
 	// CreatedCacheTokens is NOT part of the pinned Responses wire contract:
-	// encoding/json never emits or accepts it (json:"-"), and a wire
-	// input_tokens_details.created_cache_tokens key is still rejected as an
-	// unknown field by strict decode. It is an in-memory composition carrier
-	// for the Chat provider extension of the same name, so the composed
-	// Messages←Chat stream can know the cache-write component without
-	// inventing wire bytes the Responses contract does not define.
+	// encoding/json never emits it (json:"-"), so a wire
+	// input_tokens_details.created_cache_tokens key is never modeled here.
+	// It is an in-memory composition carrier for the Chat provider extension
+	// of the same name, so the composed Messages←Chat stream can know the
+	// cache-write component without inventing wire bytes the Responses
+	// contract does not define. (A wire key of that name is TOLERATED as an
+	// unknown field on the upstream envelope — it is not consumed here.)
 	CreatedCacheTokens *int64 `json:"-"`
 }
 

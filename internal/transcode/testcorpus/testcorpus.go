@@ -52,8 +52,8 @@ var anthropicMessagesStreamSSE []byte
 // contracts and therefore encode the same assumptions as the decoders —
 // these carry the real providers' extension spellings and shapes. They are
 // replayed through the production decode functions by the field-capture
-// regression tests so the next unmodeled provider extension fails `go test`
-// with the exact field name, instead of a user session.
+// regression tests: the production tolerant upstream decode must accept each
+// modeled extension and never leak it to the rendered client output.
 //
 // Re-capture tooling: `make field-recapture` (credentials-gated, excluded
 // from the default CI graph, and documented to never run against another

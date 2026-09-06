@@ -101,9 +101,11 @@ func (r Response) Validate() error {
 	return nil
 }
 
-// UnmarshalJSON strictly decodes the envelope. Because the official Responses
-// API returns many request-derived echo fields, the full envelope is accepted
-// and validated field-by-field; unknown fields are rejected.
+// UnmarshalJSON decodes the envelope. Because the official Responses API
+// returns many request-derived echo fields, the full envelope is accepted
+// and validated field-by-field. The envelope is a subject-to-change upstream
+// contract, so unknown fields are TOLERATED (skipped, never a failure); the
+// output items are dispatched through the strict DecodeOutputItem union.
 func (r *Response) UnmarshalJSON(data []byte) error {
 	// Decode into a shadow struct whose output field is raw so the tagged
 	// union can be dispatched through DecodeOutputItem.
@@ -139,7 +141,7 @@ func (r *Response) UnmarshalJSON(data []byte) error {
 		ServiceTier        *string            `json:"service_tier"`
 		Usage              *Usage             `json:"usage"`
 	}
-	if err := wire.Decode(data, &shadow); err != nil {
+	if err := wire.DecodeTolerant(data, &shadow); err != nil {
 		return err
 	}
 

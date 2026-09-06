@@ -101,7 +101,7 @@ func (e *OutputItemAddedEvent) UnmarshalJSON(data []byte) error {
 		OutputIndex    int64           `json:"output_index"`
 		Item           json.RawMessage `json:"item"`
 	}
-	if err := wire.Decode(data, &shadow); err != nil {
+	if err := wire.DecodeTolerant(data, &shadow); err != nil {
 		return err
 	}
 	item, err := DecodeOutputItem(shadow.Item)
@@ -147,7 +147,7 @@ func (e *OutputItemDoneEvent) UnmarshalJSON(data []byte) error {
 		OutputIndex    int64           `json:"output_index"`
 		Item           json.RawMessage `json:"item"`
 	}
-	if err := wire.Decode(data, &shadow); err != nil {
+	if err := wire.DecodeTolerant(data, &shadow); err != nil {
 		return err
 	}
 	item, err := DecodeOutputItem(shadow.Item)
@@ -348,7 +348,7 @@ func (e *ContentPartAddedEvent) UnmarshalJSON(data []byte) error {
 		ContentIndex   int64           `json:"content_index"`
 		Part           json.RawMessage `json:"part"`
 	}
-	if err := wire.Decode(data, &shadow); err != nil {
+	if err := wire.DecodeTolerant(data, &shadow); err != nil {
 		return err
 	}
 	part, err := decodeStreamContentPart(shadow.Part)
@@ -454,7 +454,7 @@ func (e *ContentPartDoneEvent) UnmarshalJSON(data []byte) error {
 		ContentIndex   int64           `json:"content_index"`
 		Part           json.RawMessage `json:"part"`
 	}
-	if err := wire.Decode(data, &shadow); err != nil {
+	if err := wire.DecodeTolerant(data, &shadow); err != nil {
 		return err
 	}
 	part, err := decodeStreamContentPart(shadow.Part)
@@ -1014,7 +1014,7 @@ func DecodeEvent(data []byte) (Event, error) {
 		}
 	}
 
-	if err := wire.Decode(data, event); err != nil {
+	if err := wire.DecodeTolerant(data, event); err != nil {
 		return nil, err
 	}
 	if err := event.Validate(); err != nil {

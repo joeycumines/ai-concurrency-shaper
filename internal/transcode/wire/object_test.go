@@ -266,6 +266,72 @@ func TestJSONObject(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// DecodeTolerant
+// ---------------------------------------------------------------------------
+
+// TestDecodeTolerant proves the tolerant decode used for the UPSTREAM
+// provider response envelope skips unknown fields (a subject-to-change
+// contract) while still rejecting duplicate keys, illegal nulls, trailing
+// values, and malformed syntax.
+func TestDecodeTolerant(t *testing.T) {
+	type target struct {
+		Model string `json:"model"`
+	}
+
+	// An unknown field is tolerated.
+	var v target
+	if err := DecodeTolerant([]byte(`{"model":"m","provider_meta":1}`), &v); err != nil {
+		t.Fatalf("DecodeTolerant rejected an unknown field: %v", err)
+	}
+	if v.Model != "m" {
+		t.Fatalf("model = %q, want m", v.Model)
+	}
+
+	// Unknown-field values of object/array/null shape are skipped wholesale
+	// (the null walk recurses only into modeled fields); the decode must not
+	// desync or reject a nested illegal null inside an unknown value.
+	for _, body := range []string{
+		`{"model":"m","provider_meta":{"a":1}}`,
+		`{"model":"m","provider_meta":{"a":null}}`,
+		`{"model":"m","provider_meta":[1,2,3]}`,
+		`{"model":"m","provider_meta":[null]}`,
+		`{"model":"m","provider_meta":null}`,
+	} {
+		var v target
+		if err := DecodeTolerant([]byte(body), &v); err != nil {
+			t.Fatalf("DecodeTolerant rejected an unknown field with nested shape %s: %v", body, err)
+		}
+		if v.Model != "m" {
+			t.Fatalf("model = %q, want m", v.Model)
+		}
+	}
+
+	// The strict decoder still rejects an unknown object field.
+	var s target
+	if err := Decode([]byte(`{"model":"m","provider_meta":{"a":1}}`), &s); err == nil {
+		t.Fatal("Decode accepted an unknown object field; want rejection")
+	}
+
+	// The malformed-wire rejections are preserved.
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"duplicate_key", `{"model":"m","model":"n"}`},
+		{"illegal_null", `{"model":null}`},
+		{"trailing_value", `{"model":"m"} {"x":1}`},
+		{"malformed", `{"model":"m",`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var v target
+			if err := DecodeTolerant([]byte(tc.body), &v); err == nil {
+				t.Fatalf("DecodeTolerant(%s) accepted malformed wire", tc.name)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Error shapes
 // ---------------------------------------------------------------------------
 

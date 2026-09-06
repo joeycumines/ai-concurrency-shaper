@@ -593,22 +593,31 @@ client-facing error.
 The pinned wire contract covers the official schemas, but real gateways also
 emit their own opaque extensions — `prompt_token_ids`, `prompt_text`,
 `reasoning_content`, `matched_stop`, `stop_reason`, `routed_experts`,
-`token_ids`, the top-level usage extensions (`reasoning_tokens`,
+`token_ids`, the billing fields `cache_cost`/`completion_cost` (the Verboo /
+LiteLLM gateways), the top-level usage extensions (`reasoning_tokens`,
 `cached_tokens`, `prompt_cache_hit_tokens`, `prompt_cache_miss_tokens`),
-and `prompt_tokens_details.created_cache_tokens`; the exhaustive table lives in
-`internal/transcode/pins.md`. Four field regressions — three of them
-spellings from this list, plus an empty `status` string on Responses
-history items — caused live field failures before they were modeled; every
-one passed the synthetic test suite, because synthetic fixtures encode the
-same assumptions as the decoders.
+and `prompt_tokens_details.created_cache_tokens`; the table of modeled
+spellings lives in `internal/transcode/pins.md`.
+
+The transcoder applies strictness by CONTRACT ROLE (see the "Transcoding
+invariants" section): the CLIENT request (OpenAI Responses / Anthropic
+Messages) and the content-block unions are STRICT, so a client-sent unknown
+field, a text block carrying `image_url`, or an unknown content-block type is
+rejected. The UPSTREAM response envelope is a **subject-to-change** provider
+contract, so an unknown field there is TOLERATED — it is skipped (discarded)
+and never forwarded, and it never fails the request. This is why a field like
+`completion_cost` no longer breaks a live session. Known provider-extension
+spellings are documented in `internal/transcode/pins.md`; a newly observed
+spelling can be pinned there (and in the field-capture corpus) for
+observability.
 
 The defense is a committed corpus of sanitized fixtures reconstructed from
-the four field regressions: `internal/transcode/testcorpus/testdata/field/`
+the field regressions: `internal/transcode/testcorpus/testdata/field/`
 holds stream, non-stream, and request fixtures carrying the exact spellings
 and null-vs-value placement real providers use. The field-capture tests
 replay them through the production decode functions — not a test-only
-copy — so a newly captured extension the shadows do not yet model fails
-`go test` with the field name, not a user session:
+copy — so a modeled extension is pinned (decode succeeds, and it never
+reaches the rendered client output):
 
 ```sh
 go test ./internal/transcode/ -run TestFieldCapture
@@ -628,7 +637,7 @@ make field-recapture-stop     # stop it by exact PID
 The bearer credential is read from the environment at runtime and fed to
 curl on stdin, so it is never persisted: the environment value is never expanded into make arguments, never shown in process listings (`make -n`, `/proc`), and the proxy never writes the secret to disk or to any captured log; only the reference name (`env:VAR`) appears in startup logs and in `project.mk`.
 Refresh the fixtures from the captured bytes, add the extension to
-the strict wire shadows alongside its siblings, and extend the corpus
+the wire shadows alongside its siblings, and extend the corpus
 test — the regression harness then holds the shape permanently.
 
 ## How Concurrency Protection Works

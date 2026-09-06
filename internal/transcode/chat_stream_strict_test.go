@@ -36,9 +36,13 @@ func assertChatStreamChunkWireError(t *testing.T, err error) {
 // TestChatStreamRejectsMissingRequiredEnvelopeFields proves every chunk
 // envelope and choice requirement of the pinned Chat streaming contract is
 // enforced: missing or wrong object, missing id/model/created, a missing or
-// wrong choice index, more than one choice, a missing delta, a message arm
-// coexisting with a delta, unknown fields, and a usage object omitting any
-// required total are all corrupt upstream wire (review-08 blocker 2).
+// wrong choice index, more than one choice, a missing delta, a non-streaming
+// message arm (a STRUCTURAL rejection — the streaming surface carries only
+// deltas), and a usage object omitting any required total are all corrupt
+// upstream wire (review-08 blocker 2). Contract-role note (2026-09-06): an
+// UNKNOWN field on the upstream stream envelope is a provider extension and is
+// TOLERATED (never a failure), but the message arm is a KNOWN non-streaming
+// field and is a structural rejection — it must never be silently dropped.
 func TestChatStreamRejectsMissingRequiredEnvelopeFields(t *testing.T) {
 	tests := []struct {
 		name string
@@ -85,12 +89,12 @@ func TestChatStreamRejectsMissingRequiredEnvelopeFields(t *testing.T) {
 			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"message":{"role":"assistant","content":"y"},"finish_reason":null}]}`,
 		},
 		{
-			name: "unknown envelope field",
-			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","bogus":1,"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}`,
+			name: "message arm without delta",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"y"},"finish_reason":null}]}`,
 		},
 		{
-			name: "unknown choice field",
-			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null,"bogus":1}]}`,
+			name: "empty delta with message content",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"message":{"role":"assistant","content":"full text"},"finish_reason":"stop"}]}`,
 		},
 		{
 			name: "malformed json",
@@ -672,7 +676,7 @@ func TestChatStreamReviewMalformedStreamIsUpstreamFailure(t *testing.T) {
 // yolo/qwen chat gateway: the opaque spelling of the stop signal that
 // finish_reason already carries) decodes on the strict streaming surface in
 // both its string and null forms — a current provider must never fail the
-// strict chunk decode — while a genuinely unknown field is still rejected.
+// strict chunk decode — while a genuinely unknown field is now TOLERATED.
 func TestChatStreamDecodesMatchedStopExtension(t *testing.T) {
 	tests := []struct {
 		name string
@@ -703,8 +707,46 @@ func TestChatStreamDecodesMatchedStopExtension(t *testing.T) {
 		})
 	}
 
-	// A genuinely unknown choice field is still corrupt upstream wire.
+	// Contract-role note (2026-09-06): a genuinely unknown choice-level field
+	// on the upstream stream envelope is a provider extension and is now
+	// TOLERATED, not a failure.
 	bogus := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null,"bogus_field":1}]}`
-	_, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(bogus)})
-	assertChatStreamChunkWireError(t, err)
+	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(bogus)}); err != nil {
+		t.Fatalf("unknown choice field tolerated decode = %v, want success", err)
+	}
+}
+
+// TestChatStreamMessageArmRejected proves the non-streaming message arm is a
+// STRUCTURAL rejection on the streaming surface (the streaming surface carries
+// only deltas), so its content can never be silently dropped. An empty
+// delta-with-message-content chunk is rejected, not silently reduced to the
+// empty delta. A chunk with a valid delta and NO message arm still decodes.
+func TestChatStreamMessageArmRejected(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "message arm with content and delta",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"message":{"role":"assistant","content":"y"},"finish_reason":null}]}`,
+		},
+		{
+			name: "empty delta with message content",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"message":{"role":"assistant","content":"full text"},"finish_reason":"stop"}]}`,
+		},
+		{
+			name: "message arm without delta",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"y"},"finish_reason":null}]}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(tt.body)})
+			assertChatStreamChunkWireError(t, err)
+		})
+	}
+
+	// A chunk with a valid delta and no message arm still decodes.
+	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(chatStreamChunkBase)}); err != nil {
+		t.Fatalf("official shape rejected: %v", err)
+	}
 }

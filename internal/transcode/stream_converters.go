@@ -1241,11 +1241,13 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
 // streaming chunk (review-08 blocker 2): the pinned envelope fields (object,
 // id, model, created) and the choice fields (index, delta) are required and
 // must be explicitly present — absent fields are corrupt upstream wire,
-// never zero-defaulted. The non-streaming message arm is outside the
-// streaming surface, so a chunk carrying it is rejected as an unknown field.
-// The delta reuses ChatStreamDelta (already pointer-based); usage reuses
-// chatUsageShadow so an omitted total is distinguishable from zero (the
-// pinned contract requires all three totals).
+// never zero-defaulted. The upstream envelope is a subject-to-change
+// contract, so an unknown field is TOLERATED (never a failure); the
+// non-streaming message arm, by contrast, is a KNOWN field and a STRUCTURAL
+// rejection (a streaming chunk carries only deltas). The delta reuses
+// ChatStreamDelta (already pointer-based); usage reuses chatUsageShadow so an
+// omitted total is distinguishable from zero (the pinned contract requires
+// all three totals).
 type chatStreamChunkShadow struct {
 	ID                string                   `json:"id"`
 	Object            *string                  `json:"object"`
@@ -1263,15 +1265,23 @@ type chatStreamChunkShadow struct {
 	PromptText     *string `json:"prompt_text,omitempty"`
 
 	// CacheCost is an opaque provider extension (the Verboo gateway's
-	// billing field). Preserve raw JSON so strict decoding accepts the
-	// provider field without coercing or forwarding it.
+	// billing field). Modeled as an opaque provider extension; captured as
+	// raw JSON and never forwarded (the envelope decode is tolerant regardless).
 	CacheCost json.RawMessage `json:"cache_cost,omitempty"`
+
+	// CompletionCost is an opaque provider extension (the LiteLLM gateway's
+	// cost-accounting field). Modeled as an opaque provider extension; captured
+	// as raw JSON and never forwarded (the envelope decode is tolerant regardless).
+	CompletionCost json.RawMessage `json:"completion_cost,omitempty"`
 }
 
 // chatStreamChoiceShadow mirrors the pinned streaming choice: index and
 // delta are required, finish_reason is a present-or-absent nullable string
-// (no terminal is enforced here), logprobs is nullable, and a message arm
-// would be an unknown-field rejection. Choices absent from the chunk are not
+// (no terminal is enforced here), logprobs is nullable, and the non-streaming
+// message arm is a STRUCTURAL rejection — the streaming surface carries only
+// deltas, so a chunk carrying a message arm is corrupt upstream wire (a known
+// field, not a provider extension, so this does not weaken the envelope's
+// unknown-field tolerance). Choices absent from the chunk are not
 // distinguished from an empty list: a usage-only tail chunk legitimately
 // carries choices: [].
 type chatStreamChoiceShadow struct {
@@ -1279,6 +1289,11 @@ type chatStreamChoiceShadow struct {
 	FinishReason *string             `json:"finish_reason"`
 	LogProbs     *ChatChoiceLogprobs `json:"logprobs"`
 	Delta        *ChatStreamDelta    `json:"delta"`
+
+	// Message is the non-streaming message arm. It is modeled so a chunk
+	// carrying it is rejected (the streaming surface carries only deltas),
+	// rather than silently skipped and its content dropped.
+	Message json.RawMessage `json:"message,omitempty"`
 
 	TokenIDs      any     `json:"token_ids,omitempty"`
 	RoutedExperts any     `json:"routed_experts,omitempty"`
@@ -1329,11 +1344,15 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 		}
 	}
 	// Presence-aware strict shadow decode: the pinned envelope and choice
-	// fields must be explicitly present, unknown fields are rejected, and
-	// the message arm is outside the streaming surface (review-08 blocker
-	// 2). Every violation is corrupt upstream wire.
+	// fields must be explicitly present — absent fields are corrupt upstream
+	// wire (review-08 blocker 2). The upstream envelope is a subject-to-change
+	// contract, so the decode is tolerant to unknown provider-extension fields
+	// (which are discarded), while the modeled presence checks below still
+	// reject every semantic violation — including the non-streaming message
+	// arm, which is a KNOWN field and a STRUCTURAL rejection (a streaming chunk
+	// carries only deltas), never a silently-dropped extension.
 	var shadow chatStreamChunkShadow
-	if err := wire.Decode(data, &shadow); err != nil {
+	if err := wire.DecodeTolerant(data, &shadow); err != nil {
 		return ChatStreamResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			http.StatusOK,
@@ -1405,6 +1424,19 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 				errors.New("chat stream chunk choice has no delta"),
 			)
 		}
+		// A non-streaming message arm is a STRUCTURAL rejection: the
+		// streaming surface carries only deltas, so a chunk carrying a
+		// message arm is corrupt upstream wire. This is a KNOWN field (the
+		// non-streaming arm), not a provider extension, so it does not
+		// weaken the envelope's unknown-field tolerance. Rejecting it here
+		// prevents the message-arm content from being silently dropped.
+		if len(choice.Message) > 0 {
+			return ChatStreamResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				http.StatusOK,
+				errors.New("chat stream chunk choice carries a non-streaming message arm; the streaming surface carries only deltas"),
+			)
+		}
 		// A present delta role must be assistant: a non-assistant role is
 		// corrupt upstream wire, never relabeled as assistant output
 		// (review-08 blocker 2).
@@ -1441,6 +1473,17 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 				)
 			}
 		}
+		// The legacy non-tool_calls function_call fragment spelling is a KNOWN
+		// official field (pinned in pins.md), not a provider extension: the
+		// transcoder cannot represent it, so it is a structural rejection —
+		// never a silent drop.
+		if len(choice.Delta.FunctionCall) > 0 {
+			return ChatStreamResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				http.StatusOK,
+				errors.New("chat stream chunk delta carries the legacy function_call spelling; only tool_calls is supported"),
+			)
+		}
 	}
 	// The pinned CompletionUsage requires all three totals: an omitted total
 	// must never become a factual zero (review-08 blocker 2). The breakdown
@@ -1457,12 +1500,13 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			),
 		)
 	}
-	// The wire decode cannot fail after the shadow succeeded: the shadow
-	// models the full streaming surface with the same strictness (where the
-	// shadow used a pointer and the wire a value, a null is silently ignored
-	// by the value field, never a decode error), and the shadow's presence
-	// checks above reject every null that matters before the conversion path
-	// runs.
+	// The shadow enforces every semantic violation (including the
+	// message-arm structural rejection above) before the wire decode, so a
+	// chunk carrying a message arm never reaches this point. The second pass
+	// (json.Unmarshal) re-decodes the same bytes into the wire type; it does
+	// not re-run the duplicate-key/null walk (pass 1 already did on the same
+	// bytes). Delta content is a plain string field, so no strict union
+	// decoder runs in this pass.
 	var chunk ChatStreamResponse
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return ChatStreamResponse{}, upstreamWireError(

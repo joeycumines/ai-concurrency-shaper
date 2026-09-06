@@ -411,11 +411,11 @@ review the schema diff per the update procedure.
 ## Modeled opaque provider extensions
 
 The pins above cover the official schemas. Real chat gateways additionally
-emit fields outside them; the strict decoders model every observed spelling
-as a shadow field so its presence is not an unknown-field failure. They
-live in the OpenAI Chat dialect only. The table below is exhaustive: every
-spelling the wire shadows accept is listed, each with its fate after
-decode, and each is pinned by a committed unit test (spread across
+emit fields outside them; the wire shadows MODEL every observed spelling so
+its presence is an observed inert extension. They live in the OpenAI Chat
+dialect only. The table below lists every spelling the wire shadows model,
+each with its fate after decode, and each is pinned by a committed unit test
+(spread across
 `chat_schema_test.go`, `chat_response_strict_test.go`,
 `chat_stream_strict_test.go`, `chat_reasoning_content_test.go`, and
 `modern_client_test.go`). The field-capture corpus
@@ -427,21 +427,53 @@ those unit tests.
 
 | Placement | Extension | Fate |
 | --- | --- | --- |
-| chat envelope (stream + non-stream) | `prompt_token_ids`, `prompt_text`, `cache_cost` | inert — decoded, never forwarded |
+| chat envelope (stream + non-stream) | `prompt_token_ids`, `prompt_text`, `cache_cost`, `completion_cost` | inert — decoded, never forwarded |
 | chat choice | `token_ids`, `routed_experts`, `stop_reason`, `matched_stop` | inert — decoded, never forwarded |
 | chat message | `token_ids`, `routed_experts`, `stop_reason`, `matched_stop` (defensive mirror), `reasoning`, `reasoning_content` | `reasoning`/`reasoning_content` map to capability-gated ordinary text; the rest are inert |
 | chat stream delta | `reasoning`, `reasoning_content` | capability-gated ordinary text |
 | chat usage (top level) | `reasoning_tokens`, `cached_tokens`, `prompt_cache_hit_tokens`, `prompt_cache_miss_tokens` | mapped to canonical usage (`CacheRead`, `ReasoningTokens`); `prompt_cache_miss_tokens` has no canonical home |
-| chat usage (top level) | `cache_cost` | inert — decoded, never forwarded |
+| chat usage (top level) | `cache_cost`, `completion_cost` | inert — decoded, never forwarded |
 | chat `prompt_tokens_details` | `created_cache_tokens`, `multimodal_tokens` | `created_cache_tokens` maps to canonical `CacheWrite`; `multimodal_tokens` is inert |
 
 None of these spellings is forwarded or re-rendered verbatim. Several
 feed the canonical model instead: `reasoning`/`reasoning_content` become
 capability-gated ordinary text, and the usage spellings become canonical
-usage breakdowns (`CacheRead`, `CacheWrite`, `ReasoningTokens`). A new
-provider spelling belongs here, in the wire shadows next to its siblings,
-and in the corpus as a fixture —
-capture real bytes first (`make field-recapture` in the top-level
-`project.mk`; see the README section on provider extensions). An extension
-absent from this table is an unknown-field failure by design; that failure
-is the signal to model it.
+usage breakdowns (`CacheRead`, `CacheWrite`, `ReasoningTokens`).
+
+### Known-but-unmodeled, tolerated provider extensions
+
+The table above models the spellings the wire shadows deliberately capture.
+Real gateways also emit other opaque fields that the tolerant upstream
+envelope DISCARDS (never a failure, never forwarded). These are observed in
+the wild and are NOT modeled; they are listed here so an operator can
+recognize a known-safe extension versus something unexpected. If one becomes
+semantically meaningful, model it in the wire shadows + document it in the
+table above + add it to the field-capture corpus:
+
+| Provider | Tolerated (discarded) extensions |
+| --- | --- |
+| OpenRouter | `cost`, `native_finish_reason`, `is_byok`, `cost_details`, `cache_write_tokens`, `video_tokens`, `image_tokens`, `error` |
+| vLLM | `prompt_logprobs`, `kv_transfer_params`, `ec_transfer_params`, `metrics` |
+| DeepSeek / open-weights | `logprobs.reasoning_content` (NOTE: `reasoning_content` at message/delta level IS modeled and maps to capability-gated text — see the table above; only the `logprobs`-nested spelling is discarded) |
+| LiteLLM / Verboo | `completion_cost`, `cache_cost` (modeled as opaque raw JSON in the table above, never forwarded) |
+| Legacy OpenAI (deprecated 2023) | `message.function_call`, `delta.function_call` — the legacy non-`tool_calls` tool-call spelling; a KNOWN official field, so it is a STRUCTURAL REJECTION (not tolerated): the transcoder cannot represent it, and silently dropping it would leave a `tool_use` stop reason with no tool call. Modern gateways emit `tool_calls`, which IS modeled |
+
+`completion_cost` and `cache_cost` appear in BOTH the modeled table and this
+list because they are modeled as opaque `json.RawMessage` (never forwarded)
+while the wider LiteLLM/Verboo surface is tolerated-and-discarded.
+
+### Contract-role strictness on the upstream envelope
+
+The table above documents the KNOWN provider-extension spellings so their
+presence is an observed inert extension, not a mystery. The upstream
+response ENVELOPE (and the nested choice/message/usage objects) is a
+**subject-to-change** contract: the decode there is TOLERANT to unknown
+fields (see AGENTS.md 'Contract-role strictness and the directional loss
+model'). An extension absent from this table is therefore NOT a failure —
+it is skipped (discarded) and never forwarded. The CLIENT REQUEST decode and
+the content-block unions stay STRICT: a client-sent unknown field, a text
+block carrying `image_url`, or an unknown content-block type is still
+rejected. A new provider spelling belongs here, in the wire shadows next to
+its siblings, and in the corpus as a fixture — capture real bytes first
+(`make field-recapture` in the top-level `project.mk`; see the README section
+on provider extensions).

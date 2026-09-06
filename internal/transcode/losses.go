@@ -312,12 +312,26 @@ func (e *UnsupportedFeatureError) Error() string {
 	)
 }
 
+// LossKind distinguishes an approved loss from a Note (a sanctioned encoding).
+type LossKind uint8
+
+const (
+	// LossRecord is an approved loss (Lose): a feature dropped because the
+	// policy allows it.
+	LossRecord LossKind = iota
+	// NoteRecord is a Note (Note): a sanctioned encoding recorded without a
+	// policy decision; it is observable but is NOT a loss.
+	NoteRecord
+)
+
 // ConversionLoss records a feature that was dropped under an approved loss
-// policy.
+// policy (LossRecord) or a sanctioned encoding noted without a policy decision
+// (NoteRecord).
 type ConversionLoss struct {
 	Feature Feature
 	Path    string
 	Detail  string
+	Kind    LossKind
 }
 
 // ConversionReport accumulates approved losses for one conversion.
@@ -365,6 +379,7 @@ func (r *ConversionReport) Lose(
 		Feature: feature,
 		Path:    path,
 		Detail:  detail,
+		Kind:    LossRecord,
 	})
 	return nil
 }
@@ -382,6 +397,7 @@ func (r *ConversionReport) Note(feature Feature, path string, detail string) err
 		Feature: feature,
 		Path:    path,
 		Detail:  detail,
+		Kind:    NoteRecord,
 	})
 	return nil
 }
