@@ -2,7 +2,7 @@
   "openai_responses": {
     "source": "openai-go",
     "version": "v1.12.0",
-    "snapshot_sha256": "bbd67c90691efe37097affc8cd3200b2360f14426ae0d60b2d59e444a7f87186"
+    "snapshot_sha256": "26da47966721b5a2614b656439970f6e67cce6bcef04175b0d6c6291a97f5fce"
   },
   "openai_chat_completions": {
     "source": "openai-go",

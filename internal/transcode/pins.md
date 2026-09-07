@@ -12,7 +12,7 @@ the pin is deliberately bumped (see below).
 
 | Protocol | Source | Version | Snapshot SHA256 |
 | --- | --- | --- | --- |
-| OpenAI Responses | openai-go | v1.12.0 | `bbd67c90691efe37097affc8cd3200b2360f14426ae0d60b2d59e444a7f87186` |
+| OpenAI Responses | openai-go | v1.12.0 | `26da47966721b5a2614b656439970f6e67cce6bcef04175b0d6c6291a97f5fce` |
 | OpenAI Chat Completions | openai-go | v1.12.0 | `bde5294743898ff93efee09fe80eb59c07599c252cb591d532205fbde1aeb53c` |
 | Anthropic Messages | anthropic-api | 2023-06-01 | `7904599c41df8745b57614322d73e970c8bf54bb48563829d8ec3a2381920ce5` |
 
@@ -33,9 +33,11 @@ hashes (drift test in contracts_test.go).
 4. Run `go generate ./internal/transcode` to regenerate the pinned-revisions
    table from the lock.
 5. Review the schema diff: every added/removed/changed field must be traced to
-   `internal/transcode/*.go` and `internal/transcode/wire/` (strict decoders
-   reject unknown fields, so a bump that adds official fields is a breaking
-   step that must land with its schema and fixture updates in the same commit).
+   `internal/transcode/*.go` and `internal/transcode/wire/` (the client
+   contract and the content-block unions are strict, so a bump that adds
+   official client-side fields is a breaking step that must land with its
+   schema and fixture updates in the same commit; the upstream envelope is
+   tolerant).
 6. Record the bump in `contracts.lock.json`, this file, and `blueprint.json`
    goalLog.
 
@@ -195,9 +197,10 @@ usage                     ResponseUsage
 user                      string
 ```
 
-NOT in v1.12.0 (present in later revisions only; a strict decode of a newer
-upstream response carrying them is an unknown-field failure until the pin is
-bumped): `completed_at`, `conversation`, `moderation`, `store`.
+NOT in v1.12.0 (present in later revisions only; the tolerant upstream
+envelope decode accepts them — they are discarded, never forwarded — and a
+pin bump is needed only to MODEL/MAP them, not to avoid a failure):
+`completed_at`, `conversation`, `moderation`, `store`.
 
 ### ResponseUsage
 

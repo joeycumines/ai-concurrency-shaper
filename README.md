@@ -66,6 +66,15 @@ The proxy's internal semaphore limits how many tokens are held concurrently. Wha
 | `-adaptive-headroom` | provider | `false` | Reduce effective concurrency by one slot after a 429, restoring after a quiet window. Use when the provider can see N+1 concurrent requests due to connection teardown or CDN accounting lag. |
 | `-adaptive-headroom-window` | provider | `30s` | How long the one-slot 429 headroom is held. Each new 429 resets this window. |
 
+**Boundedness of transcode routes.** Concurrency limiting matches on the
+route patterns configured with `-limit` (or every request with
+`-limit-all`). A custom transcode route (`-transcode-route` or the
+`-transcode-*` presets) whose client path matches **no** `-limit` pattern
+flows through the passthrough limiter — bounded by `-global-concurrency`
+when set, otherwise unbounded. If a transcoded route must be bounded but
+its path is not a limited route, either set `-global-concurrency` or add an
+explicit `-limit` pattern for that path.
+
 The upstream HTTP transport sizes `MaxIdleConnsPerHost` to the sum of configured route/global concurrency caps, with a per-host minimum floor of 20 applied after the global cap. This avoids closing a large burst of healthy keep-alive connections when multiple route limiters or groups share the same upstream host. Use `-upstream-disable-keep-alives` only when the upstream counts idle/open connections as concurrent.
 
 #### Circuit Breaker
