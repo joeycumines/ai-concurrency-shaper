@@ -1121,18 +1121,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if recPtr != nil {
 			status = recPtr.status
 		}
-		p.m.RecordStatus(status)
-		if aborted {
-			p.m.RecordAbortedRequest(r.Method, r.URL.Path, status, time.Since(start), limited)
-		} else {
-			p.m.RecordRequest(r.Method, r.URL.Path, status, time.Since(start), limited)
-		}
 
-		// Finalize and record the journal entry. Aborted responses deliberately
-		// leave ResponseComplete unset: headers/body may have been partially
-		// accepted by the downstream ResponseWriter, but the exchange did not
-		// complete cleanly. The Aborted flag is the explicit outcome signal for
-		// the TUI/network log.
+		// Finalize and record the journal entry BEFORE any counter publishes
+		// (autopsy 2026-09-06 M10, the same counter-before-journal shape
+		// c9ff856 fixed for the aborted pair): a consumer that observes a
+		// status bucket, the request ring, TotalProxied/TotalPassThrough, or
+		// TotalAborted must find the journal entry already present. Aborted
+		// responses deliberately leave ResponseComplete unset: headers/body
+		// may have been partially accepted by the downstream ResponseWriter,
+		// but the exchange did not complete cleanly. The Aborted flag is the
+		// explicit outcome signal for the TUI/network log.
 		if entry != nil {
 			entry.Aborted = aborted
 			if recPtr != nil && recPtr.hijacked && recPtr.status == http.StatusSwitchingProtocols {
@@ -1165,6 +1163,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			p.journal.Record(entry)
+		}
+
+		p.m.RecordStatus(status)
+		if aborted {
+			p.m.RecordAbortedRequest(r.Method, r.URL.Path, status, time.Since(start), limited)
+		} else {
+			p.m.RecordRequest(r.Method, r.URL.Path, status, time.Since(start), limited)
+			// The clean-completion counter publishes here — after the journal
+			// entry — instead of at the end of the handler body, so the
+			// counter-then-journal window M10 closed cannot reopen. The
+			// admission-completed gate keeps the queue-timeout, cancel, and
+			// circuit-rejection early returns out (they never counted as
+			// clean completions), and aborted exchanges never reach this
+			// branch (review-08 blocker 12).
+			if recPtr != nil && recPtr.admissionCompleted {
+				p.completionCounter(limited)
+			}
 		}
 	}
 	defer func() {
@@ -1256,6 +1271,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	finalize(recPtr != nil && recPtr.aborted)
+}
+
+// completionCounter records the exchange in the clean-completion counter
+// selected by the admission path. finalize calls it after the journal entry
+// is published (autopsy 2026-09-06 M10), so a consumer that observes the
+// counter finds the journal entry already present.
+func (p *Proxy) completionCounter(limited bool) {
+	if limited {
+		p.m.IncProxied()
+	} else {
+		p.m.IncPassThrough()
+	}
 }
 
 // serveTranscodeHandler runs a transcode handler with the per-request outcome
@@ -1541,15 +1568,14 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 	if p.breaker != nil && !localPanic {
 		p.resolveBreakerResult(result, retryAttempt, proxyStart, breakerEpoch)
 	}
-	// Count the passthrough request only after it has actually been
-	// forwarded AND the breaker logic has run. This placement mirrors
-	// serveLimited's IncProxied() at the end of that function. If a
-	// panic occurs in the breaker logic above, IncPassThrough is NOT
-	// called — the recovered panic marks the exchange aborted and the
-	// outer ServeHTTP recovery finalizes it as aborted (RecordAbortedRequest;
-	// review-08 blocker 12), so the completion counter is never
-	// double-counted.
-	p.m.IncPassThrough()
+	// The clean-completion counter publishes in finalize (after the journal
+	// entry; autopsy 2026-09-06 M10). The admission flag is set only after
+	// the breaker logic above: a panic in it marks the exchange aborted and
+	// skips the counter — the completion counter is never double-counted
+	// (review-08 blocker 12).
+	if rec != nil {
+		rec.admissionCompleted = true
+	}
 }
 
 func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID uint64) {
@@ -1862,8 +1888,11 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	if p.breaker != nil && !localPanic {
 		p.resolveBreakerResult(result, retryAttempt, proxyStart, breakerEpoch)
 	}
-
-	p.m.IncProxied()
+	// The clean-completion counter publishes in finalize (after the journal
+	// entry; autopsy 2026-09-06 M10), mirroring the passthrough path.
+	if rec, ok := w.(*statusRecorder); ok {
+		rec.admissionCompleted = true
+	}
 }
 
 func (p *Proxy) acquireSlot(ctx context.Context, method, path string) (release func(), limiter *queue.Limiter, err error) {
@@ -2793,6 +2822,12 @@ type statusRecorder struct {
 	proxyGeneratedError bool
 	transportErr        error
 	aborted             bool
+	// admissionCompleted is set at the end of the admission path
+	// (serveLimited/servePassthrough): finalize's clean-completion counter
+	// fires only when the exchange actually completed the admission path,
+	// not on the queue-timeout/cancel/circuit-rejection early returns
+	// (autopsy 2026-09-06 M10).
+	admissionCompleted  bool
 	localUpgradeFailure bool
 
 	switchingProtocolsProbeResolved      atomic.Bool
