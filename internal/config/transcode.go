@@ -434,6 +434,7 @@ var defaultTranscodeLosses = map[transcode.Feature]struct{}{
 	transcode.FeatureUsageCacheWriteUnknown: {},
 	transcode.FeatureUsageReasoningUnknown:  {},
 	transcode.FeatureRequestReasoning:       {},
+	transcode.FeatureToolResultErrorStatus:  {},
 	transcode.FeatureDeveloperRole:          {},
 }
 
