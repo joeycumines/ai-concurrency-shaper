@@ -554,6 +554,7 @@ func TestResponsesToAnthropicBasic(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,
@@ -694,6 +695,7 @@ func TestResponsesToAnthropicFunctionCall(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,
@@ -778,6 +780,7 @@ func TestResponsesToAnthropicFailedNeverEndTurn(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,
@@ -819,6 +822,7 @@ func TestResponsesToAnthropicErrorEventNested(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,
@@ -844,6 +848,7 @@ func TestResponsesToAnthropicReasoningNeverThinking(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,
@@ -887,6 +892,7 @@ func TestChatToAnthropicCompositionInMemory(t *testing.T) {
 	anthropic := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,
@@ -975,6 +981,7 @@ func TestChatToAnthropicFailedStream(t *testing.T) {
 	anthropic := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,
@@ -1038,7 +1045,7 @@ func TestChatToAnthropicInterleavedContentAndRefusal(t *testing.T) {
 			1,
 			nil,
 		),
-		newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), "resp_1", "m", 1),
+		newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), ChatCapabilities{}, "resp_1", "m", 1),
 	)
 
 	feed := func(deltaJSON string) []AnthropicStreamEvent {
@@ -1275,7 +1282,7 @@ func TestChatToResponsesAmbiguousFragmentRejected(t *testing.T) {
 func TestAnthropicStreamStopReasons(t *testing.T) {
 	// Tool-call terminal -> stop_reason tool_use. The terminal envelope's
 	// function item must reconcile with the observed lifecycle.
-	state := newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), "resp_1", "m", 1)
+	state := newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), ChatCapabilities{}, "resp_1", "m", 1)
 	builder := &ResponsesEventBuilder{}
 	parallel := true
 	created := ResponseEnvelope{
@@ -1318,7 +1325,7 @@ func TestAnthropicStreamStopReasons(t *testing.T) {
 	}
 
 	// content_filter -> refusal stop.
-	state = newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), "resp_1", "m", 1)
+	state = newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), ChatCapabilities{}, "resp_1", "m", 1)
 	builder = &ResponsesEventBuilder{}
 	if _, err := state.Convert(builder.Created(created)); err != nil {
 		t.Fatal(err)
@@ -1339,7 +1346,7 @@ func TestAnthropicStreamStopReasons(t *testing.T) {
 	}
 
 	// max_output_tokens -> max_tokens stop.
-	state = newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), "resp_1", "m", 1)
+	state = newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), ChatCapabilities{}, "resp_1", "m", 1)
 	builder = &ResponsesEventBuilder{}
 	if _, err := state.Convert(builder.Created(created)); err != nil {
 		t.Fatal(err)
@@ -1377,7 +1384,7 @@ func TestChatStreamUnknownFinishReasonRejected(t *testing.T) {
 // stream emits exactly one content_block_stop per tool block: the stop from
 // output_item.done, and the terminal must not stop the block again.
 func TestAnthropicStreamToolTerminalSingleStop(t *testing.T) {
-	state := newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), "resp_1", "m", 1)
+	state := newAnthropicResponsesStreamState(testStreamContext(), j6PermissivePolicy(), ChatCapabilities{}, "resp_1", "m", 1)
 	builder := &ResponsesEventBuilder{}
 	parallel := true
 

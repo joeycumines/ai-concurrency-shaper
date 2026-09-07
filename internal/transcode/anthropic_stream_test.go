@@ -17,6 +17,7 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
 		1,
@@ -115,6 +116,7 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 			FeatureUsageReasoningUnknown:  {},
 			FeatureUsageUnknown:           {},
 		}},
+		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
 		1,
@@ -153,6 +155,7 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 	state = newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
 		1,
@@ -224,6 +227,7 @@ func TestAnthropicStreamMessageStartNullStopFields(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
 		1,
@@ -389,6 +393,7 @@ func TestAnthropicUsageStreamNonStreamAgree(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
 		1,

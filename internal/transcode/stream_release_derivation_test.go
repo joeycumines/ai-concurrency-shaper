@@ -204,6 +204,7 @@ func TestResponsesAnthropicToolIdentityCharged(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,

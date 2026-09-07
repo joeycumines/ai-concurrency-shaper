@@ -178,6 +178,7 @@ func TestResponsesStreamToolArgumentsCumulativeBound(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,
@@ -276,6 +277,7 @@ func TestStreamTotalStateBound(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			j6PermissivePolicy(),
+			ChatCapabilities{},
 			"msg_1",
 			"m",
 			1,
@@ -308,6 +310,7 @@ func TestStreamTotalStateBound(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			j6PermissivePolicy(),
+			ChatCapabilities{},
 			"msg_1",
 			"m",
 			1,
@@ -395,6 +398,7 @@ func TestResponsesMaximalPartAcceptedAndReleasable(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,
@@ -576,6 +580,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			j6PermissivePolicy(),
+			ChatCapabilities{},
 			"msg_1",
 			"m",
 			1,
@@ -622,6 +627,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			j6PermissivePolicy(),
+			ChatCapabilities{},
 			"msg_1",
 			"m",
 			1,
@@ -678,6 +684,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			j6PermissivePolicy(),
+			ChatCapabilities{},
 			"msg_1",
 			"m",
 			1,
@@ -775,6 +782,7 @@ func TestStreamToolSnapshotBytesCounted(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,

@@ -1293,6 +1293,20 @@ func anthropicContentToCanonical(
 
 		case AnthropicContentBlockTypeThinking,
 			AnthropicContentBlockTypeRedactedThinking:
+			// REQUEST SCRUBBING (operator-adjudicated design, 2026-09-07):
+			// a thinking block whose signature is the proxy's own marker
+			// (SyntheticThinkingSignature) is a block this proxy synthesized
+			// on a previous response. It is scrubbed here — dropped before
+			// artifact capture, never counted under authenticated_thinking,
+			// and never forwarded to any upstream — so the synthetic
+			// signature can never reach a provider that validates
+			// signatures. Non-marker thinking blocks are source-authenticated
+			// artifacts and keep the existing behavior below.
+			if block.Type == AnthropicContentBlockTypeThinking &&
+				block.Signature != nil &&
+				*block.Signature == SyntheticThinkingSignature {
+				continue
+			}
 			// Thinking blocks are source-authenticated artifacts. They may
 			// pass through unchanged only to a Messages target; crossing
 			// protocols is decided by RequirePortableArtifacts.

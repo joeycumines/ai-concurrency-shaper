@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"net/http"
 	"strings"
 )
@@ -556,13 +557,82 @@ func (s *chatResponsesStreamState) convertDelta(
 	}
 
 	if reasoningText != "" {
-		// Provider plaintext reasoning is mapped to ordinary text only when
-		// the capability is enabled (a named, reported encoding); otherwise
-		// it is dropped with a documented loss (review-j finding 10). It
-		// must never be synthesized into reasoning items. Either report
-		// entry is recorded exactly once per stream, never once per delta
-		// (review-08 blocker 7).
-		if !s.capabilities.ProviderReasoningText {
+		// Provider plaintext reasoning follows the capability ladder:
+		// provider_reasoning_thinking maps it to native reasoning events
+		// (the anthropic state renders them as thinking blocks carrying the
+		// marker signature; operator-adjudicated design, 2026-09-07);
+		// provider_reasoning_text maps it to ordinary text; neither is a
+		// documented loss. Every report entry is recorded exactly once per
+		// stream, never once per delta (review-08 blocker 7).
+		if s.capabilities.ProviderReasoningThinking {
+			// A reasoning item accumulates its own summary text; the
+			// anthropic state machine owns the thinking-block lifecycle.
+			if !s.reasoningReportRecorded {
+				s.reasoningReportRecorded = true
+				if err := s.report.Note(
+					FeatureProviderReasoningText,
+					reasoningPath,
+					"provider reasoning mapped to native thinking blocks (provider_reasoning_thinking encoding)",
+				); err != nil {
+					return nil, err
+				}
+			}
+			if len(s.items) == 0 || !s.isReasoningItem(&s.items[len(s.items)-1]) {
+				if err := s.budget.addItem(); err != nil {
+					return nil, s.wireError(err)
+				}
+				if err := s.budget.addStateEntries(1); err != nil {
+					return nil, s.wireError(err)
+				}
+				reasoning := &ResponsesReasoningOutputItem{
+					ID:      s.ctx.IDs.New("rs_"),
+					Type:    "reasoning",
+					Status:  ResponsesItemInProgress,
+					Summary: []ResponsesReasoningSummary{},
+				}
+				item := openResponsesItem{
+					outputIndex:   s.itemIndex,
+					openPartIndex: -1,
+					item:          reasoning,
+				}
+				s.itemIndex++
+				s.items = append(s.items, item)
+				// The standard lifecycle: output_item.added (a detached
+				// snapshot; the live item accumulates summary text through
+				// later deltas — review-k finding 1), then the summary
+				// events. The anthropic state machine reconciles the
+				// output_item.done against this observation.
+				snapshot := *reasoning
+				snapshot.Summary = []ResponsesReasoningSummary{}
+				events = append(events,
+					s.builder.OutputItemAdded(item.outputIndex, &snapshot),
+					s.builder.ReasoningSummaryPartAdded(
+						reasoning.ID,
+						item.outputIndex,
+						0,
+						openairesponses.SummaryTextPart{Type: "summary_text", Text: ""},
+					),
+				)
+			}
+			events = append(events, s.builder.ReasoningSummaryTextDelta(
+				s.items[len(s.items)-1].item.(*ResponsesReasoningOutputItem).ID,
+				s.items[len(s.items)-1].outputIndex,
+				0,
+				reasoningText,
+			))
+			reasoning := s.items[len(s.items)-1].item.(*ResponsesReasoningOutputItem)
+			if len(reasoning.Summary) == 0 {
+				reasoning.Summary = []ResponsesReasoningSummary{{
+					Type: "summary_text",
+					Text: reasoningText,
+				}}
+			} else {
+				reasoning.Summary[0].Text += reasoningText
+			}
+			if err := s.chargeIdentity(len(reasoningText)); err != nil {
+				return nil, err
+			}
+		} else if !s.capabilities.ProviderReasoningText {
 			if !s.reasoningReportRecorded {
 				s.reasoningReportRecorded = true
 				if err := s.report.Lose(
@@ -1037,6 +1107,41 @@ func (s *chatResponsesStreamState) finish(
 		))
 	}
 
+	// Close open reasoning items (provider_reasoning_thinking): the summary
+	// done event, then output_item.done — the anthropic state machine
+	// reconciles the terminal envelope against these observations.
+	for i := range s.items {
+		item := &s.items[i]
+		reasoning, ok := item.item.(*ResponsesReasoningOutputItem)
+		if !ok {
+			continue
+		}
+		if reasoning.Status == ResponsesItemInProgress {
+			reasoning.Status = ResponsesItemCompleted
+		}
+		events = append(events,
+			s.builder.ReasoningSummaryTextDone(
+				reasoning.ID,
+				item.outputIndex,
+				0,
+				reasoning.Summary[0].Text,
+			),
+			s.builder.ReasoningSummaryPartDone(
+				reasoning.ID,
+				item.outputIndex,
+				0,
+				openairesponses.SummaryTextPart{
+					Type: "summary_text",
+					Text: reasoning.Summary[0].Text,
+				},
+			),
+			s.builder.OutputItemDone(
+				item.outputIndex,
+				reasoning,
+			),
+		)
+	}
+
 	// The terminal envelope is NOT built here: the optional usage tail may
 	// still arrive and must be reflected in the terminal's usage. The
 	// finish reason is recorded and the envelope is built at release.
@@ -1197,6 +1302,13 @@ func (s *chatResponsesStreamState) FinalizeEOF() ([]ResponsesSSEEvent, error) {
 	return nil, errors.New(
 		"chat stream ended before a terminal condition",
 	)
+}
+
+// isReasoningItem reports whether the open item is a reasoning item
+// (the provider_reasoning_thinking accumulation carrier).
+func (s *chatResponsesStreamState) isReasoningItem(item *openResponsesItem) bool {
+	_, ok := item.item.(*ResponsesReasoningOutputItem)
+	return ok
 }
 
 // isMessage reports whether the open item is a message item.
@@ -1660,6 +1772,15 @@ type anthropicResponsesStreamState struct {
 	// bytes (text, refusal, tool arguments; review-08 blocker 7).
 	totalAccumulated int64
 
+	// capabilities gates the native thinking rendering
+	// (provider_reasoning_thinking): when enabled, reasoning-summary events
+	// render as thinking blocks carrying the marker signature.
+	capabilities ChatCapabilities
+
+	// reasoningBlockIndex is the content-block index of the OPEN thinking
+	// block (nil when none is open).
+	reasoningBlockIndex *int
+
 	// phaseGated tracks the output items whose phase already entered the
 	// loss decision, so a phase-bearing item seen both in output_item.added
 	// and in the terminal envelope is gated exactly once (review-j finding
@@ -1716,6 +1837,7 @@ type anthropicClosedToolCall struct {
 func newAnthropicResponsesStreamState(
 	ctx *ExchangeContext,
 	policy LossPolicy,
+	capabilities ChatCapabilities,
 	responseID string,
 	model string,
 	createdAt float64,
@@ -1723,6 +1845,7 @@ func newAnthropicResponsesStreamState(
 	return &anthropicResponsesStreamState{
 		ctx:              ctx,
 		policy:           policy,
+		capabilities:     capabilities,
 		responseID:       responseID,
 		model:            model,
 		budget:           newStreamBudget(),
@@ -1829,10 +1952,27 @@ func (s *anthropicResponsesStreamState) Convert(
 		ResponseReasoningSummaryTextDeltaEvent,
 		ResponseReasoningSummaryTextDoneEvent,
 		ResponseReasoningSummaryPartDoneEvent:
-		// OpenAI reasoning is never synthesized as Anthropic thinking; these
-		// events are dropped. The loss is recorded exactly once per stream
-		// (review-j finding 7).
-		return nil, s.loseReasoningOnce()
+		// With the provider_reasoning_thinking capability, reasoning
+		// summary events render as NATIVE Anthropic thinking blocks
+		// carrying the proxy's marker signature (operator-adjudicated
+		// design, 2026-09-07); the request path scrubs marker-signature
+		// blocks from replayed history, so the synthetic signature never
+		// reaches an upstream. Without the capability the events are
+		// dropped with the documented loss (review-j finding 7).
+		if !s.capabilities.ProviderReasoningThinking {
+			return nil, s.loseReasoningOnce()
+		}
+		switch value := value.(type) {
+		case ResponseReasoningSummaryPartAddedEvent:
+			return s.reasoningPartAdded(value)
+		case ResponseReasoningSummaryTextDeltaEvent:
+			return s.reasoningTextDelta(value)
+		case ResponseReasoningSummaryTextDoneEvent:
+			return nil, nil
+		case ResponseReasoningSummaryPartDoneEvent:
+			return s.reasoningPartDone(value)
+		}
+		return nil, nil
 
 	case ResponseCompletedEvent:
 		return s.completed(value.Response)
@@ -2059,10 +2199,15 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 		return nil, nil
 
 	case *ResponsesReasoningOutputItem:
-		// OpenAI reasoning is never synthesized as Anthropic thinking; the
-		// reasoning item is dropped. The loss is recorded exactly once per
-		// stream (review-j finding 7).
-		return nil, s.loseReasoningOnce()
+		// With the provider_reasoning_thinking capability, the chat state
+		// routes provider reasoning here as a reasoning item whose summary
+		// deltas render as native thinking blocks (see the
+		// reasoning-summary handlers). Without the capability the item is
+		// dropped with the documented loss (review-j finding 7).
+		if !s.capabilities.ProviderReasoningThinking {
+			return nil, s.loseReasoningOnce()
+		}
+		return nil, nil
 
 	case *ResponsesFunctionCallOutputItem:
 		// Buffer the tool block start until call ID and name are known.
@@ -3029,6 +3174,17 @@ func (s *anthropicResponsesStreamState) reconcileTerminalOutput(
 					itemID,
 				))
 			}
+		case *ResponsesReasoningOutputItem:
+			// The thinking-rendering reasoning item: the summary text was
+			// streamed as thinking deltas (provider_reasoning_thinking);
+			// identity and type already reconciled above, and the done
+			// event marked it observed.
+			if _, done := s.doneItems[itemID]; !done {
+				return s.wireError(fmt.Errorf(
+					"terminal envelope reasoning item %q was never closed by output_item.done",
+					itemID,
+				))
+			}
 		case *ResponsesFunctionCallOutputItem:
 			closed, ok := s.closedToolCalls[itemID]
 			if !ok {
@@ -3332,6 +3488,76 @@ func (s *anthropicResponsesStreamState) loseReasoningOnce() error {
 		"stream[].reasoning",
 		"OpenAI reasoning cannot be reproduced in an Anthropic stream",
 	)
+}
+
+// reasoningPartAdded opens the native thinking content block for a
+// reasoning item (provider_reasoning_thinking). The block start carries the
+// empty thinking text and empty signature; the signature delta (the marker)
+// arrives immediately before content_block_stop per the Anthropic streaming
+// contract.
+func (s *anthropicResponsesStreamState) reasoningPartAdded(
+	event ResponseReasoningSummaryPartAddedEvent,
+) ([]AnthropicStreamEvent, error) {
+	if err := s.budget.addStateEntries(1); err != nil {
+		return nil, s.wireError(err)
+	}
+	if err := s.budget.addPart(); err != nil {
+		return nil, s.wireError(err)
+	}
+	thinking := ""
+	s.reasoningBlockIndex = new(int(int(s.blockIndex)))
+	s.blockIndex++
+	emptySignature := ""
+	return []AnthropicStreamEvent{{
+		Type:  AnthropicStreamEventTypeContentBlockStart,
+		Index: new(int(*s.reasoningBlockIndex)),
+		ContentBlock: &AnthropicContentBlock{
+			Type:      AnthropicContentBlockTypeThinking,
+			Thinking:  &thinking,
+			Signature: &emptySignature,
+		},
+	}}, nil
+}
+
+// reasoningTextDelta streams one thinking_delta into the open thinking
+// block.
+func (s *anthropicResponsesStreamState) reasoningTextDelta(
+	event ResponseReasoningSummaryTextDeltaEvent,
+) ([]AnthropicStreamEvent, error) {
+	if err := s.budget.addEvent(); err != nil {
+		return nil, s.wireError(err)
+	}
+	delta := event.Delta
+	return []AnthropicStreamEvent{{
+		Type:  AnthropicStreamEventTypeContentBlockDelta,
+		Index: new(int(*s.reasoningBlockIndex)),
+		Delta: &AnthropicStreamDelta{
+			Type:     AnthropicStreamDeltaTypeThinkingDelta,
+			Thinking: &delta,
+		},
+	}}, nil
+}
+
+// reasoningPartDone closes the thinking block: the signature delta (the
+// marker signature) precedes content_block_stop exactly as the Anthropic
+// streaming contract requires.
+func (s *anthropicResponsesStreamState) reasoningPartDone(
+	event ResponseReasoningSummaryPartDoneEvent,
+) ([]AnthropicStreamEvent, error) {
+	signature := SyntheticThinkingSignature
+	events := []AnthropicStreamEvent{{
+		Type:  AnthropicStreamEventTypeContentBlockDelta,
+		Index: new(int(*s.reasoningBlockIndex)),
+		Delta: &AnthropicStreamDelta{
+			Type:      AnthropicStreamDeltaTypeSignatureDelta,
+			Signature: &signature,
+		},
+	}, {
+		Type:  AnthropicStreamEventTypeContentBlockStop,
+		Index: new(int(*s.reasoningBlockIndex)),
+	}}
+	s.reasoningBlockIndex = nil
+	return events, nil
 }
 
 func stopReasonToAnthropic(stop CanonicalStopReason) AnthropicStopReason {

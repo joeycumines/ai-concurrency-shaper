@@ -365,7 +365,7 @@ the flags below extend the defaults, never replace them:
 
 | Layer | Default | Meaning |
 | --- | --- | --- |
-| Chat capabilities | `parallel_tool_calls`, `provider_reasoning_text` | a maximally compatible out-of-the-box core, enabled via `-transcode-chat-capability` (granular names: `developer_role`, `image_input`, `structured_outputs`, `parallel_tool_calls`, `stop_sequences`, `reasoning_effort`, `provider_reasoning_text`, `system_anywhere`). The fidelity-only knobs — `reasoning_effort` (a parameter several open-source servers reject) and `developer_role` (a role Qwen/Llama/DeepSeek chat templates do not know) — are deliberately opt-in: add them for upstreams that accept the modern surface |
+| Chat capabilities | `parallel_tool_calls`, `provider_reasoning_text` | a maximally compatible out-of-the-box core, enabled via `-transcode-chat-capability` (granular names: `developer_role`, `image_input`, `structured_outputs`, `parallel_tool_calls`, `stop_sequences`, `reasoning_effort`, `provider_reasoning_text`, `provider_reasoning_thinking`, `system_anywhere`). The fidelity-only knobs — `reasoning_effort` (a parameter several open-source servers reject) and `developer_role` (a role Qwen/Llama/DeepSeek chat templates do not know) — are deliberately opt-in: add them for upstreams that accept the modern surface |
 | Allowed client query | `beta` | Anthropic clients (Claude Code) gate every request with `?beta=true`; harmless on chat endpoints. Add more via `-transcode-allow-client-query` |
 | Loss policy | `reasoning_summary`, `authenticated_thinking`, `mid_conversation_system`, `responses_controls`, `anthropic_controls`, `builtin_tools`, `usage_unknown`, `usage_cache_read_unknown`, `usage_cache_write_unknown`, `usage_reasoning_unknown`, `request_reasoning`, `developer_role`, `tool_result_error_status` | the non-portable features real Responses/Messages client traffic triggers (reasoning summaries, Anthropic thinking blocks, system turns that cannot keep their position in a chat request, Responses and Anthropic envelope controls, built-in tools, usage breakdowns the chat upstreams do not always report, the effort/role knobs behind the opt-in capabilities, and the error status of a failed tool result); approved via `-transcode-allow-loss` on top of the defaults. Note: approving `responses_controls` tolerates `include`/`client_metadata`/`prompt_cache_key` and upstream-echoed controls — the conversation-state request controls (`background`, `max_tool_calls`, `prompt`, `safety_identifier`, `status`) are errors under every policy. The `tool_result_error_status` default is deliberate: Claude Code marks every failed tool call with `is_error: true`, so rejecting it makes the proxy unusable with the flagship client — the permissive encoding renders the visible `[tool_result_error]` prefix before the result content (the model still sees that the tool failed) and the decision is logged per exchange; withdraw it with `-transcode-allow-loss '!tool_result_error_status'` if you want strict rejection. A multi-part all-text tool result is joined into one string for a chat tool message as a sanctioned encoding (recorded as a note on every exchange; every content byte is preserved) |
 
@@ -373,21 +373,16 @@ Capabilities are exercised only when the client actually uses the feature:
 `provider_reasoning_text` maps the chat provider reasoning response
 extension — spelled `reasoning` (OpenRouter style) or `reasoning_content`
 (the DeepSeek/Qwen convention open-weights gateways stream) — to client
-text; `parallel_tool_calls` forwards the parallel-tool-calls setting.
-
-**Why reasoning renders as ordinary text, not "thinking".** An Anthropic
-client (Claude Code) displays the mapped reasoning as regular assistant
-text — that is expected, not a rendering quirk. The alternative, emitting a
-`type: "thinking"` block, would require an Anthropic-issued `signature`:
-Anthropic's contract treats the signature as verification material, and a
-synthesized or unsigned thinking block is rejected with a 400 when the
-client replays it in a follow-up turn. The proxy therefore never
-synthesizes thinking, redacted thinking, or signatures (a hard invariant —
-see AGENTS.md), and ordinary text is the only lossless-compatible
-rendering. Operators who prefer no visible reasoning can withdraw the
-capability (`-transcode-chat-capability '!provider_reasoning_text'`); the
-provider's reasoning text then drops under the named
-`provider_reasoning_text` loss instead.
+text; `provider_reasoning_thinking` maps the same field to NATIVE Anthropic
+thinking blocks so Claude Code renders it with its native thinking UI —
+each synthesized block carries the proxy's marker signature
+(`shaper-synth-thinking-1`), and the request path scrubs
+marker-signature thinking blocks out of replayed history before any
+upstream rendering, so the synthetic signature never reaches an upstream;
+`parallel_tool_calls` forwards the parallel-tool-calls setting. When both
+reasoning capabilities are enabled, `provider_reasoning_thinking` takes
+precedence. Without either, provider reasoning follows the
+`provider_reasoning_text` loss decision.
 
 Two
 capabilities are opt-in because generic upstreams reject what they render:

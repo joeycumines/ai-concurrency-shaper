@@ -154,6 +154,7 @@ func TestStreamResponsesUsageMismatchIsUpstreamWire(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
 		1,
@@ -216,6 +217,7 @@ func TestStreamResponsesUsageMismatchAtCreatedIsUpstreamWire(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
 		1,

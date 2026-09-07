@@ -289,6 +289,7 @@ var chatCapabilityNames = []struct {
 	{"stop_sequences", func(c *transcode.ChatCapabilities) *bool { return &c.StopSequences }},
 	{"reasoning_effort", func(c *transcode.ChatCapabilities) *bool { return &c.ReasoningEffort }},
 	{"provider_reasoning_text", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningText }},
+	{"provider_reasoning_thinking", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningThinking }},
 	{"system_anywhere", func(c *transcode.ChatCapabilities) *bool { return &c.SystemAnywhere }},
 }
 
@@ -473,24 +474,26 @@ func mergedChatCapabilities(
 		out = defaultTranscodeChatCapabilities
 	}
 	fields := map[string]*bool{
-		"developer_role":          &out.DeveloperRole,
-		"image_input":             &out.ImageInput,
-		"structured_outputs":      &out.StructuredOutputs,
-		"parallel_tool_calls":     &out.ParallelToolCalls,
-		"stop_sequences":          &out.StopSequences,
-		"reasoning_effort":        &out.ReasoningEffort,
-		"provider_reasoning_text": &out.ProviderReasoningText,
-		"system_anywhere":         &out.SystemAnywhere,
+		"developer_role":              &out.DeveloperRole,
+		"image_input":                 &out.ImageInput,
+		"structured_outputs":          &out.StructuredOutputs,
+		"parallel_tool_calls":         &out.ParallelToolCalls,
+		"stop_sequences":              &out.StopSequences,
+		"reasoning_effort":            &out.ReasoningEffort,
+		"provider_reasoning_text":     &out.ProviderReasoningText,
+		"provider_reasoning_thinking": &out.ProviderReasoningThinking,
+		"system_anywhere":             &out.SystemAnywhere,
 	}
 	cli := map[string]bool{
-		"developer_role":          capabilities.DeveloperRole,
-		"image_input":             capabilities.ImageInput,
-		"structured_outputs":      capabilities.StructuredOutputs,
-		"parallel_tool_calls":     capabilities.ParallelToolCalls,
-		"stop_sequences":          capabilities.StopSequences,
-		"reasoning_effort":        capabilities.ReasoningEffort,
-		"provider_reasoning_text": capabilities.ProviderReasoningText,
-		"system_anywhere":         capabilities.SystemAnywhere,
+		"developer_role":              capabilities.DeveloperRole,
+		"image_input":                 capabilities.ImageInput,
+		"structured_outputs":          capabilities.StructuredOutputs,
+		"parallel_tool_calls":         capabilities.ParallelToolCalls,
+		"stop_sequences":              capabilities.StopSequences,
+		"reasoning_effort":            capabilities.ReasoningEffort,
+		"provider_reasoning_text":     capabilities.ProviderReasoningText,
+		"provider_reasoning_thinking": capabilities.ProviderReasoningThinking,
+		"system_anywhere":             capabilities.SystemAnywhere,
 	}
 	for name, field := range fields {
 		_, deny := negated[name]

@@ -406,6 +406,7 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 		anthropic := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			j6PermissivePolicy(),
+			ChatCapabilities{},
 			"msg_1",
 			"gpt-4.1",
 			1710000000,
@@ -436,6 +437,7 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 		anthropic := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			j6PermissivePolicy(),
+			ChatCapabilities{},
 			"msg_1",
 			"gpt-4.1",
 			1710000000,
@@ -536,6 +538,7 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 		anthropic := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			j6PermissivePolicy(),
+			ChatCapabilities{},
 			"msg_1",
 			"gpt-4.1",
 			1710000000,
@@ -566,6 +569,7 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 		anthropic := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			j6PermissivePolicy(),
+			ChatCapabilities{},
 			"msg_1",
 			"gpt-4.1",
 			1710000000,

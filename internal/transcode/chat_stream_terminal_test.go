@@ -316,6 +316,7 @@ func TestChatStreamComposedPrematureDone(t *testing.T) {
 	anthropic := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
 		1710000000,
@@ -358,6 +359,7 @@ func TestChatStreamComposedPrematureDone(t *testing.T) {
 	anthropic2 := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
 		1710000000,

@@ -36,7 +36,7 @@ Transcoding invariants:
 - The supported surface is a strict subset. Every unsupported field or variant must produce a client-dialect error; never silently drop, default, merge, or reinterpret it.
 - Preserve turn boundaries, content order, tool-call identity, tool-result identity, and stream lifecycle ordering.
 
-- Never synthesize Anthropic `thinking`, `redacted_thinking`, or signatures. Preserve an original Anthropic block byte-for-byte or reject/explicitly lose it.
+- Thinking-block synthesis is adjudicated SAFE under the marker+scrubbing contract (operator ruling, 2026-09-07): the proxy may synthesize Anthropic `thinking` blocks ONLY under the `provider_reasoning_thinking` capability, ONLY with the marker signature (`SyntheticThinkingSignature`), and the request path MUST scrub marker-signature thinking blocks out of replayed history before any upstream rendering — a synthetic signature must never reach an upstream. `redacted_thinking` is never synthesized (no source data exists). Non-marker thinking blocks are source-authenticated artifacts: preserve them byte-for-byte or reject/explicitly lose them.
 - Use event-specific SSE types. Emit every required field, keep `event:` equal to JSON `type`, and emit exactly one success terminal or one error terminal.
 - A failed, malformed, truncated, or cancelled exchange must never be reported as a successful model completion.
 - Strip inbound authentication before applying target authentication. Never forward credentials across providers blindly or log/journal them.

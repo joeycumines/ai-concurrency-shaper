@@ -1116,6 +1116,7 @@ func (h *TranscodeHandler) newFrameConverter(
 		state := newAnthropicResponsesStreamState(
 			context,
 			h.cfg.Mapping.LossPolicy,
+			h.cfg.Mapping.ChatCapabilities,
 			context.IDs.New("msg_"),
 			model,
 			createdAt,
@@ -1135,6 +1136,7 @@ func (h *TranscodeHandler) newFrameConverter(
 		anthropic := newAnthropicResponsesStreamState(
 			context,
 			h.cfg.Mapping.LossPolicy,
+			h.cfg.Mapping.ChatCapabilities,
 			context.IDs.New("msg_"),
 			model,
 			createdAt,

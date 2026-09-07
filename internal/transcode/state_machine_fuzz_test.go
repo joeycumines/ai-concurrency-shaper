@@ -282,6 +282,7 @@ func FuzzResponsesToAnthropicStateMachine(f *testing.F) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
 			j6PermissivePolicy(),
+			ChatCapabilities{},
 			"resp_1",
 			"gpt-4.1",
 			1710000000,

@@ -551,23 +551,28 @@ func chatMessageToCanonicalParts(
 			)
 		}
 		if reasoningText != "" {
-			if !capabilities.ProviderReasoningText {
-				// Provider plaintext reasoning is capability-gated exactly
-				// like the stream surface: an approved loss with the reasoning
-				// dropped (the content parts still render) or an
-				// UnsupportedFeatureError under the strict policy — never a
-				// silent drop (stream disposition parity).
-				if err := report.Lose(
-					policy,
+			if capabilities.ProviderReasoningThinking {
+				// The provider_reasoning_thinking capability maps provider
+				// plaintext reasoning to a NATIVE thinking part carrying the
+				// proxy's marker signature (the request path scrubs
+				// marker-signature blocks from replayed history, so the
+				// synthetic signature never reaches an upstream). Thinking
+				// takes precedence over the ordinary-text mapping when both
+				// capabilities are enabled — it is the more faithful
+				// rendering, and Claude Code displays it with the native
+				// thinking UI.
+				parts = append(parts, CanonicalThinkingPart{
+					Text:      reasoningText,
+					Signature: SyntheticThinkingSignature,
+				})
+				if err := report.Note(
 					FeatureProviderReasoningText,
 					reasoningPath,
-					chatProviderReasoningDroppedDetail,
+					"provider reasoning mapped to a native thinking block (provider_reasoning_thinking encoding)",
 				); err != nil {
 					return nil, nil, err
 				}
-				// The reasoning text is dropped; rendering continues with the
-				// ordinary content.
-			} else {
+			} else if capabilities.ProviderReasoningText {
 				// Provider plaintext reasoning is mapped to ordinary text only.
 				// The mapping is the named provider_reasoning_text encoding and
 				// is recorded exactly once, sharing the stream surface's note
@@ -579,6 +584,19 @@ func chatMessageToCanonicalParts(
 					FeatureProviderReasoningText,
 					reasoningPath,
 					chatProviderReasoningMappedDetail,
+				); err != nil {
+					return nil, nil, err
+				}
+			} else {
+				// Neither capability: an approved loss with the reasoning
+				// dropped (the content parts still render) or an
+				// UnsupportedFeatureError under the strict policy — never a
+				// silent drop (stream disposition parity).
+				if err := report.Lose(
+					policy,
+					FeatureProviderReasoningText,
+					reasoningPath,
+					chatProviderReasoningDroppedDetail,
 				); err != nil {
 					return nil, nil, err
 				}
@@ -893,6 +911,20 @@ func RenderResponsesResponse(
 						Text:        partValue.Text,
 						Annotations: []ResponsesAnnotation{},
 					})
+				case CanonicalThinkingPart:
+					// A thinking part renders as a native Responses reasoning
+					// output item: the reasoning summary carries the provider
+					// reasoning text (the Responses dialect has no thinking
+					// blocks; this is its native reasoning carrier).
+					envelope.Output = append(envelope.Output, &ResponsesReasoningOutputItem{
+						ID:     context.IDs.New("rs_"),
+						Type:   "reasoning",
+						Status: ResponsesItemCompleted,
+						Summary: []ResponsesReasoningSummary{{
+							Type: "summary_text",
+							Text: partValue.Text,
+						}},
+					})
 				case CanonicalRefusal:
 					message.Content = append(message.Content, &ResponsesOutputRefusal{
 						Type:    "refusal",
@@ -1173,6 +1205,17 @@ func RenderMessagesResponse(
 					out.Content = append(out.Content, AnthropicContentBlock{
 						Type: AnthropicContentBlockTypeText,
 						Text: &text,
+					})
+				case CanonicalThinkingPart:
+					// Native thinking block: the marker signature travels so
+					// the request path can scrub the block from replayed
+					// history (see CanonicalThinkingPart).
+					thinking := partValue.Text
+					signature := partValue.Signature
+					out.Content = append(out.Content, AnthropicContentBlock{
+						Type:      AnthropicContentBlockTypeThinking,
+						Thinking:  &thinking,
+						Signature: &signature,
 					})
 				case CanonicalRefusal:
 					text := partValue.Text

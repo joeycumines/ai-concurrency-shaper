@@ -339,7 +339,7 @@ func TestSSEReadLineCROnly(t *testing.T) {
 // tag (review-08 additional 12).
 func TestResponsesStreamEmptyEventNameRejected(t *testing.T) {
 	ctx := testStreamContext()
-	state := newAnthropicResponsesStreamState(ctx, StrictLossPolicy(), "resp_1", "m", 1)
+	state := newAnthropicResponsesStreamState(ctx, StrictLossPolicy(), ChatCapabilities{}, "resp_1", "m", 1)
 	converter := &responsesToAnthropicConverter{state: state}
 
 	// Empty event name + valid data → rejected by the adapter guard.

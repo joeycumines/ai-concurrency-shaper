@@ -105,6 +105,12 @@ func canonicalizeRoutePath(path string) string {
 	return b.String()
 }
 
+// SyntheticThinkingSignature is the deterministic signature carried by
+// proxy-synthesized Anthropic thinking blocks. It is never empty, and the
+// request path recognizes it by this exact value to scrub replayed blocks
+// before upstream forwarding. Never forward it to an upstream.
+const SyntheticThinkingSignature = "shaper-synth-thinking-1"
+
 // ChatCapabilities describes only independently verified upstream behavior.
 // A capability must be enabled from configuration or a maintained provider
 // profile; conversion code must never infer it from a successful response.
@@ -121,6 +127,17 @@ type ChatCapabilities struct {
 	// ordinary text, an approved loss, or a rejection. It must never become an
 	// Anthropic thinking or redacted_thinking block.
 	ProviderReasoningText bool
+
+	// ProviderReasoningThinking maps the same provider plaintext reasoning
+	// extension to NATIVE Anthropic thinking blocks (Messages-client
+	// directions): the block carries the marker signature
+	// (SyntheticThinkingSignature), and the request path scrubs
+	// marker-signature thinking blocks out of replayed history before any
+	// upstream rendering — the synthetic signature never reaches an
+	// upstream. Claude Code renders these blocks with its native thinking
+	// UI (operator-adjudicated design, 2026-09-07; see
+	// knowledgeBase.thinking_synthesis_design).
+	ProviderReasoningThinking bool
 
 	// SystemAnywhere renders system/developer turns positionally exactly as
 	// decoded, for upstreams that accept system messages anywhere (e.g. the

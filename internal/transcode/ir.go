@@ -45,6 +45,21 @@ type CanonicalRefusal struct {
 
 func (CanonicalRefusal) isCanonicalPart() {}
 
+// CanonicalThinkingPart is provider plaintext reasoning rendered as a
+// NATIVE Anthropic thinking block (Messages dialect) or a reasoning item
+// (Responses dialect). It is produced only under the
+// provider_reasoning_thinking capability and carries the proxy's synthetic
+// marker signature (SyntheticThinkingSignature): the request path scrubs
+// marker-signature thinking blocks out of replayed history before upstream
+// rendering, so the synthetic signature never reaches an upstream
+// (operator-adjudicated design, 2026-09-07).
+type CanonicalThinkingPart struct {
+	Text      string
+	Signature string
+}
+
+func (CanonicalThinkingPart) isCanonicalPart() {}
+
 // CanonicalImage is an image input. Exactly one of URL or Base64 is set.
 type CanonicalImage struct {
 	MediaType string
@@ -648,14 +663,18 @@ func ValidateCanonicalResponse(response CanonicalResponse) error {
 }
 
 // validateResponsePart checks the per-part invariants of ASSISTANT output
-// message items: only text and refusal parts are model output; function
-// calls and results are their own items, and a part smuggling them into a
-// message is a role violation.
+// message items: text, refusal, and thinking parts are model output;
+// function calls and results are their own items, and a part smuggling them
+// into a message is a role violation. (A thinking part carries the marker
+// signature and is scrubbed from replayed history at request decode — see
+// CanonicalThinkingPart.)
 func validateResponsePart(part CanonicalPart) error {
 	switch part.(type) {
 	case CanonicalText:
 		return nil
 	case CanonicalRefusal:
+		return nil
+	case CanonicalThinkingPart:
 		return nil
 	default:
 		return fmt.Errorf(

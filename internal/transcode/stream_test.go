@@ -670,6 +670,7 @@ func TestFixtureResponsesStreamToAnthropicFrames(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"gpt-4.1",
 		1,

@@ -305,6 +305,7 @@ func TestUsageStreamingResponsesToAnthropicLossGatedOnce(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,
@@ -326,6 +327,7 @@ func TestUsageStreamingResponsesToAnthropicLossGatedOnce(t *testing.T) {
 			FeatureUsageReasoningUnknown:  {},
 			FeatureUsageUnknown:           {},
 		}},
+		ChatCapabilities{},
 		"msg_1",
 		"m",
 		1,

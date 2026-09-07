@@ -359,6 +359,7 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 				state := newAnthropicResponsesStreamState(
 					testStreamContext(),
 					j6PermissivePolicy(),
+					ChatCapabilities{},
 					"msg_1",
 					"m",
 					1,
@@ -380,6 +381,7 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 				anthropic := newAnthropicResponsesStreamState(
 					testStreamContext(),
 					j6PermissivePolicy(),
+					ChatCapabilities{},
 					"msg_1",
 					"m",
 					1,
