@@ -580,19 +580,22 @@ func renderChatToolResult(
 
 	// Exact text results stay exact text: the string arm of the Chat
 	// message content union. A single text part renders byte-exact; a
-	// multi-part all-text result is joined with '\n' under the named
-	// tool_result_text_join decision (autopsy 2026-09-06 H2: the join is
-	// observably reported, never silent). The count is over the
-	// client-supplied parts only — the synthetic error_status_prefix part
-	// is not a client part boundary (its own encoding is reported under
-	// tool_result_error_status).
+	// multi-part all-text result is joined with '\n' and recorded as a
+	// sanctioned Note — the join preserves every content byte (the part
+	// boundaries are structural metadata the chat dialect cannot carry),
+	// so it is an observable sanctioned encoding, never a policy-gated
+	// loss and never silent (autopsy 2026-09-06 H2; REM-B acceptance: a
+	// Note, NOT a policy-gated loss — default-rejecting the join made
+	// multi-part tool results a live availability failure with Claude
+	// Code). The count is over the client-supplied parts only — the
+	// synthetic error_status_prefix part is not a client part boundary
+	// (its own encoding is reported under tool_result_error_status).
 	if allTextParts(parts) {
 		if len(result.Parts) > 1 {
-			if err := report.Lose(
-				policy,
+			if err := report.Note(
 				FeatureToolResultTextJoin,
 				"messages[].tool_result.content",
-				"the multi-part all-text tool result is joined into one '\\n'-separated string; the chat tool message cannot carry part boundaries",
+				"multi-part all-text tool result joined into one '\\n'-separated string (the chat tool message cannot carry part boundaries; every content byte is preserved)",
 			); err != nil {
 				return ChatMessage{}, err
 			}

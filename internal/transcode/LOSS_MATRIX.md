@@ -20,7 +20,6 @@ individual keys via `-transcode-allow-loss`.
 | `tool_schema_strictness` | the source tool schema has no strictness semantic; the Responses function-tool contract requires explicit strict, emitted as strict:false under this permission |
 | `tool_result_error_status` | the tool result error status cannot be reproduced in the target; the permissive encoding is the visible error_status_prefix text |
 | `tool_result_multimodal_content` | multimodal tool-result content cannot be carried by a Chat tool message; under this permission it is encoded as the tool_result_json_envelope text |
-| `tool_result_text_join` | a multi-part all-text tool result is joined into one '\n'-separated string in a Chat tool message; the joined parts cannot keep their part boundaries |
 | `output_item_boundaries` | output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target |
 | `output_phase` | the output message phase (commentary vs final_answer) cannot be reproduced in the target |
 | `usage_unknown` | the source provided no token usage; the required target usage cannot be reproduced |

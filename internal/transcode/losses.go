@@ -78,11 +78,15 @@ const (
 	// carry: rejected under strict policy, deterministically encoded as the
 	// tool_result_json_envelope text under its own loss key when approved.
 	FeatureToolResultMultimodalContent Feature = "tool_result_multimodal_content"
-	// ToolResultTextJoin covers a multi-part all-text tool result rendered
-	// to a Chat tool message: the chat dialect carries tool content as a
-	// single string, so multiple text parts are joined with '\n' under this
-	// named decision — rejected under strict policy, observably joined when
-	// approved (autopsy 2026-09-06 H2: the join was previously silent).
+	// ToolResultTextJoin is the SANCTIONED-ENCODING note for a multi-part
+	// all-text tool result rendered to a Chat tool message: the chat dialect
+	// carries tool content as a single string, so multiple text parts are
+	// joined with '\n'. Every content byte is preserved — the part
+	// boundaries are structural metadata the target cannot carry — so the
+	// join is recorded as a Note (a sanctioned encoding, never a
+	// policy-gated loss and never silent; autopsy 2026-09-06 H2, REM-B
+	// acceptance). Deliberately NOT in lossRegistry: it is not a loss, so
+	// it is not policy-addressable via -transcode-allow-loss.
 	FeatureToolResultTextJoin Feature = "tool_result_text_join"
 	// OutputItemBoundaries covers output item boundaries (and
 	// conversation-state output items such as function_call_output) that the
@@ -207,7 +211,6 @@ var lossRegistry = []lossEntry{
 	{FeatureToolSchemaStrictness, "the source tool schema has no strictness semantic; the Responses function-tool contract requires explicit strict, emitted as strict:false under this permission"},
 	{FeatureToolResultErrorStatus, "the tool result error status cannot be reproduced in the target; the permissive encoding is the visible error_status_prefix text"},
 	{FeatureToolResultMultimodalContent, "multimodal tool-result content cannot be carried by a Chat tool message; under this permission it is encoded as the tool_result_json_envelope text"},
-	{FeatureToolResultTextJoin, "a multi-part all-text tool result is joined into one '\\n'-separated string in a Chat tool message; the joined parts cannot keep their part boundaries"},
 	{FeatureOutputItemBoundaries, "output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target"},
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},
