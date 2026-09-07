@@ -205,6 +205,21 @@ func (s *chatResponsesStreamState) chargeIdentity(n int) error {
 	return nil
 }
 
+// chargeIdentity adds n bytes of tool-call identity (call id, function name)
+// to the exchange accumulated total, mirroring the chat direction's charge:
+// the identity renders into the generated tool_use block start and the
+// terminal reconciliation (autopsy 2026-09-06 M1 round 5).
+func (s *anthropicResponsesStreamState) chargeIdentity(n int) error {
+	s.totalAccumulated += int64(n)
+	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
+		return s.wireError(fmt.Errorf(
+			"responses stream accumulated tool-call identity exceeds the exchange total of %d bytes",
+			maxStreamTotalAccumulatedBytes,
+		))
+	}
+	return nil
+}
+
 // loseServiceTierOnce records the service-tier loss exactly once per stream:
 // the tier is a chunk-envelope attribute whose presence on any chunk enters
 // the decision once, not once per chunk (review-k finding 9).
@@ -2056,6 +2071,14 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 		}
 		if err := s.budget.addStateEntries(1); err != nil {
 			return nil, s.wireError(err)
+		}
+		// Tool-call identity renders into the generated tool_use block start
+		// and the terminal reconciliation, so it is semantic state charged
+		// against the exchange total exactly like the chat direction's
+		// identity (autopsy 2026-09-06 M1 round 5: the direct
+		// Responses→Anthropic path left identity uncharged).
+		if err := s.chargeIdentity(len(item.CallID) + len(item.Name)); err != nil {
+			return nil, err
 		}
 		pending := &pendingToolBlock{
 			blockIndex:  s.blockIndex,

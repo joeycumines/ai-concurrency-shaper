@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -118,13 +120,29 @@ func TestResponsesRequestEchoCapped(t *testing.T) {
 		}
 	})
 	t.Run("echo under the bound accepted", func(t *testing.T) {
+		// The measurement is the SERIALIZED echo (json.Marshal with the
+		// envelope's HTML escaping), so the under-bound payload must not
+		// escape: 'x' renders 1x. The '<'-heavy cases above already pin the
+		// escaping amplification.
 		body := fmt.Sprintf(
 			`{"model":"m","input":"x","instructions":%q}`,
-			strings.Repeat("<", maxStreamEchoBytes-64),
+			strings.Repeat("x", maxStreamEchoBytes-512),
 		)
 		_, _, err := DecodeResponsesRequest([]byte(body), StrictLossPolicy())
 		if err != nil {
 			t.Fatalf("echo under the bound must be accepted: %v", err)
+		}
+	})
+	t.Run("escaping-heavy user above the bound rejected", func(t *testing.T) {
+		// The rendered members beyond instructions are measured too (review
+		// round 5): a '<'-heavy user field renders at 6x into every envelope.
+		body := fmt.Sprintf(
+			`{"model":"m","input":"x","user":%q}`,
+			strings.Repeat("<", maxStreamEchoBytes),
+		)
+		_, _, err := DecodeResponsesRequest([]byte(body), StrictLossPolicy())
+		if !errors.Is(err, errEchoTooLarge) {
+			t.Fatalf("err = %T %v, want errEchoTooLarge", err, err)
 		}
 	})
 	t.Run("ordinary request unaffected", func(t *testing.T) {
@@ -173,6 +191,67 @@ func TestChatStreamMaximalEchoReleases(t *testing.T) {
 	}
 	if reader.sawErrorEvent {
 		t.Fatal("exchange emitted an error event")
+	}
+}
+
+// TestResponsesAnthropicToolIdentityCharged pins the round-5 gate finding:
+// the DIRECT Responses→Anthropic direction charges tool-call identity (call
+// id, function name) against the exchange accumulated total, exactly like
+// the chat direction — identity renders into the generated tool_use block
+// start and the terminal reconciliation, so uncharged identity would defeat
+// the generated-total derivation.
+func TestResponsesAnthropicToolIdentityCharged(t *testing.T) {
+	state := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		"msg_1",
+		"m",
+		1,
+	)
+	converter := newResponsesToAnthropicConverter(state)
+	feed := func(eventType, data string) error {
+		_, err := converter.Convert(SSEEvent{Event: eventType, Data: []byte(data)})
+		return err
+	}
+	if err := feed("response.created",
+		`{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1,"status":"in_progress","model":"m","output":[]}}`); err != nil {
+		t.Fatal(err)
+	}
+
+	bigID := strings.Repeat("i", maxStreamAccumulatedBytes)
+	bigName := strings.Repeat("n", maxStreamAccumulatedBytes)
+	if err := feed("response.output_item.added", fmt.Sprintf(
+		`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":%q,"name":%q,"arguments":""}}`,
+		bigID, bigName,
+	)); err != nil {
+		t.Fatalf("identity at the per-item scale must be accepted: %v", err)
+	}
+	if state.totalAccumulated != int64(2*len(bigID)) {
+		t.Fatalf("totalAccumulated = %d, want %d (identity charged)", state.totalAccumulated, 2*len(bigID))
+	}
+
+	// A third tool call's identity exceeds the exchange accumulated total:
+	// two items charge 2x2 MiB = 4 MiB (exactly the bound, admitted by the
+	// strict >), and the third pushes past it — rejected as corrupt upstream
+	// wire, never silently accumulated.
+	for i := 2; i <= 3; i++ {
+		err := feed("response.output_item.added", fmt.Sprintf(
+			`{"type":"response.output_item.added","sequence_number":%d,"output_index":%d,"item":{"id":"fc_%d","type":"function_call","status":"in_progress","call_id":%q,"name":%q,"arguments":""}}`,
+			i, i-1, i, bigID, bigName,
+		))
+		if i == 2 {
+			if err != nil {
+				t.Fatalf("second item at the exact exchange bound must be accepted: %v", err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Fatal("identity beyond the exchange total must be rejected (round 5)")
+		}
+		var wireErr *UpstreamWireError
+		if !errors.As(err, &wireErr) {
+			t.Fatalf("err = %T %v, want UpstreamWireError", err, err)
+		}
 	}
 }
 
@@ -227,4 +306,33 @@ func TestChatStreamToolIdentityCharged(t *testing.T) {
 			t.Fatalf("totalAccumulated = %d, want %d (charged once)", state.totalAccumulated, len(bigID))
 		}
 	})
+}
+
+// TestEchoCapLiveHandler413 pins the round-5 gate finding: the echo cap
+// rejects through the LIVE handler as a 413 for both a streaming and a
+// non-streaming Responses request (the decode hook runs before stream
+// negotiation, so the classification must not depend on the stream intent).
+func TestEchoCapLiveHandler413(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		body := fmt.Sprintf(
+			`{"model":"m","input":"x","stream":%t,"instructions":%q}`,
+			stream, strings.Repeat("<", maxStreamEchoBytes+1),
+		)
+		mapping := responsesMapping(t)
+		mapping.ModelMap = ModelMap{AllowIdentity: true}
+		handler := NewTranscodeHandler(
+			HandlerConfig{Mapping: mapping, Upstream: mustParseURL(t, "https://upstream.example")},
+			func(req *http.Request) (*http.Response, error) {
+				t.Fatal("round trip must not be reached for an oversized echo")
+				return nil, nil
+			},
+			nil,
+		)
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("stream=%t: status = %d body=%q, want 413", stream, rec.Code, rec.Body.String())
+		}
+	}
 }

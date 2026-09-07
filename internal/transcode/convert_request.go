@@ -375,40 +375,21 @@ func DecodeResponsesRequest(
 	return result, echo, nil
 }
 
-// checkEchoSize rejects a request echo whose serialized size exceeds
-// maxStreamEchoBytes. The string-bearing members are measured directly and
-// the composite members through json.Marshal with default HTML escaping —
-// the same escaping the envelope render applies, so the measurement matches
-// the worst-case rendered size. The scalar members are bounded constants and
-// carry no measurement.
+// checkEchoSize rejects a request echo whose rendered size exceeds
+// maxStreamEchoBytes. The echo is measured the way the envelope renders it:
+// one json.Marshal of the ENTIRE ResponsesRequestEcho with the same
+// escaping the envelope render applies (review-gate round 5: per-member raw
+// lengths under-counted escaping-heavy strings and omitted rendered members
+// such as user, previous_response_id, and service_tier — the measurement
+// must be the serialized whole, not an inventory of selected members).
 func checkEchoSize(echo *ResponsesRequestEcho) error {
-	total := 0
-	if echo.Instructions != nil {
-		if echo.Instructions.Text != nil {
-			total += len(*echo.Instructions.Text)
-		}
-		serialized, err := json.Marshal(echo.Instructions.Items)
-		if err != nil {
-			return fmt.Errorf("responses request echo: %w", err)
-		}
-		total += len(serialized)
+	serialized, err := json.Marshal(echo)
+	if err != nil {
+		return fmt.Errorf("responses request echo: %w", err)
 	}
-	for key, value := range echo.Metadata {
-		total += len(key) + len(value)
-	}
-	for _, encoded := range []any{echo.Tools, echo.ToolChoice, echo.Reasoning, echo.Text} {
-		if encoded == nil {
-			continue
-		}
-		serialized, err := json.Marshal(encoded)
-		if err != nil {
-			return fmt.Errorf("responses request echo: %w", err)
-		}
-		total += len(serialized)
-	}
-	if total > maxStreamEchoBytes {
-		return fmt.Errorf("%w: the responses request echo of %d bytes exceeds the %d byte echo bound; the instructions, metadata, tools, and text configuration are echoed into every response envelope and are bounded as a resource limit",
-			errEchoTooLarge, total, maxStreamEchoBytes)
+	if len(serialized) > maxStreamEchoBytes {
+		return fmt.Errorf("%w: the rendered responses request echo of %d bytes exceeds the %d byte echo bound; the request echo renders into every response envelope and is bounded as a resource limit",
+			errEchoTooLarge, len(serialized), maxStreamEchoBytes)
 	}
 	return nil
 }
