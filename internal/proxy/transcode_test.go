@@ -1180,3 +1180,70 @@ func TestProxyExternalSignerRequiresReplayableBodies(t *testing.T) {
 		t.Fatalf("err = %v, want the replayability error", err)
 	}
 }
+
+// TestProxyTranscodeQueueCommentsLocalErrorFailsClosedDialect pins the
+// committed-stream error contract (review ses_f82433a3affeYcnpN3ETKBmQxz):
+// with -queue-comments active and a streaming Accept, a pre-upstream
+// transcode local error (malformed request body) must failed-close the
+// committed stream with a client-dialect SSE error event — never a raw JSON
+// body the committed stream cannot carry, and never a silent clean EOF.
+func TestProxyTranscodeQueueCommentsLocalErrorFailsClosedDialect(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("upstream must not be contacted for a local request-conversion error")
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pat, _ := route.Parse("POST /messages:2")
+	met := metrics.NewCollector()
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+		WithMetrics(met),
+		WithQueueComments(20*time.Millisecond),
+		WithQueueTimeout(10*time.Second),
+		WithTranscodeMapping(transcodeMapping(testMessagesResponsesMapping(t))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	// A syntactically invalid JSON document (not an empty body, which the
+	// request decode treats as a valid empty document): it fails request
+	// conversion with a local 400. The request is bodyless so the recorder
+	// writer (no full duplex) still commits the early SSE representation.
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Header.Set("Accept", "text/event-stream")
+	p.ServeHTTP(rec, req)
+
+	// The streaming representation was committed pre-admission: the status
+	// is locked at 200 (the guard silences the 400 and marks aborted).
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (committed by the early SSE commit)", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, ": queue-wait elapsed=0") {
+		t.Fatalf("early-commit comment marker missing: %q", body)
+	}
+	if !strings.Contains(body, "event: error") {
+		t.Fatalf("post-commit local error must failed-close with an SSE error event: %q", body)
+	}
+	if !strings.Contains(body, `"invalid_request_error"`) {
+		t.Fatalf("error event must carry the client-dialect error type: %q", body)
+	}
+	if strings.Contains(body, `"request_id"`) {
+		t.Fatalf("raw JSON HTTP error body leaked into the committed stream: %q", body)
+	}
+	snap := met.Snapshot()
+	if snap.TotalAborted != 1 {
+		t.Fatalf("TotalAborted = %d, want 1 (the committed stream failed)", snap.TotalAborted)
+	}
+	if snap.TotalProxied != 0 {
+		t.Fatalf("TotalProxied = %d, want 0 (no clean completion)", snap.TotalProxied)
+	}
+}

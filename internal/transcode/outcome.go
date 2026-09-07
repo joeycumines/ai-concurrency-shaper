@@ -111,3 +111,25 @@ func LocalFailureOutcome() Outcome {
 		UpstreamStatus: Optional[int]{Set: true, Value: http.StatusBadGateway},
 	}
 }
+
+// committedStreamContextKey marks a request whose streaming representation
+// was already committed to the client before the transcode handler ran
+// (the proxy's queue-comment mode): statuses are locked and error bodies
+// must stay dialect-legal SSE frames.
+type committedStreamContextKey struct{}
+
+// WithCommittedStreamContext marks the request's streaming representation
+// as already committed (200 + SSE headers sent by the proxy before
+// admission). The handler's error writers branch on it: a post-commit
+// error can never change the status, so it failed-closes the stream with a
+// client-dialect error event instead of a raw JSON body.
+func WithCommittedStreamContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, committedStreamContextKey{}, true)
+}
+
+// CommittedStreamFromContext reports whether the streaming representation
+// was already committed before the handler ran.
+func CommittedStreamFromContext(ctx context.Context) bool {
+	committed, _ := ctx.Value(committedStreamContextKey{}).(bool)
+	return committed
+}

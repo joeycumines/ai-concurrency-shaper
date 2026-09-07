@@ -1002,10 +1002,14 @@ func New(opts ...Option) (*Proxy, error) {
 				if rec, ok := w.(*statusRecorder); ok {
 					if rec.commentsCommitted {
 						// The streaming representation was already
-						// committed: failed close, never a non-SSE error
-						// body inside the committed stream (the failed
-						// close is why the terminalWritten guard below
-						// cannot be relied on for this path).
+						// committed: failed close. The transcode handler
+						// frames its own dialect error events (via the
+						// committed-stream context marker); this
+						// transparent-path failure is dialect-agnostic,
+						// so the failed close is the comment + EOF (the
+						// terminalWritten guard below cannot be relied
+						// on for this path — recordImplicitOK satisfied
+						// it on the comment write).
 						rec.aborted = true
 						fmt.Fprintf(rec, ": queue-wait failed: circuit open\n\n")
 						_ = rec.FlushError()
@@ -1774,6 +1778,12 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		if recIsRecorder && transcode.AcceptIsEventStream(r.Header.Get("Accept")) {
 			if canCommitCommentsWithUnreadBody(r) || http.NewResponseController(rec).EnableFullDuplex() == nil {
 				stopComments = p.startQueueComments(rec)
+				// Tell a downstream transcode handler the streaming
+				// representation is committed: its error writers then
+				// failed-close with dialect-legal SSE error events
+				// instead of raw JSON bodies the committed stream
+				// cannot carry.
+				r = r.WithContext(transcode.WithCommittedStreamContext(r.Context()))
 			}
 		}
 	}

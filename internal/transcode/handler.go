@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -1171,6 +1172,54 @@ func (h *TranscodeHandler) writeLocalError(
 	h.writeDialectHTTPError(r, w, apiErr, provenance)
 }
 
+// writeCommittedStreamError failed-closes an already-committed SSE stream
+// with a client-dialect error event. The re-declared WriteHeader never
+// reaches the wire (the proxy's committed-stream guard silences it and
+// marks the exchange aborted); the SSE error frame is the observable
+// failure. A failed downstream write is returned so the outcome records
+// the delivery fact exactly like the JSON error writers.
+func writeCommittedStreamError(
+	w http.ResponseWriter,
+	client ClientProtocol,
+	apiErr CanonicalAPIError,
+) error {
+	apiErr = normalizeCanonicalError(apiErr)
+	w.WriteHeader(apiErr.Status)
+	var payload []byte
+	var err error
+	switch client {
+	case ClientMessages:
+		payload, err = json.Marshal(AnthropicStreamEvent{
+			Type: AnthropicStreamEventTypeError,
+			Error: &AnthropicStreamError{
+				Type:    anthropicErrorType(apiErr),
+				Message: apiErr.Message,
+			},
+		})
+	case ClientResponses:
+		code := apiErr.Code
+		if code == "" {
+			code = "conversion_error"
+		}
+		payload, err = json.Marshal(ResponseErrorEvent{
+			Type:           "error",
+			SequenceNumber: 0,
+			Code:           code,
+			Message:        apiErr.Message,
+			Param:          "",
+		})
+	default:
+		return fmt.Errorf("unknown client error dialect %q", client)
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: error\ndata: %s\n\n", payload); err != nil {
+		return err
+	}
+	return http.NewResponseController(w).Flush()
+}
+
 // writeUpstreamHTTPError renders a non-2xx upstream response in the client
 // dialect. The failure classification uses the response-aware breaker
 // semantics (IsFailureStatusWithHeaders) so 429, 5xx, and 403 with
@@ -1329,7 +1378,18 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 	// Every client-visible error message respects the configured
 	// ErrorMessageBytes bound (review-z commit 3).
 	apiErr.Message = h.boundErrorMessage(apiErr.Message)
-	writeErr := WriteDialectHTTPError(w, client, apiErr)
+	var writeErr error
+	if CommittedStreamFromContext(r.Context()) {
+		// The proxy committed the SSE representation before dispatch
+		// (queue comments): the status is locked (the proxy's guard
+		// silences the re-declared WriteHeader and marks the exchange
+		// aborted) and the body must stay dialect-legal SSE — the error
+		// failed-closes the stream as a client-dialect error event
+		// instead of a raw JSON body (review ses_f82433a3affeYcnpN3ETKBmQxz).
+		writeErr = writeCommittedStreamError(w, client, apiErr)
+	} else {
+		writeErr = WriteDialectHTTPError(w, client, apiErr)
+	}
 	upstreamFailure := false
 	switch provenance {
 	case ProvenanceUpstreamTransportError:
