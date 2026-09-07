@@ -35,7 +35,7 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-upstream` | provider | _(required)_ | Upstream base URL |
 | `-bind` | server | `:8080` | Listen address |
 | `-metrics-bind` | server | _(unset)_ | Dedicated listen address for the Prometheus `/metrics` endpoint (see [Metrics Export](#metrics-export)); empty disables it |
-| `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints) |
+| `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints). A `:unlimited` suffix (`POST /messages/count_tokens:unlimited`) exempts the route from limiting entirely, including under `-limit-all` |
 | `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
 | `-concurrency` | provider | `4` | Max concurrent limited requests |
 | `-global-concurrency` | provider | `0` | Global concurrency limit (0 = disabled) |
@@ -703,7 +703,21 @@ The proxy uses a token-bucket channel to enforce the concurrency limit. Each lim
 
 A limited request blocks until a slot opens — that is the feature: the client call waits instead of failing, so clients need no retry/backoff logic of their own. While a request waits, its connection stays open with **zero response bytes**: no headers are committed until the request is admitted, converted, and the upstream has responded. An AI client cannot distinguish this wait from a dead connection, and most agents (including Claude Code) enforce their own deadlines — a request blocked past the client's effective timeout is aborted **and retried**, which amplifies load on a bounded queue. Size `-queue-timeout` against the client's effective deadline (well below it): an expired queue wait fails visibly with `504 queue timeout` instead of hanging silently. The TUI shows queue depth and active slots so the operator can see what the client cannot.
 
-**Cheap endpoints must not share the completion pool.** Under `-limit-all=true`, *every* request is limiter-admitted — including cheap auxiliary routes like `POST /v1/messages/count_tokens`, which does **not** match the end-anchored `/messages` pattern and therefore falls through to the default pool. A token-count probe then queues behind 80–200s streaming completions and the calling agent appears to hang. Give cheap routes their own limiter class:
+**Cheap endpoints must not share the completion pool.** Under `-limit-all=true`, *every* request is limiter-admitted — including cheap auxiliary routes like `POST /v1/messages/count_tokens`, which does **not** match the end-anchored `/messages` pattern and therefore falls through to the default pool. A token-count probe then queues behind 80–200s streaming completions and the calling agent appears to hang. Two fixes exist.
+
+The **unlimited admission class** exempts a route from limiting entirely — including under `-limit-all`:
+
+```sh
+ai-concurrency-shaper \
+  -limit-all=true \
+  -concurrency=2 \
+  -limit "POST /messages:2" \
+  -limit "POST /messages/count_tokens:unlimited"
+```
+
+An `:unlimited` route never acquires a slot (it cannot declare a `@group` — the class has no limiter to share). Pattern order matters: the **first matching pattern** decides, exactly as limiter selection does, so a `:unlimited` pattern must precede any broader limited pattern on the same path. Unlimited requests count as passthrough in the metrics and TUI.
+
+The **separate-limiter class** bounds the cheap route instead of exempting it:
 
 ```sh
 ai-concurrency-shaper \

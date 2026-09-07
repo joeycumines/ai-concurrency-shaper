@@ -34,6 +34,14 @@ type Pattern struct {
 	Raw      string
 	Limit    int    // per-route concurrency limit; 0 = use default pool
 	Group    string // non-empty when patterns share a limiter
+	// Unlimited exempts matching requests from concurrency limiting
+	// entirely — including under -limit-all. It is the cheap-endpoint
+	// admission class: a route declared ":unlimited" never acquires a
+	// slot, so auxiliary calls (token counting, health checks) cannot
+	// queue behind long-running completions. Unlimited patterns carry no
+	// limiter and cannot declare a group (a group shares a limiter; the
+	// unlimited class has none).
+	Unlimited bool
 }
 
 // Parse parses a pattern string.
@@ -44,6 +52,7 @@ type Pattern struct {
 //	"POST /v1/messages:4"          - limit 4
 //	"POST /v1/messages:4@anthropic" - limit 4, shares "anthropic" pool
 //	"POST /v1/messages:@anthropic"  - shares "anthropic" pool, default limit
+//	"POST /v1/messages/count_tokens:unlimited" - exempt from limiting
 func Parse(s string) (Pattern, error) {
 	s = strings.TrimSpace(s)
 	before, after, ok := strings.Cut(s, " ")
@@ -56,29 +65,39 @@ func Parse(s string) (Pattern, error) {
 		return Pattern{}, fmt.Errorf("route: empty method in %q", s)
 	}
 
-	path, limit, group := parsePathLimitGroup(rest)
+	path, limit, group, unlimited := parsePathLimitGroup(rest)
+	if unlimited && group != "" {
+		return Pattern{}, fmt.Errorf(
+			"route: pattern %q declares :unlimited with a group %q; the unlimited class has no limiter to share",
+			s, group,
+		)
+	}
 
 	if !strings.HasPrefix(path, "/") {
 		return Pattern{}, fmt.Errorf("route: path must start with / in %q", s)
 	}
 
 	return Pattern{
-		Method:   method,
-		Segments: splitSegments(path),
-		Raw:      s,
-		Limit:    limit,
-		Group:    group,
+		Method:    method,
+		Segments:  splitSegments(path),
+		Raw:       s,
+		Limit:     limit,
+		Group:     group,
+		Unlimited: unlimited,
 	}, nil
 }
 
-func parsePathLimitGroup(s string) (path string, limit int, group string) {
+func parsePathLimitGroup(s string) (path string, limit int, group string, unlimited bool) {
 	if at := strings.LastIndex(s, "@"); at >= 0 && !strings.Contains(s[at:], "/") {
 		group = s[at+1:]
 		s = s[:at]
 	}
 	if idx := strings.LastIndex(s, ":"); idx >= 0 {
 		candidate := s[idx+1:]
-		if n, err := strconv.Atoi(candidate); err == nil && n >= 0 {
+		if candidate == "unlimited" {
+			unlimited = true
+			s = s[:idx]
+		} else if n, err := strconv.Atoi(candidate); err == nil && n >= 0 {
 			limit = n
 			s = s[:idx]
 		}
@@ -191,6 +210,20 @@ func (m *Matcher) IsLimited(method, path string) bool {
 		if p.Match(method, path) {
 			return true
 		}
+	}
+	return false
+}
+
+// IsUnlimited reports whether the FIRST pattern matching the request
+// declares the unlimited admission class. The first-match rule is the same
+// one the proxy's limiter selection uses (FindMatch), so classification and
+// admission can never disagree: a request is exempt exactly when its
+// first-matching pattern is unlimited. Patterns are evaluated in
+// configuration order, so a more specific unlimited pattern must precede a
+// broader limited pattern to win.
+func (m *Matcher) IsUnlimited(method, path string) bool {
+	if pat := m.FindMatch(method, path); pat != nil {
+		return pat.Unlimited
 	}
 	return false
 }

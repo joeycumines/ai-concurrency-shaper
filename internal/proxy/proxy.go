@@ -1093,7 +1093,12 @@ func (p *Proxy) Journal() *journal.Journal {
 
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	limited := p.limitAll || p.matcher.IsLimited(r.Method, r.URL.Path)
+	// The unlimited admission class exempts a request whose FIRST matching
+	// pattern declares :unlimited — including under -limit-all. The same
+	// first-match lookup drives limiter selection (acquireSlot/FindMatch),
+	// so classification and admission can never disagree (UNRESP-2).
+	limited := (p.limitAll || p.matcher.IsLimited(r.Method, r.URL.Path)) &&
+		!p.matcher.IsUnlimited(r.Method, r.URL.Path)
 
 	flightID := p.m.RegisterInFlight(r.Method, r.URL.Path, limited)
 	defer p.m.DeregisterInFlight(flightID)

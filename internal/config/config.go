@@ -559,6 +559,9 @@ func routeLimiters(limitSpecs []string, releaseCooldown time.Duration) map[strin
 
 	for _, s := range limitSpecs {
 		pattern, _ := route.Parse(s) // validated by validateBasic
+		if pattern.Unlimited {
+			continue // exempt class: no limiter, never acquires a slot
+		}
 		if pattern.Limit == 0 {
 			continue // falls through to the default pool
 		}
