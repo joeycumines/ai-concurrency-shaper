@@ -544,7 +544,7 @@ func (h *TranscodeHandler) convertRequest(
 		// (parsed below with full media-range and q-value semantics — q=0
 		// excludes, malformed ranges are ignored). The response media type
 		// must agree with the resolved intent (merge gate 17).
-		StreamIntent: acceptIsEventStream(r.Header.Get("Accept")),
+		StreamIntent: AcceptIsEventStream(r.Header.Get("Accept")),
 	}
 
 	// Resolve the client model through the mapping once the decoded request
@@ -1545,7 +1545,7 @@ func effectiveAcceptPreference(ranges []acceptRange, mediaType, typeWildcard str
 	return best
 }
 
-// acceptIsEventStream reports whether the client's Accept header selects
+// AcceptIsEventStream reports whether the client's Accept header selects
 // text/event-stream as the most-preferred acceptable representation over
 // application/json. Every media range is parsed (media type and q); a q=0
 // range excludes the representation it names (an unmentioned representation
@@ -1556,7 +1556,7 @@ func effectiveAcceptPreference(ranges []acceptRange, mediaType, typeWildcard str
 // (exact type over type/* over */*); (3) order of appearance in the header.
 // A tie that remains (e.g. Accept: */*, or no acceptable representation at
 // all) defaults to application/json, the non-streaming representation.
-func acceptIsEventStream(accept string) bool {
+func AcceptIsEventStream(accept string) bool {
 	ranges := parseAcceptRanges(accept)
 	sse := effectiveAcceptPreference(ranges, "text/event-stream", "text/*")
 	jsonPref := effectiveAcceptPreference(ranges, "application/json", "application/*")

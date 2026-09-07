@@ -168,6 +168,8 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.intVar(&p.GlobalConcurrency, "global-concurrency", 0, "global concurrency limit (0 = disabled)")
 	r.boolVar(&p.LimitAll, "limit-all", false, "limit all requests, not just matching routes")
 	r.durationVar(&p.QueueTimeout, "queue-timeout", defaultQueueTimeout, "max time a request waits in the queue (0 = wait indefinitely)")
+	r.intVar(&p.QueueDepth, "queue-depth", 0, "max requests waiting for a slot at once (0 = unbounded; exceeding fails fast with 429 + Retry-After)")
+	r.durationVar(&p.QueueComments, "queue-comments", 0, "SSE queue-comment interval for streaming requests (0 = disabled; e.g. 15s commits the stream early and emits ': queue-wait' comments while queued)")
 
 	// Retry.
 	r.intVar(&p.RetryMax, "retry", defaultRetryMax, "max retries for limited requests (negative = unlimited)")

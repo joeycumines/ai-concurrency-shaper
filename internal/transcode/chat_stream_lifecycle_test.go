@@ -37,8 +37,8 @@ func TestAcceptIsEventStream(t *testing.T) {
 		{"bogus, text/event-stream", true},
 	}
 	for _, tt := range tests {
-		if got := acceptIsEventStream(tt.accept); got != tt.want {
-			t.Errorf("acceptIsEventStream(%q) = %v, want %v", tt.accept, got, tt.want)
+		if got := AcceptIsEventStream(tt.accept); got != tt.want {
+			t.Errorf("AcceptIsEventStream(%q) = %v, want %v", tt.accept, got, tt.want)
 		}
 	}
 }
@@ -101,8 +101,8 @@ func TestAcceptStreamSelectionQualityAndOrdering(t *testing.T) {
 		{"case-insensitive", "TEXT/EVENT-STREAM;Q=0.5, APPLICATION/JSON;Q=0.5", true},
 	}
 	for _, tt := range tests {
-		if got := acceptIsEventStream(tt.accept); got != tt.want {
-			t.Errorf("acceptIsEventStream(%q) = %v, want %v", tt.accept, got, tt.want)
+		if got := AcceptIsEventStream(tt.accept); got != tt.want {
+			t.Errorf("AcceptIsEventStream(%q) = %v, want %v", tt.accept, got, tt.want)
 		}
 	}
 }

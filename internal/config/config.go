@@ -118,6 +118,7 @@ type Provider struct {
 	LimitAll          bool
 	QueueTimeout      time.Duration
 	QueueDepth        int
+	QueueComments     time.Duration
 	RetryMax          int
 	// RetryMaxBodyMB is the max request body size in MiB retained for replay by
 	// the proxy retry transport. It propagates as the default RetryReplayBytes
@@ -375,6 +376,9 @@ func (p *Provider) validateBasic(index int, multi bool) error {
 	}
 	if p.QueueDepth < 0 {
 		return fmt.Errorf("%s-queue-depth must be >= 0, got %d", ctx(), p.QueueDepth)
+	}
+	if p.QueueComments < 0 {
+		return fmt.Errorf("%s-queue-comments must be >= 0, got %v", ctx(), p.QueueComments)
 	}
 	if p.RetryMaxBodyMB < 0 {
 		return fmt.Errorf("%s-retry-max-body-mb must be >= 0, got %d", ctx(), p.RetryMaxBodyMB)

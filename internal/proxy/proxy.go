@@ -66,7 +66,17 @@ type proxyConfig struct {
 	// Retry-After instead of queueing — the protocol signal AI clients and
 	// the official SDKs already handle (UNRESP-2/QUEUE-1; prevents silent
 	// blocking from amplifying into client retries).
-	queueDepthLimit        int
+	queueDepthLimit int
+	// queueComments is the SSE queue-comment interval for streaming
+	// requests (0 = disabled, the default). When enabled and the request's
+	// Accept header selects text/event-stream, the proxy commits 200 +
+	// SSE headers BEFORE admission and writes ": queue-wait elapsed=N"
+	// comment lines every interval while the request waits for a slot —
+	// keeping the client's connection visibly alive instead of silently
+	// blocking (QUEUE-1-B; operator PSA 2026-09-07: deterministically
+	// testable with the locally-installed Claude Code, since the upstream
+	// is only contacted after admission).
+	queueComments          time.Duration
 	globalLimiter          *queue.Limiter
 	routeLimiters          map[string]*queue.Limiter
 	maxRetries             int
@@ -233,6 +243,29 @@ func (o *QueueDepthLimitOption) applyProxyOption(cfg *proxyConfig) error {
 		return fmt.Errorf("proxy: queue depth limit must be >= 0, got %d", o.value)
 	}
 	cfg.queueDepthLimit = o.value
+	return nil
+}
+
+// WithQueueComments returns an option that enables SSE queue comments for
+// streaming requests: when the interval is positive and the request's Accept
+// header selects text/event-stream, the proxy commits 200 + SSE headers
+// BEFORE admission and writes ": queue-wait elapsed=N" comment lines every
+// interval while the request waits for a slot. 0 (the default) disables the
+// mode. Opt-in: once comments are committed the exchange is locked to the
+// streaming representation — later failures surface as stream failures, not
+// HTTP error statuses (the documented trade-off of the mode).
+func WithQueueComments(interval time.Duration) *QueueCommentsOption {
+	return &QueueCommentsOption{value: interval}
+}
+
+// QueueCommentsOption sets WithQueueComments.
+type QueueCommentsOption struct{ value time.Duration }
+
+func (o *QueueCommentsOption) applyProxyOption(cfg *proxyConfig) error {
+	if o.value < 0 {
+		return fmt.Errorf("proxy: queue comment interval must be >= 0, got %v", o.value)
+	}
+	cfg.queueComments = o.value
 	return nil
 }
 
@@ -608,13 +641,16 @@ type Proxy struct {
 	// queueDepthLimit bounds concurrent waiters (0 = unbounded). See
 	// WithQueueDepthLimit.
 	queueDepthLimit int
-	globalLimiter   *queue.Limiter
-	routeLimiters   map[string]*queue.Limiter
-	transport       http.RoundTripper
-	journal         *journal.Journal
-	breaker         *circuitbreaker.Breaker
-	cancelCooldown  time.Duration
-	failureHold     time.Duration
+	// queueComments is the SSE queue-comment interval (0 = disabled). See
+	// WithQueueComments.
+	queueComments  time.Duration
+	globalLimiter  *queue.Limiter
+	routeLimiters  map[string]*queue.Limiter
+	transport      http.RoundTripper
+	journal        *journal.Journal
+	breaker        *circuitbreaker.Breaker
+	cancelCooldown time.Duration
+	failureHold    time.Duration
 
 	// retryHandlesBreaker is true when the transport is a retry.Transport
 	// with a non-nil Breaker. In that case, the retry transport reports
@@ -838,6 +874,7 @@ func New(opts ...Option) (*Proxy, error) {
 		m:                      cfg.metrics,
 		timeout:                cfg.queueTimeout,
 		queueDepthLimit:        cfg.queueDepthLimit,
+		queueComments:          cfg.queueComments,
 		globalLimiter:          cfg.globalLimiter,
 		routeLimiters:          cfg.routeLimiters,
 		journal:                cfg.journal,
@@ -1689,6 +1726,22 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		}
 	}
 
+	// SSE queue comments (QUEUE-1-B, opt-in): commit the streaming
+	// representation BEFORE admission and keep the client's connection
+	// visibly alive while it waits. Eligibility requires the client's
+	// Accept header to select text/event-stream — the same signal the
+	// transcode layer uses as its default stream intent — so an exchange
+	// locked to the streaming representation is one that asked for it.
+	// The comments stop before the downstream flow writes the real
+	// response; while queued, the ticker goroutine is the only writer.
+	rec, recIsRecorder := w.(*statusRecorder)
+	var stopComments func()
+	if p.queueComments > 0 {
+		if recIsRecorder && transcode.AcceptIsEventStream(r.Header.Get("Accept")) {
+			stopComments = p.startQueueComments(rec)
+		}
+	}
+
 	p.m.IncQueued()
 	// Record the start of the queue phase precisely at the moment
 	// the request begins waiting for a limiter slot, overriding
@@ -1703,7 +1756,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	if err != nil {
 		// Record the moment the queue wait ended so that QueueDuration
 		// reflects the actual time spent waiting, not zero.
-		if rec, ok := w.(*statusRecorder); ok && rec.entry != nil {
+		if recIsRecorder && rec.entry != nil {
 			rec.entry.Timing.QueueEnd = time.Now()
 		}
 		if p.breaker != nil {
@@ -1711,13 +1764,38 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			p.m.IncTimeout()
-			http.Error(w, "queue timeout", http.StatusGatewayTimeout)
+			if stopComments != nil {
+				// The streaming representation was already committed: the
+				// failure surfaces as a failed close (error comment +
+				// aborted exchange), never as a misleading new HTTP status
+				// or a non-SSE body inside the committed stream.
+				stopComments()
+				rec.aborted = true
+				fmt.Fprintf(w, ": queue-wait failed: timeout\n\n")
+				_ = rec.FlushError()
+			} else {
+				http.Error(w, "queue timeout", http.StatusGatewayTimeout)
+			}
 		} else {
 			p.m.IncCancelled()
-			http.Error(w, "request canceled", http.StatusServiceUnavailable)
+			if stopComments != nil {
+				stopComments()
+				rec.aborted = true
+				fmt.Fprintf(w, ": queue-wait failed: canceled\n\n")
+				_ = rec.FlushError()
+			} else {
+				http.Error(w, "request canceled", http.StatusServiceUnavailable)
+			}
 		}
 		return
 	}
+	// The comments keep flowing through the GLOBAL limiter wait below —
+	// the request is not fully admitted until both the route limiter and
+	// the global limiter have granted a slot. Stopping here would leave a
+	// client behind a full global queue with stopped comments and resumed
+	// silence (exactly the UX the mode exists to prevent). The global
+	// error path stops them; the success path stops them after the
+	// global acquire.
 
 	// Phantom concurrency penalty: hold the slot after a qualifying
 	// UPSTREAM failure to prevent exceeding downstream concurrency limits.
@@ -1829,7 +1907,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		if err != nil {
 			// Record the moment the global limiter wait ended so that
 			// QueueDuration reflects the full queue time, not zero.
-			if rec, ok := w.(*statusRecorder); ok && rec.entry != nil {
+			if recIsRecorder && rec.entry != nil {
 				rec.entry.Timing.QueueEnd = time.Now()
 			}
 			if p.breaker != nil {
@@ -1837,14 +1915,36 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			}
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				p.m.IncTimeout()
-				http.Error(w, "queue timeout", http.StatusGatewayTimeout)
+				if stopComments != nil {
+					stopComments()
+					rec.aborted = true
+					fmt.Fprintf(w, ": queue-wait failed: timeout\n\n")
+					_ = rec.FlushError()
+				} else {
+					http.Error(w, "queue timeout", http.StatusGatewayTimeout)
+				}
 			} else {
 				p.m.IncCancelled()
-				http.Error(w, "request canceled", http.StatusServiceUnavailable)
+				if stopComments != nil {
+					stopComments()
+					rec.aborted = true
+					fmt.Fprintf(w, ": queue-wait failed: canceled\n\n")
+					_ = rec.FlushError()
+				} else {
+					http.Error(w, "request canceled", http.StatusServiceUnavailable)
+				}
 			}
 			return
 		}
 		defer globalRelease()
+	}
+
+	// All admission complete (per-route + global limiter): stop the queue
+	// comments and take over the ResponseWriter before the downstream flow
+	// writes the real response (the ticker goroutine must never interleave
+	// with it).
+	if stopComments != nil {
+		stopComments()
 	}
 
 	// Record the moment the slot was acquired — this is the end of queuing.
@@ -1988,6 +2088,48 @@ func (p *Proxy) acquireSlot(ctx context.Context, method, path string) (release f
 // ({"error":{...}}). The status and Retry-After are the machine signal the
 // official SDKs act on; the body is for human logs. The write goes through
 // the statusRecorder so the journal and status buckets capture the 429.
+// startQueueComments commits the SSE streaming representation (200 +
+// text/event-stream) BEFORE admission and writes ": queue-wait elapsed=N"
+// comment lines every p.queueComments interval, flushing each, until the
+// returned stop function is called. The stop function blocks until the
+// comment goroutine has finished its last write, so the caller can safely
+// take over the ResponseWriter. The recorder's commentsCommitted flag locks
+// the representation: later WriteHeader calls cannot change the status the
+// client already received (QUEUE-1-B).
+func (p *Proxy) startQueueComments(rec *statusRecorder) func() {
+	rec.commentsCommitted = true
+	rec.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	rec.Header().Set("Cache-Control", "no-cache")
+	rec.WriteHeader(http.StatusOK)
+	start := time.Now()
+	fmt.Fprintf(rec, ": queue-wait elapsed=0\n\n")
+	_ = rec.FlushError()
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(p.queueComments)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fmt.Fprintf(rec, ": queue-wait elapsed=%d\n\n", int(time.Since(start).Seconds()))
+				if rec.FlushError() != nil {
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		wg.Wait()
+	}
+}
+
 func writeQueueRejected(w http.ResponseWriter, depthLimit int, waiters int64) {
 	if rec, ok := w.(*statusRecorder); ok {
 		if !rec.terminalWritten {
@@ -2920,7 +3062,14 @@ type statusRecorder struct {
 	// fires only when the exchange actually completed the admission path,
 	// not on the queue-timeout/cancel/circuit-rejection early returns
 	// (autopsy 2026-09-06 M10).
-	admissionCompleted  bool
+	admissionCompleted bool
+	// commentsCommitted marks the SSE queue-comment mode (QUEUE-1-B): the
+	// streaming representation (200 + text/event-stream) was committed
+	// BEFORE admission, so the exchange is locked to the streaming
+	// representation — later WriteHeader calls cannot change what the
+	// client already received, and admission failures surface as stream
+	// error frames, never as HTTP error statuses.
+	commentsCommitted   bool
 	localUpgradeFailure bool
 
 	switchingProtocolsProbeResolved      atomic.Bool
@@ -2984,6 +3133,18 @@ func (r *statusRecorder) suppressibleClientAbort(ctxErr error) bool {
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
+	// QUEUE-1-B: once the queue-comment mode committed the streaming
+	// representation, the client has already received 200 + SSE headers —
+	// later WriteHeader calls cannot change that. A 200 dup is silenced
+	// (the handler re-commits on its streaming path); a non-200 (e.g. a
+	// representation-mismatch 502) marks the exchange aborted — the client
+	// sees the comments then a failed close, never a misleading new status.
+	if r.commentsCommitted {
+		if code >= 200 && code != http.StatusOK {
+			r.aborted = true
+		}
+		return
+	}
 	// Ignore duplicate terminal statuses in the journal, matching net/http
 	// behavior. Once a terminal status (>=200) is locked, subsequent
 	// terminal WriteHeader calls are forwarded to the underlying writer
