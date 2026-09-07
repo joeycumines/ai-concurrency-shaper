@@ -1728,11 +1728,22 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			effective = p.limiter
 		}
 		if effective != nil && effective.Stats().Waiters >= int64(p.queueDepthLimit) {
+			// The request carries a HALF_OPEN recovery probe (Allow()
+			// already admitted it); returning on the queue-rejection path
+			// without cancelling would strand the probe until the open
+			// timeout and block breaker recovery exactly under load
+			// (review ses_f82433a3affeYcnpN3ETKBmQxz).
+			if p.breaker != nil {
+				p.breaker.CancelProbe(breakerEpoch)
+			}
 			p.m.IncQueueRejected()
 			writeQueueRejected(w, p.queueDepthLimit, effective.Stats().Waiters)
 			return
 		}
 		if p.globalLimiter != nil && p.globalLimiter.Stats().Waiters >= int64(p.queueDepthLimit) {
+			if p.breaker != nil {
+				p.breaker.CancelProbe(breakerEpoch)
+			}
 			p.m.IncQueueRejected()
 			writeQueueRejected(w, p.queueDepthLimit, p.globalLimiter.Stats().Waiters)
 			return

@@ -3498,6 +3498,19 @@ func (s *anthropicResponsesStreamState) loseReasoningOnce() error {
 func (s *anthropicResponsesStreamState) reasoningPartAdded(
 	event ResponseReasoningSummaryPartAddedEvent,
 ) ([]AnthropicStreamEvent, error) {
+	if s.reasoningBlockIndex != nil {
+		// The Anthropic dialect cannot represent two concurrently-open
+		// content blocks: the Responses FSM tracks reasoning phase per
+		// item, so interleaved part lifecycles across items are FSM-legal
+		// but unrenderable — reject as corrupt upstream wire rather than
+		// misattribute deltas into the wrong block (review
+		// ses_f82433a3affeYcnpN3ETKBmQxz; the previous behavior panicked
+		// on the nil'd index after the first part closed).
+		return nil, s.wireError(fmt.Errorf(
+			"reasoning summary part added for %q while a thinking block is open",
+			event.ItemID,
+		))
+	}
 	if err := s.budget.addStateEntries(1); err != nil {
 		return nil, s.wireError(err)
 	}
@@ -3524,6 +3537,11 @@ func (s *anthropicResponsesStreamState) reasoningPartAdded(
 func (s *anthropicResponsesStreamState) reasoningTextDelta(
 	event ResponseReasoningSummaryTextDeltaEvent,
 ) ([]AnthropicStreamEvent, error) {
+	if s.reasoningBlockIndex == nil {
+		return nil, s.wireError(errors.New(
+			"reasoning summary delta with no open thinking block",
+		))
+	}
 	if err := s.budget.addEvent(); err != nil {
 		return nil, s.wireError(err)
 	}
@@ -3544,6 +3562,11 @@ func (s *anthropicResponsesStreamState) reasoningTextDelta(
 func (s *anthropicResponsesStreamState) reasoningPartDone(
 	event ResponseReasoningSummaryPartDoneEvent,
 ) ([]AnthropicStreamEvent, error) {
+	if s.reasoningBlockIndex == nil {
+		return nil, s.wireError(errors.New(
+			"reasoning summary part done with no open thinking block",
+		))
+	}
 	signature := SyntheticThinkingSignature
 	events := []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,

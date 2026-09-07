@@ -12,6 +12,7 @@ package transcode
 // provider_reasoning_text mapping.
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -216,5 +217,95 @@ func TestStreamReasoningRendersThinkingLifecycle(t *testing.T) {
 	}
 	if len(signatures) == 0 || signatures[0] != SyntheticThinkingSignature {
 		t.Fatalf("signature_delta must carry the marker signature: %v", signatures)
+	}
+}
+
+// TestAnthropicStreamReasoningInterleavedPartsRejected pins the review
+// finding (ses_f82433a3affeYcnpN3ETKBmQxz, 2026-09-08): the Responses FSM
+// tracks reasoning phase per item, so two items can concurrently hold open
+// summary parts, but the Anthropic dialect cannot represent two
+// concurrently-open content blocks — the render state holds exactly one
+// open thinking block. The pre-fix behavior let the second part.added
+// overwrite the block index (misattributing B's deltas into A's block) and
+// then panicked on a nil reasoningBlockIndex dereference inside the
+// converting reader after A's part.done — killing the whole proxy. The
+// rejection now fires at the second part.added as a typed upstream wire
+// error, so the panic window can never open.
+func TestAnthropicStreamReasoningInterleavedPartsRejected(t *testing.T) {
+	state := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"msg_1",
+		"claude-x",
+		1,
+	)
+	created := ResponseCreatedEvent{
+		Type: "response.created", SequenceNumber: 0,
+		Response: ResponseEnvelope{
+			ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
+			Output: []ResponsesOutputItem{},
+			Usage: &ResponsesUsage{
+				InputTokens: 0, OutputTokens: 0, TotalTokens: 0,
+				InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 0},
+				OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 0},
+			},
+		},
+	}
+	if _, err := state.Convert(created); err != nil {
+		t.Fatal(err)
+	}
+	part := ResponsesSummaryTextPart{Type: "summary_text", Text: ""}
+	if _, err := state.Convert(ResponseReasoningSummaryPartAddedEvent{
+		Type: "response.reasoning_summary_part.added", SequenceNumber: 1, ItemID: "rs_a", OutputIndex: 0, SummaryIndex: 0, Part: part,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := state.Convert(ResponseReasoningSummaryPartAddedEvent{
+		Type: "response.reasoning_summary_part.added", SequenceNumber: 2, ItemID: "rs_b", OutputIndex: 1, SummaryIndex: 0, Part: part,
+	})
+	if err == nil {
+		t.Fatal("a second concurrently-open thinking part must be rejected")
+	}
+	var wire *UpstreamWireError
+	if !errors.As(err, &wire) {
+		t.Fatalf("failure must be a typed upstream wire error, got %T: %v", err, err)
+	}
+}
+
+// TestAnthropicStreamReasoningNilIndexGuarded pins the defense-in-depth
+// guards: reasoningTextDelta and reasoningPartDone with no open thinking
+// block return typed upstream wire errors (mirroring the textDelta
+// precedent) instead of dereferencing the nil block index.
+func TestAnthropicStreamReasoningNilIndexGuarded(t *testing.T) {
+	state := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"msg_1",
+		"claude-x",
+		1,
+	)
+	part := ResponsesSummaryTextPart{Type: "summary_text", Text: ""}
+	_, err := state.reasoningTextDelta(ResponseReasoningSummaryTextDeltaEvent{
+		EventBase: EventBase{Type: "response.reasoning_summary_text.delta", SequenceNumber: 1},
+		ItemID:    "rs_a", OutputIndex: 0, SummaryIndex: 0, Delta: "x",
+	})
+	if err == nil {
+		t.Fatal("reasoningTextDelta with no open thinking block must fail")
+	}
+	var wire *UpstreamWireError
+	if !errors.As(err, &wire) {
+		t.Fatalf("reasoningTextDelta failure must be a typed upstream wire error, got %T: %v", err, err)
+	}
+	_, err = state.reasoningPartDone(ResponseReasoningSummaryPartDoneEvent{
+		EventBase: EventBase{Type: "response.reasoning_summary_part.done", SequenceNumber: 2},
+		ItemID:    "rs_a", OutputIndex: 0, SummaryIndex: 0, Part: part,
+	})
+	if err == nil {
+		t.Fatal("reasoningPartDone with no open thinking block must fail")
+	}
+	if !errors.As(err, &wire) {
+		t.Fatalf("reasoningPartDone failure must be a typed upstream wire error, got %T: %v", err, err)
 	}
 }
