@@ -1000,7 +1000,16 @@ func New(opts ...Option) (*Proxy, error) {
 			if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
 				p.m.IncCircuitRejected()
 				if rec, ok := w.(*statusRecorder); ok {
-					if !rec.terminalWritten {
+					if rec.commentsCommitted {
+						// The streaming representation was already
+						// committed: failed close, never a non-SSE error
+						// body inside the committed stream (the failed
+						// close is why the terminalWritten guard below
+						// cannot be relied on for this path).
+						rec.aborted = true
+						fmt.Fprintf(rec, ": queue-wait failed: circuit open\n\n")
+						_ = rec.FlushError()
+					} else if !rec.terminalWritten {
 						rec.proxyGeneratedError = true
 						http.Error(rec, "circuit open", http.StatusServiceUnavailable)
 					}
@@ -1009,7 +1018,11 @@ func New(opts ...Option) (*Proxy, error) {
 			}
 			slog.Error("proxy transport error", "error", sanitizeTransportError(err))
 			if rec, ok := w.(*statusRecorder); ok {
-				if !rec.terminalWritten {
+				if rec.commentsCommitted {
+					rec.aborted = true
+					fmt.Fprintf(rec, ": queue-wait failed: upstream\n\n")
+					_ = rec.FlushError()
+				} else if !rec.terminalWritten {
 					rec.proxyGeneratedError = true
 					http.Error(rec, "bad gateway", http.StatusBadGateway)
 				}
@@ -1734,11 +1747,23 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	// locked to the streaming representation is one that asked for it.
 	// The comments stop before the downstream flow writes the real
 	// response; while queued, the ticker goroutine is the only writer.
+	//
+	// Writing response bytes while the request body is still unconsumed
+	// makes the HTTP/1.1 server drain-and-close that body before the first
+	// flush (net/http writeHeader — the behavior behind Issue 15527) unless
+	// the handler enabled full duplex; the post-admission upstream send
+	// would then fail with "invalid Read on closed Body" (wire regression
+	// 2026-09-08, pinned by TestProxy_QueueCommentsPreserveRequestBody). A
+	// body-carrying request therefore requires a full-duplex writer; one
+	// that cannot (recorders, exotic embedders) falls back to the
+	// documented silent-queuing semantics instead of corrupting the body.
 	rec, recIsRecorder := w.(*statusRecorder)
 	var stopComments func()
 	if p.queueComments > 0 {
 		if recIsRecorder && transcode.AcceptIsEventStream(r.Header.Get("Accept")) {
-			stopComments = p.startQueueComments(rec)
+			if canCommitCommentsWithUnreadBody(r) || http.NewResponseController(rec).EnableFullDuplex() == nil {
+				stopComments = p.startQueueComments(rec)
+			}
 		}
 	}
 
@@ -2081,6 +2106,15 @@ func (p *Proxy) acquireSlot(ctx context.Context, method, path string) (release f
 	}
 	rel, err := p.limiter.Acquire(ctx)
 	return rel, p.limiter, err
+}
+
+// canCommitCommentsWithUnreadBody reports whether the early SSE commit can
+// proceed without enabling full duplex — i.e. whether the request carries
+// no body bytes the post-admission upstream send still needs. ContentLength
+// 0 covers both absent and empty bodies; a negative (chunked/unknown) or
+// positive length must assume bytes are pending and require full duplex.
+func canCommitCommentsWithUnreadBody(r *http.Request) bool {
+	return r.Body == nil || r.ContentLength == 0
 }
 
 // writeQueueRejected emits the bounded-queue 429: a Retry-After header plus

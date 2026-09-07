@@ -9,6 +9,7 @@ package proxy
 // failures, never as HTTP error statuses.
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -230,6 +231,200 @@ func TestProxy_QueueCommentsTimeoutAborts(t *testing.T) {
 		t.Fatalf("comments must flow before the timeout: %q", body)
 	}
 	snap := f.met.Snapshot()
+	if snap.TotalAborted != 1 {
+		t.Fatalf("TotalAborted = %d, want 1 (the committed stream failed)", snap.TotalAborted)
+	}
+	if snap.TotalProxied != 0 {
+		t.Fatalf("TotalProxied = %d, want 0 (no clean completion)", snap.TotalProxied)
+	}
+}
+
+// queueCommentsEchoUpstream starts an upstream that echoes the request body
+// back as "echo:<body>", recording the received body for assertions.
+func queueCommentsEchoUpstream(t *testing.T) (*httptest.Server, *string, *sync.Mutex) {
+	t.Helper()
+	var mu sync.Mutex
+	got := ""
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("upstream body read: %v", err)
+			return
+		}
+		mu.Lock()
+		got = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("echo:" + string(b)))
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream, &got, &mu
+}
+
+// TestProxy_QueueCommentsPreserveRequestBody pins the wire-smoke regression
+// (2026-09-08): committing the streaming representation BEFORE admission
+// writes response bytes while the request body is still unread, and the
+// real HTTP server then closes that body — the post-admission upstream send
+// failed with "http: invalid Read on closed Body". The proxy buffers the
+// body before the early commit; this test drives the proxy through a REAL
+// http server (httptest.NewServer) with a real request body and asserts the
+// body reaches the upstream intact.
+func TestProxy_QueueCommentsPreserveRequestBody(t *testing.T) {
+	upstream, got, mu := queueCommentsEchoUpstream(t)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pat, _ := route.Parse("POST /messages:1")
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueComments(20*time.Millisecond),
+		WithQueueTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p)
+	t.Cleanup(srv.Close)
+
+	const reqBody = `{"model":"m","max_tokens":10}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("response body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %q)", resp.StatusCode, respBody)
+	}
+	if !strings.Contains(string(respBody), ": queue-wait elapsed=0") {
+		t.Fatalf("early-commit comment marker missing: %q", respBody)
+	}
+	if !strings.Contains(string(respBody), "echo:"+reqBody) {
+		t.Fatalf("request body did not survive the early commit (no upstream echo): %q", respBody)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if *got != reqBody {
+		t.Fatalf("upstream received body %q, want %q", *got, reqBody)
+	}
+}
+
+// nonDuplexResponseWriter hides Unwrap/EnableFullDuplex behind an embedded
+// recorder, simulating a downstream writer that cannot support full-duplex
+// streaming.
+type nonDuplexResponseWriter struct{ *httptest.ResponseRecorder }
+
+// TestProxy_QueueCommentsBodyWithoutFullDuplexSilent pins the fallback: a
+// body-carrying request whose downstream writer cannot enable full duplex
+// must NOT lock the exchange to the streaming representation — comments are
+// skipped and the exchange completes through the normal silent path with
+// the body intact.
+func TestProxy_QueueCommentsBodyWithoutFullDuplexSilent(t *testing.T) {
+	f := newQueueCommentsFixture(t, 20*time.Millisecond, 10*time.Second)
+
+	firstDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		req.Header.Set("Accept", "application/json")
+		f.p.ServeHTTP(rec, req)
+		firstDone <- rec.Code
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	const reqBody = `{"model":"m","max_tokens":10}`
+	secondRec := nonDuplexResponseWriter{httptest.NewRecorder()}
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(reqBody))
+	secondReq.Header.Set("Accept", "text/event-stream")
+	secondDone := make(chan int, 1)
+	go func() {
+		f.p.ServeHTTP(secondRec, secondReq)
+		secondDone <- secondRec.Code
+	}()
+	time.Sleep(250 * time.Millisecond)
+
+	f.gateC.Do(func() { close(f.gate) })
+	if code := <-firstDone; code != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200", code)
+	}
+	if code := <-secondDone; code != http.StatusOK {
+		t.Fatalf("second request status = %d, want 200", code)
+	}
+	if body := secondRec.Body.String(); strings.Contains(body, ": queue-wait") {
+		t.Fatalf("body-carrying request without full duplex must fall back to silent queuing: %q", body)
+	}
+	if body := secondRec.Body.String(); !strings.Contains(body, "ok") {
+		t.Fatalf("queued request must complete normally after admission: %q", body)
+	}
+}
+
+// TestProxy_QueueCommentsTransportFailureFailedClose pins the post-commit
+// transport-failure contract: when the upstream send fails after the queue
+// comments committed the streaming representation, the client receives an
+// explicit failed-close comment (never silent EOF, never a non-SSE error
+// body), and the exchange counts as aborted.
+func TestProxy_QueueCommentsTransportFailureFailedClose(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream.Close()
+
+	pat, _ := route.Parse("POST /messages:1")
+	met := metrics.NewCollector()
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(met),
+		WithQueueComments(20*time.Millisecond),
+		WithQueueTimeout(10*time.Second),
+		WithMaxRetries(0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p)
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("response body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (committed by the early SSE commit)", resp.StatusCode)
+	}
+	if !strings.Contains(string(respBody), ": queue-wait elapsed=0") {
+		t.Fatalf("early-commit comment marker missing: %q", respBody)
+	}
+	if !strings.Contains(string(respBody), ": queue-wait failed: upstream") {
+		t.Fatalf("transport failure must emit an explicit failed-close comment: %q", respBody)
+	}
+	snap := met.Snapshot()
 	if snap.TotalAborted != 1 {
 		t.Fatalf("TotalAborted = %d, want 1 (the committed stream failed)", snap.TotalAborted)
 	}
