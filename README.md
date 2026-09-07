@@ -538,6 +538,21 @@ failure, never a silent fallback. The client's stream intent (the
   are stripped and nothing is injected (`none`) — a visible 401/403 from
   a missing credential is preferable to silently exporting a client
   credential across a provider boundary.
+- A secret-requiring `-transcode-auth` mode (`auto`, `bearer`,
+  `x-api-key`, `api-key`, `header`) without an explicit
+  `-transcode-auth-source` fails at startup — it never silently forwards
+  the client credential upstream. The resolution table:
+
+  | `-transcode-auth` | `-transcode-auth-source` | Result |
+  |-------------------|--------------------------|--------|
+  | _(unset)_ | _(unset)_ | inherit provider auth, else strip-only `none` |
+  | _(unset)_ | `env:`/`file:` | credential attached in the derived way |
+  | _(unset)_ | `inbound` | client credential forwarded (explicit opt-in) |
+  | `none` | _(any)_ | strip client credentials, inject nothing |
+  | secret-requiring mode | `env:`/`file:` | credential attached in the configured mode |
+  | secret-requiring mode | `inbound` | client credential forwarded in the configured mode |
+  | secret-requiring mode | `provider` | startup error (provider spelling cannot combine with `-transcode-auth`) |
+  | secret-requiring mode | _(unset)_ | **startup error** (`auth mode requires a secret source or inbound credentials`) |
 - Secrets are never accepted as command-line arguments. Inbound
   credentials are stripped before the target policy is applied: nothing is
   forwarded across provider boundaries unless the configured policy says

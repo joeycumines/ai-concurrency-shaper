@@ -253,8 +253,18 @@ func parseTranscodeAuth(
 	}
 
 	switch source {
-	case "", "inbound":
+	case "inbound":
+		// Explicit opt-in: the single client credential is forwarded to the
+		// transcode target.
 		policy.Inbound = true
+	case "":
+		// FAIL CLOSED (autopsy 2026-09-06 M6): no source declared and no
+		// inbound opt-in leaves Inbound=false and Secret=nil, so the
+		// mapping's auth validation rejects the policy at startup ("auth
+		// mode requires a secret source or inbound credentials") instead of
+		// silently forwarding the CLIENT credential upstream — the visible
+		// startup failure is preferable to an implicit credential export
+		// (GAP-005 adjudication principle).
 	default:
 		secret, err := secretSource(source)
 		if err != nil {

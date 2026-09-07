@@ -199,25 +199,33 @@ func (m Mapping) Validate() error {
 	}
 
 	if !m.Auth.IsZero() {
+		// The custom-header name checks run BEFORE the policy validation so
+		// an operator fixing a header-mode route sees the header-name error
+		// first, then the missing-source error (autopsy 2026-09-06 M6 made
+		// the missing source a startup failure).
+		if m.Auth.Mode == AuthCustomHeader {
+			if strings.TrimSpace(m.Auth.CustomHeader) == "" {
+				return fmt.Errorf("auth policy: custom auth header is empty")
+			}
+			// The custom header name must be a valid HTTP field name and
+			// must not collide with a header the proxy pipeline manages
+			// (auth stripping, hop-by-hop removal, representation
+			// sanitization).
+			if !ValidHTTPFieldName(m.Auth.CustomHeader) {
+				return fmt.Errorf(
+					"auth policy: custom header name %q is not a valid HTTP field name",
+					m.Auth.CustomHeader,
+				)
+			}
+			if reservedTranscodeHeaderName(m.Auth.CustomHeader) {
+				return fmt.Errorf(
+					"auth policy: custom header name %q is reserved by the proxy pipeline",
+					m.Auth.CustomHeader,
+				)
+			}
+		}
 		if err := m.Auth.Validate(m.UpstreamProtocol); err != nil {
 			return fmt.Errorf("auth policy: %w", err)
-		}
-	}
-	if m.Auth.Mode == AuthCustomHeader {
-		// The custom header name must be a valid HTTP field name and must
-		// not collide with a header the proxy pipeline manages (auth
-		// stripping, hop-by-hop removal, representation sanitization).
-		if !ValidHTTPFieldName(m.Auth.CustomHeader) {
-			return fmt.Errorf(
-				"auth policy: custom header name %q is not a valid HTTP field name",
-				m.Auth.CustomHeader,
-			)
-		}
-		if reservedTranscodeHeaderName(m.Auth.CustomHeader) {
-			return fmt.Errorf(
-				"auth policy: custom header name %q is reserved by the proxy pipeline",
-				m.Auth.CustomHeader,
-			)
 		}
 	}
 
