@@ -478,6 +478,14 @@ type ResponseSourceArtifacts struct {
 	// dialects cannot reproduce them, so their presence enters the explicit
 	// loss/reject decision at render time (review-j finding 13).
 	ResponsesControls []string
+
+	// ResponsesServiceTier is the upstream Responses response's service tier
+	// (empty when absent). The client dialects cannot represent the tier
+	// actually served; a non-empty value enters the explicit loss/reject
+	// decision at render time — the same decision the chat source's tier
+	// enters (autopsy 2026-09-06 M4: the Responses→Messages drop was
+	// silent).
+	ResponsesServiceTier string
 }
 
 // CanonicalResponse is the decoded model response in canonical form: an

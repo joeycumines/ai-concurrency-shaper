@@ -695,6 +695,9 @@ func DecodeResponsesResponse(
 			response.Source.ResponsesControls = append(response.Source.ResponsesControls, control.name)
 		}
 	}
+	if envelope.ServiceTier != nil {
+		response.Source.ResponsesServiceTier = *envelope.ServiceTier
+	}
 
 	if envelope.Usage != nil {
 		response.Usage = CanonicalUsage{
@@ -948,8 +951,21 @@ func RenderResponsesResponse(
 	// policy), never a silent zero — omitting the required field would just
 	// move the fabricated zero into the client's defaulting (review-k
 	// finding 6). The total is the source's own when provided, otherwise
-	// derived from the parts.
-	if !response.Usage.Unknown() {
+	// derived from the parts. The Responses wire does not require the usage
+	// object itself, so a source without usage renders without one — but
+	// the omission is recorded as a Note (a sanctioned elision, not a
+	// policy-gated loss: nothing the source sent was dropped), so the
+	// exchange's usage provenance stays observable (autopsy 2026-09-06 M4:
+	// the omission was silent).
+	if response.Usage.Unknown() {
+		if err := report.Note(
+			FeatureUsageUnknown,
+			"usage",
+			"the source response provided no token usage; the Responses usage object is omitted (the target wire does not require it)",
+		); err != nil {
+			return nil, report, err
+		}
+	} else {
 		envelope.Usage = &ResponsesUsage{
 			InputTokens:  response.Usage.InputTokens,
 			OutputTokens: response.Usage.OutputTokens,
@@ -1106,6 +1122,19 @@ func RenderMessagesResponse(
 			"output",
 			"the Responses envelope controls "+strings.Join(response.Source.ResponsesControls, ", ")+
 				" cannot be reproduced in a Messages response",
+		); err != nil {
+			return nil, report, err
+		}
+	}
+	// The Responses source's service tier enters the same loss/reject
+	// decision as the chat source's tier (autopsy 2026-09-06 M4: the
+	// Responses→Messages drop was silent).
+	if response.Source.ResponsesServiceTier != "" {
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeatureResponseServiceTier,
+			"service_tier",
+			"the upstream service tier actually served cannot be reproduced in a Messages response",
 		); err != nil {
 			return nil, report, err
 		}
