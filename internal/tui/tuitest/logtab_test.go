@@ -134,9 +134,13 @@ func TestPTY_GroupConflictWarningCaptured(t *testing.T) {
 }
 
 // TestPTY_TransportErrorToast verifies an actionable (error) log line triggers a
-// toast banner on the dashboard.
+// toast banner on the dashboard. Retries are disabled so the closed upstream
+// surfaces as a single transport error: with the default unlimited retries the
+// breaker opens mid-retry and the exchange ends as a circuit rejection (503,
+// no transport-error log line) — the correct M7 classification, but not the
+// scenario this toast test pins.
 func TestPTY_TransportErrorToast(t *testing.T) {
-	h := Launch(t)
+	h := Launch(t, WithArgs("-retry", "0"))
 	defer h.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
