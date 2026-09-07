@@ -133,6 +133,10 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 						{Role: CanonicalSystem, Parts: []CanonicalPart{CanonicalText{Text: "two"}}},
 					},
 				}
+				request.Turns = append(request.Turns, CanonicalTurn{
+					Role:  CanonicalUser,
+					Parts: []CanonicalPart{CanonicalText{Text: "hi"}},
+				})
 				context := testExchangeContext()
 				context.LossPolicy = policy
 				_, report, err := RenderResponsesRequest(request, context)
@@ -153,6 +157,10 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 						}},
 					}},
 				}
+				request.Turns = append(request.Turns, CanonicalTurn{
+					Role:  CanonicalUser,
+					Parts: []CanonicalPart{CanonicalText{Text: "hi"}},
+				})
 				context := testExchangeContext()
 				context.LossPolicy = policy
 				_, report, err := RenderResponsesRequest(request, context)

@@ -1426,6 +1426,17 @@ func RenderResponsesRequest(
 	// Render user/assistant turns into input items, preserving order. A
 	// turn's content parts become one easy message; function calls and
 	// results become their own items after it.
+	//
+	// A source request with no conversation turns renders "input":[] — the
+	// pinned Responses contract requires input, and an empty item list is
+	// not a legal substitute for a missing conversation. This matches the
+	// Messages→Chat direction, which rejects the same source shape
+	// (autopsy 2026-09-06 M3: the directions disagreed).
+	if len(conversationTurns) == 0 {
+		return nil, report, errors.New(
+			"the source request has no Messages-representable conversation turns for the Responses input",
+		)
+	}
 	for _, turn := range conversationTurns {
 		var contentParts []CanonicalPart
 		for _, part := range turn.Parts {

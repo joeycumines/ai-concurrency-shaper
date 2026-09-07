@@ -283,11 +283,15 @@ func envelopeWithControls() ResponseEnvelope {
 // text-join encoding note (review-j finding 13).
 func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 	// Multiple system turns: a loss/reject decision, never an items array.
+	// A dialog turn accompanies the system turns: an empty conversation is
+	// rejected on the Responses target (autopsy M3), so the instructions
+	// scenarios carry user input too.
 	request := CanonicalRequest{
 		ClientModel: "m",
 		Turns: []CanonicalTurn{
 			{Role: CanonicalSystem, Parts: []CanonicalPart{CanonicalText{Text: "one"}}},
 			{Role: CanonicalSystem, Parts: []CanonicalPart{CanonicalText{Text: "two"}}},
+			{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: "hi"}}},
 		},
 	}
 	permissive := testExchangeContext()
@@ -308,10 +312,13 @@ func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 	// A document system part is loss-gated with system_non_text_content.
 	request = CanonicalRequest{
 		ClientModel: "m",
-		Turns: []CanonicalTurn{{
-			Role:  CanonicalSystem,
-			Parts: []CanonicalPart{CanonicalDocument{URL: "https://example.com/doc.pdf"}},
-		}},
+		Turns: []CanonicalTurn{
+			{
+				Role:  CanonicalSystem,
+				Parts: []CanonicalPart{CanonicalDocument{URL: "https://example.com/doc.pdf"}},
+			},
+			{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: "hi"}}},
+		},
 	}
 	permissive = testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
@@ -331,13 +338,16 @@ func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 	// Multiple text parts in one system turn join with the named encoding.
 	request = CanonicalRequest{
 		ClientModel: "m",
-		Turns: []CanonicalTurn{{
-			Role: CanonicalSystem,
-			Parts: []CanonicalPart{
-				CanonicalText{Text: "one"},
-				CanonicalText{Text: "two"},
+		Turns: []CanonicalTurn{
+			{
+				Role: CanonicalSystem,
+				Parts: []CanonicalPart{
+					CanonicalText{Text: "one"},
+					CanonicalText{Text: "two"},
+				},
 			},
-		}},
+			{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: "hi"}}},
+		},
 	}
 	rendered, report, err = RenderResponsesRequest(request, testExchangeContext())
 	if err != nil {
