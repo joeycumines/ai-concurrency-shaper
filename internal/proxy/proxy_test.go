@@ -2146,8 +2146,14 @@ func TestProxy_RetryTransportErrCircuitOpenNotUpstreamFailure(t *testing.T) {
 
 			firstRec := httptest.NewRecorder()
 			p.ServeHTTP(firstRec, httptest.NewRequest(tt.method, tt.path, nil))
-			if firstRec.Code != http.StatusBadGateway {
-				t.Fatalf("first response status = %d body=%q, want proxy-generated 502 from retry-side ErrCircuitOpen", firstRec.Code, firstRec.Body.String())
+			// Autopsy 2026-09-06 M7: a breaker that opened between retries is
+			// the same rejection the pre-flight Allow() check produces —
+			// 503 + IncCircuitRejected — never a proxy 502.
+			if firstRec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("first response status = %d body=%q, want 503 from retry-side ErrCircuitOpen", firstRec.Code, firstRec.Body.String())
+			}
+			if got := met.Snapshot().TotalCircuitRejected; got != 1 {
+				t.Fatalf("TotalCircuitRejected after retry-side ErrCircuitOpen = %d, want 1 (the rejection is counted like the pre-flight check)", got)
 			}
 			if got := calls.Load(); got != 1 {
 				t.Fatalf("transport calls after first request = %d, want only breaker-neutral 404 before retry Allow rejected", got)

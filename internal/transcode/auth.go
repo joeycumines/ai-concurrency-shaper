@@ -121,6 +121,16 @@ type SecretSource interface {
 	Secret(context.Context) (string, error)
 }
 
+// staticSecretSource pins an already-resolved secret value: the mapping
+// freeze contract resolves the credential once at handler construction, so
+// a mutable custom source can never change live behavior (autopsy
+// 2026-09-06 M9).
+type staticSecretSource string
+
+func (s staticSecretSource) Secret(context.Context) (string, error) {
+	return string(s), nil
+}
+
 // RequestSigner signs a final request. Sign runs last, after the final URL,
 // query, body, Host, and representation headers are set.
 type RequestSigner interface {

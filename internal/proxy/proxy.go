@@ -658,8 +658,15 @@ func New(opts ...Option) (*Proxy, error) {
 	// Freeze the auth policy: the credential is resolved once and pinned, so
 	// a mutable custom SecretSource or caller mutation of the policy after
 	// New cannot change live behavior, and source failures surface here
-	// (review-08 additional 2).
+	// (review-08 additional 2). Validate runs BEFORE the Rewrite hook can
+	// rely on it: an invalid programmatic policy (unknown mode, missing
+	// secret source, unresolved auto) fails construction instead of
+	// degrading per request to strip-only forwarding (autopsy 2026-09-06
+	// M8).
 	if cfg.authPolicy != nil {
+		if err := cfg.authPolicy.Validate(); err != nil {
+			return nil, fmt.Errorf("proxy: auth policy: %w", err)
+		}
 		frozen, err := auth.FreezeAuthPolicy(context.Background(), cfg.authPolicy)
 		if err != nil {
 			return nil, fmt.Errorf("proxy: freeze auth policy: %w", err)
@@ -913,6 +920,22 @@ func New(opts ...Option) (*Proxy, error) {
 				}
 			}
 			if isContextCancellation(r.Context().Err()) && isContextCancellation(err) {
+				return
+			}
+			// A breaker that opened between retries is the same rejection the
+			// pre-flight Allow() check produces (503 + IncCircuitRejected),
+			// not an upstream transport failure: the exchange never reached
+			// the upstream, and isUpstreamFailureStatus already excludes
+			// retryCircuitOpen from breaker classification (autopsy
+			// 2026-09-06 M7 — the 502 left the counter blind).
+			if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
+				p.m.IncCircuitRejected()
+				if rec, ok := w.(*statusRecorder); ok {
+					if !rec.terminalWritten {
+						rec.proxyGeneratedError = true
+						http.Error(rec, "circuit open", http.StatusServiceUnavailable)
+					}
+				}
 				return
 			}
 			slog.Error("proxy transport error", "error", sanitizeTransportError(err))

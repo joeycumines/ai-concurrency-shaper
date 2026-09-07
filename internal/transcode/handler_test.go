@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"io"
 	"log"
@@ -2254,7 +2255,11 @@ func (leakingPathSecret) Secret(context.Context) (string, error) {
 
 // TestHandlerInternalErrorSanitized proves internal construction errors
 // (secret file paths) never leak into the client message (review-j finding
-// 14); the detail is logged instead.
+// 14); the detail is logged instead. Autopsy 2026-09-06 M9: the mapping
+// secret is resolved once at construction, so a failing source panics
+// construction with a wrapped error — the leak-prevention contract moves to
+// the construction panic (the detail never reaches a client, because no
+// client exchange ever starts).
 func TestHandlerInternalErrorSanitized(t *testing.T) {
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
@@ -2266,7 +2271,17 @@ func TestHandlerInternalErrorSanitized(t *testing.T) {
 	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
 	mapping.AllowedClientQuery = map[string]struct{}{}
 
-	handler := NewTranscodeHandler(
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("NewTranscodeHandler must panic when the mapping secret cannot be resolved")
+		}
+		msg := fmt.Sprintf("%v", r)
+		if !strings.Contains(msg, "resolve mapping auth secret") {
+			t.Fatalf("panic = %v, want the secret-resolution error", msg)
+		}
+	}()
+	NewTranscodeHandler(
 		HandlerConfig{
 			Mapping:  mapping,
 			Upstream: mustParseURL(t, "https://upstream.example"),
@@ -2281,22 +2296,6 @@ func TestHandlerInternalErrorSanitized(t *testing.T) {
 		},
 		nil,
 	)
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/v1/responses",
-		strings.NewReader(`{"model":"m","input":"x"}`),
-	)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", rec.Code)
-	}
-	if strings.Contains(rec.Body.String(), "/etc/secrets") {
-		t.Fatalf("client message leaks the secret file path: %q", rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "internal error") {
-		t.Fatalf("client message should be generic: %q", rec.Body.String())
-	}
 }
 
 // TestHandlerResponsesRequestMissingToolStrictRejected proves the pinned

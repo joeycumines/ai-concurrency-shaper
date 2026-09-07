@@ -143,8 +143,19 @@ func NewTranscodeHandler(
 	// The configuration is frozen at construction: the mapping and upstream
 	// URL are deep-copied once into the private configuration, so
 	// programmatic callers can never mutate live configuration (review-z
-	// commit 4).
+	// commit 4). The mapping's Secret source is resolved ONCE here into a
+	// static source (when not the inbound-forwarding mode): a mutable
+	// custom SecretSource can no longer change live behavior or fail
+	// mid-exchange — the same freeze contract the provider auth policy
+	// satisfies through auth.FreezeAuthPolicy (autopsy 2026-09-06 M9).
 	cfg.Mapping = cloneMapping(cfg.Mapping)
+	if !cfg.Mapping.Auth.Inbound && cfg.Mapping.Auth.Secret != nil {
+		secret, err := cfg.Mapping.Auth.Secret.Secret(context.Background())
+		if err != nil {
+			panic(fmt.Sprintf("transcode: resolve mapping auth secret: %v", err))
+		}
+		cfg.Mapping.Auth.Secret = staticSecretSource(strings.TrimSpace(secret))
+	}
 	upstream := *cfg.Upstream
 	cfg.Upstream = &upstream
 	// Startup observability (GAP-011, operator choice: aggregate + startup
