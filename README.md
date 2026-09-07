@@ -372,7 +372,23 @@ Capabilities are exercised only when the client actually uses the feature:
 `provider_reasoning_text` maps the chat provider reasoning response
 extension — spelled `reasoning` (OpenRouter style) or `reasoning_content`
 (the DeepSeek/Qwen convention open-weights gateways stream) — to client
-text; `parallel_tool_calls` forwards the parallel-tool-calls setting. Two
+text; `parallel_tool_calls` forwards the parallel-tool-calls setting.
+
+**Why reasoning renders as ordinary text, not "thinking".** An Anthropic
+client (Claude Code) displays the mapped reasoning as regular assistant
+text — that is expected, not a rendering quirk. The alternative, emitting a
+`type: "thinking"` block, would require an Anthropic-issued `signature`:
+Anthropic's contract treats the signature as verification material, and a
+synthesized or unsigned thinking block is rejected with a 400 when the
+client replays it in a follow-up turn. The proxy therefore never
+synthesizes thinking, redacted thinking, or signatures (a hard invariant —
+see AGENTS.md), and ordinary text is the only lossless-compatible
+rendering. Operators who prefer no visible reasoning can withdraw the
+capability (`-transcode-chat-capability '!provider_reasoning_text'`); the
+provider's reasoning text then drops under the named
+`provider_reasoning_text` loss instead.
+
+Two
 capabilities are opt-in because generic upstreams reject what they render:
 `reasoning_effort` forwards the Responses `reasoning.effort` (and an
 Anthropic `thinking` budget, see below) as the chat `reasoning_effort`
@@ -579,6 +595,21 @@ smaller than the minimum legal terminal or error frame are rejected at
 startup — a stream that could never emit its terminal is a configuration
 error, not a runtime surprise.
 
+### `count_tokens` against a chat-only upstream
+
+`POST /v1/messages/count_tokens` has no chat-completions equivalent, so it
+is **never** transcoded: it passes through transparently and a chat-only
+upstream answers 404. That is deliberate. Claude Code does not hang on the
+404 — it degrades through its own fallbacks (documented by operators as
+silent `max_tokens: 1` probe requests that read back the input usage). The
+proxy deliberately does not shim, estimate, or synthesize a count: a
+constant-zero stub suppresses client context-management (compaction) and
+turning the count into a completion is billable, consumes a concurrency
+slot, and is exactly the workaround real gateways (Bifrost) rejected. The
+operational pain with this route is not the 404 but queueing — fix it with
+the limiter-class workaround in [Client-visible queue
+semantics](#client-visible-queue-semantics).
+
 ### Failure taxonomy
 
 | Exchange | Classification |
@@ -667,6 +698,22 @@ test — the regression harness then holds the shape permanently.
 ## How Concurrency Protection Works
 
 The proxy uses a token-bucket channel to enforce the concurrency limit. Each limited request acquires a token; the token is returned when the request completes. This bounds the proxy's internal concurrency, but the downstream may still observe more due to accounting lag (see above).
+
+### Client-visible queue semantics
+
+A limited request blocks until a slot opens — that is the feature: the client call waits instead of failing, so clients need no retry/backoff logic of their own. While a request waits, its connection stays open with **zero response bytes**: no headers are committed until the request is admitted, converted, and the upstream has responded. An AI client cannot distinguish this wait from a dead connection, and most agents (including Claude Code) enforce their own deadlines — a request blocked past the client's effective timeout is aborted **and retried**, which amplifies load on a bounded queue. Size `-queue-timeout` against the client's effective deadline (well below it): an expired queue wait fails visibly with `504 queue timeout` instead of hanging silently. The TUI shows queue depth and active slots so the operator can see what the client cannot.
+
+**Cheap endpoints must not share the completion pool.** Under `-limit-all=true`, *every* request is limiter-admitted — including cheap auxiliary routes like `POST /v1/messages/count_tokens`, which does **not** match the end-anchored `/messages` pattern and therefore falls through to the default pool. A token-count probe then queues behind 80–200s streaming completions and the calling agent appears to hang. Give cheap routes their own limiter class:
+
+```sh
+ai-concurrency-shaper \
+  -limit-all=true \
+  -concurrency=2 \
+  -limit "POST /messages:2" \
+  -limit "POST /messages/count_tokens:8@count_tokens"
+```
+
+Two rules make this work: any explicit `-limit` flag **replaces** the automatic default patterns (so `POST /messages` must be listed explicitly), and `/messages` is end-anchored — it never captures `/messages/count_tokens`, so the two routes stay independent. A `-global-concurrency` still couples every class behind one shared limiter; omit it or size it deliberately.
 
 The concurrency protection flags insert dead zones between slot release and re-admission:
 
