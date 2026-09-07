@@ -263,10 +263,14 @@ func (r *convertingReader) appendErrorEvent(err error) error {
 // isUpstreamConversionError reports whether the conversion error carries
 // upstream provenance: the error came from real upstream data that failed
 // conversion, not from a local decode/render/validation step. Corrupt
-// upstream wire (UpstreamWireError) is always upstream; a StreamConversionError
+// upstream wire (UpstreamWireError) and internally inconsistent source data
+// (SourceInconsistencyError) are always upstream; a StreamConversionError
 // is upstream only when its provenance says so (review-k finding 3).
 func isUpstreamConversionError(err error) bool {
 	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
+		return true
+	}
+	if _, ok := errors.AsType[*SourceInconsistencyError](err); ok {
 		return true
 	}
 	var convErr *StreamConversionError

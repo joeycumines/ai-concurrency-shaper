@@ -388,6 +388,27 @@ func (e *UsageArithmeticError) Error() string {
 	return "usage arithmetic: " + e.Detail
 }
 
+// SourceInconsistencyError is returned when the SOURCE response's own data
+// is internally inconsistent — token counts that violate nonnegative
+// arithmetic or a cached breakdown exceeding the input total — discovered at
+// render time (the decode-side totals were individually well-formed). It is
+// corrupt upstream data, not a local conversion failure: the exchange
+// classifies as an upstream body failure on every surface (the non-stream
+// conversionProvenance and the stream isUpstreamConversionError both name
+// this type), so a poisonous upstream is breaker-visible (autopsy
+// 2026-09-06 M2).
+type SourceInconsistencyError struct {
+	// Detail names the violated invariant.
+	Detail string
+}
+
+func (e *SourceInconsistencyError) Error() string {
+	if e.Detail == "" {
+		return "source response is internally inconsistent"
+	}
+	return "source usage is arithmetically inconsistent: " + e.Detail
+}
+
 // upstreamWireError wraps cause as corrupt upstream wire data. A cause that
 // is or carries an UnsupportedFeatureError is NEVER wrapped: a valid source
 // feature this transcoder knows but does not support is a local conversion

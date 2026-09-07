@@ -3239,9 +3239,9 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, err
 	}
 	if usage.InputTokens < 0 || cached < 0 || cacheWrite < 0 || usage.InputTokens-cached-cacheWrite < 0 ||
 		usage.OutputTokens < 0 || reasoning < 0 {
-		return nil, errors.New(
-			"source usage is arithmetically inconsistent: nonnegative token counts required and cached tokens must not exceed the input total",
-		)
+		return nil, &SourceInconsistencyError{
+			Detail: "nonnegative token counts required and cached tokens must not exceed the input total",
+		}
 	}
 	// The responses contract defines total_tokens as input + output
 	// EXACTLY: a known total that is not their exact sum is corrupt

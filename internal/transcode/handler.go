@@ -868,12 +868,17 @@ func (h *TranscodeHandler) checkDecodedRequestSize(rendered []byte) error {
 }
 
 // conversionProvenance classifies a response-conversion error: corrupt
-// upstream wire data (UpstreamWireError) is an upstream body failure; valid
-// source features the transcoder does not support (UnsupportedFeatureError),
-// loss-policy rejections, and target-render failures stay local (review-k
-// finding 3).
+// upstream wire data (UpstreamWireError) and internally inconsistent source
+// data (SourceInconsistencyError — the decode-side totals were individually
+// well-formed, so the contradiction surfaces at render) are upstream body
+// failures; valid source features the transcoder does not support
+// (UnsupportedFeatureError), loss-policy rejections, and target-render
+// failures stay local (review-k finding 3; autopsy 2026-09-06 M2).
 func conversionProvenance(err error) ExchangeProvenance {
 	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
+		return ProvenanceUpstreamBodyError
+	}
+	if _, ok := errors.AsType[*SourceInconsistencyError](err); ok {
 		return ProvenanceUpstreamBodyError
 	}
 	return ProvenanceLocalResponseConversionError

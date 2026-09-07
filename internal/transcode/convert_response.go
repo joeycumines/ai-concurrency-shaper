@@ -24,7 +24,7 @@ type chatResponseShadow struct {
 	ID                string             `json:"id"`
 	Object            *string            `json:"object"`
 	Created           int64              `json:"created"`
-	Model             string             `json:"model"`
+	Model             *string            `json:"model"`
 	ServiceTier       *string            `json:"service_tier,omitempty"`
 	SystemFingerprint string             `json:"system_fingerprint,omitempty"`
 	Choices           []chatChoiceShadow `json:"choices"`
@@ -177,6 +177,17 @@ func DecodeChatResponseWithPolicy(
 			UpstreamChatCompletions,
 			0,
 			fmt.Errorf("chat response object = %q, want \"chat.completion\"", derefStr(shadow.Object)),
+		)
+	}
+	// model is a required field of the pinned Chat response contract: absent
+	// or empty is corrupt upstream wire, classified upstream so a poisonous
+	// upstream is breaker-visible instead of failing locally at the IR
+	// validation (autopsy 2026-09-06 M2).
+	if shadow.Model == nil || *shadow.Model == "" {
+		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
+			UpstreamChatCompletions,
+			0,
+			errors.New("chat response has no model"),
 		)
 	}
 	if len(shadow.Choices) == 0 {
@@ -652,6 +663,16 @@ func DecodeResponsesResponse(
 		if envelope.Error != nil {
 			response.ErrorMessage = envelope.Error.Message
 		}
+	case "":
+		// An absent or empty status is a missing required semantic field —
+		// corrupt upstream wire, classified upstream so a poisonous upstream
+		// is breaker-visible (autopsy 2026-09-06 M2). A PRESENT but unknown
+		// status stays an unsupported feature (local) below.
+		return CanonicalResponse{}, upstreamWireError(
+			UpstreamResponses,
+			0,
+			errors.New("responses response has no status"),
+		)
 	default:
 		return CanonicalResponse{}, &UnsupportedFeatureError{
 			Protocol: "responses",
@@ -1270,9 +1291,9 @@ func RenderMessagesResponse(
 		inputTokens := response.Usage.InputTokens
 		cached := response.Usage.CacheReadTokens + response.Usage.CacheWriteTokens
 		if inputTokens < 0 || cached < 0 || inputTokens-cached < 0 {
-			return nil, report, errors.New(
-				"source usage is arithmetically inconsistent: nonnegative token counts required and cached tokens must not exceed the input total",
-			)
+			return nil, report, &SourceInconsistencyError{
+				Detail: "nonnegative token counts required and cached tokens must not exceed the input total",
+			}
 		}
 		// Checked, architecture-independent int64-to-int conversion before
 		// rendering Messages usage: a count that cannot be represented on
