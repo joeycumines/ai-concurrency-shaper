@@ -39,10 +39,20 @@ func TestChatToolResultMultiPartTextJoinReported(t *testing.T) {
 		if !reportHasFeature(report, FeatureToolResultTextJoin) {
 			t.Fatalf("%s: silent join: report lacks tool_result_text_join: %+v", name, report)
 		}
+		// EXACTLY ONE note: a duplicate Note would spam the aggregated loss
+		// line (gate run 1 MEDIUM).
+		entries := 0
 		for _, entry := range report.Losses {
-			if entry.Feature == FeatureToolResultTextJoin && entry.Kind != NoteRecord {
+			if entry.Feature != FeatureToolResultTextJoin {
+				t.Fatalf("%s: unexpected report entry: %+v", name, entry)
+			}
+			if entry.Kind != NoteRecord {
 				t.Fatalf("%s: join entry kind = %v, want NoteRecord", name, entry.Kind)
 			}
+			entries++
+		}
+		if entries != 1 {
+			t.Fatalf("%s: join entries = %d, want exactly 1", name, entries)
 		}
 	}
 
