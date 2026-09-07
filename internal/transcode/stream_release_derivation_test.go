@@ -7,9 +7,11 @@ package transcode
 // (charged against the exchange accumulated total).
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -335,5 +337,227 @@ func TestEchoCapLiveHandler413(t *testing.T) {
 		if rec.Code != http.StatusRequestEntityTooLarge {
 			t.Fatalf("stream=%t: status = %d body=%q, want 413", stream, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+// TestPerEventFramingChargeCoversAllShapes pins the 256-byte per-event
+// framing charge BY CONSTRUCTION (review ses_f82433a3affeYcnpN3ETKBmQxz):
+// every generated non-terminal frame shape from both stream converters is
+// re-marshaled with the worst-case large sequence number and long identity
+// strings, and its FIXED overhead (frame bytes minus payload bytes) must fit
+// maxStreamPerEventFramingBytes. An under-count would let the exchange
+// generated total fire before the event budget — the M1 round-3 F1
+// regression — for streams of legal tiny deltas with long identities.
+func TestPerEventFramingChargeCoversAllShapes(t *testing.T) {
+	// maxStreamPerEventFramingBytes is the fixed overhead each generated
+	// frame may contribute to the exchange generated total. The
+	// measurement: (full frame bytes incl. SSE framing) minus (payload
+	// bytes), re-marshaled with maximal-width numbers and identities.
+	const charge = int(maxStreamPerEventFramingBytes)
+
+	type shape struct {
+		name    string
+		typ     string
+		payload string // the JSON data of the frame, as generated
+	}
+	var shapes []shape
+
+	measure := func(name string, events []ResponsesSSEEvent) {
+		t.Helper()
+		builder := &ResponsesEventBuilder{}
+		for i := range events {
+			// Re-stamp worst-case widths: a maximal int64 sequence number
+			// and long item/identity strings are legal wire values, so the
+			// fixed overhead must cover them.
+			events[i] = restampForFramingProbe(t, events[i], builder)
+			data, err := MarshalResponsesEvent(events[i])
+			if err != nil {
+				t.Fatalf("%s: marshal: %v", name, err)
+			}
+			shapes = append(shapes, shape{name: name + ":" + events[i].EventType(), typ: events[i].EventType(), payload: string(data)})
+		}
+	}
+
+	// --- chat -> responses: every delta shape ---
+	chatState := newChatResponsesStreamState(
+		testStreamContext(), StrictLossPolicy(), ChatCapabilities{},
+		"resp_1", "gpt-4.1", 1710000000, nil,
+	)
+	roleChunk := chatChunk(t, ChatStreamDelta{Role: new("assistant"), Content: new("H")}, nil)
+	events, err := chatState.Convert(roleChunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	measure("chat→responses", events)
+	// Plain text delta (the dominant shape of a legal tiny-delta stream).
+	events, err = chatState.Convert(chatChunk(t, ChatStreamDelta{Content: new("x")}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	measure("chat→responses", events)
+	// Tool-call delta (identity rendered per event).
+	events, err = chatState.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{{
+		Index:    new(0),
+		ID:       new("call_worst_case_identity_string"),
+		Type:     new("function"),
+		Function: ChatToolCallFunction{Name: new("fn_worst_case_name_string"), Arguments: "{}"},
+	}}}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	measure("chat→responses", events)
+	// Finish reason chunk.
+	events, err = chatState.Convert(chatChunk(t, ChatStreamDelta{}, new("stop")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	measure("chat→responses", events)
+	// Terminal event (usage envelope) is measured for information but
+	// excluded from the charge assertion: the terminal batch carries its
+	// own bound (GeneratedSSEBatchBytes) and the derivation adds it
+	// separately.
+	terminalEvents, err := chatState.Convert(ChatStreamResponse{
+		ID: "chatcmpl-1", Object: "chat.completion.chunk", Created: 1710000000, Model: "gpt-4.1",
+		Choices: []ChatChoice{},
+		Usage: &ChatLLMUsage{
+			PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+			PromptTokensDetails:     &ChatPromptTokensDetails{CachedTokens: 0},
+			CompletionTokensDetails: &ChatCompletionTokensDetails{ReasoningTokens: 0},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	measure("chat→responses-terminal", terminalEvents)
+
+	// --- responses -> anthropic: every render shape ---
+	anthropicState := newAnthropicResponsesStreamState(
+		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{ProviderReasoningThinking: true},
+		"msg_1", "claude-x", 1710000000,
+	)
+	created := ResponseCreatedEvent{
+		Type: "response.created", SequenceNumber: 0,
+		Response: ResponseEnvelope{
+			ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
+			Output: []ResponsesOutputItem{},
+			Usage: &ResponsesUsage{
+				InputTokens: 0, OutputTokens: 0, TotalTokens: 0,
+				InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 0},
+				OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 0},
+			},
+		},
+	}
+	convEvents, err := anthropicState.Convert(created)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var anthropicFrames []AnthropicStreamEvent
+	anthropicFrames = append(anthropicFrames, convEvents...)
+	part := &ResponsesSummaryTextPart{Type: "summary_text", Text: ""}
+	for _, ev := range []ResponsesSSEEvent{
+		ResponseOutputItemAddedEvent{Type: "response.output_item.added", SequenceNumber: 1, OutputIndex: 0, Item: &ResponsesOutputMessage{ID: "msg_worst_case_identity_string", Type: "message", Role: "assistant", Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{}}},
+		ResponseContentPartAddedEvent{Type: "response.content_part.added", SequenceNumber: 2, ItemID: "msg_worst_case_identity_string", OutputIndex: 0, ContentIndex: 0, Part: &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}}},
+		ResponseTextDeltaEvent{Type: "response.output_text.delta", SequenceNumber: 3, ItemID: "msg_worst_case_identity_string", OutputIndex: 0, ContentIndex: 0, Delta: "x", Logprobs: []ResponsesTextLogprob{}},
+		ResponseReasoningSummaryPartAddedEvent{Type: "response.reasoning_summary_part.added", SequenceNumber: 4, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Part: *part},
+		ResponseReasoningSummaryTextDeltaEvent{Type: "response.reasoning_summary_text.delta", SequenceNumber: 5, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Delta: "x"},
+		ResponseReasoningSummaryTextDoneEvent{Type: "response.reasoning_summary_text.done", SequenceNumber: 6, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Text: "x"},
+		ResponseReasoningSummaryPartDoneEvent{Type: "response.reasoning_summary_part.done", SequenceNumber: 7, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Part: *part},
+	} {
+		out, err := anthropicState.Convert(ev)
+		if err != nil {
+			t.Fatalf("%T: %v", ev, err)
+		}
+		anthropicFrames = append(anthropicFrames, out...)
+	}
+	for _, ev := range anthropicFrames {
+		data, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shapes = append(shapes, shape{name: "responses→anthropic:" + string(ev.Type), typ: string(ev.Type), payload: string(data)})
+	}
+
+	// Measure every non-terminal shape: fixed overhead = full SSE frame
+	// minus payload, with worst-case widths.
+	worst := 0
+	worstName := ""
+	for _, s := range shapes {
+		full := len("event: ") + len(s.typ) + len("\ndata: ") + len(s.payload) + len("\n\n")
+		overhead := full - len(s.payload)
+		// writeFrameBytesBounded reserves len(Type)+16 on top of data; the
+		// charge covers the same fixed cost.
+		if s.typ == "response.completed" || s.typ == "response.failed" || s.typ == "response.incomplete" || s.typ == "message_stop" {
+			continue
+		}
+		if overhead > worst {
+			worst = overhead
+			worstName = s.name
+		}
+	}
+	t.Logf("worst non-terminal fixed overhead = %d bytes (%s), charge = %d", worst, worstName, charge)
+	if worst > charge {
+		t.Fatalf("frame shape %s has fixed overhead %d > charge %d: the generated total can fire before the event budget (M1 F1 regression)", worstName, worst, charge)
+	}
+}
+
+// restampForFramingProbe replaces an event's sequence number and item
+// identity strings with worst-case widths so the measured overhead covers
+// legal maximal frames.
+func restampForFramingProbe(t *testing.T, event ResponsesSSEEvent, builder *ResponsesEventBuilder) ResponsesSSEEvent {
+	t.Helper()
+	switch e := event.(type) {
+	case ResponseCreatedEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseInProgressEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseOutputItemAddedEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseContentPartAddedEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseTextDeltaEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseTextDoneEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseContentPartDoneEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseOutputItemDoneEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseFunctionCallArgumentsDeltaEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseFunctionCallArgumentsDoneEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseRefusalDeltaEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseRefusalDoneEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseReasoningSummaryPartAddedEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseReasoningSummaryTextDeltaEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseReasoningSummaryTextDoneEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseReasoningSummaryPartDoneEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	case ResponseCompletedEvent:
+		e.SequenceNumber = int64(math.MaxInt64)
+		return e
+	default:
+		return event
 	}
 }
