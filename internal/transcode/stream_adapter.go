@@ -3,6 +3,7 @@ package transcode
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
@@ -344,6 +345,15 @@ func decodeResponsesSSEEvent(data []byte) (ResponsesSSEEvent, error) {
 	}
 
 	// Return by value so the value-type switches in the state machines match.
+	return typedResponsesEvent(event)
+}
+
+// typedResponsesEvent maps a decoded wire event to its value form. The
+// switch must cover every event type openairesponses.DecodeEvent returns;
+// an unmapped type is an internal invariant break surfaced as a typed error,
+// never a panic — the conversion runs on the stream-copy goroutine, where an
+// escaping panic kills the process (autopsy 2026-09-06 M5).
+func typedResponsesEvent(event openairesponses.Event) (ResponsesSSEEvent, error) {
 	switch probe := event.(type) {
 	case *openairesponses.CreatedEvent:
 		return *probe, nil
@@ -386,7 +396,10 @@ func decodeResponsesSSEEvent(data []byte) (ResponsesSSEEvent, error) {
 	case *openairesponses.ErrorEvent:
 		return *probe, nil
 	default:
-		panic("unreachable: validated event type")
+		return nil, fmt.Errorf(
+			"responses stream event type %T decoded but is not mapped to a typed event",
+			event,
+		)
 	}
 }
 

@@ -500,10 +500,14 @@ func responsesInputToTurns(
 					err,
 				)
 			}
+			raw, err := rawMessage(arguments)
+			if err != nil {
+				return nil, fmt.Errorf("input item %d: function call arguments: %w", i, err)
+			}
 			part := CanonicalFunctionCall{
 				CallID:    value.CallID,
 				Name:      value.Name,
-				Arguments: mustRawMessage(arguments),
+				Arguments: raw,
 			}
 			turns = appendFunctionCallTurn(turns, part)
 
@@ -772,14 +776,18 @@ func canonicalizeResponsesToolChoice(
 	return &CanonicalToolChoice{Mode: *choice.Str}, nil
 }
 
-// mustRawMessage marshals a map into a raw JSON object. The map is already
-// validated JSON by decodeJSONObject, so marshaling cannot fail.
-func mustRawMessage(value map[string]json.RawMessage) json.RawMessage {
+// rawMessage marshals a map into a raw JSON object. The map comes from
+// decodeJSONObject, so every value is valid JSON by construction and
+// marshaling cannot fail — but the conversion runs on the stream-copy
+// goroutine in the composed directions, where an escaping panic kills the
+// process, so the impossible failure is surfaced as a typed error instead of
+// a panic (autopsy 2026-09-06 M5).
+func rawMessage(value map[string]json.RawMessage) (json.RawMessage, error) {
 	raw, err := json.Marshal(value)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("tool arguments object: %w", err)
 	}
-	return raw
+	return raw, nil
 }
 
 // flattenNamespaceTool returns the nested function tools of a namespace
@@ -1275,10 +1283,14 @@ func anthropicContentToCanonical(
 			if err != nil {
 				return nil, fmt.Errorf("content block %d: tool_use input: %w", i, err)
 			}
+			raw, err := rawMessage(arguments)
+			if err != nil {
+				return nil, fmt.Errorf("content block %d: tool_use input: %w", i, err)
+			}
 			parts = append(parts, CanonicalFunctionCall{
 				CallID:    *block.ID,
 				Name:      *block.Name,
-				Arguments: mustRawMessage(arguments),
+				Arguments: raw,
 			})
 
 		case AnthropicContentBlockTypeToolResult:

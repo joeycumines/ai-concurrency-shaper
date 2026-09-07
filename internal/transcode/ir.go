@@ -394,12 +394,17 @@ type ToolArguments struct {
 
 // ParseToolArguments parses raw model-generated arguments: on a successful
 // strict object decode the parsed clone is stored and IsObject is true;
-// otherwise the raw text is preserved and IsObject stays false.
+// otherwise the raw text is preserved and IsObject stays false. The raw
+// remarshal cannot fail (the strict object decode validated every value),
+// so a failure falls back to the raw text — never a panic (autopsy
+// 2026-09-06 M5).
 func ParseToolArguments(raw string) ToolArguments {
 	out := ToolArguments{Raw: raw}
 	if object, err := decodeJSONObject(raw); err == nil {
-		out.Object = mustRawMessage(object)
-		out.IsObject = true
+		if marshaled, marshalErr := rawMessage(object); marshalErr == nil {
+			out.Object = marshaled
+			out.IsObject = true
+		}
 	}
 	return out
 }

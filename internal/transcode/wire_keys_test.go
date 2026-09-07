@@ -288,9 +288,12 @@ func TestRawKeyChatRequest(t *testing.T) {
 			{Role: CanonicalAssistant, Parts: []CanonicalPart{
 				CanonicalText{Text: "sure"},
 				CanonicalFunctionCall{
-					CallID:    "call_1",
-					Name:      "get_weather",
-					Arguments: mustRawMessage(map[string]json.RawMessage{"location": json.RawMessage(`"tokyo"`)}),
+					CallID: "call_1",
+					Name:   "get_weather",
+					Arguments: func() json.RawMessage {
+						raw, _ := rawMessage(map[string]json.RawMessage{"location": json.RawMessage(`"tokyo"`)})
+						return raw
+					}(),
 				},
 			}},
 		},
