@@ -118,6 +118,7 @@ func WritePrometheusFleet(w io.Writer, providers []ProviderSnapshot) error {
 		gauge("shaper_clean_passthrough_total", func(s *Snapshot) int64 { return s.TotalPassThrough }),
 		gauge("shaper_aborted_total", func(s *Snapshot) int64 { return s.TotalAborted }),
 		gauge("shaper_circuit_rejected_total", func(s *Snapshot) int64 { return s.TotalCircuitRejected }),
+		gauge("shaper_queue_rejected_total", func(s *Snapshot) int64 { return s.TotalQueueRejected }),
 	}
 	for bucket := 1; bucket < int(statusBuckets); bucket++ {
 		b := bucket

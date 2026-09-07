@@ -199,9 +199,9 @@ func TestWritePrometheusFleetGroupsByMetricName(t *testing.T) {
 	}
 
 	runs := familyRunCounts(t, buf.String())
-	// 7 gauges + shaper_requests_total (one family, five labeled series)
-	// + breaker = 9 distinct metric names.
-	wantFamilies := 9
+	// 8 gauges + shaper_requests_total (one family, five labeled series)
+	// + breaker = 10 distinct metric names.
+	wantFamilies := 10
 	if len(runs) != wantFamilies {
 		t.Errorf("exported %d distinct metric names, want %d:\n%s", len(runs), wantFamilies, buf.String())
 	}

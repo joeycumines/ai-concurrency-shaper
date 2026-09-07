@@ -98,6 +98,7 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 		proxy.WithLimiter(p.DefaultLimiter()),
 		proxy.WithMetrics(met),
 		proxy.WithQueueTimeout(p.QueueTimeout),
+		proxy.WithQueueDepthLimit(p.QueueDepth),
 		proxy.WithGlobalLimiter(p.GlobalLimiter()),
 		proxy.WithRouteLimiters(p.RouteLimiters()),
 		proxy.WithMaxRetries(p.RetryMax),

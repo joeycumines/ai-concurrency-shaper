@@ -40,6 +40,7 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-concurrency` | provider | `4` | Max concurrent limited requests |
 | `-global-concurrency` | provider | `0` | Global concurrency limit (0 = disabled) |
 | `-queue-timeout` | provider | `30s` | Max wait for a concurrency slot |
+| `-queue-depth` | provider | `0` | Max requests waiting for a slot at once (0 = unbounded, the documented blocking semantics). When the bound is reached, arriving requests fail fast with `429 Too Many Requests` + `Retry-After` — the protocol signal AI clients and the official SDKs already act on — instead of queueing silently and amplifying into client-side retries |
 | `-upstream-disable-keep-alives` | provider | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
 | `-retry` | provider | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
 | `-retry-max-body-mb` | provider | `5` | Max request body size (MB) eligible for retry |

@@ -55,11 +55,18 @@ type Option interface {
 // --- Unexported Config Struct ---
 
 type proxyConfig struct {
-	upstream               *url.URL
-	matcher                *route.Matcher
-	limiter                *queue.Limiter
-	metrics                *metrics.Collector
-	queueTimeout           time.Duration
+	upstream     *url.URL
+	matcher      *route.Matcher
+	limiter      *queue.Limiter
+	metrics      *metrics.Collector
+	queueTimeout time.Duration
+	// queueDepthLimit bounds how many requests may WAIT for a slot at once
+	// (0 = unbounded, the default). A limited request arriving when the
+	// waiters count already reaches the bound fails fast with 429 +
+	// Retry-After instead of queueing — the protocol signal AI clients and
+	// the official SDKs already handle (UNRESP-2/QUEUE-1; prevents silent
+	// blocking from amplifying into client retries).
+	queueDepthLimit        int
 	globalLimiter          *queue.Limiter
 	routeLimiters          map[string]*queue.Limiter
 	maxRetries             int
@@ -206,6 +213,27 @@ type QueueTimeoutOption struct {
 // Zero means use the request context deadline.
 func WithQueueTimeout(d time.Duration) *QueueTimeoutOption {
 	return &QueueTimeoutOption{value: d}
+}
+
+// WithQueueDepthLimit returns an option that bounds how many requests may
+// wait for a slot at once. 0 (the default) is unbounded. A limited request
+// arriving when the waiters count already reaches the bound fails fast with
+// 429 Too Many Requests + Retry-After instead of queueing: the protocol
+// signal AI clients and the official SDKs already handle, preventing silent
+// blocking from amplifying into client-side retries.
+func WithQueueDepthLimit(n int) *QueueDepthLimitOption {
+	return &QueueDepthLimitOption{value: n}
+}
+
+// QueueDepthLimitOption sets WithQueueDepthLimit.
+type QueueDepthLimitOption struct{ value int }
+
+func (o *QueueDepthLimitOption) applyProxyOption(cfg *proxyConfig) error {
+	if o.value < 0 {
+		return fmt.Errorf("proxy: queue depth limit must be >= 0, got %d", o.value)
+	}
+	cfg.queueDepthLimit = o.value
+	return nil
 }
 
 func (o *QueueTimeoutOption) applyProxyOption(cfg *proxyConfig) error {
@@ -572,18 +600,21 @@ var (
 
 // Proxy is a concurrency-bounded reverse proxy.
 type Proxy struct {
-	inner          *httputil.ReverseProxy
-	matcher        *route.Matcher
-	limiter        *queue.Limiter
-	m              *metrics.Collector
-	timeout        time.Duration
-	globalLimiter  *queue.Limiter
-	routeLimiters  map[string]*queue.Limiter
-	transport      http.RoundTripper
-	journal        *journal.Journal
-	breaker        *circuitbreaker.Breaker
-	cancelCooldown time.Duration
-	failureHold    time.Duration
+	inner   *httputil.ReverseProxy
+	matcher *route.Matcher
+	limiter *queue.Limiter
+	m       *metrics.Collector
+	timeout time.Duration
+	// queueDepthLimit bounds concurrent waiters (0 = unbounded). See
+	// WithQueueDepthLimit.
+	queueDepthLimit int
+	globalLimiter   *queue.Limiter
+	routeLimiters   map[string]*queue.Limiter
+	transport       http.RoundTripper
+	journal         *journal.Journal
+	breaker         *circuitbreaker.Breaker
+	cancelCooldown  time.Duration
+	failureHold     time.Duration
 
 	// retryHandlesBreaker is true when the transport is a retry.Transport
 	// with a non-nil Breaker. In that case, the retry transport reports
@@ -806,6 +837,7 @@ func New(opts ...Option) (*Proxy, error) {
 		limiter:                cfg.limiter,
 		m:                      cfg.metrics,
 		timeout:                cfg.queueTimeout,
+		queueDepthLimit:        cfg.queueDepthLimit,
 		globalLimiter:          cfg.globalLimiter,
 		routeLimiters:          cfg.routeLimiters,
 		journal:                cfg.journal,
@@ -1621,6 +1653,42 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		r = r.WithContext(p.withRetryAttemptContext(r.Context(), &retryAttempt))
 	}
 
+	// Bounded-queue admission (QUEUE-1): when a depth limit is configured,
+	// a request arriving while the effective limiter already holds the
+	// bound in waiters fails fast with 429 + Retry-After — the protocol
+	// signal AI clients and the official SDKs already handle — instead of
+	// queueing silently and amplifying into client-side retries. The check
+	// mirrors acquireSlot's limiter selection (first-matching pattern's
+	// route limiter, else the default pool, then the global limiter) so the
+	// bound applies to the queue the request would actually join. The
+	// waiters count is a point-in-time snapshot: a burst may overshoot the
+	// bound slightly, which is the documented soft-bound semantics.
+	if p.queueDepthLimit > 0 {
+		var effective *queue.Limiter
+		if pat := p.matcher.FindMatch(r.Method, r.URL.Path); pat != nil {
+			key := pat.Group
+			if key == "" {
+				key = pat.Raw
+			}
+			if lim, ok := p.routeLimiters[key]; ok {
+				effective = lim
+			}
+		}
+		if effective == nil {
+			effective = p.limiter
+		}
+		if effective != nil && effective.Stats().Waiters >= int64(p.queueDepthLimit) {
+			p.m.IncQueueRejected()
+			writeQueueRejected(w, p.queueDepthLimit, effective.Stats().Waiters)
+			return
+		}
+		if p.globalLimiter != nil && p.globalLimiter.Stats().Waiters >= int64(p.queueDepthLimit) {
+			p.m.IncQueueRejected()
+			writeQueueRejected(w, p.queueDepthLimit, p.globalLimiter.Stats().Waiters)
+			return
+		}
+	}
+
 	p.m.IncQueued()
 	// Record the start of the queue phase precisely at the moment
 	// the request begins waiting for a limiter slot, overriding
@@ -1913,6 +1981,26 @@ func (p *Proxy) acquireSlot(ctx context.Context, method, path string) (release f
 	}
 	rel, err := p.limiter.Acquire(ctx)
 	return rel, p.limiter, err
+}
+
+// writeQueueRejected emits the bounded-queue 429: a Retry-After header plus
+// a JSON error body valid under both AI dialects' envelope conventions
+// ({"error":{...}}). The status and Retry-After are the machine signal the
+// official SDKs act on; the body is for human logs. The write goes through
+// the statusRecorder so the journal and status buckets capture the 429.
+func writeQueueRejected(w http.ResponseWriter, depthLimit int, waiters int64) {
+	if rec, ok := w.(*statusRecorder); ok {
+		if !rec.terminalWritten {
+			rec.proxyGeneratedError = true
+		}
+	}
+	seconds := 5
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = fmt.Fprintf(w,
+		`{"error":{"type":"rate_limit_error","message":"gateway concurrency queue is full: %d requests already waiting (limit %d); retry after %d seconds"}}`,
+		waiters, depthLimit, seconds)
 }
 
 func isUpstreamFailureStatus(rec *statusRecorder, now time.Time, ctxErr error) bool {

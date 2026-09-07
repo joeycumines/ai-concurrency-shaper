@@ -97,6 +97,7 @@ type Collector struct {
 	totalTimeout       atomic.Int64
 	totalCancelled     atomic.Int64
 	totalCircuitReject atomic.Int64
+	totalQueueReject   atomic.Int64
 	totalAborted       atomic.Int64
 
 	retriesInFlight atomic.Int64
@@ -186,6 +187,12 @@ func (c *Collector) RetriesInFlightCounter() *atomic.Int64 { return &c.retriesIn
 // the circuit breaker was OPEN. These are immediate pre-queue rejections,
 // distinct from queue timeouts.
 func (c *Collector) IncCircuitRejected() { c.totalCircuitReject.Add(1) }
+
+// IncQueueRejected increments the counter for requests rejected because the
+// bounded-queue depth limit was reached (the 429 fail-fast admission class).
+// Like circuit rejections, these are immediate pre-queue rejections: the
+// request never waited for a slot.
+func (c *Collector) IncQueueRejected() { c.totalQueueReject.Add(1) }
 
 // RecordStatus records an HTTP status code.
 // A code of 0 is ignored (it indicates the response was never written to).
@@ -490,6 +497,7 @@ func (c *Collector) Reset() {
 	c.totalTimeout.Store(0)
 	c.totalCancelled.Store(0)
 	c.totalCircuitReject.Store(0)
+	c.totalQueueReject.Store(0)
 	c.totalAborted.Store(0)
 	for i := range c.statusCounts {
 		c.statusCounts[i].Store(0)
@@ -525,6 +533,7 @@ func (c *Collector) Snapshot() Snapshot {
 	s.TotalTimeout = c.totalTimeout.Load()
 	s.TotalCancelled = c.totalCancelled.Load()
 	s.TotalCircuitRejected = c.totalCircuitReject.Load()
+	s.TotalQueueRejected = c.totalQueueReject.Load()
 	s.TotalAborted = c.totalAborted.Load()
 	for i := range c.statusCounts {
 		s.StatusCounts[i] = c.statusCounts[i].Load()
@@ -573,6 +582,7 @@ type Snapshot struct {
 	TotalTimeout         int64
 	TotalCancelled       int64
 	TotalCircuitRejected int64
+	TotalQueueRejected   int64
 	TotalAborted         int64
 	StatusCounts         [6]int64
 	LogEntries           []RequestLogEntry
