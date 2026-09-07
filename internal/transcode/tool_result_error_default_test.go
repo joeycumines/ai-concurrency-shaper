@@ -8,6 +8,7 @@ package transcode
 
 import (
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -71,6 +72,11 @@ func TestIsErrorToolResultConvertsUnderDefaultProfile(t *testing.T) {
 	handler := newIsErrorTestHandler(t, cliDefaultStylePolicy(), func(req *http.Request) (*http.Response, error) {
 		return chatOKResponse(), nil
 	})
+	var logs logBuffer
+	prev := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prev)
+
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"model":"m","max_tokens":100,
 		"messages":[
@@ -82,7 +88,24 @@ func TestIsErrorToolResultConvertsUnderDefaultProfile(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%q — the CLI default profile must convert is_error tool results (live Claude Code failure)", rec.Code, rec.Body.String())
 	}
+	// The decision is OBSERVABLE: exactly one request-stage loss line naming
+	// the feature (REM-M acceptance).
+	joined := logs.String()
+	if !strings.Contains(joined, "tool_result_error_status at messages[].tool_result.is_error") {
+		t.Fatalf("loss log lacks the tool_result_error_status entry: %q", joined)
+	}
+	if got := strings.Count(joined, "tool_result_error_status at messages[].tool_result.is_error"); got != 1 {
+		t.Fatalf("tool_result_error_status loss line appears %d times, want exactly 1", got)
+	}
 }
+
+// logBuffer collects log output.
+type logBuffer struct {
+	b strings.Builder
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) { return l.b.Write(p) }
+func (l *logBuffer) String() string              { return l.b.String() }
 
 func TestIsErrorToolResultStrictPolicyStillRejects(t *testing.T) {
 	handler := newIsErrorTestHandler(t, StrictLossPolicy(), func(req *http.Request) (*http.Response, error) {
