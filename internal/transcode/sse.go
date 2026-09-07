@@ -21,8 +21,8 @@ const maxSSELineBytes = 1 << 20
 
 // maxSSEFrameBytes bounds the total data payload of one SSE event read from
 // the upstream wire. Generated downstream frames are bounded separately by
-// maxGeneratedSSEFrameBytes, which must accommodate the worst-case escaping
-// of a maximally accumulated part (see limits.go).
+// maxGeneratedSSEFrameBytes, which derives from the exchange accumulated
+// total and the request echo bound (see limits.go).
 const maxSSEFrameBytes = 1 << 20
 
 // errSSELineOversized is returned by readSSELine when a line exceeds

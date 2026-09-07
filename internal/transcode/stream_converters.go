@@ -190,6 +190,21 @@ func (s *chatResponsesStreamState) checkAccumulated(builder *strings.Builder, ad
 	return nil
 }
 
+// chargeIdentity adds n bytes of tool-call identity (call id, function name)
+// to the exchange accumulated total: identity renders into the terminal
+// envelope and the done events, so it is part of the repeated semantic
+// state the release bounds derive from (autopsy 2026-09-06 M1 round 4).
+func (s *chatResponsesStreamState) chargeIdentity(n int) error {
+	s.totalAccumulated += int64(n)
+	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
+		return s.wireError(fmt.Errorf(
+			"chat stream accumulated tool-call identity exceeds the exchange total of %d bytes",
+			maxStreamTotalAccumulatedBytes,
+		))
+	}
+	return nil
+}
+
 // loseServiceTierOnce records the service-tier loss exactly once per stream:
 // the tier is a chunk-envelope attribute whose presence on any chunk enters
 // the decision once, not once per chunk (review-k finding 9).
@@ -788,10 +803,22 @@ func (s *chatResponsesStreamState) convertToolCall(
 		))
 	}
 
-	if call.ID != nil && *call.ID != "" {
+	// Tool-call identity (call id, function name) renders into the terminal
+	// envelope and the done events, so it is semantic state: charge new
+	// identity bytes against the exchange accumulated total exactly like
+	// text/refusal/arguments (autopsy 2026-09-06 M1 round 4 — an unbounded
+	// identity would defeat the release-bound derivation; repeated
+	// fragments carrying the same id are charged once).
+	if call.ID != nil && *call.ID != "" && pending.callID != *call.ID {
+		if err := s.chargeIdentity(len(*call.ID)); err != nil {
+			return nil, err
+		}
 		pending.callID = *call.ID
 	}
-	if call.Function.Name != nil && *call.Function.Name != "" {
+	if call.Function.Name != nil && *call.Function.Name != "" && pending.name != *call.Function.Name {
+		if err := s.chargeIdentity(len(*call.Function.Name)); err != nil {
+			return nil, err
+		}
 		pending.name = *call.Function.Name
 	}
 	if call.Function.Arguments != "" {

@@ -345,15 +345,15 @@ func TestStreamTotalStateBound(t *testing.T) {
 	})
 }
 
-// TestGeneratedFrameBoundAfterJSONEscaping proves generated downstream
-// frames are bounded AFTER marshaling: a payload whose JSON escaping
-// amplifies it beyond the generated-frame bound is rejected with the typed
-// SSE frame error (review-08 blocker 7; autopsy 2026-09-06 M1 re-anchored
-// the bound above the accumulated bound so an ACCEPTED accumulation always
-// releases — the escaping bound is now only reachable when the accumulated
-// state itself was rejected, i.e. via a delta that stays under the
-// accumulated bound part-wise but repeats across parts of one item, plus
-// escaping).
+// TestGeneratedFrameBoundAfterJSONEscaping pins the marshaling-order
+// enforcement of the generated-frame bound (review-08 blocker 7): a delta
+// whose JSON escaping amplifies it (600 KiB of '<' renders at 3.6 MiB) is
+// accepted within the derived frame bound, and the SECOND identical delta
+// exceeds the per-item accumulated bound and is rejected as corrupt upstream
+// wire — the frame bound is never the failure for state the accumulators
+// accepted (autopsy 2026-09-06 M1: the release bounds derive from the
+// exchange total and the echo bound, so accepted accumulation always
+// releases).
 func TestGeneratedFrameBoundAfterJSONEscaping(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -365,25 +365,6 @@ func TestGeneratedFrameBoundAfterJSONEscaping(t *testing.T) {
 		nil,
 	)
 	converter := newChatToResponsesConverter(state)
-	// Two deltas of 600 KiB of '<' each stay under the 1 MiB per-item
-	// accumulated bound (1.2 MiB total... exceeds it) — use one delta of
-	// 600 KiB (accepted, escapes to 3.6 MiB) plus a second part of 600 KiB:
-	// parts reset the accumulator, so each part is individually accepted,
-	// the item total stays at 1.2 MiB under the 4 MiB exchange total, and
-	// the marshaled frame for the terminal item (6 * 1.2 MiB = 7.2 MiB)
-	// exceeds the 7 MiB generated-frame bound.
-	//
-	// Actually feed a single accepted 600 KiB delta first, then a second
-	// 600 KiB delta: same accumulator per part is reset only between parts,
-	// so drive the part boundary through the Anthropic direction's part
-	// structure is not available here — instead use two separate
-	// conversions on the SAME state via distinct output_text parts. The
-	// chat direction has no part structure, so the bound is exercised with
-	// one 600 KiB delta repeated as two parts of one item through the
-	// Responses upstream direction instead. The chat→responses direction
-	// below simply proves a single accepted delta that escapes past the
-	// generated-frame bound when combined with the item envelope is
-	// rejected at marshal time.
 	delta := strings.Repeat("<", 600*1024)
 	_, err := converter.Convert(SSEEvent{Data: []byte(
 		"{\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" + delta + "\"},\"finish_reason\":null}]}",
@@ -445,6 +426,32 @@ func TestResponsesMaximalPartAcceptedAndReleasable(t *testing.T) {
 		maxPart,
 	)); err != nil {
 		t.Fatalf("an exactly-maximal part must be accepted and releasable (autopsy M1): %v", err)
+	}
+	// Release the stream: text done, part done, item done, then
+	// response.completed — the terminal conversion carries the maximal
+	// part within the derived release bounds. "Releasable" is asserted by
+	// the successful terminal conversion, not by comment. The done text
+	// echoes the accumulated part exactly (the converter verifies the
+	// accumulated text).
+	if err := feed("response.output_text.done", fmt.Sprintf(
+		`{"type":"response.output_text.done","sequence_number":4,"item_id":"m1","output_index":0,"content_index":0,"text":%q,"logprobs":[]}`,
+		maxPart,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := feed("response.content_part.done",
+		`{"type":"response.content_part.done","sequence_number":5,"item_id":"m1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := feed("response.output_item.done", fmt.Sprintf(
+		`{"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"id":"m1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":%q,"annotations":[]}]}}`,
+		maxPart,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if err := feed("response.completed",
+		`{"type":"response.completed","sequence_number":7,"response":{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"m","output":[]}}`); err != nil {
+		t.Fatalf("the maximal-part exchange must complete its terminal conversion (M1): %v", err)
 	}
 }
 
@@ -591,12 +598,12 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 			t.Fatal(err)
 		}
 		// A single upstream frame already at the 1 MiB wire bound full of
-		// '<' (escapes 6x to ~6 MiB) no longer exceeds the generated-frame
-		// bound (7 MiB, autopsy 2026-09-06 M1) — the accepted accumulation
-		// must release. The frame bound's surviving enforcement is pinned
-		// structurally by TestStreamBoundaryHelpers2/append_batch_frame_bound;
-		// this sub-test pins the M1 contract: the maximal accepted part is
-		// NOT a frame violation.
+		// '<' (escapes 6x to ~6 MiB) is far under the derived frame bound —
+		// the accepted accumulation is not a frame violation. The frame
+		// bound's surviving enforcement is pinned structurally by
+		// TestStreamBoundaryHelpers2/append_batch_frame_bound; the maximal
+		// release for this direction is pinned by
+		// TestResponsesMaximalPartAcceptedAndReleasable.
 		maxPart := strings.Repeat("<", maxStreamAccumulatedBytes)
 		err := feed("response.output_text.delta", fmt.Sprintf(
 			`{"type":"response.output_text.delta","sequence_number":3,"item_id":"m1","output_index":0,"content_index":0,"delta":%q,"logprobs":[]}`,

@@ -363,7 +363,54 @@ func DecodeResponsesRequest(
 	echo.ServiceTier = request.ServiceTier
 	echo.TopLogprobs = request.TopLogprobs
 
+	// The echo re-marshals into EVERY generated envelope frame (created,
+	// in_progress, terminal) and the non-streaming response envelope, at up
+	// to 6x JSON escaping. Bound its serialized size at decode as a
+	// fail-closed resource limit: an unbounded echo would defeat the
+	// generated-frame derivation (limits.go maxStreamEchoBytes).
+	if err := checkEchoSize(echo); err != nil {
+		return DecodeResult{}, nil, err
+	}
+
 	return result, echo, nil
+}
+
+// checkEchoSize rejects a request echo whose serialized size exceeds
+// maxStreamEchoBytes. The string-bearing members are measured directly and
+// the composite members through json.Marshal with default HTML escaping —
+// the same escaping the envelope render applies, so the measurement matches
+// the worst-case rendered size. The scalar members are bounded constants and
+// carry no measurement.
+func checkEchoSize(echo *ResponsesRequestEcho) error {
+	total := 0
+	if echo.Instructions != nil {
+		if echo.Instructions.Text != nil {
+			total += len(*echo.Instructions.Text)
+		}
+		serialized, err := json.Marshal(echo.Instructions.Items)
+		if err != nil {
+			return fmt.Errorf("responses request echo: %w", err)
+		}
+		total += len(serialized)
+	}
+	for key, value := range echo.Metadata {
+		total += len(key) + len(value)
+	}
+	for _, encoded := range []any{echo.Tools, echo.ToolChoice, echo.Reasoning, echo.Text} {
+		if encoded == nil {
+			continue
+		}
+		serialized, err := json.Marshal(encoded)
+		if err != nil {
+			return fmt.Errorf("responses request echo: %w", err)
+		}
+		total += len(serialized)
+	}
+	if total > maxStreamEchoBytes {
+		return fmt.Errorf("%w: the responses request echo of %d bytes exceeds the %d byte echo bound; the instructions, metadata, tools, and text configuration are echoed into every response envelope and are bounded as a resource limit",
+			errEchoTooLarge, total, maxStreamEchoBytes)
+	}
+	return nil
 }
 
 // responsesInputToTurns maps the Responses input item list to canonical turns,

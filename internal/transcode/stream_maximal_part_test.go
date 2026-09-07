@@ -11,9 +11,10 @@ import (
 // in one content part was accepted by the accumulator, then the [DONE]
 // terminal envelope (which repeats the full text inside the Responses
 // envelope JSON) failed the EQUAL generated-frame bound — a completed
-// upstream conversation errored at its terminal. The generated-frame bound
-// (6*maxStreamAccumulatedBytes + 1 MiB headroom) must strictly accommodate
-// the worst case, so the maximal part completes its release.
+// upstream conversation errored at its terminal. The release bounds now
+// derive from the exchange total and the echo bound (limits.go), strictly
+// above the worst-case accepted release, so the maximal part completes its
+// release.
 func TestChatStreamMaximalPartCompletesRelease(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -102,8 +103,8 @@ func TestChatStreamMaximalExchangeCompletesRelease(t *testing.T) {
 	}
 	// Finish, then [DONE]: the terminal envelope carries BOTH completed
 	// function calls (2 MiB total semantics, 12 MiB escaped at 6x) and must
-	// release. Every release bound (frame 56 MiB, batch 128 MiB, generated
-	// total) is derived above this worst case.
+	// release. Every release bound (frame, batch, generated total) is
+	// derived above this worst case.
 	if _, err := converter.Convert(SSEEvent{Data: []byte(
 		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)}); err != nil {

@@ -317,9 +317,10 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// A decoded/rendered request that amplifies beyond the decoded-request
-		// body limit is a 413, not a generic conversion 400.
+		// body limit — or whose echo exceeds the echo bound — is a 413, not a
+		// generic conversion 400.
 		status := http.StatusBadRequest
-		if errors.Is(err, errDecodedRequestTooLarge) {
+		if errors.Is(err, errDecodedRequestTooLarge) || errors.Is(err, errEchoTooLarge) {
 			status = http.StatusRequestEntityTooLarge
 		}
 		h.writeLocalError(r, w,
@@ -491,6 +492,12 @@ var errRequestBodyTooLarge = errors.New("request body too large")
 // beyond the decoded-request body limit. It renders as 413 RequestEntityTooLarge
 // in the client dialect, not the generic conversion 400 (review-j finding 15).
 var errDecodedRequestTooLarge = errors.New("decoded request exceeds the decoded-request body limit")
+
+// errEchoTooLarge marks a Responses request whose echo exceeds the echo
+// bound (checkEchoSize): the echo renders into every response envelope at up
+// to 6x JSON escaping, so it is bounded as a fail-closed resource limit. It
+// renders as 413 like the decoded-request bound.
+var errEchoTooLarge = errors.New("responses request echo exceeds the echo body limit")
 
 func (h *TranscodeHandler) readRequestBody(r *http.Request) ([]byte, error) {
 	limit := h.cfg.BodyLimits.AcceptedRequestBytes

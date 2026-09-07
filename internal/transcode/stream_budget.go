@@ -131,11 +131,25 @@ const (
 	// maxStreamStateEntries bounds the total state-map entries (item, part,
 	// tool bookkeeping) one exchange may allocate.
 	maxStreamStateEntries = 1 << 16
+	// maxStreamPerEventFramingBytes bounds the fixed per-event overhead of
+	// one generated downstream frame (envelope keys, item identity,
+	// sequence number, event:/data:/\n\n framing) — measured ~221 bytes
+	// for the largest chat→responses delta frame shape. maxStreamGenerated
+	// Bytes multiplies it by maxStreamTotalEvents so the exchange generated
+	// total can never fire before the event budget: a legal stream of
+	// tiny deltas is bounded by events × per-event framing, NOT by payload
+	// escaping (autopsy 2026-09-06 M1 round 3, finding F1: 1-byte deltas
+	// died at ~69% of the event budget when only a 1 MiB framing slack
+	// covered 2^20 events × 221 B ≈ 221 MiB of fixed overhead).
+	maxStreamPerEventFramingBytes = 256
 	// maxStreamGeneratedBytes bounds the total generated downstream bytes of
 	// one exchange. Derived jointly with the terminal-release bounds
-	// (autopsy 2026-09-06 M1 rounds 1-2): the worst-case accepted release
-	// emits the streamed deltas (up to 6x the escaped exchange total) PLUS
-	// the terminal batch (DefaultGeneratedSSEBatchBytes), so the exchange
-	// generated-total must exceed their sum.
-	maxStreamGeneratedBytes = int64(DefaultGeneratedSSEBatchBytes) + 6*int64(maxStreamTotalAccumulatedBytes) + 1<<20
+	// (autopsy 2026-09-06 M1 rounds 1-3): the worst-case accepted release
+	// emits the streamed deltas (payload at 6x escaping + every event's
+	// fixed framing overhead) PLUS the terminal batch
+	// (DefaultGeneratedSSEBatchBytes) PLUS 1 MiB slack, and can never fire
+	// before the event budget or the terminal bounds.
+	maxStreamGeneratedBytes = int64(DefaultGeneratedSSEBatchBytes) +
+		int64(maxStreamTotalEvents)*maxStreamPerEventFramingBytes +
+		6*int64(maxStreamTotalAccumulatedBytes) + 1<<20
 )
