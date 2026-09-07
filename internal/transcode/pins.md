@@ -443,6 +443,19 @@ feed the canonical model instead: `reasoning`/`reasoning_content` become
 capability-gated ordinary text, and the usage spellings become canonical
 usage breakdowns (`CacheRead`, `CacheWrite`, `ReasoningTokens`).
 
+With the `provider_reasoning_thinking` capability the same
+`reasoning`/`reasoning_content` spellings render as NATIVE Anthropic
+thinking blocks instead of ordinary text: each block is synthesized with
+the proxy's marker signature (`shaper-synth-thinking-1`, carried by
+`SyntheticThinkingSignature`) emitted as the block's `signature_delta`
+before `content_block_stop`, and the Messages request path scrubs
+marker-signature thinking blocks out of replayed history before any
+upstream rendering, so the synthetic signature never reaches an upstream
+(THINK-2, operator-adjudicated 2026-09-07). `redacted_thinking` is never
+synthesized — no source data exists for it. Without the capability the
+ordinary-text mapping applies (or the documented loss under a strict
+policy).
+
 ### Known-but-unmodeled, tolerated provider extensions
 
 The table above models the spellings the wire shadows deliberately capture.
