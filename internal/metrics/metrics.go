@@ -215,13 +215,16 @@ func (c *Collector) RegisterInFlight(method, path string, limited bool) uint64 {
 	c.flightSeq++
 	id := c.flightSeq
 	now := time.Now()
+	// StartTime stays ZERO while the request waits for a slot: the queued
+	// state is `StartTime.IsZero()` (the convention InFlightSnapshot's sort
+	// and OldestQueuedAge already assume), and MarkInFlightStarted sets it
+	// at admission. Registration time is carried by QueueTime.
 	c.flightByID[id] = &InFlightEntry{
 		ID:        id,
 		Method:    method,
 		Path:      path,
 		Limited:   limited,
 		QueueTime: now,
-		StartTime: now,
 	}
 	return id
 }
@@ -566,6 +569,25 @@ func (c *Collector) Snapshot() Snapshot {
 	}
 	s.OldestQueuedAge = oldestQueue
 
+	// Per-route queue view (UNRESP-3): queued counts and oldest queued age
+	// keyed by the same "METHOD /path" key RouteStats uses, derived from the
+	// in-flight registry (Limited + not yet started = waiting for a slot).
+	queuedByRoute := make(map[string]int64)
+	oldestByRoute := make(map[string]time.Duration)
+	for _, e := range s.InFlight {
+		if !e.Limited || !e.StartTime.IsZero() || e.QueueTime.IsZero() {
+			continue
+		}
+		key := e.Method + " " + e.Path
+		queuedByRoute[key]++
+		age := time.Since(e.QueueTime)
+		if age > oldestByRoute[key] {
+			oldestByRoute[key] = age
+		}
+	}
+	s.QueuedByRoute = queuedByRoute
+	s.OldestQueuedAgeByRoute = oldestByRoute
+
 	return s
 }
 
@@ -594,7 +616,13 @@ type Snapshot struct {
 	InFlightPassthrough  int64
 	RetriesInFlight      int64
 	OldestQueuedAge      time.Duration
-	CircuitBreaker       *CBStats
+	// QueuedByRoute / OldestQueuedAgeByRoute break the aggregate queue view
+	// down per route (key "METHOD /path", matching RouteStats): which routes
+	// are waiting for admission and how long the oldest waiter has waited
+	// (UNRESP-3).
+	QueuedByRoute          map[string]int64
+	OldestQueuedAgeByRoute map[string]time.Duration
+	CircuitBreaker         *CBStats
 }
 
 // CBStats is a snapshot of circuit breaker state for the TUI.
