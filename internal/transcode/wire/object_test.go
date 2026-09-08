@@ -258,10 +258,26 @@ func TestJSONObject(t *testing.T) {
 	if len(obj) != 2 || string(obj["b"]) != `{"c":[1,2]}` {
 		t.Fatalf("obj = %v", obj)
 	}
-	for _, bad := range []string{``, `null`, `[]`, `"x"`, `1`, `{`, `{"a":1} x`} {
+	for _, bad := range []string{``, `null`, `[]`, `"x"`, `1`, `true`, `false`, `{`, `{"a":1} x`, `{"a":1} {"b":2}`} {
 		if _, err := JSONObject(bad); err == nil {
 			t.Fatalf("JSONObject(%q) accepted", bad)
 		}
+	}
+
+	// Duplicate keys must be accepted and resolved via last-key-wins per RFC 8259
+	// (tool arguments and payload-level JSON schemas emitted by LLMs or client harnesses).
+	dupObj, err := JSONObject(`{"max_output_tokens":100,"max_output_tokens":200,"extra":"val"}`)
+	if err != nil {
+		t.Fatalf("JSONObject with duplicate keys rejected: %v", err)
+	}
+	if len(dupObj) != 2 {
+		t.Fatalf("expected 2 keys, got %d: %v", len(dupObj), dupObj)
+	}
+	if string(dupObj["max_output_tokens"]) != "200" {
+		t.Fatalf("expected last-key-wins 200, got %s", string(dupObj["max_output_tokens"]))
+	}
+	if string(dupObj["extra"]) != `"val"` {
+		t.Fatalf("expected extra val, got %s", string(dupObj["extra"]))
 	}
 }
 

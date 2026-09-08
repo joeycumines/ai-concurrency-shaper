@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openaichat"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
@@ -332,6 +333,13 @@ func TestDecodeJSONObject(t *testing.T) {
 	if _, err := decodeJSONObject(``); err == nil {
 		t.Fatal("expected empty rejection")
 	}
+	dupVal, err := decodeJSONObject(`{"max_output_tokens": 100, "max_output_tokens": 200}`)
+	if err != nil {
+		t.Fatalf("expected duplicate keys accepted in decodeJSONObject: %v", err)
+	}
+	if len(dupVal) != 1 || string(dupVal["max_output_tokens"]) != "200" {
+		t.Fatalf("unexpected dupVal: %v", dupVal)
+	}
 }
 
 func TestStringInputDecodeEndToEnd(t *testing.T) {
@@ -527,4 +535,85 @@ func TestResponsesInputItemIdentityNoted(t *testing.T) {
 			t.Fatalf("input[].id notes = %d, want 0", got)
 		}
 	})
+}
+
+func TestResponsesInputFunctionCallDuplicateArgumentsKeys(t *testing.T) {
+	// Exact scenario observed from Codex TUI (glm-5.3-flash):
+	// replaying conversation history where an input item contains a function_call
+	// with duplicate JSON keys in the arguments string (e.g. "max_output_tokens").
+	rawBody := []byte(`{
+		"model": "glm-5.3-flash",
+		"input": [
+			{
+				"type": "message",
+				"role": "user",
+				"content": "Perform task"
+			},
+			{
+				"type": "function_call",
+				"id": "fc_01a07f8a",
+				"call_id": "call_01a07f8a",
+				"name": "generate_text",
+				"arguments": "{\"max_output_tokens\": 100, \"prompt\": \"hello\", \"max_output_tokens\": 200}"
+			}
+		]
+	}`)
+
+	result, _, err := DecodeResponsesRequest(rawBody, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("DecodeResponsesRequest failed on duplicate keys in function call arguments: %v", err)
+	}
+
+	// Verify CanonicalFunctionCall arguments were normalized
+	var call *CanonicalFunctionCall
+	for _, turn := range result.Request.Turns {
+		for _, part := range turn.Parts {
+			if fc, ok := part.(CanonicalFunctionCall); ok {
+				call = &fc
+				break
+			}
+		}
+	}
+	if call == nil {
+		t.Fatal("expected CanonicalFunctionCall in turns")
+	}
+	if call.CallID != "call_01a07f8a" || call.Name != "generate_text" {
+		t.Fatalf("unexpected call identity: %+v", call)
+	}
+	// Arguments must be valid JSON with the last key value (200)
+	var parsedArgs map[string]any
+	if err := json.Unmarshal(call.Arguments, &parsedArgs); err != nil {
+		t.Fatalf("unmarshal normalized arguments: %v", err)
+	}
+	if parsedArgs["max_output_tokens"] != float64(200) {
+		t.Fatalf("expected max_output_tokens 200, got %v", parsedArgs["max_output_tokens"])
+	}
+	if parsedArgs["prompt"] != "hello" {
+		t.Fatalf("expected prompt hello, got %v", parsedArgs["prompt"])
+	}
+
+	// Verify RenderChatRequest renders valid upstream chat tool_calls without error
+	chatBytes, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("RenderChatRequest failed: %v", err)
+	}
+	var chatReq openaichat.Request
+	if err := wire.Decode(chatBytes, &chatReq); err != nil {
+		t.Fatalf("rendered Chat request failed wire.Decode: %v", err)
+	}
+
+	// Proves that duplicate keys on the envelope itself are STILL strictly rejected
+	envelopeDup := []byte(`{
+		"model": "glm-5.3-flash",
+		"model": "other-model",
+		"input": "hi"
+	}`)
+	if _, _, err := DecodeResponsesRequest(envelopeDup, StrictLossPolicy()); err == nil {
+		t.Fatal("expected envelope-level duplicate key rejection")
+	} else {
+		var decodeErr *wire.DecodeError
+		if !errors.As(err, &decodeErr) || decodeErr.Kind != wire.DecodeDuplicateKey {
+			t.Fatalf("expected DecodeDuplicateKey error, got %v", err)
+		}
+	}
 }

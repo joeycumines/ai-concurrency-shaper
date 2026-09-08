@@ -224,18 +224,41 @@ func TrimSpace(data []byte) []byte {
 }
 
 // JSONObject decodes raw as exactly one JSON object, returning its keys.
-// A non-object value or malformed JSON is an error. The caller decides the
-// classification (client input vs model-generated output).
+// A non-object value, empty input, trailing values, or malformed JSON is an error.
+// The caller decides the classification (client input vs model-generated output).
+//
+// Unlike Decode (which validates wire-envelope structs and strictly rejects duplicate
+// keys in protocol request/response documents), JSONObject validates payload-level
+// JSON objects (such as function call arguments and schemas) where duplicate keys
+// are resolved by standard Go JSON unmarshaling (last key wins) per RFC 8259.
 func JSONObject(raw string) (map[string]json.RawMessage, error) {
-	if strings.TrimSpace(raw) == "" {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
 		return nil, errors.New("empty JSON object")
 	}
+	if !strings.HasPrefix(trimmed, "{") {
+		return nil, errors.New("value is not a JSON object")
+	}
+	dec := json.NewDecoder(strings.NewReader(trimmed))
 	var value map[string]json.RawMessage
-	if err := Decode([]byte(raw), &value); err != nil {
+	if err := dec.Decode(&value); err != nil {
 		return nil, err
 	}
 	if value == nil {
 		return nil, errors.New("value is not a JSON object")
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, &DecodeError{
+				Kind:    DecodeTrailingValue,
+				Message: "unexpected trailing JSON value",
+			}
+		}
+		return nil, &DecodeError{
+			Kind:    DecodeMalformed,
+			Message: err.Error(),
+		}
 	}
 	return value, nil
 }
