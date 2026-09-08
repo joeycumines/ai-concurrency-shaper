@@ -168,7 +168,7 @@ func TestStreamReasoningContiguousDeltasOneThinkingBlock(t *testing.T) {
 		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"m","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}`,
 		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 	}
-	var starts, stops, thinkingDeltas []int
+	starts, stops, thinkingDeltas := 0, 0, 0
 	for _, f := range frames {
 		batch, err := converter.Convert(SSEEvent{Data: []byte(f)})
 		if err != nil {
@@ -177,22 +177,22 @@ func TestStreamReasoningContiguousDeltasOneThinkingBlock(t *testing.T) {
 		for _, ev := range batch.Events {
 			switch {
 			case ev.Type == "content_block_start" && strings.Contains(string(ev.Data), `"type":"thinking"`):
-				starts = append(starts, 1)
+				starts++
 			case ev.Type == "content_block_stop" && strings.Contains(string(ev.Data), `"index":0`):
-				stops = append(stops, 1)
+				stops++
 			case ev.Type == "content_block_delta" && strings.Contains(string(ev.Data), `"thinking_delta"`):
-				thinkingDeltas = append(thinkingDeltas, 1)
+				thinkingDeltas++
 			}
 		}
 	}
 	if _, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")}); err != nil {
 		t.Fatal(err)
 	}
-	if len(starts) != 1 {
-		t.Fatalf("thinking content_block_start count = %d, want exactly 1 for contiguous reasoning deltas (one-block-per-delta is the CC-FRAGMENTATION regression)", len(starts))
+	if starts != 1 {
+		t.Fatalf("thinking content_block_start count = %d, want exactly 1 for contiguous reasoning deltas (one-block-per-delta is the CC-FRAGMENTATION regression)", starts)
 	}
-	if len(thinkingDeltas) != 3 {
-		t.Fatalf("thinking_delta count = %d, want 3 (all fragments in the one block)", len(thinkingDeltas))
+	if thinkingDeltas != 3 {
+		t.Fatalf("thinking_delta count = %d, want 3 (all fragments in the one block)", thinkingDeltas)
 	}
 }
 

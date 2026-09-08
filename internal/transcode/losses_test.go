@@ -1,9 +1,6 @@
 package transcode
 
 import (
-	"errors"
-	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -27,11 +24,13 @@ func TestParseLossFeatures(t *testing.T) {
 	}
 }
 
-// TestConversionReportNoteBound proves Note enforces the same exchange bound
-// as Lose (review-gate task-12 finding 5): notes and losses accumulate into
-// one slice, so either path driving the report past the bound must surface
-// the typed corruption error instead of growing the report unboundedly.
-func TestConversionReportNoteBound(t *testing.T) {
+// TestConversionReportOverflowAggregated pins the CC-REPORT-BOUND
+// disposition (operator-observed 2026-09-08: a 1.25MB Claude Code agentic
+// request exhausted the 4096-entry bound and 502'd): overflow is an
+// observability saturation, never an exchange failure. Both entry paths
+// (Lose and Note) stop recording at the bound, record exactly one
+// aggregated note, and count the dropped entries.
+func TestConversionReportOverflowAggregated(t *testing.T) {
 	features := []Feature{FeatureUsageUnknown, FeatureReasoningSummary, FeatureOutputPhase, FeatureImageInput}
 
 	allowed := make(map[Feature]struct{}, len(features))
@@ -68,19 +67,32 @@ func TestConversionReportNoteBound(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var report ConversionReport
 			fill(&report)
-			err := overflow(&report)
-			if err == nil {
-				t.Fatal("overflow accepted; want the typed exchange-bound error")
+			// The overflow attempt must SUCCEED (never fail the exchange)
+			// and be absorbed into the aggregated note.
+			if err := overflow(&report); err != nil {
+				t.Fatalf("overflow must not fail the exchange: %v", err)
 			}
-			var target *UpstreamWireError
-			if !errors.As(err, &target) {
-				t.Fatalf("error = %T: %v, want UpstreamWireError", err, err)
+			if len(report.Losses) != maxStreamConversionReportEntries+1 {
+				t.Fatalf("entries = %d, want the bound plus exactly one aggregated note", len(report.Losses))
 			}
-			if got := fmt.Sprintf("%v", target.Cause); !strings.Contains(got, fmt.Sprintf("exchange bound of %d entries", maxStreamConversionReportEntries)) {
-				t.Fatalf("cause = %q, want it to name the bound", got)
+			last := report.Losses[len(report.Losses)-1]
+			if last.Feature != FeatureReportOverflow || last.Kind != NoteRecord {
+				t.Fatalf("last entry = %+v, want the report_overflow aggregated note", last)
 			}
-			if len(report.Losses) != maxStreamConversionReportEntries {
-				t.Fatalf("entries = %d, want the bound held", len(report.Losses))
+			if report.Dropped != 1 {
+				t.Fatalf("dropped = %d, want 1", report.Dropped)
+			}
+			// Further overflows keep counting silently; the note stays single.
+			for i := 0; i < 5; i++ {
+				if err := overflow(&report); err != nil {
+					t.Fatalf("overflow #%d must not fail: %v", i, err)
+				}
+			}
+			if report.Dropped != 6 {
+				t.Fatalf("dropped = %d, want 6", report.Dropped)
+			}
+			if len(report.Losses) != maxStreamConversionReportEntries+1 {
+				t.Fatalf("entries = %d, want the note to stay single", len(report.Losses))
 			}
 		})
 	}

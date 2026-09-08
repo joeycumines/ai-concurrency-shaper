@@ -378,6 +378,22 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
+			// CC-REPORT-BOUND: the aggregated overflow note is reachable by
+			// simply saturating the report; it is a Note (no policy gate).
+			key:  FeatureReportOverflow,
+			perm: []Feature{},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				var report ConversionReport
+				for i := 0; i <= maxStreamConversionReportEntries; i++ {
+					if err := report.Note(FeatureUsageUnknown, "p", "d"); err != nil {
+						return report, err
+					}
+				}
+				return report, nil
+			},
+		},
+		{
 			key: FeatureUsageCacheReadUnknown,
 			perm: []Feature{
 				FeatureUsageCacheReadUnknown,

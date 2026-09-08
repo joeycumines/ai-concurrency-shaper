@@ -1747,6 +1747,12 @@ func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.
 	if len(entries) == 0 {
 		return
 	}
+	if report.Dropped > 0 {
+		entries = append(entries, fmt.Sprintf(
+			"note: report_overflow: %d further entries dropped after the bound (CC-REPORT-BOUND)",
+			report.Dropped,
+		))
+	}
 	header := "approved loss(es)"
 	if anyNote {
 		header = "loss(es)/note(s)"

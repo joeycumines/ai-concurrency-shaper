@@ -24,6 +24,7 @@ individual keys via `-transcode-allow-loss`.
 | `output_phase` | the output message phase (commentary vs final_answer) cannot be reproduced in the target |
 | `usage_unknown` | the source provided no token usage; the required target usage cannot be reproduced |
 | `usage_total_mismatch` | the source usage totals are arithmetically inconsistent (total_tokens != input + output); the source values are relayed as-is with the mismatch recorded |
+| `report_overflow` | the conversion report reached its entry bound; further entries are aggregated into this note (observability saturation, never an exchange failure) |
 | `usage_cache_read_unknown` | the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced |
 | `usage_cache_write_unknown` | the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced |
 | `usage_reasoning_unknown` | the source provided no reasoning-token breakdown; the required target usage breakdown cannot be reproduced |

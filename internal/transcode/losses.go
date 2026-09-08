@@ -5,6 +5,7 @@ package transcode
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -101,6 +102,12 @@ const (
 	// UsageUnknown covers a source that provided no token usage at all: the
 	// required target usage cannot be reproduced.
 	FeatureUsageUnknown Feature = "usage_unknown"
+	// ReportOverflow is the aggregated note recorded when the conversion
+	// report reaches its entry bound: further entries are dropped (their
+	// count tracked on the report), and the exchange completes — report
+	// saturation is an observability fact, never an exchange failure
+	// (CC-REPORT-BOUND).
+	FeatureReportOverflow Feature = "report_overflow"
 	// UsageTotalMismatch covers a source whose usage totals are
 	// arithmetically inconsistent (total_tokens != input + output). Real
 	// gateways emit such totals routinely (cache/reasoning accounting the
@@ -224,6 +231,7 @@ var lossRegistry = []lossEntry{
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},
 	{FeatureUsageTotalMismatch, "the source usage totals are arithmetically inconsistent (total_tokens != input + output); the source values are relayed as-is with the mismatch recorded"},
+	{FeatureReportOverflow, "the conversion report reached its entry bound; further entries are aggregated into this note (observability saturation, never an exchange failure)"},
 	{FeatureUsageCacheReadUnknown, "the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageCacheWriteUnknown, "the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageReasoningUnknown, "the source provided no reasoning-token breakdown; the required target usage breakdown cannot be reproduced"},
@@ -354,28 +362,52 @@ type ConversionLoss struct {
 	Kind    LossKind
 }
 
-// ConversionReport accumulates approved losses for one conversion.
+// ConversionReport accumulates approved losses for one conversion. When the
+// entry bound saturates, recording stops and Dropped counts the dropped
+// entries (the aggregated note carries the observable fact; CC-REPORT-BOUND).
 type ConversionReport struct {
 	Losses []ConversionLoss
+	// Dropped counts entries discarded after the bound was reached. Zero
+	// means every entry was recorded.
+	Dropped int
+	// overflowNoted records that the single aggregated report_overflow note
+	// has been emitted.
+	overflowNoted bool
 }
 
-// reserve enforces the shared report bound for both entry paths: an exchange
-// that accumulates more entries than the exchange budget is corrupt
-// (review-08 blocker 7). Notes and losses accumulate into the same slice, so
-// an unbounded Note path could grow the report past the bound without either
-// path noticing (review-gate task-12 finding 5).
+// reserve enforces the shared report bound for both entry paths. A report
+// overflow is an OBSERVABILITY saturation, never an exchange failure
+// (CC-REPORT-BOUND, operator-observed 2026-09-08: a 1.25MB Claude Code
+// agentic request replays hundreds of tool results per turn and exhausted
+// the 4096-entry bound, 502-ing the session — the report exists to make
+// losses observable, and failing the exchange for report growth inverts
+// that purpose). On overflow the report stops recording and one aggregated
+// note names the saturation; the Dropped count surfaces the scale.
 func (r *ConversionReport) reserve() error {
-	if len(r.Losses) >= maxStreamConversionReportEntries {
-		// A report overflow is corrupt upstream data on the response side
-		// (the stream path derives upstream provenance from this typed
-		// error) while the request path records its own explicit local
-		// provenance (review-08 blocker 7).
-		return &UpstreamWireError{
-			Cause: fmt.Errorf("conversion report exceeds the exchange bound of %d entries", maxStreamConversionReportEntries),
-		}
+	if len(r.Losses) < maxStreamConversionReportEntries {
+		return nil
 	}
-	return nil
+	if !r.overflowNoted {
+		r.overflowNoted = true
+		r.Losses = append(r.Losses, ConversionLoss{
+			Feature: FeatureReportOverflow,
+			Path:    "report",
+			Detail: fmt.Sprintf(
+				"conversion report reached the %d-entry bound; further entries are aggregated here (observability saturation, never an exchange failure)",
+				maxStreamConversionReportEntries,
+			),
+			Kind: NoteRecord,
+		})
+	}
+	r.Dropped++
+	return errEntryDropped
 }
+
+// errEntryDropped is the internal sentinel reserve returns once the report
+// has saturated: Lose and Note swallow it (the entry is intentionally not
+// recorded; the aggregated note + Dropped carry the fact), so the exchange
+// never fails on report growth.
+var errEntryDropped = errors.New("conversion report entry dropped after the bound")
 
 // Lose records a loss of the feature, or returns an UnsupportedFeatureError
 // when the policy does not allow it. The report is bounded: see reserve.
@@ -393,6 +425,9 @@ func (r *ConversionReport) Lose(
 		}
 	}
 	if err := r.reserve(); err != nil {
+		if errors.Is(err, errEntryDropped) {
+			return nil
+		}
 		return err
 	}
 	r.Losses = append(r.Losses, ConversionLoss{
@@ -411,6 +446,9 @@ func (r *ConversionReport) Lose(
 // The report is bounded exactly like Lose: see reserve.
 func (r *ConversionReport) Note(feature Feature, path string, detail string) error {
 	if err := r.reserve(); err != nil {
+		if errors.Is(err, errEntryDropped) {
+			return nil
+		}
 		return err
 	}
 	r.Losses = append(r.Losses, ConversionLoss{

@@ -473,9 +473,14 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 				t.Fatalf("entry %d: %v", i, err)
 			}
 		}
+		// CC-REPORT-BOUND: the overflow is absorbed (one aggregated note,
+		// dropped-count incremented) — never an exchange failure.
 		err := report.Lose(policy, FeatureResponseServiceTier, "x", "y")
-		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
-			t.Fatalf("err = %T %v, want *UpstreamWireError (upstream classification)", err, err)
+		if err != nil {
+			t.Fatalf("overflow must not fail the exchange: %v", err)
+		}
+		if report.Dropped != 1 {
+			t.Fatalf("dropped = %d, want 1", report.Dropped)
 		}
 	})
 
