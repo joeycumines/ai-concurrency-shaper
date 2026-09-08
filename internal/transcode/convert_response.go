@@ -1198,6 +1198,22 @@ func RenderMessagesResponse(
 					return nil, report, err
 				}
 			}
+			// Anthropic ordering: thinking blocks precede text. The chat
+			// message walk appends the reasoning part AFTER the content
+			// parts (the reasoning_content field follows content on the
+			// chat wire), so the parts are emitted in two passes: thinking
+			// first, then text/refusal.
+			for _, part := range value.Parts {
+				if thinkingPart, ok := part.(CanonicalThinkingPart); ok {
+					thinking := thinkingPart.Text
+					signature := thinkingPart.Signature
+					out.Content = append(out.Content, AnthropicContentBlock{
+						Type:      AnthropicContentBlockTypeThinking,
+						Thinking:  &thinking,
+						Signature: &signature,
+					})
+				}
+			}
 			for _, part := range value.Parts {
 				switch partValue := part.(type) {
 				case CanonicalText:
@@ -1206,23 +1222,14 @@ func RenderMessagesResponse(
 						Type: AnthropicContentBlockTypeText,
 						Text: &text,
 					})
-				case CanonicalThinkingPart:
-					// Native thinking block: the marker signature travels so
-					// the request path can scrub the block from replayed
-					// history (see CanonicalThinkingPart).
-					thinking := partValue.Text
-					signature := partValue.Signature
-					out.Content = append(out.Content, AnthropicContentBlock{
-						Type:      AnthropicContentBlockTypeThinking,
-						Thinking:  &thinking,
-						Signature: &signature,
-					})
 				case CanonicalRefusal:
 					text := partValue.Text
 					out.Content = append(out.Content, AnthropicContentBlock{
 						Type: AnthropicContentBlockTypeText,
 						Text: &text,
 					})
+				case CanonicalThinkingPart:
+					// Already emitted in the thinking-first pass above.
 				default:
 					return nil, report, fmt.Errorf(
 						"response message item: unknown canonical part %T",

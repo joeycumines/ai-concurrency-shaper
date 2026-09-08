@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - `make lint` passes: dead increments in the TUI detail overlay are removed, and the pre-existing deadcode findings are catalogued as confirmed false positives / test-only-exercised wire API in `.deadcodeignore`.
 
 ### Changed
+- Default reasoning rendering flipped to native thinking (`provider_reasoning_thinking` is now a default chat capability; `provider_reasoning_text` is off by default): Claude Code receives provider reasoning as native Anthropic thinking blocks out of the box and renders it with its native thinking UI — live-verified against Claude Code 2.1.260 (thinking lifecycle streams correctly and replayed synthetic blocks are scrubbed before the upstream sees them). The stream also now seals the thinking block at the reasoning→content transition (signature_delta + content_block_stop before the text block opens) instead of holding every item close until the [DONE] sentinel, which previously emitted two concurrently-open blocks and an out-of-order signature. Restore the old ordinary-text rendering with `-transcode-chat-capability '!provider_reasoning_thinking' -transcode-chat-capability provider_reasoning_text`.
 - `-transcode-auth-source` accepts `provider` (explicit provider-auth inheritance; conflicts with `-transcode-auth`/`-transcode-auth-header`, requires a configured provider auth source).
 - The metrics endpoint binds after the proxy listener; a bad `-metrics-bind` address fails at startup with the proxy listener already released.
 

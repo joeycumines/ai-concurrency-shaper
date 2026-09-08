@@ -178,8 +178,15 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 	}
 	for i, m := range mappings {
 		cap := m.Mapping.ChatCapabilities
-		if !cap.ProviderReasoningText || !cap.ParallelToolCalls {
+		// The default reasoning rendering is provider_reasoning_thinking
+		// (REASONING-DISPLAY, operator directive 2026-09-07/08): provider
+		// reasoning renders as native thinking blocks; the text mapping is
+		// the explicit opt-out.
+		if !cap.ProviderReasoningThinking || !cap.ParallelToolCalls {
 			t.Errorf("mapping %d capabilities = %+v, want the compatible core", i, cap)
+		}
+		if cap.ProviderReasoningText {
+			t.Errorf("mapping %d: the text mapping must be off by default (thinking takes precedence and is the dictated default), got %+v", i, cap)
 		}
 		if cap.ReasoningEffort || cap.DeveloperRole {
 			t.Errorf("mapping %d: fidelity-only capabilities must be opt-in, got %+v", i, cap)

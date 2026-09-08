@@ -413,10 +413,11 @@ func parseClientQuery(
 }
 
 var defaultTranscodeChatCapabilities = transcode.ChatCapabilities{
-	DeveloperRole:         false,
-	ParallelToolCalls:     true,
-	ReasoningEffort:       false,
-	ProviderReasoningText: true,
+	DeveloperRole:             false,
+	ParallelToolCalls:         true,
+	ReasoningEffort:           false,
+	ProviderReasoningText:     false,
+	ProviderReasoningThinking: true,
 }
 
 var defaultTranscodeAllowedQuery = map[string]struct{}{
