@@ -473,7 +473,11 @@ func responsesInputToTurns(
 					return nil, err
 				}
 			}
-			arguments, err := decodeJSONObject(value.Arguments)
+			argsStr := value.Arguments
+			if strings.TrimSpace(argsStr) == "" {
+				argsStr = "{}"
+			}
+			arguments, err := decodeJSONObject(argsStr)
 			if err != nil {
 				return nil, fmt.Errorf(
 					"input item %d: function call arguments: %w",
@@ -1056,6 +1060,12 @@ func DecodeMessagesRequest(
 		parts, err := anthropicContentToCanonical(message.Content, policy, &result.Report, &result.Request.Artifacts)
 		if err != nil {
 			return DecodeResult{}, fmt.Errorf("messages[%d]: %w", i, err)
+		}
+		if len(parts) == 0 && len(message.Content.ContentBlocks) > 0 {
+			// When all content blocks in an assistant turn were scrubbed (e.g.
+			// synthetic thinking blocks), preserve the turn with an empty text
+			// part so canonical validation does not reject an empty turn.
+			parts = []CanonicalPart{CanonicalText{Text: ""}}
 		}
 		result.Request.Turns = append(result.Request.Turns, CanonicalTurn{
 			Role:  role,

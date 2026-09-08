@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
@@ -475,7 +476,7 @@ func (c *FunctionCallInput) Validate() error {
 	if c.Status != "" && !ValidStatus(c.Status) {
 		return fmt.Errorf("invalid function call status %q", c.Status)
 	}
-	if !json.Valid([]byte(c.Arguments)) {
+	if strings.TrimSpace(c.Arguments) != "" && !json.Valid([]byte(c.Arguments)) {
 		return &wire.DecodeError{
 			Kind:    wire.DecodeContradictoryUnion,
 			Path:    "arguments",
