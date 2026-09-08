@@ -635,3 +635,123 @@ func TestUsageClampDetailFidelity(t *testing.T) {
 		}
 	})
 }
+
+// TestUsageClampBoundsArePinned pins the clamp lines whose removal would emit
+// a client-dialect-invalid usage: each subtest fails when the named bound is
+// removed (the mutations were identified by an independent review of the
+// committed diff). The canonical cache-write bound and its Responses-shape
+// twin keep the Anthropic identity uncached = input - cache-read - cache-write
+// nonnegative; the total clamp and the detail builders keep the recorded note
+// accurate.
+func TestUsageClampBoundsArePinned(t *testing.T) {
+	t.Run("canonical cache-creation bound", func(t *testing.T) {
+		usage := &CanonicalUsage{
+			InputTokens: 10, InputKnown: true,
+			CacheReadTokens: 0, CacheReadKnown: true,
+			CacheWriteTokens: 20, CacheWriteKnown: true,
+			OutputTokens: 5, OutputKnown: true,
+			TotalTokens: 35, TotalKnown: true,
+		}
+		clamp := clampCanonicalUsage(usage)
+		if !clamp.cacheExceedsInput || usage.CacheWriteTokens != 10 {
+			t.Fatalf("clamp = %+v, cache-write = %d, want the bound to input-cache-read = 10", clamp, usage.CacheWriteTokens)
+		}
+		if uncached := usage.InputTokens - usage.CacheReadTokens - usage.CacheWriteTokens; uncached != 0 {
+			t.Fatalf("uncached = %d, want 0 (the Anthropic identity)", uncached)
+		}
+	})
+	t.Run("responses-shape cache-creation bound", func(t *testing.T) {
+		created := int64(20)
+		usage := &ResponsesUsage{
+			InputTokens:        10,
+			OutputTokens:       5,
+			TotalTokens:        35,
+			CreatedCacheTokens: &created,
+		}
+		clamp := clampResponsesUsage(usage, responsesUsagePresence(usage))
+		if !clamp.cacheExceedsInput || *usage.CreatedCacheTokens != 10 {
+			t.Fatalf("clamp = %+v, created = %d, want the bound to 10", clamp, *usage.CreatedCacheTokens)
+		}
+	})
+	t.Run("negative total clamped and noted", func(t *testing.T) {
+		usage := &CanonicalUsage{
+			InputTokens: 5, InputKnown: true,
+			OutputTokens: 3, OutputKnown: true,
+			TotalTokens: -8, TotalKnown: true,
+		}
+		clamp := clampCanonicalUsage(usage)
+		if usage.TotalTokens != 0 || !clamp.negativeCounts {
+			t.Fatalf("clamp = %+v, total = %d, want the total clamped to 0 with a negative-counts note", clamp, usage.TotalTokens)
+		}
+	})
+	t.Run("negative detail names every source count", func(t *testing.T) {
+		usage := &CanonicalUsage{
+			InputTokens: -2, InputKnown: true,
+			OutputTokens: -3, OutputKnown: true,
+			TotalTokens: -1, TotalKnown: true,
+		}
+		clamp := clampCanonicalUsage(usage)
+		for _, want := range []string{
+			"input -2", "output -3", "total -1",
+			"cache-read absent", "cache-creation absent", "reasoning absent",
+		} {
+			if !strings.Contains(clamp.negativeDetail, want) {
+				t.Fatalf("detail = %q, missing %q", clamp.negativeDetail, want)
+			}
+		}
+	})
+	t.Run("cache detail names the source breakdown", func(t *testing.T) {
+		usage := &CanonicalUsage{
+			InputTokens: 10, InputKnown: true,
+			CacheReadTokens: 3, CacheReadKnown: true,
+			CacheWriteTokens: 20, CacheWriteKnown: true,
+			OutputTokens: 5, OutputKnown: true,
+			TotalTokens: 35, TotalKnown: true,
+		}
+		clamp := clampCanonicalUsage(usage)
+		if !clamp.cacheExceedsInput {
+			t.Fatalf("clamp = %+v, want cacheExceedsInput", clamp)
+		}
+		for _, want := range []string{"3 read", "20 creation", "exceeds the input total 10"} {
+			if !strings.Contains(clamp.cacheDetail, want) {
+				t.Fatalf("detail = %q, missing %q", clamp.cacheDetail, want)
+			}
+		}
+	})
+}
+
+// TestComposedClampNoteRecordedOnce pins the composed Messages<-Chat merge:
+// both sub-states convert the same source usage, so both can record the same
+// clamp fact. The merged report must carry it once, and the surviving detail
+// must be the chat state's, which names the source numbers instead of
+// presenting the clamp-corrected values as source values.
+func TestComposedClampNoteRecordedOnce(t *testing.T) {
+	chat := newChatResponsesStreamState(
+		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		"resp_1", "gpt-4.1", 1710000000, nil,
+	)
+	anthropic := newAnthropicResponsesStreamState(
+		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		"msg_1", "gpt-4.1", 1710000000,
+	)
+	converter := newChatToAnthropicConverter(chat, anthropic)
+	for name, chunk := range map[string]string{
+		"usage chunk":  `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"x"}}],"usage":{"prompt_tokens":-2,"completion_tokens":5,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":1}}}`,
+		"finish chunk": `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	} {
+		if _, err := converter.Convert(SSEEvent{Data: []byte(chunk)}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if _, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")}); err != nil {
+		t.Fatalf("terminal sentinel: %v", err)
+	}
+	report := converter.ConversionReport()
+	if got := countFeature(*report, FeatureUsageTotalMismatch); got != 1 {
+		t.Fatalf("usage_total_mismatch entries = %d, want exactly 1 (the merge dedupes by feature at path)", got)
+	}
+	detail := mustNoteDetail(t, report, FeatureUsageTotalMismatch, "composed clamp")
+	if want := "the clamp corrected the source's input -2 to 0"; !strings.Contains(detail, want) {
+		t.Fatalf("detail = %q, want it to name the applied correction (%q)", detail, want)
+	}
+}

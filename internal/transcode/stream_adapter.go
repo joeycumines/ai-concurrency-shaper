@@ -434,11 +434,26 @@ func (c *responsesToAnthropicConverter) ErrorEvent(err error) (frameEvent, bool)
 }
 
 // ConversionReport returns the merged approved losses of both states of the
-// composed conversion.
+// composed conversion. Both states convert the same source usage, so both can
+// record the same clamp fact; the merge keeps the first entry per feature at
+// path (the chat state's, which names the source numbers), matching the
+// per-request log line's dedupe. The dropped counts of both states are summed:
+// a saturated sub-report must stay visible in the merged report.
 func (c *chatToAnthropicConverter) ConversionReport() *ConversionReport {
-	merged := ConversionReport{}
-	merged.Losses = append(merged.Losses, c.chat.report.Losses...)
-	merged.Losses = append(merged.Losses, c.anthropic.report.Losses...)
+	merged := ConversionReport{
+		Dropped: c.chat.report.Dropped + c.anthropic.report.Dropped,
+	}
+	seen := make(map[string]struct{}, len(c.chat.report.Losses)+len(c.anthropic.report.Losses))
+	for _, losses := range [][]ConversionLoss{c.chat.report.Losses, c.anthropic.report.Losses} {
+		for _, loss := range losses {
+			key := fmt.Sprintf("%s at %s", loss.Feature, loss.Path)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged.Losses = append(merged.Losses, loss)
+		}
+	}
 	return &merged
 }
 
