@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Canonical IR contains only semantics genuinely shared by the supported
@@ -408,13 +409,20 @@ type ToolArguments struct {
 }
 
 // ParseToolArguments parses raw model-generated arguments: on a successful
-// strict object decode the parsed clone is stored and IsObject is true;
-// otherwise the raw text is preserved and IsObject stays false. The raw
-// remarshal cannot fail (the strict object decode validated every value),
+// object decode the parsed clone is stored and IsObject is true;
+// otherwise the raw text is preserved and IsObject stays false.
+// An empty arguments string (commonly emitted by upstream models for no-argument
+// tool calls) is treated as an empty object "{}".
+// The raw remarshal cannot fail (the object decode validated every value),
 // so a failure falls back to the raw text — never a panic (autopsy
 // 2026-09-06 M5).
 func ParseToolArguments(raw string) ToolArguments {
 	out := ToolArguments{Raw: raw}
+	if strings.TrimSpace(raw) == "" {
+		out.Object = json.RawMessage("{}")
+		out.IsObject = true
+		return out
+	}
 	if object, err := decodeJSONObject(raw); err == nil {
 		if marshaled, marshalErr := rawMessage(object); marshalErr == nil {
 			out.Object = marshaled

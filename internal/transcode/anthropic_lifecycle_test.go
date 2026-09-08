@@ -827,6 +827,69 @@ func TestResponsesToolArgumentsCannotBecomeEmptyObject(t *testing.T) {
 	}
 }
 
+// TestResponsesStreamToolArgumentsWithDuplicateKeys proves that when an upstream
+// Responses stream emits a done snapshot containing duplicate keys in tool arguments
+// (e.g. from glm-5.3-flash or other models), the stream converter accepts and reconciles
+// the arguments cleanly without failing with UnrepresentableError or wire errors.
+func TestResponsesStreamToolArgumentsWithDuplicateKeys(t *testing.T) {
+	state := anthropicLifecycleState(t)
+	feedAnthropicCreated(t, state, 0)
+	addedEvents, err := state.Convert(ResponseOutputItemAddedEvent{
+		Type: "response.output_item.added", SequenceNumber: 1,
+		OutputIndex: 0,
+		Item: &ResponsesFunctionCallOutputItem{
+			ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
+			CallID: "call_1", Name: "f", Arguments: "",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := state.Convert(ResponseOutputItemDoneEvent{
+		Type: "response.output_item.done", SequenceNumber: 2,
+		OutputIndex: 0,
+		Item: &ResponsesFunctionCallOutputItem{
+			ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
+			CallID: "call_1", Name: "f", Arguments: `{"max_output_tokens":100,"max_output_tokens":200}`,
+		},
+	})
+	if err != nil {
+		t.Fatalf("done with duplicate keys rejected: %v", err)
+	}
+	events = append(addedEvents, events...)
+	var sawDelta bool
+	var deltaJSON string
+	for _, event := range events {
+		if event.Type == AnthropicStreamEventTypeContentBlockDelta &&
+			event.Delta != nil && event.Delta.Type == AnthropicStreamDeltaTypeInputJSONDelta {
+			sawDelta = true
+			deltaJSON = *event.Delta.PartialJSON
+		}
+	}
+	if !sawDelta {
+		t.Fatalf("done snapshot with duplicate keys must be delivered: %+v", events)
+	}
+	if deltaJSON != `{"max_output_tokens":100,"max_output_tokens":200}` {
+		t.Fatalf("tool input = %q", deltaJSON)
+	}
+
+	// Terminal envelope reconciliation with identical arguments also succeeds
+	envelope := anthropicLifecycleEnvelope("resp_1")
+	envelope.Status = "completed"
+	envelope.Output = []ResponsesOutputItem{
+		&ResponsesFunctionCallOutputItem{
+			ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
+			CallID: "call_1", Name: "f", Arguments: `{"max_output_tokens":100,"max_output_tokens":200}`,
+		},
+	}
+	if _, err := state.Convert(ResponseCompletedEvent{
+		Type: "response.completed", SequenceNumber: 3,
+		Response: envelope,
+	}); err != nil {
+		t.Fatalf("terminal envelope with duplicate keys rejected: %v", err)
+	}
+}
+
 // TestResponsesStreamOfficialLifecycleStillConverts proves the official
 // lifecycle — created, item added, content part added, deltas, done events,
 // completed — converts cleanly with the terminal envelope reconciliation.

@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -29,5 +30,62 @@ func TestChatUsageTotalMismatchRelayed(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("usage_total_mismatch note missing: %+v", report.Losses)
+	}
+}
+
+func TestChatResponseToolCallsDuplicateKeysAndEmptyArguments(t *testing.T) {
+	context := &ExchangeContext{
+		IDs:        NewExchangeIDs(),
+		LossPolicy: j6PermissivePolicy(),
+	}
+
+	// Case 1: Duplicate keys in tool arguments
+	bodyDup := []byte(`{"id":"c","object":"chat.completion","created":1,"model":"m",` +
+		`"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,` +
+		`"tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"query\":\"hello\",\"query\":\"world\"}"}}]}}],` +
+		`"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`)
+
+	resDup, _, err := DecodeChatResponseWithPolicy(bodyDup, ChatCapabilities{}, j6PermissivePolicy())
+	if err != nil {
+		t.Fatalf("decode chat response with duplicate tool arguments failed: %v", err)
+	}
+	msgBytesDup, _, err := RenderMessagesResponse(resDup, context)
+	if err != nil {
+		t.Fatalf("render messages response failed on duplicate tool arguments: %v", err)
+	}
+	if !strings.Contains(string(msgBytesDup), `"world"`) {
+		t.Fatalf("expected last-key-wins world in rendered messages: %s", string(msgBytesDup))
+	}
+	respBytesDup, _, err := RenderResponsesResponse(resDup, context)
+	if err != nil {
+		t.Fatalf("render responses response failed on duplicate tool arguments: %v", err)
+	}
+	if !strings.Contains(string(respBytesDup), `"arguments":"{\"query\":\"hello\",\"query\":\"world\"}"`) {
+		t.Fatalf("expected raw string preserved in rendered responses: %s", string(respBytesDup))
+	}
+
+	// Case 2: Empty string arguments (no-arg tool call from model)
+	bodyEmpty := []byte(`{"id":"c2","object":"chat.completion","created":1,"model":"m",` +
+		`"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,` +
+		`"tool_calls":[{"id":"call_2","type":"function","function":{"name":"get_time","arguments":""}}]}}],` +
+		`"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`)
+
+	resEmpty, _, err := DecodeChatResponseWithPolicy(bodyEmpty, ChatCapabilities{}, j6PermissivePolicy())
+	if err != nil {
+		t.Fatalf("decode chat response with empty tool arguments failed: %v", err)
+	}
+	msgBytesEmpty, _, err := RenderMessagesResponse(resEmpty, context)
+	if err != nil {
+		t.Fatalf("render messages response failed on empty tool arguments: %v", err)
+	}
+	if !strings.Contains(string(msgBytesEmpty), `"input":{}`) {
+		t.Fatalf("expected empty object input in rendered messages: %s", string(msgBytesEmpty))
+	}
+	respBytesEmpty, _, err := RenderResponsesResponse(resEmpty, context)
+	if err != nil {
+		t.Fatalf("render responses response failed on empty tool arguments: %v", err)
+	}
+	if !strings.Contains(string(respBytesEmpty), `"arguments":""`) {
+		t.Fatalf("expected empty string arguments preserved in rendered responses: %s", string(respBytesEmpty))
 	}
 }

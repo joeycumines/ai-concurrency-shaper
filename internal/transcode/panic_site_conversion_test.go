@@ -70,4 +70,37 @@ func TestParseToolArgumentsInvalidJSONFallsBackToRaw(t *testing.T) {
 	if out.Raw != "not an object" {
 		t.Fatalf("raw = %q", out.Raw)
 	}
+
+	// Empty arguments string (e.g. no-argument tool call) is normalized to empty object
+	emptyOut := ParseToolArguments("")
+	if !emptyOut.IsObject {
+		t.Fatal("empty string must be treated as valid object")
+	}
+	if string(emptyOut.Object) != "{}" {
+		t.Fatalf("object = %s, want {}", string(emptyOut.Object))
+	}
+	if emptyOut.Raw != "" {
+		t.Fatalf("raw = %q, want empty", emptyOut.Raw)
+	}
+
+	// Whitespace-only arguments string
+	wsOut := ParseToolArguments("   \n\t  ")
+	if !wsOut.IsObject {
+		t.Fatal("whitespace string must be treated as valid object")
+	}
+	if string(wsOut.Object) != "{}" {
+		t.Fatalf("object = %s, want {}", string(wsOut.Object))
+	}
+
+	// Arguments with duplicate keys are normalized via last-key-wins
+	dupOut := ParseToolArguments(`{"count": 1, "count": 2}`)
+	if !dupOut.IsObject {
+		t.Fatal("duplicate keys must produce valid object")
+	}
+	if string(dupOut.Object) != `{"count":2}` {
+		t.Fatalf("object = %s, want {\"count\":2}", string(dupOut.Object))
+	}
+	if dupOut.Raw != `{"count": 1, "count": 2}` {
+		t.Fatalf("raw = %q", dupOut.Raw)
+	}
 }
