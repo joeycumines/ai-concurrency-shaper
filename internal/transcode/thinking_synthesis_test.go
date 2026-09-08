@@ -45,6 +45,16 @@ func TestNonStreamReasoningRendersThinkingBlockWithMarker(t *testing.T) {
 	if !strings.Contains(string(rendered), "I should check the weather.") {
 		t.Fatalf("thinking block lost the reasoning text: %s", rendered)
 	}
+	// Anthropic ordering: the thinking block must PRECEDE the text block.
+	// The chat message walk appends the reasoning part after the content
+	// parts (reasoning_content follows content on the chat wire); the
+	// Messages renderer emits thinking in a first pass. The pre-fix render
+	// put thinking AFTER text (live Claude Code conformance, 2026-09-08).
+	thinkingIdx := strings.Index(string(rendered), `"type":"thinking"`)
+	textIdx := strings.Index(string(rendered), `"type":"text"`)
+	if thinkingIdx < 0 || textIdx < 0 || thinkingIdx > textIdx {
+		t.Fatalf("thinking block must precede the text block: thinking@%d text@%d in %s", thinkingIdx, textIdx, rendered)
+	}
 	_ = rendered
 }
 
