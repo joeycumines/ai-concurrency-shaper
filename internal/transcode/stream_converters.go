@@ -487,6 +487,19 @@ func (s *chatResponsesStreamState) convertDelta(
 ) ([]ResponsesSSEEvent, error) {
 	var events []ResponsesSSEEvent
 
+	// Reasoning→content/tool transition (provider_reasoning_thinking): the
+	// open reasoning item's summary lifecycle must close INLINE — before
+	// the content/tool events — so the anthropic state emits
+	// signature_delta + content_block_stop for the thinking block before
+	// the next block opens. Holding the close until finish() scrambled the
+	// order on the wire (text block closed before the thinking block's
+	// signature; live Claude Code conformance, 2026-09-08).
+	closeEvents, err := s.closeOpenReasoningItem()
+	if err != nil {
+		return nil, err
+	}
+	events = append(events, closeEvents...)
+
 	if delta.Content != nil && *delta.Content != "" {
 		item, addedEvents, err := s.openMessageItemForPart("output_text")
 		if err != nil {
@@ -567,8 +580,18 @@ func (s *chatResponsesStreamState) convertDelta(
 		if s.capabilities.ProviderReasoningThinking {
 			// A reasoning item accumulates its own summary text; the
 			// anthropic state machine owns the thinking-block lifecycle.
+			// Thinking takes precedence over the ordinary-text mapping when
+			// both capabilities are enabled (the more faithful rendering;
+			// Claude Code displays it with the native thinking UI).
+			//
+			// A reasoning delta arriving while the LAST item is a message
+			// (reasoning resumed after content/tool output) opens a NEW
+			// reasoning item: the previous thinking block was sealed at the
+			// transition, and appending into it would reconcile against a
+			// sealed block. Each burst therefore renders as its own
+			// thinking block with its own marker signature — the Anthropic
+			// dialect's sequential-blocks contract permits exactly that.
 			if !s.reasoningReportRecorded {
-				s.reasoningReportRecorded = true
 				if err := s.report.Note(
 					FeatureProviderReasoningText,
 					reasoningPath,
@@ -577,7 +600,18 @@ func (s *chatResponsesStreamState) convertDelta(
 					return nil, err
 				}
 			}
-			if len(s.items) == 0 || !s.isReasoningItem(&s.items[len(s.items)-1]) {
+			reasoningClosed := false
+			if len(s.items) > 0 {
+				if reasoning, ok := s.items[len(s.items)-1].item.(*ResponsesReasoningOutputItem); ok &&
+					reasoning.Status == ResponsesItemCompleted {
+					// The reasoning item was closed at a reasoning→content
+					// transition; resumed reasoning renders as a NEW
+					// thinking block (the previous one is sealed on the
+					// wire).
+					reasoningClosed = true
+				}
+			}
+			if len(s.items) == 0 || !s.isReasoningItem(&s.items[len(s.items)-1]) || reasoningClosed {
 				if err := s.budget.addItem(); err != nil {
 					return nil, s.wireError(err)
 				}
@@ -996,6 +1030,48 @@ func (s *chatResponsesStreamState) openMessageItem() ([]ResponsesSSEEvent, error
 	}, nil
 }
 
+// closeOpenReasoningItem closes the trailing open reasoning item inline at a
+// reasoning→content/tool transition (provider_reasoning_thinking): summary
+// text.done, part.done, then output_item.done — the same event sequence
+// finish() emits, but AT THE TRANSITION so the anthropic state seals the
+// thinking block (signature_delta + content_block_stop) before the next
+// content block opens. No-op when the last item is not an open reasoning
+// item. The closed item stays in s.items with a completed status: the
+// terminal reconciliation still sees it, and resumed reasoning opens a NEW
+// item (a completed reasoning item is never appended to).
+func (s *chatResponsesStreamState) closeOpenReasoningItem() ([]ResponsesSSEEvent, error) {
+	if len(s.items) == 0 {
+		return nil, nil
+	}
+	item := &s.items[len(s.items)-1]
+	reasoning, ok := item.item.(*ResponsesReasoningOutputItem)
+	if !ok || reasoning.Status != ResponsesItemInProgress {
+		return nil, nil
+	}
+	reasoning.Status = ResponsesItemCompleted
+	return []ResponsesSSEEvent{
+		s.builder.ReasoningSummaryTextDone(
+			reasoning.ID,
+			item.outputIndex,
+			0,
+			reasoning.Summary[0].Text,
+		),
+		s.builder.ReasoningSummaryPartDone(
+			reasoning.ID,
+			item.outputIndex,
+			0,
+			openairesponses.SummaryTextPart{
+				Type: "summary_text",
+				Text: reasoning.Summary[0].Text,
+			},
+		),
+		s.builder.OutputItemDone(
+			item.outputIndex,
+			reasoning,
+		),
+	}, nil
+}
+
 // finish closes open items and builds the terminal event batch.
 func (s *chatResponsesStreamState) finish(
 	finishReason string,
@@ -1116,9 +1192,15 @@ func (s *chatResponsesStreamState) finish(
 		if !ok {
 			continue
 		}
-		if reasoning.Status == ResponsesItemInProgress {
-			reasoning.Status = ResponsesItemCompleted
+		if reasoning.Status == ResponsesItemCompleted {
+			// Already closed inline at a reasoning→content/tool
+			// transition (closeOpenReasoningItem): its done events were
+			// emitted there — emitting them twice is a duplicate
+			// part.done on the wire and a duplicate reconciliation in
+			// the anthropic state.
+			continue
 		}
+		reasoning.Status = ResponsesItemCompleted
 		events = append(events,
 			s.builder.ReasoningSummaryTextDone(
 				reasoning.ID,
