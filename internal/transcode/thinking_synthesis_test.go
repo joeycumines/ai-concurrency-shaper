@@ -135,6 +135,67 @@ func TestNonMarkerThinkingBlocksKeepAuthenticatedBehavior(t *testing.T) {
 	}
 }
 
+// TestStreamReasoningContiguousDeltasOneThinkingBlock pins the
+// CC-FRAGMENTATION fix (operator-observed 2026-09-08): contiguous reasoning
+// deltas must render as exactly ONE thinking block — the transition close
+// fires only when a delta actually carries content or tool output, never for
+// a reasoning-only delta. The pre-fix behavior sealed the reasoning item on
+// every reasoning delta, so Claude Code rendered one ∴ fragment per line.
+func TestStreamReasoningContiguousDeltasOneThinkingBlock(t *testing.T) {
+	chat := newChatResponsesStreamState(
+		testStreamContext(),
+		StrictLossPolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"resp_1",
+		"m",
+		1710000000,
+		nil,
+	)
+	anthropic := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"msg_1",
+		"claude-x",
+		1710000000,
+	)
+	converter := newChatToAnthropicConverter(chat, anthropic)
+
+	frames := []string{
+		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"frag one "},"finish_reason":null}]}`,
+		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"frag two "},"finish_reason":null}]}`,
+		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"frag three"},"finish_reason":null}]}`,
+		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"m","choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}`,
+		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	}
+	var starts, stops, thinkingDeltas []int
+	for _, f := range frames {
+		batch, err := converter.Convert(SSEEvent{Data: []byte(f)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, ev := range batch.Events {
+			switch {
+			case ev.Type == "content_block_start" && strings.Contains(string(ev.Data), `"type":"thinking"`):
+				starts = append(starts, 1)
+			case ev.Type == "content_block_stop" && strings.Contains(string(ev.Data), `"index":0`):
+				stops = append(stops, 1)
+			case ev.Type == "content_block_delta" && strings.Contains(string(ev.Data), `"thinking_delta"`):
+				thinkingDeltas = append(thinkingDeltas, 1)
+			}
+		}
+	}
+	if _, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")}); err != nil {
+		t.Fatal(err)
+	}
+	if len(starts) != 1 {
+		t.Fatalf("thinking content_block_start count = %d, want exactly 1 for contiguous reasoning deltas (one-block-per-delta is the CC-FRAGMENTATION regression)", len(starts))
+	}
+	if len(thinkingDeltas) != 3 {
+		t.Fatalf("thinking_delta count = %d, want 3 (all fragments in the one block)", len(thinkingDeltas))
+	}
+}
+
 func TestStreamReasoningRendersThinkingLifecycle(t *testing.T) {
 	chat := newChatResponsesStreamState(
 		testStreamContext(),

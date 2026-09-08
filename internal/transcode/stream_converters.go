@@ -494,11 +494,21 @@ func (s *chatResponsesStreamState) convertDelta(
 	// the next block opens. Holding the close until finish() scrambled the
 	// order on the wire (text block closed before the thinking block's
 	// signature; live Claude Code conformance, 2026-09-08).
-	closeEvents, err := s.closeOpenReasoningItem()
-	if err != nil {
-		return nil, err
+	//
+	// The close fires ONLY at a real transition — a delta that actually
+	// carries content or tool output. A reasoning-only delta must NOT
+	// close the item: sealing it here would fragment contiguous reasoning
+	// into one thinking block per delta (CC-FRAGMENTATION, operator-
+	// observed 2026-09-08 — Claude Code rendered one ∴ fragment per line).
+	hasOutput := (delta.Content != nil && *delta.Content != "") ||
+		len(delta.ToolCalls) > 0
+	if hasOutput {
+		closeEvents, err := s.closeOpenReasoningItem()
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, closeEvents...)
 	}
-	events = append(events, closeEvents...)
 
 	if delta.Content != nil && *delta.Content != "" {
 		item, addedEvents, err := s.openMessageItemForPart("output_text")
