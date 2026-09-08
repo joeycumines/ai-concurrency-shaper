@@ -590,23 +590,25 @@ type ReasoningSummary struct {
 	Text string `json:"text"`
 }
 
-// ReasoningText is one reasoning_text content entry.
+// ReasoningText is one reasoning_text content entry. Signature tolerates an
+// explicit null (codex-tui sends it, observed 2026-09-08): null decodes to
+// empty and omitempty omits the key from pass-through rendering.
 type ReasoningText struct {
-	Type      string `json:"type"`
-	Text      string `json:"text"`
-	Signature string `json:"signature,omitempty"`
+	Type      string              `json:"type"`
+	Text      string              `json:"text"`
+	Signature wire.NullOmitString `json:"signature,omitempty"`
 }
 
 // ReasoningInput is a reasoning input item. Summary must be present (use an
 // empty array); content and encrypted_content are provider-opaque and only
 // ever passed through unchanged.
 type ReasoningInput struct {
-	ID               string             `json:"id"`
-	Type             string             `json:"type"`
-	Status           ItemStatus         `json:"status,omitempty"`
-	Summary          []ReasoningSummary `json:"summary"`
-	Content          []ReasoningText    `json:"content,omitempty"`
-	EncryptedContent string             `json:"encrypted_content,omitempty"`
+	ID               string              `json:"id"`
+	Type             string              `json:"type"`
+	Status           ItemStatus          `json:"status,omitempty"`
+	Summary          []ReasoningSummary  `json:"summary"`
+	Content          []ReasoningText     `json:"content,omitempty"`
+	EncryptedContent wire.NullOmitString `json:"encrypted_content,omitempty"`
 }
 
 func (*ReasoningInput) isInputItem() {}

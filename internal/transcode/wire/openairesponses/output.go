@@ -264,12 +264,12 @@ func (c *FunctionCallOutputResultItem) Validate() error {
 
 // ReasoningOutputItem is an output reasoning item.
 type ReasoningOutputItem struct {
-	ID               string             `json:"id"`
-	Type             string             `json:"type"`
-	Status           ItemStatus         `json:"status"`
-	Summary          []ReasoningSummary `json:"summary"`
-	Content          []ReasoningText    `json:"content,omitempty"`
-	EncryptedContent string             `json:"encrypted_content,omitempty"`
+	ID               string              `json:"id"`
+	Type             string              `json:"type"`
+	Status           ItemStatus          `json:"status"`
+	Summary          []ReasoningSummary  `json:"summary"`
+	Content          []ReasoningText     `json:"content,omitempty"`
+	EncryptedContent wire.NullOmitString `json:"encrypted_content,omitempty"`
 }
 
 func (*ReasoningOutputItem) isOutputItem() {}
