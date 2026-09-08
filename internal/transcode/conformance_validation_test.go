@@ -233,11 +233,14 @@ func TestValidateCanonicalResponseNegativeMatrix(t *testing.T) {
 		}
 	})
 
-	t.Run("inconsistent total (overflow)", func(t *testing.T) {
+	t.Run("inconsistent total (mismatch)", func(t *testing.T) {
+		// CC-USAGE-ARITHMETIC: a total that is not the exact sum of input +
+		// output is an observability fact (real gateways emit it), relayed
+		// as-is — never an exchange failure.
 		r := base()
-		r.Usage.TotalTokens = 3 // 5+2 > 3
-		if err := ValidateCanonicalResponse(r); err == nil {
-			t.Fatal("inconsistent total accepted")
+		r.Usage.TotalTokens = 3 // 5+2 != 3
+		if err := ValidateCanonicalResponse(r); err != nil {
+			t.Fatalf("inconsistent total must be relayed, not rejected: %v", err)
 		}
 	})
 
@@ -278,13 +281,17 @@ func TestUsageStreamingNegativeRejection(t *testing.T) {
 	})
 
 	t.Run("chat inconsistent total", func(t *testing.T) {
-		_, err := chatUsageToResponsesUsage(&ChatLLMUsage{
+		// CC-USAGE-ARITHMETIC: relayed as-is, never rejected.
+		got, err := chatUsageToResponsesUsage(&ChatLLMUsage{
 			PromptTokens:     10,
 			CompletionTokens: 5,
-			TotalTokens:      12, // 10+5 > 12 is false; 10+5=15 > 12 is true
+			TotalTokens:      12,
 		})
-		if err == nil {
-			t.Fatal("inconsistent total accepted")
+		if err != nil {
+			t.Fatalf("inconsistent total must be relayed, not rejected: %v", err)
+		}
+		if got.TotalTokens != 12 {
+			t.Fatalf("total = %d, want the source's own 12", got.TotalTokens)
 		}
 	})
 

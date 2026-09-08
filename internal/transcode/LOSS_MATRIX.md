@@ -23,6 +23,7 @@ individual keys via `-transcode-allow-loss`.
 | `output_item_boundaries` | output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target |
 | `output_phase` | the output message phase (commentary vs final_answer) cannot be reproduced in the target |
 | `usage_unknown` | the source provided no token usage; the required target usage cannot be reproduced |
+| `usage_total_mismatch` | the source usage totals are arithmetically inconsistent (total_tokens != input + output); the source values are relayed as-is with the mismatch recorded |
 | `usage_cache_read_unknown` | the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced |
 | `usage_cache_write_unknown` | the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced |
 | `usage_reasoning_unknown` | the source provided no reasoning-token breakdown; the required target usage breakdown cannot be reproduced |

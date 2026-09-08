@@ -352,6 +352,7 @@ func DecodeChatResponseWithPolicy(
 	// prompt_cache_hit_tokens (DeepSeek hit = cached-read semantics).
 	// prompt_cache_miss_tokens has no canonical home — the miss is the
 	// derivable uncached prompt.
+	var report ConversionReport
 	if shadow.Usage != nil {
 		response.Usage = CanonicalUsage{
 			CacheReadKnown: shadow.Usage.PromptTokensDetails != nil ||
@@ -373,6 +374,23 @@ func DecodeChatResponseWithPolicy(
 		if shadow.Usage.TotalTokens != nil {
 			response.Usage.TotalTokens = int64(*shadow.Usage.TotalTokens)
 			response.Usage.TotalKnown = true
+		}
+		// CC-USAGE-ARITHMETIC: a total that is not the exact sum of
+		// prompt + completion is an observability fact (real gateways emit
+		// it), never an exchange failure — recorded as a note, values
+		// relayed as-is.
+		if shadow.Usage.PromptTokens != nil && shadow.Usage.CompletionTokens != nil && shadow.Usage.TotalTokens != nil {
+			sum := int64(*shadow.Usage.PromptTokens) + int64(*shadow.Usage.CompletionTokens)
+			if sum != int64(*shadow.Usage.TotalTokens) {
+				_ = report.Note(
+					FeatureUsageTotalMismatch,
+					"usage",
+					fmt.Sprintf(
+						"chat usage total %d is not the exact sum of prompt %d + completion %d; the source values are relayed as-is",
+						*shadow.Usage.TotalTokens, *shadow.Usage.PromptTokens, *shadow.Usage.CompletionTokens,
+					),
+				)
+			}
 		}
 		switch {
 		case shadow.Usage.PromptTokensDetails != nil:
@@ -424,7 +442,6 @@ func DecodeChatResponseWithPolicy(
 	// the model-generated arguments byte-exact (review-z commit 2). The
 	// answer-content parts render even while provider reasoning is dropped
 	// under an approved loss, so the client still receives a rendered response.
-	var report ConversionReport
 	parts, calls, err := chatMessageToCanonicalParts(message, capabilities, policy, &report)
 	if err != nil {
 		return CanonicalResponse{}, report, err

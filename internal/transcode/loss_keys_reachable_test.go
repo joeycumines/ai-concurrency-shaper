@@ -41,6 +41,10 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 		key  Feature
 		perm []Feature // permissions the scenario's render path needs
 		run  func(policy LossPolicy) (ConversionReport, error)
+		// note marks a Note-recorded key (a sanctioned encoding, not a
+		// policy decision): the strict-policy rejection assertion is
+		// skipped, since Notes record under every policy.
+		note bool
 	}
 	permissive := func(keys ...Feature) LossPolicy {
 		allowed := map[Feature]struct{}{}
@@ -349,6 +353,28 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 				context.RequestedClientModel = "m"
 				_, report, err := RenderMessagesResponse(response, context)
 				return report, err
+			},
+		},
+		{
+			// CC-USAGE-ARITHMETIC: the mismatch note is reachable on any
+			// chat usage relay whose total is not prompt + completion; the
+			// note needs no policy approval (Notes are sanctioned
+			// encodings), so the scenario runs under the strict policy and
+			// records the key anyway.
+			key:  FeatureUsageTotalMismatch,
+			perm: []Feature{},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newChatResponsesStreamState(
+					testStreamContext(), policy, ChatCapabilities{},
+					"resp_1", "m", 1710000000, nil,
+				)
+				state.noteUsageTotalMismatchChat(&ChatLLMUsage{
+					PromptTokens:     10,
+					CompletionTokens: 5,
+					TotalTokens:      20,
+				})
+				return state.report, nil
 			},
 		},
 		{
@@ -777,9 +803,13 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 
 	for _, s := range scenarios {
 		t.Run(string(s.key), func(t *testing.T) {
-			// Strict policy rejects the key's decision.
-			if _, err := s.run(strict); err == nil {
-				t.Fatal("strict policy accepted the loss")
+			// Notes are sanctioned encodings, not policy decisions: they
+			// record under every policy including strict. Gated losses must
+			// reject under strict.
+			if !s.note {
+				if _, err := s.run(strict); err == nil {
+					t.Fatal("strict policy accepted the loss")
+				}
 			}
 			// A policy allowing exactly this scenario's own permissions must
 			// complete the scenario and record the key (allowed by its own

@@ -101,6 +101,15 @@ const (
 	// UsageUnknown covers a source that provided no token usage at all: the
 	// required target usage cannot be reproduced.
 	FeatureUsageUnknown Feature = "usage_unknown"
+	// UsageTotalMismatch covers a source whose usage totals are
+	// arithmetically inconsistent (total_tokens != input + output). Real
+	// gateways emit such totals routinely (cache/reasoning accounting the
+	// proxy cannot see, gateway-side rounding); the source values are
+	// relayed as-is with the mismatch recorded — the check is observability,
+	// never an exchange failure (CC-USAGE-ARITHMETIC, operator-observed
+	// 2026-09-08: glm gateway total 293640 vs sum 293581 on a 293K-token
+	// exchange 502'd Claude Code 8 retries).
+	FeatureUsageTotalMismatch Feature = "usage_total_mismatch"
 	// UsageCacheReadUnknown covers a source that provided no cache-read
 	// token breakdown.
 	FeatureUsageCacheReadUnknown Feature = "usage_cache_read_unknown"
@@ -214,6 +223,7 @@ var lossRegistry = []lossEntry{
 	{FeatureOutputItemBoundaries, "output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target"},
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},
+	{FeatureUsageTotalMismatch, "the source usage totals are arithmetically inconsistent (total_tokens != input + output); the source values are relayed as-is with the mismatch recorded"},
 	{FeatureUsageCacheReadUnknown, "the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageCacheWriteUnknown, "the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageReasoningUnknown, "the source provided no reasoning-token breakdown; the required target usage breakdown cannot be reproduced"},

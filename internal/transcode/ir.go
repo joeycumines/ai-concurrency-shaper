@@ -747,25 +747,13 @@ func validateCanonicalUsage(u CanonicalUsage) error {
 		u.CacheReadTokens < 0 || u.CacheWriteTokens < 0 || u.TotalTokens < 0 {
 		return errors.New("usage has negative token counts")
 	}
-	// A known total must be the EXACT sum of the known components: the
-	// chat and responses contracts both define total_tokens as
-	// input + output (review-z commit 5). Only chat and responses sources
-	// reach this branch with a known total — anthropic wire has no total —
-	// so exact equality cannot reject a legitimate cache-inclusive total.
-	if u.InputKnown && u.OutputKnown && u.TotalKnown {
-		sum := u.InputTokens + u.OutputTokens
-		if sum < u.InputTokens || sum != u.TotalTokens {
-			return &UsageArithmeticError{
-				Detail: fmt.Sprintf(
-					"total %d is not the exact sum of input %d + output %d",
-					u.TotalTokens, u.InputTokens, u.OutputTokens,
-				),
-				SourceMismatch: true,
-				Input:          u.InputTokens,
-				Output:         u.OutputTokens,
-				Total:          u.TotalTokens,
-			}
-		}
-	}
+	// A known total that is not the exact sum of the known components is
+	// an OBSERVABILITY fact, not a rejection (CC-USAGE-ARITHMETIC,
+	// operator-observed 2026-09-08): real gateways emit totals whose
+	// arithmetic includes accounting the proxy cannot see, and failing the
+	// exchange for it 502'd Claude Code 8 retries on a 293K-token session.
+	// The conversion boundaries record the mismatch as a
+	// usage_total_mismatch note and relay the source values as-is. The
+	// negative-count checks above remain hard failures (fabricated facts).
 	return nil
 }

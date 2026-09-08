@@ -120,6 +120,9 @@ type chatResponsesStreamState struct {
 	serviceTierLossRecorded bool
 	logprobsLossRecorded    bool
 
+	// usageMismatchRecorded gates the usage_total_mismatch note (once per
+	// stream; CC-USAGE-ARITHMETIC).
+	usageMismatchRecorded bool
 	// reasoningReportRecorded gates the provider-reasoning report entry
 	// (loss or note) to exactly once per stream (review-08 blocker 7).
 	reasoningReportRecorded bool
@@ -249,6 +252,30 @@ func (s *chatResponsesStreamState) loseLogprobsOnce() error {
 		FeatureLogprobs,
 		"choices[].logprobs",
 		"chat response logprobs cannot be reproduced in the client dialect",
+	)
+}
+
+// noteUsageTotalMismatchChat records the chat usage-total mismatch once per
+// stream: real gateways emit totals whose arithmetic includes accounting the
+// proxy cannot see; the source values are relayed as-is and the mismatch is
+// observable (CC-USAGE-ARITHMETIC).
+func (s *chatResponsesStreamState) noteUsageTotalMismatchChat(usage *ChatLLMUsage) {
+	if usage == nil || s.usageMismatchRecorded {
+		return
+	}
+	total := int64(usage.TotalTokens)
+	sum := int64(usage.PromptTokens) + int64(usage.CompletionTokens)
+	if sum == total {
+		return
+	}
+	s.usageMismatchRecorded = true
+	_ = s.report.Note(
+		FeatureUsageTotalMismatch,
+		"usage",
+		fmt.Sprintf(
+			"chat usage total %d is not the exact sum of prompt %d + completion %d; the source values are relayed as-is",
+			total, usage.PromptTokens, usage.CompletionTokens,
+		),
 	)
 }
 
@@ -421,6 +448,7 @@ func (s *chatResponsesStreamState) Convert(
 		if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
 			return nil, err
 		}
+		s.noteUsageTotalMismatchChat(chunk.Usage)
 		converted, err := chatUsageToResponsesUsage(chunk.Usage)
 		if err != nil {
 			return nil, s.wireError(err)
@@ -1448,21 +1476,11 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
 			"chat usage has negative token counts",
 		)
 	}
-	// The chat contract defines total_tokens as prompt + completion
-	// EXACTLY: a known total that is not their exact sum is corrupt
-	// upstream wire (review-z commit 5).
-	if prompt+completion < prompt || prompt+completion != total {
-		return nil, &UsageArithmeticError{
-			Detail: fmt.Sprintf(
-				"chat usage total %d is not the exact sum of prompt %d + completion %d",
-				total, prompt, completion,
-			),
-			SourceMismatch: true,
-			Input:          prompt,
-			Output:         completion,
-			Total:          total,
-		}
-	}
+	// A total that is not the exact sum of prompt + completion is an
+	// observability fact, not a rejection (CC-USAGE-ARITHMETIC): the
+	// source values are relayed as-is; the mismatch is recorded as a
+	// usage_total_mismatch note by the caller (the note needs the report,
+	// which this helper does not own).
 	out := &ResponsesUsage{
 		InputTokens:  prompt,
 		OutputTokens: completion,
@@ -1775,6 +1793,10 @@ type anthropicResponsesStreamState struct {
 
 	messageSent bool
 	blockIndex  int64
+
+	// usageMismatchRecorded gates the usage_total_mismatch note (once per
+	// stream; CC-USAGE-ARITHMETIC).
+	usageMismatchRecorded bool
 
 	// lastSequence is the sequence number of the last processed event; the
 	// wire requires strictly increasing, unique sequence numbers across the
@@ -2163,17 +2185,18 @@ func (s *anthropicResponsesStreamState) messageStart(
 	}
 	usage, err := responsesUsageToAnthropicUsage(envelope.Usage)
 	if err != nil {
-		// A source-total mismatch is corrupt upstream wire; an int-width
-		// overflow while rendering stays local (review-z commit 5).
+		// An int-width overflow while rendering stays local (review-z
+		// commit 5); source-total mismatches no longer reject (they are
+		// recorded as usage_total_mismatch notes — CC-USAGE-ARITHMETIC).
 		if usageErr, ok := errors.AsType[*UsageArithmeticError](err); ok {
-			if usageErr.SourceMismatch {
-				return nil, s.wireError(fmt.Errorf("response usage: %w", err))
+			if !usageErr.SourceMismatch {
+				return nil, usageErr
 			}
-			return nil, usageErr
 		}
 		return nil, s.wireError(fmt.Errorf("response usage: %w", err))
 	}
 	if usage != nil {
+		s.noteUsageTotalMismatch(envelope.Usage)
 		// The required Messages breakdown components the source did not
 		// provide enter the loss decision before the zeros are emitted
 		// (review-k finding 6).
@@ -3420,6 +3443,28 @@ func anthropicErrorTypeFromCode(code string) string {
 	}
 }
 
+// noteUsageTotalMismatch records the Responses usage-total mismatch once per
+// stream: the source values are relayed as-is and the mismatch is observable
+// (CC-USAGE-ARITHMETIC).
+func (s *anthropicResponsesStreamState) noteUsageTotalMismatch(usage *ResponsesUsage) {
+	if usage == nil || s.usageMismatchRecorded {
+		return
+	}
+	sum := usage.InputTokens + usage.OutputTokens
+	if sum == usage.TotalTokens {
+		return
+	}
+	s.usageMismatchRecorded = true
+	_ = s.report.Note(
+		FeatureUsageTotalMismatch,
+		"usage",
+		fmt.Sprintf(
+			"responses usage total %d is not the exact sum of input %d + output %d; the source values are relayed as-is",
+			usage.TotalTokens, usage.InputTokens, usage.OutputTokens,
+		),
+	)
+}
+
 func (s *anthropicResponsesStreamState) finalizeMessage(
 	stop CanonicalStopReason,
 	usage *ResponsesUsage,
@@ -3427,17 +3472,17 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 	s.message.StopReason = new(stopReasonToAnthropic(stop))
 	converted, err := responsesUsageToAnthropicUsage(usage)
 	if err != nil {
-		// A source-total mismatch is corrupt upstream wire; an int-width
-		// overflow while rendering stays local (review-z commit 5).
+		// An int-width overflow while rendering stays local (review-z
+		// commit 5); source-total mismatches no longer reject.
 		if usageErr, ok := errors.AsType[*UsageArithmeticError](err); ok {
-			if usageErr.SourceMismatch {
-				return s.wireError(fmt.Errorf("response usage: %w", err))
+			if !usageErr.SourceMismatch {
+				return usageErr
 			}
-			return usageErr
 		}
 		return s.wireError(fmt.Errorf("response usage: %w", err))
 	}
 	if converted != nil {
+		s.noteUsageTotalMismatch(usage)
 		// The required Messages breakdown components the source did not
 		// provide enter the loss decision before the zeros are emitted
 		// (review-k finding 6); gated once per stream.
@@ -3514,22 +3559,10 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, err
 			Detail: "nonnegative token counts required and cached tokens must not exceed the input total",
 		}
 	}
-	// The responses contract defines total_tokens as input + output
-	// EXACTLY: a known total that is not their exact sum is corrupt
-	// upstream wire (review-z commit 5).
-	if sum := usage.InputTokens + usage.OutputTokens; sum < usage.InputTokens ||
-		sum != usage.TotalTokens {
-		return nil, &UsageArithmeticError{
-			Detail: fmt.Sprintf(
-				"responses usage total %d is not the exact sum of input %d + output %d",
-				usage.TotalTokens, usage.InputTokens, usage.OutputTokens,
-			),
-			SourceMismatch: true,
-			Input:          usage.InputTokens,
-			Output:         usage.OutputTokens,
-			Total:          usage.TotalTokens,
-		}
-	}
+	// A total that is not the exact sum of input + output is an
+	// observability fact, not a rejection (CC-USAGE-ARITHMETIC): the
+	// source values are relayed as-is; the mismatch note is recorded by
+	// the callers owning the report.
 	// Checked, architecture-independent int64-to-int conversion before
 	// rendering Messages usage: a count that cannot be represented on this
 	// platform (32-bit builds) is a typed error, never a silent overflow

@@ -1,9 +1,14 @@
 package transcode
 
-// Review-z commit 5 acceptance tests: exact usage-total equality everywhere
-// the pinned contract defines total as input + output, checked
-// architecture-independent int64-to-int conversions before rendering
-// Messages usage, and preserved absent-vs-zero usage fidelity.
+// Usage arithmetic acceptance tests. History: review-z commit 5 pinned
+// exact total == input + output and failed the exchange on mismatch.
+// CC-USAGE-ARITHMETIC (operator-observed 2026-09-08: a real glm gateway
+// emitted total 293640 vs sum 293581, 502-ing Claude Code 8 retries on a
+// 293K-token session) re-adjudicated the disposition: a mismatched total is
+// an OBSERVABILITY fact — the source values are relayed as-is and the
+// mismatch is recorded as a usage_total_mismatch note. The
+// architecture-independent int64-to-int width checks and the
+// absent-vs-zero usage fidelity pins are unchanged.
 
 import (
 	"errors"
@@ -11,66 +16,91 @@ import (
 	"testing"
 )
 
-// mustUsageError asserts err is (or wraps) a UsageArithmeticError.
-func mustUsageError(t *testing.T, err error, context string) {
+// mustMismatchNote asserts the report carries the usage_total_mismatch note.
+func mustMismatchNote(t *testing.T, report *ConversionReport, context string) {
 	t.Helper()
-	if err == nil {
-		t.Fatalf("%s: usage mismatch accepted", context)
+	for _, l := range report.Losses {
+		if l.Feature == FeatureUsageTotalMismatch {
+			return
+		}
 	}
-	if _, ok := errors.AsType[*UsageArithmeticError](err); !ok {
-		t.Fatalf("%s: err = %T %v, want *UsageArithmeticError", context, err, err)
-	}
+	t.Fatalf("%s: usage_total_mismatch note missing: %+v", context, report.Losses)
 }
 
-// TestChatUsageExactTotalStreaming proves the streaming chat -> responses
-// conversion rejects a known total that is not prompt + completion exactly
-// (review-z commit 5).
-func TestChatUsageExactTotalStreaming(t *testing.T) {
+// TestChatUsageMismatchStreamingRelayed proves the streaming chat ->
+// responses conversion relays a known total that is not prompt + completion
+// exactly, with the mismatch recorded (CC-USAGE-ARITHMETIC).
+func TestChatUsageMismatchStreamingRelayed(t *testing.T) {
 	usage := &ChatLLMUsage{
 		PromptTokens:     10,
 		CompletionTokens: 5,
-		TotalTokens:      20, // must be 15
+		TotalTokens:      20, // not 15
 	}
-	_, err := chatUsageToResponsesUsage(usage)
-	mustUsageError(t, err, "streaming chat usage")
+	state := newChatResponsesStreamState(
+		testStreamContext(), StrictLossPolicy(), ChatCapabilities{},
+		"resp_1", "m", 1710000000, nil,
+	)
+	state.noteUsageTotalMismatchChat(usage)
+	got, err := chatUsageToResponsesUsage(usage)
+	if err != nil {
+		t.Fatalf("mismatch must be relayed, not rejected: %v", err)
+	}
+	if got.TotalTokens != 20 {
+		t.Fatalf("total = %d, want the source's own 20", got.TotalTokens)
+	}
+	mustMismatchNote(t, &state.report, "streaming chat usage")
 }
 
-// TestResponsesUsageExactTotalStreaming proves the streaming responses ->
-// anthropic conversion rejects a known total that is not input + output
-// exactly (review-z commit 5).
-func TestResponsesUsageExactTotalStreaming(t *testing.T) {
+// TestResponsesUsageMismatchStreamingRelayed proves the streaming responses
+// -> anthropic conversion relays a known total that is not input + output
+// exactly, with the mismatch recorded (CC-USAGE-ARITHMETIC).
+func TestResponsesUsageMismatchStreamingRelayed(t *testing.T) {
 	usage := &ResponsesUsage{
 		InputTokens:  10,
 		OutputTokens: 5,
-		TotalTokens:  20, // must be 15
+		TotalTokens:  20, // not 15
 	}
-	_, err := responsesUsageToAnthropicUsage(usage)
-	mustUsageError(t, err, "streaming responses usage")
+	state := newAnthropicResponsesStreamState(
+		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{ProviderReasoningThinking: true},
+		"msg_1", "claude-x", 1710000000,
+	)
+	state.noteUsageTotalMismatch(usage)
+	got, err := responsesUsageToAnthropicUsage(usage)
+	if err != nil {
+		t.Fatalf("mismatch must be relayed, not rejected: %v", err)
+	}
+	if got.OutputTokens != 5 {
+		t.Fatalf("output = %d, want the source's own 5", got.OutputTokens)
+	}
+	mustMismatchNote(t, &state.report, "streaming responses usage")
 }
 
-// TestResponsesUsageExactTotalNonStreaming proves the non-streaming
-// responses decode rejects a contract-violating total: the canonical
-// validation is the single chokepoint, and the decode wraps the violation as
-// corrupt upstream wire (an upstream failure, never local) (review-z
-// commit 5).
-func TestResponsesUsageExactTotalNonStreaming(t *testing.T) {
+// TestResponsesUsageMismatchNonStreamingRelayed proves the non-streaming
+// responses decode relays a contract-violating total (CC-USAGE-ARITHMETIC).
+func TestResponsesUsageMismatchNonStreamingRelayed(t *testing.T) {
 	body := []byte(`{"object":"response","id":"resp_1","created_at":1.0,"model":"m","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":20,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`)
-	_, err := DecodeResponsesResponse(body)
-	mustUsageError(t, err, "non-streaming responses usage")
-	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
-		t.Fatalf("err = %T %v, want *UpstreamWireError wrap (corrupt upstream wire)", err, err)
+	response, err := DecodeResponsesResponse(body)
+	if err != nil {
+		t.Fatalf("mismatch must be relayed, not rejected: %v", err)
+	}
+	if response.Usage.TotalTokens != 20 {
+		t.Fatalf("source total must be relayed as-is: %d", response.Usage.TotalTokens)
 	}
 }
 
-// TestChatUsageExactTotalNonStreaming proves the non-streaming chat decode
-// rejects a contract-violating total the same way (review-z commit 5).
-func TestChatUsageExactTotalNonStreaming(t *testing.T) {
+// TestChatUsageMismatchNonStreamingRelayed proves the non-streaming chat
+// decode relays a contract-violating total with the mismatch note recorded
+// (CC-USAGE-ARITHMETIC).
+func TestChatUsageMismatchNonStreamingRelayed(t *testing.T) {
 	body := []byte(`{"object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":20}}`)
-	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
-	mustUsageError(t, err, "non-streaming chat usage")
-	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
-		t.Fatalf("err = %T %v, want *UpstreamWireError wrap (corrupt upstream wire)", err, err)
+	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("mismatch must be relayed, not rejected: %v", err)
 	}
+	if !response.Usage.TotalKnown || response.Usage.TotalTokens != 20 {
+		t.Fatalf("source total must be relayed as-is: %+v", response.Usage)
+	}
+	mustMismatchNote(t, &report, "non-streaming chat usage")
 }
 
 // TestCheckedInt64ToInt32BitSafety proves the conversion helper rejects
@@ -121,7 +151,13 @@ func TestResponsesUsageOverflowToAnthropic(t *testing.T) {
 		},
 	}
 	_, err := responsesUsageToAnthropicUsage(usage)
-	mustUsageError(t, err, "32-bit overflow to anthropic")
+	if err == nil {
+		t.Fatal("32-bit overflow to anthropic accepted")
+	}
+	var uaErr *UsageArithmeticError
+	if !errors.As(err, &uaErr) || uaErr.SourceMismatch {
+		t.Fatalf("err = %T %v, want a non-mismatch UsageArithmeticError (width overflow)", err, err)
+	}
 }
 
 // TestUsageAbsentVsZeroPreserved proves the exact-equality work preserves
@@ -145,12 +181,11 @@ func TestUsageAbsentVsZeroPreserved(t *testing.T) {
 	}
 }
 
-// TestStreamResponsesUsageMismatchIsUpstreamWire pins the stream-path
-// discrimination (review-z commit 5): a source-total mismatch in the
-// responses -> anthropic stream must surface as corrupt upstream wire
-// (SawUpstreamErrorFrame, an upstream failure), never as a local conversion
-// failure.
-func TestStreamResponsesUsageMismatchIsUpstreamWire(t *testing.T) {
+// TestStreamResponsesUsageMismatchRelayedAtTerminal pins the stream-path
+// disposition (CC-USAGE-ARITHMETIC): a mismatched total on the terminal
+// envelope is recorded as a usage_total_mismatch note and the stream
+// completes with the source's own usage — never a 502.
+func TestStreamResponsesUsageMismatchRelayedAtTerminal(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
@@ -159,8 +194,6 @@ func TestStreamResponsesUsageMismatchIsUpstreamWire(t *testing.T) {
 		"claude-x",
 		1,
 	)
-	// The stream lifecycle begins with response.created (the FSM rejects a
-	// terminal before it).
 	if _, err := state.Convert(ResponseCreatedEvent{
 		Type: "response.created", SequenceNumber: 0,
 		Response: ResponseEnvelope{
@@ -175,9 +208,8 @@ func TestStreamResponsesUsageMismatchIsUpstreamWire(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// The terminal envelope carries a contract-violating total: 10 + 5 = 15,
-	// not 20. The exchange must be an upstream wire failure.
-	_, err := state.completed(ResponseEnvelope{
+	// The terminal envelope carries a mismatched total: 10 + 5 = 15, not 20.
+	if _, err := state.completed(ResponseEnvelope{
 		ID:        "msg_1",
 		Model:     "claude-x",
 		CreatedAt: 1,
@@ -193,27 +225,22 @@ func TestStreamResponsesUsageMismatchIsUpstreamWire(t *testing.T) {
 				ReasoningTokens: 0,
 			},
 		},
-	})
-	if err == nil {
-		t.Fatal("contract-violating total accepted")
+	}); err != nil {
+		t.Fatalf("mismatched usage must not fail the stream: %v", err)
 	}
-	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
-		t.Fatalf("err = %T %v, want *UpstreamWireError (source-total mismatch is corrupt upstream wire)", err, err)
+	if !state.sawTerminal {
+		t.Fatal("terminal not reached")
 	}
-	var usageErr *UsageArithmeticError
-	if !errors.As(err, &usageErr) || !usageErr.SourceMismatch {
-		t.Fatalf("err = %T %v, want the flagged source-mismatch typed error inside", err, err)
+	if state.usage == nil || state.usage.OutputTokens != 5 {
+		t.Fatalf("source usage must be relayed as-is: %+v", state.usage)
 	}
-	if state.sawTerminal {
-		t.Fatal("terminal state reached despite the corrupt usage")
-	}
+	mustMismatchNote(t, &state.report, "terminal envelope mismatch")
 }
 
-// TestStreamResponsesUsageMismatchAtCreatedIsUpstreamWire pins the SECOND
-// stream call site (messageStart): a contract-violating total on the
-// response.created envelope is corrupt upstream wire, exactly like the
-// terminal-envelope path (review-z commit 5).
-func TestStreamResponsesUsageMismatchAtCreatedIsUpstreamWire(t *testing.T) {
+// TestStreamResponsesUsageMismatchRelayedAtCreated pins the messageStart
+// call site: a mismatched total on response.created is recorded and the
+// stream continues (CC-USAGE-ARITHMETIC).
+func TestStreamResponsesUsageMismatchRelayedAtCreated(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
 		j6PermissivePolicy(),
@@ -222,26 +249,19 @@ func TestStreamResponsesUsageMismatchAtCreatedIsUpstreamWire(t *testing.T) {
 		"claude-x",
 		1,
 	)
-	_, err := state.Convert(ResponseCreatedEvent{
+	if _, err := state.Convert(ResponseCreatedEvent{
 		Type: "response.created", SequenceNumber: 0,
 		Response: ResponseEnvelope{
 			ID: "msg_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "claude-x",
 			Output: []ResponsesOutputItem{},
 			Usage: &ResponsesUsage{
-				InputTokens: 10, OutputTokens: 5, TotalTokens: 20, // must be 15
+				InputTokens: 10, OutputTokens: 5, TotalTokens: 20,
 				InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 0},
 				OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 0},
 			},
 		},
-	})
-	if err == nil {
-		t.Fatal("contract-violating total on response.created accepted")
+	}); err != nil {
+		t.Fatalf("mismatched created usage must not fail the stream: %v", err)
 	}
-	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
-		t.Fatalf("err = %T %v, want *UpstreamWireError at messageStart", err, err)
-	}
-	var usageErr *UsageArithmeticError
-	if !errors.As(err, &usageErr) || !usageErr.SourceMismatch {
-		t.Fatalf("err = %T %v, want the flagged source-mismatch typed error inside", err, err)
-	}
+	mustMismatchNote(t, &state.report, "created envelope mismatch")
 }
