@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1854,6 +1855,357 @@ func TestE2E_MetricsEndpoint(t *testing.T) {
 	}
 	if status, _, _ = scrape(""); status != http.StatusNotFound {
 		t.Errorf("GET / status = %d, want 404", status)
+	}
+}
+
+// TestE2E_MultiProvider_QueueAdmissionAndObservability proves the composed
+// CLI queue admission classes and overload signaling end-to-end through the
+// real binary (UNRESP-2 / QUEUE-1 / UNRESP-3): two providers with distinct
+// queue admission configurations, bounded-queue 429 fail-fast under
+// saturation, the :unlimited admission class bypassing a saturated
+// -limit-all pool, SSE queue comments flowing while queued, Prometheus
+// exposition of the aggregate and per-route queue series, and a clean
+// concurrent drain with no deadlock.
+func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	// Both upstreams hold their completion route on the shared gate: the
+	// anthropic /v1/messages and the openai /v1/responses completions each
+	// saturate their provider's single slot until the gate releases, while
+	// /v1/messages/count_tokens answers immediately — the shape the
+	// unlimited admission class exists for.
+	gate := make(chan struct{})
+	var gateClose sync.Once
+	upA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/messages" {
+			<-gate
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if r.URL.Path == "/v1/messages/count_tokens" {
+			_, _ = w.Write([]byte(`{"input_tokens":42}`))
+		} else {
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}
+	}))
+	t.Cleanup(upA.Close)
+	upB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/responses" {
+			<-gate
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"served":%q}`, r.URL.Path)))
+	}))
+	t.Cleanup(upB.Close)
+
+	// Async request goroutines report failures through this collector rather
+	// than t.Errorf: a goroutine that outlives the test body (a t.Fatalf
+	// before the drain, or a client error after the proxy is signalled) must
+	// never log after the test completes — that panics the package test
+	// binary and masks the real failure. The join cleanup is registered
+	// BEFORE the process/gate cleanup below, so LIFO teardown releases the
+	// gate first and every goroutine is guaranteed to finish before its
+	// errors are reported. The client timeout bounds a goroutine whose
+	// request never returns, so the join cannot hang.
+	var asyncErrsMu sync.Mutex
+	var asyncErrs []string
+	var asyncWG sync.WaitGroup
+	asyncErr := func(format string, args ...any) {
+		asyncErrsMu.Lock()
+		defer asyncErrsMu.Unlock()
+		asyncErrs = append(asyncErrs, fmt.Sprintf(format, args...))
+	}
+	async := func(fn func()) {
+		asyncWG.Go(func() {
+			fn()
+		})
+	}
+	client := &http.Client{Timeout: 20 * time.Second}
+	t.Cleanup(func() {
+		asyncWG.Wait()
+		asyncErrsMu.Lock()
+		defer asyncErrsMu.Unlock()
+		for _, msg := range asyncErrs {
+			t.Errorf("%s", msg)
+		}
+	})
+
+	newAddr := func() string {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		return addr
+	}
+	proxyAddr := newAddr()
+	metricsAddr := newAddr()
+
+	// Provider A: -limit-all with an explicit :unlimited exemption for
+	// count_tokens, one concurrency slot, a bounded queue of one, and SSE
+	// queue comments. Provider B: one limited route with its own queue
+	// depth and queue comments.
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"-metrics-bind", metricsAddr,
+		"--provider=anthropic",
+		"-upstream", upA.URL,
+		"-prefix", "/claude",
+		"-limit-all=true",
+		"-limit", "POST /messages/count_tokens:unlimited",
+		"-limit", "POST /messages:1",
+		"-concurrency", "1",
+		"-queue-depth", "1",
+		"-queue-comments", "25ms",
+		"-queue-timeout", "30s",
+		"-retry", "0",
+		"-circuit-breaker=false",
+		"--provider=openai",
+		"-upstream", upB.URL,
+		"-prefix", "/openai",
+		"-limit", "POST /responses:1",
+		"-concurrency", "1",
+		"-queue-depth", "2",
+		"-queue-comments", "25ms",
+		"-queue-timeout", "30s",
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	var out safeBuffer
+	stdinR, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer stdinR.Close()
+	cmd.Stdin = stdinR
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v\n%s", err, out.String())
+	}
+	t.Cleanup(func() {
+		gateClose.Do(func() { close(gate) })
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		t.Fatalf("proxy addr: %v\noutput:\n%s", err, out.String())
+	}
+	if err := waitTCPReady(metricsAddr, 5*time.Second); err != nil {
+		t.Fatalf("metrics addr: %v\noutput:\n%s", err, out.String())
+	}
+
+	// Saturate provider A: one completion holds the only slot, one request
+	// fills the depth-1 queue, both blocked upstream on the gate.
+	slotsHeld := make(chan struct{}, 1)
+	async(func() {
+		resp, err := client.Post("http://"+proxyAddr+"/claude/v1/messages", "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			asyncErr("slot holder: %v", err)
+			return
+		}
+		resp.Body.Close()
+		slotsHeld <- struct{}{}
+	})
+	time.Sleep(200 * time.Millisecond)
+	queued := make(chan int, 1)
+	async(func() {
+		resp, err := client.Post("http://"+proxyAddr+"/claude/v1/messages", "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			asyncErr("queued request: %v", err)
+			return
+		}
+		resp.Body.Close()
+		queued <- resp.StatusCode
+	})
+	time.Sleep(200 * time.Millisecond)
+
+	// Bounded queue fail-fast: the third request finds waiters at the
+	// depth-1 bound and is rejected with 429 + Retry-After instead of
+	// queueing (QUEUE-1).
+	thirdRec, err := http.Post("http://"+proxyAddr+"/claude/v1/messages", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("third request: %v", err)
+	}
+	body, _ := io.ReadAll(thirdRec.Body)
+	thirdRec.Body.Close()
+	if thirdRec.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("third request status = %d body=%s, want 429 (queue depth bound)", thirdRec.StatusCode, body)
+	}
+	if ra := thirdRec.Header.Get("Retry-After"); ra == "" {
+		t.Error("429 must carry Retry-After")
+	}
+
+	// Unlimited admission class: count_tokens bypasses the saturated
+	// -limit-all pool entirely and answers immediately (UNRESP-2).
+	countDone := make(chan int, 1)
+	async(func() {
+		resp, err := client.Post("http://"+proxyAddr+"/claude/v1/messages/count_tokens", "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			asyncErr("count_tokens: %v", err)
+			return
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(respBody), `"input_tokens":42`) {
+			asyncErr("count_tokens body = %s, want the upstream token count", respBody)
+		}
+		countDone <- resp.StatusCode
+	})
+	select {
+	case code := <-countDone:
+		if code != http.StatusOK {
+			t.Errorf("count_tokens status = %d, want 200 through the unlimited class", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("count_tokens did not return within 3s while the pool was saturated; the unlimited class failed to bypass the queue")
+	}
+
+	// SSE queue comments: provider B's single slot is taken by this request;
+	// the SSE request below queues behind it and must see ": queue-wait"
+	// comments while it waits.
+	bSlot := make(chan struct{}, 1)
+	async(func() {
+		resp, err := client.Post("http://"+proxyAddr+"/openai/v1/responses", "application/json", strings.NewReader(`{}`))
+		if err != nil {
+			asyncErr("openai slot holder: %v", err)
+			return
+		}
+		resp.Body.Close()
+		bSlot <- struct{}{}
+	})
+	time.Sleep(200 * time.Millisecond)
+
+	sseDone := make(chan string, 1)
+	async(func() {
+		req, err := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/openai/v1/responses", strings.NewReader(`{}`))
+		if err != nil {
+			asyncErr("sse request: %v", err)
+			return
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		resp, err := client.Do(req)
+		if err != nil {
+			asyncErr("sse do: %v", err)
+			return
+		}
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		sseDone <- string(respBody)
+	})
+	time.Sleep(300 * time.Millisecond)
+
+	// While the SSE request is queued, scrape /metrics: the aggregate and
+	// per-route queue series must be present with accurate values
+	// (UNRESP-3). Provider A has 1 queued on POST /v1/messages; provider B
+	// has 1 queued on POST /v1/responses.
+	scrapeMetrics := func() string {
+		resp, err := http.Get("http://" + metricsAddr + "/metrics")
+		if err != nil {
+			t.Fatalf("scrape: %v", err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read scrape: %v", err)
+		}
+		return string(body)
+	}
+	var metricsBody string
+	for deadline := time.Now().Add(2 * time.Second); ; {
+		metricsBody = scrapeMetrics()
+		if strings.Contains(metricsBody, `shaper_route_queued{provider="anthropic",method="POST",path="/v1/messages"} 1`) &&
+			strings.Contains(metricsBody, `shaper_route_queued{provider="openai",method="POST",path="/v1/responses"} 1`) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("metrics never showed both providers' queued routes; last body:\n%s", metricsBody)
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	// Exact-value series: the aggregate queue depth and the queue-rejection
+	// counter.
+	for _, want := range []string{
+		`shaper_queued{provider="anthropic"} 1`,
+		`shaper_queue_rejected_total{provider="anthropic"} 1`,
+	} {
+		if !strings.Contains(metricsBody, want+"\n") {
+			t.Errorf("metrics output missing %q:\n%s", want, metricsBody)
+		}
+	}
+	// Age series carry a float value on the same line: parse it and require a
+	// positive age. The requests have demonstrably been queued for hundreds
+	// of milliseconds, so a prefix-only match would also accept NaN, a
+	// missing value, or a stale 0.000.
+	for _, want := range []string{
+		`shaper_route_oldest_queued_seconds{provider="anthropic",method="POST",path="/v1/messages"} `,
+		`shaper_route_oldest_queued_seconds{provider="openai",method="POST",path="/v1/responses"} `,
+	} {
+		idx := strings.Index(metricsBody, want)
+		if idx < 0 {
+			t.Errorf("metrics output missing %q...:\n%s", want, metricsBody)
+			continue
+		}
+		value := metricsBody[idx+len(want):]
+		if nl := strings.IndexByte(value, '\n'); nl >= 0 {
+			value = value[:nl]
+		}
+		age, err := strconv.ParseFloat(value, 64)
+		if err != nil || age <= 0 {
+			t.Errorf("age series %q value = %q (err %v), want a positive number of seconds:\n%s", want, value, err, metricsBody)
+		}
+	}
+
+	// Release everything: the SSE body must contain queue-wait comments
+	// followed by the real upstream response, and every blocked request
+	// must complete — no deadlock under maximum concurrency.
+	gateClose.Do(func() { close(gate) })
+	select {
+	case sseBody := <-sseDone:
+		// The admission comment (": queue-wait elapsed=0") is written
+		// unconditionally before the first ticker wait, so >= 1 would pass
+		// even if the -queue-comments ticker never fired. The request waited
+		// hundreds of milliseconds behind the held slot, so at least one
+		// 25ms ticker comment must follow the admission one.
+		if got := strings.Count(sseBody, ": queue-wait elapsed="); got < 2 {
+			t.Errorf("queue-wait comments = %d, want >= 2 (admission comment plus at least one ticker comment) in SSE body: %q", got, sseBody)
+		}
+		if !strings.Contains(sseBody, `"served":"/v1/responses"`) {
+			t.Errorf("SSE body missing the real upstream response after the comments: %q", sseBody)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("SSE request never completed after the gate released; deadlock")
+	}
+	select {
+	case code := <-queued:
+		if code != http.StatusOK {
+			t.Errorf("queued anthropic request status = %d, want 200", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("queued anthropic request never completed; deadlock")
+	}
+	select {
+	case <-slotsHeld:
+	case <-time.After(10 * time.Second):
+		t.Fatal("anthropic slot holder never completed; deadlock")
+	}
+	select {
+	case <-bSlot:
+	case <-time.After(10 * time.Second):
+		t.Fatal("openai slot holder never completed; deadlock")
 	}
 }
 

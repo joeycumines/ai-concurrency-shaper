@@ -17,15 +17,15 @@ import (
 // under -transcode-responses-chat.
 //
 // It validates that:
-// 1. 160+ input items with mixed roles, previous output messages, function calls,
-//    and function outputs decode cleanly under StrictLossPolicy.
-// 2. Duplicate keys in function call arguments (such as "max_output_tokens")
-//    are normalized via RFC 8259 last-key-wins without failing the request.
-// 3. Zero-argument tool calls with empty arguments ("") or whitespace ("   ")
-//    are normalized to valid empty objects ("{}").
-// 4. Unicode, special characters, escaped newlines/quotes, and large payloads
-//    in tool arguments survive byte-exact.
-// 5. RenderChatRequest produces valid, well-formed Chat Completions wire.
+//  1. 160+ input items with mixed roles, previous output messages, function calls,
+//     and function outputs decode cleanly under StrictLossPolicy.
+//  2. Duplicate keys in function call arguments (such as "max_output_tokens")
+//     are normalized via RFC 8259 last-key-wins without failing the request.
+//  3. Zero-argument tool calls with empty arguments ("") or whitespace ("   ")
+//     are normalized to valid empty objects ("{}").
+//  4. Unicode, special characters, escaped newlines/quotes, and large payloads
+//     in tool arguments survive byte-exact.
+//  5. RenderChatRequest produces valid, well-formed Chat Completions wire.
 func TestCodexMultiTurnReplayStress160(t *testing.T) {
 	var items []openairesponses.InputItem
 
@@ -47,7 +47,7 @@ func TestCodexMultiTurnReplayStress160(t *testing.T) {
 
 	// Generate 40 conversation cycles (4 items per cycle = 160 items)
 	// Each cycle: User prompt -> Assistant previous output -> Assistant function call -> User function output
-	for cycle := 0; cycle < 40; cycle++ {
+	for cycle := range 40 {
 		// 1. User message
 		items = append(items, &openairesponses.EasyInputMessage{
 			Type: "message",
@@ -65,9 +65,9 @@ func TestCodexMultiTurnReplayStress160(t *testing.T) {
 
 		// 2. Assistant previous output message
 		items = append(items, &openairesponses.PreviousOutputMessage{
-			ID:    fmt.Sprintf("msg_prev_out_%d", cycle),
-			Type:  "message",
-			Role:  "assistant",
+			ID:   fmt.Sprintf("msg_prev_out_%d", cycle),
+			Type: "message",
+			Role: "assistant",
 			Content: openairesponses.OutputContentParts{
 				&openairesponses.OutputText{
 					Type:        "output_text",
@@ -324,15 +324,15 @@ func TestCodexMultiTurnReplayStress160(t *testing.T) {
 // -transcode-messages-chat.
 //
 // It validates that:
-// 1. 160+ messages with mixed text, tool_use, tool_result, and thinking blocks
-//    decode cleanly.
-// 2. Marker-signature synthetic thinking blocks ("shaper-synth-thinking-1")
-//    are completely scrubbed from replayed history.
-// 3. An assistant turn whose ONLY content was synthetic thinking blocks is
-//    safely preserved with an empty text part rather than failing with
-//    "turn has no content parts".
-// 4. Tool use blocks with empty or duplicate input are normalized.
-// 5. RenderChatRequest produces valid upstream Chat Completions wire.
+//  1. 160+ messages with mixed text, tool_use, tool_result, and thinking blocks
+//     decode cleanly.
+//  2. Marker-signature synthetic thinking blocks ("shaper-synth-thinking-1")
+//     are completely scrubbed from replayed history.
+//  3. An assistant turn whose ONLY content was synthetic thinking blocks is
+//     safely preserved with an empty text part rather than failing with
+//     "turn has no content parts".
+//  4. Tool use blocks with empty or duplicate input are normalized.
+//  5. RenderChatRequest produces valid upstream Chat Completions wire.
 func TestClaudeCodeMultiTurnReplayStress160(t *testing.T) {
 	var messages []anthropicmessages.Message
 
@@ -342,7 +342,7 @@ func TestClaudeCodeMultiTurnReplayStress160(t *testing.T) {
 	}
 
 	// 40 cycles of dialog (4 messages per cycle = 160 messages)
-	for cycle := 0; cycle < 40; cycle++ {
+	for cycle := range 40 {
 		toolUseID := fmt.Sprintf("toolu_%03d", cycle)
 
 		// 1. User message
@@ -543,7 +543,7 @@ func TestConversionReportSaturationAcrossManyReplayedNotes(t *testing.T) {
 	policy := StrictLossPolicy()
 
 	// Add 5000 items that trigger Note
-	for i := 0; i < 5000; i++ {
+	for i := range 5000 {
 		err := report.Note(
 			FeaturePreviousResponseID,
 			fmt.Sprintf("input[%d].id", i),

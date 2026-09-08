@@ -40,17 +40,17 @@ func TestUpstreamWireDecodeMatrix(t *testing.T) {
 		},
 		{
 			name:     "chat no choices",
-			body:     `{"id":"c","object":"chat.completion"}`,
+			body:     `{"id":"c","object":"chat.completion","model":"m"}`,
 			wantWire: true,
 		},
 		{
 			name:     "chat multiple choices",
-			body:     `{"id":"c","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"a"}},{"index":1,"finish_reason":"stop","message":{"role":"assistant","content":"b"}}]}`,
+			body:     `{"id":"c","object":"chat.completion","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"a"}},{"index":1,"finish_reason":"stop","message":{"role":"assistant","content":"b"}}]}`,
 			wantWire: true,
 		},
 		{
 			name:     "chat missing message",
-			body:     `{"id":"c","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop"}]}`,
+			body:     `{"id":"c","object":"chat.completion","model":"m","choices":[{"index":0,"finish_reason":"stop"}]}`,
 			wantWire: true,
 		},
 		// Invalid model-generated tool arguments are PRESERVED byte-exact,

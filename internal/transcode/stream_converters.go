@@ -120,9 +120,6 @@ type chatResponsesStreamState struct {
 	serviceTierLossRecorded bool
 	logprobsLossRecorded    bool
 
-	// usageMismatchRecorded gates the usage_total_mismatch note (once per
-	// stream; CC-USAGE-ARITHMETIC).
-	usageMismatchRecorded bool
 	// reasoningReportRecorded gates the provider-reasoning report entry
 	// (loss or note) to exactly once per stream (review-08 blocker 7).
 	reasoningReportRecorded bool
@@ -159,6 +156,10 @@ type chatResponsesStreamState struct {
 	// detail objects the Chat source may not provide, and the decision is
 	// recorded exactly once per stream.
 	usageComponentsLossRecorded bool
+
+	// usageClampNotes gates the usage-clamp notes (usage_cache_exceeds_input,
+	// usage_negative_counts) to once per stream per key.
+	usageClampNotes usageClampNotes
 }
 
 // wireError marks a conversion error as corrupt upstream Chat wire data: the
@@ -252,30 +253,6 @@ func (s *chatResponsesStreamState) loseLogprobsOnce() error {
 		FeatureLogprobs,
 		"choices[].logprobs",
 		"chat response logprobs cannot be reproduced in the client dialect",
-	)
-}
-
-// noteUsageTotalMismatchChat records the chat usage-total mismatch once per
-// stream: real gateways emit totals whose arithmetic includes accounting the
-// proxy cannot see; the source values are relayed as-is and the mismatch is
-// observable (CC-USAGE-ARITHMETIC).
-func (s *chatResponsesStreamState) noteUsageTotalMismatchChat(usage *ChatLLMUsage) {
-	if usage == nil || s.usageMismatchRecorded {
-		return
-	}
-	total := int64(usage.TotalTokens)
-	sum := int64(usage.PromptTokens) + int64(usage.CompletionTokens)
-	if sum == total {
-		return
-	}
-	s.usageMismatchRecorded = true
-	_ = s.report.Note(
-		FeatureUsageTotalMismatch,
-		"usage",
-		fmt.Sprintf(
-			"chat usage total %d is not the exact sum of prompt %d + completion %d; the source values are relayed as-is",
-			total, usage.PromptTokens, usage.CompletionTokens,
-		),
 	)
 }
 
@@ -396,9 +373,9 @@ func (s *chatResponsesStreamState) Convert(
 			if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
 				return nil, err
 			}
-			converted, err := chatUsageToResponsesUsage(chunk.Usage)
-			if err != nil {
-				return nil, s.wireError(err)
+			converted, clamp := chatUsageToResponsesUsage(chunk.Usage)
+			if err := s.usageClampNotes.note(&s.report, "usage", clamp); err != nil {
+				return nil, err
 			}
 			s.usage = converted
 			return nil, nil
@@ -448,10 +425,9 @@ func (s *chatResponsesStreamState) Convert(
 		if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
 			return nil, err
 		}
-		s.noteUsageTotalMismatchChat(chunk.Usage)
-		converted, err := chatUsageToResponsesUsage(chunk.Usage)
-		if err != nil {
-			return nil, s.wireError(err)
+		converted, clamp := chatUsageToResponsesUsage(chunk.Usage)
+		if err := s.usageClampNotes.note(&s.report, "usage", clamp); err != nil {
+			return nil, err
 		}
 		s.usage = converted
 	}
@@ -1448,9 +1424,9 @@ func (o *openResponsesItem) isMessage() bool {
 // Messages←Chat stream can then know the cache-write component exactly like
 // the non-streaming decode, without emitting wire bytes the Responses
 // contract does not define.
-func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
+func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, usageClamp) {
 	if usage == nil {
-		return nil, nil
+		return nil, usageClamp{}
 	}
 	prompt := int64(usage.PromptTokens)
 	completion := int64(usage.CompletionTokens)
@@ -1471,16 +1447,6 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
 	case usage.ReasoningTokens != nil:
 		reasoning = int64(*usage.ReasoningTokens)
 	}
-	if prompt < 0 || completion < 0 || total < 0 || cached < 0 || reasoning < 0 {
-		return nil, errors.New(
-			"chat usage has negative token counts",
-		)
-	}
-	// A total that is not the exact sum of prompt + completion is an
-	// observability fact, not a rejection (CC-USAGE-ARITHMETIC): the
-	// source values are relayed as-is; the mismatch is recorded as a
-	// usage_total_mismatch note by the caller (the note needs the report,
-	// which this helper does not own).
 	out := &ResponsesUsage{
 		InputTokens:  prompt,
 		OutputTokens: completion,
@@ -1498,7 +1464,26 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, error) {
 		created := int64(*usage.PromptTokensDetails.CreatedCacheTokens)
 		out.CreatedCacheTokens = &created
 	}
-	return out, nil
+	// The source counts are clamped into the Responses invariants (nonnegative
+	// counts, a cached breakdown no larger than the input total, a total that
+	// matches the emitted components) and the corrections are returned for the
+	// caller to record as ungated notes: an arithmetically inconsistent
+	// upstream usage is a subject-to-change provider value, never an exchange
+	// failure. The helper itself cannot fail.
+	//
+	// The three totals are present by construction: the strict chunk decode
+	// rejects a usage that omits any of them, so a zero total here is a source
+	// fact. The breakdown presence is exact (each source spelling is an
+	// optional pointer).
+	presence := usagePresence{
+		input:      true,
+		output:     true,
+		total:      true,
+		cacheRead:  usage.PromptTokensDetails != nil || usage.CachedTokens != nil || usage.PromptCacheHitTokens != nil,
+		cacheWrite: usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CreatedCacheTokens != nil,
+		reasoning:  usage.CompletionTokensDetails != nil || usage.ReasoningTokens != nil,
+	}
+	return out, clampResponsesUsage(out, presence)
 }
 
 // chatStreamChunkShadow is the presence-aware strict decode shadow of a Chat
@@ -1794,10 +1779,6 @@ type anthropicResponsesStreamState struct {
 	messageSent bool
 	blockIndex  int64
 
-	// usageMismatchRecorded gates the usage_total_mismatch note (once per
-	// stream; CC-USAGE-ARITHMETIC).
-	usageMismatchRecorded bool
-
 	// lastSequence is the sequence number of the last processed event; the
 	// wire requires strictly increasing, unique sequence numbers across the
 	// stream (review-08 blocker 3). -1 accepts any nonnegative first
@@ -1881,6 +1862,10 @@ type anthropicResponsesStreamState struct {
 	// Responses source never provides, and the decision is recorded exactly
 	// once per stream.
 	usageComponentsLossRecorded bool
+
+	// usageClampNotes gates the usage-clamp notes (usage_cache_exceeds_input,
+	// usage_negative_counts) to once per stream per key.
+	usageClampNotes usageClampNotes
 
 	// totalAccumulated bounds the exchange-wide sum of accumulated semantic
 	// bytes (text, refusal, tool arguments; review-08 blocker 7).
@@ -2183,20 +2168,18 @@ func (s *anthropicResponsesStreamState) messageStart(
 		Model:   s.model,
 		Content: []AnthropicContentBlock{},
 	}
-	usage, err := responsesUsageToAnthropicUsage(envelope.Usage)
+	usage, clamp, err := responsesUsageToAnthropicUsage(envelope.Usage, responsesUsagePresence(envelope.Usage))
 	if err != nil {
-		// An int-width overflow while rendering stays local (review-z
-		// commit 5); source-total mismatches no longer reject (they are
-		// recorded as usage_total_mismatch notes — CC-USAGE-ARITHMETIC).
-		if usageErr, ok := errors.AsType[*UsageArithmeticError](err); ok {
-			if !usageErr.SourceMismatch {
-				return nil, usageErr
-			}
-		}
-		return nil, s.wireError(fmt.Errorf("response usage: %w", err))
+		// The only remaining failure is a count too large for this
+		// platform's int while rendering the target dialect: a local
+		// rendering impossibility, never a failed exchange on the
+		// source's own arithmetic (that is clamped and noted).
+		return nil, err
 	}
 	if usage != nil {
-		s.noteUsageTotalMismatch(envelope.Usage)
+		if err := s.usageClampNotes.note(&s.report, "usage", clamp); err != nil {
+			return nil, err
+		}
 		// The required Messages breakdown components the source did not
 		// provide enter the loss decision before the zeros are emitted
 		// (review-k finding 6).
@@ -3443,46 +3426,23 @@ func anthropicErrorTypeFromCode(code string) string {
 	}
 }
 
-// noteUsageTotalMismatch records the Responses usage-total mismatch once per
-// stream: the source values are relayed as-is and the mismatch is observable
-// (CC-USAGE-ARITHMETIC).
-func (s *anthropicResponsesStreamState) noteUsageTotalMismatch(usage *ResponsesUsage) {
-	if usage == nil || s.usageMismatchRecorded {
-		return
-	}
-	sum := usage.InputTokens + usage.OutputTokens
-	if sum == usage.TotalTokens {
-		return
-	}
-	s.usageMismatchRecorded = true
-	_ = s.report.Note(
-		FeatureUsageTotalMismatch,
-		"usage",
-		fmt.Sprintf(
-			"responses usage total %d is not the exact sum of input %d + output %d; the source values are relayed as-is",
-			usage.TotalTokens, usage.InputTokens, usage.OutputTokens,
-		),
-	)
-}
-
 func (s *anthropicResponsesStreamState) finalizeMessage(
 	stop CanonicalStopReason,
 	usage *ResponsesUsage,
 ) error {
 	s.message.StopReason = new(stopReasonToAnthropic(stop))
-	converted, err := responsesUsageToAnthropicUsage(usage)
+	converted, clamp, err := responsesUsageToAnthropicUsage(usage, responsesUsagePresence(usage))
 	if err != nil {
-		// An int-width overflow while rendering stays local (review-z
-		// commit 5); source-total mismatches no longer reject.
-		if usageErr, ok := errors.AsType[*UsageArithmeticError](err); ok {
-			if !usageErr.SourceMismatch {
-				return usageErr
-			}
-		}
-		return s.wireError(fmt.Errorf("response usage: %w", err))
+		// The only remaining failure is a count too large for this
+		// platform's int while rendering the target dialect: a local
+		// rendering impossibility, never a failed exchange on the
+		// source's own arithmetic (that is clamped and noted).
+		return err
 	}
 	if converted != nil {
-		s.noteUsageTotalMismatch(usage)
+		if err := s.usageClampNotes.note(&s.report, "usage", clamp); err != nil {
+			return err
+		}
 		// The required Messages breakdown components the source did not
 		// provide enter the loss decision before the zeros are emitted
 		// (review-k finding 6); gated once per stream.
@@ -3528,6 +3488,26 @@ func (s *anthropicResponsesStreamState) FinalizeEOF() ([]AnthropicStreamEvent, e
 	)
 }
 
+// responsesUsagePresence reports which counts a Responses usage actually
+// provided, so the clamp's details never present a defaulted zero as a source
+// fact. The pinned Responses contract requires all three totals, and the
+// non-streaming decode relies on the same assumption (DecodeResponsesResponse
+// marks them known whenever usage is present); the breakdown presence is exact
+// (the detail objects are optional pointers).
+func responsesUsagePresence(usage *ResponsesUsage) usagePresence {
+	if usage == nil {
+		return usagePresence{}
+	}
+	return usagePresence{
+		input:      true,
+		output:     true,
+		total:      true,
+		cacheRead:  usage.InputTokensDetails != nil,
+		cacheWrite: usage.CreatedCacheTokens != nil,
+		reasoning:  usage.OutputTokensDetails != nil,
+	}
+}
+
 // responsesUsageToAnthropicUsage converts a Responses usage into the
 // Anthropic form with the pinned semantics: input_tokens +
 // cache_creation_input_tokens + cache_read_input_tokens = total, so the
@@ -3537,10 +3517,19 @@ func (s *anthropicResponsesStreamState) FinalizeEOF() ([]AnthropicStreamEvent, e
 // source) supplies the cache-creation component when present, matching the
 // non-streaming decode. A nil source usage returns (nil, nil): the caller
 // decides the required-wire-usage loss instead of fabricating zeros.
-func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, error) {
+// presence is the caller's account of which counts the source provided (see
+// responsesUsagePresence).
+func responsesUsageToAnthropicUsage(usage *ResponsesUsage, presence usagePresence) (*AnthropicUsage, usageClamp, error) {
 	if usage == nil {
-		return nil, nil
+		return nil, usageClamp{}, nil
 	}
+	// The upstream usage is a subject-to-change provider value: an
+	// arithmetically inconsistent source (a cached breakdown exceeding the
+	// input total, negative counts) is CLAMPED into the Messages invariants
+	// and recorded by the caller as an ungated note naming the source
+	// numbers, instead of failing the exchange (the pre-fix failure was a
+	// 502 reading "source usage is arithmetically inconsistent").
+	clamp := clampResponsesUsage(usage, presence)
 	cached := int64(0)
 	if usage.InputTokensDetails != nil {
 		cached = usage.InputTokensDetails.CachedTokens
@@ -3553,39 +3542,34 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, err
 	if usage.OutputTokensDetails != nil {
 		reasoning = usage.OutputTokensDetails.ReasoningTokens
 	}
-	if usage.InputTokens < 0 || cached < 0 || cacheWrite < 0 || usage.InputTokens-cached-cacheWrite < 0 ||
-		usage.OutputTokens < 0 || reasoning < 0 {
-		return nil, &SourceInconsistencyError{
-			Detail: "nonnegative token counts required and cached tokens must not exceed the input total",
-		}
-	}
 	// A total that is not the exact sum of input + output is an
-	// observability fact, not a rejection (CC-USAGE-ARITHMETIC): the
-	// source values are relayed as-is; the mismatch note is recorded by
-	// the callers owning the report.
+	// observability fact, not a rejection: the emitted values are relayed and
+	// the clamp carries the mismatch detail (naming the source numbers where
+	// a clamp correction changed them); the callers owning the report record
+	// it.
 	// Checked, architecture-independent int64-to-int conversion before
 	// rendering Messages usage: a count that cannot be represented on this
 	// platform (32-bit builds) is a typed error, never a silent overflow
 	// (review-z commit 5).
 	uncached, err := checkedInt64ToInt(usage.InputTokens - cached - cacheWrite)
 	if err != nil {
-		return nil, &UsageArithmeticError{Detail: "input tokens: " + err.Error()}
+		return nil, clamp, &UsageArithmeticError{Detail: "input tokens: " + err.Error()}
 	}
 	readCached, err := checkedInt64ToInt(cached)
 	if err != nil {
-		return nil, &UsageArithmeticError{Detail: "cached tokens: " + err.Error()}
+		return nil, clamp, &UsageArithmeticError{Detail: "cached tokens: " + err.Error()}
 	}
 	created, err := checkedInt64ToInt(cacheWrite)
 	if err != nil {
-		return nil, &UsageArithmeticError{Detail: "cache-creation tokens: " + err.Error()}
+		return nil, clamp, &UsageArithmeticError{Detail: "cache-creation tokens: " + err.Error()}
 	}
 	output, err := checkedInt64ToInt(usage.OutputTokens)
 	if err != nil {
-		return nil, &UsageArithmeticError{Detail: "output tokens: " + err.Error()}
+		return nil, clamp, &UsageArithmeticError{Detail: "output tokens: " + err.Error()}
 	}
 	thinking, err := checkedInt64ToInt(reasoning)
 	if err != nil {
-		return nil, &UsageArithmeticError{Detail: "reasoning tokens: " + err.Error()}
+		return nil, clamp, &UsageArithmeticError{Detail: "reasoning tokens: " + err.Error()}
 	}
 	return &AnthropicUsage{
 		InputTokens:              uncached,
@@ -3595,7 +3579,7 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage) (*AnthropicUsage, err
 		OutputTokensDetails: &AnthropicOutputTokensDetails{
 			ThinkingTokens: thinking,
 		},
-	}, nil
+	}, clamp, nil
 }
 
 // loseReasoningOnce records the reasoning loss exactly once per stream

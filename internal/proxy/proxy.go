@@ -2162,9 +2162,7 @@ func (p *Proxy) startQueueComments(rec *statusRecorder) func() {
 
 	done := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		ticker := time.NewTicker(p.queueComments)
 		defer ticker.Stop()
 		for {
@@ -2178,7 +2176,7 @@ func (p *Proxy) startQueueComments(rec *statusRecorder) func() {
 				}
 			}
 		}
-	}()
+	})
 	return func() {
 		close(done)
 		wg.Wait()

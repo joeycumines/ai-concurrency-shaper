@@ -316,9 +316,12 @@ func TestAnthropicUsageUncachedArithmetic(t *testing.T) {
 			ReasoningTokens: 12,
 		},
 	}
-	converted, err := responsesUsageToAnthropicUsage(usage)
+	converted, clamp, err := responsesUsageToAnthropicUsage(usage, responsesUsagePresence(usage))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !clamp.empty() {
+		t.Fatalf("consistent usage clamped: %+v", clamp)
 	}
 	// Anthropic total: 40 (uncached) + 5 (cache read) = 45 — the source
 	// total, never 45 + 5.
@@ -329,9 +332,10 @@ func TestAnthropicUsageUncachedArithmetic(t *testing.T) {
 		t.Fatalf("usage = %+v", converted)
 	}
 
-	// Checked arithmetic: cached exceeding the total is an error, as are
-	// negative source values (a negative cached value must not mask a
-	// negative total).
+	// An arithmetically inconsistent source is CLAMPED, never a failed
+	// exchange: the cached breakdown is bounded by
+	// the input total and the Anthropic identity (uncached + cache-read +
+	// cache-creation = source total) holds.
 	bad := &ResponsesUsage{
 		InputTokens: 3,
 		TotalTokens: 3,
@@ -339,8 +343,15 @@ func TestAnthropicUsageUncachedArithmetic(t *testing.T) {
 			CachedTokens: 10,
 		},
 	}
-	if _, err := responsesUsageToAnthropicUsage(bad); err == nil {
-		t.Fatal("arithmetically inconsistent usage accepted")
+	converted, clamp, err = responsesUsageToAnthropicUsage(bad, responsesUsagePresence(bad))
+	if err != nil {
+		t.Fatalf("cache-exceeds-input must clamp, not reject: %v", err)
+	}
+	if !clamp.cacheExceedsInput || clamp.negativeCounts {
+		t.Fatalf("clamp = %+v, want cache-exceeds-input only", clamp)
+	}
+	if converted.InputTokens != 0 || converted.CacheReadInputTokens != 3 || converted.CacheCreationInputTokens != 0 {
+		t.Fatalf("clamped usage = %+v, want input 0 cache_read 3 cache_creation 0", converted)
 	}
 	bad = &ResponsesUsage{
 		InputTokens: -5,
@@ -349,17 +360,24 @@ func TestAnthropicUsageUncachedArithmetic(t *testing.T) {
 			CachedTokens: -10,
 		},
 	}
-	if _, err := responsesUsageToAnthropicUsage(bad); err == nil {
-		t.Fatal("negative source usage accepted")
+	converted, clamp, err = responsesUsageToAnthropicUsage(bad, responsesUsagePresence(bad))
+	if err != nil {
+		t.Fatalf("negative counts must clamp, not reject: %v", err)
+	}
+	if !clamp.negativeCounts {
+		t.Fatalf("clamp = %+v, want negative counts recorded", clamp)
+	}
+	if converted.InputTokens != 0 || converted.CacheReadInputTokens != 0 || converted.OutputTokens != 0 {
+		t.Fatalf("clamped usage = %+v, want all-zero counts", converted)
 	}
 
 	// Nil usage: unknown, never fabricated zeros.
-	converted, err = responsesUsageToAnthropicUsage(nil)
+	converted, clamp, err = responsesUsageToAnthropicUsage(nil, responsesUsagePresence(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if converted != nil {
-		t.Fatalf("nil usage converted to %+v", converted)
+	if converted != nil || !clamp.empty() {
+		t.Fatalf("nil usage converted to %+v (clamp %+v)", converted, clamp)
 	}
 }
 

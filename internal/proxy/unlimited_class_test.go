@@ -66,14 +66,12 @@ func TestProxy_UnlimitedClassPassesUnderLimitAll(t *testing.T) {
 	completions.Add(2)
 	var wg sync.WaitGroup
 	for i := range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 			req.Header.Set("X-Probe", map[bool]string{true: "1", false: "0"}[i == 0])
 			rec := httptest.NewRecorder()
 			p.ServeHTTP(rec, req)
-		}()
+		})
 	}
 	// Wait until both slots are held: a third limited request must time out.
 	time.Sleep(100 * time.Millisecond)

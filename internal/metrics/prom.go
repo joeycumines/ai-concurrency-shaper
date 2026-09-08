@@ -18,6 +18,7 @@ package metrics
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 )
 
@@ -109,10 +110,16 @@ func WritePrometheusFleet(w io.Writer, providers []ProviderSnapshot) error {
 			return fmt.Sprintf("%s{%s} %d\n", name, labels[i], pick(&providers[i].Snapshot)), true
 		})
 	}
+	gaugeFloat := func(name string, pick func(*Snapshot) float64) []string {
+		return group(func(i int) (string, bool) {
+			return fmt.Sprintf("%s{%s} %.3f\n", name, labels[i], pick(&providers[i].Snapshot)), true
+		})
+	}
 
 	families := [][]string{
 		gauge("shaper_active", func(s *Snapshot) int64 { return s.Active }),
 		gauge("shaper_queued", func(s *Snapshot) int64 { return s.Queued }),
+		gaugeFloat("shaper_oldest_queued_seconds", func(s *Snapshot) float64 { return s.OldestQueuedAge.Seconds() }),
 		gauge("shaper_retries_in_flight", func(s *Snapshot) int64 { return s.RetriesInFlight }),
 		gauge("shaper_clean_proxied_total", func(s *Snapshot) int64 { return s.TotalProxied }),
 		gauge("shaper_clean_passthrough_total", func(s *Snapshot) int64 { return s.TotalPassThrough }),
@@ -138,6 +145,69 @@ func WritePrometheusFleet(w io.Writer, providers []ProviderSnapshot) error {
 		}
 		return fmt.Sprintf("shaper_breaker_state{%s} %d\n", labels[i], breakerSeriesValue(cb.State)), true
 	}))
+
+	// Per-route queue observability (UNRESP-3): when providers have requests
+	// waiting in their per-route queues, export the per-route queued counts
+	// and oldest queued age with method and path labels.
+	// Grouped by metric name across all providers.
+	var routeQueuedLines []string
+	for i, p := range providers {
+		snap := &p.Snapshot
+		if len(snap.QueuedByRoute) == 0 {
+			continue
+		}
+		routes := make([]string, 0, len(snap.QueuedByRoute))
+		for r := range snap.QueuedByRoute {
+			routes = append(routes, r)
+		}
+		sort.Strings(routes)
+		for _, r := range routes {
+			count := snap.QueuedByRoute[r]
+			if count <= 0 {
+				continue
+			}
+			method, path, ok := strings.Cut(r, " ")
+			if !ok {
+				method = ""
+				path = r
+			}
+			routeQueuedLines = append(routeQueuedLines, fmt.Sprintf(
+				"shaper_route_queued{%s,method=\"%s\",path=\"%s\"} %d\n",
+				labels[i], escapeLabelValue(method), escapeLabelValue(path), count,
+			))
+		}
+	}
+	if len(routeQueuedLines) > 0 {
+		families = append(families, routeQueuedLines)
+	}
+
+	var routeAgeLines []string
+	for i, p := range providers {
+		snap := &p.Snapshot
+		if len(snap.OldestQueuedAgeByRoute) == 0 {
+			continue
+		}
+		routes := make([]string, 0, len(snap.OldestQueuedAgeByRoute))
+		for r := range snap.OldestQueuedAgeByRoute {
+			routes = append(routes, r)
+		}
+		sort.Strings(routes)
+		for _, r := range routes {
+			age := snap.OldestQueuedAgeByRoute[r]
+			method, path, ok := strings.Cut(r, " ")
+			if !ok {
+				method = ""
+				path = r
+			}
+			routeAgeLines = append(routeAgeLines, fmt.Sprintf(
+				"shaper_route_oldest_queued_seconds{%s,method=\"%s\",path=\"%s\"} %.3f\n",
+				labels[i], escapeLabelValue(method), escapeLabelValue(path), age.Seconds(),
+			))
+		}
+	}
+	if len(routeAgeLines) > 0 {
+		families = append(families, routeAgeLines)
+	}
 
 	for _, lines := range families {
 		if err := writeGroup(lines); err != nil {

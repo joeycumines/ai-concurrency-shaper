@@ -236,8 +236,8 @@ func TestStreamReasoningRendersThinkingLifecycle(t *testing.T) {
 			if strings.Contains(string(ev.Data), `"signature_delta"`) {
 				if i := strings.Index(string(ev.Data), `"signature":"`); i >= 0 {
 					rest := string(ev.Data)[i+len(`"signature":"`):]
-					if j := strings.Index(rest, `"`); j >= 0 {
-						signatures = append(signatures, rest[:j])
+					if before, _, ok := strings.Cut(rest, `"`); ok {
+						signatures = append(signatures, before)
 					}
 				}
 			}
@@ -253,8 +253,8 @@ func TestStreamReasoningRendersThinkingLifecycle(t *testing.T) {
 		if strings.Contains(string(ev.Data), `"signature_delta"`) {
 			if i := strings.Index(string(ev.Data), `"signature":"`); i >= 0 {
 				rest := string(ev.Data)[i+len(`"signature":"`):]
-				if j := strings.Index(rest, `"`); j >= 0 {
-					signatures = append(signatures, rest[:j])
+				if before, _, ok := strings.Cut(rest, `"`); ok {
+					signatures = append(signatures, before)
 				}
 			}
 		}
@@ -338,8 +338,7 @@ func TestAnthropicStreamReasoningInterleavedPartsRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("a second concurrently-open thinking part must be rejected")
 	}
-	var wire *UpstreamWireError
-	if !errors.As(err, &wire) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("failure must be a typed upstream wire error, got %T: %v", err, err)
 	}
 }
@@ -359,8 +358,8 @@ func TestAnthropicStreamReasoningNilIndexGuarded(t *testing.T) {
 	)
 	part := ResponsesSummaryTextPart{Type: "summary_text", Text: ""}
 	_, err := state.reasoningTextDelta(ResponseReasoningSummaryTextDeltaEvent{
-		EventBase: EventBase{Type: "response.reasoning_summary_text.delta", SequenceNumber: 1},
-		ItemID:    "rs_a", OutputIndex: 0, SummaryIndex: 0, Delta: "x",
+		Type: "response.reasoning_summary_text.delta", SequenceNumber: 1,
+		ItemID: "rs_a", OutputIndex: 0, SummaryIndex: 0, Delta: "x",
 	})
 	if err == nil {
 		t.Fatal("reasoningTextDelta with no open thinking block must fail")
@@ -370,8 +369,8 @@ func TestAnthropicStreamReasoningNilIndexGuarded(t *testing.T) {
 		t.Fatalf("reasoningTextDelta failure must be a typed upstream wire error, got %T: %v", err, err)
 	}
 	_, err = state.reasoningPartDone(ResponseReasoningSummaryPartDoneEvent{
-		EventBase: EventBase{Type: "response.reasoning_summary_part.done", SequenceNumber: 2},
-		ItemID:    "rs_a", OutputIndex: 0, SummaryIndex: 0, Part: part,
+		Type: "response.reasoning_summary_part.done", SequenceNumber: 2,
+		ItemID: "rs_a", OutputIndex: 0, SummaryIndex: 0, Part: part,
 	})
 	if err == nil {
 		t.Fatal("reasoningPartDone with no open thinking block must fail")

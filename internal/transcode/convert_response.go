@@ -180,15 +180,11 @@ func DecodeChatResponseWithPolicy(
 		)
 	}
 	// model is a required field of the pinned Chat response contract: absent
-	// or empty is corrupt upstream wire, classified upstream so a poisonous
-	// upstream is breaker-visible instead of failing locally at the IR
-	// validation (autopsy 2026-09-06 M2).
+	// or empty refuses the exchange as a LOCAL conversion error, never an
+	// upstream failure. A provider that omits the field is sloppy, not
+	// poisonous, and must not open the circuit breaker for every route.
 	if shadow.Model == nil || *shadow.Model == "" {
-		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
-			UpstreamChatCompletions,
-			0,
-			errors.New("chat response has no model"),
-		)
+		return CanonicalResponse{}, ConversionReport{}, errors.New("chat response has no model")
 	}
 	if len(shadow.Choices) == 0 {
 		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
@@ -375,23 +371,11 @@ func DecodeChatResponseWithPolicy(
 			response.Usage.TotalTokens = int64(*shadow.Usage.TotalTokens)
 			response.Usage.TotalKnown = true
 		}
-		// CC-USAGE-ARITHMETIC: a total that is not the exact sum of
-		// prompt + completion is an observability fact (real gateways emit
-		// it), never an exchange failure — recorded as a note, values
-		// relayed as-is.
-		if shadow.Usage.PromptTokens != nil && shadow.Usage.CompletionTokens != nil && shadow.Usage.TotalTokens != nil {
-			sum := int64(*shadow.Usage.PromptTokens) + int64(*shadow.Usage.CompletionTokens)
-			if sum != int64(*shadow.Usage.TotalTokens) {
-				_ = report.Note(
-					FeatureUsageTotalMismatch,
-					"usage",
-					fmt.Sprintf(
-						"chat usage total %d is not the exact sum of prompt %d + completion %d; the source values are relayed as-is",
-						*shadow.Usage.TotalTokens, *shadow.Usage.PromptTokens, *shadow.Usage.CompletionTokens,
-					),
-				)
-			}
-		}
+		// A total that is not the exact sum of prompt + completion is an
+		// observability fact (real gateways emit it), never an exchange
+		// failure. The mismatch is recorded by the renderer's usage clamp on
+		// the EMITTED counts: recording it here, pre-clamp, would name source
+		// numbers the clamp may then correct.
 		switch {
 		case shadow.Usage.PromptTokensDetails != nil:
 			response.Usage.CacheReadTokens = int64(shadow.Usage.PromptTokensDetails.CachedTokens)
@@ -458,12 +442,6 @@ func DecodeChatResponseWithPolicy(
 	}
 	response.Items = items
 	if err := ValidateCanonicalResponse(response); err != nil {
-		// A contract-violating token total is corrupt upstream wire — an
-		// upstream failure, never a local conversion error (review-z
-		// commit 5).
-		if _, ok := errors.AsType[*UsageArithmeticError](err); ok {
-			return CanonicalResponse{}, ConversionReport{}, upstreamWireError(UpstreamChatCompletions, 0, err)
-		}
 		return CanonicalResponse{}, ConversionReport{}, err
 	}
 	return response, report, nil
@@ -699,15 +677,12 @@ func DecodeResponsesResponse(
 			response.ErrorMessage = envelope.Error.Message
 		}
 	case "":
-		// An absent or empty status is a missing required semantic field —
-		// corrupt upstream wire, classified upstream so a poisonous upstream
-		// is breaker-visible (autopsy 2026-09-06 M2). A PRESENT but unknown
-		// status stays an unsupported feature (local) below.
-		return CanonicalResponse{}, upstreamWireError(
-			UpstreamResponses,
-			0,
-			errors.New("responses response has no status"),
-		)
+		// An absent or empty status is a missing required semantic field: the
+		// exchange is refused as a LOCAL conversion error, never an upstream
+		// failure, so a provider that omits it cannot open the circuit
+		// breaker. A PRESENT but unknown status stays an unsupported feature
+		// (also local) below.
+		return CanonicalResponse{}, errors.New("responses response has no status")
 	default:
 		return CanonicalResponse{}, &UnsupportedFeatureError{
 			Protocol: "responses",
@@ -844,12 +819,6 @@ func DecodeResponsesResponse(
 	}
 
 	if err := ValidateCanonicalResponse(response); err != nil {
-		// A contract-violating token total is corrupt upstream wire — an
-		// upstream failure, never a local conversion error (review-z
-		// commit 5).
-		if _, ok := errors.AsType[*UsageArithmeticError](err); ok {
-			return CanonicalResponse{}, upstreamWireError(UpstreamResponses, 0, err)
-		}
 		return CanonicalResponse{}, err
 	}
 	return response, nil
@@ -1015,13 +984,36 @@ func RenderResponsesResponse(
 			return nil, report, err
 		}
 	} else {
-		envelope.Usage = &ResponsesUsage{
-			InputTokens:  response.Usage.InputTokens,
-			OutputTokens: response.Usage.OutputTokens,
-			TotalTokens:  response.Usage.InputTokens + response.Usage.OutputTokens,
+		// The upstream usage is a subject-to-change provider value: an
+		// arithmetically inconsistent source (a cached breakdown exceeding
+		// the input total, negative counts) is CLAMPED into the Responses
+		// invariants and recorded as an ungated note naming the source
+		// numbers, instead of failing the exchange (the same clamp the
+		// Messages renderer applies).
+		usage := response.Usage
+		if clamp := clampCanonicalUsage(&usage); !clamp.empty() {
+			if err := clamp.record(&report, "usage"); err != nil {
+				return nil, report, err
+			}
 		}
-		if response.Usage.TotalKnown {
-			envelope.Usage.TotalTokens = response.Usage.TotalTokens
+		// The total is the source's own when provided, otherwise derived from
+		// the parts with checked arithmetic: a derived sum that cannot be
+		// represented is saturated and the saturation recorded, never a silent
+		// wrap into a negative total.
+		total := usage.TotalTokens
+		if !usage.TotalKnown {
+			var saturation string
+			total, saturation = derivedUsageTotal(usage.InputTokens, usage.OutputTokens)
+			if saturation != "" {
+				if err := report.Note(FeatureUsageTotalMismatch, "usage", saturation); err != nil {
+					return nil, report, err
+				}
+			}
+		}
+		envelope.Usage = &ResponsesUsage{
+			InputTokens:  usage.InputTokens,
+			OutputTokens: usage.OutputTokens,
+			TotalTokens:  total,
 		}
 		// Each wire-required component the source did not provide is its own
 		// granular loss decision (review-z commit 2).
@@ -1048,10 +1040,10 @@ func RenderResponsesResponse(
 			}
 		}
 		envelope.Usage.InputTokensDetails = &UsageInputTokensDetails{
-			CachedTokens: response.Usage.CacheReadTokens,
+			CachedTokens: usage.CacheReadTokens,
 		}
 		envelope.Usage.OutputTokensDetails = &UsageOutputTokensDetails{
-			ReasoningTokens: response.Usage.ReasoningTokens,
+			ReasoningTokens: usage.ReasoningTokens,
 		}
 	}
 
@@ -1384,13 +1376,20 @@ func RenderMessagesResponse(
 				return nil, report, err
 			}
 		}
-		inputTokens := response.Usage.InputTokens
-		cached := response.Usage.CacheReadTokens + response.Usage.CacheWriteTokens
-		if inputTokens < 0 || cached < 0 || inputTokens-cached < 0 {
-			return nil, report, &SourceInconsistencyError{
-				Detail: "nonnegative token counts required and cached tokens must not exceed the input total",
+		// The upstream usage is a subject-to-change provider value: an
+		// arithmetically inconsistent source (a cached breakdown exceeding
+		// the input total, negative counts) is CLAMPED into the Messages
+		// invariants and recorded as an ungated note naming the source
+		// numbers, instead of failing the exchange (the pre-fix failure was a
+		// 502 reading "source usage is arithmetically inconsistent").
+		usage := response.Usage
+		if clamp := clampCanonicalUsage(&usage); !clamp.empty() {
+			if err := clamp.record(&report, "usage"); err != nil {
+				return nil, report, err
 			}
 		}
+		inputTokens := usage.InputTokens
+		cached := usage.CacheReadTokens + usage.CacheWriteTokens
 		// Checked, architecture-independent int64-to-int conversion before
 		// rendering Messages usage: a count that cannot be represented on
 		// this platform (32-bit builds) is a typed error, never a silent
@@ -1399,19 +1398,19 @@ func RenderMessagesResponse(
 		if err != nil {
 			return nil, report, &UsageArithmeticError{Detail: "input tokens: " + err.Error()}
 		}
-		cacheWrite, err := checkedInt64ToInt(response.Usage.CacheWriteTokens)
+		cacheWrite, err := checkedInt64ToInt(usage.CacheWriteTokens)
 		if err != nil {
 			return nil, report, &UsageArithmeticError{Detail: "cache-creation tokens: " + err.Error()}
 		}
-		cacheRead, err := checkedInt64ToInt(response.Usage.CacheReadTokens)
+		cacheRead, err := checkedInt64ToInt(usage.CacheReadTokens)
 		if err != nil {
 			return nil, report, &UsageArithmeticError{Detail: "cache-read tokens: " + err.Error()}
 		}
-		output, err := checkedInt64ToInt(response.Usage.OutputTokens)
+		output, err := checkedInt64ToInt(usage.OutputTokens)
 		if err != nil {
 			return nil, report, &UsageArithmeticError{Detail: "output tokens: " + err.Error()}
 		}
-		thinking, err := checkedInt64ToInt(response.Usage.ReasoningTokens)
+		thinking, err := checkedInt64ToInt(usage.ReasoningTokens)
 		if err != nil {
 			return nil, report, &UsageArithmeticError{Detail: "reasoning tokens: " + err.Error()}
 		}

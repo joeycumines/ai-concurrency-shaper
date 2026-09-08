@@ -69,9 +69,7 @@ func TestProxy_CleanCountersPublishAfterJournalEntry(t *testing.T) {
 			// assertion flaky under -race; it is deterministic now.
 			var wg sync.WaitGroup
 			for range 32 {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					for range 25 {
 						rec := httptest.NewRecorder()
 						req := httptest.NewRequest(tc.method, tc.path, nil)
@@ -91,7 +89,7 @@ func TestProxy_CleanCountersPublishAfterJournalEntry(t *testing.T) {
 							return
 						}
 					}
-				}()
+				})
 			}
 			wg.Wait()
 

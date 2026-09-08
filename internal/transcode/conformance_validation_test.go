@@ -226,10 +226,13 @@ func TestValidateCanonicalResponseNegativeMatrix(t *testing.T) {
 	})
 
 	t.Run("negative usage", func(t *testing.T) {
+		// Supersession: a negative source count is a subject-to-change
+		// provider value that the RENDER boundaries clamp and note, never an
+		// IR validation failure.
 		r := base()
 		r.Usage.OutputTokens = -1
-		if err := ValidateCanonicalResponse(r); err == nil {
-			t.Fatal("negative usage accepted")
+		if err := ValidateCanonicalResponse(r); err != nil {
+			t.Fatalf("negative usage must reach the render clamp, not fail IR validation: %v", err)
 		}
 	})
 
@@ -251,23 +254,28 @@ func TestValidateCanonicalResponseNegativeMatrix(t *testing.T) {
 	})
 }
 
-// TestUsageStreamingNegativeRejection proves negative and inconsistent token
-// counts are rejected at the usage conversion boundaries (review-08
-// additional 10/11).
-func TestUsageStreamingNegativeRejection(t *testing.T) {
+// TestUsageConversionClampsInconsistency proves the usage conversion
+// boundaries CLAMP an arithmetically inconsistent source (negative counts, a
+// cached breakdown exceeding the input total) instead of rejecting it, and
+// record the correction: upstream usage arithmetic is a subject-to-change
+// provider value.
+func TestUsageConversionClampsInconsistency(t *testing.T) {
 	t.Run("chat negative output", func(t *testing.T) {
-		_, err := chatUsageToResponsesUsage(&ChatLLMUsage{
+		got, clamp := chatUsageToResponsesUsage(&ChatLLMUsage{
 			PromptTokens:     10,
 			CompletionTokens: -1,
 			TotalTokens:      9,
 		})
-		if err == nil {
-			t.Fatal("negative output accepted")
+		if !clamp.negativeCounts {
+			t.Fatalf("clamp = %+v, want negative counts recorded", clamp)
+		}
+		if got.OutputTokens != 0 || got.InputTokens != 10 {
+			t.Fatalf("clamped usage = %+v, want output 0 input 10", got)
 		}
 	})
 
 	t.Run("chat negative reasoning detail", func(t *testing.T) {
-		_, err := chatUsageToResponsesUsage(&ChatLLMUsage{
+		got, clamp := chatUsageToResponsesUsage(&ChatLLMUsage{
 			PromptTokens:     10,
 			CompletionTokens: 2,
 			TotalTokens:      12,
@@ -275,53 +283,80 @@ func TestUsageStreamingNegativeRejection(t *testing.T) {
 				ReasoningTokens: -1,
 			},
 		})
-		if err == nil {
-			t.Fatal("negative reasoning accepted")
+		if !clamp.negativeCounts || got.OutputTokensDetails.ReasoningTokens != 0 {
+			t.Fatalf("clamped usage = %+v (clamp %+v), want reasoning 0", got, clamp)
+		}
+	})
+
+	t.Run("chat cached exceeds prompt", func(t *testing.T) {
+		got, clamp := chatUsageToResponsesUsage(&ChatLLMUsage{
+			PromptTokens:     10,
+			CompletionTokens: 2,
+			TotalTokens:      12,
+			PromptTokensDetails: &ChatPromptTokensDetails{
+				CachedTokens: 50,
+			},
+		})
+		if !clamp.cacheExceedsInput {
+			t.Fatalf("clamp = %+v, want cache-exceeds-input recorded", clamp)
+		}
+		if got.InputTokensDetails.CachedTokens != 10 {
+			t.Fatalf("clamped cached = %d, want the input total 10", got.InputTokensDetails.CachedTokens)
 		}
 	})
 
 	t.Run("chat inconsistent total", func(t *testing.T) {
-		// CC-USAGE-ARITHMETIC: relayed as-is, never rejected.
-		got, err := chatUsageToResponsesUsage(&ChatLLMUsage{
+		// The source total is relayed as-is and the mismatch is recorded by
+		// the clamp (the caller records it as an ungated note), never a
+		// rejected exchange.
+		got, clamp := chatUsageToResponsesUsage(&ChatLLMUsage{
 			PromptTokens:     10,
 			CompletionTokens: 5,
 			TotalTokens:      12,
 		})
-		if err != nil {
-			t.Fatalf("inconsistent total must be relayed, not rejected: %v", err)
-		}
 		if got.TotalTokens != 12 {
 			t.Fatalf("total = %d, want the source's own 12", got.TotalTokens)
+		}
+		if !clamp.totalMismatch {
+			t.Fatalf("clamp = %+v, want the total mismatch recorded", clamp)
 		}
 	})
 
 	t.Run("chat nil usage returns nil", func(t *testing.T) {
-		got, err := chatUsageToResponsesUsage(nil)
-		if err != nil || got != nil {
-			t.Fatalf("nil usage = (%v, %v), want (nil, nil)", got, err)
+		got, clamp := chatUsageToResponsesUsage(nil)
+		if got != nil || !clamp.empty() {
+			t.Fatalf("nil usage = (%v, %+v), want (nil, empty)", got, clamp)
 		}
 	})
 
 	t.Run("responses negative output", func(t *testing.T) {
-		_, err := responsesUsageToAnthropicUsage(&ResponsesUsage{
+		usage := &ResponsesUsage{
 			InputTokens:  10,
 			OutputTokens: -1,
-		})
-		if err == nil {
-			t.Fatal("negative output accepted")
+		}
+		got, clamp, err := responsesUsageToAnthropicUsage(usage, responsesUsagePresence(usage))
+		if err != nil {
+			t.Fatalf("negative output must clamp, not reject: %v", err)
+		}
+		if !clamp.negativeCounts || got.OutputTokens != 0 {
+			t.Fatalf("clamped usage = %+v (clamp %+v), want output 0", got, clamp)
 		}
 	})
 
 	t.Run("responses negative reasoning detail", func(t *testing.T) {
-		_, err := responsesUsageToAnthropicUsage(&ResponsesUsage{
+		usage := &ResponsesUsage{
 			InputTokens:  10,
 			OutputTokens: 2,
 			OutputTokensDetails: &UsageOutputTokensDetails{
 				ReasoningTokens: -1,
 			},
-		})
-		if err == nil {
-			t.Fatal("negative reasoning accepted")
+		}
+		got, clamp, err := responsesUsageToAnthropicUsage(usage, responsesUsagePresence(usage))
+		if err != nil {
+			t.Fatalf("negative reasoning must clamp, not reject: %v", err)
+		}
+		if !clamp.negativeCounts || got.OutputTokensDetails.ThinkingTokens != 0 {
+			t.Fatalf("clamped usage = %+v (clamp %+v), want thinking 0", got, clamp)
 		}
 	})
 }

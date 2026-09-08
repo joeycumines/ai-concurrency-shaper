@@ -23,11 +23,13 @@ individual keys via `-transcode-allow-loss`.
 | `output_item_boundaries` | output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target |
 | `output_phase` | the output message phase (commentary vs final_answer) cannot be reproduced in the target |
 | `usage_unknown` | the source provided no token usage; the required target usage cannot be reproduced |
-| `usage_total_mismatch` | the source usage totals are arithmetically inconsistent (total_tokens != input + output); the source values are relayed as-is with the mismatch recorded |
+| `usage_total_mismatch` | the source usage totals are arithmetically inconsistent (total_tokens != input + output); the emitted values are relayed with the mismatch recorded (the note names the emitted counts and, where a clamp corrected a component, the source numbers) |
 | `report_overflow` | the conversion report reached its entry bound; further entries are aggregated into this note (observability saturation, never an exchange failure) |
 | `usage_cache_read_unknown` | the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced |
 | `usage_cache_write_unknown` | the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced |
 | `usage_reasoning_unknown` | the source provided no reasoning-token breakdown; the required target usage breakdown cannot be reproduced |
+| `usage_cache_exceeds_input` | the source usage's cached breakdown exceeds the input total; the cached components are clamped to the input total (the note names the source numbers) so the rendered usage stays arithmetically valid |
+| `usage_negative_counts` | the source usage reports negative token counts; each negative count is clamped to zero (the note names the source numbers) so the rendered usage stays nonnegative |
 | `provider_reasoning_text` | provider reasoning text in a RESPONSE (the chat extension spelled `reasoning` or, in the DeepSeek/Qwen convention real open-weights gateways emit, `reasoning_content`) cannot be reproduced in the target; it may map only to ordinary text, an approved loss, or a rejection (request-side reasoning controls are the separate request_reasoning key) |
 | `request_reasoning` | request-side reasoning controls (the Anthropic thinking budget and the Responses reasoning.effort) cannot be reproduced in the target request |
 | `reasoning_summary` | reasoning summaries (output and request-side summary style) cannot be reproduced in the target |

@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// TestChatUsageTotalMismatchRelayed pins the CC-USAGE-ARITHMETIC disposition
-// (operator-observed 2026-09-08): a gateway total that is not the exact sum
-// of prompt + completion (293640 vs 293360 + 221 on a real glm exchange)
-// must NOT fail the decode — the source values are relayed as-is and the
-// mismatch is recorded as a usage_total_mismatch note.
+// TestChatUsageTotalMismatchRelayed pins the disposition of a gateway total
+// that is not the exact sum of prompt + completion (293640 vs 293360 + 221 on
+// a real glm exchange): it must NOT fail the decode — the source values are
+// relayed as-is — and the render records the mismatch as a
+// usage_total_mismatch note naming the emitted counts.
 func TestChatUsageTotalMismatchRelayed(t *testing.T) {
 	body := []byte(`{"id":"c","object":"chat.completion","created":1,"model":"m",` +
 		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],` +
@@ -22,15 +22,17 @@ func TestChatUsageTotalMismatchRelayed(t *testing.T) {
 	if !response.Usage.TotalKnown || response.Usage.TotalTokens != 293640 {
 		t.Fatalf("source total must be relayed as-is: %+v", response.Usage)
 	}
-	found := false
-	for _, l := range report.Losses {
-		if l.Feature == FeatureUsageTotalMismatch {
-			found = true
-		}
+	if reportHasFeature(report, FeatureUsageTotalMismatch) {
+		t.Fatalf("decode recorded the mismatch before the counts were emitted: %+v", report.Losses)
 	}
-	if !found {
-		t.Fatalf("usage_total_mismatch note missing: %+v", report.Losses)
+	context := testExchangeContext()
+	context.LossPolicy = j6PermissivePolicy()
+	context.RequestedClientModel = "m"
+	_, renderReport, err := RenderMessagesResponse(response, context)
+	if err != nil {
+		t.Fatalf("render must not reject the mismatch: %v", err)
 	}
+	mustMismatchNote(t, &renderReport, "chat usage total mismatch render")
 }
 
 func TestChatResponseToolCallsDuplicateKeysAndEmptyArguments(t *testing.T) {

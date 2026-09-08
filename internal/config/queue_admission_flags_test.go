@@ -85,3 +85,49 @@ func TestQueueAdmissionFlagsNegativeRejected(t *testing.T) {
 		})
 	}
 }
+
+// TestQueueAdmissionFlagsMultiProvider pins section-scoped parsing of the
+// queue admission flags: in a multi-provider invocation, -queue-depth and
+// -queue-comments must land on the provider section they appear in, and must
+// not leak into the other sections (per-provider flag scoping is the whole
+// point of the sectioned parser).
+func TestQueueAdmissionFlagsMultiProvider(t *testing.T) {
+	cfg, err := Parse([]string{
+		"--provider=anthropic",
+		"-upstream", "https://api.anthropic.com",
+		"-prefix", "/claude",
+		"-queue-depth", "1",
+		"-queue-comments", "25ms",
+		"--provider=openai",
+		"-upstream", "https://api.openai.com",
+		"-prefix", "/openai",
+		"-queue-depth", "2",
+		"-queue-comments", "0",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("len(Providers) = %d, want 2", len(cfg.Providers))
+	}
+
+	pA, pB := cfg.Providers[0], cfg.Providers[1]
+	if pA.Name != "anthropic" || pB.Name != "openai" {
+		t.Fatalf("provider names = %q, %q; want anthropic, openai", pA.Name, pB.Name)
+	}
+	if pA.QueueDepth != 1 {
+		t.Errorf("anthropic QueueDepth = %d, want 1", pA.QueueDepth)
+	}
+	if pA.QueueComments != 25*time.Millisecond {
+		t.Errorf("anthropic QueueComments = %v, want 25ms", pA.QueueComments)
+	}
+	if pB.QueueDepth != 2 {
+		t.Errorf("openai QueueDepth = %d, want 2", pB.QueueDepth)
+	}
+	if pB.QueueComments != 0 {
+		t.Errorf("openai QueueComments = %v, want 0 (explicitly disabled)", pB.QueueComments)
+	}
+}

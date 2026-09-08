@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWritePrometheusFleetGoldenLines(t *testing.T) {
@@ -50,11 +51,13 @@ func TestWritePrometheusFleetGoldenLines(t *testing.T) {
 	wantLines := []string{
 		`shaper_active{provider="anthropic"} 0`,
 		`shaper_queued{provider="anthropic"} 0`,
+		`shaper_oldest_queued_seconds{provider="anthropic"} 0.000`,
 		`shaper_retries_in_flight{provider="anthropic"} 0`,
 		`shaper_clean_proxied_total{provider="anthropic"} 2`,
 		`shaper_clean_passthrough_total{provider="anthropic"} 1`,
 		`shaper_aborted_total{provider="anthropic"} 1`,
 		`shaper_circuit_rejected_total{provider="anthropic"} 0`,
+		`shaper_queue_rejected_total{provider="anthropic"} 0`,
 		`shaper_requests_total{provider="anthropic",status="1xx"} 0`,
 		`shaper_requests_total{provider="anthropic",status="2xx"} 2`,
 		`shaper_requests_total{provider="anthropic",status="3xx"} 0`,
@@ -199,9 +202,9 @@ func TestWritePrometheusFleetGroupsByMetricName(t *testing.T) {
 	}
 
 	runs := familyRunCounts(t, buf.String())
-	// 8 gauges + shaper_requests_total (one family, five labeled series)
-	// + breaker = 10 distinct metric names.
-	wantFamilies := 10
+	// 9 gauges + shaper_requests_total (one family, five labeled series)
+	// + breaker = 11 distinct metric names.
+	wantFamilies := 11
 	if len(runs) != wantFamilies {
 		t.Errorf("exported %d distinct metric names, want %d:\n%s", len(runs), wantFamilies, buf.String())
 	}
@@ -237,5 +240,132 @@ shaper_queued{provider="b"} 0
 	}
 	if strings.Count(buf.String(), "shaper_breaker_state") != 1 {
 		t.Errorf("breaker series must appear once (provider b has none):\n%s", buf.String())
+	}
+}
+
+func TestWritePrometheusRouteQueueMetrics(t *testing.T) {
+	// UNRESP-3: per-route queue observability. QueuedByRoute and
+	// OldestQueuedAgeByRoute export as method+path-labeled series, one
+	// contiguous family per metric name across all providers. Ragged
+	// membership on purpose: provider b has no queued routes, so both route
+	// families must be omitted for it entirely (no zero-valued filler).
+	a := Snapshot{
+		Queued: 2,
+		QueuedByRoute: map[string]int64{
+			"POST /v1/messages":         2,
+			"POST /v1/chat/completions": 0, // zero waiters: the series must be dropped
+		},
+		OldestQueuedAgeByRoute: map[string]time.Duration{
+			"POST /v1/messages": 1500 * time.Millisecond,
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := WritePrometheusFleet(&buf, []ProviderSnapshot{
+		{Name: "a", Snapshot: a},
+		{Name: "b", Snapshot: Snapshot{}},
+	}); err != nil {
+		t.Fatalf("WritePrometheusFleet: %v", err)
+	}
+	got := buf.String()
+
+	for _, want := range []string{
+		`shaper_route_queued{provider="a",method="POST",path="/v1/messages"} 2`,
+		`shaper_route_oldest_queued_seconds{provider="a",method="POST",path="/v1/messages"} 1.500`,
+	} {
+		if !strings.Contains(got, want+"\n") {
+			t.Errorf("route queue output missing %q:\n%s", want, got)
+		}
+	}
+	// Zero-waiter routes are absent (the collector never stores them, but a
+	// hand-built snapshot proves the export does not fabricate series).
+	if strings.Contains(got, "chat/completions") {
+		t.Errorf("zero-waiter route must not be exported:\n%s", got)
+	}
+	if strings.Contains(got, `provider="b",method=`) {
+		t.Errorf("provider b has no queued routes and must not appear in route families:\n%s", got)
+	}
+
+	// Both route families stay contiguous (one run each), and the route key
+	// without the "METHOD " prefix still exports with an empty method label.
+	b := Snapshot{
+		QueuedByRoute:          map[string]int64{"GETONLY": 1},
+		OldestQueuedAgeByRoute: map[string]time.Duration{"GETONLY": 2 * time.Second},
+	}
+	buf.Reset()
+	if err := WritePrometheusFleet(&buf, []ProviderSnapshot{{Name: "p", Snapshot: b}}); err != nil {
+		t.Fatalf("WritePrometheusFleet: %v", err)
+	}
+	got = buf.String()
+	if !strings.Contains(got, `shaper_route_queued{provider="p",method="",path="GETONLY"} 1`+"\n") {
+		t.Errorf("malformed route key must degrade to an empty method label:\n%s", got)
+	}
+	if !strings.Contains(got, `shaper_route_oldest_queued_seconds{provider="p",method="",path="GETONLY"} 2.000`+"\n") {
+		t.Errorf("malformed route key age missing:\n%s", got)
+	}
+	for name, n := range familyRunCounts(t, got) {
+		if n != 1 {
+			t.Errorf("metric %s forms %d contiguous blocks, want exactly 1:\n%s", name, n, got)
+		}
+	}
+
+	// Label values are escaped exactly once: escapeLabelValue pre-escapes
+	// the value and the label is quoted manually. Formatting the escaped
+	// value with %q would re-escape it (path a"b exported as a\"b, parsed
+	// back as a\"b instead of a"b) — corrupting the label Prometheus sees.
+	esc := Snapshot{
+		QueuedByRoute:          map[string]int64{`POST /v1/a"b\c`: 1},
+		OldestQueuedAgeByRoute: map[string]time.Duration{`POST /v1/a"b\c`: 3 * time.Second},
+	}
+	buf.Reset()
+	if err := WritePrometheusFleet(&buf, []ProviderSnapshot{{Name: "esc", Snapshot: esc}}); err != nil {
+		t.Fatalf("WritePrometheusFleet: %v", err)
+	}
+	got = buf.String()
+	for _, want := range []string{
+		`shaper_route_queued{provider="esc",method="POST",path="/v1/a\"b\\c"} 1`,
+		`shaper_route_oldest_queued_seconds{provider="esc",method="POST",path="/v1/a\"b\\c"} 3.000`,
+	} {
+		if !strings.Contains(got, want+"\n") {
+			t.Errorf("escaped label output missing %q:\n%s", want, got)
+		}
+	}
+
+	// Cross-provider contiguity: with TWO providers that both carry queued
+	// routes, each route family must still form exactly one contiguous block
+	// spanning both providers. A writer that emitted the route lines inside
+	// the per-provider grouping (queued_a, age_a, queued_b, age_b) would
+	// split both families into two runs — the exposition grouping rule
+	// violation this asserts against, and the only shape the single-provider
+	// cases above cannot detect.
+	both := []ProviderSnapshot{
+		{Name: "a", Snapshot: Snapshot{
+			QueuedByRoute:          map[string]int64{"POST /v1/messages": 1},
+			OldestQueuedAgeByRoute: map[string]time.Duration{"POST /v1/messages": 1500 * time.Millisecond},
+		}},
+		{Name: "b", Snapshot: Snapshot{
+			QueuedByRoute:          map[string]int64{"POST /v1/responses": 2},
+			OldestQueuedAgeByRoute: map[string]time.Duration{"POST /v1/responses": 250 * time.Millisecond},
+		}},
+	}
+	buf.Reset()
+	if err := WritePrometheusFleet(&buf, both); err != nil {
+		t.Fatalf("WritePrometheusFleet: %v", err)
+	}
+	got = buf.String()
+	for _, want := range []string{
+		`shaper_route_queued{provider="a",method="POST",path="/v1/messages"} 1`,
+		`shaper_route_queued{provider="b",method="POST",path="/v1/responses"} 2`,
+		`shaper_route_oldest_queued_seconds{provider="a",method="POST",path="/v1/messages"} 1.500`,
+		`shaper_route_oldest_queued_seconds{provider="b",method="POST",path="/v1/responses"} 0.250`,
+	} {
+		if !strings.Contains(got, want+"\n") {
+			t.Errorf("cross-provider route output missing %q:\n%s", want, got)
+		}
+	}
+	for name, n := range familyRunCounts(t, got) {
+		if n != 1 {
+			t.Errorf("metric %s forms %d contiguous blocks across two contributing providers, want exactly 1:\n%s", name, n, got)
+		}
 	}
 }

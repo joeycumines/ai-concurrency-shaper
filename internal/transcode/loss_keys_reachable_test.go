@@ -356,24 +356,109 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
-			// CC-USAGE-ARITHMETIC: the mismatch note is reachable on any
-			// chat usage relay whose total is not prompt + completion; the
-			// note needs no policy approval (Notes are sanctioned
-			// encodings), so the scenario runs under the strict policy and
-			// records the key anyway.
+			// A total that is not prompt + completion is relayed as-is and
+			// recorded by the usage clamp; the note needs no policy approval
+			// (Notes are sanctioned encodings), so the scenario runs with an
+			// empty allow-set and every usage component known, and records the
+			// key anyway.
 			key:  FeatureUsageTotalMismatch,
 			perm: []Feature{},
 			note: true,
 			run: func(policy LossPolicy) (ConversionReport, error) {
-				state := newChatResponsesStreamState(
-					testStreamContext(), policy, ChatCapabilities{},
-					"resp_1", "m", 1710000000, nil,
-				)
-				state.noteUsageTotalMismatchChat(&ChatLLMUsage{
+				chunk := chatChunk(t, ChatStreamDelta{Content: new("x")}, nil)
+				chunk.Usage = &ChatLLMUsage{
 					PromptTokens:     10,
 					CompletionTokens: 5,
 					TotalTokens:      20,
-				})
+					PromptTokensDetails: &ChatPromptTokensDetails{
+						CachedTokens:       0,
+						CreatedCacheTokens: new(0),
+					},
+					CompletionTokensDetails: &ChatCompletionTokensDetails{
+						ReasoningTokens: 0,
+					},
+				}
+				state := newChatResponsesStreamState(
+					testStreamContext(), policy, ChatCapabilities{},
+					"resp_1", "gpt-4.1", 1710000000, nil,
+				)
+				if _, err := state.Convert(chunk); err != nil {
+					return state.report, err
+				}
+				return state.report, nil
+			},
+		},
+		{
+			// A cached breakdown exceeding the
+			// input total is clamped into the Messages invariants and recorded
+			// as an ungated note. The note needs no policy approval, so the
+			// scenario runs under the strict policy with every usage component
+			// known (no gated loss is in play) and records the key anyway.
+			key:  FeatureUsageCacheExceedsInput,
+			perm: []Feature{},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				response := CanonicalResponse{
+					ID:     "resp_1",
+					Model:  "m",
+					Status: CanonicalResponseCompleted,
+					Stop:   CanonicalStop{Reason: CanonicalStopEndTurn},
+					Items: []CanonicalResponseItem{&CanonicalMessageItem{
+						Role:  CanonicalAssistant,
+						Parts: []CanonicalPart{CanonicalText{Text: "hi"}},
+					}},
+					Usage: CanonicalUsage{
+						InputKnown:      true,
+						InputTokens:     10,
+						CacheReadKnown:  true,
+						CacheReadTokens: 11,
+						CacheWriteKnown: true,
+						OutputKnown:     true,
+						OutputTokens:    5,
+						ReasoningKnown:  true,
+						TotalKnown:      true,
+						TotalTokens:     15,
+					},
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				context.RequestedClientModel = "m"
+				_, report, err := RenderMessagesResponse(response, context)
+				return report, err
+			},
+		},
+		{
+			// Negative upstream counts are clamped to zero and recorded
+			// as an ungated note on the stream surface. The scenario feeds a
+			// response.created envelope whose usage carries a negative input;
+			// the in-memory cache-write carrier and the reasoning details are
+			// provided so no gated loss is in play and the strict policy run
+			// still records the note.
+			key:  FeatureUsageNegativeCounts,
+			perm: []Feature{},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newAnthropicResponsesStreamState(
+					testStreamContext(), policy, ChatCapabilities{},
+					"msg_1", "claude-x", 1710000000,
+				)
+				envelope := anthropicLifecycleEnvelope("resp_1")
+				envelope.Usage = &ResponsesUsage{
+					InputTokens:        -1,
+					OutputTokens:       5,
+					TotalTokens:        4,
+					InputTokensDetails: &UsageInputTokensDetails{CachedTokens: 0},
+					OutputTokensDetails: &UsageOutputTokensDetails{
+						ReasoningTokens: 0,
+					},
+					CreatedCacheTokens: new(int64(0)),
+				}
+				if _, err := state.Convert(ResponseCreatedEvent{
+					Type: "response.created", SequenceNumber: 0,
+					Response: envelope,
+				}); err != nil {
+					return state.report, err
+				}
 				return state.report, nil
 			},
 		},

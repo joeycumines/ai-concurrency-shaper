@@ -3,6 +3,8 @@
 **This file intentionally contains no directory layout, file listing, or code structure details.**
 Providing structural information here makes agents lazy, as they stop exploring source files, i.e. they guess. Don't guess. Read the actual code. Every time.
 
+**Code must never reference session-scoped artefacts** — blueprint task numbers, review-round ids, incident nicknames: cite the observed behaviour or a commit instead, because a session reference is meaningless to anyone without the same context.
+
 This is a **stealth reverse proxy** with bounded concurrency and a TUI dashboard.
 
 Ensure these characteristics:
@@ -29,6 +31,7 @@ Transcoding handlers are **route-scoped wrappers** around the existing proxy pip
 Transcoding invariants:
 
 - Default behavior must be highly compatible out of the box — as strict as possible while remaining so: fidelity-only knobs (parameters, roles) are opt-in capabilities whose absence is an observable policy-gated loss, never a hard error and never a silently rendered incompatibility.
+- Compatibility nuance: whether to absorb an upstream defect or refuse the exchange is decided per case, by what the client can still be told truthfully — clamped arithmetic, totals that do not add up, absent or over-large breakdowns and provider-extension fields can be absorbed and noted because the client dialect can carry the corrected value honestly, while a defect that would mislead the client (a missing required field, a type-corrupt modeled field, malformed syntax, a self-contradictory union arm) can justify refusal; every correction is recorded as a note, so the decision is visible in the per-request log.
 - Client-facing protocols are OpenAI Responses and Anthropic Messages only. Chat Completions is an upstream-only fallback.
 - Supported directions are Responses → Chat Completions, Messages → Responses, and Messages → Chat Completions; prefer Responses → Chat Completions for Responses clients, and Messages → Responses when its explicit loss policy is configured.
 - Match mappings by HTTP method + path. Create-route mappings are POST-only.

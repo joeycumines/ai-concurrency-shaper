@@ -83,7 +83,7 @@ func TestConversionReportOverflowAggregated(t *testing.T) {
 				t.Fatalf("dropped = %d, want 1", report.Dropped)
 			}
 			// Further overflows keep counting silently; the note stays single.
-			for i := 0; i < 5; i++ {
+			for i := range 5 {
 				if err := overflow(&report); err != nil {
 					t.Fatalf("overflow #%d must not fail: %v", i, err)
 				}

@@ -111,11 +111,11 @@ const (
 	// UsageTotalMismatch covers a source whose usage totals are
 	// arithmetically inconsistent (total_tokens != input + output). Real
 	// gateways emit such totals routinely (cache/reasoning accounting the
-	// proxy cannot see, gateway-side rounding); the source values are
-	// relayed as-is with the mismatch recorded — the check is observability,
-	// never an exchange failure (CC-USAGE-ARITHMETIC, operator-observed
-	// 2026-09-08: glm gateway total 293640 vs sum 293581 on a 293K-token
-	// exchange 502'd Claude Code 8 retries).
+	// proxy cannot see, gateway-side rounding); the EMITTED values are
+	// relayed with the mismatch recorded — the check is observability, never
+	// an exchange failure (operator-observed 2026-09-08: a gateway total
+	// 293640 against a 293360 + 221 component sum on a 293K-token exchange
+	// failed the client, which retried 8 times).
 	FeatureUsageTotalMismatch Feature = "usage_total_mismatch"
 	// UsageCacheReadUnknown covers a source that provided no cache-read
 	// token breakdown.
@@ -126,6 +126,16 @@ const (
 	// UsageReasoningUnknown covers a source that provided no reasoning-token
 	// breakdown.
 	FeatureUsageReasoningUnknown Feature = "usage_reasoning_unknown"
+	// UsageCacheExceedsInput covers a source whose cached breakdown exceeds
+	// the input total: the cached components are clamped to the input total so
+	// the rendered usage stays arithmetically valid (an upstream whose usage
+	// is arithmetically inconsistent is a subject-to-change provider value,
+	// never an exchange failure).
+	FeatureUsageCacheExceedsInput Feature = "usage_cache_exceeds_input"
+	// UsageNegativeCounts covers a source reporting negative token counts:
+	// each negative count is clamped to zero so the rendered usage stays
+	// nonnegative (the same subject-to-change provider value rule).
+	FeatureUsageNegativeCounts Feature = "usage_negative_counts"
 	// ProviderReasoningText covers provider reasoning text in a RESPONSE —
 	// the Chat provider extension spelled `reasoning` (OpenRouter style) or
 	// `reasoning_content` (the DeepSeek/Qwen convention real open-weights
@@ -230,11 +240,13 @@ var lossRegistry = []lossEntry{
 	{FeatureOutputItemBoundaries, "output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target"},
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},
-	{FeatureUsageTotalMismatch, "the source usage totals are arithmetically inconsistent (total_tokens != input + output); the source values are relayed as-is with the mismatch recorded"},
+	{FeatureUsageTotalMismatch, "the source usage totals are arithmetically inconsistent (total_tokens != input + output); the emitted values are relayed with the mismatch recorded (the note names the emitted counts and, where a clamp corrected a component, the source numbers)"},
 	{FeatureReportOverflow, "the conversion report reached its entry bound; further entries are aggregated into this note (observability saturation, never an exchange failure)"},
 	{FeatureUsageCacheReadUnknown, "the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageCacheWriteUnknown, "the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageReasoningUnknown, "the source provided no reasoning-token breakdown; the required target usage breakdown cannot be reproduced"},
+	{FeatureUsageCacheExceedsInput, "the source usage's cached breakdown exceeds the input total; the cached components are clamped to the input total (the note names the source numbers) so the rendered usage stays arithmetically valid"},
+	{FeatureUsageNegativeCounts, "the source usage reports negative token counts; each negative count is clamped to zero (the note names the source numbers) so the rendered usage stays nonnegative"},
 	{FeatureProviderReasoningText, "provider reasoning text in a RESPONSE (the chat extension spelled `reasoning` or, in the DeepSeek/Qwen convention real open-weights gateways emit, `reasoning_content`) cannot be reproduced in the target; it may map only to ordinary text, an approved loss, or a rejection (request-side reasoning controls are the separate request_reasoning key)"},
 	{FeatureRequestReasoning, "request-side reasoning controls (the Anthropic thinking budget and the Responses reasoning.effort) cannot be reproduced in the target request"},
 	{FeatureReasoningSummary, "reasoning summaries (output and request-side summary style) cannot be reproduced in the target"},

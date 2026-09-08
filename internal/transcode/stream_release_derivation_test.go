@@ -251,8 +251,7 @@ func TestResponsesAnthropicToolIdentityCharged(t *testing.T) {
 		if err == nil {
 			t.Fatal("identity beyond the exchange total must be rejected (round 5)")
 		}
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want UpstreamWireError", err, err)
 		}
 	}
@@ -283,8 +282,7 @@ func TestChatStreamToolIdentityCharged(t *testing.T) {
 		}
 		fifth := ChatToolCallDelta{ID: new(bigID)}
 		_, err := state.Convert(chatChunk(t, ChatStreamDelta{ToolCalls: []ChatToolCallDelta{fifth}}, nil))
-		var wireErr *UpstreamWireError
-		if !errors.As(err, &wireErr) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want UpstreamWireError for identity beyond the exchange total", err, err)
 		}
 	})

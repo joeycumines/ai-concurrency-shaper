@@ -1666,18 +1666,27 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		}
 	}
 
-	t.Run("created with inconsistent usage", func(t *testing.T) {
+	t.Run("created with inconsistent usage clamped", func(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		envelope := anthropicLifecycleEnvelope("resp_1")
 		envelope.Usage = &ResponsesUsage{
 			InputTokens: 3, TotalTokens: 3,
 			InputTokensDetails: &UsageInputTokensDetails{CachedTokens: 10},
 		}
-		_, err := state.Convert(ResponseCreatedEvent{
+		events, err := state.Convert(ResponseCreatedEvent{
 			Type: "response.created", SequenceNumber: 0,
 			Response: envelope,
 		})
-		assertAnthropicWireError(t, err, "usage")
+		if err != nil {
+			t.Fatalf("cache-exceeds-input must clamp, not fail the stream: %v", err)
+		}
+		mustUsageClampNote(t, &state.report, FeatureUsageCacheExceedsInput, "created envelope usage")
+		if len(events) != 1 || events[0].Message == nil || events[0].Message.Usage == nil {
+			t.Fatalf("events = %+v", events)
+		}
+		if usage := events[0].Message.Usage; usage.InputTokens != 0 || usage.CacheReadInputTokens != 3 {
+			t.Fatalf("message_start usage = %+v, want input 0 cache-read 3", usage)
+		}
 	})
 
 	t.Run("unsupported item type on add", func(t *testing.T) {
@@ -2389,7 +2398,7 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 		}
 	})
 
-	t.Run("completed inconsistent usage", func(t *testing.T) {
+	t.Run("completed inconsistent usage clamped", func(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		envelope := anthropicLifecycleEnvelope("resp_1")
@@ -2398,11 +2407,16 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 			InputTokens: 3, TotalTokens: 3,
 			InputTokensDetails: &UsageInputTokensDetails{CachedTokens: 10},
 		}
-		_, err := state.Convert(ResponseCompletedEvent{
+		if _, err := state.Convert(ResponseCompletedEvent{
 			Type: "response.completed", SequenceNumber: 1,
 			Response: envelope,
-		})
-		assertAnthropicWireError(t, err, "usage")
+		}); err != nil {
+			t.Fatalf("cache-exceeds-input must clamp, not fail the stream: %v", err)
+		}
+		mustUsageClampNote(t, &state.report, FeatureUsageCacheExceedsInput, "completed envelope usage")
+		if state.usage == nil || state.usage.InputTokens != 0 || state.usage.CacheReadInputTokens != 3 {
+			t.Fatalf("terminal usage = %+v, want input 0 cache-read 3", state.usage)
+		}
 	})
 
 	t.Run("terminal envelope item never observed", func(t *testing.T) {
@@ -2638,7 +2652,7 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("incomplete inconsistent usage", func(t *testing.T) {
+	t.Run("incomplete inconsistent usage clamped", func(t *testing.T) {
 		state := anthropicLifecycleState(t)
 		feedAnthropicCreated(t, state, 0)
 		envelope := anthropicLifecycleEnvelope("resp_1")
@@ -2648,11 +2662,16 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 			InputTokens: 3, TotalTokens: 3,
 			InputTokensDetails: &UsageInputTokensDetails{CachedTokens: 10},
 		}
-		_, err := state.Convert(ResponseIncompleteEvent{
+		if _, err := state.Convert(ResponseIncompleteEvent{
 			Type: "response.incomplete", SequenceNumber: 1,
 			Response: envelope,
-		})
-		assertAnthropicWireError(t, err, "usage")
+		}); err != nil {
+			t.Fatalf("cache-exceeds-input must clamp, not fail the stream: %v", err)
+		}
+		mustUsageClampNote(t, &state.report, FeatureUsageCacheExceedsInput, "incomplete envelope usage")
+		if state.usage == nil || state.usage.InputTokens != 0 || state.usage.CacheReadInputTokens != 3 {
+			t.Fatalf("terminal usage = %+v, want input 0 cache-read 3", state.usage)
+		}
 	})
 }
 

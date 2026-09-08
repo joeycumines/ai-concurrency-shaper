@@ -548,9 +548,11 @@ type CanonicalResponse struct {
 }
 
 // ValidateCanonicalResponse checks the response IR invariants: a non-empty
-// model, a valid status and stop reason, role-correct items and parts,
-// non-negative and consistent usage, and tool-call identity (review-08
-// additional 10; review-z commit 2 central role validation).
+// model, a valid status and stop reason, role-correct items and parts, and
+// tool-call identity. Usage is NOT validated here: an arithmetically
+// inconsistent source usage (negative counts, a cached breakdown exceeding
+// the input total) is a subject-to-change provider value that the render
+// boundaries clamp and note, never an exchange failure.
 func ValidateCanonicalResponse(response CanonicalResponse) error {
 	if response.Model == "" {
 		return errors.New("response has no model")
@@ -664,9 +666,6 @@ func ValidateCanonicalResponse(response CanonicalResponse) error {
 		}
 	}
 
-	if err := validateCanonicalUsage(response.Usage); err != nil {
-		return fmt.Errorf("response usage: %w", err)
-	}
 	return nil
 }
 
@@ -743,25 +742,5 @@ func validateCanonicalPart(part CanonicalPart) error {
 			}
 		}
 	}
-	return nil
-}
-
-// validateCanonicalUsage enforces non-negative token counts and, where a
-// total is known, its consistency with the known components (review-08
-// additional 10/11). An input + output total must not underflow or exceed a
-// known total.
-func validateCanonicalUsage(u CanonicalUsage) error {
-	if u.InputTokens < 0 || u.OutputTokens < 0 || u.ReasoningTokens < 0 ||
-		u.CacheReadTokens < 0 || u.CacheWriteTokens < 0 || u.TotalTokens < 0 {
-		return errors.New("usage has negative token counts")
-	}
-	// A known total that is not the exact sum of the known components is
-	// an OBSERVABILITY fact, not a rejection (CC-USAGE-ARITHMETIC,
-	// operator-observed 2026-09-08): real gateways emit totals whose
-	// arithmetic includes accounting the proxy cannot see, and failing the
-	// exchange for it 502'd Claude Code 8 retries on a 293K-token session.
-	// The conversion boundaries record the mismatch as a
-	// usage_total_mismatch note and relay the source values as-is. The
-	// negative-count checks above remain hard failures (fabricated facts).
 	return nil
 }

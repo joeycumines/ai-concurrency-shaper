@@ -139,13 +139,11 @@ func TestProxy_QueueDepthZeroIsUnbounded(t *testing.T) {
 	var wg sync.WaitGroup
 	codes := make(chan int, 3)
 	for range 3 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rec := httptest.NewRecorder()
 			p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
 			codes <- rec.Code
-		}()
+		})
 	}
 	time.Sleep(150 * time.Millisecond)
 
@@ -214,7 +212,7 @@ func TestProxy_QueueDepth429ReleasesBreakerProbe(t *testing.T) {
 	// Fill the slot and the single waiter bound while the breaker is still
 	// CLOSED (only CLOSED arrivals pass Allow() to become waiters).
 	fillerDone := make(chan int, 2)
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		go func() {
 			rec := httptest.NewRecorder()
 			p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
@@ -237,7 +235,7 @@ func TestProxy_QueueDepth429ReleasesBreakerProbe(t *testing.T) {
 	// requests below carry their own.
 	time.Sleep(1100 * time.Millisecond)
 	halfOpen := false
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		epoch, err := b.Allow()
 		if err == nil {
 			b.CancelProbe(epoch)
@@ -268,7 +266,7 @@ func TestProxy_QueueDepth429ReleasesBreakerProbe(t *testing.T) {
 	// Drain the queue, then prove the breaker still recovers: the next
 	// request is admitted, succeeds, and closes the circuit.
 	close(gate)
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if code := <-fillerDone; code != http.StatusOK {
 			t.Fatalf("filler request status = %d, want 200", code)
 		}

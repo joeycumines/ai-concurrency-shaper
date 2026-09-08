@@ -135,9 +135,12 @@
 //
 // Invalid model-generated tool arguments are local unrepresentable output
 // when the target requires an object. Malformed source wire (strict decode
-// violations, lifecycle contradictions, contract-violating usage totals) is
-// corrupt upstream wire: an upstream failure. Unsupported-but-valid source
-// features are local conversion errors.
+// violations, lifecycle contradictions) is corrupt upstream wire: an upstream
+// failure. An arithmetically inconsistent source usage — a cached breakdown
+// above the input total, or negative counts — is not malformed wire: it is
+// clamped into the target dialect's invariants and recorded as an ungated note
+// naming the source numbers. Unsupported-but-valid source features are local
+// conversion errors.
 //
 // # Outcome accounting
 //
