@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestWritePrometheusFleetGoldenLines(t *testing.T) {
@@ -366,6 +367,67 @@ func TestWritePrometheusRouteQueueMetrics(t *testing.T) {
 	for name, n := range familyRunCounts(t, got) {
 		if n != 1 {
 			t.Errorf("metric %s forms %d contiguous blocks across two contributing providers, want exactly 1:\n%s", name, n, got)
+		}
+	}
+}
+
+// TestWritePrometheusSkipsInvalidUTF8RouteLabels proves the fail-closed label
+// rule: a client-supplied request path that is not valid UTF-8 makes the
+// reference Prometheus parser reject the ENTIRE document, so the affected
+// per-route series is skipped while every other series (both route families,
+// other routes, other providers, and the aggregate families) is unaffected.
+// Sanitizing is never an option: strings.ToValidUTF8 is not injective and can
+// collide two distinct routes into duplicate series.
+func TestWritePrometheusSkipsInvalidUTF8RouteLabels(t *testing.T) {
+	bad := "POST /v1/\xff\xfe"
+	var buf bytes.Buffer
+	if err := WritePrometheusFleet(&buf, []ProviderSnapshot{
+		{Name: "a", Snapshot: Snapshot{
+			Queued: 1,
+			QueuedByRoute: map[string]int64{
+				bad:                 1,
+				"POST /v1/messages": 2,
+			},
+			OldestQueuedAgeByRoute: map[string]time.Duration{
+				bad:                 3 * time.Second,
+				"POST /v1/messages": 1500 * time.Millisecond,
+			},
+		}},
+		{Name: "b", Snapshot: Snapshot{
+			Queued:                 4,
+			QueuedByRoute:          map[string]int64{"POST /v1/responses": 4},
+			OldestQueuedAgeByRoute: map[string]time.Duration{"POST /v1/responses": time.Second},
+		}},
+	}); err != nil {
+		t.Fatalf("WritePrometheusFleet: %v", err)
+	}
+	got := buf.String()
+	if strings.ContainsRune(got, '\xff') {
+		t.Fatalf("invalid UTF-8 reached the exposition:\n%q", got)
+	}
+	for _, want := range []string{
+		`shaper_route_queued{provider="a",method="POST",path="/v1/messages"} 2`,
+		`shaper_route_oldest_queued_seconds{provider="a",method="POST",path="/v1/messages"} 1.500`,
+		`shaper_route_queued{provider="b",method="POST",path="/v1/responses"} 4`,
+		`shaper_route_oldest_queued_seconds{provider="b",method="POST",path="/v1/responses"} 1.000`,
+		`shaper_queued{provider="a"} 1`,
+	} {
+		if !strings.Contains(got, want+"\n") {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	// Every emitted label value is valid UTF-8 — the reference parser's
+	// precondition, and the reason the series is skipped rather than sanitized.
+	for line := range strings.SplitSeq(got, "\n") {
+		open := strings.IndexByte(line, '{')
+		closeIdx := strings.IndexByte(line, '}')
+		if open < 0 || closeIdx < open {
+			continue
+		}
+		for label := range strings.SplitSeq(line[open+1:closeIdx], ",") {
+			if !utf8.ValidString(label) {
+				t.Fatalf("label %q in line %q is not valid UTF-8", label, line)
+			}
 		}
 	}
 }

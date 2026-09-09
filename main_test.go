@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -2030,12 +2031,34 @@ func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
 		resp.Body.Close()
 		queued <- resp.StatusCode
 	})
-	time.Sleep(200 * time.Millisecond)
+	// Deterministic readiness instead of a fixed sleep: the 429 below requires
+	// one request to be QUEUED, so poll /metrics (bounded) until the per-route
+	// queue series shows it. A precondition miss fails fast with an
+	// informative message instead of admitting the third request and blocking
+	// until the gate releases.
+	{
+		want := `shaper_route_queued{provider="anthropic",method="POST",path="/v1/messages"} 1`
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			resp, err := client.Get("http://" + metricsAddr + "/metrics")
+			if err == nil {
+				body, readErr := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if readErr == nil && strings.Contains(string(body), want) {
+					break
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %q in /metrics (the queue-depth 429 precondition)", want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 
 	// Bounded queue fail-fast: the third request finds waiters at the
 	// depth-1 bound and is rejected with 429 + Retry-After instead of
 	// queueing (QUEUE-1).
-	thirdRec, err := http.Post("http://"+proxyAddr+"/claude/v1/messages", "application/json", strings.NewReader(`{}`))
+	thirdRec, err := client.Post("http://"+proxyAddr+"/claude/v1/messages", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatalf("third request: %v", err)
 	}
@@ -2112,7 +2135,7 @@ func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
 	// (UNRESP-3). Provider A has 1 queued on POST /v1/messages; provider B
 	// has 1 queued on POST /v1/responses.
 	scrapeMetrics := func() string {
-		resp, err := http.Get("http://" + metricsAddr + "/metrics")
+		resp, err := client.Get("http://" + metricsAddr + "/metrics")
 		if err != nil {
 			t.Fatalf("scrape: %v", err)
 		}
@@ -2164,7 +2187,7 @@ func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
 			value = value[:nl]
 		}
 		age, err := strconv.ParseFloat(value, 64)
-		if err != nil || age <= 0 {
+		if err != nil || math.IsNaN(age) || age <= 0 {
 			t.Errorf("age series %q value = %q (err %v), want a positive number of seconds:\n%s", want, value, err, metricsBody)
 		}
 	}

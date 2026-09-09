@@ -20,6 +20,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 // statusBucketNames names the six StatusCounts buckets. Index 0 has no HTTP
@@ -40,6 +41,21 @@ var statusBucketNames = [statusBuckets]string{
 func escapeLabelValue(v string) string {
 	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 	return r.Replace(v)
+}
+
+// validLabelValues reports whether every label value is valid UTF-8. The
+// Prometheus text parser rejects the ENTIRE document on any label value that
+// is not valid UTF-8, and a client-supplied request path is arbitrary bytes,
+// so a per-route series carrying one is skipped entirely (fail-closed) rather
+// than sanitized: strings.ToValidUTF8 is not injective and can collide two
+// distinct routes into duplicate series.
+func validLabelValues(values ...string) bool {
+	for _, v := range values {
+		if !utf8.ValidString(v) {
+			return false
+		}
+	}
+	return true
 }
 
 // ProviderSnapshot pairs one provider's display name with its collected
@@ -171,6 +187,9 @@ func WritePrometheusFleet(w io.Writer, providers []ProviderSnapshot) error {
 				method = ""
 				path = r
 			}
+			if !validLabelValues(labels[i], method, path) {
+				continue
+			}
 			routeQueuedLines = append(routeQueuedLines, fmt.Sprintf(
 				"shaper_route_queued{%s,method=\"%s\",path=\"%s\"} %d\n",
 				labels[i], escapeLabelValue(method), escapeLabelValue(path), count,
@@ -198,6 +217,9 @@ func WritePrometheusFleet(w io.Writer, providers []ProviderSnapshot) error {
 			if !ok {
 				method = ""
 				path = r
+			}
+			if !validLabelValues(labels[i], method, path) {
+				continue
 			}
 			routeAgeLines = append(routeAgeLines, fmt.Sprintf(
 				"shaper_route_oldest_queued_seconds{%s,method=\"%s\",path=\"%s\"} %.3f\n",
