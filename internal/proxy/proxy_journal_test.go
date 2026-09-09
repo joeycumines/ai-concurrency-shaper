@@ -16,6 +16,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -244,6 +245,61 @@ func TestProxy_JournalCapturesRequestBody(t *testing.T) {
 	e := entries[0]
 	if string(e.RequestBody) != `{"hello":"world"}` {
 		t.Errorf("RequestBody = %q, want %q", string(e.RequestBody), `{"hello":"world"}`)
+	}
+	if e.RequestBodyTruncated {
+		t.Errorf("RequestBodyTruncated = true for a fully written body")
+	}
+}
+
+// TestProxy_JournalMarksTruncatedRequestBody pins the truncation flag: an
+// upstream that answers without consuming the request body leaves the capture
+// incomplete, and the journal entry records that fact instead of presenting a
+// prefix as the whole body. The capture is read while the transport may still
+// be writing, so this test under -race also proves the synchronization.
+func TestProxy_JournalMarksTruncatedRequestBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Answer immediately without reading the request body.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":"nope"}`)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	patterns := []route.Pattern{
+		{Method: "POST", Segments: []string{"v1", "messages"}, Raw: "POST /v1/messages"},
+	}
+
+	j := journal.New(512, 1<<20)
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(patterns)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+		WithJournal(j),
+		WithMaxRetries(0),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	body := bytes.Repeat([]byte("x"), 4<<20)
+	req := httptest.NewRequest("POST", "/v1/messages", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	entries := j.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 journal entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if !e.RequestBodyTruncated {
+		t.Fatalf("RequestBodyTruncated = false, want true (the upstream answered before reading the body)")
+	}
+	if len(e.RequestBody) >= len(body) {
+		t.Fatalf("captured %d bytes, want a prefix of %d", len(e.RequestBody), len(body))
 	}
 }
 
@@ -758,4 +814,46 @@ func TestProxy_QueueDurationOnPassthroughCancel(t *testing.T) {
 
 	// Clean up the first request goroutine.
 	firstCancel()
+}
+
+// TestProxy_JournalBodylessRequestNotTruncated pins the flag's meaning: a
+// request that declared no body is never read by the transport, so its empty
+// capture is complete, not truncated.
+func TestProxy_JournalBodylessRequestNotTruncated(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, _ := url.Parse(upstream.URL)
+	patterns := []route.Pattern{
+		{Method: "POST", Segments: []string{"v1", "messages"}, Raw: "POST /v1/messages"},
+	}
+
+	j := journal.New(512, 1<<20)
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(patterns)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(30*time.Second),
+		WithJournal(j),
+		WithMaxRetries(0),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(""))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	entries := j.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 journal entry, got %d", len(entries))
+	}
+	if entries[0].RequestBodyTruncated {
+		t.Fatalf("RequestBodyTruncated = true for a request that declared no body")
+	}
 }

@@ -3292,8 +3292,13 @@ func (m Model) renderNetworkDetail(e *journal.Entry) string {
 		}
 	}
 	if len(e.RequestBody) > 0 && usedReq < reqBudget {
-		preview := truncateBytes(e.RequestBody, 256)
-		fmt.Fprintf(&b, " Body:     %s\n", preview)
+		marker := ""
+		if e.RequestBodyTruncated {
+			// Before the preview: the preview is capped at 256 runes, so a
+			// trailing marker would be clipped on a normal terminal width.
+			marker = "(truncated) "
+		}
+		fmt.Fprintf(&b, " Body:     %s%s\n", marker, truncateBytes(e.RequestBody, 256))
 	}
 	b.WriteByte('\n')
 

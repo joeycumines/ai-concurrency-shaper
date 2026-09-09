@@ -343,3 +343,71 @@ func mustURL(s string) *url.URL {
 // Ensure types implement the interfaces we need.
 var _ io.ReadCloser = (*CapturingReader)(nil)
 var _ io.Writer = (*CaptureBuf)(nil)
+
+// TestCaptureBufConcurrentWriteAndBytes drives Write from one goroutine while
+// another reads the capture, so `go test -race` proves the synchronization the
+// journal relies on: the tee runs on the transport's write loop, which by the
+// RoundTripper contract can outlive RoundTrip, while the proxy reads the
+// capture after the exchange.
+func TestCaptureBufConcurrentWriteAndBytes(t *testing.T) {
+	const chunks, size = 64, 1024
+	cb := &CaptureBuf{maxBytes: 1 << 20}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		chunk := bytes.Repeat([]byte("x"), size)
+		for i := 0; i < chunks; i++ {
+			if _, err := cb.Write(chunk); err != nil {
+				t.Errorf("Write: %v", err)
+				return
+			}
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		_ = cb.Bytes()
+		_ = cb.Truncated()
+		_ = cb.Complete()
+	}
+	wg.Wait()
+	if got := len(cb.Bytes()); got != chunks*size {
+		t.Fatalf("captured %d bytes, want %d", got, chunks*size)
+	}
+	if cb.Truncated() || cb.Complete() {
+		t.Fatalf("Truncated=%v Complete=%v, want false/false (no cap hit, no EOF)", cb.Truncated(), cb.Complete())
+	}
+}
+
+// TestTeeReadCloser_Completion pins the completeness signal: a fully read
+// source reports Complete, a source abandoned before EOF does not, and the
+// byte cap reports Truncated even when the source reaches EOF.
+func TestTeeReadCloser_Completion(t *testing.T) {
+	content := "hello world"
+	rdr, capture := TeeReadCloser(io.NopCloser(strings.NewReader(content)), 1024)
+	if _, err := io.ReadAll(rdr); err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !capture.Complete() || capture.Truncated() {
+		t.Fatalf("Complete=%v Truncated=%v, want true/false", capture.Complete(), capture.Truncated())
+	}
+
+	rdr, capture = TeeReadCloser(io.NopCloser(strings.NewReader(content)), 1024)
+	buf := make([]byte, 4)
+	if _, err := rdr.Read(buf); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if capture.Complete() {
+		t.Fatal("Complete = true after a partial read, want false")
+	}
+	if got := string(capture.Bytes()); got != content[:4] {
+		t.Fatalf("captured = %q, want %q", got, content[:4])
+	}
+
+	rdr, capture = TeeReadCloser(io.NopCloser(strings.NewReader(content)), 5)
+	if _, err := io.ReadAll(rdr); err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if !capture.Complete() || !capture.Truncated() {
+		t.Fatalf("Complete=%v Truncated=%v, want true/true", capture.Complete(), capture.Truncated())
+	}
+}

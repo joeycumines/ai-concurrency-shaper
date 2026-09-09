@@ -14,7 +14,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 // Package journal provides a thread-safe ring buffer of HTTP request/response
-// pairs for both retry body replay and the TUI's Network inspection panel.
+// pairs for the TUI's Network inspection panel.
 //
 // A Journal is safe for concurrent use from many goroutines. It stores
 // immutable Entry values in a fixed-size ring; when full, the oldest entry
@@ -22,6 +22,8 @@
 package journal
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -91,20 +93,24 @@ func (t Timing) DownloadDuration() time.Duration {
 
 // Entry is an immutable record of one HTTP request/response exchange.
 type Entry struct {
-	ID              uint64
-	Method          string
-	URL             *url.URL
-	RequestHeaders  http.Header
-	RequestBody     []byte
-	StatusCode      int
-	ResponseHeaders http.Header
-	ResponseBody    []byte
-	Timing          Timing
-	Limited         bool
-	Aborted         bool
-	Attempt         int
-	ContentType     string
-	ResponseSize    int64
+	ID             uint64
+	Method         string
+	URL            *url.URL
+	RequestHeaders http.Header
+	RequestBody    []byte
+	// RequestBodyTruncated reports that RequestBody is not the complete
+	// request body: the capture hit its byte limit, or the transport stopped
+	// reading before EOF (an upstream that answered before consuming it).
+	RequestBodyTruncated bool
+	StatusCode           int
+	ResponseHeaders      http.Header
+	ResponseBody         []byte
+	Timing               Timing
+	Limited              bool
+	Aborted              bool
+	Attempt              int
+	ContentType          string
+	ResponseSize         int64
 }
 
 // Name returns the last meaningful segment of the URL path.
@@ -267,18 +273,35 @@ type CapturingReader struct {
 	capture *CaptureBuf
 }
 
+// Read tees the source bytes and records EOF so the capture can report
+// whether the body was fully read.
+func (c *CapturingReader) Read(p []byte) (int, error) {
+	n, err := c.Reader.Read(p)
+	if errors.Is(err, io.EOF) {
+		c.capture.markEOF()
+	}
+	return n, err
+}
+
 func (c *CapturingReader) Close() error {
 	return c.orig.Close()
 }
 
-// CaptureBuf is an io.Writer that accumulates bytes up to a limit.
+// CaptureBuf is an io.Writer that accumulates bytes up to a limit. It is safe
+// for concurrent use: the tee writes from the transport's write loop, which by
+// the RoundTripper contract can outlive RoundTrip, while the proxy reads the
+// capture after the exchange.
 type CaptureBuf struct {
+	mu        sync.Mutex
 	data      []byte
 	maxBytes  int64
 	truncated bool
+	eof       bool
 }
 
 func (cb *CaptureBuf) Write(p []byte) (int, error) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
 	if cb.truncated {
 		return len(p), nil
 	}
@@ -296,15 +319,53 @@ func (cb *CaptureBuf) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Bytes returns the captured bytes (may be truncated).
+// Bytes returns a copy of the captured bytes (may be truncated or partial;
+// see Truncated and Complete).
 func (cb *CaptureBuf) Bytes() []byte {
-	return cb.data
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return bytes.Clone(cb.data)
 }
 
-// TeeReadCloser wraps r so that reads are teed into a capture buffer.
-// The returned ReadCloser must be fully consumed. After consumption,
-// call CaptureBuf.Bytes() on the returned buffer to retrieve the
-// captured bytes.
+// Snapshot returns a copy of the captured bytes together with the truncation
+// and completeness flags, read under one lock so the three facts describe the
+// same instant. Reading them through separate calls would let the writer
+// append the final bytes and mark EOF in between, recording a strict prefix as
+// a complete body.
+func (cb *CaptureBuf) Snapshot() (data []byte, truncated, complete bool) {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return bytes.Clone(cb.data), cb.truncated, cb.eof
+}
+
+// Truncated reports whether the capture hit its byte limit.
+func (cb *CaptureBuf) Truncated() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.truncated
+}
+
+// Complete reports whether the source was read to EOF. A false result means
+// the captured bytes are a prefix of the request body: the transport stopped
+// reading early (an upstream that answered before consuming it) or the source
+// never returned EOF.
+func (cb *CaptureBuf) Complete() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.eof
+}
+
+// markEOF records that the source returned EOF.
+func (cb *CaptureBuf) markEOF() {
+	cb.mu.Lock()
+	cb.eof = true
+	cb.mu.Unlock()
+}
+
+// TeeReadCloser wraps r so that reads are teed into a capture buffer. The
+// capture is partial when the reader stops before EOF (an upstream that
+// answers early) or the byte limit is hit; take one CaptureBuf.Snapshot to
+// read the bytes and both flags together.
 func TeeReadCloser(r io.ReadCloser, maxBytes int64) (*CapturingReader, *CaptureBuf) {
 	cb := &CaptureBuf{maxBytes: maxBytes}
 	return &CapturingReader{

@@ -1238,7 +1238,15 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				entry.Timing.QueueEnd = entry.Timing.QueueStart
 			}
 			if reqBodyBuf != nil {
-				entry.RequestBody = reqBodyBuf.Bytes()
+				// One snapshot: the transport write loop can still be
+				// appending (and can mark EOF) while finalize runs, so the
+				// bytes and the flags must describe the same instant.
+				body, truncated, complete := reqBodyBuf.Snapshot()
+				entry.RequestBody = body
+				// A request that declared no body (ContentLength 0) is never
+				// read by the transport, so the capture cannot reach EOF: an
+				// empty capture is complete, not truncated.
+				entry.RequestBodyTruncated = r.ContentLength != 0 && (truncated || !complete)
 			}
 			if recPtr != nil {
 				entry.ResponseBody = recPtr.capturedBody

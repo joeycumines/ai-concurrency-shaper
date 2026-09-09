@@ -67,8 +67,7 @@ func main() {
 // the per-provider request journal, metrics collector and upstream transport, plus
 // the proxy itself wired onto them.
 //
-// The journal is shared between retry body replay and the TUI's Network
-// inspection panel. Its capacity scales inversely with the body limit so the
+// The journal backs the TUI's Network inspection panel. Its capacity scales inversely with the body limit so the
 // default worst-case memory footprint stays roughly bounded (~512 MiB) regardless
 // of how large -retry-max-body-mb is configured.
 func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journal.Journal, error) {

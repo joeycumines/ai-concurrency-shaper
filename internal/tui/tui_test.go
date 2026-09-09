@@ -5251,3 +5251,38 @@ func TestFleetStrip_AggregateObservability(t *testing.T) {
 		t.Error("active provider chip must be present in switcher")
 	}
 }
+
+// TestRenderNetworkDetailMarksTruncatedBody pins the marker's position: it
+// precedes the (256-rune-capped) preview so a normal terminal width cannot
+// clip it, and it is absent for a complete body.
+func TestRenderNetworkDetailMarksTruncatedBody(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	// Tall enough that the variable-line budget admits the body preview
+	// (the renderer reserves 17 fixed lines and splits the rest).
+	m.height = 60
+	m.tab = tabNetwork
+	j := journal.New(100, 1<<20)
+	truncated := &journal.Entry{
+		Method: "POST", URL: mustParseURL("/v1/messages"), StatusCode: 200,
+		ContentType: "application/json", RequestBody: []byte(strings.Repeat("x", 4096)),
+		RequestBodyTruncated: true,
+	}
+	complete := &journal.Entry{
+		Method: "POST", URL: mustParseURL("/v1/messages"), StatusCode: 200,
+		ContentType: "application/json", RequestBody: []byte(`{"hello":"world"}`),
+	}
+	j.Record(truncated)
+	j.Record(complete)
+	m.journal = j
+	m.networkFiltered = m.computeVisibleNetworkEntries()
+
+	detail := stripANSI(m.renderNetworkDetail(truncated))
+	if !strings.Contains(detail, "Body:     (truncated) ") {
+		t.Fatalf("truncated body marker must precede the preview, got: %s", detail)
+	}
+	detail = stripANSI(m.renderNetworkDetail(complete))
+	if strings.Contains(detail, "(truncated)") {
+		t.Fatalf("complete body must not carry the marker, got: %s", detail)
+	}
+}
