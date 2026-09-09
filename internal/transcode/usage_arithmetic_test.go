@@ -735,12 +735,15 @@ func TestComposedClampNoteRecordedOnce(t *testing.T) {
 		"msg_1", "gpt-4.1", 1710000000,
 	)
 	converter := newChatToAnthropicConverter(chat, anthropic)
-	for name, chunk := range map[string]string{
-		"usage chunk":  `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"x"}}],"usage":{"prompt_tokens":-2,"completion_tokens":5,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":1}}}`,
-		"finish chunk": `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	// An ordered slice, not a map: the chunks must be converted in stream
+	// order (a finish chunk before a usage chunk is an upstream protocol
+	// error), and map iteration order is random.
+	for _, chunk := range []struct{ name, data string }{
+		{"usage chunk", `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"x"}}],"usage":{"prompt_tokens":-2,"completion_tokens":5,"total_tokens":3,"prompt_tokens_details":{"cached_tokens":1}}}`},
+		{"finish chunk", `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`},
 	} {
-		if _, err := converter.Convert(SSEEvent{Data: []byte(chunk)}); err != nil {
-			t.Fatalf("%s: %v", name, err)
+		if _, err := converter.Convert(SSEEvent{Data: []byte(chunk.data)}); err != nil {
+			t.Fatalf("%s: %v", chunk.name, err)
 		}
 	}
 	if _, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")}); err != nil {
