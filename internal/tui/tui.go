@@ -440,6 +440,28 @@ type Model struct {
 	// switching back to the Logs tab re-engages it.
 	followLogs bool
 
+	// hScroll holds the horizontal scroll offset for tabs whose rows are
+	// wider than the terminal (currently Network and Logs). It is keyed by
+	// tab, mirroring the per-tab scrollbar state, and is clamped by
+	// adjustHScroll against the widest rendered row.
+	hScroll map[tabID]int
+
+	// logDetailAnchor pins the open Logs detail view to the item that was
+	// selected when modeDetail was entered: pos is the 0-based position in
+	// visibleLogLines at open time and text is the full line content. Every
+	// render resolves the anchor against the current list so new arrivals
+	// never shift the displayed message; eviction closes the overlay.
+	logDetailAnchor struct {
+		pos  int
+		text string
+	}
+
+	// networkDetailAnchor pins the open Network detail view to the journal
+	// Entry that was selected when modeDetail was entered. The pointer is
+	// stable (journal entries are immutable and never rewritten in place);
+	// eviction is detected by scanning the current journal for the ID.
+	networkDetailAnchor *journal.Entry
+
 	// toastSeen deduplicates log lines that already triggered a toast so the
 	// same recurring message does not spam the dashboard. It is bounded: when
 	// it reaches toastSeenMax keys, the oldest toastSeenEvict entries are
@@ -528,6 +550,7 @@ func NewModelForProviders(metas []ProviderMeta) Model {
 		resetCh:    make(chan struct{}, 1),
 		logRing:    newLogRing(logRingCapacity),
 		followLogs: true,
+		hScroll:    make(map[tabID]int),
 		toastSeen:  make(map[string]struct{}),
 		styles:     newTheme(true),
 	}
@@ -924,6 +947,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.networkFiltered = m.computeVisibleNetworkEntries()
 	m.toasts = toast.VisibleToasts(m.toasts)
 
+	// If the anchored Logs detail item was evicted from the ring, close the
+	// overlay rather than leave it pinned to nothing. This runs on every
+	// update cycle so eviction is detected without waiting for a keypress.
+	if m.mode == modeDetail && m.tab == tabLogs && !m.logDetailStillPresent() {
+		m.mode = modeBrowse
+	}
+	// Same for Network: if the anchored entry is no longer in the journal,
+	// close the overlay so the operator never sees a stale detail view.
+	if m.mode == modeDetail && m.tab == tabNetwork && m.networkDetailAnchor != nil && !m.networkDetailStillPresent() {
+		m.mode = modeBrowse
+	}
+
 	// Tail-follow: while on the Logs tab and not paused by scroll input, keep the
 	// viewport pinned to the newest lines so incoming logs scroll into view.
 	if m.tab == tabLogs && m.followLogs && m.width > 0 && m.height > 0 {
@@ -1007,6 +1042,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 
 	keyCode := msg.Key().Code
+	if keyCode == tea.KeyHome {
+		m.hScroll[m.tab] = 0
+	}
 	if keyCode == tea.KeyPgUp {
 		if m.tab == tabLogs {
 			m.followLogs = false
@@ -1097,6 +1135,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		m.moveCursor(1)
 	case "k", "up":
 		m.moveCursor(-1)
+	case "h", "left":
+		m.adjustHScroll(-1)
+	case "l", "right":
+		m.adjustHScroll(1)
+	case "H", "shift+left":
+		m.adjustHScroll(-m.viewportWidth() / 2)
+	case "L", "shift+right":
+		m.adjustHScroll(m.viewportWidth() / 2)
 	case "g":
 		if m.tab == tabLogs {
 			m.followLogs = false
@@ -1143,6 +1189,21 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	case "enter", " ", "space":
 		if m.canInspect() {
 			m.mode = modeDetail
+			if m.tab == tabLogs {
+				lines := m.visibleLogLines()
+				if m.cursor < len(lines) {
+					m.logDetailAnchor = struct {
+						pos  int
+						text string
+					}{m.cursor, lines[m.cursor]}
+				}
+			}
+			if m.tab == tabNetwork {
+				entries := m.visibleNetworkEntries()
+				if m.cursor < len(entries) {
+					m.networkDetailAnchor = entries[m.cursor]
+				}
+			}
 		}
 
 	case "/":
@@ -1200,6 +1261,35 @@ func (m *Model) moveCursor(delta int) {
 		m.cursor = max
 	}
 	m.adjustViewport()
+}
+
+// adjustHScroll shifts the active tab's horizontal viewport by delta cells,
+// clamping to [0, maxHScroll]. Tabs without horizontally scrollable rows
+// (maxHScroll == 0) always land at offset 0, so unrelated keys are no-ops.
+func (m *Model) adjustHScroll(delta int) {
+	max := m.maxHScroll()
+	offset := m.hScroll[m.tab] + delta
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > max {
+		offset = max
+	}
+	m.hScroll[m.tab] = offset
+}
+
+// maxHScroll returns how many cells the active tab's widest rendered row
+// extends beyond the viewport. It scans the tab's rendered lines, so the
+// bound always matches what renderContentWithScrollbar would draw.
+func (m Model) maxHScroll() int {
+	width := m.viewportWidth()
+	maxWidth := 0
+	for _, line := range strings.Split(m.renderContent(), "\n") {
+		if w := uniseg.StringWidth(stripANSI(line)); w > maxWidth {
+			maxWidth = w
+		}
+	}
+	return max(maxWidth-width, 0)
 }
 
 // scrollDashboard adjusts m.scroll directly by delta for the Dashboard tab,
@@ -1460,6 +1550,50 @@ func truncateANSI(line string, width int) string {
 	return truncateGraphemes(line, width, true)
 }
 
+// skipANSI returns line with the first skip visible cells removed, preserving
+// ANSI escape sequences (which never consume visible width). If skip exceeds
+// the line's visible width, an empty string is returned.
+func skipANSI(line string, skip int) string {
+	if skip <= 0 {
+		return line
+	}
+	var b strings.Builder
+	b.Grow(len(line))
+	cells := 0
+	state := -1
+	for i := 0; i < len(line); {
+		if line[i] == '\x1b' {
+			j := i + 1
+			if j < len(line) && line[j] == '[' {
+				j++
+				for j < len(line) && !(line[j] >= 0x40 && line[j] <= 0x7E) {
+					j++
+				}
+				if j < len(line) {
+					j++
+				}
+			} else if j < len(line) {
+				j++
+			}
+			// Preserve every escape sequence, even inside the skipped
+			// region: an SGR opened before the cut point must remain in
+			// effect for the text that follows it.
+			b.WriteString(line[i:j])
+			i = j
+			state = -1
+			continue
+		}
+		cluster, _, w, newState := uniseg.FirstGraphemeClusterInString(line[i:], state)
+		if cells >= skip {
+			b.WriteString(cluster)
+		}
+		cells += w
+		i += len(cluster)
+		state = newState
+	}
+	return b.String()
+}
+
 // truncatePlain truncates a plain, unstyled string to at most width terminal
 // cells using the same grapheme-cluster semantics as truncateANSI. It never
 // emits escape sequences: the callers feed the result into a surrounding
@@ -1620,6 +1754,7 @@ func (m Model) renderContentWithScrollbar() string {
 	}
 
 	contentWidth := m.viewportWidth()
+	hScroll := m.hScroll[m.tab]
 	headerRows := m.contentHeaderRows()
 	visibleRows := m.visibleRows()
 
@@ -1633,7 +1768,15 @@ func (m Model) renderContentWithScrollbar() string {
 			line := lines[i]
 			stripped := stripANSI(line)
 			visibleCells := uniseg.StringWidth(stripped)
-			if visibleCells > contentWidth {
+			if i >= headerRows && hScroll > 0 && visibleCells > contentWidth {
+				shifted := skipANSI(line, hScroll)
+				visible := truncateANSI(shifted, contentWidth)
+				b.WriteString(visible)
+				actualWidth := uniseg.StringWidth(stripANSI(visible))
+				if actualWidth < contentWidth {
+					b.WriteString(strings.Repeat(" ", contentWidth-actualWidth))
+				}
+			} else if visibleCells > contentWidth {
 				truncated := truncateANSI(line, contentWidth)
 				b.WriteString(truncated)
 				actualWidth := uniseg.StringWidth(stripANSI(truncated))
@@ -3210,12 +3353,13 @@ func (m Model) renderDetailOverlay() string {
 				e.Status, e.Duration.Truncate(time.Millisecond), e.Limited)))
 
 	case tabNetwork:
-		entries := m.visibleNetworkEntries()
-		if m.cursor >= len(entries) {
-			return ""
+		if e := m.networkDetailAnchor; e != nil {
+			// The anchor is a stable pointer to an immutable Entry; the
+			// journal never rewrites entries in place. It may have been
+			// evicted from the ring, but the overlay can still render it
+			// because the Entry value is fully self-contained.
+			b.WriteString(m.renderNetworkDetail(e))
 		}
-		e := entries[m.cursor]
-		b.WriteString(m.renderNetworkDetail(e))
 
 	case tabConcurrency:
 		if m.cursor >= len(m.snap.InFlight) {
@@ -3234,12 +3378,128 @@ func (m Model) renderDetailOverlay() string {
 				r.ID, r.Method, r.Path, r.Limited,
 				r.Age().Truncate(time.Millisecond),
 				r.TotalAge().Truncate(time.Millisecond))))
+
+	case tabLogs:
+		// Resolve the anchored item against the current visible list. New
+		// arrivals may have shifted positions, so re-scan for the original
+		// text; eviction (text no longer present) closes the overlay.
+		anchor := m.logDetailAnchor
+		found := false
+		for i, line := range m.visibleLogLines() {
+			if line == anchor.text {
+				b.WriteString(m.renderLogDetail(i, line))
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ""
+		}
 	}
 
 	if !builderEndsWithNewline(&b) {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// renderLogDetail renders a full-screen view of a single log line, wrapped
+// to the available width so long messages are readable without horizontal
+// scrolling. The 1-based index matches the line number shown in the list.
+func (m Model) renderLogDetail(index int, line string) string {
+	vw := m.viewportWidth()
+	var b strings.Builder
+	b.WriteString(m.styles.sectionStyle.Render(fmt.Sprintf(" Log Line %d ", index+1)))
+	b.WriteByte('\n')
+	b.WriteByte('\n')
+	for _, row := range wrapText(stripANSI(line), max(vw-4, 1)) {
+		b.WriteString("  " + row)
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+	b.WriteString(" [Esc/Enter] close ")
+	return b.String()
+}
+
+// logDetailStillPresent reports whether the currently anchored Logs detail
+// item still exists in the visible log lines. It is used to close the
+// overlay when the underlying ring has evicted the line.
+func (m Model) logDetailStillPresent() bool {
+	for _, line := range m.visibleLogLines() {
+		if line == m.logDetailAnchor.text {
+			return true
+		}
+	}
+	return false
+}
+
+// networkDetailStillPresent reports whether the currently anchored Network
+// detail entry still exists in the journal (matched by pointer identity —
+// the journal never rewrites entries in place, so a live pointer implies
+// the same entry).
+func (m Model) networkDetailStillPresent() bool {
+	if m.networkDetailAnchor == nil || m.journal == nil {
+		return false
+	}
+	for _, e := range m.journal.Entries() {
+		if e == m.networkDetailAnchor {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapText breaks a plain-text string into rows that each fit within width
+// terminal cells, breaking on spaces when possible and on grapheme-cluster
+// boundaries when a single word exceeds the width. It never drops text.
+func wrapText(text string, width int) []string {
+	if text == "" {
+		return []string{""}
+	}
+	if width <= 0 {
+		return []string{text}
+	}
+	var rows []string
+	var current strings.Builder
+	currentWidth := 0
+	for _, word := range strings.Fields(text) {
+		wordWidth := uniseg.StringWidth(word)
+		if currentWidth > 0 && currentWidth+1+wordWidth > width {
+			rows = append(rows, current.String())
+			current.Reset()
+			currentWidth = 0
+		}
+		if currentWidth > 0 {
+			current.WriteByte(' ')
+			currentWidth++
+		}
+		// A single word wider than width must be split on grapheme
+		// boundaries so no text is ever lost.
+		for uniseg.StringWidth(word) > width {
+			cut := width - currentWidth
+			if cut <= 0 {
+				rows = append(rows, current.String())
+				current.Reset()
+				currentWidth = 0
+				cut = width
+			}
+			remaining := truncatePlain(word, cut)
+			current.WriteString(remaining)
+			word = word[len(remaining):]
+			rows = append(rows, current.String())
+			current.Reset()
+			currentWidth = 0
+		}
+		current.WriteString(word)
+		currentWidth += uniseg.StringWidth(word)
+	}
+	if current.Len() > 0 {
+		rows = append(rows, current.String())
+	}
+	if len(rows) == 0 {
+		rows = []string{""}
+	}
+	return rows
 }
 
 func (m Model) renderNetworkDetail(e *journal.Entry) string {
@@ -3394,11 +3654,12 @@ func (m Model) renderHelpOverlay() string {
 	return m.styles.overlayStyle.Render(" Keybindings \n\n"+
 		" 1-6          Switch tab (Overview/Requests/Network/Logs/Concurrency/Routes)\n"+
 		" j/k or ↑/↓   Scroll down/up\n"+
+		"h/l or ←/→   Scroll left/right (Network/Logs)\n"+
 		" PgUp/PgDn     Page up / Page down\n"+
 		" Home/End      Jump to first / last item\n"+
 		" Ctrl-U / Ctrl-D  Half-page scroll\n"+
 		" g             Jump to top    G      Jump to bottom\n"+
-		" Enter/Space   Inspect selected entry\n"+
+		" Enter/Space   Inspect selected entry (full log message on Logs)\n"+
 		" /             Filter entries (Requests/Network/Logs tabs)\n"+
 		" t             Cycle type filter (Network tab)\n"+
 		" s             Cycle status filter (Network tab)\n"+
@@ -3412,7 +3673,7 @@ func (m Model) renderHelpOverlay() string {
 }
 
 func (m Model) renderFooter() string {
-	keys := " 1-6:tab │ j/k:scroll │ PgUp/PgDn │ Home/End │ Ctrl-U/D │ /:filter │ t:type │ s:status │ c:reset │ ?:help │ q:quit "
+	keys := " 1-6:tab │ j/k:scroll │ h/l:hscroll │ PgUp/PgDn │ Home/End │ Ctrl-U/D │ /:filter │ t:type │ s:status │ c:reset │ ?:help │ q:quit "
 	return m.styles.footerStyle.Render(keys)
 }
 

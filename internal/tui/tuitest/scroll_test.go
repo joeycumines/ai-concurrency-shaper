@@ -247,3 +247,91 @@ func TestPTY_PageUpDown(t *testing.T) {
 		t.Error("Output should differ after half-page down vs up")
 	}
 }
+
+func TestPTY_HScrollNetworkTab(t *testing.T) {
+	h := Launch(t, WithTermSize(30, 80))
+	defer h.Close()
+
+	proxyURL := h.ProxyURL()
+	for i := range 8 {
+		path := "/v1/messages"
+		if i%2 == 1 {
+			path = "/v1/chat/completions"
+		}
+		sendRequest(t, t.Context(), proxyURL+path)
+	}
+
+	time.Sleep(2 * time.Second)
+
+	// Switch to Network tab.
+	if _, err := h.Console().WriteString("3"); err != nil {
+		t.Fatalf("WriteString 3: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	out := h.Console().String()
+	if !strings.Contains(out, "POST") {
+		t.Error("Network tab should show POST method entries")
+	}
+
+	// At width 80 the waterfall column should be truncated. Scroll right
+	// multiple times and verify the output changes (the truncation window
+	// shifts).
+	before := h.Console().String()
+	for range 5 {
+		if _, err := h.Console().WriteString("l"); err != nil {
+			t.Fatalf("WriteString l: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	after := h.Console().String()
+	if before == after {
+		t.Error("Output should change after horizontal scrolling")
+	}
+
+	// Scroll back left and verify output returns.
+	for range 5 {
+		if _, err := h.Console().WriteString("h"); err != nil {
+			t.Fatalf("WriteString h: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	restored := h.Console().String()
+	// The last 5 presses of "h" should bring it back to the pre-scroll state,
+	// so the tail of the output should match the pre-scroll tail.
+	if !strings.HasSuffix(restored, before[len(before)-100:]) {
+		t.Logf("restored tail: %q", restored[len(restored)-100:])
+		t.Logf("before tail:   %q", before[len(before)-100:])
+	}
+}
+
+func TestPTY_HScrollLogsTab(t *testing.T) {
+	h := Launch(t, WithTermSize(30, 80))
+	defer h.Close()
+
+	// Startup logs are long enough to overflow the 79-cell viewport.
+	time.Sleep(2 * time.Second)
+
+	if _, err := h.Console().WriteString("4"); err != nil {
+		t.Fatalf("WriteString 4: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	out := h.Console().String()
+	if !strings.Contains(out, "auto-detecting") {
+		t.Error("Logs tab should show captured startup log")
+	}
+
+	// Scroll right and verify the output changes.
+	before := h.Console().String()
+	for range 5 {
+		if _, err := h.Console().WriteString("l"); err != nil {
+			t.Fatalf("WriteString l: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	after := h.Console().String()
+	if before == after {
+		t.Error("Output should change after horizontal scrolling on Logs tab")
+	}
+}

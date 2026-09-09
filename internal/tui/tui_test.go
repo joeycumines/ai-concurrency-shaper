@@ -5251,3 +5251,579 @@ func TestFleetStrip_AggregateObservability(t *testing.T) {
 		t.Error("active provider chip must be present in switcher")
 	}
 }
+
+// ─── T01: horizontal scrolling on the Network tab ───
+
+func TestHScroll_NetworkShiftsTruncationWindow(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	m.journal = journal.New(8, 1024)
+	m.journal.Record(&journal.Entry{
+		ID:         1,
+		Method:     "POST",
+		URL:        mustParseURL("https://upstream.example/v1/really-long-path-name/messages"),
+		StatusCode: 200,
+		Timing:     journal.Timing{QueueStart: time.Now(), QueueEnd: time.Now(), ResponseHeaders: time.Now().Add(time.Millisecond), ResponseComplete: time.Now().Add(2 * time.Millisecond)},
+	})
+	m.networkFiltered = m.computeVisibleNetworkEntries()
+	m.cursor = 0
+
+	// Baseline: the row is clipped to the viewport, so the waterfall column
+	// content near the right edge is cut off.
+	before := stripANSI(m.renderContentWithScrollbar())
+	if !strings.Contains(before, "POST") {
+		t.Fatalf("baseline Network render missing POST row: %q", before)
+	}
+
+	// "l" shifts right by one cell; the truncation window widens.
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.hScroll[tabNetwork] != 1 {
+		t.Fatalf("hScroll[Network] after right = %d, want 1", m.hScroll[tabNetwork])
+	}
+	after := stripANSI(m.renderContentWithScrollbar())
+	if after == before {
+		t.Error("right key must change the rendered Network rows (horizontal shift)")
+	}
+
+	// The cursor and vertical scroll are untouched by horizontal navigation.
+	if m.cursor != 0 || m.scroll != 0 {
+		t.Errorf("cursor/scroll = %d/%d, want 0/0 after horizontal navigation", m.cursor, m.scroll)
+	}
+
+	// "h" shifts back; the render returns to the baseline clip.
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	if m.hScroll[tabNetwork] != 0 {
+		t.Fatalf("hScroll[Network] after left = %d, want 0", m.hScroll[tabNetwork])
+	}
+	if stripANSI(m.renderContentWithScrollbar()) != before {
+		t.Error("left back to 0 must restore the baseline Network render")
+	}
+}
+
+func TestHScroll_NetworkClampsAtBounds(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	m.journal = journal.New(8, 1024)
+	m.journal.Record(&journal.Entry{
+		ID:         1,
+		Method:     "POST",
+		URL:        mustParseURL("https://upstream.example/v1/really-long-path-name/messages"),
+		StatusCode: 200,
+		Timing:     journal.Timing{QueueStart: time.Now(), QueueEnd: time.Now().Add(time.Millisecond), ResponseHeaders: time.Now().Add(2 * time.Millisecond), ResponseComplete: time.Now().Add(3 * time.Millisecond)},
+	})
+	m.networkFiltered = m.computeVisibleNetworkEntries()
+	if m.maxHScroll() == 0 {
+		t.Fatal("setup: Network rows must overflow the viewport for this test")
+	}
+
+	// Left at offset 0 stays at 0.
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	if m.hScroll[tabNetwork] != 0 {
+		t.Fatalf("hScroll after left at 0 = %d, want 0", m.hScroll[tabNetwork])
+	}
+
+	// Far-right paging clamps at the widest row's overflow.
+	for range 40 {
+		m = update(m, tea.KeyPressMsg{Code: 'L', Text: "L"})
+	}
+	max := m.maxHScroll()
+	if got := m.hScroll[tabNetwork]; got != max {
+		t.Fatalf("hScroll after L paging = %d, want clamp %d", got, max)
+	}
+
+	// Far-left paging clamps back to 0.
+	for range 40 {
+		m = update(m, tea.KeyPressMsg{Code: 'H', Text: "H"})
+	}
+	if got := m.hScroll[tabNetwork]; got != 0 {
+		t.Fatalf("hScroll after H paging = %d, want 0", got)
+	}
+}
+
+func TestHScroll_HomeResetsNetwork(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	m.journal = journal.New(8, 1024)
+	m.journal.Record(&journal.Entry{
+		ID:         1,
+		Method:     "POST",
+		URL:        mustParseURL("https://upstream.example/v1/really-long-path-name/messages"),
+		StatusCode: 200,
+		Timing:     journal.Timing{QueueStart: time.Now(), QueueEnd: time.Now().Add(time.Millisecond), ResponseHeaders: time.Now().Add(2 * time.Millisecond), ResponseComplete: time.Now().Add(3 * time.Millisecond)},
+	})
+	m.networkFiltered = m.computeVisibleNetworkEntries()
+	if m.maxHScroll() == 0 {
+		t.Fatal("setup: Network rows must overflow the viewport for this test")
+	}
+
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.hScroll[tabNetwork] != 1 {
+		t.Fatalf("setup: hScroll = %d, want 1", m.hScroll[tabNetwork])
+	}
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyHome})
+	if m.hScroll[tabNetwork] != 0 {
+		t.Fatalf("hScroll after Home = %d, want 0", m.hScroll[tabNetwork])
+	}
+	if m.cursor != 0 || m.scroll != 0 {
+		t.Errorf("cursor/scroll = %d/%d, want 0/0 after Home", m.cursor, m.scroll)
+	}
+}
+
+// ─── T02: horizontal scrolling on the Logs tab ───
+
+func TestHScroll_LogsShiftsTruncationWindow(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	longLine := "This is a very long log line that definitely exceeds the 79-cell viewport width and should be scrollable horizontally."
+	m.logRing.Write([]byte(longLine + "\n"))
+	m.cursor = 0
+
+	// Baseline: the long line is clipped to the viewport.
+	before := stripANSI(m.renderContentWithScrollbar())
+	if !strings.Contains(before, "This is a very") {
+		t.Fatalf("baseline Logs render missing long line: %q", before)
+	}
+	if strings.Contains(before, longLine) {
+		t.Fatal("baseline should truncate the long line")
+	}
+
+	// "l" shifts right by one cell; the visible window shifts.
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.hScroll[tabLogs] != 1 {
+		t.Fatalf("hScroll[Logs] after right = %d, want 1", m.hScroll[tabLogs])
+	}
+	after := stripANSI(m.renderContentWithScrollbar())
+	if after == before {
+		t.Error("right key must change the rendered Logs rows (horizontal shift)")
+	}
+
+	// Vertical cursor is untouched by horizontal navigation.
+	if m.cursor != 0 || m.scroll != 0 {
+		t.Errorf("cursor/scroll = %d/%d, want 0/0 after horizontal navigation", m.cursor, m.scroll)
+	}
+
+	// "h" shifts back; the render returns to the baseline clip.
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	if m.hScroll[tabLogs] != 0 {
+		t.Fatalf("hScroll[Logs] after left = %d, want 0", m.hScroll[tabLogs])
+	}
+	if stripANSI(m.renderContentWithScrollbar()) != before {
+		t.Error("left back to 0 must restore the baseline Logs render")
+	}
+}
+
+func TestHScroll_LogsClampsAtBounds(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("This log line is intentionally longer than the 79-cell viewport so it overflows and can be scrolled horizontally.\n"))
+	if m.maxHScroll() == 0 {
+		t.Fatal("setup: Logs rows must overflow the viewport for this test")
+	}
+
+	// Left at offset 0 stays at 0.
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyLeft})
+	if m.hScroll[tabLogs] != 0 {
+		t.Fatalf("hScroll after left at 0 = %d, want 0", m.hScroll[tabLogs])
+	}
+
+	// Far-right paging clamps at the widest row's overflow.
+	for range 40 {
+		m = update(m, tea.KeyPressMsg{Code: 'L', Text: "L"})
+	}
+	max := m.maxHScroll()
+	if got := m.hScroll[tabLogs]; got != max {
+		t.Fatalf("hScroll after L paging = %d, want clamp %d", got, max)
+	}
+
+	// Far-left paging clamps back to 0.
+	for range 40 {
+		m = update(m, tea.KeyPressMsg{Code: 'H', Text: "H"})
+	}
+	if got := m.hScroll[tabLogs]; got != 0 {
+		t.Fatalf("hScroll after H paging = %d, want 0", got)
+	}
+}
+
+func TestHScroll_LogsDoesNotPauseFollow(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("long line that overflows the viewport width for horizontal scrolling test\n"))
+	if m.maxHScroll() == 0 {
+		t.Fatal("setup: Logs rows must overflow the viewport for this test")
+	}
+	if !m.followLogs {
+		t.Fatal("setup: followLogs should be true on Logs tab")
+	}
+
+	// Horizontal navigation must NOT pause followLogs.
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.hScroll[tabLogs] != 1 {
+		t.Fatalf("hScroll after right = %d, want 1", m.hScroll[tabLogs])
+	}
+	if !m.followLogs {
+		t.Error("horizontal navigation must not pause followLogs")
+	}
+
+	// Vertical navigation still pauses it.
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.followLogs {
+		t.Error("vertical navigation must pause followLogs")
+	}
+}
+
+// ─── T03: Logs detail view ───
+
+func TestLogDetail_ShowsFullMessage(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	longLine := "This is a very long log line that definitely exceeds the 79-cell viewport width and should be fully visible in the detail view."
+	m.logRing.Write([]byte(longLine + "\n"))
+	m.cursor = 0
+	m = update(m, special("enter"))
+
+	detail := stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detail, "Log Line 1") {
+		t.Errorf("detail should show the log line heading, got: %q", detail)
+	}
+	// The text is wrapped, so verify the full content is present across
+	// the joined rows (whitespace is normalized by the wrapping).
+	joined := strings.Join(strings.Fields(detail), " ")
+	if !strings.Contains(joined, longLine) {
+		t.Errorf("detail should contain the full wrapped message, got: %q", detail)
+	}
+}
+
+func TestLogDetail_WrapsToFitViewport(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	longLine := strings.Repeat("word ", 40)
+	m.logRing.Write([]byte(longLine + "\n"))
+	m.cursor = 0
+	m = update(m, special("enter"))
+
+	detail := m.renderDetailOverlay()
+	for _, row := range strings.Split(detail, "\n") {
+		if w := uniseg.StringWidth(stripANSI(row)); w > m.viewportWidth() {
+			t.Errorf("detail row exceeds viewport width %d: %d cells %q", m.viewportWidth(), w, stripANSI(row))
+		}
+	}
+}
+
+func TestLogDetail_LongLineProducesMultipleRowsWithoutLoss(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	longLine := strings.Repeat("abcdefghij", 20) // 200 chars, no spaces
+	m.logRing.Write([]byte(longLine + "\n"))
+	m.cursor = 0
+	m = update(m, special("enter"))
+
+	detail := stripANSI(m.renderDetailOverlay())
+	// The full text must be present across the wrapped rows (no loss).
+	joined := strings.Join(strings.Fields(detail), "")
+	if !strings.Contains(joined, longLine) {
+		t.Errorf("wrapped detail must preserve the full 200-char text, got: %q", detail)
+	}
+}
+
+func TestLogDetail_EmptySelectionDoesNotPanic(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.cursor = 0
+	m.mode = modeDetail
+	// No log lines: renderDetailOverlay must return "" without panicking.
+	if s := m.renderDetailOverlay(); s != "" {
+		t.Errorf("empty selection should render empty, got: %q", s)
+	}
+}
+
+func TestLogDetail_EnterOpensAndEscCloses(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("hello\n"))
+	m.cursor = 0
+
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatalf("after Enter: mode = %v, want modeDetail", m.mode)
+	}
+	m = update(m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.mode != modeBrowse {
+		t.Fatalf("after Escape: mode = %v, want modeBrowse", m.mode)
+	}
+}
+
+// ─── T04: identity-pinned Logs detail view ───
+
+func TestLogDetailPin_NewArrivalsDoNotChangeDisplay(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	original := "original log message that stays displayed"
+	m.logRing.Write([]byte(original + "\n"))
+	m.cursor = 0
+
+	// Open detail on the original line.
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("setup: should be in detail mode")
+	}
+	detailBefore := stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detailBefore, original) {
+		t.Fatalf("setup: detail should show original, got: %q", detailBefore)
+	}
+
+	// New log lines arrive while the detail is open.
+	for range 5 {
+		m = update(m, logPollTickMsg{})
+	}
+	m.logRing.Write([]byte("new log line one\nnew log line two\nnew log line three\n"))
+	m = update(m, logPollTickMsg{})
+
+	// The overlay must still show the ORIGINAL message, not the new lines
+	// that have shifted the cursor position.
+	detailAfter := stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detailAfter, original) {
+		t.Errorf("detail must keep the original message after new arrivals, got: %q", detailAfter)
+	}
+	if strings.Contains(detailAfter, "new log line one") {
+		t.Error("detail must not display a newer line that shifted into the anchored position")
+	}
+}
+
+func TestLogDetailPin_EvictionClosesOverlay(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	original := "original message that will be evicted"
+	m.logRing.Write([]byte(original + "\n"))
+	m.cursor = 0
+
+	// Open detail on the original line.
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("setup: should be in detail mode")
+	}
+	if !strings.Contains(stripANSI(m.renderDetailOverlay()), original) {
+		t.Fatal("setup: detail should show original")
+	}
+
+	// Overflow the 2048-line ring to evict the original.
+	for i := range 2050 {
+		m.logRing.Write([]byte(fmt.Sprintf("filler %d\n", i)))
+	}
+	m = update(m, logPollTickMsg{})
+
+	// The overlay must close (mode back to browse) and the render must
+	// not show the evicted message.
+	if m.mode != modeBrowse {
+		t.Errorf("mode after eviction = %v, want modeBrowse (overlay must close)", m.mode)
+	}
+}
+
+func TestLogDetailPin_StillPresentAppendKeepsMessage(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	original := "still present message"
+	m.logRing.Write([]byte(original + "\n"))
+	m.cursor = 0
+
+	m = update(m, special("enter"))
+
+	// Append a few lines (no eviction).
+	m.logRing.Write([]byte("later line A\nlater line B\n"))
+	m = update(m, logPollTickMsg{})
+
+	// The overlay must still show the original.
+	detail := stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detail, original) {
+		t.Errorf("detail must keep the original after append, got: %q", detail)
+	}
+	if m.mode != modeDetail {
+		t.Error("overlay must stay open when the item is still present")
+	}
+}
+
+// ─── T04: identity-pinned Logs detail view (direct logRing writes) ───
+
+func TestLogDetailPin_RingAppendKeepsOriginal(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	original := "original log message that stays displayed"
+	m.logRing.Write([]byte(original + "\n"))
+	m.cursor = 0
+
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("setup: should be in detail mode")
+	}
+
+	// Write directly to the ring (new arrivals).
+	m.logRing.Write([]byte("new line A\nnew line B\n"))
+
+	// The overlay must still show the original.
+	detail := stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detail, original) {
+		t.Errorf("detail must keep the original after ring append, got: %q", detail)
+	}
+}
+
+func TestLogDetailPin_RingEvictionClosesOverlay(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	original := "original message that will be evicted"
+	m.logRing.Write([]byte(original + "\n"))
+	m.cursor = 0
+
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("setup: should be in detail mode")
+	}
+
+	// Overflow the 2048-line ring to evict the original.
+	var sb strings.Builder
+	for i := range 2050 {
+		fmt.Fprintf(&sb, "filler %d\n", i)
+	}
+	m.logRing.Write([]byte(sb.String()))
+
+	// The eviction check runs on every Update cycle; any keypress triggers
+	// the post-update tail that closes the overlay.
+	m = update(m, key(' '))
+
+	// The overlay must close.
+	if m.mode != modeBrowse {
+		t.Errorf("mode after ring eviction = %v, want modeBrowse", m.mode)
+	}
+}
+
+// ─── T05: Network detail identity pinning ───
+
+func TestNetworkDetailPin_NewEntriesDoNotChangeDisplay(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	m.journal = journal.New(8, 1024)
+	m.journal.Record(&journal.Entry{
+		ID:         1,
+		Method:     "POST",
+		URL:        mustParseURL("https://upstream.example/v1/original-path"),
+		StatusCode: 200,
+	})
+	m.networkFiltered = m.computeVisibleNetworkEntries()
+	m.cursor = 0
+
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("setup: should be in detail mode")
+	}
+	detailBefore := stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detailBefore, "original-path") {
+		t.Fatalf("setup: detail should show original entry, got: %q", detailBefore)
+	}
+
+	// Record newer entries while the detail is open.
+	m.journal.Record(&journal.Entry{
+		ID:         2,
+		Method:     "GET",
+		URL:        mustParseURL("https://upstream.example/v1/newer-path"),
+		StatusCode: 200,
+	})
+	m = update(m, metrics.Snapshot{})
+
+	// The overlay must still show the ORIGINAL entry.
+	detailAfter := stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detailAfter, "original-path") {
+		t.Errorf("detail must keep the original entry after new records, got: %q", detailAfter)
+	}
+	if strings.Contains(detailAfter, "newer-path") {
+		t.Error("detail must not display a newer entry")
+	}
+}
+
+func TestNetworkDetailPin_EvictionClosesOverlay(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabNetwork
+	m.journal = journal.New(2, 1024)
+	m.journal.Record(&journal.Entry{
+		ID:         1,
+		Method:     "POST",
+		URL:        mustParseURL("https://upstream.example/v1/original"),
+		StatusCode: 200,
+	})
+	m.networkFiltered = m.computeVisibleNetworkEntries()
+	m.cursor = 0
+
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("setup: should be in detail mode")
+	}
+
+	// Overflow the 2-entry journal to evict the original.
+	m.journal.Record(&journal.Entry{ID: 2, Method: "GET", URL: mustParseURL("https://upstream.example/v1/two"), StatusCode: 200})
+	m.journal.Record(&journal.Entry{ID: 3, Method: "GET", URL: mustParseURL("https://upstream.example/v1/three"), StatusCode: 200})
+
+	// The eviction check runs on every Update cycle; any keypress triggers
+	// the post-update tail that closes the overlay.
+	m = update(m, key(' '))
+
+	if m.mode != modeBrowse {
+		t.Errorf("mode after journal eviction = %v, want modeBrowse", m.mode)
+	}
+}
+
+// ─── T06: Help/footer text for new affordances ───
+
+func TestHelpOverlay_DocumentsHorizontalScrollAndLogDetail(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	text := stripANSI(m.renderHelpOverlay())
+	for _, want := range []string{"Scroll left/right", "full log message"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("help overlay should contain %q, got:\n%s", want, text)
+		}
+	}
+}
+
+func TestFooterMentionsHorizontalScroll(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 100
+	m.height = 24
+	s := stripANSI(m.renderFooter())
+	if !strings.Contains(s, "h/l:hscroll") {
+		t.Errorf("footer should contain %q, got:\n%s", "h/l:hscroll", s)
+	}
+}
