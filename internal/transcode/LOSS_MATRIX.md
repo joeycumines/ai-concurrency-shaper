@@ -45,5 +45,6 @@ individual keys via `-transcode-allow-loss`.
 | `logprobs` | token log-probabilities cannot be reproduced in the target |
 | `responses_controls` | the Responses envelope controls that are tolerated observably: include and client_metadata are noted and prompt_cache_key is dropped under this permission, and Responses envelope controls echoed on an upstream response are dropped under this permission; the request-side conversation-state controls (background, max_tool_calls, prompt, safety_identifier, status) remain typed unsupported-feature errors under every policy |
 | `anthropic_controls` | the Anthropic Messages client-side envelope controls (context_management, output_config) have no representation in the target request; an approved loss drops them observably |
+| `request_citations` | request citations on text blocks cannot be reproduced in the target request |
 | `builtin_tools` | Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject) |
 | `response_service_tier` | the upstream chat service tier actually served cannot be reproduced in the target |

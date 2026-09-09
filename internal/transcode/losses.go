@@ -206,6 +206,12 @@ const (
 	// already carried by max_tokens, and context_management edits direct
 	// server-side context trimming. An approved loss drops them observably.
 	FeatureAnthropicControls Feature = "anthropic_controls"
+	// RequestCitations covers request citations on text content blocks (e.g.
+	// Anthropic Messages citations from earlier turns, web search, or documents)
+	// that the target request cannot reproduce natively: an approved loss
+	// drops the citations structure observably while preserving the text
+	// content losslessly.
+	FeatureRequestCitations Feature = "request_citations"
 	// BuiltinTools covers Responses built-in tools (web_search, file_search,
 	// code_interpreter, computer_use, and other non-function tool types) that
 	// a chat request cannot express: an approved loss drops them from the
@@ -262,6 +268,7 @@ var lossRegistry = []lossEntry{
 	{FeatureLogprobs, "token log-probabilities cannot be reproduced in the target"},
 	{FeatureResponsesControls, "the Responses envelope controls that are tolerated observably: include and client_metadata are noted and prompt_cache_key is dropped under this permission, and Responses envelope controls echoed on an upstream response are dropped under this permission; the request-side conversation-state controls (background, max_tool_calls, prompt, safety_identifier, status) remain typed unsupported-feature errors under every policy"},
 	{FeatureAnthropicControls, "the Anthropic Messages client-side envelope controls (context_management, output_config) have no representation in the target request; an approved loss drops them observably"},
+	{FeatureRequestCitations, "request citations on text blocks cannot be reproduced in the target request"},
 	{FeatureBuiltinTools, "Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject)"},
 	{FeatureResponseServiceTier, "the upstream chat service tier actually served cannot be reproduced in the target"},
 }

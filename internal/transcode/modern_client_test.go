@@ -509,3 +509,151 @@ func TestAnthropicMessagesThinkingWireType(t *testing.T) {
 		t.Fatalf("thinking = %+v", r.Thinking)
 	}
 }
+
+// TestAnthropicRequestCitationsReplay proves that Claude Code replaying
+// multi-turn conversation history containing text blocks with citations
+// (e.g. from earlier web search, documents, or context) decodes without
+// 400 "unknown field citations". Under strict policy it is rejected naming
+// request_citations; under approving policy the text is preserved losslessly
+// and the citations drop is recorded observably.
+func TestAnthropicRequestCitationsReplay(t *testing.T) {
+	claudeCodePayload := []byte(`{
+		"model": "claude-3-5-sonnet-20241022",
+		"max_tokens": 8192,
+		"messages": [
+			{
+				"role": "user",
+				"content": "What does the documentation say?"
+			},
+			{
+				"role": "assistant",
+				"content": [
+					{
+						"type": "text",
+						"text": "According to the documentation, bounded concurrency is enforced.",
+						"citations": [
+							{
+								"type": "char_location",
+								"cited_text": "bounded concurrency is enforced",
+								"document_index": 0,
+								"document_title": "architecture.md",
+								"start_char_index": 42,
+								"end_char_index": 73
+							},
+							{
+								"type": "web_search_result_location",
+								"cited_text": "concurrency",
+								"url": "https://example.com/docs",
+								"title": "Example Docs"
+							}
+						]
+					}
+				]
+			},
+			{
+				"role": "user",
+				"content": "Can you elaborate?"
+			}
+		]
+	}`)
+
+	// Strict policy must reject with UnsupportedFeatureError naming request_citations
+	strictPolicy := StrictLossPolicy()
+	if _, err := DecodeMessagesRequest(claudeCodePayload, strictPolicy); err == nil {
+		t.Fatal("strict policy accepted text block citations; want rejection")
+	} else {
+		var ufe *UnsupportedFeatureError
+		if !errors.As(err, &ufe) {
+			t.Fatalf("expected UnsupportedFeatureError, got %T: %v", err, err)
+		}
+		if ufe.Feature != string(FeatureRequestCitations) {
+			t.Fatalf("feature = %q, want %q", ufe.Feature, FeatureRequestCitations)
+		}
+		if ufe.Path != "messages[1].content[0].citations" {
+			t.Fatalf("path = %q, want %q", ufe.Path, "messages[1].content[0].citations")
+		}
+	}
+
+	// Approving policy must decode cleanly and record request_citations
+	approvingPolicy := LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureRequestCitations: {},
+	}}
+	result, err := DecodeMessagesRequest(claudeCodePayload, approvingPolicy)
+	if err != nil {
+		t.Fatalf("decode messages request: %v", err)
+	}
+	if !reportHasFeature(result.Report, FeatureRequestCitations) {
+		t.Fatalf("report lacks request_citations: %+v", result.Report)
+	}
+
+	// Render to Chat Completions: assistant message text is preserved losslessly
+	context := testExchangeContext()
+	context.LossPolicy = approvingPolicy
+	chatReq, report, err := RenderChatRequest(result.Request, context, ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("render chat request: %v", err)
+	}
+	_ = report
+	var chatEnvelope openaichat.Request
+	if err := json.Unmarshal(chatReq, &chatEnvelope); err != nil {
+		t.Fatalf("unmarshal chat request: %v", err)
+	}
+	if len(chatEnvelope.Messages) != 3 {
+		t.Fatalf("expected 3 chat messages, got %d", len(chatEnvelope.Messages))
+	}
+	// Assistant message is at index 1
+	asstMsg := chatEnvelope.Messages[1]
+	if asstMsg.Role != "assistant" {
+		t.Fatalf("expected assistant role, got %q", asstMsg.Role)
+	}
+	var text string
+	if asstMsg.Content != nil {
+		if asstMsg.Content.ContentStr != nil {
+			text = *asstMsg.Content.ContentStr
+		} else if len(asstMsg.Content.ContentBlocks) > 0 && asstMsg.Content.ContentBlocks[0].Text != nil {
+			text = *asstMsg.Content.ContentBlocks[0].Text
+		}
+	}
+	if !strings.Contains(text, "According to the documentation, bounded concurrency is enforced.") {
+		t.Fatalf("assistant text not preserved: %+v", asstMsg.Content)
+	}
+
+	// Render to Responses upstream: assistant text is preserved losslessly in input items
+	respReq, _, err := RenderResponsesRequest(result.Request, context)
+	if err != nil {
+		t.Fatalf("render responses request: %v", err)
+	}
+	var respEnvelope openairesponses.Request
+	if err := json.Unmarshal(respReq, &respEnvelope); err != nil {
+		t.Fatalf("unmarshal responses request: %v", err)
+	}
+	if respEnvelope.Input == nil || len(respEnvelope.Input.Items) == 0 {
+		t.Fatalf("expected responses input items, got %+v", respEnvelope.Input)
+	}
+	foundAsst := false
+	for _, item := range respEnvelope.Input.Items {
+		if msg, ok := item.(*openairesponses.EasyInputMessage); ok && msg.Role == openairesponses.InputRoleAssistant {
+			if msg.Content.Text != nil && strings.Contains(*msg.Content.Text, "bounded concurrency is enforced") {
+				foundAsst = true
+				break
+			}
+			for _, part := range msg.Content.Parts {
+				switch p := part.(type) {
+				case *openairesponses.OutputText:
+					if strings.Contains(p.Text, "bounded concurrency is enforced") {
+						foundAsst = true
+						break
+					}
+				case *openairesponses.InputText:
+					if strings.Contains(p.Text, "bounded concurrency is enforced") {
+						foundAsst = true
+						break
+					}
+				}
+			}
+		}
+	}
+	if !foundAsst {
+		t.Fatalf("assistant message text not found in responses input items: %s", string(respReq))
+	}
+}

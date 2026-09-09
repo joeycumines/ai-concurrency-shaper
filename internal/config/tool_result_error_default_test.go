@@ -66,3 +66,38 @@ func TestNegationWithdrawsToolResultErrorStatusDefault(t *testing.T) {
 		t.Fatal("an explicit negation must withdraw the tool_result_error_status default")
 	}
 }
+
+func TestDefaultPolicyApprovesRequestCitations(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-transcode-messages-chat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	policy := cfg.Providers[0].TranscodeMappings()[0].Mapping.LossPolicy
+	if !policy.Allows(transcode.FeatureRequestCitations) {
+		t.Fatal("the CLI default policy must approve request_citations for replayed conversation history")
+	}
+}
+
+func TestStrictDefaultsStillRejectRequestCitations(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.openai.com",
+		"-transcode-messages-chat",
+		"-transcode-strict-defaults",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatal(err)
+	}
+	policy := cfg.Providers[0].TranscodeMappings()[0].Mapping.LossPolicy
+	if policy.Allows(transcode.FeatureRequestCitations) {
+		t.Fatal("-transcode-strict-defaults must withdraw the request_citations approval")
+	}
+}

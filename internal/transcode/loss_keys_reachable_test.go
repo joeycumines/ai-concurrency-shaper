@@ -851,6 +851,18 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
+			// Request citations on text blocks are approved or rejected per the
+			// exchange policy; the approved drop is reported for each citation.
+			key:  FeatureRequestCitations,
+			perm: []Feature{FeatureRequestCitations},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				result, err := DecodeMessagesRequest([]byte(
+					`{"model":"m","max_tokens":100,"messages":[{"role":"assistant","content":[{"type":"text","text":"hi","citations":[{"type":"char_location","cited_text":"hi","document_index":0,"start_char_index":0,"end_char_index":2}]}]}]}`,
+				), policy)
+				return result.Report, err
+			},
+		},
+		{
 			// Built-in tools (web_search) are approved or rejected per the
 			// exchange policy; the approved drop is reported.
 			key: FeatureBuiltinTools,

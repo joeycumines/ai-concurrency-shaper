@@ -40,6 +40,21 @@ const (
 	AnthropicSourceTypeURL    = anthropicmessages.SourceTypeURL
 )
 
+// AnthropicTextCitationType is the type of an Anthropic text citation.
+type AnthropicTextCitationType = anthropicmessages.TextCitationType
+
+// AnthropicTextCitationType values.
+const (
+	AnthropicCitationTypeCharLocation            = anthropicmessages.CitationTypeCharLocation
+	AnthropicCitationTypePageLocation            = anthropicmessages.CitationTypePageLocation
+	AnthropicCitationTypeContentBlockLocation    = anthropicmessages.CitationTypeContentBlockLocation
+	AnthropicCitationTypeWebSearchResultLocation = anthropicmessages.CitationTypeWebSearchResultLocation
+	AnthropicCitationTypeSearchResultLocation    = anthropicmessages.CitationTypeSearchResultLocation
+)
+
+// AnthropicTextCitation is an Anthropic text citation.
+type AnthropicTextCitation = anthropicmessages.TextCitation
+
 // AnthropicSource is the source of an image or document block.
 type AnthropicSource = anthropicmessages.Source
 

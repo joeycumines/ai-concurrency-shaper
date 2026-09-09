@@ -90,6 +90,265 @@ func (s Source) Validate() error {
 	return nil
 }
 
+// TextCitationType is the type of an Anthropic text citation.
+type TextCitationType string
+
+// TextCitationType values.
+const (
+	CitationTypeCharLocation            TextCitationType = "char_location"
+	CitationTypePageLocation            TextCitationType = "page_location"
+	CitationTypeContentBlockLocation    TextCitationType = "content_block_location"
+	CitationTypeWebSearchResultLocation TextCitationType = "web_search_result_location"
+	CitationTypeSearchResultLocation    TextCitationType = "search_result_location"
+)
+
+// TextCitation represents an Anthropic text citation.
+type TextCitation struct {
+	Type TextCitationType `json:"type"`
+
+	// Common field for all citations:
+	CitedText string `json:"cited_text"`
+
+	// char_location, page_location, content_block_location:
+	DocumentIndex *int    `json:"document_index,omitempty"`
+	DocumentTitle *string `json:"document_title,omitempty"`
+	FileID        *string `json:"file_id,omitempty"`
+
+	// char_location:
+	StartCharIndex *int `json:"start_char_index,omitempty"`
+	EndCharIndex   *int `json:"end_char_index,omitempty"`
+
+	// page_location:
+	StartPageNumber *int `json:"start_page_number,omitempty"`
+	EndPageNumber   *int `json:"end_page_number,omitempty"`
+
+	// content_block_location:
+	StartBlockIndex *int `json:"start_block_index,omitempty"`
+	EndBlockIndex   *int `json:"end_block_index,omitempty"`
+
+	// web_search_result_location:
+	URL            *string `json:"url,omitempty"`
+	Title          *string `json:"title,omitempty"`
+	EncryptedIndex *string `json:"encrypted_index,omitempty"`
+
+	// search_result_location:
+	SearchResultIndex *int    `json:"search_result_index,omitempty"`
+	Source            *string `json:"source,omitempty"`
+}
+
+// Validate checks citation shape and bounds.
+func (c TextCitation) Validate() error {
+	switch c.Type {
+	case CitationTypeCharLocation:
+		if c.DocumentIndex == nil {
+			return errors.New("char_location citation has no document_index")
+		}
+		if c.StartCharIndex == nil {
+			return errors.New("char_location citation has no start_char_index")
+		}
+		if c.EndCharIndex == nil {
+			return errors.New("char_location citation has no end_char_index")
+		}
+		if *c.StartCharIndex < 0 || *c.EndCharIndex < *c.StartCharIndex {
+			return errors.New("char_location citation has invalid char indices")
+		}
+	case CitationTypePageLocation:
+		if c.DocumentIndex == nil {
+			return errors.New("page_location citation has no document_index")
+		}
+		if c.StartPageNumber == nil {
+			return errors.New("page_location citation has no start_page_number")
+		}
+		if c.EndPageNumber == nil {
+			return errors.New("page_location citation has no end_page_number")
+		}
+		if *c.StartPageNumber < 0 || *c.EndPageNumber < *c.StartPageNumber {
+			return errors.New("page_location citation has invalid page numbers")
+		}
+	case CitationTypeContentBlockLocation:
+		if c.DocumentIndex == nil {
+			return errors.New("content_block_location citation has no document_index")
+		}
+		if c.StartBlockIndex == nil {
+			return errors.New("content_block_location citation has no start_block_index")
+		}
+		if c.EndBlockIndex == nil {
+			return errors.New("content_block_location citation has no end_block_index")
+		}
+		if *c.StartBlockIndex < 0 || *c.EndBlockIndex < *c.StartBlockIndex {
+			return errors.New("content_block_location citation has invalid block indices")
+		}
+	case CitationTypeWebSearchResultLocation:
+		if c.URL == nil || *c.URL == "" {
+			return errors.New("web_search_result_location citation has no url")
+		}
+	case CitationTypeSearchResultLocation:
+		if c.SearchResultIndex == nil {
+			return errors.New("search_result_location citation has no search_result_index")
+		}
+		if c.Source == nil || *c.Source == "" {
+			return errors.New("search_result_location citation has no source")
+		}
+		if c.StartBlockIndex == nil {
+			return errors.New("search_result_location citation has no start_block_index")
+		}
+		if c.EndBlockIndex == nil {
+			return errors.New("search_result_location citation has no end_block_index")
+		}
+		if *c.StartBlockIndex < 0 || *c.EndBlockIndex < *c.StartBlockIndex {
+			return errors.New("search_result_location citation has invalid block indices")
+		}
+	default:
+		return fmt.Errorf("unknown anthropic citation type %q", c.Type)
+	}
+	return nil
+}
+
+// UnmarshalJSON decodes the citation tagged union per-arm with wire.Decode.
+func (c *TextCitation) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Type TextCitationType `json:"type"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+
+	var cit TextCitation
+	switch probe.Type {
+	case CitationTypeCharLocation:
+		var shadow struct {
+			Type           TextCitationType `json:"type"`
+			CitedText      *string          `json:"cited_text"`
+			DocumentIndex  *int             `json:"document_index"`
+			DocumentTitle  *string          `json:"document_title,omitempty"`
+			StartCharIndex *int             `json:"start_char_index"`
+			EndCharIndex   *int             `json:"end_char_index"`
+			FileID         *string          `json:"file_id,omitempty"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("char_location citation: %w", err)
+		}
+		if shadow.CitedText == nil {
+			return errors.New("char_location citation has no cited_text")
+		}
+		cit = TextCitation{
+			Type:           shadow.Type,
+			CitedText:      *shadow.CitedText,
+			DocumentIndex:  shadow.DocumentIndex,
+			DocumentTitle:  shadow.DocumentTitle,
+			StartCharIndex: shadow.StartCharIndex,
+			EndCharIndex:   shadow.EndCharIndex,
+			FileID:         shadow.FileID,
+		}
+
+	case CitationTypePageLocation:
+		var shadow struct {
+			Type            TextCitationType `json:"type"`
+			CitedText       *string          `json:"cited_text"`
+			DocumentIndex   *int             `json:"document_index"`
+			DocumentTitle   *string          `json:"document_title,omitempty"`
+			StartPageNumber *int             `json:"start_page_number"`
+			EndPageNumber   *int             `json:"end_page_number"`
+			FileID          *string          `json:"file_id,omitempty"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("page_location citation: %w", err)
+		}
+		if shadow.CitedText == nil {
+			return errors.New("page_location citation has no cited_text")
+		}
+		cit = TextCitation{
+			Type:            shadow.Type,
+			CitedText:       *shadow.CitedText,
+			DocumentIndex:   shadow.DocumentIndex,
+			DocumentTitle:   shadow.DocumentTitle,
+			StartPageNumber: shadow.StartPageNumber,
+			EndPageNumber:   shadow.EndPageNumber,
+			FileID:          shadow.FileID,
+		}
+
+	case CitationTypeContentBlockLocation:
+		var shadow struct {
+			Type            TextCitationType `json:"type"`
+			CitedText       *string          `json:"cited_text"`
+			DocumentIndex   *int             `json:"document_index"`
+			DocumentTitle   *string          `json:"document_title,omitempty"`
+			StartBlockIndex *int             `json:"start_block_index"`
+			EndBlockIndex   *int             `json:"end_block_index"`
+			FileID          *string          `json:"file_id,omitempty"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("content_block_location citation: %w", err)
+		}
+		if shadow.CitedText == nil {
+			return errors.New("content_block_location citation has no cited_text")
+		}
+		cit = TextCitation{
+			Type:            shadow.Type,
+			CitedText:       *shadow.CitedText,
+			DocumentIndex:   shadow.DocumentIndex,
+			DocumentTitle:   shadow.DocumentTitle,
+			StartBlockIndex: shadow.StartBlockIndex,
+			EndBlockIndex:   shadow.EndBlockIndex,
+			FileID:          shadow.FileID,
+		}
+
+	case CitationTypeWebSearchResultLocation:
+		var shadow struct {
+			Type           TextCitationType `json:"type"`
+			CitedText      *string          `json:"cited_text"`
+			URL            *string          `json:"url"`
+			Title          *string          `json:"title,omitempty"`
+			EncryptedIndex *string          `json:"encrypted_index,omitempty"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("web_search_result_location citation: %w", err)
+		}
+		if shadow.CitedText == nil {
+			return errors.New("web_search_result_location citation has no cited_text")
+		}
+		cit = TextCitation{
+			Type:           shadow.Type,
+			CitedText:      *shadow.CitedText,
+			URL:            shadow.URL,
+			Title:          shadow.Title,
+			EncryptedIndex: shadow.EncryptedIndex,
+		}
+
+	case CitationTypeSearchResultLocation:
+		var shadow struct {
+			Type              TextCitationType `json:"type"`
+			CitedText         *string          `json:"cited_text"`
+			SearchResultIndex *int             `json:"search_result_index"`
+			Title             *string          `json:"title,omitempty"`
+			Source            *string          `json:"source"`
+			StartBlockIndex   *int             `json:"start_block_index"`
+			EndBlockIndex     *int             `json:"end_block_index"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("search_result_location citation: %w", err)
+		}
+		if shadow.CitedText == nil {
+			return errors.New("search_result_location citation has no cited_text")
+		}
+		cit = TextCitation{
+			Type:              shadow.Type,
+			CitedText:         *shadow.CitedText,
+			SearchResultIndex: shadow.SearchResultIndex,
+			Title:             shadow.Title,
+			Source:            shadow.Source,
+			StartBlockIndex:   shadow.StartBlockIndex,
+			EndBlockIndex:     shadow.EndBlockIndex,
+		}
+
+	default:
+		return fmt.Errorf("unknown anthropic citation type %q", probe.Type)
+	}
+
+	*c = cit
+	return c.Validate()
+}
+
 // ContentBlock is one content block of an Anthropic message.
 type ContentBlock struct {
 	Type      ContentBlockType `json:"type"`
@@ -105,6 +364,9 @@ type ContentBlock struct {
 	Content   *Content        `json:"content,omitempty"`
 	IsError   *bool           `json:"is_error,omitempty"`
 	Source    *Source         `json:"source,omitempty"`
+
+	// Citations on text blocks:
+	Citations []TextCitation `json:"citations,omitempty"`
 
 	// CacheControl is the Anthropic prompt-cache marker (e.g.
 	// {"type":"ephemeral"}) real clients (Claude Code) attach to text,
@@ -136,6 +398,7 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 		var shadow struct {
 			Type         ContentBlockType `json:"type"`
 			Text         *string          `json:"text"`
+			Citations    []TextCitation   `json:"citations,omitempty"`
 			CacheControl any              `json:"cache_control,omitempty"`
 		}
 		if err := wire.Decode(data, &shadow); err != nil {
@@ -143,6 +406,7 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 		}
 		block.Type = shadow.Type
 		block.Text = shadow.Text
+		block.Citations = shadow.Citations
 		block.CacheControl = shadow.CacheControl
 
 	case ContentBlockTypeImage, ContentBlockTypeDocument:
@@ -242,6 +506,11 @@ func (b ContentBlock) Validate() error {
 	case ContentBlockTypeText:
 		if b.Text == nil {
 			return errors.New("text block has no text")
+		}
+		for i, cit := range b.Citations {
+			if err := cit.Validate(); err != nil {
+				return fmt.Errorf("citation %d: %w", i, err)
+			}
 		}
 	case ContentBlockTypeImage:
 		if b.Source == nil {
@@ -532,6 +801,7 @@ type StreamDelta struct {
 	PartialJSON  *string         `json:"partial_json,omitempty"`
 	Thinking     *string         `json:"thinking,omitempty"`
 	Signature    *string         `json:"signature,omitempty"`
+	Citation     *TextCitation   `json:"citation,omitempty"`
 	StopReason   *StopReason     `json:"stop_reason,omitempty"`
 	StopSequence *string         `json:"stop_sequence,omitempty"`
 }

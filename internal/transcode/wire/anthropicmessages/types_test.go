@@ -192,3 +192,154 @@ func TestThinkingBlockCacheControlRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestTextCitationsArms(t *testing.T) {
+	// char_location
+	charJSON := `{"type":"char_location","cited_text":"excerpt","document_index":0,"document_title":"doc","start_char_index":5,"end_char_index":12,"file_id":"file_1"}`
+	var charCit TextCitation
+	if err := json.Unmarshal([]byte(charJSON), &charCit); err != nil {
+		t.Fatalf("unmarshal char_location: %v", err)
+	}
+	if charCit.Type != CitationTypeCharLocation || charCit.CitedText != "excerpt" ||
+		charCit.DocumentIndex == nil || *charCit.DocumentIndex != 0 ||
+		charCit.StartCharIndex == nil || *charCit.StartCharIndex != 5 ||
+		charCit.EndCharIndex == nil || *charCit.EndCharIndex != 12 ||
+		charCit.DocumentTitle == nil || *charCit.DocumentTitle != "doc" ||
+		charCit.FileID == nil || *charCit.FileID != "file_1" {
+		t.Fatalf("char_location unexpected: %+v", charCit)
+	}
+
+	// page_location
+	pageJSON := `{"type":"page_location","cited_text":"paged excerpt","document_index":1,"start_page_number":2,"end_page_number":4}`
+	var pageCit TextCitation
+	if err := json.Unmarshal([]byte(pageJSON), &pageCit); err != nil {
+		t.Fatalf("unmarshal page_location: %v", err)
+	}
+	if pageCit.Type != CitationTypePageLocation || *pageCit.StartPageNumber != 2 || *pageCit.EndPageNumber != 4 {
+		t.Fatalf("page_location unexpected: %+v", pageCit)
+	}
+
+	// content_block_location
+	blockJSON := `{"type":"content_block_location","cited_text":"block excerpt","document_index":2,"start_block_index":0,"end_block_index":1}`
+	var blockCit TextCitation
+	if err := json.Unmarshal([]byte(blockJSON), &blockCit); err != nil {
+		t.Fatalf("unmarshal content_block_location: %v", err)
+	}
+	if blockCit.Type != CitationTypeContentBlockLocation || *blockCit.StartBlockIndex != 0 || *blockCit.EndBlockIndex != 1 {
+		t.Fatalf("content_block_location unexpected: %+v", blockCit)
+	}
+
+	// web_search_result_location
+	webJSON := `{"type":"web_search_result_location","cited_text":"web excerpt","url":"https://example.com","title":"Example","encrypted_index":"enc_1"}`
+	var webCit TextCitation
+	if err := json.Unmarshal([]byte(webJSON), &webCit); err != nil {
+		t.Fatalf("unmarshal web_search_result_location: %v", err)
+	}
+	if webCit.Type != CitationTypeWebSearchResultLocation || *webCit.URL != "https://example.com" ||
+		*webCit.Title != "Example" || *webCit.EncryptedIndex != "enc_1" {
+		t.Fatalf("web_search_result_location unexpected: %+v", webCit)
+	}
+
+	// search_result_location
+	searchJSON := `{"type":"search_result_location","cited_text":"search excerpt","search_result_index":3,"title":"search title","source":"tool","start_block_index":1,"end_block_index":3}`
+	var searchCit TextCitation
+	if err := json.Unmarshal([]byte(searchJSON), &searchCit); err != nil {
+		t.Fatalf("unmarshal search_result_location: %v", err)
+	}
+	if searchCit.Type != CitationTypeSearchResultLocation || *searchCit.SearchResultIndex != 3 ||
+		searchCit.Title == nil || *searchCit.Title != "search title" ||
+		*searchCit.Source != "tool" || *searchCit.StartBlockIndex != 1 || *searchCit.EndBlockIndex != 3 {
+		t.Fatalf("search_result_location unexpected: %+v", searchCit)
+	}
+
+	// Unknown type rejected
+	var bogus TextCitation
+	if err := json.Unmarshal([]byte(`{"type":"bogus_location","cited_text":"x"}`), &bogus); err == nil {
+		t.Fatal("unknown citation type accepted")
+	}
+
+	// Unknown field in arm rejected
+	var unknownField TextCitation
+	if err := json.Unmarshal([]byte(`{"type":"char_location","cited_text":"x","document_index":0,"start_char_index":0,"end_char_index":1,"extra":"nope"}`), &unknownField); err == nil {
+		t.Fatal("unknown field in char_location accepted")
+	}
+
+	// Duplicate key in arm rejected
+	var dupKey TextCitation
+	if err := json.Unmarshal([]byte(`{"type":"char_location","cited_text":"x","cited_text":"y","document_index":0,"start_char_index":0,"end_char_index":1}`), &dupKey); err == nil {
+		t.Fatal("duplicate key in citation accepted")
+	}
+
+	// Missing required fields rejected
+	var missingRequired TextCitation
+	if err := json.Unmarshal([]byte(`{"type":"char_location","document_index":0,"start_char_index":0,"end_char_index":1}`), &missingRequired); err == nil {
+		t.Fatal("char_location without cited_text accepted")
+	}
+
+	// Inverted indices rejected
+	var inverted TextCitation
+	if err := json.Unmarshal([]byte(`{"type":"char_location","cited_text":"x","document_index":0,"start_char_index":10,"end_char_index":5}`), &inverted); err == nil {
+		t.Fatal("char_location with inverted indices accepted")
+	}
+}
+
+func TestContentBlockTextWithCitations(t *testing.T) {
+	textBlockJSON := `{
+		"type": "text",
+		"text": "Here is information based on the document.",
+		"citations": [
+			{
+				"type": "char_location",
+				"cited_text": "source text",
+				"document_index": 0,
+				"start_char_index": 10,
+				"end_char_index": 21
+			}
+		],
+		"cache_control": {"type": "ephemeral"}
+	}`
+	var cb ContentBlock
+	if err := json.Unmarshal([]byte(textBlockJSON), &cb); err != nil {
+		t.Fatalf("unmarshal text block with citations: %v", err)
+	}
+	if cb.Type != ContentBlockTypeText || *cb.Text != "Here is information based on the document." {
+		t.Fatalf("text block content mismatch: %+v", cb)
+	}
+	if len(cb.Citations) != 1 || cb.Citations[0].Type != CitationTypeCharLocation || cb.Citations[0].CitedText != "source text" {
+		t.Fatalf("citations mismatch: %+v", cb.Citations)
+	}
+	if cb.CacheControl == nil {
+		t.Fatal("cache_control dropped")
+	}
+
+	// Invalid citation inside text block fails decode
+	badCitationJSON := `{
+		"type": "text",
+		"text": "bad",
+		"citations": [{"type": "unknown"}]
+	}`
+	var badCB ContentBlock
+	if err := json.Unmarshal([]byte(badCitationJSON), &badCB); err == nil {
+		t.Fatal("text block with invalid citation accepted")
+	}
+}
+
+func TestStreamDeltaCitations(t *testing.T) {
+	deltaJSON := `{
+		"type": "citations_delta",
+		"citation": {
+			"type": "web_search_result_location",
+			"cited_text": "result",
+			"url": "https://example.org"
+		}
+	}`
+	var delta StreamDelta
+	if err := json.Unmarshal([]byte(deltaJSON), &delta); err != nil {
+		t.Fatalf("unmarshal citations_delta: %v", err)
+	}
+	if delta.Type != StreamDeltaTypeCitationsDelta || delta.Citation == nil ||
+		delta.Citation.Type != CitationTypeWebSearchResultLocation ||
+		*delta.Citation.URL != "https://example.org" {
+		t.Fatalf("stream delta citation mismatch: %+v", delta)
+	}
+}

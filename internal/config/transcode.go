@@ -430,6 +430,7 @@ var defaultTranscodeLosses = map[transcode.Feature]struct{}{
 	transcode.FeatureMidConversationSystem:  {},
 	transcode.FeatureResponsesControls:      {},
 	transcode.FeatureAnthropicControls:      {},
+	transcode.FeatureRequestCitations:       {},
 	transcode.FeatureBuiltinTools:           {},
 	transcode.FeatureUsageUnknown:           {},
 	transcode.FeatureUsageCacheReadUnknown:  {},

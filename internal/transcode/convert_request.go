@@ -974,6 +974,43 @@ func DecodeMessagesRequest(
 		}
 	}
 
+	// Citations on text blocks are an Anthropic feature (replayed conversation
+	// history, document context, or web search citations) that the target
+	// request cannot reproduce natively: an approved loss drops the citations
+	// structure observably while preserving the text content losslessly.
+	var scanCitations func(blocks []anthropicmessages.ContentBlock, pathPrefix string) error
+	scanCitations = func(blocks []anthropicmessages.ContentBlock, pathPrefix string) error {
+		for i, block := range blocks {
+			blockPath := fmt.Sprintf("%s[%d]", pathPrefix, i)
+			if len(block.Citations) > 0 {
+				if err := result.Report.Lose(
+					policy,
+					FeatureRequestCitations,
+					blockPath+".citations",
+					"request citations on text blocks cannot be reproduced in the target request",
+				); err != nil {
+					return err
+				}
+			}
+			if block.Content != nil {
+				if err := scanCitations(block.Content.ContentBlocks, blockPath+".content"); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if envelope.System != nil {
+		if err := scanCitations(envelope.System.ContentBlocks, "system"); err != nil {
+			return DecodeResult{}, err
+		}
+	}
+	for i, message := range envelope.Messages {
+		if err := scanCitations(message.Content.ContentBlocks, fmt.Sprintf("messages[%d].content", i)); err != nil {
+			return DecodeResult{}, err
+		}
+	}
+
 	// Thinking configuration. "enabled" requires an explicit budget; members
 	// are validated per type against the official contract (enabled={type,
 	// budget_tokens}, disabled={type}, adaptive={type,display}) so a
