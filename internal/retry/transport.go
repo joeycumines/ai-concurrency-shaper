@@ -239,6 +239,10 @@ type Transport struct {
 	// the upstream's rate-limit header.
 	MinRetryDelay time.Duration
 
+	// DrainTimeout is the maximum duration to wait when draining a retryable
+	// response body. Defaults to 5 seconds when zero or negative.
+	DrainTimeout time.Duration
+
 	// InFlightRetries tracks the number of RoundTrip calls currently in retry
 	// mode. When non-nil, it is incremented exactly once when the RoundTrip
 	// enters retry mode (attempt == 1) and decremented exactly once via defer
@@ -249,6 +253,13 @@ type Transport struct {
 	// Breaker is an optional circuit breaker. When set, failed attempts are
 	// reported to the breaker, and retries are aborted if the circuit is OPEN.
 	Breaker *circuitbreaker.Breaker
+}
+
+func (t *Transport) drainTimeout() time.Duration {
+	if t != nil && t.DrainTimeout > 0 {
+		return t.DrainTimeout
+	}
+	return 5 * time.Second
 }
 
 // RetryBreaker exposes the breaker owned by this retry transport. Wrappers may
@@ -297,7 +308,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	deferSuccess := deferBreakerSuccess(req)
 
-	var bodyBuf *bytes.Buffer
+	var bodyTracker *bufferTracker
 	if req.Body != nil && t.MaxBodyBytes > 0 {
 		buf := bufPool.Get().(*bytes.Buffer)
 		buf.Reset()
@@ -315,7 +326,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			origBody := req.Body
 			req.Body = &pooledBody{
 				ReadCloser: io.NopCloser(io.MultiReader(buf, origBody)),
-				buf:        nil, // buf is inside MultiReader — do NOT recycle in Close or after RoundTrip
+				tracker:    nil, // buf is inside MultiReader — do NOT recycle in Close or after RoundTrip
 				origBody:   origBody,
 			}
 			// Report the outcome to the circuit breaker. The body-too-large
@@ -379,7 +390,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return resp, err
 		}
 		req.Body.Close()
-		bodyBuf = buf
+		bodyTracker = newBufferTracker(buf)
 	}
 
 	var lastResp *http.Response
@@ -407,7 +418,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// RoundTrip. Check before Breaker.Allow so a HALF_OPEN failure from the
 		// previous response cannot turn an abandoned request into ErrCircuitOpen.
 		if attempt > 0 && isRequestContextCancellation(req) {
-			return t.finishRequestCancellation(req, nil, bodyBuf, breakerEpoch)
+			return t.finishRequestCancellation(req, nil, bodyTracker, breakerEpoch)
 		}
 
 		// Enter retry mode on the first retry attempt (attempt == 1).
@@ -425,18 +436,21 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			breakerEpoch, allowErr = t.Breaker.Allow()
 			if allowErr != nil {
 				// Circuit is OPEN — abort retries.
-				if bodyBuf != nil {
-					releaseBuf(bodyBuf)
+				if bodyTracker != nil {
+					bodyTracker.finalize(false)
 				}
 				return nil, circuitbreaker.ErrCircuitOpen
 			}
 		}
 
-		if bodyBuf != nil {
-			req.Body = io.NopCloser(bytes.NewReader(bodyBuf.Bytes()))
-			req.ContentLength = int64(bodyBuf.Len())
+		if bodyTracker != nil {
+			req.Body = bodyTracker.newBody()
+			req.GetBody = func() (io.ReadCloser, error) {
+				return bodyTracker.newBody(), nil
+			}
+			req.ContentLength = int64(bodyTracker.buf.Len())
 			if req.Header != nil {
-				req.Header.Set("Content-Length", strconv.Itoa(bodyBuf.Len()))
+				req.Header.Set("Content-Length", strconv.Itoa(bodyTracker.buf.Len()))
 			}
 		}
 
@@ -466,7 +480,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			select {
 			case <-req.Context().Done():
 				timer.Stop()
-				return t.finishRequestCancellation(req, nil, bodyBuf, breakerEpoch)
+				return t.finishRequestCancellation(req, nil, bodyTracker, breakerEpoch)
 			case <-timer.C:
 			}
 		}
@@ -534,14 +548,14 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// preserving definitive response-status failures, so return the context error
 		// without entering the retry path.
 		if err != nil && isTerminalCancellation(req, err) {
-			return t.finishRequestCancellation(req, resp, bodyBuf, breakerEpoch)
+			return t.finishRequestCancellation(req, resp, bodyTracker, breakerEpoch)
 		}
 
 		mustRetry := shouldRetry(resp, err)
 		atLimit := t.MaxRetries >= 0 && attempt >= t.MaxRetries
 
 		// When a request has a body but MaxBodyBytes <= 0, the body
-		// was not buffered (bodyBuf is nil). After the first attempt
+		// was not buffered (bodyTracker is nil). After the first attempt
 		// consumes and closes the body, subsequent retries would pass
 		// the already-closed body to inner.RoundTrip, causing an
 		// immediate "http: request body closed" error. This error is
@@ -549,7 +563,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// creating a rapid futile retry loop that feeds false status-0
 		// failures to the circuit breaker. Prevent this by checking
 		// that the body is either absent or buffered before retrying.
-		canRetry := req.Body == nil || req.Body == http.NoBody || bodyBuf != nil
+		canRetry := req.Body == nil || req.Body == http.NoBody || bodyTracker != nil
 		if !mustRetry || atLimit || !canRetry {
 			// Preserve terminal responses even if req.Context() was canceled before
 			// RoundTrip returned. At this point the response will not be retried: it is
@@ -558,21 +572,21 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			// the upstream outcome after breaker accounting has already recorded any
 			// failure/success. Retryable responses still check cancellation before
 			// draining below so an abandoned request never waits on connection reuse.
-			finalizeBufferedResponseBody(resp, bodyBuf)
+			finalizeBufferedResponseBody(resp, bodyTracker)
 			return resp, err
 		}
 		if isRequestContextCancellation(req) {
-			return t.finishRequestCancellation(req, resp, bodyBuf, breakerEpoch)
+			return t.finishRequestCancellation(req, resp, bodyTracker, breakerEpoch)
 		}
 
 		// Drain the body so the connection can be reused. Bound the
 		// drain to 4KB to prevent a tarpit (malicious upstream
 		// returning 5xx with an infinite streaming body) from blocking
 		// the retry goroutine indefinitely — a trivial DoS vector.
-		// The drain is also time-bounded (5 seconds) to prevent a
+		// The drain is also time-bounded (5 seconds default) to prevent a
 		// slow-drip tarpit (1 byte/minute) from blocking the goroutine.
 		if resp != nil && resp.Body != nil {
-			drainBody(resp.Body, 4096)
+			drainBody(resp.Body, 4096, t.drainTimeout())
 			resp.Body.Close()
 		}
 		lastResp = resp
@@ -580,11 +594,11 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 }
 
-func (t *Transport) finishRequestCancellation(req *http.Request, resp *http.Response, buf *bytes.Buffer, breakerEpoch uint64) (*http.Response, error) {
+func (t *Transport) finishRequestCancellation(req *http.Request, resp *http.Response, bt *bufferTracker, breakerEpoch uint64) (*http.Response, error) {
 	if t != nil && t.Breaker != nil {
 		t.Breaker.CancelProbe(breakerEpoch)
 	}
-	closeResponseAndReleaseBuffer(resp, buf)
+	closeResponseAndReleaseBuffer(resp, bt)
 	err := req.Context().Err()
 	if err == nil {
 		err = context.Canceled
@@ -592,24 +606,25 @@ func (t *Transport) finishRequestCancellation(req *http.Request, resp *http.Resp
 	return nil, err
 }
 
-func closeResponseAndReleaseBuffer(resp *http.Response, buf *bytes.Buffer) {
+func closeResponseAndReleaseBuffer(resp *http.Response, bt *bufferTracker) {
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}
-	if buf != nil {
-		releaseBuf(buf)
+	if bt != nil {
+		bt.finalize(false)
 	}
 }
 
-func finalizeBufferedResponseBody(resp *http.Response, buf *bytes.Buffer) {
-	if buf == nil {
+func finalizeBufferedResponseBody(resp *http.Response, bt *bufferTracker) {
+	if bt == nil {
 		return
 	}
 	if resp != nil && resp.Body != nil {
-		resp.Body = wrapBufferedResponseBody(resp, buf)
+		bt.finalize(true)
+		resp.Body = wrapBufferedResponseBody(resp, bt)
 		return
 	}
-	releaseBuf(buf)
+	bt.finalize(false)
 }
 
 // statusCode extracts the HTTP status code from a response/error pair.
@@ -650,42 +665,149 @@ func calcWait(attempt int, wMin, wMax time.Duration) time.Duration {
 	return base
 }
 
-// drainBody drains up to maxBytes from body, bounded by a 5-second timeout.
+// drainBody drains up to maxBytes from body, bounded by timeout.
 // If the deadline fires, the body is closed to abort the read, and the
-// function returns immediately. The caller must still close resp.Body after
-// calling drainBody (the close is a no-op if drainBody already closed it).
-func drainBody(body io.ReadCloser, maxBytes int64) {
+// function returns without blocking on the background drain goroutine.
+// The caller must still close resp.Body after calling drainBody (the close
+// is a no-op if drainBody already closed it).
+func drainBody(body io.ReadCloser, maxBytes int64, timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
 	done := make(chan struct{})
 	go func() {
+		defer func() {
+			_ = recover()
+			close(done)
+		}()
 		_, _ = io.Copy(io.Discard, io.LimitReader(body, maxBytes))
-		close(done)
 	}()
-	timer := time.NewTimer(5 * time.Second)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case <-done:
 		// Drain completed within the deadline.
 	case <-timer.C:
 		// Timeout — close the body to abort the read goroutine.
-		body.Close()
-		// Wait for the goroutine to finish to prevent it from reading
-		// from a closed body after we return.
-		<-done
+		_ = body.Close()
+		// Do NOT block unconditionally on <-done. An uncooperative response body
+		// whose Read() does not unblock on Close() would hang drainBody indefinitely,
+		// tying up the retry loop and any held limiter slot.
+		select {
+		case <-done:
+		default:
+		}
 	}
 }
 
-// pooledBody wraps an io.ReadCloser and optionally recycles a bytes.Buffer
-// back to bufPool on Close. It is safe for concurrent Read and Close calls,
+// bufferTracker manages the recycling of a pooled request-body bytes.Buffer.
+// It decouples buffer recycling from the response body lifecycle, ensuring that
+// the buffer is returned to bufPool only when:
+// 1. No further request attempts will be made (finalized == true).
+// 2. All request bodies passed to inner.RoundTrip have been closed or read to EOF (activeReads == 0).
+// 3. The response body (if any) has been closed or was not buffered (respClosed == true).
+type bufferTracker struct {
+	buf         *bytes.Buffer
+	mu          sync.Mutex
+	activeReads int
+	finalized   bool
+	respClosed  bool
+	released    bool
+}
+
+func newBufferTracker(buf *bytes.Buffer) *bufferTracker {
+	return &bufferTracker{buf: buf}
+}
+
+// newBody returns an io.ReadCloser wrapping the tracker's buffer for an attempt.
+// Each body tracks its active lifetime and decrements the active counter upon EOF or Close.
+func (bt *bufferTracker) newBody() io.ReadCloser {
+	bt.mu.Lock()
+	bt.activeReads++
+	bt.mu.Unlock()
+	return &trackingReader{
+		tracker: bt,
+		reader:  bytes.NewReader(bt.buf.Bytes()),
+	}
+}
+
+func (bt *bufferTracker) readDone() {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	bt.activeReads--
+	bt.maybeReleaseLocked()
+}
+
+func (bt *bufferTracker) responseClosed() {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	bt.respClosed = true
+	bt.maybeReleaseLocked()
+}
+
+func (bt *bufferTracker) finalize(hasRespBody bool) {
+	bt.mu.Lock()
+	defer bt.mu.Unlock()
+	bt.finalized = true
+	if !hasRespBody {
+		bt.respClosed = true
+	}
+	bt.maybeReleaseLocked()
+}
+
+func (bt *bufferTracker) maybeReleaseLocked() {
+	if !bt.released && bt.finalized && bt.respClosed && bt.activeReads <= 0 {
+		bt.released = true
+		releaseBuf(bt.buf)
+	}
+}
+
+// trackingReader wraps a bytes.Reader, notifying the parent bufferTracker when
+// the body is closed or exhausted via EOF.
+type trackingReader struct {
+	tracker *bufferTracker
+	reader  *bytes.Reader
+	mu      sync.Mutex
+	closed  bool
+	once    sync.Once
+}
+
+func (r *trackingReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return 0, http.ErrBodyReadAfterClose
+	}
+	n, err := r.reader.Read(p)
+	r.mu.Unlock()
+
+	if err == io.EOF {
+		r.once.Do(func() {
+			r.tracker.readDone()
+		})
+	}
+	return n, err
+}
+
+func (r *trackingReader) Close() error {
+	r.mu.Lock()
+	r.closed = true
+	r.mu.Unlock()
+	r.once.Do(func() {
+		r.tracker.readDone()
+	})
+	return nil
+}
+
+// pooledBody wraps an io.ReadCloser and optionally signals a bufferTracker
+// on Close. It is safe for concurrent Read and Close calls,
 // as required by the http.Request.Body contract: "Body must allow Read to
 // be called concurrently with Close."
 //
-// The closeOnce field guarantees Close logic executes exactly once, preventing
-// sync.Pool double-put. The buf field is only recycled in Close when it is
-// NOT part of an active io.MultiReader — the body-too-large path sets buf=nil
-// and handles pool return separately after the transport finishes reading.
+// The closeOnce field guarantees Close logic executes exactly once.
 type pooledBody struct {
 	io.ReadCloser
-	buf       *bytes.Buffer
+	tracker   *bufferTracker
 	origBody  io.ReadCloser // original body to close on Close (nil unless body-too-large path)
 	closeOnce sync.Once
 }
@@ -694,21 +816,21 @@ type closeWriter interface {
 	CloseWrite() error
 }
 
-func wrapBufferedResponseBody(resp *http.Response, buf *bytes.Buffer) io.ReadCloser {
+func wrapBufferedResponseBody(resp *http.Response, bt *bufferTracker) io.ReadCloser {
 	if resp != nil && resp.StatusCode == http.StatusSwitchingProtocols {
 		if rwc, ok := resp.Body.(io.ReadWriteCloser); ok {
 			if cw, ok := resp.Body.(closeWriter); ok {
-				return &pooledReadWriteCloseWriter{ReadWriteCloser: rwc, closeWriter: cw, buf: buf}
+				return &pooledReadWriteCloseWriter{ReadWriteCloser: rwc, closeWriter: cw, tracker: bt}
 			}
-			return &pooledReadWriteBody{ReadWriteCloser: rwc, buf: buf}
+			return &pooledReadWriteBody{ReadWriteCloser: rwc, tracker: bt}
 		}
 	}
-	return &pooledBody{ReadCloser: resp.Body, buf: buf}
+	return &pooledBody{ReadCloser: resp.Body, tracker: bt}
 }
 
 type pooledReadWriteBody struct {
 	io.ReadWriteCloser
-	buf       *bytes.Buffer
+	tracker   *bufferTracker
 	closeOnce sync.Once
 }
 
@@ -718,8 +840,8 @@ func (p *pooledReadWriteBody) Close() error {
 		if p.ReadWriteCloser != nil {
 			err = p.ReadWriteCloser.Close()
 		}
-		if p.buf != nil {
-			releaseBuf(p.buf)
+		if p.tracker != nil {
+			p.tracker.responseClosed()
 		}
 	})
 	return err
@@ -728,7 +850,7 @@ func (p *pooledReadWriteBody) Close() error {
 type pooledReadWriteCloseWriter struct {
 	io.ReadWriteCloser
 	closeWriter
-	buf       *bytes.Buffer
+	tracker   *bufferTracker
 	closeOnce sync.Once
 }
 
@@ -738,8 +860,8 @@ func (p *pooledReadWriteCloseWriter) Close() error {
 		if p.ReadWriteCloser != nil {
 			err = p.ReadWriteCloser.Close()
 		}
-		if p.buf != nil {
-			releaseBuf(p.buf)
+		if p.tracker != nil {
+			p.tracker.responseClosed()
 		}
 	})
 	return err
@@ -766,8 +888,8 @@ func (p *pooledBody) Close() error {
 		if p.origBody != nil {
 			errs = append(errs, p.origBody.Close())
 		}
-		if p.buf != nil {
-			releaseBuf(p.buf)
+		if p.tracker != nil {
+			p.tracker.responseClosed()
 		}
 		err = errors.Join(errs...)
 	})

@@ -2576,7 +2576,7 @@ func TestPooledBody_ConcurrentReadAndClose(t *testing.T) {
 
 	pb := &pooledBody{
 		ReadCloser: io.NopCloser(io.MultiReader(buf, slowReader)),
-		buf:        nil, // body-too-large path sets nil to avoid pool race
+		tracker:    nil, // body-too-large path sets nil to avoid pool race
 		origBody:   slowReader,
 	}
 
@@ -2635,10 +2635,12 @@ func TestPooledBody_CloseOnceIdempotent(t *testing.T) {
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	buf.WriteString("test data")
+	tracker := newBufferTracker(buf)
+	tracker.finalize(true)
 
 	pb := &pooledBody{
 		ReadCloser: io.NopCloser(bytes.NewReader(buf.Bytes())),
-		buf:        buf,
+		tracker:    tracker,
 	}
 
 	var wg sync.WaitGroup
@@ -2660,11 +2662,13 @@ func TestPooledBody_ResponsePathBufRecycled(t *testing.T) {
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	buf.WriteString("response body data")
+	tracker := newBufferTracker(buf)
+	tracker.finalize(true)
 
 	respBody := io.NopCloser(strings.NewReader("upstream response"))
 	pb := &pooledBody{
 		ReadCloser: respBody,
-		buf:        buf,
+		tracker:    tracker,
 	}
 
 	// Read some data.
@@ -2716,10 +2720,12 @@ func TestWrapBufferedResponseBody_PreservesSwitchingProtocolsReadWriteCloseWrite
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	buf.WriteString("buffered request body")
+	tracker := newBufferTracker(buf)
+	tracker.finalize(true)
 	underlying := &testReadWriteCloseWriter{read: bytes.NewBufferString("upgrade-read")}
 	resp := &http.Response{StatusCode: http.StatusSwitchingProtocols, Body: underlying}
 
-	wrapped := wrapBufferedResponseBody(resp, buf)
+	wrapped := wrapBufferedResponseBody(resp, tracker)
 	rwc, ok := wrapped.(io.ReadWriteCloser)
 	if !ok {
 		t.Fatalf("wrapped body type %T does not implement io.ReadWriteCloser", wrapped)
@@ -2903,5 +2909,89 @@ func TestSignerErrorBodyTooLargeReturnsTypedError(t *testing.T) {
 	}
 	if stats := breaker.Stats(); stats.TotalFailures != 0 {
 		t.Fatalf("breaker failures = %d, want 0 for a local signing failure", stats.TotalFailures)
+	}
+}
+
+// uncooperativeBody simulates an upstream response body whose Read() hangs
+// on a channel and does not unblock even after Close() is called.
+type uncooperativeBody struct {
+	unblockRead chan struct{}
+	closed      atomic.Bool
+}
+
+func (u *uncooperativeBody) Read(p []byte) (int, error) {
+	<-u.unblockRead
+	return 0, io.EOF
+}
+
+func (u *uncooperativeBody) Close() error {
+	u.closed.Store(true)
+	return nil
+}
+
+func TestRetry_DrainBodyTimeoutDoesNotHangOnUncooperativeClose(t *testing.T) {
+	unblock := make(chan struct{})
+	defer close(unblock)
+	body := &uncooperativeBody{unblockRead: unblock}
+
+	start := time.Now()
+	drainBody(body, 1024, 25*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if elapsed > 300*time.Millisecond {
+		t.Fatalf("drainBody took %v, want <= 300ms", elapsed)
+	}
+	if !body.closed.Load() {
+		t.Fatal("drainBody did not call Close() on timeout")
+	}
+}
+
+func TestRetry_PooledBufferNotRecycledWhileRequestBodyLive(t *testing.T) {
+	const bodyContent = "original request body content that must not be corrupted by buffer recycling"
+	var capturedReqBody io.ReadCloser
+
+	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+		capturedReqBody = req.Body
+		// Return immediate response before request body is read/closed
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(strings.NewReader("too many requests")),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	tr := Transport{
+		Inner:        inner,
+		MaxRetries:   0,
+		MaxBodyBytes: 1024 * 1024,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/test", strings.NewReader(bodyContent))
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip: %v", err)
+	}
+
+	// Close the response body while capturedReqBody is still completely unread.
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("resp.Body.Close: %v", err)
+	}
+
+	// In the pre-fix code, closing the response body recycled the buffer immediately.
+	// We simulate a subsequent request pulling a buffer from bufPool and overwriting it.
+	borrowed := bufPool.Get().(*bytes.Buffer)
+	borrowed.Reset()
+	borrowed.WriteString("CORRUPTED_OVERWRITTEN_DATA_FROM_CONCURRENT_OR_SUBSEQUENT_REQUEST")
+
+	// Read the captured request body to verify it was NOT corrupted.
+	readData, readErr := io.ReadAll(capturedReqBody)
+	_ = capturedReqBody.Close()
+	releaseBuf(borrowed)
+
+	if readErr != nil {
+		t.Fatalf("capturedReqBody ReadAll: %v", readErr)
+	}
+	if string(readData) != bodyContent {
+		t.Fatalf("capturedReqBody corrupted: got %q, want %q", string(readData), bodyContent)
 	}
 }
