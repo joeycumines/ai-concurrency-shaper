@@ -1700,16 +1700,17 @@ func TestBreaker_StaleSuccessDiscarded(t *testing.T) {
 		t.Fatalf("epoch4 should differ from epoch3")
 	}
 
-	// Stale success from Probe C — must be discarded, circuit stays HALF_OPEN.
+	// Probe C resolved with success despite probe timeout — it must close the circuit
+	// (preventing HALF_OPEN livelock under continuous traffic).
 	b.RecordSuccess(time.Time{}, epoch3)
-	if b.State() != HalfOpen {
-		t.Fatalf("subtest B: expected HALF_OPEN (stale success discarded), got %v", b.State())
+	if b.State() != Closed {
+		t.Fatalf("subtest B: expected CLOSED after slow probe success, got %v", b.State())
 	}
 
-	// Current success from Probe D — must close the circuit.
-	b.RecordSuccess(time.Time{}, epoch4)
+	// Stale failure from Probe D (superseded by Probe C's recovery) must not re-open the circuit.
+	b.RecordFailure(500, 0, time.Time{}, epoch4)
 	if b.State() != Closed {
-		t.Fatalf("subtest B: expected CLOSED after current success, got %v", b.State())
+		t.Fatalf("subtest B: expected CLOSED (stale probe failure discarded), got %v", b.State())
 	}
 }
 
@@ -1897,6 +1898,7 @@ func TestBreaker_ConstructorValidationMatrix(t *testing.T) {
 		{"negative max penalty", []Option{WithMaxPenalty(-time.Second)}, true},
 		{"max below base", []Option{WithBasePenalty(10 * time.Second), WithMaxPenalty(5 * time.Second)}, true},
 		{"max equal to base", []Option{WithBasePenalty(5 * time.Second), WithMaxPenalty(5 * time.Second)}, false},
+		{"huge threshold", []Option{WithFailureThreshold(MaxFailureThreshold + 1)}, true},
 		{"defaults only", []Option{}, false},
 		{"valid explicit", []Option{WithFailureThreshold(7), WithWindow(time.Second), WithOpenTimeout(2 * time.Second), WithMaxOpenTimeout(4 * time.Second), WithBasePenalty(time.Second), WithMaxPenalty(30 * time.Second)}, false},
 	}
@@ -1910,5 +1912,160 @@ func TestBreaker_ConstructorValidationMatrix(t *testing.T) {
 				t.Fatalf("construction failed: %v", err)
 			}
 		})
+	}
+}
+
+func TestBreaker_ProbeSlowSuccessRecoversCircuitUnderContinuousTraffic(t *testing.T) {
+	b, err := New(
+		WithFailureThreshold(1),
+		WithWindow(10*time.Second),
+		WithOpenTimeout(30*time.Millisecond),
+		WithMaxOpenTimeout(200*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Trip the breaker to OPEN.
+	b.RecordFailure(500, 0, time.Time{}, 0)
+	if b.State() != Open {
+		t.Fatalf("state = %v, want OPEN", b.State())
+	}
+
+	// Wait for open timeout and dispatch Probe 1 (epoch 1).
+	time.Sleep(40 * time.Millisecond)
+	epoch1, err := b.Allow()
+	if err != nil || epoch1 == 0 {
+		t.Fatalf("Allow Probe 1: epoch=%d, err=%v", epoch1, err)
+	}
+	if b.State() != HalfOpen {
+		t.Fatalf("state = %v, want HALF_OPEN", b.State())
+	}
+
+	// Probe 1 is slow (> openTimeout). Traffic arrives and dispatches Probe 2 (epoch 2).
+	time.Sleep(40 * time.Millisecond)
+	epoch2, err := b.Allow()
+	if err != nil || epoch2 <= epoch1 {
+		t.Fatalf("Allow Probe 2: epoch=%d (want > %d), err=%v", epoch2, epoch1, err)
+	}
+
+	// Probe 2 is also slow. Traffic arrives and dispatches Probe 3 (epoch 3).
+	time.Sleep(40 * time.Millisecond)
+	epoch3, err := b.Allow()
+	if err != nil || epoch3 <= epoch2 {
+		t.Fatalf("Allow Probe 3: epoch=%d (want > %d), err=%v", epoch3, epoch2, err)
+	}
+
+	// Now Probe 1 finishes with 200 OK. It must close the circuit,
+	// breaking the HALF_OPEN livelock.
+	b.RecordSuccess(time.Now(), epoch1)
+	if b.State() != Closed {
+		t.Fatalf("state after slow Probe 1 success = %v, want CLOSED", b.State())
+	}
+
+	// Verify that late failure from Probe 2 does not re-open the recovered circuit.
+	b.RecordFailure(500, 0, time.Now(), epoch2)
+	if b.State() != Closed {
+		t.Fatalf("state after late Probe 2 failure = %v, want CLOSED", b.State())
+	}
+
+	// Subsequent request must pass through CLOSED circuit.
+	epochNext, err := b.Allow()
+	if err != nil || epochNext != 0 {
+		t.Fatalf("Allow after recovery: epoch=%d, err=%v", epochNext, err)
+	}
+}
+
+func TestBreaker_StalePreOpenFailureDoesNotReOpenRecoveredCircuit(t *testing.T) {
+	b, err := New(
+		WithFailureThreshold(1),
+		WithWindow(10*time.Second),
+		WithOpenTimeout(20*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Request A is admitted while CLOSED.
+	t0 := time.Now()
+	_, _ = b.Allow()
+
+	time.Sleep(10 * time.Millisecond)
+
+	// An outage occurs: a failure trips the breaker to OPEN.
+	b.RecordFailure(500, 0, time.Now(), 0)
+	if b.State() != Open {
+		t.Fatalf("state = %v, want OPEN", b.State())
+	}
+
+	// Wait for open timeout and recover via successful probe.
+	time.Sleep(30 * time.Millisecond)
+	epoch, err := b.Allow()
+	if err != nil || epoch == 0 {
+		t.Fatalf("Allow probe: %v", err)
+	}
+	b.RecordSuccess(time.Now(), epoch)
+	if b.State() != Closed {
+		t.Fatalf("state after probe success = %v, want CLOSED", b.State())
+	}
+
+	// Request A (started at t0 before circuit opened) now returns a failure.
+	// It must NOT re-open the recovered circuit.
+	b.RecordFailure(500, 60*time.Second, t0, 0)
+	if b.State() != Closed {
+		t.Fatalf("state after stale pre-OPEN failure = %v, want CLOSED", b.State())
+	}
+	if stats := b.Stats(); stats.ConsecutiveFailures != 0 {
+		t.Fatalf("consecutive failures = %d, want 0", stats.ConsecutiveFailures)
+	}
+}
+
+func TestBreaker_HugeFailureThresholdReturnsErrorAndDoesNotPanic(t *testing.T) {
+	// Huge threshold that would panic makeslice if unvalidated.
+	_, err := New(WithFailureThreshold(1 << 62))
+	if err == nil {
+		t.Fatal("expected error for 1<<62 threshold, got nil")
+	}
+
+	// Above MaxFailureThreshold.
+	_, err = New(WithFailureThreshold(MaxFailureThreshold + 1))
+	if err == nil {
+		t.Fatal("expected error for MaxFailureThreshold+1, got nil")
+	}
+
+	// Max allowable threshold constructs successfully with bounded capacity.
+	b, err := New(WithFailureThreshold(MaxFailureThreshold))
+	if err != nil {
+		t.Fatalf("unexpected error for MaxFailureThreshold: %v", err)
+	}
+	if cap(b.failures) > 1024 {
+		t.Fatalf("initial failures cap = %d, want <= 1024", cap(b.failures))
+	}
+}
+
+func TestBreaker_StatsDecaysExpiredFailuresOnRead(t *testing.T) {
+	b, err := New(
+		WithFailureThreshold(5),
+		WithWindow(50*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Record 3 failures.
+	for range 3 {
+		b.RecordFailure(500, 0, time.Time{}, 0)
+	}
+
+	if stats := b.Stats(); stats.Failures != 3 {
+		t.Fatalf("initial stats.Failures = %d, want 3", stats.Failures)
+	}
+
+	// Wait for the failure counting window to expire.
+	time.Sleep(70 * time.Millisecond)
+
+	// Stats() must decay the expired failures on read.
+	if stats := b.Stats(); stats.Failures != 0 {
+		t.Fatalf("decayed stats.Failures = %d, want 0", stats.Failures)
 	}
 }

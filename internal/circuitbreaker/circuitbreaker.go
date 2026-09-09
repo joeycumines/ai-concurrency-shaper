@@ -117,6 +117,13 @@ func (c *breakerConfig) applyDefaults() {
 
 // --- Concrete Options ---
 
+const (
+	// DefaultFailureThreshold is the default number of failures within the window to trip the breaker.
+	DefaultFailureThreshold = 5
+	// MaxFailureThreshold bounds failure threshold to prevent excessive memory allocation.
+	MaxFailureThreshold = 100_000
+)
+
 // FailureThresholdOption sets the number of qualifying failures within the
 // window that triggers the circuit to open.
 type FailureThresholdOption struct {
@@ -124,14 +131,14 @@ type FailureThresholdOption struct {
 }
 
 // WithFailureThreshold returns an option that sets the failure threshold.
-// Must be > 0.
+// Must be between 1 and MaxFailureThreshold.
 func WithFailureThreshold(n int) *FailureThresholdOption {
 	return &FailureThresholdOption{value: n}
 }
 
 func (o *FailureThresholdOption) applyBreakerOption(cfg *breakerConfig) error {
-	if o.value <= 0 {
-		return fmt.Errorf("circuitbreaker: failure threshold must be > 0, got %d", o.value)
+	if o.value <= 0 || o.value > MaxFailureThreshold {
+		return fmt.Errorf("circuitbreaker: failure threshold must be between 1 and %d, got %d", MaxFailureThreshold, o.value)
 	}
 	cfg.failureThreshold = o.value
 	return nil
@@ -271,6 +278,7 @@ type Breaker struct {
 	probeInFlight  bool
 	probeStartedAt time.Time // when the current probe was dispatched
 	probeEpoch     uint64    // incremented each time a probe is dispatched; used to discard stale probe results
+	halfOpenEpoch  uint64    // earliest probe epoch issued in the current continuous HALF_OPEN period
 }
 
 // New creates a Breaker with the given options. Zero-valued fields receive
@@ -293,11 +301,12 @@ func New(opts ...Option) (*Breaker, error) {
 		)
 	}
 	now := time.Now()
+	initCap := min(cfg.failureThreshold*2, 1024)
 	return &Breaker{
 		cfg:             cfg,
 		state:           Closed,
 		lastStateChange: now,
-		failures:        make([]time.Time, 0, cfg.failureThreshold*2),
+		failures:        make([]time.Time, 0, initCap),
 	}, nil
 }
 
@@ -320,6 +329,7 @@ func (b *Breaker) Allow() (uint64, error) {
 			b.probeInFlight = true
 			b.probeStartedAt = time.Now()
 			b.probeEpoch++
+			b.halfOpenEpoch = b.probeEpoch
 			return b.probeEpoch, nil
 		}
 		return 0, ErrCircuitOpen
@@ -329,6 +339,9 @@ func (b *Breaker) Allow() (uint64, error) {
 			b.probeInFlight = true
 			b.probeStartedAt = time.Now()
 			b.probeEpoch++
+			if b.halfOpenEpoch == 0 {
+				b.halfOpenEpoch = b.probeEpoch
+			}
 			return b.probeEpoch, nil
 		}
 		// If the probe has been in flight longer than the open timeout,
@@ -366,6 +379,7 @@ func (b *Breaker) CancelProbe(epoch uint64) {
 	if b.state == HalfOpen && b.probeInFlight && b.probeEpoch == epoch {
 		b.probeInFlight = false
 		b.probeEpoch++
+		b.halfOpenEpoch = 0
 	}
 }
 
@@ -384,27 +398,19 @@ func (b *Breaker) RecordFailure(statusCode int, retryAfter time.Duration, starte
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Discard results from stale probes. When Allow() dispatches a probe
-	// in HALF_OPEN, it increments probeEpoch and returns the new value.
-	// If the circuit subsequently dispatches another probe (e.g., because
-	// the first one timed out), the old probe's epoch no longer matches.
-	// This prevents out-of-order probe resolution from corrupting the
-	// state machine: a stale failure cannot re-trip a recovered circuit,
-	// and a stale success cannot falsely close a re-opened circuit.
+	// Discard results from stale probes. Only the latest probe epoch in HALF_OPEN
+	// can record a probe failure; older superseded probes do not re-trip the circuit.
 	if epoch != 0 && epoch != b.probeEpoch {
 		return
 	}
 
-	// Ignore stale failures in HALF_OPEN: if the request started before the
-	// current OPEN period, it is a ghost from the previous failure wave, not
-	// the probe. The probe request started AFTER openSince, so its startedAt
-	// will be after openSince and will correctly trigger the HALF_OPEN → OPEN
-	// transition. This guard MUST precede ALL state mutations — a stale
-	// failure must not inflate b.consecutive (which feeds the penalty), pollute
-	// b.failures (which feeds the threshold check), or update b.lastRetryAfter
-	// (which feeds the penalty floor).
-	if b.state == HalfOpen &&
-		!startedAt.IsZero() && !b.openSince.IsZero() && startedAt.Before(b.openSince) {
+	// Ignore stale failures: if the request started before the current OPEN period,
+	// it is a ghost from the previous failure wave, not a new failure. This guard MUST
+	// precede ALL state mutations across all states — a slow pre-OPEN failure from a
+	// request admitted before the circuit tripped must not re-open a recovered circuit,
+	// inflate b.consecutive (which feeds the penalty), pollute b.failures (which feeds
+	// the threshold check), or update b.lastRetryAfter (which feeds the penalty floor).
+	if !startedAt.IsZero() && !b.openSince.IsZero() && startedAt.Before(b.openSince) {
 		return
 	}
 
@@ -428,6 +434,8 @@ func (b *Breaker) RecordFailure(statusCode int, retryAfter time.Duration, starte
 		if len(b.failures) >= b.cfg.failureThreshold {
 			b.setState(Open)
 			b.openSince = now
+			b.probeEpoch++
+			b.halfOpenEpoch = 0
 		}
 	case HalfOpen:
 		// Probe failed — back to OPEN with increased backoff.
@@ -435,6 +443,8 @@ func (b *Breaker) RecordFailure(statusCode int, retryAfter time.Duration, starte
 		b.setState(Open)
 		b.openSince = now
 		b.probeInFlight = false
+		b.probeEpoch++
+		b.halfOpenEpoch = 0
 	}
 }
 
@@ -452,8 +462,14 @@ func (b *Breaker) RecordSuccess(startedAt time.Time, epoch uint64) {
 	defer b.mu.Unlock()
 
 	// Discard results from stale probes (same logic as RecordFailure).
-	if epoch != 0 && epoch != b.probeEpoch {
-		return
+	if epoch != 0 {
+		if b.state == HalfOpen {
+			if b.halfOpenEpoch == 0 || epoch < b.halfOpenEpoch || epoch > b.probeEpoch {
+				return
+			}
+		} else if epoch != b.probeEpoch {
+			return
+		}
 	}
 
 	b.totalSuccesses++
@@ -477,6 +493,8 @@ func (b *Breaker) RecordSuccess(startedAt time.Time, epoch uint64) {
 		b.failures = b.failures[:0] // Clear accumulated failures on recovery.
 		b.setState(Closed)
 		b.probeInFlight = false
+		b.probeEpoch++
+		b.halfOpenEpoch = 0
 	case Closed:
 		// Normal success — reset consecutive and penalty state.
 		b.consecutive = 0
@@ -526,6 +544,8 @@ func (b *Breaker) State() State {
 func (b *Breaker) Stats() Stats {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	b.trimFailures(time.Now())
 
 	var nextRetry time.Time
 	if b.state == Open {
