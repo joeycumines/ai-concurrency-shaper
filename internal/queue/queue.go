@@ -55,8 +55,14 @@ type Limiter struct {
 	// release race under load).
 	cooldown time.Duration
 
-	// waiters tracks how many goroutines are currently blocked in Acquire.
+	// waiters tracks how many goroutines are currently blocked in Acquire
+	// waiting for a slot to become available.
 	waiters atomic.Int64
+
+	// active tracks how many concurrency slots are currently held by callers
+	// between a successful Acquire and release(). Tokens parked in post-release
+	// cooldown do not count as active.
+	active atomic.Int64
 
 	// Stats (all atomically accessed).
 	totalAcquired atomic.Int64
@@ -86,7 +92,8 @@ type Limiter struct {
 // immediately return the token to the channel; instead, the token is returned
 // after the cooldown duration via time.AfterFunc. This creates a buffer between
 // slot release and re-admission, preventing the downstream from observing N+1
-// concurrent requests due to accounting lag (KILL-02).
+// concurrent requests due to accounting lag. Note that this delay acts as an
+// upper bound on total throughput: limit / cooldown requests per second.
 func NewLimiterWithCooldown(limit int, cooldown time.Duration) *Limiter {
 	if limit < 1 {
 		panic("queue: concurrency limit must be >= 1")
@@ -116,6 +123,22 @@ func NewLimiterWithCooldown(limit int, cooldown time.Duration) *Limiter {
 // If the context is canceled while waiting, Acquire returns an error and
 // no slot is held.
 func (l *Limiter) Acquire(ctx context.Context) (release func(), err error) {
+	// Fast fail if the context is already done.
+	if err := ctx.Err(); err != nil {
+		l.totalTimeout.Add(1)
+		return nil, err
+	}
+
+	// Fast path: if a slot is available immediately, acquire without
+	// incrementing waiters so that in-flight acquisitions do not falsely
+	// inflate queue-depth checks.
+	select {
+	case <-l.slots:
+		return l.trackAcquiredAndReturnRelease(), nil
+	default:
+	}
+
+	// Slow path: no slot is immediately available. Track as a blocked waiter.
 	l.waiters.Add(1)
 	defer l.waiters.Add(-1)
 
@@ -124,25 +147,31 @@ func (l *Limiter) Acquire(ctx context.Context) (release func(), err error) {
 		l.totalTimeout.Add(1)
 		return nil, ctx.Err()
 	case <-l.slots:
-		l.totalAcquired.Add(1)
-		released := new(sync.Once)
-		return func() {
-			released.Do(func() {
-				doRelease := func() {
-					l.slots <- struct{}{}
-					l.totalReleased.Add(1)
-				}
-				if l.cooldown > 0 {
-					time.AfterFunc(l.cooldown, func() {
-						if !l.absorbNextRelease() {
-							doRelease()
-						}
-					})
-				} else if !l.absorbNextRelease() {
-					doRelease()
-				}
-			})
-		}, nil
+		return l.trackAcquiredAndReturnRelease(), nil
+	}
+}
+
+func (l *Limiter) trackAcquiredAndReturnRelease() func() {
+	l.totalAcquired.Add(1)
+	l.active.Add(1)
+	released := new(sync.Once)
+	return func() {
+		released.Do(func() {
+			l.active.Add(-1)
+			doRelease := func() {
+				l.slots <- struct{}{}
+				l.totalReleased.Add(1)
+			}
+			if l.cooldown > 0 {
+				time.AfterFunc(l.cooldown, func() {
+					if !l.absorbNextRelease() {
+						doRelease()
+					}
+				})
+			} else if !l.absorbNextRelease() {
+				doRelease()
+			}
+		})
 	}
 }
 
@@ -269,16 +298,9 @@ func (l *Limiter) Withheld() int {
 func (l *Limiter) Stats() LimiterStats {
 	l.adaptiveMu.Lock()
 	withheld := int64(l.withheld)
-	absorbPending := l.absorbNext
 	l.adaptiveMu.Unlock()
 
-	active := int64(cap(l.slots)) - int64(len(l.slots)) - withheld
-	if absorbPending {
-		active++
-	}
-	if active < 0 {
-		active = 0
-	}
+	active := max(l.active.Load(), 0)
 	return LimiterStats{
 		Active:       active,
 		Waiters:      l.waiters.Load(),
@@ -291,6 +313,9 @@ func (l *Limiter) Stats() LimiterStats {
 
 // LimiterStats is a point-in-time snapshot of limiter metrics.
 type LimiterStats struct {
+	// Active is the number of concurrency slots currently held by callers
+	// (in-flight requests). Slots undergoing post-release cooldown do not
+	// count as active.
 	Active       int64
 	Waiters      int64
 	TotalAcq     int64

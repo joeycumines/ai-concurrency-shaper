@@ -172,6 +172,12 @@ func TestProxy_QueueDepthZeroIsUnbounded(t *testing.T) {
 // once the queue drains.
 func TestProxy_QueueDepth429ReleasesBreakerProbe(t *testing.T) {
 	gate := make(chan struct{})
+	var closeGate sync.Once
+	safeCloseGate := func() {
+		closeGate.Do(func() {
+			close(gate)
+		})
+	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		<-gate
 		w.WriteHeader(http.StatusOK)
@@ -181,6 +187,7 @@ func TestProxy_QueueDepth429ReleasesBreakerProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(upstream.Close)
+	t.Cleanup(safeCloseGate)
 
 	// 1s open timeout: short enough that the lazy HALF_OPEN transition is
 	// reachable in test time, long enough to cover the setup sleeps.
@@ -265,7 +272,7 @@ func TestProxy_QueueDepth429ReleasesBreakerProbe(t *testing.T) {
 
 	// Drain the queue, then prove the breaker still recovers: the next
 	// request is admitted, succeeds, and closes the circuit.
-	close(gate)
+	safeCloseGate()
 	for range 2 {
 		if code := <-fillerDone; code != http.StatusOK {
 			t.Fatalf("filler request status = %d, want 200", code)
@@ -278,5 +285,83 @@ func TestProxy_QueueDepth429ReleasesBreakerProbe(t *testing.T) {
 	}
 	if state := b.State(); state != circuitbreaker.Closed {
 		t.Fatalf("breaker state after a successful recovery probe = %v, want Closed", state)
+	}
+}
+
+// TestProxy_QueueDepthDoesNotRejectWhenSlotsFree verifies that when concurrency
+// slots are available, in-flight slot acquisitions do not falsely inflate the
+// waiters count and trigger 429 rejections under a tight queue-depth limit.
+func TestProxy_QueueDepthDoesNotRejectWhenSlotsFree(t *testing.T) {
+	gate := make(chan struct{})
+	var closeGate sync.Once
+	safeCloseGate := func() {
+		closeGate.Do(func() {
+			close(gate)
+		})
+	}
+	t.Cleanup(safeCloseGate)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		<-gate
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const concurrencyLimit = 64
+	const queueDepthLimit = 1
+	const concurrentRequests = 16
+
+	pat, _ := route.Parse("POST /messages:64")
+	met := metrics.NewCollector()
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(concurrencyLimit, 0)),
+		WithMetrics(met),
+		WithQueueDepthLimit(queueDepthLimit),
+		WithQueueTimeout(5*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fire concurrent requests simultaneously while slots are completely free.
+	startBarrier := make(chan struct{})
+	type reqResult struct {
+		code int
+		body string
+	}
+	results := make(chan reqResult, concurrentRequests)
+
+	for range concurrentRequests {
+		go func() {
+			<-startBarrier
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+			p.ServeHTTP(rec, req)
+			results <- reqResult{code: rec.Code, body: rec.Body.String()}
+		}()
+	}
+
+	// Release all client goroutines simultaneously.
+	close(startBarrier)
+
+	// Wait briefly to ensure requests enter ServeHTTP and acquire slots.
+	time.Sleep(50 * time.Millisecond)
+
+	// Now unblock the upstream handlers so the requests can finish.
+	safeCloseGate()
+
+	for i := range concurrentRequests {
+		res := <-results
+		if res.code != http.StatusOK {
+			t.Fatalf("request %d returned status %d (body=%q), want 200 OK — false 429 rejection while slots free", i, res.code, res.body)
+		}
 	}
 }

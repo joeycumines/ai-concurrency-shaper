@@ -180,7 +180,7 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.boolVar(&p.RetrySkipOn429, "retry-skip-429", defaultRetrySkipOn429, "skip retrying 429 responses to prevent concurrency amplification")
 
 	// Concurrency protection.
-	r.durationVar(&p.ReleaseCooldown, "release-cooldown", defaultReleaseCooldown, "delay after slot release before re-admission (0 = immediate)")
+	r.durationVar(&p.ReleaseCooldown, "release-cooldown", defaultReleaseCooldown, "delay after slot release before re-admission; caps throughput at limit/cooldown req/s (0 = immediate)")
 	r.durationVar(&p.CancelCooldown, "cancel-cooldown", defaultCancelCooldown, "hold slot after client cancel once an upstream attempt started (0 = immediate)")
 	r.durationVar(&p.FailureHold, "failure-hold", defaultFailureHold, "hold slot after upstream failure even without circuit breaker (0 = disabled)")
 

@@ -601,3 +601,173 @@ func TestLimiter_AdaptiveReduceWithCooldownDrainsIdle(t *testing.T) {
 		t.Fatalf("expected effective limit 2 after recovery, got %d", l.EffectiveLimit())
 	}
 }
+
+func TestQueue_AcquireFastPathDoesNotIncrementWaiters(t *testing.T) {
+	const limit = 64
+	l := NewLimiterWithCooldown(limit, 0)
+	ctx := context.Background()
+
+	// Acquire all 64 slots concurrently.
+	var wg sync.WaitGroup
+	startBarrier := make(chan struct{})
+	releases := make([]func(), limit)
+
+	for i := range limit {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-startBarrier
+			rel, err := l.Acquire(ctx)
+			if err != nil {
+				t.Errorf("Acquire %d: %v", idx, err)
+				return
+			}
+			releases[idx] = rel
+		}(i)
+	}
+
+	close(startBarrier)
+	wg.Wait()
+
+	stats := l.Stats()
+	if stats.Waiters != 0 {
+		t.Fatalf("expected 0 waiters during immediate acquisition, got %d", stats.Waiters)
+	}
+	if stats.Active != limit {
+		t.Fatalf("expected %d active slots, got %d", limit, stats.Active)
+	}
+
+	// 65th acquire must block because all slots are held.
+	waiterBlocked := make(chan struct{})
+	var waiterErr error
+	var waiterRel func()
+	waiterDone := make(chan struct{})
+
+	go func() {
+		close(waiterBlocked)
+		waiterRel, waiterErr = l.Acquire(ctx)
+		close(waiterDone)
+	}()
+
+	<-waiterBlocked
+	time.Sleep(50 * time.Millisecond)
+
+	stats = l.Stats()
+	if stats.Waiters != 1 {
+		t.Fatalf("expected 1 blocked waiter, got %d", stats.Waiters)
+	}
+
+	// Release 1 slot — the blocked waiter should be admitted.
+	releases[0]()
+	<-waiterDone
+
+	if waiterErr != nil {
+		t.Fatalf("unexpected waiter error: %v", waiterErr)
+	}
+	if waiterRel == nil {
+		t.Fatal("expected non-nil waiter release")
+	}
+
+	stats = l.Stats()
+	if stats.Waiters != 0 {
+		t.Fatalf("expected 0 waiters after unblocking, got %d", stats.Waiters)
+	}
+	if stats.Active != limit {
+		t.Fatalf("expected %d active, got %d", limit, stats.Active)
+	}
+
+	// Release remaining slots.
+	waiterRel()
+	for _, rel := range releases[1:] {
+		rel()
+	}
+
+	stats = l.Stats()
+	if stats.Active != 0 {
+		t.Fatalf("expected 0 active after full release, got %d", stats.Active)
+	}
+	if stats.Waiters != 0 {
+		t.Fatalf("expected 0 waiters after full release, got %d", stats.Waiters)
+	}
+}
+
+func TestQueue_ActiveExcludesCooldownParkedTokens(t *testing.T) {
+	const cooldown = 150 * time.Millisecond
+	l := NewLimiterWithCooldown(2, cooldown)
+	ctx := context.Background()
+
+	rel1, err := l.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire 1: %v", err)
+	}
+	rel2, err := l.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire 2: %v", err)
+	}
+
+	if got := l.Stats().Active; got != 2 {
+		t.Fatalf("Active while both slots held = %d, want 2", got)
+	}
+
+	// Release slot 1: Active must immediately drop to 1, even though
+	// the token is parked in cooldown and not yet back in circulation.
+	rel1()
+	if got := l.Stats().Active; got != 1 {
+		t.Fatalf("Active immediately after rel1() = %d, want 1", got)
+	}
+
+	// Release slot 2: Active must immediately drop to 0.
+	rel2()
+	if got := l.Stats().Active; got != 0 {
+		t.Fatalf("Active immediately after rel2() = %d, want 0", got)
+	}
+
+	// While both tokens are still cooling down, an Acquire must block.
+	ctxShort, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+	defer cancel()
+
+	_, err = l.Acquire(ctxShort)
+	if err != context.DeadlineExceeded {
+		t.Fatalf("expected timeout while slots in cooldown, got %v", err)
+	}
+
+	// Wait for cooldown to expire.
+	time.Sleep(150 * time.Millisecond)
+
+	// Now a slot must be available immediately.
+	rel3, err := l.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire after cooldown: %v", err)
+	}
+	if got := l.Stats().Active; got != 1 {
+		t.Fatalf("Active after re-acquire = %d, want 1", got)
+	}
+	rel3()
+}
+
+func TestQueue_CooldownThroughputCeiling(t *testing.T) {
+	// A limiter with limit=1 and cooldown=50ms has a maximum throughput
+	// ceiling of 1 / 0.05s = 20 req/s.
+	const limit = 1
+	const cooldown = 50 * time.Millisecond
+	l := NewLimiterWithCooldown(limit, cooldown)
+	ctx := context.Background()
+
+	start := time.Now()
+	const cycles = 4
+	for range cycles {
+		rel, err := l.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("Acquire: %v", err)
+		}
+		rel()
+	}
+	elapsed := time.Since(start)
+
+	// 4 cycles with 50ms cooldown each must take at least 3*50ms = 150ms
+	// (the first cycle acquires immediately; cycles 2, 3, 4 each wait 50ms).
+	minExpected := time.Duration(cycles-1) * cooldown
+	if elapsed < minExpected-10*time.Millisecond {
+		t.Fatalf("elapsed time %v < minimum expected %v for %d cycles with %v cooldown", elapsed, minExpected, cycles, cooldown)
+	}
+}

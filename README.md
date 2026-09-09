@@ -60,7 +60,7 @@ The proxy's internal semaphore limits how many tokens are held concurrently. Wha
 
 | Flag | Scope | Default | Description |
 |------|-------|---------|-------------|
-| `-release-cooldown` | provider | `200ms` | Delay after releasing a slot before re-admission. Reduces the chance the next request arrives while the downstream is still cleaning up. |
+| `-release-cooldown` | provider | `200ms` | Delay after releasing a slot before re-admission; caps maximum throughput at `limit / cooldown` req/s. Reduces the chance the next request arrives while the downstream is still cleaning up. |
 | `-cancel-cooldown` | provider | `200ms` | Hold the slot after a client disconnects once an upstream attempt has started. Mitigates N+1 from rapid connect/disconnect cycles. |
 | `-failure-hold` | provider | `2s` | Hold the slot after an upstream failure (5xx, 429, or rate-limit-signaled 403) when the circuit breaker is disabled or its penalty is zero. When the breaker is enabled with a non-zero penalty, the phantom penalty takes precedence instead. |
 | `-retry-min-delay` | provider | `1s` | Minimum delay before retrying. Reduces the chance the retry arrives before the downstream has finished accounting. |
@@ -735,7 +735,7 @@ Two rules make this work: any explicit `-limit` flag **replaces** the automatic 
 
 The concurrency protection flags insert dead zones between slot release and re-admission:
 
-- **`-release-cooldown`** (success path): token is held for this duration before re-entering the pool. Default 200ms covers most provider accounting windows.
+- **`-release-cooldown`** (success path): token is held for this duration before re-entering the pool. Imposes a throughput ceiling of `limit / cooldown` req/s (e.g. 5 req/s at limit=1, 200ms; 40 req/s at limit=8, 200ms). Default 200ms covers most provider accounting windows.
 - **`-failure-hold`** (failure path): slot is held after 5xx, 429, or rate-limit-signaled 403 when the circuit breaker is disabled. Default 2s. When the breaker is enabled, the phantom penalty (`-cb-penalty`) handles failure-path holds instead — the two are mutually exclusive (else-if branches).
 - **`-cancel-cooldown`** (client disconnect): slot is held briefly when a client disconnects after an upstream attempt has started. Default 200ms.
 - **`-retry-min-delay`** (retry path): floor on retry delay to reduce the chance of arriving before the downstream finishes cleanup. Default 1s.
