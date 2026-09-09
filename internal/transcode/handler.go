@@ -341,6 +341,16 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if CommittedStreamFromContext(r.Context()) && !context.StreamIntent {
+		h.writeDialectHTTPError(r, w, CanonicalAPIError{
+			Status:  http.StatusBadRequest,
+			Type:    "invalid_request_error",
+			Code:    "stream_intent_mismatch",
+			Message: "stream:false is incompatible with committed event-stream representation",
+		}, ProvenanceLocalRequestConversionError)
+		return
+	}
+
 	outReq, err := h.buildUpstreamRequest(r, upstreamBody, context.StreamIntent)
 	if err != nil {
 		// An unallowed client query parameter or an invalid inbound
@@ -407,6 +417,11 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Code:    "request_conversion_error",
 				Message: "build upstream request: internal error",
 			}, ProvenanceLocalRequestConversionError)
+			return
+		}
+		if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
+			h.logRequestError(r, sanitizeUpstreamTransportError(err))
+			h.writeCircuitOpenError(r, w)
 			return
 		}
 		// The transport error may embed the full outbound URL (a custom
@@ -1214,6 +1229,52 @@ func writeCommittedStreamError(
 	return http.NewResponseController(w).Flush()
 }
 
+// writeDialectOrCommittedStreamError renders the canonical error as a dialect-legal
+// SSE error event when the streaming representation was already committed, or as a
+// standard dialect HTTP JSON error otherwise.
+func (h *TranscodeHandler) writeDialectOrCommittedStreamError(
+	r *http.Request,
+	w http.ResponseWriter,
+	client ClientProtocol,
+	apiErr CanonicalAPIError,
+) error {
+	if CommittedStreamFromContext(r.Context()) {
+		return writeCommittedStreamError(w, client, apiErr)
+	}
+	return WriteDialectHTTPError(w, client, apiErr)
+}
+
+func (h *TranscodeHandler) writeCircuitOpenError(r *http.Request, w http.ResponseWriter) {
+	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
+	apiErr := CanonicalAPIError{
+		Status:  http.StatusServiceUnavailable,
+		Type:    "api_error",
+		Code:    "circuit_open",
+		Message: "circuit open",
+	}
+	apiErr.Message = h.boundErrorMessage(apiErr.Message)
+	writeErr := h.writeDialectOrCommittedStreamError(r, w, client, apiErr)
+	outcome := Outcome{
+		UpstreamAttempted: false,
+		UpstreamStatus:    Optional[int]{Value: http.StatusServiceUnavailable, Set: true},
+		Provenance:        ProvenanceLocalRequestConversionError,
+		UpstreamFailure:   false,
+		LocalFailure:      true,
+		CircuitRejected:   true,
+	}
+	if writeErr != nil {
+		if r.Context().Err() != nil {
+			outcome.Provenance = ProvenanceClientAbort
+			outcome.ClientAborted = true
+		} else {
+			outcome.Provenance = ProvenanceDownstreamWriteError
+		}
+	} else {
+		outcome.DownstreamComplete = true
+	}
+	h.recordOutcome(r, outcome)
+}
+
 // writeUpstreamHTTPError renders a non-2xx upstream response in the client
 // dialect. The failure classification uses the response-aware breaker
 // semantics (IsFailureStatusWithHeaders) so 429, 5xx, and 403 with
@@ -1256,7 +1317,7 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 	}
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
 	apiErr.Message = h.boundErrorMessage(apiErr.Message)
-	if err := WriteDialectHTTPError(w, client, apiErr); err != nil {
+	if err := h.writeDialectOrCommittedStreamError(r, w, client, apiErr); err != nil {
 		// A failed downstream write is a fact about the exchange, not a
 		// log line: the translated error was never delivered. The recorded
 		// provenance changes to the downstream failure (or a client abort
@@ -1291,7 +1352,7 @@ func (h *TranscodeHandler) writeUpstreamBodyError(
 ) {
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
 	apiErr.Message = h.boundErrorMessage(apiErr.Message)
-	writeErr := WriteDialectHTTPError(w, client, apiErr)
+	writeErr := h.writeDialectOrCommittedStreamError(r, w, client, apiErr)
 	retryAfter := circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, time.Now())
 	outcome := Outcome{
 		UpstreamAttempted: true,
@@ -1335,7 +1396,7 @@ func (h *TranscodeHandler) writeUpstreamSemanticFailure(
 ) {
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
 	apiErr.Message = h.boundErrorMessage(apiErr.Message)
-	writeErr := WriteDialectHTTPError(w, client, apiErr)
+	writeErr := h.writeDialectOrCommittedStreamError(r, w, client, apiErr)
 	outcome := Outcome{
 		UpstreamAttempted: true,
 		UpstreamStatus:    Optional[int]{Value: upstreamStatus, Set: true},
@@ -1372,18 +1433,7 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 	// Every client-visible error message respects the configured
 	// ErrorMessageBytes bound (review-z commit 3).
 	apiErr.Message = h.boundErrorMessage(apiErr.Message)
-	var writeErr error
-	if CommittedStreamFromContext(r.Context()) {
-		// The proxy committed the SSE representation before dispatch
-		// (queue comments): the status is locked (the proxy's guard
-		// silences the re-declared WriteHeader and marks the exchange
-		// aborted) and the body must stay dialect-legal SSE — the error
-		// failed-closes the stream as a client-dialect error event
-		// instead of a raw JSON body (review ses_f82433a3affeYcnpN3ETKBmQxz).
-		writeErr = writeCommittedStreamError(w, client, apiErr)
-	} else {
-		writeErr = WriteDialectHTTPError(w, client, apiErr)
-	}
+	writeErr := h.writeDialectOrCommittedStreamError(r, w, client, apiErr)
 	upstreamFailure := false
 	switch provenance {
 	case ProvenanceUpstreamTransportError:

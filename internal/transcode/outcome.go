@@ -49,6 +49,11 @@ type Outcome struct {
 	// (request/response conversion, stream validation, rendering, signing):
 	// never an upstream failure, never a breaker penalty.
 	LocalFailure bool
+	// CircuitRejected is true when the exchange failed because a circuit
+	// breaker was open (e.g. between retries): renders 503 circuit_open and
+	// increments shaper_circuit_rejected_total without recording a breaker
+	// failure.
+	CircuitRejected bool
 
 	// StreamOutcome is the stream classification for streaming exchanges.
 	StreamOutcome streamOutcome

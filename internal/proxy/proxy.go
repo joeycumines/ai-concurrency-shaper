@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -995,8 +996,8 @@ func New(opts ...Option) (*Proxy, error) {
 			// pre-flight Allow() check produces (503 + IncCircuitRejected),
 			// not an upstream transport failure: the exchange never reached
 			// the upstream, and isUpstreamFailureStatus already excludes
-			// retryCircuitOpen from breaker classification (autopsy
-			// 2026-09-06 M7 — the 502 left the counter blind).
+			// retryCircuitOpen from breaker classification — the 502 left
+			// shaper_circuit_rejected_total blind.
 			if errors.Is(err, circuitbreaker.ErrCircuitOpen) {
 				p.m.IncCircuitRejected()
 				if rec, ok := w.(*statusRecorder); ok {
@@ -1392,6 +1393,9 @@ func (p *Proxy) completionCounter(limited bool) {
 // downstream response was not fully written (client abort or failed write) is
 // marked aborted so it is never counted as a clean completion.
 func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, handler http.Handler) {
+	if rec, ok := w.(*statusRecorder); ok {
+		rec.transcodeStream = true
+	}
 	ctx, sink := transcode.WithOutcomeSink(r.Context())
 	handler.ServeHTTP(w, r.WithContext(ctx))
 	// The handler records EXACTLY ONE outcome synchronously (its defer
@@ -1402,9 +1406,15 @@ func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, ha
 	if !recorded {
 		panic("transcode handler returned without recording an outcome")
 	}
+	if outcome.CircuitRejected {
+		p.m.IncCircuitRejected()
+	}
 	if rec, ok := w.(*statusRecorder); ok {
 		outcomeCopy := outcome
 		rec.transcodeOutcome = &outcomeCopy
+		if outcome.CircuitRejected {
+			rec.transportErr = circuitbreaker.ErrCircuitOpen
+		}
 		// Completion is monotonic: the recorder's independent
 		// write-failure observation (a short write or write error on
 		// the raw ResponseWriter) can never be overwritten by an
@@ -1783,7 +1793,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	rec, recIsRecorder := w.(*statusRecorder)
 	var stopComments func()
 	if p.queueComments > 0 {
-		if recIsRecorder && transcode.AcceptIsEventStream(r.Header.Get("Accept")) {
+		if recIsRecorder && transcode.AcceptIsEventStream(r.Header.Get("Accept")) && !isExplicitNonStreamingRequest(r) {
 			if canCommitCommentsWithUnreadBody(r) || http.NewResponseController(rec).EnableFullDuplex() == nil {
 				stopComments = p.startQueueComments(rec)
 				// Tell a downstream transcode handler the streaming
@@ -2146,6 +2156,42 @@ func canCommitCommentsWithUnreadBody(r *http.Request) bool {
 	return r.Body == nil || r.ContentLength == 0
 }
 
+type bodyReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+// isExplicitNonStreamingRequest inspects whether a POST request carries a JSON body
+// with an explicit "stream": false field. Stream intent precedence dictates that an
+// explicit body stream field takes precedence over the client's Accept header; when
+// stream: false is explicitly requested, the early SSE queue comments must not lock
+// the exchange into the streaming representation.
+func isExplicitNonStreamingRequest(r *http.Request) bool {
+	if r == nil || r.Method != http.MethodPost || r.Body == nil || r.ContentLength == 0 {
+		return false
+	}
+	limit := int64(10 << 20)
+	if r.ContentLength > 0 && r.ContentLength < limit {
+		limit = r.ContentLength
+	}
+	buf, err := io.ReadAll(io.LimitReader(r.Body, limit))
+	if err != nil {
+		return false
+	}
+	origBody := r.Body
+	r.Body = &bodyReadCloser{
+		Reader: io.MultiReader(bytes.NewReader(buf), origBody),
+		Closer: origBody,
+	}
+	var probe struct {
+		Stream *bool `json:"stream"`
+	}
+	if err := json.Unmarshal(buf, &probe); err == nil && probe.Stream != nil && !*probe.Stream {
+		return true
+	}
+	return false
+}
+
 // writeQueueRejected emits the bounded-queue 429: a Retry-After header plus
 // a JSON error body valid under both AI dialects' envelope conventions
 // ({"error":{...}}). The status and Retry-After are the machine signal the
@@ -2210,14 +2256,21 @@ func isUpstreamFailureStatus(rec *statusRecorder, now time.Time, ctxErr error) b
 	if rec != nil && (rec.localUpgradeFailure || rec.retryCircuitOpen()) {
 		return false
 	}
+	status := 0
+	if rec != nil {
+		status = rec.status
+		if rec.commentsCommitted && rec.upstreamStatusOverride > 0 {
+			status = rec.upstreamStatusOverride
+		}
+	}
 	// When the client cancelled the context and the upstream returned a
 	// clean 2xx response, this is a suppressible client abort — the
 	// upstream succeeded and the client just disconnected. Classifying
 	// it as an upstream failure would incorrectly trip the breaker.
-	if ctxErr != nil && rec != nil && rec.status >= 200 && rec.status < 300 {
+	if ctxErr != nil && status >= 200 && status < 300 {
 		return false
 	}
-	return circuitbreaker.IsFailureStatusWithHeaders(rec.status, responseHeaders(rec), rec.responseAt, now)
+	return circuitbreaker.IsFailureStatusWithHeaders(status, responseHeaders(rec), rec.responseAt, now)
 }
 
 // exchangeResult is the immutable per-exchange classification produced after
@@ -2372,7 +2425,11 @@ func classifyNativeExchange(
 	if retryAttempt != nil && retryAttempt.Epoch != 0 {
 		epoch = retryAttempt.Epoch
 	}
-	result.upstreamStatus = rec.status
+	effectiveStatus := rec.status
+	if rec.commentsCommitted && rec.upstreamStatusOverride > 0 {
+		effectiveStatus = rec.upstreamStatusOverride
+	}
+	result.upstreamStatus = effectiveStatus
 	result.upstreamFailure = isUpstreamFailureStatus(rec, now, ctxErr) || upstreamAbortFailure
 	result.switchingProtocolsResolved = rec.status == http.StatusSwitchingProtocols &&
 		rec.switchingProtocolsProbeResolved.Load()
@@ -2488,14 +2545,18 @@ func isBreakerSuccessStatus(rec *statusRecorder, now time.Time, epoch uint64, ct
 	if rec.status == http.StatusSwitchingProtocols && rec.switchingProtocolsProbeResolved.Load() {
 		return false
 	}
-	if rec.status >= 200 && rec.status < 300 {
+	status := rec.status
+	if rec.commentsCommitted && rec.upstreamStatusOverride > 0 {
+		status = rec.upstreamStatusOverride
+	}
+	if status >= 200 && status < 300 {
 		return true
 	}
 	// A HALF_OPEN probe must be resolved by every definitive upstream response.
 	// Clean 101 upgrades are successful HTTP handshakes, and other non-failure
 	// statuses (for example a bare auth 403) prove the upstream answered even if
 	// they are not counted as ordinary CLOSED-state 2xx successes.
-	if epoch != 0 && rec.status > 0 && !isUpstreamFailureStatus(rec, now, ctxErr) {
+	if epoch != 0 && status > 0 && !isUpstreamFailureStatus(rec, now, ctxErr) {
 		return true
 	}
 	return false
@@ -3130,8 +3191,10 @@ type statusRecorder struct {
 	// representation — later WriteHeader calls cannot change what the
 	// client already received, and admission failures surface as stream
 	// error frames, never as HTTP error statuses.
-	commentsCommitted   bool
-	localUpgradeFailure bool
+	commentsCommitted      bool
+	upstreamStatusOverride int
+	transcodeStream        bool
+	localUpgradeFailure    bool
 
 	switchingProtocolsProbeResolved      atomic.Bool
 	onSwitchingProtocolsHandshakeSuccess func()
@@ -3203,6 +3266,19 @@ func (r *statusRecorder) WriteHeader(code int) {
 	if r.commentsCommitted {
 		if code >= 200 && code != http.StatusOK {
 			r.aborted = true
+			r.upstreamStatusOverride = code
+			now := time.Now()
+			r.responseAt = now
+			if r.entry != nil {
+				r.entry.StatusCode = code
+				r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
+				r.entry.Timing.ResponseHeaders = now
+				r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
+			}
+			if !r.transcodeStream {
+				fmt.Fprintf(r.ResponseWriter, ": queue-wait failed: upstream\n\n")
+				_ = r.FlushError()
+			}
 		}
 		return
 	}
@@ -3239,6 +3315,22 @@ func (r *statusRecorder) WriteHeader(code int) {
 }
 
 func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.commentsCommitted && r.upstreamStatusOverride > 0 && !r.transcodeStream {
+		if r.entry != nil && !r.captureDone && len(b) > 0 {
+			remaining := r.captureMax - int64(len(r.capturedBody))
+			if remaining > 0 {
+				if int64(len(b)) > remaining {
+					r.capturedBody = append(r.capturedBody, b[:remaining]...)
+					r.captureDone = true
+				} else {
+					r.capturedBody = append(r.capturedBody, b...)
+				}
+			}
+		}
+		r.bytesWritten += int64(len(b))
+		return len(b), nil
+	}
+
 	// If WriteHeader was never called for a terminal status, the Go runtime
 	// will trigger an implicit WriteHeader(StatusOK) inside
 	// ResponseWriter.Write — which bypasses our override. 1xx informational
