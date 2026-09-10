@@ -46,7 +46,6 @@ func TestStripANSI(t *testing.T) {
 // (terminated by BEL or ST) and DCS/SOS/PM/APC bodies (terminated by ST) must
 // not leak their bytes into stripped output — logged text can never inject
 // terminal control sequences into the Logs tab or a toast.
-
 func TestStripANSI_SwallowsNonCSISequences(t *testing.T) {
 	tests := []struct {
 		input string
@@ -79,7 +78,6 @@ func TestStripANSI_SwallowsNonCSISequences(t *testing.T) {
 // additionally pins the review-15 #1 rebuttal: no literal newline can survive
 // stripping, so multi-line toast messages with unindented continuations are
 // impossible to produce.
-
 func TestStripANSI_StripsControlBytes(t *testing.T) {
 	tests := []struct{ input, want string }{
 		{"a\rb", "ab"},
@@ -107,7 +105,6 @@ func TestStripANSI_StripsControlBytes(t *testing.T) {
 // the rune alone corrupts the valid encoding down to its lone first byte.
 // Stray-byte passthrough outside C1 and C1 dropping are re-pinned here so the
 // size-based distinction cannot regress either contract.
-
 func TestStripANSI_PreservesEncodedReplacementChar(t *testing.T) {
 	tests := []struct{ input, want string }{
 		{"\uFFFD", "\uFFFD"},

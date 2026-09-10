@@ -135,7 +135,6 @@ func TestSingleProviderHeaderKeepsShaper(t *testing.T) {
 // stay visible and clickable, chipAt must map clicks to exactly the chips
 // actually rendered (walking every rendered x-position), and the
 // single-provider "⚡ shaper" header must be byte-identical at every width.
-
 func TestHeaderWidthBudget(t *testing.T) {
 	widths := []int{40, 60, 80, 120}
 	multi := []ProviderMeta{
@@ -293,10 +292,8 @@ func TestMultiProviderHeaderShowsNames(t *testing.T) {
 	}
 }
 
-// TestResetStatsSendsOnChannel proves the c -> y confirm path delivers a
-// signal on the model's reset channel (Task 6: the channel is drained by
-// main, which calls Collector.Reset for every provider).
-
+// TestFleetStrip_AggregateObservability pins the one-line fleet strip atop the
+// TUI in multi-provider mode (M6/G8).
 func TestFleetStrip_AggregateObservability(t *testing.T) {
 	metas := []ProviderMeta{
 		{Name: "openai", Concurrency: 8},

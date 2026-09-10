@@ -108,6 +108,8 @@ func secondClearIndex(output string) (int, bool) {
 	return clearIdx + len("\x1b[2J") + secondClearIdx, true
 }
 
+// TestFooterMentionsReset pins the footer's c:reset hint so the binding stays
+// discoverable from every tab.
 func TestFooterMentionsReset(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 100

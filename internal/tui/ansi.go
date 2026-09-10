@@ -22,6 +22,11 @@ import (
 	"github.com/rivo/uniseg"
 )
 
+// truncateANSI truncates line to at most width terminal cells, preserving the
+// CSI/SGR escape sequences produced by lipgloss. It appends a reset sequence
+// (ESC[0m) if truncation occurs so that active styles do not leak into the
+// trailing padding. It intentionally does not handle OSC/DCS/APC/SOS
+// sequences because the TUI only emits SGR styling.
 func truncateANSI(line string, width int) string {
 	return truncateGraphemes(line, width, true)
 }
@@ -219,9 +224,6 @@ func skipStringSequence(s string, i int, belTerminated bool) int {
 	return len(s) - 1
 }
 
-// renderContentWithScrollbar wraps the active tab's content with a scrollbar
-// column in the rightmost position. ANSI-aware width calculation. The
-// scrollbar is aligned with the scrollable data rows, below the fixed header
 func truncate(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) <= maxLen {

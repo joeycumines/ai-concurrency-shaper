@@ -141,8 +141,12 @@ func TestRequestsTabMarksAbortedRows(t *testing.T) {
 	}
 }
 
-// ─── TUI-06: Scroll / Viewport Behavior ───
-
+// TestDashboard_SummaryFitsViewport reproduces the Summary section
+// overflow: the composed Summary rows must fit within the viewport and
+// every metric must remain visible at widths 40, 80, and 120. The
+// single pre-fix row renders 114 cells (measured), overflowing the
+// 39- and 79-cell viewports and silently truncating the rightmost
+// metrics.
 func TestDashboard_SummaryFitsViewport(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -216,10 +220,19 @@ func TestDashboard_SummaryFitsViewport(t *testing.T) {
 	}
 }
 
-// inflightSectionRows returns the rows of the In-Flight Requests
-// section: every dashboard line after the section header up to the
-// next blank line (the summary line(s) plus the per-request entries).
-
+// TestDashboard_InFlightSummaryFitsViewport reproduces the In-Flight
+// summary overflow (review-09): "  N in-flight: L limited, P
+// passthrough" spans exactly 39 cells for single-digit values — the
+// entire 40-column viewport — and exceeds it the moment any value
+// reaches two digits, so renderContentWithScrollbar silently truncates
+// "passthrough". The summary must fit at any magnitude: counts are
+// abbreviated via formatCount and, when the composed line still cannot
+// fit, the parts pack into viewport-fitting rows. The absurd-magnitude
+// cases deliberately exercise each counter independently (a consistent
+// snapshot with int64-max limited AND passthrough counts would need an
+// unallocatable slice; the render math treats the three numbers
+// independently, and TestDashboard_AllLinesFitViewport covers the
+// consistent path).
 func TestDashboard_InFlightSummaryFitsViewport(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -277,7 +290,6 @@ func TestDashboard_InFlightSummaryFitsViewport(t *testing.T) {
 // makes the row exceed the viewport, so renderContentWithScrollbar
 // silently truncates the age. The path column must shrink per row to
 // absorb the actual age and method widths.
-
 func TestDashboard_InFlightRowsFitViewport(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -338,7 +350,6 @@ func TestDashboard_InFlightRowsFitViewport(t *testing.T) {
 // (default zero values, circuit breaker CLOSED/OPEN, retries in
 // flight, multi-digit counts, sparse status counts, and in-flight
 // request entries).
-
 func TestDashboard_AllLinesFitViewport(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
@@ -436,6 +447,12 @@ func TestDashboard_AllLinesFitViewport(t *testing.T) {
 	}
 }
 
+// TestDashboard_StatusLineFitsViewport reproduces the status-row overflow:
+// the composed production row ("  Status  " prefix + bar + labels) must fit
+// the viewport and every non-zero status class (plus Aborted) must remain
+// visible. It exercises the real dashboardLines() composition, including
+// sparse distributions (the budget loop skips zero classes while the render
+// loop used to print them all) and multi-digit counts.
 func TestDashboard_StatusLineFitsViewport(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -759,6 +776,10 @@ func TestDashboardCacheInvalidation(t *testing.T) {
 	}
 }
 
+// dashboardStatusLines extracts the Status section rows from rendered
+// dashboard lines: the "  Status  " header row plus every immediately
+// following non-empty row (the wrapped label rows, when the labels
+// could not share the bar's line).
 func dashboardStatusLines(lines []string) []string {
 	var out []string
 	for i, l := range lines {
@@ -776,7 +797,6 @@ func dashboardStatusLines(lines []string) []string {
 // summaryRows returns the metric rows of the Summary section: every
 // dashboard line after the " Summary " section header (the last
 // section rendered by dashboardLines).
-
 func summaryRows(lines []string) []string {
 	for i, l := range lines {
 		if stripANSI(l) == " Summary " {
@@ -786,13 +806,9 @@ func summaryRows(lines []string) []string {
 	return nil
 }
 
-// TestDashboard_SummaryFitsViewport reproduces the Summary section
-// overflow: the composed Summary rows must fit within the viewport and
-// every metric must remain visible at widths 40, 80, and 120. The
-// single pre-fix row renders 114 cells (measured), overflowing the
-// 39- and 79-cell viewports and silently truncating the rightmost
-// metrics.
-
+// inflightSectionRows returns the rows of the In-Flight Requests
+// section: every dashboard line after the section header up to the
+// next blank line (the summary line(s) plus the per-request entries).
 func inflightSectionRows(lines []string) []string {
 	for i, l := range lines {
 		if stripANSI(l) == " In-Flight Requests " {

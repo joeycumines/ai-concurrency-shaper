@@ -68,7 +68,6 @@ func TestHelpOverlayDismissWithAnyKey(t *testing.T) {
 // The provider-switch binding documents the switcher, which only exists in
 // multi-provider mode (or with a single named provider). A single unnamed
 // provider must keep the legacy overlay byte-identical.
-
 func TestHelpOverlaySingleProviderOmitsSwitchProvider(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -103,7 +102,6 @@ func TestHelpOverlayMultiProviderShowsSwitchProvider(t *testing.T) {
 
 // A single provider with an explicit name also renders the switcher, so its
 // overlay documents the binding too.
-
 func TestHelpOverlaySingleNamedProviderShowsSwitchProvider(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Name: "acme", Concurrency: 4}})
 	m.width = 80

@@ -22,6 +22,9 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 )
 
+// scrollbarTop returns the first terminal row that belongs to the scrollbar
+// track for the current tab. It is offset past the fixed header rows so that
+// the scrollbar aligns with the scrollable data area.
 func scrollbarTop(m Model) int { return contentStartRow + m.contentHeaderRows() }
 
 func TestMouseClickContentArea_SetsCursor(t *testing.T) {

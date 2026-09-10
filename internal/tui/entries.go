@@ -23,6 +23,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 )
 
+// visibleEntries returns the currently visible request entries, respecting filter.
 func (m *Model) visibleEntries() []metrics.RequestLogEntry {
 	if m.filterText == "" {
 		return m.snap.LogEntries
@@ -68,6 +69,8 @@ func (m *Model) visibleLogLines() []string {
 	return filtered
 }
 
+// computeVisibleNetworkEntries performs the actual filter logic used to
+// rebuild the networkFiltered cache.
 func (m Model) computeVisibleNetworkEntries() []*journal.Entry {
 	if m.journal == nil {
 		return nil

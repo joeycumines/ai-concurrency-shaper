@@ -32,13 +32,11 @@ func hexString(c color.Color) string {
 
 // darkModel returns a bare Model with the default dark palette populated, for
 // style-selection tests that only read m.styles (no renderer wiring needed).
-
 func darkModel() Model { return Model{styles: newTheme(true)} }
 
 // relativeLuminance returns the WCAG relative luminance of a color, each sRGB
 // channel linearized per the WCAG 2.x transfer function. Used by the theme
 // contrast tests to prove the light palette actually meets AA on a light terminal.
-
 func relativeLuminance(c color.Color) float64 {
 	r, g, b, _ := c.RGBA()
 	lin := func(v uint32) float64 {
@@ -53,7 +51,6 @@ func relativeLuminance(c color.Color) float64 {
 
 // contrastRatio returns the WCAG contrast ratio between two colors (L1+0.05)/(L2+0.05)
 // with the lighter luminance always in the numerator, so >= 4.5 means AA for normal text.
-
 func contrastRatio(a, b color.Color) float64 {
 	la, lb := relativeLuminance(a), relativeLuminance(b)
 	if la < lb {
@@ -66,7 +63,6 @@ func contrastRatio(a, b color.Color) float64 {
 // and swaps to the light palette when the terminal reports a light background
 // (tea.BackgroundColorMsg), then back to dark on a dark report. The swaps
 // cover the whole theme, including the per-tab scrollbar thumb/track.
-
 func TestBackgroundColorMsgSwitchesTheme(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	if got, want := hexString(m.styles.rowStyle.GetForeground()), "#E6EDF3"; got != want {
@@ -101,7 +97,6 @@ func TestBackgroundColorMsgSwitchesTheme(t *testing.T) {
 // every text-bearing ink against the light surface it actually renders on. This is the
 // regression guard for the "pale text invisible on a light terminal" bug: a future
 // pastel edit to any of these styles fails loudly instead of shipping.
-
 func TestLightThemeContrast(t *testing.T) {
 	white := color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
 	// The two header/tab texts are white ink on blue fills; #FFFFFF vs #0969DA

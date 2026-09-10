@@ -23,6 +23,8 @@ import (
 	"testing"
 )
 
+// ringTexts extracts the text of a ring snapshot for assertions that only
+// care about line content.
 func ringTexts(r *logRing) []string {
 	items := r.snapshot()
 	out := make([]string, len(items))
@@ -208,7 +210,6 @@ func TestLogBuffer_EmptySegmentsSkipped(t *testing.T) {
 // TestLogBuffer_Write_ReturnsInputLength pins the io.Writer contract: Write
 // consumes all of p and must report that it did. Regression for the log-buffer
 // sink returning n=0 for non-empty input.
-
 func TestLogBuffer_Write_ReturnsInputLength(t *testing.T) {
 	b := NewLogBuffer(8)
 	for _, in := range [][]byte{[]byte("one\ntwo\nthree"), []byte("single"), []byte("a\nb\n")} {
@@ -221,7 +222,6 @@ func TestLogBuffer_Write_ReturnsInputLength(t *testing.T) {
 // TestLogBuffer_Write_DoesNotRetainCallerSlice pins the io.Writer no-retain
 // rule on the fragment path: a caller that reuses its buffer after Write must
 // not corrupt the withheld partial line.
-
 func TestLogBuffer_Write_DoesNotRetainCallerSlice(t *testing.T) {
 	b := NewLogBuffer(8)
 	frag := []byte("hel")
@@ -239,7 +239,6 @@ func TestLogBuffer_Write_DoesNotRetainCallerSlice(t *testing.T) {
 // TestLogBuffer_ReadNew_NoDuplicateDelivery pins the single-lock cursor: a line
 // written after a poll is delivered exactly once on the next poll — the TOCTOU
 // between a separate Revision() and ReadNew() call would deliver it twice.
-
 func TestLogBuffer_ReadNew_NoDuplicateDelivery(t *testing.T) {
 	b := NewLogBuffer(4)
 	b.Write([]byte("a\nb\nc\n"))
@@ -262,7 +261,6 @@ func TestLogBuffer_ReadNew_NoDuplicateDelivery(t *testing.T) {
 // io.Writer makes no line-boundary guarantee, so a logical line split across
 // Write calls must still arrive as one line, and an unterminated tail must not
 // be published until the newline that completes it.
-
 func TestLogBuffer_FragmentedWritesAssembleLines(t *testing.T) {
 	b := NewLogBuffer(8)
 	b.Write([]byte("hel"))
@@ -287,7 +285,6 @@ func TestLogBuffer_FragmentedWritesAssembleLines(t *testing.T) {
 // TestLogBuffer_FlushEmitsPartial pins Flush: an unterminated fragment withheld
 // from the line stream is published as a single final line (idempotent, no-op
 // when nothing is pending).
-
 func TestLogBuffer_FlushEmitsPartial(t *testing.T) {
 	b := NewLogBuffer(8)
 	b.Write([]byte("one\ntwo"))
@@ -319,7 +316,6 @@ func TestLogBuffer_FlushEmitsPartial(t *testing.T) {
 // TestLogRing_Len pins the locked total accessor renderLogs uses: Len reflects
 // writes, is bounded by capacity, and is safe to call concurrently with writers
 // (exercised under -race).
-
 func TestLogRing_Len(t *testing.T) {
 	r := newLogRing(4)
 	if got := r.Len(); got != 0 {
@@ -423,6 +419,10 @@ func TestLogBuffer_CompleteLineLongerThanCapPublishedWhole(t *testing.T) {
 	}
 }
 
+// TestLogBuffer_RedirectToStreamsThrough pins review-10 #4 / review-11 #2:
+// RedirectTo flips the buffer into live passthrough — the torn fragment held at
+// flip time is flushed to the target first, subsequent Writes bypass the ring
+// entirely, and nothing new lands in the polled buffer.
 func TestLogBuffer_RedirectToStreamsThrough(t *testing.T) {
 	b := NewLogBuffer(8)
 	b.Write([]byte("torn"))
@@ -447,7 +447,6 @@ func TestLogBuffer_RedirectToStreamsThrough(t *testing.T) {
 
 // TestLogBuffer_RedirectToNilRestoresBuffering pins that a nil-w redirect
 // returns the buffer to ordinary capture.
-
 func TestLogBuffer_RedirectToNilRestoresBuffering(t *testing.T) {
 	b := NewLogBuffer(8)
 	var sink bytes.Buffer
@@ -466,7 +465,6 @@ func TestLogBuffer_RedirectToNilRestoresBuffering(t *testing.T) {
 // dies — RedirectTo must hand every retained-but-unpolled line, plus any
 // pending fragment, to the target writer before flipping passthrough. Lines a
 // poller already delivered must not be re-emitted to stderr.
-
 func TestLogBuffer_RedirectToForwardsUnpolledRingLines(t *testing.T) {
 	b := NewLogBuffer(8)
 	b.Write([]byte("shown-a\nshown-b\n"))
@@ -500,7 +498,6 @@ func TestLogBuffer_RedirectToForwardsUnpolledRingLines(t *testing.T) {
 // redirects with buffering restored in between must forward each undelivered
 // line exactly once — already-polled lines are never re-emitted, and content
 // forwarded by an earlier redirect never leaks into a later one.
-
 func TestLogBuffer_RedirectToRepeatedHandoffExactlyOnce(t *testing.T) {
 	b := NewLogBuffer(64)
 	var s1, s2 bytes.Buffer
@@ -533,7 +530,6 @@ func TestLogBuffer_RedirectToRepeatedHandoffExactlyOnce(t *testing.T) {
 // TestLogBuffer_RedirectToConcurrentExactlyOneSink races writers against a
 // toggling redirect: every line must land in exactly one of the two sinks,
 // never both and never neither (exercised under -race).
-
 func TestLogBuffer_RedirectToConcurrentExactlyOneSink(t *testing.T) {
 	const writers = 8
 	const perWriter = 200

@@ -146,9 +146,6 @@ func builderEndsWithNewline(b *strings.Builder) bool {
 	return b.String()[b.Len()-1] == '\n'
 }
 
-// providerName returns the display name for the active provider, prefixed with a
-// single leading space. A single unnamed provider (and the zero Model) keep the
-// legacy " ⚡ shaper" brand in the header.
 func (m Model) renderContent() string {
 	switch m.tab {
 	case tabDashboard:

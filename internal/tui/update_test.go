@@ -25,6 +25,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 )
 
+// helper: apply a message and return the updated model (type-asserted).
 func update(m Model, msg tea.Msg) Model {
 	m2, _ := m.Update(msg)
 	return m2.(Model)
@@ -33,7 +34,6 @@ func update(m Model, msg tea.Msg) Model {
 // helper: send a key by rune. Sets both Code and Text to properly
 // simulate real terminal input where Key.Text is populated for
 // printable characters.
-
 func key(r rune) tea.Msg {
 	return tea.KeyPressMsg{Code: r, Text: string(r)}
 }
@@ -47,7 +47,6 @@ func key(r rune) tea.Msg {
 // this helper would incorrectly simulate a printable key (non-empty Text).
 // For testing non-printable key rejection, use KeyPressMsg{Code: tea.KeyUp}
 // directly (see TestFilterModeArrowKeysIgnored).
-
 func special(k string) tea.Msg {
 	return tea.KeyPressMsg{Text: k}
 }
@@ -587,6 +586,9 @@ func TestSnapshotSugarGuardsNoProviders(t *testing.T) {
 	update(m, metrics.Snapshot{})
 }
 
+// TestResetStatsSendsOnChannel proves the c -> y confirm path delivers a
+// signal on the model's reset channel (Task 6: the channel is drained by
+// main, which calls Collector.Reset for every provider).
 func TestResetStatsSendsOnChannel(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -639,7 +641,6 @@ func TestResetStatsSendsOnChannel(t *testing.T) {
 // TestResetStatsSendNeverBlocks proves a second confirm while the buffer is
 // still occupied is dropped, not deadlocked: the model's send is
 // non-blocking and the channel is capped at one pending request.
-
 func TestResetStatsSendNeverBlocks(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.resetCh = make(chan struct{}, 1)

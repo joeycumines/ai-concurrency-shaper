@@ -90,7 +90,6 @@ func TestLogDetail_LongLineProducesMultipleRowsWithoutLoss(t *testing.T) {
 // at width 1) must be emitted whole on its own row, not repeatedly re-truncated
 // to "". Regression for a process freeze reachable from the log detail view on
 // very narrow viewports.
-
 func TestWrapText_WideGraphemeAtTinyWidth(t *testing.T) {
 	done := make(chan []string, 1)
 	go func() {
@@ -113,7 +112,6 @@ func TestWrapText_WideGraphemeAtTinyWidth(t *testing.T) {
 // TestLogDetail_ClampedToVisibleRows pins that a message wrapping past the
 // visible-row budget is truncated with an indicator instead of emitting an
 // oversized frame (which would push the chrome into terminal scrollback).
-
 func TestLogDetail_ClampedToVisibleRows(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -326,7 +324,6 @@ func TestLogDetailPin_RingEvictionClosesOverlay(t *testing.T) {
 // opening detail on the SECOND occurrence must keep showing that occurrence
 // after further appends. The committed text-scan anchor would resolve to the
 // first occurrence instead.
-
 func TestLogDetailPin_DuplicateLinesKeepsSelectedOccurrence(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -361,7 +358,6 @@ func TestLogDetailPin_DuplicateLinesKeepsSelectedOccurrence(t *testing.T) {
 // TestLogDetailPin_FilteredAnchorUsesFilteredList pins anchor creation under
 // an active filter: Enter must anchor to the filtered list's item at m.cursor
 // (the item the operator sees), not the unfiltered ring position.
-
 func TestLogDetailPin_FilteredAnchorUsesFilteredList(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -389,7 +385,6 @@ func TestLogDetailPin_FilteredAnchorUsesFilteredList(t *testing.T) {
 // TestLogDetailPin_FilterChangeClosesOverlay pins that a filter edit which
 // drops the anchored line closes the overlay instead of keeping it alive
 // against the unfiltered ring.
-
 func TestLogDetailPin_FilterChangeClosesOverlay(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80

@@ -363,6 +363,8 @@ func (m Model) renderFooter() string {
 	return m.styles.footerStyle.Render(keys)
 }
 
+// sortedHeaderKeys returns the keys of an http.Header map in alphabetical
+// order so iteration is deterministic (avoids Go's randomized map order).
 func sortedHeaderKeys(h http.Header) []string {
 	keys := make([]string, 0, len(h))
 	for k := range h {
@@ -371,6 +373,3 @@ func sortedHeaderKeys(h http.Header) []string {
 	sort.Strings(keys)
 	return keys
 }
-
-// Run starts the TUI dashboard and blocks until the program exits.
-// The returned *tea.Program may be used by the caller to shut down the

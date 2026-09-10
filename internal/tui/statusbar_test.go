@@ -110,7 +110,6 @@ func TestRenderStatusBar_ColoredLabels(t *testing.T) {
 // composedStatusLines returns the status section rows exactly as the
 // dashboard renders them: the 10-cell "  Status  " prefix on the bar
 // row, and the wrapped labels row (if any) without a prefix.
-
 func composedStatusLines(m Model) []string {
 	lines := m.renderStatusBar(m.gaugeTrackWidth())
 	out := make([]string, len(lines))
@@ -225,7 +224,6 @@ func TestRenderStatusBar_MultiDigitSparseFitsAt80(t *testing.T) {
 // abbreviation: multi-billion status counts render abbreviated
 // ("2xx:12.3B" style) and the composed line still fits, while ordinary
 // counts below 10^7 render exactly as before.
-
 func TestRenderStatusBar_AbbreviatesLargeCounts(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -285,7 +283,6 @@ func TestRenderStatusBar_WrapsAbortedOnNarrowViewport(t *testing.T) {
 // 12.3B counts pack three classes per row (2 + 29 and 2 + 33 cells).
 // No row carries trailing padding: each is exactly "  " + the parts
 // joined with single spaces.
-
 func TestRenderStatusBar_WrapsLabelsMultiRow(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -338,7 +335,6 @@ func TestRenderStatusBar_WrapsLabelsMultiRow(t *testing.T) {
 // never exceeds the viewport at any width. Negative Active/Queued
 // values (transiently possible: metrics.go Inc/Dec) must not panic —
 // the filled widths are clamped to zero.
-
 func TestRenderDualBars_WidthsAndClamps(t *testing.T) {
 	widths := []int{28, 29, 40, 41, 80} // viewports 27, 28, 39, 40, 79
 	values := []int64{0, 1, 2, 4, 8, 16, 32, -1}
@@ -373,7 +369,6 @@ func TestRenderDualBars_WidthsAndClamps(t *testing.T) {
 // (27 cells) cannot fit, so the row is truncated downstream by
 // renderContentWithScrollbar. The renderer itself must never panic,
 // regardless of values or track widths.
-
 func TestRenderDualBars_NoPanicNarrowViewport(t *testing.T) {
 	for _, width := range []int{1, 20, 27} { // viewports 1, 19, 26
 		for _, active := range []int64{0, -1, 100} {

@@ -28,6 +28,11 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/toast"
 )
 
+// TestToastToastWidth_Fallback pins review-14 #8: with the terminal size not
+// yet known (or degenerately narrow) the toast width falls back to an 80-column
+// assumption minus the four reserved margin cells, so startup toasts keep a
+// right margin instead of rendering flush against the pane edge once the first
+// WindowSizeMsg paints.
 func TestToastToastWidth_Fallback(t *testing.T) {
 	tests := []struct {
 		width int
@@ -179,6 +184,13 @@ func TestToastNotShownInDetailMode(t *testing.T) {
 	}
 }
 
+// TestLogWiring_StdlibWarningToasts pins the exact log/slog wiring main.go
+// installs in TUI mode (review-07 #1). Order is load-bearing: slog.SetDefault
+// rewires the standard logger through its handler at INFO level, so installing
+// log.SetOutput BEFORE it silently demotes every stdlib line — including the
+// route-group config WARNING — to a non-actionable slog INFO record. The fixed
+// order restores the stdlib writer afterwards so stdlib lines keep their
+// timestamped identity and their keyword-based actionability.
 func TestLogWiring_StdlibWarningToasts(t *testing.T) {
 	prevFlags := log.Flags()
 	prevOut := log.Writer()
@@ -351,7 +363,6 @@ func TestToastAnimCmd_WhileAnimating(t *testing.T) {
 // pending, a burst of unrelated updates arms the one-shot slide-out tick
 // exactly once — later updates neither stack a second tick nor advance the
 // armed deadline.
-
 func TestToastAnimSingleOwner_SettledDoesNotStack(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -382,7 +393,6 @@ func TestToastAnimSingleOwner_SettledDoesNotStack(t *testing.T) {
 // during a toast's slide-in arms a single 30ms animation ticker instead of one
 // per update. At most one natural re-arm is tolerated in case the armed
 // interval elapses mid-burst on a very slow machine.
-
 func TestToastAnimSingleOwner_AnimatingArmsOnce(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -422,7 +432,6 @@ func TestToastAnimSingleOwner_AnimatingArmsOnce(t *testing.T) {
 // TestAddToast_ClearsArmedAnimTick pins that adding a toast clears any tick
 // already armed for an older toast's future slide-out, so the new toast's
 // slide-in re-arms promptly instead of waiting out the stale deadline.
-
 func TestAddToast_ClearsArmedAnimTick(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -445,7 +454,6 @@ func TestAddToast_ClearsArmedAnimTick(t *testing.T) {
 // TestHandleLogLines_DedupAcrossTimestamps exercises the toast path end to end:
 // two identical slog errors separated by timestamps produce one toast, a
 // distinct warning produces another.
-
 func TestHandleLogLines_DedupAcrossTimestamps(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -463,7 +471,6 @@ func TestHandleLogLines_DedupAcrossTimestamps(t *testing.T) {
 // TestHandleLogLines_WarningConfigLineToasts proves the route-group config
 // warning (a stdlib log.Printf at startup, captured into the Logs tab) is
 // actionable prose under the widened keyword set.
-
 func TestHandleLogLines_WarningConfigLineToasts(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -501,7 +508,6 @@ func TestQuitFlushesPendingLogFragment(t *testing.T) {
 // rest. Because the read cursor lives on the model and every delivery happens
 // inside Update, the previously-polled batch can neither be lost to an
 // in-flight send nor delivered twice.
-
 func TestLogDrain_TickThenQuitDeliversExactlyOnce(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.logBuf = NewLogBuffer(8)
@@ -534,7 +540,6 @@ func TestLogDrain_TickThenQuitDeliversExactlyOnce(t *testing.T) {
 
 // TestLogDrain_QuitDeliversNeverPolledLines pins that quitting delivers lines
 // no tick ever extracted — complete lines as well as the torn fragment.
-
 func TestLogDrain_QuitDeliversNeverPolledLines(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.logBuf = NewLogBuffer(8)
@@ -609,11 +614,9 @@ func TestToastSeenOldestFirstEviction(t *testing.T) {
 	}
 }
 
-// TestLogBuffer_RedirectToStreamsThrough pins review-10 #4 / review-11 #2:
-// RedirectTo flips the buffer into live passthrough — the torn fragment held at
-// flip time is flushed to the target first, subsequent Writes bypass the ring
-// entirely, and nothing new lands in the polled buffer.
-
+// TestHandleLogLines_EmptyMsgStillToasts pins review-07 #6 / review-08 #1: an
+// actionable line whose dedup key is empty (e.g. slog's msg="") must toast —
+// every occurrence, since it cannot be deduplicated — never be silently dropped.
 func TestHandleLogLines_EmptyMsgStillToasts(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -636,7 +639,6 @@ func TestHandleLogLines_EmptyMsgStillToasts(t *testing.T) {
 
 // TestHandleLogLines_DistinctAttributesToastSeparately exercises the T20 fix end
 // to end through the toast path.
-
 func TestHandleLogLines_DistinctAttributesToastSeparately(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -653,7 +655,6 @@ func TestHandleLogLines_DistinctAttributesToastSeparately(t *testing.T) {
 // TestHandleLogLines_StripsANSI pins review-07 #8 hardening: escape sequences in
 // captured lines are stripped before they reach the ring or a toast message, so
 // logged text can never inject terminal control output.
-
 func TestHandleLogLines_StripsANSI(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -678,7 +679,6 @@ func TestHandleLogLines_StripsANSI(t *testing.T) {
 // TestToastLiveCap_UnderSustainedUniqueErrors pins review-07 #3: a burst of
 // distinct actionable errors cannot grow the live-toast slice without bound;
 // only the newest toastLiveMax survive and the Logs tab keeps everything.
-
 func TestToastLiveCap_UnderSustainedUniqueErrors(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -712,7 +712,6 @@ func TestToastLiveCap_UnderSustainedUniqueErrors(t *testing.T) {
 // mid slide-in so the armed tick horizon is one 30ms animation interval, and
 // the stale arrival's deadline is forced into the past instead of racing wall
 // clocks.
-
 func TestAnimTick_StaleGenerationIgnored(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80

@@ -26,6 +26,8 @@ import (
 	"github.com/rivo/uniseg"
 )
 
+// renderDashboardContent returns the portion of the dashboard that is visible
+// in the current viewport, using m.scroll as the top offset.
 func (m Model) renderDashboardContent() string {
 	lines := m.cachedDashboardLines()
 	visible := m.visibleRows()

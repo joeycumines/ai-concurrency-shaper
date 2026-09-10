@@ -173,7 +173,6 @@ func TestRenderContentWithScrollbar_NoCellUnderflow(t *testing.T) {
 // and the number of visible cells accumulated up to that index. If width is
 // larger than the width of s, it returns len(s) and the actual width. The
 // input is assumed to contain no ANSI escape sequences.
-
 func splitAtCells(s string, width int) (int, int) {
 	var (
 		split int
@@ -320,7 +319,6 @@ func TestHScroll_HomeResetsNetwork(t *testing.T) {
 // above the current bound (after vertical navigation onto a page of short
 // rows) is walked back one step per left keypress rather than teleporting to
 // zero, and that rightward motion still clamps to the current bound.
-
 func TestHScroll_NoSnapOnShrunkenBound(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -359,7 +357,6 @@ func TestHScroll_NoSnapOnShrunkenBound(t *testing.T) {
 // data row into the same coordinate space: a row shorter than the viewport
 // must not keep its left edge while a longer neighbor row loses its cells to
 // the shift (a torn table).
-
 func TestHScroll_ShiftsAllDataRows(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80

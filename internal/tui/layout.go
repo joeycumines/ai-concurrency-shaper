@@ -168,7 +168,9 @@ func (m *Model) maxScroll() int {
 	return max(m.maxCursor()-m.dataRows()+1, 0)
 }
 
-// visibleEntries returns the currently visible request entries, respecting filter.
+// applyScrollbarTheme paints every per-tab scrollbar with the active theme's
+// thumb/track colors. Called from NewModelForProviders and on theme swaps (and
+// re-applied on each updateScrollbars) so a background change repaints the
 // scrollbars too.
 func (m *Model) applyScrollbarTheme() {
 	for i := range m.scrollbars {
