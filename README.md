@@ -665,7 +665,10 @@ field, a text block carrying `image_url`, or an unknown content-block type is
 rejected. The UPSTREAM response envelope is a **subject-to-change** provider
 contract, so an unknown field there is TOLERATED — it is skipped (discarded)
 and never forwarded, and it never fails the request. This is why a field like
-`completion_cost` no longer breaks a live session. Known provider-extension
+`completion_cost` no longer breaks a live session. The deprecated chat
+`function_call` spelling is a known official field rather than an extension:
+the single invocation maps to one tool call with the id synthesized from the
+response id and recorded as the `legacy_function_call` note. Known provider-extension
 spellings are documented in `internal/transcode/pins.md`; a newly observed
 spelling can be pinned there (and in the field-capture corpus) for
 observability.
