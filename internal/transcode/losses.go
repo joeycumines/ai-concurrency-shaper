@@ -221,6 +221,12 @@ const (
 	// SERVED (distinct from the requested tier): the client dialects cannot
 	// represent the tier served.
 	FeatureResponseServiceTier Feature = "response_service_tier"
+	// LegacyFunctionCall covers the legacy non-tool_calls function_call
+	// spelling on upstream chat responses (message.function_call and
+	// delta.function_call): the single invocation maps to one canonical
+	// tool call with a synthesized id derived from the response id, recorded
+	// as an ungated note naming the source.
+	FeatureLegacyFunctionCall Feature = "legacy_function_call"
 )
 
 // lossEntry pairs a loss key with the documentation emitted in
@@ -271,6 +277,7 @@ var lossRegistry = []lossEntry{
 	{FeatureRequestCitations, "request citations on text blocks cannot be reproduced in the target request"},
 	{FeatureBuiltinTools, "Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject)"},
 	{FeatureResponseServiceTier, "the upstream chat service tier actually served cannot be reproduced in the target"},
+	{FeatureLegacyFunctionCall, "the upstream chat response uses the legacy non-tool_calls function_call spelling; the single invocation maps to one canonical tool call with a synthesized id derived from the response id (the note names the synthesis)"},
 }
 
 // allLossKeys returns the set of every registered loss key.

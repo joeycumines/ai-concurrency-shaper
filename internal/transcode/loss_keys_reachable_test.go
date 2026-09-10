@@ -898,6 +898,20 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 				return report, err
 			},
 		},
+		{
+			// The legacy function_call spelling maps to one tool call with
+			// a synthesized id; the synthesis is an ungated note, so the
+			// scenario runs under the strict policy and records the key
+			// anyway.
+			key:  FeatureLegacyFunctionCall,
+			perm: []Feature{},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"function_call","message":{"role":"assistant","content":null,"function_call":{"name":"f","arguments":"{}"}}}]}`
+				_, report, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, policy)
+				return report, err
+			},
+		},
 	}
 
 	// The scenario matrix must cover every registered key exactly once.

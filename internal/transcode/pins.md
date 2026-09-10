@@ -472,7 +472,7 @@ table above + add it to the field-capture corpus:
 | vLLM | `prompt_logprobs`, `kv_transfer_params`, `ec_transfer_params`, `metrics` |
 | DeepSeek / open-weights | `logprobs.reasoning_content` (NOTE: `reasoning_content` at message/delta level IS modeled and maps to capability-gated text — see the table above; only the `logprobs`-nested spelling is discarded) |
 | LiteLLM / Verboo | `completion_cost`, `cache_cost` (modeled as opaque raw JSON in the table above, never forwarded) |
-| Legacy OpenAI (deprecated 2023) | `message.function_call`, `delta.function_call` — the legacy non-`tool_calls` tool-call spelling; a KNOWN official field, so it is a STRUCTURAL REJECTION (not tolerated): the transcoder cannot represent it, and silently dropping it would leave a `tool_use` stop reason with no tool call. Modern gateways emit `tool_calls`, which IS modeled |
+| Legacy OpenAI (deprecated 2023) | `message.function_call`, `delta.function_call` — the legacy non-`tool_calls` tool-call spelling; a KNOWN official field that maps to one canonical tool call with a synthesized id derived from the response id (recorded as the ungated `legacy_function_call` note), never a silent drop (which would leave a `tool_use` stop reason with no tool call). Modern gateways emit `tool_calls`, which IS modeled |
 
 `completion_cost` and `cache_cost` appear in BOTH the modeled table and this
 list because they are modeled as opaque `json.RawMessage` (never forwarded)

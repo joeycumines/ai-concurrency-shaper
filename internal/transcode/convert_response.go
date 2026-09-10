@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -243,16 +244,46 @@ func DecodeChatResponseWithPolicy(
 		)
 	}
 	// The legacy non-tool_calls function_call spelling is a KNOWN official
-	// field (pinned in pins.md), not a provider extension: the transcoder
-	// cannot represent it, so it is a structural rejection — never a silent
-	// drop (which would leave the client with a tool_use stop reason and no
-	// tool call).
+	// field (pinned in pins.md): the single invocation maps to one
+	// canonical tool call with a synthesized id, never a silent drop (which
+	// would leave the client with a tool_use stop reason and no tool call).
+	// A message carrying both spellings at once is a contradictory union.
 	if len(shadowChoice.Message.FunctionCall) > 0 {
-		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
-			UpstreamChatCompletions,
-			0,
-			errors.New("chat response message carries the legacy function_call spelling; only tool_calls is supported"),
-		)
+		trimmed := bytes.TrimSpace(shadowChoice.Message.FunctionCall)
+		if !bytes.Equal(trimmed, []byte("null")) {
+			if len(shadowChoice.Message.ToolCalls) > 0 {
+				return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
+					UpstreamChatCompletions,
+					0,
+					errors.New("chat response message carries both tool_calls and the legacy function_call spelling"),
+				)
+			}
+			var frag struct {
+				Name      *string `json:"name"`
+				Arguments *string `json:"arguments"`
+			}
+			if err := json.Unmarshal(trimmed, &frag); err != nil {
+				return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
+					UpstreamChatCompletions,
+					0,
+					fmt.Errorf("chat response legacy function_call: %w", err),
+				)
+			}
+			if frag.Name == nil || *frag.Name == "" {
+				return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
+					UpstreamChatCompletions,
+					0,
+					errors.New("chat response legacy function_call has no name"),
+				)
+			}
+			if frag.Arguments == nil {
+				return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
+					UpstreamChatCompletions,
+					0,
+					errors.New("chat response legacy function_call has no arguments"),
+				)
+			}
+		}
 	}
 	// tool_call_id is a tool-only field: on an assistant response message it
 	// would otherwise be silently dropped (review-k finding 5). A message
@@ -418,6 +449,50 @@ func DecodeChatResponseWithPolicy(
 			Protocol: "chat",
 			Path:     "choices[].finish_reason",
 			Feature:  *choice.FinishReason,
+		}
+	}
+
+	// Map the legacy function_call to one tool call with a synthesized id
+	// derived from the response id. The shadow validation above guarantees
+	// the fragment is well-formed and alone; the wire decode discards it
+	// (the wire type models only tool_calls), so inject the synthesized
+	// call here and record the synthesis as an ungated note.
+	if len(shadowChoice.Message.FunctionCall) > 0 && !bytes.Equal(bytes.TrimSpace(shadowChoice.Message.FunctionCall), []byte("null")) {
+		var frag struct {
+			Name      *string `json:"name"`
+			Arguments *string `json:"arguments"`
+		}
+		// Validated above; a failure here is corrupt wire all the same.
+		if err := json.Unmarshal(bytes.TrimSpace(shadowChoice.Message.FunctionCall), &frag); err != nil {
+			return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
+				UpstreamChatCompletions,
+				0,
+				fmt.Errorf("chat response legacy function_call: %w", err),
+			)
+		}
+		synthID := chat.ID + ":legacy-function-call-0"
+		args := ""
+		if frag.Arguments != nil {
+			args = *frag.Arguments
+		}
+		legacyCall := ChatMessageToolCall{
+			Type: "function",
+			ID:   &synthID,
+			Function: ChatToolCallFunction{
+				Name:      frag.Name,
+				Arguments: args,
+			},
+		}
+		if message.ChatAssistantMessage == nil {
+			message.ChatAssistantMessage = &ChatAssistantMessage{}
+		}
+		message.ToolCalls = append(message.ToolCalls, legacyCall)
+		if err := report.Note(
+			FeatureLegacyFunctionCall,
+			"choices[].message.function_call",
+			"legacy function_call mapped to one tool call with id synthesized from the response id ("+synthID+")",
+		); err != nil {
+			return CanonicalResponse{}, ConversionReport{}, err
 		}
 	}
 

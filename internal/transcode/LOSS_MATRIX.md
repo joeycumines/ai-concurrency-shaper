@@ -48,3 +48,4 @@ individual keys via `-transcode-allow-loss`.
 | `request_citations` | request citations on text blocks cannot be reproduced in the target request |
 | `builtin_tools` | Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject) |
 | `response_service_tier` | the upstream chat service tier actually served cannot be reproduced in the target |
+| `legacy_function_call` | the upstream chat response uses the legacy non-tool_calls function_call spelling; the single invocation maps to one canonical tool call with a synthesized id derived from the response id (the note names the synthesis) |

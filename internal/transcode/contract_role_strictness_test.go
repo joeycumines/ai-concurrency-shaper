@@ -214,21 +214,48 @@ func TestContractRoleNonStreamDeltaArmRejected(t *testing.T) {
 	}
 }
 
-// TestContractRoleLegacyFunctionCallRejected proves the legacy non-tool_calls
-// function_call spelling is a STRUCTURAL rejection on both the non-streaming
-// and streaming chat surfaces (a KNOWN official field, not a provider
-// extension), so it is never silently dropped (which would leave the client
+// TestContractRoleLegacyFunctionCallMapped proves the legacy non-tool_calls
+// function_call spelling maps to one canonical tool call with a synthesized
+// id on both the non-streaming and streaming chat surfaces (a KNOWN official
+// field), so it is never silently dropped (which would leave the client
 // with a tool_use stop reason and no tool call).
-func TestContractRoleLegacyFunctionCallRejected(t *testing.T) {
-	// Non-streaming message.function_call.
+func TestContractRoleLegacyFunctionCallMapped(t *testing.T) {
+	// Non-streaming message.function_call maps to one tool call.
 	nonStream := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"function_call","message":{"role":"assistant","content":null,"function_call":{"name":"f","arguments":"{}"}}}]}`
-	if _, _, err := DecodeChatResponseWithPolicy([]byte(nonStream), ChatCapabilities{}, StrictLossPolicy()); err == nil {
-		t.Fatal("non-streaming message.function_call accepted; want rejection")
+	resp, report, err := DecodeChatResponseWithPolicy([]byte(nonStream), ChatCapabilities{}, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("non-streaming message.function_call rejected: %v", err)
 	}
-	// Streaming delta.function_call.
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %d, want 1 tool call", len(resp.Items))
+	}
+	call, ok := resp.Items[0].(*CanonicalFunctionCallItem)
+	if !ok {
+		t.Fatalf("item is %T, want *CanonicalFunctionCallItem", resp.Items[0])
+	}
+	if call.Name != "f" || call.CallID != "c:legacy-function-call-0" {
+		t.Fatalf("call = %+v, want name f with synthesized id", call)
+	}
+	if !reportHasFeature(report, FeatureLegacyFunctionCall) {
+		t.Fatalf("report lacks legacy_function_call note: %+v", report)
+	}
+	// Streaming delta.function_call decodes to a tool_calls fragment.
 	stream := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"function_call":{"name":"f","arguments":"{}"}},"finish_reason":null}]}`
-	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(stream)}); err == nil {
-		t.Fatal("streaming delta.function_call accepted; want rejection")
+	chunk, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(stream)})
+	if err != nil {
+		t.Fatalf("streaming delta.function_call rejected: %v", err)
+	}
+	if len(chunk.Choices) != 1 || chunk.Choices[0].Delta == nil || len(chunk.Choices[0].Delta.ToolCalls) != 1 {
+		t.Fatalf("chunk tool calls = %+v, want 1 synthesized fragment", chunk.Choices[0].Delta)
+	}
+	frag := chunk.Choices[0].Delta.ToolCalls[0]
+	if frag.ID == nil || *frag.ID != "c:legacy-function-call-0" {
+		t.Fatalf("fragment id = %v, want synthesized id", frag.ID)
+	}
+	// Both spellings at once is a contradictory union.
+	both := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}],"function_call":{"name":"g","arguments":"{}"}},"finish_reason":null}]}`
+	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(both)}); err == nil {
+		t.Fatal("delta with both tool_calls and function_call accepted; want rejection")
 	}
 }
 

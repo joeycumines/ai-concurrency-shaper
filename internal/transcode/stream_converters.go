@@ -124,6 +124,10 @@ type chatResponsesStreamState struct {
 	// (loss or note) to exactly once per stream (review-08 blocker 7).
 	reasoningReportRecorded bool
 
+	// legacyFunctionCallNoted gates the legacy function_call synthesis note
+	// to exactly once per stream.
+	legacyFunctionCallNoted bool
+
 	// totalAccumulated bounds the exchange-wide sum of accumulated semantic
 	// bytes (review-08 blocker 7).
 	totalAccumulated int64
@@ -836,6 +840,20 @@ func (s *chatResponsesStreamState) convertToolCall(
 ) ([]ResponsesSSEEvent, error) {
 	var events []ResponsesSSEEvent
 
+	// Legacy function_call fragments carry a synthesized id derived from
+	// the chunk id: record the synthesis once per stream as an ungated
+	// note naming the source.
+	if call.ID != nil && strings.Contains(*call.ID, ":legacy-function-call-") && !s.legacyFunctionCallNoted {
+		s.legacyFunctionCallNoted = true
+		if err := s.report.Note(
+			FeatureLegacyFunctionCall,
+			"choices[].delta.function_call",
+			"legacy function_call mapped to one tool call with id synthesized from the chunk id ("+*call.ID+")",
+		); err != nil {
+			return nil, err
+		}
+	}
+
 	// Resolve the pending call: by id alias first (an id makes the fragment
 	// attributable even without an index), then by fragment index.
 	var pending *pendingToolCall
@@ -1486,6 +1504,41 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, usageClamp
 	return out, clampResponsesUsage(out, presence)
 }
 
+// parseLegacyFunctionCallFragment parses one legacy function_call fragment:
+// explicit nulls are illegal (the tool_calls spelling rejects null arguments
+// at the wire level), malformed JSON is corrupt wire, and a fragment with
+// neither a name nor arguments content carries nothing to accumulate.
+func parseLegacyFunctionCallFragment(raw json.RawMessage) (name *string, args *string, hasContent bool, err error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil, false, errors.New("legacy function_call is null")
+	}
+	var present map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &present); err != nil {
+		return nil, nil, false, err
+	}
+	if v, ok := present["name"]; ok {
+		if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+			return nil, nil, false, errors.New("legacy function_call name is null")
+		}
+	}
+	if v, ok := present["arguments"]; ok {
+		if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+			return nil, nil, false, errors.New("legacy function_call arguments is null")
+		}
+	}
+	var frag struct {
+		Name      *string `json:"name"`
+		Arguments *string `json:"arguments"`
+	}
+	if err := json.Unmarshal(trimmed, &frag); err != nil {
+		return nil, nil, false, err
+	}
+	hasName := frag.Name != nil && *frag.Name != ""
+	hasArgs := frag.Arguments != nil && *frag.Arguments != ""
+	return frag.Name, frag.Arguments, hasName || hasArgs, nil
+}
+
 // chatStreamChunkShadow is the presence-aware strict decode shadow of a Chat
 // streaming chunk (review-08 blocker 2): the pinned envelope fields (object,
 // id, model, created) and the choice fields (index, delta) are required and
@@ -1723,15 +1776,35 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			}
 		}
 		// The legacy non-tool_calls function_call fragment spelling is a KNOWN
-		// official field (pinned in pins.md), not a provider extension: the
-		// transcoder cannot represent it, so it is a structural rejection —
-		// never a silent drop.
+		// official field (pinned in pins.md): the single invocation maps to
+		// one canonical tool call with a synthesized id, never a silent
+		// drop (which would leave the client with a tool_use stop reason
+		// and no tool call). A delta carrying both spellings at once is a
+		// contradictory union.
 		if len(choice.Delta.FunctionCall) > 0 {
-			return ChatStreamResponse{}, upstreamWireError(
-				UpstreamChatCompletions,
-				http.StatusOK,
-				errors.New("chat stream chunk delta carries the legacy function_call spelling; only tool_calls is supported"),
-			)
+			trimmed := bytes.TrimSpace(choice.Delta.FunctionCall)
+			if !bytes.Equal(trimmed, []byte("null")) {
+				if len(choice.Delta.ToolCalls) > 0 {
+					return ChatStreamResponse{}, upstreamWireError(
+						UpstreamChatCompletions,
+						http.StatusOK,
+						errors.New("chat stream chunk delta carries both tool_calls and the legacy function_call spelling"),
+					)
+				}
+				if _, _, hasContent, err := parseLegacyFunctionCallFragment(trimmed); err != nil {
+					return ChatStreamResponse{}, upstreamWireError(
+						UpstreamChatCompletions,
+						http.StatusOK,
+						fmt.Errorf("chat stream chunk legacy function_call: %w", err),
+					)
+				} else if !hasContent {
+					return ChatStreamResponse{}, upstreamWireError(
+						UpstreamChatCompletions,
+						http.StatusOK,
+						errors.New("chat stream chunk legacy function_call has neither name nor arguments"),
+					)
+				}
+			}
 		}
 	}
 	// The pinned CompletionUsage requires all three totals: an omitted total
@@ -1763,6 +1836,57 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			http.StatusOK,
 			fmt.Errorf("chat stream chunk: %w", err),
 		)
+	}
+	// Map the legacy function_call fragment to the tool_calls spelling so
+	// the downstream state machine accumulates it exactly like a tool call
+	// fragment. The id is synthesized deterministically from the chunk id
+	// (stable across the stream); the conversion to canonical tool calls
+	// records the synthesis as an ungated note.
+	if len(chunk.Choices) > 0 && chunk.Choices[0].Delta != nil && len(chunk.Choices[0].Delta.FunctionCall) > 0 {
+		raw := bytes.TrimSpace(chunk.Choices[0].Delta.FunctionCall)
+		if bytes.Equal(raw, []byte("null")) {
+			chunk.Choices[0].Delta.FunctionCall = nil
+			return chunk, nil
+		}
+		name, argsPtr, hasContent, err := parseLegacyFunctionCallFragment(raw)
+		if err != nil {
+			return ChatStreamResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				http.StatusOK,
+				fmt.Errorf("chat stream chunk legacy function_call: %w", err),
+			)
+		}
+		if !hasContent {
+			return ChatStreamResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				http.StatusOK,
+				errors.New("chat stream chunk legacy function_call has neither name nor arguments"),
+			)
+		}
+		if len(chunk.Choices[0].Delta.ToolCalls) > 0 {
+			return ChatStreamResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				http.StatusOK,
+				errors.New("chat stream chunk delta carries both tool_calls and the legacy function_call spelling"),
+			)
+		}
+		synthID := chunk.ID + ":legacy-function-call-0"
+		idx := 0
+		typ := "function"
+		args := ""
+		if argsPtr != nil {
+			args = *argsPtr
+		}
+		chunk.Choices[0].Delta.ToolCalls = []ChatToolCallDelta{{
+			Index: &idx,
+			ID:    &synthID,
+			Type:  &typ,
+			Function: ChatToolCallFunction{
+				Name:      name,
+				Arguments: args,
+			},
+		}}
+		chunk.Choices[0].Delta.FunctionCall = nil
 	}
 	return chunk, nil
 }
