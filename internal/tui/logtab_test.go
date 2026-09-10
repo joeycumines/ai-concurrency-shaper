@@ -609,7 +609,7 @@ func TestQuitFlushesPendingLogFragment(t *testing.T) {
 
 	m.logBuf.Write([]byte("shutting dow"))
 	m = update(m, tea.KeyPressMsg{Text: "q"})
-	got := m.logRing.snapshot()
+	got := ringTexts(m.logRing)
 	if len(got) == 0 || got[len(got)-1] != "shutting dow" {
 		t.Fatalf("last ring line = %q, want the torn fragment delivered on quit", got)
 	}
@@ -632,14 +632,14 @@ func TestLogDrain_TickThenQuitDeliversExactlyOnce(t *testing.T) {
 
 	m.logBuf.Write([]byte("one\ntwo\n"))
 	m.drainLogs() // what Update does for a logPollTickMsg
-	if got := m.logRing.snapshot(); len(got) != 2 || got[0] != "one" || got[1] != "two" {
+	if got := ringTexts(m.logRing); len(got) != 2 || got[0] != "one" || got[1] != "two" {
 		t.Fatalf("after tick ring = %v, want [one two]", got)
 	}
 
 	m.logBuf.Write([]byte("three\ntorn"))
 	m = update(m, tea.KeyPressMsg{Text: "q"})
 	want := []string{"one", "two", "three", "torn"}
-	if got := m.logRing.snapshot(); len(got) != len(want) {
+	if got := ringTexts(m.logRing); len(got) != len(want) {
 		t.Fatalf("ring = %v, want %v (exactly once each)", got, want)
 	} else {
 		for i := range want {
@@ -651,7 +651,7 @@ func TestLogDrain_TickThenQuitDeliversExactlyOnce(t *testing.T) {
 
 	// A late tick queued behind the quit redelivers nothing.
 	m.drainLogs()
-	if got := m.logRing.snapshot(); len(got) != len(want) {
+	if got := ringTexts(m.logRing); len(got) != len(want) {
 		t.Fatalf("late tick duplicated delivery: %v", got)
 	}
 }
@@ -665,7 +665,7 @@ func TestLogDrain_QuitDeliversNeverPolledLines(t *testing.T) {
 	m.logBuf.Write([]byte("complete\n"))
 	m.logBuf.Write([]byte("torn"))
 	m = update(m, tea.KeyPressMsg{Text: "q"})
-	got := m.logRing.snapshot()
+	got := ringTexts(m.logRing)
 	if len(got) != 2 || got[0] != "complete" || got[1] != "torn" {
 		t.Fatalf("ring = %v, want [complete torn]", got)
 	}

@@ -63,6 +63,17 @@ func special(k string) tea.Msg {
 	return tea.KeyPressMsg{Text: k}
 }
 
+// ringTexts extracts the text of a ring snapshot for assertions that only
+// care about line content.
+func ringTexts(r *logRing) []string {
+	items := r.snapshot()
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = item.text
+	}
+	return out
+}
+
 type safeBuffer struct {
 	mu sync.Mutex
 	bytes.Buffer
@@ -2116,7 +2127,7 @@ func TestCtrlD_TUI06(t *testing.T) {
 func TestLogRing_WriteSingleLine(t *testing.T) {
 	r := newLogRing(10)
 	r.Write([]byte("hello"))
-	snap := r.snapshot()
+	snap := ringTexts(r)
 	if len(snap) != 1 || snap[0] != "hello" {
 		t.Errorf("snapshot = %v, want [hello]", snap)
 	}
@@ -2125,7 +2136,7 @@ func TestLogRing_WriteSingleLine(t *testing.T) {
 func TestLogRing_WriteMultipleLines(t *testing.T) {
 	r := newLogRing(10)
 	r.Write([]byte("line1\nline2\nline3\n"))
-	snap := r.snapshot()
+	snap := ringTexts(r)
 	if len(snap) != 3 {
 		t.Errorf("len(snapshot) = %d, want 3", len(snap))
 	}
@@ -2137,7 +2148,7 @@ func TestLogRing_WriteMultipleLines(t *testing.T) {
 func TestLogRing_WriteEmptyLinesSkipped(t *testing.T) {
 	r := newLogRing(10)
 	r.Write([]byte("\n\nhello\n\n"))
-	snap := r.snapshot()
+	snap := ringTexts(r)
 	if len(snap) != 1 || snap[0] != "hello" {
 		t.Errorf("snapshot = %v, want [hello]", snap)
 	}
@@ -2145,9 +2156,9 @@ func TestLogRing_WriteEmptyLinesSkipped(t *testing.T) {
 
 func TestLogRing_SnapshotEmpty(t *testing.T) {
 	r := newLogRing(10)
-	snap := r.snapshot()
-	if snap != nil {
-		t.Errorf("snapshot = %v, want nil", snap)
+	snap := ringTexts(r)
+	if len(snap) != 0 {
+		t.Errorf("snapshot = %v, want empty", snap)
 	}
 }
 
@@ -2157,7 +2168,7 @@ func TestLogRing_CapacityOverflow(t *testing.T) {
 	r.Write([]byte("b\n"))
 	r.Write([]byte("c\n"))
 	r.Write([]byte("d\n"))
-	snap := r.snapshot()
+	snap := ringTexts(r)
 	if len(snap) != 3 {
 		t.Fatalf("len(snapshot) = %d, want 3", len(snap))
 	}
@@ -2176,7 +2187,7 @@ func TestLogWriter_DelegatesToRing(t *testing.T) {
 	if n != 11 {
 		t.Errorf("n = %d, want 11", n)
 	}
-	snap := r.snapshot()
+	snap := ringTexts(r)
 	if len(snap) != 1 || snap[0] != "via writer" {
 		t.Errorf("snapshot = %v, want [via writer]", snap)
 	}
@@ -5375,6 +5386,74 @@ func TestHScroll_HomeResetsNetwork(t *testing.T) {
 	}
 }
 
+// TestHScroll_NoSnapOnShrunkenBound pins that a horizontal offset stranded
+// above the current bound (after vertical navigation onto a page of short
+// rows) is walked back one step per left keypress rather than teleporting to
+// zero, and that rightward motion still clamps to the current bound.
+func TestHScroll_NoSnapOnShrunkenBound(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	wide := "This log line is intentionally longer than the 79-cell viewport so it overflows and can be scrolled horizontally."
+	m.logRing.Write([]byte(wide + "\n"))
+	for range 30 {
+		m = update(m, key('l'))
+	}
+	if m.hScroll[tabLogs] != 30 {
+		t.Fatalf("setup: hScroll = %d, want 30", m.hScroll[tabLogs])
+	}
+
+	// Replace the content with short rows: the current bound drops to 0 while
+	// the offset stays 30 (rendering shows empty space for the long rows).
+	m.logRing = newLogRing(logRingCapacity)
+	m.logRing.Write([]byte("short\n"))
+
+	// Right motion clamps to the new bound.
+	m = update(m, key('l'))
+	if m.hScroll[tabLogs] != 0 {
+		t.Fatalf("hScroll after right on short-only page = %d, want 0 (clamped)", m.hScroll[tabLogs])
+	}
+
+	// A stranded offset walks back one step per left press instead of
+	// snapping to zero.
+	m.hScroll[tabLogs] = 30
+	m = update(m, key('h'))
+	if m.hScroll[tabLogs] != 29 {
+		t.Errorf("hScroll after left with stranded offset = %d, want 29 (one step, no snap)", m.hScroll[tabLogs])
+	}
+}
+
+// TestHScroll_ShiftsAllDataRows pins that horizontal scrolling shifts every
+// data row into the same coordinate space: a row shorter than the viewport
+// must not keep its left edge while a longer neighbor row loses its cells to
+// the shift (a torn table).
+func TestHScroll_ShiftsAllDataRows(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte(strings.Repeat("a", 90) + "\n")) // overflows: shifts
+	m.logRing.Write([]byte(strings.Repeat("b", 40) + "\n")) // fits: must shift too
+	m.hScroll[tabLogs] = 10
+
+	lines := strings.Split(m.renderContentWithScrollbar(), "\n")
+	rowA := stripANSI(lines[0])
+	rowB := stripANSI(lines[1])
+	// The short row's line-number prefix ("       2  ") must be scrolled off
+	// with the rest of its left edge; the row starts with its own content.
+	if strings.Contains(rowB, "       2") {
+		t.Errorf("short row kept its left edge while the long row shifted (torn table): %q", rowB)
+	}
+	if !strings.HasPrefix(strings.TrimRight(rowB, " "), "bbbbbbbbbb") {
+		t.Errorf("short row must show its cells from the offset on, got %q", rowB)
+	}
+	// The long row is shifted and truncated to the viewport.
+	if got := len(strings.TrimRight(rowA, " ")); got != m.viewportWidth() {
+		t.Errorf("long row rendered %d cells, want %d", got, m.viewportWidth())
+	}
+}
+
 // ─── T02: horizontal scrolling on the Logs tab ───
 
 func TestHScroll_LogsShiftsTruncationWindow(t *testing.T) {
@@ -5543,6 +5622,54 @@ func TestLogDetail_LongLineProducesMultipleRowsWithoutLoss(t *testing.T) {
 	}
 }
 
+// TestWrapText_WideGraphemeAtTinyWidth pins the word-split loop against an
+// infinite loop: a grapheme cluster wider than the wrap width (a 2-cell emoji
+// at width 1) must be emitted whole on its own row, not repeatedly re-truncated
+// to "". Regression for a process freeze reachable from the log detail view on
+// very narrow viewports.
+func TestWrapText_WideGraphemeAtTinyWidth(t *testing.T) {
+	done := make(chan []string, 1)
+	go func() {
+		done <- wrapText("⚡ wide start then more words here", 1)
+	}()
+	select {
+	case rows := <-done:
+		joined := strings.Join(rows, "")
+		if !strings.Contains(joined, "⚡") {
+			t.Error("wide emoji dropped by wrapping")
+		}
+		if joined != "⚡widestartthenmorewordshere" {
+			t.Errorf("wrapText must not lose text, got %q", joined)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("wrapText did not return: infinite loop on wide grapheme at width 1")
+	}
+}
+
+// TestLogDetail_ClampedToVisibleRows pins that a message wrapping past the
+// visible-row budget is truncated with an indicator instead of emitting an
+// oversized frame (which would push the chrome into terminal scrollback).
+func TestLogDetail_ClampedToVisibleRows(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte(strings.Repeat("word ", 2000) + "\n"))
+	m.cursor = 0
+	m = update(m, special("enter"))
+
+	overlay := m.renderDetailOverlay()
+	if n := countContentLines(overlay); n > m.visibleRows() {
+		t.Errorf("detail overlay emits %d lines for a %d-row viewport", n, m.visibleRows())
+	}
+	if !strings.Contains(stripANSI(overlay), "more lines withheld") {
+		t.Error("clamped detail must carry a truncation indicator")
+	}
+	if !strings.Contains(stripANSI(overlay), "[Esc/Enter] close") {
+		t.Error("clamped detail must keep the close hint visible")
+	}
+}
+
 func TestLogDetail_EmptySelectionDoesNotPanic(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -5635,7 +5762,10 @@ func TestLogDetailPin_EvictionClosesOverlay(t *testing.T) {
 	for i := range 2050 {
 		m.logRing.Write([]byte(fmt.Sprintf("filler %d\n", i)))
 	}
-	m = update(m, logPollTickMsg{})
+	// 'x' is ignored by handleKey in modeDetail, so the Update-tail eviction
+	// check is the only path that can close the overlay (a dismiss key like
+	// space would mask whether eviction detection actually works).
+	m = update(m, key('x'))
 
 	// The overlay must close (mode back to browse) and the render must
 	// not show the evicted message.
@@ -5716,13 +5846,106 @@ func TestLogDetailPin_RingEvictionClosesOverlay(t *testing.T) {
 	}
 	m.logRing.Write([]byte(sb.String()))
 
-	// The eviction check runs on every Update cycle; any keypress triggers
-	// the post-update tail that closes the overlay.
-	m = update(m, key(' '))
+	// 'x' is ignored by handleKey in modeDetail, so the Update-tail eviction
+	// check is the only path that can close the overlay.
+	m = update(m, key('x'))
 
 	// The overlay must close.
 	if m.mode != modeBrowse {
 		t.Errorf("mode after ring eviction = %v, want modeBrowse", m.mode)
+	}
+}
+
+// TestLogDetailPin_DuplicateLinesKeepsSelectedOccurrence pins the sequence-
+// number anchor against duplicate text: with two identical lines in the ring,
+// opening detail on the SECOND occurrence must keep showing that occurrence
+// after further appends. The committed text-scan anchor would resolve to the
+// first occurrence instead.
+func TestLogDetailPin_DuplicateLinesKeepsSelectedOccurrence(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	shared := "duplicate log line"
+	m.logRing.Write([]byte("unrelated first line\n"))
+	m.logRing.Write([]byte(shared + "\n"))
+	m.cursor = 1 // the second occurrence of the shared text
+
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("setup: should be in detail mode")
+	}
+	detail := stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detail, "Log Line 2") {
+		t.Fatalf("setup: detail should show list position 2, got: %q", detail)
+	}
+
+	// Appends shift nothing relevant, but a later occurrence of the same text
+	// must not hijack the anchor; the resolved position stays 2 (1-based).
+	m.logRing.Write([]byte(shared + "\n"))
+	detail = stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detail, "Log Line 2") {
+		t.Errorf("detail must stay pinned to the second occurrence, got: %q", detail)
+	}
+	if m.mode != modeDetail {
+		t.Error("overlay must stay open while the anchored occurrence is retained")
+	}
+}
+
+// TestLogDetailPin_FilteredAnchorUsesFilteredList pins anchor creation under
+// an active filter: Enter must anchor to the filtered list's item at m.cursor
+// (the item the operator sees), not the unfiltered ring position.
+func TestLogDetailPin_FilteredAnchorUsesFilteredList(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("noise one\n"))
+	m.logRing.Write([]byte("target log message\n"))
+	m.logRing.Write([]byte("noise two\n"))
+	m.filterText = "target"
+	m.cursor = 0 // position 0 of the FILTERED list = "target log message"
+
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("setup: should be in detail mode")
+	}
+	detail := stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detail, "target log message") {
+		t.Fatalf("detail should show the filtered list's item, got: %q", detail)
+	}
+	if !strings.Contains(detail, "Log Line 1") {
+		t.Errorf("detail heading should be the filtered list position, got: %q", detail)
+	}
+}
+
+// TestLogDetailPin_FilterChangeClosesOverlay pins that a filter edit which
+// drops the anchored line closes the overlay instead of keeping it alive
+// against the unfiltered ring.
+func TestLogDetailPin_FilterChangeClosesOverlay(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	m.logRing.Write([]byte("target log message\n"))
+	m.cursor = 0
+
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("setup: should be in detail mode")
+	}
+
+	// The operator edits the filter so the anchored line no longer matches.
+	m.filterText = "nomatch"
+	// 'x' is ignored by handleKey in modeDetail, so the Update-tail
+	// unresolvable-anchor check is the only path that can close the overlay.
+	m = update(m, key('x'))
+
+	if m.mode != modeBrowse {
+		t.Errorf("mode after filter change = %v, want modeBrowse (overlay must close)", m.mode)
+	}
+	if s := stripANSI(m.renderDetailOverlay()); s != "" {
+		t.Errorf("renderDetailOverlay must render empty after the anchor is filtered out, got: %q", s)
 	}
 }
 
@@ -5795,9 +6018,9 @@ func TestNetworkDetailPin_EvictionClosesOverlay(t *testing.T) {
 	m.journal.Record(&journal.Entry{ID: 2, Method: "GET", URL: mustParseURL("https://upstream.example/v1/two"), StatusCode: 200})
 	m.journal.Record(&journal.Entry{ID: 3, Method: "GET", URL: mustParseURL("https://upstream.example/v1/three"), StatusCode: 200})
 
-	// The eviction check runs on every Update cycle; any keypress triggers
-	// the post-update tail that closes the overlay.
-	m = update(m, key(' '))
+	// 'x' is ignored by handleKey in modeDetail, so the Update-tail eviction
+	// check is the only path that can close the overlay.
+	m = update(m, key('x'))
 
 	if m.mode != modeBrowse {
 		t.Errorf("mode after journal eviction = %v, want modeBrowse", m.mode)

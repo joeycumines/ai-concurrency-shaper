@@ -113,17 +113,31 @@ const (
 	redrawInterval       = 10 * time.Second
 )
 
-// logRing is a thread-safe ring buffer of log lines.
+// logRingItem is one retained log line together with its ring sequence
+// number. The sequence is assigned under the same lock that manages eviction,
+// so callers see exactly one identity per accepted line.
+type logRingItem struct {
+	seq  uint64
+	text string
+}
+
+// logRing is a thread-safe ring buffer of log lines. It assigns a unique,
+// monotonically increasing sequence number to every accepted line so detail
+// views can pin an item across position shifts and duplicate text.
 type logRing struct {
 	mu       sync.Mutex
-	lines    []string
+	lines    []logRingItem
 	head     int
 	count    int
 	capacity int
+	seq      uint64
 }
 
 func newLogRing(capacity int) *logRing {
-	return &logRing{lines: make([]string, capacity), capacity: capacity}
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &logRing{lines: make([]logRingItem, capacity), capacity: capacity}
 }
 
 func (r *logRing) Write(p []byte) (int, error) {
@@ -132,41 +146,38 @@ func (r *logRing) Write(p []byte) (int, error) {
 	text := string(p)
 	for text != "" {
 		idx := strings.IndexByte(text, '\n')
+		var line string
 		if idx < 0 {
-			if r.count < r.capacity {
-				r.lines[(r.head+r.count)%r.capacity] = text
-				r.count++
-			} else {
-				r.lines[r.head] = text
-				r.head = (r.head + 1) % r.capacity
-			}
-			break
+			line = text
+			text = ""
+		} else {
+			line = text[:idx]
+			text = text[idx+1:]
 		}
-		line := text[:idx]
-		text = text[idx+1:]
 		// Blank lines are deliberately skipped here too, mirroring
 		// LogBuffer.Write; pinned by TestLogRing_WriteEmptyLinesSkipped.
 		if line == "" {
 			continue
 		}
+		r.seq++
+		item := logRingItem{seq: r.seq, text: line}
+		r.lines[(r.head+r.count)%r.capacity] = item
 		if r.count < r.capacity {
-			r.lines[(r.head+r.count)%r.capacity] = line
 			r.count++
 		} else {
-			r.lines[r.head] = line
 			r.head = (r.head + 1) % r.capacity
 		}
 	}
 	return len(p), nil
 }
 
-func (r *logRing) snapshot() []string {
+func (r *logRing) snapshot() []logRingItem {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.count == 0 {
 		return nil
 	}
-	out := make([]string, r.count)
+	out := make([]logRingItem, r.count)
 	for i := 0; i < r.count; i++ {
 		out[i] = r.lines[(r.head+i)%r.capacity]
 	}
@@ -446,15 +457,12 @@ type Model struct {
 	// adjustHScroll against the widest rendered row.
 	hScroll map[tabID]int
 
-	// logDetailAnchor pins the open Logs detail view to the item that was
-	// selected when modeDetail was entered: pos is the 0-based position in
-	// visibleLogLines at open time and text is the full line content. Every
-	// render resolves the anchor against the current list so new arrivals
-	// never shift the displayed message; eviction closes the overlay.
-	logDetailAnchor struct {
-		pos  int
-		text string
-	}
+	// logDetailAnchor pins the open Logs detail view to the logRing item that
+	// was selected when modeDetail was entered. seq is the ring sequence
+	// number, which is unique per accepted line and survives position shifts
+	// caused by new arrivals; text is the full line content. Eviction closes
+	// the overlay once the sequence can no longer be resolved.
+	logDetailAnchor logDetailAnchor
 
 	// networkDetailAnchor pins the open Network detail view to the journal
 	// Entry that was selected when modeDetail was entered. The pointer is
@@ -950,13 +958,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// If the anchored Logs detail item was evicted from the ring, close the
 	// overlay rather than leave it pinned to nothing. This runs on every
 	// update cycle so eviction is detected without waiting for a keypress.
-	if m.mode == modeDetail && m.tab == tabLogs && !m.logDetailStillPresent() {
+	if m.mode == modeDetail && m.tab == tabLogs && !m.detailStillPresent() {
 		m.mode = modeBrowse
+		m.logDetailAnchor = logDetailAnchor{}
 	}
 	// Same for Network: if the anchored entry is no longer in the journal,
 	// close the overlay so the operator never sees a stale detail view.
 	if m.mode == modeDetail && m.tab == tabNetwork && m.networkDetailAnchor != nil && !m.networkDetailStillPresent() {
 		m.mode = modeBrowse
+		m.networkDetailAnchor = nil
 	}
 
 	// Tail-follow: while on the Logs tab and not paused by scroll input, keep the
@@ -1006,6 +1016,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "enter", " ", "space":
 			m.mode = modeBrowse
+			m.logDetailAnchor = logDetailAnchor{}
+			m.networkDetailAnchor = nil
 			return m, nil
 		default:
 			return m, nil
@@ -1190,12 +1202,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		if m.canInspect() {
 			m.mode = modeDetail
 			if m.tab == tabLogs {
-				lines := m.visibleLogLines()
-				if m.cursor < len(lines) {
-					m.logDetailAnchor = struct {
-						pos  int
-						text string
-					}{m.cursor, lines[m.cursor]}
+				if item := m.logItemAtCursor(); item != nil {
+					m.logDetailAnchor = logDetailAnchor{seq: item.seq, text: item.text}
 				}
 			}
 			if m.tab == tabNetwork {
@@ -1266,13 +1274,20 @@ func (m *Model) moveCursor(delta int) {
 // adjustHScroll shifts the active tab's horizontal viewport by delta cells,
 // clamping to [0, maxHScroll]. Tabs without horizontally scrollable rows
 // (maxHScroll == 0) always land at offset 0, so unrelated keys are no-ops.
+// adjustHScroll applies a horizontal scroll delta to the active tab. The
+// upper bound comes from maxHScroll, which measures the currently rendered
+// rows — so after vertical navigation onto a page of short rows the bound can
+// drop below the live offset. Clamping against that shrunken bound on a
+// leftward step would teleport the view back to column 0, so an offset beyond
+// the bound is only ever pulled down by moving left toward it, one step at a
+// time; rightward motion is clamped to the bound as usual.
 func (m *Model) adjustHScroll(delta int) {
 	max := m.maxHScroll()
 	offset := m.hScroll[m.tab] + delta
 	if offset < 0 {
 		offset = 0
 	}
-	if offset > max {
+	if delta > 0 && offset > max {
 		offset = max
 	}
 	m.hScroll[m.tab] = offset
@@ -1503,18 +1518,22 @@ func (m Model) visibleNetworkEntries() []*journal.Entry {
 
 // visibleLogLines returns log lines for the Logs tab, respecting filter.
 func (m *Model) visibleLogLines() []string {
-	all := m.logRing.snapshot()
-	if all == nil {
+	items := m.logRing.snapshot()
+	if len(items) == 0 {
 		return nil
 	}
 	if m.filterText == "" {
-		return all
+		lines := make([]string, len(items))
+		for i, item := range items {
+			lines[i] = item.text
+		}
+		return lines
 	}
 	var filtered []string
 	lower := strings.ToLower(m.filterText)
-	for _, line := range all {
-		if strings.Contains(strings.ToLower(line), lower) {
-			filtered = append(filtered, line)
+	for _, item := range items {
+		if strings.Contains(strings.ToLower(item.text), lower) {
+			filtered = append(filtered, item.text)
 		}
 	}
 	return filtered
@@ -1601,6 +1620,14 @@ func skipANSI(line string, skip int) string {
 // from the rest of the rendered row.
 func truncatePlain(s string, width int) string {
 	return truncateGraphemes(s, width, false)
+}
+
+// firstGrapheme returns the leading grapheme cluster of s ("" for empty
+// input). It is the unit of progress for word-splitting loops that must
+// advance even when a single cluster is wider than the available width.
+func firstGrapheme(s string) string {
+	cluster, _, _, _ := uniseg.FirstGraphemeClusterInString(s, -1)
+	return cluster
 }
 
 // truncateGraphemes is the shared core of truncateANSI and truncatePlain: it
@@ -1768,7 +1795,12 @@ func (m Model) renderContentWithScrollbar() string {
 			line := lines[i]
 			stripped := stripANSI(line)
 			visibleCells := uniseg.StringWidth(stripped)
-			if i >= headerRows && hScroll > 0 && visibleCells > contentWidth {
+			switch {
+			case i >= headerRows && hScroll > 0:
+				// The shift applies to every data row, not just overflowing
+				// ones: rows are columns of one table, so a row that keeps
+				// its left edge while its neighbors shift is a torn table.
+				// A row shorter than the offset renders empty.
 				shifted := skipANSI(line, hScroll)
 				visible := truncateANSI(shifted, contentWidth)
 				b.WriteString(visible)
@@ -1776,14 +1808,14 @@ func (m Model) renderContentWithScrollbar() string {
 				if actualWidth < contentWidth {
 					b.WriteString(strings.Repeat(" ", contentWidth-actualWidth))
 				}
-			} else if visibleCells > contentWidth {
+			case visibleCells > contentWidth:
 				truncated := truncateANSI(line, contentWidth)
 				b.WriteString(truncated)
 				actualWidth := uniseg.StringWidth(stripANSI(truncated))
 				if actualWidth < contentWidth {
 					b.WriteString(strings.Repeat(" ", contentWidth-actualWidth))
 				}
-			} else {
+			default:
 				b.WriteString(line)
 				b.WriteString(strings.Repeat(" ", contentWidth-visibleCells))
 			}
@@ -3380,19 +3412,13 @@ func (m Model) renderDetailOverlay() string {
 				r.TotalAge().Truncate(time.Millisecond))))
 
 	case tabLogs:
-		// Resolve the anchored item against the current visible list. New
-		// arrivals may have shifted positions, so re-scan for the original
-		// text; eviction (text no longer present) closes the overlay.
-		anchor := m.logDetailAnchor
-		found := false
-		for i, line := range m.visibleLogLines() {
-			if line == anchor.text {
-				b.WriteString(m.renderLogDetail(i, line))
-				found = true
-				break
-			}
-		}
-		if !found {
+		// Resolve the anchored item against the current ring snapshot. New
+		// arrivals shift positions, but the sequence number keeps the view
+		// pinned to the originally selected line; eviction or a filter change
+		// that drops the line closes it.
+		if pos, text, ok := m.resolveAnchor(m.logDetailAnchor); ok {
+			b.WriteString(m.renderLogDetail(text, pos+1))
+		} else {
 			return ""
 		}
 	}
@@ -3401,36 +3427,6 @@ func (m Model) renderDetailOverlay() string {
 		b.WriteByte('\n')
 	}
 	return b.String()
-}
-
-// renderLogDetail renders a full-screen view of a single log line, wrapped
-// to the available width so long messages are readable without horizontal
-// scrolling. The 1-based index matches the line number shown in the list.
-func (m Model) renderLogDetail(index int, line string) string {
-	vw := m.viewportWidth()
-	var b strings.Builder
-	b.WriteString(m.styles.sectionStyle.Render(fmt.Sprintf(" Log Line %d ", index+1)))
-	b.WriteByte('\n')
-	b.WriteByte('\n')
-	for _, row := range wrapText(stripANSI(line), max(vw-4, 1)) {
-		b.WriteString("  " + row)
-		b.WriteByte('\n')
-	}
-	b.WriteByte('\n')
-	b.WriteString(" [Esc/Enter] close ")
-	return b.String()
-}
-
-// logDetailStillPresent reports whether the currently anchored Logs detail
-// item still exists in the visible log lines. It is used to close the
-// overlay when the underlying ring has evicted the line.
-func (m Model) logDetailStillPresent() bool {
-	for _, line := range m.visibleLogLines() {
-		if line == m.logDetailAnchor.text {
-			return true
-		}
-	}
-	return false
 }
 
 // networkDetailStillPresent reports whether the currently anchored Network
@@ -3474,7 +3470,11 @@ func wrapText(text string, width int) []string {
 			currentWidth++
 		}
 		// A single word wider than width must be split on grapheme
-		// boundaries so no text is ever lost.
+		// boundaries so no text is ever lost. Progress is guaranteed because
+		// the split always consumes at least one grapheme cluster: a cluster
+		// wider than the remaining cut is emitted whole on its own row rather
+		// than being repeatedly re-truncated to "" (a 2-cell emoji at width 1
+		// would otherwise loop forever).
 		for uniseg.StringWidth(word) > width {
 			cut := width - currentWidth
 			if cut <= 0 {
@@ -3484,6 +3484,10 @@ func wrapText(text string, width int) []string {
 				cut = width
 			}
 			remaining := truncatePlain(word, cut)
+			if remaining == "" {
+				// The next cluster alone exceeds cut; emit it whole.
+				remaining = firstGrapheme(word)
+			}
 			current.WriteString(remaining)
 			word = word[len(remaining):]
 			rows = append(rows, current.String())
@@ -3654,7 +3658,7 @@ func (m Model) renderHelpOverlay() string {
 	return m.styles.overlayStyle.Render(" Keybindings \n\n"+
 		" 1-6          Switch tab (Overview/Requests/Network/Logs/Concurrency/Routes)\n"+
 		" j/k or ↑/↓   Scroll down/up\n"+
-		"h/l or ←/→   Scroll left/right (Network/Logs)\n"+
+		" h/l or ←/→   Scroll left/right (Network/Logs)\n"+
 		" PgUp/PgDn     Page up / Page down\n"+
 		" Home/End      Jump to first / last item\n"+
 		" Ctrl-U / Ctrl-D  Half-page scroll\n"+
