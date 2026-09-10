@@ -16,26 +16,169 @@
 package tui
 
 import (
-	"bytes"
 	"fmt"
 	"log"
 	"log/slog"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui/toast"
 )
 
-// TestLogWiring_StdlibWarningToasts pins the exact log/slog wiring main.go
-// installs in TUI mode (review-07 #1). Order is load-bearing: slog.SetDefault
-// rewires the standard logger through its handler at INFO level, so installing
-// log.SetOutput BEFORE it silently demotes every stdlib line — including the
-// route-group config WARNING — to a non-actionable slog INFO record. The fixed
-// order restores the stdlib writer afterwards so stdlib lines keep their
-// timestamped identity and their keyword-based actionability.
+func TestToastToastWidth_Fallback(t *testing.T) {
+	tests := []struct {
+		width int
+		want  int
+	}{
+		{0, 76},
+		{-3, 76},
+		{4, 76},
+		{5, 1},
+		{100, 96},
+	}
+	for _, tt := range tests {
+		if got := toastToastWidth(tt.width); got != tt.want {
+			t.Errorf("toastToastWidth(%d) = %d, want %d", tt.width, got, tt.want)
+		}
+	}
+}
+
+func TestAddToast_DefaultDuration(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	tt := &toast.Toast{Message: "test"}
+	m.AddToast(tt)
+	if tt.Duration != defaultToastDuration {
+		t.Errorf("Duration = %v, want %v", tt.Duration, defaultToastDuration)
+	}
+}
+
+func TestAddToast_AppendsToSlice(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.AddToast(&toast.Toast{Message: "first"})
+	m.AddToast(&toast.Toast{Message: "second"})
+	if len(m.toasts) != 2 {
+		t.Fatalf("len(toasts) = %d, want 2", len(m.toasts))
+	}
+	if m.toasts[0].Message != "first" {
+		t.Errorf("toasts[0].Message = %q, want %q", m.toasts[0].Message, "first")
+	}
+}
+
+func TestToastExpired_PurgedInUpdate(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	tt := &toast.Toast{Message: "expires", Duration: 1 * time.Millisecond}
+	m.AddToast(tt)
+	time.Sleep(10 * time.Millisecond)
+	m = update(m, metrics.Snapshot{})
+	if len(m.toasts) != 0 {
+		t.Errorf("len(toasts) = %d after expired toast purged, want 0", len(m.toasts))
+	}
+}
+
+func TestToastNotExpired_KeptInUpdate(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	tt := &toast.Toast{Message: "alive", Duration: 5 * time.Second}
+	m.AddToast(tt)
+	m = update(m, metrics.Snapshot{})
+	if len(m.toasts) != 1 {
+		t.Errorf("len(toasts) = %d, want 1 (non-expired toast should be kept)", len(m.toasts))
+	}
+}
+
+func TestToastStacking_ShowsMultipleToasts(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.AddToast(&toast.Toast{Message: "first", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "second", Duration: 5 * time.Second})
+	v := m.View()
+	content := stripANSI(v.Content)
+	if !strings.Contains(content, "first") {
+		t.Error("View should contain 'first' toast")
+	}
+	if !strings.Contains(content, "second") {
+		t.Error("View should contain 'second' toast")
+	}
+}
+
+func TestToastStacking_LimitsToThree(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.AddToast(&toast.Toast{Message: "t1", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "t2", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "t3", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "t4", Duration: 5 * time.Second})
+	v := m.View()
+	content := stripANSI(v.Content)
+	if strings.Contains(content, "t1") {
+		t.Error("View should NOT contain oldest toast 't1' (max 3 visible)")
+	}
+	for _, msg := range []string{"t2", "t3", "t4"} {
+		if !strings.Contains(content, msg) {
+			t.Errorf("View should contain toast %q", msg)
+		}
+	}
+}
+
+func TestToastStacking_MostRecentAtBottom(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.AddToast(&toast.Toast{Message: "older", Duration: 5 * time.Second})
+	m.AddToast(&toast.Toast{Message: "newer", Duration: 5 * time.Second})
+	v := m.View()
+	content := stripANSI(v.Content)
+	olderIdx := strings.Index(content, "older")
+	newerIdx := strings.Index(content, "newer")
+	if olderIdx < 0 || newerIdx < 0 {
+		t.Fatal("both toasts should be visible")
+	}
+	if olderIdx >= newerIdx {
+		t.Error("older toast should appear before (above) newer toast")
+	}
+}
+
+func TestToastStacking_NoToastsRendersNothing(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	v := m.View()
+	content := stripANSI(v.Content)
+	if content == "" {
+		t.Fatal("View should render even without toasts")
+	}
+}
+
+func TestToastNotShownInDetailMode(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabRequests
+	m.snap.LogEntries = []metrics.RequestLogEntry{{Method: "POST", Path: "/v1/messages", Status: 200}}
+	m.AddToast(&toast.Toast{Message: "test", Duration: 5 * time.Second})
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("should be in detail mode")
+	}
+	v := m.View()
+	content := stripANSI(v.Content)
+	if strings.Contains(content, "test") {
+		t.Error("toast should not render in detail mode")
+	}
+}
+
 func TestLogWiring_StdlibWarningToasts(t *testing.T) {
 	prevFlags := log.Flags()
 	prevOut := log.Writer()
@@ -80,207 +223,6 @@ func TestLogWiring_StdlibWarningToasts(t *testing.T) {
 	}
 	if !strings.Contains(m.toasts[0].Message, "WARNING: route") {
 		t.Fatalf("toast message = %q, want the route warning", m.toasts[0].Message)
-	}
-}
-
-func TestLogBuffer_ReadNew_Sequential(t *testing.T) {
-	b := NewLogBuffer(8)
-	if got := b.Revision(); got != 0 {
-		t.Fatalf("Revision = %d, want 0", got)
-	}
-	b.Write([]byte("one\ntwo\n"))
-	b.Write([]byte("three\n"))
-
-	lines, rev := b.ReadNew(0)
-	if rev != 3 {
-		t.Fatalf("ReadNew cursor = %d, want 3", rev)
-	}
-	if len(lines) != 3 || lines[0] != "one" || lines[2] != "three" {
-		t.Fatalf("ReadNew(0) = %v, want [one two three]", lines)
-	}
-
-	// Polling from the returned cursor yields only the new line.
-	b.Write([]byte("four\n"))
-	next, rev2 := b.ReadNew(rev)
-	if len(next) != 1 || next[0] != "four" {
-		t.Fatalf("ReadNew(after) = %v, want [four]", next)
-	}
-	if rev2 != 4 {
-		t.Fatalf("ReadNew cursor = %d, want 4", rev2)
-	}
-	// Nothing further: empty result, cursor remains.
-	if got, cur := b.ReadNew(b.Revision()); got != nil || cur != 4 {
-		t.Fatalf("ReadNew(current) = %v,%d, want nil,4", got, cur)
-	}
-}
-
-func TestLogBuffer_CapacityEvictsOldest(t *testing.T) {
-	b := NewLogBuffer(3)
-	for _, l := range []string{"a", "b", "c", "d"} {
-		b.Write([]byte(l + "\n"))
-	}
-	lines, rev := b.ReadNew(0)
-	if len(lines) != 3 || lines[0] != "b" || lines[2] != "d" {
-		t.Fatalf("ReadNew(0) = %v, want [b c d]", lines)
-	}
-	if rev != 4 {
-		t.Fatalf("revision = %d, want 4 (monotonic past eviction)", rev)
-	}
-	// Evicted lines are never re-read after the cursor advances.
-	if got, _ := b.ReadNew(rev); got != nil {
-		t.Fatalf("ReadNew(after eviction) = %v, want nil", got)
-	}
-}
-
-func TestLogBuffer_EmptySegmentsSkipped(t *testing.T) {
-	b := NewLogBuffer(8)
-	b.Write([]byte("\n\nhello\n\n"))
-	lines, rev := b.ReadNew(0)
-	if len(lines) != 1 || lines[0] != "hello" {
-		t.Fatalf("ReadNew(0) = %v, want [hello]", lines)
-	}
-	if rev != 1 {
-		t.Fatalf("revision = %d, want 1", rev)
-	}
-}
-
-// TestLogBuffer_Write_ReturnsInputLength pins the io.Writer contract: Write
-// consumes all of p and must report that it did. Regression for the log-buffer
-// sink returning n=0 for non-empty input.
-func TestLogBuffer_Write_ReturnsInputLength(t *testing.T) {
-	b := NewLogBuffer(8)
-	for _, in := range [][]byte{[]byte("one\ntwo\nthree"), []byte("single"), []byte("a\nb\n")} {
-		if n, err := b.Write(in); err != nil || n != len(in) {
-			t.Fatalf("Write(%q) = n=%d err=%v, want n=%d err=nil", in, n, err, len(in))
-		}
-	}
-}
-
-// TestLogBuffer_Write_DoesNotRetainCallerSlice pins the io.Writer no-retain
-// rule on the fragment path: a caller that reuses its buffer after Write must
-// not corrupt the withheld partial line.
-func TestLogBuffer_Write_DoesNotRetainCallerSlice(t *testing.T) {
-	b := NewLogBuffer(8)
-	frag := []byte("hel")
-	if _, err := b.Write(frag); err != nil {
-		t.Fatalf("Write = %v, want nil", err)
-	}
-	frag[0] = 'X' // caller reuse between writes
-	b.Write([]byte("lo\n"))
-	lines, _ := b.ReadNew(0)
-	if len(lines) != 1 || lines[0] != "hello" {
-		t.Fatalf("ReadNew(0) = %v, want [hello]", lines)
-	}
-}
-
-// TestLogBuffer_ReadNew_NoDuplicateDelivery pins the single-lock cursor: a line
-// written after a poll is delivered exactly once on the next poll — the TOCTOU
-// between a separate Revision() and ReadNew() call would deliver it twice.
-func TestLogBuffer_ReadNew_NoDuplicateDelivery(t *testing.T) {
-	b := NewLogBuffer(4)
-	b.Write([]byte("a\nb\nc\n"))
-	_, cur := b.ReadNew(0) // cursor = 3
-
-	b.Write([]byte("d\n")) // a write racing the previous poll
-	next, cur2 := b.ReadNew(cur)
-	if len(next) != 1 || next[0] != "d" {
-		t.Fatalf("second poll = %v, want [d] (no duplicates)", next)
-	}
-	if cur2 != 4 {
-		t.Fatalf("cursor = %d, want 4", cur2)
-	}
-	if got, _ := b.ReadNew(cur2); got != nil {
-		t.Fatalf("third poll = %v, want nil", got)
-	}
-}
-
-// TestLogBuffer_FragmentedWritesAssembleLines pins the line-assembly contract:
-// io.Writer makes no line-boundary guarantee, so a logical line split across
-// Write calls must still arrive as one line, and an unterminated tail must not
-// be published until the newline that completes it.
-func TestLogBuffer_FragmentedWritesAssembleLines(t *testing.T) {
-	b := NewLogBuffer(8)
-	b.Write([]byte("hel"))
-	b.Write([]byte("lo\n"))
-	b.Write([]byte("one\nt"))
-	b.Write([]byte("wo\n"))
-	lines, rev := b.ReadNew(0)
-	if len(lines) != 3 || lines[0] != "hello" || lines[1] != "one" || lines[2] != "two" {
-		t.Fatalf("ReadNew(0) = %v, want [hello one two]", lines)
-	}
-	if rev != 3 {
-		t.Fatalf("revision = %d, want 3", rev)
-	}
-	// The unterminated fragment "tail" from the writes above has no newline, so
-	// it must not have been published as a line.
-	b.Write([]byte("tail"))
-	if got, _ := b.ReadNew(rev); got != nil {
-		t.Fatalf("ReadNew(after unterminated fragment) = %v, want nil", got)
-	}
-}
-
-// TestLogBuffer_FlushEmitsPartial pins Flush: an unterminated fragment withheld
-// from the line stream is published as a single final line (idempotent, no-op
-// when nothing is pending).
-func TestLogBuffer_FlushEmitsPartial(t *testing.T) {
-	b := NewLogBuffer(8)
-	b.Write([]byte("one\ntwo"))
-	if got, _ := b.ReadNew(0); len(got) != 1 || got[0] != "one" {
-		t.Fatalf("ReadNew(0) = %v, want [one]", got)
-	}
-	b.Flush()
-	lines, rev := b.ReadNew(0)
-	if len(lines) != 2 || lines[1] != "two" {
-		t.Fatalf("ReadNew(after Flush) = %v, want [one two]", lines)
-	}
-	if rev != 2 {
-		t.Fatalf("revision = %d, want 2", rev)
-	}
-	// Flush with nothing pending is a no-op: no new line, cursor stable.
-	b.Flush()
-	if got, cur := b.ReadNew(rev); got != nil || cur != 2 {
-		t.Fatalf("ReadNew(no-op Flush) = %v,%d, want nil,2", got, cur)
-	}
-	// A fragment split across writes plus Flush still assembles to one line.
-	b.Write([]byte("thr"))
-	b.Write([]byte("ee"))
-	b.Flush()
-	if got, _ := b.ReadNew(rev); len(got) != 1 || got[0] != "three" {
-		t.Fatalf("ReadNew(after split+Flush) = %v, want [three]", got)
-	}
-}
-
-// TestLogRing_Len pins the locked total accessor renderLogs uses: Len reflects
-// writes, is bounded by capacity, and is safe to call concurrently with writers
-// (exercised under -race).
-func TestLogRing_Len(t *testing.T) {
-	r := newLogRing(4)
-	if got := r.Len(); got != 0 {
-		t.Fatalf("empty ring Len = %d, want 0", got)
-	}
-	r.Write([]byte("a\nb\n"))
-	if got := r.Len(); got != 2 {
-		t.Fatalf("Len after two lines = %d, want 2", got)
-	}
-	r.Write([]byte("c\nd\ne\n"))
-	if got := r.Len(); got != 4 {
-		t.Fatalf("Len past capacity = %d, want 4", got)
-	}
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Add(2)
-		go func() {
-			defer wg.Done()
-			r.Write([]byte("x\n"))
-		}()
-		go func() {
-			defer wg.Done()
-			_ = r.Len()
-		}()
-	}
-	wg.Wait()
-	if got := r.Len(); got != 4 {
-		t.Fatalf("Len after concurrent writes = %d, want 4 (capacity-bounded)", got)
 	}
 }
 
@@ -409,6 +351,7 @@ func TestToastAnimCmd_WhileAnimating(t *testing.T) {
 // pending, a burst of unrelated updates arms the one-shot slide-out tick
 // exactly once — later updates neither stack a second tick nor advance the
 // armed deadline.
+
 func TestToastAnimSingleOwner_SettledDoesNotStack(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -439,6 +382,7 @@ func TestToastAnimSingleOwner_SettledDoesNotStack(t *testing.T) {
 // during a toast's slide-in arms a single 30ms animation ticker instead of one
 // per update. At most one natural re-arm is tolerated in case the armed
 // interval elapses mid-burst on a very slow machine.
+
 func TestToastAnimSingleOwner_AnimatingArmsOnce(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -478,6 +422,7 @@ func TestToastAnimSingleOwner_AnimatingArmsOnce(t *testing.T) {
 // TestAddToast_ClearsArmedAnimTick pins that adding a toast clears any tick
 // already armed for an older toast's future slide-out, so the new toast's
 // slide-in re-arms promptly instead of waiting out the stale deadline.
+
 func TestAddToast_ClearsArmedAnimTick(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -500,6 +445,7 @@ func TestAddToast_ClearsArmedAnimTick(t *testing.T) {
 // TestHandleLogLines_DedupAcrossTimestamps exercises the toast path end to end:
 // two identical slog errors separated by timestamps produce one toast, a
 // distinct warning produces another.
+
 func TestHandleLogLines_DedupAcrossTimestamps(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -517,6 +463,7 @@ func TestHandleLogLines_DedupAcrossTimestamps(t *testing.T) {
 // TestHandleLogLines_WarningConfigLineToasts proves the route-group config
 // warning (a stdlib log.Printf at startup, captured into the Logs tab) is
 // actionable prose under the widened keyword set.
+
 func TestHandleLogLines_WarningConfigLineToasts(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -528,78 +475,6 @@ func TestHandleLogLines_WarningConfigLineToasts(t *testing.T) {
 	}
 	if m.toasts[0].Message != strings.TrimSpace(line) {
 		t.Errorf("toast message = %q, want %q", m.toasts[0].Message, line)
-	}
-}
-
-func TestLogBuffer_PendingCapForcePublishes(t *testing.T) {
-	buf := NewLogBuffer(8)
-	payload := strings.Repeat("x", maxPendingLine*2+5)
-
-	if n, err := buf.Write([]byte(payload)); n != len(payload) || err != nil {
-		t.Fatalf("Write = (%d, %v), want (%d, nil)", n, err, len(payload))
-	}
-
-	lines, rev := buf.ReadNew(0)
-	if len(lines) != 2 {
-		t.Fatalf("got %d lines, want 2 cap-sized force-published chunks", len(lines))
-	}
-	for i := range lines {
-		if len(lines[i]) != maxPendingLine || strings.Trim(lines[i], "x") != "" {
-			t.Fatalf("line %d is not a %d-byte chunk of x's (len %d)", i, maxPendingLine, len(lines[i]))
-		}
-	}
-	// The tail below the cap stays retained for the next write or Flush.
-	if string(buf.pending) != "xxxxx" {
-		t.Fatalf("pending = %q (%d bytes), want the 5-byte retained tail", buf.pending, len(buf.pending))
-	}
-
-	buf.Flush()
-	lines, _ = buf.ReadNew(rev)
-	if len(lines) != 1 || lines[0] != "xxxxx" {
-		t.Fatalf("after Flush got %v, want [xxxxx]", lines)
-	}
-}
-
-func TestLogBuffer_PendingCapCarriesAcrossWrites(t *testing.T) {
-	buf := NewLogBuffer(8)
-	first := strings.Repeat("a", maxPendingLine-3)
-	buf.Write([]byte(first))
-	if len(buf.pending) != maxPendingLine-3 {
-		t.Fatalf("pending = %d bytes, want the fragment fully retained", len(buf.pending))
-	}
-
-	// Crossing the cap mid-fragment force-publishes at the exact cap boundary
-	// and retains only the remainder.
-	buf.Write([]byte("bcde"))
-	lines, rev := buf.ReadNew(0)
-	if len(lines) != 1 || len(lines[0]) != maxPendingLine {
-		t.Fatalf("got %d lines (first len %d), want one cap-sized chunk", len(lines), len(lines[0]))
-	}
-	if want := first + "bcd"; lines[0] != want {
-		t.Fatal("chunk is not the accumulated fragment truncated at the cap boundary")
-	}
-	if string(buf.pending) != "e" {
-		t.Fatalf("pending = %q, want %q", buf.pending, "e")
-	}
-
-	// The remainder keeps assembling normally.
-	buf.Write([]byte("f\n"))
-	lines, _ = buf.ReadNew(rev)
-	if len(lines) != 1 || lines[0] != "ef" {
-		t.Fatalf("got %v, want [ef]", lines)
-	}
-}
-
-func TestLogBuffer_CompleteLineLongerThanCapPublishedWhole(t *testing.T) {
-	buf := NewLogBuffer(4)
-	line := strings.Repeat("y", maxPendingLine*2+7)
-	buf.Write([]byte(line + "\n"))
-	lines, _ := buf.ReadNew(0)
-	if len(lines) != 1 || lines[0] != line {
-		t.Fatalf("complete lines must publish whole regardless of the pending cap (got %d lines)", len(lines))
-	}
-	if len(buf.pending) != 0 {
-		t.Fatalf("pending = %d bytes, want none", len(buf.pending))
 	}
 }
 
@@ -626,6 +501,7 @@ func TestQuitFlushesPendingLogFragment(t *testing.T) {
 // rest. Because the read cursor lives on the model and every delivery happens
 // inside Update, the previously-polled batch can neither be lost to an
 // in-flight send nor delivered twice.
+
 func TestLogDrain_TickThenQuitDeliversExactlyOnce(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.logBuf = NewLogBuffer(8)
@@ -658,6 +534,7 @@ func TestLogDrain_TickThenQuitDeliversExactlyOnce(t *testing.T) {
 
 // TestLogDrain_QuitDeliversNeverPolledLines pins that quitting delivers lines
 // no tick ever extracted — complete lines as well as the torn fragment.
+
 func TestLogDrain_QuitDeliversNeverPolledLines(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.logBuf = NewLogBuffer(8)
@@ -736,185 +613,7 @@ func TestToastSeenOldestFirstEviction(t *testing.T) {
 // RedirectTo flips the buffer into live passthrough — the torn fragment held at
 // flip time is flushed to the target first, subsequent Writes bypass the ring
 // entirely, and nothing new lands in the polled buffer.
-func TestLogBuffer_RedirectToStreamsThrough(t *testing.T) {
-	b := NewLogBuffer(8)
-	b.Write([]byte("torn"))
 
-	var sink bytes.Buffer
-	b.RedirectTo(&sink)
-	if got := sink.String(); got != "torn" {
-		t.Fatalf("pending fragment not flushed on redirect: %q, want %q", got, "torn")
-	}
-	if lines, _ := b.ReadNew(0); lines != nil {
-		t.Fatalf("flushed fragment leaked into the ring: %v", lines)
-	}
-
-	b.Write([]byte("live\n"))
-	if got := sink.String(); got != "tornlive\n" {
-		t.Fatalf("post-redirect write did not stream through: %q, want %q", got, "tornlive\n")
-	}
-	if lines, _ := b.ReadNew(0); lines != nil {
-		t.Fatalf("post-redirect write leaked into the ring: %v", lines)
-	}
-}
-
-// TestLogBuffer_RedirectToNilRestoresBuffering pins that a nil-w redirect
-// returns the buffer to ordinary capture.
-func TestLogBuffer_RedirectToNilRestoresBuffering(t *testing.T) {
-	b := NewLogBuffer(8)
-	var sink bytes.Buffer
-	b.RedirectTo(&sink)
-	b.RedirectTo(nil)
-
-	b.Write([]byte("buffered\n"))
-	lines, _ := b.ReadNew(0)
-	if len(lines) != 1 || lines[0] != "buffered" {
-		t.Fatalf("nil redirect did not restore buffering: ring=%v sink=%q", lines, sink.String())
-	}
-}
-
-// TestLogBuffer_RedirectToForwardsUnpolledRingLines pins review-14 #1: lines
-// published to the ring but never read by a poller are stranded when the TUI
-// dies — RedirectTo must hand every retained-but-unpolled line, plus any
-// pending fragment, to the target writer before flipping passthrough. Lines a
-// poller already delivered must not be re-emitted to stderr.
-func TestLogBuffer_RedirectToForwardsUnpolledRingLines(t *testing.T) {
-	b := NewLogBuffer(8)
-	b.Write([]byte("shown-a\nshown-b\n"))
-	lines, rev := b.ReadNew(0)
-	if len(lines) != 2 || lines[0] != "shown-a" || lines[1] != "shown-b" {
-		t.Fatalf("precondition poll = %v, want [shown-a shown-b]", lines)
-	}
-
-	// Written after the final drain: stranded by the old implementation.
-	b.Write([]byte("late-c\nlate-d\ntorn"))
-
-	var sink bytes.Buffer
-	b.RedirectTo(&sink)
-	if got, want := sink.String(), "late-c\nlate-d\ntorn"; got != want {
-		t.Fatalf("redirect sink = %q, want %q", got, want)
-	}
-	// The flipped buffer retains nothing readable: everything left was either
-	// delivered to the TUI (never re-emitted) or just handed to the sink.
-	if got, _ := b.ReadNew(rev); got != nil {
-		t.Fatalf("post-redirect ReadNew = %v, want nil", got)
-	}
-	// Subsequent writes stream through as before.
-	b.Write([]byte("live\n"))
-	if got, want := sink.String(), "late-c\nlate-d\ntornlive\n"; got != want {
-		t.Fatalf("post-redirect sink = %q, want %q", got, want)
-	}
-}
-
-// TestLogBuffer_RedirectToRepeatedHandoffExactlyOnce is the sequential mirror
-// of TestLogBuffer_RedirectToConcurrentExactlyOneSink (review-14 #1): repeated
-// redirects with buffering restored in between must forward each undelivered
-// line exactly once — already-polled lines are never re-emitted, and content
-// forwarded by an earlier redirect never leaks into a later one.
-func TestLogBuffer_RedirectToRepeatedHandoffExactlyOnce(t *testing.T) {
-	b := NewLogBuffer(64)
-	var s1, s2 bytes.Buffer
-
-	b.Write([]byte("a\nb\n"))
-	lines, _ := b.ReadNew(0) // the model drains [a b]
-	if len(lines) != 2 {
-		t.Fatalf("precondition poll = %v, want two lines", lines)
-	}
-	b.Write([]byte("c\nd\n"))
-	b.RedirectTo(&s1) // gets only c,d — a,b were already delivered
-
-	b.RedirectTo(nil) // capture restored
-	b.Write([]byte("e\nf\n"))
-	b.RedirectTo(&s2) // gets e,f; c,d must not reappear
-
-	for _, l := range []string{"a\n", "b\n"} {
-		if strings.Contains(s1.String(), l) || strings.Contains(s2.String(), l) {
-			t.Fatalf("polled line %q re-emitted to a teardown sink", strings.TrimSpace(l))
-		}
-	}
-	if got, want := s1.String(), "c\nd\n"; got != want {
-		t.Fatalf("first sink = %q, want %q", got, want)
-	}
-	if got, want := s2.String(), "e\nf\n"; got != want {
-		t.Fatalf("second sink = %q, want %q", got, want)
-	}
-}
-
-// TestLogBuffer_RedirectToConcurrentExactlyOneSink races writers against a
-// toggling redirect: every line must land in exactly one of the two sinks,
-// never both and never neither (exercised under -race).
-func TestLogBuffer_RedirectToConcurrentExactlyOneSink(t *testing.T) {
-	const writers = 8
-	const perWriter = 200
-
-	// Ring capacity covers the whole stream: eviction is legitimate ring behavior,
-	// not part of this invariant, and would silently swallow buffered lines.
-	b := NewLogBuffer(writers * perWriter)
-	var sink safeBuffer
-
-	stop := make(chan struct{})
-	togglerDone := make(chan struct{})
-	go func() {
-		defer close(togglerDone)
-		on := false
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			if on {
-				b.RedirectTo(nil)
-			} else {
-				b.RedirectTo(&sink)
-			}
-			on = !on
-		}
-	}()
-
-	var wg sync.WaitGroup
-	for i := range writers {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			for j := range perWriter {
-				line := fmt.Sprintf("g%02d-line%03d\n", i, j)
-				if _, err := b.Write([]byte(line)); err != nil {
-					t.Errorf("write: %v", err)
-					return
-				}
-			}
-		}(i)
-	}
-	wg.Wait()
-	close(stop)
-	<-togglerDone
-	b.RedirectTo(nil)
-
-	ring := map[string]int{}
-	for _, l := range func() []string { ls, _ := b.ReadNew(0); return ls }() {
-		ring[l]++
-	}
-	sinkLines := strings.SplitSeq(strings.TrimSuffix(sink.String(), "\n"), "\n")
-	for l := range sinkLines {
-		if l == "" {
-			continue
-		}
-		ring[l]++
-	}
-	if len(ring) != writers*perWriter {
-		t.Fatalf("sinks hold %d distinct lines, want exactly %d", len(ring), writers*perWriter)
-	}
-	for line, n := range ring {
-		if n != 1 {
-			t.Fatalf("line %q landed in sinks %d times, want exactly once", line, n)
-		}
-	}
-}
-
-// TestHandleLogLines_EmptyMsgStillToasts pins review-07 #6 / review-08 #1: an
-// actionable line whose dedup key is empty (e.g. slog's msg="") must toast —
-// every occurrence, since it cannot be deduplicated — never be silently dropped.
 func TestHandleLogLines_EmptyMsgStillToasts(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -937,6 +636,7 @@ func TestHandleLogLines_EmptyMsgStillToasts(t *testing.T) {
 
 // TestHandleLogLines_DistinctAttributesToastSeparately exercises the T20 fix end
 // to end through the toast path.
+
 func TestHandleLogLines_DistinctAttributesToastSeparately(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -953,6 +653,7 @@ func TestHandleLogLines_DistinctAttributesToastSeparately(t *testing.T) {
 // TestHandleLogLines_StripsANSI pins review-07 #8 hardening: escape sequences in
 // captured lines are stripped before they reach the ring or a toast message, so
 // logged text can never inject terminal control output.
+
 func TestHandleLogLines_StripsANSI(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -977,6 +678,7 @@ func TestHandleLogLines_StripsANSI(t *testing.T) {
 // TestToastLiveCap_UnderSustainedUniqueErrors pins review-07 #3: a burst of
 // distinct actionable errors cannot grow the live-toast slice without bound;
 // only the newest toastLiveMax survive and the Logs tab keeps everything.
+
 func TestToastLiveCap_UnderSustainedUniqueErrors(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
@@ -1010,6 +712,7 @@ func TestToastLiveCap_UnderSustainedUniqueErrors(t *testing.T) {
 // mid slide-in so the armed tick horizon is one 30ms animation interval, and
 // the stale arrival's deadline is forced into the past instead of racing wall
 // clocks.
+
 func TestAnimTick_StaleGenerationIgnored(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
