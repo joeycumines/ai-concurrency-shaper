@@ -69,17 +69,27 @@ func (m Model) resolveAnchor(anchor logDetailAnchor) (int, string, bool) {
 
 // logItemAtCursor returns the ring item the Logs cursor currently selects,
 // resolved through the filtered list so it is the item the operator sees.
+// The walk mirrors resolveAnchor's: the filtered list is position-indexed,
+// so with duplicate lines only a position-based mapping selects the
+// occurrence the cursor is actually on — a first-text-match would return
+// the earliest duplicate's sequence and mis-pin the anchor (and, once that
+// earliest duplicate is evicted, falsely close the overlay).
 // nil when the cursor is out of range.
 func (m *Model) logItemAtCursor() *logRingItem {
 	lines := m.visibleLogLines()
 	if m.cursor >= len(lines) {
 		return nil
 	}
-	text := lines[m.cursor]
+	lower := strings.ToLower(m.filterText)
+	visibleCount := 0
 	for _, item := range m.logRing.snapshot() {
-		if item.text == text {
+		if lower != "" && !strings.Contains(strings.ToLower(item.text), lower) {
+			continue
+		}
+		if visibleCount == m.cursor {
 			return &item
 		}
+		visibleCount++
 	}
 	return nil
 }

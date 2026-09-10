@@ -355,6 +355,60 @@ func TestLogDetailPin_DuplicateLinesKeepsSelectedOccurrence(t *testing.T) {
 	}
 }
 
+// TestLogDetailPin_AdjacentDuplicatesKeepsSelectedOccurrence pins the anchor
+// against ADJACENT duplicate lines: with ring [dup, dup] and the cursor on the
+// second occurrence, the anchor must record the second occurrence's sequence —
+// a first-text-match would record the first occurrence's, mis-pinning the
+// heading to "Log Line 1" and falsely closing the overlay when the first
+// occurrence is evicted while the selected one is retained.
+func TestLogDetailPin_AdjacentDuplicatesKeepsSelectedOccurrence(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
+	m.width = 80
+	m.height = 24
+	m.tab = tabLogs
+	shared := "duplicate log line"
+	m.logRing.Write([]byte(shared + "\n"))
+	m.logRing.Write([]byte(shared + "\n"))
+	m.cursor = 1 // the SECOND occurrence of the shared text
+
+	m = update(m, special("enter"))
+	if m.mode != modeDetail {
+		t.Fatal("setup: should be in detail mode")
+	}
+	detail := stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detail, "Log Line 2") {
+		t.Fatalf("detail must show list position 2 for the selected occurrence, got: %q", detail)
+	}
+
+	// Evict the FIRST occurrence with 2047 fillers (ring capacity 2048): the
+	// selected occurrence is still retained, so the overlay must stay open —
+	// a first-text-match anchor would have become unresolvable here.
+	var sb strings.Builder
+	for i := range 2047 {
+		fmt.Fprintf(&sb, "filler %d\n", i)
+	}
+	m.logRing.Write([]byte(sb.String()))
+	m = update(m, key('x')) // ignored in modeDetail: only the Update tail can close
+
+	if m.mode != modeDetail {
+		t.Fatalf("overlay falsely closed after the first duplicate was evicted (the selected occurrence is still retained)")
+	}
+	detail = stripANSI(m.renderDetailOverlay())
+	if !strings.Contains(detail, shared) {
+		t.Errorf("overlay must still show the retained occurrence, got: %q", detail)
+	}
+
+	// Evicting the selected occurrence too must close the overlay.
+	for i := range 10 {
+		fmt.Fprintf(&sb, "more %d\n", i)
+	}
+	m.logRing.Write([]byte(sb.String()))
+	m = update(m, key('x'))
+	if m.mode != modeBrowse {
+		t.Errorf("mode after the anchored occurrence was evicted = %v, want modeBrowse", m.mode)
+	}
+}
+
 // TestLogDetailPin_FilteredAnchorUsesFilteredList pins anchor creation under
 // an active filter: Enter must anchor to the filtered list's item at m.cursor
 // (the item the operator sees), not the unfiltered ring position.
