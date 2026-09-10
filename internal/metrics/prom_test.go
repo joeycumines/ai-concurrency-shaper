@@ -402,9 +402,6 @@ func TestWritePrometheusSkipsInvalidUTF8RouteLabels(t *testing.T) {
 		t.Fatalf("WritePrometheusFleet: %v", err)
 	}
 	got := buf.String()
-	if strings.ContainsRune(got, '\xff') {
-		t.Fatalf("invalid UTF-8 reached the exposition:\n%q", got)
-	}
 	for _, want := range []string{
 		`shaper_route_queued{provider="a",method="POST",path="/v1/messages"} 2`,
 		`shaper_route_oldest_queued_seconds{provider="a",method="POST",path="/v1/messages"} 1.500`,

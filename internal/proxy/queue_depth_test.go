@@ -26,6 +26,10 @@ func TestProxy_QueueDepthLimitRejectsWith429(t *testing.T) {
 	// depth 1: the first request waits (the upstream is gated), the second
 	// must be rejected with 429 + Retry-After instead of queueing.
 	gate := make(chan struct{})
+	var gateClose sync.Once
+	safeCloseGate := func() {
+		gateClose.Do(func() { close(gate) })
+	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-gate
 		w.WriteHeader(http.StatusOK)
@@ -35,6 +39,7 @@ func TestProxy_QueueDepthLimitRejectsWith429(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(upstream.Close)
+	t.Cleanup(safeCloseGate)
 
 	pat, _ := route.Parse("POST /messages:1")
 	met := metrics.NewCollector()
@@ -91,7 +96,7 @@ func TestProxy_QueueDepthLimitRejectsWith429(t *testing.T) {
 
 	// Release the gate: the queued request completes; the rejected one never
 	// queued at all. (Closed exactly once, after every consumer finished.)
-	close(gate)
+	safeCloseGate()
 	if code := <-firstDone; code != http.StatusOK {
 		t.Fatalf("first request status = %d, want 200", code)
 	}
@@ -299,7 +304,6 @@ func TestProxy_QueueDepthDoesNotRejectWhenSlotsFree(t *testing.T) {
 			close(gate)
 		})
 	}
-	t.Cleanup(safeCloseGate)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		<-gate
@@ -307,6 +311,7 @@ func TestProxy_QueueDepthDoesNotRejectWhenSlotsFree(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	t.Cleanup(upstream.Close)
+	t.Cleanup(safeCloseGate)
 
 	upstreamURL, err := url.Parse(upstream.URL)
 	if err != nil {

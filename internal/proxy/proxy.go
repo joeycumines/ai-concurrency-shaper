@@ -1297,8 +1297,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				recPtr.aborted = true
 				if !recPtr.terminalWritten {
 					recPtr.proxyGeneratedError = true
+					http.Error(recPtr, "internal error", http.StatusBadGateway)
 				}
-				http.Error(recPtr, "internal error", http.StatusBadGateway)
 				finalize(true)
 			} else {
 				// No statusRecorder — write directly to the raw ResponseWriter.
@@ -1479,7 +1479,7 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 		r = r.WithContext(p.withRetryAttemptContext(r.Context(), &retryAttempt))
 	}
 
-	if p.globalLimiter != nil {
+	if p.globalLimiter != nil && !p.matcher.IsUnlimited(r.Method, r.URL.Path) {
 		// Track queue metrics for passthrough requests waiting in the
 		// global limiter so the TUI reports queue depth accurately.
 		p.m.IncQueued()
@@ -1515,8 +1515,13 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 			if p.breaker != nil {
 				p.breaker.CancelProbe(breakerEpoch)
 			}
-			p.m.IncCancelled()
-			http.Error(w, "request canceled", http.StatusServiceUnavailable)
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				p.m.IncTimeout()
+				http.Error(w, "queue timeout", http.StatusGatewayTimeout)
+			} else {
+				p.m.IncCancelled()
+				http.Error(w, "request canceled", http.StatusServiceUnavailable)
+			}
 			return
 		}
 		// Slot-release defer: applies phantom penalty, cancel-cooldown,
@@ -1815,9 +1820,9 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		rec.entry.Timing.QueueStart = time.Now()
 	}
 	release, slotLimiter, err := p.acquireSlot(ctx, r.Method, r.URL.Path)
-	p.m.DecQueued()
 
 	if err != nil {
+		p.m.DecQueued()
 		// Record the moment the queue wait ended so that QueueDuration
 		// reflects the actual time spent waiting, not zero.
 		if recIsRecorder && rec.entry != nil {
@@ -1969,6 +1974,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	if p.globalLimiter != nil {
 		globalRelease, err := p.globalLimiter.Acquire(ctx)
 		if err != nil {
+			p.m.DecQueued()
 			// Record the moment the global limiter wait ended so that
 			// QueueDuration reflects the full queue time, not zero.
 			if recIsRecorder && rec.entry != nil {
@@ -2021,7 +2027,11 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	p.m.IncActive()
 	defer p.m.DecActive()
 
+	// Mark started before decrementing the queued gauge so a concurrent
+	// snapshot never observes aggregate 0 with a per-route waiter still
+	// present: the transient is an overcount (1 vs 0), never an undercount.
 	p.m.MarkInFlightStarted(flightID)
+	p.m.DecQueued()
 
 	// Capture the time the upstream request begins so we can pass it to
 	// RecordFailure as startedAt. This enables stale-request protection:

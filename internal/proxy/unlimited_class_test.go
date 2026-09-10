@@ -150,3 +150,61 @@ func TestProxy_UnlimitedClassPrecedenceFirstMatchWins(t *testing.T) {
 		t.Fatalf("TotalProxied = %d, want 1 (the first-matching limited pattern governs)", got)
 	}
 }
+
+func TestProxy_UnlimitedBypassesGlobalLimiter(t *testing.T) {
+	// The unlimited class never acquires a slot, including the global
+	// limiter: with the single global slot held by a blocking limited
+	// request, an unlimited request still answers immediately instead of
+	// queueing behind it.
+	release := make(chan struct{})
+	var closeRelease sync.Once
+	safeClose := func() { closeRelease.Do(func() { close(release) }) }
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/messages" {
+			<-release
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	t.Cleanup(upstream.Close)
+	t.Cleanup(safeClose)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited, _ := route.Parse("POST /messages:1")
+	unlimited, _ := route.Parse("POST /messages/count_tokens:unlimited")
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{unlimited, limited})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithLimitAll(true),
+		WithQueueTimeout(2*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holderDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+		holderDone <- rec.Code
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", nil))
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("unlimited request took %v behind the held global slot, want immediate bypass", elapsed)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unlimited status = %d, want 200", rec.Code)
+	}
+	safeClose()
+	if code := <-holderDone; code != http.StatusOK {
+		t.Fatalf("holder status = %d, want 200", code)
+	}
+}

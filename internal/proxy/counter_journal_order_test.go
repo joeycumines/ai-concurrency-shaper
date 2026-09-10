@@ -45,7 +45,12 @@ func TestProxy_CleanCountersPublishAfterJournalEntry(t *testing.T) {
 			counter: func(s metrics.Snapshot) int64 { return s.TotalPassThrough }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			j := journal.New(2048, 1<<20)
+			// Production capacity: main.go derives 51 entries from the
+			// default 5 MiB retry body budget ((512 MiB)/(5 MiB*2)).
+			// The invariant must hold under eviction, so the test pins
+			// it at that capacity instead of an oversized ring.
+			const journalCap = 51
+			j := journal.New(journalCap, 5<<20)
 			met := metrics.NewCollector()
 			pat, err := route.Parse("POST /v1/messages")
 			if err != nil {
@@ -84,8 +89,13 @@ func TestProxy_CleanCountersPublishAfterJournalEntry(t *testing.T) {
 							return
 						}
 						entries := j.Entries()
-						if len(entries) < int(tc.counter(snap)) {
-							t.Errorf("journal entries = %d < counter = %d: counter published before the journal entry (M10)", len(entries), tc.counter(snap))
+						got := tc.counter(snap)
+						wantLen := int(got)
+						if wantLen > journalCap {
+							wantLen = journalCap
+						}
+						if len(entries) < wantLen {
+							t.Errorf("journal entries = %d < min(counter = %d, cap = %d): counter published before the journal entry (M10)", len(entries), got, journalCap)
 							return
 						}
 					}
@@ -95,8 +105,12 @@ func TestProxy_CleanCountersPublishAfterJournalEntry(t *testing.T) {
 
 			snap := met.Snapshot()
 			entries := j.Entries()
-			if got := tc.counter(snap); got != int64(len(entries)) {
-				t.Fatalf("final: counter = %d, journal entries = %d", got, len(entries))
+			const totalRequests = 32 * 25
+			if got := tc.counter(snap); got != totalRequests {
+				t.Fatalf("final: counter = %d, want %d", got, totalRequests)
+			}
+			if len(entries) != journalCap {
+				t.Fatalf("final: journal entries = %d, want cap %d (ring evicts under production capacity)", len(entries), journalCap)
 			}
 			for _, entry := range entries {
 				if entry.Aborted {

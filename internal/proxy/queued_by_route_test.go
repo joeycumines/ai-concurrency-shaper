@@ -143,3 +143,69 @@ func TestProxy_QueuedByRouteEmptyWhenIdle(t *testing.T) {
 		t.Fatalf("OldestQueuedAgeByRoute = %v, want empty", snap.OldestQueuedAgeByRoute)
 	}
 }
+
+func TestProxy_QueuedGaugesAgreeDuringGlobalWait(t *testing.T) {
+	// A limited request waiting on the global limiter (route slot free,
+	// global slot held) must appear in both the aggregate queued gauge
+	// and the per-route view: a snapshot reporting shaper_queued=0 with a
+	// per-route waiter present breaks the TUI headline invariant.
+	gate := make(chan struct{})
+	var gateClose sync.Once
+	safeClose := func() { gateClose.Do(func() { close(gate) }) }
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-gate
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+	t.Cleanup(safeClose)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pat, _ := route.Parse("POST /messages:4")
+	met := metrics.NewCollector()
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(met),
+		WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithQueueTimeout(10*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holderDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+		holderDone <- rec.Code
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	waiterDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+		waiterDone <- rec.Code
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	snap := met.Snapshot()
+	if snap.Queued < 1 {
+		t.Fatalf("aggregate queued = %d, want >= 1 while a limited request waits on the global limiter", snap.Queued)
+	}
+	if got := snap.QueuedByRoute["POST /v1/messages"]; got != 1 {
+		t.Fatalf("QueuedByRoute[POST /v1/messages] = %d, want 1 during the global wait", got)
+	}
+	if age := snap.OldestQueuedAgeByRoute["POST /v1/messages"]; age <= 0 {
+		t.Fatalf("oldest queued age = %v, want > 0 during the global wait", age)
+	}
+	safeClose()
+	if code := <-holderDone; code != http.StatusOK {
+		t.Fatalf("holder status = %d, want 200", code)
+	}
+	if code := <-waiterDone; code != http.StatusOK {
+		t.Fatalf("waiter status = %d, want 200", code)
+	}
+}

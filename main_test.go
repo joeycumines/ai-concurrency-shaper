@@ -1781,7 +1781,8 @@ func TestE2E_MetricsEndpoint(t *testing.T) {
 	}
 
 	fire := func(path string) {
-		resp, err := http.Get("http://" + proxyAddr + path)
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get("http://" + proxyAddr + path)
 		if err != nil {
 			t.Fatalf("fire %s: %v", path, err)
 		}
@@ -1796,9 +1797,10 @@ func TestE2E_MetricsEndpoint(t *testing.T) {
 	// sleep so the test stays fast and deterministic under load.
 	waitForMetricsLine := func(want string) {
 		t.Helper()
+		client := &http.Client{Timeout: 10 * time.Second}
 		deadline := time.Now().Add(2 * time.Second)
 		for {
-			resp, err := http.Get("http://" + metricsAddr + "/metrics")
+			resp, err := client.Get("http://" + metricsAddr + "/metrics")
 			if err != nil {
 				t.Fatalf("scrape while waiting for %q: %v", want, err)
 			}
@@ -1821,7 +1823,8 @@ func TestE2E_MetricsEndpoint(t *testing.T) {
 	waitForMetricsLine(`shaper_requests_total{provider="beta",status="2xx"} 1`)
 
 	scrape := func(path string) (int, string, string) {
-		resp, err := http.Get("http://" + metricsAddr + path)
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get("http://" + metricsAddr + path)
 		if err != nil {
 			t.Fatalf("scrape %s: %v", path, err)
 		}
@@ -2109,7 +2112,29 @@ func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
 		resp.Body.Close()
 		bSlot <- struct{}{}
 	})
-	time.Sleep(200 * time.Millisecond)
+	// Deterministic readiness: the SSE request must queue behind the holder,
+	// so wait until the holder demonstrably holds the single openai slot
+	// (active 1) before firing the SSE request. A fixed sleep lets the SSE
+	// request win the slot under load and false-fail while the product is
+	// correct.
+	{
+		want := `shaper_active{provider="openai"} 1`
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			resp, err := client.Get("http://" + metricsAddr + "/metrics")
+			if err == nil {
+				body, readErr := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if readErr == nil && strings.Contains(string(body), want) {
+					break
+				}
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %q in /metrics (openai slot-holder readiness)", want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 
 	sseDone := make(chan string, 1)
 	async(func() {
@@ -2128,7 +2153,9 @@ func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
 		resp.Body.Close()
 		sseDone <- string(respBody)
 	})
-	time.Sleep(300 * time.Millisecond)
+	// No head-start sleep: the scrape loop below polls until both queued
+	// series are present, so it already waits deterministically for the SSE
+	// request to be queued.
 
 	// While the SSE request is queued, scrape /metrics: the aggregate and
 	// per-route queue series must be present with accurate values

@@ -2728,7 +2728,7 @@ func TestProxy_PassthroughQueueTimeoutRespected(t *testing.T) {
 	//
 	// Strategy: upstream sleeps forever, global limiter has 1 slot, queue timeout
 	// is 100ms. First request (passthrough) takes the slot. Second passthrough
-	// request should receive 503 within the timeout window.
+	// request should receive 504 within the timeout window.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(5 * time.Second) // block forever (relative to test)
 		w.WriteHeader(http.StatusOK)
@@ -2768,8 +2768,11 @@ func TestProxy_PassthroughQueueTimeoutRespected(t *testing.T) {
 	p.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/unlimited", nil))
 	elapsed := time.Since(start)
 
-	if rec2.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 (queue timeout on global limiter), got %d", rec2.Code)
+	if rec2.Code != http.StatusGatewayTimeout {
+		t.Fatalf("expected 504 (queue timeout on global limiter), got %d", rec2.Code)
+	}
+	if got := met.Snapshot().TotalTimeout; got != 1 {
+		t.Fatalf("TotalTimeout = %d, want 1 (passthrough queue timeout parity with the limited path)", got)
 	}
 
 	// The request should complete within roughly queue timeout + overhead.
@@ -10252,7 +10255,7 @@ func TestProxy_QueueFailureBeforeRoundTrip_ReleasesHalfOpenProbe(t *testing.T) {
 		wantStatus int
 	}{
 		{name: "limited queue timeout", method: http.MethodPost, path: "/v1/messages", wantStatus: http.StatusGatewayTimeout},
-		{name: "passthrough global queue cancel", method: http.MethodGet, path: "/health", global: true, wantStatus: http.StatusServiceUnavailable},
+		{name: "passthrough global queue timeout", method: http.MethodGet, path: "/health", global: true, wantStatus: http.StatusGatewayTimeout},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
