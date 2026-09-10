@@ -1,6 +1,6 @@
 package transcode
 
-// Raw-key golden tests for the emitted wire (review-z commit 1). The recipe
+// Raw-key golden tests for the emitted wire. The recipe
 // from the plan: unmarshal emitted JSON into map[string]json.RawMessage,
 // assert the exact required key set, and assert required nullable keys are
 // present even when null. These tests never validate emitted wire by
@@ -515,7 +515,7 @@ func TestRawKeyResponsesInputFunctionCall(t *testing.T) {
 // TestRawKeyResponsesRequestStreamField proves the rendered request's stream
 // field matches the exchange mode: omitted entirely for a non-streaming
 // exchange (a present struct value would otherwise always emit), and
-// "stream":true only when streaming (review run 1 finding F1).
+// "stream":true only when streaming.
 func TestRawKeyResponsesRequestStreamField(t *testing.T) {
 	request := CanonicalRequest{
 		ClientModel: "m",
@@ -553,8 +553,7 @@ func TestRawKeyResponsesRequestStreamField(t *testing.T) {
 }
 
 // TestRawKeyResponsesEnvelopeErrorAndUsageKeys proves the error object's
-// code and the usage detail objects are always emitted (review run 1
-// findings F3 and F6).
+// code and the usage detail objects are always emitted.
 func TestRawKeyResponsesEnvelopeErrorAndUsageKeys(t *testing.T) {
 	// A failed envelope always carries error.code, even when unknown.
 	failed := ResponseEnvelope{

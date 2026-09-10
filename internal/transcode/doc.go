@@ -45,7 +45,7 @@
 // # Semantic matrix
 //
 // Every canonical field and source artifact is classified per target dialect
-// (review-j finding 10). New fields must be placed in exactly one row below
+// New fields must be placed in exactly one row below
 // before being used in a renderer:
 //
 //   - exact: the value crosses protocols unchanged;

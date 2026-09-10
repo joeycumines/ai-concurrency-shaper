@@ -21,7 +21,7 @@ import (
 // outside the documented allowlist is stripped from the outbound request:
 // cookies, forwarding headers, range/conditional controls, idempotency keys,
 // source-provider controls, credentials, and extension/tenant headers never
-// reach the target provider (review-08 blocker 10).
+// reach the target provider.
 func TestTranscodeRequestHeaderAllowlist(t *testing.T) {
 	var (
 		gotHeader http.Header
@@ -74,7 +74,7 @@ func TestTranscodeRequestHeaderAllowlist(t *testing.T) {
 // TestTranscodeResponseHeaderAllowlist proves the upstream response headers
 // exposed to the client-facing origin are limited to the request-id family
 // and the rate-limit informational headers: Set-Cookie and other control or
-// extension headers never leak across providers (review-08 blocker 10).
+// extension headers never leak across providers.
 func TestTranscodeResponseHeaderAllowlist(t *testing.T) {
 	mapping := responsesMapping(t)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
@@ -117,8 +117,7 @@ func TestTranscodeResponseHeaderAllowlist(t *testing.T) {
 }
 
 // TestTranscodeOutboundAcceptNormalization proves the outbound Accept always
-// matches the negotiated stream mode after the allowlist applies (review-08
-// blockers 1 and 10).
+// matches the negotiated stream mode after the allowlist applies.
 func TestTranscodeOutboundAcceptNormalization(t *testing.T) {
 	tests := []struct {
 		name       string

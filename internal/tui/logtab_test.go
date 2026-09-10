@@ -30,7 +30,7 @@ import (
 )
 
 // TestLogWiring_StdlibWarningToasts pins the exact log/slog wiring main.go
-// installs in TUI mode (review-07 #1). Order is load-bearing: slog.SetDefault
+// installs in TUI mode. Order is load-bearing: slog.SetDefault
 // rewires the standard logger through its handler at INFO level, so installing
 // log.SetOutput BEFORE it silently demotes every stdlib line — including the
 // route-group config WARNING — to a non-actionable slog INFO record. The fixed
@@ -620,8 +620,8 @@ func TestQuitFlushesPendingLogFragment(t *testing.T) {
 	}
 }
 
-// TestLogDrain_TickThenQuitDeliversExactlyOnce models the message flow that
-// review-05 flagged: a poll tick delivers some lines through Update, more lines
+// TestLogDrain_TickThenQuitDeliversExactlyOnce models the message flow where
+// a poll tick delivers some lines through Update, more lines
 // are written afterwards (including a torn tail), and quit then drains the
 // rest. Because the read cursor lives on the model and every delivery happens
 // inside Update, the previously-polled batch can neither be lost to an
@@ -707,7 +707,7 @@ func TestToastSeenOldestFirstEviction(t *testing.T) {
 	}
 
 	// Replaying an evicted error re-toasts exactly once: the new toast joins as
-	// the newest survivor of the bounded live-toast slice (review-07 #3 cap).
+	// the newest survivor of the bounded live-toast slice.
 	// Replaying a retained one stays deduplicated and leaves the slice alone.
 	evicted := fmt.Sprintf(`level=ERROR msg="boom %03d"`, 0)
 	retained := fmt.Sprintf(`level=ERROR msg="boom %03d"`, total-1)
@@ -732,7 +732,7 @@ func TestToastSeenOldestFirstEviction(t *testing.T) {
 	}
 }
 
-// TestLogBuffer_RedirectToStreamsThrough pins review-10 #4 / review-11 #2:
+// TestLogBuffer_RedirectToStreamsThrough pins the live-passthrough contract:
 // RedirectTo flips the buffer into live passthrough — the torn fragment held at
 // flip time is flushed to the target first, subsequent Writes bypass the ring
 // entirely, and nothing new lands in the polled buffer.
@@ -773,7 +773,8 @@ func TestLogBuffer_RedirectToNilRestoresBuffering(t *testing.T) {
 	}
 }
 
-// TestLogBuffer_RedirectToForwardsUnpolledRingLines pins review-14 #1: lines
+// TestLogBuffer_RedirectToForwardsUnpolledRingLines pins the stranded-lines
+// contract: lines
 // published to the ring but never read by a poller are stranded when the TUI
 // dies — RedirectTo must hand every retained-but-unpolled line, plus any
 // pending fragment, to the target writer before flipping passthrough. Lines a
@@ -807,7 +808,7 @@ func TestLogBuffer_RedirectToForwardsUnpolledRingLines(t *testing.T) {
 }
 
 // TestLogBuffer_RedirectToRepeatedHandoffExactlyOnce is the sequential mirror
-// of TestLogBuffer_RedirectToConcurrentExactlyOneSink (review-14 #1): repeated
+// of TestLogBuffer_RedirectToConcurrentExactlyOneSink: repeated
 // redirects with buffering restored in between must forward each undelivered
 // line exactly once — already-polled lines are never re-emitted, and content
 // forwarded by an earlier redirect never leaks into a later one.
@@ -912,7 +913,7 @@ func TestLogBuffer_RedirectToConcurrentExactlyOneSink(t *testing.T) {
 	}
 }
 
-// TestHandleLogLines_EmptyMsgStillToasts pins review-07 #6 / review-08 #1: an
+// TestHandleLogLines_EmptyMsgStillToasts pins the empty-key rule: an
 // actionable line whose dedup key is empty (e.g. slog's msg="") must toast —
 // every occurrence, since it cannot be deduplicated — never be silently dropped.
 func TestHandleLogLines_EmptyMsgStillToasts(t *testing.T) {
@@ -950,7 +951,7 @@ func TestHandleLogLines_DistinctAttributesToastSeparately(t *testing.T) {
 	}
 }
 
-// TestHandleLogLines_StripsANSI pins review-07 #8 hardening: escape sequences in
+// TestHandleLogLines_StripsANSI pins the ANSI-stripping hardening: escape sequences in
 // captured lines are stripped before they reach the ring or a toast message, so
 // logged text can never inject terminal control output.
 func TestHandleLogLines_StripsANSI(t *testing.T) {
@@ -974,7 +975,7 @@ func TestHandleLogLines_StripsANSI(t *testing.T) {
 	}
 }
 
-// TestToastLiveCap_UnderSustainedUniqueErrors pins review-07 #3: a burst of
+// TestToastLiveCap_UnderSustainedUniqueErrors pins the live-toast cap: a burst of
 // distinct actionable errors cannot grow the live-toast slice without bound;
 // only the newest toastLiveMax survive and the Logs tab keeps everything.
 func TestToastLiveCap_UnderSustainedUniqueErrors(t *testing.T) {
@@ -1004,7 +1005,7 @@ func TestToastLiveCap_UnderSustainedUniqueErrors(t *testing.T) {
 	}
 }
 
-// TestAnimTick_StaleGenerationIgnored pins review-07 #2: a tick armed before an
+// TestAnimTick_StaleGenerationIgnored pins the stale-tick rule: a tick armed before an
 // AddToast carries a dead generation, so its late arrival neither re-renders via
 // re-arm nor stacks a ticker. Deterministic and fast: the first toast is placed
 // mid slide-in so the armed tick horizon is one 30ms animation interval, and

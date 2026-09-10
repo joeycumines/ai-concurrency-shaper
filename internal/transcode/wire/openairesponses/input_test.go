@@ -10,7 +10,7 @@ import (
 )
 
 // TestDecodeInputItemCodexHistoryOutputTextNoAnnotations reproduces the
-// field-observed Codex turn-2 failure (autopsy 01): real clients replay
+// field-observed Codex turn-2 failure: real clients replay
 // assistant history as output_text parts WITHOUT an annotations key, and the
 // union decode must normalize the absent array to [] instead of rejecting
 // the item. Validate itself stays strict — only the decode path normalizes.
@@ -72,7 +72,7 @@ func TestDecodeInputItemCodexHistoryOutputTextNoAnnotations(t *testing.T) {
 }
 
 // TestDecodeStreamContentPartOutputTextNoAnnotations pins the same
-// decode-side normalization for the stream content-part union (autopsy 01):
+// decode-side normalization for the stream content-part union:
 // upstream content_part events may omit annotations.
 func TestDecodeStreamContentPartOutputTextNoAnnotations(t *testing.T) {
 	data := `{"type":"response.content_part.added","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"hi"}}`
@@ -108,7 +108,7 @@ func TestDecodeStreamContentPartOutputTextNoAnnotations(t *testing.T) {
 }
 
 // TestDecodeInputItemAssistantEasyMessageOutputParts covers the second
-// autopsy-01 defect: an assistant easy input message (no id/status) carries
+// defect: an assistant easy input message (no id/status) carries
 // output-type content parts in the field, and DecodeInputContentPart must
 // decode output_text/refusal arms — legal only for the assistant role.
 func TestDecodeInputItemAssistantEasyMessageOutputParts(t *testing.T) {
@@ -182,7 +182,8 @@ func TestDecodeInputItemAssistantEasyMessageOutputParts(t *testing.T) {
 	}
 }
 
-// TestDecodeInputItemFunctionOutputRejectsOutputParts pins review F1: the
+// TestDecodeInputItemFunctionOutputRejectsOutputParts pins the typed
+// rejection: the
 // output_text/refusal input-part arms exist for assistant message history
 // only — a function_call_output payload keeps the typed rejection it had
 // before those arms were added.

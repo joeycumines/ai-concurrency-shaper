@@ -16,8 +16,8 @@ var (
 
 // sealedSSEWriter provides two guarantees:
 //
-//  1. every downstream Flush follows one complete "\n\n"-terminated SSE event;
-//  2. after Seal returns, no goroutine can call the underlying ResponseWriter.
+// 1. every downstream Flush follows one complete "\n\n"-terminated SSE event;
+// 2. after Seal returns, no goroutine can call the underlying ResponseWriter.
 //
 // io.Copy is allowed to split or combine reads arbitrarily, so flushing on
 // every Write call does not imply one flush per SSE event.
@@ -105,7 +105,7 @@ func (w *sealedSSEWriter) Seal() error {
 // writeAll writes p fully to w with a single Write. A partial write with a
 // nil error is io.ErrShortWrite: repeated partial writes must never be
 // retried into a false success, because a caller that sees nil records the
-// write as complete (review-08 blocker 11).
+// write as complete.
 func writeAll(w io.Writer, p []byte) error {
 	n, err := w.Write(p)
 	if err != nil {

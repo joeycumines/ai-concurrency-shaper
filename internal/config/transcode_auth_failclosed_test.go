@@ -1,6 +1,6 @@
 package config
 
-// Autopsy 2026-09-06 M6: -transcode-auth <mode> without -transcode-auth-source
+// -transcode-auth <mode> without -transcode-auth-source
 // silently set Inbound=true, forwarding the CLIENT credential to the transcode
 // target and contradicting the documented fail-closed default. The missing
 // source is now a startup configuration error: Inbound stays false and
@@ -24,7 +24,7 @@ func TestTranscodeAuthModeWithoutSourceFailsClosed(t *testing.T) {
 		}
 		err = cfg.ResolveAndValidate()
 		if err == nil {
-			t.Fatalf("mode %s: ResolveAndValidate must fail without a source (autopsy M6)", mode)
+			t.Fatalf("mode %s: ResolveAndValidate must fail without a source", mode)
 		}
 		if !strings.Contains(err.Error(), "requires a secret source or inbound credentials") {
 			t.Fatalf("mode %s: err = %v, want the missing-source validation error", mode, err)

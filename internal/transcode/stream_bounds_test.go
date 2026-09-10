@@ -1,6 +1,6 @@
 package transcode
 
-// J9 regression tests (review-k finding 9, medium): stream bookkeeping is
+// J9 regression tests: stream bookkeeping is
 // bounded and non-quadratic — text and refusal accumulate in builders, the
 // repeated per-chunk envelope losses are recorded once per stream, and
 // cumulative semantic state beyond the configured bound is rejected as
@@ -103,7 +103,6 @@ func TestChatStreamRepeatedLossesRecordedOnce(t *testing.T) {
 // TestChatStreamToolArgumentsCumulativeBound proves identity-complete tool
 // argument fragments accumulate against the per-item cumulative bound and
 // crossing it terminates the stream with the typed upstream wire error
-// (review-k finding 9).
 func TestChatStreamToolArgumentsCumulativeBound(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -234,7 +233,6 @@ func TestResponsesStreamToolArgumentsCumulativeBound(t *testing.T) {
 // total accumulated semantic bytes across all items/parts/tools, the output
 // item count, and the content parts per item are all hard bounds — crossing
 // any of them terminates the exchange with the typed upstream wire error
-// (review-08 blocker 7).
 func TestStreamTotalStateBound(t *testing.T) {
 	t.Run("total accumulated bytes across parts", func(t *testing.T) {
 		state := newChatResponsesStreamState(
@@ -349,12 +347,12 @@ func TestStreamTotalStateBound(t *testing.T) {
 }
 
 // TestGeneratedFrameBoundAfterJSONEscaping pins the marshaling-order
-// enforcement of the generated-frame bound (review-08 blocker 7): a delta
+// enforcement of the generated-frame bound: a delta
 // whose JSON escaping amplifies it (600 KiB of '<' renders at 3.6 MiB) is
 // accepted within the derived frame bound, and the SECOND identical delta
 // exceeds the per-item accumulated bound and is rejected as corrupt upstream
 // wire — the frame bound is never the failure for state the accumulators
-// accepted (autopsy 2026-09-06 M1: the release bounds derive from the
+// accepted (the release bounds derive from the
 // exchange total and the echo bound, so accepted accumulation always
 // releases).
 func TestGeneratedFrameBoundAfterJSONEscaping(t *testing.T) {
@@ -377,7 +375,7 @@ func TestGeneratedFrameBoundAfterJSONEscaping(t *testing.T) {
 	}
 	// The second identical delta pushes the item total to 1.2 MiB — over
 	// the accumulated bound: rejected as accumulated-wire, never reaching
-	// the frame bound (the M1 fix guarantees the frame bound is never the
+	// the frame bound (the fix guarantees the frame bound is never the
 	// failure for accepted state).
 	_, err = converter.Convert(SSEEvent{Data: []byte(
 		"{\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"" + delta + "\"},\"finish_reason\":null}]}",
@@ -387,11 +385,11 @@ func TestGeneratedFrameBoundAfterJSONEscaping(t *testing.T) {
 	}
 }
 
-// TestResponsesMaximalPartAcceptedAndReleasable pins the M1 contract on the
+// TestResponsesMaximalPartAcceptedAndReleasable pins the maximal-part contract on the
 // Responses→Anthropic direction: an exactly-maximal accepted part (the
 // accumulated bound) must be accepted AND releasable — the generated-frame
 // bound derives from the exchange total, so an accepted accumulation can
-// never be a frame violation (autopsy 2026-09-06 M1 rounds 1-2). The
+// never be a frame violation. The
 // structural frame-bound enforcement is pinned separately by
 // TestGeneratedFrameBoundEnforced and append_batch_frame_bound.
 func TestResponsesMaximalPartAcceptedAndReleasable(t *testing.T) {
@@ -419,7 +417,7 @@ func TestResponsesMaximalPartAcceptedAndReleasable(t *testing.T) {
 	// An exactly-maximal part (1 MiB of '<', escaping to ~6 MiB) is
 	// accepted and must release: the generated-frame bound derives from
 	// the exchange total (40 MiB + echo headroom), so the accepted maximum
-	// is never a frame violation (the M1 defect).
+	// is never a frame violation (the defect).
 	if err := feed("response.content_part.added",
 		`{"type":"response.content_part.added","sequence_number":2,"item_id":"m1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}`); err != nil {
 		t.Fatal(err)
@@ -429,7 +427,7 @@ func TestResponsesMaximalPartAcceptedAndReleasable(t *testing.T) {
 		`{"type":"response.output_text.delta","sequence_number":3,"item_id":"m1","output_index":0,"content_index":0,"delta":%q,"logprobs":[]}`,
 		maxPart,
 	)); err != nil {
-		t.Fatalf("an exactly-maximal part must be accepted and releasable (autopsy M1): %v", err)
+		t.Fatalf("an exactly-maximal part must be accepted and releasable: %v", err)
 	}
 	// Release the stream: text done, part done, item done, then
 	// response.completed — the terminal conversion carries the maximal
@@ -455,7 +453,7 @@ func TestResponsesMaximalPartAcceptedAndReleasable(t *testing.T) {
 	}
 	if err := feed("response.completed",
 		`{"type":"response.completed","sequence_number":7,"response":{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"m","output":[]}}`); err != nil {
-		t.Fatalf("the maximal-part exchange must complete its terminal conversion (M1): %v", err)
+		t.Fatalf("the maximal-part exchange must complete its terminal conversion: %v", err)
 	}
 }
 
@@ -463,7 +461,6 @@ func TestResponsesMaximalPartAcceptedAndReleasable(t *testing.T) {
 // the conversion-report entry cap, the terminal-batch bound in the
 // converting reader, the chat-side tool-call and part-per-item counts, the
 // bounded error text, and the Anthropic-direction frame bound
-// (review-08 blocker 7).
 func TestStreamBoundaryHelpers(t *testing.T) {
 	t.Run("conversion report entry cap", func(t *testing.T) {
 		report := ConversionReport{}
@@ -486,7 +483,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 
 	t.Run("terminal batch bound", func(t *testing.T) {
 		// Anchor the batch-bound probe at the operative derived default
-		// (autopsy 2026-09-06 M1 round 2 joint derivation).
+		// (joint derivation).
 		reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(strings.NewReader(""), 0, 0), &fixedConverter{}, 0, 0, 0)
 		frames := (DefaultGeneratedSSEBatchBytes / (DefaultGeneratedSSEFrameBytes - 64)) + 2
 		batch := convertedBatch{}
@@ -568,8 +565,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 	t.Run("bounded error text", func(t *testing.T) {
 		long := strings.Repeat("x", maxStreamErrorTextBytes*2)
 		bounded := boundedErrorMessage(errors.New(long))
-		// The ellipsis must not push the text past the bound (review-z
-		// commit 3): truncated text is bound-3 plus the ellipsis.
+		// The ellipsis must not push the text past the bound: truncated text is bound-3 plus the ellipsis.
 		if len(bounded) > maxStreamErrorTextBytes {
 			t.Fatalf("bounded length = %d, want <= %d", len(bounded), maxStreamErrorTextBytes)
 		}
@@ -620,13 +616,13 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 			maxPart,
 		))
 		if err != nil {
-			t.Fatalf("exactly-maximal part must be accepted and releasable (autopsy M1): %v", err)
+			t.Fatalf("exactly-maximal part must be accepted and releasable: %v", err)
 		}
 	})
 }
 
 // TestStreamBoundaryHelpers2 closes the remaining reachable exchange-budget
-// branches (review-08 blocker 7).
+// branches.
 func TestStreamBoundaryHelpers2(t *testing.T) {
 	t.Run("anthropic per-item text bound", func(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
@@ -722,7 +718,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 
 	t.Run("append batch frame bound", func(t *testing.T) {
 		// The generated-frame default moved above the accumulated bound
-		// (autopsy 2026-09-06 M1), so the structural check is anchored at
+		// , so the structural check is anchored at
 		// the new default: one frame over DefaultGeneratedSSEFrameBytes.
 		reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(strings.NewReader(""), 0, 0), &fixedConverter{}, 0, 0, 0)
 		err := reader.appendBatch(convertedBatch{Events: []frameEvent{{
@@ -737,7 +733,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 
 // TestChatStreamReasoningReportRecordedOnce proves the provider-reasoning
 // report entry (loss without the capability, note with it) is recorded
-// exactly once per stream, never once per delta (review-08 blocker 7).
+// exactly once per stream, never once per delta.
 func TestChatStreamReasoningReportRecordedOnce(t *testing.T) {
 	t.Run("loss without capability", func(t *testing.T) {
 		state := newChatResponsesStreamState(
@@ -781,8 +777,7 @@ func TestChatStreamReasoningReportRecordedOnce(t *testing.T) {
 
 // TestStreamToolSnapshotBytesCounted proves the done-snapshot bytes written
 // into the accumulated tool-argument buffer count against the exchange total
-// — the snapshot-completion path must not bypass the budget (review-08
-// blocker 7).
+// — the snapshot-completion path must not bypass the budget.
 func TestStreamToolSnapshotBytesCounted(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),

@@ -106,7 +106,7 @@ func TestFunctionArgumentsDeltaUsesDelta(t *testing.T) {
 
 func TestFunctionArgumentsDoneCarriesArguments(t *testing.T) {
 	// The official done event carries arguments and NO name: call identity
-	// comes from the item-added lifecycle (review-08 blocker 5).
+	// comes from the item-added lifecycle.
 	builder := &ResponsesEventBuilder{}
 	event := builder.FunctionArgumentsDone("fc_1", 1, `{"location":"Tokyo"}`)
 	m := marshalEvent(t, event)

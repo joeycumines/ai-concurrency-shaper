@@ -100,8 +100,7 @@ func TestChatToResponsesTextStream(t *testing.T) {
 	if !state.sawFinish {
 		t.Fatal("sawFinish not set")
 	}
-	// The terminal is held until the [DONE] sentinel releases it (review-08
-	// blocker 2); this test drives the release directly, as the [DONE]
+	// The terminal is held until the [DONE] sentinel releases it; this test drives the release directly, as the [DONE]
 	// adapter path does.
 	held, ok := state.releaseTerminal()
 	if !ok {
@@ -254,7 +253,7 @@ func TestChatToResponsesFunctionCallStream(t *testing.T) {
 		t.Fatalf("held[0] = %T", held[0])
 	}
 	// The official done event carries arguments and no name: call identity
-	// comes from the item-added lifecycle (review-08 blocker 5).
+	// comes from the item-added lifecycle.
 	if done.Arguments != `{"location":"Tokyo"}` {
 		t.Fatalf("done = %+v", done)
 	}
@@ -309,8 +308,7 @@ func TestChatToResponsesEmptyToolArguments(t *testing.T) {
 // TestChatToResponsesNonObjectArgumentsPreserved proves completed Chat tool
 // arguments are preserved byte-exact in the emitted function_call arguments,
 // whatever their shape: invalid model-generated arguments are never corrupt
-// upstream wire (review-z commit 2; supersedes the review-08 object
-// requirement).
+// upstream wire.
 func TestChatToResponsesNonObjectArgumentsPreserved(t *testing.T) {
 	for _, arguments := range []string{`[1,2]`, `"str"`, `42`} {
 		t.Run(arguments, func(t *testing.T) {
@@ -335,7 +333,7 @@ func TestChatToResponsesNonObjectArgumentsPreserved(t *testing.T) {
 				t.Fatal(err)
 			}
 			// The finish holds the item-closing events until the [DONE]
-			// sentinel releases them (review-08 blocker 2).
+			// sentinel releases them.
 			held, ok := state.releaseTerminal()
 			if !ok {
 				t.Fatal("no held terminal")
@@ -646,8 +644,7 @@ func TestResponsesToAnthropicBasic(t *testing.T) {
 		t.Fatalf("block stop = %+v", blockStop)
 	}
 
-	// The item is closed by its done event before the terminal (review-08
-	// blocker 3).
+	// The item is closed by its done event before the terminal.
 	if _, err := state.Convert(builder.OutputItemDone(0, &ResponsesOutputMessage{
 		ID: "msg_2", Type: "message", Role: "assistant", Status: ResponsesItemCompleted,
 		Content: ResponsesOutputContentParts{
@@ -750,7 +747,7 @@ func TestResponsesToAnthropicFunctionCall(t *testing.T) {
 	// The accumulated buffer was the byte-prefix `{"x":`; the done snapshot
 	// completes it and the missing suffix `1}` is delivered as one
 	// input_json_delta so the client's assembled input equals the snapshot
-	// (review-08 blocker 4).
+	//.
 	if len(events) != 1 {
 		t.Fatalf("done events = %d", len(events))
 	}

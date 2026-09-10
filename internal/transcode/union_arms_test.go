@@ -1,6 +1,6 @@
 package transcode
 
-// J5 regression tests (review-k finding 5, high): tagged unions decode
+// J5 regression tests: tagged unions decode
 // per-arm — each type admits exactly its own fields with DisallowUnknownFields,
 // so contradictory arms are rejected at decode instead of having their data
 // silently discarded.
@@ -13,7 +13,7 @@ import (
 
 // TestAnthropicContentBlockPerArmRejectsMixedArms proves every anthropic
 // content block arm rejects fields belonging to another arm, including the
-// review's exact counterexample (a text block carrying a source).
+// exact counterexample (a text block carrying a source).
 func TestAnthropicContentBlockPerArmRejectsMixedArms(t *testing.T) {
 	tests := []struct {
 		name string

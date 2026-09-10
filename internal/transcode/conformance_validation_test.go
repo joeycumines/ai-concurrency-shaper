@@ -18,7 +18,7 @@ func contextWithCancel() (context.Context, context.CancelFunc) {
 
 // TestIsJSONApplicationTreeRestriction proves the structured-syntax suffix
 // "+json" matches ONLY within the application tree: text/example+json is NOT
-// JSON per RFC 6839 (review-08 additional 7).
+// JSON per RFC 6839.
 func TestIsJSONApplicationTreeRestriction(t *testing.T) {
 	tests := []struct {
 		contentType string
@@ -48,7 +48,6 @@ func TestIsJSONApplicationTreeRestriction(t *testing.T) {
 
 // TestValidateCanonicalRequestNegativeMatrix exercises the new IR validation
 // invariants: role, part presence, tool-call identity, arguments shape
-// (review-08 additional 10).
 func TestValidateCanonicalRequestNegativeMatrix(t *testing.T) {
 	validCall := CanonicalFunctionCall{
 		CallID:    "fc_1",
@@ -173,7 +172,6 @@ func TestValidateCanonicalRequestNegativeMatrix(t *testing.T) {
 
 // TestValidateCanonicalResponseNegativeMatrix exercises the response-side IR
 // validation: model, status, stop reason, turn structure, usage arithmetic
-// (review-08 additional 10).
 func TestValidateCanonicalResponseNegativeMatrix(t *testing.T) {
 	base := func() CanonicalResponse {
 		return CanonicalResponse{
@@ -362,8 +360,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 }
 
 // TestSSEReadLineCROnly proves readSSELine handles CR-only line endings
-// (legal per the HTML SSE spec), not just LF and CRLF (review-08 additional
-// 12).
+// (legal per the HTML SSE spec), not just LF and CRLF.
 func TestSSEReadLineCROnly(t *testing.T) {
 	input := "event: message_stop\rdata: {\"type\":\"message_stop\"}\r\r"
 	events, err := readAllEvents(t, input)
@@ -378,7 +375,7 @@ func TestSSEReadLineCROnly(t *testing.T) {
 // TestResponsesStreamEmptyEventNameRejected proves a Responses stream frame
 // without an event name is rejected by the Responses→Anthropic adapter: the
 // package's own rule requires event: to be present and equal the JSON type
-// tag (review-08 additional 12).
+// tag.
 func TestResponsesStreamEmptyEventNameRejected(t *testing.T) {
 	ctx := testStreamContext()
 	state := newAnthropicResponsesStreamState(ctx, StrictLossPolicy(), ChatCapabilities{}, "resp_1", "m", 1)
@@ -396,7 +393,7 @@ func TestResponsesStreamEmptyEventNameRejected(t *testing.T) {
 
 // TestSSEEmptyDataFrameHandledPerSpec proves a frame with an event name but
 // no data line is handled per spec: the data is empty, and the frame does not
-// produce a spurious event (review-08 additional 12).
+// produce a spurious event.
 func TestSSEEmptyDataFrameHandledPerSpec(t *testing.T) {
 	// "event: ping\n\n" — event name but no data. Per the existing spec
 	// behavior, this is discarded (no data payload).
@@ -412,7 +409,7 @@ func TestSSEEmptyDataFrameHandledPerSpec(t *testing.T) {
 
 // TestStreamOutcomeReflectsClassification proves Outcome.StreamOutcome is
 // truthfully assigned from classifyStreamObservation for every streaming
-// classification bucket (review-08 additional 8).
+// classification bucket.
 func TestStreamOutcomeReflectsClassification(t *testing.T) {
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}

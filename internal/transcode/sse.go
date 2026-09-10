@@ -75,7 +75,7 @@ func readSSEEvent(r *bufio.Reader) (SSEEvent, error) {
 // frameMax. Exceeding either is FATAL for the exchange: a typed SSEBoundError
 // is returned immediately and the frame is never skipped or continued. A
 // following valid terminal event must never turn a size violation into a
-// shortened successful stream (review-j finding 3).
+// shortened successful stream.
 func readSSEEventLimited(r *bufio.Reader, lineMax, frameMax int) (SSEEvent, error) {
 	var event SSEEvent
 	var data []byte
@@ -143,7 +143,7 @@ func readSSEEventLimited(r *bufio.Reader, lineMax, frameMax int) (SSEEvent, erro
 
 // readSSELine reads one line, without growing past lineMax, handling all
 // three SSE line terminators defined by the HTML spec: LF, CR, and CRLF
-// (review-08 additional 12). Oversized lines are consumed and reported as
+// Oversized lines are consumed and reported as
 // errSSELineOversized so the frame parser can report the size violation as
 // fatal.
 func readSSELine(r *bufio.Reader, lineMax int) (string, error) {
@@ -225,7 +225,7 @@ type frameEvent struct {
 // flush exactly one complete event per Write call. A frame whose total size
 // exceeds the frame bound (data payload plus the event name and framing
 // overhead) is a typed frame error: the generated downstream wire must be
-// bounded like the input wire (review-08 blocker 7).
+// bounded like the input wire.
 // writeFrameBytesBounded writes one SSE frame bounded by max bytes. The
 // bound covers the type and data payloads plus the framing overhead.
 func writeFrameBytesBounded(buf *bytes.Buffer, event frameEvent, max int) error {

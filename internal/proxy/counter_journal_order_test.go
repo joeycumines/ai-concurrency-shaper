@@ -1,6 +1,6 @@
 package proxy
 
-// Autopsy 2026-09-06 M10: the clean-completion counters (TotalProxied /
+// The clean-completion counters (TotalProxied /
 // TotalPassThrough) and the status buckets published BEFORE the journal
 // entry — the same counter-before-journal shape c9ff856 fixed for the
 // aborted pair. A consumer that observes the counter must find the journal
@@ -90,12 +90,9 @@ func TestProxy_CleanCountersPublishAfterJournalEntry(t *testing.T) {
 						}
 						entries := j.Entries()
 						got := tc.counter(snap)
-						wantLen := int(got)
-						if wantLen > journalCap {
-							wantLen = journalCap
-						}
+						wantLen := min(int(got), journalCap)
 						if len(entries) < wantLen {
-							t.Errorf("journal entries = %d < min(counter = %d, cap = %d): counter published before the journal entry (M10)", len(entries), got, journalCap)
+							t.Errorf("journal entries = %d < min(counter = %d, cap = %d): counter published before the journal entry", len(entries), got, journalCap)
 							return
 						}
 					}

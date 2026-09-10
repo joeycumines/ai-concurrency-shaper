@@ -45,7 +45,7 @@ type Tool struct {
 // (the strict contract applies to function tools). A missing type is a
 // typed malformed rejection under every policy: a tool with no type is
 // never a built-in (built-ins are known non-empty strings), so it must
-// never reach the builtin_tools loss path (review-12 finding 4).
+// never reach the builtin_tools loss path.
 func (t Tool) Validate() error {
 	if t.Type == "" {
 		return &wire.DecodeError{
@@ -115,7 +115,7 @@ func (t Tool) Validate() error {
 // carries external_web_access) and the transcode boundary decides the
 // loss/reject path, so strictness here would only reject real clients. A
 // missing or empty type is rejected here, at decode time, so it can never
-// masquerade as a built-in under an approved loss (review-12 finding 4);
+// masquerade as a built-in under an approved loss;
 // cross-type fields (tools on a function tool, parameters/strict on a
 // namespace tool) are rejected rather than silently swallowed into the
 // shared struct.
@@ -165,7 +165,7 @@ func (t *Tool) UnmarshalJSON(data []byte) error {
 	t.Tools = strict.Tools
 	// Cross-type shape violations are rejected at decode so the shared
 	// struct can never silently swallow a field the tool's type does not
-	// own (review-12 finding 4).
+	// own.
 	return t.Validate()
 }
 

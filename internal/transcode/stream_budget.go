@@ -1,6 +1,6 @@
 package transcode
 
-// The total exchange budget for one stream (review-z commit 3): every state
+// The total exchange budget for one stream: every state
 // allocation and every event increments the budget BEFORE the mutation, so a
 // corrupt upstream cannot grow memory without limit across many empty items,
 // parts, tool calls, state-map entries, or generated frames. A violation
@@ -138,13 +138,13 @@ const (
 	// Bytes multiplies it by maxStreamTotalEvents so the exchange generated
 	// total can never fire before the event budget: a legal stream of
 	// tiny deltas is bounded by events × per-event framing, NOT by payload
-	// escaping (autopsy 2026-09-06 M1 round 3, finding F1: 1-byte deltas
+	// escaping (1-byte deltas
 	// died at ~69% of the event budget when only a 1 MiB framing slack
 	// covered 2^20 events × 221 B ≈ 221 MiB of fixed overhead).
 	maxStreamPerEventFramingBytes = 256
 	// maxStreamGeneratedBytes bounds the total generated downstream bytes of
 	// one exchange. Derived jointly with the terminal-release bounds
-	// (autopsy 2026-09-06 M1 rounds 1-3): the worst-case accepted release
+	// : the worst-case accepted release
 	// emits the streamed deltas (payload at 6x escaping + every event's
 	// fixed framing overhead) PLUS the terminal batch
 	// (DefaultGeneratedSSEBatchBytes) PLUS 1 MiB slack, and can never fire

@@ -12,7 +12,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
 
-// The granular loss registry (review-z commit 2). Every non-portable feature
+// The granular loss registry. Every non-portable feature
 // is gated by exactly one granular, direction-specific loss key; the
 // registry below is the SINGLE source of truth for the CLI, the converters,
 // and the generated LOSS_MATRIX.md (drift-tested). The legacy broad
@@ -85,7 +85,7 @@ const (
 	// joined with '\n'. Every content byte is preserved — the part
 	// boundaries are structural metadata the target cannot carry — so the
 	// join is recorded as a Note (a sanctioned encoding, never a
-	// policy-gated loss and never silent; autopsy 2026-09-06 H2, REM-B
+	// policy-gated loss and never silent
 	// acceptance). Deliberately NOT in lossRegistry: it is not a loss, so
 	// it is not policy-addressable via -transcode-allow-loss.
 	FeatureToolResultTextJoin Feature = "tool_result_text_join"
@@ -142,7 +142,7 @@ const (
 	// gateways stream) — that cannot be reproduced in the target: it may map
 	// only to ordinary text, an approved loss, or a rejection. Request-side
 	// reasoning controls are a separate semantic — see RequestReasoning —
-	// and must never reuse this key (review-11 finding 4).
+	// and must never reuse this key.
 	FeatureProviderReasoningText Feature = "provider_reasoning_text"
 	// RequestReasoning covers request-side reasoning controls — the Anthropic
 	// Messages thinking budget (an explicit enabled budget_tokens) and the
@@ -194,7 +194,7 @@ const (
 	// this permission; the conversation-state request controls (background,
 	// max_tool_calls, prompt, safety_identifier, status) are typed
 	// unsupported-feature errors under every policy — this key cannot
-	// un-gate them (review-12 R12-1). Response-side, Responses envelope
+	// un-gate them. Response-side, Responses envelope
 	// controls echoed on an upstream response (background, max_tool_calls,
 	// prompt, prompt_cache_key, safety_identifier) are dropped under this
 	// permission.
@@ -322,10 +322,9 @@ func StrictLossPolicy() LossPolicy {
 }
 
 // ParseLossFeatures parses comma- or space-separated feature names into a
-// map for a LossPolicy, rejecting unknown names (review-j finding 14: a
-// misconfigured loss policy fails at startup, never on the first request).
+// map for a LossPolicy, rejecting unknown names.
 // Only the granular registry names are accepted; the legacy broad names are
-// removed, not aliased (review-z commit 2).
+// removed, not aliased.
 func ParseLossFeatures(names ...string) (map[Feature]struct{}, error) {
 	known := allLossKeys()
 	allowed := make(map[Feature]struct{})
@@ -467,8 +466,7 @@ func (r *ConversionReport) Lose(
 
 // Note records a named encoding that the conversion applied without a policy
 // decision — the encoding is sanctioned by a capability or an approved loss
-// — so it is observable even though no loss occurred (review-j finding 10:
-// encodings that invent or reinterpret content must be named and reported).
+// — so it is observable even though no loss occurred.
 // The report is bounded exactly like Lose: see reserve.
 func (r *ConversionReport) Note(feature Feature, path string, detail string) error {
 	if err := r.reserve(); err != nil {

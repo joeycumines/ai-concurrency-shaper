@@ -3,7 +3,7 @@ package transcode
 // Drift test for the generated loss matrix: the checked-in LOSS_MATRIX.md
 // must byte-match the document regenerated from the registry, every
 // registered key must be documented, and every documented key must be
-// registered — code and documentation cannot drift (review-z commit 2).
+// registered — code and documentation cannot drift.
 
 import (
 	"os"

@@ -264,7 +264,7 @@ func TestResponsesFunctionOutputUnion(t *testing.T) {
 
 func TestResponsesInputInstructionsString(t *testing.T) {
 	// The create-request instructions is a plain string per the pinned
-	// ResponseNewParams shape (review-j finding 13).
+	// ResponseNewParams shape.
 	data := `{"instructions":"system prompt","input":"hi","model":"m"}`
 	var envelope openairesponses.Request
 	if err := strictDecode([]byte(data), &envelope); err != nil {
@@ -464,7 +464,7 @@ func TestResponsesInputImageDetailOptional(t *testing.T) {
 }
 
 // TestResponsesInputItemIdentityNoted pins the observable drop of input
-// item identity (review-gate task-11 finding 3): every ID-bearing input
+// item identity: every ID-bearing input
 // item type (easy message, previous output message, function call, function
 // call output) accepts an id on the wire, and the decode records exactly one
 // deduped previous_response_id note per exchange — never a silent drop and

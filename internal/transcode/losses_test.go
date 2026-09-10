@@ -5,7 +5,7 @@ import (
 )
 
 // TestParseLossFeatures proves the CLI loss-feature names validate at
-// startup and unknown names are rejected (review-j finding 14).
+// startup and unknown names are rejected.
 func TestParseLossFeatures(t *testing.T) {
 	allowed, err := ParseLossFeatures("usage_unknown", "reasoning_summary,output_phase", " image_input ")
 	if err != nil {

@@ -129,7 +129,6 @@ func TestMouseClickTabBarOffRowNoChange(t *testing.T) {
 	// tabRequests would make the assertion vacuous: a Y-agnostic regression
 	// would "switch" to tabRequests (the already-active tab), leaving it
 	// unchanged and letting the test pass silently despite the bug.
-	// See scratch/review-04.md (tautological test flaw).
 	m.tab = tabDashboard
 	// Click at X=15 (geometrically tabRequests) but off the tab bar row
 	// (header Y=0, separator Y=2, content rows Y=3/5/10) — must not change tab.
@@ -191,8 +190,8 @@ func TestMouseClickTabBarNarrowStillGeometry(t *testing.T) {
 	}
 }
 
-// TestTabAtActiveStyleConsistency closes the gap identified in review-01 and
-// review-03: no test previously rendered with a non-zero active tab and checked
+// TestTabAtActiveStyleConsistency closes a rendering gap: no test previously
+// rendered with a non-zero active tab and checked
 // that tabAt boundaries hold. This iterates EVERY tab as the selected tab and
 // verifies the rendered bar is still 80 cells and tabAt's boundaries match.
 func TestTabAtActiveStyleConsistency(t *testing.T) {

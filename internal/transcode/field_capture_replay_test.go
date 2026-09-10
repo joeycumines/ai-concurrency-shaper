@@ -1,6 +1,6 @@
 package transcode
 
-// Field-capture regression harness (task 31, 2026-08-25): replays the
+// Field-capture regression harness (2026-08-25): replays the
 // committed field-capture corpus (testcorpus/testdata/field/ — raw wire
 // bytes carrying the real providers' extension spellings, reconstructed
 // byte-faithfully from the committed reproduce-first tests of the four

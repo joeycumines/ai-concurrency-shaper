@@ -293,7 +293,7 @@ func New(opts ...Option) (*Breaker, error) {
 	cfg.applyDefaults()
 	// Cross-option consistency is validated BEFORE allocating capacity:
 	// a max penalty below the base penalty is a construction error, never
-	// a silent coercion (review-z commit 5).
+	// a silent coercion.
 	if cfg.maxPenalty < cfg.basePenalty {
 		return nil, fmt.Errorf(
 			"circuitbreaker: max penalty %v must be >= base penalty %v",
@@ -781,7 +781,7 @@ func (b *Breaker) currentPenaltyLocked() time.Duration {
 	// always at least basePenalty. The cap is maxPenalty/basePenalty MINUS
 	// ONE (floored at 0) so the product can never overflow AND never needs
 	// the min() clamp: 1+c <= max/base makes the scaled value <= maxPenalty
-	// by construction (review-z commit 5).
+	// by construction.
 	c := b.consecutive
 	if c > 0 {
 		maxConsecutive := max(int64(b.cfg.maxPenalty/b.cfg.basePenalty)-1, 0)

@@ -26,7 +26,7 @@ import (
 )
 
 // TestDeferredVisionClauses_TypesRemainAbsent asserts that deferred/niche vision
-// types (M4 client auth, G6 session affinity/stickiness, G7 client identity/LocalAddr rotation)
+// types (client auth, session affinity/stickiness, client identity/LocalAddr rotation)
 // remain absent from the codebase. Reintroducing any of these must be a deliberate,
 // blueprint-documented design change rather than accidental drift.
 func TestDeferredVisionClauses_TypesRemainAbsent(t *testing.T) {

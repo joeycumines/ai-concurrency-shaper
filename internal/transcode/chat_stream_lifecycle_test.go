@@ -1,6 +1,6 @@
 package transcode
 
-// J5 regression tests: the Chat stream lifecycle (review-j finding 6) —
+// J5 regression tests: the Chat stream lifecycle —
 // header-derived stream intent is written back into the rendered request,
 // include_usage is requested, chunk identity and creation time are pinned
 // before the first client event, the usage-only tail chunk is consumed into
@@ -44,7 +44,7 @@ func TestAcceptIsEventStream(t *testing.T) {
 }
 
 // TestAcceptStreamSelectionQualityAndOrdering pins the RFC 9110 media-range
-// selection of the Accept header (review-08 blocker 1): every range is
+// selection of the Accept header: every range is
 // evaluated with its quality value, q=0 excludes a representation, and the
 // client's most-preferred acceptable representation between text/event-stream
 // and application/json wins — by effective quality, then specificity, then
@@ -55,7 +55,7 @@ func TestAcceptStreamSelectionQualityAndOrdering(t *testing.T) {
 		accept string
 		want   bool
 	}{
-		// The review-08 examples: the first parseable range must not decide,
+		// The: the first parseable range must not decide,
 		// and q=0 must be honored.
 		{"json-then-sse", "application/json, text/event-stream", false},
 		{"sse-q0-then-json", "text/event-stream;q=0, application/json", false},
@@ -110,7 +110,6 @@ func TestAcceptStreamSelectionQualityAndOrdering(t *testing.T) {
 // TestChatStreamIntentWrittenBack proves the merged stream intent is written
 // back into the canonical request so the upstream renderer emits stream:true
 // — an Accept-only stream request must not ask the upstream for JSON
-// (review-j finding 6).
 func TestChatStreamIntentWrittenBack(t *testing.T) {
 	result, echo, err := DecodeResponsesRequest(
 		[]byte(`{"model":"m","input":"x"}`),
@@ -159,7 +158,7 @@ func TestChatStreamIntentWrittenBack(t *testing.T) {
 
 // TestChatStreamUsageTailProducesRealTotals proves the usage-only tail chunk
 // after the finish reason updates the terminal envelope's usage — no
-// fabricated zero usage and no rejection of the tail (review-j finding 6).
+// fabricated zero usage and no rejection of the tail.
 func TestChatStreamUsageTailProducesRealTotals(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -229,7 +228,7 @@ func TestChatStreamUsageTailProducesRealTotals(t *testing.T) {
 }
 
 // TestChatStreamTopLevelUsageExtensionsDecode reproduces the stream-side
-// field shape (autopsy 03): a raw usage tail chunk carrying ONLY the
+// field shape: a raw usage tail chunk carrying ONLY the
 // top-level provider extensions (DeepSeek/vLLM convention) must decode
 // through the strict chunk shadow, record NO unknown-usage losses for the
 // covered components (the run below uses the STRICT policy — any fired loss
@@ -333,7 +332,7 @@ func TestChatStreamFixtureUsageTailEndToEnd(t *testing.T) {
 
 // TestChatStreamCreatedAtConsistent proves response.created,
 // response.in_progress, and the terminal envelope share one created_at taken
-// from the first chunk BEFORE the first client event (review-j finding 6).
+// from the first chunk BEFORE the first client event.
 func TestChatStreamCreatedAtConsistent(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -382,7 +381,7 @@ func TestChatStreamCreatedAtConsistent(t *testing.T) {
 // TestChatStreamOutputItemAddedEmptyArguments proves output_item.added never
 // invents complete arguments ("{}") — the added event carries an empty
 // argument string and the real arguments arrive through deltas and the done
-// event (review-j finding 6).
+// event.
 func TestChatStreamOutputItemAddedEmptyArguments(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -429,7 +428,7 @@ func TestChatStreamOutputItemAddedEmptyArguments(t *testing.T) {
 
 // TestChatStreamComposedAnthropicUsageTail proves the composed Chat→Anthropic
 // direction: a usage-only tail chunk is folded into message_delta's usage —
-// real totals, never fabricated zeros (review-j finding 6).
+// real totals, never fabricated zeros.
 func TestChatStreamComposedAnthropicUsageTail(t *testing.T) {
 	chat := newChatResponsesStreamState(
 		testStreamContext(),
@@ -504,8 +503,7 @@ func TestChatStreamComposedAnthropicUsageTail(t *testing.T) {
 }
 
 // TestChatStreamChoiceIndexAndIdentityEnforced proves a choice index != 0 and
-// a mismatched chunk id/model are upstream protocol errors (review-j finding
-// 6).
+// a mismatched chunk id/model are upstream protocol errors.
 func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -562,7 +560,7 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 // j6PermissivePolicy returns a policy approving the response-side losses the
 // Responses->Messages path triggers (reasoning and usage timing) plus the
 // tool strictness loss a messages->responses mapping requires to serve tool
-// traffic (review-z commit 6).
+// traffic.
 func j6PermissivePolicy() LossPolicy {
 	return LossPolicy{Allowed: map[Feature]struct{}{
 		FeatureToolSchemaStrictness:   {},
@@ -575,8 +573,8 @@ func j6PermissivePolicy() LossPolicy {
 }
 
 // TestChatStreamComposedCreatedCacheTokens pins the stream-path parity of
-// the created_cache_tokens provider extension with the non-streaming decode
-// (review-gate task-11 finding 5): a usage tail carrying it renders
+// the created_cache_tokens provider extension with the non-streaming decode:
+// a usage tail carrying it renders
 // cache_creation_input_tokens with the value and records NO
 // usage_cache_write_unknown loss (the component is known); a tail without it
 // keeps the loss-gated zero path with exactly one recorded loss. The

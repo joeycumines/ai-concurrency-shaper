@@ -1,6 +1,6 @@
 package transcode
 
-// Autopsy 2026-09-06 M5: the conversion ran on the stream-copy goroutine
+// The conversion ran on the stream-copy goroutine
 // with no recover, so a panic at either explicit panic site killed the
 // process. Both sites are unreachable-by-construction internal invariants;
 // they now surface typed errors so a future invariant break degrades the

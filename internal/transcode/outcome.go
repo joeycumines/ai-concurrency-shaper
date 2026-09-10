@@ -1,6 +1,6 @@
 package transcode
 
-// Exact per-request outcome accounting (review-z commit 4): every transcoded
+// Exact per-request outcome accounting: every transcoded
 // exchange records EXACTLY ONE outcome through a synchronous per-request
 // sink. There is no non-blocking channel that can silently lose provenance:
 // the handler installs a defer that records an internal local-failure outcome
@@ -80,7 +80,7 @@ func (s *OutcomeSink) Record(outcome Outcome) {
 // recorded flag is acquired BEFORE the outcome is read, so a true result is
 // always paired with the fully-published outcome (Record stores the outcome
 // before the release-store of the flag) — a Load that observed the flag can
-// never observe a stale outcome (review-z commit 4).
+// never observe a stale outcome.
 func (s *OutcomeSink) Load() (Outcome, bool) {
 	if !s.recorded.Load() {
 		return Outcome{}, false

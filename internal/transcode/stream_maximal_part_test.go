@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestChatStreamMaximalPartCompletesRelease pins autopsy 2026-09-06 M1: a
+// TestChatStreamMaximalPartCompletesRelease pins the maximal-part release: a
 // chat stream accumulating exactly maxStreamAccumulatedBytes (1 MiB) of text
 // in one content part was accepted by the accumulator, then the [DONE]
 // terminal envelope (which repeats the full text inside the Responses
@@ -47,7 +47,7 @@ func TestChatStreamMaximalPartCompletesRelease(t *testing.T) {
 	}
 	terminalBatch, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")})
 	if err != nil {
-		t.Fatalf("maximal part terminal release failed (autopsy M1 collision): %v", err)
+		t.Fatalf("maximal part terminal release failed (collision): %v", err)
 	}
 	if !terminalBatch.Terminal {
 		t.Fatal("[DONE] batch is not terminal")
@@ -112,7 +112,7 @@ func TestChatStreamMaximalExchangeCompletesRelease(t *testing.T) {
 	}
 	terminalBatch, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")})
 	if err != nil {
-		t.Fatalf("maximal two-accumulator exchange release failed (M1 round 2): %v", err)
+		t.Fatalf("maximal two-accumulator exchange release failed: %v", err)
 	}
 	if !terminalBatch.Terminal {
 		t.Fatal("[DONE] batch is not terminal")

@@ -90,16 +90,16 @@ func DecodeResponsesRequest(
 	// Client-controlled request fields that a chat upstream cannot honor
 	// are recorded, never silently dropped:
 	//
-	//   - include requests extra response fields (e.g.
-	//     reasoning.encrypted_content). The chat upstream cannot produce
-	//     them; the rendered response carries what the source actually
-	//     provided (the reasoning content mapping under the
-	//     provider_reasoning_text capability). Best-effort by nature.
-	//   - client_metadata is pure client telemetry with no upstream
-	//     semantics.
-	//   - prompt_cache_key is a conversation-cache control; the
-	//     responses_controls loss decision applies (approved by the CLI
-	//     defaults, rejectable by policy).
+	//  - include requests extra response fields (e.g.
+	//    reasoning.encrypted_content). The chat upstream cannot produce
+	//    them; the rendered response carries what the source actually
+	//    provided (the reasoning content mapping under the
+	//    provider_reasoning_text capability). Best-effort by nature.
+	//  - client_metadata is pure client telemetry with no upstream
+	//    semantics.
+	//  - prompt_cache_key is a conversation-cache control; the
+	//    responses_controls loss decision applies (approved by the CLI
+	//    defaults, rejectable by policy).
 	if len(request.Include) > 0 {
 		if err := result.Report.Note(
 			FeatureResponsesControls,
@@ -163,7 +163,7 @@ func DecodeResponsesRequest(
 	result.Request.Stream = request.Stream.Value
 	// An explicitly present body stream field (true or false, never null) is
 	// recorded as present so the handler can apply the documented precedence
-	// over the Accept header (review-08 blocker 1). An absent or null field
+	// over the Accept header. An absent or null field
 	// is treated as absent, consistent with the envelope's other pointer
 	// fields.
 	if request.Stream.Present && !request.Stream.Null {
@@ -185,7 +185,7 @@ func DecodeResponsesRequest(
 	// The raw parameters schema is validated as exactly one JSON object at
 	// this boundary; its bytes are preserved, never decoded and remarshaled
 	// through a map, so large integers, decimals, and exponents survive
-	// byte-exact (review-k finding 2).
+	// byte-exact.
 	for i, tool := range request.Tools {
 		switch tool.Type {
 		case "namespace":
@@ -252,7 +252,7 @@ func DecodeResponsesRequest(
 	// Tool choice, reconciled against the tools that survive conversion: an
 	// approved built-in drop can leave "required" or a named function choice
 	// pointing at tools that no longer exist, which would render an invalid
-	// upstream request (review-12 finding 5).
+	// upstream request.
 	if request.ToolChoice != nil {
 		choice, err := canonicalizeResponsesToolChoice(*request.ToolChoice)
 		if err != nil {
@@ -378,10 +378,10 @@ func DecodeResponsesRequest(
 // checkEchoSize rejects a request echo whose rendered size exceeds
 // maxStreamEchoBytes. The echo is measured the way the envelope renders it:
 // one json.Marshal of the ENTIRE ResponsesRequestEcho with the same
-// escaping the envelope render applies (review-gate round 5: per-member raw
-// lengths under-counted escaping-heavy strings and omitted rendered members
-// such as user, previous_response_id, and service_tier — the measurement
-// must be the serialized whole, not an inventory of selected members).
+// escaping the envelope render applies: per-member raw lengths under-count
+// escaping-heavy strings and omit rendered members such as user,
+// previous_response_id, and service_tier — the measurement must be the
+// serialized whole, not an inventory of selected members.
 func checkEchoSize(echo *ResponsesRequestEcho) error {
 	serialized, err := json.Marshal(echo)
 	if err != nil {
@@ -418,7 +418,7 @@ func responsesInputToTurns(
 	// content order, and tool-call identity — not item ids — and every
 	// renderer rebuilds items from turns. The drop is unconditional and
 	// observable: one deduped note per exchange under the conversation-state
-	// feature, never a silent elision (review-gate task-11 finding 3).
+	// feature, never a silent elision.
 	itemIdentityNoted := false
 	noteItemIdentity := func() error {
 		if itemIdentityNoted {
@@ -648,7 +648,7 @@ func responsesInputContentPartToCanonical(
 
 	case *ResponsesOutputText:
 		// Assistant easy-message history turns carry output-type parts
-		// (autopsy 01 §3.3); they map exactly like
+		// ; they map exactly like
 		// responsesOutputContentToCanonical — only .Text/.Refusal reach the
 		// IR, annotations never do.
 		return CanonicalText{Text: value.Text}, nil
@@ -705,7 +705,7 @@ func responsesFunctionOutputToCanonical(
 // splitImageDataURL parses a base64 data URL of the form
 // data:<media-type>;<parameters>;base64,<data>. The parameters section must
 // include the base64 parameter — anything else is rejected, never silently
-// reinterpreted (review-j finding 15). A non-data URL returns empty media
+// reinterpreted. A non-data URL returns empty media
 // type and data.
 func splitImageDataURL(url string) (mediaType string, base64Data string, err error) {
 	const prefix = "data:"
@@ -766,7 +766,7 @@ func canonicalizeResponsesToolChoice(
 // marshaling cannot fail — but the conversion runs on the stream-copy
 // goroutine in the composed directions, where an escaping panic kills the
 // process, so the impossible failure is surfaced as a typed error instead of
-// a panic (autopsy 2026-09-06 M5).
+// a panic.
 func rawMessage(value map[string]json.RawMessage) (json.RawMessage, error) {
 	raw, err := json.Marshal(value)
 	if err != nil {
@@ -780,7 +780,7 @@ func rawMessage(value map[string]json.RawMessage) (json.RawMessage, error) {
 // structure a chat request cannot express; the nested function tools are
 // fully portable, so the flatten is reported as a named Note. A nested
 // non-function tool type is the SAME builtin_tools loss decision as a
-// top-level built-in tool (review-11 finding 2): approved, it drops
+// top-level built-in tool: approved, it drops
 // observably; rejected, the request fails — never a different, harder rule
 // than the top-level path.
 func flattenNamespaceTool(
@@ -818,7 +818,7 @@ func flattenNamespaceTool(
 		// an all-built-in tools list is accept-and-drop under the approval,
 		// and the tool_choice reconciliation owns the no-tools-left case —
 		// a namespace is never a different, harder rule than the top level
-		// (review-11 finding 2).
+		//.
 		if err := report.Note(
 			FeatureBuiltinTools,
 			"tools[]",
@@ -894,7 +894,7 @@ func DecodeMessagesRequest(
 	// budget whose effective cap is already carried by max_tokens, and
 	// context_management directs server-side conversation trimming. They are
 	// never silently stripped — each present control is an explicit
-	// loss/reject decision under anthropic_controls (review-11 finding 1).
+	// loss/reject decision under anthropic_controls.
 	if envelope.ContextManagement != nil {
 		if err := result.Report.Lose(
 			policy,
@@ -1014,8 +1014,8 @@ func DecodeMessagesRequest(
 	// Thinking configuration. "enabled" requires an explicit budget; members
 	// are validated per type against the official contract (enabled={type,
 	// budget_tokens}, disabled={type}, adaptive={type,display}) so a
-	// cross-type member is a malformed request, never silently ignored
-	// (review-12 R12-L1). The strict wire decode already rejected unknown
+	// cross-type member is a malformed request, never silently ignored.
+	// The strict wire decode already rejected unknown
 	// fields inside the object.
 	if envelope.Thinking != nil {
 		switch envelope.Thinking.Type {
@@ -1113,7 +1113,7 @@ func DecodeMessagesRequest(
 	// Tools. The input_schema raw bytes are preserved — validated as exactly
 	// one JSON object at this boundary, never decoded and remarshaled through
 	// a map, so large integers, decimals, and exponents survive byte-exact
-	// (review-k finding 2).
+	//.
 	for i, tool := range envelope.Tools {
 		if err := tool.Validate(); err != nil {
 			return DecodeResult{}, fmt.Errorf("messages tools[%d]: %w", i, err)
@@ -1138,7 +1138,7 @@ func DecodeMessagesRequest(
 
 	// Tool choice: Anthropic "auto"/"none"/"any"/named tool, reconciled
 	// against the surviving tools so a dangling reference never reaches a
-	// renderer (review-12 finding 5).
+	// renderer.
 	if envelope.ToolChoice != nil {
 		choice, err := canonicalizeAnthropicToolChoice(
 			*envelope.ToolChoice,
@@ -1185,7 +1185,7 @@ func canonicalizeAnthropicToolChoice(
 	case "auto", "none", "any":
 		// A name is only meaningful with type "tool": carrying one on
 		// another mode is a contradictory union arm, rejected instead of
-		// silently discarded (review-k finding 5).
+		// silently discarded.
 		if choice.Name != "" {
 			return nil, fmt.Errorf(
 				"messages tool_choice type %s must not carry a name",
@@ -1215,7 +1215,7 @@ func canonicalizeAnthropicToolChoice(
 }
 
 // reconcileToolChoice checks a canonicalized tool choice against the tools
-// that actually survive conversion (review-12 finding 5). A named choice must
+// that actually survive conversion. A named choice must
 // reference a surviving tool under every policy — a dangling reference is
 // malformed no matter how many tools the client sent. A mode choice is only
 // reconciled when the client DID send tools and the converter dropped them
@@ -1436,7 +1436,7 @@ func RenderResponsesRequest(
 	// ResponseNewParams shape). Text-only system prompts render as that
 	// string; non-text parts (images, documents) or multiple system turns
 	// cannot be expressed in the string and are a loss/reject decision —
-	// never an illegal items array (review-j finding 13).
+	// never an illegal items array.
 	if len(systemTurns) > 1 {
 		if err := report.Lose(
 			context.lossPolicy(),
@@ -1485,7 +1485,7 @@ func RenderResponsesRequest(
 	// pinned Responses contract requires input, and an empty item list is
 	// not a legal substitute for a missing conversation. This matches the
 	// Messages→Chat direction, which rejects the same source shape
-	// (autopsy 2026-09-06 M3: the directions disagreed).
+	// (the directions disagreed).
 	if len(conversationTurns) == 0 {
 		return nil, report, errors.New(
 			"the source request has no Messages-representable conversation turns for the Responses input",
@@ -1654,13 +1654,13 @@ func RenderResponsesRequest(
 	// ExchangeContext.Capabilities). The mapping is explicit and documented —
 	// never silent (high finding request_reasoning-default-native-path):
 	//
-	//   - "adaptive"  the client delegated the thinking decision to the
-	//                 model; the absence of reasoning.effort is the exact
-	//                 semantic (the upstream applies its own default).
-	//   - "disabled"  no thinking requested; nothing is emitted.
-	//   - "enabled"   the explicit budget_tokens maps through the documented
-	//                 deterministic threshold table thinkingBudgetToEffort
-	//                 and is reported as a named Note.
+	//  - "adaptive"  the client delegated the thinking decision to the
+	//                model; the absence of reasoning.effort is the exact
+	//                semantic (the upstream applies its own default).
+	//  - "disabled"  no thinking requested; nothing is emitted.
+	//  - "enabled"   the explicit budget_tokens maps through the documented
+	//                deterministic threshold table thinkingBudgetToEffort
+	//                and is reported as a named Note.
 	//
 	// Without the ReasoningEffort capability an enabled budget is a
 	// loss/reject decision (request_reasoning), never a silent drop — the
@@ -1676,8 +1676,7 @@ func RenderResponsesRequest(
 				// An "enabled" thinking request without a budget is provider
 				// intent the responses target cannot reproduce. Decode rejects
 				// this shape today; a hand-built CanonicalRequest or a future
-				// decode relaxation must never pass it silently (task-21
-				// never-silent invariant).
+				// decode relaxation must never pass it silently (the never-silent invariant).
 				if err := report.Note(
 					FeatureRequestReasoning,
 					"thinking",
@@ -1791,7 +1790,7 @@ func RenderChatRequest(
 	}
 	// The official stream protocol sends a final usage-only chunk before
 	// [DONE] when include_usage is requested; the state machine consumes it
-	// into the terminal envelope's usage (review-j finding 6). It is
+	// into the terminal envelope's usage. It is
 	// requested whenever the exchange streams, so Messages clients receive
 	// real totals instead of fabricated zero usage.
 	if request.Stream {
@@ -1867,7 +1866,7 @@ func RenderChatRequest(
 	// turns carry text and tool results; assistant turns carry text, refusal,
 	// and tool calls.
 	//
-	// System-channel placement (autopsy 02): open-weights chat templates
+	// System-channel placement: open-weights chat templates
 	// (Qwen/Llama/DeepSeek Jinja) reject ANY role:system message after
 	// index 0 — including a second leading one. Unless the configured
 	// upstream declared the system_anywhere capability, system-channel turns
@@ -1988,7 +1987,7 @@ func RenderChatRequest(
 	// A source request with no Chat-representable messages is a
 	// client-dialect invalid-request error before any upstream request:
 	// messages:null or an invented empty user prompt are never emitted
-	// (review-z commit 2).
+	//.
 	if len(out.Messages) == 0 {
 		return nil, report, errors.New(
 			"the source request has no Chat-representable messages",
@@ -1997,8 +1996,7 @@ func RenderChatRequest(
 
 	// Tools. The canonical schema is passed through byte-exact: it was
 	// validated as exactly one JSON object at decode, so no
-	// decode-and-remarshal round trip can corrupt its numbers (review-k
-	// finding 2). An absent schema is omitted, matching the source's
+	// decode-and-remarshal round trip can corrupt its numbers. An absent schema is omitted, matching the source's
 	// presence.
 	for _, tool := range request.Tools {
 		description := tool.Description
@@ -2067,7 +2065,7 @@ func RenderChatRequest(
 			}
 		} else {
 			// The canonical schema is passed through byte-exact (validated
-			// as exactly one JSON object at decode; review-k finding 2).
+			// as exactly one JSON object at decode).
 			out.ResponseFormat = &ChatResponseFormat{
 				Type: ChatResponseFormatJSONSchema,
 				JSONSchema: &ChatJSONSchemaFormat{
@@ -2099,7 +2097,7 @@ func RenderChatRequest(
 	}
 	// The reasoning summary style has no Chat representation: only the
 	// effort is portable, so the summary request is a loss/reject decision
-	// (review-j finding 10).
+	//.
 	if context != nil && context.OriginalResponsesRequest != nil &&
 		context.OriginalResponsesRequest.Reasoning != nil &&
 		context.OriginalResponsesRequest.Reasoning.Summary != nil {
@@ -2118,14 +2116,14 @@ func RenderChatRequest(
 	// chat provider supports it (ReasoningEffort capability). The mapping is
 	// explicit and documented — never silent:
 	//
-	//   - "adaptive"   the client delegated the thinking decision to the
-	//                  model; chat's absent reasoning_effort is the exact
-	//                  semantic (the provider applies its own default).
-	//   - "disabled"   no thinking requested; nothing is emitted.
-	//   - "enabled"    the explicit budget_tokens maps through the
-	//                  documented deterministic threshold table in
-	//                  thinkingBudgetToEffort; the mapping is reported as a
-	//                  named Note so it is observable on every exchange.
+	//  - "adaptive"   the client delegated the thinking decision to the
+	//                 model; chat's absent reasoning_effort is the exact
+	//                 semantic (the provider applies its own default).
+	//  - "disabled"   no thinking requested; nothing is emitted.
+	//  - "enabled"    the explicit budget_tokens maps through the
+	//                 documented deterministic threshold table in
+	//                 thinkingBudgetToEffort; the mapping is reported as a
+	//                 named Note so it is observable on every exchange.
 	//
 	// Without the ReasoningEffort capability an enabled budget is a
 	// loss/reject decision (request_reasoning), never a silent drop.
@@ -2136,8 +2134,7 @@ func RenderChatRequest(
 				// An "enabled" thinking request without a budget is provider
 				// intent the chat target cannot reproduce. Decode rejects
 				// this shape today; a hand-built CanonicalRequest or a future
-				// decode relaxation must never pass it silently (task-21
-				// never-silent invariant).
+				// decode relaxation must never pass it silently (the never-silent invariant).
 				if err := report.Note(
 					FeatureRequestReasoning,
 					"thinking",
@@ -2203,7 +2200,6 @@ func RenderChatRequest(
 // status. It is rejected by default (FeatureToolResultErrorStatus); a permissive
 // policy may encode the status into visible content with the named
 // "error_status_prefix" encoding, which is reported because it invents text
-// (review-j finding 10).
 func transcodeToolResult(
 	result CanonicalFunctionResult,
 	policy LossPolicy,
@@ -2232,7 +2228,6 @@ func transcodeToolResult(
 // loseInputPhase applies the input-message phase decision at decode time.
 // The canonical IR cannot carry a phase and no target dialect can reproduce
 // it, so its presence is a loss/reject decision regardless of the target
-// (review-j finding 10).
 func loseInputPhase(
 	policy LossPolicy,
 	report *ConversionReport,
@@ -2252,7 +2247,6 @@ func loseInputPhase(
 
 // loseSystemPart applies the loss/reject decision for a system prompt part
 // that cannot be expressed in the string-only create-request instructions
-// (review-j finding 13).
 func loseSystemPart(
 	policy LossPolicy,
 	report *ConversionReport,

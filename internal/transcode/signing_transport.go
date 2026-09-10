@@ -1,6 +1,6 @@
 package transcode
 
-// Per-attempt external request signing (review-z commit 4): the signer is
+// Per-attempt external request signing: the signer is
 // attached to the request context by ApplyTargetAuthentication and a signing
 // transport inserted between the retry transport and the configured base
 // transport signs EVERY actual attempt AFTER the retry layer rebuilt the
@@ -32,7 +32,7 @@ func RequestSignerFromContext(ctx context.Context) RequestSigner {
 
 // SigningError is the typed error reported when per-attempt signing fails:
 // a local construction/auth failure (neutral), never an upstream failure
-// (review-z commit 4). The handler classifies it as a local error so the
+// The handler classifies it as a local error so the
 // circuit breaker is never opened by a signer defect.
 type SigningError struct {
 	Cause error
@@ -43,7 +43,7 @@ func (e *SigningError) Unwrap() error { return e.Cause }
 
 // IsNonRetryable marks signing failures as local non-retryable defects: the
 // retry transport never retries them and never records them as breaker
-// failures (review-z commit 4).
+// failures.
 func (e *SigningError) IsNonRetryable() bool { return true }
 
 // SigningTransport signs every outgoing request whose context carries a

@@ -71,7 +71,7 @@ func newPanickingProxy(t *testing.T, limitRoute string, panicValue func(attempt 
 	return p
 }
 
-// TestProxy_PanicLogsAreStructured pins review-13 issue 2: the panic-recovery
+// TestProxy_PanicLogsAreStructured pins the structured-panic-log contract: the panic-recovery
 // paths must emit structured key-value log records — a stable message naming
 // the recovery site plus the recovered value as a separate attribute — instead
 // of baking the dynamic value into the message via fmt.Sprintf. Structured
@@ -113,7 +113,7 @@ func TestProxy_PanicLogsAreStructured(t *testing.T) {
 				t.Errorf("recovered value must ride a structured panic attribute: %q", out)
 			}
 			// The old fmt.Sprintf form baked the value into the message:
-			// msg="... : boom from transport". Guard against regression.
+			// msg="...: boom from transport". Guard against regression.
 			if strings.Contains(out, tt.wantMsg+": boom from transport") {
 				t.Errorf("panic value baked into the static msg token: %q", out)
 			}

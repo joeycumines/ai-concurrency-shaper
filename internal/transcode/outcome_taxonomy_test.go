@@ -55,7 +55,7 @@ func TestOutcomeSinkExactlyOnce(t *testing.T) {
 }
 
 // TestOutcomeTaxonomyEightRows asserts the eight-row failure taxonomy exactly
-// (review-z commit 4): the breaker classification derived from each outcome.
+// the breaker classification derived from each outcome.
 func TestOutcomeTaxonomyEightRows(t *testing.T) {
 	type row struct {
 		name string
@@ -285,7 +285,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 // transcoded classification uses ONLY the outcome's anchored Retry-After:
 // the recorder-header fallback is gone, so an expired original hold is never
 // re-parsed from the translated downstream header with a fresh receipt
-// timestamp (review-z commit 4).
+// timestamp.
 func TestTranscodeRetryAfterNeverReDerivedFromRenderedHeader(t *testing.T) {
 	// The outcome carries a present-but-expired hold (Set=true, zero): the
 	// translated header may carry a stale value, but the classification must

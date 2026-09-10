@@ -1,7 +1,7 @@
 package proxy
 
-// Autopsy E2E replay conformance suite (blueprint task 17): the three field
-// failure modes from scratch/observed-issue-autopsy replayed END-TO-END
+// E2E replay conformance suite: the three field
+// failure modes replayed END-TO-END
 // through Proxy.ServeHTTP with transcode mappings, against httptest chat
 // upstreams. Each scenario uses the exact captured client shapes; each
 // asserts the field failure is dead at the proxy boundary.
@@ -49,7 +49,7 @@ func replayUpstream(t *testing.T) (*httptest.Server, func() [][]byte) {
 	}
 }
 
-// TestReplayCodexTwoTurn proves the autopsy-01 fix end-to-end: the observed
+// TestReplayCodexTwoTurn proves the fix end-to-end: the observed
 // Codex turn-2 shape (an assistant history item carrying output_text with NO
 // annotations key) proxies to a 200 with the history converted upstream —
 // Codex sessions survive turn 2+ against the proxy.
@@ -106,7 +106,7 @@ func TestReplayCodexTwoTurn(t *testing.T) {
 	}
 }
 
-// TestReplayClaudeCodeMidConversationSystem proves the autopsy-02 fix
+// TestReplayClaudeCodeMidConversationSystem proves the fix
 // end-to-end: a Claude Code Messages exchange with envelope.system plus an
 // inline mid-conversation system turn proxies to a 200 whose single upstream
 // system message sits at index 0 — no 'System message must be at the
@@ -191,8 +191,8 @@ func TestReplayClaudeCodeMidConversationSystem(t *testing.T) {
 	}
 }
 
-// TestReplayPoisonUsageSuccess proves the autopsy-03 fix end-to-end and
-// composes task 16's retry pin: a chat upstream 200 carrying top-level
+// TestReplayPoisonUsageSuccess proves the fix end-to-end and
+// composes the retry pin: a chat upstream 200 carrying top-level
 // reasoning_tokens yields a 200 to the client with the converted usage, zero
 // breaker failures, and exactly one upstream hit even with retries enabled.
 func TestReplayPoisonUsageSuccess(t *testing.T) {
@@ -208,7 +208,7 @@ func TestReplayPoisonUsageSuccess(t *testing.T) {
 	breaker := j2Breaker(t)
 
 	// Retries and the production replay cap armed so the single-hit
-	// assertion exercises the real retry decision (task 16).
+	// assertion exercises the real retry decision.
 	u, _ := url.Parse(upstream.URL)
 	pattern, err := route.Parse("POST /v1/responses")
 	if err != nil {
@@ -584,8 +584,7 @@ func TestReplayMatchedStopNonStream(t *testing.T) {
 	t.Cleanup(upstream.Close)
 
 	u, _ := url.Parse(upstream.URL)
-	// The non-stream leak pin runs on BOTH client dialects (gate run 5,
-	// finding 4): the Responses renderer is a distinct render path from the
+	// The non-stream leak pin runs on BOTH client dialects: the Responses renderer is a distinct render path from the
 	// Messages one, so each must independently prove the extension never
 	// reaches the client body.
 	tests := []struct {

@@ -1,6 +1,6 @@
 package transcode
 
-// J4 regression tests (review-k finding 4, high): the non-streaming Chat
+// J4 regression tests: the non-streaming Chat
 // response decode is presence-aware and strict — the pinned required fields
 // (object, one choice, choice index 0, finish_reason, message with role
 // assistant, complete tool-call identity) must be explicitly present, never
@@ -46,7 +46,7 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 			// stop.
 			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"","message":{"role":"assistant","content":"x"}}]}`,
 			// wantUnsupported mirrors the pinned unknown-finish_reason
-			// convention (blueprint task 3 keeps it local).
+			// convention (kept local).
 			wantUnsupported: true,
 		},
 		{
@@ -94,7 +94,7 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 			body: `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f"}}]}}]}`,
 		},
 		// Empty and non-object model-generated arguments are PRESERVED
-		// byte-exact, never rejected as corrupt wire (review-z commit 2);
+		// byte-exact, never rejected as corrupt wire;
 		// the exact preservation is asserted in TestToolArgumentsFidelityAcrossTargets.
 		{
 			name:       "tool call empty arguments preserved",
@@ -149,7 +149,7 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 	}
 }
 
-// TestChatResponseReviewKCounterexampleIsRejected proves the exact review-k
+// TestChatResponseReviewKCounterexampleIsRejected proves the exact
 // counterexample — a single choice with index zero, a user-role message, and
 // no finish_reason — is rejected as corrupt upstream wire and can never
 // become a successful assistant response.
@@ -228,8 +228,8 @@ func TestChatResponseOfficialShapesStillDecode(t *testing.T) {
 
 // TestChatStreamChunkObjectDiscriminator proves the streaming parity: the
 // chunk object discriminator is a required field of the pinned envelope —
-// a chunk with a missing or wrong object is corrupt upstream wire
-// (review-08 blocker 2); the correct discriminator passes.
+// a chunk with a missing or wrong object is corrupt upstream wire;
+// the correct discriminator passes.
 func TestChatStreamChunkObjectDiscriminator(t *testing.T) {
 	good := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}`
 	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(good)}); err != nil {
@@ -302,7 +302,7 @@ func TestChatResponseDecodesMatchedStopExtension(t *testing.T) {
 // error text ("unknown field \"matched_stop\"") is level-ambiguous between
 // choice and message, so the message surface mirrors Choice's opaque
 // extensions (token_ids/routed_experts/stop_reason are modeled at message
-// level per the task-12 F1 pattern) to keep the strict decode from failing
+// level per the shadow-mirrors-wire pattern) to keep the strict decode from failing
 // if a gateway also rides matched_stop there. The strict non-streaming
 // decode surface must accept matched_stop inside choices[].message in both
 // string and null forms, while a genuinely unknown message field stays

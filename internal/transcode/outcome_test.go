@@ -1,7 +1,6 @@
 package transcode
 
-// J2 regression tests for the extended Outcome dimensions (review-j finding
-// 2): a failed downstream write changes the recorded provenance instead of
+// J2 regression tests for the extended Outcome dimensions: a failed downstream write changes the recorded provenance instead of
 // being logged and ignored, and writeUpstreamHTTPError records RetryAfter
 // from the ORIGINAL upstream response so rate-signalled 403s keep their hold
 // signal.
@@ -62,8 +61,7 @@ func outcomeCaptureHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) (
 // TestWriteDialectHTTPErrorDownstreamWriteFailureChangesOutcome proves that a
 // failed downstream write changes the recorded provenance to
 // DownstreamWriteError (or ClientAbort when the context is cancelled) with
-// DownstreamComplete=false, instead of being logged and ignored (review-j
-// finding 2).
+// DownstreamComplete=false, instead of being logged and ignored.
 func TestWriteDialectHTTPErrorDownstreamWriteFailureChangesOutcome(t *testing.T) {
 	handler, outcomes := outcomeCaptureHandler(t, responsesMapping(t), func(req *http.Request) (*http.Response, error) {
 		t.Fatal("round trip must not be called")
@@ -167,7 +165,7 @@ func TestWriteUpstreamHTTPErrorRetainsUpstreamRetryAfter(t *testing.T) {
 	handler.writeUpstreamHTTPError(req, &failingResponseWriter{}, resp, time.Now(), apiErr)
 	outcome := <-outcomes
 	// The hold is anchored at header receipt and evaluated at outcome
-	// construction: a fast body leaves ~5s remaining (review-08 blocker 9).
+	// construction: a fast body leaves ~5s remaining.
 	if !outcome.RetryAfter.Set || outcome.RetryAfter.Value <= 4*time.Second || outcome.RetryAfter.Value > 5*time.Second {
 		t.Fatalf("RetryAfter = %v, want ~5s", outcome.RetryAfter)
 	}

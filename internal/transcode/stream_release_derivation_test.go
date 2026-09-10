@@ -1,8 +1,8 @@
 package transcode
 
-// Autopsy 2026-09-06 M1 round 4: the release-bound derivation is closed on
+// The release-bound derivation is closed on
 // every axis the round-3 gate falsified — the per-event framing overhead
-// times the event budget (F1), the 6x-escaped request echo (F2, bounded at
+// times the event budget, the 6x-escaped request echo (bounded at
 // decode), and tool-call identity rendered into the terminal envelope
 // (charged against the exchange accumulated total).
 
@@ -41,7 +41,8 @@ func (r *sseReplayReader) Read(p []byte) (int, error) {
 	return 0, io.EOF
 }
 
-// TestChatStreamFramingOverheadCompletesRelease pins M1 round 3 finding F1:
+// TestChatStreamFramingOverheadCompletesRelease pins the full-event-budget
+// release:
 // a legal stream of single-byte deltas is bounded by the EVENT budget, and
 // its generated total is dominated by per-event framing overhead (~221 bytes
 // per chat→responses text-delta frame, measured), not payload escaping. The
@@ -74,7 +75,7 @@ func TestChatStreamFramingOverheadCompletesRelease(t *testing.T) {
 	reader := newConvertingReaderWithLimits(source, newChatToResponsesConverter(state), 0, 0, 0)
 
 	if _, err := io.Copy(io.Discard, reader); err != nil {
-		t.Fatalf("full-event-budget exchange must complete its release (M1 round 3 F1): %v", err)
+		t.Fatalf("full-event-budget exchange must complete its release: %v", err)
 	}
 	if !reader.sawTerminal {
 		t.Fatal("exchange did not reach its terminal")
@@ -84,7 +85,7 @@ func TestChatStreamFramingOverheadCompletesRelease(t *testing.T) {
 	}
 }
 
-// TestResponsesRequestEchoCapped pins M1 round 3 finding F2: the request
+// TestResponsesRequestEchoCapped pins the echo cap: the request
 // echo is bounded at decode (maxStreamEchoBytes, fail-closed 413 resource
 // limit) because it re-marshals into every generated envelope frame at up to
 // 6x JSON escaping. A '<'-heavy echo above the bound is rejected at decode —
@@ -136,7 +137,7 @@ func TestResponsesRequestEchoCapped(t *testing.T) {
 		}
 	})
 	t.Run("escaping-heavy user above the bound rejected", func(t *testing.T) {
-		// The rendered members beyond instructions are measured too (review
+		// The rendered members beyond instructions are measured too.
 		// round 5): a '<'-heavy user field renders at 6x into every envelope.
 		body := fmt.Sprintf(
 			`{"model":"m","input":"x","user":%q}`,
@@ -186,7 +187,7 @@ func TestChatStreamMaximalEchoReleases(t *testing.T) {
 	reader := newConvertingReaderWithLimits(source, newChatToResponsesConverter(state), 0, 0, 0)
 
 	if _, err := io.Copy(io.Discard, reader); err != nil {
-		t.Fatalf("maximal-echo terminal release failed (M1 round 3 F2): %v", err)
+		t.Fatalf("maximal-echo terminal release failed: %v", err)
 	}
 	if !reader.sawTerminal {
 		t.Fatal("exchange did not reach its terminal")
@@ -257,7 +258,7 @@ func TestResponsesAnthropicToolIdentityCharged(t *testing.T) {
 	}
 }
 
-// TestChatStreamToolIdentityCharged pins M1 round 4: tool-call identity
+// TestChatStreamToolIdentityCharged pins the tool-identity charge: tool-call identity
 // (call id, function name) renders into the terminal envelope and the done
 // events, so it is charged against the exchange accumulated total. Identity
 // bytes beyond the exchange total are corrupt upstream wire; a repeated id
@@ -339,12 +340,12 @@ func TestEchoCapLiveHandler413(t *testing.T) {
 }
 
 // TestPerEventFramingChargeCoversAllShapes pins the 256-byte per-event
-// framing charge BY CONSTRUCTION (review ses_f82433a3affeYcnpN3ETKBmQxz):
+// framing charge BY CONSTRUCTION:
 // every generated non-terminal frame shape from both stream converters is
 // re-marshaled with the worst-case large sequence number and long identity
 // strings, and its FIXED overhead (frame bytes minus payload bytes) must fit
 // maxStreamPerEventFramingBytes. An under-count would let the exchange
-// generated total fire before the event budget — the M1 round-3 F1
+// generated total fire before the event budget — the
 // regression — for streams of legal tiny deltas with long identities.
 func TestPerEventFramingChargeCoversAllShapes(t *testing.T) {
 	// maxStreamPerEventFramingBytes is the fixed overhead each generated
@@ -494,7 +495,7 @@ func TestPerEventFramingChargeCoversAllShapes(t *testing.T) {
 	}
 	t.Logf("worst non-terminal fixed overhead = %d bytes (%s), charge = %d", worst, worstName, charge)
 	if worst > charge {
-		t.Fatalf("frame shape %s has fixed overhead %d > charge %d: the generated total can fire before the event budget (M1 F1 regression)", worstName, worst, charge)
+		t.Fatalf("frame shape %s has fixed overhead %d > charge %d: the generated total can fire before the event budget", worstName, worst, charge)
 	}
 }
 

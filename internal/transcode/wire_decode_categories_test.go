@@ -212,7 +212,7 @@ func assertWireDecodeKind(t *testing.T, err error, kind wire.DecodeErrorKind) {
 
 // TestWireDecodeNullUnionPayloads proves null or type-less union payloads
 // are corrupt wire (typed missing-required), never an empty-feature
-// unsupported report (review run 1 finding F1).
+// unsupported report.
 func TestWireDecodeNullUnionPayloads(t *testing.T) {
 	cases := []struct {
 		name string

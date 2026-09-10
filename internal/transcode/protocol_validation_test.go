@@ -1,7 +1,6 @@
 package transcode
 
-// J13 regression tests: the remaining protocol-validation details (review-j
-// finding 15) — exact media-type matching, the base64 data-URL parameter,
+// J13 regression tests: the remaining protocol-validation details — exact media-type matching, the base64 data-URL parameter,
 // and Anthropic source union exclusivity.
 
 import (
@@ -12,7 +11,6 @@ import (
 
 // TestMediaTypeMatchingExact proves media recognition is exact: lookalike
 // types are rejected and the JSON structured-syntax family is accepted
-// (review-j finding 15).
 func TestMediaTypeMatchingExact(t *testing.T) {
 	response := func(contentType string) *http.Response {
 		return &http.Response{Header: http.Header{"Content-Type": {contentType}}}
@@ -46,7 +44,7 @@ func TestMediaTypeMatchingExact(t *testing.T) {
 }
 
 // TestSplitImageDataURLBase64Parameter proves the data-URL parameters section
-// must include base64 (review-j finding 15).
+// must include base64.
 func TestSplitImageDataURLBase64Parameter(t *testing.T) {
 	if _, _, err := splitImageDataURL("data:image/png;base64,aGk="); err != nil {
 		t.Fatalf("valid data URL rejected: %v", err)
@@ -73,7 +71,6 @@ func TestSplitImageDataURLBase64Parameter(t *testing.T) {
 
 // TestAnthropicSourceExclusivity proves ambiguous sources are rejected —
 // a base64 source must not carry a url and a url source must not carry data
-// (review-j finding 15).
 func TestAnthropicSourceExclusivity(t *testing.T) {
 	valid := []AnthropicSource{
 		{Type: AnthropicSourceTypeBase64, MediaType: "image/png", Data: "aGk="},
@@ -103,7 +100,7 @@ func TestAnthropicSourceExclusivity(t *testing.T) {
 
 // TestMappingMissingModelPolicyRejected proves a mapping whose model map has
 // neither identity fallback nor explicit entries is a construction error:
-// every request model would fail to resolve (review-z commit 6).
+// every request model would fail to resolve.
 func TestMappingMissingModelPolicyRejected(t *testing.T) {
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{} // no policy at all
@@ -117,7 +114,7 @@ func TestMappingMissingModelPolicyRejected(t *testing.T) {
 // TestMappingMessagesResponsesStrictRejected proves a Messages->Responses
 // mapping under the strict loss policy is a construction error: Messages
 // tools carry no strictness and the Responses contract requires explicit
-// strict, so tool requests could never be served (review-z commit 6).
+// strict, so tool requests could never be served.
 func TestMappingMessagesResponsesStrictRejected(t *testing.T) {
 	key, err := NewRouteKey(http.MethodPost, "/v1/messages")
 	if err != nil {

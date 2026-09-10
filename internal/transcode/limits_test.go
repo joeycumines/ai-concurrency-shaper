@@ -11,7 +11,6 @@ import (
 )
 
 // TestBodyLimitsValidate proves negative limits fail startup validation
-// (review-j finding 14).
 func TestBodyLimitsValidate(t *testing.T) {
 	if err := (BodyLimits{}).Validate(); err != nil {
 		t.Fatalf("zero limits must be valid: %v", err)
@@ -36,7 +35,7 @@ func TestBodyLimitsValidate(t *testing.T) {
 }
 
 // TestBodyLimitsWithDefaults proves every zero field selects its package
-// default and explicit values are preserved (review-k finding 8): an
+// default and explicit values are preserved: an
 // all-zero BodyLimits enforces real bounds on every field, never unlimited.
 func TestBodyLimitsWithDefaults(t *testing.T) {
 	effective := (BodyLimits{}).WithDefaults()
@@ -93,14 +92,13 @@ func TestBodyLimitsWithDefaults(t *testing.T) {
 // TestRenderedResponseBoundEndToEnd proves the complete rendered JSON
 // response is bounded AFTER conversion and BEFORE any header commit: an
 // oversized render fails the exchange with the configured limit and an
-// UpstreamBodyError outcome, never a partial response (review-z commit 5,
-// review-z commit 3).
+// UpstreamBodyError outcome, never a partial response.
 func TestRenderedResponseBoundEndToEnd(t *testing.T) {
 	roundTrip := func(req *http.Request) (*http.Response, error) {
 		// The upstream response MUST carry the JSON content type: without it
 		// the handler rejects the representation earlier and the rendered
 		// bound check never runs — this test pins the bound mechanism
-		// itself (review-z commit 5).
+		// itself.
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -120,8 +118,7 @@ func TestRenderedResponseBoundEndToEnd(t *testing.T) {
 			BodyLimits: BodyLimits{
 				AcceptedRequestBytes:    1 << 20,
 				SuccessfulResponseBytes: 1 << 20,
-				// The minimum legal rendered-response bound (review-z
-				// commit 6); the 4096-char content still overflows it.
+				// The minimum legal rendered-response bound; the 4096-char content still overflows it.
 				GeneratedResponseBytes: MinGeneratedResponseBytes,
 			},
 		},
@@ -145,7 +142,7 @@ func TestRenderedResponseBoundEndToEnd(t *testing.T) {
 }
 
 // TestErrorMessageBoundEndToEnd proves every client-visible error message is
-// truncated to the configured ErrorMessageBytes bound (review-z commit 5).
+// truncated to the configured ErrorMessageBytes bound.
 func TestErrorMessageBoundEndToEnd(t *testing.T) {
 	roundTrip := func(req *http.Request) (*http.Response, error) {
 		return nil, errors.New(strings.Repeat("x", 8192))
@@ -199,7 +196,6 @@ func TestErrorMessageBoundEndToEnd(t *testing.T) {
 // smallest legal terminal batches (both client dialects), the smallest SSE
 // error frame, and the smallest rendered JSON response all fit within the
 // constants, so a limit below them could never carry a legal completion
-// (review-z commit 6).
 func TestMinimumOutputBoundsFit(t *testing.T) {
 	// Messages-client terminal batch: message_delta + message_stop. The
 	// real state machine always carries the usage object on the delta when
@@ -296,7 +292,7 @@ func TestMinimumOutputBoundsFit(t *testing.T) {
 
 // TestBodyLimitsMinimumOutputRejected proves output limits below the
 // minimum legal terminal or error frame fail validation while zero values
-// (default-selected) and the minimum itself pass (review-z commit 6).
+// (default-selected) and the minimum itself pass.
 func TestBodyLimitsMinimumOutputRejected(t *testing.T) {
 	base := BodyLimits{AcceptedRequestBytes: 1 << 20, SuccessfulResponseBytes: 1 << 20}
 	if err := base.Validate(); err != nil {

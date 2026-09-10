@@ -2,8 +2,8 @@ package transcode
 
 import "testing"
 
-// TestChatToolResultMultiPartTextJoinReported pins autopsy 2026-09-06 H2
-// (REM-B acceptance): a multi-part all-text tool result renders as the
+// TestChatToolResultMultiPartTextJoinReported pins the multi-part join
+// (acceptance): a multi-part all-text tool result renders as the
 // joined string AND records exactly one sanctioned Note — the join is
 // observable, never silent, and NEVER policy-gated (every content byte is
 // preserved; the part boundaries are structural metadata the chat dialect
@@ -40,7 +40,7 @@ func TestChatToolResultMultiPartTextJoinReported(t *testing.T) {
 			t.Fatalf("%s: silent join: report lacks tool_result_text_join: %+v", name, report)
 		}
 		// EXACTLY ONE note: a duplicate Note would spam the aggregated loss
-		// line (gate run 1 MEDIUM).
+		// line.
 		entries := 0
 		for _, entry := range report.Losses {
 			if entry.Feature != FeatureToolResultTextJoin {

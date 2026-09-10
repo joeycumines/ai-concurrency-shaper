@@ -89,7 +89,7 @@ func fire(ps *parkedServer) {
 	}()
 }
 
-// TestShutdownServersDrainsBothUnderStall pins the fix for the review finding
+// TestShutdownServersDrainsBothUnderStall pins the fix for the finding
 // that sequentially shutting the metrics and proxy servers down against ONE
 // shared context lets the first consumer starve the second: stdlib answers an
 // already-expired context after a single idle-conn poll, abandoning the
@@ -265,5 +265,5 @@ func TestSequentialShutdownStarvesSecondServer(t *testing.T) {
 	}
 	// The second server's connection was abandoned rather than drained: its
 	// handler is still parked at this point (release happens in t.Cleanup),
-	// which is exactly the client-severing behavior under review.
+	// which is exactly the client-severing behavior being pinned.
 }

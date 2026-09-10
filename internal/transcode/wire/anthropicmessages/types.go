@@ -759,7 +759,7 @@ type Request struct {
 // thinking decision to the model/server. Unknown fields are rejected by the
 // strict wire decode; the Type value and the per-type member set (a
 // budget_tokens on disabled/adaptive or a display on enabled is malformed,
-// never silently ignored — review-12 R12-L1) are validated by the transcode
+// never silently ignored) are validated by the transcode
 // layer.
 type ThinkingConfig struct {
 	Type         string  `json:"type"`

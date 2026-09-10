@@ -268,7 +268,7 @@ func TestConcurrentAcquireRelease(t *testing.T) {
 func TestLimiter_PostReleaseCooldown(t *testing.T) {
 	// Verify that a limiter with cooldown delays the return of tokens
 	// after release. This creates a "dead zone" between slot release
-	// and re-admission, preventing KILL-02 (slot release race).
+	// and re-admission, preventing the slot release race.
 	l := NewLimiterWithCooldown(1, 200*time.Millisecond)
 
 	release, err := l.Acquire(context.Background())

@@ -19,8 +19,8 @@ import (
 // distinguishable, while the full surface is modeled (reusing the wire types
 // for non-presence-sensitive payloads) so the tolerant decode's modeled
 // surface covers the full pinned contract. The shadow enforces the pinned
-// required fields of the Chat response contract (review-k finding 4) and its
-// usage presence is consumed by the usage Known-flag decode (review-k finding 6).
+// required fields of the Chat response contract and its
+// usage presence is consumed by the usage Known-flag decode.
 type chatResponseShadow struct {
 	ID                string             `json:"id"`
 	Object            *string            `json:"object"`
@@ -80,8 +80,7 @@ type chatMessageShadow struct {
 	// would leave the client with a tool_use stop reason and no tool call).
 	FunctionCall json.RawMessage `json:"function_call,omitempty"`
 	// ReasoningContent mirrors the wire ChatAssistantMessage extension (the
-	// DeepSeek/Qwen spelling); shadow-mirrors-wire per the task-12 F1
-	// pattern.
+	// DeepSeek/Qwen spelling); shadow-mirrors-wire pattern.
 	ReasoningContent *string `json:"reasoning_content,omitempty"`
 
 	TokenIDs      any     `json:"token_ids,omitempty"`
@@ -90,7 +89,7 @@ type chatMessageShadow struct {
 	// MatchedStop mirrors the wire ChatAssistantMessage extension
 	// (matched_stop is observed at choice level; the message-level mirror
 	// is defensive — the captured error text is level-ambiguous);
-	// shadow-mirrors-wire per the task-12 F1 pattern.
+	// shadow-mirrors-wire pattern.
 	MatchedStop any `json:"matched_stop,omitempty"`
 }
 
@@ -109,9 +108,9 @@ type chatToolCallFunctionShadow struct {
 
 // chatUsageShadow mirrors ChatLLMUsage with pointer totals so explicit
 // presence is distinguishable from omitted (the wire fields are omitempty;
-// review-k finding 6 decodes the Known flags from this shadow). The four
+// the Known flags are decoded from this shadow). The four
 // provider-extension pointers mirror the wire LLMUsage extensions exactly
-// (shadow-mirrors-wire, task-12 F1 pattern): the shared struct covers both
+// (shadow-mirrors-wire pattern): the shared struct covers both
 // the non-streaming response and the streaming chunk shadows.
 type chatUsageShadow struct {
 	PromptTokens            *int                         `json:"prompt_tokens,omitempty"`
@@ -142,8 +141,8 @@ type chatUsageShadow struct {
 // subject-to-change contract, so unknown provider-extension fields are
 // TOLERATED, but): the required fields (object, one choice, choice index 0,
 // finish_reason, message with role assistant, and complete tool-call identity)
-// must be explicitly present — absent or null is rejected, never defaulted
-// (review-k finding 4); corrupt upstream wire is an upstream failure. Provider
+// must be explicitly present — absent or null is rejected, never defaulted;
+// corrupt upstream wire is an upstream failure. Provider
 // plaintext reasoning is the one field that instead follows the loss policy:
 // mapped to ordinary text with the capability, an approved loss with the
 // reasoning dropped when the policy allows losing provider_reasoning_text, or
@@ -159,7 +158,7 @@ func DecodeChatResponseWithPolicy(
 	if err := wire.DecodeTolerant(body, &shadow); err != nil {
 		// A decode failure — malformed JSON or a type-corrupt modeled value —
 		// is corrupt upstream wire, an
-		// upstream failure (review-k finding 3). Valid features the
+		// upstream failure. Valid features the
 		// transcoder knows but does not support are rejected as
 		// UnsupportedFeatureError (local) instead.
 		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
@@ -172,7 +171,7 @@ func DecodeChatResponseWithPolicy(
 	// The pinned Chat response contract (openai-go v1.12.0 chatcompletion.go):
 	// object, choices, created, model, finish_reason, index, message, and the
 	// message role are required fields. Every violation is corrupt upstream
-	// wire (review-k findings 3 and 4).
+	// wire.
 	if shadow.Object == nil || *shadow.Object != "chat.completion" {
 		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
@@ -286,7 +285,7 @@ func DecodeChatResponseWithPolicy(
 		}
 	}
 	// tool_call_id is a tool-only field: on an assistant response message it
-	// would otherwise be silently dropped (review-k finding 5). A message
+	// would otherwise be silently dropped. A message
 	// carrying another role's fields is a contradictory union — a typed
 	// decode rejection.
 	if shadowChoice.Message.ToolCallID != nil {
@@ -367,12 +366,12 @@ func DecodeChatResponseWithPolicy(
 	// Chat usage totals are modeled omitempty (defensively — the pinned
 	// contract marks them required, so a conforming upstream always sends
 	// them, but presence is distinguishable only through the probe;
-	// review-k finding 6). Cache-write tokens come from the
+	// ). Cache-write tokens come from the
 	// created_cache_tokens provider extension: a provider that reports it
 	// makes the Messages cache-creation component known; one that does not
 	// leaves the loss-gated unknown decision.
 	//
-	// Top-level provider extensions (autopsy 03): a reasoning signal from
+	// Top-level provider extensions: a reasoning signal from
 	// EITHER the pinned detail object OR the top-level reasoning_tokens
 	// makes the component known (details win); a cache-read signal comes
 	// from prompt_tokens_details.cached_tokens, then cached_tokens, then
@@ -498,7 +497,7 @@ func DecodeChatResponseWithPolicy(
 
 	// The assistant message becomes one message item; tool calls become
 	// their own function-call items, preserving function-call identity and
-	// the model-generated arguments byte-exact (review-z commit 2). The
+	// the model-generated arguments byte-exact. The
 	// answer-content parts render even while provider reasoning is dropped
 	// under an approved loss, so the client still receives a rendered response.
 	parts, calls, err := chatMessageToCanonicalParts(message, capabilities, policy, &report)
@@ -543,7 +542,7 @@ func derefRole(role *ChatMessageRole) string {
 // is enabled — provider plaintext reasoning mapped to ordinary text) and
 // separate function-call items. Tool-call arguments are model-generated and
 // preserved byte-exact in ToolArguments; invalid model output is never an
-// upstream defect (review-z commit 2). Provider plaintext reasoning without
+// upstream defect. Provider plaintext reasoning without
 // the capability follows the loss policy: an approved
 // provider_reasoning_text loss with the reasoning dropped when the policy
 // allows it, an error otherwise (the stream disposition, sharing the same
@@ -647,8 +646,7 @@ func chatMessageToCanonicalParts(
 				// The mapping is the named provider_reasoning_text encoding and
 				// is recorded exactly once, sharing the stream surface's note
 				// detail so a capability-on exchange is observable through both
-				// conversion paths (review-j finding 10 / task-22
-				// de-asymmetry).
+				// conversion paths.
 				parts = append(parts, CanonicalText{Text: reasoningText})
 				if err := report.Note(
 					FeatureProviderReasoningText,
@@ -687,9 +685,8 @@ func chatMessageToCanonicalParts(
 			}
 			// The shadow enforced arguments presence; the raw string is
 			// preserved byte-exact — invalid model output is preserved, not
-			// rejected (review-z commit 2). The empty-string-to-"{}"
-			// substitution exists only in the render direction (review-k
-			// finding 4).
+			// rejected. The empty-string-to-"{}"
+			// substitution exists only in the render direction.
 			calls = append(calls, &CanonicalFunctionCallItem{
 				CallID:    *call.ID,
 				Name:      name,
@@ -711,7 +708,7 @@ func DecodeResponsesResponse(
 	if err := wire.DecodeTolerant(body, &envelope); err != nil {
 		// A decode failure — malformed JSON or a type-corrupt modeled value —
 		// is corrupt upstream wire, an
-		// upstream failure (review-k finding 3). Valid features the
+		// upstream failure. Valid features the
 		// transcoder knows but does not support are rejected as
 		// UnsupportedFeatureError (local) instead: the wire layer reports
 		// them as wire.UnsupportedTypeError and the boundary translates
@@ -806,8 +803,7 @@ func DecodeResponsesResponse(
 
 	// Output items decode one-to-one into canonical items: item boundaries,
 	// output ordering, phases, reasoning artifacts, function calls, and
-	// conversation-state items survive until the target renderer (review-z
-	// commit 2).
+	// conversation-state items survive until the target renderer.
 	sawToolUse := false
 	for i, item := range envelope.Output {
 		switch value := item.(type) {
@@ -836,7 +832,7 @@ func DecodeResponsesResponse(
 
 		case *ResponsesFunctionCallOutputItem:
 			// Model-generated arguments are preserved byte-exact; invalid
-			// model output is never an upstream defect (review-z commit 2).
+			// model output is never an upstream defect.
 			response.Items = append(response.Items, &CanonicalFunctionCallItem{
 				ItemID:    value.ID,
 				CallID:    value.CallID,
@@ -903,7 +899,7 @@ func DecodeResponsesResponse(
 // response envelope, reconstructed from the request echo. The client-facing
 // model alias is returned; the actual upstream model is never leaked. The
 // returned report carries every approved loss and named encoding of the
-// conversion (review-j finding 10).
+// conversion.
 func RenderResponsesResponse(
 	response CanonicalResponse,
 	context *ExchangeContext,
@@ -916,8 +912,7 @@ func RenderResponsesResponse(
 	}
 	// Chat response attributes the Responses envelope cannot reproduce
 	// (token log-probabilities and the tier actually served) are a loss or a
-	// rejection per the exchange policy — never a silent drop (review-j
-	// finding 4).
+	// rejection per the exchange policy — never a silent drop.
 	var report ConversionReport
 	if response.Source.ChatLogProbs {
 		if err := report.Lose(
@@ -950,7 +945,7 @@ func RenderResponsesResponse(
 	}
 
 	// Output items render one-to-one from the canonical items; item
-	// boundaries and identities are preserved (review-z commit 2).
+	// boundaries and identities are preserved.
 	for _, item := range response.Items {
 		switch value := item.(type) {
 		case *CanonicalMessageItem:
@@ -1003,7 +998,7 @@ func RenderResponsesResponse(
 		case *CanonicalFunctionCallItem:
 			// The Responses function_call arguments field is a string:
 			// the model-generated raw text is preserved byte-exact
-			// (review-z commit 2).
+			//.
 			envelope.Output = append(envelope.Output, &ResponsesFunctionCallOutputItem{
 				ID:        context.IDs.New("fc_"),
 				Type:      "function_call",
@@ -1037,18 +1032,17 @@ func RenderResponsesResponse(
 
 	// Usage.
 	// Usage is emitted only when the source provided it: unknown usage is
-	// never fabricated as zero facts (review-j finding 9). The pinned
+	// never fabricated as zero facts. The pinned
 	// Responses contract requires the breakdown detail objects on the usage
 	// object (openai-go v1.12.0 response.go): a component the source did not
 	// provide is a usage-timing loss (approved or rejected per the exchange
 	// policy), never a silent zero — omitting the required field would just
-	// move the fabricated zero into the client's defaulting (review-k
-	// finding 6). The total is the source's own when provided, otherwise
+	// move the fabricated zero into the client's defaulting. The total is the source's own when provided, otherwise
 	// derived from the parts. The Responses wire does not require the usage
 	// object itself, so a source without usage renders without one — but
 	// the omission is recorded as a Note (a sanctioned elision, not a
 	// policy-gated loss: nothing the source sent was dropped), so the
-	// exchange's usage provenance stays observable (autopsy 2026-09-06 M4:
+	// exchange's usage provenance stays observable (
 	// the omission was silent).
 	if response.Usage.Unknown() {
 		if err := report.Note(
@@ -1091,7 +1085,7 @@ func RenderResponsesResponse(
 			TotalTokens:  total,
 		}
 		// Each wire-required component the source did not provide is its own
-		// granular loss decision (review-z commit 2).
+		// granular loss decision.
 		components := []struct {
 			feature Feature
 			name    string
@@ -1197,7 +1191,7 @@ func RenderMessagesResponse(
 		// A 2xx envelope reporting status "failed" is an upstream semantic
 		// failure: the typed error classifies the exchange as an upstream
 		// failure with the upstream HTTP status, matching the streamed
-		// response.failed classification (review-j finding 11).
+		// response.failed classification.
 		return nil, report, &UpstreamSemanticFailureError{
 			Message: response.ErrorMessage,
 		}
@@ -1207,8 +1201,7 @@ func RenderMessagesResponse(
 	}
 	// Chat response attributes the Messages response cannot reproduce
 	// (token log-probabilities and the tier actually served) are a loss or a
-	// rejection per the exchange policy — never a silent drop (review-j
-	// finding 4).
+	// rejection per the exchange policy — never a silent drop.
 	if response.Source.ChatLogProbs {
 		if err := report.Lose(
 			context.lossPolicy(),
@@ -1230,7 +1223,7 @@ func RenderMessagesResponse(
 		}
 	}
 	// The pinned Responses envelope controls cannot be reproduced in a
-	// Messages response (review-j finding 13).
+	// Messages response.
 	if len(response.Source.ResponsesControls) > 0 {
 		if err := report.Lose(
 			context.lossPolicy(),
@@ -1243,7 +1236,7 @@ func RenderMessagesResponse(
 		}
 	}
 	// The Responses source's service tier enters the same loss/reject
-	// decision as the chat source's tier (autopsy 2026-09-06 M4: the
+	// decision as the chat source's tier (the
 	// Responses→Messages drop was silent).
 	if response.Source.ResponsesServiceTier != "" {
 		if err := report.Lose(
@@ -1325,7 +1318,7 @@ func RenderMessagesResponse(
 		case *CanonicalFunctionCallItem:
 			// Anthropic tool_use.input requires an object. Model-generated
 			// arguments that are not an object are a LOCAL unrepresentable
-			// output — never corrupt upstream wire (review-z commit 2).
+			// output — never corrupt upstream wire.
 			if !value.Arguments.IsObject {
 				return nil, report, &UnrepresentableError{
 					Protocol: "messages",
@@ -1399,7 +1392,7 @@ func RenderMessagesResponse(
 	// Anthropic usage semantics: input_tokens + cache_creation_input_tokens
 	// + cache_read_input_tokens = total. The uncached input is the total
 	// minus the cached breakdown, with checked nonnegative arithmetic
-	// (review-j finding 9). Unknown usage is never fabricated as zero facts:
+	//. Unknown usage is never fabricated as zero facts:
 	// it is an explicit loss/reject decision.
 	if response.Usage.Unknown() {
 		if err := report.Lose(
@@ -1421,12 +1414,12 @@ func RenderMessagesResponse(
 		// cache_read_input_tokens, and output_tokens_details.thinking_tokens
 		// on the usage object: every component the source did not provide is
 		// a usage-timing loss (approved or rejected per the exchange policy),
-		// never a silent zero (review-k finding 6). Cache-write tokens are
+		// never a silent zero. Cache-write tokens are
 		// not part of the pinned Chat/Responses contract; the chat source
 		// knows them only through the created_cache_tokens provider
 		// extension, and the Responses source never does.
 		// Each wire-required component the source did not provide is its own
-		// granular loss decision (review-z commit 2).
+		// granular loss decision.
 		components := []struct {
 			feature Feature
 			name    string
@@ -1468,7 +1461,7 @@ func RenderMessagesResponse(
 		// Checked, architecture-independent int64-to-int conversion before
 		// rendering Messages usage: a count that cannot be represented on
 		// this platform (32-bit builds) is a typed error, never a silent
-		// overflow (review-z commit 5).
+		// overflow.
 		uncached, err := checkedInt64ToInt(inputTokens - cached)
 		if err != nil {
 			return nil, report, &UsageArithmeticError{Detail: "input tokens: " + err.Error()}

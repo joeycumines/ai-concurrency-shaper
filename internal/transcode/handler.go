@@ -24,8 +24,7 @@ import (
 // HandlerConfig configures one transcoded route.
 // HandlerConfig is the transcode handler configuration. The route-specific
 // values (auth, model map, loss policy, capabilities, allowed client query)
-// live in Mapping — HandlerConfig does not duplicate them (review-z commit
-// 4). The constructor validates, defaults, and deep-copies the mapping once
+// live in Mapping — HandlerConfig does not duplicate them. The constructor validates, defaults, and deep-copies the mapping once
 // into a private immutable configuration; runtime always reads the
 // normalized copy.
 type HandlerConfig struct {
@@ -114,7 +113,7 @@ type TranscodeHandler struct {
 // configuration is validated at construction, never on the first request: a
 // nil round trip would panic at request time, negative body limits would be
 // silently defaulted, and an invalid mapping or upstream would fail
-// mid-exchange (review-08 additional 9).
+// mid-exchange.
 func NewTranscodeHandler(
 	cfg HandlerConfig,
 	roundTrip RoundTrip,
@@ -137,18 +136,17 @@ func NewTranscodeHandler(
 	// The body limits contract (limits.go): zero values select the package
 	// defaults, computed ONCE here so zero never reaches handler logic — in
 	// particular, a zero DecodedRequestBytes is never treated as unlimited
-	// (review-k finding 8). The handler-side per-use fallbacks remain as
+	//. The handler-side per-use fallbacks remain as
 	// defense-in-depth for any future construction path that bypasses this
 	// normalization.
 	cfg.BodyLimits = cfg.BodyLimits.WithDefaults()
 	// The configuration is frozen at construction: the mapping and upstream
 	// URL are deep-copied once into the private configuration, so
-	// programmatic callers can never mutate live configuration (review-z
-	// commit 4). The mapping's Secret source is resolved ONCE here into a
+	// programmatic callers can never mutate live configuration. The mapping's Secret source is resolved ONCE here into a
 	// static source (when not the inbound-forwarding mode): a mutable
 	// custom SecretSource can no longer change live behavior or fail
 	// mid-exchange — the same freeze contract the provider auth policy
-	// satisfies through auth.FreezeAuthPolicy (autopsy 2026-09-06 M9).
+	// satisfies through auth.FreezeAuthPolicy.
 	cfg.Mapping = cloneMapping(cfg.Mapping)
 	if !cfg.Mapping.Auth.Inbound && cfg.Mapping.Auth.Secret != nil {
 		secret, err := cfg.Mapping.Auth.Secret.Secret(context.Background())
@@ -258,7 +256,7 @@ func (h *TranscodeHandler) ClientPath() string {
 // ServeHTTP implements http.Handler. Every exchange records EXACTLY ONE
 // outcome: the defer below records an internal local-failure outcome when no
 // path recorded one, so the proxy's synchronous sink read can never observe a
-// missing outcome (review-z commit 4).
+// missing outcome.
 func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if sink := OutcomeSinkFromContext(r.Context()); sink != nil {
@@ -357,7 +355,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// credential is a client fault (400); other request-construction
 		// failures are internal (500). Internal construction errors (secret
 		// resolution, signing) never leak details such as file paths into
-		// the client message (review-j finding 14); the detail is logged.
+		// the client message; the detail is logged.
 		status := http.StatusInternalServerError
 		message := "build upstream request: " + err.Error()
 		if errors.Is(err, errClientQueryParameter) ||
@@ -381,8 +379,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.roundTrip(outReq)
 	// The response headers arrived: anchor Retry-After and the 403
 	// rate-signal classification here so body-read time is excluded from the
-	// recorded hold (review-08 blocker 9; the same pattern the retry
-	// transport uses).
+	// recorded hold.
 	receivedAt := time.Now()
 	if err != nil {
 		// A RoundTripper may return a non-nil response alongside an error;
@@ -393,7 +390,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A client abort suppresses the failure only when the transport
 		// error is itself cancellation-derived: an unrelated connection
 		// reset, DNS, or TLS failure racing with the cancellation must win
-		// as the upstream transport failure it is (review-08 blocker 8).
+		// as the upstream transport failure it is.
 		if r.Context().Err() != nil && isContextCancellationError(err) {
 			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 			// A cancelled client context means the exchange is already over.
@@ -403,13 +400,12 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// A signer error is a local construction/auth failure (neutral),
-		// never an upstream transport failure (review-z commit 4).
+		// never an upstream transport failure.
 		if signingErr, ok := errors.AsType[*SigningError](err); ok {
 			// The signer failure is logged with detail; the client message
-			// is sanitized (review-j finding 14: local construction errors
-			// never leak details). The code is request-side: the failure
+			// is sanitized. The code is request-side: the failure
 			// happened building the upstream request, before any response
-			// existed (review-z commit 4).
+			// existed.
 			h.logRequestError(r, signingErr)
 			h.writeDialectHTTPError(r, w, CanonicalAPIError{
 				Status:  http.StatusBadGateway,
@@ -429,8 +425,8 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// request URL, including a credential-bearing upstream base query).
 		// The detail is logged server-side with sensitive URL query values
 		// redacted; the client message is neutral (the native passthrough
-		// path likewise sends a fixed body — autopsy 2026-09-06 H1;
-		// review-j finding 14 precedent).
+		// path likewise sends a fixed body;
+		// ).
 		h.logRequestError(r, sanitizeUpstreamTransportError(err))
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadGateway,
@@ -486,7 +482,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// The upstream returned the wrong representation for the
 			// negotiated mode: corrupt upstream wire, an upstream failure
 			// that fails a half-open probe and applies the failure hold
-			// (review-08 blocker 8).
+			//.
 			h.writeLocalError(r, w,
 				http.StatusBadGateway,
 				"upstream returned a stream for a non-streaming request",
@@ -517,7 +513,7 @@ var errRequestBodyTooLarge = errors.New("request body too large")
 
 // errDecodedRequestTooLarge marks a decoded/rendered request that amplified
 // beyond the decoded-request body limit. It renders as 413 RequestEntityTooLarge
-// in the client dialect, not the generic conversion 400 (review-j finding 15).
+// in the client dialect, not the generic conversion 400.
 var errDecodedRequestTooLarge = errors.New("decoded request exceeds the decoded-request body limit")
 
 // errEchoTooLarge marks a Responses request whose echo exceeds the echo
@@ -583,14 +579,14 @@ func (h *TranscodeHandler) convertRequest(
 			return nil, nil, err
 		}
 		// The request body's stream field, when explicitly present, is
-		// authoritative over the Accept header (review-08 blocker 1): an
+		// authoritative over the Accept header: an
 		// explicit stream:false is never merged into streaming.
 		if result.StreamSet {
 			context.StreamIntent = result.Request.Stream
 		}
 		// Write the resolved intent back into the canonical request so the
 		// upstream renderer emits the stream value matching the negotiated
-		// mode (review-j finding 6): an Accept-only stream request must not
+		// mode: an Accept-only stream request must not
 		// ask the upstream for JSON while the handler expects SSE.
 		result.Request.Stream = context.StreamIntent
 		if err := resolveModel(result.Request.ClientModel); err != nil {
@@ -632,14 +628,14 @@ func (h *TranscodeHandler) convertRequest(
 			return nil, nil, err
 		}
 		// The request body's stream field, when explicitly present, is
-		// authoritative over the Accept header (review-08 blocker 1): an
+		// authoritative over the Accept header: an
 		// explicit stream:false is never merged into streaming.
 		if result.StreamSet {
 			context.StreamIntent = result.Request.Stream
 		}
 		// Write the resolved intent back into the canonical request so the
 		// upstream renderer emits the stream value matching the negotiated
-		// mode (review-j finding 6): an Accept-only stream request must not
+		// mode: an Accept-only stream request must not
 		// ask the upstream for JSON while the handler expects SSE.
 		result.Request.Stream = context.StreamIntent
 		if err := resolveModel(result.Request.ClientModel); err != nil {
@@ -703,7 +699,7 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 	}
 
 	// The outbound request uses an explicit allowlist: NOTHING the client
-	// sent is forwarded unless it is on the list (review-08 blocker 10).
+	// sent is forwarded unless it is on the list.
 	// Cookies, forwarding headers, range/conditional controls, idempotency
 	// keys, source-provider controls, and unknown credential or extension
 	// headers never reach the target provider; hop-by-hop and
@@ -713,7 +709,7 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 	// requested upstream: text/event-stream when the exchange streams,
 	// otherwise application/json. The client's Accept describes its own
 	// preferences, not the mode of the converted request, and must never
-	// reach the target provider unnormalized (review-08 blockers 1 and 10).
+	// reach the target provider unnormalized.
 	if streamIntent {
 		headers.Set("Accept", "text/event-stream")
 	} else {
@@ -800,12 +796,12 @@ func (h *TranscodeHandler) jsonResponse(
 		// A typed upstream semantic failure (a 2xx envelope whose payload
 		// reports failure) classifies with the UPSTREAM status and
 		// UpstreamFailure=true, matching the streamed classification
-		// (review-j finding 11) — never a local conversion failure.
+		// — never a local conversion failure.
 		if _, ok := errors.AsType[*UpstreamSemanticFailureError](err); ok {
 			h.writeUpstreamSemanticFailure(r, w, apiErr, resp.StatusCode)
 			return
 		}
-		// The conversion failure is logged server-side (autopsy 04 rec 3:
+		// The conversion failure is logged server-side (
 		// a parse-failure cascade must be visible to the operator) in
 		// addition to the bounded client message below. Upstream-authored
 		// semantic-failure text is NOT logged: it is already echoed to the
@@ -822,7 +818,7 @@ func (h *TranscodeHandler) jsonResponse(
 	RemoveHopByHopHeaders(resp.Header)
 	// The complete rendered JSON response is bounded AFTER conversion and
 	// BEFORE any header commits: an oversized body fails the exchange
-	// without a partial response escaping (review-z commit 3).
+	// without a partial response escaping.
 	if int64(len(converted)) > h.cfg.BodyLimits.GeneratedResponseBytes {
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadGateway,
@@ -842,8 +838,7 @@ func (h *TranscodeHandler) jsonResponse(
 	// same way); a write failure without a client cancel is a downstream
 	// error. A short write (n < len) with a nil error violates the
 	// io.Writer contract — the recorder detects it independently, and the
-	// handler must never record it as a clean completion (review-k finding
-	// 7).
+	// handler must never record it as a clean completion.
 	n, writeErr := w.Write(converted)
 	if writeErr == nil && n != len(converted) {
 		writeErr = io.ErrShortWrite
@@ -1043,11 +1038,11 @@ func (h *TranscodeHandler) streamResponse(
 	// short-write check of its own: every downstream frame is written
 	// through sealedSSEWriter.writeAll, which treats a partial write as
 	// io.ErrShortWrite, and the writer's first error surfaces as WriterErr
-	// (review-k finding 7).
+	//.
 	downstreamComplete := observation.WriterErr == nil && observation.SealErr == nil
 
 	// Classify the outcome from explicit provenance. The classification is
-	// recorded on the outcome (review-08 additional 8) so downstream sinks
+	// recorded on the outcome  so downstream sinks
 	// observe the truthful stream bucket for every exchange, not the zero
 	// value.
 	var outcome Outcome
@@ -1073,7 +1068,7 @@ func (h *TranscodeHandler) streamResponse(
 		// time captured when the upstream response arrived: the remaining
 		// hold excludes the stream duration, exactly as the JSON error
 		// writers record it. Set=true whenever the upstream signaled, even
-		// when already expired (review-z commit 4).
+		// when already expired.
 		outcome.RetryAfter = Optional[time.Duration]{
 			Value: circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, time.Now()),
 			Set:   resp.Header.Get("Retry-After") != "",
@@ -1094,7 +1089,7 @@ func (h *TranscodeHandler) streamResponse(
 	}
 	h.recordOutcome(r, outcome)
 	// Response-side approved losses are logged with the same fidelity as
-	// request-side losses (review-j findings 7 and 10).
+	// request-side losses.
 	h.logConversionReport(*converter.ConversionReport(), r, "response")
 }
 
@@ -1293,7 +1288,7 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 	// Evaluate the failure classification and Retry-After at outcome
 	// construction time, anchored at header receipt: the error body was read
 	// between the two, and the hold must measure from when the headers
-	// arrived (review-08 blocker 9).
+	// arrived.
 	evaluatedAt := time.Now()
 	upstreamFailure := circuitbreaker.IsFailureStatusWithHeaders(
 		apiErr.Status,
@@ -1309,7 +1304,7 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 		UpstreamFailure:   upstreamFailure,
 		// Set=true whenever the upstream SIGNALED a hold, even when it has
 		// already expired (a zero remaining hold is present-but-expired);
-		// Set=false when no hold was signaled (review-z commit 4).
+		// Set=false when no hold was signaled.
 		RetryAfter: Optional[time.Duration]{
 			Value: retryAfter,
 			Set:   resp.Header.Get("Retry-After") != "",
@@ -1340,8 +1335,7 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 // non-2xx upstream body transfer: the error body could not be read within
 // its bound, so the upstream's own status cannot be trusted as the exchange
 // outcome. The exchange is recorded as an upstream body failure regardless
-// of the status — a truncated 400 is never a healthy non-failure (review-08
-// blocker 8). A failed downstream write changes the provenance exactly like
+// of the status — a truncated 400 is never a healthy non-failure. A failed downstream write changes the provenance exactly like
 // the other error writers while the upstream failure fact is retained.
 func (h *TranscodeHandler) writeUpstreamBodyError(
 	r *http.Request,
@@ -1362,7 +1356,7 @@ func (h *TranscodeHandler) writeUpstreamBodyError(
 		// The upstream's Retry-After is a header fact that survives the
 		// failed body transfer: the rate-signalled hold must be recorded
 		// even when the error body could not be read, anchored at header
-		// receipt (review-08 blockers 8 and 9). Set=true whenever the
+		// receipt. Set=true whenever the
 		// upstream signaled a hold, even when it has already expired.
 		RetryAfter: Optional[time.Duration]{
 			Value: retryAfter,
@@ -1386,7 +1380,7 @@ func (h *TranscodeHandler) writeUpstreamBodyError(
 // upstream semantic failure (a 2xx envelope whose payload reports failure)
 // and records the outcome with the upstream's HTTP status and
 // UpstreamFailure=true, matching the streamed response.failed classification
-// (review-j finding 11). A failed downstream write changes the provenance
+// A failed downstream write changes the provenance
 // exactly like the other error writers.
 func (h *TranscodeHandler) writeUpstreamSemanticFailure(
 	r *http.Request,
@@ -1431,7 +1425,7 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 ) {
 	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
 	// Every client-visible error message respects the configured
-	// ErrorMessageBytes bound (review-z commit 3).
+	// ErrorMessageBytes bound.
 	apiErr.Message = h.boundErrorMessage(apiErr.Message)
 	writeErr := h.writeDialectOrCommittedStreamError(r, w, client, apiErr)
 	upstreamFailure := false
@@ -1443,13 +1437,13 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 		// IsFailureStatusWithHeaders): 429 and 5xx are failures, and 403 is
 		// a failure only when it carries a rate-limit signal (Retry-After).
 		//
-		// Disposition (autopsy 04 rec 2, no change): the upstream-failure
-		// classification of body errors is pinned review-k design — a body
+		// Disposition (no change): the upstream-failure
+		// classification of body errors is pinned — a body
 		// violating the wire contract IS an upstream health signal, and a
 		// consistently-poisonous upstream SHOULD open the breaker
 		// (TestHandlerCorruptUpstreamResponseIsUpstreamFailure). The
 		// field-observed poison sources are eliminated at the decode layer
-		// (autopsy tasks 13-15), not by widening breaker tolerance here.
+		// (the upstream-failure classification), not by widening breaker tolerance here.
 		upstreamFailure = apiErr.Status == http.StatusTooManyRequests ||
 			(apiErr.Status >= 500 && apiErr.Status < 600) ||
 			(apiErr.Status == http.StatusForbidden && apiErr.RetryAfter != "")
@@ -1458,7 +1452,7 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 		// The attempt fact reflects whether an upstream request was
 		// dispatched: local REQUEST conversion and signing errors never
 		// are; upstream HTTP/body/transport outcomes and local RESPONSE
-		// conversion errors are (review-z commit 4).
+		// conversion errors are.
 		UpstreamAttempted: provenance != ProvenanceLocalRequestConversionError,
 		UpstreamStatus:    Optional[int]{Value: apiErr.Status, Set: true},
 		Provenance:        provenance,
@@ -1488,8 +1482,7 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 // outcome sink is present on the request context, to the proxy's per-request
 // provenance reader.
 func (h *TranscodeHandler) recordOutcome(r *http.Request, outcome Outcome) {
-	// The synchronous per-request sink records exactly once (review-z
-	// commit 4): there is no non-blocking path that can silently lose
+	// The synchronous per-request sink records exactly once: there is no non-blocking path that can silently lose
 	// provenance.
 	if r != nil {
 		if sink := OutcomeSinkFromContext(r.Context()); sink != nil {
@@ -1503,8 +1496,7 @@ func (h *TranscodeHandler) recordOutcome(r *http.Request, outcome Outcome) {
 
 // copyResponseHeaders copies the upstream response headers a transcoded
 // route is allowed to expose to the client-facing origin: the request-id
-// family and the provider rate-limit informational headers (review-08
-// blocker 10). Everything else — Set-Cookie and other control headers,
+// family and the provider rate-limit informational headers. Everything else — Set-Cookie and other control headers,
 // entity metadata, and provider extension headers — is stripped: the
 // translated response is a new representation and the client's origin must
 // not receive cross-provider control signals.
@@ -1536,7 +1528,7 @@ func isAllowedResponseHeader(name string) bool {
 
 // isEventStreamMediaType reports whether the media type is exactly
 // text/event-stream, shared by the Accept parsing and the response
-// Content-Type matching (review-j findings 6 and 15).
+// Content-Type matching.
 func isEventStreamMediaType(mediaType string) bool {
 	return mediaType == "text/event-stream"
 }
@@ -1687,7 +1679,7 @@ func AcceptIsEventStream(accept string) bool {
 
 // isEventStream reports whether the response is an SSE stream, matched by
 // media type exactly — text/event-streaming and other lookalikes are not
-// streams (review-j finding 15).
+// streams.
 func isEventStream(resp *http.Response) bool {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	return err == nil && isEventStreamMediaType(mediaType)
@@ -1696,8 +1688,8 @@ func isEventStream(resp *http.Response) bool {
 // isJSON reports whether the response is JSON: the application/json media
 // type or a structured-syntax-suffix member of the JSON family
 // (application/*+json). application/notjson and other lookalikes are not
-// JSON (review-j finding 15). The structured-syntax suffix "+json" matches
-// only within the application tree (review-08 additional 7):
+// JSON. The structured-syntax suffix "+json" matches
+// only within the application tree:
 // text/example+json is NOT JSON, per RFC 6839 — the suffix is only defined
 // for application/*.
 func isJSON(resp *http.Response) bool {
@@ -1734,14 +1726,14 @@ func isUpgradeRequest(r *http.Request) bool {
 // (context.Canceled or context.DeadlineExceeded, possibly wrapped). Client
 // abort suppression applies only to such errors: an unrelated transport or
 // body failure racing with a client cancellation must win as its true
-// classification (review-08 blocker 8).
+// classification.
 func isContextCancellationError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // nowUnix returns the current unix time in seconds as a float64: the
 // Responses contract's created_at is float64, so the generated stream
-// identity timestamps share the type end-to-end (review-z commit 1).
+// identity timestamps share the type end-to-end.
 func nowUnix() float64 {
 	return float64(time.Now().Unix())
 }
@@ -1812,7 +1804,7 @@ func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.
 }
 
 // boundErrorMessage truncates a client-visible error message to the
-// configured ErrorMessageBytes bound (review-z commit 3). Every error
+// configured ErrorMessageBytes bound. Every error
 // writing path goes through it, so no upstream error body can amplify
 // client-visible text beyond the bound.
 func (h *TranscodeHandler) boundErrorMessage(message string) string {
@@ -1832,8 +1824,8 @@ func (h *TranscodeHandler) boundErrorMessage(message string) string {
 
 // logRequestError logs a local failure with its detail (never the client
 // message): local construction and conversion failures are logged,
-// sanitized, and reported neutrally (review-j finding 14; autopsy 04 rec 3
-// pins the conversion-failure path for operator observability).
+// sanitized, and reported neutrally (the conversion-failure path stays
+// observable to the operator).
 func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
 	log.Printf("transcode: %s %s: %v", r.Method, r.URL.Path, err)
 }
@@ -1845,7 +1837,7 @@ func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
 // route mapping), so the error string is scrubbed with the same sensitive
 // parameter redaction the native passthrough path applies to its log line,
 // recursing through nested url.Error chains the way the native sanitizer
-// does (autopsy 2026-09-06 H1).
+// does.
 func sanitizeUpstreamTransportError(err error) error {
 	var outer *url.Error
 	if !errors.As(err, &outer) {

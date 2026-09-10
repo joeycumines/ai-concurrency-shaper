@@ -1,6 +1,6 @@
 package transcode
 
-// J2 regression tests (review-k finding 2, blocker): schema-bearing JSON
+// J2 regression tests: schema-bearing JSON
 // (Anthropic input_schema, Chat function parameters, Chat json_schema
 // response_format, Responses tool parameters and text.format schema) crosses
 // every wire and canonical representation as validated json.RawMessage, so
@@ -108,7 +108,7 @@ func TestSchemaBigNumbersMessagesToResponses(t *testing.T) {
 	}
 	// Under strict policy a Messages tool (no strictness semantic) cannot be
 	// rendered as a Responses function tool: the conversion is rejected
-	// client-dialect before any upstream request (review-z commit 1).
+	// client-dialect before any upstream request.
 	if _, _, err := RenderResponsesRequest(
 		result.Request,
 		testExchangeContext(),

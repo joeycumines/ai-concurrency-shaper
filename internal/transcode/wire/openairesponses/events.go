@@ -504,7 +504,7 @@ func decodeStreamContentPart(data []byte) (StreamContentPart, error) {
 	if err := wire.Decode(data, part); err != nil {
 		return nil, err
 	}
-	// Decode-side normalization (autopsy 01): real clients omit the
+	// Decode-side normalization: real clients omit the
 	// annotations key on output_text parts; a decoded absent array is the
 	// same empty array. Validate itself stays strict for hand-built values.
 	if text, ok := part.(*StreamOutputTextPart); ok && text.Annotations == nil {
@@ -564,7 +564,7 @@ func (e FunctionCallArgumentsDoneEvent) Validate() error {
 	// arguments is optional on the wire: the official done event may carry
 	// an empty string when nothing was accumulated. The payload is
 	// model-generated output preserved byte-exact; any string is legal and
-	// invalid model output is never an upstream defect (review-z commit 2).
+	// invalid model output is never an upstream defect.
 	return nil
 }
 

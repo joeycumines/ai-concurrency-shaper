@@ -1102,8 +1102,7 @@ func TestStatusRecorderShortWriteWithContentLength(t *testing.T) {
 	// but Write accepts only a subset of those bytes due to a
 	// client disconnect (short write), the journal entry's ResponseSize
 	// reflects the bytes accepted by Write (from bytesWritten), not the
-	// Content-Length value. This is the critical bug identified by
-	// review-01 and review-02: the old finalizer checked
+	// Content-Length value. This is the critical bug: the old finalizer checked
 	// entry.ResponseSize == 0, which was always false when Content-Length
 	// was present, causing bytesWritten to be silently ignored.
 	inner := httptest.NewRecorder()
@@ -1148,7 +1147,7 @@ func TestStatusRecorderShortWriteWithContentLength(t *testing.T) {
 func TestStatusRecorderShortWriteCapturedBody(t *testing.T) {
 	// Verify that capturedBody contains only the bytes accepted by Write
 	// (b[:n]) on a short write, not the full input slice. This is the
-	// structural fix from review-02: moving body capture after Write
+	// structural fix: moving body capture after Write
 	// allows using b[:n] instead of b, so the journal's ResponseBody
 	// matches the recorder's accepted payload.
 	inner := httptest.NewRecorder()
@@ -1606,7 +1605,7 @@ func TestProxy_CircuitBreakerRejectIncrementsCircuitRejected(t *testing.T) {
 	}
 }
 
-// --- R21: review-03 fixes ---
+// --- R21: phantom-penalty fixes ---
 
 func TestProxy_PhantomPenaltyDoesNotBlockHandler(t *testing.T) {
 	// Verify that the phantom concurrency penalty is released asynchronously:
@@ -2146,7 +2145,7 @@ func TestProxy_RetryTransportErrCircuitOpenNotUpstreamFailure(t *testing.T) {
 
 			firstRec := httptest.NewRecorder()
 			p.ServeHTTP(firstRec, httptest.NewRequest(tt.method, tt.path, nil))
-			// Autopsy 2026-09-06 M7: a breaker that opened between retries is
+			// A breaker that opened between retries is
 			// the same rejection the pre-flight Allow() check produces —
 			// 503 + IncCircuitRejected — never a proxy 502.
 			if firstRec.Code != http.StatusServiceUnavailable {
@@ -3049,7 +3048,7 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 func TestProxy_CancelCooldownDelaysRelease(t *testing.T) {
 	// Verify that when a client cancels after an upstream transport attempt starts,
 	// the slot is held for the configured cancelCooldown duration before
-	// being returned to the limiter (KILL-04 mitigation).
+	// being returned to the limiter.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
@@ -3148,7 +3147,7 @@ func TestProxy_CancelCooldownZeroReleasesImmediately(t *testing.T) {
 func TestProxy_CancelCooldownFiresOnSlowUpstreamClientCancel(t *testing.T) {
 	// R34-01 regression test: Verify that the cancelCooldown fires when the
 	// client cancels while the upstream is still processing (rec.status == 0,
-	// WriteHeader never called). This is the KILL-04 mitigation case — the
+	// WriteHeader never called). This is the cooldown case — the
 	// upstream is still working on the abandoned request, so releasing the slot
 	// immediately would allow slot-exhaustion attacks. The !isTransportOrProxyError
 	// guard was erroneously applied to the cancelCooldown branch, suppressing it
@@ -3232,7 +3231,7 @@ func TestProxy_CancelCooldownFiresOnSlowUpstreamClientCancel(t *testing.T) {
 	// holds the slot. Without the fix, the slot would be released immediately
 	// and the second request would complete in ~10ms (fast upstream).
 	if elapsed < 100*time.Millisecond {
-		t.Errorf("second request took %v — cancelCooldown may not be firing when rec.status == 0 (KILL-04 regression)", elapsed)
+		t.Errorf("second request took %v — cancelCooldown may not be firing when rec.status == 0", elapsed)
 	}
 	if rec2.Code != http.StatusOK {
 		t.Errorf("second request status = %d, want 200", rec2.Code)
@@ -3242,8 +3241,7 @@ func TestProxy_CancelCooldownFiresOnSlowUpstreamClientCancel(t *testing.T) {
 func TestProxy_EpochContextHandoff_Limited(t *testing.T) {
 	// Verify that when retries are active and a limited-route request's
 	// first attempt fails, the breaker's RecordFailure uses the epoch from
-	// the proxy's Allow() call — not 0. This is the fix for review-06
-	// Finding 1: without the context handoff, the retry transport's
+	// the proxy's Allow() call — not 0. Without the context handoff, the retry transport's
 	// breakerEpoch would be 0 for attempt 0, bypassing the stale-probe
 	// guard in circuitbreaker.RecordFailure.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3397,7 +3395,7 @@ func TestProxy_EpochContextHandoff_Passthrough(t *testing.T) {
 
 func TestProxy_ReleaseCooldownPreventsImmediateReuse(t *testing.T) {
 	// Verify that the post-release cooldown delays slot re-admission at the
-	// proxy level (KILL-02 mitigation). With concurrency=1 and cooldown=200ms,
+	// proxy level. With concurrency=1 and cooldown=200ms,
 	// two sequential requests should have ~200ms gap between the first's
 	// completion and the second's start.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4343,7 +4341,7 @@ func TestProxy_PassthroughCancelCooldownFiresOnSlowUpstreamClientCancel(t *testi
 	// holds the global slot. Without the fix, the slot would be released
 	// immediately and the second request would complete in ~10ms (fast upstream).
 	if elapsed < 100*time.Millisecond {
-		t.Errorf("second passthrough request took %v — cancelCooldown may not be firing when rec.status == 0 (KILL-04 regression)", elapsed)
+		t.Errorf("second passthrough request took %v — cancelCooldown may not be firing when rec.status == 0", elapsed)
 	}
 	if rec2.Code != http.StatusOK {
 		t.Errorf("second passthrough request status = %d, want 200", rec2.Code)
@@ -4474,8 +4472,8 @@ func TestProxy_PanicRecoveryMetricsComplete(t *testing.T) {
 		t.Errorf("StatusCounts[5] = %d, want 1", snap.StatusCounts[5])
 	}
 
-	// A recovered panic is an aborted exchange, never a clean completion
-	// (review-08 blocker 12): the proxied counter stays zero and the
+	// A recovered panic is an aborted exchange, never a clean completion:
+	// the proxied counter stays zero and the
 	// request is recorded as aborted.
 	if snap.TotalProxied != 0 {
 		t.Errorf("TotalProxied = %d, want 0 (panic request must not be a clean completion)", snap.TotalProxied)
@@ -4555,8 +4553,8 @@ func TestProxy_PanicRecoveryMetricsComplete_Passthrough(t *testing.T) {
 		t.Errorf("StatusCounts[5] = %d, want 1", snap.StatusCounts[5])
 	}
 
-	// A recovered panic is an aborted exchange, never a clean completion
-	// (review-08 blocker 12): neither completion counter moves and the
+	// A recovered panic is an aborted exchange, never a clean completion:
+	// neither completion counter moves and the
 	// request is recorded as aborted.
 	if snap.TotalPassThrough != 0 {
 		t.Errorf("TotalPassThrough = %d, want 0 (panic passthrough must not be a clean completion)", snap.TotalPassThrough)
@@ -4830,7 +4828,7 @@ func TestProxy_PanicRecovery_JournalRecorded(t *testing.T) {
 	}
 
 	// Metrics must also be complete: a recovered panic is an aborted
-	// exchange, never a clean completion (review-08 blocker 12).
+	// exchange, never a clean completion.
 	snap := met.Snapshot()
 	if snap.TotalProxied != 0 {
 		t.Errorf("TotalProxied = %d, want 0", snap.TotalProxied)
@@ -5385,7 +5383,7 @@ func (w *slowResponseWriter) Write(b []byte) (int, error) {
 }
 
 func TestProxy_403SlowDripPenaltyDurationHonored(t *testing.T) {
-	// Regression for review-13: the penalty must be the remaining delay, not
+	// Regression: the penalty must be the remaining delay, not
 	// the raw (Retry-After - Date) duration. With a finite body transfer,
 	// some of the ban window elapses before the proxy evaluates the failure;
 	// the recorded penalty must reflect what is actually left, not the full 2s
@@ -5544,7 +5542,7 @@ func TestProxy_403SlowDripStillActiveTemporaryBan(t *testing.T) {
 }
 
 func TestProxy_403SlowDripExpiredRetryAfterNotTemporaryBan(t *testing.T) {
-	// Regression for review-13: returning the raw (Retry-After - Date)
+	// Regression: returning the raw (Retry-After - Date)
 	// duration kept expired bans alive. If the Retry-After HTTP-date expires
 	// during the body transfer, classification must now treat the 403 as a
 	// permanent auth error and must NOT trip the breaker.
@@ -10393,7 +10391,8 @@ func TestProxy_ErrorHandler_TransportErrorBeforeResponse_Records502(t *testing.T
 	}
 }
 
-// TestProxy_ErrorHandler_StructuredTransportErrorLog pins review-11 #1: the
+// TestProxy_ErrorHandler_StructuredTransportErrorLog pins the structured-log
+// contract: the
 // ErrorHandler logs the failure through slog with the error as a structured
 // attribute (machine-readable context preserved), not flattened into the
 // message string via fmt.Sprintf.

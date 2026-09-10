@@ -386,7 +386,7 @@ func TestDispatchEncodedSlashAndDotSegments(t *testing.T) {
 }
 
 // TestRouter_DoesNotMutateInboundRequest proves that delegating through router.ServeHTTP
-// does not mutate the caller's *http.Request or *url.URL pointers or fields (review-16 finding 1).
+// does not mutate the caller's *http.Request or *url.URL pointers or fields.
 func TestRouter_DoesNotMutateInboundRequest(t *testing.T) {
 	up, _ := echo(t)
 

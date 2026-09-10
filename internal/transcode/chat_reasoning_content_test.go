@@ -109,7 +109,7 @@ func TestDecodeChatResponseReasoningContentMirrorsReasoning(t *testing.T) {
 	// The mapping is the named provider_reasoning_text encoding, recorded
 	// exactly once with the resolved field path and the detail shared with the
 	// stream surface — a capability-on non-stream exchange is observable in the
-	// exchange report (review-j finding 10 / task-22 de-asymmetry).
+	// exchange report (de-asymmetry).
 	var mapped []ConversionLoss
 	for _, loss := range report.Losses {
 		if loss.Feature == FeatureProviderReasoningText {
@@ -267,8 +267,7 @@ func TestDecodeChatResponseReasoningContradictionRejected(t *testing.T) {
 	}
 }
 
-// TestChatProviderReasoningCapabilityOffParity pins the task-22
-// de-asymmetry: a non-stream chat response carrying plaintext reasoning
+// TestChatProviderReasoningCapabilityOffParity pins the de-asymmetry: a non-stream chat response carrying plaintext reasoning
 // while the ProviderReasoningText capability is off now follows the STREAM
 // disposition — an approved provider_reasoning_text loss with the reasoning
 // dropped and the ordinary content still rendered, sharing the same loss
@@ -381,7 +380,7 @@ func assertChatReasoningBothDetail(t *testing.T, err error) {
 	}
 }
 
-// TestChatReasoningBothDetailShared pins the task-22 de-asymmetry of the
+// TestChatReasoningBothDetailShared pins the de-asymmetry of the
 // both-spellings contradiction as a single verbatim constant across both chat
 // surfaces: a non-stream message carrying reasoning + reasoning_content and a
 // stream delta carrying both are rejected with the exact same shared detail

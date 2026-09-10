@@ -9,7 +9,7 @@ import (
 // strictDecodeUnknown uses encoding/json with DisallowUnknownFields to prove
 // the given wire carries ONLY fields in the target schema. This is the
 // emitted-wire conformance contract: the transcoder's output must be
-// pin-conformant, not merely decodable (review-08 task 12b).
+// pin-conformant, not merely decodable.
 func strictDecodeUnknown(t *testing.T, wire []byte, target any, label string) {
 	t.Helper()
 	dec := json.NewDecoder(strings.NewReader(string(wire)))
@@ -21,7 +21,7 @@ func strictDecodeUnknown(t *testing.T, wire []byte, target any, label string) {
 
 // TestEmittedWireResponsesEnvelopeStrictConformance proves the non-streaming
 // Chat→Responses render emits a ResponseEnvelope that strict-decodes against
-// the package schema (no unknown fields, review-08 task 12b).
+// the package schema (no unknown fields).
 func TestEmittedWireResponsesEnvelopeStrictConformance(t *testing.T) {
 	resp := CanonicalResponse{
 		ID:        "resp_1",
@@ -166,7 +166,7 @@ func TestEmittedWireResponsesStreamEventsStrictConformance(t *testing.T) {
 		convertAndStrictDecode(events)
 	}
 	// Release the held terminal to strict-decode the done/completed events
-	// (the [DONE] sentinel is the release signal — review-08 blocker 2).
+	// (the [DONE] sentinel is the release signal — ).
 	held, ok := state.releaseTerminal()
 	if !ok {
 		t.Fatal("releaseTerminal returned false")

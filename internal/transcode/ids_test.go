@@ -16,9 +16,9 @@ import (
 // TestGeneratedIDsAreUniqueAcrossExchanges proves IDs emitted by independent
 // exchanges never collide: the random per-exchange prefix makes
 // cross-exchange collisions effectively impossible, while the local counter
-// keeps ordering within one exchange monotonic (review-08 blocker 6). The
+// keeps ordering within one exchange monotonic. The
 // emitted shape is msg_<32 lowercase hex>_<counter> (128 random bits,
-// review-z commit 5).
+// ).
 func TestGeneratedIDsAreUniqueAcrossExchanges(t *testing.T) {
 	const (
 		exchanges   = 4096
@@ -78,7 +78,7 @@ func TestGeneratedIDsAreUniqueAcrossExchanges(t *testing.T) {
 
 // TestExchangeIDsEntropyFloor proves every exchange prefix carries at least
 // 128 random bits: 32 lowercase hex characters, spanning the full hex
-// alphabet across draws (review-z commit 5).
+// alphabet across draws.
 func TestExchangeIDsEntropyFloor(t *testing.T) {
 	alphabet := make(map[byte]struct{})
 	for range 4096 {

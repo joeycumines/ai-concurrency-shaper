@@ -135,7 +135,7 @@ func assertFSMWire(t *testing.T, err error) {
 }
 
 // TestResponsesStreamFSMTransitionTable covers every rejection class of the
-// transition table with one test per class (review-z commit 3).
+// transition table with one test per class.
 func TestResponsesStreamFSMTransitionTable(t *testing.T) {
 	// A full legal lifecycle passes.
 	t.Run("legal lifecycle", func(t *testing.T) {
@@ -436,7 +436,7 @@ func TestResponsesStreamFSMBudgetBounds(t *testing.T) {
 
 // TestConvertingReaderStagingAtomicity proves an oversized terminal batch is
 // never partially delivered: the reader emits exactly one error terminal and
-// never a success terminal followed by an error (review-z commit 3). Each
+// never a success terminal followed by an error. Each
 // individual frame passes the generatedFrameMax; only the STAGED terminal
 // batch (the released item-closing events plus the terminal envelope) exceeds
 // the generatedBatchMax.

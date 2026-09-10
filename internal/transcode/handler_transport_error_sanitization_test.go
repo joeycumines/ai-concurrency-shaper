@@ -11,7 +11,7 @@ import (
 )
 
 // TestTransportErrorBodyNeverContainsUpstreamURL pins the client-facing
-// sanitization of upstream transport errors (autopsy 2026-09-06 H1): the
+// sanitization of upstream transport errors: the
 // transcode 502 body must never echo the outbound URL — a credential-bearing
 // upstream base query (e.g. Gemini ?key=) must not reach the client through
 // a url.Error-shaped transport failure. The detail remains available

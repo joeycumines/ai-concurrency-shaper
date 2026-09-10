@@ -14,8 +14,7 @@ import (
 // object identifiers it emits are unique across unrelated exchanges: clients
 // key response stores, tool-call correlation, logs and traces, and
 // retry/dedup systems by these IDs, and the old per-exchange counter alone
-// (resp_1/msg_1/fc_1 on every exchange) made collisions certain (review-08
-// blocker 6).
+// (resp_1/msg_1/fc_1 on every exchange) made collisions certain.
 //
 // The prefix is 32 lowercase hex characters (128 bits of entropy from
 // crypto/rand): both provider ID shapes are opaque lowercase-alphanumeric
@@ -23,7 +22,7 @@ import (
 // shape clients already accept. 128 random bits make collisions across
 // unrelated exchanges cryptographically negligible (~2^-64 after 2^32
 // exchanges, birthday bound) while the local counter keeps ordering within
-// one exchange deterministic (review-z commit 5).
+// one exchange deterministic.
 //
 // https://platform.openai.com/docs/api-reference/responses
 // https://platform.claude.com/docs/en/api/messages

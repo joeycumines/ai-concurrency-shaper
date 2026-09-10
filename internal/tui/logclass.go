@@ -210,7 +210,7 @@ var slogLevelActionable = map[string]bool{
 // MESSAGE alone (attributes are structured metadata, not prose); non-slog lines
 // (stdlib output, plain prose) keep whole-line keyword scanning.
 //
-// The parse always runs over the ORIGINAL line bytes (review-13 issue 1):
+// The parse always runs over the ORIGINAL line bytes:
 // lowercasing the line first would rewrite uppercase \U escapes — which
 // strconv.Unquote reads as 8 hex digits — into \u escapes read as 4 hex digits,
 // corrupting the decoded message ("\U0001F512FAILED" would become

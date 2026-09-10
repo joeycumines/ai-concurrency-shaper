@@ -134,7 +134,7 @@ func TestEventValidateNegativeCases(t *testing.T) {
 		t.Fatalf("missing arguments delta item_id accepted: %v", err)
 	}
 	// A done event carries model-generated arguments preserved byte-exact:
-	// any string is legal on the wire (review-z commit 2).
+	// any string is legal on the wire.
 	if err := builder.FunctionArgumentsDone(
 		"fc_1", 0, "not json",
 	).Validate(); err != nil {

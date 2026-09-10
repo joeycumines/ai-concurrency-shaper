@@ -234,7 +234,7 @@ func TestToast_SlideOutStart_Sticky(t *testing.T) {
 	}
 }
 
-// TestToast_SlideOutStart_ZeroCreatedAt pins review-14 #6: a toast rendered
+// TestToast_SlideOutStart_ZeroCreatedAt pins the zero-CreatedAt contract: a toast rendered
 // without Show() carries a zero CreatedAt, and every other public time-derived
 // method (slideDistance, AnimatingAt) treats that as fully settled/no schedule.
 // SlideOutStart must agree instead of returning CreatedAt.Add(exitRel) computed
@@ -286,7 +286,7 @@ func TestToast_Render_SettledNoOffset(t *testing.T) {
 	}
 }
 
-// TestToast_Render_LongMessageStaysSingleLine pins the review-15 #1 rebuttal:
+// TestToast_Render_LongMessageStaysSingleLine pins the truncation contract:
 // lipgloss v2 MaxWidth truncates an over-long message instead of wrapping it,
 // so continuation lines that would lose RenderAt's leading margin/slide prefix
 // can never exist. If a dependency bump ever turns this into wrapping, this
@@ -358,7 +358,7 @@ func TestAnimatingAt_DoesNotReportPastExpiry(t *testing.T) {
 	}
 }
 
-// TestSlideDistance_ExpiryInvariant pins review-06 issue 2: slideDistance must agree
+// TestSlideDistance_ExpiryInvariant pins the expiry agreement: slideDistance must agree
 // with ExpiredAt and AnimatingAt at the inclusive expiry boundary. At age==Duration
 // the toast is expired, not animating, and must render with zero offset rather
 // than a full animWidth slide-out or a slide-in tail.
@@ -483,7 +483,7 @@ func TestSlideDistance_ShortDurationTrajectory(t *testing.T) {
 	}
 }
 
-// TestSlideDistance_MidDurationNoJump pins review-09 #2's exact scenario: a
+// TestSlideDistance_MidDurationNoJump pins the no-jump scenario: a
 // 400ms toast previously sat in the slide-in branch until age==slideIn (250ms)
 // while SlideOutStart claimed the exit began at 150ms; at 250ms the rendered
 // offset jumped straight from ~0 columns to ~40% of animWidth. The unified
@@ -649,7 +649,7 @@ func TestAnimatingAt_WindowGrid(t *testing.T) {
 	}
 }
 
-// TestToast_Render_LeftMargin pins review-08 #3: a settled toast reserves an
+// TestToast_Render_LeftMargin pins the margin contract: a settled toast reserves an
 // explicit two-cell left margin inside its width budget instead of anchoring
 // flush against column zero, so the width headroom toastToastWidth subtracts is
 // symmetric rather than a dead zone on the right.

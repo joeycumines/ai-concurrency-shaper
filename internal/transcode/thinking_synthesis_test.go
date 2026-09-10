@@ -49,7 +49,7 @@ func TestNonStreamReasoningRendersThinkingBlockWithMarker(t *testing.T) {
 	// The chat message walk appends the reasoning part after the content
 	// parts (reasoning_content follows content on the chat wire); the
 	// Messages renderer emits thinking in a first pass. The pre-fix render
-	// put thinking AFTER text (live Claude Code conformance, 2026-09-08).
+	// put thinking AFTER text (conformance, 2026-09-08).
 	thinkingIdx := strings.Index(string(rendered), `"type":"thinking"`)
 	textIdx := strings.Index(string(rendered), `"type":"text"`)
 	if thinkingIdx < 0 || textIdx < 0 || thinkingIdx > textIdx {
@@ -291,7 +291,7 @@ func TestStreamReasoningRendersThinkingLifecycle(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamReasoningInterleavedPartsRejected pins the review
+// TestAnthropicStreamReasoningInterleavedPartsRejected pins the rule
 // finding (ses_f82433a3affeYcnpN3ETKBmQxz, 2026-09-08): the Responses FSM
 // tracks reasoning phase per item, so two items can concurrently hold open
 // summary parts, but the Anthropic dialect cannot represent two

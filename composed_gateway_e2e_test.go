@@ -33,7 +33,7 @@ import (
 	"time"
 )
 
-// TestE2E_ComposedGateway_MultiProvider_TranscodeHarness proves Task 16's composed
+// TestE2E_ComposedGateway_MultiProvider_TranscodeHarness proves the composed
 // end-to-end verification harness against a single gateway process serving 3 providers:
 // 1. Anthropic mount (/anthropic) with Messages->Chat transcoding and Bearer auth.
 // 2. OpenAI mount (/openai) with Responses->Chat transcoding and Bearer auth.

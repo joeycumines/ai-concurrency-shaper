@@ -258,7 +258,7 @@ func parseTranscodeAuth(
 		// transcode target.
 		policy.Inbound = true
 	case "":
-		// FAIL CLOSED (autopsy 2026-09-06 M6): no source declared and no
+		// FAIL CLOSED: no source declared and no
 		// inbound opt-in leaves Inbound=false and Secret=nil, so the
 		// mapping's auth validation rejects the policy at startup ("auth
 		// mode requires a secret source or inbound credentials") instead of

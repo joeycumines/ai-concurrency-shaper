@@ -162,7 +162,7 @@ func WritePrometheusFleet(w io.Writer, providers []ProviderSnapshot) error {
 		return fmt.Sprintf("shaper_breaker_state{%s} %d\n", labels[i], breakerSeriesValue(cb.State)), true
 	}))
 
-	// Per-route queue observability (UNRESP-3): when providers have requests
+	// Per-route queue observability: when providers have requests
 	// waiting in their per-route queues, export the per-route queued counts
 	// and oldest queued age with method and path labels.
 	// Grouped by metric name across all providers.

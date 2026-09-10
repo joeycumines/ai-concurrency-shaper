@@ -38,9 +38,9 @@ func (c *chatToResponsesConverter) Convert(
 		// returned so the exchange classifies as an upstream body failure
 		// and the reader stops immediately — never an empty successful
 		// batch that would wait on an upstream keeping the connection open
-		// after [DONE] (review-k finding 1). The sawFinish guard is
+		// after [DONE]. The sawFinish guard is
 		// required because a zero-output finish holds an EMPTY batch that
-		// releaseTerminal still releases (review-08 blocker 2).
+		// releaseTerminal still releases.
 		if !c.state.sawFinish {
 			return convertedBatch{}, errChatDoneBeforeTerminal()
 		}
@@ -70,8 +70,7 @@ func (c *chatToResponsesConverter) Convert(
 
 // FinalizeEOF reports a truncation error unless the stream terminated
 // correctly. The held terminal (which may be an empty batch for a
-// zero-output finish) is released ONLY by the [DONE] sentinel (review-08
-// blocker 2).
+// zero-output finish) is released ONLY by the [DONE] sentinel.
 func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
@@ -84,8 +83,7 @@ func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
 
 // marshalResponsesEvents validates and marshals typed Responses events into
 // frames. A marshaled payload amplified beyond the frame bound (JSON
-// escaping, terminal repetition) is a typed frame error (review-08 blocker
-// 7): the generated downstream wire must be bounded like the input wire.
+// escaping, terminal repetition) is a typed frame error: the generated downstream wire must be bounded like the input wire.
 func marshalResponsesEvents(
 	events []ResponsesSSEEvent,
 ) (convertedBatch, error) {
@@ -145,7 +143,7 @@ func (c *responsesToAnthropicConverter) Convert(
 	}
 	// Validate the SSE event name equals the JSON type. Responses streams
 	// require event: to be present and equal the JSON type tag (the
-	// package's own rule, review-08 additional 12): an empty event name is
+	// package's own rule): an empty event name is
 	// a wire error, not a silent pass.
 	if frame.Event == "" {
 		return convertedBatch{}, upstreamWireError(
@@ -191,8 +189,7 @@ func (c *responsesToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 // marshalAnthropicEvents marshals typed Anthropic events into frames. The
 // SSE event name equals the JSON type, matching the manual conformance
 // validator. A marshaled payload amplified beyond the frame bound (JSON
-// escaping, terminal repetition) is a typed frame error (review-08 blocker
-// 7).
+// escaping, terminal repetition) is a typed frame error.
 func marshalAnthropicEvents(
 	events []AnthropicStreamEvent,
 ) (convertedBatch, error) {
@@ -243,10 +240,9 @@ func (c *chatToAnthropicConverter) Convert(
 		// itself decides: the typed error is returned so the exchange
 		// classifies as an upstream body failure and the reader stops
 		// immediately — never an empty non-terminal batch that would wait
-		// on an upstream keeping the connection open after [DONE] (review-k
-		// finding 1). The sawFinish guard is required because a zero-output
+		// on an upstream keeping the connection open after [DONE]. The sawFinish guard is required because a zero-output
 		// finish holds an EMPTY batch that releaseTerminals still releases
-		// (review-08 blocker 2).
+		//.
 		if !c.chat.sawFinish {
 			return convertedBatch{}, errChatDoneBeforeTerminal()
 		}
@@ -309,8 +305,7 @@ func (c *chatToAnthropicConverter) releaseTerminals() (convertedBatch, error) {
 
 // FinalizeEOF reports a truncation error unless the stream terminated
 // correctly. The Chat held terminal (which may be an empty batch for a
-// zero-output finish) is released ONLY by the [DONE] sentinel (review-08
-// blocker 2): EOF after finish_reason without [DONE] is a typed upstream
+// zero-output finish) is released ONLY by the [DONE] sentinel: EOF after finish_reason without [DONE] is a typed upstream
 // truncation, never a released terminal.
 func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 	if c.chat.sawFinish && !c.chat.terminalReleased {
@@ -352,7 +347,7 @@ func decodeResponsesSSEEvent(data []byte) (ResponsesSSEEvent, error) {
 // switch must cover every event type openairesponses.DecodeEvent returns;
 // an unmapped type is an internal invariant break surfaced as a typed error,
 // never a panic — the conversion runs on the stream-copy goroutine, where an
-// escaping panic kills the process (autopsy 2026-09-06 M5).
+// escaping panic kills the process.
 func typedResponsesEvent(event openairesponses.Event) (ResponsesSSEEvent, error) {
 	switch probe := event.(type) {
 	case *openairesponses.CreatedEvent:
@@ -466,7 +461,7 @@ func (c *chatToAnthropicConverter) ErrorEvent(err error) (frameEvent, bool) {
 // boundedErrorMessage bounds the error text embedded in a client-dialect
 // error frame: a conversion error may carry an entire corrupt upstream
 // payload (e.g. an invalid tool-argument buffer), which must not amplify the
-// downstream frame without bound (review-08 blocker 7).
+// downstream frame without bound.
 func boundedErrorMessage(err error) string {
 	return boundedErrorMessageLimit(err, maxStreamErrorTextBytes)
 }
@@ -474,9 +469,7 @@ func boundedErrorMessage(err error) string {
 // boundedErrorMessageLimit bounds the error text embedded in a client-dialect
 // error frame to max bytes: a conversion error may carry an entire corrupt
 // upstream payload (e.g. an invalid tool-argument buffer), which must not
-// amplify the downstream frame without bound (review-08 blocker 7; the
-// configured ErrorMessageBytes is wired at the call sites, review-z commit
-// 3).
+// amplify the downstream frame without bound.
 func boundedErrorMessageLimit(err error, max int) string {
 	message := err.Error()
 	if len(message) <= max {

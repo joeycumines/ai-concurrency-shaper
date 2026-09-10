@@ -4,7 +4,7 @@ package transcode
 // pinned contract (openai-go v1.12.0) — every pinned envelope field decodes
 // as a typed shadow, the outbound instructions is always the create-request
 // string, and the envelope controls enter the explicit loss/reject decision
-// (review-j findings 13 and 17).
+//.
 
 import (
 	"strings"
@@ -21,7 +21,7 @@ func currentOfficialEnvelope() string {
 // TestResponsesEnvelopePinnedControlsStrictDecode proves a current official
 // response carrying every pinned envelope extra strict-decodes with no
 // unknown-field failure, flags the controls, and enters the explicit
-// loss/reject decision (review-j finding 13).
+// loss/reject decision.
 func TestResponsesEnvelopePinnedControlsStrictDecode(t *testing.T) {
 	response, err := DecodeResponsesResponse([]byte(currentOfficialEnvelope()))
 	if err != nil {
@@ -71,8 +71,7 @@ func TestResponsesEnvelopeControlsAbsentNoLoss(t *testing.T) {
 	}
 	// The usage breakdown is fully known (both detail objects present), but
 	// cache-creation is never part of the pinned Responses contract: the
-	// Messages render enters the usage-timing loss decision (review-k
-	// finding 6). The controls are absent — that is the property under
+	// Messages render enters the usage-timing loss decision. The controls are absent — that is the property under
 	// test.
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
@@ -89,7 +88,7 @@ func TestResponsesEnvelopeControlsAbsentNoLoss(t *testing.T) {
 
 // TestResponsesRequestInstructionsStringOnly proves the outbound Responses
 // request always emits the pinned create-request instructions string — never
-// an items array (review-j finding 13).
+// an items array.
 func TestResponsesRequestInstructionsStringOnly(t *testing.T) {
 	// Text-only system: the string arm.
 	body := `{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"system":"You are helpful."}`
@@ -150,7 +149,7 @@ func TestResponsesEchoInstructionsStringArm(t *testing.T) {
 	context := testExchangeContext()
 	// The pinned Responses usage requires the breakdown detail objects the
 	// source did not provide: the render enters the usage-timing loss
-	// decision (review-k finding 6).
+	// decision.
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
 		FeatureUsageCacheReadUnknown:  {},
 		FeatureUsageCacheWriteUnknown: {},
@@ -201,7 +200,7 @@ func TestResponsesEchoInstructionsStringArm(t *testing.T) {
 
 // TestStreamingEnvelopeControlsGated proves the streaming direction gates
 // the pinned envelope controls exactly once per stream instead of silently
-// dropping them (review-j finding 13).
+// dropping them.
 func TestStreamingEnvelopeControlsGated(t *testing.T) {
 	// Strict: a created envelope carrying controls rejects the stream.
 	state := newAnthropicResponsesStreamState(
@@ -282,11 +281,11 @@ func envelopeWithControls() ResponseEnvelope {
 
 // TestResponsesInstructionsMultiTurnAndParts covers the remaining
 // instructions loss branches: multiple system turns, document parts, and the
-// text-join encoding note (review-j finding 13).
+// text-join encoding note.
 func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 	// Multiple system turns: a loss/reject decision, never an items array.
 	// A dialog turn accompanies the system turns: an empty conversation is
-	// rejected on the Responses target (autopsy M3), so the instructions
+	// rejected on the Responses target, so the instructions
 	// scenarios carry user input too.
 	request := CanonicalRequest{
 		ClientModel: "m",
@@ -366,11 +365,10 @@ func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 // TestStreamingEnvelopeControlsLateAppearance proves controls appearing only
 // on the completed envelope (not the created one) are still gated exactly
 // once — the gate must not latch on a control-free first envelope
-// (review-j finding 13).
 func TestStreamingEnvelopeControlsLateAppearance(t *testing.T) {
 	// Strict for controls: the usage-timing loss (the required
 	// cache-creation breakdown the Responses source never provides,
-	// review-k finding 6) must be allowed so the created envelope passes and
+	// ) must be allowed so the created envelope passes and
 	// the late controls are the only rejection.
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),

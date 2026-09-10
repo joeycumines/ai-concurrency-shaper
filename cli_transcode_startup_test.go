@@ -28,7 +28,7 @@ func runCLIStartup(t *testing.T, args ...string) (string, error) {
 }
 
 // TestCLIRejectsImpossibleTranscodeConfigs proves the six enumerated
-// startup rejections fire before any traffic is served (review-z commit 6).
+// startup rejections fire before any traffic is served.
 func TestCLIRejectsImpossibleTranscodeConfigs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -160,8 +160,7 @@ func TestCLIRejectsImpossibleTranscodeConfigs(t *testing.T) {
 		},
 		{
 			// An unknown !name negation is exactly as fatal as an unknown
-			// positive: the vocabulary is validated in both directions
-			// (review-11 finding 3).
+			// positive: the vocabulary is validated in both directions.
 			name: "unknown negated loss",
 			args: []string{
 				"-bind", "127.0.0.1:1",

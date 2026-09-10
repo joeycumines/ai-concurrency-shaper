@@ -579,7 +579,7 @@ func TestParseTranscodeAuth(t *testing.T) {
 		t.Fatal("expected invalid source rejection")
 	}
 
-	// AuthNone must NEVER enable inbound credential extraction or require secret resolution (review-15 finding 1, 2)
+	// AuthNone must NEVER enable inbound credential extraction or require secret resolution.
 	nonePolicy, err := parseTranscodeAuth("none", "", "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -1150,7 +1150,7 @@ func TestResolveAndValidate_FileSecretSource_RotationRequiresRestart(t *testing.
 
 // TestResolveAndValidate_TranscodeAuth_NoneWithUnsetEnvVar proves that setting
 // -transcode-auth none skips secret resolution even if -transcode-auth-source specifies
-// an unset environment variable (review-15 finding 2).
+// an unset environment variable.
 func TestResolveAndValidate_TranscodeAuth_NoneWithUnsetEnvVar(t *testing.T) {
 	cfg, err := Parse([]string{
 		"-upstream", "https://api.openai.com",
@@ -1180,7 +1180,7 @@ func TestResolveAndValidate_TranscodeAuth_NoneWithUnsetEnvVar(t *testing.T) {
 }
 
 // TestProvider_TranscodeMappings_DeepCopyIsIsolated verifies that mutating maps
-// returned by Provider.TranscodeMappings() does not alter the provider's internal state (review-15 finding 7).
+// returned by Provider.TranscodeMappings() does not alter the provider's internal state.
 func TestProvider_TranscodeMappings_DeepCopyIsIsolated(t *testing.T) {
 	cfg, err := Parse([]string{
 		"-upstream", "https://api.openai.com",
@@ -1221,7 +1221,7 @@ func TestProvider_TranscodeMappings_DeepCopyIsIsolated(t *testing.T) {
 }
 
 // TestResolveAndValidate_Transcode_RetryReplayBytes_ZeroWhenRetriesDisabled proves
-// that when RetryMax is 0, RetryReplayBytes remains 0 even if RetryMaxBodyMB is configured (review-15 finding 4, review-18 finding 4).
+// that when RetryMax is 0, RetryReplayBytes remains 0 even if RetryMaxBodyMB is configured.
 func TestResolveAndValidate_Transcode_RetryReplayBytes_ZeroWhenRetriesDisabled(t *testing.T) {
 	cfg, err := Parse([]string{
 		"-upstream", "https://api.openai.com",

@@ -1,6 +1,6 @@
 package transcode
 
-// Autopsy 2026-09-06 M3: a Messages request with absent, null, or empty
+// A Messages request with absent, null, or empty
 // messages decoded and the Messages→Responses direction rendered
 // "input":[] upstream, while Messages→Chat rejected the same source shape.
 // The directions must agree: absent/empty conversation turns are a
@@ -27,7 +27,7 @@ func TestMessagesEmptyConversationRejectedOnResponsesTarget(t *testing.T) {
 		}}
 		_, _, err = RenderResponsesRequest(result.Request, context)
 		if err == nil {
-			t.Fatalf("%s: Messages→Responses must reject an empty conversation (autopsy M3)", name)
+			t.Fatalf("%s: Messages→Responses must reject an empty conversation", name)
 		}
 		if !strings.Contains(err.Error(), "no Messages-representable conversation turns") {
 			t.Fatalf("%s: err = %v, want the empty-conversation rejection", name, err)

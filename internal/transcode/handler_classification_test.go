@@ -32,8 +32,7 @@ func (f *failingReadCloser) Close() error             { return nil }
 // TestWrongUpstreamMediaTypeIsUpstreamFailure proves a 2xx upstream response
 // carrying the wrong representation for the negotiated stream mode is an
 // UPSTREAM failure — the breaker must see a definitive upstream defect (probe
-// failed, failure hold applied), never a local conversion error (review-08
-// blocker 8).
+// failed, failure hold applied), never a local conversion error.
 func TestWrongUpstreamMediaTypeIsUpstreamFailure(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -94,7 +93,6 @@ func TestWrongUpstreamMediaTypeIsUpstreamFailure(t *testing.T) {
 // TestTransportFailureWinsCancellationRace proves a RoundTrip failure that is
 // NOT cancellation-derived wins over a concurrent client cancellation: the
 // breaker sees the real upstream defect, never a suppressed client abort
-// (review-08 blocker 8).
 func TestTransportFailureWinsCancellationRace(t *testing.T) {
 	mapping := responsesMapping(t)
 	handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
@@ -136,7 +134,7 @@ func TestTransportFailureWinsCancellationRace(t *testing.T) {
 
 // TestSuccessfulBodyReadFailureWinsCancellationRace proves an upstream body
 // read failure racing a client cancellation is an upstream body failure, not
-// a suppressed client abort (review-08 blocker 8).
+// a suppressed client abort.
 func TestSuccessfulBodyReadFailureWinsCancellationRace(t *testing.T) {
 	mapping := responsesMapping(t)
 	handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
@@ -167,7 +165,6 @@ func TestSuccessfulBodyReadFailureWinsCancellationRace(t *testing.T) {
 // TestErrorBodyReadFailureIsUpstreamFailure proves a non-2xx response whose
 // error body fails to read or exceeds its bound is an upstream body failure
 // regardless of the status: a truncated 400 is never a healthy non-failure
-// (review-08 blocker 8).
 func TestErrorBodyReadFailureIsUpstreamFailure(t *testing.T) {
 	tests := []struct {
 		name string
@@ -212,7 +209,7 @@ func TestErrorBodyReadFailureIsUpstreamFailure(t *testing.T) {
 
 // TestRequestBodyCancellationDerivedAbort proves a cancellation-derived
 // request-body read error with a cancelled context stays a client abort
-// (the suppression gate's positive direction, review-08 blocker 8).
+// (the suppression gate's positive direction).
 func TestRequestBodyCancellationDerivedAbort(t *testing.T) {
 	mapping := responsesMapping(t)
 	handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
@@ -237,8 +234,7 @@ func TestRequestBodyCancellationDerivedAbort(t *testing.T) {
 
 // TestWriteUpstreamBodyErrorWriteFailure proves a failed downstream write
 // while rendering an upstream body error changes the provenance exactly like
-// the other error writers, retaining the upstream failure fact (review-08
-// blocker 8).
+// the other error writers, retaining the upstream failure fact.
 func TestWriteUpstreamBodyErrorWriteFailure(t *testing.T) {
 	apiErr := CanonicalAPIError{
 		Status:  http.StatusBadGateway,
@@ -283,8 +279,7 @@ func TestWriteUpstreamBodyErrorWriteFailure(t *testing.T) {
 }
 
 // TestErrorBodyFailureKeepsRetryAfter proves a failed error-body transfer
-// retains the upstream Retry-After hold signal from the headers (review-08
-// blocker 8).
+// retains the upstream Retry-After hold signal from the headers.
 func TestErrorBodyFailureKeepsRetryAfter(t *testing.T) {
 	mapping := responsesMapping(t)
 	handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
@@ -317,7 +312,7 @@ func TestErrorBodyFailureKeepsRetryAfter(t *testing.T) {
 
 // TestResponseWriteCancellationDerivedAbort proves a cancellation-derived
 // response write error with a cancelled context stays a client abort (the
-// write-site suppression gate's positive direction, review-08 blocker 8).
+// write-site suppression gate's positive direction).
 func TestResponseWriteCancellationDerivedAbort(t *testing.T) {
 	mapping := responsesMapping(t)
 	handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
@@ -361,8 +356,7 @@ func (w *writeErrorRecorder) Write([]byte) (int, error) {
 
 // TestRequestSideRacesStayLocal proves a non-cancellation request-side
 // failure racing with a client cancellation is recorded as its true LOCAL
-// classification, never suppressed into a client abort (review-08 blocker
-// 8).
+// classification, never suppressed into a client abort.
 func TestRequestSideRacesStayLocal(t *testing.T) {
 	t.Run("body read", func(t *testing.T) {
 		mapping := responsesMapping(t)
@@ -415,7 +409,7 @@ func TestRequestSideRacesStayLocal(t *testing.T) {
 
 // TestSuccessfulBodyReadCancellationDerivedAbort proves a cancellation-derived
 // successful-body read error with a cancelled context stays a client abort
-// (the JSON body-read suppression gate's positive direction, review-08
+// (the JSON body-read suppression gate's positive direction,
 // blocker 8).
 func TestSuccessfulBodyReadCancellationDerivedAbort(t *testing.T) {
 	mapping := responsesMapping(t)
@@ -472,8 +466,7 @@ func (s *slowReadCloser) Close() error { return nil }
 // TestRetryAfterUsesHeaderReceiptTime proves the recorded Outcome.RetryAfter
 // and the 403 rate-signal classification measure from the moment the
 // upstream headers arrived, never from the moment the error body finished
-// reading: body-read time is excluded from the remaining hold (review-08
-// blocker 9).
+// reading: body-read time is excluded from the remaining hold.
 func TestRetryAfterUsesHeaderReceiptTime(t *testing.T) {
 	const (
 		retryAfter = 10 * time.Second

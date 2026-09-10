@@ -103,7 +103,7 @@ func TestDecodeMessagesRequestThinkingConfig(t *testing.T) {
 // enabled without a budget, an unknown type, and cross-type members
 // (budget_tokens on disabled/adaptive, display on enabled — the official
 // contract is enabled={type,budget_tokens}, disabled={type},
-// adaptive={type,display}) all fail the decode (review-12 R12-L1).
+// adaptive={type,display}) all fail the decode.
 func TestDecodeMessagesRequestThinkingRejections(t *testing.T) {
 	for _, thinking := range []string{
 		`{"type":"enabled"}`,
@@ -186,7 +186,7 @@ func TestDecodeMessagesRequestThinkingNoCapability(t *testing.T) {
 // TestMessagesThinkingRejectedOnResponsesTarget proves an explicit thinking
 // budget is never silently dropped when the target cannot express it: the
 // messages->responses render rejects under the strict policy and records the
-// loss under a permissive policy (review finding: the decode alone must not
+// loss under a permissive policy (the decode alone must not
 // change a hard error into a silent drop).
 func TestMessagesThinkingRejectedOnResponsesTarget(t *testing.T) {
 	body := []byte(`{
@@ -245,7 +245,7 @@ func TestMessagesThinkingRejectedOnResponsesTarget(t *testing.T) {
 	}
 }
 
-// TestMessagesThinkingBudgetMapsToResponsesEffort is the task 21 reproduction
+// TestMessagesThinkingBudgetMapsToResponsesEffort is the reproduction
 // for the high finding request_reasoning-default-native-path: an explicit
 // Anthropic thinking budget must map to Responses reasoning.effort when the
 // exchange grants the ReasoningEffort capability, instead of being consumed as
@@ -321,7 +321,7 @@ func TestMessagesThinkingBudgetMapsToResponsesEffort(t *testing.T) {
 	}
 }
 
-// TestMessagesThinkingEnabledWithoutBudgetNoted pins the task-21 never-silent
+// TestMessagesThinkingEnabledWithoutBudgetNoted pins the never-silent
 // invariant for the render path: an "enabled" thinking config rendered with no
 // budget — a shape decode rejects today but a hand-built CanonicalRequest or a
 // future decode relaxation can reach — is never silently passed. Both renderers

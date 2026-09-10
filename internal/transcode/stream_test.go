@@ -722,7 +722,7 @@ func TestFixtureResponsesStreamToAnthropicFrames(t *testing.T) {
 // TestChatStreamChunkTypedErrorFrame proves an in-band Chat error frame is a
 // typed upstream conversion error carrying provenance and the upstream
 // status, and that it flows through the converting reader as a definitive
-// upstream outcome (review-j finding 11).
+// upstream outcome.
 func TestChatStreamChunkTypedErrorFrame(t *testing.T) {
 	_, err := chatStreamChunkFromSSE(SSEEvent{
 		Data: []byte(`{"error":{"message":"boom"}}`),
@@ -808,8 +808,7 @@ func (r *errReader) Read(p []byte) (int, error) {
 
 // TestConvertingReaderUpstreamBodyError proves a raw non-EOF upstream body
 // read failure is marked as an upstream body error (never a local conversion
-// failure) and the client still receives the dialect error event (review-j
-// finding 1: a stream that fails while its body is read).
+// failure) and the client still receives the dialect error event.
 func TestConvertingReaderUpstreamBodyError(t *testing.T) {
 	source := &errReader{
 		data:  "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n",

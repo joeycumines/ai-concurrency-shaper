@@ -569,7 +569,7 @@ func (c *Collector) Snapshot() Snapshot {
 	}
 	s.OldestQueuedAge = oldestQueue
 
-	// Per-route queue view (UNRESP-3): queued counts and oldest queued age
+	// Per-route queue view: queued counts and oldest queued age
 	// keyed by the same "METHOD /path" key RouteStats uses, derived from the
 	// in-flight registry (Limited + not yet started = waiting for a slot).
 	queuedByRoute := make(map[string]int64)
@@ -618,8 +618,7 @@ type Snapshot struct {
 	OldestQueuedAge      time.Duration
 	// QueuedByRoute / OldestQueuedAgeByRoute break the aggregate queue view
 	// down per route (key "METHOD /path", matching RouteStats): which routes
-	// are waiting for admission and how long the oldest waiter has waited
-	// (UNRESP-3).
+	// are waiting for admission and how long the oldest waiter has waited.
 	QueuedByRoute          map[string]int64
 	OldestQueuedAgeByRoute map[string]time.Duration
 	CircuitBreaker         *CBStats

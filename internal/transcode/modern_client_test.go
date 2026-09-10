@@ -18,8 +18,7 @@ import (
 // blocks and tools, inline system-role messages, and adaptive thinking. The
 // two envelope controls are client-side semantics no target reproduces: under
 // the strict policy the request is REJECTED naming anthropic_controls, and
-// under an approving policy both drops are recorded observably (review-11
-// finding 1 — never a silent drop).
+// under an approving policy both drops are recorded observably.
 func TestAnthropicRequestModernClientFields(t *testing.T) {
 	body := []byte(`{
 		"model":"m",
@@ -133,8 +132,7 @@ func TestAnthropicRequestControlsIndependent(t *testing.T) {
 // response surface mirrors the streaming surface's opaque provider extensions
 // (prompt_token_ids, prompt_text): a real provider response carrying them must
 // strict-decode through BOTH the wire type and the full DecodeChatResponse
-// path instead of failing the exchange as corrupt upstream wire (review-11
-// finding 5).
+// path instead of failing the exchange as corrupt upstream wire.
 func TestOpenAIChatResponseProviderExtensions(t *testing.T) {
 	raw := []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m","prompt_token_ids":[1,2,3],"prompt_text":"hi","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop","token_ids":null,"routed_experts":null}]}`)
 
@@ -224,7 +222,7 @@ func TestAnthropicCacheControlNoted(t *testing.T) {
 // choices[].message, not on the choice or envelope) decodes end-to-end:
 // before the fix the wire Message type rejected them as unknown fields
 // while chatMessageShadow modeled them, so the fields were dead surface and
-// the exchange failed as corrupt upstream wire (gate run 2 F1). Value
+// the exchange failed as corrupt upstream wire. Value
 // fixtures, not explicit nulls — presence is what the wire decode rejects.
 func TestOpenAIChatResponseMessageLevelExtensions(t *testing.T) {
 	raw := []byte(`{"id":"chatcmpl-ml","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok","token_ids":[7,8,9],"routed_experts":["expert-Alpha-9"],"stop_reason":"end_turn"},"finish_reason":"stop"}]}`)
@@ -281,7 +279,7 @@ func TestOpenAIChatResponseMessageLevelExtensions(t *testing.T) {
 // on real chat streams (yolo gateway) decode: prompt_token_ids and
 // prompt_text on the chunk, reasoning deltas, and the
 // created_cache_tokens/multimodal_tokens usage details — each asserted, not
-// just mentioned (review-12 R12-L3).
+// just mentioned.
 func TestOpenAIChatStreamProviderExtensions(t *testing.T) {
 	raw := []byte(`{"id":"chunk1","object":"chat.completion.chunk","created":1,"model":"m","prompt_token_ids":null,"prompt_text":null,"choices":[{"index":0,"delta":{"role":"assistant","reasoning":"hmm"},"finish_reason":null,"token_ids":null,"routed_experts":null}]}`)
 	var chunk openaichat.StreamChunk
@@ -403,7 +401,7 @@ func TestMessagesSystemCoexistence(t *testing.T) {
 		t.Fatalf("system texts = %v, want [top inline]", got)
 	}
 
-	// INTENDED SEMANTIC CHANGE (autopsy 02, task 14): the Chat render no
+	// INTENDED SEMANTIC CHANGE: the Chat render no
 	// longer carries multiple system turns positionally — open-weights
 	// chat templates (Qwen/Llama/DeepSeek Jinja) reject any role:system
 	// message after index 0, including a second leading one, which killed
@@ -470,7 +468,7 @@ func TestMessagesSystemCoexistence(t *testing.T) {
 	// instructions string: strict rejects, and the permission records the
 	// loss and emits NO instructions — the multi-turn system prompt is the
 	// shape the loss drops (the single-turn builder only runs for exactly
-	// one system turn; review-j finding 13), never an illegal items array.
+	// one system turn), never an illegal items array.
 	if _, _, err := RenderResponsesRequest(result.Request, testExchangeContext()); err == nil {
 		t.Fatal("strict responses render accepted multiple system turns; want rejection")
 	}

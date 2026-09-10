@@ -175,7 +175,7 @@ func TestRequestShape(t *testing.T) {
 // caching, "What cannot be cached"). The asymmetry with the
 // text/image/document/tool_use/tool_result arms - which admit the marker
 // and note the drop at decode - is the contract's own shape, not an
-// oversight (gate run 1 informational note 1).
+// oversight.
 func TestThinkingBlockCacheControlRejected(t *testing.T) {
 	for _, block := range []string{
 		`{"type":"thinking","thinking":"t","signature":"s","cache_control":{"type":"ephemeral"}}`,

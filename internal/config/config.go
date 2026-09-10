@@ -198,7 +198,7 @@ type Provider struct {
 }
 
 // TranscodeMappings returns the resolved transcode route mappings for this provider,
-// deep-cloning internal maps to prevent caller mutations (review-15 finding 7).
+// deep-cloning internal maps to prevent caller mutations.
 func (p *Provider) TranscodeMappings() []proxy.TranscodeMapping {
 	out := make([]proxy.TranscodeMapping, len(p.transcodeMappings))
 	for i, m := range p.transcodeMappings {

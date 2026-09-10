@@ -14,7 +14,7 @@ import (
 )
 
 // partialWriter returns one byte per Write with a nil error, violating the
-// io.Writer contract in exactly the way the review describes. It implements
+// io.Writer contract exactly. It implements
 // http.ResponseWriter so the dialect error path can be exercised.
 type partialWriter struct {
 	header http.Header
@@ -37,7 +37,7 @@ func (w *partialWriter) Write(p []byte) (int, error) {
 
 // TestWriteAllRejectsShortWrite proves writeAll never turns repeated partial
 // writes into success: a (1, nil)-per-call writer yields io.ErrShortWrite,
-// and a compliant writer succeeds (review-08 blocker 11).
+// and a compliant writer succeeds.
 func TestWriteAllRejectsShortWrite(t *testing.T) {
 	if err := writeAll(&partialWriter{}, []byte("hello")); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("err = %v, want io.ErrShortWrite", err)
@@ -49,7 +49,7 @@ func TestWriteAllRejectsShortWrite(t *testing.T) {
 
 // TestWriteDialectHTTPErrorShortWriteNotClean proves a short write through
 // WriteDialectHTTPError records DownstreamComplete=false: the translated
-// error was never fully delivered (review-08 blocker 11).
+// error was never fully delivered.
 func TestWriteDialectHTTPErrorShortWriteNotClean(t *testing.T) {
 	handler, outcomes := outcomeCaptureHandler(t, responsesMapping(t), func(req *http.Request) (*http.Response, error) {
 		t.Fatal("round trip must not be called")

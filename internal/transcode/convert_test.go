@@ -131,7 +131,7 @@ func TestDecodeResponsesRequestRejectsUnsupported(t *testing.T) {
 }
 
 // TestDecodeResponsesRequestControlsPermissiveProbe pins the responses_controls
-// contract against every policy (review-12 R12-1): the five conversation-state
+// contract against every policy: the five conversation-state
 // request controls are typed unsupported-feature errors even when
 // responses_controls is APPROVED — the key cannot un-gate them — while
 // prompt_cache_key under the same approval drops observably.
@@ -194,7 +194,7 @@ func TestDecodeResponsesRequestToolChoiceRequired(t *testing.T) {
 	}
 }
 
-// TestDecodeResponsesRequestToolTypeViolations reproduces review-12 finding
+// TestDecodeResponsesRequestToolTypeViolations reproduces
 // 4 at the decode boundary: a tool with a missing type must be a malformed
 // request under EVERY policy (never silently droppable as a pseudo
 // built-in under an approved builtin_tools loss), and cross-type fields
@@ -249,7 +249,7 @@ func TestDecodeResponsesRequestToolTypeViolations(t *testing.T) {
 // tool nested inside a namespace is the SAME builtin_tools loss decision as a
 // top-level one: approved (e.g. by the CLI defaults) it drops observably,
 // rejected it fails the request — never a different, harder rule than the
-// top-level path (review-11 finding 2).
+// top-level path.
 func TestDecodeResponsesRequestNamespaceNestedBuiltinTools(t *testing.T) {
 	body := []byte(`{
 		"model":"m",
@@ -298,7 +298,7 @@ func TestDecodeResponsesRequestNamespaceNestedBuiltinTools(t *testing.T) {
 	}
 }
 
-// TestDecodeResponsesRequestToolChoiceReconciliation reproduces review-12
+// TestDecodeResponsesRequestToolChoiceReconciliation reproduces
 // finding 5: an approved built-in tool drop must reconcile tool_choice against
 // the tools that actually survive, or the converter renders an invalid
 // upstream request (tool_choice "required" or a named function with zero
@@ -436,7 +436,6 @@ func TestDecodeResponsesRequestToolChoiceReconciliation(t *testing.T) {
 
 // TestRenderChatRequestNoDanglingToolChoice proves the chat body carries no
 // tool_choice when the built-in drop left no tools to choose among
-// (review-12 finding 5, render level).
 func TestRenderChatRequestNoDanglingToolChoice(t *testing.T) {
 	body := []byte(`{
 		"model":"m","input":"x",
@@ -470,7 +469,7 @@ func TestRenderChatRequestNoDanglingToolChoice(t *testing.T) {
 }
 
 // TestDecodeMessagesRequestToolChoiceNamedMissingTool pins the Messages side
-// of review-12 finding 5: Messages has no built-in tools (every tool is a
+// of: Messages has no built-in tools (every tool is a
 // function and always survives), so only the dangling named reference needs
 // guarding.
 func TestDecodeMessagesRequestToolChoiceNamedMissingTool(t *testing.T) {
@@ -761,7 +760,7 @@ func TestRenderResponsesRequestFromMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The Messages source tool carries no strictness semantic: under strict
-	// policy the conversion is rejected client-dialect (review-z commit 1).
+	// policy the conversion is rejected client-dialect.
 	if _, _, err := RenderResponsesRequest(
 		result.Request,
 		testExchangeContext(),
@@ -1436,7 +1435,7 @@ func TestDecodeResponsesResponseContentFilterRefusal(t *testing.T) {
 }
 
 // TestResponsesToolMarshalUnionShape pins the response-echo marshal shape of
-// the tool union (review-gate task-11 finding 1): a function tool always
+// the tool union: a function tool always
 // carries strict (the pinned contract marks it required on both the create
 // request and the response echo), while built-in and namespace tools never
 // do — a blanket struct marshal would invent strict:false on echoed
@@ -1542,7 +1541,7 @@ func TestResponsesToolMarshalUnionShape(t *testing.T) {
 }
 
 // TestAnthropicNestedOnlyCacheControlNoted pins the recursive cache_control
-// scan (review-gate task-11 finding 2): a marker that appears ONLY inside
+// scan: a marker that appears ONLY inside
 // nested tool_result content (no top-level block carries it) still produces
 // exactly one deduped anthropic_controls note per exchange.
 func TestAnthropicNestedOnlyCacheControlNoted(t *testing.T) {
@@ -1603,8 +1602,7 @@ func TestAnthropicNestedOnlyCacheControlNoted(t *testing.T) {
 }
 
 // TestDecodeResponsesRequestAllBuiltinNamespace pins the top-level parity of
-// a namespace whose nested tools are ALL built-ins (review-gate task-11
-// finding 6): under an approved builtin_tools loss the namespace drops
+// a namespace whose nested tools are ALL built-ins: under an approved builtin_tools loss the namespace drops
 // observably exactly like a top-level all-built-in tools list (tool_choice
 // reconciliation owns the no-tools-left case), and under a strict policy it
 // is the same typed builtin_tools rejection — never a different, harder
@@ -1645,8 +1643,7 @@ func TestDecodeResponsesRequestAllBuiltinNamespace(t *testing.T) {
 
 	// The zero-flatten itself is observable too: the namespace produced no
 	// portable function tools, so the report carries an explicit note saying
-	// so rather than an unremarked empty tools list (review-gate task-12
-	// finding 4).
+	// so rather than an unremarked empty tools list.
 	foundZeroFlatten := false
 	for _, loss := range result.Report.Losses {
 		if loss.Feature == FeatureBuiltinTools &&
@@ -1676,7 +1673,7 @@ func TestDecodeResponsesRequestAllBuiltinNamespace(t *testing.T) {
 
 func TestDecodeResponsesRequestCodexTurnTwoHistory(t *testing.T) {
 	// Byte-faithful replay of the field-observed Codex turn-2 shape
-	// (autopsy 01): the assistant history item carries output_text with NO
+	// : the assistant history item carries output_text with NO
 	// annotations key. Pre-fix this failed locally in 14ms with
 	// "output_text annotations must be present; use an empty array".
 	body := []byte(`{
@@ -1733,7 +1730,7 @@ func TestDecodeResponsesRequestCodexTurnTwoHistory(t *testing.T) {
 
 func TestDecodeResponsesRequestIdStrippedAssistantHistory(t *testing.T) {
 	// An assistant history turn stripped of id/status routes to the easy
-	// message arm (autopsy 01 §3.3) and carries output-type parts.
+	// message arm and carries output-type parts.
 	body := []byte(`{
 		"model":"m",
 		"input":[
@@ -1781,7 +1778,7 @@ func TestDecodeResponsesRequestFunctionOutputOutputPartRejected(t *testing.T) {
 }
 
 func TestRenderChatRequestMidConversationSystemConsolidates(t *testing.T) {
-	// Field-observed Claude Code shape (autopsy 02): envelope.system plus an
+	// Field-observed Claude Code shape: envelope.system plus an
 	// inline role:system message AFTER dialog turns. Positional rendering
 	// puts role:system at index >0 — the exact shape Qwen/Llama/DeepSeek
 	// Jinja templates reject with "System message must be at the
@@ -1994,7 +1991,7 @@ func TestRenderChatRequestSystemAnywhereCapability(t *testing.T) {
 }
 
 // TestDecodeResponsesRequestPreviousOutputEmptyStatus (field regression
-// 2026-08-24, task 30): codex resume traffic carries previous-output history
+// 2026-08-24): codex resume traffic carries previous-output history
 // items with "status": "" (observed live against the yolo gateway: 'convert
 // request: responses request: wire: malformed: input item 3: invalid previous
 // output status ""'). The sibling input items treat an absent status as

@@ -19,7 +19,7 @@ import (
 )
 
 // FuzzTranscodeSigningAndRetry drives the per-attempt signing + retry
-// interplay (review-z commit 4/6) and asserts:
+// interplay and asserts:
 //
 //   - the signer runs EXACTLY once per actual upstream attempt;
 //   - a signer failure never contacts the upstream, never retries, and
@@ -158,7 +158,7 @@ func (s fuzzSigner) Sign(_ context.Context, req *http.Request) error {
 	s.calls.Add(1)
 	if req.ContentLength < 0 {
 		// The retry layer must always finalize Content-Length before the
-		// signer runs (review-z commit 4).
+		// signer runs.
 		return &transcode.SigningError{Cause: context.DeadlineExceeded}
 	}
 	if s.fails {

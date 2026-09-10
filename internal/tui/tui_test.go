@@ -386,7 +386,7 @@ func TestStripANSI(t *testing.T) {
 	}
 }
 
-// TestStripANSI_SwallowsNonCSISequences pins review-10 #5d: OSC payloads
+// TestStripANSI_SwallowsNonCSISequences pins OSC payloads
 // (terminated by BEL or ST) and DCS/SOS/PM/APC bodies (terminated by ST) must
 // not leak their bytes into stripped output — logged text can never inject
 // terminal control sequences into the Logs tab or a toast.
@@ -413,13 +413,13 @@ func TestStripANSI_SwallowsNonCSISequences(t *testing.T) {
 	}
 }
 
-// TestStripANSI_StripsControlBytes pins review-14 #5: C0 controls other than
+// TestStripANSI_StripsControlBytes pins C0 controls other than
 // tab, DEL, and the C1 block are stripped — both their UTF-8 encodings and
 // stray raw bytes in the 0x80–0x9F range, which are the 8-bit control
 // positions legacy terminals act on. Valid multibyte text must survive
 // untouched even when its continuation bytes fall inside that range (the
 // emoji row guards against any naive byte-level implementation). The \n row
-// additionally pins the review-15 #1 rebuttal: no literal newline can survive
+// additionally pins the rebuttal: no literal newline can survive
 // stripping, so multi-line toast messages with unindented continuations are
 // impossible to produce.
 func TestStripANSI_StripsControlBytes(t *testing.T) {
@@ -442,7 +442,8 @@ func TestStripANSI_StripsControlBytes(t *testing.T) {
 	}
 }
 
-// TestStripANSI_PreservesEncodedReplacementChar pins review-16 #1: a
+// TestStripANSI_PreservesEncodedReplacementChar pins the encoded replacement
+// character: a
 // legitimately encoded U+FFFD (bytes EF BF BD) must survive stripping byte-for-
 // byte. utf8.DecodeRuneInString reports utf8.RuneError for it (size 3), the
 // same rune it reports for an invalid byte (size 1), so a decoder that keys on
@@ -464,7 +465,7 @@ func TestStripANSI_PreservesEncodedReplacementChar(t *testing.T) {
 	}
 }
 
-// TestToastToastWidth_Fallback pins review-14 #8: with the terminal size not
+// TestToastToastWidth_Fallback pins the width fallback: with the terminal size not
 // yet known (or degenerately narrow) the toast width falls back to an 80-column
 // assumption minus the four reserved margin cells, so startup toasts keep a
 // right margin instead of rendering flush against the pane edge once the first
@@ -2689,7 +2690,7 @@ func TestRenderStatusBar_WrapsAbortedOnNarrowViewport(t *testing.T) {
 	}
 }
 
-// TestRenderStatusBar_WrapsLabelsMultiRow pins the review-09 fix: with
+// TestRenderStatusBar_WrapsLabelsMultiRow pins the multi-row wrap: with
 // all six labels present at width 40 the wrapped labels pack into rows
 // that each fit the viewport, and every part — including "Aborted" —
 // stays visible. Single-digit counts pack the five status classes into
@@ -2927,7 +2928,7 @@ func inflightSectionRows(lines []string) []string {
 }
 
 // TestDashboard_InFlightSummaryFitsViewport reproduces the In-Flight
-// summary overflow (review-09): "  N in-flight: L limited, P
+// summary overflow: "  N in-flight: L limited, P
 // passthrough" spans exactly 39 cells for single-digit values — the
 // entire 40-column viewport — and exceeds it the moment any value
 // reaches two digits, so renderContentWithScrollbar silently truncates
@@ -2988,7 +2989,7 @@ func TestDashboard_InFlightSummaryFitsViewport(t *testing.T) {
 }
 
 // TestDashboard_InFlightRowsFitViewport reproduces the in-flight entry
-// row overflow (review-10): the path column width is derived from a
+// row overflow: the path column width is derived from a
 // fixed-overhead heuristic (viewportWidth()-23) that assumes the age
 // renders in at most 8 cells and the method in at most 6. A request
 // with a multi-hour age (e.g. "1h2m3.004s" = 10 cells) or a method
@@ -3127,7 +3128,7 @@ func TestDashboard_AllLinesFitViewport(t *testing.T) {
 					}
 				}
 				// One multi-hour age: "1h2m3.004s" renders 10 cells, so
-				// the path column must absorb it (review-10).
+				// the path column must absorb it.
 				s.InFlight[0].StartTime = now.Add(-(time.Hour + 2*time.Minute + 3*time.Second + 4*time.Millisecond))
 				s.InFlightLimited = 8
 				s.InFlightPassthrough = 2
@@ -3279,7 +3280,7 @@ func TestDashboard_StatusLineFitsViewport(t *testing.T) {
 			expected: []string{"1xx:1", "2xx:20", "3xx:3", "4xx:4", "5xx:5"},
 		},
 		{
-			// review-09 repro: at 40 columns the wrapped labels row
+			// repro: at 40 columns the wrapped labels row
 			// ("  " + six parts joined + "  ") is 43 cells even for
 			// single-digit counts, exceeding the 39-cell viewport, so
 			// renderContentWithScrollbar silently truncates "Aborted:6".
@@ -3290,7 +3291,7 @@ func TestDashboard_StatusLineFitsViewport(t *testing.T) {
 			expected: []string{"1xx:1", "2xx:2", "3xx:3", "4xx:4", "5xx:5", "Aborted:6"},
 		},
 		{
-			// review-09 repro: with all five classes and Aborted at
+			// repro: with all five classes and Aborted at
 			// multi-billion magnitudes the wrapped labels row spans 67
 			// cells (labelsWidth 64 + 3) — the last 28 cells are cut off.
 			name:     "narrow-all-nonzero-aborted-big",
@@ -4412,7 +4413,7 @@ func TestScrollbarDrag_GrabOffsetNoJump(t *testing.T) {
 	}
 }
 
-// ─── TUI-REVIEW-01: scratch/review-01.md fixes ───
+// ─── Dashboard overflow fixes ───
 
 func dashboardWithOverflow(conc, height, flights int) Model {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: conc}})
@@ -4938,7 +4939,7 @@ func TestSingleProviderHeaderKeepsShaper(t *testing.T) {
 	}
 }
 
-// TestHeaderWidthBudget pins the narrow-pane contract of Task 9: for every
+// TestHeaderWidthBudget pins the narrow-pane contract: for every
 // width >= 40 and any provider names, the header row must never exceed the
 // terminal width (no wrap onto the tab bar), the active provider's chip must
 // stay visible and clickable, chipAt must map clicks to exactly the chips
@@ -5114,7 +5115,7 @@ func TestMultiProviderHeaderShowsNames(t *testing.T) {
 }
 
 // TestResetStatsSendsOnChannel proves the c -> y confirm path delivers a
-// signal on the model's reset channel (Task 6: the channel is drained by
+// signal on the model's reset channel (the channel is drained by
 // main, which calls Collector.Reset for every provider).
 func TestResetStatsSendsOnChannel(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})

@@ -24,7 +24,7 @@ import (
 func testHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) *TranscodeHandler {
 	t.Helper()
 	// The common test defaults live on the mapping (HandlerConfig carries
-	// only Mapping, Upstream, and BodyLimits — review-z commit 4).
+	// only Mapping, Upstream, and BodyLimits — ).
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
 	if mapping.LossPolicy.Allowed == nil {
 		mapping.LossPolicy = StrictLossPolicy()
@@ -58,8 +58,7 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 // TestTranscodeConstructorValidatesConfig verifies that
 // NewTranscodeHandler validates its configuration eagerly, panicking on a
 // nil round trip, an invalid mapping, invalid body limits, or an invalid
-// upstream, rather than failing on the first request (review-08 additional
-// 9).
+// upstream, rather than failing on the first request.
 func TestTranscodeConstructorValidatesConfig(t *testing.T) {
 	validMapping := responsesMapping(t)
 	validUpstream := mustParseURL(t, "https://upstream.example")
@@ -161,8 +160,7 @@ func messagesMapping(t *testing.T, upstream UpstreamProtocol) Mapping {
 	}
 	if upstream == UpstreamResponses {
 		// Messages tools carry no strictness; a messages->responses mapping
-		// under the strict policy is a startup rejection (review-z commit
-		// 6). These tests exercise error/stream behavior, not the
+		// under the strict policy is a startup rejection. These tests exercise error/stream behavior, not the
 		// strictness loss, so the mapping allows it explicitly.
 		mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
 			FeatureToolSchemaStrictness: {},
@@ -398,7 +396,7 @@ func TestHandlerContentEncoding415(t *testing.T) {
 
 func TestHandlerContentEncodingIdentityAccepted(t *testing.T) {
 	// The identity content encoding is the no-op and must be accepted
-	// (review-j finding 15); only non-identity encodings are unsupported.
+	//; only non-identity encodings are unsupported.
 	mapping := responsesMapping(t)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -427,7 +425,7 @@ func TestHandlerContentEncodingIdentityAccepted(t *testing.T) {
 func TestHandlerDecodedRequestAmplification413(t *testing.T) {
 	// A decoded/rendered request that amplifies beyond the decoded-request
 	// body limit is a 413 in the client dialect, not the generic conversion
-	// 400 (review-j finding 15).
+	// 400.
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
 	mapping.LossPolicy = StrictLossPolicy()
@@ -617,7 +615,7 @@ func TestHandlerLocalConversion502NotUpstreamFailure(t *testing.T) {
 			// Upstream returns a 200 with a VALID Chat response whose
 			// finish_reason is outside the supported subset: a
 			// known-but-unsupported feature is a local conversion failure,
-			// never an upstream failure (review-k finding 3).
+			// never an upstream failure.
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -651,7 +649,7 @@ func TestHandlerLocalConversion502NotUpstreamFailure(t *testing.T) {
 	}
 }
 
-// TestHandlerCorruptUpstreamResponseIsUpstreamFailure proves the review-k
+// TestHandlerCorruptUpstreamResponseIsUpstreamFailure proves the
 // finding-3 counterexample: a 200 response that is not a valid instance of
 // the supported Chat subset (here: an object that is not a chat completion
 // at all) is corrupt upstream wire — recorded as an upstream body failure
@@ -704,8 +702,8 @@ func TestHandlerCorruptUpstreamResponseIsUpstreamFailure(t *testing.T) {
 	}
 }
 
-// TestHandlerDecodeFailure502IsLogged pins the operator-observability path
-// (autopsy 04 rec 3): a 200 body that fails transcode decode is logged
+// TestHandlerDecodeFailure502IsLogged pins the operator-observability path:
+// a 200 body that fails transcode decode is logged
 // server-side with the conversion detail before the bounded client 502 is
 // written — a parse-failure cascade must be visible in the server log, not
 // only in client-visible error bodies.
@@ -779,10 +777,10 @@ func TestHandlerDecodeFailure502IsLogged(t *testing.T) {
 }
 
 // TestHandlerReviewKChatCounterexampleIsUpstreamFailure proves the exact
-// review-k finding-4 counterexample end to end: a single choice with index
+// -4 counterexample end to end: a single choice with index
 // zero, a user-role message, and no finish_reason is rejected with a
 // client-dialect error and recorded as an upstream failure — it can never
-// become a successful assistant response (review-k findings 3 and 4).
+// become a successful assistant response.
 func TestHandlerReviewKChatCounterexampleIsUpstreamFailure(t *testing.T) {
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
@@ -827,7 +825,7 @@ func TestHandlerReviewKChatCounterexampleIsUpstreamFailure(t *testing.T) {
 		t.Fatalf("provenance = %s, want upstream_body_error", outcomes[0].Provenance)
 	}
 	if !outcomes[0].UpstreamFailure {
-		t.Fatal("the review-k counterexample must record an upstream failure")
+		t.Fatal("the counterexample must record an upstream failure")
 	}
 }
 
@@ -868,8 +866,7 @@ func TestHandlerMessagesToResponsesJSON(t *testing.T) {
 				t.Fatal("instructions missing")
 			}
 			// A non-streaming exchange must not demand SSE from the
-			// upstream: the rendered request carries no stream key
-			// (review run 1 finding F1).
+			// upstream: the rendered request carries no stream key.
 			if envelope.Stream.Present {
 				t.Fatalf("non-streaming upstream request carries stream: %s", body)
 			}
@@ -1017,7 +1014,6 @@ func TestHandlerStreamingResponsesToChat(t *testing.T) {
 // that signals streaming ONLY via Accept: text/event-stream must produce an
 // upstream request with stream:true + stream_options.include_usage:true, and
 // the SSE response must be accepted — never the JSON-vs-SSE 502 mismatch
-// (review-j finding 6).
 func TestHandlerStreamingResponsesToChatAcceptOnly(t *testing.T) {
 	var (
 		mu      sync.Mutex
@@ -1078,7 +1074,7 @@ func TestHandlerStreamingResponsesToChatAcceptOnly(t *testing.T) {
 }
 
 // TestExplicitStreamFalseIsNotOverridden proves the request body's stream
-// field is authoritative over the Accept header (review-08 blocker 1): an
+// field is authoritative over the Accept header: an
 // explicit stream:false must never become an upstream SSE request or an SSE
 // response, regardless of the client's Accept header — the outbound request
 // stays non-streaming, its Accept header is rewritten to application/json,
@@ -1178,7 +1174,7 @@ func TestExplicitStreamFalseIsNotOverridden(t *testing.T) {
 }
 
 // TestExplicitStreamTrueOverridesJsonAccept proves the body-authoritative
-// precedence in the streaming direction (review-08 blocker 1): an explicit
+// precedence in the streaming direction: an explicit
 // body stream:true with Accept: application/json still produces an upstream
 // SSE request whose outbound Accept is rewritten to text/event-stream, and
 // the SSE response is accepted — the mirror of
@@ -1545,7 +1541,7 @@ func TestHandlerAuthApplied(t *testing.T) {
 
 // TestHandlerAuthNone_MultipleClientAuthHeadersStripped proves that when Mode == AuthNone,
 // any inbound client auth headers (even conflicting or malformed ones) are stripped cleanly
-// and do not trigger an inbound credential extraction failure (review-15 finding 1, review-16 finding 2).
+// and do not trigger an inbound credential extraction failure.
 func TestHandlerAuthNone_MultipleClientAuthHeadersStripped(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
@@ -2030,7 +2026,7 @@ func TestHandlerHopByHopHeadersStrippedJSON(t *testing.T) {
 	}
 	// The response allowlist is stricter than hop-by-hop removal: any
 	// non-listed upstream header, including an ordinary entity header, is
-	// stripped on a transcoded route (review-08 blocker 10).
+	// stripped on a transcoded route.
 	if got := rec.Header().Get("X-Keep"); got != "" {
 		t.Fatalf("non-allowed entity header leaked: %q", got)
 	}
@@ -2070,8 +2066,7 @@ func TestHandlerConversationStateRejectedChat(t *testing.T) {
 // TestHandlerStreamingMessagesToResponsesStrictRejectsEarlyUsage pins the
 // strict-policy behavior: a Messages stream whose source cannot provide the
 // required early message_start usage is rejected with a client-dialect error
-// event (review-j finding 9: zeros would fabricate facts; the FeatureUsageUnknown
-// decision is explicit).
+// event.
 func TestHandlerStreamingMessagesToResponsesStrictRejectsEarlyUsage(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
@@ -2143,7 +2138,6 @@ func representationHeaders() http.Header {
 // TestHandlerTransformedRequestSanitized proves inbound integrity digests,
 // message signatures, content metadata, and validators never reach the
 // upstream, and Content-Length is recomputed from the converted body
-// (review-j finding 12).
 func TestHandlerTransformedRequestSanitized(t *testing.T) {
 	var got *http.Request
 	mapping := responsesMapping(t)
@@ -2185,7 +2179,7 @@ func TestHandlerTransformedRequestSanitized(t *testing.T) {
 // TestHandlerExternalSignerAttachedToContext proves the external-signer mode
 // attaches the signer to the request context instead of invoking it inline:
 // the signing transport inside the retry chain signs every actual attempt
-// after body reconstruction (review-z commit 4).
+// after body reconstruction.
 func TestHandlerExternalSignerAttachedToContext(t *testing.T) {
 	signer := &captureSigner{}
 	mapping := responsesMapping(t)
@@ -2254,8 +2248,7 @@ func (leakingPathSecret) Secret(context.Context) (string, error) {
 }
 
 // TestHandlerInternalErrorSanitized proves internal construction errors
-// (secret file paths) never leak into the client message (review-j finding
-// 14); the detail is logged instead. Autopsy 2026-09-06 M9: the mapping
+// (secret file paths) never leak into the client message; the detail is logged instead. The mapping
 // secret is resolved once at construction, so a failing source panics
 // construction with a wrapped error — the leak-prevention contract moves to
 // the construction panic (the detail never reaches a client, because no
@@ -2301,7 +2294,7 @@ func TestHandlerInternalErrorSanitized(t *testing.T) {
 // TestHandlerResponsesRequestMissingToolStrictRejected proves the pinned
 // strict requirement end to end: a Responses client request whose tool
 // entries omit strict is rejected client-dialect (400) BEFORE any upstream
-// request is made (review-z commit 1).
+// request is made.
 func TestHandlerResponsesRequestMissingToolStrictRejected(t *testing.T) {
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}

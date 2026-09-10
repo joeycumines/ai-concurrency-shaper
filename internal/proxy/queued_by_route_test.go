@@ -1,6 +1,6 @@
 package proxy
 
-// UNRESP-3: per-route queue observability. The aggregate queued count hides
+// Per-route queue observability. The aggregate queued count hides
 // WHICH route is starved; the snapshot now breaks the queue down per route
 // (key "METHOD /path", matching RouteStats) with the oldest queued age per
 // route, so the operator can see "which route is waiting" without packet
@@ -77,7 +77,13 @@ func TestProxy_QueuedByRoutePerRouteCounts(t *testing.T) {
 			send(path)
 		}(path)
 	}
-	time.Sleep(150 * time.Millisecond)
+	// Deterministic readiness: both second requests must demonstrably be
+	// queued before the snapshot. A fixed sleep lets the snapshot race the
+	// queue entries under load and false-fail the count assertions.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool {
+		return s.QueuedByRoute["POST /v1/messages"] == 1 &&
+			s.QueuedByRoute["POST /v1/chat/completions"] == 1
+	})
 
 	snap := met.Snapshot()
 	if got := snap.QueuedByRoute["POST /v1/messages"]; got != 1 {
@@ -181,7 +187,12 @@ func TestProxy_QueuedGaugesAgreeDuringGlobalWait(t *testing.T) {
 		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 		holderDone <- rec.Code
 	}()
-	time.Sleep(100 * time.Millisecond)
+	// Deterministic readiness: the holder must demonstrably hold the global
+	// slot (active 1) before the waiter fires, so the waiter is the one
+	// that queues on the global limiter. A fixed sleep lets the waiter win
+	// the global slot under load, which would leave nothing queued and
+	// false-fail the gauge assertions.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool { return s.Active == 1 })
 
 	waiterDone := make(chan int, 1)
 	go func() {
@@ -189,7 +200,12 @@ func TestProxy_QueuedGaugesAgreeDuringGlobalWait(t *testing.T) {
 		p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
 		waiterDone <- rec.Code
 	}()
-	time.Sleep(200 * time.Millisecond)
+	// Deterministic readiness: the waiter must demonstrably be queued on
+	// the global limiter before the snapshot. A fixed sleep lets the
+	// snapshot race the queue entry under load.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool {
+		return s.Queued >= 1 && s.QueuedByRoute["POST /v1/messages"] == 1
+	})
 
 	snap := met.Snapshot()
 	if snap.Queued < 1 {

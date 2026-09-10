@@ -39,7 +39,7 @@ func assertChatStreamChunkWireError(t *testing.T, err error) {
 // wrong choice index, more than one choice, a missing delta, a non-streaming
 // message arm (a STRUCTURAL rejection — the streaming surface carries only
 // deltas), and a usage object omitting any required total are all corrupt
-// upstream wire (review-08 blocker 2). Contract-role note (2026-09-06): an
+// upstream wire. Contract-role note (2026-09-06): an
 // UNKNOWN field on the upstream stream envelope is a provider extension and is
 // TOLERATED (never a failure), but the message arm is a KNOWN non-streaming
 // field and is a structural rejection — it must never be silently dropped.
@@ -128,13 +128,13 @@ func TestChatStreamRejectsMissingRequiredEnvelopeFields(t *testing.T) {
 
 // TestChatStreamRejectsNonAssistantRole proves a delta role that is present
 // but not assistant is corrupt upstream wire — never relabeled as assistant
-// output (review-08 blocker 2). The review's minimal malformed chunk, which
+// output. The minimal malformed chunk, which
 // also omits every envelope field, is rejected for the envelope first.
 func TestChatStreamRejectsNonAssistantRole(t *testing.T) {
-	// The review's exact counterexample chunk: a user-role delta and no
+	// The exact counterexample chunk: a user-role delta and no
 	// envelope fields at all.
-	review := `{"choices":[{"delta":{"role":"user","content":"x"},"finish_reason":"stop"}]}`
-	_, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(review)})
+	chunk := `{"choices":[{"delta":{"role":"user","content":"x"},"finish_reason":"stop"}]}`
+	_, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(chunk)})
 	assertChatStreamChunkWireError(t, err)
 
 	// A user-role delta with a full envelope is rejected for the role.
@@ -157,7 +157,6 @@ func TestChatStreamRejectsNonAssistantRole(t *testing.T) {
 // "function", and identity (call id and name) is immutable once the
 // output_item.added event was announced — a later fragment changing identity
 // or resolving through a conflicting index is corrupt upstream wire
-// (review-08 blocker 2).
 func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 	t.Run("decode index and type", func(t *testing.T) {
 		base := `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[%s]},"finish_reason":null}]}`
@@ -302,7 +301,7 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 }
 
 // TestChatStreamRequiresPinnedTerminal proves the [DONE] sentinel is the only
-// release of the held terminal (review-08 blocker 2): a stream that ends
+// release of the held terminal: a stream that ends
 // after finish_reason without [DONE] is a typed upstream truncation — the
 // terminal batch is never released at EOF, the exchange is never reported as
 // a successful completion, and the client receives an error event.
@@ -310,7 +309,7 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 	finishChunk := `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}`
 	// A finish chunk that opened no items is a legitimate zero-output
 	// completion: the held terminal is empty but must still be pinned to the
-	// [DONE] sentinel (review-08 blocker 2).
+	// [DONE] sentinel.
 	emptyFinishChunk := `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
 
 	t.Run("state finalize without done", func(t *testing.T) {
@@ -628,11 +627,11 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 	})
 }
 
-// TestChatStreamReviewMalformedStreamIsUpstreamFailure proves the review's
+// TestChatStreamReviewMalformedStreamIsUpstreamFailure proves the
 // minimal malformed stream — a user-role delta chunk with no envelope fields,
 // terminated by [DONE] — is rejected with a client-dialect error event and
 // classified as an upstream failure: it can never become a successful
-// assistant response (review-08 blocker 2 acceptance).
+// assistant response.
 func TestChatStreamReviewMalformedStreamIsUpstreamFailure(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),

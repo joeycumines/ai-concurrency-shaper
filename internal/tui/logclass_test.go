@@ -115,7 +115,7 @@ func TestLogLineIsActionable_WholeWordTokens(t *testing.T) {
 	}
 }
 
-// TestLogDedupKey_QuotedPreMsgAttribute pins review-06 issue 5 hardening: the slog
+// TestLogDedupKey_QuotedPreMsgAttribute pins the quoted-pre-msg hardening: the slog
 // dedup regex must handle a quoted value with spaces in an attribute preceding msg.
 // Without the `(?:\S+|\"(?:\\.|[^"\\])*")` alternative, a line like
 // `k="a b" level=ERROR msg="hi"` would fail to extract msg and would not dedup.
@@ -146,7 +146,8 @@ func TestLogDedupKey_QuotedPreMsgAttribute(t *testing.T) {
 	}
 }
 
-// TestLogLineIsActionable_QuotedPreMsgAttribute pins review-09 issue 1: severity
+// TestLogLineIsActionable_QuotedPreMsgAttribute pins the quote-aware severity
+// detection: severity
 // detection must locate the REAL msg token (quote-aware), not the first
 // occurrence of the substring "msg=". A quoted pre-msg attribute containing
 // "msg=" previously hid the true level attribute from both the INFO suppression
@@ -156,10 +157,10 @@ func TestLogLineIsActionable_QuotedPreMsgAttribute(t *testing.T) {
 		name, line string
 		want       bool
 	}{
-		// The review's false-positive: level=INFO hidden behind a quoted
+		// The false-positive case: level=INFO hidden behind a quoted
 		// pre-msg value containing "msg=", payload matches the 'failed' keyword.
 		{"info hidden by quoted msg= substring", `k="a msg= b" level=INFO msg="failed to open"`, false},
-		// The review's false-negative: level=FATAL likewise hidden.
+		// The false-negative case: level=FATAL likewise hidden.
 		{"fatal hidden by quoted msg= substring", `k="a msg= b" level=FATAL msg="shutdown"`, true},
 		// Sanity: same shape with a genuinely warn-level record.
 		{"warn with quoted msg= substring", `k="a msg= b" level=WARN msg="queue timeout"`, true},
@@ -176,7 +177,7 @@ func TestLogLineIsActionable_QuotedPreMsgAttribute(t *testing.T) {
 	}
 }
 
-// TestLogLineIsActionable_QuotedLevelSubstring pins review-10 blocker 1:
+// TestLogLineIsActionable_QuotedLevelSubstring pins the quoted-level rule:
 // severity must come ONLY from a top-level level= field of the slog record.
 // A quoted attribute VALUE containing "level=..." must neither suppress a real
 // ERROR nor fabricate a toast for a non-info record, and a quoted attribute KEY
@@ -201,7 +202,7 @@ func TestLogLineIsActionable_QuotedLevelSubstring(t *testing.T) {
 	}
 }
 
-// TestLogDedupKey_NoDelimiterCollision pins review-10 blocker 2: a msg that
+// TestLogDedupKey_NoDelimiterCollision pins the delimiter-collision rule: a msg that
 // itself contains the "|" framing delimiter must never alias a different record
 // whose msg is the delimiter-split prefix and whose trailing attributes supply
 // the rest — the two records are distinct incidents and must not dedup together.
@@ -218,7 +219,7 @@ func TestLogDedupKey_NoDelimiterCollision(t *testing.T) {
 	}
 }
 
-// TestLogDedupKey_QuotedAttributeKey pins review-11 #3: slog quotes keys that
+// TestLogDedupKey_QuotedAttributeKey pins the quoted-key rule: slog quotes keys that
 // contain spaces ("user agent"=curl). Such a line must still parse as
 // slog-shaped so its dedup key comes from the msg value, not from the whole
 // raw line treated as prose.
@@ -229,7 +230,7 @@ func TestLogDedupKey_QuotedAttributeKey(t *testing.T) {
 	}
 }
 
-// TestLogDedupKey_TrailingAttributes pins review-07 #7: structured slog records
+// TestLogDedupKey_TrailingAttributes pins the trailing-attribute rule: structured slog records
 // that differ beyond their message text (route=, err=, ...) must not collapse to
 // one dedup key, while records without trailing attributes keep exactly the
 // legacy keys.
@@ -256,14 +257,14 @@ func TestLogDedupKey_TrailingAttributes(t *testing.T) {
 	}
 }
 
-// TestLogLineIsActionable_UnicodeEscapeMsgNotCorrupted pins review-13 issue 1:
-// actionability must be decided from a parse of the ORIGINAL line bytes, never
+// TestLogLineIsActionable_UnicodeEscapeMsgNotCorrupted pins the original-byte
+// parse rule: actionability must be decided from a parse of the ORIGINAL line bytes, never
 // from a pre-lowercased copy. Lowercasing rewrites an uppercase \U escape
 // (8 hex digits to strconv.Unquote) into \u (4 hex digits), so the decoded
 // message changes shape — `\U0001F512FAILED` decodes to "🔒FAILED" but its
 // lowered form decodes to "\x01f512failed", where the token character '2'
-// before "failed" defeats whole-word keyword matching. Since review-14 #3,
-// WARN-3 itself carries a level signal (offset stripped → warn → true), so
+// before "failed" defeats whole-word keyword matching. Since offset levels
+// (WARN-3) carry their own level signal (offset stripped → warn → true), so
 // this line resolves through the level map without reaching that scan; the
 // guard that forces the scan over the decoded msg is
 // TestLogLineIsActionable_FallthroughLevelDecodesMsg below.
@@ -275,7 +276,7 @@ func TestLogLineIsActionable_UnicodeEscapeMsgNotCorrupted(t *testing.T) {
 }
 
 // TestLogLineIsActionable_FallthroughLevelDecodesMsg pins the decode guard at
-// full strength after review-14 #3 gave offset levels their own signal: WARN-3
+// full strength now that offset levels have their own signal: WARN-3
 // now returns true via the level map alone, so THIS case uses a base name with
 // no mapped signal (NOTICE) to force the keyword scan over the DECODED msg.
 // Under a lowercase-first parse the uppercase \U escape collapses to \u,
@@ -290,8 +291,8 @@ func TestLogLineIsActionable_FallthroughLevelDecodesMsg(t *testing.T) {
 	}
 }
 
-// TestLogDedupKey_MatchesActionabilityParse pins the other half of review-13
-// issue 1: logDedupKey already parses the original bytes, so once actionability
+// TestLogDedupKey_MatchesActionabilityParse pins the parse-agreement invariant:
+// logDedupKey already parses the original bytes, so once actionability
 // does too, both functions derive their view of the same decoded msg. If the
 // two ever diverge again (one parsing lowercased bytes, one original), this
 // exact-value assertion fails against whichever side corrupts the escape.

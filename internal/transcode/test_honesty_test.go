@@ -1,6 +1,6 @@
 package transcode
 
-// Autopsy 2026-09-06 REM-L (test honesty): three regression tests that pin
+// Test honesty: three regression tests that pin
 // behavior whose tests could no longer fail on the fixed code.
 //
 // 1. GAP-018 dedup: the aggregated loss line collapses duplicate
@@ -152,7 +152,7 @@ func TestTranscodeMessagesToChatStripsClientCredentials(t *testing.T) {
 	}
 	for _, name := range []string{"Authorization", "X-Api-Key", "Proxy-Authorization", "Api-Key", "X-Goog-Api-Key"} {
 		if got := upstreamHeaders.Get(name); got != "" {
-			t.Fatalf("client credential header %q reached the upstream (strip-then-apply, autopsy REM-L): %q", name, got)
+			t.Fatalf("client credential header %q reached the upstream (strip-then-apply): %q", name, got)
 		}
 	}
 }

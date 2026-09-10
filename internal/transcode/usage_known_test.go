@@ -1,6 +1,6 @@
 package transcode
 
-// J6 regression tests (review-k finding 6, high): unknown usage breakdowns
+// J6 regression tests: unknown usage breakdowns
 // are never emitted as factual zeros — the Responses and Messages renderers
 // loss-gate every wire-required component the source did not provide and
 // emit the required zeros only after the loss is approved, streaming behaves
@@ -11,16 +11,15 @@ import (
 	"testing"
 )
 
-// usageCounterexample is the review-k finding-6 fixture: all three totals
+// usageCounterexample is the -6 fixture: all three totals
 // present, no breakdown detail objects.
 const usageCounterexample = `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`
 
-// TestUsageCounterexampleResponsesLossGated proves the review-k
+// TestUsageCounterexampleResponsesLossGated proves the
 // counterexample renders to a Responses client only after the explicit
 // usage-timing loss: the pinned Responses contract requires the breakdown
 // detail objects, so strict policy rejects and under an approved loss the
-// zeros are emitted with the loss recorded exactly once (review-k finding
-// 6). The known totals are preserved.
+// zeros are emitted with the loss recorded exactly once. The known totals are preserved.
 func TestUsageCounterexampleResponsesLossGated(t *testing.T) {
 	response, _, err := DecodeChatResponseWithPolicy([]byte(usageCounterexample), ChatCapabilities{}, StrictLossPolicy())
 	if err != nil {
@@ -176,7 +175,7 @@ func TestUsagePartialPreservesKnownTotals(t *testing.T) {
 
 // TestUsageStreamingDetailObjectsPresence proves the stream chunk usage
 // converter always emits the pinned-required detail objects — the loss gate
-// at the call sites sanctions the zeros (review-k finding 6) — and reflects
+// at the call sites sanctions the zeros — and reflects
 // provided breakdowns.
 func TestUsageStreamingDetailObjectsPresence(t *testing.T) {
 	usage, _ := chatUsageToResponsesUsage(&ChatLLMUsage{
@@ -212,7 +211,7 @@ func TestUsageStreamingDetailObjectsPresence(t *testing.T) {
 // TestUsageStreamingChatToResponsesLossGatedOnce proves the chat→responses
 // stream gate: a chunk usage without the breakdown details rejects under the
 // strict policy and converts under an approved usage_timing loss recorded
-// exactly once per stream (review-k finding 6).
+// exactly once per stream.
 func TestUsageStreamingChatToResponsesLossGatedOnce(t *testing.T) {
 	chunk := chatChunk(t, ChatStreamDelta{Content: new("x")}, nil)
 	chunk.Usage = &ChatLLMUsage{
@@ -281,7 +280,7 @@ func usageEnvelope() *ResponsesUsage {
 // TestUsageStreamingResponsesToAnthropicLossGatedOnce proves the Responses→
 // Anthropic stream enters the usage-timing loss for the always-unknown
 // cache-creation component — strict rejects, permissive converts with the
-// loss recorded exactly once across the whole stream (review-k finding 6).
+// loss recorded exactly once across the whole stream.
 func TestUsageStreamingResponsesToAnthropicLossGatedOnce(t *testing.T) {
 	created := ResponseEnvelope{
 		ID:        "resp_1",

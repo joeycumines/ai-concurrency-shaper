@@ -53,7 +53,7 @@ func TestPTY_LogsTabShowsCapturedLogs(t *testing.T) {
 // TestPTY_NoStderrLogLeak verifies the startup/config logs never reach the
 // terminal once the TUI is enabled — they are consumed by the Logs buffer and
 // not printed to stderr (which would corrupt the dashboard). It also pins the
-// shutdown half of the lifecycle (review-10 #4 / review-11 #2): once the TUI
+// shutdown half of the lifecycle: once the TUI
 // exits, the captured buffer is redirected to stderr, so graceful-shutdown
 // logging streams live instead of evaporating inside the unpolled buffer —
 // while the ring's retained contents are never dumped wholesale at teardown.
@@ -88,7 +88,7 @@ func TestPTY_NoStderrLogLeak(t *testing.T) {
 // route parsing is captured into the Logs tab AND surfaced as a toast. Two -limit
 // flags sharing a @group at different limits trigger exactly that log.Printf in
 // main; the wiring must keep it at stdlib identity (not bridged to slog INFO),
-// which the toast assertion pins end to end — see review-07 #1.
+// which the toast assertion pins end to end.
 func TestPTY_GroupConflictWarningCaptured(t *testing.T) {
 	h := Launch(t,
 		WithArgs("-limit", "POST /a:2@g", "-limit", "POST /b:3@g"),
@@ -137,7 +137,7 @@ func TestPTY_GroupConflictWarningCaptured(t *testing.T) {
 // toast banner on the dashboard. Retries are disabled so the closed upstream
 // surfaces as a single transport error: with the default unlimited retries the
 // breaker opens mid-retry and the exchange ends as a circuit rejection (503,
-// no transport-error log line) — the correct M7 classification, but not the
+// no transport-error log line) — the correct classification, but not the
 // scenario this toast test pins.
 func TestPTY_TransportErrorToast(t *testing.T) {
 	h := Launch(t, WithArgs("-retry", "0"))

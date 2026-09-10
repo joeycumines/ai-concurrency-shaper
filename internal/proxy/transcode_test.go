@@ -56,7 +56,7 @@ func testResponsesMapping(t *testing.T) transcode.Mapping {
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		// The pinned Responses usage requires the breakdown detail objects
-		// the Chat source may not provide (review-k finding 6): the test
+		// the Chat source may not provide: the test
 		// fixtures' usage lacks them, so the shared mapping permits the
 		// usage-timing loss.
 		LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
@@ -85,7 +85,7 @@ func testMessagesResponsesMapping(t *testing.T) transcode.Mapping {
 		Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
 	}
 	// Messages tools carry no strictness; a messages->responses mapping
-	// under the strict policy is a startup rejection (review-z commit 6).
+	// under the strict policy is a startup rejection.
 	// These tests exercise error/stream behavior, not the strictness loss.
 	mapping.LossPolicy = transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
 		transcode.FeatureToolSchemaStrictness: {},
@@ -396,8 +396,7 @@ func TestProxyTranscodeStringInput(t *testing.T) {
 	}
 }
 
-// TestValidQueryName covers the allowed-client-query name rule (review-08
-// additional 6): query syntax characters ('=', '&', '#', '?'), control
+// TestValidQueryName covers the allowed-client-query name rule: query syntax characters ('=', '&', '#', '?'), control
 // characters, and empty names are rejected; pchar characters that field-name
 // syntax would reject (e.g. '@') are accepted.
 func TestValidQueryName(t *testing.T) {
@@ -490,7 +489,7 @@ func TestProxyTranscodeMessagesToResponsesStreaming(t *testing.T) {
 // the limiter slot and release it when the stream terminates. The test
 // serves two concurrent requests under a limit of one; the second must wait
 // for the first to finish. A request ordinal guards the first-started signal
-// so the server never double-closes the channel (review finding 20a).
+// so the server never double-closes the channel.
 func TestProxyTranscodeLimitedRoute(t *testing.T) {
 	var (
 		mu             sync.Mutex
@@ -618,7 +617,7 @@ func newProxyWithLimiter(t *testing.T, upstreamURL string, limiter *queue.Limite
 
 // TestProxyTranscodeBreakerClientCancelNoPhantomSuccess verifies that a
 // client that cancels a 2xx transcode stream mid-body cannot reset a
-// pre-seeded failure streak or bump TotalSuccesses (review findings 14/20).
+// pre-seeded failure streak or bump TotalSuccesses.
 func TestProxyTranscodeBreakerClientCancelNoPhantomSuccess(t *testing.T) {
 	upstreamStarted := make(chan struct{})
 	terminalWritten := make(chan struct{})
@@ -732,8 +731,7 @@ func TestProxyTranscodeBreakerClientCancelNoPhantomSuccess(t *testing.T) {
 // TestProxyTranscodeLocalConversion502NotFailure verifies that a local
 // conversion 502 is recorded as neither success nor failure on the breaker.
 // The fixture is a VALID Chat response whose finish_reason is outside the
-// supported subset — a known-but-unsupported feature stays local (review-k
-// finding 3).
+// supported subset — a known-but-unsupported feature stays local.
 func TestProxyTranscodeLocalConversion502NotFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1155,7 +1153,7 @@ func (noopSigner) Sign(_ context.Context, _ *http.Request) error { return nil }
 // TestProxyExternalSignerRequiresReplayableBodies proves the startup
 // rejection for signer configurations that cannot supply replayable request
 // bodies: an external signer with retries enabled but a zero retry body cap
-// fails construction (review-z commit 6).
+// fails construction.
 func TestProxyExternalSignerRequiresReplayableBodies(t *testing.T) {
 	mapping := testResponsesMapping(t)
 	mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthExternalSigner, Signer: noopSigner{}}
@@ -1182,7 +1180,7 @@ func TestProxyExternalSignerRequiresReplayableBodies(t *testing.T) {
 }
 
 // TestProxyTranscodeQueueCommentsLocalErrorFailsClosedDialect pins the
-// committed-stream error contract (review ses_f82433a3affeYcnpN3ETKBmQxz):
+// committed-stream error contract:
 // with -queue-comments active and a streaming Accept, a pre-upstream
 // transcode local error (malformed request body) must failed-close the
 // committed stream with a client-dialect SSE error event — never a raw JSON

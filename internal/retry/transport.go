@@ -37,8 +37,7 @@ type CheckRetry func(resp *http.Response, err error) bool
 
 // nonRetryableError is implemented by errors that must never be retried and
 // never count as upstream failures: local construction/auth defects that
-// will fail identically on every attempt (e.g. request signing failures,
-// review-z commit 4).
+// will fail identically on every attempt (e.g. request signing failures).
 type nonRetryableError interface {
 	IsNonRetryable() bool
 }
@@ -202,7 +201,7 @@ func isRequestContextCancellation(req *http.Request) bool {
 
 func suppressBreakerFailureForError(req *http.Request, err error) bool {
 	// A local non-retryable defect (e.g. a signing failure) is never an
-	// upstream failure and never opens the breaker (review-z commit 4).
+	// upstream failure and never opens the breaker.
 	if IsNonRetryable(err) {
 		return true
 	}
@@ -213,8 +212,7 @@ func suppressBreakerFailureForError(req *http.Request, err error) bool {
 // cancellation that must terminate this RoundTrip without retrying. Only a
 // REAL context cancellation qualifies: a non-retryable local defect (e.g. a
 // signing failure) is terminal for DIFFERENT reasons and must return its own
-// typed error to the caller, never a fabricated context.Canceled (review-z
-// commit 4).
+// typed error to the caller, never a fabricated context.Canceled.
 func isTerminalCancellation(req *http.Request, err error) bool {
 	return isRequestContextCancellation(req) && isContextCancellation(err)
 }
@@ -231,7 +229,7 @@ type Transport struct {
 	// MinRetryDelay is a floor for the retry wait duration. When > 0, the
 	// wait before each retry attempt is max(calcWait, MinRetryDelay). This
 	// gives the downstream service time to complete its accounting before
-	// the retry arrives (KILL-05 mitigation). MinRetryDelay applies after
+	// the retry arrives. MinRetryDelay applies after
 	// the Retry-After header is considered: the final wait is
 	// max(calcWait, Retry-After, MinRetryDelay). This means MinRetryDelay
 	// can override a shorter Retry-After value — this is intentional, as
@@ -247,7 +245,7 @@ type Transport struct {
 	// mode. When non-nil, it is incremented exactly once when the RoundTrip
 	// enters retry mode (attempt == 1) and decremented exactly once via defer
 	// when RoundTrip returns. This provides visibility into retry pressure for
-	// the TUI and enables future admission control (KILL-01/03 mitigation).
+	// the TUI and enables future admission control.
 	InFlightRetries *atomic.Int64
 
 	// Breaker is an optional circuit breaker. When set, failed attempts are
@@ -300,7 +298,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Extract the breaker epoch from the request context, if set by the
 	// proxy's pre-check Allow() call. This ensures the first attempt's
 	// RecordFailure/RecordSuccess uses the correct epoch instead of 0,
-	// preventing stale-probe bypass (review-06 Finding 1).
+	// preventing stale-probe bypass.
 	var breakerEpoch uint64
 	if v, ok := req.Context().Value(BreakerEpochKey).(uint64); ok {
 		breakerEpoch = v
@@ -397,7 +395,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var lastReceivedAt time.Time // when the previous attempt's response headers arrived
 	var attemptStart time.Time
 
-	// Track in-flight retry state for TUI visibility (KILL-01/03).
+	// Track in-flight retry state for TUI visibility.
 	// The counter is incremented exactly once when the RoundTrip enters
 	// retry mode (attempt == 1) and decremented exactly once when the
 	// function exits via defer. This prevents the counter leak where
@@ -470,7 +468,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 				}
 			}
 			// Enforce minimum retry delay floor for downstream accounting
-			// (KILL-05 mitigation). This gives the downstream time to
+			// . This gives the downstream time to
 			// complete its cleanup before the retry arrives. Retry-After
 			// values already override this when larger.
 			if t.MinRetryDelay > 0 && wait < t.MinRetryDelay {

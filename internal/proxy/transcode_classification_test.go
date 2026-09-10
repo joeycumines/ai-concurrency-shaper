@@ -1,7 +1,6 @@
 package proxy
 
-// J2 regression tests for the unified exchange classification (review-j
-// findings 1 and 2): one immutable exchange result drives slot holds, breaker
+// Regression tests for the unified exchange classification: one immutable exchange result drives slot holds, breaker
 // resolution, completion counters, and journal finalization for both
 // admission paths.
 
@@ -71,10 +70,9 @@ func j2LimitedProxy(t *testing.T, upstream *httptest.Server, breaker *circuitbre
 // TestProxyTranscodeLocalConversion502NoPhantomHold proves that a local
 // response conversion failure (downstream 502, UpstreamFailure=false) does
 // NOT hold the limiter slot, even though PenaltyDuration is nonzero at zero
-// consecutive failures (review-j finding 1, false-penalty direction). The
+// consecutive failures (the false-penalty direction). The
 // fixture is a VALID Chat response whose finish_reason is outside the
-// supported subset — a known-but-unsupported feature stays local (review-k
-// finding 3).
+// supported subset — a known-but-unsupported feature stays local.
 func TestProxyTranscodeLocalConversion502NoPhantomHold(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -122,10 +120,10 @@ func TestProxyTranscodeLocalConversion502NoPhantomHold(t *testing.T) {
 }
 
 // TestProxyTranscodeCorruptUpstreamJSONAppliesPhantomHold proves the
-// review-k finding-3 counterexample: a 200 response that is not a valid
+// counterexample: a 200 response that is not a valid
 // instance of the supported Chat subset (an object that is not a chat
 // completion at all) is corrupt upstream wire — an upstream failure — and
-// DOES hold the limiter slot (review-k finding 3).
+// DOES hold the limiter slot.
 func TestProxyTranscodeCorruptUpstreamJSONAppliesPhantomHold(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -172,7 +170,7 @@ func TestProxyTranscodeCorruptUpstreamJSONAppliesPhantomHold(t *testing.T) {
 	}
 }
 
-// TestProxyTranscodePoisonUsage200IsNeverRetried pins the autopsy-04 retry
+// TestProxyTranscodePoisonUsage200IsNeverRetried pins the retry
 // disposition: the proxy retry transport classifies only RoundTrip errors
 // and HTTP status, so a 200 body that fails transcode decode (a
 // deterministic schema violation) is never re-sent — the upstream is hit
@@ -236,7 +234,7 @@ func TestProxyTranscodePoisonUsage200IsNeverRetried(t *testing.T) {
 
 // TestProxyTranscodeTruncatedStreamAppliesPhantomHold proves that a 200
 // stream truncated by the upstream — an explicit upstream failure — DOES hold
-// the limiter slot (review-j finding 1, missed-penalty direction).
+// the limiter slot (the missed-penalty direction).
 func TestProxyTranscodeTruncatedStreamAppliesPhantomHold(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -287,7 +285,7 @@ func TestProxyTranscodeTruncatedStreamAppliesPhantomHold(t *testing.T) {
 // TestProxyTranscodeRateLimit403HoldAndBreakerFailure proves that an upstream
 // 403 carrying only x-ratelimit-* signals is classified as an upstream
 // failure and holds the slot, even though the rendered client error carries
-// none of the signals (review-j finding 1, missed rate-ban direction).
+// none of the signals (the missed rate-ban direction).
 func TestProxyTranscodeRateLimit403HoldAndBreakerFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -363,8 +361,7 @@ func (w *failWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
 // genuine upstream error frame (a streamed response.failed) whose downstream
 // write fails is still an upstream failure (breaker failure recorded) AND is
 // not counted as a clean completion: the exchange is aborted because the
-// translated error was never delivered (review-j finding 2, write-failure
-// accounting).
+// translated error was never delivered (write-failure accounting).
 func TestProxyTranscodeUpstreamErrorFrameWriteFailureNotClean(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -546,7 +543,7 @@ func TestClassifyTranscodeExchangeClientAborted2xxIsNotSuccess(t *testing.T) {
 // frame terminates the exchange with a client-dialect error event classified
 // as an upstream body/protocol failure: breaker failure recorded, phantom
 // hold applied, and the terminal frame can never turn the stream into a
-// shortened success (review-j finding 3).
+// shortened success.
 func TestProxyTranscodeOversizedSSEFatalNotShortenedSuccess(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -634,7 +631,7 @@ func TestProxyTranscodeOversizedSSEFatalNotShortenedSuccess(t *testing.T) {
 // TestProxyTranscodeAbortNotCleanCompletion proves that a client-aborted
 // transcode exchange is never counted as a clean completion: IncProxied does
 // not fire, the journal marks the entry aborted without ResponseComplete, and
-// the aborted-request metric is recorded (review-j finding 2).
+// the aborted-request metric is recorded.
 func TestProxyTranscodeAbortNotCleanCompletion(t *testing.T) {
 	upstreamStarted := make(chan struct{})
 
@@ -739,7 +736,7 @@ func TestProxyTranscodeAbortNotCleanCompletion(t *testing.T) {
 // independent write-failure observation is preserved by the monotonic
 // aborted assignment, so IncProxied does not fire, the journal marks the
 // entry aborted without ResponseComplete, and the breaker records neither
-// success nor failure (review-k finding 7).
+// success nor failure.
 func TestProxyTranscodeShortWriteNotCleanCompletion(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -834,7 +831,7 @@ func (w *shortWriteResponseWriter) Write(b []byte) (int, error) {
 // TestProxyTranscodeInBandChatErrorFrameIsUpstreamFailure proves an in-band
 // Chat error frame is classified as an upstream failure: breaker failure
 // recorded, phantom hold applied, client-dialect error event emitted — never
-// a local conversion failure (review-j finding 11).
+// a local conversion failure.
 func TestProxyTranscodeInBandChatErrorFrameIsUpstreamFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -886,7 +883,7 @@ func TestProxyTranscodeInBandChatErrorFrameIsUpstreamFailure(t *testing.T) {
 // TestProxyTranscodeNonStreamFailedEnvelopeIsUpstreamFailure proves a 200
 // non-stream Responses envelope with status "failed" classifies as an
 // upstream failure — identical to the streamed response.failed case — with
-// the upstream's HTTP status driving the breaker (review-j finding 11).
+// the upstream's HTTP status driving the breaker.
 func TestProxyTranscodeNonStreamFailedEnvelopeIsUpstreamFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -979,7 +976,7 @@ func TestProxyTranscodeNonStreamFailedEnvelopeIsUpstreamFailure(t *testing.T) {
 }
 
 // TestProxyNewRetryReplayBytesContract proves the retry-replay contract
-// (review-k finding 8): a declared RetryReplayBytes must equal the proxy
+// a declared RetryReplayBytes must equal the proxy
 // retry body cap with retries enabled, or proxy.New fails naming the route
 // and both values; equal values construct.
 func TestProxyNewRetryReplayBytesContract(t *testing.T) {
@@ -1048,7 +1045,7 @@ func TestProxyNewRetryReplayBytesContract(t *testing.T) {
 }
 
 // TestProxyNewRejectsMisconfiguredTranscodeRoutes proves a misconfigured
-// route fails at proxy.New, never on the first request (review-j finding 14).
+// route fails at proxy.New, never on the first request.
 func TestProxyNewRejectsMisconfiguredTranscodeRoutes(t *testing.T) {
 	pattern, err := route.Parse("POST /v1/responses")
 	if err != nil {
@@ -1110,8 +1107,8 @@ func TestProxyNewRejectsMisconfiguredTranscodeRoutes(t *testing.T) {
 // TestProxyTranscodeMidStreamBodyErrorIsUpstreamFailure proves a raw
 // non-EOF upstream body failure mid-stream (a connection reset) classifies
 // as an upstream failure: breaker failure recorded, phantom hold applied,
-// client error event emitted — matching the non-streaming path (review-j
-// finding 1: a stream that truncates OR FAILS while its body is read).
+// client error event emitted — matching the non-streaming path (a stream
+// that truncates OR FAILS while its body is read).
 func TestProxyTranscodeMidStreamBodyErrorIsUpstreamFailure(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1176,7 +1173,7 @@ func TestProxyTranscodeMidStreamBodyErrorIsUpstreamFailure(t *testing.T) {
 // response carrying the wrong representation for the negotiated stream mode
 // is an UPSTREAM failure that holds the limiter slot: the old local
 // classification cancelled a half-open probe and applied no hold, letting a
-// broken provider pass for healthy (review-08 blocker 8).
+// broken provider pass for healthy.
 func TestProxyTranscodeWrongMediaTypeAppliesPhantomHold(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1223,8 +1220,7 @@ func TestProxyTranscodeWrongMediaTypeAppliesPhantomHold(t *testing.T) {
 
 // TestProxyPassthroughRouteKeepsHeaders proves the transcode header
 // allowlists are confined to transcoded routes: a route that does not match
-// a transcode mapping forwards client and upstream headers untouched
-// (review-08 blocker 10).
+// a transcode mapping forwards client and upstream headers untouched.
 func TestProxyPassthroughRouteKeepsHeaders(t *testing.T) {
 	var gotRequestHeader string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1282,7 +1278,7 @@ func (panickingBody) Close() error             { return nil }
 // TestPanicAfterCommittedResponseIsAborted proves a panic after the response
 // was committed is an ABORTED exchange, never a clean completion: the
 // completion counters are skipped and the journal records Aborted with
-// ResponseComplete unset (review-08 blocker 12).
+// ResponseComplete unset.
 func TestPanicAfterCommittedResponseIsAborted(t *testing.T) {
 	upstreamURL, _ := url.Parse("https://upstream.example")
 	pat, _ := route.Parse("POST /v1/messages")
@@ -1340,7 +1336,7 @@ func TestPanicAfterCommittedResponseIsAborted(t *testing.T) {
 // TestTranscodeConfigurationIsDeepCopied proves the proxy deep-copies the
 // mutable parts of a transcoded route's configuration (model map, loss
 // policy, allowed client query, upstream URL): caller mutation after New
-// cannot change live behavior (review-08 additional 2).
+// cannot change live behavior.
 func TestTranscodeConfigurationIsDeepCopied(t *testing.T) {
 	const chatFixture = `{"id":"chatcmpl-1","object":"chat.completion","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`
 
@@ -1470,7 +1466,7 @@ func TestTranscodeConfigurationIsDeepCopied(t *testing.T) {
 // TestTranscodeRetryAfterNoRecorderFallback proves the transcoded exchange
 // classification derives Retry-After ONLY from the outcome: a recorder whose
 // rendered header carries a fresh Retry-After must not influence the result
-// (review-z commit 4 — the fallback was removed).
+// (the fallback was removed).
 func TestTranscodeRetryAfterNoRecorderFallback(t *testing.T) {
 	makeRec := func(outcome transcode.Outcome) *statusRecorder {
 		rec := &statusRecorder{
@@ -1512,7 +1508,7 @@ func TestTranscodeRetryAfterNoRecorderFallback(t *testing.T) {
 // TestProxyExternalSignerFailureIsLocal proves a failing external signer
 // classifies the exchange as a LOCAL failure (neutral): the breaker never
 // records an upstream failure for a signer defect, and the client receives a
-// dialect-correct error (review-z commit 4).
+// dialect-correct error.
 func TestProxyExternalSignerFailureIsLocal(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("upstream must never be reached when signing fails")
@@ -1565,8 +1561,7 @@ func newTranscodeProxyUpstreamBreaker(
 
 // TestProxyExternalSignerSeesSanitizedRequest proves the external signer,
 // invoked per attempt inside the retry chain, observes the sanitized
-// converted request with a finalized Content-Length (review-j finding 12;
-// review-z commit 4).
+// converted request with a finalized Content-Length.
 func TestProxyExternalSignerSeesSanitizedRequest(t *testing.T) {
 	var mu sync.Mutex
 	var signed []*http.Request
@@ -1631,7 +1626,7 @@ func (f signerFunc) Sign(ctx context.Context, req *http.Request) error {
 // TestProxyExternalSignerFailureWithRetriesIsLocal proves the CLI-default
 // configuration (retries + breaker enabled) treats a failing signer as a
 // local non-retryable defect: ZERO breaker failures, ZERO retries, and the
-// upstream is never contacted (review-z commit 4).
+// upstream is never contacted.
 func TestProxyExternalSignerFailureWithRetriesIsLocal(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("upstream must never be reached when signing fails")
@@ -1655,7 +1650,7 @@ func TestProxyExternalSignerFailureWithRetriesIsLocal(t *testing.T) {
 		WithBreaker(breaker),
 		WithMaxRetries(3),
 		// The CLI-default retry body cap: a positive cap is what makes the
-		// signer's per-attempt body replay possible (review-z commit 6).
+		// signer's per-attempt body replay possible.
 		WithMaxBodyBytes(5<<20),
 		WithTranscodeMapping(transcodeMapping(mapping)),
 	)
@@ -1680,7 +1675,7 @@ func TestProxyExternalSignerFailureWithRetriesIsLocal(t *testing.T) {
 // the attempt marker fires when the signing+dispatch chain STARTS, which
 // precedes the signer — a local request conversion or signing error never
 // dispatches, so the outcome fact must override the marker; everything else
-// keeps the marker (review-z commit 4).
+// keeps the marker.
 func TestClassifyTranscodeExchangeAttemptFact(t *testing.T) {
 	makeRec := func(outcome transcode.Outcome) *statusRecorder {
 		outcomeCopy := outcome

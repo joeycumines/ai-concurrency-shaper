@@ -180,7 +180,7 @@ type DecodeResult struct {
 	// StreamSet is true when the request body explicitly carried a stream
 	// field (true or false). The handler applies the documented stream-intent
 	// precedence: a present body field is authoritative over the client
-	// Accept header (review-08 blocker 1).
+	// Accept header.
 	StreamSet bool
 }
 
@@ -199,7 +199,7 @@ type ExchangeContext struct {
 	// Capabilities is the mapping's independent-verification gate for
 	// fidelity-only rendering decisions, e.g. realizing an Anthropic thinking
 	// budget as Responses reasoning.effort. Copied from the mapping, like
-	// LossPolicy (high finding request_reasoning-default-native-path, task 21).
+	// LossPolicy (request_reasoning-default-native-path).
 	Capabilities ChatCapabilities
 
 	// Request-derived state required to reconstruct the client response
@@ -211,7 +211,7 @@ type ExchangeContext struct {
 	// StreamIntent records the resolved stream mode of the exchange: the
 	// request body's stream field when explicitly present, otherwise the
 	// client Accept header's most-preferred acceptable representation
-	// (review-08 blocker 1). A stream/JSON mismatch on the upstream response
+	//. A stream/JSON mismatch on the upstream response
 	// is an error rather than a silent mode change.
 	StreamIntent bool
 }
@@ -264,7 +264,7 @@ func RequirePortableArtifacts(
 	// enabled budget to a reasoning effort when the exchange grants the
 	// capability and record the request_reasoning loss elsewhere, so a budget
 	// is never silently dropped nor double-reported (high finding
-	// request_reasoning-default-native-path, task 21).
+	// request_reasoning-default-native-path).
 	return nil
 }
 
@@ -272,7 +272,7 @@ func RequirePortableArtifacts(
 // every turn role is one of the canonical values, every turn has content,
 // every part is non-nil, tool calls carry non-empty identity (item/call id
 // and name) with object-shaped arguments, and tool results carry a non-empty
-// call id (review-08 additional 10).
+// call id.
 func ValidateCanonicalRequest(request CanonicalRequest) error {
 	for turnIndex, turn := range request.Turns {
 		switch turn.Role {
@@ -291,7 +291,7 @@ func ValidateCanonicalRequest(request CanonicalRequest) error {
 					partIndex,
 				)
 			}
-			// Central role semantics (review-z commit 2): function calls only
+			// Central role semantics: function calls only
 			// in assistant turns, function results only in user turns, and
 			// refusal only on assistant messages — enforced once here, not
 			// per-renderer.
@@ -353,9 +353,9 @@ type Optional[T any] struct {
 // CanonicalUsage is the token usage of a canonical response. Breakdown
 // fields are zero when the source did not provide them; the Known flags
 // distinguish a real zero from an unknown value, so a renderer never
-// fabricates zeros as fact (review-j finding 9). TotalTokens carries the
+// fabricates zeros as fact. TotalTokens carries the
 // source's own total when provided (TotalKnown); renderers derive the total
-// from the parts only when the source total is unknown (review-k finding 6).
+// from the parts only when the source total is unknown.
 type CanonicalUsage struct {
 	InputTokens      int64
 	CacheReadTokens  int64
@@ -399,7 +399,7 @@ type CanonicalStop struct {
 // Model output is not guaranteed to be valid JSON; Raw carries the original
 // text byte-exact, Object carries a cloned parse when the raw text is a JSON
 // object (IsObject true), and invalid model output is NOT an upstream defect
-// (review-z commit 2). Targets whose wire requires a string preserve Raw;
+// Targets whose wire requires a string preserve Raw;
 // targets whose wire requires an object (Anthropic tool_use.input) require
 // IsObject and otherwise report a local unrepresentable-output error.
 type ToolArguments struct {
@@ -414,8 +414,7 @@ type ToolArguments struct {
 // An empty arguments string (commonly emitted by upstream models for no-argument
 // tool calls) is treated as an empty object "{}".
 // The raw remarshal cannot fail (the object decode validated every value),
-// so a failure falls back to the raw text — never a panic (autopsy
-// 2026-09-06 M5).
+// so a failure falls back to the raw text — never a panic.
 func ParseToolArguments(raw string) ToolArguments {
 	out := ToolArguments{Raw: raw}
 	if strings.TrimSpace(raw) == "" {
@@ -504,14 +503,14 @@ type ResponseSourceArtifacts struct {
 	// (background, max_tool_calls, prompt, prompt_cache_key,
 	// safety_identifier) present in the decoded envelope. The client
 	// dialects cannot reproduce them, so their presence enters the explicit
-	// loss/reject decision at render time (review-j finding 13).
+	// loss/reject decision at render time.
 	ResponsesControls []string
 
 	// ResponsesServiceTier is the upstream Responses response's service tier
 	// (empty when absent). The client dialects cannot represent the tier
 	// actually served; a non-empty value enters the explicit loss/reject
 	// decision at render time — the same decision the chat source's tier
-	// enters (autopsy 2026-09-06 M4: the Responses→Messages drop was
+	// enters (the Responses→Messages drop was
 	// silent).
 	ResponsesServiceTier string
 }
@@ -694,17 +693,17 @@ func validateResponsePart(part CanonicalPart) error {
 // validateCanonicalPart checks the per-part invariants shared by request and
 // response IR: tool calls carry a non-empty call id and name with an
 // object-shaped arguments payload, and tool results carry a non-empty call id
-// (review-08 additional 10). ItemID is Responses-specific and may be empty
+// ItemID is Responses-specific and may be empty
 // for Chat/Messages-originated calls.
 func validateCanonicalPart(part CanonicalPart) error {
 	switch p := part.(type) {
 	case CanonicalImage:
-		// Exactly one image source (review-z commit 2).
+		// Exactly one image source.
 		if (p.URL == "") == (p.Base64 == "") {
 			return errors.New("image part requires exactly one of url or base64")
 		}
 	case CanonicalDocument:
-		// Exactly one document source (review-z commit 2).
+		// Exactly one document source.
 		selected := 0
 		if p.URL != "" {
 			selected++

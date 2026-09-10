@@ -286,7 +286,7 @@ func canonicalTextTurnToChatMessage(
 
 // joinChatSystemMessages consolidates rendered system-channel messages into
 // one leading system message, joining their text with "\n\n" in encounter
-// order (autopsy 02). Every input message is text-only (canonicalTextTurnTo
+// order. Every input message is text-only (canonicalTextTurnTo
 // ChatMessage rejects anything else), so the join cannot lose content.
 func joinChatSystemMessages(leading, midDialog []ChatMessage) ChatMessage {
 	texts := make([]string, 0, len(leading)+len(midDialog))
@@ -339,7 +339,7 @@ func canonicalUserTurnToChatMessages(
 				contentParts = nil
 			}
 			// Tool messages use the dedicated tool-result renderer — never
-			// the user-message renderer (review-z commit 2).
+			// the user-message renderer.
 			toolMessage, err := renderChatToolResult(value, policy, report)
 			if err != nil {
 				return nil, err
@@ -421,7 +421,7 @@ func canonicalContentPartsToChatUserMessage(
 		case CanonicalDocument:
 			// Document input cannot be rendered by the chat provider; it is
 			// an approved loss (the part is dropped) or a rejection, mirroring
-			// the image-input decision (review-z commit 2).
+			// the image-input decision.
 			if err := report.Lose(
 				policy,
 				FeatureDocumentInput,
@@ -482,9 +482,9 @@ func canonicalAssistantTurnToChatMessage(
 				arguments = "{}"
 			}
 			// The official non-stream assistant tool-call shape carries id,
-			// function, and type with NO index (review-j finding 5). The
+			// function, and type with NO index. The
 			// type field is required on the wire and always emitted as
-			// "function" (review-z commit 1) — never omitted.
+			// "function" — never omitted.
 			toolCalls = append(toolCalls, ChatMessageToolCall{
 				Type: "function",
 				ID:   &callID,
@@ -547,7 +547,7 @@ type toolResultEnvelope struct {
 
 // renderChatToolResult renders a function result into a complete Chat
 // tool-role message — the dedicated tool-result renderer, never the
-// user-message renderer (review-z commit 2). Exact text results stay exact
+// user-message renderer. Exact text results stay exact
 // text. Image, document, or mixed results are rejected under strict policy
 // (UnrepresentableError — local, never corrupt wire) and, under the
 // tool_result_multimodal_content and tool_result_json_envelope permissions,
@@ -563,7 +563,7 @@ func renderChatToolResult(
 	if result.IsError {
 		// The error status cannot be carried by a Chat tool message; the
 		// permissive encoding is the visible error_status_prefix text
-		// (review-j finding 10).
+		//.
 		if err := report.Lose(
 			policy,
 			FeatureToolResultErrorStatus,
@@ -584,7 +584,7 @@ func renderChatToolResult(
 	// sanctioned Note — the join preserves every content byte (the part
 	// boundaries are structural metadata the chat dialect cannot carry),
 	// so it is an observable sanctioned encoding, never a policy-gated
-	// loss and never silent (autopsy 2026-09-06 H2; REM-B acceptance: a
+	// loss and never silent (acceptance: a
 	// Note, NOT a policy-gated loss — default-rejecting the join made
 	// multi-part tool results a live availability failure with Claude
 	// Code). The count is over the client-supplied parts only — the
@@ -732,15 +732,14 @@ func nonEmpty(s *string) bool {
 // ProviderReasoningText capability is not enabled. One constant, shared
 // verbatim by the non-stream and stream chat surfaces, so a capability-off
 // exchange produces observably identical loss text through both conversion
-// paths (task 22 de-asymmetry).
+// paths (de-asymmetry).
 const chatProviderReasoningDroppedDetail = "provider reasoning is dropped because the provider_reasoning_text capability is not enabled"
 
 // chatProviderReasoningMappedDetail is the single note detail reported when
 // provider plaintext reasoning maps to ordinary text under the enabled
 // ProviderReasoningText capability. One constant, shared verbatim by the
 // non-stream and stream chat surfaces, so a capability-on exchange produces
-// observably identical note text through both conversion paths (task 22
-// de-asymmetry).
+// observably identical note text through both conversion paths (de-asymmetry).
 const chatProviderReasoningMappedDetail = "provider reasoning maps to ordinary text (provider_reasoning_text encoding)"
 
 // chatProviderReasoningBothDetail is the single loss detail reported when a
@@ -748,7 +747,7 @@ const chatProviderReasoningMappedDetail = "provider reasoning maps to ordinary t
 // message with both, or one stream delta carrying both) — the contradiction
 // that is never an ordered merge. One constant, shared verbatim by the
 // non-stream and stream chat surfaces, so the both-spellings disposition has
-// exactly one spelling across both conversion paths (task 22 de-asymmetry).
+// exactly one spelling across both conversion paths (de-asymmetry).
 const chatProviderReasoningBothDetail = "chat response carries both reasoning and reasoning_content"
 
 // resolveChatReasoningSpelling resolves the two provider spelling of chat
@@ -756,7 +755,7 @@ const chatProviderReasoningBothDetail = "chat response carries both reasoning an
 // and `reasoning` (OpenRouter style) — into a single text and its wire path.
 // They are one logical field shared by the non-stream and stream chat
 // surfaces, so the resolution invariant has exactly one implementation
-// (review-reuse finding 5). A present-but-empty value counts as absent; two
+// A present-but-empty value counts as absent; two
 // non-empty spellings at once are contradictory upstream wire and reported by
 // returning empty text with both set. The caller supplies the per-surface
 // report paths and owns the surface-specific rejection/encoding decision.

@@ -1,6 +1,6 @@
 package transcode
 
-// J3 regression tests (review-k finding 3, high): corrupt upstream wire and
+// J3 regression tests: corrupt upstream wire and
 // protocol data must classify as an upstream failure — never a local
 // conversion failure — via the typed UpstreamWireError, while valid source
 // features the transcoder knows but does not support (UnsupportedFeatureError)
@@ -54,7 +54,7 @@ func TestUpstreamWireDecodeMatrix(t *testing.T) {
 			wantWire: true,
 		},
 		// Invalid model-generated tool arguments are PRESERVED byte-exact,
-		// never corrupt wire (review-z commit 2); the preservation is
+		// never corrupt wire; the preservation is
 		// asserted in TestToolArgumentsFidelityAcrossTargets.
 		{
 			name:       "chat invalid tool arguments preserved",
@@ -107,7 +107,7 @@ func TestUpstreamWireDecodeMatrix(t *testing.T) {
 		}
 	}
 	// Invalid model-generated Responses tool arguments are preserved
-	// byte-exact (review-z commit 2): the decode succeeds and carries the
+	// byte-exact: the decode succeeds and carries the
 	// raw string.
 	response, err := DecodeResponsesResponse([]byte(
 		`{"id":"r","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"fc_1","type":"function_call","status":"completed","call_id":"call_1","name":"f","arguments":"{\"a\":"}]}`,
@@ -249,7 +249,7 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 		{
 			// Invalid model-generated tool arguments are preserved
 			// byte-exact in the emitted function_call arguments, never
-			// corrupt wire (review-z commit 2).
+			// corrupt wire.
 			name:      "chat invalid final tool arguments preserved",
 			direction: "chat",
 			frames: []string{

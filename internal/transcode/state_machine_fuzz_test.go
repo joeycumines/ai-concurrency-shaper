@@ -251,7 +251,7 @@ func contentKey(itemID string, contentIndex int64) string {
 
 // FuzzResponsesToAnthropicStateMachine drives the Responses-to-Anthropic
 // stream state machine with arbitrary typed events (decoded from fuzz JSON)
-// and asserts the Anthropic trace invariants from review-i section 11.3.
+// and asserts the Anthropic trace invariants.
 func FuzzResponsesToAnthropicStateMachine(f *testing.F) {
 	seeds := [][]byte{
 		[]byte(`{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1,"status":"in_progress","model":"m","output":[],"parallel_tool_calls":true,"tools":[],"tool_choice":"auto"}}`),

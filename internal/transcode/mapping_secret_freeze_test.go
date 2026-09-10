@@ -1,6 +1,6 @@
 package transcode
 
-// Autopsy 2026-09-06 M9: a programmatic mapping with a live SecretSource
+// A programmatic mapping with a live SecretSource
 // resolved the credential per request, so caller mutation (or a mutable
 // source) changed live behavior. The secret is resolved once at
 // NewTranscodeHandler into a static source.
@@ -81,6 +81,6 @@ func TestMappingSecretResolvedOnceAtConstruction(t *testing.T) {
 	}
 	second := serve()
 	if second != "Bearer first-secret" {
-		t.Fatalf("second request credential = %q, want the SAME construction-time resolution (the source must be frozen, autopsy M9)", second)
+		t.Fatalf("second request credential = %q, want the SAME construction-time resolution (the source must be frozen)", second)
 	}
 }

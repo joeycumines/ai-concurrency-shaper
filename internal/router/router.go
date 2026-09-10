@@ -131,7 +131,7 @@ func New(providers []Provider) (*Handler, error) {
 // ensuring route key dispatch parity. No match yields 404.
 //
 // Inbound requests are shallow-cloned before mutating URL path fields, ensuring
-// the caller's request object and URL are never mutated (review-16 finding 1).
+// the caller's request object and URL are never mutated.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.bare != nil {
 		r2 := new(http.Request)

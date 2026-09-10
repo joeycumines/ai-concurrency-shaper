@@ -56,7 +56,7 @@ func RemoveHopByHopHeaders(h http.Header) {
 // ValidHTTPFieldName reports whether s is a valid HTTP field name using
 // token characters. Malformed Connection tokens are rejected rather than
 // passed to Header.Del as arbitrary input, and custom authentication header
-// names are validated with the same rule (review-j finding 14).
+// names are validated with the same rule.
 func ValidHTTPFieldName(s string) bool {
 	if s == "" {
 		return false
@@ -105,7 +105,6 @@ func RemoveTransformedRepresentationHeaders(h http.Header) {
 
 // errClientQueryParameter marks an unallowed client query parameter: a
 // client fault, classified by type rather than error-string matching
-// (review-j finding 14).
 var errClientQueryParameter = errors.New("client query parameter")
 
 // BuildMappedURL joins the configured upstream base path with the mapping's

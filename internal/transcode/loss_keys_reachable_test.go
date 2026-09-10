@@ -12,9 +12,9 @@ import (
 )
 
 // legacyLossNames are the REMOVED broad permission names: none may be
-// accepted anywhere (review-z commit 2; no deprecated aliases).
+// accepted anywhere.
 // legacyLossNames are the REMOVED broad permission names: none may be
-// accepted anywhere (review-z commit 2; no deprecated aliases). Names that
+// accepted anywhere. Names that
 // survived as granular keys in their own right (image_input, top_k, ...) are
 // not legacy and remain accepted.
 var legacyLossNames = []string{
@@ -173,7 +173,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 		},
 		{
 			// A system-channel turn following dialog turns cannot keep its
-			// position in a chat request (autopsy 02): the consolidation
+			// position in a chat request: the consolidation
 			// into one leading system message is the approved loss; strict
 			// policy rejects the position loss.
 			key:  FeatureMidConversationSystem,

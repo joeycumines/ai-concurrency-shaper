@@ -27,7 +27,7 @@ func TestDefaultPolicyApprovesToolResultErrorStatus(t *testing.T) {
 	}
 	policy := cfg.Providers[0].TranscodeMappings()[0].Mapping.LossPolicy
 	if !policy.Allows(transcode.FeatureToolResultErrorStatus) {
-		t.Fatal("the CLI default policy must approve tool_result_error_status (live Claude Code is_error results)")
+		t.Fatal("the CLI default policy must approve tool_result_error_status (Claude Code is_error tool results)")
 	}
 }
 

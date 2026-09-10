@@ -1,6 +1,6 @@
 package proxy
 
-// UNRESP-2: the unlimited admission class. Under -limit-all, a route
+// The unlimited admission class. Under -limit-all, a route
 // declared ":unlimited" never acquires a slot, so cheap auxiliary calls
 // (token counting) cannot queue behind long-running completions — the
 // operator-reported unresponsive-agent failure mode.
@@ -74,7 +74,10 @@ func TestProxy_UnlimitedClassPassesUnderLimitAll(t *testing.T) {
 		})
 	}
 	// Wait until both slots are held: a third limited request must time out.
-	time.Sleep(100 * time.Millisecond)
+	// A fixed sleep lets the third request win a slot under load and
+	// complete instead of queueing, false-failing the saturation
+	// precondition.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool { return s.Active == 2 })
 
 	blocked := make(chan int, 1)
 	go func() {
@@ -101,7 +104,7 @@ func TestProxy_UnlimitedClassPassesUnderLimitAll(t *testing.T) {
 		t.Fatalf("count_tokens status = %d, want 200 through the unlimited class", countRec.Code)
 	}
 	if elapsed > 250*time.Millisecond {
-		t.Fatalf("count_tokens took %v — it queued behind the saturated limited pool (UNRESP-2)", elapsed)
+		t.Fatalf("count_tokens took %v — it queued behind the saturated limited pool", elapsed)
 	}
 
 	close(release1)

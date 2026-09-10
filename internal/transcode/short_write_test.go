@@ -1,6 +1,6 @@
 package transcode
 
-// J7 regression tests (review-k finding 7, medium): a recorder-detected
+// J7 regression tests: a recorder-detected
 // short write can never be a clean completion.
 
 import (
@@ -40,7 +40,7 @@ func (w *shortWriteResponseWriter) Write(b []byte) (int, error) {
 
 // TestHandlerShortWriteNotCleanCompletion proves jsonResponse treats a short
 // write with a nil error as io.ErrShortWrite: the recorded outcome is a
-// downstream write error and never a clean completion (review-k finding 7).
+// downstream write error and never a clean completion.
 func TestHandlerShortWriteNotCleanCompletion(t *testing.T) {
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}

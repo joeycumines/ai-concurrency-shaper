@@ -2,9 +2,9 @@ package transcode
 
 // J4 regression tests: the Chat schema aligned with the pinned contract
 // (openai-go v1.12.0, internal/transcode/pins.md) — logprobs/service_tier
-// model every pinned field (review-j finding 4), and the tool-call wire types
+// model every pinned field, and the tool-call wire types
 // are split into the non-stream shape (no index) and the streaming delta
-// (index-carrying) (review-j finding 5).
+// (index-carrying).
 
 import (
 	"bytes"
@@ -23,7 +23,7 @@ func currentChatResponse() string {
 
 // TestChatResponseCurrentShapeStrictDecodes proves that a standard current
 // Chat response (logprobs:null, service_tier present, pinned usage details)
-// strict-decodes — no unknown-field failure (review-j finding 4).
+// strict-decodes — no unknown-field failure.
 func TestChatResponseCurrentShapeStrictDecodes(t *testing.T) {
 	response, _, err := DecodeChatResponseWithPolicy([]byte(currentChatResponse()), ChatCapabilities{}, StrictLossPolicy())
 	if err != nil {
@@ -50,7 +50,7 @@ func TestChatResponseCurrentShapeConverts(t *testing.T) {
 	// contract) and the Messages render additionally requires the
 	// cache-creation component — the source provided neither, so both
 	// renders enter the usage-timing loss decision: strict rejects, an
-	// approved usage_timing loss converts (review-k finding 6).
+	// approved usage_timing loss converts.
 	response, _, err := DecodeChatResponseWithPolicy([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`), ChatCapabilities{}, StrictLossPolicy())
 	if err != nil {
 		t.Fatal(err)
@@ -187,7 +187,7 @@ func TestChatStreamCurrentShape(t *testing.T) {
 
 // TestNonStreamToolCallNoIndexOnWire proves that an outbound non-stream
 // assistant message with a tool call renders id/function/type only — the
-// index field is never serialized (review-j finding 5).
+// index field is never serialized.
 func TestNonStreamToolCallNoIndexOnWire(t *testing.T) {
 	result, err := DecodeMessagesRequest(
 		testcorpus.AnthropicMessagesRequestJSON(),
@@ -270,7 +270,7 @@ func TestStreamToolCallDeltaKeepsIndex(t *testing.T) {
 }
 
 // TestChatResponseTopLevelReasoningTokens reproduces the field-observed 502
-// (autopsy 03): open-weights gateways (DeepSeek/vLLM/LiteLLM convention)
+// (open-weights gateways: DeepSeek/vLLM/LiteLLM convention)
 // report reasoning_tokens at the TOP LEVEL of usage. Pre-fix the strict
 // decode rejected the unknown field and discarded 15-40s successful
 // completions; post-fix it decodes into a known reasoning breakdown.

@@ -1,6 +1,6 @@
 package config
 
-// QUEUE-1-B regression: the -queue-depth and -queue-comments flags must
+// Regression: the -queue-depth and -queue-comments flags must
 // actually PARSE. The -queue-depth registration was silently missing from
 // flags.go for a window (the wiring and validation existed, the flag did
 // not) — a config-layer parse test is the only guard that catches a flag

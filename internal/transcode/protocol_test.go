@@ -40,7 +40,7 @@ func TestNewRouteKey(t *testing.T) {
 }
 
 // TestNewRouteKeyRejectsQueryFragment verifies that route paths carrying
-// query or fragment syntax are configuration errors (review-08 additional 5):
+// query or fragment syntax are configuration errors:
 // such characters would never match a request path, which is a literal path
 // match.
 func TestNewRouteKeyRejectsQueryFragment(t *testing.T) {
@@ -186,7 +186,7 @@ func TestMappingValidate(t *testing.T) {
 }
 
 // TestMappingValidateConfiguration proves the immutable configuration
-// dimensions fail at startup validation (review-j finding 14).
+// dimensions fail at startup validation.
 func TestMappingValidateConfiguration(t *testing.T) {
 	valid := Mapping{
 		ClientRoute:      RouteKey{Method: http.MethodPost, Path: "/v1/responses"},

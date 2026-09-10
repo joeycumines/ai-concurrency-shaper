@@ -3030,7 +3030,7 @@ func (m Model) renderConcurrency() string {
 		b.WriteString(m.styles.dimStyle2.Render("  Queue: empty\n"))
 	} else {
 		fmt.Fprintf(&b, "  %d waiting\n", m.snap.Queued)
-		// Per-route breakdown (UNRESP-3): which routes are waiting and how
+		// Per-route breakdown: which routes are waiting and how
 		// long the oldest waiter on each has waited — the operator view of
 		// "which route is starved" that the aggregate count hides.
 		routes := make([]string, 0, len(m.snap.QueuedByRoute))

@@ -42,9 +42,9 @@ var anthropicMessagesResponseJSON []byte
 var anthropicMessagesStreamSSE []byte
 
 // Field-capture fixtures (testdata/field/): wire bodies for the four
-// provider-extension field regressions (usage top-level extensions, task 15;
-// reasoning_content, task 18; matched_stop, task 27; empty-status codex
-// multi-turn history, task 30). The extension spellings and their
+// provider-extension field regressions (usage top-level extensions,
+// reasoning_content, matched_stop, empty-status codex
+// multi-turn history). The extension spellings and their
 // null-vs-value placement are byte-faithful to the committed reproduce-first
 // tests of those regressions; the envelope ids, model, content narrative,
 // and usage composition are reconstructed (no raw capture was retained).

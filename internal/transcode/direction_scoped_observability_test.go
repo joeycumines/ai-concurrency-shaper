@@ -1,6 +1,6 @@
 package transcode
 
-// Autopsy 2026-09-06 M4: direction-scoped loss observability.
+// Direction-scoped loss observability.
 //
 // (1) A Responses upstream response's service_tier was silently dropped on
 // the Responses→Messages render while the chat source's tier entered the
@@ -37,7 +37,7 @@ func TestResponsesSourceServiceTierObservedOnMessagesRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reportHasFeature(report, FeatureResponseServiceTier) {
-		t.Fatalf("report lacks the service-tier loss (autopsy M4): %+v", report)
+		t.Fatalf("report lacks the service-tier loss: %+v", report)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestChatSourceWithoutUsageRecordsOmissionNoteOnResponsesRender(t *testing.T
 		t.Fatalf("a usage-less source must render (the omission is a Note, not a policy-gated loss): %v", err)
 	}
 	if !reportHasFeature(report, FeatureUsageUnknown) {
-		t.Fatalf("report lacks the usage-omission note (autopsy M4): %+v", report)
+		t.Fatalf("report lacks the usage-omission note: %+v", report)
 	}
 	for _, entry := range report.Losses {
 		if entry.Feature == FeatureUsageUnknown && entry.Kind != NoteRecord {

@@ -324,8 +324,8 @@ func TestSplitImageDataURL(t *testing.T) {
 
 func TestExchangeIDs(t *testing.T) {
 	// IDs within one exchange share the random prefix and carry a
-	// monotonic counter (review-08 blocker 6); the prefix shape is 32
-	// lowercase hex characters (128 random bits, review-z commit 5).
+	// monotonic counter; the prefix shape is 32
+	// lowercase hex characters (128 random bits).
 	ids := NewExchangeIDs()
 	first := ids.New("msg_")
 	second := ids.New("fc_")

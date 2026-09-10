@@ -245,7 +245,7 @@ shaper_queued{provider="b"} 0
 }
 
 func TestWritePrometheusRouteQueueMetrics(t *testing.T) {
-	// UNRESP-3: per-route queue observability. QueuedByRoute and
+	// Per-route queue observability. QueuedByRoute and
 	// OldestQueuedAgeByRoute export as method+path-labeled series, one
 	// contiguous family per metric name across all providers. Ragged
 	// membership on purpose: provider b has no queued routes, so both route

@@ -1,6 +1,6 @@
 package transcode
 
-// Usage arithmetic acceptance tests. History: review-z commit 5 pinned
+// Usage arithmetic acceptance tests. History:
 // exact total == input + output and failed the exchange on mismatch.
 // CC-USAGE-ARITHMETIC (operator-observed 2026-09-08: a real glm gateway
 // emitted total 293640 vs sum 293581, 502-ing Claude Code 8 retries on a
@@ -139,7 +139,7 @@ func TestChatUsageMismatchNonStreamingRelayed(t *testing.T) {
 // TestCheckedInt64ToInt32BitSafety proves the conversion helper rejects
 // values that do not fit the platform int width: on 32-bit builds
 // MaxInt32+1 overflows a plain cast, on 64-bit builds MaxInt64 is
-// representable. The test is architecture-independent (review-z commit 5).
+// representable. The test is architecture-independent.
 func TestCheckedInt64ToInt32BitSafety(t *testing.T) {
 	if strconv.IntSize == 32 {
 		// 32-bit build: int64 values above MaxInt32 must be rejected.
@@ -167,7 +167,7 @@ func TestCheckedInt64ToInt32BitSafety(t *testing.T) {
 
 // TestResponsesUsageOverflowToAnthropic proves the streaming responses ->
 // anthropic conversion rejects counts that cannot be represented on this
-// platform instead of silently wrapping (review-z commit 5).
+// platform instead of silently wrapping.
 func TestResponsesUsageOverflowToAnthropic(t *testing.T) {
 	if strconv.IntSize != 32 {
 		t.Skip("32-bit-specific: int is 64 bits here, nothing can overflow")
@@ -195,7 +195,7 @@ func TestResponsesUsageOverflowToAnthropic(t *testing.T) {
 // TestUsageAbsentVsZeroPreserved proves the exact-equality work preserves
 // absent-vs-zero fidelity: a chat response with usage present but no
 // total_tokens still decodes with the derived total (Known flags intact) and
-// never fabricates an inconsistent rejection (review-z commit 5).
+// never fabricates an inconsistent rejection.
 func TestUsageAbsentVsZeroPreserved(t *testing.T) {
 	// Chat usage without total_tokens: the shadow marks the total unknown,
 	// the decode must not fabricate a mismatch.
@@ -638,7 +638,7 @@ func TestUsageClampDetailFidelity(t *testing.T) {
 
 // TestUsageClampBoundsArePinned pins the clamp lines whose removal would emit
 // a client-dialect-invalid usage: each subtest fails when the named bound is
-// removed (the mutations were identified by an independent review of the
+// removed (the mutations were identified by an independent analysis of the
 // committed diff). The canonical cache-write bound and its Responses-shape
 // twin keep the Anthropic identity uncached = input - cache-read - cache-write
 // nonnegative; the total clamp and the detail builders keep the recorded note

@@ -1,7 +1,7 @@
 package transcode
 
 // J7 regression tests: the loss-policy semantic matrix and response-side
-// reporting (review-j finding 10).
+// reporting.
 
 import (
 	"strings"
@@ -9,8 +9,7 @@ import (
 )
 
 // TestToolResultIsErrorStrictRejects proves a tool result marked as an error
-// is rejected by default when rendering to Responses and Chat (review-j
-// finding 10).
+// is rejected by default when rendering to Responses and Chat.
 func TestToolResultIsErrorStrictRejects(t *testing.T) {
 	body := `{"model":"m","max_tokens":100,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","is_error":true,"content":"boom"}]}]}`
 	result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
@@ -42,8 +41,7 @@ func TestToolResultIsErrorStrictRejects(t *testing.T) {
 
 // TestToolResultIsErrorPermissiveEncoding proves the permissive policy
 // encodes the error status into visible content with the named
-// error_status_prefix encoding, and the loss is reported (review-j finding
-// 10).
+// error_status_prefix encoding, and the loss is reported.
 func TestToolResultIsErrorPermissiveEncoding(t *testing.T) {
 	body := `{"model":"m","max_tokens":100,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","is_error":true,"content":"boom"}]}]}`
 	result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
@@ -79,8 +77,7 @@ func TestToolResultIsErrorPermissiveEncoding(t *testing.T) {
 }
 
 // TestReasoningSummaryRequestLossGate proves the Responses reasoning.summary
-// style entering a Chat request is a loss/reject decision (review-j finding
-// 10).
+// style entering a Chat request is a loss/reject decision.
 func TestReasoningSummaryRequestLossGate(t *testing.T) {
 	body := `{"model":"m","input":"x","reasoning":{"effort":"medium","summary":"auto"}}`
 	result, echo, err := DecodeResponsesRequest([]byte(body), StrictLossPolicy())
@@ -118,7 +115,7 @@ func TestReasoningSummaryRequestLossGate(t *testing.T) {
 // TestStreamProviderReasoningCapabilityGate proves streaming provider
 // reasoning deltas are capability-gated: without the capability they enter
 // the loss decision; with it they map to ordinary text with the named
-// provider_reasoning_text encoding (review-j finding 10).
+// provider_reasoning_text encoding.
 func TestStreamProviderReasoningCapabilityGate(t *testing.T) {
 	// Without the capability: strict rejects, permissive drops with a loss.
 	state := newChatResponsesStreamState(
@@ -180,7 +177,7 @@ func TestStreamProviderReasoningCapabilityGate(t *testing.T) {
 }
 
 // TestOutputMessagePhaseLossGate proves a Responses output-message phase is
-// a loss/reject decision when rendering to Messages (review-j finding 10).
+// a loss/reject decision when rendering to Messages.
 func TestOutputMessagePhaseLossGate(t *testing.T) {
 	source := `{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"thinking out loud","annotations":[]}]}]}`
 	response, err := DecodeResponsesResponse([]byte(source))
@@ -218,7 +215,7 @@ func TestOutputMessagePhaseLossGate(t *testing.T) {
 
 // TestStreamOutputMessagePhaseGate proves the streaming direction loss-gates
 // a phase-bearing message exactly once per item, in both the added event and
-// the terminal envelope (review-j finding 10).
+// the terminal envelope.
 func TestStreamOutputMessagePhaseGate(t *testing.T) {
 	created := ResponseEnvelope{
 		ID:        "resp_1",
@@ -327,8 +324,7 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	// The item is closed by its done event before the terminal (review-08
-	// blocker 3).
+	// The item is closed by its done event before the terminal.
 	if _, err := state.Convert(ResponseOutputItemDoneEvent{
 		Type:           "response.output_item.done",
 		SequenceNumber: 2,
@@ -357,7 +353,7 @@ func TestStreamOutputMessagePhaseGate(t *testing.T) {
 }
 
 // TestInputMessagePhaseGate proves input-message phases are loss-gated at
-// decode (review-j finding 10).
+// decode.
 func TestInputMessagePhaseGate(t *testing.T) {
 	body := `{"model":"m","input":[{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"input_text","text":"thinking"}]}]}`
 	if _, _, err := DecodeResponsesRequest([]byte(body), StrictLossPolicy()); err == nil {
@@ -397,7 +393,6 @@ func countFeature(report ConversionReport, feature Feature) int {
 
 // TestResponseRenderReportSurfaced proves the response renderers return the
 // accumulated report (conversation-state and reasoning losses flow through)
-// (review-j finding 10).
 func TestResponseRenderReportSurfaced(t *testing.T) {
 	source := `{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Tokyo\"}"},{"id":"fo_1","type":"function_call_output","call_id":"call_1","output":"{\"temp\":21}"},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`
 	response, err := DecodeResponsesResponse([]byte(source))

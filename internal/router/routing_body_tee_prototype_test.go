@@ -27,13 +27,13 @@ import (
 )
 
 // readCloser pairs an io.Reader with an io.Closer to restore body reading
-// while preserving the underlying closer (review-17 finding 1, review-18 finding 3).
+// while preserving the underlying closer.
 type readCloser struct {
 	io.Reader
 	io.Closer
 }
 
-// extractModelFromBody is the Task 12 prototype helper that reads up to maxBytes
+// extractModelFromBody is the body-tee prototype helper that reads up to maxBytes
 // from r.Body, extracts the model string, and restores r.Body for downstream consumers.
 func extractModelFromBody(r *http.Request, maxBytes int64) (string, error) {
 	if r.Body == nil || r.Method != http.MethodPost {
@@ -77,7 +77,7 @@ func (t *trackingCloser) Close() error {
 	return nil
 }
 
-// TestPrototype_BodyTee_ModelExtractionAndReplaySafety proves the Task 12 spike's
+// TestPrototype_BodyTee_ModelExtractionAndReplaySafety proves the body-tee prototype's
 // body-tee mechanism:
 //  1. Correctly extracts the model identifier from JSON bodies.
 //  2. Fails closed with an error on malformed JSON or bodies exceeding bounds.

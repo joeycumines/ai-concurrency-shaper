@@ -125,7 +125,7 @@ func (parts *OutputContentParts) UnmarshalJSON(data []byte) error {
 		if err := wire.Decode(partData, part); err != nil {
 			return fmt.Errorf("output content part %d: %w", i, err)
 		}
-		// Decode-side normalization (autopsy 01): real clients omit the
+		// Decode-side normalization: real clients omit the
 		// annotations key on output_text parts; a decoded absent array is
 		// the same empty array. Validate itself stays strict for hand-built
 		// values.
@@ -228,8 +228,7 @@ func (c *FunctionCallOutputItem) Validate() error {
 		return errors.New("output function call requires call_id and name")
 	}
 	// arguments is a stringified payload: model-generated arguments are
-	// preserved exactly and are NOT required to be valid JSON (review-z
-	// commit 2) — invalid model output is never an upstream defect.
+	// preserved exactly and are NOT required to be valid JSON — invalid model output is never an upstream defect.
 	return nil
 }
 

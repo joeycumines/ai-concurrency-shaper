@@ -24,7 +24,7 @@ var errChatStreamDone = errors.New("chat stream [DONE] sentinel")
 // when the [DONE] sentinel arrives before any terminal condition. The
 // sentinel itself decides the result: the exchange is an upstream body
 // failure and the reader must stop immediately rather than wait on an
-// upstream that keeps the connection open after [DONE] (review-k finding 1).
+// upstream that keeps the connection open after [DONE].
 func errChatDoneBeforeTerminal() error {
 	return upstreamWireError(
 		UpstreamChatCompletions,
@@ -34,7 +34,7 @@ func errChatDoneBeforeTerminal() error {
 }
 
 // pendingToolCall buffers Chat tool-call fragments until call ID and function
-// name are both known, per the review: do not emit an incomplete
+// name are both known: do not emit an incomplete
 // function_call output_item.added and hope a later delta supplies identity.
 type pendingToolCall struct {
 	itemID      string
@@ -71,7 +71,7 @@ type chatPartKey struct {
 // SSE events with the full item lifecycle. Function-call starts are buffered
 // until call ID and name are known; argument fragments are emitted with delta
 // (never arguments); the completion event carries the arguments ("{}" for
-// empty) and no name (review-08 blocker 5). Provider reasoning deltas are
+// empty) and no name. Provider reasoning deltas are
 // dropped with a documented loss, or mapped to ordinary text under the
 // ProviderReasoningText capability — they are never synthesized into
 // reasoning items.
@@ -93,13 +93,13 @@ type chatResponsesStreamState struct {
 
 	// chunkID and chunkModel pin the chunk identity from the first chunk;
 	// later chunks with a different id or model are an upstream protocol
-	// error (review-j finding 6).
+	// error.
 	chunkID    string
 	chunkModel string
 
 	// finishReason is recorded when the finish chunk arrives; the terminal
 	// envelope is built lazily at release so the optional usage tail is
-	// reflected in its usage (review-j finding 6).
+	// reflected in its usage.
 	finishReason string
 
 	items        []openResponsesItem
@@ -108,7 +108,7 @@ type chatResponsesStreamState struct {
 
 	// textBufs and refusalBufs accumulate streamed text and refusal per
 	// content part in strings.Builder, avoiding quadratic re-copying of the
-	// whole accumulated string on every delta (review-k finding 9). The
+	// whole accumulated string on every delta. The
 	// final strings are materialized into the message parts once at
 	// finish(); the parts stay empty while the stream is in progress, so
 	// the emitted deltas remain the only per-chunk representation.
@@ -116,12 +116,12 @@ type chatResponsesStreamState struct {
 	refusalBufs map[chatPartKey]*strings.Builder
 
 	// serviceTierLossRecorded and logprobsLossRecorded gate the per-chunk
-	// envelope losses to exactly once per stream (review-k finding 9).
+	// envelope losses to exactly once per stream.
 	serviceTierLossRecorded bool
 	logprobsLossRecorded    bool
 
 	// reasoningReportRecorded gates the provider-reasoning report entry
-	// (loss or note) to exactly once per stream (review-08 blocker 7).
+	// (loss or note) to exactly once per stream.
 	reasoningReportRecorded bool
 
 	// legacyFunctionCallNoted gates the legacy function_call synthesis note
@@ -129,11 +129,10 @@ type chatResponsesStreamState struct {
 	legacyFunctionCallNoted bool
 
 	// totalAccumulated bounds the exchange-wide sum of accumulated semantic
-	// bytes (review-08 blocker 7).
+	// bytes.
 	totalAccumulated int64
 
-	// budget is the seven-dimension total exchange budget (review-z commit
-	// 3): every event and every state allocation charges it BEFORE the
+	// budget is the seven-dimension total exchange budget: every event and every state allocation charges it BEFORE the
 	// mutation.
 	budget streamBudget
 
@@ -143,7 +142,7 @@ type chatResponsesStreamState struct {
 
 	// heldTerminal holds the item-closing events built on finish_reason; the
 	// terminal envelope is appended at release by the [DONE] sentinel (the
-	// only release path; review-08 blocker 2). A finish that opened no items
+	// only release path). A finish that opened no items
 	// leaves this nil — the release signal is terminalReleased, never this
 	// slice's nil-ness.
 	heldTerminal []ResponsesSSEEvent
@@ -151,12 +150,11 @@ type chatResponsesStreamState struct {
 	// terminalReleased is set when the held terminal was released by the
 	// [DONE] sentinel. It is the release signal, NOT heldTerminal's nil-ness:
 	// a finish that opened no items holds a nil slice, which must remain
-	// distinguishable from "no terminal condition reached" (review-08
-	// blocker 2).
+	// distinguishable from "no terminal condition reached".
 	terminalReleased bool
 
 	// usageComponentsLossRecorded gates the required-usage-component loss
-	// (review-k finding 6): the pinned Responses usage requires the breakdown
+	// the pinned Responses usage requires the breakdown
 	// detail objects the Chat source may not provide, and the decision is
 	// recorded exactly once per stream.
 	usageComponentsLossRecorded bool
@@ -168,7 +166,7 @@ type chatResponsesStreamState struct {
 
 // wireError marks a conversion error as corrupt upstream Chat wire data: the
 // exchange classifies as an upstream failure, never a local conversion
-// failure (review-k finding 3).
+// failure.
 func (s *chatResponsesStreamState) wireError(err error) error {
 	return upstreamWireError(UpstreamChatCompletions, http.StatusOK, err)
 }
@@ -177,8 +175,7 @@ func (s *chatResponsesStreamState) wireError(err error) error {
 // arguments) beyond the per-item cumulative bound and the exchange total:
 // individually bounded SSE frames could otherwise accumulate without limit
 // and be emitted as one generated downstream frame, and a corrupt upstream
-// can amplify memory without bound (review-k finding 9, review-08 blocker
-// 7). The typed upstream wire error classifies the exchange as an upstream
+// can amplify memory without bound. The typed upstream wire error classifies the exchange as an upstream
 // failure.
 func (s *chatResponsesStreamState) checkAccumulated(builder *strings.Builder, added int, what string) error {
 	if builder.Len() > maxStreamAccumulatedBytes {
@@ -202,7 +199,7 @@ func (s *chatResponsesStreamState) checkAccumulated(builder *strings.Builder, ad
 // chargeIdentity adds n bytes of tool-call identity (call id, function name)
 // to the exchange accumulated total: identity renders into the terminal
 // envelope and the done events, so it is part of the repeated semantic
-// state the release bounds derive from (autopsy 2026-09-06 M1 round 4).
+// state the release bounds derive from.
 func (s *chatResponsesStreamState) chargeIdentity(n int) error {
 	s.totalAccumulated += int64(n)
 	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
@@ -217,7 +214,7 @@ func (s *chatResponsesStreamState) chargeIdentity(n int) error {
 // chargeIdentity adds n bytes of tool-call identity (call id, function name)
 // to the exchange accumulated total, mirroring the chat direction's charge:
 // the identity renders into the generated tool_use block start and the
-// terminal reconciliation (autopsy 2026-09-06 M1 round 5).
+// terminal reconciliation.
 func (s *anthropicResponsesStreamState) chargeIdentity(n int) error {
 	s.totalAccumulated += int64(n)
 	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
@@ -231,7 +228,7 @@ func (s *anthropicResponsesStreamState) chargeIdentity(n int) error {
 
 // loseServiceTierOnce records the service-tier loss exactly once per stream:
 // the tier is a chunk-envelope attribute whose presence on any chunk enters
-// the decision once, not once per chunk (review-k finding 9).
+// the decision once, not once per chunk.
 func (s *chatResponsesStreamState) loseServiceTierOnce() error {
 	if s.serviceTierLossRecorded {
 		return nil
@@ -246,7 +243,7 @@ func (s *chatResponsesStreamState) loseServiceTierOnce() error {
 }
 
 // loseLogprobsOnce records the log-probabilities loss exactly once per
-// stream (review-k finding 9).
+// stream.
 func (s *chatResponsesStreamState) loseLogprobsOnce() error {
 	if s.logprobsLossRecorded {
 		return nil
@@ -262,7 +259,7 @@ func (s *chatResponsesStreamState) loseLogprobsOnce() error {
 
 // wireError marks a conversion error as corrupt upstream Responses wire
 // data: the exchange classifies as an upstream failure, never a local
-// conversion failure (review-k finding 3).
+// conversion failure.
 func (s *anthropicResponsesStreamState) wireError(err error) error {
 	return upstreamWireError(UpstreamResponses, http.StatusOK, err)
 }
@@ -295,14 +292,13 @@ func newChatResponsesStreamState(
 // per stream when a wire-required Responses usage component is unknown on
 // the Chat source: the pinned Responses usage requires the breakdown detail
 // objects, and they are unknown when the chunk omits them. Zeros are never
-// emitted silently (review-k finding 6).
+// emitted silently.
 func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLMUsage) error {
 	if s.usageComponentsLossRecorded || usage == nil {
 		return nil
 	}
 	s.usageComponentsLossRecorded = true
-	// A component is unknown only when NO signal exists anywhere (autopsy
-	// 03): the top-level provider extensions make the same components known
+	// A component is unknown only when NO signal exists anywhere: the top-level provider extensions make the same components known
 	// as the pinned detail objects.
 	if usage.PromptTokensDetails == nil &&
 		usage.CachedTokens == nil &&
@@ -331,14 +327,13 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 
 // Convert processes one Chat stream chunk into Responses events.
 //
-// The stream lifecycle has explicit phases (review-j finding 6):
+// The stream lifecycle has explicit phases:
 //
 //  1. normal chunks — content, tool-call fragments, and the finish chunk;
 //  2. after the finish reason — the optional usage-only tail chunk
 //     (choices: []/empty, usage present) that the official protocol sends
 //     before [DONE] when include_usage is requested;
-//  3. terminal — built at release by the [DONE] frame only (review-08
-//     blocker 2), with the final usage.
+//  3. terminal — built at release by the [DONE] frame only, with the final usage.
 func (s *chatResponsesStreamState) Convert(
 	chunk ChatStreamResponse,
 ) ([]ResponsesSSEEvent, error) {
@@ -353,8 +348,7 @@ func (s *chatResponsesStreamState) Convert(
 		// chunk.
 		if chunk.Usage != nil && len(chunk.Choices) == 0 {
 			// The strict chunk decode guarantees id and model are always
-			// present, so a mismatch is an upstream protocol error (review-j
-			// finding 6).
+			// present, so a mismatch is an upstream protocol error.
 			if chunk.ID != s.chunkID {
 				return nil, s.wireError(fmt.Errorf(
 					"chat stream chunk id %q does not match the first chunk id %q",
@@ -408,7 +402,7 @@ func (s *chatResponsesStreamState) Convert(
 	} else {
 		// Stable chunk identity across the stream: the strict chunk decode
 		// guarantees id and model are always present, so a mismatch is an
-		// upstream protocol error (review-j finding 6).
+		// upstream protocol error.
 		if chunk.ID != s.chunkID {
 			return nil, s.wireError(fmt.Errorf(
 				"chat stream chunk id %q does not match the first chunk id %q",
@@ -439,8 +433,8 @@ func (s *chatResponsesStreamState) Convert(
 	// The chunk envelope's service tier and per-choice token log
 	// probabilities cannot be reproduced in the client dialect: their
 	// presence enters the explicit loss/reject decision instead of being
-	// silently dropped (review-j finding 4), recorded exactly once per
-	// stream (review-k finding 9).
+	// silently dropped, recorded exactly once per
+	// stream.
 	if chunk.ServiceTier != nil {
 		if err := s.loseServiceTierOnce(); err != nil {
 			return nil, err
@@ -453,7 +447,7 @@ func (s *chatResponsesStreamState) Convert(
 	}
 
 	for _, choice := range chunk.Choices {
-		// n=1: the single choice must be index 0 (review-j finding 6).
+		// n=1: the single choice must be index 0.
 		if choice.Index != 0 {
 			return nil, s.wireError(fmt.Errorf(
 				"chat stream chunk choice index = %d; n=1 requires index 0",
@@ -479,8 +473,7 @@ func (s *chatResponsesStreamState) Convert(
 			}
 			// Hold the item-closing events; the terminal envelope is built
 			// at release so the optional usage tail is reflected in its
-			// usage. Released ONLY by the [DONE] sentinel (review-08 blocker
-			// 2); EOF after finish_reason without [DONE] is a truncation.
+			// usage. Released ONLY by the [DONE] sentinel; EOF after finish_reason without [DONE] is a truncation.
 			s.heldTerminal = terminal
 			s.sawFinish = true
 		}
@@ -501,7 +494,7 @@ func (s *chatResponsesStreamState) convertDelta(
 	// signature_delta + content_block_stop for the thinking block before
 	// the next block opens. Holding the close until finish() scrambled the
 	// order on the wire (text block closed before the thinking block's
-	// signature; live Claude Code conformance, 2026-09-08).
+	// signature).
 	//
 	// The close fires ONLY at a real transition — a delta that actually
 	// carries content or tool output. A reasoning-only delta must NOT
@@ -594,7 +587,7 @@ func (s *chatResponsesStreamState) convertDelta(
 		// marker signature; operator-adjudicated design, 2026-09-07);
 		// provider_reasoning_text maps it to ordinary text; neither is a
 		// documented loss. Every report entry is recorded exactly once per
-		// stream, never once per delta (review-08 blocker 7).
+		// stream, never once per delta.
 		if s.capabilities.ProviderReasoningThinking {
 			// A reasoning item accumulates its own summary text; the
 			// anthropic state machine owns the thinking-block lifecycle.
@@ -651,7 +644,7 @@ func (s *chatResponsesStreamState) convertDelta(
 				s.items = append(s.items, item)
 				// The standard lifecycle: output_item.added (a detached
 				// snapshot; the live item accumulates summary text through
-				// later deltas — review-k finding 1), then the summary
+				// later deltas — ), then the summary
 				// events. The anthropic state machine reconciles the
 				// output_item.done against this observation.
 				snapshot := *reasoning
@@ -721,7 +714,7 @@ func (s *chatResponsesStreamState) convertDelta(
 				return nil, err
 			}
 			// The encoding note is recorded exactly once per stream, never
-			// once per delta (review-08 blocker 7).
+			// once per delta.
 			if !s.reasoningReportRecorded {
 				s.reasoningReportRecorded = true
 				if err := s.report.Note(
@@ -927,7 +920,7 @@ func (s *chatResponsesStreamState) convertToolCall(
 	} else if call.Index != nil {
 		// The fragment resolved by id (or the single-pending fallback) but
 		// also carries an index: the index must resolve to the same pending
-		// call, never silently select another (review-08 blocker 2).
+		// call, never silently select another.
 		if other, exists := s.pendingCalls[*call.Index]; exists && other != pending {
 			return nil, s.wireError(fmt.Errorf(
 				"chat tool call fragment index %d resolves to call %q but the fragment id %q resolves to call %q",
@@ -939,7 +932,7 @@ func (s *chatResponsesStreamState) convertToolCall(
 		}
 	}
 
-	// Identity immutability (review-08 blocker 2): once the output_item.added
+	// Identity immutability: once the output_item.added
 	// event was announced, a later fragment changing the call NAME is corrupt
 	// upstream wire — the client already saw the announced identity and the
 	// done events must never drift from it. A conflicting id cannot reach
@@ -957,7 +950,7 @@ func (s *chatResponsesStreamState) convertToolCall(
 	// Tool-call identity (call id, function name) renders into the terminal
 	// envelope and the done events, so it is semantic state: charge new
 	// identity bytes against the exchange accumulated total exactly like
-	// text/refusal/arguments (autopsy 2026-09-06 M1 round 4 — an unbounded
+	// text/refusal/arguments (an unbounded
 	// identity would defeat the release-bound derivation; repeated
 	// fragments carrying the same id are charged once).
 	if call.ID != nil && *call.ID != "" && pending.callID != *call.ID {
@@ -976,7 +969,7 @@ func (s *chatResponsesStreamState) convertToolCall(
 		pending.pending.WriteString(call.Function.Arguments)
 		pending.complete.WriteString(call.Function.Arguments)
 		// The complete buffer is emitted as one generated downstream frame
-		// at finish: bound its cumulative size (review-k finding 9).
+		// at finish: bound its cumulative size.
 		if err := s.checkAccumulated(&pending.complete, len(call.Function.Arguments), "tool arguments"); err != nil {
 			return nil, err
 		}
@@ -985,13 +978,13 @@ func (s *chatResponsesStreamState) convertToolCall(
 	// Emit the output_item.added only once identity (call ID + name) is
 	// complete, then replay buffered argument fragments. The added event
 	// carries an EMPTY argument string — never an invented complete object
-	// (review-j finding 6): the arguments arrive through deltas and the done
+	// the arguments arrive through deltas and the done
 	// event.
 	//
 	// The emitted item is a fresh value constructed here, never the pending
 	// call: later fragments mutate only the pendingToolCall (callID, name,
 	// builders), so the added event is already a detached snapshot and needs
-	// no copy (review-k finding 1, function-call arm).
+	// no copy.
 	if !pending.started && pending.callID != "" && pending.name != "" {
 		pending.itemID = s.ctx.IDs.New("fc_")
 		pending.started = true
@@ -1025,7 +1018,7 @@ func (s *chatResponsesStreamState) convertToolCall(
 // event carries a DETACHED snapshot of the message as it exists at creation:
 // the live item accumulates content and status through later deltas, and
 // sharing the pointer would leak that mutation into the already-emitted
-// output_item.added frame (review-k finding 1).
+// output_item.added frame.
 func (s *chatResponsesStreamState) openMessageItem() ([]ResponsesSSEEvent, error) {
 	if len(s.items) >= maxStreamOutputItems {
 		return nil, s.wireError(fmt.Errorf(
@@ -1111,7 +1104,7 @@ func (s *chatResponsesStreamState) finish(
 	var events []ResponsesSSEEvent
 
 	// Close every pending tool call: arguments done (arguments, "{}" for
-	// empty, no name — review-08 blocker 5) then output_item.done. A
+	// empty, no name — ) then output_item.done. A
 	// fragment that never received an identity (id or name) is malformed
 	// upstream data: silently dropping it would hide the corruption behind a
 	// successful completion.
@@ -1127,7 +1120,7 @@ func (s *chatResponsesStreamState) finish(
 		}
 		// Model-generated arguments are preserved byte-exact: the Responses
 		// function_call arguments field is a string, and invalid model
-		// output is never an upstream defect (review-z commit 2). Only the
+		// output is never an upstream defect. Only the
 		// snapshot-vs-accumulated identity check remains wire-corrupt.
 		events = append(events,
 			s.builder.FunctionArgumentsDone(
@@ -1152,7 +1145,7 @@ func (s *chatResponsesStreamState) finish(
 	// Close open message items: content parts done, then output_item.done.
 	// The accumulated text and refusal strings are materialized into the
 	// parts ONCE here — the parts stayed empty while the stream was in
-	// progress (review-k finding 9) — so the done events and the terminal
+	// progress — so the done events and the terminal
 	// envelope carry the full content.
 	for i := range s.items {
 		item := &s.items[i]
@@ -1382,10 +1375,9 @@ func (s *chatResponsesStreamState) baseEnvelope(status string) ResponseEnvelope 
 // releaseTerminal returns the held terminal batch — the item-closing events
 // plus the terminal envelope — and whether this call performed the release.
 // The envelope is built at release time so the optional usage tail is
-// reflected in its usage (review-j finding 6). A finish that opened no items
+// reflected in its usage. A finish that opened no items
 // still releases a one-event batch (just the terminal envelope): the [DONE]
-// sentinel must be able to release a zero-output completion (review-08
-// blocker 2).
+// sentinel must be able to release a zero-output completion.
 func (s *chatResponsesStreamState) releaseTerminal() ([]ResponsesSSEEvent, bool) {
 	if s.terminalReleased {
 		return nil, false
@@ -1398,7 +1390,7 @@ func (s *chatResponsesStreamState) releaseTerminal() ([]ResponsesSSEEvent, bool)
 
 // FinalizeEOF reports a truncation error unless the stream terminated
 // correctly. The held terminal is released ONLY by the [DONE] sentinel
-// (review-08 blocker 2): a stream that ends after finish_reason without
+// a stream that ends after finish_reason without
 // [DONE] is a truncated stream — the usage tail never arrived — and is a
 // typed upstream truncation, never a released clean terminal. A zero-output
 // finish is pinned the same way: the terminal was reached but not released.
@@ -1435,9 +1427,9 @@ func (o *openResponsesItem) isMessage() bool {
 // form. The pinned Responses contract requires the breakdown detail objects;
 // the call sites gate the unknown components through
 // loseUnknownUsageComponentsOnce before this runs, so the zeros below are
-// emitted only after the explicit usage-timing loss (review-k finding 6).
+// emitted only after the explicit usage-timing loss.
 // The top-level provider extensions feed the same breakdowns with details
-// winning (autopsy 03). The created_cache_tokens provider extension rides
+// winning. The created_cache_tokens provider extension rides
 // the in-memory Responses usage carrier (json:"-"): the composed
 // Messages←Chat stream can then know the cache-write component exactly like
 // the non-streaming decode, without emitting wire bytes the Responses
@@ -1540,7 +1532,7 @@ func parseLegacyFunctionCallFragment(raw json.RawMessage) (name *string, args *s
 }
 
 // chatStreamChunkShadow is the presence-aware strict decode shadow of a Chat
-// streaming chunk (review-08 blocker 2): the pinned envelope fields (object,
+// streaming chunk: the pinned envelope fields (object,
 // id, model, created) and the choice fields (index, delta) are required and
 // must be explicitly present — absent fields are corrupt upstream wire,
 // never zero-defaulted. The upstream envelope is a subject-to-change
@@ -1600,7 +1592,7 @@ type chatStreamChoiceShadow struct {
 	TokenIDs      any     `json:"token_ids,omitempty"`
 	RoutedExperts any     `json:"routed_experts,omitempty"`
 	StopReason    *string `json:"stop_reason,omitempty"`
-	// MatchedStop mirrors the wire Choice extension (2026-08-24, task 27);
+	// MatchedStop mirrors the wire Choice extension (2026-08-24);
 	// delta level is unobserved — the raw-upstream probe places the field on
 	// the choice of every chunk — so ChatStreamDelta deliberately carries no
 	// twin (gate record run 5, finding 5).
@@ -1637,8 +1629,7 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 		}
 		// An in-band Chat error frame is real upstream data: the typed
 		// error carries upstream provenance so the exchange classifies as
-		// an upstream failure, never a local conversion failure (review-j
-		// finding 11).
+		// an upstream failure, never a local conversion failure.
 		return ChatStreamResponse{}, &StreamConversionError{
 			Cause:      fmt.Errorf("chat stream chunk: %s", message),
 			Provenance: ProvenanceUpstreamBodyError,
@@ -1647,7 +1638,7 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 	}
 	// Presence-aware strict shadow decode: the pinned envelope and choice
 	// fields must be explicitly present — absent fields are corrupt upstream
-	// wire (review-08 blocker 2). The upstream envelope is a subject-to-change
+	// wire. The upstream envelope is a subject-to-change
 	// contract, so the decode is tolerant to unknown provider-extension fields
 	// (which are discarded), while the modeled presence checks below still
 	// reject every semantic violation — including the non-streaming message
@@ -1741,7 +1732,7 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 		}
 		// A present delta role must be assistant: a non-assistant role is
 		// corrupt upstream wire, never relabeled as assistant output
-		// (review-08 blocker 2).
+		//.
 		if choice.Delta.Role != nil && *choice.Delta.Role != "assistant" {
 			return ChatStreamResponse{}, upstreamWireError(
 				UpstreamChatCompletions,
@@ -1808,7 +1799,7 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 		}
 	}
 	// The pinned CompletionUsage requires all three totals: an omitted total
-	// must never become a factual zero (review-08 blocker 2). The breakdown
+	// must never become a factual zero. The breakdown
 	// components remain optional and enter the loss/reject decision.
 	if shadow.Usage != nil &&
 		(shadow.Usage.PromptTokens == nil ||
@@ -1905,27 +1896,25 @@ type anthropicResponsesStreamState struct {
 
 	// lastSequence is the sequence number of the last processed event; the
 	// wire requires strictly increasing, unique sequence numbers across the
-	// stream (review-08 blocker 3). -1 accepts any nonnegative first
+	// stream. -1 accepts any nonnegative first
 	// sequence.
 	lastSequence int64
 
 	// Upstream response identity, pinned from the response.created envelope
 	// and verified on every later envelope-bearing event: id, model, and
-	// created_at must be stable across the stream (review-08 blocker 3).
-	// created_at is float64 end-to-end (review-z commit 1).
+	// created_at must be stable across the stream.
+	// created_at is float64 end-to-end.
 	upstreamID        string
 	upstreamModel     string
 	upstreamCreatedAt float64
 
 	// addedItems records every output item observed via output_item.added:
 	// its output index and type. Duplicate identities, content parts for
-	// unknown items, and output-index mismatches are wire errors (review-08
-	// blocker 3).
+	// unknown items, and output-index mismatches are wire errors.
 	addedItems map[string]anthropicAddedItem
 
 	// doneItems records every output item closed by output_item.done: a
-	// duplicate done for any item type is corrupt upstream wire (review-08
-	// blocker 3).
+	// duplicate done for any item type is corrupt upstream wire.
 	doneItems map[string]struct{}
 
 	// partsSeen records every content part observed via content_part.added
@@ -1935,12 +1924,12 @@ type anthropicResponsesStreamState struct {
 
 	// partCounts tracks the number of parts observed per item so the
 	// per-item part bound and the done/envelope count checks are O(1)
-	// instead of scanning partsSeen (review-08 blocker 7).
+	// instead of scanning partsSeen.
 	partCounts map[string]int
 
 	// textBufs and refusalBufs accumulate streamed text and refusal per
 	// content part so the done events and the terminal envelope reconcile
-	// against the incrementally observed content (review-08 blocker 4).
+	// against the incrementally observed content.
 	textBufs    map[responsePartKey]*strings.Builder
 	refusalBufs map[responsePartKey]*strings.Builder
 
@@ -1949,12 +1938,11 @@ type anthropicResponsesStreamState struct {
 
 	// closedToolCalls records every function call closed by output_item.done:
 	// the terminal envelope's function items must reconcile against it
-	// (review-08 blocker 4).
+	//.
 	closedToolCalls map[string]anthropicClosedToolCall
 
 	// partBlocks maps the Responses content part — keyed by owning item and
-	// content index (review-j finding 7: content indices are scoped to an
-	// item, so two message items may both have content index 0) — to the
+	// content index — to the
 	// Anthropic block index it opened. The composed chat->anthropic
 	// direction keeps text and refusal parts open simultaneously, so deltas
 	// must target their own block, never the lowest open one.
@@ -1964,13 +1952,12 @@ type anthropicResponsesStreamState struct {
 	model      string
 	createdAt  float64
 
-	// budget is the seven-dimension total exchange budget (review-z commit
-	// 3): every event and every state allocation charges it BEFORE the
+	// budget is the seven-dimension total exchange budget: every event and every state allocation charges it BEFORE the
 	// mutation.
 	budget streamBudget
 
 	// fsm is the single lifecycle validator every event passes before
-	// interpretation (review-z commit 3).
+	// interpretation.
 	fsm *responsesStreamFSM
 
 	sawTerminal   bool
@@ -1978,11 +1965,11 @@ type anthropicResponsesStreamState struct {
 	sawToolUse    bool
 
 	// reasoningLossRecorded ensures the reasoning loss is recorded exactly
-	// once per stream (review-j finding 7).
+	// once per stream.
 	reasoningLossRecorded bool
 
 	// usageComponentsLossRecorded gates the required-usage-component loss
-	// (review-k finding 6): the Messages wire requires breakdown fields the
+	// the Messages wire requires breakdown fields the
 	// Responses source never provides, and the decision is recorded exactly
 	// once per stream.
 	usageComponentsLossRecorded bool
@@ -1992,7 +1979,7 @@ type anthropicResponsesStreamState struct {
 	usageClampNotes usageClampNotes
 
 	// totalAccumulated bounds the exchange-wide sum of accumulated semantic
-	// bytes (text, refusal, tool arguments; review-08 blocker 7).
+	// bytes (text, refusal, tool arguments).
 	totalAccumulated int64
 
 	// capabilities gates the native thinking rendering
@@ -2006,12 +1993,11 @@ type anthropicResponsesStreamState struct {
 
 	// phaseGated tracks the output items whose phase already entered the
 	// loss decision, so a phase-bearing item seen both in output_item.added
-	// and in the terminal envelope is gated exactly once (review-j finding
-	// 10).
+	// and in the terminal envelope is gated exactly once.
 	phaseGated map[string]struct{}
 
 	// controlsGated ensures the envelope-controls loss is recorded exactly
-	// once per stream (review-j finding 13).
+	// once per stream.
 	controlsGated bool
 
 	usage *AnthropicUsage
@@ -2026,7 +2012,7 @@ type anthropicResponsesStreamState struct {
 
 // responsePartKey identifies a Responses content part by its owning output
 // item and content index. Content indices are scoped to an output item, so
-// the item id is part of the identity (review-j finding 7).
+// the item id is part of the identity.
 type responsePartKey struct {
 	ItemID       string
 	ContentIndex int64
@@ -2095,8 +2081,7 @@ func (s *anthropicResponsesStreamState) Convert(
 	if s.sawTerminal {
 		return nil, errors.New("responses stream event after terminal")
 	}
-	// Every event passes the single lifecycle validator FIRST (review-z
-	// commit 3); the render-side checks below remain as defense.
+	// Every event passes the single lifecycle validator FIRST; the render-side checks below remain as defense.
 	if err := s.fsm.Validate(event); err != nil {
 		return nil, err
 	}
@@ -2104,7 +2089,7 @@ func (s *anthropicResponsesStreamState) Convert(
 		return nil, s.wireError(err)
 	}
 	// The wire requires strictly increasing, unique sequence numbers across
-	// the stream (review-08 blocker 3).
+	// the stream.
 	if sequence := event.Sequence(); sequence <= s.lastSequence {
 		return nil, s.wireError(fmt.Errorf(
 			"responses stream sequence number %d is not strictly increasing (last %d)",
@@ -2115,8 +2100,7 @@ func (s *anthropicResponsesStreamState) Convert(
 		s.lastSequence = sequence
 	}
 	// response.created must arrive first and exactly once: any other event
-	// before the created envelope is a corrupt lifecycle (review-08 blocker
-	// 3). The stream error event is the one exception: it is an abort
+	// before the created envelope is a corrupt lifecycle. The stream error event is the one exception: it is an abort
 	// terminal that may arrive at any point.
 	if !s.messageSent && event.EventType() != "response.created" &&
 		event.EventType() != "error" {
@@ -2181,7 +2165,7 @@ func (s *anthropicResponsesStreamState) Convert(
 		// design, 2026-09-07); the request path scrubs marker-signature
 		// blocks from replayed history, so the synthetic signature never
 		// reaches an upstream. Without the capability the events are
-		// dropped with the documented loss (review-j finding 7).
+		// dropped with the documented loss.
 		if !s.capabilities.ProviderReasoningThinking {
 			return nil, s.loseReasoningOnce()
 		}
@@ -2225,7 +2209,6 @@ func (s *anthropicResponsesStreamState) Convert(
 // unless the composed Chat source carried the created_cache_tokens provider
 // extension through the in-memory usage carrier (it is never part of the
 // pinned Responses wire contract). Zeros are never emitted silently
-// (review-k finding 6).
 func (s *anthropicResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ResponsesUsage) error {
 	if s.usageComponentsLossRecorded || usage == nil {
 		return nil
@@ -2275,7 +2258,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 	s.messageSent = true
 	// Pin the upstream response identity from the created envelope: every
 	// later envelope-bearing event must carry the same id, model, and
-	// created_at (review-08 blocker 3).
+	// created_at.
 	s.upstreamID = envelope.ID
 	s.upstreamModel = envelope.Model
 	s.upstreamCreatedAt = envelope.CreatedAt
@@ -2283,7 +2266,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 		return nil, err
 	}
 	// The stream-start message serializes stop_reason: null and
-	// stop_sequence: null (review-j finding 8): generation has not finished,
+	// stop_sequence: null: generation has not finished,
 	// and the stop fields are assigned only in message_delta.
 	s.message = AnthropicMessageResponse{
 		ID:      s.responseID,
@@ -2306,7 +2289,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 		}
 		// The required Messages breakdown components the source did not
 		// provide enter the loss decision before the zeros are emitted
-		// (review-k finding 6).
+		//.
 		if err := s.loseUnknownUsageComponentsOnce(envelope.Usage); err != nil {
 			return nil, err
 		}
@@ -2316,7 +2299,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 		// The created envelope cannot provide usage yet (Responses streams
 		// deliver it at completion). The Messages contract requires usage on
 		// message_start; emitting zeros would fabricate facts, so the early
-		// usage is an explicit loss/reject decision (review-j finding 9).
+		// usage is an explicit loss/reject decision.
 		if err := s.report.Lose(
 			s.policy,
 			FeatureUsageUnknown,
@@ -2327,7 +2310,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 		}
 		// The Messages wire requires output_tokens_details on the usage
 		// object: the zeros are emitted only after the approved loss above
-		// (review-k finding 6).
+		//.
 		s.message.Usage = &AnthropicUsage{
 			OutputTokensDetails: &AnthropicOutputTokensDetails{},
 		}
@@ -2341,7 +2324,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 // checkEnvelopeIdentity verifies a later envelope-bearing event (in_progress,
 // completed, incomplete, failed) carries the response identity pinned from
 // response.created: a drifted id, model, or created_at is corrupt upstream
-// wire (review-08 blocker 3).
+// wire.
 func (s *anthropicResponsesStreamState) checkEnvelopeIdentity(
 	envelope ResponseEnvelope,
 ) error {
@@ -2389,7 +2372,7 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 ) ([]AnthropicStreamEvent, error) {
 	// Item identities are unique across the stream: a duplicate
 	// output_item.added for the same item id is corrupt upstream wire
-	// (review-08 blocker 3).
+	//.
 	itemType := itemTypeName(event.Item)
 	itemID := responsesOutputItemID(event.Item)
 	if _, exists := s.addedItems[itemID]; exists {
@@ -2414,7 +2397,7 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 	case *ResponsesOutputMessage:
 		// Message items open their content blocks via content_part.added.
 		// The output-message phase has no Messages representation: it
-		// enters the loss decision (review-j finding 10).
+		// enters the loss decision.
 		if err := s.losePhaseOnce(item); err != nil {
 			return nil, err
 		}
@@ -2425,7 +2408,7 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 		// routes provider reasoning here as a reasoning item whose summary
 		// deltas render as native thinking blocks (see the
 		// reasoning-summary handlers). Without the capability the item is
-		// dropped with the documented loss (review-j finding 7).
+		// dropped with the documented loss.
 		if !s.capabilities.ProviderReasoningThinking {
 			return nil, s.loseReasoningOnce()
 		}
@@ -2442,7 +2425,7 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 		// Tool-call identity renders into the generated tool_use block start
 		// and the terminal reconciliation, so it is semantic state charged
 		// against the exchange total exactly like the chat direction's
-		// identity (autopsy 2026-09-06 M1 round 5: the direct
+		// identity (the direct
 		// Responses→Anthropic path left identity uncharged).
 		if err := s.chargeIdentity(len(item.CallID) + len(item.Name)); err != nil {
 			return nil, err
@@ -2498,8 +2481,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	var events []AnthropicStreamEvent
 
 	// The done item must reconcile with the observed added item: known
-	// identity, matching type, and matching output index (review-08 blocker
-	// 3). A duplicate done for any item type is corrupt upstream wire.
+	// identity, matching type, and matching output index. A duplicate done for any item type is corrupt upstream wire.
 	itemID := responsesOutputItemID(event.Item)
 	if _, done := s.doneItems[itemID]; done {
 		return nil, s.wireError(fmt.Errorf(
@@ -2532,8 +2514,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	switch item := event.Item.(type) {
 	case *ResponsesOutputMessage:
 		// The done message's content must match the incrementally observed
-		// parts: same parts, same types, same accumulated text (review-08
-		// blocker 4).
+		// parts: same parts, same types, same accumulated text.
 		for contentIndex, part := range item.Content {
 			key := responsePartKey{ItemID: item.ID, ContentIndex: int64(contentIndex)}
 			seenType, seen := s.partsSeen[key]
@@ -2594,7 +2575,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	}
 	// Identity comes from the item-added lifecycle: the added item must have
 	// carried the call identity, and the done snapshot must not drift from it
-	// (review-08 blocker 4).
+	//.
 	if pending.callID == "" || pending.name == "" {
 		return nil, s.wireError(fmt.Errorf(
 			"tool block for item %q was added without call identity",
@@ -2617,7 +2598,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	}
 	// The done item's status is optional on the pinned wire (the official
 	// fixture omits it); a PRESENT status other than completed is a
-	// contradiction with the done snapshot (review-08 blocker 4).
+	// contradiction with the done snapshot.
 	if call.Status != "" && call.Status != ResponsesItemCompleted {
 		return nil, s.wireError(fmt.Errorf(
 			"output item done status = %q, want completed",
@@ -2636,7 +2617,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	// conflicting snapshot is corrupt upstream wire. The reconciled
 	// arguments are delivered to the client as input_json_delta fragments
 	// so the tool input can never collapse to an empty object or drift from
-	// the done snapshot (review-08 blocker 4).
+	// the done snapshot.
 	arguments, suffix, err := s.reconcileToolArguments(pending, call.Arguments)
 	if err != nil {
 		if _, ok := errors.AsType[*UnrepresentableError](err); ok {
@@ -2658,7 +2639,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 	if err := validateFinalToolInput(arguments); err != nil {
 		// Anthropic tool_use.input requires an object: invalid
 		// model-generated arguments are a LOCAL unrepresentable output,
-		// never corrupt upstream wire (review-z commit 2).
+		// never corrupt upstream wire.
 		return nil, &UnrepresentableError{
 			Protocol: "anthropic",
 			Path:     "content_block.input",
@@ -2695,7 +2676,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 // returned suffix is the byte range the upstream never streamed as deltas:
 // the caller must emit it as one input_json_delta so the client's assembled
 // tool input equals the snapshot. A conflicting snapshot is an error:
-// arguments can never be silently replaced (review-08 blocker 4).
+// arguments can never be silently replaced.
 func (s *anthropicResponsesStreamState) reconcileToolArguments(
 	pending *pendingToolBlock,
 	snapshot string,
@@ -2704,7 +2685,7 @@ func (s *anthropicResponsesStreamState) reconcileToolArguments(
 	if err != nil {
 		// The snapshot is the upstream's final claim about model-generated
 		// arguments: a non-object is a LOCAL unrepresentable output, never
-		// corrupt upstream wire (review-z commit 2). Callers pass this
+		// corrupt upstream wire. Callers pass this
 		// typed error through unwrapped.
 		return "", "", &UnrepresentableError{
 			Protocol: "anthropic",
@@ -2718,7 +2699,7 @@ func (s *anthropicResponsesStreamState) reconcileToolArguments(
 		// snapshot completes it. The suffix is the part the upstream never
 		// streamed as a delta — and the snapshot bytes retained for the
 		// exchange's lifetime must count against the exchange total like any
-		// other accumulation (review-08 blocker 7).
+		// other accumulation.
 		suffix := snapshot[len(accumulated):]
 		s.totalAccumulated += int64(len(suffix))
 		if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
@@ -2744,7 +2725,7 @@ func (s *anthropicResponsesStreamState) reconcileToolArguments(
 
 // checkAccumulated bounds one accumulated semantic builder (text, refusal,
 // or tool arguments) by the per-item bound and the exchange-wide total
-// (review-08 blocker 7): a corrupt upstream must not amplify memory without
+// a corrupt upstream must not amplify memory without
 // limit across many parts.
 func (s *anthropicResponsesStreamState) checkAccumulated(builder *strings.Builder, added int, what string) error {
 	if builder.Len() > maxStreamAccumulatedBytes {
@@ -2768,7 +2749,7 @@ func (s *anthropicResponsesStreamState) checkAccumulated(builder *strings.Builde
 // accumulatedText returns the accumulated text of a content part, or the
 // empty string when the part never accumulated a delta. The empty string is
 // the reconciliation baseline: a zero-delta part reconciles with an empty
-// done snapshot and contradicts any non-empty one (review-08 blocker 4).
+// done snapshot and contradicts any non-empty one.
 func (s *anthropicResponsesStreamState) accumulatedText(key responsePartKey) string {
 	if builder := s.textBufs[key]; builder != nil {
 		return builder.String()
@@ -2777,8 +2758,7 @@ func (s *anthropicResponsesStreamState) accumulatedText(key responsePartKey) str
 }
 
 // accumulatedRefusal returns the accumulated refusal of a content part, or
-// the empty string when the part never accumulated a delta (review-08
-// blocker 4).
+// the empty string when the part never accumulated a delta.
 func (s *anthropicResponsesStreamState) accumulatedRefusal(key responsePartKey) string {
 	if builder := s.refusalBufs[key]; builder != nil {
 		return builder.String()
@@ -2806,8 +2786,7 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 ) ([]AnthropicStreamEvent, error) {
 	// A content part must be owned by a MESSAGE item observed via
 	// output_item.added — function-call and reasoning items own no content
-	// parts — and each (item, content index) identity is unique (review-08
-	// blocker 3).
+	// parts — and each (item, content index) identity is unique.
 	added, ok := s.addedItems[event.ItemID]
 	if !ok {
 		return nil, s.wireError(fmt.Errorf(
@@ -2888,8 +2867,7 @@ func (s *anthropicResponsesStreamState) textDelta(
 		return nil, err
 	}
 	// A text delta must target a text part: forwarding it to a refusal block
-	// would drift the emitted block from every snapshot (review-08 blocker
-	// 4).
+	// would drift the emitted block from every snapshot.
 	if seenType := s.partsSeen[key]; seenType != "output_text" {
 		return nil, s.wireError(fmt.Errorf(
 			"text delta for part of type %q",
@@ -2933,8 +2911,7 @@ func (s *anthropicResponsesStreamState) textDone(
 		))
 	}
 	// The done text must match the accumulated deltas: a mismatch means the
-	// upstream's fragments and its final snapshot disagree (review-08
-	// blocker 4). A part that accumulated nothing reconciles with the empty
+	// upstream's fragments and its final snapshot disagree. A part that accumulated nothing reconciles with the empty
 	// string.
 	if accumulated := s.accumulatedText(key); accumulated != event.Text {
 		return nil, s.wireError(errors.New(
@@ -2955,8 +2932,7 @@ func (s *anthropicResponsesStreamState) contentPartDone(
 	if err := s.checkPartOutputIndex(key, event.OutputIndex); err != nil {
 		return nil, err
 	}
-	// The done part must match the opened part's type (review-08 blocker
-	// 4).
+	// The done part must match the opened part's type.
 	if got := partTypeName(event.Part); got != s.partsSeen[key] {
 		return nil, s.wireError(fmt.Errorf(
 			"content part done type = %q, want %q (observed at content_part.added)",
@@ -2972,7 +2948,7 @@ func (s *anthropicResponsesStreamState) contentPartDone(
 }
 
 // checkPartOutputIndex verifies an event targeting a content part carries
-// the owning item's output index (review-08 blocker 3).
+// the owning item's output index.
 func (s *anthropicResponsesStreamState) checkPartOutputIndex(
 	key responsePartKey,
 	outputIndex int64,
@@ -3015,16 +2991,14 @@ func (s *anthropicResponsesStreamState) functionArgumentsDelta(
 	}
 	pending.arguments.WriteString(event.Delta)
 	// The accumulated arguments are emitted as one generated downstream
-	// frame at output_item.done: bound their cumulative size (review-k
-	// finding 9) and the exchange-wide total (review-08 blocker 7).
+	// frame at output_item.done: bound their cumulative size and the exchange-wide total.
 	if err := s.checkAccumulated(&pending.arguments, len(event.Delta), "tool arguments"); err != nil {
 		return nil, err
 	}
 	// A block that never started (the added item lacked call identity, which
 	// is corrupt wire rejected at output_item.done) must not receive an
 	// input_json_delta without a content_block_start: the bytes are still
-	// accumulated so the eventual rejection is consistent (review-08 blocker
-	// 3).
+	// accumulated so the eventual rejection is consistent.
 	if !pending.started {
 		return startEvents, nil
 	}
@@ -3058,7 +3032,7 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 	// silently replacing it: a mismatch is corrupt upstream wire, and any
 	// snapshot bytes the upstream never streamed as deltas are emitted as
 	// one input_json_delta so the client's assembled input equals the
-	// snapshot (review-08 blocker 4). Identity comes from the item-added
+	// snapshot. Identity comes from the item-added
 	// lifecycle.
 	_, suffix, err := s.reconcileToolArguments(pending, event.Arguments)
 	if err != nil {
@@ -3074,7 +3048,7 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 	// A block that never started (the added item lacked call identity) must
 	// not receive an input_json_delta without a content_block_start; the
 	// suffix is dropped with the exchange, which the done reconciliation
-	// rejects (review-08 blocker 3).
+	// rejects.
 	if pending.started && suffix != "" {
 		partial := suffix
 		events = append(events, AnthropicStreamEvent{
@@ -3101,8 +3075,7 @@ func (s *anthropicResponsesStreamState) refusalDelta(
 		return nil, err
 	}
 	// A refusal delta must target a refusal part: forwarding it to a text
-	// block would drift the emitted block from every snapshot (review-08
-	// blocker 4).
+	// block would drift the emitted block from every snapshot.
 	if seenType := s.partsSeen[key]; seenType != "refusal" {
 		return nil, s.wireError(fmt.Errorf(
 			"refusal delta for part of type %q",
@@ -3145,8 +3118,7 @@ func (s *anthropicResponsesStreamState) refusalDone(
 			seenType,
 		))
 	}
-	// The done refusal must match the accumulated deltas (review-08 blocker
-	// 4). A part that accumulated nothing reconciles with the empty string.
+	// The done refusal must match the accumulated deltas. A part that accumulated nothing reconciles with the empty string.
 	if accumulated := s.accumulatedRefusal(key); accumulated != event.Refusal {
 		return nil, s.wireError(errors.New(
 			"refusal done does not match the accumulated refusal",
@@ -3173,7 +3145,7 @@ func (s *anthropicResponsesStreamState) gateEnvelopePhases(
 // loseControlsOnce records the pinned envelope-controls loss exactly once
 // per stream: the created envelope, the completed envelope, or an
 // incomplete envelope may each carry them, and the first sighting decides
-// (review-j finding 13). An envelope without controls never triggers a
+// An envelope without controls never triggers a
 // loss.
 func (s *anthropicResponsesStreamState) loseControlsOnce(
 	envelope ResponseEnvelope,
@@ -3210,7 +3182,7 @@ func (s *anthropicResponsesStreamState) loseControlsOnce(
 }
 
 // losePhaseOnce records the output-message phase loss exactly once per
-// item (review-j finding 10).
+// item.
 func (s *anthropicResponsesStreamState) losePhaseOnce(
 	message *ResponsesOutputMessage,
 ) error {
@@ -3287,8 +3259,8 @@ func (s *anthropicResponsesStreamState) incomplete(
 // terminal may only follow response.created, every opened item, content
 // part, and tool block must have been closed by its done events — an open
 // block at the terminal is corrupt upstream wire, never a synthesized
-// content_block_stop (review-08 blocker 3) — and the envelope's output
-// items must match the incrementally observed output (review-08 blocker 4).
+// content_block_stop — and the envelope's output
+// items must match the incrementally observed output.
 func (s *anthropicResponsesStreamState) gateTerminalEnvelope(
 	envelope ResponseEnvelope,
 ) error {
@@ -3309,8 +3281,7 @@ func (s *anthropicResponsesStreamState) gateTerminalEnvelope(
 	}
 	// Every observed output item must have been closed by its
 	// output_item.done before the terminal envelope: a message or reasoning
-	// item left open at the terminal is corrupt upstream wire (review-08
-	// blocker 3).
+	// item left open at the terminal is corrupt upstream wire.
 	for itemID := range s.addedItems {
 		if _, done := s.doneItems[itemID]; !done {
 			return s.wireError(fmt.Errorf(
@@ -3326,7 +3297,7 @@ func (s *anthropicResponsesStreamState) gateTerminalEnvelope(
 // consistent with the incrementally observed output: every envelope item
 // must have been added with a matching type, message content must match the
 // observed parts and accumulated text, and function calls must match their
-// closed done snapshots (review-08 blocker 4). Observed items MAY be absent
+// closed done snapshots. Observed items MAY be absent
 // from the envelope: the published function-calling guide's completed
 // envelope carries "output":[] (and the stop-reason logic already falls back
 // to the state's own knowledge for such upstreams).
@@ -3425,7 +3396,7 @@ func (s *anthropicResponsesStreamState) reconcileTerminalOutput(
 			if err != nil {
 				// Anthropic tool_use.input requires an object: invalid
 				// model-generated arguments are a LOCAL unrepresentable
-				// output, never corrupt upstream wire (review-z commit 2).
+				// output, never corrupt upstream wire.
 				return &UnrepresentableError{
 					Protocol: "anthropic",
 					Path:     "content_block.input",
@@ -3450,7 +3421,7 @@ func (s *anthropicResponsesStreamState) reconcileTerminalOutput(
 
 // terminalEvents emits the terminal message_delta + message_stop. Every
 // opened block must already be closed: gateTerminalEnvelope rejected open
-// blocks, so nothing is synthesized here (review-08 blocker 3).
+// blocks, so nothing is synthesized here.
 func (s *anthropicResponsesStreamState) terminalEvents(
 	stop CanonicalStopReason,
 ) ([]AnthropicStreamEvent, error) {
@@ -3483,7 +3454,7 @@ func (s *anthropicResponsesStreamState) failed(
 	// A failed Responses stream must become an Anthropic error event, never
 	// end_turn. The failure terminal may only follow response.created: a
 	// failed envelope before the created envelope is a corrupt lifecycle
-	// (review-08 blocker 3).
+	//.
 	if !s.messageSent {
 		return nil, s.wireError(errors.New(
 			"responses stream terminal before response.created",
@@ -3569,7 +3540,7 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 		}
 		// The required Messages breakdown components the source did not
 		// provide enter the loss decision before the zeros are emitted
-		// (review-k finding 6); gated once per stream.
+		//; gated once per stream.
 		if err := s.loseUnknownUsageComponentsOnce(usage); err != nil {
 			return err
 		}
@@ -3579,7 +3550,7 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 	if s.usage == nil {
 		// message_delta.usage is required on the wire. The terminal envelope
 		// provided no usage: zeros would fabricate facts, so the omission is
-		// an explicit loss/reject decision (review-j finding 9).
+		// an explicit loss/reject decision.
 		if err := s.report.Lose(
 			s.policy,
 			FeatureUsageUnknown,
@@ -3590,7 +3561,7 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 		}
 		// The Messages wire requires output_tokens_details on the usage
 		// object: the zeros are emitted only after the approved loss above
-		// (review-k finding 6).
+		//.
 		s.usage = &AnthropicUsage{
 			OutputTokensDetails: &AnthropicOutputTokensDetails{},
 		}
@@ -3636,7 +3607,7 @@ func responsesUsagePresence(usage *ResponsesUsage) usagePresence {
 // Anthropic form with the pinned semantics: input_tokens +
 // cache_creation_input_tokens + cache_read_input_tokens = total, so the
 // uncached input is the total minus the cached breakdown with checked
-// nonnegative arithmetic (review-j finding 9). The in-memory
+// nonnegative arithmetic. The in-memory
 // created_cache_tokens carrier (never a wire field; set by the composed Chat
 // source) supplies the cache-creation component when present, matching the
 // non-streaming decode. A nil source usage returns (nil, nil): the caller
@@ -3674,7 +3645,7 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage, presence usagePresenc
 	// Checked, architecture-independent int64-to-int conversion before
 	// rendering Messages usage: a count that cannot be represented on this
 	// platform (32-bit builds) is a typed error, never a silent overflow
-	// (review-z commit 5).
+	//.
 	uncached, err := checkedInt64ToInt(usage.InputTokens - cached - cacheWrite)
 	if err != nil {
 		return nil, clamp, &UsageArithmeticError{Detail: "input tokens: " + err.Error()}
@@ -3707,7 +3678,7 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage, presence usagePresenc
 }
 
 // loseReasoningOnce records the reasoning loss exactly once per stream
-// (review-j finding 7): OpenAI reasoning is never synthesized as Anthropic
+// OpenAI reasoning is never synthesized as Anthropic
 // thinking, and dropping it silently would bypass the loss policy that the
 // non-streaming path consults.
 func (s *anthropicResponsesStreamState) loseReasoningOnce() error {
@@ -3736,7 +3707,7 @@ func (s *anthropicResponsesStreamState) reasoningPartAdded(
 		// content blocks: the Responses FSM tracks reasoning phase per
 		// item, so interleaved part lifecycles across items are FSM-legal
 		// but unrenderable — reject as corrupt upstream wire rather than
-		// misattribute deltas into the wrong block (review
+		// misattribute deltas into the wrong block.
 		// ses_f82433a3affeYcnpN3ETKBmQxz; the previous behavior panicked
 		// on the nil'd index after the first part closed).
 		return nil, s.wireError(fmt.Errorf(
@@ -3881,8 +3852,7 @@ func partTypeName(part ResponsesStreamContentPart) string {
 
 // checkedInt64ToInt converts an int64 token count to int with an explicit
 // range check: the Messages wire types use platform int, and a silent
-// wrap on 32-bit builds would emit a corrupt negative count (review-z
-// commit 5).
+// wrap on 32-bit builds would emit a corrupt negative count.
 func checkedInt64ToInt(value int64) (int, error) {
 	converted := int(value)
 	if int64(converted) != value {

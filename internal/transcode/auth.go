@@ -123,8 +123,7 @@ type SecretSource interface {
 
 // staticSecretSource pins an already-resolved secret value: the mapping
 // freeze contract resolves the credential once at handler construction, so
-// a mutable custom source can never change live behavior (autopsy
-// 2026-09-06 M9).
+// a mutable custom source can never change live behavior.
 type staticSecretSource string
 
 func (s staticSecretSource) Secret(context.Context) (string, error) {
@@ -205,7 +204,7 @@ func (p AuthPolicy) Validate(target UpstreamProtocol) error {
 
 	// A secret-requiring mode must have a way to obtain the secret:
 	// inbound forwarding or a configured source. A missing source would
-	// otherwise pass startup and fail every request (review-j finding 14).
+	// otherwise pass startup and fail every request.
 	if p.Mode != AuthNone && p.Mode != AuthExternalSigner && !p.Inbound && p.Secret == nil {
 		return errors.New("auth mode requires a secret source or inbound credentials")
 	}
@@ -246,7 +245,7 @@ func ApplyTargetAuthentication(
 	if policy.Mode == AuthExternalSigner {
 		// The signer is attached to the request context; the signing
 		// transport inside the retry chain signs EVERY actual attempt after
-		// body reconstruction (review-z commit 4).
+		// body reconstruction.
 		*req = *req.WithContext(WithRequestSigner(req.Context(), policy.Signer))
 		return nil
 	}

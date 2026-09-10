@@ -154,7 +154,7 @@ func TestBodyReplay(t *testing.T) {
 func TestRetry_BreakerEpochFromContext(t *testing.T) {
 	// Verify that the breakerEpoch is extracted from the request context
 	// when set by the proxy's pre-check Allow() call. This prevents the
-	// stale-probe bypass described in review-06 Finding 1: without the
+	// stale-probe bypass: without the
 	// context handoff, the retry transport's breakerEpoch would be 0 for
 	// the first attempt, causing RecordFailure(..., epoch=0) to bypass
 	// the stale-probe guard in circuitbreaker.RecordFailure.
@@ -2879,7 +2879,7 @@ func TestIsNonRetryableTraversesMultiUnwrap(t *testing.T) {
 // TestSignerErrorBodyTooLargeReturnsTypedError pins the body-too-large
 // branch: a non-retryable local defect (e.g. a signing failure) must return
 // its own typed error, never a fabricated context.Canceled, and must not
-// open the circuit breaker (review-z commit 4).
+// open the circuit breaker.
 func TestSignerErrorBodyTooLargeReturnsTypedError(t *testing.T) {
 	signerErr := &nonRetryableTestError{err: errors.New("signing failed")}
 	inner := rtFunc(func(req *http.Request) (*http.Response, error) {

@@ -665,7 +665,7 @@ func TestParseRetryAfter(t *testing.T) {
 }
 
 func TestParseRetryAfter_HTTPDateClockSkew(t *testing.T) {
-	// Regression test for scratch/review-14.md: when a Date header is present,
+	// Regression test: when a Date header is present,
 	// ParseRetryAfter must compute the remaining delay using upstream-clock-only
 	// timestamps (Retry-After - Date) and proxy-clock-only elapsed time, so that
 	// clock skew between the machines does not inflate or deflate the result.
@@ -868,7 +868,7 @@ func TestIsTemporaryBanResponse_HTTPDateClockSkew(t *testing.T) {
 }
 
 func TestIsTemporaryBanResponse_HTTPDateClockSkewWithDate(t *testing.T) {
-	// Regression test for scratch/review-14.md: when a Date header is present,
+	// Regression test: when a Date header is present,
 	// IsTemporaryBanResponse must compute the remaining delay using upstream-
 	// clock-only timestamps (Retry-After - Date) and proxy-clock-only elapsed
 	// time, so that clock skew between the machines does not cause active bans
@@ -1791,7 +1791,7 @@ func TestBreaker_RetryAfterHTTPDate(t *testing.T) {
 // TestBreaker_PenaltyDurationFormula pins the exact implemented formula with
 // a table over consecutive failure counts: BasePenalty * (1 + consecutive),
 // so zero consecutive failures already yields one base unit and the first
-// recorded failure yields two (review-j finding 16).
+// recorded failure yields two.
 func TestBreaker_PenaltyDurationFormula(t *testing.T) {
 	const base = 2 * time.Second
 	const maxPenalty = 7 * time.Second
@@ -1804,7 +1804,7 @@ func TestBreaker_PenaltyDurationFormula(t *testing.T) {
 		{"zero consecutive", 0, base},
 		{"first failure", 1, 2 * base},
 		{"second consecutive", 2, 3 * base},
-		// Cap (review-z commit 5): consecutive is capped at
+		// Cap: consecutive is capped at
 		// maxPenalty/basePenalty - 1, so the scaled product can never
 		// exceed maxPenalty by construction. With base=2s, max=7s the cap
 		// is 7/2-1 = 2 -> penalty = 2s * (1+2) = 6s (the largest multiple
@@ -1845,7 +1845,7 @@ func TestBreaker_PenaltyDurationFormula(t *testing.T) {
 	}
 }
 
-// TestBreaker_PenaltyOverflowExtreme pins the review-z commit 5 cap at the
+// TestBreaker_PenaltyOverflowExtreme pins the consecutive cap at the
 // true overflow edge: with a 1ns base penalty and a max penalty of
 // MaxInt64ns, the OLD cap (max/base without -1) let 1+consecutive wrap to
 // MinInt64, zeroing the penalty. The -1 cap (floored at 0) makes the product
@@ -1869,7 +1869,7 @@ func TestBreaker_PenaltyOverflowExtreme(t *testing.T) {
 	// Floor: base > max (only reachable by direct struct misuse) still
 	// yields a sane penalty: the cap floors at 0, the scaled value is one
 	// base unit, and the min() clamp caps it at maxPenalty — never an
-	// overflow, never negative (review-z commit 5).
+	// overflow, never negative.
 	b2 := &Breaker{cfg: breakerConfig{basePenalty: 10 * time.Second, maxPenalty: time.Second}}
 	b2.consecutive = math.MaxInt64
 	if p := b2.PenaltyDuration(); p != time.Second {
@@ -1878,7 +1878,7 @@ func TestBreaker_PenaltyOverflowExtreme(t *testing.T) {
 }
 
 // TestBreaker_ConstructorValidationMatrix proves impossible constructor
-// values fail fast at construction (review-z commit 5): zero/negative
+// values fail fast at construction: zero/negative
 // penalties, an inconsistent max < base pair, and invalid thresholds are
 // all construction errors, never silent coercions.
 func TestBreaker_ConstructorValidationMatrix(t *testing.T) {

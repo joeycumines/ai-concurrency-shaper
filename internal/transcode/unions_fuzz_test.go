@@ -33,7 +33,7 @@ func FuzzWireUnions(f *testing.F) {
 		[]byte(`null`),
 		[]byte(`123`),
 		[]byte(`{"type":"unknown"}`),
-		// Mixed-arm seeds (review-k finding 5): a block carrying another
+		// Mixed-arm seeds: a block carrying another
 		// arm's fields must be rejected at decode, never silently discarded.
 		[]byte(`{"type":"text","text":"visible","source":{"type":"url","url":"https://example.test/image.png"}}`),
 		[]byte(`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"x"},"text":"t"}`),

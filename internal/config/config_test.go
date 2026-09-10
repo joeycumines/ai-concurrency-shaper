@@ -1132,7 +1132,7 @@ func TestConfigUnprotectedProviderCount(t *testing.T) {
 }
 
 // TestValidateMBFlag proves negative and overflowing megabyte flags are
-// rejected against their actual byte shift (review-j finding 14): a value
+// rejected against their actual byte shift: a value
 // valid at shift 20 may overflow at shift 22.
 func TestValidateMBFlag(t *testing.T) {
 	for _, tc := range []struct {
@@ -1158,8 +1158,7 @@ func TestValidateMBFlag(t *testing.T) {
 		{"negative", -1, 20},
 		{"overflow at 20", (math.MaxInt64 >> 20) + 1, 20},
 		// retry-max-body-mb is validated at shift 21 because its byte value is
-		// doubled (journal sizing maxBody*2) and must not overflow (review-08
-		// additional 3).
+		// doubled (journal sizing maxBody*2) and must not overflow.
 		{"overflow at 21", (math.MaxInt64 >> 21) + 1, 21},
 		{"overflow at 22", (math.MaxInt64 >> 22) + 1, 22},
 	} {

@@ -1,15 +1,15 @@
 package transcode
 
-// J1 regression tests (review-k finding 1, blocker):
+// J1 regression tests:
 //
-//   - response.output_item.added is a DETACHED snapshot of the message as it
-//     exists at creation (item.content == [] on the first ordinary text
-//     delta), never the live item that subsequent events mutate;
-//   - a premature [DONE] — before any finish_reason — terminates the
-//     exchange IMMEDIATELY at the sentinel with the typed upstream
-//     truncation error, so the reader never hangs on an upstream that keeps
-//     the HTTP response open after [DONE] and the exchange classifies as an
-//     upstream body failure.
+//  - response.output_item.added is a DETACHED snapshot of the message as it
+//    exists at creation (item.content == [] on the first ordinary text
+//    delta), never the live item that subsequent events mutate;
+//  - a premature [DONE] — before any finish_reason — terminates the
+//    exchange IMMEDIATELY at the sentinel with the typed upstream
+//    truncation error, so the reader never hangs on an upstream that keeps
+//    the HTTP response open after [DONE] and the exchange classifies as an
+//    upstream body failure.
 
 import (
 	"bytes"
@@ -45,7 +45,7 @@ func drainReader(t *testing.T, reader *convertingReader) (string, error) {
 // text delta emits the full trace — output_item.added with item.content == []
 // (a snapshot of creation-time state), then content_part.added, then
 // output_text.delta — and the terminal envelope later carries the FULL
-// accumulated text (review-k finding 1).
+// accumulated text.
 func TestChatStreamOutputItemAddedIsCreationSnapshot(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -194,7 +194,6 @@ func mustDecodeResponsesEvent(t *testing.T, data []byte) ResponsesSSEEvent {
 // finish_reason, followed by upstream EOF, terminates the exchange at the
 // sentinel: the typed upstream truncation error is returned, the client
 // receives the dialect error event, and no success terminal is emitted
-// (review-k finding 1).
 func TestChatStreamPrematureDoneImmediateEOF(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -263,7 +262,6 @@ func assertPrematureDoneResult(
 // TestChatStreamPrematureDoneHeldOpen proves the reader stops at the [DONE]
 // sentinel even when the upstream keeps the connection open after it: no hang
 // (bounded by the test deadline), same typed upstream error and error event
-// (review-k finding 1).
 func TestChatStreamPrematureDoneHeldOpen(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
@@ -302,7 +300,7 @@ func TestChatStreamPrematureDoneHeldOpen(t *testing.T) {
 // TestChatStreamComposedPrematureDone proves the composed Chat→Anthropic
 // direction: a [DONE] before any finish_reason returns the typed upstream
 // truncation error and the reader emits the Anthropic error frame and stops —
-// never an empty non-terminal batch (review-k finding 1).
+// never an empty non-terminal batch.
 func TestChatStreamComposedPrematureDone(t *testing.T) {
 	chat := newChatResponsesStreamState(
 		testStreamContext(),

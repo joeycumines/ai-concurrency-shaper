@@ -1,7 +1,7 @@
 package transcode
 
 // J6 regression tests: Responses→Messages stream identity, reasoning loss,
-// stop nullability, and usage (review-j findings 7, 8, 9).
+// stop nullability, and usage.
 
 import (
 	"encoding/json"
@@ -12,7 +12,6 @@ import (
 
 // TestAnthropicStreamPartBlockIdentity proves two message items with the same
 // content_index 0 target their own Anthropic blocks — no aliasing
-// (review-j finding 7).
 func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
@@ -102,7 +101,7 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 
 // TestAnthropicStreamReasoningLossExactlyOnce proves reasoning events enter
 // the loss decision exactly once: strict rejects, permissive converts with a
-// single recorded loss (review-j finding 7).
+// single recorded loss.
 func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 	// Strict: the first reasoning event rejects the stream. The policy
 	// approves the unavoidable usage-timing loss (cache_creation is never
@@ -222,7 +221,7 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 
 // TestAnthropicStreamMessageStartNullStopFields proves message_start
 // serializes stop_reason: null and stop_sequence: null, and the stop reason
-// appears only in message_delta (review-j finding 8).
+// appears only in message_delta.
 func TestAnthropicStreamMessageStartNullStopFields(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
@@ -303,7 +302,7 @@ func TestAnthropicStreamMessageStartNullStopFields(t *testing.T) {
 
 // TestAnthropicUsageUncachedArithmetic proves the Responses→Anthropic usage
 // conversion: uncached input = total - cache read, never a double count, with
-// checked nonnegative arithmetic (review-j finding 9).
+// checked nonnegative arithmetic.
 func TestAnthropicUsageUncachedArithmetic(t *testing.T) {
 	usage := &ResponsesUsage{
 		InputTokens:  45,
@@ -383,7 +382,6 @@ func TestAnthropicUsageUncachedArithmetic(t *testing.T) {
 
 // TestAnthropicUsageStreamNonStreamAgree proves the stream and non-stream
 // conversions produce identical Anthropic usage for the same source
-// (review-j finding 9).
 func TestAnthropicUsageStreamNonStreamAgree(t *testing.T) {
 	source := `{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi","annotations":[]}]}],"usage":{"input_tokens":45,"input_tokens_details":{"cached_tokens":5},"output_tokens":25,"output_tokens_details":{"reasoning_tokens":12},"total_tokens":70}}`
 
@@ -466,7 +464,7 @@ func TestAnthropicUsageStreamNonStreamAgree(t *testing.T) {
 
 // TestAnthropicNonStreamUnknownUsageLoss proves the non-stream Messages
 // render with unknown usage enters the loss decision instead of fabricating
-// zeros (review-j finding 9).
+// zeros.
 func TestAnthropicNonStreamUnknownUsageLoss(t *testing.T) {
 	source := `{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi","annotations":[]}]}]}`
 	response, err := DecodeResponsesResponse([]byte(source))

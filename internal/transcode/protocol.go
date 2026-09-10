@@ -55,7 +55,7 @@ func NewRouteKey(method, path string) (RouteKey, error) {
 	}
 	// A route path is matched literally: query or fragment characters would
 	// be percent-encoded into the match, so a configured path carrying them
-	// is a configuration error (review-08 additional 5).
+	// is a configuration error.
 	if strings.ContainsAny(path, "?#") {
 		return RouteKey{}, fmt.Errorf(
 			"transcode route path %q must not contain query or fragment characters",
@@ -143,7 +143,7 @@ type ChatCapabilities struct {
 	// decoded, for upstreams that accept system messages anywhere (e.g. the
 	// genuine OpenAI chat endpoint). When unset — the default —
 	// system-channel turns consolidate into one leading system message
-	// under the mid_conversation_system loss policy (autopsy 02: open-weights
+	// under the mid_conversation_system loss policy (open-weights
 	// chat templates reject any system message after index 0).
 	SystemAnywhere bool
 }
@@ -168,7 +168,7 @@ type Mapping struct {
 }
 
 // Validate checks the whole immutable route configuration so a misconfigured
-// mapping fails at startup, never on the first request (review-j finding 14):
+// mapping fails at startup, never on the first request:
 // the route shape, the direction, the authentication policy, and the model
 // map.
 func (m Mapping) Validate() error {
@@ -194,7 +194,7 @@ func (m Mapping) Validate() error {
 		// Messages tools carry no strictness semantic, the Responses
 		// function-tool contract requires explicit strict, and emitting
 		// strict:false is that loss — rejected on every tool request
-		// otherwise (review-z commit 6). The configuration cannot possibly
+		// otherwise. The configuration cannot possibly
 		// serve tool traffic, so it fails at startup instead. The check is
 		// feature-specific rather than "empty policy" so the CLI's sensible
 		// default loss set cannot accidentally silence it.
@@ -218,7 +218,7 @@ func (m Mapping) Validate() error {
 	if !m.Auth.IsZero() {
 		// The custom-header name checks run BEFORE the policy validation so
 		// an operator fixing a header-mode route sees the header-name error
-		// first, then the missing-source error (autopsy 2026-09-06 M6 made
+		// first, then the missing-source error (
 		// the missing source a startup failure).
 		if m.Auth.Mode == AuthCustomHeader {
 			if strings.TrimSpace(m.Auth.CustomHeader) == "" {
@@ -249,8 +249,7 @@ func (m Mapping) Validate() error {
 	// A model map with no explicit entries AND no usable identity fallback
 	// is no model-resolution policy at all: every request model fails to
 	// resolve. RequireExplicitMap disables the identity fallback even when
-	// AllowIdentity is set, so it too demands explicit entries (review-z
-	// commit 6). Checked after the auth policy so a more specific auth
+	// AllowIdentity is set, so it too demands explicit entries. Checked after the auth policy so a more specific auth
 	// failure is reported first.
 	if len(m.ModelMap.Exact) == 0 &&
 		(!m.ModelMap.AllowIdentity || m.ModelMap.RequireExplicitMap) {
@@ -280,7 +279,7 @@ func (m Mapping) Validate() error {
 // auth stripping (including the x-amz-*/x-goog-* cloud-signature prefixes),
 // hop-by-hop removal, representation sanitization, forwarded-header
 // deletion, and anti-compression would remove or rewrite it — the secret
-// would be stripped, clobbered, or leaked (review-j finding 14).
+// would be stripped, clobbered, or leaked.
 func reservedTranscodeHeaderName(name string) bool {
 	lower := strings.ToLower(name)
 	switch lower {

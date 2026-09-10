@@ -332,7 +332,7 @@ func firstNonEmpty(values ...string) string {
 // exchange is an upstream failure (breaker penalty and slot protection).
 // Valid source features this transcoder does not support remain
 // UnsupportedFeatureError — a local conversion result — and are never
-// wrapped in this type (review-k finding 3).
+// wrapped in this type.
 type UpstreamWireError struct {
 	// Protocol is the upstream protocol whose wire data is corrupt.
 	Protocol UpstreamProtocol
@@ -378,7 +378,7 @@ func (e *UsageArithmeticError) Error() string {
 // is or carries an UnsupportedFeatureError is NEVER wrapped: a valid source
 // feature this transcoder knows but does not support is a local conversion
 // result, and the typed error is passed through untouched so no classification
-// point can mistake it for corrupt wire (review-k finding 3).
+// point can mistake it for corrupt wire.
 func upstreamWireError(protocol UpstreamProtocol, status int, cause error) error {
 	if _, ok := errors.AsType[*UnsupportedFeatureError](cause); ok {
 		return cause
@@ -388,7 +388,7 @@ func upstreamWireError(protocol UpstreamProtocol, status int, cause error) error
 
 // StreamConversionError is a typed conversion error carrying provenance and
 // the upstream response status, so the exchange classification never relies
-// on error-string matching (review-j finding 11).
+// on error-string matching.
 type StreamConversionError struct {
 	Cause      error
 	Provenance ExchangeProvenance
@@ -408,8 +408,7 @@ func (e *StreamConversionError) Unwrap() error { return e.Cause }
 // response itself reports a failure — a 2xx Responses envelope with status
 // "failed". The exchange classifies as an upstream failure with the
 // upstream's HTTP status, matching the streamed response.failed
-// classification; it is never a local conversion error (review-j finding
-// 11).
+// classification; it is never a local conversion error.
 type UpstreamSemanticFailureError struct {
 	Message string
 }
@@ -425,7 +424,7 @@ func (e *UpstreamSemanticFailureError) Error() string {
 // cannot represent at all — e.g. model-generated tool arguments that are not
 // a JSON object when the target requires an object. It is a LOCAL conversion
 // result: invalid model output is never an upstream defect, never opens the
-// circuit breaker, and the exchange records it neutral (review-z commit 2).
+// circuit breaker, and the exchange records it neutral.
 type UnrepresentableError struct {
 	Protocol string
 	Path     string

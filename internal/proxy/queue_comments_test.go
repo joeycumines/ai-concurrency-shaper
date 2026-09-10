@@ -1,6 +1,6 @@
 package proxy
 
-// QUEUE-1-B: opt-in SSE queue comments. When enabled and the request's
+// Opt-in SSE queue comments. When enabled and the request's
 // Accept header selects text/event-stream, the proxy commits 200 + SSE
 // headers BEFORE admission and writes ": queue-wait elapsed=N" comment
 // lines while the request waits for a slot — keeping the client's
@@ -89,7 +89,11 @@ func TestProxy_QueueCommentsEmittedWhileQueued(t *testing.T) {
 		f.p.ServeHTTP(rec, req)
 		firstDone <- rec.Code
 	}()
-	time.Sleep(100 * time.Millisecond)
+	// Deterministic readiness: the first request must demonstrably hold the
+	// slot before the streaming request fires, so the streaming request is
+	// the one that queues. A fixed sleep lets it win the slot under load,
+	// which would leave it with no queue comments and false-fail.
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool { return s.Active == 1 })
 
 	// Second request: queues with comments (streaming Accept).
 	secondRec := httptest.NewRecorder()
@@ -100,7 +104,14 @@ func TestProxy_QueueCommentsEmittedWhileQueued(t *testing.T) {
 		f.p.ServeHTTP(secondRec, secondReq)
 		secondDone <- secondRec.Code
 	}()
-	time.Sleep(250 * time.Millisecond)
+	// Deterministic readiness: the streaming request must demonstrably have
+	// been queued for at least two 20ms comment ticker intervals before the
+	// gate closes, so the body carries the admission comment plus at least
+	// one ticker comment. A fixed sleep lets the request queue late under
+	// load and be released before the first tick.
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool {
+		return s.Queued == 1 && s.OldestQueuedAge >= 40*time.Millisecond
+	})
 
 	// Release the gate: the first request completes, the slot frees, the
 	// queued request is admitted and its real response flows.
@@ -216,7 +227,12 @@ func TestProxy_QueueCommentsTimeoutAborts(t *testing.T) {
 		f.p.ServeHTTP(rec, req)
 		firstDone <- rec.Code
 	}()
-	time.Sleep(50 * time.Millisecond)
+	// Deterministic readiness: the first request must demonstrably hold the
+	// slot before the streaming request is served, so the streaming request
+	// queues and times out with comments. A fixed sleep lets it take the
+	// slot under load, where it blocks upstream (the gate never opens) and
+	// times out with no comments, false-failing the comment assertions.
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool { return s.Active == 1 })
 
 	secondRec := httptest.NewRecorder()
 	secondReq := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)

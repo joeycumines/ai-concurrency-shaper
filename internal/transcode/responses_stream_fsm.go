@@ -1,6 +1,6 @@
 package transcode
 
-// The reusable Responses stream lifecycle FSM (review-z commit 3): every
+// The reusable Responses stream lifecycle FSM: every
 // stream event passes through ONE validator before any protocol conversion.
 // The FSM owns the phase model (item/part/call phases), sequence and identity
 // pinning, output-index uniqueness, accumulated text/refusal/arguments
@@ -47,7 +47,7 @@ const (
 
 // fsmItem is the FSM's per-item state. Accumulated text/refusal/arguments
 // use strings.Builder to avoid quadratic re-copying on every delta (the
-// review-k finding 9 antipattern the render machine already avoids).
+// ).
 type fsmItem struct {
 	outputIndex int64
 	kind        string // message, function_call, function_call_output, reasoning
@@ -508,7 +508,7 @@ func (f *responsesStreamFSM) argumentsDone(event ResponseFunctionCallArgumentsDo
 	}
 	// The done snapshot carries model-generated arguments preserved
 	// byte-exact: any string is legal and invalid model output is never an
-	// upstream defect (review-z commit 2). The render-side reconciliation
+	// upstream defect. The render-side reconciliation
 	// remains the snapshot-vs-accumulated authority (16).
 	item.calls[event.ItemID] = callPhaseArgumentsDone
 	return nil

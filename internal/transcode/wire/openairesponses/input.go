@@ -84,7 +84,7 @@ type InputContentPart interface {
 	Validate() error
 }
 
-// Output-type parts join the input-part union directly (autopsy 01 §3.3):
+// Output-type parts join the input-part union directly:
 // an assistant easy input message carries the same output_text/refusal
 // shapes the response side produces, so the response wire types are reused
 // instead of duplicated behind adapters. Legality is enforced at the
@@ -247,7 +247,7 @@ func (p InputContentParts) MarshalJSON() ([]byte, error) {
 // OutputText/OutputRefusal types the response side uses — reused via the
 // input-part marker below rather than thin adapters — because the field
 // shapes are identical and the canonical mapping reads only .Text/.Refusal
-// (autopsy 01 §3.3). This dispatcher has no context, so the consumers gate
+// . This dispatcher has no context, so the consumers gate
 // legality: EasyInputMessage.Validate admits output parts only for the
 // assistant role, and FunctionOutput.Validate rejects them everywhere.
 func DecodeInputContentPart(data []byte) (InputContentPart, error) {
@@ -288,7 +288,7 @@ func DecodeInputContentPart(data []byte) (InputContentPart, error) {
 	if err := wire.Decode(data, part); err != nil {
 		return nil, err
 	}
-	// Decode-side normalization (autopsy 01): real clients omit the
+	// Decode-side normalization: real clients omit the
 	// annotations key on output_text parts; a decoded absent array is the
 	// same empty array. Validate itself stays strict for hand-built values.
 	if text, ok := part.(*OutputText); ok && text.Annotations == nil {
@@ -400,7 +400,7 @@ func (m *EasyInputMessage) Validate() error {
 		return fmt.Errorf("invalid assistant phase %q", m.Phase)
 	}
 	// Output-type parts are assistant output: legal only on an assistant
-	// easy message (autopsy 01 §3.3). Other roles keep the typed rejection
+	// easy message. Other roles keep the typed rejection
 	// the union dispatch produced before output arms were added.
 	if m.Role != InputRoleAssistant {
 		for i, part := range m.Content.Parts {
@@ -441,7 +441,7 @@ func (m *PreviousOutputMessage) Validate() error {
 		return fmt.Errorf("previous output message role = %q", m.Role)
 	}
 	// Status is optional on a previous-output history item: real codex resume
-	// traffic sends "status": "" (field 2026-08-24, task 30). The three sibling
+	// traffic sends "status": "" (field 2026-08-24). The three sibling
 	// input items (FunctionCallInput, FunctionCallOutputInput, ReasoningInput)
 	// treat an absent status as legal; a non-empty value that is not a known
 	// status is still a typed rejection.
@@ -503,7 +503,7 @@ func (o FunctionOutput) Validate() error {
 	}
 	// A function_call_output payload takes input-type parts only: the
 	// output_text/refusal arms exist for assistant message history, never
-	// for tool results (autopsy 01 review F1 — the typed rejection the
+	// for tool results (the typed rejection the
 	// union dispatch produced before those arms existed is preserved).
 	for i, part := range o.Parts {
 		if name := outputPartTypeName(part); name != "" {

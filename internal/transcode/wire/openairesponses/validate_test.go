@@ -63,7 +63,7 @@ func TestToolValidateBranches(t *testing.T) {
 	}
 }
 
-// TestToolValidateMissingType reproduces review-12 finding 4: a tool with an
+// TestToolValidateMissingType reproduces: a tool with an
 // empty/missing type decodes into the lenient built-in branch and Validate's
 // default arm returns nil, so it can be silently dropped under an approved
 // builtin_tools loss instead of rejected as malformed. Missing type is never
@@ -91,7 +91,7 @@ func TestToolValidateMissingType(t *testing.T) {
 	}
 }
 
-// TestToolValidateCrossTypeFields reproduces review-12 finding 4: cross-type
+// TestToolValidateCrossTypeFields reproduces: cross-type
 // fields (tools on a function tool; parameters/strict on a namespace tool)
 // are accepted by the shared decode struct then silently ignored. The union
 // must reject them with typed errors so a malformed tool definition never
@@ -448,7 +448,7 @@ func TestOutputItemValidateBranches(t *testing.T) {
 		t.Fatal("name-less function call accepted")
 	}
 	// Invalid model-generated arguments are preserved exactly: any string
-	// is legal on the wire (review-z commit 2).
+	// is legal on the wire.
 	if err := (&FunctionCallOutputItem{
 		ID: "fc_1", Type: "function_call", Status: ItemCompleted, CallID: "c", Name: "f", Arguments: `{`,
 	}).Validate(); err != nil {
@@ -519,7 +519,7 @@ func TestFunctionCallOutputResultBranches(t *testing.T) {
 	}
 }
 
-// TestPreviousOutputMessageEmptyStatus (field regression 2026-08-24, task 30):
+// TestPreviousOutputMessageEmptyStatus (field regression 2026-08-24):
 // real codex resume traffic sends a previous-output history item carrying
 // "status": "" — the sibling input items (FunctionCallInput,
 // FunctionCallOutputInput, ReasoningInput) treat an absent status as optional

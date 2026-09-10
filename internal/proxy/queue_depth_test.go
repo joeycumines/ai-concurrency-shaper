@@ -1,6 +1,6 @@
 package proxy
 
-// QUEUE-1: bounded-queue admission. With a queue-depth limit configured, a
+// Bounded-queue admission. With a queue-depth limit configured, a
 // limited request arriving while the effective limiter already holds the
 // bound in waiters fails fast with 429 Too Many Requests + Retry-After
 // (the protocol signal AI clients and the official SDKs already handle)
@@ -62,7 +62,11 @@ func TestProxy_QueueDepthLimitRejectsWith429(t *testing.T) {
 		p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
 		firstDone <- rec.Code
 	}()
-	time.Sleep(100 * time.Millisecond)
+	// Deterministic readiness: request 1 must demonstrably hold the slot
+	// (active 1) before request 2 fires, so request 2 is the one that
+	// queues. A fixed sleep lets request 2 win the slot under load, which
+	// would admit request 3 instead of rejecting it.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool { return s.Active == 1 })
 
 	// Request 2 queues (waiters = 1, at the bound).
 	secondDone := make(chan int, 1)
@@ -71,7 +75,11 @@ func TestProxy_QueueDepthLimitRejectsWith429(t *testing.T) {
 		p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
 		secondDone <- rec.Code
 	}()
-	time.Sleep(100 * time.Millisecond)
+	// Deterministic readiness: request 2 must demonstrably be QUEUED
+	// (waiters 1) before request 3 fires, so request 3 finds the depth
+	// bound reached. A fixed sleep lets request 3 arrive before request 2
+	// queues, admitting it instead of rejecting it.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool { return s.Queued == 1 })
 
 	// Request 3 arrives while waiters == 1 >= depth 1: rejected with 429.
 	thirdRec := httptest.NewRecorder()
@@ -165,7 +173,7 @@ func TestProxy_QueueDepthZeroIsUnbounded(t *testing.T) {
 	}
 }
 
-// TestProxy_QueueDepth429ReleasesBreakerProbe pins the review finding
+// TestProxy_QueueDepth429ReleasesBreakerProbe pins the finding
 // (ses_f82433a3affeYcnpN3ETKBmQxz, 2026-09-08): the bounded-queue 429
 // happens after breaker.Allow(), so in HALF_OPEN the request carries the
 // single recovery probe — if it returns on the queue-rejection path without
@@ -231,7 +239,11 @@ func TestProxy_QueueDepth429ReleasesBreakerProbe(t *testing.T) {
 			fillerDone <- rec.Code
 		}()
 	}
-	time.Sleep(100 * time.Millisecond)
+	// Deterministic readiness: one filler must hold the slot and the other
+	// must be queued (waiters 1) before the probe below fires. A fixed
+	// sleep lets the probe arrive before the queue is full under load,
+	// admitting it upstream and timing out instead of asserting the 429.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool { return s.Active == 1 && s.Queued == 1 })
 
 	// Trip the breaker directly: a real exchange could not reach the
 	// upstream while the queue is full, and the direct record keeps the
@@ -368,5 +380,24 @@ func TestProxy_QueueDepthDoesNotRejectWhenSlotsFree(t *testing.T) {
 		if res.code != http.StatusOK {
 			t.Fatalf("request %d returned status %d (body=%q), want 200 OK — false 429 rejection while slots free", i, res.code, res.body)
 		}
+	}
+}
+
+// waitSnapshot polls the collector snapshot until cond holds, failing the
+// test after a bounded deadline. It replaces fixed sleeps in the queue-depth
+// tests: a sleep lets a later request race the queue state it depends on
+// (the slot holder, the queued waiter) and false-fail under load, while a
+// poll on the live snapshot is deterministic.
+func waitSnapshot(t *testing.T, met *metrics.Collector, cond func(metrics.Snapshot) bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if cond(met.Snapshot()) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for the queue-depth precondition; last snapshot: %+v", met.Snapshot())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

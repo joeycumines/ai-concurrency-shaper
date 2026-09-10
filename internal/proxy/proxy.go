@@ -65,7 +65,7 @@ type proxyConfig struct {
 	// (0 = unbounded, the default). A limited request arriving when the
 	// waiters count already reaches the bound fails fast with 429 +
 	// Retry-After instead of queueing — the protocol signal AI clients and
-	// the official SDKs already handle (UNRESP-2/QUEUE-1; prevents silent
+	// the official SDKs already handle (prevents silent
 	// blocking from amplifying into client retries).
 	queueDepthLimit int
 	// queueComments is the SSE queue-comment interval for streaming
@@ -74,7 +74,7 @@ type proxyConfig struct {
 	// SSE headers BEFORE admission and writes ": queue-wait elapsed=N"
 	// comment lines every interval while the request waits for a slot —
 	// keeping the client's connection visibly alive instead of silently
-	// blocking (QUEUE-1-B; operator PSA 2026-09-07: deterministically
+	// blocking (deterministically
 	// testable with the locally-installed Claude Code, since the upstream
 	// is only contacted after admission).
 	queueComments          time.Duration
@@ -152,8 +152,7 @@ func (o *UpstreamOption) applyProxyOption(cfg *proxyConfig) error {
 		return errors.New("proxy: upstream URL scheme must be http or https")
 	}
 	// Hostname() (not Host) is checked: "http://:8080" has a non-empty Host
-	// but no hostname, and would fail per-request instead of at startup
-	// (review-08 additional 4).
+	// but no hostname, and would fail per-request instead of at startup.
 	if o.value.Hostname() == "" {
 		return errors.New("proxy: upstream URL must include a hostname")
 	}
@@ -450,7 +449,7 @@ type RetryMinDelayOption struct {
 
 // WithRetryMinDelay returns an option that sets the minimum retry delay.
 // This gives the downstream service time to complete its accounting before
-// the retry arrives (KILL-05 mitigation). Zero means no floor.
+// the retry arrives. Zero means no floor.
 func WithRetryMinDelay(d time.Duration) *RetryMinDelayOption {
 	return &RetryMinDelayOption{value: d}
 }
@@ -471,7 +470,7 @@ type CancelCooldownOption struct {
 
 // WithCancelCooldown returns an option that sets the client-cancel cooldown.
 // When a client disconnects after an upstream transport attempt has started,
-// the slot is held for this duration before re-admission (KILL-04 mitigation).
+// the slot is held for this duration before re-admission.
 // Zero means no cooldown (immediate release on client cancel).
 func WithCancelCooldown(d time.Duration) *CancelCooldownOption {
 	return &CancelCooldownOption{value: d}
@@ -719,18 +718,16 @@ func New(opts ...Option) (*Proxy, error) {
 
 	// Freeze the upstream URL: both the passthrough director and the
 	// transcode handlers read it on every request, so caller mutation of the
-	// original after New must not change live behavior or race with requests
-	// (review-08 additional 2).
+	// original after New must not change live behavior or race with requests.
 	cfg.upstream = cloneURL(cfg.upstream)
 
 	// Freeze the auth policy: the credential is resolved once and pinned, so
 	// a mutable custom SecretSource or caller mutation of the policy after
-	// New cannot change live behavior, and source failures surface here
-	// (review-08 additional 2). Validate runs BEFORE the Rewrite hook can
+	// New cannot change live behavior, and source failures surface here.
+	// Validate runs BEFORE the Rewrite hook can
 	// rely on it: an invalid programmatic policy (unknown mode, missing
 	// secret source, unresolved auto) fails construction instead of
-	// degrading per request to strip-only forwarding (autopsy 2026-09-06
-	// M8).
+	// degrading per request to strip-only forwarding.
 	if cfg.authPolicy != nil {
 		if err := cfg.authPolicy.Validate(); err != nil {
 			return nil, fmt.Errorf("proxy: auth policy: %w", err)
@@ -743,8 +740,8 @@ func New(opts ...Option) (*Proxy, error) {
 	}
 
 	// Copy the caller's route-limiters map and matcher: mutation of the
-	// originals after New must not change live routing or limiter behavior
-	// (review-08 additional 2). The limiter values stay shared — they are
+	// originals after New must not change live routing or limiter behavior.
+	// The limiter values stay shared — they are
 	// live synchronization objects.
 	cfg.routeLimiters = cloneLimiterMap(cfg.routeLimiters)
 	cfg.matcher = cloneMatcher(cfg.matcher)
@@ -752,7 +749,7 @@ func New(opts ...Option) (*Proxy, error) {
 	// Reject duplicate transcode client routes: the first matching handler
 	// would silently win. The key is method+path. A mapping that declares a
 	// RetryReplayBytes bound must equal the proxy's retry transport body cap
-	// with retries enabled (review-k finding 8): the declared bound is
+	// with retries enabled: the declared bound is
 	// otherwise a silent lie about the actual replay cap.
 	seenTranscodeRoutes := make(map[transcode.RouteKey]struct{}, len(cfg.transcodeMappings))
 	for i := range cfg.transcodeMappings {
@@ -763,11 +760,10 @@ func New(opts ...Option) (*Proxy, error) {
 		seenTranscodeRoutes[routeKey] = struct{}{}
 
 		// An external signer signs EVERY actual attempt AFTER the retry
-		// layer rebuilt the body (review-z commit 4). With retries enabled,
+		// layer rebuilt the body. With retries enabled,
 		// that requires the retry transport to buffer and replay bodies: a
 		// zero body cap means no GetBody is ever supplied, so the signer
-		// contract cannot be met and the configuration cannot possibly work
-		// (review-z commit 6).
+		// contract cannot be met and the configuration cannot possibly work.
 		if cfg.transcodeMappings[i].Mapping.Auth.Mode == transcode.AuthExternalSigner &&
 			cfg.maxRetries != 0 && cfg.maxBodyBytes <= 0 {
 			return nil, fmt.Errorf(
@@ -809,7 +805,7 @@ func New(opts ...Option) (*Proxy, error) {
 			checkRetry = func(resp *http.Response, err error) bool {
 				if err != nil {
 					// Local non-retryable defects (e.g. signing failures)
-					// are never retried (review-z commit 4).
+					// are never retried.
 					return !retry.IsNonRetryable(err)
 				}
 				if resp == nil {
@@ -820,7 +816,7 @@ func New(opts ...Option) (*Proxy, error) {
 				return resp.StatusCode >= 500
 			}
 		}
-		// Disposition (autopsy 04 rec 2, grounded moot): a deterministic
+		// Disposition (grounded moot): a deterministic
 		// transcode decode failure (a 200 body outside the supported wire
 		// subset) can NEVER be retried here, because this policy sees only
 		// RoundTrip errors and HTTP status — the body fails AFTER the
@@ -831,7 +827,7 @@ func New(opts ...Option) (*Proxy, error) {
 		// (transcode_classification_test.go).
 		// The signing transport sits inside the retry chain so EVERY
 		// attempt is signed after the retry layer rebuilt the body and
-		// finalized Content-Length (review-z commit 4). Requests without a
+		// finalized Content-Length. Requests without a
 		// signer in their context pass through untouched.
 		transport = &retry.Transport{
 			Inner: withAttemptMarkingTransport(&transcode.SigningTransport{
@@ -861,7 +857,7 @@ func New(opts ...Option) (*Proxy, error) {
 		if retryInfo.breaker != nil {
 			retryHandlesBreaker = true
 		}
-		// Wire the in-flight retry counter for TUI visibility (KILL-01/03).
+		// Wire the in-flight retry counter for TUI visibility.
 		// The counter is the metrics collector's atomic, so the TUI sees
 		// retry pressure through the snapshot cycle.
 		if retryInfo.setInFlightRetries != nil {
@@ -893,7 +889,7 @@ func New(opts ...Option) (*Proxy, error) {
 	// Build one transcode handler per mapping, each forwarding through the
 	// proxy engine (the retry/breaker-aware transport). The mutable parts of
 	// the configuration are deep-copied so caller mutation after New cannot
-	// change live behavior or race with requests (review-08 additional 2).
+	// change live behavior or race with requests.
 	p.transcodeHandlerMap = make(map[transcode.RouteKey]http.Handler, len(cfg.transcodeMappings))
 	for i := range cfg.transcodeMappings {
 		m := &cfg.transcodeMappings[i]
@@ -1183,7 +1179,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The unlimited admission class exempts a request whose FIRST matching
 	// pattern declares :unlimited — including under -limit-all. The same
 	// first-match lookup drives limiter selection (acquireSlot/FindMatch),
-	// so classification and admission can never disagree (UNRESP-2).
+	// so classification and admission can never disagree.
 	limited := (p.limitAll || p.matcher.IsLimited(r.Method, r.URL.Path)) &&
 		!p.matcher.IsUnlimited(r.Method, r.URL.Path)
 
@@ -1215,7 +1211,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Finalize and record the journal entry BEFORE any counter publishes
-		// (autopsy 2026-09-06 M10, the same counter-before-journal shape
+		// (the same counter-before-journal shape
 		// c9ff856 fixed for the aborted pair): a consumer that observes a
 		// status bucket, the request ring, TotalProxied/TotalPassThrough, or
 		// TotalAborted must find the journal entry already present. Aborted
@@ -1272,11 +1268,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			p.m.RecordRequest(r.Method, r.URL.Path, status, time.Since(start), limited)
 			// The clean-completion counter publishes here — after the journal
 			// entry — instead of at the end of the handler body, so the
-			// counter-then-journal window M10 closed cannot reopen. The
+			// counter-then-journal window cannot reopen. The
 			// admission-completed gate keeps the queue-timeout, cancel, and
 			// circuit-rejection early returns out (they never counted as
 			// clean completions), and aborted exchanges never reach this
-			// branch (review-08 blocker 12).
+			// branch.
 			if recPtr != nil && recPtr.admissionCompleted {
 				p.completionCounter(limited)
 			}
@@ -1292,8 +1288,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if recPtr != nil {
 				// Any recovered panic is an aborted exchange: the exchange never
 				// completed cleanly, the clean-completion counters are skipped,
-				// and the journal records Aborted with ResponseComplete unset
-				// (review-08 blocker 12).
+				// and the journal records Aborted with ResponseComplete unset.
 				recPtr.aborted = true
 				if !recPtr.terminalWritten {
 					recPtr.proxyGeneratedError = true
@@ -1375,7 +1370,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // completionCounter records the exchange in the clean-completion counter
 // selected by the admission path. finalize calls it after the journal entry
-// is published (autopsy 2026-09-06 M10), so a consumer that observes the
+// is published, so a consumer that observes the
 // counter finds the journal entry already present.
 func (p *Proxy) completionCounter(limited bool) {
 	if limited {
@@ -1401,7 +1396,7 @@ func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, ha
 	// The handler records EXACTLY ONE outcome synchronously (its defer
 	// guarantees one when no path recorded it): there is no non-blocking
 	// branch that silently loses provenance, and a missing outcome is an
-	// internal invariant violation (review-z commit 4).
+	// internal invariant violation.
 	outcome, recorded := sink.Load()
 	if !recorded {
 		panic("transcode handler returned without recording an outcome")
@@ -1418,7 +1413,7 @@ func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, ha
 		// Completion is monotonic: the recorder's independent
 		// write-failure observation (a short write or write error on
 		// the raw ResponseWriter) can never be overwritten by an
-		// outcome that claims a clean completion (review-k finding 7).
+		// outcome that claims a clean completion.
 		rec.aborted = rec.aborted ||
 			!outcomeCopy.DownstreamComplete ||
 			rec.downstreamWriteFailed()
@@ -1568,7 +1563,7 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 			if isClientCancel && result.upstreamAttempted && p.cancelCooldown > 0 {
 				// Client disconnected after an upstream transport attempt started. Hold
 				// the slot briefly to prevent N+1 observed concurrency from
-				// downstream accounting lag (KILL-04 mitigation). Unlike
+				// downstream accounting lag. Unlike
 				// phantom penalty and failure hold, the cancelCooldown does NOT
 				// use the isTransportOrProxyError guard — it MUST fire even when
 				// rec.status == 0 (upstream still processing). See
@@ -1624,7 +1619,7 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 				if rec, ok := w.(*statusRecorder); ok {
 					// Any recovered panic is an aborted exchange: it never
 					// reaches the completion counters or a clean journal
-					// finalization (review-08 blocker 12).
+					// finalization.
 					rec.aborted = true
 					if !rec.terminalWritten {
 						rec.proxyGeneratedError = true
@@ -1662,8 +1657,8 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 		// definitive upstream failure retained in the result is recorded
 		// (mirroring the native abort path); everything else cancels the
 		// probe. A LOCAL panic is not an upstream failure: its
-		// proxy-generated 502 must never fail the breaker (review-08
-		// blocker 12 preserves the localPanic guard).
+		// proxy-generated 502 must never fail the breaker (the
+		// localPanic guard preserves that).
 		if !localPanic {
 			p.resolveAbortedExchange(result, retryAttempt, proxyStart, breakerEpoch, upstreamAbortFailure)
 		} else {
@@ -1683,10 +1678,9 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 		p.resolveBreakerResult(result, retryAttempt, proxyStart, breakerEpoch)
 	}
 	// The clean-completion counter publishes in finalize (after the journal
-	// entry; autopsy 2026-09-06 M10). The admission flag is set only after
+	// entry). The admission flag is set only after
 	// the breaker logic above: a panic in it marks the exchange aborted and
-	// skips the counter — the completion counter is never double-counted
-	// (review-08 blocker 12).
+	// skips the counter — the completion counter is never double-counted.
 	if rec != nil {
 		rec.admissionCompleted = true
 	}
@@ -1730,7 +1724,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		r = r.WithContext(p.withRetryAttemptContext(r.Context(), &retryAttempt))
 	}
 
-	// Bounded-queue admission (QUEUE-1): when a depth limit is configured,
+	// Bounded-queue admission: when a depth limit is configured,
 	// a request arriving while the effective limiter already holds the
 	// bound in waiters fails fast with 429 + Retry-After — the protocol
 	// signal AI clients and the official SDKs already handle — instead of
@@ -1758,8 +1752,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			// The request carries a HALF_OPEN recovery probe (Allow()
 			// already admitted it); returning on the queue-rejection path
 			// without cancelling would strand the probe until the open
-			// timeout and block breaker recovery exactly under load
-			// (review ses_f82433a3affeYcnpN3ETKBmQxz).
+			// timeout and block breaker recovery exactly under load.
 			if p.breaker != nil {
 				p.breaker.CancelProbe(breakerEpoch)
 			}
@@ -1777,7 +1770,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		}
 	}
 
-	// SSE queue comments (QUEUE-1-B, opt-in): commit the streaming
+	// SSE queue comments (opt-in): commit the streaming
 	// representation BEFORE admission and keep the client's connection
 	// visibly alive while it waits. Eligibility requires the client's
 	// Accept header to select text/event-stream — the same signal the
@@ -1954,7 +1947,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		if isClientCancel && result.upstreamAttempted && p.cancelCooldown > 0 {
 			// Client disconnected after an upstream transport attempt started. Hold the
 			// slot briefly to prevent N+1 observed concurrency from downstream
-			// accounting lag (KILL-04 mitigation). Unlike phantom penalty and
+			// accounting lag. Unlike phantom penalty and
 			// failure hold, the cancelCooldown does NOT use the
 			// isTransportOrProxyError guard — it MUST fire even when
 			// rec.status == 0 (upstream still processing, WriteHeader not yet
@@ -2075,7 +2068,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 				if rec, ok := w.(*statusRecorder); ok {
 					// Any recovered panic is an aborted exchange: it never
 					// reaches the completion counters or a clean journal
-					// finalization (review-08 blocker 12).
+					// finalization.
 					rec.aborted = true
 					if !rec.terminalWritten {
 						rec.proxyGeneratedError = true
@@ -2113,8 +2106,8 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		// definitive upstream failure retained in the result is recorded
 		// (mirroring the native abort path); everything else cancels the
 		// probe. A LOCAL panic is not an upstream failure: its
-		// proxy-generated 502 must never fail the breaker (review-08
-		// blocker 12 preserves the localPanic guard).
+		// proxy-generated 502 must never fail the breaker (the
+		// localPanic guard preserves that).
 		if !localPanic {
 			p.resolveAbortedExchange(result, retryAttempt, proxyStart, breakerEpoch, upstreamAbortFailure)
 		} else {
@@ -2136,7 +2129,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		p.resolveBreakerResult(result, retryAttempt, proxyStart, breakerEpoch)
 	}
 	// The clean-completion counter publishes in finalize (after the journal
-	// entry; autopsy 2026-09-06 M10), mirroring the passthrough path.
+	// entry), mirroring the passthrough path.
 	if rec, ok := w.(*statusRecorder); ok {
 		rec.admissionCompleted = true
 	}
@@ -2214,7 +2207,7 @@ func isExplicitNonStreamingRequest(r *http.Request) bool {
 // comment goroutine has finished its last write, so the caller can safely
 // take over the ResponseWriter. The recorder's commentsCommitted flag locks
 // the representation: later WriteHeader calls cannot change the status the
-// client already received (QUEUE-1-B).
+// client already received.
 func (p *Proxy) startQueueComments(rec *statusRecorder) func() {
 	rec.commentsCommitted = true
 	rec.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -2363,7 +2356,7 @@ func classifyTranscodeExchange(
 	// precedes the signer: a local request conversion or signing error never
 	// dispatches, so its outcome fact overrides the marker. The marker still
 	// ORs in for exchanges aborted mid-flight where the handler recorded no
-	// attempt fact (review-z commit 4).
+	// attempt fact.
 	attempted := outcome.UpstreamAttempted ||
 		(upstreamAttempted && outcome.Provenance != transcode.ProvenanceLocalRequestConversionError)
 	result := exchangeResult{
@@ -2387,7 +2380,7 @@ func classifyTranscodeExchange(
 	// partial stream could reset a real failure streak. This mirrors the
 	// native path's !clientAborted guard so classification is self-contained
 	// and does not depend on the recorder's independent rec.aborted coupling
-	// in serveTranscodeHandler (review-z commit 4).
+	// in serveTranscodeHandler.
 	result.upstreamSuccess = !result.upstreamFailure &&
 		!result.clientAborted &&
 		outcome.UpstreamStatus.Set &&
@@ -2395,7 +2388,7 @@ func classifyTranscodeExchange(
 		outcome.UpstreamStatus.Value < http.StatusMultipleChoices
 	// Retry-After is anchored at the ORIGINAL header receipt in the
 	// outcome; the translated downstream header is NEVER re-parsed with a
-	// fresh receipt timestamp (review-z commit 4).
+	// fresh receipt timestamp.
 	if outcome.RetryAfter.Set {
 		result.retryAfter = outcome.RetryAfter.Value
 	}
@@ -3192,10 +3185,9 @@ type statusRecorder struct {
 	// admissionCompleted is set at the end of the admission path
 	// (serveLimited/servePassthrough): finalize's clean-completion counter
 	// fires only when the exchange actually completed the admission path,
-	// not on the queue-timeout/cancel/circuit-rejection early returns
-	// (autopsy 2026-09-06 M10).
+	// not on the queue-timeout/cancel/circuit-rejection early returns.
 	admissionCompleted bool
-	// commentsCommitted marks the SSE queue-comment mode (QUEUE-1-B): the
+	// commentsCommitted marks the SSE queue-comment mode: the
 	// streaming representation (200 + text/event-stream) was committed
 	// BEFORE admission, so the exchange is locked to the streaming
 	// representation — later WriteHeader calls cannot change what the
@@ -3267,7 +3259,7 @@ func (r *statusRecorder) suppressibleClientAbort(ctxErr error) bool {
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
-	// QUEUE-1-B: once the queue-comment mode committed the streaming
+	// Once the queue-comment mode committed the streaming
 	// representation, the client has already received 200 + SSE headers —
 	// later WriteHeader calls cannot change that. A 200 dup is silenced
 	// (the handler re-commits on its streaming path); a non-200 (e.g. a
@@ -3511,8 +3503,8 @@ func (w *switchingProtocolsHandshakeWriter) Write(p []byte) (int, error) {
 }
 
 // Validate checks the immutable transcode route configuration so a
-// misconfigured route fails at proxy.New, never on the first request
-// (review-j finding 14): the mapping (route, direction, auth, model map),
+// misconfigured route fails at proxy.New, never on the first request:
+// the mapping (route, direction, auth, model map),
 // the body limits, and the allowed client query keys.
 func (m TranscodeMapping) Validate() error {
 	if err := m.Mapping.Validate(); err != nil {
@@ -3534,7 +3526,7 @@ func (m TranscodeMapping) Validate() error {
 
 // validQueryName reports whether s is a valid client query parameter name on
 // a transcoded route: non-empty, no control characters, and none of the
-// characters that delimit or encode query syntax (review-08 additional 6).
+// characters that delimit or encode query syntax.
 // HTTP field-name syntax is not query-name syntax: query names may contain
 // characters such as '@' or '/' that field names reject, while '=' '&' '#'
 // and '?' would alter the query structure.
@@ -3552,7 +3544,7 @@ func validQueryName(s string) bool {
 }
 
 // cloneModelMap deep-copies the mutable model map so caller mutation after
-// New cannot change live behavior (review-08 additional 2).
+// New cannot change live behavior.
 func cloneModelMap(m transcode.ModelMap) transcode.ModelMap {
 	if m.Exact != nil {
 		cloned := make(map[string]transcode.ModelMapping, len(m.Exact))
@@ -3562,8 +3554,7 @@ func cloneModelMap(m transcode.ModelMap) transcode.ModelMap {
 	return m
 }
 
-// cloneLossPolicy deep-copies the mutable loss policy (review-08 additional
-// 2).
+// cloneLossPolicy deep-copies the mutable loss policy.
 func cloneLossPolicy(p transcode.LossPolicy) transcode.LossPolicy {
 	if p.Allowed != nil {
 		cloned := make(map[transcode.Feature]struct{}, len(p.Allowed))
@@ -3575,7 +3566,7 @@ func cloneLossPolicy(p transcode.LossPolicy) transcode.LossPolicy {
 	return p
 }
 
-// cloneStringSet deep-copies a string set (review-08 additional 2).
+// cloneStringSet deep-copies a string set.
 func cloneStringSet(s map[string]struct{}) map[string]struct{} {
 	if s == nil {
 		return nil
@@ -3588,7 +3579,7 @@ func cloneStringSet(s map[string]struct{}) map[string]struct{} {
 }
 
 // cloneURL copies the upstream URL value so caller mutation of the original
-// after New cannot change the live target (review-08 additional 2).
+// after New cannot change the live target.
 func cloneURL(u *url.URL) *url.URL {
 	if u == nil {
 		return nil
@@ -3599,7 +3590,7 @@ func cloneURL(u *url.URL) *url.URL {
 
 // cloneLimiterMap copies the route-limiters map (the limiter pointers stay
 // shared: they are live synchronization objects) so caller mutation of the
-// original map after New cannot change live routing (review-08 additional 2).
+// original map after New cannot change live routing.
 func cloneLimiterMap(m map[string]*queue.Limiter) map[string]*queue.Limiter {
 	if m == nil {
 		return nil
@@ -3611,7 +3602,7 @@ func cloneLimiterMap(m map[string]*queue.Limiter) map[string]*queue.Limiter {
 
 // cloneMatcher deep-copies the caller's matcher — including every
 // Pattern.Segments slice — so caller mutation of the original after New
-// cannot change live route matching (review-08 additional 2).
+// cannot change live route matching.
 func cloneMatcher(m *route.Matcher) *route.Matcher {
 	if m == nil {
 		return nil

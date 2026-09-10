@@ -69,7 +69,7 @@ func assertAnthropicWireError(t *testing.T, err error, wantSubstring string) {
 // TestResponsesStreamRejectsTerminalBeforeCreated proves completed,
 // incomplete, and failed envelopes before response.created are corrupt
 // upstream wire: they must never emit message_delta + message_stop without
-// message_start (review-08 blocker 3).
+// message_start.
 func TestResponsesStreamRejectsTerminalBeforeCreated(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -124,7 +124,7 @@ func TestResponsesStreamRejectsTerminalBeforeCreated(t *testing.T) {
 // TestResponsesStreamRejectsMissingDoneEvents proves a terminal envelope
 // with an open text part or tool block is corrupt upstream wire: the missing
 // content_part.done / output_item.done is an error, never a synthesized
-// content_block_stop (review-08 blocker 3).
+// content_block_stop.
 func TestResponsesStreamRejectsMissingDoneEvents(t *testing.T) {
 	t.Run("open text part at completed", func(t *testing.T) {
 		state := anthropicLifecycleState(t)
@@ -190,7 +190,7 @@ func TestResponsesStreamRejectsMissingDoneEvents(t *testing.T) {
 }
 
 // TestResponsesStreamRejectsSequenceRegression proves sequence numbers must
-// be strictly increasing and unique across the stream (review-08 blocker 3).
+// be strictly increasing and unique across the stream.
 func TestResponsesStreamRejectsSequenceRegression(t *testing.T) {
 	tests := []struct {
 		name string
@@ -236,7 +236,6 @@ func TestResponsesStreamRejectsSequenceRegression(t *testing.T) {
 // lifecycle ownership rules: nothing before response.created, stable
 // response identity across envelopes, unique item and part identities, an
 // item that owns a part before any delta, and matching output indexes
-// (review-08 blocker 3).
 func TestResponsesStreamRejectsIdentityAndOwnershipViolations(t *testing.T) {
 	t.Run("event before created", func(t *testing.T) {
 		state := anthropicLifecycleState(t)
@@ -393,7 +392,7 @@ func anthropicMessageItem(id string, parts ...ResponsesOutputContentPart) *Respo
 // reconciled against the accumulated state: text.done and refusal.done
 // against the accumulated text, content_part.done against the opened part,
 // output_item.done against the observed item, and the terminal envelope
-// against the incremental output (review-08 blockers 3 and 4).
+// against the incremental output.
 func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 	t.Run("text done mismatch", func(t *testing.T) {
 		state := anthropicLifecycleState(t)
@@ -771,10 +770,10 @@ func TestResponsesStreamReconcilesDoneSnapshots(t *testing.T) {
 	})
 }
 
-// TestResponsesToolArgumentsCannotBecomeEmptyObject proves the review's
+// TestResponsesToolArgumentsCannotBecomeEmptyObject proves the
 // corruption sequence — added opens the call, no argument deltas, the done
 // item carries {"x":1} — delivers the done snapshot to the client as an
-// input_json_delta, never an empty object (review-08 blocker 4).
+// input_json_delta, never an empty object.
 func TestResponsesToolArgumentsCannotBecomeEmptyObject(t *testing.T) {
 	state := anthropicLifecycleState(t)
 	feedAnthropicCreated(t, state, 0)
@@ -981,7 +980,7 @@ func TestResponsesStreamOfficialLifecycleStillConverts(t *testing.T) {
 
 // TestResponsesStreamLifecycleErrorMatrix closes the remaining error-branch
 // coverage of the lifecycle and reconciliation machinery: every violation
-// class is corrupt upstream wire (review-08 blockers 3 and 4).
+// class is corrupt upstream wire.
 func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 	textPart := func() *ResponsesStreamOutputTextPart {
 		return &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}}
@@ -1605,7 +1604,7 @@ func TestResponsesStreamLifecycleErrorMatrix(t *testing.T) {
 // TestResponsesToolArgumentsSemanticEquality proves the arguments
 // reconciliation accepts a snapshot that is semantically equal but not a
 // byte-prefix of the accumulated buffer (e.g. re-serialized whitespace):
-// review-08 blocker 4 requires byte-or-semantic reconciliation.
+// -or-semantic reconciliation.
 func TestResponsesToolArgumentsSemanticEquality(t *testing.T) {
 	state := anthropicLifecycleState(t)
 	feedAnthropicCreated(t, state, 0)
@@ -1645,7 +1644,7 @@ func TestResponsesToolArgumentsSemanticEquality(t *testing.T) {
 }
 
 // TestResponsesStreamLifecycleErrorMatrix2 closes the remaining error
-// branches of the lifecycle machinery (review-08 blockers 3 and 4).
+// branches of the lifecycle machinery.
 func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 	textPart := func() *ResponsesStreamOutputTextPart {
 		return &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}}
@@ -1900,7 +1899,7 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 		})
 		// Non-object model-generated arguments cannot be represented as
 		// tool_use.input: a LOCAL unrepresentable output, never corrupt
-		// upstream wire (review-z commit 2).
+		// upstream wire.
 		if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
 			t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
 		}
@@ -2178,8 +2177,7 @@ func TestResponsesStreamLifecycleErrorMatrix2(t *testing.T) {
 }
 
 // TestResponsesStreamLifecycleErrorMatrix3 closes the last reachable error
-// branches of the lifecycle and reconciliation machinery (review-08 blockers
-// 3 and 4).
+// branches of the lifecycle and reconciliation machinery.
 func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 	textPart := func() *ResponsesStreamOutputTextPart {
 		return &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}}
@@ -2549,7 +2547,7 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 			Response: envelope,
 		})
 		// Non-object terminal-envelope arguments are a LOCAL unrepresentable
-		// output (review-z commit 2); only snapshot-vs-accumulated identity
+		// output; only snapshot-vs-accumulated identity
 		// drift remains corrupt upstream wire.
 		if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
 			t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
@@ -2571,7 +2569,7 @@ func TestResponsesStreamLifecycleErrorMatrix3(t *testing.T) {
 }
 
 // TestResponsesStreamIncompleteErrorBranches covers the incomplete terminal's
-// phase, controls, and usage error returns (review-08 blockers 3 and 4).
+// phase, controls, and usage error returns.
 func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 	t.Run("incomplete phase gate rejection", func(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
@@ -2679,7 +2677,7 @@ func TestResponsesStreamIncompleteErrorBranches(t *testing.T) {
 // zero-delta rule for text/refusal parts: a part that accumulated nothing
 // reconciles with the empty string — a consistent "" snapshot is accepted
 // and a contradictory non-empty snapshot is corrupt upstream wire, in every
-// done and envelope position (review-08 blocker 4).
+// done and envelope position.
 func TestResponsesStreamZeroDeltaPartReconciliation(t *testing.T) {
 	textPart := func() *ResponsesStreamOutputTextPart {
 		return &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}}
@@ -2844,7 +2842,7 @@ func TestResponsesStreamZeroDeltaPartReconciliation(t *testing.T) {
 }
 
 // TestResponsesStreamZeroDeltaRefusalReconciliation covers the zero-delta
-// rule for refusal parts (review-08 blocker 4).
+// rule for refusal parts.
 func TestResponsesStreamZeroDeltaRefusalReconciliation(t *testing.T) {
 	refusalPart := func() *ResponsesStreamRefusalPart {
 		return &ResponsesStreamRefusalPart{Type: "refusal", Refusal: ""}
@@ -2894,7 +2892,7 @@ func TestResponsesStreamZeroDeltaRefusalReconciliation(t *testing.T) {
 
 // TestResponsesStreamItemClosureAndPartOwnership proves every observed item
 // must be closed by output_item.done before the terminal, and content parts
-// may only attach to message items (review-08 blocker 3).
+// may only attach to message items.
 func TestResponsesStreamItemClosureAndPartOwnership(t *testing.T) {
 	t.Run("message item never done at terminal", func(t *testing.T) {
 		state := anthropicLifecycleState(t)
@@ -2945,7 +2943,7 @@ func TestResponsesStreamItemClosureAndPartOwnership(t *testing.T) {
 
 // TestResponsesStreamDeltaPartTypeMatching proves text and refusal deltas
 // must target their own part type: a misrouted delta would drift the emitted
-// block from every done snapshot (review-08 blocker 4).
+// block from every done snapshot.
 func TestResponsesStreamDeltaPartTypeMatching(t *testing.T) {
 	refusalPart := func() *ResponsesStreamRefusalPart {
 		return &ResponsesStreamRefusalPart{Type: "refusal", Refusal: ""}

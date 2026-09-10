@@ -51,7 +51,7 @@ type Limiter struct {
 	// release; instead, time.AfterFunc(cooldown, returnToken) schedules
 	// the return. This creates a "dead zone" after every slot release,
 	// ensuring the downstream service has time to complete its accounting
-	// before the next request arrives. This mitigates KILL-02 (slot
+	// before the next request arrives. This mitigates the slot
 	// release race under load).
 	cooldown time.Duration
 

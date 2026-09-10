@@ -20,7 +20,6 @@ const maxStreamEchoBytes = 4 << 20
 // before the exchange is rejected as corrupt upstream wire: individually
 // bounded SSE frames could otherwise accumulate without limit and be emitted
 // as one generated downstream frame, amplifying memory without bound
-// (review-k finding 9).
 const maxStreamAccumulatedBytes = 1 << 20
 
 // maxGeneratedSSEFrameBytes bounds one GENERATED downstream SSE frame (the
@@ -30,7 +29,7 @@ const maxStreamAccumulatedBytes = 1 << 20
 // every accepted accumulator of the exchange (output items, tool
 // arguments, tool-call identity) plus the request echo, so the bound
 // derives from the exchange total and the echo bound — the same derivation
-// as DefaultGeneratedSSEFrameBytes (autopsy 2026-09-06 M1 rounds 1-3: a
+// as DefaultGeneratedSSEFrameBytes (a
 // per-item derivation left the multi-accumulator release failing, a
 // backstop below the reader bound masked the reader derivation entirely,
 // and a raw-size echo model under-covered the 6x-escaped echo). The
@@ -39,7 +38,7 @@ const maxStreamAccumulatedBytes = 1 << 20
 // reader on every outbound frame.
 const maxGeneratedSSEFrameBytes = DefaultGeneratedSSEFrameBytes
 
-// Exchange-level stream budgets (review-08 blocker 7): the per-item/part
+// Exchange-level stream budgets: the per-item/part
 // bounds above limit a single accumulator; these budgets bound the whole
 // exchange so a corrupt upstream cannot grow memory without limit across
 // many items, parts, tool calls, or report entries, and cannot amplify the
@@ -67,8 +66,7 @@ const (
 
 // Package defaults for the BodyLimits fields. A zero value in a programmatic
 // BodyLimits selects the field's default; the effective limits are computed
-// once at handler construction so zero never reaches handler logic (review-k
-// finding 8). The decoded-request default carries headroom over the
+// once at handler construction so zero never reaches handler logic. The decoded-request default carries headroom over the
 // accepted-request default for decode amplification, matching the CLI ratio.
 const (
 	DefaultAcceptedRequestBytes    int64 = 32 << 20
@@ -80,7 +78,7 @@ const (
 	DefaultSSEFrameBytes           int   = 1 << 20
 	// DefaultGeneratedResponseBytes bounds the complete rendered non-stream
 	// JSON response body, applied after conversion and BEFORE headers
-	// commit (review-z commit 3).
+	// commit.
 	DefaultGeneratedResponseBytes int64 = 32 << 20
 	// DefaultErrorMessageBytes bounds every client-visible error message
 	// (stream error frames and dialect error bodies).
@@ -93,7 +91,7 @@ const (
 	// 6x escaping of maxStreamTotalAccumulatedBytes (measured 6.00x for a
 	// '<'-heavy payload) + 6x escaping of maxStreamEchoBytes (the echo
 	// bound is enforced at decode, so the 6x-escaped echo can never exceed
-	// 24 MiB — autopsy 2026-09-06 M1 round 3, finding F2: the earlier
+	// 24 MiB — the earlier
 	// raw-size headroom under-covered a maximal escaping echo by 3.4x) +
 	// 1 MiB framing scaffolding for envelope keys, item identity, and
 	// usage. The default terminal batch and generated total are re-derived
@@ -102,7 +100,7 @@ const (
 	// (TextDone + ContentPartDone + OutputItemDone + envelope; 3x for
 	// tool arguments) plus the echo in every envelope copy.
 	DefaultGeneratedSSEFrameBytes int = 6*maxStreamTotalAccumulatedBytes + 6*maxStreamEchoBytes + 1<<20
-	// The minimum legal output sizes (review-z commit 6): a generated SSE
+	// The minimum legal output sizes: a generated SSE
 	// frame, terminal batch, or rendered JSON response smaller than these
 	// could never carry even the smallest legal terminal/error/created
 	// event or an empty rendered response, so the stream could never
@@ -120,7 +118,7 @@ const (
 	// arguments.done + content_part.done + output_item.done + envelope;
 	// tool arguments repeat 3x) plus the full frame bound — every
 	// envelope copy carries the echo, so the frame term subsumes the
-	// batch's echo share (autopsy 2026-09-06 M1 rounds 1-3).
+	// batch's echo share.
 	DefaultGeneratedSSEBatchBytes int = 6*4*maxStreamTotalAccumulatedBytes + DefaultGeneratedSSEFrameBytes
 )
 
@@ -133,7 +131,7 @@ const (
 // retry transport body cap (cfg.maxBodyBytes) with retries enabled, or the
 // proxy fails construction naming the route and both values — a declared
 // bound that silently differs from the actual replay cap is a configuration
-// error (review-k finding 8). A zero value declares no bound: the transport
+// error. A zero value declares no bound: the transport
 // cap governs replay eligibility and no equality check applies.
 //
 // https://platform.claude.com/docs/en/api/overview
@@ -150,7 +148,7 @@ type BodyLimits struct {
 	ErrorResponseBytes      int64
 	SSELineBytes            int
 	SSEFrameBytes           int
-	// Output-side limits (review-z commit 3). SSELineBytes and SSEFrameBytes
+	// Output-side limits. SSELineBytes and SSEFrameBytes
 	// bound the INBOUND upstream stream; the Generated* fields bound what the
 	// transcoder emits.
 	GeneratedResponseBytes int64
@@ -161,7 +159,7 @@ type BodyLimits struct {
 
 // WithDefaults returns the body limits with every zero field replaced by its
 // package default, so a programmatic all-zero BodyLimits enforces real bounds
-// instead of leaving some fields unlimited (review-k finding 8). The handler
+// instead of leaving some fields unlimited. The handler
 // applies this normalization once at construction; the handler-side per-use
 // fallbacks remain as defense-in-depth. The proxy's RetryReplayBytes
 // fail-fast check reads the raw declared value, not the defaulted one.
@@ -203,7 +201,7 @@ func (l BodyLimits) WithDefaults() BodyLimits {
 }
 
 // minGeneratedOutputError builds the fail-fast message for an output limit
-// below the minimum legal terminal or error frame (review-z commit 6). The
+// below the minimum legal terminal or error frame. The
 // prefix is omitted: every caller wraps the error with its own context
 // (e.g. "body limits: %w").
 func minGeneratedOutputError(name string, limit, minimum any) error {
@@ -214,7 +212,7 @@ func minGeneratedOutputError(name string, limit, minimum any) error {
 }
 
 // Validate checks the body limits are usable: every byte limit and the SSE
-// line/frame bounds are nonnegative (review-j finding 14). Zero values mean
+// line/frame bounds are nonnegative. Zero values mean
 // "use the package default" and are valid.
 func (l BodyLimits) Validate() error {
 	for name, value := range map[string]int64{
@@ -250,7 +248,7 @@ func (l BodyLimits) Validate() error {
 	// completion impossible: zero values select the package defaults
 	// (WithDefaults) and are skipped here; a small-but-positive limit that
 	// could never carry the smallest legal frame is a construction error
-	// (review-z commit 6).
+	//.
 	if l.GeneratedSSEFrameBytes > 0 && l.GeneratedSSEFrameBytes < MinGeneratedFrameBytes {
 		return minGeneratedOutputError("GeneratedSSEFrameBytes", l.GeneratedSSEFrameBytes, MinGeneratedFrameBytes)
 	}

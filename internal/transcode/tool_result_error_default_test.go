@@ -86,7 +86,7 @@ func TestIsErrorToolResultConvertsUnderDefaultProfile(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d body=%q — the CLI default profile must convert is_error tool results (live Claude Code failure)", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d body=%q — the CLI default profile must convert is_error tool results (Claude Code failure)", rec.Code, rec.Body.String())
 	}
 	// The decision is OBSERVABLE: exactly one request-stage loss line naming
 	// the feature (REM-M acceptance).

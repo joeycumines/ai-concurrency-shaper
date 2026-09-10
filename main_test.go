@@ -1124,7 +1124,7 @@ func TestE2E_MultiProvider_Transcode_AuthPrecedence(t *testing.T) {
 
 // TestResetDrainResetsAllCollectors proves the TUI ticker's "Reset Stats"
 // path: drainResetSignals collapses coalesced signals and every provider's
-// collector is reset fleet-wide (Task 6).
+// collector is reset fleet-wide.
 func TestResetDrainResetsAllCollectors(t *testing.T) {
 	ch := make(chan struct{}, 1)
 	drainResetSignals(ch) // empty channel: must not block
@@ -1864,7 +1864,7 @@ func TestE2E_MetricsEndpoint(t *testing.T) {
 
 // TestE2E_MultiProvider_QueueAdmissionAndObservability proves the composed
 // CLI queue admission classes and overload signaling end-to-end through the
-// real binary (UNRESP-2 / QUEUE-1 / UNRESP-3): two providers with distinct
+// real binary: two providers with distinct
 // queue admission configurations, bounded-queue 429 fail-fast under
 // saturation, the :unlimited admission class bypassing a saturated
 // -limit-all pool, SSE queue comments flowing while queued, Prometheus
@@ -2060,7 +2060,7 @@ func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
 
 	// Bounded queue fail-fast: the third request finds waiters at the
 	// depth-1 bound and is rejected with 429 + Retry-After instead of
-	// queueing (QUEUE-1).
+	// queueing.
 	thirdRec, err := client.Post("http://"+proxyAddr+"/claude/v1/messages", "application/json", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatalf("third request: %v", err)
@@ -2075,7 +2075,7 @@ func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
 	}
 
 	// Unlimited admission class: count_tokens bypasses the saturated
-	// -limit-all pool entirely and answers immediately (UNRESP-2).
+	// -limit-all pool entirely and answers immediately.
 	countDone := make(chan int, 1)
 	async(func() {
 		resp, err := client.Post("http://"+proxyAddr+"/claude/v1/messages/count_tokens", "application/json", strings.NewReader(`{}`))
@@ -2158,8 +2158,8 @@ func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
 	// request to be queued.
 
 	// While the SSE request is queued, scrape /metrics: the aggregate and
-	// per-route queue series must be present with accurate values
-	// (UNRESP-3). Provider A has 1 queued on POST /v1/messages; provider B
+	// per-route queue series must be present with accurate values.
+	// Provider A has 1 queued on POST /v1/messages; provider B
 	// has 1 queued on POST /v1/responses.
 	scrapeMetrics := func() string {
 		resp, err := client.Get("http://" + metricsAddr + "/metrics")
@@ -2173,15 +2173,50 @@ func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
 		}
 		return string(body)
 	}
+	// ageValue extracts the float value of a shaper_route_oldest_queued_seconds
+	// series from a scrape, or -1 when the series is absent.
+	ageValue := func(body, series string) float64 {
+		_, after, ok := strings.Cut(body, series)
+		if !ok {
+			return -1
+		}
+		value := after
+		if nl := strings.IndexByte(value, '\n'); nl >= 0 {
+			value = value[:nl]
+		}
+		age, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			return -1
+		}
+		return age
+	}
+	const (
+		anthropicQueuedSeries = `shaper_route_queued{provider="anthropic",method="POST",path="/v1/messages"} 1`
+		openaiQueuedSeries    = `shaper_route_queued{provider="openai",method="POST",path="/v1/responses"} 1`
+		anthropicAgeSeries    = `shaper_route_oldest_queued_seconds{provider="anthropic",method="POST",path="/v1/messages"} `
+		openaiAgeSeries       = `shaper_route_oldest_queued_seconds{provider="openai",method="POST",path="/v1/responses"} `
+	)
+	// The SSE request must demonstrably have been QUEUED for at least two
+	// 25ms queue-comment ticker intervals before the gate closes: the
+	// assertions below require a positive rendered age (%.3f seconds, so a
+	// sub-millisecond wait renders as 0.000 and fails) and at least one
+	// ticker comment after the admission one (a wait shorter than one tick
+	// leaves only the admission comment). Both queued series being visible
+	// is NOT enough — the metrics snapshot reads live state, so the first
+	// scrape can observe the SSE request within microseconds of its queue
+	// entry. Break only when BOTH queued series are present AND both ages
+	// are at least 50ms.
 	var metricsBody string
 	for deadline := time.Now().Add(2 * time.Second); ; {
 		metricsBody = scrapeMetrics()
-		if strings.Contains(metricsBody, `shaper_route_queued{provider="anthropic",method="POST",path="/v1/messages"} 1`) &&
-			strings.Contains(metricsBody, `shaper_route_queued{provider="openai",method="POST",path="/v1/responses"} 1`) {
+		if strings.Contains(metricsBody, anthropicQueuedSeries) &&
+			strings.Contains(metricsBody, openaiQueuedSeries) &&
+			ageValue(metricsBody, anthropicAgeSeries) >= 0.05 &&
+			ageValue(metricsBody, openaiAgeSeries) >= 0.05 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Errorf("metrics never showed both providers' queued routes; last body:\n%s", metricsBody)
+			t.Errorf("metrics never showed both providers' queued routes with ages >= 50ms; last body:\n%s", metricsBody)
 			break
 		}
 		time.Sleep(25 * time.Millisecond)
@@ -2197,12 +2232,12 @@ func TestE2E_MultiProvider_QueueAdmissionAndObservability(t *testing.T) {
 		}
 	}
 	// Age series carry a float value on the same line: parse it and require a
-	// positive age. The requests have demonstrably been queued for hundreds
-	// of milliseconds, so a prefix-only match would also accept NaN, a
+	// positive age. The loop above already waited for both ages to reach
+	// 50ms, so a prefix-only match would also accept NaN, a
 	// missing value, or a stale 0.000.
 	for _, want := range []string{
-		`shaper_route_oldest_queued_seconds{provider="anthropic",method="POST",path="/v1/messages"} `,
-		`shaper_route_oldest_queued_seconds{provider="openai",method="POST",path="/v1/responses"} `,
+		anthropicAgeSeries,
+		openaiAgeSeries,
 	} {
 		idx := strings.Index(metricsBody, want)
 		if idx < 0 {

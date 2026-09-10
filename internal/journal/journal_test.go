@@ -353,18 +353,16 @@ func TestCaptureBufConcurrentWriteAndBytes(t *testing.T) {
 	const chunks, size = 64, 1024
 	cb := &CaptureBuf{maxBytes: 1 << 20}
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		chunk := bytes.Repeat([]byte("x"), size)
-		for i := 0; i < chunks; i++ {
+		for range chunks {
 			if _, err := cb.Write(chunk); err != nil {
 				t.Errorf("Write: %v", err)
 				return
 			}
 		}
-	}()
-	for i := 0; i < 200; i++ {
+	})
+	for range 200 {
 		_ = cb.Bytes()
 		_ = cb.Truncated()
 		_ = cb.Complete()
