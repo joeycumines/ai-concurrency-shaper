@@ -154,7 +154,10 @@ func TestProxy_QueueCommentsDisabledByDefault(t *testing.T) {
 		f.p.ServeHTTP(rec, req)
 		firstDone <- rec.Code
 	}()
-	time.Sleep(100 * time.Millisecond)
+	// Deterministic readiness: the first request must hold the slot before
+	// the second fires, so the second queues. A fixed sleep lets the second
+	// race the slot under load.
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool { return s.Active == 1 })
 
 	secondRec := httptest.NewRecorder()
 	secondReq := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -164,7 +167,10 @@ func TestProxy_QueueCommentsDisabledByDefault(t *testing.T) {
 		f.p.ServeHTTP(secondRec, secondReq)
 		secondDone <- secondRec.Code
 	}()
-	time.Sleep(250 * time.Millisecond)
+	// Deterministic readiness: the second request must demonstrably be
+	// queued before the gate releases, so the exchange traverses the
+	// queued-then-admitted path rather than a direct admit.
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool { return s.Queued == 1 })
 
 	f.gateC.Do(func() { close(f.gate) })
 	<-firstDone
@@ -187,7 +193,9 @@ func TestProxy_QueueCommentsNonStreamAcceptSkipped(t *testing.T) {
 		f.p.ServeHTTP(rec, req)
 		firstDone <- rec.Code
 	}()
-	time.Sleep(100 * time.Millisecond)
+	// Deterministic readiness: the first request must hold the slot before
+	// the second fires, so the second queues.
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool { return s.Active == 1 })
 
 	// Non-streaming Accept: queues SILENTLY (no early commit — a JSON
 	// response cannot be preceded by SSE comments).
@@ -199,7 +207,9 @@ func TestProxy_QueueCommentsNonStreamAcceptSkipped(t *testing.T) {
 		f.p.ServeHTTP(secondRec, secondReq)
 		secondDone <- secondRec.Code
 	}()
-	time.Sleep(250 * time.Millisecond)
+	// Deterministic readiness: the non-streaming second request must
+	// demonstrably be queued before the gate releases.
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool { return s.Queued == 1 })
 
 	f.gateC.Do(func() { close(f.gate) })
 	<-firstDone
@@ -359,7 +369,9 @@ func TestProxy_QueueCommentsBodyWithoutFullDuplexSilent(t *testing.T) {
 		f.p.ServeHTTP(rec, req)
 		firstDone <- rec.Code
 	}()
-	time.Sleep(100 * time.Millisecond)
+	// Deterministic readiness: the first request must hold the slot before
+	// the second fires, so the second queues.
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool { return s.Active == 1 })
 
 	const reqBody = `{"model":"m","max_tokens":10}`
 	secondRec := nonDuplexResponseWriter{httptest.NewRecorder()}
@@ -370,7 +382,9 @@ func TestProxy_QueueCommentsBodyWithoutFullDuplexSilent(t *testing.T) {
 		f.p.ServeHTTP(secondRec, secondReq)
 		secondDone <- secondRec.Code
 	}()
-	time.Sleep(250 * time.Millisecond)
+	// Deterministic readiness: the body-carrying second request must
+	// demonstrably be queued before the gate releases.
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool { return s.Queued == 1 })
 
 	f.gateC.Do(func() { close(f.gate) })
 	if code := <-firstDone; code != http.StatusOK {

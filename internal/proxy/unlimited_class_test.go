@@ -22,7 +22,6 @@ func TestProxy_UnlimitedClassPassesUnderLimitAll(t *testing.T) {
 	// Two gated completions hold the only two limited slots.
 	release1 := make(chan struct{})
 	release2 := make(chan struct{})
-	completions := sync.WaitGroup{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/messages":
@@ -32,7 +31,6 @@ func TestProxy_UnlimitedClassPassesUnderLimitAll(t *testing.T) {
 			} else {
 				<-release2
 			}
-			completions.Done()
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok"))
 		default:
@@ -63,7 +61,6 @@ func TestProxy_UnlimitedClassPassesUnderLimitAll(t *testing.T) {
 	}
 
 	// Two completions occupy both limited slots (they block server-side).
-	completions.Add(2)
 	var wg sync.WaitGroup
 	for i := range 2 {
 		wg.Go(func() {
@@ -86,12 +83,10 @@ func TestProxy_UnlimitedClassPassesUnderLimitAll(t *testing.T) {
 		p.ServeHTTP(rec, req)
 		blocked <- rec.Code
 	}()
-	select {
-	case code := <-blocked:
-		t.Fatalf("third limited request completed with %d while both slots were held; want it queued", code)
-	case <-time.After(300 * time.Millisecond):
-		// Still queued: the limited pool is saturated, as expected.
-	}
+	// Deterministic: the third limited request must be QUEUED, not admitted.
+	// If it had bypassed the saturated pool it would occupy no queue slot, so
+	// the wait would time out instead of implying a negative window by sleep.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool { return s.Queued >= 1 })
 
 	// The unlimited count_tokens request passes WITHOUT queueing, even
 	// though -limit-all is on and both slots are held.
@@ -110,7 +105,6 @@ func TestProxy_UnlimitedClassPassesUnderLimitAll(t *testing.T) {
 	close(release1)
 	close(release2)
 	wg.Wait()
-	completions.Wait()
 	<-blocked // the queued third completion completes after a slot frees
 
 	snap := met.Snapshot()
@@ -177,11 +171,12 @@ func TestProxy_UnlimitedBypassesGlobalLimiter(t *testing.T) {
 	}
 	limited, _ := route.Parse("POST /messages:1")
 	unlimited, _ := route.Parse("POST /messages/count_tokens:unlimited")
+	met := metrics.NewCollector()
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher([]route.Pattern{unlimited, limited})),
 		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
-		WithMetrics(metrics.NewCollector()),
+		WithMetrics(met),
 		WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)),
 		WithLimitAll(true),
 		WithQueueTimeout(2*time.Second),
@@ -195,7 +190,12 @@ func TestProxy_UnlimitedBypassesGlobalLimiter(t *testing.T) {
 		p.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
 		holderDone <- rec.Code
 	}()
-	time.Sleep(100 * time.Millisecond)
+	// Deterministic readiness: the holder must demonstrably hold the single
+	// global slot before the unlimited request fires, so the bypass is
+	// proven against a genuinely saturated global limiter. A fixed sleep
+	// lets the unlimited request run before the holder acquires, proving
+	// nothing.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool { return s.Active == 1 })
 
 	start := time.Now()
 	rec := httptest.NewRecorder()

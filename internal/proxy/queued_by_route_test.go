@@ -66,7 +66,12 @@ func TestProxy_QueuedByRoutePerRouteCounts(t *testing.T) {
 	// upstream).
 	go send("/v1/messages")
 	go send("/v1/chat/completions")
-	time.Sleep(150 * time.Millisecond)
+	// Deterministic readiness: both route holders must demonstrably hold
+	// their route's single slot before the second requests fire, so each
+	// second request is the one that queues. A fixed sleep lets a second
+	// request win a slot under load, leaving nothing queued and
+	// false-failing the per-route count assertions.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool { return s.Active == 2 })
 
 	// Second request per route: queues on its OWN route limiter.
 	var wg sync.WaitGroup

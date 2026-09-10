@@ -253,13 +253,12 @@ func TestProxy_QueueDepth429ReleasesBreakerProbe(t *testing.T) {
 		t.Fatalf("breaker state after recorded failure = %v, want Open", state)
 	}
 
-	// Age past the open timeout, then drive the lazy OPEN→HALF_OPEN
-	// transition (it only fires inside Allow(); State() is a pure read).
+	// Drive the lazy OPEN→HALF_OPEN transition (it only fires inside Allow();
+	// State() is a pure read), which happens once the open timeout elapses.
 	// The probe this poll takes is cancelled immediately so the proxy
 	// requests below carry their own.
-	time.Sleep(1100 * time.Millisecond)
 	halfOpen := false
-	for range 200 {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
 		epoch, err := b.Allow()
 		if err == nil {
 			b.CancelProbe(epoch)
@@ -369,8 +368,12 @@ func TestProxy_QueueDepthDoesNotRejectWhenSlotsFree(t *testing.T) {
 	// Release all client goroutines simultaneously.
 	close(startBarrier)
 
-	// Wait briefly to ensure requests enter ServeHTTP and acquire slots.
-	time.Sleep(50 * time.Millisecond)
+	// Deterministic readiness: every request must demonstrably be in flight
+	// (all 64 slots free, so none is rejected) before the gate releases.
+	// This maximises the concurrency the false-429 regression needs; a sleep
+	// could let requests complete before the peak is reached, and a false
+	// 429 would leave Active below the request count and time this wait out.
+	waitSnapshot(t, met, func(s metrics.Snapshot) bool { return s.Active == concurrentRequests })
 
 	// Now unblock the upstream handlers so the requests can finish.
 	safeCloseGate()
