@@ -240,7 +240,7 @@ func (m Model) renderContentWithScrollbar() string {
 func (m Model) maxHScroll() int {
 	width := m.viewportWidth()
 	maxWidth := 0
-	for _, line := range strings.Split(m.renderContent(), "\n") {
+	for line := range strings.SplitSeq(m.renderContent(), "\n") {
 		if w := uniseg.StringWidth(stripANSI(line)); w > maxWidth {
 			maxWidth = w
 		}

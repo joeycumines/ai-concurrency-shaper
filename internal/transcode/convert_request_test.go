@@ -1,6 +1,8 @@
 package transcode
 
 import (
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -43,5 +45,126 @@ func TestDecodeResponsesRequestNullEncryptedContent(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("reasoning artifact item missing")
+	}
+}
+
+// TestResponsesStructuredOutputToChatDefaultCapabilities pins the fix for
+// the observed codex-tui 400 (operator-observed 2026-09-11): a Responses
+// request carrying text.format with type json_schema was rejected by
+// RenderChatRequest because ChatCapabilities.StructuredOutputs defaulted to
+// false and FeatureStructuredOutput was not in the default loss policy. The
+// fix enables StructuredOutputs by default so json_schema maps losslessly to
+// Chat response_format.
+func TestResponsesStructuredOutputToChatDefaultCapabilities(t *testing.T) {
+	body := []byte(`{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"text":{"format":{"type":"json_schema","name":"test_schema","schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]},"strict":true}},"stream":false}`)
+
+	// Decode under strict policy — json_schema decode is lossless, no
+	// policy decision needed at this stage.
+	result, _, err := DecodeResponsesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("decode responses request with text.format json_schema: %v", err)
+	}
+	if result.Request.StructuredOutput == nil {
+		t.Fatal("expected StructuredOutput to be set from text.format json_schema")
+	}
+	if result.Request.StructuredOutput.Name != "test_schema" {
+		t.Fatalf("structured output name = %q, want %q", result.Request.StructuredOutput.Name, "test_schema")
+	}
+
+	// Render to Chat with default capabilities (StructuredOutputs: true).
+	context := testExchangeContext()
+	defaultCaps := ChatCapabilities{
+		ParallelToolCalls:         true,
+		ProviderReasoningThinking: true,
+		StructuredOutputs:         true,
+	}
+	rendered, report, err := RenderChatRequest(result.Request, context, defaultCaps)
+	if err != nil {
+		t.Fatalf("render chat request with default capabilities must not reject structured_output: %v", err)
+	}
+
+	// Verify no structured_output loss was recorded.
+	for _, loss := range report.Losses {
+		if loss.Feature == FeatureStructuredOutput {
+			t.Fatalf("unexpected structured_output loss under default capabilities: %+v", loss)
+		}
+	}
+
+	// Verify the rendered body contains response_format json_schema.
+	var parsed struct {
+		ResponseFormat *struct {
+			Type       string `json:"type"`
+			JSONSchema *struct {
+				Name   string          `json:"name"`
+				Schema json.RawMessage `json:"schema"`
+				Strict *bool           `json:"strict"`
+			} `json:"json_schema"`
+		} `json:"response_format"`
+	}
+	if err := json.Unmarshal(rendered, &parsed); err != nil {
+		t.Fatalf("unmarshal rendered chat request: %v", err)
+	}
+	if parsed.ResponseFormat == nil {
+		t.Fatal("rendered chat request missing response_format")
+	}
+	if parsed.ResponseFormat.Type != "json_schema" {
+		t.Fatalf("response_format type = %q, want json_schema", parsed.ResponseFormat.Type)
+	}
+	if parsed.ResponseFormat.JSONSchema == nil {
+		t.Fatal("response_format missing json_schema")
+	}
+	if parsed.ResponseFormat.JSONSchema.Name != "test_schema" {
+		t.Fatalf("json_schema name = %q, want test_schema", parsed.ResponseFormat.JSONSchema.Name)
+	}
+	if parsed.ResponseFormat.JSONSchema.Strict == nil || !*parsed.ResponseFormat.JSONSchema.Strict {
+		t.Fatal("json_schema strict should be true")
+	}
+	// Verify schema bytes are preserved byte-exact.
+	var schemaObj map[string]json.RawMessage
+	if err := json.Unmarshal(parsed.ResponseFormat.JSONSchema.Schema, &schemaObj); err != nil {
+		t.Fatalf("schema is not a valid JSON object: %v", err)
+	}
+	if _, ok := schemaObj["properties"]; !ok {
+		t.Fatal("schema missing properties key")
+	}
+}
+
+// TestResponsesJSONObjectStructuredOutputIsLossGated proves that
+// text.format.type json_object still requires the structured_output loss
+// permission at decode time, even with StructuredOutputs capability enabled.
+func TestResponsesJSONObjectStructuredOutputIsLossGated(t *testing.T) {
+	body := []byte(`{"model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"text":{"format":{"type":"json_object"}},"stream":false}`)
+
+	// Under strict policy, json_object must be rejected.
+	_, _, err := DecodeResponsesRequest(body, StrictLossPolicy())
+	if err == nil {
+		t.Fatal("json_object under strict policy must be rejected")
+	}
+	var ufe *UnsupportedFeatureError
+	if !errors.As(err, &ufe) || ufe.Feature != "structured_output" {
+		t.Fatalf("expected UnsupportedFeatureError for structured_output, got: %v", err)
+	}
+
+	// With the loss allowed, it must succeed (the format is dropped
+	// observably; the render path sees no StructuredOutput).
+	allowed, err := ParseLossFeatures("structured_output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, _, err := DecodeResponsesRequest(body, LossPolicy{Allowed: allowed})
+	if err != nil {
+		t.Fatalf("json_object with structured_output loss allowed: %v", err)
+	}
+	if result.Request.StructuredOutput != nil {
+		t.Fatal("json_object must not produce a CanonicalStructuredOutput")
+	}
+	found := false
+	for _, loss := range result.Report.Losses {
+		if loss.Feature == FeatureStructuredOutput && loss.Kind == LossRecord {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected structured_output loss record for json_object")
 	}
 }

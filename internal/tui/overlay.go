@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -119,12 +120,7 @@ func (m Model) networkDetailStillPresent() bool {
 	if m.networkDetailAnchor == nil || m.journal == nil {
 		return false
 	}
-	for _, e := range m.journal.Entries() {
-		if e == m.networkDetailAnchor {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(m.journal.Entries(), m.networkDetailAnchor)
 }
 
 // wrapText breaks a plain-text string into rows that each fit within width
@@ -140,7 +136,7 @@ func wrapText(text string, width int) []string {
 	var rows []string
 	var current strings.Builder
 	currentWidth := 0
-	for _, word := range strings.Fields(text) {
+	for word := range strings.FieldsSeq(text) {
 		wordWidth := uniseg.StringWidth(word)
 		if currentWidth > 0 && currentWidth+1+wordWidth > width {
 			rows = append(rows, current.String())

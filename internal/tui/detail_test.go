@@ -60,7 +60,7 @@ func TestLogDetail_WrapsToFitViewport(t *testing.T) {
 	m = update(m, special("enter"))
 
 	detail := m.renderDetailOverlay()
-	for _, row := range strings.Split(detail, "\n") {
+	for row := range strings.SplitSeq(detail, "\n") {
 		if w := uniseg.StringWidth(stripANSI(row)); w > m.viewportWidth() {
 			t.Errorf("detail row exceeds viewport width %d: %d cells %q", m.viewportWidth(), w, stripANSI(row))
 		}

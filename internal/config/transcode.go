@@ -418,6 +418,7 @@ var defaultTranscodeChatCapabilities = transcode.ChatCapabilities{
 	ReasoningEffort:           false,
 	ProviderReasoningText:     false,
 	ProviderReasoningThinking: true,
+	StructuredOutputs:         true,
 }
 
 var defaultTranscodeAllowedQuery = map[string]struct{}{
