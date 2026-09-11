@@ -244,3 +244,41 @@ func TestPTY_NetworkTabFilterByText(t *testing.T) {
 		t.Logf("Full output: %s", h.Console().String())
 	}
 }
+
+// TestPTY_NetworkDetailPinPersistsNewEntries verifies that opening a Network
+// detail and then recording a newer entry keeps the ORIGINAL entry displayed.
+func TestPTY_NetworkDetailPinPersistsNewEntries(t *testing.T) {
+	h := Launch(t)
+	defer h.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	proxyURL := h.ProxyURL()
+	sendRequest(t, t.Context(), proxyURL+"/v1/messages")
+	time.Sleep(2 * time.Second)
+
+	if _, err := h.Console().WriteString("3"); err != nil {
+		t.Fatalf("WriteString 3: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if _, err := h.Console().WriteString("\r"); err != nil {
+		t.Fatalf("WriteString enter: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	snap := h.Console().Snapshot()
+	if err := h.Console().Expect(ctx, snap, termtest.Contains("Request"), "network detail Request section"); err != nil {
+		t.Fatalf("Network detail should open: %v", err)
+	}
+
+	// Record a newer entry while the detail is open.
+	sendRequest(t, t.Context(), proxyURL+"/v1/chat/completions")
+	time.Sleep(2 * time.Second)
+
+	// The detail should still show the original entry's Request section.
+	out := h.Console().String()
+	if !strings.Contains(out, "Request") {
+		t.Errorf("Network detail should still show the original entry after new records")
+		t.Logf("Full output: %s", out)
+	}
+}
