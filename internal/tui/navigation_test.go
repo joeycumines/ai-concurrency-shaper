@@ -691,12 +691,12 @@ func TestScrollbar_AlignedWithDataRows(t *testing.T) {
 	}
 
 	// Clicking inside the header area should not interact with the scrollbar.
-	m2 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow + headerRows - 1})
+	m2 := update(m, tea.MouseClickMsg{X: 79, Y: m.contentStartRow() + headerRows - 1})
 	if m2.scroll != 0 {
 		t.Errorf("click in header area should not scroll: scroll = %d, want 0", m2.scroll)
 	}
 	// Clicking at the top of the track should start a drag.
-	m3 := update(m, tea.MouseClickMsg{X: 79, Y: contentStartRow + headerRows})
+	m3 := update(m, tea.MouseClickMsg{X: 79, Y: m.contentStartRow() + headerRows})
 	if !m3.dragging {
 		t.Error("click at top of data area should set dragging = true")
 	}

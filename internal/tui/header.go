@@ -66,8 +66,15 @@ func (m Model) renderProviderSwitcher() string {
 	if !m.hasSwitcher() {
 		return ""
 	}
-	layout := m.budgetedChips()
-	return strings.Join(layout.parts, " ")
+	rows := m.chipRowsLayout()
+	if len(rows) == 0 {
+		return ""
+	}
+	lines := make([]string, len(rows))
+	for i, r := range rows {
+		lines[i] = strings.Join(r.parts, " ")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // headerBody renders the header's left side: provider identity and live
@@ -83,7 +90,21 @@ func (m Model) renderProviderSwitcher() string {
 // fleetSummary returns the one-line fleet aggregate observability strip
 // (M6/G8) summarizing active, queued, open breaker counts, and the busiest
 // provider across all configured providers.
-func (m Model) fleetSummary() string {
+// identityWidth returns the cell width of the active-provider identity
+// segment (provider name + scroll affordance) used for mouse-wheel
+// hit-testing in the header.
+func (m Model) identityWidth() int {
+	if !m.hasSwitcher() {
+		return 0
+	}
+	// " " + label + " ↕"
+	return lipgloss.Width(" " + m.providerLabel(m.active) + " ↕")
+}
+
+// fleetStats returns the aggregate observability strip without the legacy
+// "Fleet:" prefix, since the active provider identity already shows which
+// dashboard is selected.
+func (m Model) fleetStats() string {
 	var totalActive, totalQueued int64
 	var openBreakers int
 	var maxActive int64 = -1
@@ -104,14 +125,16 @@ func (m Model) fleetSummary() string {
 		}
 	}
 
-	return fmt.Sprintf("Fleet: %d active · %d queued · %d OPEN · busiest: %s",
+	return fmt.Sprintf("%d active · %d queued · %d OPEN · busiest: %s",
 		totalActive, totalQueued, openBreakers, busiest)
 }
 
 func (m Model) headerBody(reserveForSwitcher bool) string {
 	var body string
 	if len(m.providers) > 1 {
-		body = " " + m.fleetSummary()
+		// In fleet mode, show the active provider identity with a scroll
+		// affordance (↕), followed by aggregate stats.
+		body = fmt.Sprintf(" %s ↕ │ %s", m.providerLabel(m.active), m.fleetStats())
 	} else {
 		uptime := time.Since(m.startTime).Truncate(time.Second)
 		body = fmt.Sprintf("%s │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
@@ -181,139 +204,181 @@ type chipLayout struct {
 // full rendered widths — active chip first, then the rest left-to-right — so
 // the active chip's label is the most legible one on the row. A chip whose
 // slack is fully restored renders byte-identically to an unbudgeted chip.
+// budgetedChips returns the first row of chipRowsLayout for backward
+// compatibility with existing tests.
 func (m Model) budgetedChips() chipLayout {
-	if !m.hasSwitcher() {
+	rows := m.chipRowsLayout()
+	if len(rows) == 0 {
 		return chipLayout{}
 	}
-	budget := m.width - 2 - lipgloss.Width(m.headerBody(true)) - 1
-	if budget < chipFloor {
-		return chipLayout{}
+	return rows[0]
+}
+
+// chipRowsLayout computes a multi-row chip layout. Row 0 shares space with
+// the header body; subsequent rows get the full header width (m.width-2).
+// Chips are packed greedily in provider order. The active chip is never
+// dropped. Returns one chipLayout per row. Row 0 is the body row; when the
+// body leaves no room for a chip (row0Budget < chipFloor) the returned slice
+// starts with an empty row 0 so renderHeader leaves the body untouched and
+// chips begin on the next line. The layout is capped to max(m.height-4,1)
+// rows so headerRowCount and renderHeader stay in lockstep.
+func (m Model) chipRowsLayout() []chipLayout {
+	if !m.hasSwitcher() {
+		return nil
 	}
 
 	labels := make([]string, len(m.providers))
 	natural := make([]int, len(m.providers))
 	for i := range m.providers {
 		labels[i] = " " + m.providerLabel(i) + " "
-		// natural is the chip's full RENDERED width — label plus the chip
-		// style's 1+1 padding cells — not the bare label width, so a chip
-		// whose slack is fully restored renders byte-identically to an
-		// unbudgeted chip instead of being permanently truncated by the
-		// two padding cells. Either chip style yields the same width here:
-		// both add exactly one padding cell per side, and bold/colour
-		// sequences carry no width.
 		natural[i] = lipgloss.Width(m.styles.chipActiveStyle.Render(labels[i]))
 	}
 
-	// total returns the floor cost of exactly these providers as a chip row:
-	// chipFloor per chip plus one gap between adjacent chips.
-	total := func(keep []int) int {
-		return len(keep)*chipFloor + (len(keep) - 1)
+	row0Budget := m.width - 2 - lipgloss.Width(m.headerBody(true)) - 1
+	fullBudget := m.width - 2
+	maxRows := max(m.height-4, 1)
+
+	if fullBudget < chipFloor {
+		return nil // elide entirely — terminal too narrow for any chip
 	}
 
-	// Select kept chips right-to-left at floor width.
-	keep := make([]int, 0, len(labels))
-	prefix := func(i int, rest []int) []int {
-		out := make([]int, 0, len(rest)+1)
-		out = append(out, i)
-		out = append(out, rest...)
-		return out
+	// floorCost returns the minimum width for a set of chips on one row.
+	floorCost := func(indices []int) int {
+		if len(indices) == 0 {
+			return 0
+		}
+		return len(indices)*chipFloor + (len(indices) - 1)
 	}
-	kept := func(i int) bool {
-		return slices.Contains(keep, i)
+
+	// Greedy packing: fill rows left-to-right in provider order.
+	type rowPlan struct {
+		indices []int
+		budget  int
 	}
-	for i := range slices.Backward(labels) {
-		candidate := prefix(i, keep)
-		if total(candidate) <= budget {
-			keep = candidate
-			continue
+	var rows []rowPlan
+	currentIndices := make([]int, 0)
+	var currentBudget int
+
+	if row0Budget < chipFloor {
+		if maxRows == 1 {
+			return nil // no room for a dedicated chip row
 		}
-		if i != m.active {
-			break // rule 2: trailing chip does not fit, stop walking left
-		}
-		// The active chip must be kept: evict the leftmost kept chips until
-		// the row fits (the active chip wins over any number of inactive
-		// ones to its left).
-		for len(keep) > 0 && total(candidate) > budget {
-			keep = keep[1:]
-			candidate = prefix(i, keep)
-		}
-		if total(candidate) > budget {
-			return chipLayout{} // unreachable: budget >= chipFloor
-		}
-		keep = candidate
+		// Reserve row 0 for the body only; chips start on row 1.
+		rows = append(rows, rowPlan{indices: nil, budget: 0})
+		currentBudget = fullBudget
+	} else {
+		currentBudget = row0Budget
 	}
-	// The walk can stop left of the active chip's position (rule 2 break),
-	// leaving the ACTIVE provider unkept; insert it at its display position,
-	// then evict inactive chips (from either end) until the row fits — the
-	// active chip always wins.
-	if !kept(m.active) {
-		pos := 0
-		for pos < len(keep) && keep[pos] < m.active {
-			pos++
-		}
-		keep = append(keep[:pos], append([]int{m.active}, keep[pos:]...)...)
-		for len(keep) > 1 && total(keep) > budget {
-			// Evict the rightmost inactive chip; the active chip is never
-			// dropped.
-			last := len(keep) - 1
-			if keep[last] == m.active {
-				last = 0 // only the leftmost remains to evict
-			}
-			keep = append(keep[:last], keep[last+1:]...)
-		}
-		if total(keep) > budget {
-			return chipLayout{} // unreachable: budget >= chipFloor
+
+	flushRow := func() {
+		if len(currentIndices) > 0 {
+			rows = append(rows, rowPlan{indices: currentIndices, budget: currentBudget})
+			currentIndices = make([]int, 0)
+			currentBudget = fullBudget
 		}
 	}
 
-	// Restore slack toward natural widths: the active chip first, then the
-	// remaining kept chips left-to-right.
-	widths := make([]int, len(keep))
-	for k := range keep {
-		widths[k] = chipFloor
-	}
-	slack := budget - total(keep)
-	order := make([]int, 0, len(keep))
-	for k, i := range keep {
-		if i == m.active {
-			order = append(order, k)
-		}
-	}
-	for k := range keep {
-		if keep[k] != m.active {
-			order = append(order, k)
-		}
-	}
-	for _, k := range order {
-		for slack > 0 && widths[k] < natural[keep[k]] {
-			widths[k]++
-			slack--
-		}
-	}
-
-	parts := make([]string, len(keep))
-	for k, i := range keep {
-		if i == m.active {
-			parts[k] = truncateANSI(m.styles.chipActiveStyle.Render(labels[i]), widths[k])
+	for i := range m.providers {
+		candidate := append(append([]int{}, currentIndices...), i)
+		if floorCost(candidate) <= currentBudget {
+			currentIndices = candidate
 		} else {
-			parts[k] = truncateANSI(m.styles.chipInactiveStyle.Render(labels[i]), widths[k])
+			flushRow()
+			currentIndices = []int{i}
+			currentBudget = fullBudget
+			// If it still doesn't fit on a full row, it gets truncated later.
 		}
 	}
-	return chipLayout{parts: parts, providers: keep}
+	flushRow()
+
+	// Cap to the height budget before guaranteeing the active provider.
+	if len(rows) > maxRows {
+		rows = rows[:maxRows]
+	}
+
+	// Ensure the active chip is present. Greedy packing already places it,
+	// but truncation by maxRows can drop it. In that case inject it into
+	// the last row, evicting peers until the budget is satisfied.
+	hasActive := false
+	for _, r := range rows {
+		if slices.Contains(r.indices, m.active) {
+			hasActive = true
+		}
+	}
+	if !hasActive && len(rows) > 0 {
+		last := len(rows) - 1
+		r := rows[last]
+		r.indices = append(r.indices, m.active)
+		for len(r.indices) > 1 && floorCost(r.indices) > r.budget {
+			// Evict the rightmost inactive chip (penultimate) to keep the
+			// newly appended active chip.
+			idx := len(r.indices) - 2
+			r.indices = append(r.indices[:idx], r.indices[idx+1:]...)
+		}
+		rows[last] = r
+	}
+
+	// Build chipLayout for each row.
+	result := make([]chipLayout, len(rows))
+	for ri, r := range rows {
+		widths := make([]int, len(r.indices))
+		for k := range r.indices {
+			widths[k] = chipFloor
+		}
+		slack := max(r.budget-floorCost(r.indices), 0)
+		// Restore slack: active chip first, then rest left-to-right.
+		order := make([]int, 0, len(r.indices))
+		for k, idx := range r.indices {
+			if idx == m.active {
+				order = append(order, k)
+			}
+		}
+		for k, idx := range r.indices {
+			if idx != m.active {
+				order = append(order, k)
+			}
+		}
+		for _, k := range order {
+			for slack > 0 && widths[k] < natural[r.indices[k]] {
+				widths[k]++
+				slack--
+			}
+		}
+
+		parts := make([]string, len(r.indices))
+		for k, idx := range r.indices {
+			if idx == m.active {
+				parts[k] = truncateANSI(m.styles.chipActiveStyle.Render(labels[idx]), widths[k])
+			} else {
+				parts[k] = truncateANSI(m.styles.chipInactiveStyle.Render(labels[idx]), widths[k])
+			}
+		}
+		result[ri] = chipLayout{parts: parts, providers: r.indices}
+	}
+	return result
 }
 
-// chipAt maps a click column on header row 0 to a provider chip index,
-// following the same right-aligned layout renderHeader displays: the row's
-// content spans m.width-2 usable cells, so the last chip ends at column
-// m.width-2 and each chip occupies [x-w+1, x] for its rendered width w. Only
-// chips that survive the width budget are hit-testable — a dropped chip is
-// invisible and must not be clickable.
-func (m Model) chipAt(mx int) (int, bool) {
+// chipAt maps a click at (mx, my) to a provider chip index. It uses
+// chipRowsLayout so hit-testing matches the rendered geometry exactly.
+// Row 0 chips are right-aligned after the header body; row 1+ chips are
+// right-aligned in the full header width (m.width-2).
+func (m Model) chipAt(mx, my int) (int, bool) {
 	if !m.hasSwitcher() {
 		return 0, false
 	}
-	layout := m.budgetedChips()
+	rows := m.chipRowsLayout()
+	if my < 0 || my >= len(rows) {
+		return 0, false
+	}
+	layout := rows[my]
+	if len(layout.parts) == 0 {
+		return 0, false
+	}
+
+	// All chip rows are right-aligned within the full header width (m.width-2).
+	// renderHeader pads row 0's body to push chips to the same right edge.
 	right := m.width - 2
+
 	for i, v := range slices.Backward(layout.parts) {
 		w := lipgloss.Width(v)
 		if mx >= right-w+1 && mx <= right {
@@ -325,21 +390,38 @@ func (m Model) chipAt(mx int) (int, bool) {
 }
 
 func (m Model) renderHeader() string {
-	// With a switcher, render with the reserved body so the truncated body
-	// the chips were budgeted against is the one displayed; without one,
-	// render the natural body capped at the usable width (single-provider
-	// rows keep their legacy content; only a too-narrow terminal truncates).
 	body := m.headerBody(m.hasSwitcher())
-	if switcher := m.renderProviderSwitcher(); switcher != "" {
-		// Right-align the switcher inside the header content: headerStyle
-		// adds 1 cell of padding on each side, so the usable body width is
-		// m.width-2; the extra cell is a visual gap before the chips.
-		if pad := m.width - lipgloss.Width(body) - lipgloss.Width(switcher) - 3; pad > 0 {
-			body += strings.Repeat(" ", pad)
-		}
-		body += " " + switcher
+	if !m.hasSwitcher() {
+		return m.styles.headerStyle.Render(body)
 	}
-	return m.styles.headerStyle.Render(body)
+	rows := m.chipRowsLayout()
+	if len(rows) == 0 {
+		return m.styles.headerStyle.Render(body)
+	}
+
+	// Row 0: body + right-aligned chips.
+	row0Chips := strings.Join(rows[0].parts, " ")
+	row0Body := body
+	if row0Chips != "" {
+		if pad := m.width - lipgloss.Width(row0Body) - lipgloss.Width(row0Chips) - 3; pad > 0 {
+			row0Body += strings.Repeat(" ", pad)
+		}
+		row0Body += " " + row0Chips
+	}
+
+	var lines []string
+	lines = append(lines, m.styles.headerStyle.Render(row0Body))
+
+	// Row 1+: full-width, right-aligned chips.
+	for _, r := range rows[1:] {
+		chips := strings.Join(r.parts, " ")
+		if pad := m.width - lipgloss.Width(chips) - 2; pad > 0 {
+			chips = strings.Repeat(" ", pad) + chips
+		}
+		lines = append(lines, m.styles.headerStyle.Render(chips))
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // renderTab renders a single tab label using the theme. The selected tab

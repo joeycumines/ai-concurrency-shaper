@@ -351,6 +351,7 @@ func (m Model) renderHelpOverlay() string {
 		" t             Cycle type filter (Network tab)\n"+
 		" s             Cycle status filter (Network tab)\n"+
 		" c             Reset Stats (y confirms, n/Esc cancels)\n"+
+		" Ctrl+K        Command palette\n"+
 		switcher+
 		" Esc           Close overlay / Clear filter\n"+
 		" ?             Show this help\n"+

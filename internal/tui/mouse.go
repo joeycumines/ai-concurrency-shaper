@@ -24,18 +24,18 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 	mx := msg.Mouse().X
 	my := msg.Mouse().Y
 
-	// Provider switcher chips (row 0). chipAt does the same right-aligned
-	// cumulative-width hit test that renderHeader uses to position the chips, so a
-	// click lands on whichever chip the user sees under the cursor.
-	if my == 0 {
-		if i, ok := m.chipAt(mx); ok {
+	// Provider switcher chips occupy header rows 0..headerRowCount()-1.
+	// chipAt uses chipRowsLayout so hit-testing matches rendered geometry.
+	if my >= 0 && my < m.headerRowCount() {
+		if i, ok := m.chipAt(mx, my); ok {
 			m.switchProvider(i)
 		}
 		return m, nil
 	}
 
-	// Tab bar (row 1).
-	if my == 1 {
+	// Tab bar (immediately below header rows).
+	tabBarRow := m.headerRowCount()
+	if my == tabBarRow {
 		// Clicks beyond the terminal width land on non-existent cells and
 		// must not switch tabs. tabAt deliberately ignores m.width, so this
 		// guard is the boundary between rendered and unrendered columns.
@@ -49,8 +49,8 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 	}
 
 	// Content area starts at row 3 (header=0, tabbar=1, separator=2).
-	contentEndRow := contentStartRow + m.visibleRows()
-	if my < contentStartRow || my >= contentEndRow {
+	contentEndRow := m.contentStartRow() + m.visibleRows()
+	if my < m.contentStartRow() || my >= contentEndRow {
 		return m, nil
 	}
 
@@ -69,7 +69,7 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 		contentHeight := m.maxCursor() + 1
 		trackHeight := m.dataRows()
 		headerRows := m.contentHeaderRows()
-		trackStartRow := contentStartRow + headerRows
+		trackStartRow := m.contentStartRow() + headerRows
 		if my < trackStartRow {
 			return m, nil
 		}
@@ -96,7 +96,7 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	relativeRow := my - contentStartRow - m.contentHeaderRows()
+	relativeRow := my - m.contentStartRow() - m.contentHeaderRows()
 	if relativeRow < 0 {
 		return m, nil
 	}
@@ -105,6 +105,25 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
+	mx := msg.Mouse().X
+	my := msg.Mouse().Y
+
+	// Mouse wheel over the active-provider identity area in fleet mode
+	// cycles providers instead of scrolling content. The identity starts at
+	// column 1 because headerStyle has PaddingLeft(1); column 0 is padding.
+	if my == 0 && m.hasSwitcher() {
+		idW := m.identityWidth()
+		if mx >= 1 && mx < 1+idW {
+			switch msg.Mouse().Button {
+			case tea.MouseWheelUp:
+				m.cycleProvider(-1)
+			case tea.MouseWheelDown:
+				m.cycleProvider(1)
+			}
+			return m, nil
+		}
+	}
+
 	switch msg.Mouse().Button {
 	case tea.MouseWheelUp:
 		m.moveCursor(-3)
@@ -127,7 +146,7 @@ func (m Model) handleMouseMotion(msg tea.MouseMotionMsg) (Model, tea.Cmd) {
 	if viewport.ScrollMax(contentHeight, trackHeight) <= 0 {
 		return m, nil
 	}
-	trackStartRow := contentStartRow + m.contentHeaderRows()
+	trackStartRow := m.contentStartRow() + m.contentHeaderRows()
 	if my < trackStartRow {
 		my = trackStartRow
 	}

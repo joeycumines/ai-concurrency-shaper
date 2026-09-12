@@ -48,6 +48,7 @@ const (
 	modeFilter
 	modeHelp
 	modeConfirm
+	modePalette
 )
 
 type tabID int
@@ -203,6 +204,10 @@ type Model struct {
 	// flat conc/snap/journal fields below mirror the active provider's state.
 	providers []providerState
 	active    int
+
+	// palette is the live state of the command palette overlay.
+	// It is only meaningful when mode == modePalette.
+	palette paletteState
 }
 
 // ProviderMeta describes one upstream provider for a multi-provider dashboard.

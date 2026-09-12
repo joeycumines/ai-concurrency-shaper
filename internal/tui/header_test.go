@@ -120,7 +120,7 @@ func TestSingleProviderHeaderKeepsShaper(t *testing.T) {
 	if got := m.providerName(); got != " ⚡ shaper" {
 		t.Errorf("providerName = %q, want %q", got, " ⚡ shaper")
 	}
-	if _, ok := m.chipAt(0); ok {
+	if _, ok := m.chipAt(0, 0); ok {
 		t.Error("chipAt must not hit a chip for a single unnamed provider")
 	}
 	h := stripANSI(m.renderHeader())
@@ -156,32 +156,31 @@ func TestHeaderWidthBudget(t *testing.T) {
 				t.Errorf("width=%d active=%d: header row is %d cells, exceeds %d (wrap onto tab bar):\n%s",
 					w, active, got, w, m.renderHeader())
 			}
-			// (b) The active provider's chip is always present — visible in
-			// the rendered row and returned by chipAt at its position.
-			layout := m.budgetedChips()
+			// (b) The active provider's chip is always present across all
+			// wrapped rows, and chipAt maps clicks to it.
+			allRows := m.chipRowsLayout()
 			found := false
-			for k, prov := range layout.providers {
-				if prov == active {
-					found = true
-					// chipAt must hit-test this chip somewhere inside its
-					// rendered span. Walk the right-aligned layout the same
-					// way chipAt does.
-					right := m.width - 2
-					for i, v := range slices.Backward(layout.parts) {
-						cw := lipgloss.Width(v)
-						if i == k {
-							if idx, ok := m.chipAt(right); !ok || idx != prov {
-								t.Errorf("width=%d active=%d: chipAt(%d) = (%d,%v), want (%d,true)",
-									w, active, right, idx, ok, prov)
+			for ri, row := range allRows {
+				for k, prov := range row.providers {
+					if prov == active {
+						found = true
+						right := m.width - 2
+						for i, v := range slices.Backward(row.parts) {
+							cw := lipgloss.Width(v)
+							if i == k {
+								if idx, ok := m.chipAt(right, ri); !ok || idx != prov {
+									t.Errorf("width=%d active=%d: chipAt(%d,%d) = (%d,%v), want (%d,true)",
+										w, active, right, ri, idx, ok, prov)
+								}
+								break
 							}
-							break
+							right -= cw + 1
 						}
-						right -= cw + 1
 					}
 				}
 			}
 			if !found {
-				t.Errorf("width=%d active=%d: active provider's chip missing from the rendered switcher", w, active)
+				t.Errorf("width=%d active=%d: active provider's chip missing from all rendered switcher rows", w, active)
 			}
 		}
 	}
@@ -195,30 +194,36 @@ func TestHeaderWidthBudget(t *testing.T) {
 			m.height = 24
 			m.active = active
 			m.syncActive()
-			layout := m.budgetedChips()
+			allRows := m.chipRowsLayout()
 			rendered := make(map[int]bool)
-			for _, prov := range layout.providers {
-				rendered[prov] = true
+			for _, row := range allRows {
+				for _, prov := range row.providers {
+					rendered[prov] = true
+				}
 			}
-			// Every column of the row: a hit must be a rendered chip.
-			for x := 0; x < m.width; x++ {
-				idx, ok := m.chipAt(x)
-				if ok && !rendered[idx] {
-					t.Errorf("width=%d active=%d: chipAt(%d) hit provider %d whose chip is not rendered", w, active, x, idx)
+			// Every column of every header row: a hit must be a rendered chip.
+			for ri := range allRows {
+				for x := 0; x < m.width; x++ {
+					idx, ok := m.chipAt(x, ri)
+					if ok && !rendered[idx] {
+						t.Errorf("width=%d active=%d: chipAt(%d,%d) hit provider %d whose chip is not rendered", w, active, x, ri, idx)
+					}
 				}
 			}
 			// Every rendered chip: each of its columns maps back to itself.
-			right := m.width - 2
-			for i, v := range slices.Backward(layout.parts) {
-				cw := lipgloss.Width(v)
-				prov := layout.providers[i]
-				for x := right - cw + 1; x <= right; x++ {
-					if idx, ok := m.chipAt(x); !ok || idx != prov {
-						t.Errorf("width=%d active=%d: chipAt(%d) = (%d,%v), want (%d,true) across the rendered chip span",
-							w, active, x, idx, ok, prov)
+			for ri, row := range allRows {
+				right := m.width - 2
+				for i, v := range slices.Backward(row.parts) {
+					cw := lipgloss.Width(v)
+					prov := row.providers[i]
+					for x := right - cw + 1; x <= right; x++ {
+						if idx, ok := m.chipAt(x, ri); !ok || idx != prov {
+							t.Errorf("width=%d active=%d: chipAt(%d,%d) = (%d,%v), want (%d,true) across the rendered chip span",
+								w, active, x, ri, idx, ok, prov)
+						}
 					}
+					right -= cw + 1
 				}
-				right -= cw + 1
 			}
 		}
 	}
@@ -341,9 +346,15 @@ func TestFleetStrip_AggregateObservability(t *testing.T) {
 	})
 
 	hdr := stripANSI(m.renderHeader())
-	want := "Fleet: 5 active · 2 queued · 1 OPEN · busiest: openai"
-	if !strings.Contains(hdr, want) {
-		t.Fatalf("header missing fleet strip %q; got header: %q", want, hdr)
+	// The fleet header now shows the active provider identity with a scroll
+	// affordance, followed by aggregate stats (no "Fleet:" prefix).
+	wantStats := "5 active · 2 queued · 1 OPEN · busiest: openai"
+	if !strings.Contains(hdr, wantStats) {
+		t.Fatalf("header missing fleet stats %q; got header: %q", wantStats, hdr)
+	}
+	wantIdentity := "openai ↕"
+	if !strings.Contains(hdr, wantIdentity) {
+		t.Fatalf("header missing active provider identity %q; got header: %q", wantIdentity, hdr)
 	}
 
 	// Provider switcher chips are rendered on the right side of the same row.

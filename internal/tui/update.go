@@ -158,6 +158,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	// Palette mode: fully self-contained key handling.
+	if m.mode == modePalette {
+		return m.handlePaletteKey(msg)
+	}
+
 	// Help mode: any key dismisses (checked before quit so 'q' in help doesn't kill)
 	if m.mode == modeHelp {
 		m.mode = modeBrowse
@@ -302,6 +307,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "ctrl+k":
+		m.openPalette()
+		return m, nil
 	case "?":
 		m.mode = modeHelp
 	case "1":

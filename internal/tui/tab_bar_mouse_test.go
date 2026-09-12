@@ -311,8 +311,8 @@ func TestMouseClickContentAreaPausesFollowLogs(t *testing.T) {
 	}
 
 	// Content area starts at row 3 (header=0, tabbar=1, separator=2).
-	// Clicking at Y=contentStartRow within the viewport pauses tailing.
-	m2 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow})
+	// Clicking at Y=m.contentStartRow() within the viewport pauses tailing.
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: m.contentStartRow()})
 	if m2.followLogs {
 		t.Errorf("content-area click should set followLogs=false, got %v", m2.followLogs)
 	}

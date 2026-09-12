@@ -37,3 +37,9 @@ internal/transcode/testcorpus/*
 *unreachable func: EventBuilder.ReasoningSummaryTextDelta*
 *unreachable func: EventBuilder.ReasoningSummaryTextDone*
 *unreachable func: EventBuilder.ReasoningSummaryPartDone*
+
+# TUI header helpers exercised only by tests: deadcode analyzes reachability
+# from the binary entry, so helpers pinned by header_test.go appear
+# unreachable even though they are load-bearing test surface.
+*unreachable func: Model.renderProviderSwitcher*
+*unreachable func: Model.budgetedChips*

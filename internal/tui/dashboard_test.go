@@ -736,7 +736,7 @@ func TestDashboardCacheInvalidation(t *testing.T) {
 	if m2.dashboardLinesCache == nil {
 		t.Error("MouseWheelMsg should not clear dashboardLinesCache")
 	}
-	m2 = update(m2, tea.MouseClickMsg{X: 1, Y: contentStartRow})
+	m2 = update(m2, tea.MouseClickMsg{X: 1, Y: m.contentStartRow()})
 	if m2.dashboardLinesCache == nil {
 		t.Error("MouseClickMsg should not clear dashboardLinesCache")
 	}

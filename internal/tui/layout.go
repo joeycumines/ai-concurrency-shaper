@@ -17,14 +17,37 @@ package tui
 
 import ()
 
-const contentStartRow = 3
+// headerRowCount returns the number of rows the header occupies. In
+// single-provider mode (or when the switcher is elided) this is 1. In fleet
+// mode with wrapped provider chips it is 1 + the number of additional chip
+// rows. The result is capped so at least 1 content row remains.
+func (m Model) headerRowCount() int {
+	rows := 1
+	if m.hasSwitcher() {
+		if layout := m.chipRowsLayout(); len(layout) > 1 {
+			rows = len(layout)
+		}
+	}
+	// Cap: header + tab bar + separator + >=1 content row + footer must fit.
+	maxRows := max(m.height-4, 1)
+	if rows > maxRows {
+		rows = maxRows
+	}
+	return rows
+}
+
+// contentStartRow returns the first row of the content area, below the
+// header rows, tab bar, and separator.
+func (m Model) contentStartRow() int {
+	return m.headerRowCount() + 2
+}
 
 func (m *Model) visibleRows() int {
 	// Reserve only the chrome (header, tabbar, separator, footer). Filter input
 	// and active toasts are overlays above the footer; they reduce the
 	// scrollable content area only while they are present, so no space is
 	// wasted when they are absent.
-	v := m.height - 4
+	v := m.height - m.headerRowCount() - 3
 	if m.mode == modeFilter && (m.tab == tabRequests || m.tab == tabNetwork || m.tab == tabLogs) {
 		v--
 	}

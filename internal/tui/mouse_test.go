@@ -25,7 +25,7 @@ import (
 // scrollbarTop returns the first terminal row that belongs to the scrollbar
 // track for the current tab. It is offset past the fixed header rows so that
 // the scrollbar aligns with the scrollable data area.
-func scrollbarTop(m Model) int { return contentStartRow + m.contentHeaderRows() }
+func scrollbarTop(m Model) int { return m.contentStartRow() + m.contentHeaderRows() }
 
 func TestMouseClickContentArea_SetsCursor(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
@@ -36,7 +36,7 @@ func TestMouseClickContentArea_SetsCursor(t *testing.T) {
 	m2 := update(m, tea.MouseClickMsg{X: 10, Y: 5})
 	// Row 5 skips the table header on row 3, so it maps to data row 1.
 	if m2.cursor != 1 {
-		t.Errorf("cursor = %d, want 1 (row 5 - contentStartRow 3 - header 1)", m2.cursor)
+		t.Errorf("cursor = %d, want 1 (row 5 - m.contentStartRow() 3 - header 1)", m2.cursor)
 	}
 }
 
@@ -60,7 +60,7 @@ func TestMouseClickContentArea_DashboardSetsCursor(t *testing.T) {
 	m2 := update(m, tea.MouseClickMsg{X: 10, Y: 5})
 	// Dashboard is scrollable, so a content click sets the cursor/scroll position.
 	if m2.cursor != 2 {
-		t.Errorf("cursor = %d, want 2 (row 5 - contentStartRow 3 + scroll 0)", m2.cursor)
+		t.Errorf("cursor = %d, want 2 (row 5 - m.contentStartRow() 3 + scroll 0)", m2.cursor)
 	}
 }
 
@@ -73,13 +73,13 @@ func TestMouseClickContentArea_LogsTabNoHeader(t *testing.T) {
 	m.tab = tabLogs
 	m.logRing.Write([]byte("line1\nline2\nline3\n"))
 	// contentHeaderRows for Logs without filter is 0, so clicking
-	// contentStartRow (row 3) maps to cursor 0.
-	m2 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow})
+	// m.contentStartRow() (row 3) maps to cursor 0.
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: m.contentStartRow()})
 	if m2.cursor != 0 {
 		t.Errorf("Logs first-row click: cursor = %d, want 0 (no header offset)", m2.cursor)
 	}
 	// Second row should map to cursor 1.
-	m3 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow + 1})
+	m3 := update(m, tea.MouseClickMsg{X: 10, Y: m.contentStartRow() + 1})
 	if m3.cursor != 1 {
 		t.Errorf("Logs second-row click: cursor = %d, want 1", m3.cursor)
 	}
@@ -136,7 +136,7 @@ func TestMouseClickContentArea_CursorFollowsClick(t *testing.T) {
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, 50)
 	m.scroll = 10
 	// Click on the 2nd visible data row (past the table header).
-	m2 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow + m.contentHeaderRows() + 1})
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: m.contentStartRow() + m.contentHeaderRows() + 1})
 	if m2.cursor != 11 {
 		t.Errorf("cursor = %d, want 11 (scroll 10 + relative data row 1)", m2.cursor)
 	}
@@ -150,7 +150,7 @@ func TestMouseClickContentArea_ClampedAtEnd(t *testing.T) {
 	m.snap.LogEntries = make([]metrics.RequestLogEntry, 5)
 	m.scroll = 0
 	// Click way past the end.
-	m2 := update(m, tea.MouseClickMsg{X: 10, Y: contentStartRow + 100})
+	m2 := update(m, tea.MouseClickMsg{X: 10, Y: m.contentStartRow() + 100})
 	if m2.cursor > m2.maxCursor() {
 		t.Errorf("cursor = %d, should be clamped to %d", m2.cursor, m2.maxCursor())
 	}

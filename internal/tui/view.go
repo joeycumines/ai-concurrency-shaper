@@ -63,6 +63,10 @@ func (m Model) View() tea.View {
 		confirm := m.renderConfirmOverlay()
 		b.WriteString(confirm)
 		m.padLines(&b, countContentLines(confirm))
+	case modePalette:
+		palette := m.renderCommandPalette()
+		b.WriteString(palette)
+		m.padLines(&b, countContentLines(palette))
 	default:
 		content := m.renderContentWithScrollbar()
 		b.WriteString(content)

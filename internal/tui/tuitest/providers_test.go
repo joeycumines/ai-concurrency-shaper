@@ -130,25 +130,25 @@ func TestPTY_MultiProviderTabSwitch(t *testing.T) {
 			t.Fatalf("header should show chip %q; got: %q", name, out)
 		}
 	}
-	if !strings.Contains(out, "Fleet: 0 active · 0 queued · 0 OPEN · busiest: prov1") {
+	if !strings.Contains(out, "0 active · 0 queued · 0 OPEN · busiest: prov1") {
 		t.Fatalf("initial header should show fleet summary 0 active; got: %q", headerLine(out))
 	}
 
 	// One parked request at prov1's mount: /v1/messages is a limited route by
 	// default, so it enters prov1's limiter and holds its counter at 1.
 	fireRequest(t, &fired, h.ProviderURL(0)+"/v1/messages")
-	awaitRender(t, h, "Fleet: 1 active · 0 queued · 0 OPEN · busiest: prov1")
+	awaitRender(t, h, "1 active · 0 queued · 0 OPEN · busiest: prov1")
 
 	// Tab switches the visible dashboard to prov2 (which still has zero
 	// in-flight — its counter must not have been moved by prov1's request).
 	if _, err := h.Console().WriteString("\t"); err != nil {
 		t.Fatalf("WriteString tab: %v", err)
 	}
-	awaitRender(t, h, "Fleet: 1 active · 0 queued · 0 OPEN · busiest: prov1")
+	awaitRender(t, h, "1 active · 0 queued · 0 OPEN · busiest: prov1")
 
 	// A parked request at prov2's mount drives the now-active view's counter.
 	fireRequest(t, &fired, h.ProviderURL(1)+"/v1/messages")
-	awaitRender(t, h, "Fleet: 2 active · 0 queued · 0 OPEN")
+	awaitRender(t, h, "2 active · 0 queued · 0 OPEN")
 
 	// The dashboard body follows the switch: the Concurrency view (key 5)
 	// renders the active provider's gauge line.
@@ -195,7 +195,7 @@ func TestPTY_MultiProviderTeardown(t *testing.T) {
 
 	// One parked request at prov1's mount holds its counter at 1.
 	fireRequest(t, &fired, h.ProviderURL(0)+"/v1/messages")
-	awaitRender(t, h, "Fleet: 1 active · 0 queued · 0 OPEN · busiest: prov1")
+	awaitRender(t, h, "1 active · 0 queued · 0 OPEN · busiest: prov1")
 
 	// Switch to prov2 and hold a request there too: both providers must
 	// carry an in-flight request at the same time.
@@ -203,7 +203,7 @@ func TestPTY_MultiProviderTeardown(t *testing.T) {
 		t.Fatalf("WriteString tab: %v", err)
 	}
 	fireRequest(t, &fired, h.ProviderURL(1)+"/v1/messages")
-	awaitRender(t, h, "Fleet: 2 active · 0 queued · 0 OPEN")
+	awaitRender(t, h, "2 active · 0 queued · 0 OPEN")
 
 	// Ctrl+C: the TUI exits, main's shutdown runs, the server drain (5s
 	// grace) expires with the parked handlers, and the process exits cleanly.
@@ -240,12 +240,12 @@ func TestPTY_ThreeProvidersFleetStrip(t *testing.T) {
 	defer h.Close()
 
 	// Initial fleet strip: 0 active, 0 queued, 0 OPEN.
-	awaitRender(t, h, "Fleet: 0 active · 0 queued · 0 OPEN")
+	awaitRender(t, h, "0 active · 0 queued · 0 OPEN")
 
 	// Fire request at prov1 and prov2.
 	fireRequest(t, &fired, h.ProviderURL(0)+"/v1/messages")
 	fireRequest(t, &fired, h.ProviderURL(1)+"/v1/messages")
 
 	// Fleet strip reflects aggregate active count.
-	awaitRender(t, h, "Fleet: 2 active · 0 queued · 0 OPEN")
+	awaitRender(t, h, "2 active · 0 queued · 0 OPEN")
 }

@@ -74,6 +74,12 @@ type tuiTheme struct {
 	// when the theme is (re)applied.
 	scrollbarThumb lipgloss.Style
 	scrollbarTrack lipgloss.Style
+
+	// Command palette styles.
+	paletteFrameStyle    lipgloss.Style
+	paletteInputStyle    lipgloss.Style
+	paletteSelectedStyle lipgloss.Style
+	paletteDimStyle      lipgloss.Style
 }
 
 // newTheme builds the style set for the given background. dark=true is the
@@ -230,6 +236,24 @@ func darkTheme() tuiTheme {
 
 		scrollbarTrack: s().
 			Foreground(lipgloss.Color("#21262D")),
+
+		paletteFrameStyle: s().
+			Foreground(lipgloss.Color("#E6EDF3")).
+			Background(lipgloss.Color("#161B22")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#58A6FF")).
+			Padding(0, 1),
+
+		paletteInputStyle: s().
+			Bold(true).
+			Foreground(lipgloss.Color("#58A6FF")),
+
+		paletteSelectedStyle: s().
+			Foreground(lipgloss.Color("#0D1117")).
+			Background(lipgloss.Color("#388BFD")),
+
+		paletteDimStyle: s().
+			Foreground(lipgloss.Color("#6E7681")),
 	}
 	return t
 }
@@ -379,6 +403,24 @@ func lightTheme() tuiTheme {
 
 		scrollbarTrack: s().
 			Foreground(lipgloss.Color("#D0D7DE")),
+
+		paletteFrameStyle: s().
+			Foreground(lipgloss.Color("#1F2328")).
+			Background(lipgloss.Color("#FFFFFF")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#0550AE")).
+			Padding(0, 1),
+
+		paletteInputStyle: s().
+			Bold(true).
+			Foreground(lipgloss.Color("#0550AE")),
+
+		paletteSelectedStyle: s().
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#0550AE")),
+
+		paletteDimStyle: s().
+			Foreground(lipgloss.Color("#59636E")),
 	}
 	return t
 }
