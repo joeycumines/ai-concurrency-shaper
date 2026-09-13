@@ -242,20 +242,20 @@ func TestRepro_FirstChipOrphan(t *testing.T) {
 			rows := m.chipRowsLayout()
 			if len(rows) == 0 || len(rows[0].providers) != 0 {
 				t.Fatalf("fleet %q w=%d h=24: expected empty row 0 (body-only) after fix, got providers %v widths %v", fleet.name, w, func() []int {
-				if len(rows) > 0 {
-					return rows[0].providers
-				}
-				return nil
-			}(), func() []int {
-				if len(rows) > 0 && len(rows[0].parts) > 0 {
-					ws := make([]int, len(rows[0].parts))
-					for i, pp := range rows[0].parts {
-						ws[i] = lipgloss.Width(pp)
+					if len(rows) > 0 {
+						return rows[0].providers
 					}
-					return ws
-				}
-				return nil
-			}())
+					return nil
+				}(), func() []int {
+					if len(rows) > 0 && len(rows[0].parts) > 0 {
+						ws := make([]int, len(rows[0].parts))
+						for i, pp := range rows[0].parts {
+							ws[i] = lipgloss.Width(pp)
+						}
+						return ws
+					}
+					return nil
+				}())
 			}
 			// All wrapped rows must still honor header <= width
 			rendered := m.renderHeader()

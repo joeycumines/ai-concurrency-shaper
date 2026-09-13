@@ -30,15 +30,15 @@ func TestHeaderBreakpointGoldens(t *testing.T) {
 	}
 
 	type golden struct {
-		width        int
-		height       int
-		metas        []ProviderMeta
-		fleetName    string
-		active       int
-		wantHRC      int
-		wantRowCount int
+		width         int
+		height        int
+		metas         []ProviderMeta
+		fleetName     string
+		active        int
+		wantHRC       int
+		wantRowCount  int
 		wantProviders [][]int
-		wantWidths [][]int
+		wantWidths    [][]int
 	}
 
 	goldens := []golden{

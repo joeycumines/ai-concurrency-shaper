@@ -56,8 +56,6 @@ import (
 //   layout is exactly one row with each chip at natural width.
 //
 
-
-
 func TestChipRowsLayout_AllProvidersPresent(t *testing.T) {
 	metas := []ProviderMeta{
 		{Name: "anthropic-eu-central", Concurrency: 4},

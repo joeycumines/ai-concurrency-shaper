@@ -15,7 +15,10 @@ import (
 
 func TestHeaderPropertyFuzz(t *testing.T) {
 	r := rand.New(rand.NewSource(1)) // deterministic
-	const iterations = 200
+	iterations := 200
+	if isRace {
+		iterations = 60
+	}
 
 	latinChars := []rune("abcdefghijklmnopqrstuvwxyz0123456789-")
 	cjkRunes := []rune("模型日本語中文한국어αβγδε🪄⚡🔥🚀🌟")
@@ -161,53 +164,117 @@ func TestHeaderPropertyFuzz(t *testing.T) {
 					t.Fatalf("iter %d w=%d h=%d empty row0 has parts %d want 0 rows=%v", iter, w, h, len(rows[0].parts), rows)
 				}
 				// empty row0 must have no hits
-				for x := 0; x < w; x++ {
-					if _, ok := m.chipAt(x, 0); ok {
-						t.Fatalf("iter %d w=%d h=%d empty row0 hit at x=%d", iter, w, h, x)
+				if isRace {
+					for _, x := range []int{0, w / 2, w - 1} {
+						if x < 0 || x >= w {
+							continue
+						}
+						if _, ok := m.chipAt(x, 0); ok {
+							t.Fatalf("iter %d w=%d h=%d empty row0 hit at x=%d", iter, w, h, x)
+						}
+					}
+				} else {
+					for x := 0; x < w; x++ {
+						if _, ok := m.chipAt(x, 0); ok {
+							t.Fatalf("iter %d w=%d h=%d empty row0 hit at x=%d", iter, w, h, x)
+						}
 					}
 				}
 			}
 			// per-row chipAt lockstep
 			for ri, rr := range rows {
 				if len(rr.parts) == 0 {
-					for x := 0; x < w; x++ {
-						if _, ok := m.chipAt(x, ri); ok {
-							t.Fatalf("iter %d w=%d h=%d ri=%d empty row hit at x=%d rows=%v", iter, w, h, ri, x, rows)
+					if isRace {
+						for _, x := range []int{0, w / 2, w - 1} {
+							if x < 0 || x >= w {
+								continue
+							}
+							if _, ok := m.chipAt(x, ri); ok {
+								t.Fatalf("iter %d w=%d h=%d ri=%d empty row hit at x=%d rows=%v", iter, w, h, ri, x, rows)
+							}
+						}
+					} else {
+						for x := 0; x < w; x++ {
+							if _, ok := m.chipAt(x, ri); ok {
+								t.Fatalf("iter %d w=%d h=%d ri=%d empty row hit at x=%d rows=%v", iter, w, h, ri, x, rows)
+							}
 						}
 					}
 					continue
 				}
 				right := m.width - 2
-				for i := len(rr.parts) - 1; i >= 0; i-- {
-					cw := lipgloss.Width(rr.parts[i])
-					prov := rr.providers[i]
-					for x := right - cw + 1; x <= right; x++ {
-						idx, ok := m.chipAt(x, ri)
-						if !ok || idx != prov {
-							t.Fatalf("iter %d w=%d h=%d ri=%d x=%d chipAt=(%d,%v) want (%d,true) widths %v rows=%v strip %q", iter, w, h, ri, x, idx, ok, prov, func() []int {
-								ws := make([]int, len(rr.parts))
-								for k, p := range rr.parts {
-									ws[k] = lipgloss.Width(p)
-								}
-								return ws
-							}(), rows, stripANSI(rendered))
+				if isRace {
+					for i := len(rr.parts) - 1; i >= 0; i-- {
+						cw := lipgloss.Width(rr.parts[i])
+						prov := rr.providers[i]
+						for _, x := range []int{right - cw + 1, right - cw/2, right} {
+							idx, ok := m.chipAt(x, ri)
+							if !ok || idx != prov {
+								t.Fatalf("iter %d w=%d h=%d ri=%d x=%d chipAt=(%d,%v) want (%d,true) widths %v rows=%v strip %q", iter, w, h, ri, x, idx, ok, prov, func() []int {
+									ws := make([]int, len(rr.parts))
+									for k, p := range rr.parts {
+										ws[k] = lipgloss.Width(p)
+									}
+									return ws
+								}(), rows, stripANSI(rendered))
+							}
+						}
+						right -= cw + 1
+						if i > 0 {
+							gx := right + 1
+							if _, ok := m.chipAt(gx, ri); ok {
+								t.Fatalf("iter %d w=%d h=%d ri=%d gap hit at x=%d", iter, w, h, ri, gx)
+							}
 						}
 					}
-					right -= cw + 1
-				}
-				// gaps and padding must not hit
-				// Check all x from 0..w-1 where chipAt hits, provider must be in seen
-				for x := 0; x < w; x++ {
-					if idx, ok := m.chipAt(x, ri); ok && !seen[idx] {
-						t.Fatalf("iter %d w=%d h=%d ri=%d x=%d hit unrendered provider %d seen %v rows=%v", iter, w, h, ri, x, idx, seen, rows)
+					for _, x := range []int{0, w / 2} {
+						if x < 0 || x >= right+1 {
+							continue
+						}
+						if idx, ok := m.chipAt(x, ri); ok && !seen[idx] {
+							t.Fatalf("iter %d w=%d h=%d ri=%d x=%d hit unrendered provider %d seen %v rows=%v", iter, w, h, ri, x, idx, seen, rows)
+						}
+					}
+				} else {
+					for i := len(rr.parts) - 1; i >= 0; i-- {
+						cw := lipgloss.Width(rr.parts[i])
+						prov := rr.providers[i]
+						for x := right - cw + 1; x <= right; x++ {
+							idx, ok := m.chipAt(x, ri)
+							if !ok || idx != prov {
+								t.Fatalf("iter %d w=%d h=%d ri=%d x=%d chipAt=(%d,%v) want (%d,true) widths %v rows=%v strip %q", iter, w, h, ri, x, idx, ok, prov, func() []int {
+									ws := make([]int, len(rr.parts))
+									for k, p := range rr.parts {
+										ws[k] = lipgloss.Width(p)
+									}
+									return ws
+								}(), rows, stripANSI(rendered))
+							}
+						}
+						right -= cw + 1
+					}
+					for x := 0; x < w; x++ {
+						if idx, ok := m.chipAt(x, ri); ok && !seen[idx] {
+							t.Fatalf("iter %d w=%d h=%d ri=%d x=%d hit unrendered provider %d seen %v rows=%v", iter, w, h, ri, x, idx, seen, rows)
+						}
 					}
 				}
 			}
 			// no hit beyond rows len
-			for y := len(rows); y < len(rows)+2; y++ {
-				for x := 0; x < w; x++ {
-					if _, ok := m.chipAt(x, y); ok {
-						t.Fatalf("iter %d w=%d h=%d y=%d beyond rows hit", iter, w, h, y)
+			if isRace {
+				for y := len(rows); y < len(rows)+2; y++ {
+					for _, x := range []int{0, w / 2, w - 1} {
+						if _, ok := m.chipAt(x, y); ok {
+							t.Fatalf("iter %d w=%d h=%d y=%d beyond rows hit at x=%d", iter, w, h, y, x)
+						}
+					}
+				}
+			} else {
+				for y := len(rows); y < len(rows)+2; y++ {
+					for x := 0; x < w; x++ {
+						if _, ok := m.chipAt(x, y); ok {
+							t.Fatalf("iter %d w=%d h=%d y=%d beyond rows hit", iter, w, h, y)
+						}
 					}
 				}
 			}
