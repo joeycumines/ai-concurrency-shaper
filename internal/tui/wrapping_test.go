@@ -25,6 +25,39 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// Fleet header spec — see header.go fleet invariants and below.
+//
+// Policy:
+//   Usable = width-2 (headerStyle padding). Body natural =
+//   lipgloss.Width(headerBody(false)); chips natural =
+//   lipgloss.Width(chipActiveStyle.Render(" "+label+" ")).
+//   Row 0 chips iff first chip fits naturally (natural-fit prefix).
+//   Otherwise row 0 is body-only (empty chip row, body at full usable) and
+//   every chip starts on row 1+ at fullBudget = usable. Wrapped rows use
+//   greedy floorCost packing with active-first slack restoration. Height cap
+//   maxRows = max(height-4,1) caps len(chipRowsLayout) and headerRowCount.
+//
+// Breakpoint table (falsifiable, height 24 unless noted):
+//   20 cols, 3-long (anthropic-eu-central/openai-prod-longname/acme-edge-provider):
+//     body ~86 nat -> row0 body-only truncated to 18, row1 chips floor, hrc 2.
+//   40 cols, 3-long: row0 body-only (38 usable < body+firstChip), row1 chips
+//     2-3 at reduced widths (>3), hrc 2.
+//   80 cols, 3-long: row0 body-only, row1 full-width chips. 80 cols, 2-short
+//     (acme/anthropic, body 54, naturals 8+13): single row body+chips nat, hrc 1.
+//   100 cols, 3-long: row0 body-only (available 11 < 24), hrc 2.
+//   120 cols, 3-long: row0 shares one chip (available 31 fits 24), row1 holds
+//     remaining 2, hrc 2. 120 cols, 2-short: MUST be single-row nat
+//     (wrapping_test hard-requires). First chip on row 0 is always at natural
+//     width (no truncation on row 0).
+//   150 cols, 3-long: row0 shares two chips (available 61), row1 one, hrc 2.
+//   180 cols, 3-long: single row body+all nat, hrc 1.
+//   At 20-30 cols hrc is body-only row0 + chip row(s); if row0 holds chips its
+//   first chip width == natural (no truncation on row 0). At 120/2-short the
+//   layout is exactly one row with each chip at natural width.
+//
+
+
+
 func TestChipRowsLayout_AllProvidersPresent(t *testing.T) {
 	metas := []ProviderMeta{
 		{Name: "anthropic-eu-central", Concurrency: 4},

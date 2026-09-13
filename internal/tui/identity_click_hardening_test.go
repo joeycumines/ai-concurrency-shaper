@@ -18,11 +18,10 @@ import (
 )
 
 // TestFleetIdentityClick_GeometryLocks exhausts responsive widths and
-// active indices, locking the invariants that the blueprint declares sacred:
+// active indices, locking the fleet header geometry invariants:
 // header rows never exceed terminal width, active chip never dropped,
 // chipAt hit-tests every rendered chip pixel, and identity clicks outside the
-// canonical region are strict no-ops. This test is the hostile lock that
-// Task 3 requires before the Rule-of-Two gate.
+// canonical region are strict no-ops. This test is the hostile lock required before the correctness gate.
 func TestFleetIdentityClick_GeometryLocks(t *testing.T) {
 	metas := []ProviderMeta{
 		{Name: "anthropic-eu-central", Concurrency: 4},

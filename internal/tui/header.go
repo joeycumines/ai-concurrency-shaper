@@ -25,6 +25,76 @@ import (
 	"github.com/rivo/uniseg"
 )
 
+// Fleet header layout invariants (fleet / multi-provider mode, -tui).
+//
+// Usable width is m.width-2 (headerStyle pads 1 cell each side). The body is
+// the fleet identity + aggregate stats rendered by headerBody; the chips are
+// " "+label+" " rendered with chipActiveStyle / chipInactiveStyle. Natural
+// widths are measured with lipgloss.Width on the styled strings (headerBody
+// without reservation for the body, chipActiveStyle.Render(label) for chips).
+//
+// Invariant — first-chip-truncated => wrap-all (empty row 0):
+//
+//	Row 0 may contain chips only when the first provider's chip would render
+//	at its natural width without truncation. After measuring body natural and
+//	chip naturals, greedily pack the maximal prefix k of providers that fit
+//	naturally alongside the body: sum(natural[0:k])+(k-1)+1+bodyWidth(k) <=
+//	usable, where bodyWidth(k) is the truncated body that still fits. If no
+//	chip fits naturally (available < natural[0]), row 0 is body-only: an empty
+//	chipLayout (no providers) so renderHeader draws the body at the full
+//	usable width (headerBody(false) cap) and every provider chip begins on
+//	row 1+. Truncation, if unavoidable at ultra-narrow widths, is therefore
+//	distributed across a full-width chip row and never leaves a lone
+//	single-letter orphan on row 0. For rows where k>0 the row-0 chips are
+//	allocated their exact natural widths (defensive truncateANSI is identity);
+//
+// Wrapped rows (row 1+) use fullBudget = usable and greedy floorCost packing
+// (floorCost = n*chipFloor+(n-1)), with the existing slack-restoration order
+// (active chip first, then left-to-right) and truncateANSI — truncation may
+// still occur there at ultra-narrow widths but never on row 0;
+//
+// Height cap maxRows = max(height-4,1) governs both chipRowsLayout and
+// headerRowCount / renderHeader; if capping would drop the active chip it is
+// injected into the last row (evicting peers as needed). chipRowsLayout is
+// the single source of truth for both renderHeader and chipAt, and
+// headerRowCount/contentStartRow/visibleRows stay in lockstep.
+//
+// Breakpoints are dynamic (natural-fit), not fixed width thresholds:
+//
+//	The shared-row vs wrapped-row transition is derived from whether chips fit
+//	naturally beside the fleet identity body, not from a fixed chipFloor
+//	reserve. Representative behaviour (height 24, 3 long names
+//	anthropic-eu-central / openai-prod-longname / acme-edge-provider,
+//	body ~86 cells natural, chip naturals ~24/24/22):
+//	  ~20 cols (usable 18): row 0 body-only (truncated to usable), row 1
+//	     holds chips at floor widths; hrc=2. At 20-40 cols the header is
+//	     always body-only on row 0, chips on row 1+.
+//	  ~40 cols (usable 38): row 0 body-only, row 1 holds 2-3 chips at
+//	     reduced but still legible widths (> chipFloor singleton).
+//	  ~80 cols (usable 78): row 0 body-only for the 3-long fleet; row 1
+//	     holds chips full-width. For a 2-short fleet (acme/anthropic,
+//	     body ~54, naturals 8+13) 80 cols already fits single-row
+//	     (body+chips naturally, hrc=1).
+//	  ~100 cols (usable 98): 3-long remains body-only on row 0 (hrc=2,
+//	     available 11 < 24), 2-short single-row.
+//	  ~120 cols (usable 118): 3-long shares one chip on row 0 (first chip
+//	     24 fits in available 31) and wraps remaining 2 to row 1 (hrc=2);
+//	     2-short is single-row with spare slack. This row is falsifiable: at
+//	     120 cols with 2 short providers the header MUST be single-row at
+//	     natural widths; at 120 cols with 3-long the header MUST have row 0
+//	     chip at natural width (no truncation on row 0).
+//	  ~150 cols (usable 148): 3-long shares two chips on row 0 (available
+//	     61 fits 24+24+1) and wraps one to row 1 (hrc=2).
+//	  ~180 cols (usable 178): 3-long collapses to single-row body+all chips
+//	     at natural widths (hrc=1). Narrower 3-long fleets collapse earlier
+//	     when the body is shorter or provider count is smaller.
+//
+// Falsifiable checks: at 20-30 cols headerRowCount is body-only row 0 plus
+// chip row(s); first visible chip width equals its natural when row 0 holds
+// chips. At 120 cols with 2 short providers chipRowsLayout is single row,
+// each chip at natural width, header never exceeds width.
+
+
 // providerName returns the display name for the active provider, prefixed with a
 // single leading space. A single unnamed provider (and the zero Model) keep the
 // legacy " ⚡ shaper" brand in the header.
@@ -78,21 +148,23 @@ func (m Model) renderProviderSwitcher() string {
 }
 
 // headerBody renders the header's left side: provider identity and live
-// counters, truncated to never exceed the usable row width on its own. It is
-// shared by renderHeader and budgetedChips so the budget the chips degrade
-// against is computed from the exact body the row displays. The '✗' (U+2717)
-// and '⚡' (U+26A1) glyphs occupy 1 and 2 cells respectively.
+// counters, truncated to never exceed the usable row width on its own. The
+// fleet header's chip placement is decided by chipRowsLayout via natural-fit
+// (see fleet invariants); headerBody itself always caps to the full usable
+// width. The '✗' (U+2717) and '⚡' (U+26A1) glyphs occupy 1 and 2 cells
+// respectively.
 //
 // The truncation happens on the plain string, BEFORE headerStyle wraps it:
 // truncateANSI would append ESC[0m inside the styled row and kill
 // headerStyle's background for the remainder of the line.
 //
-// fleetSummary returns the one-line fleet aggregate observability strip
-// (M6/G8) summarizing active, queued, open breaker counts, and the busiest
-// provider across all configured providers.
 // identityWidth returns the cell width of the active-provider identity
-// segment (provider name + scroll affordance) used for mouse-wheel
-// hit-testing in the header.
+// segment (provider name + scroll affordance) used for mouse-wheel and
+// click hit-testing in the header. It is the natural
+// lipgloss.Width(" "+label+" ↕") independent of headerBody truncation, so
+// at narrow widths the hit region may extend beyond the visible truncated
+// prefix but stays consistent between wheel and click and is always bounded
+// by the terminal width.
 func (m Model) identityWidth() int {
 	if !m.hasSwitcher() {
 		return 0
@@ -130,32 +202,29 @@ func (m Model) fleetStats() string {
 }
 
 func (m Model) headerBody(reserveForSwitcher bool) string {
-	var body string
-	if len(m.providers) > 1 {
-		// In fleet mode, show the active provider identity with a scroll
-		// affordance (↕), followed by aggregate stats.
-		body = fmt.Sprintf(" %s ↕ │ %s", m.providerLabel(m.active), m.fleetStats())
-	} else {
-		uptime := time.Since(m.startTime).Truncate(time.Second)
-		body = fmt.Sprintf("%s │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
-			m.providerName(), m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput,
-			m.snap.TotalTimeout, uptime)
-	}
+	// reserveForSwitcher is retained for compatibility but no longer affects
+	// the cap — the fleet header now decides whether chips share row 0 via
+	// natural-fit in chipRowsLayout (see package invariants). The body is
+	// always capped to the full usable width.
+	_ = reserveForSwitcher
+	body := m.rawBody()
 	usable := max(m.width-2, 1)
-	cap := usable
-	if reserveForSwitcher && m.hasSwitcher() {
-		// 1 gap + the active chip's floor. Any chip that fits beyond the
-		// active one only shrinks this body further via budgetedChips'
-		// budget computation, which uses this same reserve.
-		cap -= 1 + chipFloor
-		if cap < 1 {
-			cap = 1
-		}
-	}
-	if lipgloss.Width(body) > cap {
-		body = truncatePlain(body, cap)
+	if lipgloss.Width(body) > usable {
+		body = truncatePlain(body, usable)
 	}
 	return body
+}
+
+// rawBody returns the untruncated header body string, before any width cap.
+// It is the source for naturalBodyWidth measurements in chipRowsLayout.
+func (m Model) rawBody() string {
+	if len(m.providers) > 1 {
+		return fmt.Sprintf(" %s ↕ │ %s", m.providerLabel(m.active), m.fleetStats())
+	}
+	uptime := time.Since(m.startTime).Truncate(time.Second)
+	return fmt.Sprintf("%s │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
+		m.providerName(), m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput,
+		m.snap.TotalTimeout, uptime)
 }
 
 // chipFloor is the smallest usable chip width: one visible label character
@@ -171,41 +240,18 @@ type chipLayout struct {
 	providers []int
 }
 
-// budgetedChips is the single source of truth for the provider switcher at a
-// given width: renderHeader displays its parts and chipAt hit-tests exactly
-// those parts, so the visible layout and the click targets cannot disagree.
-//
-// Chips are joined with single spaces and right-aligned in renderHeader; the
-// usable content width is m.width-2 (headerStyle pads 1 cell each side) and 1
-// more cell is reserved as the visual gap before the switcher:
-//
-//	budget := m.width - 2 - lipgloss.Width(headerBody(true)) - 1
-//
-// headerBody(true) itself reserves 1+chipFloor cells for the active chip, so
-// budget >= chipFloor holds whenever the width can host any chip at all; a
-// smaller budget elides the switcher (rule 3 below) and providerName carries
-// the identity.
-//
-// Chips degrade to fit that budget, in order:
-//
-//  1. Shorten: chip labels are truncated to their allotted cells via
-//     truncateANSI, preserving chip styling (the appended reset cannot leak
-//     past the chip because each chip's styles re-open on the next chip).
-//  2. Drop: trailing (leftmost-displayed) chips are dropped entirely.
-//     Providers are never removed from the model — only from this row — and
-//     Tab/Shift+Tab keep cycling the full set. The ACTIVE chip is never
-//     dropped, so the user always sees which dashboard they are on; under a
-//     tight budget that can mean evicting inactive chips that would otherwise
-//     fit to its left.
-//  3. Elide: if even the active chip at its floor width exceeds the budget,
-//     the whole switcher is dropped and providerName carries the identity.
-//
-// Slack left after the floor widths are covered is restored to the chips'
-// full rendered widths — active chip first, then the rest left-to-right — so
-// the active chip's label is the most legible one on the row. A chip whose
-// slack is fully restored renders byte-identically to an unbudgeted chip.
-// budgetedChips returns the first row of chipRowsLayout for backward
-// compatibility with existing tests.
+// budgetedChips returns the visible provider chips that share row 0 with
+// the fleet identity body, when any do, as computed by chipRowsLayout. It is
+// retained for compatibility and for tests that assert on the first row
+// alone — renderHeader and chipAt both consume the full chipRowsLayout
+// directly, so the visible layout and the click targets cannot disagree.
+// Row 0 holds a maximal prefix of providers that fit naturally beside the
+// body (see fleet header invariants); if none fits, row 0 is empty and
+// budgetedChips is empty. Chips on row 0 are at natural widths, while
+// wrapped rows (row 1+) degrade via floorCost and active-first slack
+// restoration (truncateANSI). The active chip is never dropped; if even a
+// floor-width chip cannot fit on any row the switcher is elided and
+// providerName carries the identity.
 func (m Model) budgetedChips() chipLayout {
 	rows := m.chipRowsLayout()
 	if len(rows) == 0 {
@@ -218,10 +264,11 @@ func (m Model) budgetedChips() chipLayout {
 // the header body; subsequent rows get the full header width (m.width-2).
 // Chips are packed greedily in provider order. The active chip is never
 // dropped. Returns one chipLayout per row. Row 0 is the body row; when the
-// body leaves no room for a chip (row0Budget < chipFloor) the returned slice
-// starts with an empty row 0 so renderHeader leaves the body untouched and
-// chips begin on the next line. The layout is capped to max(m.height-4,1)
-// rows so headerRowCount and renderHeader stay in lockstep.
+// first chip would need truncation (natural-fit fails) the returned slice
+// starts with an empty row 0 so renderHeader leaves the body at full usable
+// width and every provider chip begins on row 1+ — the first-chip-truncated
+// => wrap-all invariant (see package doc). The layout is capped to
+// max(m.height-4,1) rows so headerRowCount and renderHeader stay in lockstep.
 func (m Model) chipRowsLayout() []chipLayout {
 	if !m.hasSwitcher() {
 		return nil
@@ -234,12 +281,31 @@ func (m Model) chipRowsLayout() []chipLayout {
 		natural[i] = lipgloss.Width(m.styles.chipActiveStyle.Render(labels[i]))
 	}
 
-	row0Budget := m.width - 2 - lipgloss.Width(m.headerBody(true)) - 1
 	fullBudget := m.width - 2
 	maxRows := max(m.height-4, 1)
 
 	if fullBudget < chipFloor {
 		return nil // elide entirely — terminal too narrow for any chip
+	}
+
+	usable := max(m.width-2, 1)
+	bodyW := lipgloss.Width(m.headerBody(false))
+	available := usable - bodyW - 1
+
+	// Natural-fit: maximal prefix k that fits alongside the body at its
+	// natural (or usable-capped) width without truncating any chip. If the
+	// first chip does not fit, k stays 0 and row 0 becomes body-only.
+	k := 0
+	sum := 0
+	for k < len(natural) {
+		nextSum := sum + natural[k]
+		nextGaps := k // gaps for k+1 chips is k
+		if nextSum+nextGaps <= available {
+			sum = nextSum
+			k++
+		} else {
+			break
+		}
 	}
 
 	// floorCost returns the minimum width for a set of chips on one row.
@@ -256,19 +322,26 @@ func (m Model) chipRowsLayout() []chipLayout {
 		budget  int
 	}
 	var rows []rowPlan
-	currentIndices := make([]int, 0)
-	var currentBudget int
 
-	if row0Budget < chipFloor {
+	if k == 0 {
 		if maxRows == 1 {
 			return nil // no room for a dedicated chip row
 		}
-		// Reserve row 0 for the body only; chips start on row 1.
+		// Body-only row 0; every chip starts on row 1+ at full width.
 		rows = append(rows, rowPlan{indices: nil, budget: 0})
-		currentBudget = fullBudget
 	} else {
-		currentBudget = row0Budget
+		indices := make([]int, k)
+		for i := 0; i < k; i++ {
+			indices[i] = i
+		}
+		// Row 0 chips are at natural widths; budget is their total natural
+		// width plus gaps so width allocation restores exactly to natural.
+		rows = append(rows, rowPlan{indices: indices, budget: sum + (k - 1)})
 	}
+
+	// Pack the remaining providers (k .. n-1) greedily by floorCost.
+	currentIndices := make([]int, 0)
+	currentBudget := fullBudget
 
 	flushRow := func() {
 		if len(currentIndices) > 0 {
@@ -278,7 +351,7 @@ func (m Model) chipRowsLayout() []chipLayout {
 		}
 	}
 
-	for i := range m.providers {
+	for i := k; i < len(m.providers); i++ {
 		candidate := append(append([]int{}, currentIndices...), i)
 		if floorCost(candidate) <= currentBudget {
 			currentIndices = candidate
@@ -286,7 +359,6 @@ func (m Model) chipRowsLayout() []chipLayout {
 			flushRow()
 			currentIndices = []int{i}
 			currentBudget = fullBudget
-			// If it still doesn't fit on a full row, it gets truncated later.
 		}
 	}
 	flushRow()

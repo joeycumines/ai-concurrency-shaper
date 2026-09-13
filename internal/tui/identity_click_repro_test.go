@@ -15,12 +15,12 @@ import (
 )
 
 // TestFleetIdentityClick_CyclesProvider pins the desired operator-visible
-// behavior for Task 2: left-click on the fleet identity (` <label> ↕` at
+// behavior: left-click on the fleet identity (` <label> ↕` at
 // header row 0 col [1,1+identityWidth)) cycles active provider forward (+1,
 // wrapping), matching the wheel guard `my==0 && hasSwitcher && mx>=1 &&
 // mx<1+identityWidth()`. Boundary/padding/single-provider clicks are no-ops.
-// This test is expected to FAIL before the Task 2 fix (current
-// handleMouseClick swallows non-chip header clicks) and PASS after.
+// This test is expected to FAIL before the fleet identity click fix (previous
+// handleMouseClick swallowed non-chip header clicks) and PASS after.
 func TestFleetIdentityClick_CyclesProvider(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{
 		{Name: "acme", Concurrency: 4},
