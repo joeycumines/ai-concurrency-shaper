@@ -221,10 +221,50 @@ func TestRepro_FirstChipOrphan(t *testing.T) {
 
 	t.Logf("\n=== SUMMARY ===")
 	t.Logf("thin-width orphan detections (3-long, 20-40, h=24): %d/%d rows had single-letter first chip on row0", orphanCount, totalThin)
-	if orphanCount == 0 {
-		t.Logf("WARNING: orphan flaw not reproduced — check fleet or widths")
-	} else {
-		t.Logf("REPRO CONFIRMED: at thin widths first chip is isolated at chipFloor=%d cells (e.g. \"  a\") while wrapped rows use fullBudget widths", chipFloor)
+	// Post-fix this is a hard invariant: no orphan on row 0 when maxRows>1.
+	// The summary doubles as a regression gate (previously 4/4 orphaned via degenerate
+	// row0Budget==3; after fix headerBody caps to full usable and row 0 becomes
+	// body-only with available < natural[0], so 0/4).
+	if orphanCount != 0 {
+		t.Fatalf("fleet header orphan regression: %d/%d thin rows still have first chip at floor %d < natural on row 0 (expected 0)", orphanCount, totalThin, chipFloor)
+	}
+	// Also assert the documented empty-row0 property: at 20-40 cols row 0 must be body-only
+	for _, fleet := range fleets {
+		if fleet.name != "3-long" {
+			continue
+		}
+		for _, w := range []int{20, 30, 40} {
+			m := NewModelForProviders(fleet.metas)
+			m.width = w
+			m.height = 24
+			m.active = 0
+			m.syncActive()
+			rows := m.chipRowsLayout()
+			if len(rows) == 0 || len(rows[0].providers) != 0 {
+				t.Fatalf("fleet %q w=%d h=24: expected empty row 0 (body-only) after fix, got providers %v widths %v", fleet.name, w, func() []int {
+				if len(rows) > 0 {
+					return rows[0].providers
+				}
+				return nil
+			}(), func() []int {
+				if len(rows) > 0 && len(rows[0].parts) > 0 {
+					ws := make([]int, len(rows[0].parts))
+					for i, pp := range rows[0].parts {
+						ws[i] = lipgloss.Width(pp)
+					}
+					return ws
+				}
+				return nil
+			}())
+			}
+			// All wrapped rows must still honor header <= width
+			rendered := m.renderHeader()
+			for i, line := range strings.Split(rendered, "\n") {
+				if lipgloss.Width(line) > w {
+					t.Fatalf("fleet %q w=%d: header line %d width %d exceeds %d after fix", fleet.name, w, i, lipgloss.Width(line), w)
+				}
+			}
+		}
 	}
 }
 
