@@ -426,20 +426,22 @@ var defaultTranscodeAllowedQuery = map[string]struct{}{
 }
 
 var defaultTranscodeLosses = map[transcode.Feature]struct{}{
-	transcode.FeatureReasoningSummary:       {},
-	transcode.FeatureAuthenticatedThinking:  {},
-	transcode.FeatureMidConversationSystem:  {},
-	transcode.FeatureResponsesControls:      {},
-	transcode.FeatureAnthropicControls:      {},
-	transcode.FeatureRequestCitations:       {},
-	transcode.FeatureBuiltinTools:           {},
-	transcode.FeatureUsageUnknown:           {},
-	transcode.FeatureUsageCacheReadUnknown:  {},
-	transcode.FeatureUsageCacheWriteUnknown: {},
-	transcode.FeatureUsageReasoningUnknown:  {},
-	transcode.FeatureRequestReasoning:       {},
-	transcode.FeatureToolResultErrorStatus:  {},
-	transcode.FeatureDeveloperRole:          {},
+	transcode.FeatureReasoningSummary:            {},
+	transcode.FeatureAuthenticatedThinking:       {},
+	transcode.FeatureMidConversationSystem:       {},
+	transcode.FeatureResponsesControls:           {},
+	transcode.FeatureAnthropicControls:           {},
+	transcode.FeatureRequestCitations:            {},
+	transcode.FeatureBuiltinTools:                {},
+	transcode.FeatureUsageUnknown:                {},
+	transcode.FeatureUsageCacheReadUnknown:       {},
+	transcode.FeatureUsageCacheWriteUnknown:      {},
+	transcode.FeatureUsageReasoningUnknown:       {},
+	transcode.FeatureRequestReasoning:            {},
+	transcode.FeatureToolResultErrorStatus:       {},
+	transcode.FeatureToolResultMultimodalContent: {},
+	transcode.FeatureToolResultJSONEnvelope:      {},
+	transcode.FeatureDeveloperRole:               {},
 }
 
 func mergedLossPolicy(

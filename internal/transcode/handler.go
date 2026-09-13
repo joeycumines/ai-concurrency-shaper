@@ -271,6 +271,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Reject Upgrade requests on transcoded routes: a 101 Switching
 	// Protocols response cannot be meaningfully schema-transcoded.
 	if isUpgradeRequest(r) {
+		h.logRequestError(r, fmt.Errorf("[%s] upgrade requests are not supported on transcoded routes", ProvenanceLocalRequestConversionError))
 		h.writeLocalError(r, w,
 			http.StatusBadRequest, "upgrade requests are not supported on transcoded routes",
 			ProvenanceLocalRequestConversionError)
@@ -288,6 +289,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Code:    "unsupported_content_encoding",
 			Message: "content-encoding is not supported on transcoded routes",
 		}
+		h.logRequestError(r, fmt.Errorf("[%s] content-encoding is not supported on transcoded routes", ProvenanceLocalRequestConversionError))
 		h.writeDialectHTTPError(r, w, apiErr, ProvenanceLocalRequestConversionError)
 		return
 	}
@@ -303,11 +305,13 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, errRequestBodyTooLarge) {
+			h.logRequestError(r, fmt.Errorf("[%s] request body too large", ProvenanceLocalRequestConversionError))
 			h.writeLocalError(r, w,
 				http.StatusRequestEntityTooLarge, "request body too large",
 				ProvenanceLocalRequestConversionError)
 			return
 		}
+		h.logRequestError(r, fmt.Errorf("[%s] read request body: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
 			http.StatusBadRequest, "read request body: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
@@ -333,6 +337,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errDecodedRequestTooLarge) || errors.Is(err, errEchoTooLarge) {
 			status = http.StatusRequestEntityTooLarge
 		}
+		h.logRequestError(r, fmt.Errorf("[%s] convert request: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
 			status, "convert request: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
@@ -340,6 +345,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if CommittedStreamFromContext(r.Context()) && !context.StreamIntent {
+		h.logRequestError(r, fmt.Errorf("[%s] stream:false is incompatible with committed event-stream representation", ProvenanceLocalRequestConversionError))
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadRequest,
 			Type:    "invalid_request_error",
@@ -361,6 +367,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errClientQueryParameter) ||
 			errors.Is(err, errAuthInboundCredential) {
 			status = http.StatusBadRequest
+			h.logRequestError(r, fmt.Errorf("[%s] build upstream request: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		} else {
 			log.Printf(
 				"transcode: %s %s: build upstream request: %v",
@@ -1000,6 +1007,7 @@ func (h *TranscodeHandler) streamResponse(
 	if err != nil {
 		// writeLocalError -> writeDialectHTTPError records the outcome
 		// exactly once.
+		h.logRequestError(r, fmt.Errorf("[%s] build stream converter: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
 			http.StatusInternalServerError, "build stream converter: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
