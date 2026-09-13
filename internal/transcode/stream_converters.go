@@ -347,16 +347,17 @@ func (s *chatResponsesStreamState) Convert(
 		// the tail enters the same loss/reject decision as on any other
 		// chunk.
 		if chunk.Usage != nil && len(chunk.Choices) == 0 {
-			// The strict chunk decode guarantees id and model are always
-			// present, so a mismatch is an upstream protocol error.
-			if chunk.ID != s.chunkID {
+			// A content-bearing chunk's identity must stay stable, but a
+			// provider may omit the usage-only tail's id/model; enforce the
+			// identity only when the tail carries it.
+			if chunk.ID != "" && chunk.ID != s.chunkID {
 				return nil, s.wireError(fmt.Errorf(
 					"chat stream chunk id %q does not match the first chunk id %q",
 					chunk.ID,
 					s.chunkID,
 				))
 			}
-			if chunk.Model != s.chunkModel {
+			if chunk.Model != "" && chunk.Model != s.chunkModel {
 				return nil, s.wireError(fmt.Errorf(
 					"chat stream chunk model %q does not match the first chunk model %q",
 					chunk.Model,
@@ -1500,23 +1501,26 @@ func chatUsageToResponsesUsage(usage *ChatLLMUsage) (*ResponsesUsage, usageClamp
 // explicit nulls are illegal (the tool_calls spelling rejects null arguments
 // at the wire level), malformed JSON is corrupt wire, and a fragment with
 // neither a name nor arguments content carries nothing to accumulate.
-func parseLegacyFunctionCallFragment(raw json.RawMessage) (name *string, args *string, hasContent bool, err error) {
+// When both members are present but carry empty strings (a benign terminal
+// marker emitted by some upstreams before [DONE]), emptyFragment is true
+// and the caller should treat it as a no-op equivalent to null.
+func parseLegacyFunctionCallFragment(raw json.RawMessage) (name *string, args *string, hasContent bool, emptyFragment bool, err error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return nil, nil, false, errors.New("legacy function_call is null")
+		return nil, nil, false, false, errors.New("legacy function_call is null")
 	}
 	var present map[string]json.RawMessage
 	if err := json.Unmarshal(trimmed, &present); err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, false, err
 	}
 	if v, ok := present["name"]; ok {
 		if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
-			return nil, nil, false, errors.New("legacy function_call name is null")
+			return nil, nil, false, false, errors.New("legacy function_call name is null")
 		}
 	}
 	if v, ok := present["arguments"]; ok {
 		if bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
-			return nil, nil, false, errors.New("legacy function_call arguments is null")
+			return nil, nil, false, false, errors.New("legacy function_call arguments is null")
 		}
 	}
 	var frag struct {
@@ -1524,11 +1528,20 @@ func parseLegacyFunctionCallFragment(raw json.RawMessage) (name *string, args *s
 		Arguments *string `json:"arguments"`
 	}
 	if err := json.Unmarshal(trimmed, &frag); err != nil {
-		return nil, nil, false, err
+		return nil, nil, false, false, err
 	}
 	hasName := frag.Name != nil && *frag.Name != ""
 	hasArgs := frag.Arguments != nil && *frag.Arguments != ""
-	return frag.Name, frag.Arguments, hasName || hasArgs, nil
+	if !hasName && !hasArgs {
+		// Both members present but empty strings: a benign terminal marker,
+		// not corrupt wire. The caller treats this as a no-op.
+		_, namePresent := present["name"]
+		_, argsPresent := present["arguments"]
+		if namePresent && argsPresent {
+			return nil, nil, false, true, nil
+		}
+	}
+	return frag.Name, frag.Arguments, hasName || hasArgs, false, nil
 }
 
 // chatStreamChunkShadow is the presence-aware strict decode shadow of a Chat
@@ -1662,21 +1675,26 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			),
 		)
 	}
-	if shadow.ID == "" {
+	// The optional usage-only tail chunk (stream_options.include_usage) carries
+	// only usage accounting with an empty choices list; some providers omit its
+	// id/model/created identity. Identity is meaningless on a content-less tail,
+	// so only content-bearing chunks require it.
+	usageOnlyTail := shadow.Usage != nil && len(shadow.Choices) == 0
+	if !usageOnlyTail && shadow.ID == "" {
 		return ChatStreamResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			http.StatusOK,
 			errors.New("chat stream chunk id is empty"),
 		)
 	}
-	if shadow.Model == "" {
+	if !usageOnlyTail && shadow.Model == "" {
 		return ChatStreamResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			http.StatusOK,
 			errors.New("chat stream chunk model is empty"),
 		)
 	}
-	if shadow.Created == nil {
+	if !usageOnlyTail && shadow.Created == nil {
 		return ChatStreamResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			http.StatusOK,
@@ -1782,13 +1800,13 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 						errors.New("chat stream chunk delta carries both tool_calls and the legacy function_call spelling"),
 					)
 				}
-				if _, _, hasContent, err := parseLegacyFunctionCallFragment(trimmed); err != nil {
+				if _, _, hasContent, emptyFragment, err := parseLegacyFunctionCallFragment(trimmed); err != nil {
 					return ChatStreamResponse{}, upstreamWireError(
 						UpstreamChatCompletions,
 						http.StatusOK,
 						fmt.Errorf("chat stream chunk legacy function_call: %w", err),
 					)
-				} else if !hasContent {
+				} else if !hasContent && !emptyFragment {
 					return ChatStreamResponse{}, upstreamWireError(
 						UpstreamChatCompletions,
 						http.StatusOK,
@@ -1839,13 +1857,17 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			chunk.Choices[0].Delta.FunctionCall = nil
 			return chunk, nil
 		}
-		name, argsPtr, hasContent, err := parseLegacyFunctionCallFragment(raw)
+		name, argsPtr, hasContent, emptyFragment, err := parseLegacyFunctionCallFragment(raw)
 		if err != nil {
 			return ChatStreamResponse{}, upstreamWireError(
 				UpstreamChatCompletions,
 				http.StatusOK,
 				fmt.Errorf("chat stream chunk legacy function_call: %w", err),
 			)
+		}
+		if emptyFragment {
+			chunk.Choices[0].Delta.FunctionCall = nil
+			return chunk, nil
 		}
 		if !hasContent {
 			return ChatStreamResponse{}, upstreamWireError(

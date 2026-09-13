@@ -204,3 +204,137 @@ func TestLegacyFunctionCallResponsesHandlerStream(t *testing.T) {
 		t.Fatalf("missing function_call item: %q", body)
 	}
 }
+
+// A terminal chunk carrying a legacy function_call fragment where both
+// members are present but empty strings is a benign upstream marker (not
+// corrupt wire): it carries no tool-call content to accumulate and must
+// not kill an otherwise-complete stream. The parser treats it as a no-op
+// equivalent to the already-accepted null fragment.
+func TestLegacyFunctionCallEmptyStringFragmentAccepted(t *testing.T) {
+	_, _, hasContent, emptyFragment, err := parseLegacyFunctionCallFragment(
+		[]byte(`{"arguments":"","name":""}`),
+	)
+	if err != nil {
+		t.Fatalf("empty-string fragment rejected: %v", err)
+	}
+	if hasContent {
+		t.Fatal("empty-string fragment reported hasContent=true")
+	}
+	if !emptyFragment {
+		t.Fatal("empty-string fragment did not set emptyFragment=true")
+	}
+}
+
+// The full verboo glm-5.3-flash terminal shape: a chunk with
+// delta.function_call {"arguments":"","name":""}, finish_reason stop,
+// full usage, followed by a usage-only tail and [DONE]. The stream must
+// complete without an error terminal.
+func TestLegacyFunctionCallEmptyStringTerminalStream(t *testing.T) {
+	mapping := messagesMapping(t, UpstreamChatCompletions)
+	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
+	}}
+	sse := "data: {\"id\":\"chatcmpl-v1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.3-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"42\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-v1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.3-flash\",\"choices\":[{\"index\":0,\"delta\":{\"function_call\":{\"arguments\":\"\",\"name\":\"\"}},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":10,\"prompt_tokens\":20,\"total_tokens\":30}}\n\n" +
+		"data: {\"id\":\"chatcmpl-v1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"glm-5.3-flash\",\"choices\":[],\"usage\":{\"completion_tokens\":10,\"prompt_tokens\":20,\"total_tokens\":30}}\n\n" +
+		"data: [DONE]\n\n"
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}, nil
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		strings.NewReader(`{"model":"glm-5.3-flash","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("error terminal in empty-string fragment stream: %q", body)
+	}
+	if !strings.Contains(body, `"type":"message_stop"`) {
+		t.Fatalf("missing message_stop: %q", body)
+	}
+	if !strings.Contains(body, `"type":"text"`) || !strings.Contains(body, "42") {
+		t.Fatalf("missing text content: %q", body)
+	}
+}
+
+// The optional usage-only tail chunk (stream_options.include_usage) is a
+// pure accounting frame; some gateways (observed on the verboo glm stream)
+// omit the envelope identity on it. The tail decodes without id, model, or
+// created, while a content-bearing chunk missing its identity still rejects.
+func TestUsageOnlyTailIdentityOptionalDecode(t *testing.T) {
+	chunk, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(`{"choices":[],"object":"chat.completion.chunk","usage":{"completion_tokens":124,"prompt_tokens":26,"total_tokens":209}}`)})
+	if err != nil {
+		t.Fatalf("identity-less usage-only tail rejected: %v", err)
+	}
+	if chunk.Usage == nil || chunk.Usage.TotalTokens != 209 {
+		t.Fatalf("tail usage lost: %+v", chunk.Usage)
+	}
+
+	for _, body := range []string{
+		// content-bearing chunk (one choice) with no id still rejects
+		`{"object":"chat.completion.chunk","model":"m","created":1,"choices":[{"index":0,"delta":{"content":"x"}}]}`,
+		// a frame with neither usage nor identity is not a tail and still rejects
+		`{"object":"chat.completion.chunk","model":"m","created":1,"choices":[]}`,
+	} {
+		if _, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(body)}); err == nil {
+			t.Fatalf("non-tail fragment accepted: %s", body)
+		}
+	}
+}
+
+// The full streaming lifecycle with an identity-less usage-only tail
+// completes to exactly one message_stop terminal: content chunk, finish
+// chunk, tail without id/model/created, then [DONE].
+func TestStreamLifecycleIdentityLessUsageTail(t *testing.T) {
+	mapping := messagesMapping(t, UpstreamChatCompletions)
+	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
+	}}
+	sse := "data: {\"id\":\"chatcmpl-t\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"42\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-t\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: {\"choices\":[],\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":5,\"prompt_tokens\":7,\"total_tokens\":12}}\n\n" +
+		"data: [DONE]\n\n"
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}, nil
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		strings.NewReader(`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("error terminal in identity-less tail stream: %q", body)
+	}
+	if strings.Count(body, `"type":"message_stop"`) != 1 {
+		t.Fatalf("message_stop count != 1: %q", body)
+	}
+	if !strings.Contains(body, `"type":"text"`) || !strings.Contains(body, "42") {
+		t.Fatalf("missing text content: %q", body)
+	}
+}
