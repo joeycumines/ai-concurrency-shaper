@@ -29,6 +29,25 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 	if my >= 0 && my < m.headerRowCount() {
 		if i, ok := m.chipAt(mx, my); ok {
 			m.switchProvider(i)
+			return m, nil
+		}
+		// Fleet identity click — mirrors handleMouseWheel guard exactly
+		// (my==0 && hasSwitcher && mx>=1 && mx<1+identityWidth()).
+		// Only left-button (or MouseNone for test compat where Button is omitted)
+		// on row 0 within [1,1+identityWidth()) cycles forward (+1, wrapping).
+		// Uses natural identityWidth (lipgloss.Width(" "+label+" ↕")) rather than
+		// the truncated visible prefix: at very narrow widths headerBody may
+		// truncate below idW, but the hit region stays at the natural width so
+		// wheel and click stay consistent and header width is still bounded.
+		if my == 0 && m.hasSwitcher() {
+			idW := m.identityWidth()
+			if mx >= 1 && mx < 1+idW {
+				btn := msg.Mouse().Button
+				if btn == tea.MouseLeft || btn == tea.MouseNone {
+					m.cycleProvider(1)
+				}
+				return m, nil
+			}
 		}
 		return m, nil
 	}

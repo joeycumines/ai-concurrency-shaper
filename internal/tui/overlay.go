@@ -336,7 +336,7 @@ func (m Model) renderHelpOverlay() string {
 	// unnamed provider keeps the legacy overlay byte-identical.
 	switcher := ""
 	if m.hasSwitcher() {
-		switcher = " Tab/Shift+Tab  Switch provider\n"
+		switcher = " Tab/Shift+Tab / Click name ↕ / Wheel  Switch provider\n"
 	}
 	return m.styles.overlayStyle.Render(" Keybindings \n\n"+
 		" 1-6          Switch tab (Overview/Requests/Network/Logs/Concurrency/Routes)\n"+

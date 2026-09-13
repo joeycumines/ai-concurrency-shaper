@@ -93,7 +93,7 @@ func TestHelpOverlayMultiProviderShowsSwitchProvider(t *testing.T) {
 		t.Fatal("multiple providers must render a provider switcher")
 	}
 	s := m.renderHelpOverlay()
-	for _, want := range []string{"Tab/Shift+Tab", "Switch provider"} {
+	for _, want := range []string{"Tab/Shift+Tab", "Click name ↕", "Wheel", "Switch provider"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("multi-provider help overlay should document %q, got:\n%s", want, s)
 		}
@@ -110,8 +110,11 @@ func TestHelpOverlaySingleNamedProviderShowsSwitchProvider(t *testing.T) {
 	if !m.hasSwitcher() {
 		t.Fatal("a single named provider renders a provider switcher")
 	}
-	if s := m.renderHelpOverlay(); !strings.Contains(s, "Switch provider") {
-		t.Errorf("single-named-provider help overlay should document the provider switcher, got:\n%s", s)
+	s := m.renderHelpOverlay()
+	for _, want := range []string{"Tab/Shift+Tab", "Click name ↕", "Wheel", "Switch provider"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("single-named-provider help overlay should document %q, got:\n%s", want, s)
+		}
 	}
 }
 
