@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -43,6 +44,26 @@ func (m Model) renderConfirmOverlay() string {
 			" Clear all cumulative counters?\n"+
 			" (Proxied, Passthrough, Timeouts, etc.)\n\n"+
 			" y = yes    n/Esc = no")) + "\n"
+}
+
+// renderMetaDrawer renders the engine-level meta drawer toggled by clicking
+// the brand block. It shows CLI version, Go runtime, proxy uptime, and a
+// placeholder for config reload status.
+func runtimeVersion() string {
+	return runtime.Version()
+}
+
+func (m Model) renderMetaDrawer() string {
+	uptime := time.Since(m.startTime).Truncate(time.Second)
+	return m.styles.overlayStyle.Render(
+		fmt.Sprintf(" Engine Meta \n\n"+
+			" CLI Version:  ai-concurrency-shaper\n"+
+			" Go Runtime:   %s\n"+
+			" Uptime:       %s\n"+
+			" Providers:    %d\n"+
+			" Active:       %d\n\n"+
+			" [Esc/Enter] close ",
+			runtimeVersion(), uptime, len(m.providers), m.snap.Active)) + "\n"
 }
 
 func (m Model) renderDetailOverlay() string {

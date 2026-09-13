@@ -44,27 +44,29 @@ func TestFleetIdentityClick_CyclesProvider(t *testing.T) {
 		t.Fatalf("header missing fleetStats markers; got %q", hdr)
 	}
 
-	// Click on first content column of identity (X=1, Y=0) cycles forward.
+	idOff := m.identityOffset()
+
+	// Click on first column of identity (X=idOff, Y=0) cycles forward.
 	// No explicit Button → Button==0 (MouseNone) must be treated as left.
-	m = update(m, tea.MouseClickMsg{X: 1, Y: 0})
+	m = update(m, tea.MouseClickMsg{X: idOff, Y: 0})
 	if m.active != 1 {
-		t.Fatalf("after click at X=1,Y=0: active=%d want 1", m.active)
+		t.Fatalf("after click at X=%d,Y=0: active=%d want 1", idOff, m.active)
 	}
-	m = update(m, tea.MouseClickMsg{X: 1, Y: 0})
+	m = update(m, tea.MouseClickMsg{X: idOff, Y: 0})
 	if m.active != 2 {
 		t.Fatalf("after second identity click: active=%d want 2", m.active)
 	}
-	m = update(m, tea.MouseClickMsg{X: 1, Y: 0})
+	m = update(m, tea.MouseClickMsg{X: idOff, Y: 0})
 	if m.active != 0 {
 		t.Fatalf("after third identity click (wrap): active=%d want 0", m.active)
 	}
 
-	// Last column of identity (X=1+idW-1) still cycles.
+	// Last column of identity (X=idOff+idW-1) still cycles.
 	m.active = 0
 	m.syncActive()
-	m = update(m, tea.MouseClickMsg{X: 1 + idW - 1, Y: 0})
+	m = update(m, tea.MouseClickMsg{X: idOff + idW - 1, Y: 0})
 	if m.active != 1 {
-		t.Fatalf("click at last identity col X=%d: active=%d want 1", 1+idW-1, m.active)
+		t.Fatalf("click at last identity col X=%d: active=%d want 1", idOff+idW-1, m.active)
 	}
 
 	// Boundary: padding col 0 must NOT cycle.
@@ -75,14 +77,14 @@ func TestFleetIdentityClick_CyclesProvider(t *testing.T) {
 		t.Fatalf("click at padding X=0,Y=0 changed active to %d, want 0 (no-op)", m2.active)
 	}
 
-	// Boundary: just past identity (X=1+idW) must NOT cycle.
-	m2 = update(m, tea.MouseClickMsg{X: 1 + idW, Y: 0})
+	// Boundary: just past identity (X=idOff+idW) must NOT cycle.
+	m2 = update(m, tea.MouseClickMsg{X: idOff + idW, Y: 0})
 	if m2.active != 0 {
-		t.Fatalf("click at X=%d (past identity) changed active to %d, want 0", 1+idW, m2.active)
+		t.Fatalf("click at X=%d (past identity) changed active to %d, want 0", idOff+idW, m2.active)
 	}
 
 	// Not on row 0: Y=1 with same X must NOT cycle.
-	m2 = update(m, tea.MouseClickMsg{X: 1, Y: 1})
+	m2 = update(m, tea.MouseClickMsg{X: idOff, Y: 1})
 	if m2.active != 0 {
 		t.Fatalf("click at Y=1 should not cycle identity, got active %d", m2.active)
 	}
@@ -117,17 +119,17 @@ func TestFleetIdentityClick_LeftButtonOnly(t *testing.T) {
 	m.active = 0
 	m.syncActive()
 
-	// Explicit left button should cycle.
-	mL := update(m, tea.MouseClickMsg{X: 1, Y: 0, Button: tea.MouseLeft})
+	idOff := m.identityOffset()
+
+	mL := update(m, tea.MouseClickMsg{X: idOff, Y: 0, Button: tea.MouseLeft})
 	if mL.active != 1 {
 		t.Fatalf("left-button click at identity: active=%d want 1", mL.active)
 	}
 
-	// Right and middle must NOT cycle.
 	for _, btn := range []tea.MouseButton{tea.MouseRight, tea.MouseMiddle} {
 		m.active = 0
 		m.syncActive()
-		m2 := update(m, tea.MouseClickMsg{X: 1, Y: 0, Button: btn})
+		m2 := update(m, tea.MouseClickMsg{X: idOff, Y: 0, Button: btn})
 		if m2.active != 0 {
 			t.Fatalf("button %v click at identity must not cycle, got active %d", btn, m2.active)
 		}

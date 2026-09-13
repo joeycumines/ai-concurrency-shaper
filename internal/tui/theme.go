@@ -80,6 +80,23 @@ type tuiTheme struct {
 	paletteInputStyle    lipgloss.Style
 	paletteSelectedStyle lipgloss.Style
 	paletteDimStyle      lipgloss.Style
+
+	// Fleet brand block styles. The brand is an 11-cell "⎎ AI·SHAPER"
+	// block pinned at the top-left of the fleet header. Every brand cell
+	// carries the bezel background and every surrounding gutter cell carries
+	// the header bar background, so SGR resets between styled fragments
+	// cannot leave a terminal-default hole in the bar. The transducer glyph
+	// color reflects engine health.
+	brandBarBG     string         // header bar background (matches headerStyle BG)
+	brandBezelBG   string         // subtle recessed panel behind the brand block
+	brandAIStyle   lipgloss.Style // "AI" bold primary wordmark
+	brandDotStyle  lipgloss.Style // "·" dim cyan delimiter
+	brandNameStyle lipgloss.Style // "SHAPER" secondary moniker
+	brandSepStyle  lipgloss.Style // "│" divider after brand
+
+	// providerHues is the palette of distinct hues assigned to providers by
+	// index hash. The active provider's ↕ identity uses its hue.
+	providerHues []string
 }
 
 // newTheme builds the style set for the given background. dark=true is the
@@ -254,6 +271,33 @@ func darkTheme() tuiTheme {
 
 		paletteDimStyle: s().
 			Foreground(lipgloss.Color("#6E7681")),
+
+		// Fleet brand block — dark palette.
+		brandBarBG: "#1F6FEB",
+		brandAIStyle: s().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#1857BD")),
+		brandDotStyle: s().
+			Foreground(lipgloss.Color("#38BDF8")).
+			Background(lipgloss.Color("#1857BD")),
+		brandNameStyle: s().
+			Foreground(lipgloss.Color("#E0F2FE")).
+			Background(lipgloss.Color("#1857BD")),
+		brandSepStyle: s().
+			Foreground(lipgloss.Color("#4A7AD6")),
+
+		// Provider hue palette — 8 distinct hues for ↕ identity coloring.
+		providerHues: []string{
+			"#58A6FF", // blue
+			"#3FB950", // green
+			"#F0883E", // orange
+			"#BC8CFF", // purple
+			"#F778BA", // pink
+			"#56D4DD", // cyan
+			"#D2A8FF", // lavender
+			"#FFA657", // amber
+		},
 	}
 	return t
 }
@@ -421,6 +465,43 @@ func lightTheme() tuiTheme {
 
 		paletteDimStyle: s().
 			Foreground(lipgloss.Color("#59636E")),
+
+		// Fleet brand block — light palette (WCAG AA 4.5:1).
+		brandBarBG: "#0969DA",
+		brandAIStyle: s().
+			Bold(true).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#0859B8")),
+		brandDotStyle: s().
+			Foreground(lipgloss.Color("#7DD3FC")).
+			Background(lipgloss.Color("#0859B8")),
+		brandNameStyle: s().
+			Foreground(lipgloss.Color("#E0F2FE")).
+			Background(lipgloss.Color("#0859B8")),
+		brandSepStyle: s().
+			Foreground(lipgloss.Color("#94A3B8")),
+
+		// Provider hue palette — darker variants for light backgrounds.
+		providerHues: []string{
+			"#0550AE", // blue
+			"#1A7F37", // green
+			"#BC4C00", // orange
+			"#6639BA", // purple
+			"#BF3989", // pink
+			"#0969DA", // cyan
+			"#8250DF", // lavender
+			"#9A6700", // amber
+		},
 	}
 	return t
+}
+
+// providerHue returns the distinct hue hex string for provider i from the
+// theme's providerHues palette, cycling by index. The hue is used for the ↕
+// identity affordance color so each provider is visually distinguishable.
+func (t tuiTheme) providerHue(i int) string {
+	if len(t.providerHues) == 0 {
+		return "#58A6FF"
+	}
+	return t.providerHues[i%len(t.providerHues)]
 }

@@ -42,21 +42,21 @@ func TestHeaderBreakpointGoldens(t *testing.T) {
 	}
 
 	goldens := []golden{
-		{width: 20, height: 24, metas: metas3, fleetName: "3-long-w20", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{}, {0, 1, 2}}, wantWidths: [][]int{{}, {10, 3, 3}}},
-		{width: 40, height: 24, metas: metas3, fleetName: "3-long-w40", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{}, {0, 1, 2}}, wantWidths: [][]int{{}, {24, 9, 3}}},
+		{width: 20, height: 24, metas: metas3, fleetName: "3-long-w20", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{}, {0, 1, 2}}, wantWidths: [][]int{{}, {6, 5, 5}}},
+		{width: 40, height: 24, metas: metas3, fleetName: "3-long-w40", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{}, {0, 1, 2}}, wantWidths: [][]int{{}, {12, 12, 12}}},
 		{width: 80, height: 24, metas: metas3, fleetName: "3-long-w80", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{}, {0, 1, 2}}, wantWidths: [][]int{{}, {24, 24, 22}}},
-		{width: 120, height: 24, metas: metas3, fleetName: "3-long-w120", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{0}, {1, 2}}, wantWidths: [][]int{{24}, {24, 22}}},
-		{width: 150, height: 24, metas: metas3, fleetName: "3-long-w150", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{0, 1}, {2}}, wantWidths: [][]int{{24, 24}, {22}}},
+		{width: 120, height: 24, metas: metas3, fleetName: "3-long-w120", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{}, {0, 1, 2}}, wantWidths: [][]int{{}, {24, 24, 22}}},
+		{width: 150, height: 24, metas: metas3, fleetName: "3-long-w150", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{0}, {1, 2}}, wantWidths: [][]int{{24}, {24, 22}}},
 		{width: 180, height: 24, metas: metas3, fleetName: "3-long-w180", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1, 2}}, wantWidths: [][]int{{24, 24, 22}}},
 		{width: 20, height: 24, metas: metas2, fleetName: "2-short-w20", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{}, {0, 1}}, wantWidths: [][]int{{}, {8, 9}}},
 		{width: 40, height: 24, metas: metas2, fleetName: "2-short-w40", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{}, {0, 1}}, wantWidths: [][]int{{}, {8, 13}}},
-		{width: 80, height: 24, metas: metas2, fleetName: "2-short-w80", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1}}, wantWidths: [][]int{{8, 13}}},
+		{width: 80, height: 24, metas: metas2, fleetName: "2-short-w80", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{0}, {1}}, wantWidths: [][]int{{8}, {13}}},
 		{width: 120, height: 24, metas: metas2, fleetName: "2-short-w120", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1}}, wantWidths: [][]int{{8, 13}}},
 		{width: 150, height: 24, metas: metas2, fleetName: "2-short-w150", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1}}, wantWidths: [][]int{{8, 13}}},
 		{width: 180, height: 24, metas: metas2, fleetName: "2-short-w180", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1}}, wantWidths: [][]int{{8, 13}}},
-		{width: 120, height: 5, metas: metas3, fleetName: "3-long-h5-active0", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0}}, wantWidths: [][]int{{24}}},
-		{width: 120, height: 5, metas: metas3, fleetName: "3-long-h5-active1", active: 1, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1}}, wantWidths: [][]int{{3, 20}}},
-		{width: 120, height: 5, metas: metas3, fleetName: "3-long-h5-active2", active: 2, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 2}}, wantWidths: [][]int{{3, 20}}},
+		{width: 120, height: 5, metas: metas3, fleetName: "3-long-h5-active0", active: 0, wantHRC: 1, wantRowCount: 0, wantProviders: [][]int{}, wantWidths: [][]int{}},
+		{width: 120, height: 5, metas: metas3, fleetName: "3-long-h5-active1", active: 1, wantHRC: 1, wantRowCount: 0, wantProviders: [][]int{}, wantWidths: [][]int{}},
+		{width: 120, height: 5, metas: metas3, fleetName: "3-long-h5-active2", active: 2, wantHRC: 1, wantRowCount: 0, wantProviders: [][]int{}, wantWidths: [][]int{}},
 	}
 
 	for _, g := range goldens {

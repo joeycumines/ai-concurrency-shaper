@@ -200,6 +200,102 @@ func (m Model) fleetStats() string {
 		totalActive, totalQueued, openBreakers, busiest)
 }
 
+// healthColor returns the hex color for the brand transducer glyph based on
+// current engine health: nominal (cyan/emerald), backpressure (amber), or
+// breaker-open fault (coral).
+func (m Model) healthColor() string {
+	var openBreakers int
+	var totalQueued int64
+	for _, p := range m.providers {
+		if p.snap.CircuitBreaker != nil && p.snap.CircuitBreaker.State == "OPEN" {
+			openBreakers++
+		}
+		totalQueued += p.snap.Queued
+	}
+	if openBreakers > 0 {
+		return "#FF453A"
+	}
+	if totalQueued > 0 {
+		return "#F59E0B"
+	}
+	return "#00F5FF"
+}
+
+// renderBrand returns the 11-cell brand block "⎎ AI·SHAPER" with the
+// transducer glyph colored by engine health, followed by the divider and
+// fleet metrics. Every cell carries the header bar background so that SGR
+// resets between styled fragments cannot create background holes. The
+// result is capped to the usable header width.
+func (m Model) renderBrand() string {
+	healthHex := m.healthColor()
+	barBG := lipgloss.Color(m.styles.brandBarBG)
+	bezelBG := lipgloss.Color(m.styles.brandBezelBG)
+
+	glyph := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(healthHex)).
+		Background(bezelBG).
+		Bold(true).
+		Render("⎎")
+	ai := m.styles.brandAIStyle.Render("AI")
+	dot := m.styles.brandDotStyle.Render("·")
+	name := m.styles.brandNameStyle.Render("SHAPER")
+	bezelPad := lipgloss.NewStyle().Background(bezelBG).Render(" ")
+	barPad := lipgloss.NewStyle().Background(barBG).Render(" ")
+	brand := bezelPad + glyph + bezelPad + ai + dot + name
+
+	sep := m.styles.brandSepStyle.Background(barBG).Render("│")
+	identity := m.styles.providerHueStyle(m.active).Background(barBG).Render(" " + m.providerLabel(m.active) + " ↕")
+	sep2 := lipgloss.NewStyle().Foreground(m.styles.brandSepStyle.GetForeground()).Background(barBG).Render("│")
+	metrics := lipgloss.NewStyle().Background(barBG).Render(m.fleetStats())
+	body := brand + sep + identity + barPad + sep2 + barPad + metrics
+
+	usable := max(m.width-2, 1)
+	if lipgloss.Width(body) > usable {
+		body = truncateANSI(body, usable)
+	}
+	return body
+}
+
+// headerBarFill renders run cells of the header bar background. It is used
+// for the unstyled runs renderHeader adds around the ANSI-styled fleet body
+// (alignment gutters and chip gaps): the body's fragments end in SGR resets,
+// so any plain space appended after them would fall back to the terminal's
+// default background and punch a visible hole in the bar.
+func (m Model) headerBarFill(run int) string {
+	if run <= 0 {
+		return ""
+	}
+	return lipgloss.NewStyle().
+		Background(lipgloss.Color(m.styles.brandBarBG)).
+		Render(strings.Repeat(" ", run))
+}
+
+// providerHueStyle returns a lipgloss.Style with the provider hue as
+// foreground, used for the ↕ identity. It inherits the header bar
+// background from the surrounding row rather than setting its own.
+func (t tuiTheme) providerHueStyle(i int) lipgloss.Style {
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color(t.providerHue(i))).
+		Bold(true)
+}
+
+// brandPrefixWidth returns the visible cell width of the brand block
+// (" ⎎ AI·SHAPER") excluding the separator and identity. This is the
+// fixed anchor width for brand hit-testing and identity offset.
+func brandPrefixWidth() int {
+	return lipgloss.Width(" ⎎ AI·SHAPER")
+}
+
+// identityOffset returns the screen column where the identity segment
+// (" <label> ↕") begins in the fleet header body. It accounts for
+// headerStyle PaddingLeft(1), the brand block, and the separator.
+func (m Model) identityOffset() int {
+	if !m.hasSwitcher() {
+		return 1
+	}
+	return 1 + brandPrefixWidth() + 1 // padding + brand + separator
+}
+
 func (m Model) headerBody(reserveForSwitcher bool) string {
 	// reserveForSwitcher is retained for compatibility but no longer affects
 	// the cap — the fleet header now decides whether chips share row 0 via
@@ -218,7 +314,7 @@ func (m Model) headerBody(reserveForSwitcher bool) string {
 // It is the source for naturalBodyWidth measurements in chipRowsLayout.
 func (m Model) rawBody() string {
 	if len(m.providers) > 1 {
-		return fmt.Sprintf(" %s ↕ │ %s", m.providerLabel(m.active), m.fleetStats())
+		return m.renderBrand()
 	}
 	uptime := time.Since(m.startTime).Truncate(time.Second)
 	return fmt.Sprintf("%s │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
@@ -397,22 +493,23 @@ func (m Model) chipRowsLayout() []chipLayout {
 			widths[k] = chipFloor
 		}
 		slack := max(r.budget-floorCost(r.indices), 0)
-		// Restore slack: active chip first, then rest left-to-right.
-		order := make([]int, 0, len(r.indices))
-		for k, idx := range r.indices {
-			if idx == m.active {
-				order = append(order, k)
+		// Restore slack round-robin in provider order so no single chip
+		// monopolizes the row width. Each pass distributes one cell to
+		// each chip that has not yet reached its natural width.
+		for slack > 0 {
+			distributed := false
+			for k := range r.indices {
+				if slack <= 0 {
+					break
+				}
+				if widths[k] < natural[r.indices[k]] {
+					widths[k]++
+					slack--
+					distributed = true
+				}
 			}
-		}
-		for k, idx := range r.indices {
-			if idx != m.active {
-				order = append(order, k)
-			}
-		}
-		for _, k := range order {
-			for slack > 0 && widths[k] < natural[r.indices[k]] {
-				widths[k]++
-				slack--
+			if !distributed {
+				break
 			}
 		}
 
@@ -470,14 +567,16 @@ func (m Model) renderHeader() string {
 		return m.styles.headerStyle.Render(body)
 	}
 
-	// Row 0: body + right-aligned chips.
-	row0Chips := strings.Join(rows[0].parts, " ")
+	// Row 0: body + right-aligned chips. The gutter between the body and the
+	// chips carries the bar background (see headerBarFill).
+	row0Chips := strings.Join(rows[0].parts, m.headerBarFill(1))
 	row0Body := body
 	if row0Chips != "" {
+		gutter := 1
 		if pad := m.width - lipgloss.Width(row0Body) - lipgloss.Width(row0Chips) - 3; pad > 0 {
-			row0Body += strings.Repeat(" ", pad)
+			gutter += pad
 		}
-		row0Body += " " + row0Chips
+		row0Body += m.headerBarFill(gutter) + row0Chips
 	}
 
 	var lines []string
@@ -485,9 +584,9 @@ func (m Model) renderHeader() string {
 
 	// Row 1+: full-width, right-aligned chips.
 	for _, r := range rows[1:] {
-		chips := strings.Join(r.parts, " ")
+		chips := strings.Join(r.parts, m.headerBarFill(1))
 		if pad := m.width - lipgloss.Width(chips) - 2; pad > 0 {
-			chips = strings.Repeat(" ", pad) + chips
+			chips = m.headerBarFill(pad) + chips
 		}
 		lines = append(lines, m.styles.headerStyle.Render(chips))
 	}

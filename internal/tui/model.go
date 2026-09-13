@@ -49,6 +49,7 @@ const (
 	modeHelp
 	modeConfirm
 	modePalette
+	modeMeta
 )
 
 type tabID int

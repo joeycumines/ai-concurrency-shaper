@@ -183,6 +183,17 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 	}
 
+	if m.mode == modeMeta {
+		switch msg.String() {
+		case "esc", "enter", "q":
+			m.mode = modeBrowse
+			return m, nil
+		default:
+			m.mode = modeBrowse
+			return m, nil
+		}
+	}
+
 	switch msg.String() {
 	case "q", "ctrl+c":
 		// Best-effort final drain so the last render includes everything

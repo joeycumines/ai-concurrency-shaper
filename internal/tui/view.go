@@ -63,6 +63,10 @@ func (m Model) View() tea.View {
 		confirm := m.renderConfirmOverlay()
 		b.WriteString(confirm)
 		m.padLines(&b, countContentLines(confirm))
+	case modeMeta:
+		meta := m.renderMetaDrawer()
+		b.WriteString(meta)
+		m.padLines(&b, countContentLines(meta))
 	case modePalette:
 		palette := m.renderCommandPalette()
 		b.WriteString(palette)

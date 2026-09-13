@@ -235,15 +235,26 @@ func TestFleetFirstChipNotOrphaned(t *testing.T) {
 			}
 		}
 	})
-	t.Run("spot_120_3long_share_one", func(t *testing.T) {
+	t.Run("spot_120_3long_body_only", func(t *testing.T) {
 		m := NewModelForProviders([]ProviderMeta{{Name: "anthropic-eu-central", Concurrency: 4}, {Name: "openai-prod-longname", Concurrency: 8}, {Name: "acme-edge-provider", Concurrency: 12}})
 		m.width = 120
 		m.height = 24
 		m.active = 0
 		m.syncActive()
 		rows := m.chipRowsLayout()
+		if len(rows) != 2 || len(rows[0].providers) != 0 {
+			t.Fatalf("120/3-long must be body-only on row0, got rows %v", rows)
+		}
+	})
+	t.Run("spot_150_3long_share_one", func(t *testing.T) {
+		m := NewModelForProviders([]ProviderMeta{{Name: "anthropic-eu-central", Concurrency: 4}, {Name: "openai-prod-longname", Concurrency: 8}, {Name: "acme-edge-provider", Concurrency: 12}})
+		m.width = 150
+		m.height = 24
+		m.active = 0
+		m.syncActive()
+		rows := m.chipRowsLayout()
 		if len(rows) != 2 || len(rows[0].providers) != 1 {
-			t.Fatalf("120/3-long must share one chip on row0, got rows %v", rows)
+			t.Fatalf("150/3-long must share one chip on row0, got rows %v", rows)
 		}
 		label := " " + m.providerLabel(rows[0].providers[0]) + " "
 		nat := lipgloss.Width(m.styles.chipActiveStyle.Render(label))
@@ -251,13 +262,13 @@ func TestFleetFirstChipNotOrphaned(t *testing.T) {
 			t.Errorf("row0 first chip %d != nat %d", got, nat)
 		}
 	})
-	t.Run("spot_150_3long_share_two", func(t *testing.T) {
+	t.Run("spot_160_3long_share_two", func(t *testing.T) {
 		m := NewModelForProviders([]ProviderMeta{{Name: "anthropic-eu-central", Concurrency: 4}, {Name: "openai-prod-longname", Concurrency: 8}, {Name: "acme-edge-provider", Concurrency: 12}})
-		m.width = 150
+		m.width = 160
 		m.height = 24
 		rows := m.chipRowsLayout()
 		if len(rows) != 2 || len(rows[0].providers) != 2 {
-			t.Fatalf("150/3-long must share two chips on row0, got rows %v", rows)
+			t.Fatalf("160/3-long must share two chips on row0, got rows %v", rows)
 		}
 	})
 	t.Run("spot_180_3long_single", func(t *testing.T) {

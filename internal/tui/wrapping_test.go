@@ -214,16 +214,17 @@ func TestWheelOverIdentity_CyclesProvider(t *testing.T) {
 	if idW == 0 {
 		t.Fatal("identityWidth should be > 0 in fleet mode")
 	}
-	m = update(m, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 1, Y: 0})
+	idOff := m.identityOffset()
+	m = update(m, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: idOff, Y: 0})
 	if m.active != 1 {
 		t.Fatalf("after wheel down at identity: active=%d want 1", m.active)
 	}
-	m = update(m, tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 1, Y: 0})
+	m = update(m, tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: idOff, Y: 0})
 	if m.active != 0 {
 		t.Fatalf("after wheel up at identity: active=%d want 0", m.active)
 	}
 	m.cursor = 0
-	m = update(m, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: idW + 10, Y: 0})
+	m = update(m, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: idOff + idW + 10, Y: 0})
 	if m.active != 0 {
 		t.Fatalf("wheel outside identity changed provider to %d", m.active)
 	}
