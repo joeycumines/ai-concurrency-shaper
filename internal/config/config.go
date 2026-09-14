@@ -167,6 +167,7 @@ type Provider struct {
 	TranscodeAllowClientQuery  []string
 	TranscodeModelMap          []string
 	TranscodeMaxRequestMB      int64
+	TranscodeFlowLogDir        string
 	TranscodeMaxResponseMB     int64
 	TranscodeAuth              string
 	TranscodeAuthSource        string

@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,6 +107,13 @@ type TranscodeMapping struct {
 	// BodyLimits bounds request/response bodies on this route. Zero values
 	// fall back to the proxy defaults.
 	BodyLimits transcode.BodyLimits
+
+	// FlowLogDir, when non-empty, receives one JSON record per transcoded
+	// exchange capturing the full flow. The directory must already exist;
+	// New validates it before any handler is constructed. Records are
+	// unredacted (they include headers and bodies), so the directory is
+	// secret-bearing.
+	FlowLogDir string
 }
 
 // TranscodeOption configures transcoding route mappings.
@@ -912,6 +920,7 @@ func New(opts ...Option) (*Proxy, error) {
 				Mapping:    mapping,
 				Upstream:   cfg.upstream,
 				BodyLimits: m.BodyLimits,
+				FlowLogDir: m.FlowLogDir,
 			},
 			p.RoundTrip,
 			nil,
@@ -3512,6 +3521,15 @@ func (m TranscodeMapping) Validate() error {
 	}
 	if err := m.BodyLimits.Validate(); err != nil {
 		return fmt.Errorf("body limits: %w", err)
+	}
+	if m.FlowLogDir != "" {
+		info, err := os.Stat(m.FlowLogDir)
+		if err != nil {
+			return fmt.Errorf("flow log directory: %w", err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("flow log directory %q is not a directory", m.FlowLogDir)
+		}
 	}
 	for key := range m.AllowedClientQuery {
 		if !validQueryName(key) {

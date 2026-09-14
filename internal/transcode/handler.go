@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +37,14 @@ type HandlerConfig struct {
 
 	// BodyLimits are the independent request/response body limits.
 	BodyLimits BodyLimits
+
+	// FlowLogDir, when non-empty, is an existing directory that receives one
+	// JSON record per transcoded exchange capturing the full flow (client
+	// request, converted upstream request, upstream response, downstream
+	// response, conversion reports, outcome). The directory is validated by
+	// the constructing caller (the proxy), never created here, and the
+	// records are unredacted: treat the directory as secret-bearing.
+	FlowLogDir string
 }
 
 // RoundTrip executes an outbound HTTP request through the proxy engine.
@@ -193,6 +202,18 @@ func NewTranscodeHandler(
 			b.String(),
 		)
 	}
+	if cfg.FlowLogDir != "" {
+		info, err := os.Stat(cfg.FlowLogDir)
+		if err != nil || !info.IsDir() {
+			panic(fmt.Sprintf("transcode: invalid flow log directory %q: not an existing directory", cfg.FlowLogDir))
+		}
+		log.Printf(
+			"transcode: %s %s: flow recorder enabled: writing unredacted full exchange records to %q",
+			cfg.Mapping.ClientRoute.Method,
+			cfg.Mapping.ClientRoute.Path,
+			cfg.FlowLogDir,
+		)
+	}
 	return &TranscodeHandler{
 		cfg:       cfg,
 		roundTrip: roundTrip,
@@ -258,13 +279,23 @@ func (h *TranscodeHandler) ClientPath() string {
 // path recorded one, so the proxy's synchronous sink read can never observe a
 // missing outcome.
 func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Diagnostic full-flow tap (-transcode-flowlog-dir): captures the
+	// complete contents of every transcoded exchange to one JSON file each.
+	// Nil when disabled; every hook below is a nil-guarded no-op then.
+	fl := newFlowCapture(h.cfg.FlowLogDir)
+	if fl != nil {
+		fl.setClientRequest(r)
+		fl.setCommitted(CommittedStreamFromContext(r.Context()))
+		r = r.WithContext(withFlowCapture(r.Context(), fl))
+		w = fl.wrapWriter(w)
+		defer fl.seal()
+	}
 	defer func() {
 		if sink := OutcomeSinkFromContext(r.Context()); sink != nil {
 			if _, recorded := sink.Load(); !recorded {
-				sink.Record(LocalFailureOutcome())
-				if h.outcomeFn != nil {
-					h.outcomeFn(LocalFailureOutcome())
-				}
+				// recordOutcome records to the same sink (once-only) and
+				// carries the outcome to the diagnostic tap.
+				h.recordOutcome(r, LocalFailureOutcome())
 			}
 		}
 	}()
@@ -317,6 +348,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ProvenanceLocalRequestConversionError)
 		return
 	}
+	fl.setClientBody(body)
 
 	// Decode the source request into the canonical IR and render the target
 	// request, resolving the model through the map.
@@ -343,6 +375,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ProvenanceLocalRequestConversionError)
 		return
 	}
+	fl.setUpstreamRequest(upstreamBody, context.StreamIntent)
 
 	if CommittedStreamFromContext(r.Context()) && !context.StreamIntent {
 		h.logRequestError(r, fmt.Errorf("[%s] stream:false is incompatible with committed event-stream representation", ProvenanceLocalRequestConversionError))
@@ -382,6 +415,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ProvenanceLocalRequestConversionError)
 		return
 	}
+	fl.setUpstreamTarget(outReq)
 
 	resp, err := h.roundTrip(outReq)
 	// The response headers arrived: anchor Retry-After and the 403
@@ -444,6 +478,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	resp.Body = fl.wrapUpstreamBody(resp.Body, resp)
 
 	// A 101 Switching Protocols response on a transcoded JSON/SSE create
 	// route is an upstream protocol error; it cannot be schema-transcoded.
@@ -1096,6 +1131,10 @@ func (h *TranscodeHandler) streamResponse(
 		outcome.DownstreamComplete = downstreamComplete
 	}
 	h.recordOutcome(r, outcome)
+	// The streamed classification ran: the diagnostic record may now report
+	// StreamOutcome (its zero value is a success, so an exchange that never
+	// reached this point must not claim one).
+	flowFromContext(r.Context()).setStreamClassified()
 	// Response-side approved losses are logged with the same fidelity as
 	// request-side losses.
 	h.logConversionReport(*converter.ConversionReport(), r, "response")
@@ -1490,6 +1529,10 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 // outcome sink is present on the request context, to the proxy's per-request
 // provenance reader.
 func (h *TranscodeHandler) recordOutcome(r *http.Request, outcome Outcome) {
+	// Diagnostic tap: stash the outcome on the per-exchange flow capture.
+	if r != nil {
+		flowFromContext(r.Context()).setOutcome(outcome)
+	}
 	// The synchronous per-request sink records exactly once: there is no non-blocking path that can silently lose
 	// provenance.
 	if r != nil {
@@ -1765,6 +1808,7 @@ func derefInt(v *int) int {
 // loss(es)` when every entry is an approved loss, else `loss(es)/note(s)`.
 // Duplicate feature@path entries are deduped preserving first-seen order.
 func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.Request, stage string) {
+	flowFromContext(r.Context()).addReport(stage, report)
 	if len(report.Losses) == 0 {
 		return
 	}

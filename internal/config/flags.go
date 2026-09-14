@@ -209,6 +209,7 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.stringListVar(&p.TranscodeModelMap, "transcode-model", "map client model to upstream model: client=upstream (repeatable)")
 	r.int64Var(&p.TranscodeMaxRequestMB, "transcode-max-request-mb", defaultTranscodeMaxRequestMB, "max request body size retained for transcoding, in MiB")
 	r.int64Var(&p.TranscodeMaxResponseMB, "transcode-max-response-mb", defaultTranscodeMaxResponseMB, "max response body size retained for transcoding, in MiB")
+	r.stringVar(&p.TranscodeFlowLogDir, "transcode-flowlog-dir", "", "existing directory that receives one JSON record per transcoded exchange, capturing the full flow (client request, converted upstream request, upstream response, downstream response) unredacted; empty disables the recorder")
 	r.stringVar(&p.TranscodeAuth, "transcode-auth", "", "upstream auth mode for transcode: auto | none | bearer | x-api-key | api-key | header (unset inherits the provider auth policy)")
 	r.stringVar(&p.TranscodeAuthSource, "transcode-auth-source", "", "upstream auth secret source for transcode: inbound | env:VAR | file:PATH | provider")
 	r.stringVar(&p.TranscodeAuthHeader, "transcode-auth-header", "", "custom upstream auth header name for transcode")

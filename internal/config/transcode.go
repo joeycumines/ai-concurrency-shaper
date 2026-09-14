@@ -755,6 +755,7 @@ func (p *Provider) resolveTranscode() error {
 		if p.TranscodeMaxResponseMB > 0 {
 			mappings[i].BodyLimits.SuccessfulResponseBytes = p.TranscodeMaxResponseMB << 20
 		}
+		mappings[i].FlowLogDir = p.TranscodeFlowLogDir
 
 		if err := mappings[i].Mapping.Validate(); err != nil {
 			return fmt.Errorf("transcode mapping %s %s: %w", mappings[i].ClientRoute.Method, mappings[i].ClientRoute.Path, err)

@@ -5,6 +5,8 @@ Providing structural information here makes agents lazy, as they stop exploring 
 
 **Code must never reference session-scoped artefacts** — blueprint task numbers, review-round ids, incident nicknames: cite the observed behaviour or a commit instead, because a session reference is meaningless to anyone without the same context.
 
+**All configuration options must be defined as command line flags — notable exceptions include secrets — and environment variables, ESPECIALLY any environment variable parsed within business logic, are strictly banned.**
+
 This is a **stealth reverse proxy** with bounded concurrency and a TUI dashboard.
 
 Ensure these characteristics:

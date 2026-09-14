@@ -332,6 +332,7 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-anthropic-version` | provider | `2023-06-01` | Anthropic-Version header value when target auth mode resolves to `x-api-key` |
 | `-transcode-max-request-mb` | provider | `10` | Max unmarshaled request body size (MB) for transcoding |
 | `-transcode-max-response-mb` | provider | `10` | Max unmarshaled non-streaming response body size (MB) for transcoding |
+| `-transcode-flowlog-dir` | provider | `` (disabled) | Existing directory that receives one unredacted JSON record per transcoded exchange, capturing the full flow (client request, converted upstream request, upstream response, downstream response); empty disables the recorder |
 
 ### Route examples
 
@@ -701,6 +702,45 @@ curl on stdin, so it is never persisted: the environment value is never expanded
 Refresh the fixtures from the captured bytes, add the extension to
 the wire shadows alongside its siblings, and extend the corpus
 test — the regression harness then holds the shape permanently.
+
+### Flow recording (diagnostic)
+
+`-transcode-flowlog-dir PATH` (provider scope) makes each transcoded exchange
+write one JSON file into the existing directory `PATH`, capturing the FULL
+contents of the flow: the client request (method, path, query, headers,
+body), the converted upstream request (method, URL, headers, body), the
+upstream response (status, headers, body), the downstream response (status,
+headers, body), the request/response conversion reports (the approved losses
+and Notes, plus the dropped count when a report saturated), the recorded
+outcome, and the exchange duration. A record whose write fails is logged (a
+failure after creation can leave a partial file); records are created with
+mode 0600, and concurrent processes sharing one directory cannot overwrite
+each other (the filename carries the pid, and a taken name gains a numeric
+suffix rather than replacing the existing file). This is the tool to reach
+for when a live exchange misbehaves and the aggregated `transcode:` log lines
+are not enough.
+
+```sh
+mkdir -p /tmp/shaper-flows
+./ai-concurrency-shaper -bind=127.0.0.1:11243 --provider=… -transcode-messages-chat -transcode-flowlog-dir /tmp/shaper-flows
+```
+
+Bodies are stored verbatim (base64 with an explicit flag when not valid
+UTF-8); each streamed body is capped at 64 MiB and flags `truncated` at the
+cap (the cap is per body, so the recorded size of concurrent streams is not
+bounded as a whole). A capture can also end early without the flag — a client
+abort stops the tap with the stream. The record covers the transcoded
+exchange itself: proxy-level artifacts (queue comments, admission timing)
+stay in the journal. The directory must already exist; startup fails with a
+clear error when a transcoded route is configured with a missing (or
+non-directory) path. The record is written synchronously after the exchange
+completes and before its concurrency slot is released, so a very large
+capture (the request bodies plus up to two 64 MiB streamed bodies re-encoded
+as JSON) briefly delays that slot's release — keep the recorder pointed at a
+fast local directory. Nothing is redacted — headers and bodies include
+credentials — so treat the directory as secret-bearing and delete it when
+done. The recorder is off (nil-guarded no-ops with no capture state) when the
+flag is unset.
 
 ## How Concurrency Protection Works
 
