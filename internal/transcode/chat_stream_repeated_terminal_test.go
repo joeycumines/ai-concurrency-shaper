@@ -10,12 +10,14 @@ package transcode
 // mid-stream error after the thinking/tool blocks already yielded.
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/testcorpus"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openaichat"
 )
 
@@ -85,6 +87,74 @@ func TestStreamLifecycleRepeatedTerminalChunkAbsorbed(t *testing.T) {
 	}
 	if !strings.Contains(body, `"input_tokens":100`) {
 		t.Fatalf("repeated-terminal usage not folded: %q", body)
+	}
+}
+
+// The captured gateway tail replays through the full production handler and
+// stream converter: the redelivered terminal folds its usage into the
+// terminal envelope and the exchange completes with exactly one message_stop.
+func TestStreamCapturedRepeatedTerminalTailReplayed(t *testing.T) {
+	capture := testcorpus.FieldRepeatedTerminalTailSSE()
+	if got := strings.Count(string(capture), `"finish_reason":"tool_calls"`); got != 2 {
+		t.Fatalf("captured tail carries %d non-null finish reasons, want 2", got)
+	}
+	mapping := messagesMapping(t, UpstreamChatCompletions)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+	mapping.ChatCapabilities = ChatCapabilities{ProviderReasoningThinking: true}
+	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
+	}}
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(bytes.NewReader(capture)),
+			}, nil
+		},
+		nil,
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		strings.NewReader(`{"model":"meta-muse-spark-1.3","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("error terminal in captured repeated-terminal stream: %q", body)
+	}
+	if strings.Count(body, `"type":"message_stop"`) != 1 {
+		t.Fatalf("message_stop count != 1: %q", body)
+	}
+	if !strings.Contains(body, `"thinking_delta"`) {
+		t.Fatalf("missing thinking deltas: %q", body)
+	}
+	if !strings.Contains(body, `"input_json_delta"`) {
+		t.Fatalf("missing tool input deltas: %q", body)
+	}
+	if !strings.Contains(body, `"stop_reason":"tool_use"`) {
+		t.Fatalf("missing tool_use stop: %q", body)
+	}
+	if !strings.Contains(body, `"input_tokens":143940`) {
+		t.Fatalf("captured usage not folded into the terminal envelope: %q", body)
 	}
 }
 

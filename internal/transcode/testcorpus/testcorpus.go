@@ -67,6 +67,8 @@ var (
 	qwenReasoningStreamFieldSSE []byte
 	//go:embed testdata/field/codex_multiturn_request_field.json
 	codexMultiturnRequestFieldJSON []byte
+	//go:embed testdata/field/repeated_terminal_tail_field.sse
+	repeatedTerminalTailFieldSSE []byte
 )
 
 // FieldQwenStreamSSE returns the qwen-style chat stream capture: choice-level
@@ -92,6 +94,14 @@ func FieldQwenReasoningStreamSSE() []byte { return qwenReasoningStreamFieldSSE }
 // a previous-output history item carrying "status": "" (the task-30 field
 // regression) between two user turns.
 func FieldCodexMultiturnRequestJSON() []byte { return codexMultiturnRequestFieldJSON }
+
+// FieldRepeatedTerminalTailSSE returns the captured dialagram
+// meta-muse-spark-1.3 stream tail in which the gateway redelivers the
+// terminal chunk — the same single choice, the same finish reason, an
+// insubstantial delta — with the usage accounting piggybacked, followed by
+// the [DONE] sentinel. The frames are shape-verbatim from the capture; the
+// tool-call argument payload is replaced with a neutral value.
+func FieldRepeatedTerminalTailSSE() []byte { return repeatedTerminalTailFieldSSE }
 
 // ChatCompletionsRequestJSON returns the raw chat completions request fixture
 // bytes.
