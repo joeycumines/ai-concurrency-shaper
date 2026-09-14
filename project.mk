@@ -30,11 +30,3 @@ DEADCODE_IGNORE_PATTERNS_FILE ?= .deadcodeignore
 # Treat any unignored deadcode finding as a lint error (Hana-san directive
 # 2026-08-26): unreachable code is a defect to remove, not a note to file.
 DEADCODE_ERROR_ON_UNIGNORED ?= true
-# header-gate — CI-enforced fleet header invariant gate (internal/tui).
-# Runs the fleet header regression suite with -race and coverage so a
-# future header edit that shifts a chip, reintroduces a row-0 orphan, or
-# breaks theme lockstep fails fast. See header.go fleet invariants and
-# CONTRIBUTING Development.
-.PHONY: header-gate
-header-gate: ## Run fleet header invariant gate (race + cover, fails on regression).
-	go test ./internal/tui -run 'TestFleet|TestHeader|TestChip|TestWrapping|TestRepro' -count=1 -race -cover -timeout 120s

@@ -19,6 +19,6 @@ package tui
 
 // isRace reports whether the race detector is enabled. Under -race the
 // test matrices are narrowed (via isRace guards in the test files) to keep
-// the header-gate under its 120s timeout while preserving falsifiability.
+// race-enabled runs bounded in duration while preserving falsifiability.
 // See race_off_test.go for the non-race counterpart.
 const isRace = true

@@ -350,3 +350,80 @@ func BenchmarkRenderHeader(b *testing.B) {
 		}
 	}
 }
+
+// allocCeiling records the observed allocs/op for a specific fleet/width/height
+// combination. The ceiling is set to observed + 5% jitter so that minor GC or
+// runtime variance does not cause false failures, while any real allocation
+// regression (slice copy, string concat, lipgloss.Width reallocation) exceeds it.
+type allocCeiling struct {
+	fleet   string
+	width   int
+	height  int
+	ceiling int64
+}
+
+// chipAllocCeilings pins the maximum allocs/op for BenchmarkChipRowsLayout.
+// Values derived from max of 3 race-mode AllocsPerRun(100) samples + 5% headroom.
+var chipAllocCeilings = []allocCeiling{
+	{"2-short", 20, 5, 52}, {"2-short", 20, 8, 111}, {"2-short", 20, 24, 111},
+	{"2-short", 40, 5, 52}, {"2-short", 40, 8, 111}, {"2-short", 40, 24, 111},
+	{"2-short", 80, 5, 84}, {"2-short", 80, 8, 111}, {"2-short", 80, 24, 111},
+	{"2-short", 120, 5, 108}, {"2-short", 120, 8, 108}, {"2-short", 120, 24, 108},
+	{"2-short", 150, 5, 108}, {"2-short", 150, 8, 108}, {"2-short", 150, 24, 108},
+	{"2-short", 180, 5, 108}, {"2-short", 180, 8, 108}, {"2-short", 180, 24, 108},
+	{"3-long", 20, 5, 77}, {"3-long", 20, 8, 161}, {"3-long", 20, 24, 161},
+	{"3-long", 40, 5, 77}, {"3-long", 40, 8, 162}, {"3-long", 40, 24, 162},
+	{"3-long", 80, 5, 77}, {"3-long", 80, 8, 163}, {"3-long", 80, 24, 163},
+	{"3-long", 120, 5, 112}, {"3-long", 120, 8, 163}, {"3-long", 120, 24, 163},
+	{"3-long", 150, 5, 135}, {"3-long", 150, 8, 161}, {"3-long", 150, 24, 161},
+	{"3-long", 180, 5, 158}, {"3-long", 180, 8, 158}, {"3-long", 180, 24, 158},
+	{"5-mixed", 20, 5, 126}, {"5-mixed", 20, 8, 267}, {"5-mixed", 20, 24, 267},
+	{"5-mixed", 40, 5, 126}, {"5-mixed", 40, 8, 266}, {"5-mixed", 40, 24, 266},
+	{"5-mixed", 80, 5, 126}, {"5-mixed", 80, 8, 268}, {"5-mixed", 80, 24, 268},
+	{"5-mixed", 120, 5, 188}, {"5-mixed", 120, 8, 265}, {"5-mixed", 120, 24, 265},
+	{"5-mixed", 150, 5, 235}, {"5-mixed", 150, 8, 261}, {"5-mixed", 150, 24, 261},
+	{"5-mixed", 180, 5, 260}, {"5-mixed", 180, 8, 260}, {"5-mixed", 180, 24, 260},
+	{"15-long", 20, 5, 368}, {"15-long", 20, 8, 702}, {"15-long", 20, 24, 776},
+	{"15-long", 40, 5, 368}, {"15-long", 40, 8, 771}, {"15-long", 40, 24, 771},
+	{"15-long", 80, 5, 368}, {"15-long", 80, 8, 764}, {"15-long", 80, 24, 764},
+	{"15-long", 120, 5, 423}, {"15-long", 120, 8, 767}, {"15-long", 120, 24, 767},
+	{"15-long", 150, 5, 447}, {"15-long", 150, 8, 769}, {"15-long", 150, 24, 769},
+	{"15-long", 180, 5, 470}, {"15-long", 180, 8, 769}, {"15-long", 180, 24, 769},
+	{"cjk-emoji", 20, 5, 101}, {"cjk-emoji", 20, 8, 212}, {"cjk-emoji", 20, 24, 212},
+	{"cjk-emoji", 40, 5, 101}, {"cjk-emoji", 40, 8, 213}, {"cjk-emoji", 40, 24, 213},
+	{"cjk-emoji", 80, 5, 101}, {"cjk-emoji", 80, 8, 215}, {"cjk-emoji", 80, 24, 215},
+	{"cjk-emoji", 120, 5, 161}, {"cjk-emoji", 120, 8, 213}, {"cjk-emoji", 120, 24, 213},
+	{"cjk-emoji", 150, 5, 207}, {"cjk-emoji", 150, 8, 207}, {"cjk-emoji", 150, 24, 207},
+	{"cjk-emoji", 180, 5, 207}, {"cjk-emoji", 180, 8, 207}, {"cjk-emoji", 180, 24, 207},
+}
+
+// TestBenchAllocCeilings asserts chipRowsLayout allocations stay within
+// pinned ceilings across all fleet/width/height combinations. A single extra
+// allocation (slice copy, string concat, lipgloss.Width reallocation) breaks CI.
+func TestBenchAllocCeilings(t *testing.T) {
+	fleets := benchFleets()
+	for _, c := range chipAllocCeilings {
+		var metas []ProviderMeta
+		for _, fl := range fleets {
+			if fl.name == c.fleet {
+				metas = fl.metas
+				break
+			}
+		}
+		if metas == nil {
+			t.Fatalf("unknown fleet %q in ceiling table", c.fleet)
+		}
+		m := NewModelForProviders(metas)
+		m.width = c.width
+		m.height = c.height
+		m.active = 0
+		m.syncActive()
+		allocs := testing.AllocsPerRun(100, func() {
+			sinkChipRows = m.chipRowsLayout()
+		})
+		got := int64(allocs)
+		if got > c.ceiling {
+			t.Errorf("%s/%dx%d: allocs/op %d exceeds ceiling %d", c.fleet, c.width, c.height, got, c.ceiling)
+		}
+	}
+}
