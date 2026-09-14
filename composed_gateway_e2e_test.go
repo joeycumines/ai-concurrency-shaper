@@ -34,10 +34,11 @@ import (
 )
 
 // TestE2E_ComposedGateway_MultiProvider_TranscodeHarness proves the composed
-// end-to-end verification harness against a single gateway process serving 3 providers:
+// end-to-end verification harness against a single gateway process serving 4 providers:
 // 1. Anthropic mount (/anthropic) with Messages->Chat transcoding and Bearer auth.
 // 2. OpenAI mount (/openai) with Responses->Chat transcoding and Bearer auth.
 // 3. Passthrough mount (/passthrough) with transparent routing.
+// 4. Namespace-tool mount (/nsopenai) with Responses->Chat transcoding and Bearer auth.
 //
 // Verifies:
 // (a) Claude Code multi-turn shape with mid-conversation system turn & thinking budget.
@@ -45,6 +46,13 @@ import (
 // (c) Streaming SSE translation event-for-event with exactly one terminal event.
 // (d) Poison usage extension resilience on non-stream completions.
 // (e) Limiter/breaker and Prometheus /metrics aggregate accounting.
+// (f) Namespace tool flattening upstream and the bare-name + qualifier round trip
+//
+//	downstream, non-streaming, including the collision-qualified child.
+//
+// (g) The same round trip streamed, with the qualifier on every function_call shape.
+// (h) Replayed namespaced history rendering the flat name upstream.
+// (i) Method- and path-scoped dispatch: non-transcoded traffic stays verbatim.
 func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -148,6 +156,60 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	}))
 	t.Cleanup(upC.Close)
 
+	// Upstream D (namespace-tool provider target): the chat upstream for the
+	// namespace round-trip. It answers a chat completion with two tool calls —
+	// a namespaced child (spawn_agent) and a colliding child the transcoder must
+	// have flattened to ns_group__search — and records every request body so the
+	// test can prove the upstream never sees a namespace grouping.
+	var (
+		upDMu     sync.Mutex
+		upDBodies [][]byte
+		upDAuth   string
+	)
+	upD := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upDMu.Lock()
+		upDBodies = append(upDBodies, body)
+		upDAuth = r.Header.Get("Authorization")
+		upDMu.Unlock()
+
+		if r.URL.Path == "/v1/chat/completions" && r.Method == http.MethodPost {
+			var chatReq struct {
+				Stream bool `json:"stream"`
+			}
+			_ = json.Unmarshal(body, &chatReq)
+
+			if chatReq.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				flusher, _ := w.(http.Flusher)
+				frame := func(data string) {
+					_, _ = w.Write([]byte("data: " + data + "\n\n"))
+					if flusher != nil {
+						flusher.Flush()
+					}
+				}
+				frame(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_ns_1","type":"function","function":{"name":"spawn_agent","arguments":""}}]}}]}`)
+				frame(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"message\":\"x\"}"}}]}}]}`)
+				frame(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":1,"id":"call_ns_2","type":"function","function":{"name":"ns_group__search","arguments":""}}]}}]}`)
+				frame(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":1,"function":{"arguments":"{\"q\":\"y\"}"}}]}}]}`)
+				frame(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","delta":{"role":"assistant","content":""}}]}`)
+				frame(`[DONE]`)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-ns","object":"chat.completion","created":1710000000,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_ns_1","type":"function","function":{"name":"spawn_agent","arguments":"{\"message\":\"x\"}"}},{"id":"call_ns_2","type":"function","function":{"name":"ns_group__search","arguments":"{\"q\":\"y\"}"}}]}}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_d":true,"method":%q,"path":%q}`, r.Method, r.URL.Path)
+	}))
+	t.Cleanup(upD.Close)
+
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen proxy: %v", err)
@@ -187,6 +249,14 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 		"-prefix", "/passthrough",
 		"-limit", "POST /v1/models:2",
 		"-retry", "0",
+		"--provider=nsopenai",
+		"-upstream", upD.URL,
+		"-prefix", "/nsopenai",
+		"-auth-source", "env:SHAPER_PROVIDER_NSOPENAI_KEY",
+		"-auth-mode", "bearer",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-limit", "POST /v1/responses:1",
+		"-retry", "0",
 	)
 
 	var filteredEnv []string
@@ -198,6 +268,7 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	cmd.Env = append(filteredEnv,
 		"SHAPER_PROVIDER_ANTHROPIC_KEY=secret-anthropic-key-xyz",
 		"SHAPER_PROVIDER_OPENAI_KEY=secret-openai-key-abc",
+		"SHAPER_PROVIDER_NSOPENAI_KEY=secret-nsopenai-key-ns",
 	)
 
 	stdinR, err := os.Open(os.DevNull)
@@ -494,6 +565,195 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	}
 	if upCHits.Load() == 0 {
 		t.Errorf("upCHits = 0, want > 0")
+	}
+
+	// -------------------------------------------------------------------------
+	// (f) Namespace tool round trip: non-streaming
+	// -------------------------------------------------------------------------
+	upDCount := func() int {
+		upDMu.Lock()
+		defer upDMu.Unlock()
+		return len(upDBodies)
+	}
+	upDBodyAt := func(i int) string {
+		upDMu.Lock()
+		defer upDMu.Unlock()
+		if i < 0 || i >= len(upDBodies) {
+			t.Fatalf("upstream D has no request at index %d", i)
+		}
+		return string(upDBodies[i])
+	}
+
+	const nsTools = `[
+		{"type": "function", "name": "search", "description": "plain search", "strict": false,
+		 "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}},
+		{"type": "namespace", "name": "multi_agent_v1", "description": "agents", "tools": [
+			{"type": "function", "name": "spawn_agent", "description": "spawn", "strict": false,
+			 "parameters": {"type": "object", "properties": {"message": {"type": "string"}}}}]},
+		{"type": "namespace", "name": "ns_group", "description": "group", "tools": [
+			{"type": "function", "name": "search", "description": "grouped search", "strict": false,
+			 "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}]}
+	]`
+
+	nsBefore := upDCount()
+	reqNS, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/nsopenai/v1/responses",
+		strings.NewReader(`{"model": "gpt-4o", "input": "spawn and search", "tools": `+nsTools+`}`))
+	reqNS.Header.Set("Content-Type", "application/json")
+	respNS, err := httpClient.Do(reqNS)
+	if err != nil {
+		t.Fatalf("namespace non-stream request failed: %v", err)
+	}
+	bodyNS, _ := io.ReadAll(respNS.Body)
+	respNS.Body.Close()
+	if respNS.StatusCode != http.StatusOK {
+		t.Fatalf("namespace non-stream status = %d, want 200: %s", respNS.StatusCode, bodyNS)
+	}
+
+	upDNS := upDBodyAt(nsBefore)
+	if strings.Contains(upDNS, "namespace") {
+		t.Errorf("the namespace grouping leaked into the upstream chat request: %s", upDNS)
+	}
+	for _, want := range []string{`"name":"search"`, `"name":"spawn_agent"`, `"name":"ns_group__search"`} {
+		if !strings.Contains(upDNS, want) {
+			t.Errorf("upstream chat tools lack %s: %s", want, upDNS)
+		}
+	}
+	for _, want := range []string{
+		`"type":"function_call","status":"completed","call_id":"call_ns_1","name":"spawn_agent","arguments":"{\"message\":\"x\"}","namespace":"multi_agent_v1"`,
+		`"type":"function_call","status":"completed","call_id":"call_ns_2","name":"search","arguments":"{\"q\":\"y\"}","namespace":"ns_group"`,
+	} {
+		if !strings.Contains(string(bodyNS), want) {
+			t.Errorf("downstream function_call is missing %s from: %s", want, bodyNS)
+		}
+	}
+	if strings.Contains(string(bodyNS), "ns_group__search") {
+		t.Errorf("the flattened chat name leaked to the client: %s", bodyNS)
+	}
+
+	// -------------------------------------------------------------------------
+	// (g) Namespace tool round trip: streaming
+	// -------------------------------------------------------------------------
+	nsStreamBefore := upDCount()
+	reqNSStream, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/nsopenai/v1/responses",
+		strings.NewReader(`{"model": "gpt-4o", "input": "spawn", "stream": true, "tools": `+nsTools+`}`))
+	reqNSStream.Header.Set("Content-Type", "application/json")
+	respNSStream, err := httpClient.Do(reqNSStream)
+	if err != nil {
+		t.Fatalf("namespace stream request failed: %v", err)
+	}
+	if respNSStream.StatusCode != http.StatusOK {
+		t.Fatalf("namespace stream status = %d, want 200", respNSStream.StatusCode)
+	}
+	nsScanner := bufio.NewScanner(respNSStream.Body)
+	var nsEvents []string
+	var nsData strings.Builder
+	nsTerminals := 0
+	for nsScanner.Scan() {
+		line := nsScanner.Text()
+		if after, ok := strings.CutPrefix(line, "event: "); ok {
+			nsEvents = append(nsEvents, after)
+			if after == "response.completed" {
+				nsTerminals++
+			}
+		}
+		if after, ok := strings.CutPrefix(line, "data: "); ok {
+			nsData.WriteString(after)
+			nsData.WriteByte('\n')
+		}
+	}
+	if err := nsScanner.Err(); err != nil {
+		t.Fatalf("namespace stream scanner error: %v", err)
+	}
+	respNSStream.Body.Close()
+
+	if nsTerminals != 1 || len(nsEvents) == 0 || nsEvents[len(nsEvents)-1] != "response.completed" {
+		t.Errorf("namespace stream terminals = %d, last event = %q, want exactly one response.completed", nsTerminals, nsEvents)
+	}
+	if got := strings.Count(nsData.String(), `"namespace":"multi_agent_v1"`); got != 3 {
+		t.Errorf("streamed spawn_agent qualifier count = %d, want 3 (added, done, terminal): %s", got, nsData.String())
+	}
+	if got := strings.Count(nsData.String(), `"namespace":"ns_group"`); got != 3 {
+		t.Errorf("streamed collision qualifier count = %d, want 3 (added, done, terminal): %s", got, nsData.String())
+	}
+	if !strings.Contains(nsData.String(), `"name":"spawn_agent"`) {
+		t.Errorf("streamed function_call lacks the bare child name: %s", nsData.String())
+	}
+	if !strings.Contains(nsData.String(), `"name":"search"`) {
+		t.Errorf("streamed collision call lacks the bare child name: %s", nsData.String())
+	}
+	if strings.Contains(nsData.String(), "ns_group__search") {
+		t.Errorf("the flattened chat name leaked into the client stream: %s", nsData.String())
+	}
+	if upDNSS := upDBodyAt(nsStreamBefore); strings.Contains(upDNSS, "namespace") {
+		t.Errorf("the namespace grouping leaked into the streamed upstream request: %s", upDNSS)
+	}
+
+	// -------------------------------------------------------------------------
+	// (h) Namespace history replay renders the flat name upstream
+	// -------------------------------------------------------------------------
+	nsReplayBefore := upDCount()
+	reqNSReplay, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/nsopenai/v1/responses",
+		strings.NewReader(`{"model": "gpt-4o", "input": [
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+			{"type": "function_call", "call_id": "call_ns_2", "name": "search", "namespace": "ns_group", "arguments": "{\"q\":\"y\"}"},
+			{"type": "function_call_output", "call_id": "call_ns_2", "output": "found"}
+		], "tools": `+nsTools+`}`))
+	reqNSReplay.Header.Set("Content-Type", "application/json")
+	respNSReplay, err := httpClient.Do(reqNSReplay)
+	if err != nil {
+		t.Fatalf("namespace replay request failed: %v", err)
+	}
+	bodyNSReplay, _ := io.ReadAll(respNSReplay.Body)
+	respNSReplay.Body.Close()
+	if respNSReplay.StatusCode != http.StatusOK {
+		t.Fatalf("namespace replay status = %d, want 200: %s", respNSReplay.StatusCode, bodyNSReplay)
+	}
+	upDNSReplay := upDBodyAt(nsReplayBefore)
+	if !strings.Contains(upDNSReplay, `"name":"ns_group__search"`) {
+		t.Errorf("replayed history must carry the flattened name, got: %s", upDNSReplay)
+	}
+	if strings.Contains(upDNSReplay, "namespace") {
+		t.Errorf("replayed history leaked the namespace grouping upstream: %s", upDNSReplay)
+	}
+	if !strings.Contains(upDNSReplay, `"tool_call_id":"call_ns_2"`) {
+		t.Errorf("replayed history lost the tool result pairing: %s", upDNSReplay)
+	}
+
+	// -------------------------------------------------------------------------
+	// (i) The transcode mapping stays method- and path-scoped
+	// -------------------------------------------------------------------------
+	probeBefore := upDCount()
+	const probeBody = `{"probe":"verbatim"}`
+	reqProbe, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/nsopenai/v1/embeddings", strings.NewReader(probeBody))
+	respProbe, err := httpClient.Do(reqProbe)
+	if err != nil {
+		t.Fatalf("non-transcoded probe failed: %v", err)
+	}
+	probeRespBody, _ := io.ReadAll(respProbe.Body)
+	respProbe.Body.Close()
+	if respProbe.StatusCode != http.StatusOK || !strings.Contains(string(probeRespBody), "untranscoded_d") {
+		t.Errorf("non-transcoded probe status = %d body = %s", respProbe.StatusCode, probeRespBody)
+	}
+	if got := upDBodyAt(probeBefore); got != probeBody {
+		t.Errorf("non-transcoded probe body = %q, want verbatim %q", got, probeBody)
+	}
+
+	reqMethod, _ := http.NewRequest(http.MethodGet, "http://"+proxyAddr+"/nsopenai/v1/responses", nil)
+	respMethod, err := httpClient.Do(reqMethod)
+	if err != nil {
+		t.Fatalf("method-scoped probe failed: %v", err)
+	}
+	methodBody, _ := io.ReadAll(respMethod.Body)
+	respMethod.Body.Close()
+	if respMethod.StatusCode != http.StatusOK || !strings.Contains(string(methodBody), `"method":"GET"`) {
+		t.Errorf("GET on the transcode path must pass through transparently, got status %d body %s", respMethod.StatusCode, methodBody)
+	}
+
+	upDMu.Lock()
+	nsAuth := upDAuth
+	upDMu.Unlock()
+	if nsAuth != "Bearer secret-nsopenai-key-ns" {
+		t.Errorf("upstream D auth = %q, want the injected namespace-provider credential", nsAuth)
 	}
 
 	// Poll metrics endpoint

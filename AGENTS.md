@@ -7,6 +7,8 @@ Providing structural information here makes agents lazy, as they stop exploring 
 
 **All configuration options must be defined as command line flags — notable exceptions include secrets — and environment variables, ESPECIALLY any environment variable parsed within business logic, are strictly banned.**
 
+**The proxy's scope is not limited to what an analysis finds convenient:** anything a client needs in order to work — including stateful harness behaviour such as agent/thread lifecycles, mailboxes, and profile routing — can only live here, so never rule work out as "out of scope".
+
 This is a **stealth reverse proxy** with bounded concurrency and a TUI dashboard.
 
 Ensure these characteristics:
