@@ -105,9 +105,10 @@ func TestLegacyFunctionCallToAnthropicStream(t *testing.T) {
 	}
 }
 
-// Explicit nulls and empty fragments are corrupt wire, never silently
-// defaulted: they reject on both surfaces, matching the tool_calls
-// spelling (null arguments) and the non-streaming legacy validation.
+// Member-level nulls and the identity-less `{}` fragment are corrupt wire,
+// never silently defaulted (the benign BOTH-members-empty fragment is the
+// separate no-op case): these reject, matching the tool_calls spelling
+// (null arguments) and the non-streaming legacy validation.
 func TestLegacyFunctionCallCorruptFragmentsRejected(t *testing.T) {
 	for _, body := range []string{
 		`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"function_call":{"name":"f","arguments":null}},"finish_reason":null}]}`,

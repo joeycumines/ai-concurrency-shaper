@@ -468,7 +468,7 @@ table above + add it to the field-capture corpus:
 
 | Provider | Tolerated (discarded) extensions |
 | --- | --- |
-| OpenRouter | `cost`, `native_finish_reason`, `is_byok`, `cost_details`, `cache_write_tokens`, `video_tokens`, `image_tokens`, `error` |
+| OpenRouter / Dialagram | `cost`, `native_finish_reason`, `is_byok`, `cost_details`, `cache_write_tokens`, `video_tokens`, `image_tokens`, `error`; `delta.reasoning_details` (observed on `meta-muse-spark-1.3`, a sibling array of the modeled `reasoning` delta text — discarded, never forwarded, and never treated as output by the stream converter) |
 | vLLM | `prompt_logprobs`, `kv_transfer_params`, `ec_transfer_params`, `metrics` |
 | DeepSeek / open-weights | `logprobs.reasoning_content` (NOTE: `reasoning_content` at message/delta level IS modeled and maps to capability-gated text — see the table above; only the `logprobs`-nested spelling is discarded) |
 | LiteLLM / Verboo | `completion_cost`, `cache_cost` (modeled as opaque raw JSON in the table above, never forwarded) |
@@ -493,3 +493,24 @@ rejected. A new provider spelling belongs here, in the wire shadows next to
 its siblings, and in the corpus as a fixture — capture real bytes first
 (`make field-recapture` in the top-level `project.mk`; see the README section
 on provider extensions).
+
+### Post-terminal accounting redelivery (observed stream shape)
+
+Some gateways redeliver the terminal chunk with the usage accounting
+piggybacked on it instead of sending the bare `choices: []` usage-only tail
+that `stream_options.include_usage` defines (observed live on Dialagram
+`meta-muse-spark-1.3`: the finish chunk carries `finish_reason: "tool_calls"`
+with a role-only delta, `content: ""` and `reasoning: null`, and is then
+repeated on the same single choice with a role-only delta and `content: ""`
+plus the `usage` object attached; the official bare usage-only tail is the
+common shape, and the accumulate-on-repeat shape is absorbed with or without
+a usage object). The redelivery is pure accounting: the
+stream converter folds its usage into the terminal envelope, applies the
+same loss decisions (service tier, logprobs, unknown usage components), and
+emits no events. It is NOT new output — a post-finish chunk carrying
+content, reasoning, refusal, tool-call fragments, a non-empty legacy
+`function_call` payload, a different `finish_reason`, or more than one
+choice remains corrupt upstream wire and is rejected, exactly as before
+(the benign empty-string `function_call` fragment is absorbed the same way
+it is mid-stream).
+

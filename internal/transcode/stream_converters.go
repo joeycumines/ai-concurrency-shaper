@@ -325,14 +325,101 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 	return nil
 }
 
+// isRepeatedTerminalChunk reports whether chunk re-emits the recorded
+// terminal: exactly one index-0 choice carrying the same finish reason with
+// an insubstantial delta. Role-only deltas and empty-string content,
+// refusal, and reasoning fields carry no output; any tool-call fragment or
+// raw legacy function-call value other than an explicit null or the empty
+// string is substantive, as is any finish reason other than the recorded
+// one. (The wire decoder already normalizes the benign empty
+// `function_call` fragment to nil before this predicate sees it; the raw
+// check here keeps the predicate safe on its own terms.)
+func isRepeatedTerminalChunk(chunk ChatStreamResponse, finishReason string) bool {
+	if len(chunk.Choices) != 1 {
+		return false
+	}
+	choice := chunk.Choices[0]
+	if choice.Index != 0 {
+		return false
+	}
+	if choice.FinishReason == nil || *choice.FinishReason != finishReason {
+		return false
+	}
+	if d := choice.Delta; d != nil {
+		if (d.Content != nil && *d.Content != "") ||
+			(d.Refusal != nil && *d.Refusal != "") ||
+			(d.Reasoning != nil && *d.Reasoning != "") ||
+			(d.ReasoningContent != nil && *d.ReasoningContent != "") ||
+			len(d.ToolCalls) > 0 {
+			return false
+		}
+		if trimmed := bytes.TrimSpace(d.FunctionCall); len(trimmed) > 0 &&
+			!bytes.Equal(trimmed, []byte("null")) {
+			return false
+		}
+	}
+	return true
+}
+
+// absorbPhase2Accounting folds the accounting carried by one post-finish
+// chunk into the terminal envelope's usage: stable chunk identity (enforced
+// only when the chunk carries it — gateways may omit id/model on pure
+// accounting frames), the service-tier loss decision, per-choice logprobs,
+// and the usage totals when present. It emits no events: accounting frames
+// never render downstream.
+func (s *chatResponsesStreamState) absorbPhase2Accounting(chunk ChatStreamResponse) error {
+	if chunk.ID != "" && chunk.ID != s.chunkID {
+		return s.wireError(fmt.Errorf(
+			"chat stream chunk id %q does not match the first chunk id %q",
+			chunk.ID,
+			s.chunkID,
+		))
+	}
+	if chunk.Model != "" && chunk.Model != s.chunkModel {
+		return s.wireError(fmt.Errorf(
+			"chat stream chunk model %q does not match the first chunk model %q",
+			chunk.Model,
+			s.chunkModel,
+		))
+	}
+	if chunk.ServiceTier != nil {
+		if err := s.loseServiceTierOnce(); err != nil {
+			return err
+		}
+	}
+	for _, choice := range chunk.Choices {
+		if choice.LogProbs != nil {
+			if err := s.loseLogprobsOnce(); err != nil {
+				return err
+			}
+		}
+	}
+	if chunk.Usage == nil {
+		return nil
+	}
+	if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
+		return err
+	}
+	converted, clamp := chatUsageToResponsesUsage(chunk.Usage)
+	if err := s.usageClampNotes.note(&s.report, "usage", clamp); err != nil {
+		return err
+	}
+	s.usage = converted
+	return nil
+}
+
 // Convert processes one Chat stream chunk into Responses events.
 //
 // The stream lifecycle has explicit phases:
 //
 //  1. normal chunks — content, tool-call fragments, and the finish chunk;
-//  2. after the finish reason — the optional usage-only tail chunk
-//     (choices: []/empty, usage present) that the official protocol sends
-//     before [DONE] when include_usage is requested;
+//  2. after the finish reason — accounting redeliveries that carry the final
+//     usage: either the usage-only tail chunk (choices: []/empty, usage
+//     present) that the official protocol sends before [DONE] when
+//     include_usage is requested, or a repeated terminal chunk (the same
+//     single choice with the same finish reason and an insubstantial delta)
+//     on which some gateways piggyback the usage instead of sending the
+//     bare tail;
 //  3. terminal — built at release by the [DONE] frame only, with the final usage.
 func (s *chatResponsesStreamState) Convert(
 	chunk ChatStreamResponse,
@@ -341,42 +428,28 @@ func (s *chatResponsesStreamState) Convert(
 		return nil, s.wireError(err)
 	}
 	if s.sawFinish {
-		// Phase 2: accept only the usage-only tail chunk and fold its totals
-		// into the terminal envelope's usage. The tail is still part of the
-		// stream: chunk identity must remain stable, and a service tier on
-		// the tail enters the same loss/reject decision as on any other
-		// chunk.
+		// Phase 2: accept only accounting redeliveries and fold their
+		// totals into the terminal envelope's usage. A redelivery is
+		// still part of the stream: chunk identity must remain stable
+		// (enforced when the chunk carries it), and a service tier on it
+		// enters the same loss/reject decision as on any other chunk.
 		if chunk.Usage != nil && len(chunk.Choices) == 0 {
-			// A content-bearing chunk's identity must stay stable, but a
-			// provider may omit the usage-only tail's id/model; enforce the
-			// identity only when the tail carries it.
-			if chunk.ID != "" && chunk.ID != s.chunkID {
-				return nil, s.wireError(fmt.Errorf(
-					"chat stream chunk id %q does not match the first chunk id %q",
-					chunk.ID,
-					s.chunkID,
-				))
-			}
-			if chunk.Model != "" && chunk.Model != s.chunkModel {
-				return nil, s.wireError(fmt.Errorf(
-					"chat stream chunk model %q does not match the first chunk model %q",
-					chunk.Model,
-					s.chunkModel,
-				))
-			}
-			if chunk.ServiceTier != nil {
-				if err := s.loseServiceTierOnce(); err != nil {
-					return nil, err
-				}
-			}
-			if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
+			if err := s.absorbPhase2Accounting(chunk); err != nil {
 				return nil, err
 			}
-			converted, clamp := chatUsageToResponsesUsage(chunk.Usage)
-			if err := s.usageClampNotes.note(&s.report, "usage", clamp); err != nil {
+			return nil, nil
+		}
+		// A repeated terminal chunk carries the recorded finish reason on
+		// the same single choice with an insubstantial delta (role-only
+		// or empty-string fields): it is the gateway's usage redelivery
+		// in another envelope, never new output. Fold its accounting and
+		// absorb it. Anything substantive after the terminal (content,
+		// reasoning, refusal, tool calls, a different finish reason)
+		// stays corrupt upstream wire.
+		if isRepeatedTerminalChunk(chunk, s.finishReason) {
+			if err := s.absorbPhase2Accounting(chunk); err != nil {
 				return nil, err
 			}
-			s.usage = converted
 			return nil, nil
 		}
 		return nil, s.wireError(errors.New("chat stream chunk after finish_reason"))
