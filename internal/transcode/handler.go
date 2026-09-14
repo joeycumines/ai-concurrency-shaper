@@ -1123,6 +1123,7 @@ func (h *TranscodeHandler) streamResponse(
 		outcome.Provenance = ProvenanceLocalResponseConversionError
 		outcome.LocalFailure = true
 		outcome.DownstreamComplete = downstreamComplete
+		h.logStreamConversionError(r, observation.ReaderErr)
 	case streamOutcomeDownstreamFailure:
 		outcome.Provenance = ProvenanceDownstreamWriteError
 	default:
@@ -1881,6 +1882,18 @@ func (h *TranscodeHandler) boundErrorMessage(message string) string {
 // observable to the operator).
 func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
 	log.Printf("transcode: %s %s: %v", r.Method, r.URL.Path, err)
+}
+
+// logStreamConversionError records the operator-visible reason a live
+// translated stream failed locally: the client gets the dialect error event,
+// but without this line the log shows nothing. A stream that ran out without
+// a terminal has no converter error, only that fact.
+func (h *TranscodeHandler) logStreamConversionError(r *http.Request, cause error) {
+	detail := "the upstream stream ended before a terminal event and no local error event was written"
+	if cause != nil && !errors.Is(cause, io.EOF) {
+		detail = h.boundErrorMessage(cause.Error())
+	}
+	h.logRequestError(r, fmt.Errorf("[%s] convert stream response: %s", ProvenanceLocalResponseConversionError, detail))
 }
 
 // sanitizeUpstreamTransportError redacts credential-bearing URL query values
