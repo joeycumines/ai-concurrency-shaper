@@ -15,12 +15,12 @@ import (
 )
 
 // TestFleetIdentityClick_CyclesProvider pins the desired operator-visible
-// behavior for Task 2: left-click on the fleet identity (` <label> ↕` at
+// behavior: left-click on the fleet identity (` <label> ↕` at
 // header row 0 col [1,1+identityWidth)) cycles active provider forward (+1,
 // wrapping), matching the wheel guard `my==0 && hasSwitcher && mx>=1 &&
 // mx<1+identityWidth()`. Boundary/padding/single-provider clicks are no-ops.
-// This test is expected to FAIL before the Task 2 fix (current
-// handleMouseClick swallows non-chip header clicks) and PASS after.
+// This test is expected to FAIL before the fleet identity click fix (previous
+// handleMouseClick swallowed non-chip header clicks) and PASS after.
 func TestFleetIdentityClick_CyclesProvider(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{
 		{Name: "acme", Concurrency: 4},
@@ -81,10 +81,13 @@ func TestFleetIdentityClick_CyclesProvider(t *testing.T) {
 		t.Fatalf("click at X=%d (past identity) changed active to %d, want 0", 1+idW, m2.active)
 	}
 
-	// Not on row 0: Y=1 with same X must NOT cycle.
+	// Not on row 0: Y=1 with same X must NOT cycle identity.
+	// A chip hit at Y=1 is valid (chip click, not identity cycling).
 	m2 = update(m, tea.MouseClickMsg{X: 1, Y: 1})
 	if m2.active != 0 {
-		t.Fatalf("click at Y=1 should not cycle identity, got active %d", m2.active)
+		if _, ok := m.chipAt(1, 1); !ok {
+			t.Fatalf("click at Y=1 should not cycle identity, got active %d", m2.active)
+		}
 	}
 
 	// Single-provider (no switcher) must never cycle — legacy brand pinned.

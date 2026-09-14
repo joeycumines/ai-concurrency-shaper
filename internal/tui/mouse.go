@@ -39,6 +39,9 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 		// the truncated visible prefix: at very narrow widths headerBody may
 		// truncate below idW, but the hit region stays at the natural width so
 		// wheel and click stay consistent and header width is still bounded.
+		// When the fleet header uses an empty row 0 (body-only because the first
+		// chip would truncate, see header.go invariants) this row-0 guard still
+		// applies to the single body line; the wheel guard is row 0 only.
 		if my == 0 && m.hasSwitcher() {
 			idW := m.identityWidth()
 			if mx >= 1 && mx < 1+idW {
@@ -130,6 +133,9 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 	// Mouse wheel over the active-provider identity area in fleet mode
 	// cycles providers instead of scrolling content. The identity starts at
 	// column 1 because headerStyle has PaddingLeft(1); column 0 is padding.
+	// In fleet mode the header may be body-only on row 0 (first chip would
+	// truncate, see header.go); wheel handling stays on row 0 only and uses
+	// natural identityWidth for the hit test.
 	if my == 0 && m.hasSwitcher() {
 		idW := m.identityWidth()
 		if mx >= 1 && mx < 1+idW {
