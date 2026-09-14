@@ -1647,7 +1647,7 @@ func TestDecodeResponsesRequestAllBuiltinNamespace(t *testing.T) {
 	foundZeroFlatten := false
 	for _, loss := range result.Report.Losses {
 		if loss.Feature == FeatureBuiltinTools &&
-			loss.Path == "tools[]" &&
+			loss.Path == "tools[namespace=ns]" &&
 			strings.Contains(loss.Detail, "no portable function tools") {
 			foundZeroFlatten = true
 		}

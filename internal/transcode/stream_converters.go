@@ -1062,6 +1062,7 @@ func (s *chatResponsesStreamState) convertToolCall(
 	if !pending.started && pending.callID != "" && pending.name != "" {
 		pending.itemID = s.ctx.IDs.New("fc_")
 		pending.started = true
+		callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
 		events = append(events, s.builder.OutputItemAdded(
 			pending.outputIndex,
 			&ResponsesFunctionCallOutputItem{
@@ -1069,8 +1070,9 @@ func (s *chatResponsesStreamState) convertToolCall(
 				Type:      "function_call",
 				Status:    ResponsesItemInProgress,
 				CallID:    pending.callID,
-				Name:      pending.name,
+				Name:      callName,
 				Arguments: "",
+				Namespace: callNamespace,
 			},
 		))
 	}
@@ -1196,6 +1198,7 @@ func (s *chatResponsesStreamState) finish(
 		// function_call arguments field is a string, and invalid model
 		// output is never an upstream defect. Only the
 		// snapshot-vs-accumulated identity check remains wire-corrupt.
+		callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
 		events = append(events,
 			s.builder.FunctionArgumentsDone(
 				pending.itemID,
@@ -1209,8 +1212,9 @@ func (s *chatResponsesStreamState) finish(
 					Type:      "function_call",
 					Status:    ResponsesItemCompleted,
 					CallID:    pending.callID,
-					Name:      pending.name,
+					Name:      callName,
 					Arguments: arguments,
+					Namespace: callNamespace,
 				},
 			),
 		)
@@ -1388,6 +1392,7 @@ func (s *chatResponsesStreamState) finalOutputItems() []ResponsesOutputItem {
 		if arguments == "" {
 			arguments = "{}"
 		}
+		callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
 		ordered = append(ordered, indexed{
 			index: pending.outputIndex,
 			item: &ResponsesFunctionCallOutputItem{
@@ -1395,8 +1400,9 @@ func (s *chatResponsesStreamState) finalOutputItems() []ResponsesOutputItem {
 				Type:      "function_call",
 				Status:    ResponsesItemCompleted,
 				CallID:    pending.callID,
-				Name:      pending.name,
+				Name:      callName,
 				Arguments: arguments,
+				Namespace: callNamespace,
 			},
 		})
 	}

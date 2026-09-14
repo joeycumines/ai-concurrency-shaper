@@ -635,6 +635,7 @@ func (h *TranscodeHandler) convertRequest(
 			return nil, nil, err
 		}
 		context.OriginalResponsesRequest = echo
+		context.ToolNames = result.ToolNames
 		result.Request.ClientModel = context.UpstreamModel
 
 		var rendered []byte

@@ -470,6 +470,29 @@ different failure mode; withdraw those defaults per mapping as shown under
 "Removing defaults". (`reasoning_effort` and developer roles are already
 opt-in for exactly this reason: the compatible core never renders them.)
 
+### Namespace tools (Codex subagents and MCP groups)
+
+Modern Codex clients group related tools into Responses **namespace**
+tools: `spawn_agent` and its siblings arrive under `multi_agent_v1`, each
+MCP server arrives under its own `mcp__<server>` group, and the model is
+expected to call a child by its bare name plus the group qualifier. The
+transcoder flattens every namespace child into an ordinary chat function
+tool (the grouping is client-side structure a chat request cannot express,
+recorded as a per-request note), and a model call to a flattened child is
+returned to the client as a `function_call` carrying the bare child name
+together with its separate `namespace` field — never a concatenated name.
+A child whose bare name collides with a plain tool or another namespace's
+child is qualified deterministically (`namespace__child`), and the
+per-request map — not a name separator — is what maps the call back.
+Replayed history keeps the same flat names, so the upstream is never taught
+the bare form. `tool_choice` has no namespaced selector (Codex sends
+`"auto"`), and a named choice addresses the flattened name: a bare child
+name is ambiguous when it collides with another tool, so the qualified
+`namespace__child` form is the one that stays addressable. Namespace tools
+are modeled as a deliberate extension beyond the
+pinned OpenAI SDK revision; `internal/transcode/pins.md` records the exact
+shapes.
+
 ### Removing defaults
 
 The sensible defaults above exist so a minimal invocation works out of the
