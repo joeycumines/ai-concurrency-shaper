@@ -31,33 +31,20 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 			m.switchProvider(i)
 			return m, nil
 		}
-		// Brand block click: the brand occupies the leftmost cells of row 0
-		// (after headerStyle padding). Clicking it toggles the engine meta
-		// drawer. This takes precedence over identity hit-testing.
-		if my == 0 && m.hasSwitcher() {
-			idOff := m.identityOffset()
-			if mx >= 1 && mx < idOff {
-				btn := msg.Mouse().Button
-				if btn == tea.MouseLeft || btn == tea.MouseNone {
-					if m.mode == modeMeta {
-						m.mode = modeBrowse
-					} else {
-						m.mode = modeMeta
-					}
-				}
-				return m, nil
-			}
-		}
-		// Fleet identity click — mirrors handleMouseWheel guard exactly.
-		// The identity starts at identityOffset() (after brand + separator).
+		// Fleet identity click — mirrors handleMouseWheel guard exactly
+		// (my==0 && hasSwitcher && mx>=1 && mx<1+identityWidth()).
 		// Only left-button (or MouseNone for test compat where Button is omitted)
-		// on row 0 within [identityOffset, identityOffset+identityWidth()) cycles
-		// forward (+1, wrapping). Uses natural identityWidth so wheel and click
-		// stay consistent and header width is still bounded.
+		// on row 0 within [1,1+identityWidth()) cycles forward (+1, wrapping).
+		// Uses natural identityWidth (lipgloss.Width(" "+label+" ↕")) rather than
+		// the truncated visible prefix: at very narrow widths headerBody may
+		// truncate below idW, but the hit region stays at the natural width so
+		// wheel and click stay consistent and header width is still bounded.
+		// When the fleet header uses an empty row 0 (body-only because the first
+		// chip would truncate, see header.go invariants) this row-0 guard still
+		// applies to the single body line; the wheel guard is row 0 only.
 		if my == 0 && m.hasSwitcher() {
-			idOff := m.identityOffset()
 			idW := m.identityWidth()
-			if mx >= idOff && mx < idOff+idW {
+			if mx >= 1 && mx < 1+idW {
 				btn := msg.Mouse().Button
 				if btn == tea.MouseLeft || btn == tea.MouseNone {
 					m.cycleProvider(1)
@@ -145,13 +132,13 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 
 	// Mouse wheel over the active-provider identity area in fleet mode
 	// cycles providers instead of scrolling content. The identity starts at
-	// identityOffset() (after brand block + separator). In fleet mode the
-	// header may be body-only on row 0; wheel handling stays on row 0 only
-	// and uses natural identityWidth for the hit test.
+	// column 1 because headerStyle has PaddingLeft(1); column 0 is padding.
+	// In fleet mode the header may be body-only on row 0 (first chip would
+	// truncate, see header.go); wheel handling stays on row 0 only and uses
+	// natural identityWidth for the hit test.
 	if my == 0 && m.hasSwitcher() {
-		idOff := m.identityOffset()
 		idW := m.identityWidth()
-		if mx >= idOff && mx < idOff+idW {
+		if mx >= 1 && mx < 1+idW {
 			switch msg.Mouse().Button {
 			case tea.MouseWheelUp:
 				m.cycleProvider(-1)

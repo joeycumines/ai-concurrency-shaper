@@ -149,8 +149,6 @@ func TestRepro_WheelPadding(t *testing.T) {
 	if idW == 0 {
 		t.Fatal("idW zero")
 	}
-	idOff := m.identityOffset()
-
 	// mx=0 is headerStyle left padding space, should NOT cycle
 	m2 := m
 	m2 = update(m2, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 0, Y: 0})
@@ -158,25 +156,25 @@ func TestRepro_WheelPadding(t *testing.T) {
 		t.Errorf("mx=0 should NOT cycle (padding), but active changed to %d", m2.active)
 		t.Logf("  idW=%d, mx=0 hit incorrectly", idW)
 	}
-	// mx=idOff is first char of identity (" "), should cycle
+	// mx=1 is first char of identity (" "), should cycle
 	m3 := m
-	m3 = update(m3, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: idOff, Y: 0})
+	m3 = update(m3, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 1, Y: 0})
 	if m3.active != 1 {
-		t.Errorf("mx=%d should cycle, but active %d want 1 idW=%d", idOff, m3.active, idW)
+		t.Errorf("mx=1 should cycle, but active %d want 1 idW=%d", m3.active, idW)
 	}
-	// mx = idOff+idW-1 is last char of identity (arrow), should still cycle
+	// mx = 1+idW-1 = idW is last char of identity (arrow), should still cycle? Actually range [1,1+idW) so idW is last inclusive
 	m4 := m
-	m4 = update(m4, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: idOff + idW - 1, Y: 0})
+	m4 = update(m4, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 1 + idW - 1, Y: 0})
 	if m4.active != 1 {
-		t.Errorf("mx=%d (last identity column) should cycle, got active %d", idOff+idW-1, m4.active)
+		t.Errorf("mx=%d (last identity column) should cycle, got active %d", 1+idW-1, m4.active)
 	}
-	// mx = idOff+idW is first column after identity, should NOT cycle
+	// mx = 1+idW is first column after identity (" "), should NOT cycle
 	m5 := m
-	m5 = update(m5, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: idOff + idW, Y: 0})
+	m5 = update(m5, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 1 + idW, Y: 0})
 	if m5.active != 0 {
-		t.Errorf("mx=%d (after identity) should NOT cycle, got %d", idOff+idW, m5.active)
+		t.Errorf("mx=%d (after identity) should NOT cycle, got %d", 1+idW, m5.active)
 	}
-	t.Logf("idW=%d idOff=%d padding check done", idW, idOff)
+	t.Logf("idW=%d padding check done", idW)
 }
 
 // Repro E: palette vertical overflow (border)

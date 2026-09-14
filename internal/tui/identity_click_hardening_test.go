@@ -94,7 +94,7 @@ func TestFleetIdentityClick_GeometryLocks(t *testing.T) {
 			}
 
 			// (a5) Identity click geometry no-ops.
-			// padding col 0, past col idOff+idW, row 1, and headerRowCount row must not cycle.
+			// padding col 0, past col 1+idW, row 1, and headerRowCount row must not cycle.
 			idW := m.identityWidth()
 			if idW == 0 {
 				t.Fatalf("w=%d active=%d: identityWidth==0 in fleet mode", w, active)
@@ -104,7 +104,6 @@ func TestFleetIdentityClick_GeometryLocks(t *testing.T) {
 			base.height = 24
 			base.active = active
 			base.syncActive()
-			idOff := base.identityOffset()
 
 			// padding
 			m2 := update(base, tea.MouseClickMsg{X: 0, Y: 0})
@@ -112,27 +111,27 @@ func TestFleetIdentityClick_GeometryLocks(t *testing.T) {
 				t.Errorf("w=%d active=%d: click at padding X=0 must not cycle, got %d", w, active, m2.active)
 			}
 			// just past identity
-			m2 = update(base, tea.MouseClickMsg{X: idOff + idW, Y: 0})
+			m2 = update(base, tea.MouseClickMsg{X: 1 + idW, Y: 0})
 			if m2.active != active {
-				t.Errorf("w=%d active=%d: click at X=%d (past identity) must not cycle, got %d", w, active, idOff+idW, m2.active)
+				t.Errorf("w=%d active=%d: click at X=%d (past identity) must not cycle, got %d", w, active, 1+idW, m2.active)
 			}
 			// row 1 must not cycle identity — whitelist chip hits (covers both
 			// multi-row chip row and single-row tab bar at Y=1)
-			m2 = update(base, tea.MouseClickMsg{X: idOff, Y: 1})
+			m2 = update(base, tea.MouseClickMsg{X: 1, Y: 1})
 			if m2.active != active {
-				if _, ok := base.chipAt(idOff, 1); !ok {
-					t.Errorf("w=%d active=%d: click at Y=1 X=%d must not cycle, got %d", w, active, idOff, m2.active)
+				if _, ok := base.chipAt(1, 1); !ok {
+					t.Errorf("w=%d active=%d: click at Y=1 X=1 must not cycle, got %d", w, active, m2.active)
 				}
 			}
 			// tab bar row (headerRowCount) must never cycle provider — unconditional
 			// even when hrc==1 (single-row header: Y=1 is the tab bar)
-			m2 = update(base, tea.MouseClickMsg{X: idOff, Y: hrc})
+			m2 = update(base, tea.MouseClickMsg{X: 1, Y: hrc})
 			if m2.active != active {
 				t.Errorf("w=%d active=%d: click at Y=%d (tab bar) must not cycle provider, got %d", w, active, hrc, m2.active)
 			}
-			// identity column must never bleed into chip region
-			if idx, ok := base.chipAt(idOff, 0); ok {
-				t.Errorf("w=%d active=%d: chipAt at identity column X=%d must not hit chip %d", w, active, idOff, idx)
+			// left identity column must never bleed into chip region
+			if idx, ok := base.chipAt(1, 0); ok {
+				t.Errorf("w=%d active=%d: chipAt at identity column X=1 must not hit chip %d", w, active, idx)
 			}
 		}
 	}
@@ -184,13 +183,12 @@ func TestFleetIdentityClick_NarrowAndHeightCaps(t *testing.T) {
 	m.active = 0
 	m.syncActive()
 	idW := m.identityWidth()
-	idOff := m.identityOffset()
-	m2 := update(m, tea.MouseClickMsg{X: idOff, Y: 0})
+	m2 := update(m, tea.MouseClickMsg{X: 1, Y: 0})
 	if m2.active == 0 && idW > 0 {
-		t.Errorf("20x8: identity click at X=%d must cycle in fleet mode", idOff)
+		t.Errorf("20x8: identity click at X=1 must cycle in fleet mode")
 	}
 	// padding / past / Y=1 no-ops still hold
-	for _, tc := range []struct{ x, y int }{{0, 0}, {idOff + idW, 0}, {idOff, 1}} {
+	for _, tc := range []struct{ x, y int }{{0, 0}, {1 + idW, 0}, {1, 1}} {
 		base := NewModelForProviders(metas[:3])
 		base.width = 20
 		base.height = 8
@@ -200,7 +198,7 @@ func TestFleetIdentityClick_NarrowAndHeightCaps(t *testing.T) {
 			continue // chip hit takes precedence
 		}
 		// For identity region checks, skip the actual identity area
-		if tc.y == 0 && tc.x >= idOff && tc.x < idOff+idW {
+		if tc.y == 0 && tc.x >= 1 && tc.x < 1+idW {
 			continue
 		}
 		m2 := update(base, tea.MouseClickMsg{X: tc.x, Y: tc.y})
@@ -220,62 +218,53 @@ func TestFleetIdentityClick_Precedence(t *testing.T) {
 		{Name: "anthropic", Concurrency: 8},
 		{Name: "openai", Concurrency: 12},
 	})
-	m.width = 120
+	m.width = 80
 	m.height = 24
 	m.active = 0
 	m.syncActive()
 
-	idOff := m.identityOffset()
-
 	// Rightmost column must be a chip, not identity.
 	right := m.width - 2
-	rows := m.chipRowsLayout()
-	chipRow := -1
-	for ri, r := range rows {
-		if len(r.parts) > 0 {
-			chipRow = ri
-			break
-		}
-	}
-	if chipRow == -1 {
+	layout := m.budgetedChips()
+	if len(layout.parts) == 0 {
 		t.Fatalf("no chips at 80 cols")
 	}
-	// ChipAt at right edge of the chip row must hit.
-	if _, ok := m.chipAt(right, chipRow); !ok {
-		t.Fatalf("chipAt at rightmost %d row %d must hit", right, chipRow)
+	// ChipAt at right edge must hit.
+	if _, ok := m.chipAt(right, 0); !ok {
+		t.Fatalf("chipAt at rightmost %d must hit", right)
 	}
 	// Identity width must not extend to chip region: chipAt at identity col must miss.
-	if _, ok := m.chipAt(idOff, 0); ok {
-		t.Fatalf("chipAt at identity column %d must not hit chip", idOff)
+	if _, ok := m.chipAt(1, 0); ok {
+		t.Fatalf("chipAt at identity column 1 must not hit chip")
 	}
 
 	// Click at right hits chip and switches — lock chip precedence hard.
-	m2 := update(m, tea.MouseClickMsg{X: right, Y: chipRow})
-	if hitIdx, ok := m.chipAt(right, chipRow); ok {
+	m2 := update(m, tea.MouseClickMsg{X: right, Y: 0})
+	if hitIdx, ok := m.chipAt(right, 0); ok {
 		if m2.active != hitIdx {
-			t.Errorf("click at rightmost chip X=%d row %d must switch to provider %d (hit chipAt), got active %d", right, chipRow, hitIdx, m2.active)
+			t.Errorf("click at rightmost chip X=%d must switch to provider %d (hit chipAt), got active %d layout providers %v", right, hitIdx, m2.active, layout.providers)
 		}
 		if m2.active == 0 {
-			t.Errorf("right chip click must switch away from 0, got 0 hit provider %d", hitIdx)
+			t.Errorf("right chip click must switch away from 0, got 0 hit provider %d layout %v", hitIdx, layout.providers)
 		}
 	} else {
-		t.Fatalf("chipAt at rightmost %d row %d must hit chip (precondition for precedence lock)", right, chipRow)
+		t.Fatalf("chipAt at rightmost %d must hit chip (precondition for precedence lock)", right)
 	}
 	// Identity click cycles forward independently.
 	m.active = 0
 	m.syncActive()
-	m2 = update(m, tea.MouseClickMsg{X: idOff, Y: 0})
+	m2 = update(m, tea.MouseClickMsg{X: 1, Y: 0})
 	if m2.active != 1 {
 		t.Fatalf("identity click must cycle to 1, got %d", m2.active)
 	}
 	// Wheel path must still cycle.
 	m.active = 0
 	m.syncActive()
-	m2 = update(m, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: idOff, Y: 0})
+	m2 = update(m, tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 1, Y: 0})
 	if m2.active != 1 {
 		t.Fatalf("wheel down at identity must cycle to 1, got %d", m2.active)
 	}
-	m3 := update(m2, tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: idOff, Y: 0})
+	m3 := update(m2, tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 1, Y: 0})
 	if m3.active != 0 {
 		t.Fatalf("wheel up must cycle back to 0, got %d", m3.active)
 	}

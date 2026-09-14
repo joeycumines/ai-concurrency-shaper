@@ -73,7 +73,7 @@ func TestProviderSwitcherChipClick(t *testing.T) {
 		{Name: "anthropic", Concurrency: 8},
 		{Name: "openai", Concurrency: 12},
 	})
-	p.width = 120
+	p.width = 100
 	p.height = 24
 
 	// A click on header row 0 inside a chip's right-aligned range switches
@@ -82,12 +82,12 @@ func TestProviderSwitcherChipClick(t *testing.T) {
 	// right edge and w is its rendered width.
 	// The spans come from the production budgetedChips layout — the same
 	// parts chipAt hit-tests — so the test cannot drift from what is
-	// actually rendered. At width 120 all three chips are at full width.
+	// actually rendered. At width 100 all three chips are at full width.
 	right := p.width - 2
 	layout := p.budgetedChips()
 	parts := layout.parts
 	if len(parts) != 3 {
-		t.Fatalf("budgetedChips rendered %d chips at width 120, want all 3", len(parts))
+		t.Fatalf("budgetedChips rendered %d chips at width 100, want all 3", len(parts))
 	}
 	for i, part := range slices.Backward(parts) {
 		w := lipgloss.Width(part)
@@ -357,22 +357,13 @@ func TestFleetStrip_AggregateObservability(t *testing.T) {
 		t.Fatalf("header missing active provider identity %q; got header: %q", wantIdentity, hdr)
 	}
 
-	// Provider switcher chips are rendered in the header rows.
-	rows := m.chipRowsLayout()
-	totalChips := 0
-	for _, r := range rows {
-		totalChips += len(r.parts)
-	}
-	if totalChips == 0 {
-		t.Fatal("chipRowsLayout should fit chips at 80 cols")
+	// Provider switcher chips are rendered on the right side of the same row.
+	layout := m.budgetedChips()
+	if len(layout.parts) == 0 {
+		t.Fatal("budgetedChips should fit chips at 80 cols")
 	}
 	// Active provider (index 0) is present
-	foundActive := false
-	for _, r := range rows {
-		if slices.Contains(r.providers, 0) {
-			foundActive = true
-		}
-	}
+	foundActive := slices.Contains(layout.providers, 0)
 	if !foundActive {
 		t.Error("active provider chip must be present in switcher")
 	}
