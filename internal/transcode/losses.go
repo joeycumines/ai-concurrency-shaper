@@ -1,7 +1,5 @@
 package transcode
 
-//go:generate go run ./gen/lossmatrix
-
 import (
 	"bytes"
 	"encoding/json"
@@ -15,7 +13,7 @@ import (
 // The granular loss registry. Every non-portable feature
 // is gated by exactly one granular, direction-specific loss key; the
 // registry below is the SINGLE source of truth for the CLI, the converters,
-// and the generated LOSS_MATRIX.md (drift-tested). The legacy broad
+// and the runtime reporting. The legacy broad
 // permission names that are NOT granular in their own right are REMOVED —
 // the feature is unreleased, so there are no deprecated aliases and no
 // startup expansion log (plan.md commit 6; replanLog entry 3). Names that
@@ -29,7 +27,7 @@ import (
 type Feature string
 
 // The granular loss keys. The order below is the canonical registry order
-// used by the generated LOSS_MATRIX.md.
+// used by the runtime reporting.
 const (
 	// PreviousResponseID covers the Responses previous_response_id request
 	// field (and Responses-specific conversation-state references such as
@@ -229,15 +227,15 @@ const (
 	FeatureLegacyFunctionCall Feature = "legacy_function_call"
 )
 
-// lossEntry pairs a loss key with the documentation emitted in
-// LOSS_MATRIX.md. The registry order is canonical.
+// lossEntry pairs a loss key with the description used by the per-request log
+// and the startup summary. The registry order is canonical.
 type lossEntry struct {
 	Key         Feature
 	Description string
 }
 
 // lossRegistry is the ordered granular registry — the single source for the
-// CLI, the converters, and the generated LOSS_MATRIX.md.
+// CLI, the converters and the runtime reporting.
 var lossRegistry = []lossEntry{
 	{FeaturePreviousResponseID, "the Responses previous_response_id request field and item_reference conversation-state references cannot be reproduced in the target request; input item ids are also conversation-state references and their unconditional drop is noted observably"},
 	{FeatureRequestTopLogprobs, "the Responses top_logprobs request field cannot be reproduced in the target request"},
@@ -282,9 +280,10 @@ var lossRegistry = []lossEntry{
 
 // allLossKeys returns the set of every registered loss key.
 func allLossKeys() map[Feature]struct{} {
-	known := make(map[Feature]struct{}, len(lossRegistry))
-	for _, entry := range lossRegistry {
-		known[entry.Key] = struct{}{}
+	keys := RegisteredLossKeys()
+	known := make(map[Feature]struct{}, len(keys))
+	for _, key := range keys {
+		known[key] = struct{}{}
 	}
 	return known
 }
