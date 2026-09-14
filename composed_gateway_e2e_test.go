@@ -675,11 +675,15 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	if got := strings.Count(nsData.String(), `"namespace":"ns_group"`); got != 3 {
 		t.Errorf("streamed collision qualifier count = %d, want 3 (added, done, terminal): %s", got, nsData.String())
 	}
-	if !strings.Contains(nsData.String(), `"name":"spawn_agent"`) {
-		t.Errorf("streamed function_call lacks the bare child name: %s", nsData.String())
-	}
-	if !strings.Contains(nsData.String(), `"name":"search"`) {
-		t.Errorf("streamed collision call lacks the bare child name: %s", nsData.String())
+	for _, want := range []string{
+		`"type":"function_call","status":"in_progress","call_id":"call_ns_1","name":"spawn_agent","arguments":"","namespace":"multi_agent_v1"`,
+		`"type":"function_call","status":"completed","call_id":"call_ns_1","name":"spawn_agent","arguments":"{\"message\":\"x\"}","namespace":"multi_agent_v1"`,
+		`"type":"function_call","status":"in_progress","call_id":"call_ns_2","name":"search","arguments":"","namespace":"ns_group"`,
+		`"type":"function_call","status":"completed","call_id":"call_ns_2","name":"search","arguments":"{\"q\":\"y\"}","namespace":"ns_group"`,
+	} {
+		if !strings.Contains(nsData.String(), want) {
+			t.Errorf("streamed function_call is missing %s from: %s", want, nsData.String())
+		}
 	}
 	if strings.Contains(nsData.String(), "ns_group__search") {
 		t.Errorf("the flattened chat name leaked into the client stream: %s", nsData.String())
@@ -709,14 +713,38 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 		t.Fatalf("namespace replay status = %d, want 200: %s", respNSReplay.StatusCode, bodyNSReplay)
 	}
 	upDNSReplay := upDBodyAt(nsReplayBefore)
-	if !strings.Contains(upDNSReplay, `"name":"ns_group__search"`) {
-		t.Errorf("replayed history must carry the flattened name, got: %s", upDNSReplay)
+	var replayReq struct {
+		Messages []struct {
+			ToolCalls []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+			ToolCallID string `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(upDNSReplay), &replayReq); err != nil {
+		t.Fatalf("unmarshal replayed upstream body: %v", err)
+	}
+	flatCalls, pairings := 0, 0
+	for _, message := range replayReq.Messages {
+		for _, call := range message.ToolCalls {
+			if call.Function.Name == "ns_group__search" {
+				flatCalls++
+			}
+		}
+		if message.ToolCallID == "call_ns_2" {
+			pairings++
+		}
+	}
+	if flatCalls != 1 {
+		t.Errorf("replayed history must carry exactly one flattened tool call, got %d: %s", flatCalls, upDNSReplay)
+	}
+	if pairings != 1 {
+		t.Errorf("replayed history must pair the tool result with call_ns_2, got %d: %s", pairings, upDNSReplay)
 	}
 	if strings.Contains(upDNSReplay, "namespace") {
 		t.Errorf("replayed history leaked the namespace grouping upstream: %s", upDNSReplay)
-	}
-	if !strings.Contains(upDNSReplay, `"tool_call_id":"call_ns_2"`) {
-		t.Errorf("replayed history lost the tool result pairing: %s", upDNSReplay)
 	}
 
 	// -------------------------------------------------------------------------
