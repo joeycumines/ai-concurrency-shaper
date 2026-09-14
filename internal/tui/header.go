@@ -30,16 +30,18 @@ import (
 // Usable width is m.width-2 (headerStyle pads 1 cell each side). The body is
 // the fleet identity + aggregate stats rendered by headerBody; the chips are
 // " "+label+" " rendered with chipActiveStyle / chipInactiveStyle. Natural
-// widths are measured with lipgloss.Width on the styled strings (headerBody
-// without reservation for the body, chipActiveStyle.Render(label) for chips).
+// widths are measured with lipgloss.Width on the styled strings
+// (fixedBodyWidth for the body worst case, chipActiveStyle.Render(label)
+// for chips).
 //
 // Invariant — first-chip-truncated => wrap-all (empty row 0):
 //
 //	Row 0 may contain chips only when the first provider's chip would render
 //	at its natural width without truncation. After measuring body natural and
 //	chip naturals, greedily pack the maximal prefix k of providers that fit
-//	naturally alongside the body: sum(natural[0:k])+(k-1)+1+bodyWidth(k) <=
-//	usable, where bodyWidth(k) is the truncated body that still fits. If no
+//	naturally alongside the body: sum(natural[0:k])+(k-1)+3+fixedBodyWidth <=
+//	usable, where the 3 is the row-0 " │ " divider that terminates the body
+//	before the first chip. If no
 //	chip fits naturally (available < natural[0]), row 0 is body-only: an empty
 //	chipLayout (no providers) so renderHeader draws the body at the full
 //	usable width (headerBody(false) cap) and every provider chip begins on
@@ -73,18 +75,18 @@ import (
 //	     reduced but still legible widths (> chipFloor singleton).
 //	  ~80 cols (usable 78): row 0 body-only for the 3-long fleet; row 1
 //	     holds chips full-width. For a 2-short fleet (acme/anthropic,
-//	     body ~54, naturals 8+13) 80 cols already fits single-row
-//	     (body+chips naturally, hrc=1).
+//	     worst-case body ~59 via fixedBodyWidth, naturals 8+13) the
+//	     single-row breakpoint is ~86 cols (available w-64 fits 22);
 //	  ~100 cols (usable 98): 3-long remains body-only on row 0 (hrc=2,
-//	     available 11 < 24), 2-short single-row.
+//	     available 9 < 24), 2-short single-row.
 //	  ~120 cols (usable 118): 3-long shares one chip on row 0 (first chip
-//	     24 fits in available 31) and wraps remaining 2 to row 1 (hrc=2);
+//	     24 fits in available 29) and wraps remaining 2 to row 1 (hrc=2);
 //	     2-short is single-row with spare slack. This row is falsifiable: at
 //	     120 cols with 2 short providers the header MUST be single-row at
 //	     natural widths; at 120 cols with 3-long the header MUST have row 0
 //	     chip at natural width (no truncation on row 0).
 //	  ~150 cols (usable 148): 3-long shares two chips on row 0 (available
-//	     61 fits 24+24+1) and wraps one to row 1 (hrc=2).
+//	     59 fits 24+24+1) and wraps one to row 1 (hrc=2).
 //	  ~180 cols (usable 178): 3-long collapses to single-row body+all chips
 //	     at natural widths (hrc=1). Narrower 3-long fleets collapse earlier
 //	     when the body is shorter or provider count is smaller.
@@ -125,8 +127,8 @@ func (m Model) hasSwitcher() bool {
 	return len(m.providers) > 1 || (len(m.providers) == 1 && m.providers[0].name != "")
 }
 
-// renderProviderSwitcher renders the provider chips shown on the right of the
-// header in multi-provider mode. It returns "" when there is no switcher (the
+// renderProviderSwitcher renders the provider chips shown in the header in
+// multi-provider mode. It returns "" when there is no switcher (the
 // single unnamed provider — preserving the legacy header exactly — or when the
 // width budget cannot fit even the active chip). The rendered string is exactly
 // strings.Join(budgetedChips().parts, " ") — the same parts chipAt hit-tests,
@@ -172,10 +174,12 @@ func (m Model) identityWidth() int {
 	return lipgloss.Width(" " + m.providerLabel(m.active) + " ↕")
 }
 
-// fleetStats returns the aggregate observability strip without the legacy
-// "Fleet:" prefix, since the active provider identity already shows which
-// dashboard is selected.
-func (m Model) fleetStats() string {
+// fleetAggregate computes the fleet-wide observability counters and the
+// widest provider label across all providers. It is the single source of
+// truth for both fleetStats (rendered text) and fixedBodyWidth (layout
+// budget), so the body width cannot drift when traffic shifts the busiest
+// crown between providers of different name lengths.
+func (m Model) fleetAggregate() (stats string, maxLabelW int) {
 	var totalActive, totalQueued int64
 	var openBreakers int
 	var maxActive int64 = -1
@@ -189,6 +193,9 @@ func (m Model) fleetStats() string {
 			openBreakers++
 		}
 		label := m.providerLabel(i)
+		if w := lipgloss.Width(label); w > maxLabelW {
+			maxLabelW = w
+		}
 		if p.snap.Active > maxActive || (p.snap.Active == maxActive && p.snap.Throughput > maxThroughput) {
 			maxActive = p.snap.Active
 			maxThroughput = p.snap.Throughput
@@ -196,8 +203,17 @@ func (m Model) fleetStats() string {
 		}
 	}
 
-	return fmt.Sprintf("%d active · %d queued · %d OPEN · busiest: %s",
+	stats = fmt.Sprintf("%d active · %d queued · %d OPEN · busiest: %s",
 		totalActive, totalQueued, openBreakers, busiest)
+	return stats, maxLabelW
+}
+
+// fleetStats returns the aggregate observability strip without the legacy
+// "Fleet:" prefix, since the active provider identity already shows which
+// dashboard is selected.
+func (m Model) fleetStats() string {
+	s, _ := m.fleetAggregate()
+	return s
 }
 
 func (m Model) headerBody(reserveForSwitcher bool) string {
@@ -215,7 +231,6 @@ func (m Model) headerBody(reserveForSwitcher bool) string {
 }
 
 // rawBody returns the untruncated header body string, before any width cap.
-// It is the source for naturalBodyWidth measurements in chipRowsLayout.
 func (m Model) rawBody() string {
 	if len(m.providers) > 1 {
 		return fmt.Sprintf(" %s ↕ │ %s", m.providerLabel(m.active), m.fleetStats())
@@ -224,6 +239,26 @@ func (m Model) rawBody() string {
 	return fmt.Sprintf("%s │ %d/%d active │ %d queued │ %.1f req/s │ %d ✗ TO │ uptime %s",
 		m.providerName(), m.snap.Active, m.conc, m.snap.Queued, m.snap.Throughput,
 		m.snap.TotalTimeout, uptime)
+}
+
+// fixedBodyWidth returns the widest the fleet header body can render across
+// every choice of active provider, capped to the usable row width. The
+// identity label is enveloped at the widest provider label so switching
+// providers can never change the wrap decision or shift chip columns. The
+// stats segment uses live values (digit widths and the busiest label vary
+// with traffic); that residual variation is inherent to a live dashboard
+// and cannot be enveloped without freezing the display.
+func (m Model) fixedBodyWidth() int {
+	usable := max(m.width-2, 1)
+	if len(m.providers) <= 1 {
+		return lipgloss.Width(m.headerBody(false))
+	}
+	stats, maxLabelW := m.fleetAggregate()
+	w := 1 + maxLabelW + lipgloss.Width(" ↕ │ ") + lipgloss.Width(stats)
+	if w > usable {
+		return usable
+	}
+	return w
 }
 
 // chipFloor is the smallest usable chip width: one visible label character
@@ -288,8 +323,9 @@ func (m Model) chipRowsLayout() []chipLayout {
 	}
 
 	usable := max(m.width-2, 1)
-	bodyW := lipgloss.Width(m.headerBody(false))
-	available := usable - bodyW - 1
+	bodyW := m.fixedBodyWidth()
+	// -3 reserves the row-0 " │ " divider that terminates the body.
+	available := usable - bodyW - 3
 
 	// Natural-fit: maximal prefix k that fits alongside the body at its
 	// natural (or usable-capped) width without truncating any chip. If the
@@ -431,8 +467,8 @@ func (m Model) chipRowsLayout() []chipLayout {
 
 // chipAt maps a click at (mx, my) to a provider chip index. It uses
 // chipRowsLayout so hit-testing matches the rendered geometry exactly.
-// Row 0 chips are right-aligned after the header body; row 1+ chips are
-// right-aligned in the full header width (m.width-2).
+// Chips are left-aligned: row-0 chips start after the body+divider+gap,
+// row 1+ chips start after the 1-cell left padding.
 func (m Model) chipAt(mx, my int) (int, bool) {
 	if !m.hasSwitcher() {
 		return 0, false
@@ -446,16 +482,19 @@ func (m Model) chipAt(mx, my int) (int, bool) {
 		return 0, false
 	}
 
-	// All chip rows are right-aligned within the full header width (m.width-2).
-	// renderHeader pads row 0's body to push chips to the same right edge.
-	right := m.width - 2
-
-	for i, v := range slices.Backward(layout.parts) {
+	// fw+4 = styled body (fw + left padding 1 + divider 2) + gap 1.
+	var col int
+	if my == 0 {
+		col = m.fixedBodyWidth() + 4
+	} else {
+		col = 1
+	}
+	for i, v := range layout.parts {
 		w := lipgloss.Width(v)
-		if mx >= right-w+1 && mx <= right {
+		if mx >= col && mx < col+w {
 			return layout.providers[i], true
 		}
-		right -= w + 1
+		col += w + 1
 	}
 	return 0, false
 }
@@ -470,26 +509,29 @@ func (m Model) renderHeader() string {
 		return m.styles.headerStyle.Render(body)
 	}
 
-	// Row 0: body + right-aligned chips.
 	row0Chips := strings.Join(rows[0].parts, " ")
 	row0Body := body
+	barStyle := m.styles.headerStyle
 	if row0Chips != "" {
-		if pad := m.width - lipgloss.Width(row0Body) - lipgloss.Width(row0Chips) - 3; pad > 0 {
-			row0Body += strings.Repeat(" ", pad)
+		if fw := m.fixedBodyWidth(); lipgloss.Width(row0Body) < fw {
+			row0Body += strings.Repeat(" ", fw-lipgloss.Width(row0Body))
 		}
-		row0Body += " " + row0Chips
+		row0Body += " │"
+		barStyle = barStyle.PaddingRight(0)
 	}
 
-	var lines []string
-	lines = append(lines, m.styles.headerStyle.Render(row0Body))
+	var b strings.Builder
+	b.WriteString(barStyle.Render(row0Body))
+	if row0Chips != "" {
+		b.WriteByte(' ')
+		b.WriteString(row0Chips)
+	}
 
-	// Row 1+: full-width, right-aligned chips.
+	lines := []string{b.String()}
+
 	for _, r := range rows[1:] {
 		chips := strings.Join(r.parts, " ")
-		if pad := m.width - lipgloss.Width(chips) - 2; pad > 0 {
-			chips = strings.Repeat(" ", pad) + chips
-		}
-		lines = append(lines, m.styles.headerStyle.Render(chips))
+		lines = append(lines, " "+chips)
 	}
 
 	return strings.Join(lines, "\n")

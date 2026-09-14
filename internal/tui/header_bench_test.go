@@ -170,13 +170,16 @@ func TestHeaderThemeGeometryIdentity(t *testing.T) {
 							}
 							continue
 						}
-						right := w - 2
-						for i := len(rd.parts) - 1; i >= 0; i-- {
+						var col int
+						if ri == 0 {
+							col = mDark.fixedBodyWidth() + 4
+						} else {
+							col = 1
+						}
+						for i := range rd.parts {
 							cw := lipgloss.Width(rd.parts[i])
 							prov := rd.providers[i]
-							// Left edge, mid, right edge must hit the same provider
-							// in both themes.
-							for _, x := range []int{right - cw + 1, right - cw/2, right} {
+							for _, x := range []int{col, col + cw/2, col + cw - 1} {
 								idxD, okD := mDark.chipAt(x, ri)
 								idxL, okL := mLight.chipAt(x, ri)
 								if !okD || idxD != prov {
@@ -192,10 +195,8 @@ func TestHeaderThemeGeometryIdentity(t *testing.T) {
 									t.Fatalf("fleet %q w=%d h=%d active=%d light chipAt(%d,%d) (%d,%v) want (%d,true)", fl.name, w, h, active, x, ri, idxL, okL, prov)
 								}
 							}
-							right -= cw + 1
-							// Gap between this chip and the next (if any) must not hit.
-							if i > 0 {
-								gx := right + 1 // single gap cell
+							if i < len(rd.parts)-1 {
+								gx := col + cw
 								if _, ok := mDark.chipAt(gx, ri); ok {
 									t.Fatalf("fleet %q w=%d h=%d active=%d dark gap hit at (%d,%d)", fl.name, w, h, active, gx, ri)
 								}
@@ -203,19 +204,21 @@ func TestHeaderThemeGeometryIdentity(t *testing.T) {
 									t.Fatalf("fleet %q w=%d h=%d active=%d light gap hit at (%d,%d)", fl.name, w, h, active, gx, ri)
 								}
 							}
+							col += cw + 1
 						}
-						// Padding left of the leftmost chip must not hit.
-						if right >= 0 {
-							for _, x := range []int{0, right / 2} {
-								if x < 0 || x > right {
-									continue
-								}
-								if _, ok := mDark.chipAt(x, ri); ok {
-									t.Fatalf("fleet %q w=%d h=%d active=%d dark padding hit at (%d,%d)", fl.name, w, h, active, x, ri)
-								}
-								if _, ok := mLight.chipAt(x, ri); ok {
-									t.Fatalf("fleet %q w=%d h=%d active=%d light padding hit at (%d,%d)", fl.name, w, h, active, x, ri)
-								}
+						startCol := 1
+						if ri == 0 {
+							startCol = mDark.fixedBodyWidth() + 4
+						}
+						for _, x := range []int{0} {
+							if x >= startCol {
+								continue
+							}
+							if _, ok := mDark.chipAt(x, ri); ok {
+								t.Fatalf("fleet %q w=%d h=%d active=%d dark padding hit at (%d,%d)", fl.name, w, h, active, x, ri)
+							}
+							if _, ok := mLight.chipAt(x, ri); ok {
+								t.Fatalf("fleet %q w=%d h=%d active=%d light padding hit at (%d,%d)", fl.name, w, h, active, x, ri)
 							}
 						}
 					}

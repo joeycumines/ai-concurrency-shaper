@@ -17,7 +17,6 @@ package tui
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 
@@ -28,8 +27,9 @@ import (
 // Fleet header spec — see header.go fleet invariants and below.
 //
 // Policy:
-//   Usable = width-2 (headerStyle padding). Body natural =
-//   lipgloss.Width(headerBody(false)); chips natural =
+//   Usable = width-2 (headerStyle padding). Row-0 body budget =
+//   fixedBodyWidth (worst-case body across all active providers) plus the
+//   3-cell " │ " divider before the first chip; chips natural =
 //   lipgloss.Width(chipActiveStyle.Render(" "+label+" ")).
 //   Row 0 chips iff first chip fits naturally (natural-fit prefix).
 //   Otherwise row 0 is body-only (empty chip row, body at full usable) and
@@ -42,14 +42,14 @@ import (
 //     body ~86 nat -> row0 body-only truncated to 18, row1 chips floor, hrc 2.
 //   40 cols, 3-long: row0 body-only (38 usable < body+firstChip), row1 chips
 //     2-3 at reduced widths (>3), hrc 2.
-//   80 cols, 3-long: row0 body-only, row1 full-width chips. 80 cols, 2-short
-//     (acme/anthropic, body 54, naturals 8+13): single row body+chips nat, hrc 1.
-//   100 cols, 3-long: row0 body-only (available 11 < 24), hrc 2.
-//   120 cols, 3-long: row0 shares one chip (available 31 fits 24), row1 holds
+//   80 cols, 3-long: row0 body-only, row1 full-width chips. 86 cols, 2-short
+//     (acme/anthropic, worst-case body 59, naturals 8+13): single row, hrc 1.
+//   100 cols, 3-long: row0 body-only (available 9 < 24), hrc 2.
+//   120 cols, 3-long: row0 shares one chip (available 29 fits 24), row1 holds
 //     remaining 2, hrc 2. 120 cols, 2-short: MUST be single-row nat
 //     (wrapping_test hard-requires). First chip on row 0 is always at natural
 //     width (no truncation on row 0).
-//   150 cols, 3-long: row0 shares two chips (available 61), row1 one, hrc 2.
+//   150 cols, 3-long: row0 shares two chips (available 59), row1 one, hrc 2.
 //   180 cols, 3-long: single row body+all nat, hrc 1.
 //   At 20-30 cols hrc is body-only row0 + chip row(s); if row0 holds chips its
 //   first chip width == natural (no truncation on row 0). At 120/2-short the
@@ -151,17 +151,22 @@ func TestChipAt_HitTestsAllRenderedChips(t *testing.T) {
 			continue
 		}
 		for ri, row := range rows {
-			right := m.width - 2
-			for i, v := range slices.Backward(row.parts) {
+			var col int
+			if ri == 0 {
+				col = m.fixedBodyWidth() + 4
+			} else {
+				col = 1
+			}
+			for i, v := range row.parts {
 				cw := lipgloss.Width(v)
 				prov := row.providers[i]
-				for x := right - cw + 1; x <= right; x++ {
+				for x := col; x < col+cw; x++ {
 					idx, ok := m.chipAt(x, ri)
 					if !ok || idx != prov {
 						t.Errorf("width=%d row=%d col=%d: chipAt=(%d,%v) want (%d,true)", w, ri, x, idx, ok, prov)
 					}
 				}
-				right -= cw + 1
+				col += cw + 1
 			}
 		}
 	}
@@ -266,6 +271,66 @@ func TestSingleProvider_NoWrappingNoIdentity(t *testing.T) {
 	if m.contentStartRow() != 3 {
 		t.Errorf("contentStartRow=%d want 3", m.contentStartRow())
 	}
+}
+
+// TestFixedBodyWidth_StableAcrossProviders pins the core guarantee:
+// switching the active provider at any width never changes the row count,
+// which chips sit on row 0 vs row 1+, or the column where chips begin.
+func TestFixedBodyWidth_StableAcrossProviders(t *testing.T) {
+	metas := []ProviderMeta{
+		{Name: "acme", Concurrency: 4},
+		{Name: "anthropic-eu-central", Concurrency: 8},
+		{Name: "openai-prod-longname", Concurrency: 12},
+	}
+	for _, w := range []int{60, 80, 100, 120, 150} {
+		base := NewModelForProviders(metas)
+		base.width = w
+		base.height = 24
+		base.active = 0
+		base.syncActive()
+		wantRows := base.chipRowsLayout()
+		wantHRC := base.headerRowCount()
+		for active := 1; active < len(metas); active++ {
+			m := base
+			m.active = active
+			m.syncActive()
+			gotRows := m.chipRowsLayout()
+			if got, want := m.headerRowCount(), wantHRC; got != want {
+				t.Errorf("w=%d active=%d: headerRowCount=%d want %d (active=0)", w, active, got, want)
+			}
+			if len(gotRows) != len(wantRows) {
+				t.Fatalf("w=%d active=%d: rows=%d want %d", w, active, len(gotRows), len(wantRows))
+			}
+			for ri := range wantRows {
+				if len(gotRows[ri].providers) != len(wantRows[ri].providers) {
+					t.Fatalf("w=%d active=%d row=%d: providers=%v want %v", w, active, ri, gotRows[ri].providers, wantRows[ri].providers)
+				}
+				for k := range wantRows[ri].providers {
+					if gotRows[ri].providers[k] != wantRows[ri].providers[k] {
+						t.Fatalf("w=%d active=%d row=%d col=%d: provider=%d want %d", w, active, ri, k, gotRows[ri].providers[k], wantRows[ri].providers[k])
+					}
+					gw := lipgloss.Width(gotRows[ri].parts[k])
+					ww := lipgloss.Width(wantRows[ri].parts[k])
+					if gw != ww {
+						t.Fatalf("w=%d active=%d row=%d col=%d: chip width=%d want %d", w, active, ri, k, gw, ww)
+					}
+				}
+				if len(wantRows[ri].parts) > 0 {
+					fw := base.fixedBodyWidth()
+					if got, want := leftmostChipCol(gotRows[ri], w, ri, fw), leftmostChipCol(wantRows[ri], w, ri, fw); got != want {
+						t.Fatalf("w=%d active=%d row=%d: leftmost chip column=%d want %d", w, active, ri, got, want)
+					}
+				}
+			}
+		}
+	}
+}
+
+func leftmostChipCol(row chipLayout, width int, rowIndex int, fw int) int {
+	if rowIndex == 0 {
+		return fw + 4
+	}
+	return 1
 }
 
 func TestTabBarRow_DynamicWithWrapping(t *testing.T) {

@@ -136,12 +136,17 @@ func TestFleetFirstChipNotOrphaned(t *testing.T) {
 							}
 							continue
 						}
-						right := m.width - 2
-						for i := len(r.parts) - 1; i >= 0; i-- {
+						var col int
+						if ri == 0 {
+							col = m.fixedBodyWidth() + 4
+						} else {
+							col = 1
+						}
+						for i := range r.parts {
 							cw := lipgloss.Width(r.parts[i])
 							prov := r.providers[i]
 							if isRace {
-								for _, x := range []int{right - cw + 1, right - cw/2, right} {
+								for _, x := range []int{col, col + cw/2, col + cw - 1} {
 									idx, ok := m.chipAt(x, ri)
 									if !ok || idx != prov {
 										t.Errorf("fleet %q w=%d h=%d active=%d row %d x=%d: chipAt=(%d,%v) want (%d,true) widths %v", fleet.name, w, h, active, ri, x, idx, ok, prov, func() []int {
@@ -154,7 +159,7 @@ func TestFleetFirstChipNotOrphaned(t *testing.T) {
 									}
 								}
 							} else {
-								for x := right - cw + 1; x <= right; x++ {
+								for x := col; x < col+cw; x++ {
 									idx, ok := m.chipAt(x, ri)
 									if !ok || idx != prov {
 										t.Errorf("fleet %q w=%d h=%d active=%d row %d x=%d: chipAt=(%d,%v) want (%d,true) widths %v", fleet.name, w, h, active, ri, x, idx, ok, prov, func() []int {
@@ -167,13 +172,13 @@ func TestFleetFirstChipNotOrphaned(t *testing.T) {
 									}
 								}
 							}
-							right -= cw + 1
-							if isRace && i > 0 {
-								gx := right + 1
+							if isRace && i < len(r.parts)-1 {
+								gx := col + cw
 								if _, ok := m.chipAt(gx, ri); ok {
 									t.Errorf("fleet %q w=%d h=%d active=%d: gap hit at (%d,%d)", fleet.name, w, h, active, gx, ri)
 								}
 							}
+							col += cw + 1
 						}
 					}
 					if isRace {

@@ -128,7 +128,7 @@ func TestHeaderPropertyFuzz(t *testing.T) {
 			t.Fatalf("iter %d w=%d h=%d hrc %d > maxRows %d", iter, w, h, hrc, maxRows)
 		}
 
-		// (c) chipAt exhaustive per-row, right-aligned to width-2
+		// (c) chipAt exhaustive per-row, left-aligned from body+divider+gap
 		// and (d) active never dropped, (e) first-chip natural when maxRows>1, (f) no unrendered hit
 		if len(rows) > 0 {
 			seen := make(map[int]bool)
@@ -202,12 +202,17 @@ func TestHeaderPropertyFuzz(t *testing.T) {
 					}
 					continue
 				}
-				right := m.width - 2
+				var col int
+				if ri == 0 {
+					col = m.fixedBodyWidth() + 4
+				} else {
+					col = 1
+				}
 				if isRace {
-					for i := len(rr.parts) - 1; i >= 0; i-- {
+					for i := range rr.parts {
 						cw := lipgloss.Width(rr.parts[i])
 						prov := rr.providers[i]
-						for _, x := range []int{right - cw + 1, right - cw/2, right} {
+						for _, x := range []int{col, col + cw/2, col + cw - 1} {
 							idx, ok := m.chipAt(x, ri)
 							if !ok || idx != prov {
 								t.Fatalf("iter %d w=%d h=%d ri=%d x=%d chipAt=(%d,%v) want (%d,true) widths %v rows=%v strip %q", iter, w, h, ri, x, idx, ok, prov, func() []int {
@@ -219,27 +224,24 @@ func TestHeaderPropertyFuzz(t *testing.T) {
 								}(), rows, stripANSI(rendered))
 							}
 						}
-						right -= cw + 1
-						if i > 0 {
-							gx := right + 1
+						if i < len(rr.parts)-1 {
+							gx := col + cw
 							if _, ok := m.chipAt(gx, ri); ok {
 								t.Fatalf("iter %d w=%d h=%d ri=%d gap hit at x=%d", iter, w, h, ri, gx)
 							}
 						}
+						col += cw + 1
 					}
 					for _, x := range []int{0, w / 2} {
-						if x < 0 || x >= right+1 {
-							continue
-						}
 						if idx, ok := m.chipAt(x, ri); ok && !seen[idx] {
 							t.Fatalf("iter %d w=%d h=%d ri=%d x=%d hit unrendered provider %d seen %v rows=%v", iter, w, h, ri, x, idx, seen, rows)
 						}
 					}
 				} else {
-					for i := len(rr.parts) - 1; i >= 0; i-- {
+					for i := range rr.parts {
 						cw := lipgloss.Width(rr.parts[i])
 						prov := rr.providers[i]
-						for x := right - cw + 1; x <= right; x++ {
+						for x := col; x < col+cw; x++ {
 							idx, ok := m.chipAt(x, ri)
 							if !ok || idx != prov {
 								t.Fatalf("iter %d w=%d h=%d ri=%d x=%d chipAt=(%d,%v) want (%d,true) widths %v rows=%v strip %q", iter, w, h, ri, x, idx, ok, prov, func() []int {
@@ -251,7 +253,7 @@ func TestHeaderPropertyFuzz(t *testing.T) {
 								}(), rows, stripANSI(rendered))
 							}
 						}
-						right -= cw + 1
+						col += cw + 1
 					}
 					for x := 0; x < w; x++ {
 						if idx, ok := m.chipAt(x, ri); ok && !seen[idx] {

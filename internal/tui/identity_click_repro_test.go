@@ -81,10 +81,13 @@ func TestFleetIdentityClick_CyclesProvider(t *testing.T) {
 		t.Fatalf("click at X=%d (past identity) changed active to %d, want 0", 1+idW, m2.active)
 	}
 
-	// Not on row 0: Y=1 with same X must NOT cycle.
+	// Not on row 0: Y=1 with same X must NOT cycle identity.
+	// A chip hit at Y=1 is valid (chip click, not identity cycling).
 	m2 = update(m, tea.MouseClickMsg{X: 1, Y: 1})
 	if m2.active != 0 {
-		t.Fatalf("click at Y=1 should not cycle identity, got active %d", m2.active)
+		if _, ok := m.chipAt(1, 1); !ok {
+			t.Fatalf("click at Y=1 should not cycle identity, got active %d", m2.active)
+		}
 	}
 
 	// Single-provider (no switcher) must never cycle — legacy brand pinned.

@@ -15,7 +15,7 @@ import (
 )
 
 // TestHeaderBreakpointGoldens pins the dynamic natural-fit breakpoints
-// documented in header.go: 20/40 body-only, 80 3-long body-only vs 2-short
+// documented in header.go: 20/40 body-only, 80 3-long body-only, 86 2-short
 // single-row, 120 share1, 150 share2, 180 single-row, plus the h=5
 // height-cap single-row exemption (observed at w120).
 func TestHeaderBreakpointGoldens(t *testing.T) {
@@ -50,7 +50,9 @@ func TestHeaderBreakpointGoldens(t *testing.T) {
 		{width: 180, height: 24, metas: metas3, fleetName: "3-long-w180", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1, 2}}, wantWidths: [][]int{{24, 24, 22}}},
 		{width: 20, height: 24, metas: metas2, fleetName: "2-short-w20", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{}, {0, 1}}, wantWidths: [][]int{{}, {8, 9}}},
 		{width: 40, height: 24, metas: metas2, fleetName: "2-short-w40", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{}, {0, 1}}, wantWidths: [][]int{{}, {8, 13}}},
-		{width: 80, height: 24, metas: metas2, fleetName: "2-short-w80", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1}}, wantWidths: [][]int{{8, 13}}},
+		{width: 80, height: 24, metas: metas2, fleetName: "2-short-w80", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{0}, {1}}, wantWidths: [][]int{{8}, {13}}},
+		{width: 84, height: 24, metas: metas2, fleetName: "2-short-w84", active: 0, wantHRC: 2, wantRowCount: 2, wantProviders: [][]int{{0}, {1}}, wantWidths: [][]int{{8}, {13}}},
+		{width: 86, height: 24, metas: metas2, fleetName: "2-short-w86", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1}}, wantWidths: [][]int{{8, 13}}},
 		{width: 120, height: 24, metas: metas2, fleetName: "2-short-w120", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1}}, wantWidths: [][]int{{8, 13}}},
 		{width: 150, height: 24, metas: metas2, fleetName: "2-short-w150", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1}}, wantWidths: [][]int{{8, 13}}},
 		{width: 180, height: 24, metas: metas2, fleetName: "2-short-w180", active: 0, wantHRC: 1, wantRowCount: 1, wantProviders: [][]int{{0, 1}}, wantWidths: [][]int{{8, 13}}},
@@ -129,11 +131,16 @@ func TestHeaderBreakpointGoldens(t *testing.T) {
 					}
 					continue
 				}
-				right := m.width - 2
-				for i := len(r.parts) - 1; i >= 0; i-- {
+				var col int
+				if ri == 0 {
+					col = m.fixedBodyWidth() + 4
+				} else {
+					col = 1
+				}
+				for i := range r.parts {
 					cw := lipgloss.Width(r.parts[i])
 					prov := r.providers[i]
-					for x := right - cw + 1; x <= right; x++ {
+					for x := col; x < col+cw; x++ {
 						idx, ok := m.chipAt(x, ri)
 						if !ok || idx != prov {
 							t.Fatalf("fleet %q w=%d h=%d row %d x=%d chipAt (%d,%v) want (%d,true) widths %v", g.fleetName, g.width, g.height, ri, x, idx, ok, prov, func() []int {
@@ -145,7 +152,7 @@ func TestHeaderBreakpointGoldens(t *testing.T) {
 							}())
 						}
 					}
-					right -= cw + 1
+					col += cw + 1
 				}
 			}
 		})

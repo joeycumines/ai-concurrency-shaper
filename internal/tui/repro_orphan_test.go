@@ -173,17 +173,22 @@ func TestRepro_FirstChipOrphan(t *testing.T) {
 							}
 							continue
 						}
-						right := m.width - 2
-						for i := len(r.parts) - 1; i >= 0; i-- {
+						var col int
+						if ri == 0 {
+							col = m.fixedBodyWidth() + 4
+						} else {
+							col = 1
+						}
+						for i := range r.parts {
 							wch := lipgloss.Width(r.parts[i])
 							prov := r.providers[i]
-							for x := right - wch + 1; x <= right; x++ {
+							for x := col; x < col+wch; x++ {
 								idx, ok := m.chipAt(x, ri)
 								if !ok || idx != prov {
 									t.Errorf("fleet %q w=%d h=%d row %d x=%d: chipAt=(%d,%v) want (%d,true) chip %q", fleetName, w, h, ri, x, idx, ok, prov, r.parts[i])
 								}
 							}
-							right -= wch + 1
+							col += wch + 1
 						}
 					}
 				}
