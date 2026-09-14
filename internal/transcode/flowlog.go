@@ -379,7 +379,7 @@ func flowSlug(value string) string {
 // suffix when the name is taken (pid reuse across separate runs sharing a
 // directory must not overwrite an existing record).
 func writeFlowRecord(dir, name string, data []byte) {
-	for attempt := 0; attempt < 100; attempt++ {
+	for attempt := range 100 {
 		candidate := name
 		if attempt > 0 {
 			base := strings.TrimSuffix(name, ".json")

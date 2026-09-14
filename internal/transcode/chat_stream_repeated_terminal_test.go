@@ -171,22 +171,22 @@ func TestStreamRepeatedTerminalChunkRejectsSubstantivePayload(t *testing.T) {
 	}
 	cases := map[string]ChatStreamResponse{
 		"different finish reason": envelope([]openaichat.Choice{
-			{Index: 0, FinishReason: repTermStrptr("stop")},
+			{Index: 0, FinishReason: new("stop")},
 		}),
 		"content payload": envelope([]openaichat.Choice{
-			{Index: 0, FinishReason: &finish, Delta: &openaichat.StreamDelta{Content: repTermStrptr("late")}},
+			{Index: 0, FinishReason: &finish, Delta: &openaichat.StreamDelta{Content: new("late")}},
 		}),
 		"reasoning payload": envelope([]openaichat.Choice{
-			{Index: 0, FinishReason: &finish, Delta: &openaichat.StreamDelta{Reasoning: repTermStrptr("late")}},
+			{Index: 0, FinishReason: &finish, Delta: &openaichat.StreamDelta{Reasoning: new("late")}},
 		}),
 		"reasoning content payload": envelope([]openaichat.Choice{
-			{Index: 0, FinishReason: &finish, Delta: &openaichat.StreamDelta{ReasoningContent: repTermStrptr("late")}},
+			{Index: 0, FinishReason: &finish, Delta: &openaichat.StreamDelta{ReasoningContent: new("late")}},
 		}),
 		"refusal payload": envelope([]openaichat.Choice{
-			{Index: 0, FinishReason: &finish, Delta: &openaichat.StreamDelta{Refusal: repTermStrptr("no")}},
+			{Index: 0, FinishReason: &finish, Delta: &openaichat.StreamDelta{Refusal: new("no")}},
 		}),
 		"tool call payload": envelope([]openaichat.Choice{
-			{Index: 0, FinishReason: &finish, Delta: &openaichat.StreamDelta{ToolCalls: []openaichat.ToolCallDelta{{Index: repTermIntptr(0), ID: repTermStrptr("call-1")}}}},
+			{Index: 0, FinishReason: &finish, Delta: &openaichat.StreamDelta{ToolCalls: []openaichat.ToolCallDelta{{Index: new(0), ID: new("call-1")}}}},
 		}),
 		"second choice": envelope([]openaichat.Choice{
 			{Index: 0, FinishReason: &finish},
@@ -206,7 +206,7 @@ func TestStreamRepeatedTerminalChunkRejectsSubstantivePayload(t *testing.T) {
 			)
 			seed := ChatStreamResponse{
 				ID: "c", Object: "chat.completion.chunk", Created: 1710000000, Model: "m",
-				Choices: []openaichat.Choice{{Index: 0, Delta: &openaichat.StreamDelta{Content: repTermStrptr("x")}}},
+				Choices: []openaichat.Choice{{Index: 0, Delta: &openaichat.StreamDelta{Content: new("x")}}},
 			}
 			if _, err := state.Convert(seed); err != nil {
 				t.Fatal(err)
@@ -242,7 +242,7 @@ func TestStreamRepeatedTerminalChunkRejectsIdentityMismatch(t *testing.T) {
 	finish := "stop"
 	seed := ChatStreamResponse{
 		ID: "c", Object: "chat.completion.chunk", Created: 1710000000, Model: "m",
-		Choices: []openaichat.Choice{{Index: 0, Delta: &openaichat.StreamDelta{Content: repTermStrptr("x")}}},
+		Choices: []openaichat.Choice{{Index: 0, Delta: &openaichat.StreamDelta{Content: new("x")}}},
 	}
 	if _, err := state.Convert(seed); err != nil {
 		t.Fatal(err)
@@ -271,7 +271,7 @@ func TestStreamRepeatedTerminalChunkLossPolicy(t *testing.T) {
 		finish := "stop"
 		seed := ChatStreamResponse{
 			ID: "c", Object: "chat.completion.chunk", Created: 1710000000, Model: "m",
-			Choices: []openaichat.Choice{{Index: 0, Delta: &openaichat.StreamDelta{Content: repTermStrptr("x")}}},
+			Choices: []openaichat.Choice{{Index: 0, Delta: &openaichat.StreamDelta{Content: new("x")}}},
 		}
 		if _, err := state.Convert(seed); err != nil {
 			return err
@@ -330,7 +330,7 @@ func TestStreamRepeatedTerminalChunkFoldsUsage(t *testing.T) {
 	finish := "stop"
 	seed := ChatStreamResponse{
 		ID: "c", Object: "chat.completion.chunk", Created: 1710000000, Model: "m",
-		Choices: []openaichat.Choice{{Index: 0, Delta: &openaichat.StreamDelta{Content: repTermStrptr("x")}}},
+		Choices: []openaichat.Choice{{Index: 0, Delta: &openaichat.StreamDelta{Content: new("x")}}},
 	}
 	if _, err := state.Convert(seed); err != nil {
 		t.Fatal(err)
@@ -346,7 +346,7 @@ func TestStreamRepeatedTerminalChunkFoldsUsage(t *testing.T) {
 		ID: "c", Object: "chat.completion.chunk", Created: 1710000000, Model: "m",
 		Choices: []openaichat.Choice{{
 			Index:        0,
-			Delta:        &openaichat.StreamDelta{Role: repTermStrptr("assistant"), Content: repTermStrptr("")},
+			Delta:        &openaichat.StreamDelta{Role: new("assistant"), Content: new("")},
 			FinishReason: &finish,
 		}},
 		Usage: &openaichat.LLMUsage{PromptTokens: 7, CompletionTokens: 5, TotalTokens: 12},
@@ -362,7 +362,3 @@ func TestStreamRepeatedTerminalChunkFoldsUsage(t *testing.T) {
 		t.Fatalf("usage not folded: %+v", state.usage)
 	}
 }
-
-func repTermStrptr(s string) *string { return &s }
-
-func repTermIntptr(v int) *int { return &v }
