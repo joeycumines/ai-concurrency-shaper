@@ -17,6 +17,9 @@ package config
 
 import (
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
@@ -328,5 +331,124 @@ func TestModelTableSummaryFormat(t *testing.T) {
 	}
 	if n := strings.Count(got, "@openai->w"); n != 50 {
 		t.Errorf("listed entries = %d, want 50", n)
+	}
+}
+
+// TestModelFactsReachTheServedCatalog proves the flag-to-document round trip:
+// every fact parsed from -model-table is served by the mount's catalog, and
+// absence is honest (no fabricated values).
+func TestModelFactsReachTheServedCatalog(t *testing.T) {
+	cfg := resolveModelTableArgs(t,
+		"-upstream", "https://api.openai.com",
+		"-transcode-responses-chat",
+		"-model-table", "m@openai=wire-m;context=200000;max_output=8192;efforts=low+high;modalities=text+image;default",
+		"-model-table", "old@openai=wire-old;deprecated",
+	)
+	catalog, ok := cfg.Providers[0].ModelCatalog()
+	if !ok {
+		t.Fatal("provider has no catalog snapshot")
+	}
+	handler, err := transcode.NewCatalogHandler(catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	serve := func(target string, headers map[string]string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d: %s", target, rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	codex := serve("/v1/models", nil)
+	for _, want := range []string{
+		`"slug":"m"`, `"display_name":"openai m"`, `"priority":1`,
+		`"truncation_policy":{"mode":"tokens","limit":200000}`,
+		`"context_window":200000`, `"max_context_window":200000`,
+		`"auto_compact_token_limit":190000`,
+		`"input_modalities":["text","image"]`,
+		`{"effort":"low","description":"Fast"}`, `{"effort":"high","description":"Thorough"}`,
+		`"visibility":"hide"`,
+	} {
+		if !strings.Contains(codex, want) {
+			t.Errorf("codex document missing %s:\n%s", want, codex)
+		}
+	}
+	if strings.Contains(codex, "max_output") || strings.Contains(codex, "max_tokens") {
+		t.Errorf("codex document must not carry max_output:\n%s", codex)
+	}
+
+	anthropic := serve("/v1/models", map[string]string{"Anthropic-Version": "2023-06-01"})
+	for _, want := range []string{`"id":"m"`, `"max_input_tokens":200000`, `"max_tokens":8192`, `"id":"old"`, `"max_tokens":null`} {
+		if !strings.Contains(anthropic, want) {
+			t.Errorf("anthropic document missing %s:\n%s", want, anthropic)
+		}
+	}
+}
+
+// TestModelFactsDoNotAlterRendering proves facts never reach the request path:
+// the same invocation with and without facts renders byte-identical upstream
+// request bodies for the same client exchange.
+func TestModelFactsDoNotAlterRendering(t *testing.T) {
+	render := func(entry string) []byte {
+		t.Helper()
+		cfg := resolveModelTableArgs(t,
+			"-upstream", "https://api.openai.com",
+			"-transcode-responses-chat",
+			"-model-table", entry,
+		)
+		mappings := cfg.Providers[0].TranscodeMappings()
+		if len(mappings) != 1 {
+			t.Fatalf("mappings = %d, want 1", len(mappings))
+		}
+		var upstreamBody []byte
+		handler := transcode.NewTranscodeHandler(
+			transcode.HandlerConfig{
+				Mapping:  mappings[0].Mapping,
+				Upstream: cfg.Providers[0].UpstreamURL(),
+				BodyLimits: transcode.BodyLimits{
+					AcceptedRequestBytes:    1 << 20,
+					SuccessfulResponseBytes: 1 << 20,
+				},
+			},
+			func(req *http.Request) (*http.Response, error) {
+				upstreamBody, _ = io.ReadAll(req.Body)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(strings.NewReader(
+						`{"id":"c","object":"chat.completion","created":1,"model":"wire-m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
+					)),
+				}, nil
+			},
+			nil,
+		)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/responses",
+			strings.NewReader(`{"model":"m","input":"hello world"}`),
+		)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		if len(upstreamBody) == 0 {
+			t.Fatal("upstream body not captured")
+		}
+		return upstreamBody
+	}
+
+	bare := render("m@openai=wire-m")
+	full := render("m@openai=wire-m;context=200000;max_output=8192;efforts=low+high;modalities=text+image;default")
+	if string(bare) != string(full) {
+		t.Fatalf("facts altered the rendered upstream request:\nbare: %s\nfull: %s", bare, full)
 	}
 }

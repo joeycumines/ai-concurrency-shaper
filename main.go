@@ -120,6 +120,9 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 	for _, tm := range p.TranscodeMappings() {
 		opts = append(opts, proxy.WithTranscodeMapping(tm))
 	}
+	if catalog, ok := p.ModelCatalog(); ok {
+		opts = append(opts, proxy.WithModelCatalog(catalog))
+	}
 
 	prx, err := proxy.New(opts...)
 	if err != nil {

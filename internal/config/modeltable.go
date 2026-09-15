@@ -450,3 +450,71 @@ func modelMapFromTable(subset []modelTableEntry) transcode.ModelMap {
 		RequireExplicitMap: true,
 	}
 }
+
+// resolveModelCatalog builds this provider's frozen catalog snapshot from its
+// model-table subset and resolved mappings. A provider with no entries gets no
+// catalog (nil), so its discovery route stays a transparent passthrough.
+func (p *Provider) resolveModelCatalog(modelTable []modelTableEntry) {
+	if len(modelTable) == 0 {
+		return
+	}
+	catalog := transcode.CatalogConfig{
+		ProviderName: effectiveName(p),
+		Models:       make([]transcode.CatalogModel, 0, len(modelTable)),
+		// Defaults match the ecosystem observation for mounts with no chat
+		// mapping; a chat mapping's resolved capabilities override below.
+		ParallelToolCalls: true,
+		StructuredOutputs: true,
+	}
+	for _, entry := range modelTable {
+		catalog.Models = append(catalog.Models, transcode.CatalogModel{
+			Surrogate:  entry.Surrogate,
+			Context:    entry.Context,
+			MaxOutput:  entry.MaxOutput,
+			Efforts:    entry.Efforts,
+			Modalities: entry.Modalities,
+			Default:    entry.Default,
+			Deprecated: entry.Deprecated,
+		})
+	}
+	capabilitiesSet := false
+	for i := range p.transcodeMappings {
+		mapping := &p.transcodeMappings[i].Mapping
+		switch mapping.ClientProtocol {
+		case transcode.ClientResponses:
+			catalog.ServesResponses = true
+		case transcode.ClientMessages:
+			catalog.ServesMessages = true
+		}
+		if !capabilitiesSet && mapping.UpstreamProtocol == transcode.UpstreamChatCompletions {
+			catalog.ParallelToolCalls = mapping.ChatCapabilities.ParallelToolCalls
+			catalog.StructuredOutputs = mapping.ChatCapabilities.StructuredOutputs
+			capabilitiesSet = true
+		}
+	}
+	p.modelCatalog = &catalog
+}
+
+// ModelCatalog returns a deep copy of this provider's frozen catalog snapshot,
+// or false when no -model-table entry names it.
+func (p *Provider) ModelCatalog() (transcode.CatalogConfig, bool) {
+	if p.modelCatalog == nil {
+		return transcode.CatalogConfig{}, false
+	}
+	out := *p.modelCatalog
+	out.Models = make([]transcode.CatalogModel, len(p.modelCatalog.Models))
+	for i, model := range p.modelCatalog.Models {
+		model.Efforts = slices.Clone(model.Efforts)
+		model.Modalities = slices.Clone(model.Modalities)
+		if model.Context != nil {
+			value := *model.Context
+			model.Context = &value
+		}
+		if model.MaxOutput != nil {
+			value := *model.MaxOutput
+			model.MaxOutput = &value
+		}
+		out.Models[i] = model
+	}
+	return out, true
+}

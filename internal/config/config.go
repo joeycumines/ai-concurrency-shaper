@@ -208,6 +208,9 @@ type Provider struct {
 	maxIdlePerHost    int
 	authPolicy        *auth.AuthPolicy
 	transcodeMappings []proxy.TranscodeMapping
+	// modelCatalog is this provider's frozen catalog snapshot, built from its
+	// model-table subset and resolved mappings. Nil when no table names it.
+	modelCatalog *transcode.CatalogConfig
 }
 
 // TranscodeMappings returns the resolved transcode route mappings for this provider,
@@ -563,6 +566,8 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 	if err := p.resolveTranscode(modelTable); err != nil {
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
+
+	p.resolveModelCatalog(modelTable)
 
 	p.maxIdlePerHost = proxy.MaxIdleConnsPerHost(p.GlobalConcurrency, p.Concurrency, patterns, p.routeLimiters, p.LimitAll)
 	return nil

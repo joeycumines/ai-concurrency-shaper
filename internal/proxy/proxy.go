@@ -97,6 +97,7 @@ type proxyConfig struct {
 	limitAll               bool
 	transcodeMappings      []TranscodeMapping
 	authPolicy             *auth.AuthPolicy
+	modelCatalog           *transcode.CatalogConfig
 }
 
 // TranscodeMapping configures one transcoded route. The embedded
@@ -691,6 +692,10 @@ type Proxy struct {
 	// method+path route key, built once at construction.
 	transcodeHandlerMap map[transcode.RouteKey]http.Handler
 
+	// catalog, when non-nil, answers this mount's GET /v1/models discovery
+	// request locally from the frozen model-table snapshot.
+	catalog *transcode.CatalogHandler
+
 	// authPolicy, when non-nil, strips client credential/protocol headers
 	// and attaches the upstream credential inside the Rewrite hook. nil
 	// forwards requests verbatim.
@@ -930,6 +935,17 @@ func New(opts ...Option) (*Proxy, error) {
 		if _, exists := p.transcodeHandlerMap[m.ClientRoute]; !exists {
 			p.transcodeHandlerMap[m.ClientRoute] = h
 		}
+	}
+
+	// The catalog is a local answer, not an upstream route: build its handler
+	// once here so an invalid snapshot is a startup error, never a
+	// first-request surprise.
+	if cfg.modelCatalog != nil {
+		catalogHandler, err := transcode.NewCatalogHandler(*cfg.modelCatalog)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: model catalog: %w", err)
+		}
+		p.catalog = catalogHandler
 	}
 
 	rp := &httputil.ReverseProxy{
@@ -1188,9 +1204,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The unlimited admission class exempts a request whose FIRST matching
 	// pattern declares :unlimited — including under -limit-all. The same
 	// first-match lookup drives limiter selection (acquireSlot/FindMatch),
-	// so classification and admission can never disagree.
+	// so classification and admission can never disagree. The catalog is a
+	// local answer with its own unlimited class: it is never limited, never
+	// queued, and never gated by the circuit breaker.
+	catalog := p.catalogServes(r)
 	limited := (p.limitAll || p.matcher.IsLimited(r.Method, r.URL.Path)) &&
-		!p.matcher.IsUnlimited(r.Method, r.URL.Path)
+		!p.matcher.IsUnlimited(r.Method, r.URL.Path) && !catalog
 
 	flightID := p.m.RegisterInFlight(r.Method, r.URL.Path, limited)
 	defer p.m.DeregisterInFlight(flightID)
@@ -1370,6 +1389,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// global limiter.
 	if limited {
 		p.serveLimited(rec, r, flightID)
+	} else if catalog {
+		p.serveCatalog(rec, r)
 	} else {
 		p.servePassthrough(rec, r, flightID)
 	}
