@@ -467,15 +467,22 @@ func (p *Provider) resolveModelCatalog(modelTable []modelTableEntry) {
 		StructuredOutputs: true,
 	}
 	for _, entry := range modelTable {
-		catalog.Models = append(catalog.Models, transcode.CatalogModel{
+		model := transcode.CatalogModel{
 			Surrogate:  entry.Surrogate,
-			Context:    entry.Context,
-			MaxOutput:  entry.MaxOutput,
-			Efforts:    entry.Efforts,
-			Modalities: entry.Modalities,
+			Efforts:    slices.Clone(entry.Efforts),
+			Modalities: slices.Clone(entry.Modalities),
 			Default:    entry.Default,
 			Deprecated: entry.Deprecated,
-		})
+		}
+		if entry.Context != nil {
+			value := *entry.Context
+			model.Context = &value
+		}
+		if entry.MaxOutput != nil {
+			value := *entry.MaxOutput
+			model.MaxOutput = &value
+		}
+		catalog.Models = append(catalog.Models, model)
 	}
 	capabilitiesSet := false
 	for i := range p.transcodeMappings {

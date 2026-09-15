@@ -304,14 +304,15 @@ func boundCatalogMessage(message string, max int) string {
 	return message[:max]
 }
 
-// codexPriorities assigns the 1-based priority of every model in declaration
-// order: a lone default takes priority 1 and the rest follow in declaration
-// order, otherwise declaration order decides.
-func (h *CatalogHandler) codexPriorities() map[int]int {
-	priorities := make(map[int]int, len(h.models))
+// codexPriorities assigns the 1-based priority of every listed model in
+// declaration order: a lone default takes priority 1 and the rest follow in
+// declaration order, otherwise declaration order decides. Only listed (valid)
+// models receive a priority, so a skipped entry cannot leave a numbering gap.
+func (h *CatalogHandler) codexPriorities(listed []int) map[int]int {
+	priorities := make(map[int]int, len(listed))
 	defaultIndex := -1
-	for i, model := range h.models {
-		if model.Default {
+	for _, i := range listed {
+		if h.models[i].Default {
 			defaultIndex = i
 			break
 		}
@@ -321,7 +322,7 @@ func (h *CatalogHandler) codexPriorities() map[int]int {
 		priorities[defaultIndex] = next
 		next++
 	}
-	for i := range h.models {
+	for _, i := range listed {
 		if i == defaultIndex {
 			continue
 		}
@@ -374,13 +375,16 @@ var codexEffortDescriptions = map[string]string{
 }
 
 func (h *CatalogHandler) codexDocument() codexCatalogDocument {
-	priorities := h.codexPriorities()
-	entries := make([]codexCatalogEntry, 0, len(h.models))
+	listed := make([]int, 0, len(h.models))
 	for i, model := range h.models {
-		if !validCatalogModel(model) {
-			continue
+		if validCatalogModel(model) {
+			listed = append(listed, i)
 		}
-		entries = append(entries, h.codexEntry(model, priorities[i]))
+	}
+	priorities := h.codexPriorities(listed)
+	entries := make([]codexCatalogEntry, 0, len(listed))
+	for _, i := range listed {
+		entries = append(entries, h.codexEntry(h.models[i], priorities[i]))
 	}
 	return codexCatalogDocument{Models: entries}
 }
@@ -499,14 +503,14 @@ var anthropicEffortLeaves = []string{"low", "medium", "high", "max", "xhigh"}
 
 func (h *CatalogHandler) anthropicDocument(query map[string][]string) (anthropicCatalogDocument, error) {
 	start, end := 0, len(h.models)
-	if afterID := firstQueryValue(query, "after_id"); afterID != "" {
+	if afterID, ok := queryValue(query, "after_id"); ok {
 		index := h.modelIndex(afterID)
 		if index < 0 {
 			return anthropicCatalogDocument{}, fmt.Errorf("unknown after_id %q (%s)", afterID, h.servableSuffix())
 		}
 		start = index + 1
 	}
-	if beforeID := firstQueryValue(query, "before_id"); beforeID != "" {
+	if beforeID, ok := queryValue(query, "before_id"); ok {
 		index := h.modelIndex(beforeID)
 		if index < 0 {
 			return anthropicCatalogDocument{}, fmt.Errorf("unknown before_id %q (%s)", beforeID, h.servableSuffix())
@@ -521,7 +525,7 @@ func (h *CatalogHandler) anthropicDocument(query map[string][]string) (anthropic
 	models := h.models[start:end]
 
 	limit := 0
-	if raw := firstQueryValue(query, "limit"); raw != "" {
+	if raw, ok := queryValue(query, "limit"); ok {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 1 || parsed > 1000 {
 			return anthropicCatalogDocument{}, fmt.Errorf("invalid limit %q (want an integer 1-1000)", raw)
@@ -697,10 +701,16 @@ var (
 	}
 )
 
-func firstQueryValue(query map[string][]string, key string) string {
-	values := query[key]
-	if len(values) == 0 {
-		return ""
+// queryValue returns the first value of a query key and whether the key was
+// present at all: an explicitly empty value is malformed input, not an absent
+// parameter, so cursors and limit parse it strictly.
+func queryValue(query map[string][]string, key string) (string, bool) {
+	values, ok := query[key]
+	if !ok {
+		return "", false
 	}
-	return values[0]
+	if len(values) == 0 {
+		return "", true
+	}
+	return values[0], true
 }

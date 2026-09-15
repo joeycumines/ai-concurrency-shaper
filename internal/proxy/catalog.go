@@ -42,6 +42,14 @@ func (o *ModelCatalogOption) applyProxyOption(cfg *proxyConfig) error {
 	for i := range cloned.Models {
 		cloned.Models[i].Efforts = append([]string(nil), o.config.Models[i].Efforts...)
 		cloned.Models[i].Modalities = append([]string(nil), o.config.Models[i].Modalities...)
+		if o.config.Models[i].Context != nil {
+			value := *o.config.Models[i].Context
+			cloned.Models[i].Context = &value
+		}
+		if o.config.Models[i].MaxOutput != nil {
+			value := *o.config.Models[i].MaxOutput
+			cloned.Models[i].MaxOutput = &value
+		}
 	}
 	cfg.modelCatalog = &cloned
 	return nil

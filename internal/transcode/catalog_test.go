@@ -199,6 +199,9 @@ func TestCatalogAnthropicEntryGolden(t *testing.T) {
 	if glm.MaxTokens != nil {
 		t.Errorf("glm-5.2 max_tokens = %v, want null (key present)", glm.MaxTokens)
 	}
+	if !strings.Contains(rec.Body.String(), `"max_tokens":null`) {
+		t.Errorf("glm-5.2 must carry max_tokens:null explicitly, not omit the key: %s", rec.Body.String())
+	}
 	var glmCapabilities map[string]any
 	if err := json.Unmarshal(glm.Capabilities, &glmCapabilities); err != nil {
 		t.Fatal(err)
@@ -393,4 +396,111 @@ func jsonEqual(a, b any) bool {
 	ab, aerr := json.Marshal(a)
 	bb, berr := json.Marshal(b)
 	return aerr == nil && berr == nil && string(ab) == string(bb)
+}
+
+// TestCatalogAnthropicPagination pins cursor filtering, limit slicing, and the
+// has_more/first_id/last_id envelope semantics.
+func TestCatalogAnthropicPagination(t *testing.T) {
+	context := 1000
+	handler, err := NewCatalogHandler(CatalogConfig{
+		ProviderName: "TestProv",
+		Models: []CatalogModel{
+			{Surrogate: "a", Context: &context},
+			{Surrogate: "b", Context: &context},
+			{Surrogate: "c", Context: &context},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type envelope struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		FirstID *string `json:"first_id"`
+		LastID  *string `json:"last_id"`
+		HasMore bool    `json:"has_more"`
+	}
+	fetch := func(query string) envelope {
+		t.Helper()
+		rec := catalogGet(t, handler, "/v1/models?format=anthropic"+query, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d: %s", query, rec.Code, rec.Body.String())
+		}
+		var document envelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &document); err != nil {
+			t.Fatal(err)
+		}
+		return document
+	}
+	ids := func(document envelope) []string {
+		var out []string
+		for _, entry := range document.Data {
+			out = append(out, entry.ID)
+		}
+		return out
+	}
+
+	full := fetch("")
+	if got := strings.Join(ids(full), ","); got != "a,b,c" || full.HasMore {
+		t.Errorf("full page = %q has_more=%v", got, full.HasMore)
+	}
+	if full.FirstID == nil || *full.FirstID != "a" || full.LastID == nil || *full.LastID != "c" {
+		t.Errorf("full page cursors = %v/%v", full.FirstID, full.LastID)
+	}
+
+	limited := fetch("&limit=2")
+	if got := strings.Join(ids(limited), ","); got != "a,b" || !limited.HasMore {
+		t.Errorf("limit=2 = %q has_more=%v", got, limited.HasMore)
+	}
+	if limited.LastID == nil || *limited.LastID != "b" {
+		t.Errorf("limit=2 last_id = %v", limited.LastID)
+	}
+
+	after := fetch("&after_id=a")
+	if got := strings.Join(ids(after), ","); got != "b,c" || after.HasMore {
+		t.Errorf("after_id=a = %q has_more=%v", got, after.HasMore)
+	}
+	if after.FirstID == nil || *after.FirstID != "b" {
+		t.Errorf("after_id=a first_id = %v", after.FirstID)
+	}
+
+	afterLimit := fetch("&after_id=a&limit=1")
+	if got := strings.Join(ids(afterLimit), ","); got != "b" || !afterLimit.HasMore {
+		t.Errorf("after_id=a&limit=1 = %q has_more=%v", got, afterLimit.HasMore)
+	}
+
+	before := fetch("&before_id=c")
+	if got := strings.Join(ids(before), ","); got != "a,b" || before.HasMore {
+		t.Errorf("before_id=c = %q has_more=%v", got, before.HasMore)
+	}
+
+	beforeLimit := fetch("&before_id=c&limit=1")
+	if got := strings.Join(ids(beforeLimit), ","); got != "a" || !beforeLimit.HasMore {
+		t.Errorf("before_id=c&limit=1 = %q has_more=%v", got, beforeLimit.HasMore)
+	}
+
+	emptyWindow := fetch("&after_id=c")
+	if got := ids(emptyWindow); len(got) != 0 || emptyWindow.HasMore {
+		t.Errorf("after_id=c = %v has_more=%v, want an honest empty page", got, emptyWindow.HasMore)
+	}
+	if emptyWindow.FirstID != nil || emptyWindow.LastID != nil {
+		t.Errorf("empty page cursors = %v/%v, want null", emptyWindow.FirstID, emptyWindow.LastID)
+	}
+
+	intersection := fetch("&after_id=a&before_id=c")
+	if got := strings.Join(ids(intersection), ","); got != "b" {
+		t.Errorf("after_id=a&before_id=c = %q", got)
+	}
+	inverted := fetch("&after_id=b&before_id=a")
+	if got := ids(inverted); len(got) != 0 {
+		t.Errorf("inverted cursors = %v, want empty", got)
+	}
+
+	for _, bad := range []string{"&limit=0", "&limit=-1", "&limit=1001", "&limit=abc", "&limit=", "&after_id=", "&before_id=unknown"} {
+		rec := catalogGet(t, handler, "/v1/models?format=anthropic"+bad, nil)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s status = %d, want 400: %s", bad, rec.Code, rec.Body.String())
+		}
+	}
 }

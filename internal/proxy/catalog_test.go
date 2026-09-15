@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
@@ -396,5 +397,55 @@ func TestCatalogDocumentShapeFromOption(t *testing.T) {
 	}
 	if len(document.Models) != 2 {
 		t.Fatalf("models = %d, want 2", len(document.Models))
+	}
+}
+
+// TestCatalogServedWithOpenBreaker proves the catalog is a local answer: a
+// tripped breaker must not delay or reject it.
+func TestCatalogServedWithOpenBreaker(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	breaker, err := circuitbreaker.New(
+		circuitbreaker.WithFailureThreshold(1),
+		circuitbreaker.WithWindow(time.Minute),
+		circuitbreaker.WithOpenTimeout(time.Minute),
+		circuitbreaker.WithMaxOpenTimeout(time.Minute),
+		circuitbreaker.WithBasePenalty(time.Second),
+		circuitbreaker.WithMaxPenalty(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := breaker.Allow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	breaker.RecordFailure(http.StatusInternalServerError, 0, time.Now(), epoch)
+	if _, err := breaker.Allow(); err == nil {
+		t.Fatal("breaker did not open; the test cannot prove the bypass")
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(breaker),
+		WithModelCatalog(testCatalogConfig(128000)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("catalog status = %d behind an open breaker: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"models"`) {
+		t.Fatalf("catalog document missing: %s", rec.Body.String())
 	}
 }
