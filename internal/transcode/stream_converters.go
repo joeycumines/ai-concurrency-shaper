@@ -821,8 +821,20 @@ func (s *chatResponsesStreamState) convertDelta(
 func (s *chatResponsesStreamState) openMessageItemForPart(
 	partType string,
 ) (*openResponsesItem, []ResponsesSSEEvent, error) {
-	// Open a new message item when the last item is not a message.
-	if len(s.items) == 0 || !s.items[len(s.items)-1].isMessage() {
+	// Open a new message item when the last item is not a message, or when it
+	// is a message already closed at a message→tool transition
+	// (closeOpenMessageItem): content arriving after the tool call renders as
+	// a NEW message item, exactly as resumed reasoning renders as a new
+	// thinking block, because the closed item is already sealed on the wire.
+	reuseTrailing := false
+	if len(s.items) > 0 {
+		if last := &s.items[len(s.items)-1]; last.isMessage() {
+			if message, ok := last.item.(*ResponsesOutputMessage); !ok || message.Status != ResponsesItemCompleted {
+				reuseTrailing = true
+			}
+		}
+	}
+	if !reuseTrailing {
 		added, err := s.openMessageItem()
 		if err != nil {
 			return nil, nil, err
@@ -1060,6 +1072,14 @@ func (s *chatResponsesStreamState) convertToolCall(
 	// builders), so the added event is already a detached snapshot and needs
 	// no copy.
 	if !pending.started && pending.callID != "" && pending.name != "" {
+		// The tool block must not open before the preceding message's content
+		// block is sealed, so the open message item is closed at the
+		// transition exactly as an open reasoning item is.
+		closed, err := s.closeOpenMessageItem()
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, closed...)
 		pending.itemID = s.ctx.IDs.New("fc_")
 		pending.started = true
 		callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
@@ -1173,6 +1193,60 @@ func (s *chatResponsesStreamState) closeOpenReasoningItem() ([]ResponsesSSEEvent
 	}, nil
 }
 
+// closeOpenMessageItem closes the trailing open message item inline at a
+// message→tool transition: each content part's done event, then
+// output_item.done — the same sequence finish() emits, but AT THE TRANSITION
+// so the next content block never opens before this one is sealed (anthropic
+// requires every block to be closed before the next opens). No-op when the
+// last item is not an open message item. The closed item stays in s.items
+// with a completed status: the terminal reconciliation still sees it, and
+// content arriving after the tool call opens a NEW message item (a completed
+// message item is never appended to).
+func (s *chatResponsesStreamState) closeOpenMessageItem() ([]ResponsesSSEEvent, error) {
+	if len(s.items) == 0 {
+		return nil, nil
+	}
+	item := &s.items[len(s.items)-1]
+	message, ok := item.item.(*ResponsesOutputMessage)
+	if !ok || message.Status != ResponsesItemInProgress {
+		return nil, nil
+	}
+	var events []ResponsesSSEEvent
+	for contentIndex, part := range message.Content {
+		key := chatPartKey{outputIndex: item.outputIndex, contentIndex: int64(contentIndex)}
+		switch value := part.(type) {
+		case *ResponsesOutputText:
+			if builder := s.textBufs[key]; builder != nil {
+				value.Text = builder.String()
+			}
+			events = append(events,
+				s.builder.TextDone(message.ID, item.outputIndex, int64(contentIndex), value.Text),
+				s.builder.ContentPartDone(message.ID, item.outputIndex, int64(contentIndex),
+					&ResponsesStreamOutputTextPart{
+						Type:        "output_text",
+						Text:        value.Text,
+						Annotations: []ResponsesAnnotation{},
+					}),
+			)
+		case *ResponsesOutputRefusal:
+			if builder := s.refusalBufs[key]; builder != nil {
+				value.Refusal = builder.String()
+			}
+			events = append(events,
+				s.builder.RefusalDone(message.ID, item.outputIndex, int64(contentIndex), value.Refusal),
+				s.builder.ContentPartDone(message.ID, item.outputIndex, int64(contentIndex),
+					&ResponsesStreamRefusalPart{
+						Type:    "refusal",
+						Refusal: value.Refusal,
+					}),
+			)
+		}
+	}
+	message.Status = ResponsesItemCompleted
+	events = append(events, s.builder.OutputItemDone(item.outputIndex, message))
+	return events, nil
+}
+
 // finish closes open items and builds the terminal event batch.
 func (s *chatResponsesStreamState) finish(
 	finishReason string,
@@ -1229,6 +1303,12 @@ func (s *chatResponsesStreamState) finish(
 		item := &s.items[i]
 		message, ok := item.item.(*ResponsesOutputMessage)
 		if !ok {
+			continue
+		}
+		if message.Status == ResponsesItemCompleted {
+			// Already closed inline at a message→tool transition
+			// (closeOpenMessageItem): emitting the done events twice would
+			// duplicate a part.done on the wire.
 			continue
 		}
 		for contentIndex, part := range message.Content {
