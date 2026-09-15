@@ -628,7 +628,10 @@ func validateMBFlag(name string, value int64, shift uint) error {
 }
 
 // resolveTranscode resolves and validates all transcode configuration for a Provider.
-func (p *Provider) resolveTranscode() error {
+// modelTable is this provider's frozen subset of the global -model-table: nil or
+// empty means the table is not configured and the provider-scope -transcode-model
+// values are the only model-mapping source.
+func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	if err := validateMBFlag("-transcode-max-request-mb", p.TranscodeMaxRequestMB, 20); err != nil {
 		return err
 	}
@@ -689,6 +692,10 @@ func (p *Provider) resolveTranscode() error {
 	if err != nil {
 		return err
 	}
+	tableProjected := len(modelTable) > 0
+	if tableProjected {
+		modelMap = modelMapFromTable(modelTable)
+	}
 
 	allowedLosses, negatedLosses, err := parseNegatedLosses(p.TranscodeAllowLosses...)
 	if err != nil {
@@ -738,7 +745,12 @@ func (p *Provider) resolveTranscode() error {
 		}
 		seen[mappings[i].ClientRoute] = struct{}{}
 
-		if len(modelMap.Exact) > 0 || !modelMap.AllowIdentity {
+		if tableProjected {
+			// The global table owns model resolution for every transcode-enabled
+			// provider: the projected map is stamped unconditionally, identity
+			// fallback is off, and unlisted surrogates fail as local client errors.
+			mappings[i].Mapping.ModelMap = modelMap
+		} else if len(modelMap.Exact) > 0 || !modelMap.AllowIdentity {
 			mappings[i].Mapping.ModelMap = modelMap
 		}
 		if hasExplicitTranscodeAuth || p.authPolicy != nil {

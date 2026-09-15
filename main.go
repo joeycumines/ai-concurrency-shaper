@@ -280,6 +280,10 @@ func run() error {
 		return err
 	}
 
+	if summary := cfg.ModelTableSummary(); summary != "" {
+		log.Printf("%s", summary)
+	}
+
 	// Build a proxy for every provider and mount each at its prefix on the
 	// shared dispatcher. With a single (legacy) bare-root provider this is a
 	// transparent pass-through, so startup output is byte-identical to before.

@@ -607,7 +607,7 @@ func (h *TranscodeHandler) convertRequest(
 	resolveModel := func(clientModel string) error {
 		mappingModel, err := h.cfg.Mapping.ModelMap.Resolve(clientModel)
 		if err != nil {
-			return err
+			return h.nameServableModels(err)
 		}
 		context.RequestedClientModel = mappingModel.ClientResponseModel
 		context.UpstreamModel = mappingModel.UpstreamModel
@@ -1874,6 +1874,27 @@ func (h *TranscodeHandler) boundErrorMessage(message string) string {
 		return message[:max-3] + "…"
 	}
 	return message[:max]
+}
+
+// nameServableModels decorates a model-map resolution failure with the mount's
+// sorted servable surrogates, so a client that named an unknown model learns
+// what this mount actually serves. Upstream wire ids are never listed.
+//
+// Only a closed explicit map (RequireExplicitMap, as every projected global
+// model table is) names its servable set: a legacy per-provider model map keeps
+// its historical message, so a configuration without the global table stays
+// byte-identical to its pre-table behaviour.
+func (h *TranscodeHandler) nameServableModels(err error) error {
+	modelMap := h.cfg.Mapping.ModelMap
+	if !modelMap.RequireExplicitMap || len(modelMap.Exact) == 0 {
+		return err
+	}
+	names := make([]string, 0, len(modelMap.Exact))
+	for name := range modelMap.Exact {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return fmt.Errorf("%w (servable on this mount: %s)", err, strings.Join(names, ", "))
 }
 
 // logRequestError logs a local failure with its detail (never the client
