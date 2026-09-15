@@ -237,7 +237,8 @@ type providerState struct {
 
 // NewModelForProviders creates a dashboard for one or more providers. Each
 // provider is addressed by index everywhere: ProviderUpdate messages, the Tab /
-// Shift+Tab cycle keys handled in handleKey, and the chips on header row 0.
+// Shift+Tab cycle keys handled in handleKey, and the provider chips in the
+// responsive header rows when the current terminal budget can show them.
 // The active provider's fields are mirrored into m.conc/m.snap/m.journal so
 // all existing renderers keep working against a single Provider.
 func NewModelForProviders(metas []ProviderMeta) Model {

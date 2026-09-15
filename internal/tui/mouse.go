@@ -32,14 +32,15 @@ func (m Model) handleMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		// Fleet identity click — mirrors handleMouseWheel guard exactly
-		// (my==0 && hasSwitcher && mx>=1 && mx<1+identityWidth()).
+		// (my==0 && switcherVisible && mx>=1 && mx<1+identityWidth()).
 		// Only left-button (or MouseNone for test compat where Button is omitted)
 		// on row 0 within [1,1+identityWidth()) cycles forward (+1, wrapping).
-		// Uses natural identityWidth (lipgloss.Width(" "+label+" ↕")) rather than
-		// the truncated visible prefix: at very narrow widths headerBody may
-		// truncate below idW, but the hit region stays at the natural width so
-		// wheel and click stay consistent and header width is still bounded.
-		if my == 0 && m.hasSwitcher() {
+		// identityWidth is capped to the visible header-body prefix, so truncated
+		// statistics/right-padding cells cannot become accidental hit targets.
+		// When the fleet header uses an empty row 0 (body-only because the first
+		// chip would truncate, see header.go invariants) this row-0 guard still
+		// applies to the single body line; the wheel guard is row 0 only.
+		if my == 0 && m.switcherVisible() {
 			idW := m.identityWidth()
 			if mx >= 1 && mx < 1+idW {
 				btn := msg.Mouse().Button
@@ -130,7 +131,10 @@ func (m Model) handleMouseWheel(msg tea.MouseWheelMsg) (Model, tea.Cmd) {
 	// Mouse wheel over the active-provider identity area in fleet mode
 	// cycles providers instead of scrolling content. The identity starts at
 	// column 1 because headerStyle has PaddingLeft(1); column 0 is padding.
-	if my == 0 && m.hasSwitcher() {
+	// In fleet mode the header may be body-only on row 0 (first chip would
+	// truncate, see header.go); wheel handling stays on row 0 only and uses the
+	// visible identityWidth for the hit test.
+	if my == 0 && m.switcherVisible() {
 		idW := m.identityWidth()
 		if mx >= 1 && mx < 1+idW {
 			switch msg.Mouse().Button {

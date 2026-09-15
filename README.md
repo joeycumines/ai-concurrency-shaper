@@ -145,7 +145,7 @@ Mount semantics:
 - Prefixes must not overlap: `/anthropic` and `/anthropic/v1` cannot coexist. Overlapping configurations are rejected at startup, before the listener binds.
 - Providers are matched on whole path segments, so `/anthropic2` never matches the `/anthropic` prefix.
 
-In the TUI, each provider keeps its own dashboard. The header shows one chip per provider (the active one highlighted), filled by the provider name instead of the `⚡ shaper` brand; `Tab`/`Shift+Tab` cycle providers, chips are clickable, and the number keys `1-6` still switch content tabs. The in-TUI help (`?`) lists the switch binding whenever the switcher is shown.
+In the TUI, each provider keeps its own dashboard. When the terminal's width and height budget permits, the header shows one chip per provider (the active one highlighted), filled by the provider name instead of the `⚡ shaper` brand; `Tab`/`Shift+Tab` cycle providers, visible chips are clickable, and the number keys `1-6` still switch content tabs. A narrow or height-capped terminal may elide the chip row while retaining keyboard provider switching; the in-TUI help (`?`) advertises mouse controls only when those controls are visible. The header never leaves a truncated first chip alone on its row: when the first chip would not fit at its natural width beside the fleet identity, the row stays body-only and every chip starts on the next row; narrow terminals therefore show the body on row 0 with chips wrapped below, and wider terminals share leading chips beside the body, with clicks tracking the rendered spans.
 
 #### Upstream Authentication
 

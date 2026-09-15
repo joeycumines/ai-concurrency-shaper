@@ -331,12 +331,16 @@ func (m Model) renderDetailWaterfall(e *journal.Entry, width int) string {
 }
 
 func (m Model) renderHelpOverlay() string {
-	// The provider-switch binding exists only when the header renders the
-	// switcher (multi-provider, or a single named provider). A single
-	// unnamed provider keeps the legacy overlay byte-identical.
+	// Keyboard provider switching remains available for any named/multi-provider
+	// model. Mouse affordances are documented only while the header renders a
+	// chip row; height/width caps may elide that row while retaining Tab cycling.
 	switcher := ""
 	if m.hasSwitcher() {
-		switcher = " Tab/Shift+Tab / Click name ↕ / Wheel  Switch provider\n"
+		switcher = " Tab/Shift+Tab"
+		if m.switcherVisible() {
+			switcher += " / Click name ↕ / Wheel"
+		}
+		switcher += "  Switch provider\n"
 	}
 	return m.styles.overlayStyle.Render(" Keybindings \n\n"+
 		" 1-6          Switch tab (Overview/Requests/Network/Logs/Concurrency/Routes)\n"+

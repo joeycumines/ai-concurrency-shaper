@@ -18,11 +18,10 @@ import (
 )
 
 // TestFleetIdentityClick_GeometryLocks exhausts responsive widths and
-// active indices, locking the invariants that the blueprint declares sacred:
+// active indices, locking the fleet header geometry invariants:
 // header rows never exceed terminal width, active chip never dropped,
 // chipAt hit-tests every rendered chip pixel, and identity clicks outside the
-// canonical region are strict no-ops. This test is the hostile lock that
-// Task 3 requires before the Rule-of-Two gate.
+// canonical region are strict no-ops. This test is the hostile lock required before the correctness gate.
 func TestFleetIdentityClick_GeometryLocks(t *testing.T) {
 	metas := []ProviderMeta{
 		{Name: "anthropic-eu-central", Concurrency: 4},
@@ -80,17 +79,22 @@ func TestFleetIdentityClick_GeometryLocks(t *testing.T) {
 
 			// (a4) chipAt hit-tests every rendered chip cell exactly.
 			for ri, row := range rows {
-				right := m.width - 2
-				for i, part := range slices.Backward(row.parts) {
+				var col int
+				if ri == 0 {
+					col = m.row0ChipStart()
+				} else {
+					col = 1
+				}
+				for i, part := range row.parts {
 					cw := lipgloss.Width(part)
 					prov := row.providers[i]
-					for x := right - cw + 1; x <= right; x++ {
+					for x := col; x < col+cw; x++ {
 						idx, ok := m.chipAt(x, ri)
 						if !ok || idx != prov {
 							t.Errorf("w=%d active=%d row=%d x=%d: chipAt=(%d,%v) want (%d,true)", w, active, ri, x, idx, ok, prov)
 						}
 					}
-					right -= cw + 1
+					col += cw + 1
 				}
 			}
 
@@ -210,46 +214,47 @@ func TestFleetIdentityClick_NarrowAndHeightCaps(t *testing.T) {
 }
 
 // TestFleetIdentityClick_Precedence locks the mouse hit precedence:
-// chipAt (right-aligned) retains priority over left identity; a chip click
-// at the extreme right must hit the chip, not the identity, and never bleed
-// into the identity column. Also verifies wheel and Tab paths stay green.
+// chipAt (left-aligned) takes priority; a chip click on the first chip's
+// leftmost column must hit the chip, not the identity, and the identity
+// column must never bleed into chip space. Also verifies wheel and Tab paths.
 func TestFleetIdentityClick_Precedence(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{
 		{Name: "acme", Concurrency: 4},
 		{Name: "anthropic", Concurrency: 8},
 		{Name: "openai", Concurrency: 12},
 	})
-	m.width = 80
+	m.width = 100
 	m.height = 24
 	m.active = 0
 	m.syncActive()
 
-	// Rightmost column must be a chip, not identity.
-	right := m.width - 2
+	col := m.row0ChipStart()
 	layout := m.budgetedChips()
 	if len(layout.parts) == 0 {
-		t.Fatalf("no chips at 80 cols")
+		t.Fatalf("no chips at 100 cols")
 	}
-	// ChipAt at right edge must hit.
-	if _, ok := m.chipAt(right, 0); !ok {
-		t.Fatalf("chipAt at rightmost %d must hit", right)
+	lastIdx := len(layout.parts) - 1
+	lastCol := col
+	for i := range lastIdx {
+		lastCol += lipgloss.Width(layout.parts[i]) + 1
 	}
-	// Identity width must not extend to chip region: chipAt at identity col must miss.
+	if _, ok := m.chipAt(lastCol, 0); !ok {
+		t.Fatalf("chipAt at last chip col %d must hit", lastCol)
+	}
 	if _, ok := m.chipAt(1, 0); ok {
 		t.Fatalf("chipAt at identity column 1 must not hit chip")
 	}
 
-	// Click at right hits chip and switches — lock chip precedence hard.
-	m2 := update(m, tea.MouseClickMsg{X: right, Y: 0})
-	if hitIdx, ok := m.chipAt(right, 0); ok {
+	m2 := update(m, tea.MouseClickMsg{X: lastCol, Y: 0})
+	if hitIdx, ok := m.chipAt(lastCol, 0); ok {
 		if m2.active != hitIdx {
-			t.Errorf("click at rightmost chip X=%d must switch to provider %d (hit chipAt), got active %d layout providers %v", right, hitIdx, m2.active, layout.providers)
+			t.Errorf("click at last chip X=%d must switch to provider %d (hit chipAt), got active %d layout providers %v", lastCol, hitIdx, m2.active, layout.providers)
 		}
 		if m2.active == 0 {
-			t.Errorf("right chip click must switch away from 0, got 0 hit provider %d layout %v", hitIdx, layout.providers)
+			t.Errorf("last chip click must switch away from 0, got 0 hit provider %d layout %v", hitIdx, layout.providers)
 		}
 	} else {
-		t.Fatalf("chipAt at rightmost %d must hit chip (precondition for precedence lock)", right)
+		t.Fatalf("chipAt at last chip col %d must hit chip (precondition for precedence lock)", lastCol)
 	}
 	// Identity click cycles forward independently.
 	m.active = 0

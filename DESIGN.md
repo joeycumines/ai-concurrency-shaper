@@ -14,7 +14,8 @@ The dashboard carries **two true-color palettes** behind one hue-to-state contra
 
 | Token / style               | Hex       | Role                                                                 |
 | ---------------------------- | --------- | -------------------------------------------------------------------- |
-| Background (`#0D1117`)      | `#0D1117` | Term bg; used in header and footer background.                       |
+| Background (`#0D1117`)      | `#0D1117` | Term bg; used in footer background.                       |
+| Header bar (`#1F6FEB`)       | `#1F6FEB` | Header background.                       |
 | Surface (`#161B22`)         | `#161B22` | Mildly elevated surface; tab inactive bg, overlay bg.                |
 | Panel (`#21262D`)           | `#21262D` | Gauge empty track, subtle separators.                                  |
 | Text primary (`#E6EDF3`)    | `#E6EDF3` | Body text, selected row fg over accent.                                |
@@ -46,11 +47,12 @@ Applied when the terminal reports a light background. The same hue-to-state mapp
 
 | Token / style               | Hex        | Role                                                                 |
 | --------------------------- | ---------- | -------------------------------------------------------------------- |
-| Header / active tab fill (`#0969DA`) | `#0969DA` | Header and active tab background; white text on it measures ~5.2:1. |
+| Header bar fill (`#0969DA`) | `#0969DA` | Header background; white text on it measures ~5.2:1. |
+| Selected-tab fill (`#0550AE`) | `#0550AE` | Active pane tab and active provider chip; white text on it measures ~7.6:1, and it stays distinct from the header bar so the chip never merges into the bar. |
 | Text primary (`#24292F`)    | `#24292F` | Body text, overlays.                                                  |
 | Text secondary (`#57606A`)   | `#57606A` | Inactive tabs, footer.                                                |
 | Text muted (`#59636E`)      | `#59636E` | Dim labels, status info.                                              |
-| Accent blue (`#0550AE`)     | `#0550AE` | Sections, table headers, tab active text, sparkline, 3xx.           |
+| Accent blue (`#0550AE`)     | `#0550AE` | Sections, table headers, sparklines, and 3xx status; selected tabs/chips use the dedicated fill above. |
 | Success green (`#1A7F37`)  | `#1A7F37` | 2xx status, active gauge, download segment, CLOSED breaker.           |
 | Warning amber (`#9A6700`)   | `#9A6700` | Queue depth bar, queued waterfall segment.                             |
 | Error red (`#CF222E`)        | `#CF222E` | 5xx status, gauge critical, gauge empty-adjacent warn, OPEN breaker. |
@@ -70,14 +72,14 @@ Toasts are self-colored on both palettes, so they stay legible regardless of the
 
 ## Layout
 
-- Chrome: header (row 0), tab bar (row 1), separator (row 2), content (rows 3..n-2), footer (last row).
+- Chrome: the header occupies one or more rows (fleet chips wrap within the available height); the tab bar follows it, then the separator, content, and the footer on the last row. `headerRowCount()` is the single source of truth for those offsets, and a width/height cap may elide fleet chips while preserving keyboard provider switching.
 - Content area uses a right-hand scrollbar in the last column.
 - Dashboard stacks vertically: Circuit Breaker (when configured), Throughput, Active + Queued bars, Status, In-Flight Requests, Summary.
 - Scrollable tabs (Requests, Network, Logs, Concurrency, Routes) have tables/lists with selected-row highlight.
 
 ## Components
 
-1. **Header** — bold white text on blue, shows proxy brand, active/queued/req-rate/errors/uptime.
+1. **Header** — bold white text on blue, shows proxy brand, active/queued/req-rate/errors/uptime. In fleet mode the first provider chip never sits truncated alone on row 0: chips share row 0 only when the first fits at its natural width beside the body, otherwise row 0 stays body-only and chips wrap below with clicks tracking the rendered spans.
 2. **Tab bar** — active tab fills blue on dark, inactive tabs are gray on surface.
 3. **Section header** — blue bold text, no background.
 4. **Gauge bar** — severity-scaled active blocks `█` (green ≤59%, amber 60–89%, red ≥90%), dark empty blocks `░`, labels inline.
