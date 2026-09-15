@@ -8,6 +8,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -105,6 +106,11 @@ type chatResponsesStreamState struct {
 	items        []openResponsesItem
 	itemIndex    int64
 	pendingCalls map[int]*pendingToolCall // keyed by chat tool fragment index
+	// closedCalls holds tool calls sealed inline at a transition where the
+	// next content item had to open. They are already closed on the wire,
+	// so finish must not close them again, but the terminal envelope still
+	// carries them.
+	closedCalls []*pendingToolCall
 
 	// textBufs and refusalBufs accumulate streamed text and refusal per
 	// content part in strings.Builder, avoiding quadratic re-copying of the
@@ -697,6 +703,15 @@ func (s *chatResponsesStreamState) convertDelta(
 				}
 			}
 			if len(s.items) == 0 || !s.isReasoningItem(&s.items[len(s.items)-1]) || reasoningClosed {
+				// A thinking block must not open while the preceding message's
+				// content block is still open: seal the message item at the
+				// transition, the way the reasoning item is sealed on the way
+				// into content and tool output.
+				closedMessage, err := s.closeOpenMessageItem()
+				if err != nil {
+					return nil, err
+				}
+				events = append(events, closedMessage...)
 				if err := s.budget.addItem(); err != nil {
 					return nil, s.wireError(err)
 				}
@@ -835,13 +850,20 @@ func (s *chatResponsesStreamState) openMessageItemForPart(
 		}
 	}
 	if !reuseTrailing {
+		// A new content item must not open while a tool call's block is still
+		// open: seal the pending calls at the transition.
+		closed := s.closePendingToolCalls()
 		added, err := s.openMessageItem()
 		if err != nil {
 			return nil, nil, err
 		}
-		// The output_item.added event is returned through the caller so it
-		// is emitted before the content_part.added of the first part.
-		return s.openMessageItemForPartWithEvents(partType, added)
+		// The output_item.added event is emitted before the
+		// content_part.added of the first part.
+		item, itemEvents, err := s.openMessageItemForPartWithEvents(partType, added)
+		if err != nil {
+			return nil, nil, err
+		}
+		return item, append(closed, itemEvents...), nil
 	}
 	return s.openMessageItemForPartWithEvents(partType, nil)
 }
@@ -1247,6 +1269,79 @@ func (s *chatResponsesStreamState) closeOpenMessageItem() ([]ResponsesSSEEvent, 
 	return events, nil
 }
 
+// toolCallClosure builds the arguments-done and output_item.done events for
+// one started tool call: the arguments are materialized from the accumulated
+// fragments, an empty accumulation becoming the empty object.
+func (s *chatResponsesStreamState) toolCallClosure(pending *pendingToolCall) []ResponsesSSEEvent {
+	arguments := pending.complete.String()
+	if arguments == "" {
+		arguments = "{}"
+	}
+	callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
+	return []ResponsesSSEEvent{
+		s.builder.FunctionArgumentsDone(
+			pending.itemID,
+			pending.outputIndex,
+			arguments,
+		),
+		s.builder.OutputItemDone(
+			pending.outputIndex,
+			&ResponsesFunctionCallOutputItem{
+				ID:        pending.itemID,
+				Type:      "function_call",
+				Status:    ResponsesItemCompleted,
+				CallID:    pending.callID,
+				Name:      callName,
+				Arguments: arguments,
+				Namespace: callNamespace,
+			},
+		),
+	}
+}
+
+// pendingSlice returns the pending tool calls in fragment-index order so any
+// emission over them is deterministic.
+func (s *chatResponsesStreamState) pendingSlice() []*pendingToolCall {
+	indexes := make([]int, 0, len(s.pendingCalls))
+	for index := range s.pendingCalls {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	calls := make([]*pendingToolCall, 0, len(indexes))
+	for _, index := range indexes {
+		calls = append(calls, s.pendingCalls[index])
+	}
+	return calls
+}
+
+// closePendingToolCalls seals every started pending tool call inline at a
+// transition where the next content item must open, in fragment-index order
+// so the emitted order is deterministic. A call that never received an
+// identity is left for finish, which reports it as corrupt upstream data. The
+// sealed calls move to closedCalls: the terminal envelope still carries them,
+// and finish never closes them twice.
+func (s *chatResponsesStreamState) closePendingToolCalls() []ResponsesSSEEvent {
+	if len(s.pendingCalls) == 0 {
+		return nil
+	}
+	indexes := make([]int, 0, len(s.pendingCalls))
+	for index := range s.pendingCalls {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	var events []ResponsesSSEEvent
+	for _, index := range indexes {
+		pending := s.pendingCalls[index]
+		if !pending.started {
+			continue
+		}
+		events = append(events, s.toolCallClosure(pending)...)
+		s.closedCalls = append(s.closedCalls, pending)
+		delete(s.pendingCalls, index)
+	}
+	return events
+}
+
 // finish closes open items and builds the terminal event batch.
 func (s *chatResponsesStreamState) finish(
 	finishReason string,
@@ -1264,34 +1359,11 @@ func (s *chatResponsesStreamState) finish(
 				"chat tool call fragment ended without an id and name",
 			))
 		}
-		arguments := pending.complete.String()
-		if arguments == "" {
-			arguments = "{}"
-		}
 		// Model-generated arguments are preserved byte-exact: the Responses
 		// function_call arguments field is a string, and invalid model
 		// output is never an upstream defect. Only the
 		// snapshot-vs-accumulated identity check remains wire-corrupt.
-		callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
-		events = append(events,
-			s.builder.FunctionArgumentsDone(
-				pending.itemID,
-				pending.outputIndex,
-				arguments,
-			),
-			s.builder.OutputItemDone(
-				pending.outputIndex,
-				&ResponsesFunctionCallOutputItem{
-					ID:        pending.itemID,
-					Type:      "function_call",
-					Status:    ResponsesItemCompleted,
-					CallID:    pending.callID,
-					Name:      callName,
-					Arguments: arguments,
-					Namespace: callNamespace,
-				},
-			),
-		)
+		events = append(events, s.toolCallClosure(pending)...)
 	}
 
 	// Close open message items: content parts done, then output_item.done.
@@ -1464,27 +1536,29 @@ func (s *chatResponsesStreamState) finalOutputItems() []ResponsesOutputItem {
 	for i := range s.items {
 		ordered = append(ordered, indexed{index: s.items[i].outputIndex, item: s.items[i].item})
 	}
-	for _, pending := range s.pendingCalls {
-		if !pending.started {
-			continue
+	for _, group := range [][]*pendingToolCall{s.pendingSlice(), s.closedCalls} {
+		for _, pending := range group {
+			if !pending.started {
+				continue
+			}
+			arguments := pending.complete.String()
+			if arguments == "" {
+				arguments = "{}"
+			}
+			callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
+			ordered = append(ordered, indexed{
+				index: pending.outputIndex,
+				item: &ResponsesFunctionCallOutputItem{
+					ID:        pending.itemID,
+					Type:      "function_call",
+					Status:    ResponsesItemCompleted,
+					CallID:    pending.callID,
+					Name:      callName,
+					Arguments: arguments,
+					Namespace: callNamespace,
+				},
+			})
 		}
-		arguments := pending.complete.String()
-		if arguments == "" {
-			arguments = "{}"
-		}
-		callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
-		ordered = append(ordered, indexed{
-			index: pending.outputIndex,
-			item: &ResponsesFunctionCallOutputItem{
-				ID:        pending.itemID,
-				Type:      "function_call",
-				Status:    ResponsesItemCompleted,
-				CallID:    pending.callID,
-				Name:      callName,
-				Arguments: arguments,
-				Namespace: callNamespace,
-			},
-		})
 	}
 	for i := 1; i < len(ordered); i++ {
 		for j := i; j > 0 && ordered[j].index < ordered[j-1].index; j-- {

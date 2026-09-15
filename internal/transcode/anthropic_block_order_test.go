@@ -204,18 +204,90 @@ func TestStreamContentAfterToolCallStillCompletes(t *testing.T) {
 	if len(events) == 0 {
 		t.Fatalf("no block events: %s", out)
 	}
-	// This row owns the text-to-tool transition: the first content block must
-	// be sealed before the tool block opens. Later transitions (a tool block
-	// still open when content resumes) are a separate, pre-existing gap in the
-	// same invariant and are tracked on their own row; the lifecycle here must
-	// merely keep completing, which the no-error-event check above proves.
-	textStart := eventPosition(events, "content_block_start", 0)
-	textStop := eventPosition(events, "content_block_stop", 0)
-	toolStart := eventPosition(events, "content_block_start", 1)
-	if textStart < 0 || textStop < 0 || toolStart < 0 || !(textStart < textStop && textStop < toolStart) {
-		t.Fatalf("the text block must close before the tool block opens: %+v", events)
+	// Every block must close before the next one opens, on every transition of
+	// this exchange: text, tool, then the resumed text.
+	open := 0
+	for _, event := range events {
+		switch event.Type {
+		case "content_block_start":
+			if open != 0 {
+				t.Fatalf("a block started while another was open: %+v", events)
+			}
+			open = event.Index + 1
+		case "content_block_stop":
+			if open == 0 {
+				t.Fatalf("a block stopped while none was open: %+v", events)
+			}
+			open = 0
+		}
+	}
+	if open != 0 {
+		t.Fatalf("a block was left open at the end: %+v", events)
+	}
+	if len(events) != 6 {
+		t.Fatalf("want three sealed blocks (text, tool, resumed text): %+v", events)
 	}
 	if !strings.Contains(out, "after") {
 		t.Fatalf("the content emitted after the tool call is missing: %s", out)
+	}
+}
+
+// TestChatStateSealsMessageBeforeThinking proves the producer closes an open
+// message item before it opens a reasoning item: a thinking block must not
+// start while the text block is still open.
+func TestChatStateSealsMessageBeforeThinking(t *testing.T) {
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		LossPolicy{},
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"resp_1",
+		"m",
+		1,
+		nil,
+	)
+	first, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new("spoken")}, nil))
+	if err != nil {
+		t.Fatalf("content convert: %v", err)
+	}
+	second, err := state.Convert(chatChunk(t, ChatStreamDelta{ReasoningContent: new("thought")}, nil))
+	if err != nil {
+		t.Fatalf("reasoning convert: %v", err)
+	}
+
+	var names []string
+	for _, event := range append(append([]ResponsesSSEEvent{}, first...), second...) {
+		switch event.(type) {
+		case ResponseContentPartDoneEvent:
+			names = append(names, "content_part.done")
+		case ResponseOutputItemDoneEvent:
+			names = append(names, "output_item.done")
+		case ResponseOutputItemAddedEvent:
+			names = append(names, "output_item.added")
+		}
+	}
+	// The second batch must open the reasoning item only after the message
+	// item has been fully closed.
+	indexOf := func(name string) int {
+		for i, seen := range names {
+			if seen == name {
+				return i
+			}
+		}
+		return -1
+	}
+	var addedAt []int
+	for i, seen := range names {
+		if seen == "output_item.added" {
+			addedAt = append(addedAt, i)
+		}
+	}
+	if len(addedAt) != 2 || indexOf("content_part.done") < 0 || indexOf("output_item.done") < 0 {
+		t.Fatalf("unexpected event sequence: %v", names)
+	}
+	// The message opens first; the thinking item must open only after the
+	// message's part and item are both done.
+	partDone, itemDone, thinkingAdded := indexOf("content_part.done"), indexOf("output_item.done"), addedAt[1]
+	if !(addedAt[0] < partDone && partDone < itemDone && itemDone < thinkingAdded) {
+		t.Fatalf("the message must be sealed before the thinking item opens: %v", names)
 	}
 }
