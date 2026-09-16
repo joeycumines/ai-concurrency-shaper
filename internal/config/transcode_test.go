@@ -477,6 +477,32 @@ func TestParseChatCapabilities(t *testing.T) {
 	if _, ok := negated["system_anywhere"]; !ok {
 		t.Fatalf("negated = %v, want system_anywhere", negated)
 	}
+
+	// tool_result_images is an independent granular capability: it enables
+	// multipart image parts inside chat tool messages.
+	cap, negated, err = parseChatCapabilities([]string{"tool_result_images"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cap.ToolResultImages {
+		t.Fatalf("capabilities = %+v, want ToolResultImages", cap)
+	}
+	if cap.ImageInput {
+		t.Fatalf("capabilities = %+v, tool_result_images must not imply image_input", cap)
+	}
+	if len(negated) != 0 {
+		t.Fatalf("negated = %v, want none", negated)
+	}
+	cap, negated, err = parseChatCapabilities([]string{"!tool_result_images"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap.ToolResultImages {
+		t.Fatalf("capabilities = %+v, want ToolResultImages unset", cap)
+	}
+	if _, ok := negated["tool_result_images"]; !ok {
+		t.Fatalf("negated = %v, want tool_result_images", negated)
+	}
 }
 
 // TestParseClientQuery verifies the -transcode-allow-client-query parsing.

@@ -340,7 +340,7 @@ func canonicalUserTurnToChatMessages(
 			}
 			// Tool messages use the dedicated tool-result renderer — never
 			// the user-message renderer.
-			toolMessage, err := renderChatToolResult(value, policy, report)
+			toolMessage, err := renderChatToolResult(value, capabilities, policy, report)
 			if err != nil {
 				return nil, err
 			}
@@ -549,13 +549,18 @@ type toolResultEnvelope struct {
 // tool-role message — the dedicated tool-result renderer, never the
 // user-message renderer. Exact text results stay exact
 // text. Image, document, or mixed results are rejected under strict policy
-// (UnrepresentableError — local, never corrupt wire) and, under the
-// tool_result_multimodal_content and tool_result_json_envelope permissions,
-// encoded as ONE deterministic JSON text envelope (transcode_version 1) that
-// is recorded in the conversion report. Invalid wire (image_url blocks
-// inside a tool-role message) is never emitted.
+// (UnrepresentableError — local, never corrupt wire) unless the
+// ToolResultImages capability is enabled, in which case they render as
+// multipart content blocks (text and image_url parts, order preserved) so a
+// vision model can see the image. Without that capability they fall back to
+// the observable encoding: the deterministic JSON text envelope
+// (transcode_version 1), gated by the tool_result_multimodal_content and
+// tool_result_json_envelope permissions and recorded in the conversion
+// report. Invalid wire (image_url blocks inside a tool-role message for a
+// target that cannot carry them) is never emitted.
 func renderChatToolResult(
 	result CanonicalFunctionResult,
+	capabilities ChatCapabilities,
 	policy LossPolicy,
 	report *ConversionReport,
 ) (ChatMessage, error) {
@@ -616,6 +621,21 @@ func renderChatToolResult(
 		}, nil
 	}
 
+	// The upstream accepts image parts inside a tool message: render the
+	// multimodal content as multipart blocks (text and image_url, order
+	// preserved). This is a truthful lossless encoding of the client's
+	// content, so it is preferred whenever the capability is on; only the
+	// image parts require the ImageInput rendering vocabulary.
+	if capabilities.ToolResultImages {
+		toolMessage, ok, err := renderChatToolResultMultipart(result, parts, capabilities, report)
+		if err != nil {
+			return ChatMessage{}, err
+		}
+		if ok {
+			return toolMessage, nil
+		}
+	}
+
 	// Multimodal content: the content-shape loss and the sanctioned
 	// encoding loss gate the deterministic JSON text envelope.
 	if err := report.Lose(
@@ -652,6 +672,71 @@ func renderChatToolResult(
 		Content:         &ChatMessageContent{ContentStr: &envelopeText},
 		ChatToolMessage: &ChatToolMessage{ToolCallID: &callID},
 	}, nil
+}
+
+// renderChatToolResultMultipart renders multimodal tool-result content as
+// multipart Chat tool-message content blocks: text parts as text blocks and
+// image parts as image_url blocks (data URLs), order preserved. It reports
+// ok=false when a part cannot be carried as multipart content (a document,
+// or an image whose media type is outside the Chat vocabulary), leaving the
+// caller to take its loss/reject decision. Image parts require the
+// ImageInput rendering vocabulary in addition to ToolResultImages.
+func renderChatToolResultMultipart(
+	result CanonicalFunctionResult,
+	parts []CanonicalPart,
+	capabilities ChatCapabilities,
+	report *ConversionReport,
+) (ChatMessage, bool, error) {
+	if !capabilities.ImageInput {
+		return ChatMessage{}, false, nil
+	}
+	var blocks []ChatContentBlock
+	for _, part := range parts {
+		switch value := part.(type) {
+		case CanonicalText:
+			text := value.Text
+			blocks = append(blocks, ChatContentBlock{
+				Type: ChatContentBlockTypeText,
+				Text: &text,
+			})
+
+		case CanonicalImage:
+			url := value.URL
+			if url == "" {
+				var err error
+				url, err = imageDataURL(value.MediaType, value.Base64)
+				if err != nil {
+					return ChatMessage{}, false, nil
+				}
+			}
+			detail := value.Detail
+			if detail == "" {
+				detail = "auto"
+			}
+			blocks = append(blocks, ChatContentBlock{
+				Type: ChatContentBlockTypeImage,
+				ImageURL: &ChatInputImage{
+					URL:    url,
+					Detail: &detail,
+				},
+			})
+
+		default:
+			// A document (or any other part) is not carried by the
+			// multipart tool-message form: fall back to the JSON envelope,
+			// which can represent every part shape.
+			return ChatMessage{}, false, nil
+		}
+	}
+	if len(blocks) == 0 {
+		return ChatMessage{}, false, nil
+	}
+	callID := result.CallID
+	return ChatMessage{
+		Role:            ChatMessageRoleTool,
+		Content:         &ChatMessageContent{ContentBlocks: blocks},
+		ChatToolMessage: &ChatToolMessage{ToolCallID: &callID},
+	}, true, nil
 }
 
 // allTextParts reports whether every part is ordinary text.

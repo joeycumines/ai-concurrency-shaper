@@ -146,6 +146,17 @@ type ChatCapabilities struct {
 	// under the mid_conversation_system loss policy (open-weights
 	// chat templates reject any system message after index 0).
 	SystemAnywhere bool
+
+	// ToolResultImages renders multimodal tool-result content as MULTIPART
+	// chat tool-message content blocks (text and image_url parts, order
+	// preserved) for upstreams that accept image parts inside a tool
+	// message. When unset — the default — the multimodal content is
+	// encoded as the deterministic tool_result_json_envelope text
+	// (tool_result_multimodal_content + tool_result_json_envelope losses),
+	// which makes a vision model blind to the image. This capability is
+	// independent of ImageInput: an upstream can accept user images while
+	// rejecting image parts in tool messages.
+	ToolResultImages bool
 }
 
 // Mapping declares one transcoded route: a POST client route in one client

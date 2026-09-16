@@ -284,6 +284,7 @@ var chatCapabilityNames = []struct {
 }{
 	{"developer_role", func(c *transcode.ChatCapabilities) *bool { return &c.DeveloperRole }},
 	{"image_input", func(c *transcode.ChatCapabilities) *bool { return &c.ImageInput }},
+	{"tool_result_images", func(c *transcode.ChatCapabilities) *bool { return &c.ToolResultImages }},
 	{"structured_outputs", func(c *transcode.ChatCapabilities) *bool { return &c.StructuredOutputs }},
 	{"parallel_tool_calls", func(c *transcode.ChatCapabilities) *bool { return &c.ParallelToolCalls }},
 	{"stop_sequences", func(c *transcode.ChatCapabilities) *bool { return &c.StopSequences }},
@@ -485,6 +486,7 @@ func mergedChatCapabilities(
 	fields := map[string]*bool{
 		"developer_role":              &out.DeveloperRole,
 		"image_input":                 &out.ImageInput,
+		"tool_result_images":          &out.ToolResultImages,
 		"structured_outputs":          &out.StructuredOutputs,
 		"parallel_tool_calls":         &out.ParallelToolCalls,
 		"stop_sequences":              &out.StopSequences,
@@ -496,6 +498,7 @@ func mergedChatCapabilities(
 	cli := map[string]bool{
 		"developer_role":              capabilities.DeveloperRole,
 		"image_input":                 capabilities.ImageInput,
+		"tool_result_images":          capabilities.ToolResultImages,
 		"structured_outputs":          capabilities.StructuredOutputs,
 		"parallel_tool_calls":         capabilities.ParallelToolCalls,
 		"stop_sequences":              capabilities.StopSequences,
