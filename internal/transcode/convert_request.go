@@ -1971,7 +1971,12 @@ func RenderChatRequest(
 	for _, turn := range request.Turns {
 		switch turn.Role {
 		case CanonicalSystem:
-			message, err := canonicalTextTurnToChatMessage(turn, ChatMessageRoleSystem)
+			message, err := canonicalTextTurnToChatMessage(
+				turn,
+				ChatMessageRoleSystem,
+				context.lossPolicy(),
+				&report,
+			)
 			if err != nil {
 				return nil, report, err
 			}
@@ -1985,7 +1990,12 @@ func RenderChatRequest(
 				role = ChatMessageRoleSystem
 				channel = true
 			}
-			message, err := canonicalTextTurnToChatMessage(turn, role)
+			message, err := canonicalTextTurnToChatMessage(
+				turn,
+				role,
+				context.lossPolicy(),
+				&report,
+			)
 			if err != nil {
 				return nil, report, err
 			}
@@ -2337,7 +2347,11 @@ func loseInputPhase(
 }
 
 // loseSystemPart applies the loss/reject decision for a system prompt part
-// that cannot be expressed in the string-only create-request instructions
+// that cannot be expressed in the string-only create-request instructions.
+// An image or document follows the system_non_text_content loss decision
+// (approved drop, else typed rejection); any other non-text part is a stable
+// typed rejection — never a leaked Go type name, matching the chat-side
+// decision.
 func loseSystemPart(
 	policy LossPolicy,
 	report *ConversionReport,
@@ -2346,10 +2360,11 @@ func loseSystemPart(
 	switch part.(type) {
 	case CanonicalImage, CanonicalDocument:
 	default:
-		return fmt.Errorf(
-			"system prompt part %T cannot be expressed in the create-request instructions string",
-			part,
-		)
+		return &UnsupportedFeatureError{
+			Protocol: "responses",
+			Path:     "instructions",
+			Feature:  "instructions",
+		}
 	}
 	return report.Lose(
 		policy,

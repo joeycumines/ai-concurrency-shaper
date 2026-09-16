@@ -253,13 +253,22 @@ func canonicalToolChoiceToChat(
 }
 
 // canonicalTextTurnToChatMessage renders a system or developer turn into a
-// Chat message with the given role. Only text content is portable to a Chat
-// system/developer message.
+// Chat message with the given role. Text is portable; a non-text part (an
+// image or document) follows the same loss/reject decision the Responses
+// target applies under system_non_text_content — it is either dropped
+// observably (the part cannot be expressed as a system message and the
+// upstream was told to accept the loss) or rejected with a stable,
+// client-dialect feature name (never a leaked Go type). A drop never
+// silently empties the turn: an all-non-text system turn becomes an empty
+// text block so the message shape stays valid.
 func canonicalTextTurnToChatMessage(
 	turn CanonicalTurn,
 	role ChatMessageRole,
+	policy LossPolicy,
+	report *ConversionReport,
 ) (ChatMessage, error) {
 	var blocks []ChatContentBlock
+	dropped := 0
 	for _, part := range turn.Parts {
 		switch value := part.(type) {
 		case CanonicalText:
@@ -268,18 +277,41 @@ func canonicalTextTurnToChatMessage(
 				Type: ChatContentBlockTypeText,
 				Text: &text,
 			})
+		case CanonicalImage, CanonicalDocument:
+			if err := report.Lose(
+				policy,
+				FeatureSystemNonTextContent,
+				"messages[].content",
+				"non-text system content cannot be carried by a chat system message",
+			); err != nil {
+				return ChatMessage{}, err
+			}
+			dropped++
 		default:
+			// Any other non-text part is not a shape the loss key covers: a
+			// stable feature name keeps the client-dialect error free of
+			// internal type names.
 			return ChatMessage{}, &UnsupportedFeatureError{
 				Protocol: "chat",
 				Path:     "messages[].content",
-				Feature:  fmt.Sprintf("non-text %T in %s message", part, role),
+				Feature:  "messages[].content",
 			}
 		}
 	}
 	// A system/developer turn is text-only; omit content when there are no
 	// parts rather than emitting an invalid empty union.
 	if len(blocks) == 0 {
-		return ChatMessage{}, errors.New("empty system or developer turn")
+		if dropped > 0 {
+			// Every part was dropped under an approved loss: emit an empty
+			// text block so the system message stays a valid content union.
+			empty := ""
+			blocks = append(blocks, ChatContentBlock{
+				Type: ChatContentBlockTypeText,
+				Text: &empty,
+			})
+		} else {
+			return ChatMessage{}, errors.New("empty system or developer turn")
+		}
 	}
 	return ChatMessage{Role: role, Content: &ChatMessageContent{ContentBlocks: blocks}}, nil
 }
