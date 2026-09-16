@@ -206,18 +206,22 @@ func TestParseModelTableEntry_BadContext(t *testing.T) {
 	}
 }
 
-// TestParseModelTableEntry_BadEfforts rejects values outside the closed,
-// case-sensitive effort vocabulary.
-func TestParseModelTableEntry_BadEfforts(t *testing.T) {
-	assertModelTableParseError(t, "s@p=w;efforts=xhigh",
-		`invalid -model-table "s@p=w;efforts=xhigh": unknown effort "xhigh" (want minimal, low, medium, high)`)
-	assertModelTableParseError(t, "s@p=w;efforts=Low",
-		`invalid -model-table "s@p=w;efforts=Low": unknown effort "Low" (want minimal, low, medium, high)`)
-}
+// TestParseModelTableEntry_EffortsVocabulary pins the closed effort
+// vocabulary: xhigh and max are accepted (real Responses clients dispatch
+// them), while values outside the set or in the wrong case are rejected.
+func TestParseModelTableEntry_EffortsVocabulary(t *testing.T) {
+	entry, err := parseModelTableEntry("s@p=w;efforts=minimal+low+medium+high+xhigh+max")
+	if err != nil {
+		t.Fatalf("parseModelTableEntry returned error: %v", err)
+	}
+	if want := []string{"minimal", "low", "medium", "high", "xhigh", "max"}; !reflect.DeepEqual(entry.Efforts, want) {
+		t.Fatalf("Efforts = %v, want %v", entry.Efforts, want)
+	}
 
-// TestParseModelTableEntry_BadModalities rejects values outside the closed
-// modality vocabulary.
-func TestParseModelTableEntry_BadModalities(t *testing.T) {
+	assertModelTableParseError(t, "s@p=w;efforts=ultra",
+		`invalid -model-table "s@p=w;efforts=ultra": unknown effort "ultra" (want minimal, low, medium, high, xhigh, max)`)
+	assertModelTableParseError(t, "s@p=w;efforts=Low",
+		`invalid -model-table "s@p=w;efforts=Low": unknown effort "Low" (want minimal, low, medium, high, xhigh, max)`)
 	assertModelTableParseError(t, "s@p=w;modalities=video",
 		`invalid -model-table "s@p=w;modalities=video": unknown modality "video" (want text, image, audio)`)
 }

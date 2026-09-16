@@ -161,23 +161,6 @@ func parseModelTableEntry(raw string) (modelTableEntry, error) {
 	return entry, nil
 }
 
-// modelTableEfforts is the closed reasoning-effort vocabulary the shaper can
-// honestly advertise.
-var modelTableEfforts = map[string]struct{}{
-	"minimal": {},
-	"low":     {},
-	"medium":  {},
-	"high":    {},
-}
-
-// modelTableModalities is the closed input-modality vocabulary: the three
-// modalities the served client shapes can carry.
-var modelTableModalities = map[string]struct{}{
-	"text":  {},
-	"image": {},
-	"audio": {},
-}
-
 // parseModelTableList parses a '+' joined list fact value against its closed
 // vocabulary.
 func parseModelTableList(raw, key, value string) ([]string, error) {
@@ -185,12 +168,12 @@ func parseModelTableList(raw, key, value string) ([]string, error) {
 	for _, item := range values {
 		switch key {
 		case "efforts":
-			if _, ok := modelTableEfforts[item]; !ok {
-				return nil, fmt.Errorf("invalid -model-table %q: unknown effort %q (want minimal, low, medium, high)", raw, item)
+			if !transcode.ValidModelEffort(item) {
+				return nil, fmt.Errorf("invalid -model-table %q: unknown effort %q (want %s)", raw, item, strings.Join(transcode.ModelEfforts, ", "))
 			}
 		case "modalities":
-			if _, ok := modelTableModalities[item]; !ok {
-				return nil, fmt.Errorf("invalid -model-table %q: unknown modality %q (want text, image, audio)", raw, item)
+			if !transcode.ValidModelModality(item) {
+				return nil, fmt.Errorf("invalid -model-table %q: unknown modality %q (want %s)", raw, item, strings.Join(transcode.ModelModalities, ", "))
 			}
 		}
 	}

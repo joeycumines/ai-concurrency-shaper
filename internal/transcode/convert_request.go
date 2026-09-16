@@ -1829,11 +1829,12 @@ func RenderResponsesRequest(
 }
 
 // thinkingBudgetToEffort maps an Anthropic Messages thinking budget_tokens
-// value to the OpenAI chat reasoning_effort vocabulary. The thresholds are
-// the documented midpoints of the classic Claude Code effort budgets
+// value to the reasoning_effort vocabulary. The thresholds are the
+// documented midpoints of the classic Claude Code effort budgets
 // (minimal ~ 256, low ~ 1024, medium ~ 4096, high ~ 16384); the mapping is
-// deterministic, capped at "high" (the non-standard "xhigh" is never
-// synthesized), and reported as a named Note on every mapped exchange.
+// deterministic, capped at "high" (the canonical vocabulary includes xhigh
+// and max, but no documented budget maps above high, so the projection never
+// synthesizes one), and reported as a named Note on every mapped exchange.
 func thinkingBudgetToEffort(budget int) string {
 	switch {
 	case budget < 1024:

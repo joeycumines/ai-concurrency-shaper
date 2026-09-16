@@ -366,7 +366,8 @@ type codexCatalogEntry struct {
 }
 
 // codexEffortDescriptions maps the canonical effort vocabulary to the
-// description strings real Codex catalogs carry.
+// description strings real Codex catalogs carry. A level without an entry
+// serves an empty description: a truthful blank beats a fabricated one.
 var codexEffortDescriptions = map[string]string{
 	"minimal": "Fast",
 	"low":     "Fast",
@@ -495,10 +496,10 @@ type anthropicCatalogEntry struct {
 	Capabilities   *anthropicCapabilities `json:"capabilities"`
 }
 
-// anthropicEffortLeaves are the effort names the Anthropic capabilities object
-// models as leaves. The canonical vocabulary covers low/medium/high; max and
-// xhigh are emitted false so a client that reads them sees an honest negative
-// rather than a missing key.
+// anthropicEffortLeaves are the effort names the Anthropic capabilities
+// object models as leaves: every canonical effort except minimal, which the
+// Anthropic contract has no slot for. A leaf is true only when the model's
+// table entry advertises it; otherwise it is the honest negative.
 var anthropicEffortLeaves = []string{"low", "medium", "high", "max", "xhigh"}
 
 func (h *CatalogHandler) anthropicDocument(query map[string][]string) (anthropicCatalogDocument, error) {
@@ -673,33 +674,47 @@ func validCatalogModel(model CatalogModel) bool {
 		return false
 	}
 	for _, effort := range model.Efforts {
-		if _, ok := catalogEffortSet[effort]; !ok {
+		if !ValidModelEffort(effort) {
 			return false
 		}
 	}
 	for _, modality := range model.Modalities {
-		if _, ok := catalogModalitySet[modality]; !ok {
+		if !ValidModelModality(modality) {
 			return false
 		}
 	}
 	return true
 }
 
-// catalogEffortSet and catalogModalitySet mirror the canonical fact
-// vocabularies for the render-time re-check.
+// ModelEfforts is the closed reasoning-effort vocabulary the shaper can
+// honestly advertise: the canonical four efforts plus xhigh and max, which
+// real Responses clients advertise in their own model catalogs and dispatch
+// on the wire. The -model-table grammar and the catalog render-time re-check
+// both consume this single definition, so they cannot contradict each other.
+var ModelEfforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
+
+// ModelModalities is the closed input-modality vocabulary: the three
+// modalities the served client shapes can carry.
+var ModelModalities = []string{"text", "image", "audio"}
+
 var (
-	catalogEffortSet = map[string]struct{}{
-		"minimal": {},
-		"low":     {},
-		"medium":  {},
-		"high":    {},
-	}
-	catalogModalitySet = map[string]struct{}{
-		"text":  {},
-		"image": {},
-		"audio": {},
-	}
+	modelEffortSet   = buildVocabularySet(ModelEfforts)
+	modelModalitySet = buildVocabularySet(ModelModalities)
 )
+
+func buildVocabularySet(values []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(values))
+	for _, v := range values {
+		set[v] = struct{}{}
+	}
+	return set
+}
+
+// ValidModelEffort reports whether s is in the closed effort vocabulary.
+func ValidModelEffort(s string) bool { _, ok := modelEffortSet[s]; return ok }
+
+// ValidModelModality reports whether s is in the closed modality vocabulary.
+func ValidModelModality(s string) bool { _, ok := modelModalitySet[s]; return ok }
 
 // queryValue returns the first value of a query key and whether the key was
 // present at all: an explicitly empty value is malformed input, not an absent

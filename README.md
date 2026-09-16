@@ -379,7 +379,8 @@ surrogate@provider=wire[;facts]
   verbatim; 1–256 characters), forwarded upstream and never leaked into a
   client response.
 - Optional `;`-separated facts — `context=<positive int>`,
-  `max_output=<positive int>`, `efforts=minimal+low+medium+high`,
+  `max_output=<positive int>`,
+  `efforts=minimal+low+medium+high+xhigh+max`,
   `modalities=text+image+audio`, `default`, `deprecated` — are validated at
   startup and served by the [model catalog](#model-catalog-get-v1models).
   They are presentation-only: no fact affects conversion, resolution, or

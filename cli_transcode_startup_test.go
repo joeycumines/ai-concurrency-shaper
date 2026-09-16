@@ -284,7 +284,7 @@ func TestCLIRejectsModelTableConflicts(t *testing.T) {
 			args: []string{
 				"-bind", "127.0.0.1:1",
 				"-upstream", "https://api.openai.com",
-				"-model-table", "s@openai=w;efforts=xhigh",
+				"-model-table", "s@openai=w;efforts=ultra",
 			},
 			wantErr: "unknown effort",
 		},
