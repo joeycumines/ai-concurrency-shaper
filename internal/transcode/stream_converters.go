@@ -168,6 +168,10 @@ type chatResponsesStreamState struct {
 	// usageClampNotes gates the usage-clamp notes (usage_cache_exceeds_input,
 	// usage_negative_counts) to once per stream per key.
 	usageClampNotes usageClampNotes
+
+	// usageTotalDerivedNoted gates the usage_total_derived note to once per
+	// stream: the decoder derived a missing total from the two present ones.
+	usageTotalDerivedNoted bool
 }
 
 // wireError marks a conversion error as corrupt upstream Chat wire data: the
@@ -331,6 +335,74 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 	return nil
 }
 
+// chatUsageKeyIsNull reports whether the named key inside the `usage` object
+// of a raw chat chunk is present and explicitly null. Absent keys, absent
+// usage, non-object usage, and invalid JSON report false (the pointer totals
+// decide those cases).
+func chatUsageKeyIsNull(chunkData json.RawMessage, key string) bool {
+	if len(chunkData) == 0 {
+		return false
+	}
+	var outer struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(chunkData, &outer); err != nil {
+		return false
+	}
+	if len(outer.Usage) == 0 {
+		return false
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(outer.Usage, &probe); err != nil {
+		return false
+	}
+	value, ok := probe[key]
+	if !ok {
+		return false
+	}
+	return string(bytes.TrimSpace(value)) == "null"
+}
+
+// checkedAdd returns a+b and whether the result fits. Token counts are
+// bounded in practice, but a hostile sum must never wrap into a wrong value.
+func checkedAdd(a, b int) (int, bool) {
+	sum := a + b
+	if (b > 0 && sum < a) || (b < 0 && sum > a) {
+		return 0, false
+	}
+	return sum, true
+}
+
+// checkedSub returns a-b and whether the result is non-negative and fits.
+func checkedSub(a, b int) (int, bool) {
+	if b > 0 && a < b {
+		return 0, false
+	}
+	if b < 0 && a > a-b {
+		return 0, false
+	}
+	return a - b, true
+}
+
+// noteDerivedUsageTotal records the usage_total_derived note exactly once per
+// stream when the decoder derived a missing total from the two present ones.
+// It is called from every usage-absorbing path (pre-finish and post-finish) so
+// the derivation stays observable wherever the accounting arrives.
+func (s *chatResponsesStreamState) noteDerivedUsageTotal(chunk ChatStreamResponse) error {
+	if chunk.DerivedUsageTotal == "" || s.usageTotalDerivedNoted {
+		return nil
+	}
+	s.usageTotalDerivedNoted = true
+	return s.report.Note(
+		FeatureUsageTotalDerived,
+		"usage",
+		fmt.Sprintf(
+			"the upstream usage omitted %s; it was derived from the other two totals (never defaulted to zero)",
+			chunk.DerivedUsageTotal,
+		),
+	)
+}
+
 // isRepeatedTerminalChunk reports whether chunk re-emits the recorded
 // terminal: exactly one index-0 choice carrying the same finish reason with
 // an insubstantial delta. Role-only deltas and empty-string content,
@@ -402,6 +474,9 @@ func (s *chatResponsesStreamState) absorbPhase2Accounting(chunk ChatStreamRespon
 	}
 	if chunk.Usage == nil {
 		return nil
+	}
+	if err := s.noteDerivedUsageTotal(chunk); err != nil {
+		return err
 	}
 	if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
 		return err
@@ -500,6 +575,9 @@ func (s *chatResponsesStreamState) Convert(
 	}
 
 	if chunk.Usage != nil {
+		if err := s.noteDerivedUsageTotal(chunk); err != nil {
+			return nil, err
+		}
 		if err := s.loseUnknownUsageComponentsOnce(chunk.Usage); err != nil {
 			return nil, err
 		}
@@ -1836,6 +1914,10 @@ type chatStreamChunkShadow struct {
 	Choices           []chatStreamChoiceShadow `json:"choices"`
 	Usage             *chatUsageShadow         `json:"usage,omitempty"`
 
+	// derivedTotal names the usage total this decoder derived from the other
+	// two (absent on the wire); it is recorded per exchange, never forwarded.
+	derivedTotal string
+
 	// Opaque provider-extension fields present on real chat streams (e.g.
 	// the yolo gateway's prompt_token_ids/prompt_text): decoded so strict
 	// wire decoding never fails on a current provider; never forwarded.
@@ -2087,28 +2169,70 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			}
 		}
 	}
-	// The pinned CompletionUsage requires all three totals: an omitted total
-	// must never become a factual zero. The breakdown
-	// components remain optional and enter the loss/reject decision.
-	if shadow.Usage != nil &&
-		(shadow.Usage.PromptTokens == nil ||
-			shadow.Usage.CompletionTokens == nil ||
-			shadow.Usage.TotalTokens == nil) {
-		return ChatStreamResponse{}, upstreamWireError(
-			UpstreamChatCompletions,
-			http.StatusOK,
-			errors.New(
-				"chat stream chunk usage must carry prompt_tokens, completion_tokens, and total_tokens",
-			),
-		)
+	// The pinned CompletionUsage requires all three totals, but an honest
+	// upstream sometimes omits exactly one on a tail. A single ABSENT total is
+	// DERIVED when the other two are present (input + output = total, or
+	// total - the present component), never defaulted to zero; the derivation
+	// is recorded per exchange so it stays observable. An explicitly NULL
+	// total is an illegal value for a modeled scalar and rejects, never
+	// derived. Two or more absent totals cannot be derived truthfully and
+	// remain a typed upstream wire error.
+	if shadow.Usage != nil {
+		// The pointer totals conflate null with absent, so the raw wire
+		// bytes carry the null evidence: an explicit null is a malformed
+		// modeled scalar and rejects before any derivation decision.
+		for _, name := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
+			if chatUsageKeyIsNull(data, name) {
+				return ChatStreamResponse{}, upstreamWireError(
+					UpstreamChatCompletions,
+					http.StatusOK,
+					fmt.Errorf("chat stream chunk usage %s must not be null", name),
+				)
+			}
+		}
+		prompt, completion, total := shadow.Usage.PromptTokens, shadow.Usage.CompletionTokens, shadow.Usage.TotalTokens
+		switch {
+		case prompt != nil && completion != nil && total == nil:
+			derived, ok := checkedAdd(*prompt, *completion)
+			if !ok {
+				return ChatStreamResponse{}, upstreamWireError(
+					UpstreamChatCompletions,
+					http.StatusOK,
+					errors.New("chat stream chunk usage totals overflow"),
+				)
+			}
+			shadow.Usage.TotalTokens = &derived
+			shadow.derivedTotal = "total_tokens"
+		case prompt != nil && completion == nil && total != nil:
+			derived, ok := checkedSub(*total, *prompt)
+			if !ok {
+				return ChatStreamResponse{}, upstreamWireError(
+					UpstreamChatCompletions,
+					http.StatusOK,
+					errors.New("chat stream chunk usage total_tokens is smaller than prompt_tokens"),
+				)
+			}
+			shadow.Usage.CompletionTokens = &derived
+			shadow.derivedTotal = "completion_tokens"
+		case prompt == nil && completion != nil && total != nil:
+			derived, ok := checkedSub(*total, *completion)
+			if !ok {
+				return ChatStreamResponse{}, upstreamWireError(
+					UpstreamChatCompletions,
+					http.StatusOK,
+					errors.New("chat stream chunk usage total_tokens is smaller than completion_tokens"),
+				)
+			}
+			shadow.Usage.PromptTokens = &derived
+			shadow.derivedTotal = "prompt_tokens"
+		case prompt == nil || completion == nil || total == nil:
+			return ChatStreamResponse{}, upstreamWireError(
+				UpstreamChatCompletions,
+				http.StatusOK,
+				errors.New("chat stream chunk usage must carry prompt_tokens, completion_tokens, and total_tokens"),
+			)
+		}
 	}
-	// The shadow enforces every semantic violation (including the
-	// message-arm structural rejection above) before the wire decode, so a
-	// chunk carrying a message arm never reaches this point. The second pass
-	// (json.Unmarshal) re-decodes the same bytes into the wire type; it does
-	// not re-run the duplicate-key/null walk (pass 1 already did on the same
-	// bytes). Delta content is a plain string field, so no strict union
-	// decoder runs in this pass.
 	var chunk ChatStreamResponse
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return ChatStreamResponse{}, upstreamWireError(
@@ -2116,6 +2240,26 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			http.StatusOK,
 			fmt.Errorf("chat stream chunk: %w", err),
 		)
+	}
+	// Carry the derived-total marker onto the decoded chunk (the second pass
+	// re-decodes the wire bytes and cannot see a derived value): the stream
+	// state records one note per exchange when it absorbs the usage.
+	chunk.DerivedUsageTotal = shadow.derivedTotal
+	if shadow.derivedTotal != "" && shadow.Usage != nil {
+		// The wire re-decode left the derived component absent; write the
+		// derived values back so downstream sees a complete usage object.
+		if chunk.Usage == nil {
+			chunk.Usage = &ChatLLMUsage{}
+		}
+		if shadow.Usage.PromptTokens != nil {
+			chunk.Usage.PromptTokens = *shadow.Usage.PromptTokens
+		}
+		if shadow.Usage.CompletionTokens != nil {
+			chunk.Usage.CompletionTokens = *shadow.Usage.CompletionTokens
+		}
+		if shadow.Usage.TotalTokens != nil {
+			chunk.Usage.TotalTokens = *shadow.Usage.TotalTokens
+		}
 	}
 	// Map the legacy function_call fragment to the tool_calls spelling so
 	// the downstream state machine accumulates it exactly like a tool call

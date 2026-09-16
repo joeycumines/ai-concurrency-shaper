@@ -115,6 +115,23 @@ const (
 	// 293640 against a 293360 + 221 component sum on a 293K-token exchange
 	// failed the client, which retried 8 times).
 	FeatureUsageTotalMismatch Feature = "usage_total_mismatch"
+	// UsageTotalDerived covers a source usage tail that omitted exactly one
+	// of prompt/completion/total: the missing total is derived from the two
+	// present values (never defaulted to zero) and the derivation is
+	// recorded so it stays observable. Two or more missing totals cannot be
+	// derived and remain a typed upstream wire error.
+	FeatureUsageTotalDerived Feature = "usage_total_derived"
+	// ImageDetailOriginal covers the Responses-only image detail value
+	// "original": the Chat dialect defines only auto|low|high, so the value
+	// is mapped to "high" (the closest truthful semantic — the full-fidelity
+	// request) under this ungated note, never forwarded unvalidated.
+	FeatureImageDetailOriginal Feature = "image_detail_original"
+	// ImageDetailInvented covers an image rendered with a detail value the
+	// SOURCE dialect could not express (the Anthropic Messages image block
+	// has no detail field at all), where the proxy chooses the documented
+	// "auto" default: the invention is recorded as an ungated note so it is
+	// never mistaken for a client-requested value.
+	FeatureImageDetailInvented Feature = "image_detail_invented"
 	// UsageCacheReadUnknown covers a source that provided no cache-read
 	// token breakdown.
 	FeatureUsageCacheReadUnknown Feature = "usage_cache_read_unknown"
@@ -266,6 +283,9 @@ var lossRegistry = []lossEntry{
 	{FeatureMissingEventName, "the upstream Responses stream omitted the SSE event: name; the event was routed by its JSON type and the provider quirk recorded"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},
 	{FeatureUsageTotalMismatch, "the source usage totals are arithmetically inconsistent (total_tokens != input + output); the emitted values are relayed with the mismatch recorded (the note names the emitted counts and, where a clamp corrected a component, the source numbers)"},
+	{FeatureUsageTotalDerived, "the source usage omitted exactly one total; it was derived from the two present values (never defaulted to zero) and the derivation recorded"},
+	{FeatureImageDetailOriginal, "the Responses-only image detail value original has no Chat equivalent; it was mapped to high (the full-fidelity request) and the mapping recorded"},
+	{FeatureImageDetailInvented, "the source dialect has no image detail field; the proxy chose the documented auto default and recorded the invention"},
 	{FeatureReportOverflow, "the conversion report reached its entry bound; further entries are aggregated into this note (observability saturation, never an exchange failure)"},
 	{FeatureUsageCacheReadUnknown, "the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageCacheWriteUnknown, "the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced"},

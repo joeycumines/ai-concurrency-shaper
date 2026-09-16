@@ -397,6 +397,48 @@ func canonicalUserTurnToChatMessages(
 	return messages, nil
 }
 
+// chatImageDetail maps a canonical image detail to the Chat vocabulary
+// (auto|low|high). A value outside that vocabulary is only the Responses-only
+// "original", which maps to "high" (the closest truthful semantic) and is
+// recorded as an ungated note; any other unexpected value is rejected rather
+// than forwarded unvalidated. An empty value is the source dialect having no
+// detail field (an Anthropic image block), and the documented "auto" default
+// is chosen with the invention recorded as a note.
+func chatImageDetail(
+	detail string,
+	path string,
+	report *ConversionReport,
+) (string, error) {
+	switch detail {
+	case "":
+		if err := report.Note(
+			FeatureImageDetailInvented,
+			path,
+			"the source carried no image detail; the documented 'auto' default was chosen (the source dialect may have no detail field, or the client omitted the optional one)",
+		); err != nil {
+			return "", err
+		}
+		return "auto", nil
+	case "auto", "low", "high":
+		return detail, nil
+	case "original":
+		if err := report.Note(
+			FeatureImageDetailOriginal,
+			path,
+			"the Responses-only image detail 'original' has no Chat equivalent; it was mapped to 'high'",
+		); err != nil {
+			return "", err
+		}
+		return "high", nil
+	default:
+		return "", &UnsupportedFeatureError{
+			Protocol: "chat",
+			Path:     path,
+			Feature:  "image detail " + detail,
+		}
+	}
+}
+
 // canonicalContentPartsToChatUserMessage renders text and image parts into a
 // user message. Image input is rendered as image_url blocks and requires the
 // configured capability.
@@ -436,11 +478,9 @@ func canonicalContentPartsToChatUserMessage(
 					return ChatMessage{}, fmt.Errorf("content part %d: %w", i, err)
 				}
 			}
-			detail := value.Detail
-			if detail == "" {
-				// The official Chat image detail defaults to auto; an empty
-				// value is not part of the wire enum.
-				detail = "auto"
+			detail, err := chatImageDetail(value.Detail, "messages[].content", report)
+			if err != nil {
+				return ChatMessage{}, err
 			}
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeImage,
@@ -741,9 +781,9 @@ func renderChatToolResultMultipart(
 					return ChatMessage{}, false, nil
 				}
 			}
-			detail := value.Detail
-			if detail == "" {
-				detail = "auto"
+			detail, err := chatImageDetail(value.Detail, "messages[].tool_result.content", report)
+			if err != nil {
+				return ChatMessage{}, false, err
 			}
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeImage,

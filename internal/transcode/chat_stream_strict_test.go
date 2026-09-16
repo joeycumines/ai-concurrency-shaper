@@ -100,17 +100,21 @@ func TestChatStreamRejectsMissingRequiredEnvelopeFields(t *testing.T) {
 			name: "malformed json",
 			body: `{"id":"c","object":"chat.completion.chunk",`,
 		},
+		// A tail missing exactly ONE total is no longer a rejection: it is
+		// derived (see TestChatStreamDerivesSingleMissingTotal). A tail
+		// missing TWO OR MORE totals cannot be derived and stays a wire
+		// error.
 		{
-			name: "usage omits prompt tokens",
-			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"completion_tokens":5,"total_tokens":5}}`,
+			name: "usage omits prompt and completion tokens",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"total_tokens":5}}`,
 		},
 		{
-			name: "usage omits completion tokens",
-			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":5,"total_tokens":5}}`,
+			name: "usage omits prompt tokens and total",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"completion_tokens":5}}`,
 		},
 		{
-			name: "usage omits total tokens",
-			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":5}}`,
+			name: "usage omits completion tokens and total",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":5}}`,
 		},
 	}
 	for _, tt := range tests {

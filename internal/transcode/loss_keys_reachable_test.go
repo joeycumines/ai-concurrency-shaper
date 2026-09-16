@@ -993,6 +993,101 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 				return state.report, nil
 			},
 		},
+		{
+			// A usage-only tail that omits exactly one total has it DERIVED
+			// from the two present values, recorded as the ungated
+			// usage_total_derived note (so the scenario runs under the
+			// strict policy). The pinned Messages contract needs the
+			// cache-write component the wire cannot carry, so the
+			// own-permission run also approves that usage key.
+			key: FeatureUsageTotalDerived,
+			perm: []Feature{
+				FeatureUsageCacheWriteUnknown,
+				FeatureUsageCacheReadUnknown,
+				FeatureUsageReasoningUnknown,
+			},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newChatResponsesStreamState(
+					testStreamContext(),
+					policy,
+					ChatCapabilities{},
+					"resp_1",
+					"gpt-4.1",
+					1710000000,
+					nil,
+				)
+				// Phase 1: a content-bearing finish chunk.
+				finish, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(
+					`{"id":"c","object":"chat.completion.chunk","created":1,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}`,
+				)})
+				if err != nil {
+					return state.report, err
+				}
+				if _, err := state.Convert(finish); err != nil {
+					return state.report, err
+				}
+				// Phase 2: the derived usage-only tail.
+				tail, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(
+					`{"id":"c","object":"chat.completion.chunk","created":1,"model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}`,
+				)})
+				if err != nil {
+					return state.report, err
+				}
+				if _, err := state.Convert(tail); err != nil {
+					return state.report, err
+				}
+				return state.report, nil
+			},
+		},
+		{
+			// An Anthropic-sourced image carries no detail field, so the
+			// proxy chooses the documented 'auto' default; the invention is
+			// an ungated note (strict policy records it).
+			key:  FeatureImageDetailInvented,
+			perm: []Feature{FeatureImageInput},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				request := CanonicalRequest{
+					ClientModel: "m",
+					Turns: []CanonicalTurn{{
+						Role: CanonicalUser,
+						Parts: []CanonicalPart{CanonicalImage{
+							MediaType: "image/png",
+							URL:       "https://example.test/x.png",
+						}},
+					}},
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				_, report, err := RenderChatRequest(request, context, ChatCapabilities{ImageInput: true})
+				return report, err
+			},
+		},
+		{
+			// The Responses-only detail 'original' maps to 'high' on the
+			// Chat target with an ungated note.
+			key:  FeatureImageDetailOriginal,
+			perm: []Feature{FeatureImageInput},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				request := CanonicalRequest{
+					ClientModel: "m",
+					Turns: []CanonicalTurn{{
+						Role: CanonicalUser,
+						Parts: []CanonicalPart{CanonicalImage{
+							MediaType: "image/png",
+							URL:       "https://example.test/x.png",
+							Detail:    "original",
+						}},
+					}},
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				_, report, err := RenderChatRequest(request, context, ChatCapabilities{ImageInput: true})
+				return report, err
+			},
+		},
 	}
 
 	// The scenario matrix must cover every registered key exactly once.
