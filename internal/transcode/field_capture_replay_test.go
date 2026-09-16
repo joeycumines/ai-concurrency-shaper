@@ -20,6 +20,7 @@ package transcode
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -325,4 +326,42 @@ func turnSummary(turn CanonicalTurn) string {
 		}
 	}
 	return b.String()
+}
+
+// TestFieldCaptureCamelReasoningFormatDecodes replays the captured camel
+// native-Responses body whose reasoning output item carries the gateway's
+// opaque "format" routing marker (observed live 2026-09-17): the production tolerant
+// upstream decode must accept the modeled extension and never leak it to
+// the canonical bytes any client dialect renders.
+func TestFieldCaptureCamelReasoningFormatDecodes(t *testing.T) {
+	body := testcorpus.FieldCamelReasoningFormatJSON()
+	response, err := DecodeResponsesResponse(body)
+	if err != nil {
+		t.Fatalf("field capture rejected by production decode: %v", err)
+	}
+	if len(response.Items) != 2 {
+		t.Fatalf("items = %d, want 2 (reasoning + message)", len(response.Items))
+	}
+	raw, ok := response.Items[0].(*CanonicalReasoningItem)
+	if !ok {
+		t.Fatalf("item 0 = %T, want a reasoning item", response.Items[0])
+	}
+	// Key-absence, not value-absence: any format key leaks regardless of
+	// the marker spelling (or a null from a tag change). The render-side
+	// echo re-emits Raw verbatim, so pinning the canonical bytes pins the
+	// downstream wire for every client dialect.
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(raw.Raw, &rawMap); err != nil {
+		t.Fatalf("canonical reasoning bytes do not decode: %v", err)
+	}
+	if _, leaked := rawMap["format"]; leaked {
+		t.Fatalf("provider marker key leaked into canonical bytes: %s", raw.Raw)
+	}
+	// The message half still decodes: the marker did not disturb the item.
+	if _, ok := response.Items[1].(*CanonicalMessageItem); !ok {
+		t.Fatalf("item 1 = %T, want a message item", response.Items[1])
+	}
+	if got := responseSummary(response); !strings.Contains(got, "PONG") {
+		t.Fatalf("message text missing from decoded parts: %q", got)
+	}
 }

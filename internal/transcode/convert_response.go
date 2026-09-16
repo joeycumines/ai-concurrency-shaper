@@ -857,6 +857,11 @@ func DecodeResponsesResponse(
 			})
 
 		case *ResponsesReasoningOutputItem:
+			// The provider routing marker (ReasoningOutputItem.Format) is
+			// routing metadata, never model output: strip it before the
+			// item enters the canonical bytes so it cannot cross into any
+			// client dialect.
+			value.Format = nil
 			raw, err := json.Marshal(value)
 			if err != nil {
 				return CanonicalResponse{}, fmt.Errorf("output item %d: %w", i, err)
@@ -1022,6 +1027,11 @@ func RenderResponsesResponse(
 			if err := json.Unmarshal(value.Raw, &reasoning); err != nil {
 				return nil, report, fmt.Errorf("response reasoning item: %w", err)
 			}
+			// The decode path strips the provider routing marker before
+			// the canonical bytes are cut; clear it here as well so the
+			// emit site carries the guarantee locally instead of relying
+			// on the distant producer.
+			reasoning.Format = nil
 			envelope.Output = append(envelope.Output, &reasoning)
 
 		default:

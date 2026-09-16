@@ -73,6 +73,8 @@ var (
 	repeatedTerminalTailFieldSSE []byte
 	//go:embed testdata/field/data_only_responses_stream_field.sse
 	dataOnlyResponsesStreamFieldSSE []byte
+	//go:embed testdata/field/camel_reasoning_format_field.json
+	camelReasoningFormatFieldJSON []byte
 )
 
 // FieldQwenStreamSSE returns the qwen-style chat stream capture: choice-level
@@ -124,6 +126,17 @@ func FieldRepeatedTerminalTailSSE() []byte { return repeatedTerminalTailFieldSSE
 // stable placeholders; the shape (key presence, null-vs-value, frame order)
 // is byte-faithful to the capture.
 func FieldDataOnlyResponsesStreamSSE() []byte { return dataOnlyResponsesStreamFieldSSE }
+
+// FieldCamelReasoningFormatJSON returns the captured camel native-Responses
+// non-streaming body in which the reasoning output item carries the
+// gateway's opaque "format" routing marker ("azure-openai-responses-v1").
+// Sanitized: the item id and encrypted blob are replaced with stable
+// placeholders. Byte-faithful to the capture are the item keys, the marker
+// spelling, and the status values; synthesized is the message half (the
+// exhibiting exchange carried a single reasoning item with usage 8/16/24,
+// while the fixture pairs the reasoning item with a PONG message at 8/6/14
+// so the decode path is exercised end to end).
+func FieldCamelReasoningFormatJSON() []byte { return camelReasoningFormatFieldJSON }
 
 // ChatCompletionsRequestJSON returns the raw chat completions request fixture
 // bytes.

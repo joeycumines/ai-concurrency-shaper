@@ -347,6 +347,23 @@ contract is strict, so an unmodeled field would reject the request):
 Strictness is unchanged: these fields are modeled, and any other unknown field
 on the client contract still rejects.
 
+## Responses reasoning-item routing marker (modeled extension beyond the pin)
+
+A gateway serving the native Responses API may attach a `format` routing
+marker to reasoning output items (observed live 2026-09-17 on the camel
+mount: `"format":"azure-openai-responses-v1"` alongside `id`, `type`,
+`status`, `summary`, `encrypted_content`). The marker names the gateway's
+own response dialect, not model output: it is decoded into
+`ReasoningOutputItem.Format` as opaque raw JSON, stripped before the item
+enters the canonical bytes, and never forwarded into any client dialect
+(the strict output-item union would otherwise fail the exchange on it).
+Evidence: the exhibiting flow record
+`scratch/flowlogs/000010-17635-POST-v1_messages.json` (upstream model
+`openai/gpt-5.6-luna`; flow records are git-ignored scratch, so the durable
+evidence is the committed fixture
+`testcorpus/testdata/field/camel_reasoning_format_field.json`, accessor
+`FieldCamelReasoningFormatJSON` in `testcorpus.go`).
+
 ## Anthropic Messages inventory (message.go, v1.61.0)
 
 ### Message (non-stream response + message_start payload)
@@ -443,10 +460,10 @@ review the schema diff per the update procedure.
 
 ## Modeled opaque provider extensions
 
-The pins above cover the official schemas. Real chat gateways additionally
+The pins above cover the official schemas. Real gateways additionally
 emit fields outside them; the wire shadows MODEL every observed spelling so
-its presence is an observed inert extension. They live in the OpenAI Chat
-dialect only. The table below lists every spelling the wire shadows model,
+its presence is an observed inert extension. The table below lists every
+chat-dialect spelling the wire shadows model,
 each with its fate after decode, and each is pinned by a committed unit test
 (spread across
 `chat_schema_test.go`, `chat_response_strict_test.go`,
