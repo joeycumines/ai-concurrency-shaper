@@ -1374,8 +1374,10 @@ func (s *chatResponsesStreamState) finish(
 	// empty, no name — ) then output_item.done. A
 	// fragment that never received an identity (id or name) is malformed
 	// upstream data: silently dropping it would hide the corruption behind a
-	// successful completion.
-	for _, pending := range s.pendingCalls {
+	// successful completion. The slice order is fragment-index order, so the
+	// terminal is deterministic (a map walk would randomize the done events
+	// and with them the downstream adapter's deferral order).
+	for _, pending := range s.pendingSlice() {
 		if !pending.started {
 			return nil, s.wireError(errors.New(
 				"chat tool call fragment ended without an id and name",
@@ -2213,6 +2215,16 @@ type anthropicResponsesStreamState struct {
 	// tool blocks buffered until call identity is complete.
 	pendingToolStart map[string]*pendingToolBlock // keyed by item_id
 
+	// deferredTools is the FIFO of reserved tool blocks that could not start
+	// because another content block was open, in block-index order. They are
+	// drained one at a time as each open block closes, so exactly one
+	// tool_use block is open at any moment.
+	deferredTools []*pendingToolBlock
+	// bufferedToolFragments holds, per deferred item id, the argument
+	// fragments received while the block was deferred, replayed in arrival
+	// order when the block starts.
+	bufferedToolFragments map[string][]string
+
 	// closedToolCalls records every function call closed by output_item.done:
 	// the terminal envelope's function items must reconcile against it
 	//.
@@ -2303,6 +2315,16 @@ type pendingToolBlock struct {
 	name        string
 	arguments   strings.Builder
 	started     bool
+
+	// deferred is set while the reserved block waits in deferredTools because
+	// another content block was open when its identity completed.
+	deferred bool
+	// done is set when the item's done arrived while the block was deferred:
+	// its stop (and the reconciled done-suffix) is emitted by the drain.
+	done bool
+	// doneSuffix holds reconciled snapshot bytes to emit as one
+	// input_json_delta at drain, after the buffered fragments.
+	doneSuffix string
 }
 
 // anthropicAddedItem records one output item observed via output_item.added.
@@ -2329,25 +2351,26 @@ func newAnthropicResponsesStreamState(
 	createdAt float64,
 ) *anthropicResponsesStreamState {
 	return &anthropicResponsesStreamState{
-		ctx:              ctx,
-		policy:           policy,
-		capabilities:     capabilities,
-		responseID:       responseID,
-		model:            model,
-		budget:           newStreamBudget(),
-		fsm:              newResponsesStreamFSM(),
-		createdAt:        createdAt,
-		lastSequence:     -1,
-		addedItems:       make(map[string]anthropicAddedItem),
-		doneItems:        make(map[string]struct{}),
-		partsSeen:        make(map[responsePartKey]string),
-		partCounts:       make(map[string]int),
-		textBufs:         make(map[responsePartKey]*strings.Builder),
-		refusalBufs:      make(map[responsePartKey]*strings.Builder),
-		pendingToolStart: make(map[string]*pendingToolBlock),
-		closedToolCalls:  make(map[string]anthropicClosedToolCall),
-		partBlocks:       make(map[responsePartKey]int64),
-		phaseGated:       make(map[string]struct{}),
+		ctx:                   ctx,
+		policy:                policy,
+		capabilities:          capabilities,
+		responseID:            responseID,
+		model:                 model,
+		budget:                newStreamBudget(),
+		fsm:                   newResponsesStreamFSM(),
+		createdAt:             createdAt,
+		lastSequence:          -1,
+		addedItems:            make(map[string]anthropicAddedItem),
+		doneItems:             make(map[string]struct{}),
+		partsSeen:             make(map[responsePartKey]string),
+		partCounts:            make(map[string]int),
+		textBufs:              make(map[responsePartKey]*strings.Builder),
+		refusalBufs:           make(map[responsePartKey]*strings.Builder),
+		pendingToolStart:      make(map[string]*pendingToolBlock),
+		bufferedToolFragments: make(map[string][]string),
+		closedToolCalls:       make(map[string]anthropicClosedToolCall),
+		partBlocks:            make(map[responsePartKey]int64),
+		phaseGated:            make(map[string]struct{}),
 	}
 }
 
@@ -2727,20 +2750,35 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 	}
 }
 
-// maybeStartToolBlock emits the tool_use content_block_start once the call
-// identity is complete, replaying nothing (argument fragments are emitted as
-// input_json_delta by later events).
+// maybeStartToolBlock starts the tool_use block once the call identity is
+// complete — but only when no other content block is open: the Anthropic
+// dialect carries exactly one open content block, so a block whose turn has
+// not come is deferred with its argument fragments and drained when the open
+// block closes. Argument fragments received meanwhile are replayed as
+// input_json_delta by the drain (never by later events), so a started block
+// never replays anything here.
 func (s *anthropicResponsesStreamState) maybeStartToolBlock(
 	pending *pendingToolBlock,
 ) ([]AnthropicStreamEvent, error) {
 	if pending.started || pending.callID == "" || pending.name == "" {
 		return nil, nil
 	}
+	if s.anyContentBlockOpen() {
+		if err := s.deferToolBlock(pending); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
 	pending.started = true
 	s.sawToolUse = true
+	return []AnthropicStreamEvent{s.toolBlockStartEvent(pending)}, nil
+}
+
+// toolBlockStartEvent builds the content_block_start for a tool block.
+func (s *anthropicResponsesStreamState) toolBlockStartEvent(pending *pendingToolBlock) AnthropicStreamEvent {
 	callID := pending.callID
 	name := pending.name
-	return []AnthropicStreamEvent{{
+	return AnthropicStreamEvent{
 		Type:  AnthropicStreamEventTypeContentBlockStart,
 		Index: new(int(pending.blockIndex)),
 		ContentBlock: &AnthropicContentBlock{
@@ -2749,7 +2787,102 @@ func (s *anthropicResponsesStreamState) maybeStartToolBlock(
 			Name:  &name,
 			Input: json.RawMessage("{}"),
 		},
-	}}, nil
+	}
+}
+
+// anyContentBlockOpen reports whether any content block is currently open:
+// a message part (text or refusal), a thinking block, or another started tool
+// block.
+func (s *anthropicResponsesStreamState) anyContentBlockOpen() bool {
+	if len(s.partBlocks) > 0 || s.reasoningBlockIndex != nil {
+		return true
+	}
+	for _, other := range s.pendingToolStart {
+		if other.started {
+			return true
+		}
+	}
+	return false
+}
+
+// deferToolBlock queues a reserved block whose start must wait, charging the
+// queue entry against the stream budget exactly once.
+func (s *anthropicResponsesStreamState) deferToolBlock(pending *pendingToolBlock) error {
+	if pending.deferred {
+		return nil
+	}
+	if err := s.budget.addStateEntries(1); err != nil {
+		return s.wireError(err)
+	}
+	pending.deferred = true
+	s.deferredTools = append(s.deferredTools, pending)
+	return nil
+}
+
+// drainDeferredTools starts the next deferred tool block when no content block
+// is open, replaying its buffered fragments and any reconciled done-suffix as
+// input_json_delta. When the item was already done while deferred, its stop is
+// emitted here and the call is recorded as closed, exactly as the direct path
+// would have. Only one block is started per drain: it is now open, so the next
+// drain waits for its stop.
+func (s *anthropicResponsesStreamState) drainDeferredTools() ([]AnthropicStreamEvent, error) {
+	var events []AnthropicStreamEvent
+	// Cascade: a deferred block whose item already finished starts AND stops
+	// in this batch, freeing the wire for the next deferred block, so the
+	// loop continues while blocks can be drained. A block that is not yet
+	// done stays open and ends the cascade.
+	for len(s.deferredTools) > 0 && !s.anyContentBlockOpen() {
+		pending := s.deferredTools[0]
+		s.deferredTools = s.deferredTools[1:]
+		pending.deferred = false
+		pending.started = true
+		s.sawToolUse = true
+
+		events = append(events, s.toolBlockStartEvent(pending))
+		for _, fragment := range s.bufferedToolFragments[pending.itemID] {
+			partial := fragment
+			events = append(events, AnthropicStreamEvent{
+				Type:  AnthropicStreamEventTypeContentBlockDelta,
+				Index: new(int(pending.blockIndex)),
+				Delta: &AnthropicStreamDelta{
+					Type:        AnthropicStreamDeltaTypeInputJSONDelta,
+					PartialJSON: &partial,
+				},
+			})
+		}
+		delete(s.bufferedToolFragments, pending.itemID)
+		if pending.doneSuffix != "" {
+			partial := pending.doneSuffix
+			events = append(events, AnthropicStreamEvent{
+				Type:  AnthropicStreamEventTypeContentBlockDelta,
+				Index: new(int(pending.blockIndex)),
+				Delta: &AnthropicStreamDelta{
+					Type:        AnthropicStreamDeltaTypeInputJSONDelta,
+					PartialJSON: &partial,
+				},
+			})
+		}
+		if !pending.done {
+			break
+		}
+		events = append(events, AnthropicStreamEvent{
+			Type:  AnthropicStreamEventTypeContentBlockStop,
+			Index: new(int(pending.blockIndex)),
+		})
+		delete(s.pendingToolStart, pending.itemID)
+		arguments := pending.arguments.String()
+		if arguments == "" {
+			arguments = "{}"
+		}
+		s.closedToolCalls[pending.itemID] = anthropicClosedToolCall{
+			outputIndex: pending.outputIndex,
+			callID:      pending.callID,
+			name:        pending.name,
+			arguments:   arguments,
+		}
+		s.doneItems[pending.itemID] = struct{}{}
+	}
+	return events, nil
 }
 
 func (s *anthropicResponsesStreamState) outputItemDone(
@@ -2902,6 +3035,26 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		}
 		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", call.ID, err))
 	}
+	if err := validateFinalToolInput(arguments); err != nil {
+		// Anthropic tool_use.input requires an object: invalid
+		// model-generated arguments are a LOCAL unrepresentable output,
+		// never corrupt upstream wire.
+		return nil, &UnrepresentableError{
+			Protocol: "anthropic",
+			Path:     "content_block.input",
+			Detail:   fmt.Sprintf("tool block for item %q: %v", call.ID, err),
+		}
+	}
+
+	if pending.deferred && !pending.started {
+		// The block is still waiting for another open block to close: hold
+		// the reconciled bytes and the done fact; the drain emits the start,
+		// the buffered fragments, the suffix and the stop in order.
+		pending.done = true
+		pending.doneSuffix += suffix
+		return events, nil
+	}
+
 	if suffix != "" {
 		partial := suffix
 		events = append(events, AnthropicStreamEvent{
@@ -2912,16 +3065,6 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 				PartialJSON: &partial,
 			},
 		})
-	}
-	if err := validateFinalToolInput(arguments); err != nil {
-		// Anthropic tool_use.input requires an object: invalid
-		// model-generated arguments are a LOCAL unrepresentable output,
-		// never corrupt upstream wire.
-		return nil, &UnrepresentableError{
-			Protocol: "anthropic",
-			Path:     "content_block.input",
-			Detail:   fmt.Sprintf("tool block for item %q: %v", call.ID, err),
-		}
 	}
 
 	events = append(events, AnthropicStreamEvent{
@@ -2937,6 +3080,13 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		arguments:   arguments,
 	}
 	s.doneItems[call.ID] = struct{}{}
+
+	// The closed block may have freed the wire for the next deferred block.
+	drain, err := s.drainDeferredTools()
+	if err != nil {
+		return nil, err
+	}
+	events = append(events, drain...)
 
 	// The message envelope's content stays empty: content blocks arrive via
 	// content_block_start events (the official contract); message_start is
@@ -3218,10 +3368,16 @@ func (s *anthropicResponsesStreamState) contentPartDone(
 		))
 	}
 	delete(s.partBlocks, key)
-	return []AnthropicStreamEvent{{
+	events := []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockStop,
 		Index: new(int(index)),
-	}}, nil
+	}}
+	// The closed part may have freed the wire for the next deferred block.
+	drain, err := s.drainDeferredTools()
+	if err != nil {
+		return nil, err
+	}
+	return append(events, drain...), nil
 }
 
 // checkPartOutputIndex verifies an event targeting a content part carries
@@ -3275,8 +3431,16 @@ func (s *anthropicResponsesStreamState) functionArgumentsDelta(
 	// A block that never started (the added item lacked call identity, which
 	// is corrupt wire rejected at output_item.done) must not receive an
 	// input_json_delta without a content_block_start: the bytes are still
-	// accumulated so the eventual rejection is consistent.
+	// accumulated so the eventual rejection is consistent. A deferred block
+	// buffers each fragment (charged against the state-entry budget) for the
+	// drain to replay in arrival order.
 	if !pending.started {
+		if pending.deferred {
+			if err := s.budget.addStateEntries(1); err != nil {
+				return nil, s.wireError(err)
+			}
+			s.bufferedToolFragments[event.ItemID] = append(s.bufferedToolFragments[event.ItemID], event.Delta)
+		}
 		return startEvents, nil
 	}
 	partial := event.Delta
@@ -3336,6 +3500,10 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 				PartialJSON: &partial,
 			},
 		})
+	} else if pending.deferred && suffix != "" {
+		// The block has not started yet: hold the reconciled bytes for the
+		// drain, which emits them after the buffered fragments.
+		pending.doneSuffix += suffix
 	}
 	return events, nil
 }
@@ -4061,7 +4229,13 @@ func (s *anthropicResponsesStreamState) reasoningPartDone(
 		Index: new(int(*s.reasoningBlockIndex)),
 	}}
 	s.reasoningBlockIndex = nil
-	return events, nil
+	// The closed thinking block may have freed the wire for the next
+	// deferred block.
+	drain, err := s.drainDeferredTools()
+	if err != nil {
+		return nil, err
+	}
+	return append(events, drain...), nil
 }
 
 func stopReasonToAnthropic(stop CanonicalStopReason) AnthropicStopReason {

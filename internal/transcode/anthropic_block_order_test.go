@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -485,5 +486,317 @@ func TestStreamLateSealedCallIDRejectedBeforeAdoption(t *testing.T) {
 	}
 	if strings.Contains(out, `"name":"other"`) {
 		t.Fatalf("the forked call block must never open: %s", out)
+	}
+}
+
+// anthropicEvent captures one content-block event's type, block index, and
+// (for input_json_delta) its partial JSON payload.
+type anthropicEvent struct {
+	Type  string
+	Index int
+	Data  string
+}
+
+// anthropicEventsDetailed collects the content-block events of an Anthropic
+// dialect SSE body, including delta payloads.
+func anthropicEventsDetailed(t *testing.T, body string) []anthropicEvent {
+	t.Helper()
+	var events []anthropicEvent
+	scanner := bufio.NewScanner(strings.NewReader(body))
+	eventType := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if after, ok := strings.CutPrefix(line, "event: "); ok {
+			eventType = after
+			continue
+		}
+		after, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		switch eventType {
+		case "content_block_start", "content_block_stop":
+			var frame struct {
+				Index int `json:"index"`
+			}
+			if err := json.Unmarshal([]byte(after), &frame); err != nil {
+				t.Fatalf("unmarshal %s frame: %v", eventType, err)
+			}
+			events = append(events, anthropicEvent{Type: eventType, Index: frame.Index})
+		case "content_block_delta":
+			var frame struct {
+				Index int `json:"index"`
+				Delta struct {
+					Type        string `json:"type"`
+					PartialJSON string `json:"partial_json"`
+				} `json:"delta"`
+			}
+			if err := json.Unmarshal([]byte(after), &frame); err != nil {
+				t.Fatalf("unmarshal delta frame: %v", err)
+			}
+			if frame.Delta.Type == "input_json_delta" {
+				events = append(events, anthropicEvent{Type: "input_json_delta", Index: frame.Index, Data: frame.Delta.PartialJSON})
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return events
+}
+
+// toolCallInputs assembles each block's input_json_delta payloads in order.
+func toolCallInputs(events []anthropicEvent) map[int]string {
+	inputs := map[int]string{}
+	for _, event := range events {
+		if event.Type == "input_json_delta" {
+			inputs[event.Index] += event.Data
+		}
+	}
+	return inputs
+}
+
+// assertBlocksSequential proves one block opens at a time and closes before
+// the next opens, returning the ordered block indexes.
+func assertBlocksSequential(t *testing.T, out string) []int {
+	t.Helper()
+	if strings.Contains(out, "event: error") {
+		t.Fatalf("stream must complete without an error event: %s", out)
+	}
+	events := anthropicBlockEvents(t, out)
+	var order []int
+	open := -1
+	for _, event := range events {
+		switch event.Type {
+		case "content_block_start":
+			if open >= 0 {
+				t.Fatalf("block %d opened while block %d was open: %+v", event.Index, open, events)
+			}
+			open = event.Index
+			order = append(order, event.Index)
+		case "content_block_stop":
+			if open != event.Index {
+				t.Fatalf("block %d stopped while block %d was open: %+v", event.Index, open, events)
+			}
+			open = -1
+		}
+	}
+	if open >= 0 {
+		t.Fatalf("block %d was left open at the end: %+v", open, events)
+	}
+	return order
+}
+
+// TestStreamParallelToolCallsSealedInReservationOrder proves two parallel
+// calls with interleaved argument fragments render as two sequential tool_use
+// blocks, each closed before the next opens and each carrying its own complete
+// arguments.
+func TestStreamParallelToolCallsSealedInReservationOrder(t *testing.T) {
+	rec := streamChatUpstream(t, ChatCapabilities{},
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"type\":\"function\",\"function\":{\"name\":\"fa\",\"arguments\":\"{\\\"x\\\":\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"type\":\"function\",\"function\":{\"name\":\"fb\",\"arguments\":\"{\\\"y\\\":\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"2}\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
+			"data: [DONE]\n\n")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	order := assertBlocksSequential(t, out)
+	if len(order) != 2 || order[0] != 0 || order[1] != 1 {
+		t.Fatalf("blocks must be sequential in reservation order, got %v: %s", order, out)
+	}
+	inputs := toolCallInputs(anthropicEventsDetailed(t, out))
+	if inputs[0] != `{"x":1}` {
+		t.Errorf("block 0 input = %q, want {\\\"x\\\":1}", inputs[0])
+	}
+	if inputs[1] != `{"y":2}` {
+		t.Errorf("block 1 input = %q, want {\\\"y\\\":2}", inputs[1])
+	}
+	if !strings.Contains(out, "call-a") || !strings.Contains(out, "call-b") {
+		t.Errorf("both call ids must appear: %s", out)
+	}
+}
+
+// TestStreamThreeParallelToolCallsStaySequential proves three parallel calls
+// render as three sequential blocks in reservation order.
+func TestStreamThreeParallelToolCallsStaySequential(t *testing.T) {
+	rec := streamChatUpstream(t, ChatCapabilities{},
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"type\":\"function\",\"function\":{\"name\":\"fa\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"type\":\"function\",\"function\":{\"name\":\"fb\",\"arguments\":\"{\\\"b\\\":2}\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":2,\"id\":\"call-c\",\"type\":\"function\",\"function\":{\"name\":\"fc\",\"arguments\":\"{\\\"c\\\":3}\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
+			"data: [DONE]\n\n")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	order := assertBlocksSequential(t, out)
+	if len(order) != 3 || order[0] != 0 || order[1] != 1 || order[2] != 2 {
+		t.Fatalf("three calls must render sequentially in reservation order, got %v: %s", order, out)
+	}
+	inputs := toolCallInputs(anthropicEventsDetailed(t, out))
+	wants := map[int]string{0: `{"a":1}`, 1: `{"b":2}`, 2: `{"c":3}`}
+	for index, want := range wants {
+		if inputs[index] != want {
+			t.Errorf("block %d input = %q, want %q", index, inputs[index], want)
+		}
+	}
+}
+
+// TestStreamDeferredToolFragmentsReplayedInOrder proves a deferred call's
+// fragments are buffered and replayed byte-identically in arrival order.
+func TestStreamDeferredToolFragmentsReplayedInOrder(t *testing.T) {
+	rec := streamChatUpstream(t, ChatCapabilities{},
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"type\":\"function\",\"function\":{\"name\":\"fa\",\"arguments\":\"{\\\"a\\\":\"}}]}}]}\n\n"+
+			// All of B's fragments arrive while A's block is still open.
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"type\":\"function\",\"function\":{\"name\":\"fb\",\"arguments\":\"{\\\"b\\\":\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"\\\"two\\\"\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"}\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
+			"data: [DONE]\n\n")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	order := assertBlocksSequential(t, out)
+	if len(order) != 2 || order[0] != 0 || order[1] != 1 {
+		t.Fatalf("blocks = %v: %s", order, out)
+	}
+	// Block 1's deltas must preserve the arrival order of B's fragments.
+	var deltas []string
+	for _, event := range anthropicEventsDetailed(t, out) {
+		if event.Type == "input_json_delta" && event.Index == 1 {
+			deltas = append(deltas, event.Data)
+		}
+	}
+	wantDeltas := []string{`{"b":`, `"two"`, `}`}
+	if len(deltas) != len(wantDeltas) {
+		t.Fatalf("deferred deltas = %q, want %q", deltas, wantDeltas)
+	}
+	for i, want := range wantDeltas {
+		if deltas[i] != want {
+			t.Fatalf("deferred delta %d = %q, want %q (full %q)", i, deltas[i], want, deltas)
+		}
+	}
+	if joined := strings.Join(deltas, ""); joined != `{"b":"two"}` {
+		t.Fatalf("deferred input = %q", joined)
+	}
+}
+
+// TestStreamTruncatedWhileToolBlockDeferredRejected proves the terminal gate
+// still rejects a stream that ends while a tool block is deferred: an early
+// seal (or a never-started deferred block) never hides a missing terminal.
+func TestStreamTruncatedWhileToolBlockDeferredRejected(t *testing.T) {
+	rec := streamChatUpstream(t, ChatCapabilities{},
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"type\":\"function\",\"function\":{\"name\":\"fa\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"type\":\"function\",\"function\":{\"name\":\"fb\",\"arguments\":\"{\\\"b\\\":2}\"}}]}}]}\n\n")
+	// The upstream ends without a finish chunk and without [DONE].
+	out := rec.Body.String()
+	if !strings.Contains(out, "event: error") {
+		t.Fatalf("a stream ending with a deferred block must fail: %s", out)
+	}
+	if strings.Contains(out, "event: message_stop") {
+		t.Fatalf("a truncated stream must not report a successful terminal: %s", out)
+	}
+}
+
+// TestAnthropicDeferredToolCallsDrainOutOfOrder feeds the Anthropic adapter
+// three parallel function-call items whose done events arrive in reverse order
+// and proves the deferral cascades: every block opens and closes exactly once
+// in reservation order, and no deferred or pending block is left behind.
+func TestAnthropicDeferredToolCallsDrainOutOfOrder(t *testing.T) {
+	state := anthropicLifecycleState(t)
+	feedAnthropicCreated(t, state, 0)
+
+	added := func(seq, index int64, itemID, callID, name string) {
+		t.Helper()
+		if _, err := state.Convert(ResponseOutputItemAddedEvent{
+			Type: "response.output_item.added", SequenceNumber: seq,
+			OutputIndex: index,
+			Item: &ResponsesFunctionCallOutputItem{
+				ID: itemID, Type: "function_call", Status: ResponsesItemInProgress,
+				CallID: callID, Name: name, Arguments: "",
+			},
+		}); err != nil {
+			t.Fatalf("added %s: %v", itemID, err)
+		}
+	}
+	args := func(seq, index int64, itemID, delta string) {
+		t.Helper()
+		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
+			Type: "response.function_call_arguments.delta", SequenceNumber: seq,
+			ItemID: itemID, OutputIndex: index, Delta: delta,
+		}); err != nil {
+			t.Fatalf("delta %s: %v", itemID, err)
+		}
+	}
+	doneSeq := int64(6)
+	done := func(index int64, itemID, callID, name, arguments string) []AnthropicStreamEvent {
+		t.Helper()
+		// The FSM requires the call's arguments to be done before the item's
+		// done, exactly as the producer emits them.
+		doneSeq++
+		if _, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
+			Type: "response.function_call_arguments.done", SequenceNumber: doneSeq,
+			ItemID: itemID, OutputIndex: index, Arguments: arguments,
+		}); err != nil {
+			t.Fatalf("arguments done %s: %v", itemID, err)
+		}
+		doneSeq++
+		events, err := state.Convert(ResponseOutputItemDoneEvent{
+			Type: "response.output_item.done", SequenceNumber: doneSeq,
+			OutputIndex: index,
+			Item: &ResponsesFunctionCallOutputItem{
+				ID: itemID, Type: "function_call", Status: ResponsesItemCompleted,
+				CallID: callID, Name: name, Arguments: arguments,
+			},
+		})
+		if err != nil {
+			t.Fatalf("done %s: %v", itemID, err)
+		}
+		return events
+	}
+
+	added(1, 0, "fc_a", "call_a", "fa") // A starts (no block open)
+	added(2, 1, "fc_b", "call_b", "fb") // B defers behind A
+	added(3, 2, "fc_c", "call_c", "fc") // C defers behind A
+	args(4, 0, "fc_a", `{"a":1}`)
+	args(5, 1, "fc_b", `{"b":2}`)
+	args(6, 2, "fc_c", `{"c":3}`)
+	// The done events arrive in reverse order: C, B, then A.
+	done(2, "fc_c", "call_c", "fc", `{"c":3}`)
+	done(1, "fc_b", "call_b", "fb", `{"b":2}`)
+	cascade := done(0, "fc_a", "call_a", "fa", `{"a":1}`)
+
+	var starts, stops []int
+	inputs := map[int]string{}
+	for _, event := range cascade {
+		switch event.Type {
+		case AnthropicStreamEventTypeContentBlockStart:
+			starts = append(starts, *event.Index)
+		case AnthropicStreamEventTypeContentBlockStop:
+			stops = append(stops, *event.Index)
+		case AnthropicStreamEventTypeContentBlockDelta:
+			if event.Delta != nil && event.Delta.Type == AnthropicStreamDeltaTypeInputJSONDelta {
+				inputs[*event.Index] += *event.Delta.PartialJSON
+			}
+		}
+	}
+	// A's stop plus B's and C's start/stop (both already done) drain together.
+	if want := []int{1, 2}; !slices.Equal(starts, want) {
+		t.Fatalf("cascade starts = %v, want %v", starts, want)
+	}
+	if want := []int{0, 1, 2}; !slices.Equal(stops, want) {
+		t.Fatalf("cascade stops = %v, want %v", stops, want)
+	}
+	if inputs[1] != `{"b":2}` || inputs[2] != `{"c":3}` {
+		t.Fatalf("cascade inputs = %v, want buffered arguments for B and C", inputs)
+	}
+	if len(state.deferredTools) != 0 || len(state.pendingToolStart) != 0 {
+		t.Fatalf("deferred=%d pending=%d, want both empty after the cascade",
+			len(state.deferredTools), len(state.pendingToolStart))
 	}
 }
