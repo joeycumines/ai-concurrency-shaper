@@ -19,8 +19,11 @@ import ()
 
 // headerRowCount returns the number of rows the header occupies. In
 // single-provider mode (or when the switcher is elided) this is 1. In fleet
-// mode with wrapped provider chips it is 1 + the number of additional chip
-// rows. The result is capped so at least 1 content row remains.
+// mode with wrapped provider chips it is the capped length of
+// chipRowsLayout (max(height-4,1)), which includes a body-only empty row 0
+// when the first chip would otherwise truncate — see the fleet header
+// invariants in header.go. The result is capped so at least 1 content row
+// remains.
 func (m Model) headerRowCount() int {
 	rows := 1
 	if m.hasSwitcher() {

@@ -76,33 +76,33 @@ func TestProviderSwitcherChipClick(t *testing.T) {
 	p.width = 100
 	p.height = 24
 
-	// A click on header row 0 inside a chip's right-aligned range switches
-	// to that provider. The chips end at column width-2 and are joined
-	// right-to-left: each chip occupies [x-w+1, x] where x is its
-	// right edge and w is its rendered width.
+	// A click on header row 0 inside a chip's left-aligned range switches
+	// to that provider. Chips start after the body+divider+gap and are
+	// joined left-to-right: each chip occupies [col, col+w-1].
 	// The spans come from the production budgetedChips layout — the same
 	// parts chipAt hit-tests — so the test cannot drift from what is
 	// actually rendered. At width 100 all three chips are at full width.
-	right := p.width - 2
+	col := p.row0ChipStart()
 	layout := p.budgetedChips()
 	parts := layout.parts
 	if len(parts) != 3 {
 		t.Fatalf("budgetedChips rendered %d chips at width 100, want all 3", len(parts))
 	}
-	for i, part := range slices.Backward(parts) {
+	for i, part := range parts {
 		w := lipgloss.Width(part)
-		p = update(p, tea.MouseClickMsg{X: right, Y: 0})
+		p = update(p, tea.MouseClickMsg{X: col, Y: 0})
 		if p.active != i {
-			t.Fatalf("click at column %d: active = %d, want %d", right, p.active, i)
+			t.Fatalf("click at column %d: active = %d, want %d", col, p.active, i)
 		}
-		right -= w + 1
+		col += w + 1
 	}
 
 	// A click on row 0 far outside the chips (the brand-filled left side)
 	// must leave the active provider unchanged.
+	lastActive := p.active
 	p = update(p, tea.MouseClickMsg{X: 0, Y: 0})
-	if p.active != 0 {
-		t.Errorf("click outside chips changed active to %d, want 0", p.active)
+	if p.active != lastActive {
+		t.Errorf("click outside chips changed active to %d, want %d (unchanged)", p.active, lastActive)
 	}
 }
 
@@ -164,17 +164,22 @@ func TestHeaderWidthBudget(t *testing.T) {
 				for k, prov := range row.providers {
 					if prov == active {
 						found = true
-						right := m.width - 2
-						for i, v := range slices.Backward(row.parts) {
+						var col int
+						if ri == 0 {
+							col = m.row0ChipStart()
+						} else {
+							col = 1
+						}
+						for i, v := range row.parts {
 							cw := lipgloss.Width(v)
 							if i == k {
-								if idx, ok := m.chipAt(right, ri); !ok || idx != prov {
+								if idx, ok := m.chipAt(col, ri); !ok || idx != prov {
 									t.Errorf("width=%d active=%d: chipAt(%d,%d) = (%d,%v), want (%d,true)",
-										w, active, right, ri, idx, ok, prov)
+										w, active, col, ri, idx, ok, prov)
 								}
 								break
 							}
-							right -= cw + 1
+							col += cw + 1
 						}
 					}
 				}
@@ -212,17 +217,22 @@ func TestHeaderWidthBudget(t *testing.T) {
 			}
 			// Every rendered chip: each of its columns maps back to itself.
 			for ri, row := range allRows {
-				right := m.width - 2
-				for i, v := range slices.Backward(row.parts) {
+				var col int
+				if ri == 0 {
+					col = m.row0ChipStart()
+				} else {
+					col = 1
+				}
+				for i, v := range row.parts {
 					cw := lipgloss.Width(v)
 					prov := row.providers[i]
-					for x := right - cw + 1; x <= right; x++ {
+					for x := col; x < col+cw; x++ {
 						if idx, ok := m.chipAt(x, ri); !ok || idx != prov {
 							t.Errorf("width=%d active=%d: chipAt(%d,%d) = (%d,%v), want (%d,true) across the rendered chip span",
 								w, active, x, ri, idx, ok, prov)
 						}
 					}
-					right -= cw + 1
+					col += cw + 1
 				}
 			}
 		}
@@ -254,10 +264,9 @@ func TestHeaderWidthBudget(t *testing.T) {
 }
 
 func TestMultiProviderHeaderShowsNames(t *testing.T) {
-	// Width 120 gives the budget for both full names (at 80 the "anthropic"
-	// chip legitimately truncates to "anthro" — see
-	// TestHeaderWidthBudget), so this test pins natural rendering and
-	// styling; the width test pins degradation.
+	// Width 120 gives the budget for both full names, so this test pins natural
+	// rendering and styling; the width/height tests pin responsive degradation
+	// and wrapping at narrower terminals.
 	m := NewModelForProviders([]ProviderMeta{
 		{Name: "acme", Concurrency: 4},
 		{Name: "anthropic", Concurrency: 8},
@@ -287,7 +296,8 @@ func TestMultiProviderHeaderShowsNames(t *testing.T) {
 	}
 
 	// Switching providers updates the highlighted chip.
-	m = update(m, tea.MouseClickMsg{X: m.width - 2, Y: 0})
+	col := m.row0ChipStart() + lipgloss.Width(layout.parts[0]) + 1
+	m = update(m, tea.MouseClickMsg{X: col, Y: 0})
 	layout = m.budgetedChips()
 	if layout.parts[0] != m.styles.chipInactiveStyle.Render(" acme ") {
 		t.Errorf("after switching, acme chip = %q, want the inactive style", layout.parts[0])

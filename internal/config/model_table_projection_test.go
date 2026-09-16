@@ -318,7 +318,7 @@ func TestModelTableSummaryFormat(t *testing.T) {
 	// A large table is truncated with an explicit remainder count.
 	var args []string
 	args = append(args, "-upstream", "https://api.openai.com", "-transcode-responses-chat")
-	for i := 0; i < 60; i++ {
+	for i := range 60 {
 		args = append(args, "-model-table", "s"+strings.Repeat("0", 2)+string(rune('a'+i%26))+string(rune('a'+i/26))+"@openai=w")
 	}
 	large := resolveModelTableArgs(t, args...)

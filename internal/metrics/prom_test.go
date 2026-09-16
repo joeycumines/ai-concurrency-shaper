@@ -428,3 +428,47 @@ func TestWritePrometheusSkipsInvalidUTF8RouteLabels(t *testing.T) {
 		}
 	}
 }
+
+// TestWritePrometheusRouteQueueCardinality pins the series-count invariant:
+// N waiting routes export exactly N series per route family, idle providers
+// export none, and each family stays contiguous.
+func TestWritePrometheusRouteQueueCardinality(t *testing.T) {
+	routes := map[string]int64{
+		"POST /v1/messages":         2,
+		"POST /v1/responses":        1,
+		"POST /v1/chat/completions": 3,
+	}
+	ages := map[string]time.Duration{
+		"POST /v1/messages":         1500 * time.Millisecond,
+		"POST /v1/responses":        500 * time.Millisecond,
+		"POST /v1/chat/completions": 2 * time.Second,
+	}
+	var buf bytes.Buffer
+	if err := WritePrometheusFleet(&buf, []ProviderSnapshot{
+		{Name: "a", Snapshot: Snapshot{Queued: 6, QueuedByRoute: routes, OldestQueuedAgeByRoute: ages}},
+		{Name: "idle", Snapshot: Snapshot{}},
+	}); err != nil {
+		t.Fatalf("WritePrometheusFleet: %v", err)
+	}
+	got := buf.String()
+	for _, family := range []string{"shaper_route_queued{", "shaper_route_oldest_queued_seconds{"} {
+		var n int
+		for line := range strings.SplitSeq(got, "\n") {
+			if strings.HasPrefix(line, family) {
+				n++
+			}
+		}
+		if n != len(routes) {
+			t.Errorf("family %s exports %d series, want %d (one per waiting route):\n%s",
+				strings.TrimSuffix(family, "{"), n, len(routes), got)
+		}
+	}
+	if strings.Contains(got, `provider="idle",method=`) {
+		t.Errorf("idle provider must not appear in route families:\n%s", got)
+	}
+	for name, n := range familyRunCounts(t, got) {
+		if strings.HasPrefix(name, "shaper_route_") && n != 1 {
+			t.Errorf("metric %s forms %d contiguous blocks, want exactly 1:\n%s", name, n, got)
+		}
+	}
+}

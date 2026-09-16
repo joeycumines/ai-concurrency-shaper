@@ -323,7 +323,7 @@ func TestCatalogResponseBounded(t *testing.T) {
 
 	context := 100000
 	config := transcode.CatalogConfig{ProviderName: "TestProv"}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		config.Models = append(config.Models, transcode.CatalogModel{
 			Surrogate: "model-" + string(rune('a'+i)),
 			Context:   &context,

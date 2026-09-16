@@ -156,3 +156,54 @@ func TestHelpOverlay_DocumentsHorizontalScrollAndLogDetail(t *testing.T) {
 		}
 	}
 }
+
+// TestHelpOverlay_AuditedBindings pins every help overlay binding line
+// against the implemented key/mouse handlers, so help-text drift fails fast.
+// Substring matching follows the existing test style: the overlay renders
+// inside a bordered padded box, so exact-line matching is the wrong shape.
+func TestHelpOverlay_AuditedBindings(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{
+		{Name: "acme", Concurrency: 4},
+		{Name: "anthropic", Concurrency: 8},
+	})
+	m.width = 80
+	m.height = 24
+	text := stripANSI(m.renderHelpOverlay())
+	// Each line below names a binding implemented in update.go (keys) or
+	// mouse.go (chip/identity/wheel/tab clicks): Tab/Shift+Tab cycle
+	// providers, 1-6 switch tabs, j/k/h/l/PgUp/PgDn/Home/End/Ctrl-U/D/g/G
+	// scroll, Enter/Space inspect, //t/s/c filters, Ctrl+K palette, Esc/?/q
+	// chrome, and mouse wheel/tab clicks.
+	for _, want := range []string{
+		"Tab/Shift+Tab / Click name ↕ / Wheel",
+		"Switch provider",
+		"1-6",
+		"Switch tab",
+		"j/k",
+		"h/l",
+		"PgUp/PgDn",
+		"Home/End",
+		"Ctrl-U / Ctrl-D",
+		"g             Jump to top",
+		"G      Jump to bottom",
+		"Enter/Space",
+		"full log message",
+		"Filter entries",
+		"Cycle type filter",
+		"Cycle status filter",
+		"Reset Stats",
+		"Command palette",
+		"Close overlay",
+		"Show this help",
+		"Quit",
+		"wheel scroll",
+		"click tabs to switch",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("help overlay should document %q", want)
+		}
+	}
+	if footer := stripANSI(m.renderFooter()); !strings.Contains(footer, "c:reset") {
+		t.Errorf("footer should mention c:reset, got: %q", footer)
+	}
+}

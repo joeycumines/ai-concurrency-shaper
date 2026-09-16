@@ -289,7 +289,7 @@ func lightTheme() tuiTheme {
 		tabActiveStyle: s().
 			Bold(true).
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#0969DA")).
+			Background(lipgloss.Color("#0550AE")).
 			PaddingLeft(1).
 			PaddingRight(1),
 
@@ -302,7 +302,7 @@ func lightTheme() tuiTheme {
 		chipActiveStyle: s().
 			Bold(true).
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#0969DA")).
+			Background(lipgloss.Color("#0550AE")).
 			PaddingLeft(1).
 			PaddingRight(1),
 

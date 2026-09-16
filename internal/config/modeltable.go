@@ -108,7 +108,7 @@ func parseModelTableEntry(raw string) (modelTableEntry, error) {
 	}
 
 	seen := make(map[string]struct{}, 4)
-	for _, segment := range strings.Split(facts, ";") {
+	for segment := range strings.SplitSeq(facts, ";") {
 		if segment == "" || strings.ContainsAny(segment, " \t\n\r") || hasControlByte(segment) {
 			return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: empty fact", raw)
 		}

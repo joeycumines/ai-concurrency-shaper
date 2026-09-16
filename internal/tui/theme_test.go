@@ -99,9 +99,10 @@ func TestBackgroundColorMsgSwitchesTheme(t *testing.T) {
 // pastel edit to any of these styles fails loudly instead of shipping.
 func TestLightThemeContrast(t *testing.T) {
 	white := color.RGBA{0xFF, 0xFF, 0xFF, 0xFF}
-	// The two header/tab texts are white ink on blue fills; #FFFFFF vs #0969DA
-	// measures ~5.2:1 and is included exactly because it is the tightest of the
-	// light palette.
+	// The header text is white ink on its blue fill; #FFFFFF vs #0969DA
+	// measures ~5.2:1 and is included exactly because it is tighter than
+	// most of the light palette. The selected-tab fills below (#0550AE,
+	// ~7.6:1) are the roomiest, not the tightest.
 	tests := []struct {
 		name   string
 		ink    lipgloss.Style
@@ -122,6 +123,8 @@ func TestLightThemeContrast(t *testing.T) {
 		{"queue warn on white", lightTheme().queueWarnStyle, white},
 		{"sparkline on white", lightTheme().sparklineStyle, white},
 		{"circuit open on white", lightTheme().circuitOpenStyle, white},
+		{"chip active ink on its fill", lightTheme().chipActiveStyle, color.RGBA{0x05, 0x50, 0xAE, 0xFF}},
+		{"tab active ink on its fill", lightTheme().tabActiveStyle, color.RGBA{0x05, 0x50, 0xAE, 0xFF}},
 		{"tab inactive on its bg", lightTheme().tabInactiveStyle, color.RGBA{0xEA, 0xF1, 0xF6, 0xFF}},
 		{"footer on its bg", lightTheme().footerStyle, color.RGBA{0xEA, 0xF1, 0xF6, 0xFF}},
 		{"overlay on white", lightTheme().overlayStyle, white},
@@ -137,5 +140,102 @@ func TestLightThemeContrast(t *testing.T) {
 					r, hexString(fg), hexString(c.ground))
 			}
 		})
+	}
+}
+
+// TestChipOnHeaderDistinctness proves the active chip's background is
+// visually distinct from the header bar in both themes — a regression
+// guard for the defect where identical fills made the chip invisible
+// against the bar, merging it into one continuous run of text.
+func TestChipOnHeaderDistinctness(t *testing.T) {
+	for _, dark := range []bool{true, false} {
+		theme := newTheme(dark)
+		hdrBG := theme.headerStyle.GetBackground()
+		chipBG := theme.chipActiveStyle.GetBackground()
+		if hdrBG == nil || chipBG == nil {
+			t.Fatalf("dark=%v: missing background color", dark)
+		}
+		if hexString(hdrBG) == hexString(chipBG) {
+			t.Errorf("dark=%v: chipActiveStyle BG %s == headerStyle BG %s; chip merges into bar",
+				dark, hexString(chipBG), hexString(hdrBG))
+		}
+	}
+}
+
+// TestSelectedTabColorConsistency proves the active tab and active chip
+// carry the same background fill in each theme, so every selected-tab
+// indicator is one consistent color.
+func TestSelectedTabColorConsistency(t *testing.T) {
+	for _, dark := range []bool{true, false} {
+		theme := newTheme(dark)
+		tabBG := theme.tabActiveStyle.GetBackground()
+		chipBG := theme.chipActiveStyle.GetBackground()
+		if tabBG == nil || chipBG == nil {
+			t.Fatalf("dark=%v: missing background color", dark)
+		}
+		if hexString(tabBG) != hexString(chipBG) {
+			t.Errorf("dark=%v: tabActiveStyle BG %s != chipActiveStyle BG %s; selected tabs are inconsistent",
+				dark, hexString(tabBG), hexString(chipBG))
+		}
+	}
+}
+
+// TestPaletteContrastAA pins the text-bearing selected fills in both themes
+// to WCAG AA (>= 4.5:1), so a future fill edit that keeps the box model but
+// ruins readability fails loudly instead of shipping.
+func TestPaletteContrastAA(t *testing.T) {
+	for _, dark := range []bool{true, false} {
+		theme := newTheme(dark)
+		for _, c := range []struct {
+			name   string
+			ink    lipgloss.Style
+			ground color.Color
+		}{
+			{"chip active ink on its fill", theme.chipActiveStyle, theme.chipActiveStyle.GetBackground()},
+			{"tab active ink on its fill", theme.tabActiveStyle, theme.tabActiveStyle.GetBackground()},
+		} {
+			if c.ground == nil {
+				t.Fatalf("dark=%v: %s has no background color", dark, c.name)
+			}
+			fg := c.ink.GetForeground()
+			if fg == nil {
+				t.Fatalf("dark=%v: %s has no foreground color", dark, c.name)
+			}
+			if r := contrastRatio(fg, c.ground); r < 4.5 {
+				t.Errorf("dark=%v: %s contrast = %.2f:1, want >= 4.5:1 (%s on %s)",
+					dark, c.name, r, hexString(fg), hexString(c.ground))
+			}
+		}
+	}
+}
+
+// TestChipHitSizing proves every provider chip keeps a usable hit area:
+// the shortest pinned label ("acme") renders at least chipFloor cells wide
+// in either active style, and every rendered chip in the layout covers at
+// least chipFloor cells so chipAt always has a real span to hit.
+func TestChipHitSizing(t *testing.T) {
+	m := NewModelForProviders([]ProviderMeta{{Name: "acme", Concurrency: 4}})
+	for _, style := range []lipgloss.Style{m.styles.chipActiveStyle, m.styles.chipInactiveStyle} {
+		if got := lipgloss.Width(style.Render(" acme ")); got < chipFloor {
+			t.Errorf("shortest chip renders %d cells, want >= chipFloor %d", got, chipFloor)
+		}
+	}
+	fleets := [][]ProviderMeta{
+		{{Name: "acme", Concurrency: 4}, {Name: "anthropic", Concurrency: 8}},
+		{{Name: "anthropic-eu-central", Concurrency: 4}, {Name: "openai-prod-longname", Concurrency: 8}, {Name: "acme-edge-provider", Concurrency: 12}},
+	}
+	for _, metas := range fleets {
+		for _, w := range []int{20, 40, 80, 120, 180} {
+			m := NewModelForProviders(metas)
+			m.width = w
+			m.height = 24
+			for ri, row := range m.chipRowsLayout() {
+				for k, part := range row.parts {
+					if got := lipgloss.Width(part); got < chipFloor {
+						t.Errorf("w=%d row=%d chip %d renders %d cells, want >= chipFloor %d", w, ri, k, got, chipFloor)
+					}
+				}
+			}
+		}
 	}
 }
