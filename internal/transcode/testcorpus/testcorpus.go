@@ -71,6 +71,8 @@ var (
 	codexNamespaceRequestFieldJSON []byte
 	//go:embed testdata/field/repeated_terminal_tail_field.sse
 	repeatedTerminalTailFieldSSE []byte
+	//go:embed testdata/field/data_only_responses_stream_field.sse
+	dataOnlyResponsesStreamFieldSSE []byte
 )
 
 // FieldQwenStreamSSE returns the qwen-style chat stream capture: choice-level
@@ -111,6 +113,17 @@ func FieldCodexNamespaceRequestJSON() []byte { return codexNamespaceRequestField
 // the [DONE] sentinel. The frames are shape-verbatim from the capture; the
 // tool-call argument payload is replaced with a neutral value.
 func FieldRepeatedTerminalTailSSE() []byte { return repeatedTerminalTailFieldSSE }
+
+// FieldDataOnlyResponsesStreamSSE returns the captured camel native-Responses
+// stream in which the gateway omits the SSE event: name on every frame: a
+// leading ": " comment frame then data-only frames whose JSON `type` is the
+// authoritative discriminator (the payloads also carry the gateway's opaque
+// "p" envelope extension and the pinned envelope controls, e.g.
+// output[].phase and table/prompt-cache nulls at created time). Sanitized:
+// the account id, generation id, and per-stream "p" token are replaced with
+// stable placeholders; the shape (key presence, null-vs-value, frame order)
+// is byte-faithful to the capture.
+func FieldDataOnlyResponsesStreamSSE() []byte { return dataOnlyResponsesStreamFieldSSE }
 
 // ChatCompletionsRequestJSON returns the raw chat completions request fixture
 // bytes.

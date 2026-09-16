@@ -21,6 +21,7 @@ package transcode
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -214,6 +215,76 @@ func TestFieldCaptureCodexMultiturnRequestDecodes(t *testing.T) {
 	}
 	if echo == nil {
 		t.Fatal("request echo missing")
+	}
+}
+
+// TestFieldCaptureDataOnlyResponsesStreamReplays pins the data-only
+// Responses stream regression: the captured camel stream omits the SSE
+// event: name on every frame (a leading ": " comment frame then data-only
+// frames whose JSON `type` is authoritative, plus the gateway's opaque "p"
+// envelope extension, output[].phase, and the created-time null controls).
+// Replayed through the EXACT production converter it must complete the full
+// Anthropic lifecycle: exactly one message_stop, no error event, the content
+// delivered, and the ungated missing_event_name note recorded once.
+func TestFieldCaptureDataOnlyResponsesStreamReplays(t *testing.T) {
+	// The captured gateway envelope carries the pinned controls (a real
+	// safety_identifier, output[].phase, the created-time null fields), so
+	// the replay approves the controls loss and the usage components the
+	// Messages contract requires in addition to the note's own key.
+	policy := j6PermissivePolicy()
+	policy.Allowed[FeatureResponsesControls] = struct{}{}
+	policy.Allowed[FeatureOutputPhase] = struct{}{}
+	state := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		policy,
+		ChatCapabilities{},
+		"msg_1",
+		"gpt-4.1",
+		1,
+	)
+	converter := newResponsesToAnthropicConverter(state)
+	reader := newConvertingReaderWithLimits(
+		NewSSEReaderWithLimits(bytes.NewReader(testcorpus.FieldDataOnlyResponsesStreamSSE()), 0, 0),
+		converter, 0, 0, 0,
+	)
+	var output bytes.Buffer
+	buf := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			output.Write(buf[:n])
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+	}
+	if !reader.SawTerminal() {
+		t.Fatal("no terminal on the data-only captured stream")
+	}
+	if reader.SawErrorEvent() {
+		t.Fatal("data-only captured stream reported an error event")
+	}
+	body := output.String()
+	if got := strings.Count(body, "event: message_stop"); got != 1 {
+		t.Fatalf("message_stop count = %d, want exactly one: %q", got, body)
+	}
+	if !strings.Contains(body, "event: message_start") {
+		t.Fatalf("missing message_start: %q", body)
+	}
+	notes := 0
+	for _, loss := range state.report.Losses {
+		if loss.Feature == FeatureMissingEventName {
+			notes++
+			if loss.Kind != NoteRecord {
+				t.Fatalf("missing_event_name kind = %v, want NoteRecord", loss.Kind)
+			}
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("missing_event_name note count = %d, want exactly one", notes)
 	}
 }
 

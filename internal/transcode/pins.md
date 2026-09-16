@@ -558,3 +558,24 @@ decoded JSON type and records the provider quirk as the ungated
 `missing_event_name` note (once per stream, path `responses[].stream`).
 Tolerance is scoped to an ABSENT name only: a PRESENT name that disagrees
 with the JSON type remains a typed upstream wire error, exactly as before.
+The sanitized bytes of one such capture (the camel native-Responses mount)
+are committed at `testcorpus/testdata/field/data_only_responses_stream_field.sse`
+and replayed through the production converter by
+`TestFieldCaptureDataOnlyResponsesStreamReplays`.
+
+### Tool-message content blocks (observed upstream behaviour)
+
+The pinned Chat contract models the message content union as either a plain
+string or an array of content blocks (text / image_url), for ANY role. Real
+open-weights gateways differ in whether they accept image parts inside a
+`role: "tool"` message: some reject them, others carry them and pass the
+image to a vision model (observed live on the dialagram mount, whose
+`qwen-3.8-max` answered quadrant colours from an image delivered as multipart
+tool-message content). Because the acceptance is a property of the upstream,
+not of the pinned wire, the multipart tool-message rendering is gated behind
+the opt-in `tool_result_images` capability: without it, multimodal tool-result
+content keeps the observable `tool_result_json_envelope` text encoding
+(`tool_result_multimodal_content` + `tool_result_json_envelope` losses), which
+is the compatible default. A media type outside the Chat image vocabulary is
+an encoding error on BOTH paths (the envelope cannot data-URL it either), so
+it is never silently dropped.
