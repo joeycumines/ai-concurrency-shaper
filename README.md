@@ -35,6 +35,7 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-upstream` | provider | _(required)_ | Upstream base URL |
 | `-bind` | server | `:8080` | Listen address |
 | `-metrics-bind` | server | _(unset)_ | Dedicated listen address for the Prometheus `/metrics` endpoint (see [Metrics Export](#metrics-export)); empty disables it |
+| `-model-table` | server | _(repeatable)_ | Global model identity entry `surrogate@provider=wire[;facts]` (see [Model identities](#model-identities-and-the-global-model-table)). Server scope, so with `--provider` sections every entry goes before the first marker |
 | `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints). A `:unlimited` suffix (`POST /messages/count_tokens:unlimited`) exempts the route from limiting entirely, including under `-limit-all` |
 | `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
 | `-concurrency` | provider | `4` | Max concurrent limited requests |
@@ -325,7 +326,7 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-allow-client-query` | provider | _(repeatable)_ | Forward client query parameter (`name` or withdraw `!name`) |
 | `-transcode-allow-loss` | provider | _(repeatable)_ | Approve non-portable semantic loss by granular key (or withdraw `!key`) |
 | `-transcode-strict-defaults` | provider | `false` | Strip all out-of-the-box chat capabilities, query parameters, and loss approvals |
-| `-transcode-model` | provider | _(repeatable)_ | Map client model name to upstream model name (`client=upstream`), identity fallback when omitted |
+| `-transcode-model` | provider | _(repeatable)_ | Map client model name to upstream model name (`client=upstream`), identity fallback when omitted. Cannot be combined with `-model-table` — see [Migrating from -transcode-model](#migrating-from--transcode-model) |
 | `-transcode-auth` | provider | _(unset — inherits provider auth, else none)_ | Per-route target auth mode override (`auto`, `none`, `bearer`, `x-api-key`, `api-key`, `header`) |
 | `-transcode-auth-source` | provider | _(unset — inherits provider auth, else none)_ | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`, `provider`) |
 | `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header` |
@@ -357,6 +358,111 @@ Both Messages presets map `/v1/messages`, so enabling both is a startup
 error. A Messages-to-Responses mapping without an approved
 `tool_schema_strictness` loss is also a startup error (Messages tools cannot
 preserve the strictness the Responses contract requires).
+
+### Model identities and the global model table
+
+`-model-table` (server scope, repeatable) declares the gateway's client-visible
+model identities once, globally:
+
+```
+surrogate@provider=wire[;facts]
+```
+
+- `surrogate` is the name clients send and the name responses echo back
+  (letters, digits, `.`, `_`, `-`; 1–128 characters). It is the only model
+  identifier a client ever sees.
+- `provider` is the effective provider name — `-name` when set, the
+  `--provider=` marker, or the host-derived name (`api.anthropic.com` →
+  `anthropic`) — matched case-sensitively.
+- `wire` is the upstream model id, opaque to the shaper (`/`, `:`, `@`, `=`,
+  `+` allowed; 1–256 characters), forwarded upstream and never leaked into a
+  client response.
+- Optional `;`-separated facts — `context=<positive int>`,
+  `max_output=<positive int>`, `efforts=minimal+low+medium+high`,
+  `modalities=text+image+audio`, `default`, `deprecated` — are validated at
+  startup and served by the [model catalog](#model-catalog-get-v1models).
+  They are presentation-only: no fact affects conversion, resolution, or
+  admission.
+
+Surrogates form one global namespace: a duplicate surrogate, an entry naming
+an unknown provider, a provider with transcode routes that no entry names, and
+two `default`s on one provider are all startup errors. Because the table is
+server scope, every entry goes before the first `--provider` marker.
+
+Each transcoded mount serves exactly the entries naming it, projected onto
+that mount's model map at startup: a request naming an unlisted model is a
+local 400 that names the mount's servable surrogates, never a silent identity
+fallback. With no entries at all the behavior is unchanged — identity fallback
+applies unless `-transcode-model` supplies explicit mappings.
+
+Startup logs one summary line (sorted by surrogate; facts in parentheses):
+
+```
+model table: 2 surrogates across 2 providers: gpt4o@openai->gpt-4o(context=128000,default,max_output=16384), opus@anthropic->claude-opus-4-1(context=200000,default)
+```
+
+### Model catalog (GET /v1/models)
+
+When at least one `-model-table` entry names a mount, `GET /v1/models` on that
+mount is answered locally from the frozen table — the upstream is never
+contacted and the request never queues behind in-flight completions. The
+document lists exactly that mount's surrogates, and every listed identifier
+resolves on the mount that served it.
+
+The dialect is selected by the strongest available signal: `?format=` (aliases
+`responses` and `messages` accepted), then the Codex `?client_version=` probe
+(native `{"models":[...]}` document), then an `Anthropic-Version`/`Anthropic-Beta`
+header (messages-list document with `after_id`/`before_id`/`limit` pagination
+and capability objects), then the mount's default — Responses mounts are Codex
+native, Messages mounts are Anthropic native, and everything else gets the lean
+OpenAI list. Unknown query parameters and unknown `?format=` values are local
+400s, never forwarded upstream. Wire ids never appear in any served document;
+absent facts are omitted (or `null` where the client contract requires the
+key), never fabricated; one entry with malformed facts is skipped rather than
+failing the listing. A mount with no entries keeps `GET /v1/models` a
+transparent passthrough.
+
+### Migrating from -transcode-model
+
+Per-provider `-transcode-model client=upstream` entries migrate mechanically:
+move each entry to the global table with its provider's name added. Where the
+same client string previously meant different things on different mounts, the
+global namespace forces an explicit choice — rename one surrogate or collapse
+the pair onto one target — and the startup duplicate check enforces it.
+
+```sh
+# Before: per-provider mappings, one owner per mount
+ai-concurrency-shaper \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -transcode-messages-chat \
+    -transcode-model opus=claude-opus-4-1 \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -transcode-responses-chat \
+    -transcode-model gpt4o=gpt-4o
+
+# After: one global table, each entry naming its provider
+ai-concurrency-shaper \
+  -model-table 'opus@anthropic=claude-opus-4-1' \
+  -model-table 'gpt4o@openai=gpt-4o' \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -transcode-messages-chat \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -transcode-responses-chat
+```
+
+The client-visible behavior is unchanged: clients send the surrogate, the
+upstream sees the wire id, and responses echo the surrogate. Rollback is
+deleting the entries and restoring `-transcode-model`; a configuration
+carrying both fails startup naming the provider, so the migration is never
+half-applied silently.
 
 ### Sensible defaults
 

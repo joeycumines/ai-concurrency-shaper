@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1117,5 +1118,127 @@ func TestE2E_ComposedGateway_ModelCatalog(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "model table: 3 surrogates across 2 providers:") {
 		t.Errorf("startup log lacks the model-table summary:\n%s", out.String())
+	}
+}
+
+// TestE2E_ComposedGateway_LegacyModelMapEquivalence proves the documented
+// migration: a legacy per-provider -transcode-model configuration and its
+// -model-table equivalent serve byte-identical exchanges, and a configuration
+// carrying both fails startup loudly.
+func TestE2E_ComposedGateway_LegacyModelMapEquivalence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	bin := t.TempDir() + "/migration-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	var upstreamBody atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		upstreamBody.Store(string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"wire-m",` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	run := func(args []string) (string, string) {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		var out safeBuffer
+		cmd := exec.Command(bin, append([]string{"-bind", addr}, args...)...)
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(syscall.SIGTERM)
+				_ = cmd.Wait()
+			}
+		}()
+		if err := waitTCPReady(addr, 5*time.Second); err != nil {
+			t.Fatalf("gateway not ready: %v\n%s", err, out.String())
+		}
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Post("http://"+addr+"/openai/v1/responses", "application/json",
+			strings.NewReader(`{"model":"m","input":"hi"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		downstream, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d: %s", resp.StatusCode, downstream)
+		}
+		return upstreamBody.Load().(string), string(downstream)
+	}
+
+	normalize := func(s string) string {
+		s = regexp.MustCompile(`(resp|msg)_[0-9a-zA-Z]+`).ReplaceAllString(s, "$1_GENERATED")
+		s = regexp.MustCompile(`"created_at":\d+`).ReplaceAllString(s, `"created_at":0`)
+		return s
+	}
+
+	legacyUpstream, legacyDownstream := run([]string{
+		"--provider=openai",
+		"-upstream", upstream.URL,
+		"-prefix", "/openai",
+		"-transcode-responses-chat",
+		"-transcode-model", "m=wire-m",
+	})
+	tableUpstream, tableDownstream := run([]string{
+		"-model-table", "m@openai=wire-m",
+		"--provider=openai",
+		"-upstream", upstream.URL,
+		"-prefix", "/openai",
+		"-transcode-responses-chat",
+	})
+
+	if legacyUpstream != tableUpstream {
+		t.Errorf("upstream request differs across the migration:\nlegacy: %s\ntable:  %s", legacyUpstream, tableUpstream)
+	}
+	if normalize(legacyDownstream) != normalize(tableDownstream) {
+		t.Errorf("downstream response differs across the migration:\nlegacy: %s\ntable:  %s", legacyDownstream, tableDownstream)
+	}
+	if !strings.Contains(legacyDownstream, `"model":"m"`) || !strings.Contains(tableDownstream, `"model":"m"`) {
+		t.Errorf("the client-visible alias changed: %s / %s", legacyDownstream, tableDownstream)
+	}
+
+	// A mixed configuration must fail startup, naming both flags and the provider.
+	mixed := exec.Command(bin,
+		"-model-table", "m@openai=wire-m",
+		"--provider=openai",
+		"-upstream", upstream.URL,
+		"-prefix", "/openai",
+		"-transcode-responses-chat",
+		"-transcode-model", "m=wire-m",
+	)
+	out, err := mixed.CombinedOutput()
+	if err == nil {
+		t.Fatalf("mixed configuration started; want startup failure:\n%s", out)
+	}
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+		t.Errorf("mixed configuration error = %v, want exit 1", err)
+	}
+	for _, want := range []string{"-model-table and -transcode-model cannot be combined", `provider "openai"`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("mixed startup output missing %q:\n%s", want, out)
+		}
 	}
 }
