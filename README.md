@@ -374,8 +374,9 @@ surrogate@provider=wire[;facts]
 - `provider` is the effective provider name — `-name` when set, the
   `--provider=` marker, or the host-derived name (`api.anthropic.com` →
   `anthropic`) — matched case-sensitively.
-- `wire` is the upstream model id, opaque to the shaper (`/`, `:`, `@`, `=`,
-  `+` allowed; 1–256 characters), forwarded upstream and never leaked into a
+- `wire` is the upstream model id, opaque to the shaper (letters, digits, and
+  `._-/:@=+`, so ids like `openai/gpt-4o` and `glm-5.3-flash:dev` pass through
+  verbatim; 1–256 characters), forwarded upstream and never leaked into a
   client response.
 - Optional `;`-separated facts — `context=<positive int>`,
   `max_output=<positive int>`, `efforts=minimal+low+medium+high`,
@@ -409,14 +410,18 @@ contacted and the request never queues behind in-flight completions. The
 document lists exactly that mount's surrogates, and every listed identifier
 resolves on the mount that served it.
 
-The dialect is selected by the strongest available signal: `?format=` (aliases
-`responses` and `messages` accepted), then the Codex `?client_version=` probe
-(native `{"models":[...]}` document), then an `Anthropic-Version`/`Anthropic-Beta`
-header (messages-list document with `after_id`/`before_id`/`limit` pagination
-and capability objects), then the mount's default — Responses mounts are Codex
-native, Messages mounts are Anthropic native, and everything else gets the lean
-OpenAI list. Unknown query parameters and unknown `?format=` values are local
-400s, never forwarded upstream. Wire ids never appear in any served document;
+The dialect is selected by the strongest available signal: `?format=`
+(`codex`, `anthropic`, or `openai`; `responses` and `messages` are accepted as
+aliases for the first two, `chat`/`chat-completions` for the last), then the
+Codex `?client_version=` probe (native `{"models":[...]}` document), then an
+`Anthropic-Version`/`Anthropic-Beta` header (messages-list document with
+`after_id`/`before_id`/`limit` pagination and capability objects), then the
+mount's default — Responses mounts are Codex native,
+Messages mounts are Anthropic native, and everything else gets the lean OpenAI
+list. The accepted query parameters are `format`, `client_version` and `beta`
+(ignored) on every shape, plus the pagination trio on the Anthropic shape;
+anything else and any unknown `?format=` value is a local 400, never forwarded
+upstream. Wire ids never appear in any served document;
 absent facts are omitted (or `null` where the client contract requires the
 key), never fabricated; one entry with malformed facts is skipped rather than
 failing the listing. A mount with no entries keeps `GET /v1/models` a
@@ -473,7 +478,7 @@ the flags below extend the defaults, never replace them:
 
 | Layer | Default | Meaning |
 | --- | --- | --- |
-| Chat capabilities | `parallel_tool_calls`, `provider_reasoning_thinking` | a maximally compatible out-of-the-box core, enabled via `-transcode-chat-capability` (granular names: `developer_role`, `image_input`, `structured_outputs`, `parallel_tool_calls`, `stop_sequences`, `reasoning_effort`, `provider_reasoning_text`, `provider_reasoning_thinking`, `system_anywhere`). The fidelity-only knobs — `reasoning_effort` (a parameter several open-source servers reject) and `developer_role` (a role Qwen/Llama/DeepSeek chat templates do not know) — are deliberately opt-in: add them for upstreams that accept the modern surface |
+| Chat capabilities | `parallel_tool_calls`, `provider_reasoning_thinking`, `structured_outputs` | a maximally compatible out-of-the-box core, enabled via `-transcode-chat-capability` (granular names: `developer_role`, `image_input`, `structured_outputs`, `parallel_tool_calls`, `stop_sequences`, `reasoning_effort`, `provider_reasoning_text`, `provider_reasoning_thinking`, `system_anywhere`). The fidelity-only knobs — `reasoning_effort` (a parameter several open-source servers reject) and `developer_role` (a role Qwen/Llama/DeepSeek chat templates do not know) — are deliberately opt-in: add them for upstreams that accept the modern surface. `structured_outputs` maps a client's `text.format` JSON schema onto the chat `response_format` byte-exactly — it only ever renders what the client asked for. For an upstream whose plan refuses structured output, withdraw the capability: a client that still asks for a schema then fails locally with a typed error instead of round-tripping to the refusal — or, if unconstrained output is acceptable, also approve the drop, and the exchange proceeds with the loss logged per exchange |
 | Allowed client query | `beta` | Anthropic clients (Claude Code) gate every request with `?beta=true`; harmless on chat endpoints. Add more via `-transcode-allow-client-query` |
 | Loss policy | the approvals a real client's traffic needs | the non-portable features real Responses/Messages client traffic triggers (reasoning summaries, Anthropic thinking blocks, system turns that cannot keep their position in a chat request, Responses and Anthropic envelope controls, built-in tools, usage breakdowns the chat upstreams do not always report, the effort/role knobs behind the opt-in capabilities, and the error status of a failed tool result); approved via `-transcode-allow-loss` on top of the defaults. Note: approving `responses_controls` tolerates `include`/`client_metadata`/`prompt_cache_key` and upstream-echoed controls — the conversation-state request controls (`background`, `max_tool_calls`, `prompt`, `safety_identifier`, `status`) are errors under every policy. The `tool_result_error_status` default is deliberate: Claude Code marks every failed tool call with `is_error: true`, so rejecting it makes the proxy unusable with the flagship client — the permissive encoding renders the visible `[tool_result_error]` prefix before the result content (the model still sees that the tool failed) and the decision is logged per exchange; withdraw it with `-transcode-allow-loss '!tool_result_error_status'` if you want strict rejection. A multi-part all-text tool result is joined into one string for a chat tool message as a sanctioned encoding (recorded as a note on every exchange; every content byte is preserved) |
 
