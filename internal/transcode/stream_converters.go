@@ -582,6 +582,7 @@ func (s *chatResponsesStreamState) convertDelta(
 	// into one thinking block per delta (CC-FRAGMENTATION, operator-
 	// observed 2026-09-08 — Claude Code rendered one ∴ fragment per line).
 	hasOutput := (delta.Content != nil && *delta.Content != "") ||
+		(delta.Refusal != nil && *delta.Refusal != "") ||
 		len(delta.ToolCalls) > 0
 	if hasOutput {
 		closeEvents, err := s.closeOpenReasoningItem()
@@ -706,12 +707,15 @@ func (s *chatResponsesStreamState) convertDelta(
 				// A thinking block must not open while the preceding message's
 				// content block is still open: seal the message item at the
 				// transition, the way the reasoning item is sealed on the way
-				// into content and tool output.
+				// into content and tool output. A started tool block must be
+				// sealed too — otherwise a tool_use block stays open while the
+				// thinking block opens.
 				closedMessage, err := s.closeOpenMessageItem()
 				if err != nil {
 					return nil, err
 				}
 				events = append(events, closedMessage...)
+				events = append(events, s.closePendingToolCalls()...)
 				if err := s.budget.addItem(); err != nil {
 					return nil, s.wireError(err)
 				}
@@ -952,6 +956,23 @@ func (s *chatResponsesStreamState) convertToolCall(
 			"legacy function_call mapped to one tool call with id synthesized from the chunk id ("+*call.ID+")",
 		); err != nil {
 			return nil, err
+		}
+	}
+
+	// A fragment carrying the id of a call that was already sealed inline
+	// cannot merge back: the sealed call's block closed on the wire, so any
+	// resolution would fork a duplicate call id into the terminal envelope
+	// (either by creating a new pending entry or by an unstarted pending
+	// call adopting the id through its fragment index). Reject it as corrupt
+	// upstream wire.
+	if call.ID != nil && *call.ID != "" {
+		for _, sealed := range s.closedCalls {
+			if sealed.callID == *call.ID {
+				return nil, s.wireError(fmt.Errorf(
+					"chat tool call fragment reuses the id %q of a sealed call",
+					*call.ID,
+				))
+			}
 		}
 	}
 
@@ -1299,14 +1320,20 @@ func (s *chatResponsesStreamState) toolCallClosure(pending *pendingToolCall) []R
 	}
 }
 
-// pendingSlice returns the pending tool calls in fragment-index order so any
-// emission over them is deterministic.
-func (s *chatResponsesStreamState) pendingSlice() []*pendingToolCall {
+// pendingIndexes returns the fragment indexes of the pending tool calls in
+// ascending order so any emission over them is deterministic.
+func (s *chatResponsesStreamState) pendingIndexes() []int {
 	indexes := make([]int, 0, len(s.pendingCalls))
 	for index := range s.pendingCalls {
 		indexes = append(indexes, index)
 	}
 	sort.Ints(indexes)
+	return indexes
+}
+
+// pendingSlice returns the pending tool calls in fragment-index order.
+func (s *chatResponsesStreamState) pendingSlice() []*pendingToolCall {
+	indexes := s.pendingIndexes()
 	calls := make([]*pendingToolCall, 0, len(indexes))
 	for _, index := range indexes {
 		calls = append(calls, s.pendingCalls[index])
@@ -1324,13 +1351,8 @@ func (s *chatResponsesStreamState) closePendingToolCalls() []ResponsesSSEEvent {
 	if len(s.pendingCalls) == 0 {
 		return nil
 	}
-	indexes := make([]int, 0, len(s.pendingCalls))
-	for index := range s.pendingCalls {
-		indexes = append(indexes, index)
-	}
-	sort.Ints(indexes)
 	var events []ResponsesSSEEvent
-	for _, index := range indexes {
+	for _, index := range s.pendingIndexes() {
 		pending := s.pendingCalls[index]
 		if !pending.started {
 			continue

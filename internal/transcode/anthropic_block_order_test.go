@@ -291,3 +291,199 @@ func TestChatStateSealsMessageBeforeThinking(t *testing.T) {
 		t.Fatalf("the message must be sealed before the thinking item opens: %v", names)
 	}
 }
+
+// streamChatUpstream drives one Messages->Chat stream through a handler whose
+// chat capability set the test controls.
+func streamChatUpstream(t *testing.T, capabilities ChatCapabilities, sse string) *httptest.ResponseRecorder {
+	t.Helper()
+	mapping := messagesMapping(t, UpstreamChatCompletions)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+	mapping.ChatCapabilities = capabilities
+	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+		FeatureUsageUnknown:           {},
+	}}
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(sse)),
+			}, nil
+		},
+		nil,
+	)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// assertBlocksSealedInOrder proves every content block closes before the next
+// opens, count blocks by their stops, and no error event was emitted.
+func assertBlocksSealedInOrder(t *testing.T, out string, wantStops int) []struct {
+	Type  string
+	Index int
+} {
+	t.Helper()
+	if strings.Contains(out, "event: error") {
+		t.Fatalf("stream must complete without an error event: %s", out)
+	}
+	events := anthropicBlockEvents(t, out)
+	open := 0
+	for _, event := range events {
+		switch event.Type {
+		case "content_block_start":
+			if open != 0 {
+				t.Fatalf("a block started while another was open: %+v", events)
+			}
+			open = event.Index + 1
+		case "content_block_stop":
+			if open == 0 {
+				t.Fatalf("a block stopped while none was open: %+v", events)
+			}
+			open = 0
+		}
+	}
+	if open != 0 {
+		t.Fatalf("a block was left open at the end: %+v", events)
+	}
+	stops := 0
+	for _, event := range events {
+		if event.Type == "content_block_stop" {
+			stops++
+		}
+	}
+	if stops != wantStops {
+		t.Fatalf("stopped blocks = %d, want %d: %+v", stops, wantStops, events)
+	}
+	return events
+}
+
+// TestStreamToolThenThinkingClosesEachBlockBeforeTheNext proves a started tool
+// block is sealed when a reasoning item must open: the tool_use block cannot
+// stay open while the thinking block opens.
+func TestStreamToolThenThinkingClosesEachBlockBeforeTheNext(t *testing.T) {
+	rec := streamChatUpstream(t, ChatCapabilities{ProviderReasoningThinking: true},
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"thinking\"}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
+			"data: [DONE]\n\n")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	events := assertBlocksSealedInOrder(t, out, 2)
+	toolStop := eventPosition(events, "content_block_stop", 0)
+	thinkingStart := eventPosition(events, "content_block_start", 1)
+	if toolStop < 0 || thinkingStart < 0 {
+		t.Fatalf("expected a sealed tool block and an opened thinking block: %+v\n%s", events, out)
+	}
+	if toolStop > thinkingStart {
+		t.Fatalf("the tool block must close before the thinking block opens: tool stop %d, thinking start %d: %+v",
+			toolStop, thinkingStart, events)
+	}
+	if !strings.Contains(out, "thinking") {
+		t.Fatalf("the reasoning content is missing: %s", out)
+	}
+}
+
+// TestStreamReasoningThenRefusalClosesEachBlockBeforeTheNext proves a refusal
+// arriving while a reasoning item is open seals the reasoning item first: the
+// thinking block cannot stay open while the refusal part opens.
+func TestStreamReasoningThenRefusalClosesEachBlockBeforeTheNext(t *testing.T) {
+	rec := streamChatUpstream(t, ChatCapabilities{ProviderReasoningThinking: true},
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"thinking\"}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"refusal\":\"cannot comply\"}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
+			"data: [DONE]\n\n")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	events := assertBlocksSealedInOrder(t, out, 2)
+	thinkingStop := eventPosition(events, "content_block_stop", 0)
+	refusalStart := eventPosition(events, "content_block_start", 1)
+	if thinkingStop < 0 || refusalStart < 0 {
+		t.Fatalf("expected a sealed thinking block and an opened refusal block: %+v\n%s", events, out)
+	}
+	if thinkingStop > refusalStart {
+		t.Fatalf("the thinking block must close before the refusal part opens: thinking stop %d, refusal start %d: %+v",
+			thinkingStop, refusalStart, events)
+	}
+	if !strings.Contains(out, "cannot comply") {
+		t.Fatalf("the refusal content is missing: %s", out)
+	}
+}
+
+// TestStreamLateToolFragmentAfterSealRejected proves a fragment reusing the id
+// of an already-sealed call is corrupt upstream wire: it must fail the stream
+// instead of forking a duplicate call id into the terminal envelope.
+func TestStreamLateToolFragmentAfterSealRejected(t *testing.T) {
+	rec := streamChatUpstream(t, ChatCapabilities{},
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}]}}]}\n\n"+
+			// Content resumes, sealing the tool call inline.
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"content\":\"after\"}}]}\n\n"+
+			// A late fragment for the sealed call arrives, carrying enough
+			// identity that a forked call would complete and duplicate the
+			// sealed call id in the terminal envelope.
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"more\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
+			"data: [DONE]\n\n")
+	out := rec.Body.String()
+	if !strings.Contains(out, "event: error") {
+		t.Fatalf("a late fragment for a sealed call must fail the stream: %s", out)
+	}
+	if strings.Contains(out, "event: message_stop") {
+		t.Fatalf("a failed stream must not report a successful terminal: %s", out)
+	}
+	if strings.Count(out, `"call-1"`) > 1 {
+		t.Fatalf("the sealed call id must not be duplicated: %s", out)
+	}
+}
+
+// TestStreamLateSealedCallIDRejectedBeforeAdoption proves the tombstone also
+// covers the adoption path: a sealed call's id arriving again must be rejected
+// even when an unstarted pending call would otherwise adopt it through its
+// fragment index, because either resolution forks a duplicate call id.
+func TestStreamLateSealedCallIDRejectedBeforeAdoption(t *testing.T) {
+	rec := streamChatUpstream(t, ChatCapabilities{},
+		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"content\":\"after\"}}]}\n\n"+
+			// A new index-0 call arrives without an id (unstarted).
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"other\",\"arguments\":\"\"}}]}}]}\n\n"+
+			// The sealed call's id arrives; index resolution would adopt it.
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"arguments\":\"x\"}}]}}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
+			"data: [DONE]\n\n")
+	out := rec.Body.String()
+	if !strings.Contains(out, "reuses the id") {
+		t.Fatalf("a sealed call id must be rejected before adoption: %s", out)
+	}
+	if strings.Contains(out, "event: message_stop") {
+		t.Fatalf("a failed stream must not report a successful terminal: %s", out)
+	}
+	if got := strings.Count(out, `"call-1"`); got != 1 {
+		t.Fatalf("the sealed call id must appear exactly once (its original block), got %d: %s", got, out)
+	}
+	if strings.Contains(out, `"name":"other"`) {
+		t.Fatalf("the forked call block must never open: %s", out)
+	}
+}
