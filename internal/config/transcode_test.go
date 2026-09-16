@@ -215,6 +215,33 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 	}
 }
 
+// TestBuildTranscodeMappingsDefaultImageAndStopSequences pins the two
+// flagship-client defaults and their withdrawal: with no capability flags
+// image input and stop sequences are on; `!image_input` and
+// `!stop_sequences` withdraw them.
+func TestBuildTranscodeMappingsDefaultImageAndStopSequences(t *testing.T) {
+	mappings, err := buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	if cap := mappings[0].Mapping.ChatCapabilities; !cap.ImageInput || !cap.StopSequences {
+		t.Fatalf("capabilities = %+v, want image_input and stop_sequences on by default", cap)
+	}
+
+	mappings, err = buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{
+		negatedCapabilities: map[string]struct{}{"image_input": {}, "stop_sequences": {}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap := mappings[0].Mapping.ChatCapabilities; cap.ImageInput || cap.StopSequences {
+		t.Fatalf("capabilities = %+v, want both withdrawn by negation", cap)
+	}
+}
+
 // TestBuildTranscodeMappingsNegation proves `!name` negations withdraw the
 // sensible defaults on every CLI mapping.
 func TestBuildTranscodeMappingsNegation(t *testing.T) {

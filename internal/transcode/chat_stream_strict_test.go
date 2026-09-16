@@ -767,6 +767,80 @@ data: {"choices":[],"created":1789526350,"id":"chatcmpl-f02e903cd786813e728847a3
 	}
 }
 
+// TestChatStreamReleasesCapturedClaudeCodeMissingSentinelTail replays,
+// verbatim, the upstream stream captured from a real Claude Code exchange
+// that failed pre-fix: role and reasoning-only deltas, a finishing chunk
+// with empty content, then the usage-only tail, and EOF with no [DONE].
+// The release must emit exactly one message_stop with no error event, apply
+// the usage accounting, and record the missing_stream_sentinel note.
+func TestChatStreamReleasesCapturedClaudeCodeMissingSentinelTail(t *testing.T) {
+	const captured = `data: {"choices":[{"delta":{"reasoning_content":null,"role":"assistant"},"finish_reason":null,"index":0,"logprobs":null}],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"reasoning_content":null},"finish_reason":null,"index":0,"logprobs":null}],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"reasoning_content":null},"finish_reason":null,"index":0,"logprobs":null}],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"reasoning_content":null},"finish_reason":null,"index":0,"logprobs":null}],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"content":"","reasoning_content":null},"finish_reason":"stop","index":0,"logprobs":null}],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":{"completion_tokens":8,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens":35411,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":35419}}
+
+`
+	chat := newChatResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"resp_1",
+		"deepseek-v4-flash-0731",
+		1789525525,
+		nil,
+	)
+	anthropic := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"msg_1",
+		"deepseek-v4-flash-0731",
+		1789525525,
+	)
+	converter := newChatToAnthropicConverter(chat, anthropic)
+	reader := newConvertingReaderWithLimits(
+		NewSSEReaderWithLimits(strings.NewReader(captured), 0, 0),
+		converter, 0, 0, 0,
+	)
+	output, readErr := drainReader(t, reader)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		t.Fatalf("read err = %v, want a clean EOF", readErr)
+	}
+	if !reader.SawTerminal() {
+		t.Fatal("the captured EOF after finish must release the held terminal")
+	}
+	if reader.SawErrorEvent() {
+		t.Fatal("the release is a completed exchange, not an error")
+	}
+	if got := strings.Count(output, "event: message_stop"); got != 1 {
+		t.Fatalf("message_stop count = %d, want exactly one: %q", got, output)
+	}
+	if strings.Contains(output, "event: error") {
+		t.Fatalf("released stream carries an error event: %q", output)
+	}
+	if !strings.Contains(output, `"output_tokens":8`) {
+		t.Fatalf("the usage tail was not applied: %q", output)
+	}
+	if !reportHasFeature(chat.report, FeatureMissingStreamSentinel) {
+		t.Fatal("the missing-sentinel note is not recorded")
+	}
+	if got := classifyStreamObservation(streamObservation{
+		ReaderErr:         readErr,
+		SawErrorEvent:     reader.SawErrorEvent(),
+		SawTerminal:       reader.SawTerminal(),
+		UpstreamBodyError: reader.UpstreamBodyError(),
+	}); got != streamOutcomeSuccess {
+		t.Fatalf("classification = %v, want success", got)
+	}
+}
+
 // TestChatStreamReviewMalformedStreamIsUpstreamFailure proves the
 // minimal malformed stream — a user-role delta chunk with no envelope fields,
 // terminated by [DONE] — is rejected with a client-dialect error event and
