@@ -225,6 +225,12 @@ const (
 	// tool call with a synthesized id derived from the response id, recorded
 	// as an ungated note naming the source.
 	FeatureLegacyFunctionCall Feature = "legacy_function_call"
+	// MissingStreamSentinel covers an upstream chat stream that ended after
+	// a finishing chunk without the [DONE] sentinel: the completion is
+	// released on EOF (the refusal cannot be reported as a truncated
+	// exchange when every semantic terminal already arrived) and the quirk
+	// is recorded as an ungated note so it stays observable.
+	FeatureMissingStreamSentinel Feature = "missing_stream_sentinel"
 )
 
 // lossEntry pairs a loss key with the description used by the per-request log
@@ -249,6 +255,7 @@ var lossRegistry = []lossEntry{
 	{FeatureToolResultMultimodalContent, "multimodal tool-result content cannot be carried by a Chat tool message; under this permission it is encoded as the tool_result_json_envelope text"},
 	{FeatureOutputItemBoundaries, "output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target"},
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
+	{FeatureMissingStreamSentinel, "the upstream chat stream ended after a finishing chunk without the [DONE] sentinel; the completion was released on EOF and the provider quirk recorded"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},
 	{FeatureUsageTotalMismatch, "the source usage totals are arithmetically inconsistent (total_tokens != input + output); the emitted values are relayed with the mismatch recorded (the note names the emitted counts and, where a clamp corrected a component, the source numbers)"},
 	{FeatureReportOverflow, "the conversion report reached its entry bound; further entries are aggregated into this note (observability saturation, never an exchange failure)"},

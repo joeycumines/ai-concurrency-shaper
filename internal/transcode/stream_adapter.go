@@ -303,15 +303,22 @@ func (c *chatToAnthropicConverter) releaseTerminals() (convertedBatch, error) {
 	return batch, nil
 }
 
-// FinalizeEOF reports a truncation error unless the stream terminated
-// correctly. The Chat held terminal (which may be an empty batch for a
-// zero-output finish) is released ONLY by the [DONE] sentinel: EOF after finish_reason without [DONE] is a typed upstream
-// truncation, never a released terminal.
+// FinalizeEOF releases the Chat held terminal (which may be an empty batch
+// for a zero-output finish) when the upstream ended after a finishing chunk
+// without the [DONE] sentinel, recording the quirk as an ungated note. A
+// stream that ends WITHOUT any finish_reason is a typed upstream truncation,
+// never a released terminal.
 func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 	if c.chat.sawFinish && !c.chat.terminalReleased {
-		return convertedBatch{}, c.chat.wireError(errors.New(
-			"chat stream ended after finish_reason without the [DONE] sentinel",
-		))
+		if err := c.chat.noteMissingSentinel(); err != nil {
+			return convertedBatch{}, err
+		}
+		batch, err := c.releaseTerminals()
+		if err != nil {
+			return convertedBatch{}, err
+		}
+		batch.Terminal = true
+		return batch, nil
 	}
 	if c.chat.sawFinish || c.anthropic.sawTerminal {
 		return convertedBatch{Terminal: true}, nil

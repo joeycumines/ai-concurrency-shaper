@@ -41,8 +41,8 @@ type Response struct {
 	Background       *bool   `json:"background,omitempty"`
 	MaxToolCalls     *int64  `json:"max_tool_calls,omitempty"`
 	Prompt           *Prompt `json:"prompt,omitempty"`
-	PromptCacheKey   string  `json:"prompt_cache_key,omitempty"`
-	SafetyIdentifier string  `json:"safety_identifier,omitempty"`
+	PromptCacheKey   *string `json:"prompt_cache_key,omitempty"`
+	SafetyIdentifier *string `json:"safety_identifier,omitempty"`
 
 	MaxOutputTokens    *int64     `json:"max_output_tokens,omitempty"`
 	PreviousResponseID *string    `json:"previous_response_id,omitempty"`
@@ -121,8 +121,8 @@ func (r *Response) UnmarshalJSON(data []byte) error {
 		Background         *bool              `json:"background"`
 		MaxToolCalls       *int64             `json:"max_tool_calls"`
 		Prompt             *Prompt            `json:"prompt"`
-		PromptCacheKey     string             `json:"prompt_cache_key"`
-		SafetyIdentifier   string             `json:"safety_identifier"`
+		PromptCacheKey     *string            `json:"prompt_cache_key"`
+		SafetyIdentifier   *string            `json:"safety_identifier"`
 		Instructions       *Input             `json:"instructions"`
 		MaxOutputTokens    *int64             `json:"max_output_tokens"`
 		ParallelToolCalls  *bool              `json:"parallel_tool_calls"`

@@ -1646,17 +1646,20 @@ func (s *chatResponsesStreamState) releaseTerminal() ([]ResponsesSSEEvent, bool)
 	return append(held, s.terminalEnvelope()), true
 }
 
-// FinalizeEOF reports a truncation error unless the stream terminated
-// correctly. The held terminal is released ONLY by the [DONE] sentinel
-// a stream that ends after finish_reason without
-// [DONE] is a truncated stream — the usage tail never arrived — and is a
-// typed upstream truncation, never a released clean terminal. A zero-output
-// finish is pinned the same way: the terminal was reached but not released.
+// FinalizeEOF releases a terminal held after a finishing chunk when the
+// upstream ended its stream without the [DONE] sentinel (some gateways omit
+// it): every semantic terminal already arrived, so the completion is real
+// and the client can be told so truthfully, with the provider quirk
+// recorded as an ungated note. A stream that ends WITHOUT any
+// finish_reason is still a typed truncation, never a fabricated success. A
+// zero-output finish releases the same way: the terminal was reached.
 func (s *chatResponsesStreamState) FinalizeEOF() ([]ResponsesSSEEvent, error) {
 	if s.sawFinish && !s.terminalReleased {
-		return nil, s.wireError(errors.New(
-			"chat stream ended after finish_reason without the [DONE] sentinel",
-		))
+		if err := s.noteMissingSentinel(); err != nil {
+			return nil, err
+		}
+		held, _ := s.releaseTerminal()
+		return held, nil
 	}
 	if s.sawFinish {
 		// The finish chunk was consumed and the [DONE] sentinel released the
@@ -1665,6 +1668,17 @@ func (s *chatResponsesStreamState) FinalizeEOF() ([]ResponsesSSEEvent, error) {
 	}
 	return nil, errors.New(
 		"chat stream ended before a terminal condition",
+	)
+}
+
+// noteMissingSentinel records the missing-[DONE] provider quirk as an
+// ungated note: the EOF release is truthful (the finish already arrived),
+// and the quirk staying visible in the conversion report is what matters.
+func (s *chatResponsesStreamState) noteMissingSentinel() error {
+	return s.report.Note(
+		FeatureMissingStreamSentinel,
+		"chat[].stream",
+		"the upstream stream ended after a finishing chunk without the [DONE] sentinel; the completion was released on EOF",
 	)
 }
 
@@ -2823,8 +2837,8 @@ func (s *anthropicResponsesStreamState) deferToolBlock(pending *pendingToolBlock
 // is open, replaying its buffered fragments and any reconciled done-suffix as
 // input_json_delta. When the item was already done while deferred, its stop is
 // emitted here and the call is recorded as closed, exactly as the direct path
-// would have. Only one block is started per drain: it is now open, so the next
-// drain waits for its stop.
+// would have. A drain cascades while deferred blocks can start and finish in
+// the same batch; a block that is not yet done stays open and ends it.
 func (s *anthropicResponsesStreamState) drainDeferredTools() ([]AnthropicStreamEvent, error) {
 	var events []AnthropicStreamEvent
 	// Cascade: a deferred block whose item already finished starts AND stops
@@ -3606,8 +3620,8 @@ func (s *anthropicResponsesStreamState) loseControlsOnce(
 		{"background", envelope.Background != nil},
 		{"max_tool_calls", envelope.MaxToolCalls != nil},
 		{"prompt", envelope.Prompt != nil},
-		{"prompt_cache_key", envelope.PromptCacheKey != ""},
-		{"safety_identifier", envelope.SafetyIdentifier != ""},
+		{"prompt_cache_key", envelope.PromptCacheKey != nil},
+		{"safety_identifier", envelope.SafetyIdentifier != nil},
 	} {
 		if control.present {
 			present = append(present, control.name)

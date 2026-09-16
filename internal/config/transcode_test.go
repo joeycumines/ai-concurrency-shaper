@@ -650,7 +650,7 @@ func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 	if !mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureUsageUnknown) {
 		t.Fatal("loss policy not applied to the mapping")
 	}
-	if mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureOutputPhase) {
+	if mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureToolSchemaStrictness) {
 		t.Fatal("loss policy leaks unapproved features")
 	}
 }

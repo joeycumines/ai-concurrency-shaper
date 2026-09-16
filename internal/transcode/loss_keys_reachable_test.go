@@ -912,6 +912,45 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 				return report, err
 			},
 		},
+		{
+			// An upstream chat stream that ends after a finishing chunk
+			// without the [DONE] sentinel releases the held terminal on EOF
+			// and records the provider quirk as an ungated note, so the
+			// scenario runs under the strict policy and records the key
+			// anyway.
+			key:  FeatureMissingStreamSentinel,
+			perm: []Feature{},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newChatResponsesStreamState(
+					testStreamContext(),
+					policy,
+					ChatCapabilities{},
+					"resp_1",
+					"gpt-4.1",
+					1710000000,
+					nil,
+				)
+				chunk := ChatStreamResponse{
+					ID:      "c",
+					Object:  "chat.completion.chunk",
+					Created: 1710000000,
+					Model:   "gpt-4.1",
+					Choices: []ChatChoice{{
+						Index:        0,
+						Delta:        &ChatStreamDelta{Content: new("hi")},
+						FinishReason: new("stop"),
+					}},
+				}
+				if _, err := state.Convert(chunk); err != nil {
+					return state.report, err
+				}
+				if _, err := state.FinalizeEOF(); err != nil {
+					return state.report, err
+				}
+				return state.report, nil
+			},
+		},
 	}
 
 	// The scenario matrix must cover every registered key exactly once.
