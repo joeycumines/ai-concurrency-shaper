@@ -544,3 +544,17 @@ choice remains corrupt upstream wire and is rejected, exactly as before
 (the benign empty-string `function_call` fragment is absorbed the same way
 it is mid-stream).
 
+
+### Data-only stream frames (observed stream shape)
+
+Some gateways omit the SSE `event:` name on EVERY frame of a Responses
+stream (observed live on the camel mount's native `/v1/responses`: frames
+begin with a `: ` comment then carry only `data:` lines; the JSON payloads
+carry the full `type` discriminator, e.g.
+`{"p":"...","type":"response.created",...}`). The SSE specification makes
+the `event` field optional, and the Responses JSON `type` is the
+authoritative discriminator, so the converter routes such a frame by its
+decoded JSON type and records the provider quirk as the ungated
+`missing_event_name` note (once per stream, path `responses[].stream`).
+Tolerance is scoped to an ABSENT name only: a PRESENT name that disagrees
+with the JSON type remains a typed upstream wire error, exactly as before.

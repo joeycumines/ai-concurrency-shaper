@@ -231,6 +231,13 @@ const (
 	// exchange when every semantic terminal already arrived) and the quirk
 	// is recorded as an ungated note so it stays observable.
 	FeatureMissingStreamSentinel Feature = "missing_stream_sentinel"
+	// MissingEventName covers an upstream Responses stream whose SSE frames
+	// omit the event: name: the SSE event field is optional and the JSON
+	// type is the authoritative discriminator, so the event is routed by
+	// its decoded type and the provider quirk is recorded as an ungated
+	// note. A PRESENT name that disagrees with the JSON type stays a wire
+	// error.
+	FeatureMissingEventName Feature = "missing_event_name"
 )
 
 // lossEntry pairs a loss key with the description used by the per-request log
@@ -256,6 +263,7 @@ var lossRegistry = []lossEntry{
 	{FeatureOutputItemBoundaries, "output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target"},
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
 	{FeatureMissingStreamSentinel, "the upstream chat stream ended after a finishing chunk without the [DONE] sentinel; the completion was released on EOF and the provider quirk recorded"},
+	{FeatureMissingEventName, "the upstream Responses stream omitted the SSE event: name; the event was routed by its JSON type and the provider quirk recorded"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},
 	{FeatureUsageTotalMismatch, "the source usage totals are arithmetically inconsistent (total_tokens != input + output); the emitted values are relayed with the mismatch recorded (the note names the emitted counts and, where a clamp corrected a component, the source numbers)"},
 	{FeatureReportOverflow, "the conversion report reached its entry bound; further entries are aggregated into this note (observability saturation, never an exchange failure)"},

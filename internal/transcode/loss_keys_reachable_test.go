@@ -951,6 +951,48 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 				return state.report, nil
 			},
 		},
+		{
+			// A data-only upstream Responses stream (the SSE event: name
+			// omitted on every frame) routes each event by its decoded JSON
+			// type and records the provider quirk as an ungated note. The
+			// created envelope's wire JSON cannot carry the in-memory
+			// cache-write usage carrier, so the scenario's own-permission run
+			// also approves the usage component the Messages contract
+			// requires (the note itself needs no permission).
+			key:  FeatureMissingEventName,
+			perm: []Feature{FeatureUsageCacheWriteUnknown},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newAnthropicResponsesStreamState(
+					testStreamContext(), policy, ChatCapabilities{},
+					"msg_1", "claude-x", 1710000000,
+				)
+				converter := newResponsesToAnthropicConverter(state)
+				envelope := anthropicLifecycleEnvelope("resp_1")
+				envelope.Usage = &ResponsesUsage{
+					InputTokens:        10,
+					OutputTokens:       5,
+					TotalTokens:        15,
+					InputTokensDetails: &UsageInputTokensDetails{CachedTokens: 0},
+					OutputTokensDetails: &UsageOutputTokensDetails{
+						ReasoningTokens: 0,
+					},
+					CreatedCacheTokens: new(int64(0)),
+				}
+				payload, err := json.Marshal(ResponseCreatedEvent{
+					Type:           "response.created",
+					SequenceNumber: 0,
+					Response:       envelope,
+				})
+				if err != nil {
+					return state.report, err
+				}
+				if _, err := converter.Convert(SSEEvent{Data: payload}); err != nil {
+					return state.report, err
+				}
+				return state.report, nil
+			},
+		},
 	}
 
 	// The scenario matrix must cover every registered key exactly once.
