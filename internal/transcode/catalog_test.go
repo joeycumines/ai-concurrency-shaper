@@ -504,3 +504,208 @@ func TestCatalogAnthropicPagination(t *testing.T) {
 		}
 	}
 }
+
+func TestCatalogRichFacts(t *testing.T) {
+	inCost := 0.0015
+	outCost := 0.002
+	handler, err := NewCatalogHandler(CatalogConfig{
+		ProviderName: "TestProv",
+		Models: []CatalogModel{
+			{
+				Surrogate:   "super-model",
+				Provider:    "custom-provider",
+				Description: "Fast and intelligent reasoning model",
+				Tags:        []string{"reasoning", "fast"},
+				CostInput:   &inCost,
+				CostOutput:  &outCost,
+				Created:     1710000000,
+				Efforts:     []string{"high"},
+				Modalities:  []string{"text", "image"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// OpenAI shape
+	rec := catalogGet(t, handler, "/v1/models?format=openai", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("openai list status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var openAIDoc openAICatalogDocument
+	if err := json.Unmarshal(rec.Body.Bytes(), &openAIDoc); err != nil {
+		t.Fatal(err)
+	}
+	if len(openAIDoc.Data) != 1 {
+		t.Fatalf("openai models len = %d", len(openAIDoc.Data))
+	}
+	entry := openAIDoc.Data[0]
+	if entry.ID != "super-model" || entry.OwnedBy != "custom-provider" || entry.Created != 1710000000 {
+		t.Errorf("openai entry mismatch: %+v", entry)
+	}
+	if entry.Description != "Fast and intelligent reasoning model" {
+		t.Errorf("openai description = %q", entry.Description)
+	}
+	if len(entry.Tags) != 2 || entry.Tags[0] != "reasoning" || entry.Tags[1] != "fast" {
+		t.Errorf("openai tags = %v", entry.Tags)
+	}
+	if entry.Pricing == nil || *entry.Pricing.Input != 0.0015 || *entry.Pricing.Output != 0.002 {
+		t.Errorf("openai pricing = %+v", entry.Pricing)
+	}
+
+	// Anthropic shape
+	rec = catalogGet(t, handler, "/v1/models?format=anthropic", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("anthropic list status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var anthropicDoc anthropicCatalogDocument
+	if err := json.Unmarshal(rec.Body.Bytes(), &anthropicDoc); err != nil {
+		t.Fatal(err)
+	}
+	if len(anthropicDoc.Data) != 1 {
+		t.Fatalf("anthropic models len = %d", len(anthropicDoc.Data))
+	}
+	anthEntry := anthropicDoc.Data[0]
+	if anthEntry.ID != "super-model" || anthEntry.CreatedAt != "2024-03-09T16:00:00Z" {
+		t.Errorf("anthropic entry mismatch: %+v", anthEntry)
+	}
+	if anthEntry.Description != "Fast and intelligent reasoning model" {
+		t.Errorf("anthropic description = %q", anthEntry.Description)
+	}
+	if anthEntry.Pricing == nil || *anthEntry.Pricing.InputCost != 0.0015 || *anthEntry.Pricing.OutputCost != 0.002 {
+		t.Errorf("anthropic pricing = %+v", anthEntry.Pricing)
+	}
+
+	// Codex shape
+	rec = catalogGet(t, handler, "/v1/models?format=codex", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("codex list status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var codexDoc codexCatalogDocument
+	if err := json.Unmarshal(rec.Body.Bytes(), &codexDoc); err != nil {
+		t.Fatal(err)
+	}
+	if len(codexDoc.Models) != 1 {
+		t.Fatalf("codex models len = %d", len(codexDoc.Models))
+	}
+	codexEntry := codexDoc.Models[0]
+	if codexEntry.Slug != "super-model" || codexEntry.Created != 1710000000 {
+		t.Errorf("codex entry mismatch: %+v", codexEntry)
+	}
+	if codexEntry.Description != "Fast and intelligent reasoning model" {
+		t.Errorf("codex description = %q", codexEntry.Description)
+	}
+	if codexEntry.CostInput == nil || *codexEntry.CostInput != 0.0015 {
+		t.Errorf("codex cost_input = %v", codexEntry.CostInput)
+	}
+}
+
+func TestCatalogSingleModelQuery(t *testing.T) {
+	handler := catalogFixture(t)
+
+	// Single model found - OpenAI format
+	rec := catalogGet(t, handler, "/v1/models/kimi-k3?format=openai", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("openai single status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var openAIEntry openAICatalogEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &openAIEntry); err != nil {
+		t.Fatalf("unmarshal openai single: %v", err)
+	}
+	if openAIEntry.ID != "kimi-k3" || openAIEntry.Object != "model" {
+		t.Errorf("openai single entry mismatch: %+v", openAIEntry)
+	}
+
+	// Single model found - Anthropic format
+	rec = catalogGet(t, handler, "/v1/models/kimi-k3?format=anthropic", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("anthropic single status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var anthEntry anthropicCatalogEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &anthEntry); err != nil {
+		t.Fatalf("unmarshal anthropic single: %v", err)
+	}
+	if anthEntry.ID != "kimi-k3" || anthEntry.Type != "model" {
+		t.Errorf("anthropic single entry mismatch: %+v", anthEntry)
+	}
+
+	// Single model found - Codex format
+	rec = catalogGet(t, handler, "/v1/models/kimi-k3?format=codex", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("codex single status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var codexEntry codexCatalogEntry
+	if err := json.Unmarshal(rec.Body.Bytes(), &codexEntry); err != nil {
+		t.Fatalf("unmarshal codex single: %v", err)
+	}
+	if codexEntry.Slug != "kimi-k3" || codexEntry.ShellType != "shell_command" {
+		t.Errorf("codex single entry mismatch: %+v", codexEntry)
+	}
+
+	// Single model not found - OpenAI format
+	rec = catalogGet(t, handler, "/v1/models/nonexistent?format=openai", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("not found status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	var openAIErr struct {
+		Error struct {
+			Message string `json:"message"`
+			Code    string `json:"code"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &openAIErr); err != nil {
+		t.Fatalf("unmarshal openai 404 error: %v", err)
+	}
+	if openAIErr.Error.Code != "model_not_found" {
+		t.Errorf("openai 404 code = %q, want model_not_found", openAIErr.Error.Code)
+	}
+
+	// Single model not found - Anthropic format
+	rec = catalogGet(t, handler, "/v1/models/nonexistent?format=anthropic", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("anthropic not found status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	var anthErr struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &anthErr); err != nil {
+		t.Fatalf("unmarshal anthropic 404 error: %v", err)
+	}
+	if anthErr.Error.Type != "not_found_error" {
+		t.Errorf("anthropic 404 type = %q, want not_found_error", anthErr.Error.Type)
+	}
+}
+
+func TestCatalogDefaultShape(t *testing.T) {
+	cfg := CatalogConfig{
+		ProviderName: "CustomProv",
+		Models: []CatalogModel{
+			{Surrogate: "m1"},
+		},
+		DefaultShape: CatalogShapeAnthropic,
+	}
+	handler, err := NewCatalogHandler(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := catalogGet(t, handler, "/v1/models", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var doc struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(doc.Data) != 1 || doc.Data[0]["id"] != "m1" {
+		t.Errorf("unexpected doc: %s", rec.Body.String())
+	}
+}
+

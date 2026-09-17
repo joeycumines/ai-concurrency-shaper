@@ -85,6 +85,8 @@ type Config struct {
 	// modelTableByProvider holds, per effective provider name, the frozen
 	// entries that name that provider in input order.
 	modelTableByProvider map[string][]modelTableEntry
+	// catalogSuites holds the validated -catalog-suite mounts.
+	catalogSuites []CatalogSuiteConfig
 }
 
 // Server holds the server/global section settings (legacy -bind/-tui/-version).
@@ -99,6 +101,8 @@ type Server struct {
 	// global model identity as surrogate@provider=wire[;facts]. The table is a
 	// single global namespace; ResolveAndValidate parses and freezes it.
 	ModelTable []string
+	// CatalogSuites holds the raw -catalog-suite entries mounting virtual catalog suites.
+	CatalogSuites []string
 	// Help is set by -h/-help at server scope (or legacy top level): the
 	// caller prints usage and exits 0 instead of running the proxy.
 	Help bool
@@ -323,7 +327,7 @@ type Account struct {
 //     normalize to trailing-slash-free paths and must not overlap; unnamed
 //     providers get derived names that must be unique.
 func (c *Config) ResolveAndValidate() error {
-	if len(c.Providers) == 0 {
+	if len(c.Providers) == 0 && len(c.Server.CatalogSuites) == 0 {
 		return errors.New("no providers configured")
 	}
 
@@ -342,6 +346,10 @@ func (c *Config) ResolveAndValidate() error {
 	}
 
 	if err := c.resolveModelTable(); err != nil {
+		return err
+	}
+
+	if err := c.resolveCatalogSuites(); err != nil {
 		return err
 	}
 

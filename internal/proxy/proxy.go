@@ -1210,6 +1210,16 @@ func (p *Proxy) Journal() *journal.Journal {
 	return p.journal
 }
 
+// HandlerForRouteKey returns the transcode handler mapped to key, or nil.
+func (p *Proxy) HandlerForRouteKey(key transcode.RouteKey) http.Handler {
+	return p.transcodeHandlerMap[key]
+}
+
+// Catalog returns the mount's catalog handler, or nil when no catalog was configured.
+func (p *Proxy) Catalog() *transcode.CatalogHandler {
+	return p.catalog
+}
+
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The unlimited admission class exempts a request whose FIRST matching

@@ -178,7 +178,29 @@ func TestParseModelTableEntry_EmptyFact(t *testing.T) {
 // TestParseModelTableEntry_UnknownFact rejects an unmodelled fact key.
 func TestParseModelTableEntry_UnknownFact(t *testing.T) {
 	assertModelTableParseError(t, "s@p=w;foo=1",
-		`invalid -model-table "s@p=w;foo=1": unknown fact "foo" (want context, max_output, efforts, modalities, default, deprecated)`)
+		`invalid -model-table "s@p=w;foo=1": unknown fact "foo" (want context, max_output, efforts, modalities, default, deprecated, cost_input, cost_output, tags, description, created)`)
+}
+
+func TestParseModelTableEntry_RichFacts(t *testing.T) {
+	entry, err := parseModelTableEntry("s@p=w;cost_input=0.0015;cost_output=0.002;tags=chat+fast;description=Fast_model;created=1710000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.CostInput == nil || *entry.CostInput != 0.0015 {
+		t.Errorf("CostInput = %v", entry.CostInput)
+	}
+	if entry.CostOutput == nil || *entry.CostOutput != 0.002 {
+		t.Errorf("CostOutput = %v", entry.CostOutput)
+	}
+	if want := []string{"chat", "fast"}; !reflect.DeepEqual(entry.Tags, want) {
+		t.Errorf("Tags = %v, want %v", entry.Tags, want)
+	}
+	if entry.Description != "Fast_model" {
+		t.Errorf("Description = %q", entry.Description)
+	}
+	if entry.Created != 1710000000 {
+		t.Errorf("Created = %d", entry.Created)
+	}
 }
 
 // TestParseModelTableEntry_DuplicateFact rejects a repeated fact key.

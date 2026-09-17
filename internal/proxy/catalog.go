@@ -17,6 +17,7 @@ package proxy
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
@@ -42,6 +43,7 @@ func (o *ModelCatalogOption) applyProxyOption(cfg *proxyConfig) error {
 	for i := range cloned.Models {
 		cloned.Models[i].Efforts = append([]string(nil), o.config.Models[i].Efforts...)
 		cloned.Models[i].Modalities = append([]string(nil), o.config.Models[i].Modalities...)
+		cloned.Models[i].Tags = append([]string(nil), o.config.Models[i].Tags...)
 		if o.config.Models[i].Context != nil {
 			value := *o.config.Models[i].Context
 			cloned.Models[i].Context = &value
@@ -50,14 +52,22 @@ func (o *ModelCatalogOption) applyProxyOption(cfg *proxyConfig) error {
 			value := *o.config.Models[i].MaxOutput
 			cloned.Models[i].MaxOutput = &value
 		}
+		if o.config.Models[i].CostInput != nil {
+			value := *o.config.Models[i].CostInput
+			cloned.Models[i].CostInput = &value
+		}
+		if o.config.Models[i].CostOutput != nil {
+			value := *o.config.Models[i].CostOutput
+			cloned.Models[i].CostOutput = &value
+		}
 	}
 	cfg.modelCatalog = &cloned
 	return nil
 }
 
-// catalogServes reports whether the request is this mount's catalog list route.
-// The gate is exact after canonicalization: GET /v1/models and its trailing
-// slash / dot-segment equivalents are served locally, while every other method
+// catalogServes reports whether the request is this mount's catalog list or single-model route.
+// The gate is exact after canonicalization: GET /v1/models and GET /v1/models/{model}
+// and their trailing slash / dot-segment equivalents are served locally, while every other method
 // or path falls through unchanged.
 func (p *Proxy) catalogServes(r *http.Request) bool {
 	if p.catalog == nil || r.Method != http.MethodGet {
@@ -67,7 +77,7 @@ func (p *Proxy) catalogServes(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return key.Path == transcode.CatalogPath
+	return key.Path == transcode.CatalogPath || (strings.HasPrefix(key.Path, transcode.CatalogPath+"/") && len(key.Path) > len(transcode.CatalogPath)+1)
 }
 
 // serveCatalog answers a catalog request locally. The exchange is a clean

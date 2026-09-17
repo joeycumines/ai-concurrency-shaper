@@ -65,13 +65,19 @@ const (
 // CatalogModel is one frozen, presentation-only model entry: identity plus the
 // facts the documents may carry. No resolution path reads it.
 type CatalogModel struct {
-	Surrogate  string
-	Context    *int
-	MaxOutput  *int
-	Efforts    []string
-	Modalities []string
-	Default    bool
-	Deprecated bool
+	Surrogate   string
+	Provider    string
+	Context     *int
+	MaxOutput   *int
+	Efforts     []string
+	Modalities  []string
+	Default     bool
+	Deprecated  bool
+	CostInput   *float64
+	CostOutput  *float64
+	Tags        []string
+	Description string
+	Created     int64
 }
 
 // CatalogConfig is one mount's frozen catalog snapshot. ServesResponses and
@@ -86,6 +92,7 @@ type CatalogConfig struct {
 	ServesMessages    bool
 	ParallelToolCalls bool
 	StructuredOutputs bool
+	DefaultShape      CatalogShape
 	Limits            BodyLimits
 }
 
@@ -97,6 +104,7 @@ type CatalogHandler struct {
 	servesMessages    bool
 	parallelToolCalls bool
 	structuredOutputs bool
+	defaultCatalog    CatalogShape
 	limits            BodyLimits
 }
 
@@ -111,6 +119,7 @@ func NewCatalogHandler(cfg CatalogConfig) (*CatalogHandler, error) {
 	for i, model := range cfg.Models {
 		model.Efforts = slices.Clone(model.Efforts)
 		model.Modalities = slices.Clone(model.Modalities)
+		model.Tags = slices.Clone(model.Tags)
 		if model.Context != nil {
 			value := *model.Context
 			model.Context = &value
@@ -118,6 +127,14 @@ func NewCatalogHandler(cfg CatalogConfig) (*CatalogHandler, error) {
 		if model.MaxOutput != nil {
 			value := *model.MaxOutput
 			model.MaxOutput = &value
+		}
+		if model.CostInput != nil {
+			value := *model.CostInput
+			model.CostInput = &value
+		}
+		if model.CostOutput != nil {
+			value := *model.CostOutput
+			model.CostOutput = &value
 		}
 		models[i] = model
 	}
@@ -128,6 +145,7 @@ func NewCatalogHandler(cfg CatalogConfig) (*CatalogHandler, error) {
 		servesMessages:    cfg.ServesMessages,
 		parallelToolCalls: cfg.ParallelToolCalls,
 		structuredOutputs: cfg.StructuredOutputs,
+		defaultCatalog:    cfg.DefaultShape,
 		limits:            limits,
 	}, nil
 }
@@ -168,6 +186,9 @@ func (h *CatalogHandler) catalogShapeFor(r *http.Request) (CatalogShape, error) 
 // (a passthrough-only mount, or one serving both dialects with no single native
 // shape) lists the same identifiers in the lean OpenAI document.
 func (h *CatalogHandler) defaultShape() CatalogShape {
+	if h.defaultCatalog != "" {
+		return h.defaultCatalog
+	}
 	switch {
 	case h.servesResponses && !h.servesMessages:
 		return CatalogShapeCodex
@@ -178,8 +199,18 @@ func (h *CatalogHandler) defaultShape() CatalogShape {
 	}
 }
 
-// ServeHTTP renders the selected catalog document.
+// ServeHTTP renders the selected catalog document or single model item.
 func (h *CatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	reqPath := r.URL.Path
+	if strings.HasPrefix(reqPath, CatalogPath+"/") {
+		modelID := strings.TrimPrefix(reqPath, CatalogPath+"/")
+		modelID = strings.Trim(modelID, "/")
+		if modelID != "" {
+			h.serveSingleModel(w, r, modelID)
+			return
+		}
+	}
+
 	shape, err := h.catalogShapeFor(r)
 	if err != nil {
 		h.writeDialectError(w, shape, http.StatusBadRequest, err)
@@ -304,360 +335,110 @@ func boundCatalogMessage(message string, max int) string {
 	return message[:max]
 }
 
-// codexPriorities assigns the 1-based priority of every listed model in
-// declaration order: a lone default takes priority 1 and the rest follow in
-// declaration order, otherwise declaration order decides. Only listed (valid)
-// models receive a priority, so a skipped entry cannot leave a numbering gap.
-func (h *CatalogHandler) codexPriorities(listed []int) map[int]int {
-	priorities := make(map[int]int, len(listed))
-	defaultIndex := -1
-	for _, i := range listed {
-		if h.models[i].Default {
-			defaultIndex = i
+func (h *CatalogHandler) serveSingleModel(w http.ResponseWriter, r *http.Request, modelID string) {
+	shape, err := h.catalogShapeFor(r)
+	if err != nil {
+		h.writeDialectError(w, shape, http.StatusBadRequest, err)
+		return
+	}
+	query := r.URL.Query()
+	if err := h.validateSingleModelQuery(shape, query); err != nil {
+		h.writeDialectError(w, shape, http.StatusBadRequest, err)
+		return
+	}
+
+	var found *CatalogModel
+	for i := range h.models {
+		if h.models[i].Surrogate == modelID && validCatalogModel(h.models[i]) {
+			found = &h.models[i]
 			break
 		}
 	}
-	next := 1
-	if defaultIndex >= 0 {
-		priorities[defaultIndex] = next
-		next++
+	if found == nil {
+		h.writeModelNotFoundError(w, shape, modelID)
+		return
 	}
-	for _, i := range listed {
-		if i == defaultIndex {
-			continue
-		}
-		priorities[i] = next
-		next++
+
+	var document any
+	switch shape {
+	case CatalogShapeCodex:
+		document = h.codexEntry(*found, 1)
+	case CatalogShapeAnthropic:
+		document = h.anthropicEntry(*found)
+	case CatalogShapeOpenAI:
+		document = h.openAIEntry(*found)
+	default:
+		h.writeDialectError(w, shape, http.StatusBadRequest, fmt.Errorf("unsupported catalog shape %q", shape))
+		return
 	}
-	return priorities
+
+	body, err := marshalCatalogDocument(document, h.limits.GeneratedResponseBytes)
+	if err != nil {
+		h.writeDialectError(w, shape, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
-type codexCatalogDocument struct {
-	Models []codexCatalogEntry `json:"models"`
-}
-
-type codexTruncationPolicy struct {
-	Mode  string `json:"mode"`
-	Limit int    `json:"limit"`
-}
-
-type codexReasoningLevel struct {
-	Effort      string `json:"effort"`
-	Description string `json:"description"`
-}
-
-type codexCatalogEntry struct {
-	Slug                       string                 `json:"slug"`
-	DisplayName                string                 `json:"display_name"`
-	SupportedInAPI             bool                   `json:"supported_in_api"`
-	ShellType                  string                 `json:"shell_type"`
-	Visibility                 string                 `json:"visibility"`
-	Priority                   int                    `json:"priority"`
-	SupportVerbosity           bool                   `json:"support_verbosity"`
-	SupportsParallelToolCalls  bool                   `json:"supports_parallel_tool_calls"`
-	TruncationPolicy           *codexTruncationPolicy `json:"truncation_policy,omitempty"`
-	ExperimentalSupportedTools []string               `json:"experimental_supported_tools"`
-	BaseInstructions           string                 `json:"base_instructions"`
-	InputModalities            []string               `json:"input_modalities"`
-	ContextWindow              *int                   `json:"context_window,omitempty"`
-	MaxContextWindow           *int                   `json:"max_context_window,omitempty"`
-	AutoCompactTokenLimit      *int                   `json:"auto_compact_token_limit,omitempty"`
-	SupportedReasoningLevels   []codexReasoningLevel  `json:"supported_reasoning_levels"`
-}
-
-// codexEffortDescriptions maps the canonical effort vocabulary to the
-// description strings real Codex catalogs carry. A level without an entry
-// serves an empty description: a truthful blank beats a fabricated one.
-var codexEffortDescriptions = map[string]string{
-	"minimal": "Fast",
-	"low":     "Fast",
-	"medium":  "Balanced",
-	"high":    "Thorough",
-}
-
-func (h *CatalogHandler) codexDocument() codexCatalogDocument {
-	listed := make([]int, 0, len(h.models))
-	for i, model := range h.models {
-		if validCatalogModel(model) {
-			listed = append(listed, i)
+func (h *CatalogHandler) validateSingleModelQuery(shape CatalogShape, query map[string][]string) error {
+	allowed := map[string]struct{}{"format": {}, "beta": {}, "client_version": {}}
+	for key := range query {
+		if _, ok := allowed[key]; !ok {
+			return fmt.Errorf("unknown query parameter %q for the %s single-model query", key, shape)
 		}
 	}
-	priorities := h.codexPriorities(listed)
-	entries := make([]codexCatalogEntry, 0, len(listed))
-	for _, i := range listed {
-		entries = append(entries, h.codexEntry(h.models[i], priorities[i]))
-	}
-	return codexCatalogDocument{Models: entries}
+	return nil
 }
 
-func (h *CatalogHandler) codexEntry(model CatalogModel, priority int) codexCatalogEntry {
-	entry := codexCatalogEntry{
-		Slug:                       model.Surrogate,
-		DisplayName:                h.displayName(model.Surrogate),
-		SupportedInAPI:             true,
-		ShellType:                  catalogCodexShellCommand,
-		Visibility:                 catalogCodexVisibilityList,
-		Priority:                   priority,
-		SupportVerbosity:           true,
-		SupportsParallelToolCalls:  h.parallelToolCalls,
-		ExperimentalSupportedTools: []string{},
-		BaseInstructions:           "",
-		InputModalities:            catalogModalities(model.Modalities),
-		SupportedReasoningLevels:   catalogReasoningLevels(model.Efforts),
-	}
-	if model.Deprecated {
-		entry.Visibility = catalogCodexVisibilityHide
-	}
-	if model.Context != nil {
-		limit := *model.Context
-		entry.TruncationPolicy = &codexTruncationPolicy{Mode: catalogTruncationMode, Limit: limit}
-		entry.ContextWindow = &limit
-		entry.MaxContextWindow = &limit
-		compact := limit * 95 / 100
-		entry.AutoCompactTokenLimit = &compact
-	}
-	return entry
-}
-
-func catalogReasoningLevels(efforts []string) []codexReasoningLevel {
-	levels := make([]codexReasoningLevel, 0, len(efforts))
-	for _, effort := range efforts {
-		levels = append(levels, codexReasoningLevel{
-			Effort:      effort,
-			Description: codexEffortDescriptions[effort],
+func (h *CatalogHandler) writeModelNotFoundError(w http.ResponseWriter, shape CatalogShape, modelID string) {
+	var body []byte
+	switch shape {
+	case CatalogShapeAnthropic:
+		body, _ = json.Marshal(struct {
+			Type  string `json:"type"`
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}{
+			Type: "error",
+			Error: struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			}{
+				Type:    "not_found_error",
+				Message: fmt.Sprintf("model: %s not found", modelID),
+			},
+		})
+	default:
+		body, _ = json.Marshal(struct {
+			Error struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+				Param   any    `json:"param"`
+				Code    string `json:"code"`
+			} `json:"error"`
+		}{
+			Error: struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+				Param   any    `json:"param"`
+				Code    string `json:"code"`
+			}{
+				Message: fmt.Sprintf("The model %q does not exist", modelID),
+				Type:    "invalid_request_error",
+				Param:   "model",
+				Code:    "model_not_found",
+			},
 		})
 	}
-	return levels
-}
-
-// catalogModalities returns the declared modalities, or the honest default the
-// ecosystem schema applies (text) when none are declared.
-func catalogModalities(modalities []string) []string {
-	if len(modalities) == 0 {
-		return []string{"text"}
-	}
-	return slices.Clone(modalities)
-}
-
-func (h *CatalogHandler) displayName(surrogate string) string {
-	if h.provider == "" {
-		return surrogate
-	}
-	return h.provider + " " + surrogate
-}
-
-type anthropicCatalogDocument struct {
-	Data    []anthropicCatalogEntry `json:"data"`
-	FirstID *string                 `json:"first_id"`
-	LastID  *string                 `json:"last_id"`
-	HasMore bool                    `json:"has_more"`
-}
-
-type anthropicSupport struct {
-	Supported bool `json:"supported"`
-}
-
-type anthropicEffort struct {
-	Supported bool              `json:"supported"`
-	Low       *anthropicSupport `json:"low,omitempty"`
-	Medium    *anthropicSupport `json:"medium,omitempty"`
-	High      *anthropicSupport `json:"high,omitempty"`
-	Max       *anthropicSupport `json:"max,omitempty"`
-	XHigh     *anthropicSupport `json:"xhigh,omitempty"`
-}
-
-type anthropicThinking struct {
-	Supported bool `json:"supported"`
-	Types     struct {
-		Adaptive anthropicSupport `json:"adaptive"`
-		Enabled  anthropicSupport `json:"enabled"`
-	} `json:"types"`
-}
-
-type anthropicCapabilities struct {
-	Batch             anthropicSupport  `json:"batch"`
-	Citations         anthropicSupport  `json:"citations"`
-	CodeExecution     anthropicSupport  `json:"code_execution"`
-	ContextManagement anthropicSupport  `json:"context_management"`
-	Effort            anthropicEffort   `json:"effort"`
-	ImageInput        anthropicSupport  `json:"image_input"`
-	PDFInput          anthropicSupport  `json:"pdf_input"`
-	StructuredOutputs anthropicSupport  `json:"structured_outputs"`
-	Thinking          anthropicThinking `json:"thinking"`
-}
-
-type anthropicCatalogEntry struct {
-	Type           string                 `json:"type"`
-	ID             string                 `json:"id"`
-	DisplayName    string                 `json:"display_name"`
-	CreatedAt      string                 `json:"created_at"`
-	MaxInputTokens *int                   `json:"max_input_tokens"`
-	MaxTokens      *int                   `json:"max_tokens"`
-	Capabilities   *anthropicCapabilities `json:"capabilities"`
-}
-
-// anthropicEffortLeaves are the effort names the Anthropic capabilities
-// object models as leaves: every canonical effort except minimal, which the
-// Anthropic contract has no slot for. A leaf is true only when the model's
-// table entry advertises it; otherwise it is the honest negative.
-var anthropicEffortLeaves = []string{"low", "medium", "high", "max", "xhigh"}
-
-func (h *CatalogHandler) anthropicDocument(query map[string][]string) (anthropicCatalogDocument, error) {
-	start, end := 0, len(h.models)
-	if afterID, ok := queryValue(query, "after_id"); ok {
-		index := h.modelIndex(afterID)
-		if index < 0 {
-			return anthropicCatalogDocument{}, fmt.Errorf("unknown after_id %q (%s)", afterID, h.servableSuffix())
-		}
-		start = index + 1
-	}
-	if beforeID, ok := queryValue(query, "before_id"); ok {
-		index := h.modelIndex(beforeID)
-		if index < 0 {
-			return anthropicCatalogDocument{}, fmt.Errorf("unknown before_id %q (%s)", beforeID, h.servableSuffix())
-		}
-		if index < end {
-			end = index
-		}
-	}
-	if end < start {
-		end = start
-	}
-	models := h.models[start:end]
-
-	limit := 0
-	if raw, ok := queryValue(query, "limit"); ok {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 || parsed > 1000 {
-			return anthropicCatalogDocument{}, fmt.Errorf("invalid limit %q (want an integer 1-1000)", raw)
-		}
-		limit = parsed
-	}
-
-	valid := make([]CatalogModel, 0, len(models))
-	for _, model := range models {
-		if !validCatalogModel(model) {
-			continue
-		}
-		valid = append(valid, model)
-	}
-	models = valid
-
-	hasMore := false
-	if limit > 0 && len(models) > limit {
-		models = models[:limit]
-		hasMore = true
-	}
-
-	document := anthropicCatalogDocument{
-		Data:    make([]anthropicCatalogEntry, 0, len(models)),
-		HasMore: hasMore,
-	}
-	for _, model := range models {
-		document.Data = append(document.Data, h.anthropicEntry(model))
-	}
-	if len(models) > 0 {
-		first := models[0].Surrogate
-		last := models[len(models)-1].Surrogate
-		document.FirstID = &first
-		document.LastID = &last
-	}
-	return document, nil
-}
-
-func (h *CatalogHandler) modelIndex(surrogate string) int {
-	for i, model := range h.models {
-		if model.Surrogate == surrogate {
-			return i
-		}
-	}
-	return -1
-}
-
-func (h *CatalogHandler) servableSuffix() string {
-	names := make([]string, 0, len(h.models))
-	for _, model := range h.models {
-		names = append(names, model.Surrogate)
-	}
-	return "servable on this mount: " + strings.Join(names, ", ")
-}
-
-func (h *CatalogHandler) anthropicEntry(model CatalogModel) anthropicCatalogEntry {
-	entry := anthropicCatalogEntry{
-		Type:           anthropicModelType,
-		ID:             model.Surrogate,
-		DisplayName:    h.displayName(model.Surrogate),
-		CreatedAt:      anthropicCreatedAtEpoch,
-		MaxInputTokens: model.Context,
-		MaxTokens:      model.MaxOutput,
-	}
-	if catalogHasFacts(model) {
-		capabilities := anthropicCapabilities{
-			Batch:             anthropicSupport{},
-			Citations:         anthropicSupport{},
-			CodeExecution:     anthropicSupport{},
-			ContextManagement: anthropicSupport{},
-			Effort:            anthropicEffort{Supported: len(model.Efforts) > 0},
-			ImageInput:        anthropicSupport{Supported: slices.Contains(model.Modalities, "image")},
-			PDFInput:          anthropicSupport{},
-			StructuredOutputs: anthropicSupport{Supported: h.structuredOutputs},
-		}
-		for _, leaf := range anthropicEffortLeaves {
-			leafCopy := anthropicSupport{Supported: slices.Contains(model.Efforts, leaf)}
-			switch leaf {
-			case "low":
-				capabilities.Effort.Low = &leafCopy
-			case "medium":
-				capabilities.Effort.Medium = &leafCopy
-			case "high":
-				capabilities.Effort.High = &leafCopy
-			case "max":
-				capabilities.Effort.Max = &leafCopy
-			case "xhigh":
-				capabilities.Effort.XHigh = &leafCopy
-			}
-		}
-		capabilities.Thinking = anthropicThinking{Supported: len(model.Efforts) > 0}
-		capabilities.Thinking.Types.Enabled.Supported = len(model.Efforts) > 0
-		entry.Capabilities = &capabilities
-	}
-	return entry
-}
-
-// catalogHasFacts reports whether the model carries any presentation fact; a
-// fact-free model serves a minimal entry (capabilities null, absent optional
-// fields) rather than a fabricated one.
-func catalogHasFacts(model CatalogModel) bool {
-	return model.Context != nil || model.MaxOutput != nil ||
-		len(model.Efforts) > 0 || len(model.Modalities) > 0
-}
-
-type openAICatalogDocument struct {
-	Object string               `json:"object"`
-	Data   []openAICatalogEntry `json:"data"`
-}
-
-type openAICatalogEntry struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	OwnedBy string `json:"owned_by"`
-}
-
-func (h *CatalogHandler) openAIDocument() openAICatalogDocument {
-	entries := make([]openAICatalogEntry, 0, len(h.models))
-	for _, model := range h.models {
-		if !validCatalogModel(model) {
-			continue
-		}
-		entries = append(entries, openAICatalogEntry{
-			ID:      model.Surrogate,
-			Object:  openAIModelObject,
-			Created: 0,
-			OwnedBy: h.provider,
-		})
-	}
-	return openAICatalogDocument{Object: openAIListObject, Data: entries}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write(body)
 }
 
 // validCatalogModel is the render-time backstop: startup validation is the
@@ -682,6 +463,15 @@ func validCatalogModel(model CatalogModel) bool {
 		if !ValidModelModality(modality) {
 			return false
 		}
+	}
+	if model.CostInput != nil && *model.CostInput < 0 {
+		return false
+	}
+	if model.CostOutput != nil && *model.CostOutput < 0 {
+		return false
+	}
+	if model.Created < 0 {
+		return false
 	}
 	return true
 }

@@ -53,22 +53,27 @@ const (
 )
 
 const (
-	modelTableFactVocabulary = "context, max_output, efforts, modalities, default, deprecated"
+	modelTableFactVocabulary = "context, max_output, efforts, modalities, default, deprecated, cost_input, cost_output, tags, description, created"
 )
 
 // modelTableEntry is one parsed -model-table entry. Facts stay inert here; only
 // the surrogate, provider, and wire id participate in model resolution.
 type modelTableEntry struct {
-	Surrogate  string
-	Provider   string
-	Wire       string
-	Context    *int
-	MaxOutput  *int
-	Efforts    []string
-	Modalities []string
-	Default    bool
-	Deprecated bool
-	Raw        string
+	Surrogate   string
+	Provider    string
+	Wire        string
+	Context     *int
+	MaxOutput   *int
+	Efforts     []string
+	Modalities  []string
+	Default     bool
+	Deprecated  bool
+	CostInput   *float64
+	CostOutput  *float64
+	Tags        []string
+	Description string
+	Created     int64
+	Raw         string
 }
 
 // parseModelTableEntry parses and validates one raw -model-table value. Every
@@ -153,6 +158,39 @@ func parseModelTableEntry(raw string) (modelTableEntry, error) {
 				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: default and deprecated cannot combine", raw)
 			}
 			entry.Deprecated = true
+		case "cost_input", "cost_output":
+			f, ok := parseModelTablePositiveFloat(value)
+			if !hasValue || !ok {
+				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: invalid %s %q: want positive decimal", raw, key, value)
+			}
+			if key == "cost_input" {
+				entry.CostInput = &f
+			} else {
+				entry.CostOutput = &f
+			}
+		case "tags":
+			if !hasValue || value == "" {
+				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: empty tags fact", raw)
+			}
+			tags, err := parseModelTableTags(raw, value)
+			if err != nil {
+				return modelTableEntry{}, err
+			}
+			entry.Tags = tags
+		case "description":
+			if !hasValue || value == "" {
+				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: empty description", raw)
+			}
+			entry.Description = value
+		case "created":
+			if !hasValue || value == "" {
+				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: empty created fact", raw)
+			}
+			n, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || n < 0 {
+				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: invalid created %q: want non-negative integer", raw, value)
+			}
+			entry.Created = n
 		default:
 			return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: unknown fact %q (want %s)", raw, key, modelTableFactVocabulary)
 		}
@@ -196,6 +234,27 @@ func parseModelTablePositiveInt(value string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+func parseModelTablePositiveFloat(value string) (float64, bool) {
+	if value == "" || len(value) > 32 {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(value, 64)
+	if err != nil || f <= 0 {
+		return 0, false
+	}
+	return f, true
+}
+
+func parseModelTableTags(raw, value string) ([]string, error) {
+	parts := strings.Split(value, "+")
+	for _, tag := range parts {
+		if !validModelTableIdent(tag, 64) {
+			return nil, fmt.Errorf("invalid -model-table %q: invalid tag %q: want 1-64 chars of [A-Za-z0-9._-]", raw, tag)
+		}
+	}
+	return parts, nil
 }
 
 // hasControlByte reports whether s contains an ASCII control byte.
@@ -281,10 +340,12 @@ func (c *Config) resolveModelTable() error {
 	for _, name := range known {
 		knownSet[name] = struct{}{}
 	}
-	for _, entry := range entries {
-		if _, ok := knownSet[entry.Provider]; !ok {
-			return fmt.Errorf("unknown -model-table provider %q in %q: no provider named %q (known: %s)",
-				entry.Provider, entry.Raw, entry.Provider, strings.Join(known, ", "))
+	if len(c.Providers) > 0 {
+		for _, entry := range entries {
+			if _, ok := knownSet[entry.Provider]; !ok {
+				return fmt.Errorf("unknown -model-table provider %q in %q: no provider named %q (known: %s)",
+					entry.Provider, entry.Raw, entry.Provider, strings.Join(known, ", "))
+			}
 		}
 	}
 
@@ -346,8 +407,17 @@ func cloneModelTableEntry(entry modelTableEntry) modelTableEntry {
 		value := *entry.MaxOutput
 		cloned.MaxOutput = &value
 	}
+	if entry.CostInput != nil {
+		value := *entry.CostInput
+		cloned.CostInput = &value
+	}
+	if entry.CostOutput != nil {
+		value := *entry.CostOutput
+		cloned.CostOutput = &value
+	}
 	cloned.Efforts = slices.Clone(entry.Efforts)
 	cloned.Modalities = slices.Clone(entry.Modalities)
+	cloned.Tags = slices.Clone(entry.Tags)
 	return cloned
 }
 
@@ -392,11 +462,23 @@ func (e modelTableEntry) factSuffix() string {
 	if e.Context != nil {
 		parts = append(parts, "context="+strconv.Itoa(*e.Context))
 	}
+	if e.CostInput != nil {
+		parts = append(parts, "cost_input="+strconv.FormatFloat(*e.CostInput, 'f', -1, 64))
+	}
+	if e.CostOutput != nil {
+		parts = append(parts, "cost_output="+strconv.FormatFloat(*e.CostOutput, 'f', -1, 64))
+	}
+	if e.Created > 0 {
+		parts = append(parts, "created="+strconv.FormatInt(e.Created, 10))
+	}
 	if e.Default {
 		parts = append(parts, "default")
 	}
 	if e.Deprecated {
 		parts = append(parts, "deprecated")
+	}
+	if e.Description != "" {
+		parts = append(parts, "description="+e.Description)
 	}
 	if len(e.Efforts) > 0 {
 		parts = append(parts, "efforts="+strings.Join(e.Efforts, "+"))
@@ -406,6 +488,9 @@ func (e modelTableEntry) factSuffix() string {
 	}
 	if len(e.Modalities) > 0 {
 		parts = append(parts, "modalities="+strings.Join(e.Modalities, "+"))
+	}
+	if len(e.Tags) > 0 {
+		parts = append(parts, "tags="+strings.Join(e.Tags, "+"))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -451,11 +536,15 @@ func (p *Provider) resolveModelCatalog(modelTable []modelTableEntry) {
 	}
 	for _, entry := range modelTable {
 		model := transcode.CatalogModel{
-			Surrogate:  entry.Surrogate,
-			Efforts:    slices.Clone(entry.Efforts),
-			Modalities: slices.Clone(entry.Modalities),
-			Default:    entry.Default,
-			Deprecated: entry.Deprecated,
+			Surrogate:   entry.Surrogate,
+			Provider:    entry.Provider,
+			Efforts:     slices.Clone(entry.Efforts),
+			Modalities:  slices.Clone(entry.Modalities),
+			Default:     entry.Default,
+			Deprecated:  entry.Deprecated,
+			Tags:        slices.Clone(entry.Tags),
+			Description: entry.Description,
+			Created:     entry.Created,
 		}
 		if entry.Context != nil {
 			value := *entry.Context
@@ -464,6 +553,14 @@ func (p *Provider) resolveModelCatalog(modelTable []modelTableEntry) {
 		if entry.MaxOutput != nil {
 			value := *entry.MaxOutput
 			model.MaxOutput = &value
+		}
+		if entry.CostInput != nil {
+			value := *entry.CostInput
+			model.CostInput = &value
+		}
+		if entry.CostOutput != nil {
+			value := *entry.CostOutput
+			model.CostOutput = &value
 		}
 		catalog.Models = append(catalog.Models, model)
 	}
@@ -496,6 +593,7 @@ func (p *Provider) ModelCatalog() (transcode.CatalogConfig, bool) {
 	for i, model := range p.modelCatalog.Models {
 		model.Efforts = slices.Clone(model.Efforts)
 		model.Modalities = slices.Clone(model.Modalities)
+		model.Tags = slices.Clone(model.Tags)
 		if model.Context != nil {
 			value := *model.Context
 			model.Context = &value
@@ -504,7 +602,54 @@ func (p *Provider) ModelCatalog() (transcode.CatalogConfig, bool) {
 			value := *model.MaxOutput
 			model.MaxOutput = &value
 		}
+		if model.CostInput != nil {
+			value := *model.CostInput
+			model.CostInput = &value
+		}
+		if model.CostOutput != nil {
+			value := *model.CostOutput
+			model.CostOutput = &value
+		}
 		out.Models[i] = model
 	}
 	return out, true
+}
+
+// ModelTable returns a deep copy of the configured global model table entries as CatalogModel snapshots.
+func (c *Config) ModelTable() []transcode.CatalogModel {
+	if len(c.modelTable) == 0 {
+		return nil
+	}
+	out := make([]transcode.CatalogModel, len(c.modelTable))
+	for i, entry := range c.modelTable {
+		model := transcode.CatalogModel{
+			Surrogate:   entry.Surrogate,
+			Provider:    entry.Provider,
+			Efforts:     slices.Clone(entry.Efforts),
+			Modalities:  slices.Clone(entry.Modalities),
+			Default:     entry.Default,
+			Deprecated:  entry.Deprecated,
+			Tags:        slices.Clone(entry.Tags),
+			Description: entry.Description,
+			Created:     entry.Created,
+		}
+		if entry.Context != nil {
+			v := *entry.Context
+			model.Context = &v
+		}
+		if entry.MaxOutput != nil {
+			v := *entry.MaxOutput
+			model.MaxOutput = &v
+		}
+		if entry.CostInput != nil {
+			v := *entry.CostInput
+			model.CostInput = &v
+		}
+		if entry.CostOutput != nil {
+			v := *entry.CostOutput
+			model.CostOutput = &v
+		}
+		out[i] = model
+	}
+	return out
 }
