@@ -477,3 +477,106 @@ func TestContinuityStreamRetains(t *testing.T) {
 		t.Fatal("pre-release continuityTurns ready, want not-ready")
 	}
 }
+
+// TestContinuityConcurrentIsolation proves that concurrent chains with
+// different keys never cross-contaminate. Two goroutines write to distinct
+// (provider, id) pairs in parallel; each resolves only its own chain.
+func TestContinuityConcurrentIsolation(t *testing.T) {
+	store := NewContinuityStore(ContinuityConfig{Capacity: 100, TTL: time.Minute})
+
+	// Chain A: provider "parent", id "resp-parent-1"
+	chainA := []CanonicalTurn{
+		{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: "parent turn 1"}}},
+		{Role: CanonicalAssistant, Parts: []CanonicalPart{CanonicalText{Text: "parent reply 1"}}},
+	}
+	store.Record("parent", "resp-parent-1", chainA, 0, false)
+
+	// Chain B: provider "child", id "resp-child-1"
+	chainB := []CanonicalTurn{
+		{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: "child turn 1"}}},
+		{Role: CanonicalAssistant, Parts: []CanonicalPart{CanonicalText{Text: "child reply 1"}}},
+	}
+	store.Record("child", "resp-child-1", chainB, 0, false)
+
+	// Concurrent writes to both chains.
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(2)
+		go func(idx int) {
+			defer wg.Done()
+			turns := []CanonicalTurn{
+				{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: fmt.Sprintf("parent turn %d", idx)}}},
+			}
+			store.Record("parent", fmt.Sprintf("resp-parent-%d", idx), turns, 0, false)
+		}(i)
+		go func(idx int) {
+			defer wg.Done()
+			turns := []CanonicalTurn{
+				{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: fmt.Sprintf("child turn %d", idx)}}},
+			}
+			store.Record("child", fmt.Sprintf("resp-child-%d", idx), turns, 0, false)
+		}(i)
+	}
+	wg.Wait()
+
+	// Resolve chain A: should get only parent turns.
+	priorA, _, ok := store.Resolve("parent", "resp-parent-1")
+	if !ok {
+		t.Fatal("chain A should resolve")
+	}
+	for _, turn := range priorA {
+		for _, part := range turn.Parts {
+			if text, ok := part.(CanonicalText); ok {
+				if strings.Contains(text.Text, "child") {
+					t.Errorf("chain A resolved with child content: %q", text.Text)
+				}
+			}
+		}
+	}
+
+	// Resolve chain B: should get only child turns.
+	priorB, _, ok := store.Resolve("child", "resp-child-1")
+	if !ok {
+		t.Fatal("chain B should resolve")
+	}
+	for _, turn := range priorB {
+		for _, part := range turn.Parts {
+			if text, ok := part.(CanonicalText); ok {
+				if strings.Contains(text.Text, "parent") {
+					t.Errorf("chain B resolved with parent content: %q", text.Text)
+				}
+			}
+		}
+	}
+
+	// Foreign id refusal: request for chain A with id from chain B should miss.
+	_, _, ok = store.Resolve("parent", "resp-child-1")
+	if ok {
+		t.Error("foreign id should not resolve (provider mismatch)")
+	}
+}
+
+// TestContinuityForeignIdRefusal proves that a request for one chain that
+// sends a previous_response_id from a different chain (same provider, different
+// id) misses and degrades to the existing observable loss.
+func TestContinuityForeignIdRefusal(t *testing.T) {
+	store := NewContinuityStore(ContinuityConfig{Capacity: 10, TTL: time.Minute})
+
+	// Record chain A.
+	chainA := []CanonicalTurn{
+		{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: "chain A turn"}}},
+	}
+	store.Record("provider1", "resp-a", chainA, 0, false)
+
+	// Request for chain B (different id, same provider) should miss.
+	_, _, ok := store.Resolve("provider1", "resp-b")
+	if ok {
+		t.Error("foreign id within same provider should not resolve")
+	}
+
+	// Request for chain A with wrong provider should miss.
+	_, _, ok = store.Resolve("provider2", "resp-a")
+	if ok {
+		t.Error("foreign provider should not resolve")
+	}
+}
