@@ -341,3 +341,22 @@ func TestChatResponseDecodesMatchedStopMessageExtension(t *testing.T) {
 		t.Fatalf("unknown message field tolerated decode = %v, want success", err)
 	}
 }
+
+// TestChatResponseUnknownFinishReasonRefused pins the row-44 refusal set on
+// both paths: an unknown chat finish_reason on the Chat directions stays a
+// keyed refusal (never absorbed, never defaulted to stop), non-stream and
+// stream alike.
+func TestChatResponseUnknownFinishReasonRefused(t *testing.T) {
+	body := []byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"frobnicate","message":{"role":"assistant","content":"x"}}]}`)
+	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	target := &UnsupportedFeatureError{}
+	if !errors.As(err, &target) {
+		t.Fatalf("err = %T: %v, want keyed refusal", err, err)
+	}
+	state := newChatResponsesStreamState(testStreamContext(), StrictLossPolicy(), ChatCapabilities{}, "resp_1", "m", 1, nil)
+	_, err = state.Convert(chatChunk(t, ChatStreamDelta{}, new("frobnicate")))
+	target = &UnsupportedFeatureError{}
+	if !errors.As(err, &target) {
+		t.Fatalf("stream err = %T: %v, want keyed refusal", err, err)
+	}
+}
