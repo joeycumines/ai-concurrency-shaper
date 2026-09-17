@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"sort"
@@ -634,6 +635,11 @@ func validateMBFlag(name string, value int64, shift uint) error {
 	return nil
 }
 
+// continuityStores shares one store per provider across its mappings: chains
+// accumulate across exchanges (and routes) by design. It is populated during
+// ResolveAndValidate, which runs serially; no mutex guards it.
+var continuityStores = make(map[*Provider]*transcode.ContinuityStore)
+
 // resolveTranscode resolves and validates all transcode configuration for a Provider.
 // modelTable is this provider's frozen subset of the global -model-table: nil or
 // empty means the table is not configured and the provider-scope -transcode-model
@@ -644,6 +650,12 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	}
 	if err := validateMBFlag("-transcode-max-response-mb", p.TranscodeMaxResponseMB, 20); err != nil {
 		return err
+	}
+	if p.TranscodeContinuityCap < 0 {
+		return fmt.Errorf("-transcode-continuity-capacity must be nonnegative, got %d", p.TranscodeContinuityCap)
+	}
+	if p.TranscodeContinuityTTL < 0 {
+		return fmt.Errorf("-transcode-continuity-ttl must be nonnegative, got %s", p.TranscodeContinuityTTL)
 	}
 
 	var parsedRoutes []proxy.TranscodeMapping
@@ -775,6 +787,27 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 			mappings[i].BodyLimits.SuccessfulResponseBytes = p.TranscodeMaxResponseMB << 20
 		}
 		mappings[i].FlowLogDir = p.TranscodeFlowLogDir
+
+		if p.TranscodeContinuity {
+			if continuityStores == nil {
+				continuityStores = make(map[*Provider]*transcode.ContinuityStore)
+			}
+			store, ok := continuityStores[p]
+			if !ok {
+				store = transcode.NewContinuityStore(transcode.ContinuityConfig{
+					Capacity: p.TranscodeContinuityCap,
+					TTL:      p.TranscodeContinuityTTL,
+				})
+				continuityStores[p] = store
+				log.Printf(
+					"transcode: continuity store enabled (capacity %d, ttl %s); previous_response_id resolves against retained chains, a miss degrades to the existing observable loss",
+					store.Capacity(),
+					store.TTL(),
+				)
+			}
+			mappings[i].Continuity = store
+			mappings[i].ContinuityKey = p.Name
+		}
 
 		if err := mappings[i].Mapping.Validate(); err != nil {
 			return fmt.Errorf("transcode mapping %s %s: %w", mappings[i].ClientRoute.Method, mappings[i].ClientRoute.Path, err)

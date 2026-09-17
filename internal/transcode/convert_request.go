@@ -1971,7 +1971,13 @@ func RenderChatRequest(
 	if echo := context.OriginalResponsesRequest; echo != nil {
 		out.User = echo.User
 		out.Store = echo.Store
-		if echo.PreviousResponseID != nil {
+		// Opt-in continuity (statefulness decision: OFF by default). When
+		// the store resolved this request's previous_response_id, the
+		// reconstructed history is already prepended to the rendered turns,
+		// so the field is consumed, not lost: skip the existing observable
+		// loss (the hit Note at decode already records the fact). A miss
+		// (RequestDepth 0) falls through to the loss, never a failure.
+		if echo.PreviousResponseID != nil && context.RequestDepth == 0 {
 			if err := report.Lose(
 				context.lossPolicy(),
 				FeaturePreviousResponseID,

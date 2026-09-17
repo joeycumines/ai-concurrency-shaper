@@ -263,6 +263,20 @@ type ExchangeContext struct {
 	//. A stream/JSON mismatch on the upstream response
 	// is an error rather than a silent mode change.
 	StreamIntent bool
+
+	// RequestTurns carries the decoded canonical request turns for the
+	// exchange, so the opt-in continuity store can retain the conversation
+	// that produced an emitted response id. It is set by convertRequest for
+	// Responses clients (after continuity resolution, so the retained chain
+	// already includes the reconstructed history) and left nil otherwise.
+	// Canonical parts are immutable after decode; the store copies the
+	// slice header, never the parts.
+	RequestTurns []CanonicalTurn
+
+	// RequestDepth carries the continuity resolution depth of this
+	// exchange (0 when no previous_response_id resolved), so the record
+	// call stores the depth the next resolution builds on.
+	RequestDepth int
 }
 
 // lossPolicy returns the exchange loss policy, or the strictest policy when

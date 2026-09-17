@@ -45,6 +45,17 @@ type HandlerConfig struct {
 	// the constructing caller (the proxy), never created here, and the
 	// records are unredacted: treat the directory as secret-bearing.
 	FlowLogDir string
+
+	// Continuity, when non-nil, is the opt-in bounded per-conversation
+	// store behind the statefulness decision (OFF by default: nil means no
+	// retention, and previous_response_id keeps its existing observable
+	// loss). When set, the handler records the canonical conversation that
+	// produced each emitted Responses id and resolves a later request's
+	// previous_response_id against it; a miss degrades to the existing
+	// loss, never a failure. ContinuityKey scopes retained ids to the
+	// provider mapping that emitted them.
+	Continuity    *ContinuityStore
+	ContinuityKey string
 }
 
 // RoundTrip executes an outbound HTTP request through the proxy engine.
@@ -638,6 +649,32 @@ func (h *TranscodeHandler) convertRequest(
 		context.ToolNames = result.ToolNames
 		result.Request.ClientModel = context.UpstreamModel
 
+		// Opt-in continuity (statefulness decision: OFF by default — a nil
+		// store skips this entirely and previous_response_id keeps its
+		// existing observable loss at render). When the store is set and
+		// the request carries a previous_response_id, resolve the retained
+		// conversation and prepend it ahead of the request's own turns; a
+		// miss (unknown, expired, or foreign id) falls through to the
+		// existing loss, never a failure.
+		if h.cfg.Continuity != nil && echo.PreviousResponseID != nil &&
+			*echo.PreviousResponseID != "" {
+			if prior, depth, ok := resolveContinuityChain(
+				h.cfg.Continuity, h.cfg.ContinuityKey, *echo.PreviousResponseID,
+			); ok {
+				merged := make([]CanonicalTurn, 0, len(prior)+len(result.Request.Turns))
+				merged = append(merged, prior...)
+				merged = append(merged, result.Request.Turns...)
+				result.Request.Turns = merged
+				context.RequestDepth = depth
+				if err := continuityNote(&result.Report, depth, *echo.PreviousResponseID); err != nil {
+					return nil, nil, err
+				}
+			}
+		}
+		// The retained chain must include the reconstructed history, so the
+		// record call in convertResponse stores the post-merge turns.
+		context.RequestTurns = result.Request.Turns
+
 		var rendered []byte
 		var report ConversionReport
 		switch mapping.UpstreamProtocol {
@@ -967,6 +1004,14 @@ func (h *TranscodeHandler) convertResponse(
 			if err != nil {
 				return nil, conversionProvenance(err), err
 			}
+			// Opt-in continuity: retain the canonical conversation that
+			// produced the emitted id, so a follow-up carrying it as
+			// previous_response_id can be reconstructed. The envelope id
+			// is minted inside the render (context.IDs), so it is read
+			// back from the converted bytes — response.ID is the upstream
+			// chat id, never the client-visible id. Nothing is retained
+			// when the store is nil (default) or the client sent store:false.
+			h.recordContinuityFromEnvelope(r, context, response, converted)
 			// The decode's provider reasoning drop is part of the same
 			// exchange log as the render's losses (request-side merge
 			// precedent).
@@ -1140,6 +1185,24 @@ func (h *TranscodeHandler) streamResponse(
 	// Response-side approved losses are logged with the same fidelity as
 	// request-side losses.
 	h.logConversionReport(*converter.ConversionReport(), r, "response")
+	// Opt-in continuity for streams: on a successful Responses->Chat stream,
+	// retain the conversation that produced the emitted id (request turns +
+	// terminal assistant turns) so a follow-up works exactly like the
+	// non-streaming path. Only the Responses-client/Chat-upstream converter
+	// carries a chatResponsesStreamState; every other direction is a no-op.
+	if classification == streamOutcomeSuccess && h.cfg.Continuity != nil &&
+		h.cfg.Mapping.ClientProtocol == ClientResponses &&
+		h.cfg.Mapping.UpstreamProtocol == UpstreamChatCompletions {
+		if chat, ok := converter.(*chatToResponsesConverter); ok && chat != nil && chat.state != nil {
+			if id, turns, depth, ok := chat.state.continuityTurns(context.RequestTurns, context.RequestDepth); ok {
+				storeFalse := false
+				if echo := context.OriginalResponsesRequest; echo != nil && echo.Store != nil {
+					storeFalse = !*echo.Store
+				}
+				h.cfg.Continuity.Record(h.cfg.ContinuityKey, id, turns, depth, storeFalse)
+			}
+		}
+	}
 }
 
 // newFrameConverter builds the direction-specific stream converter.

@@ -1627,6 +1627,65 @@ func (s *chatResponsesStreamState) terminalEnvelope() ResponsesSSEEvent {
 	return s.builder.Completed(envelope)
 }
 
+// continuityTurns rebuilds the canonical request turns the completed stream
+// continues: the request turns the exchange decoded (already
+// continuity-resolved, so the chain includes reconstructed history) followed
+// by the assistant turns the terminal envelope rendered. It mirrors
+// responseItemsToTurns over the terminal output items (message items become
+// assistant turns with call folding; result/reasoning items skipped), using
+// the state's own text/refusal accumulators would double-count: the terminal
+// items already carry the materialized content at release. Call with the
+// exchange's request turns; nil when the terminal never released.
+func (s *chatResponsesStreamState) continuityTurns(requestTurns []CanonicalTurn, depth int) (string, []CanonicalTurn, int, bool) {
+	if !s.terminalReleased {
+		return "", nil, 0, false
+	}
+	items := s.finalOutputItems()
+	turns := make([]CanonicalTurn, 0, len(requestTurns)+2)
+	turns = append(turns, requestTurns...)
+	for _, item := range items {
+		switch value := item.(type) {
+		case *ResponsesOutputMessage:
+			parts, err := responsesOutputContentToCanonical(value.Content)
+			if err != nil || len(parts) == 0 {
+				continue
+			}
+			// Streamed reasoning items materialize as message items whose
+			// parts may include synthesized thinking: thinking is ephemeral
+			// model reasoning, not conversation content, and no Chat render
+			// carries it — drop it so the retained chain always renders.
+			kept := parts[:0]
+			for _, part := range parts {
+				if _, ok := part.(CanonicalThinkingPart); ok {
+					continue
+				}
+				kept = append(kept, part)
+			}
+			if len(kept) == 0 {
+				continue
+			}
+			turns = append(turns, CanonicalTurn{Role: CanonicalAssistant, Parts: kept})
+		case *ResponsesFunctionCallOutputItem:
+			part := CanonicalFunctionCall{
+				CallID:    value.CallID,
+				Name:      value.Name,
+				Arguments: json.RawMessage(value.Arguments),
+			}
+			if len(turns) > 0 && turns[len(turns)-1].Role == CanonicalAssistant {
+				turns[len(turns)-1].Parts = append(turns[len(turns)-1].Parts, part)
+			} else {
+				turns = append(turns, CanonicalTurn{Role: CanonicalAssistant, Parts: []CanonicalPart{part}})
+			}
+		default:
+			continue
+		}
+	}
+	if len(turns) == 0 {
+		return "", nil, 0, false
+	}
+	return s.responseID, turns, depth, true
+}
+
 // finalOutputItems returns every completed output item ordered by output
 // index: message items plus completed function calls.
 func (s *chatResponsesStreamState) finalOutputItems() []ResponsesOutputItem {
