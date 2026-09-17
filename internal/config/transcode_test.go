@@ -1584,6 +1584,22 @@ func TestResolveTranscodeContinuityFlags(t *testing.T) {
 	if first.Capacity() != 4 {
 		t.Fatalf("capacity = %d, want 4", first.Capacity())
 	}
+	// Distinct providers receive independent stores without cross-provider leakage.
+	on2 := base()
+	on2.Name = "second-provider"
+	on2.TranscodeContinuity = true
+	on2.TranscodeContinuityCap = 4
+	if err := on2.resolveTranscode(nil); err != nil {
+		t.Fatal(err)
+	}
+	second := on2.transcodeMappings[0].Continuity
+	if second == nil {
+		t.Fatal("second provider has no store")
+	}
+	if second == first {
+		t.Fatal("distinct providers shared the same continuity store instance")
+	}
+
 	// Negative capacity rejected.
 	neg := base()
 	neg.TranscodeContinuity = true

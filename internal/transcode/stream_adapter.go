@@ -70,7 +70,10 @@ func (c *chatToResponsesConverter) Convert(
 
 // FinalizeEOF reports a truncation error unless the stream terminated
 // correctly. The held terminal (which may be an empty batch for a
-// zero-output finish) is released ONLY by the [DONE] sentinel.
+// zero-output finish) is released by the [DONE] sentinel, or by EOF when
+// a finish_reason was already received — the missing sentinel is recorded
+// as an ungated note. A stream that ends without any finish_reason is
+// still a typed truncation error.
 func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
