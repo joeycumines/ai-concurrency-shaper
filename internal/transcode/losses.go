@@ -232,6 +232,17 @@ const (
 	// a chat request cannot express: an approved loss drops them from the
 	// upstream request, a rejection refuses the request.
 	FeatureBuiltinTools Feature = "builtin_tools"
+	// AnthropicServerTools covers Anthropic Messages server-side tools and
+	// server-executed content (type-discriminated tools[] definitions such as
+	// web_search_20250305, server_tool_use / web_search_tool_result /
+	// code_execution blocks, container_upload references): a chat upstream
+	// executes no server tools, so an approved loss drops them observably
+	// and a rejection refuses the request. Strict by default: approve with
+	// -transcode-allow-loss anthropic_server_tools. Client-side tools that
+	// happen to arrive under a server spelling (mcp_tool_use /
+	// mcp_tool_result, which carry the same fields as tool_use /
+	// tool_result) map 1:1 and never touch this key.
+	FeatureAnthropicServerTools Feature = "anthropic_server_tools"
 	// ResponseServiceTier covers the upstream chat service tier ACTUALLY
 	// SERVED (distinct from the requested tier): the client dialects cannot
 	// represent the tier served.
@@ -309,6 +320,7 @@ var lossRegistry = []lossEntry{
 	{FeatureAnthropicControls, "the Anthropic Messages client-side envelope controls (context_management, output_config) have no representation in the target request; an approved loss drops them observably"},
 	{FeatureRequestCitations, "request citations on text blocks cannot be reproduced in the target request"},
 	{FeatureBuiltinTools, "Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject)"},
+	{FeatureAnthropicServerTools, "Anthropic Messages server-side tools and server-executed content (type-discriminated tools[] definitions, server_tool_use / web_search_tool_result / code_execution blocks, container_upload references) cannot be reproduced in a chat request; an approved loss drops them observably"},
 	{FeatureResponseServiceTier, "the upstream chat service tier actually served cannot be reproduced in the target"},
 	{FeatureLegacyFunctionCall, "the upstream chat response uses the legacy non-tool_calls function_call spelling; the single invocation maps to one canonical tool call with a synthesized id derived from the response id (the note names the synthesis)"},
 }

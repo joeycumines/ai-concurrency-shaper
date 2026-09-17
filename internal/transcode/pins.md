@@ -433,6 +433,36 @@ content_block_delta  index,required; delta (union),required
 content_block_stop   index,required
 ```
 
+## Anthropic server-side tools and content (modeled extension beyond the pin)
+
+The v1.61.0 pin predates the server-tool surface named here, so the
+following shapes are deliberate extensions, modeled from the official
+contract and a real Claude Code 2.1.273 capture. Every shape is admitted
+on the wire and decided under the `anthropic_server_tools` loss key (a
+chat upstream executes no server tools): approved, it drops observably;
+rejected, the request fails with the keyed error — never an unattributed
+unknown-type rejection.
+
+- Type-discriminated `tools[]` definitions (observed live 2026-09-17:
+  `{"type":"web_search_20250305","name":"web_search","max_uses":8}`):
+  admitted with raw params preserved (`Tool.Type` + `Tool.ServerParams`),
+  dropped under the key. Fixture:
+  `testcorpus/testdata/field/claude_server_tool_definition_field.json`
+  (accessor `FieldClaudeServerToolDefinitionJSON`).
+- Content blocks `server_tool_use`, `web_search_tool_result`,
+  `code_execution`, `code_execution_tool_result`, `container_upload`:
+  admitted with raw bytes preserved (`ContentBlock.ServerContent`),
+  dropped under the key. A fabricated function call would dangle with no
+  upstream executor, so mapping is refused by design.
+- Content blocks `mcp_tool_use` / `mcp_tool_result`: client-side tools
+  under a server spelling, carrying the `tool_use` / `tool_result`
+  fields exactly — mapped 1:1 onto the canonical function call/result
+  with no loss key.
+
+The key is strict by default: a session carrying server tools fails with
+the keyed error until the operator passes
+`-transcode-allow-loss anthropic_server_tools`.
+
 ## Model-vs-pin deltas (as of cycle J, task J11)
 
 Implemented J4/J5/J6/J7/J11:

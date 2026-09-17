@@ -168,3 +168,97 @@ func TestResponsesJSONObjectStructuredOutputIsLossGated(t *testing.T) {
 		t.Fatal("expected structured_output loss record for json_object")
 	}
 }
+
+// TestDecodeMessagesServerToolDefinitionKeyed pins the live server-tool
+// capture (2026-09-17, Claude Code 2.1.273 web-search session via
+// messages->chat:
+// tools:[{type:web_search_20250305, name:web_search, max_uses:8}]): the
+// type-discriminated server definition must fail with the keyed
+// anthropic_server_tools error under strict policy (never an unattributed
+// unknown-field rejection), and drop observably under the approval.
+func TestDecodeMessagesServerToolDefinitionKeyed(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":8,` +
+		`"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],` +
+		`"messages":[{"role":"user","content":"hi"}]}`)
+	_, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	if err == nil {
+		t.Fatal("expected keyed rejection under strict policy, got nil")
+	}
+	target := &UnsupportedFeatureError{}
+	if !errors.As(err, &target) {
+		t.Fatalf("err = %T: %v, want UnsupportedFeatureError carrying the key", err, err)
+	}
+	if target.Feature != string(FeatureAnthropicServerTools) {
+		t.Fatalf("feature = %q, want %q", target.Feature, FeatureAnthropicServerTools)
+	}
+	permissive := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicServerTools: {}}}
+	result, err := DecodeMessagesRequest(body, permissive)
+	if err != nil {
+		t.Fatalf("approved drop rejected: %v", err)
+	}
+	if len(result.Request.Tools) != 0 {
+		t.Fatalf("server tool leaked %d tools upstream", len(result.Request.Tools))
+	}
+	found := false
+	for _, loss := range result.Report.Losses {
+		if loss.Feature == FeatureAnthropicServerTools {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("report = %+v, want the anthropic_server_tools loss", result.Report.Losses)
+	}
+}
+
+// TestDecodeMessagesServerBlocksKeyed pins the per-block dispositions:
+// server_tool_use drops under the key (never a synthesized function call),
+// mcp_tool_use maps 1:1 onto a function call with no loss key.
+func TestDecodeMessagesServerBlocksKeyed(t *testing.T) {
+	server := []byte(`{"model":"m","max_tokens":8,` +
+		`"messages":[{"role":"assistant","content":[{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{"q":"x"}}]}]}`)
+	_, err := DecodeMessagesRequest(server, StrictLossPolicy())
+	target := &UnsupportedFeatureError{}
+	if !errors.As(err, &target) {
+		t.Fatalf("server_tool_use err = %T: %v, want keyed rejection", err, err)
+	}
+	if target.Feature != string(FeatureAnthropicServerTools) {
+		t.Fatalf("feature = %q, want %q", target.Feature, FeatureAnthropicServerTools)
+	}
+	permissive := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicServerTools: {}}}
+	res, err := DecodeMessagesRequest(server, permissive)
+	if err != nil {
+		t.Fatalf("approved server drop rejected: %v", err)
+	}
+	for _, turn := range res.Request.Turns {
+		for _, part := range turn.Parts {
+			if _, ok := part.(CanonicalFunctionCall); ok {
+				t.Fatal("server_tool_use synthesized a function call with no upstream executor")
+			}
+		}
+	}
+	mcp := []byte(`{"model":"m","max_tokens":8,` +
+		`"messages":[{"role":"assistant","content":[{"type":"mcp_tool_use","id":"call_9","name":"read","input":{"x":1}}]}]}`)
+	mcpRes, err := DecodeMessagesRequest(mcp, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("mcp_tool_use rejected under strict policy: %v", err)
+	}
+	found := false
+	for _, turn := range mcpRes.Request.Turns {
+		for _, part := range turn.Parts {
+			if call, ok := part.(CanonicalFunctionCall); ok {
+				found = true
+				if call.CallID != "call_9" || call.Name != "read" {
+					t.Fatalf("mcp call identity = %+v, want call_9/read", call)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("mcp_tool_use did not map to a function call")
+	}
+	for _, loss := range mcpRes.Report.Losses {
+		if loss.Feature == FeatureAnthropicServerTools {
+			t.Fatalf("mcp mapping touched the server key: %+v", loss)
+		}
+	}
+}

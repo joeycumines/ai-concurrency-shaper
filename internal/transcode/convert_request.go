@@ -1205,7 +1205,26 @@ func DecodeMessagesRequest(
 	// one JSON object at this boundary, never decoded and remarshaled through
 	// a map, so large integers, decimals, and exponents survive byte-exact
 	//.
+	// Server-side definitions (type-discriminated, e.g. web_search_20250305)
+	// are the anthropic_server_tools loss decision — approved, they drop
+	// observably; rejected, the request fails with a keyed error — never a
+	// silent pass and never forwarded to a chat upstream that executes no
+	// server tools.
 	for i, tool := range envelope.Tools {
+		if tool.Type != "" {
+			if err := result.Report.Lose(
+				policy,
+				FeatureAnthropicServerTools,
+				fmt.Sprintf("tools[%d]", i),
+				fmt.Sprintf(
+					"the %q server-side tool cannot be reproduced in a chat request",
+					tool.Type,
+				),
+			); err != nil {
+				return DecodeResult{}, err
+			}
+			continue
+		}
 		if err := tool.Validate(); err != nil {
 			return DecodeResult{}, fmt.Errorf("messages tools[%d]: %w", i, err)
 		}
@@ -1310,12 +1329,13 @@ func canonicalizeAnthropicToolChoice(
 // reference a surviving tool under every policy — a dangling reference is
 // malformed no matter how many tools the client sent. A mode choice is only
 // reconciled when the client DID send tools and the converter dropped them
-// all (built-in-tool loss): "required" against zero tools is a client-dialect
-// error (the converter would otherwise render an invalid upstream request),
-// and "auto" is dropped with an observable note because an empty tool list
-// leaves it meaningless. When the client sent no tools at all the choice
-// passes through untouched — the upstream judges that incoherence, not the
-// converter (TestDecodeResponsesRequestToolChoiceRequired pins it).
+// all (built-in-tool or server-tool loss): "required" against zero tools is
+// a client-dialect error (the converter would otherwise render an invalid
+// upstream request), and "auto" is dropped with an observable note because
+// an empty tool list leaves it meaningless. When the client sent no tools
+// at all the choice passes through untouched — the upstream judges that
+// incoherence, not the converter (TestDecodeResponsesRequestToolChoiceRequired
+// pins it).
 func reconcileToolChoice(
 	choice *CanonicalToolChoice,
 	requestToolCount int,
@@ -1342,7 +1362,7 @@ func reconcileToolChoice(
 	switch choice.Mode {
 	case "required":
 		return nil, errors.New(
-			"tool_choice required but no portable tools remain after the builtin_tools loss",
+			"tool_choice required but no portable tools remain after the tool loss",
 		)
 	case "auto":
 		if err := report.Note(
@@ -1456,6 +1476,62 @@ func anthropicContentToCanonical(
 				artifacts.AnthropicThinkingBlocks,
 				raw,
 			)
+
+		case AnthropicContentBlockTypeMCPToolUse:
+			// MCP tools are client-side tools under a server spelling:
+			// the fields are identical to tool_use, so the mapping is 1:1
+			// with no loss key.
+			arguments, err := decodeJSONObject(string(block.Input))
+			if err != nil {
+				return nil, fmt.Errorf("content block %d: mcp_tool_use input: %w", i, err)
+			}
+			raw, err := rawMessage(arguments)
+			if err != nil {
+				return nil, fmt.Errorf("content block %d: mcp_tool_use input: %w", i, err)
+			}
+			parts = append(parts, CanonicalFunctionCall{
+				CallID:    *block.ID,
+				Name:      *block.Name,
+				Arguments: raw,
+			})
+
+		case AnthropicContentBlockTypeMCPToolResult:
+			resultParts, err := anthropicContentToCanonical(
+				*block.Content,
+				policy,
+				report,
+				artifacts,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("content block %d: mcp_tool_result: %w", i, err)
+			}
+			isError := block.IsError != nil && *block.IsError
+			parts = append(parts, CanonicalFunctionResult{
+				CallID:  *block.ToolUseID,
+				IsError: isError,
+				Parts:   resultParts,
+			})
+
+		case AnthropicContentBlockTypeServerToolUse,
+			AnthropicContentBlockTypeWebSearchToolResult,
+			AnthropicContentBlockTypeCodeExecution,
+			AnthropicContentBlockTypeCodeExecutionResult,
+			AnthropicContentBlockTypeContainerUpload:
+			// Server-executed content a chat upstream cannot express: a
+			// fabricated CanonicalFunctionCall would dangle with no
+			// upstream executor and corrupt tool pairing, so the only
+			// honest outcomes are a keyed drop or a keyed rejection.
+			if err := report.Lose(
+				policy,
+				FeatureAnthropicServerTools,
+				fmt.Sprintf("messages[].content[%d]", i),
+				fmt.Sprintf(
+					"the %q server-side block cannot be reproduced in a chat request",
+					string(block.Type),
+				),
+			); err != nil {
+				return nil, err
+			}
 
 		default:
 			return nil, fmt.Errorf("content block %d: unknown type %q", i, block.Type)

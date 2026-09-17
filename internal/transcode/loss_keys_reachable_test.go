@@ -878,6 +878,21 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
+			// Anthropic server-side tools (the type-discriminated
+			// web_search_20250305 definition a real Claude Code session
+			// sends) are approved or rejected per the exchange policy;
+			// the approved drop is reported with the key, never as an
+			// unattributed unknown-field error.
+			key:  FeatureAnthropicServerTools,
+			perm: []Feature{FeatureAnthropicServerTools},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				result, err := DecodeMessagesRequest([]byte(
+					`{"model":"m","max_tokens":8,"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],"messages":[{"role":"user","content":"hi"}]}`,
+				), policy)
+				return result.Report, err
+			},
+		},
+		{
 			key:  FeatureResponseServiceTier,
 			perm: []Feature{FeatureResponseServiceTier},
 			run: func(policy LossPolicy) (ConversionReport, error) {

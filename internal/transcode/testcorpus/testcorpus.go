@@ -75,6 +75,8 @@ var (
 	dataOnlyResponsesStreamFieldSSE []byte
 	//go:embed testdata/field/camel_reasoning_format_field.json
 	camelReasoningFormatFieldJSON []byte
+	//go:embed testdata/field/claude_server_tool_definition_field.json
+	claudeServerToolDefinitionFieldJSON []byte
 )
 
 // FieldQwenStreamSSE returns the qwen-style chat stream capture: choice-level
@@ -137,6 +139,19 @@ func FieldDataOnlyResponsesStreamSSE() []byte { return dataOnlyResponsesStreamFi
 // while the fixture pairs the reasoning item with a PONG message at 8/6/14
 // so the decode path is exercised end to end).
 func FieldCamelReasoningFormatJSON() []byte { return camelReasoningFormatFieldJSON }
+
+// FieldClaudeServerToolDefinitionJSON returns a minimized isolation vector
+// for the Claude Code web-search server-tool shape: the tools array and
+// tool_choice are byte-faithful to the live capture
+// (scratch/flowlogs/000059-39619-POST-v1_messages.json), while the envelope
+// is minimized (model id kept as the live wire value, max_tokens reduced,
+// the text message flattened to a string, session keys dropped) so the test
+// asserts exactly the tools disposition and nothing else. A full-session
+// reproduction would additionally need the anthropic_controls approval (the
+// live body carries output_config).
+func FieldClaudeServerToolDefinitionJSON() []byte {
+	return claudeServerToolDefinitionFieldJSON
+}
 
 // ChatCompletionsRequestJSON returns the raw chat completions request fixture
 // bytes.
