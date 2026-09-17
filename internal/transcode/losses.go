@@ -200,6 +200,13 @@ const (
 	FeatureAuthenticatedThinking Feature = "authenticated_thinking"
 	// TopK covers the top_k setting that the target cannot reproduce.
 	FeatureTopK Feature = "top_k"
+	// ProfileRouting is the Note-only key recorded when a profile name
+	// resolves through the profile map: a collapse onto a different tier
+	// than the profile requested, or a fallback to the provider default
+	// model because the profile's model is unmapped. It is never a
+	// policy-gated loss — the Note is the observability contract that the
+	// profile was not silently forwarded as an unknown upstream model.
+	FeatureProfileRouting Feature = "profile_routing"
 	// Logprobs covers response token log-probabilities that the client
 	// dialects cannot reproduce.
 	FeatureLogprobs Feature = "logprobs"

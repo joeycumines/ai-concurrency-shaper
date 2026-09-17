@@ -209,6 +209,54 @@ func provisionalStrictnessLoss(m transcode.Mapping) transcode.Mapping {
 	return m
 }
 
+// parseTranscodeProfiles builds the ProfileMap from repeated -transcode-profile
+// values. Each value is "name=model:tier" or "name=model" (tier optional).
+// The tier, when present, must be in the closed effort vocabulary; an unknown
+// tier is rejected at parse time so a typo surfaces at startup rather than
+// silently falling through to the provider default.
+func parseTranscodeProfiles(values []string) (transcode.ProfileMap, error) {
+	profiles := make(map[string]transcode.ProfileMapping)
+	for _, value := range values {
+		name, rest, ok := strings.Cut(value, "=")
+		if !ok || name == "" || rest == "" {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: want name=model:tier or name=model",
+				value,
+			)
+		}
+		if _, dup := profiles[name]; dup {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"duplicate -transcode-profile name %q",
+				name,
+			)
+		}
+		model, tier, hasTier := strings.Cut(rest, ":")
+		if model == "" {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: model is empty",
+				value,
+			)
+		}
+		if hasTier && tier == "" {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: tier is empty after ':'",
+				value,
+			)
+		}
+		if hasTier && !transcode.ValidModelEffort(tier) {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: unknown tier %q (want one of %s)",
+				value, tier, strings.Join(transcode.ModelEfforts, ", "),
+			)
+		}
+		profiles[name] = transcode.ProfileMapping{
+			Model:         model,
+			ReasoningTier: tier,
+		}
+	}
+	return transcode.ProfileMap{Profiles: profiles}, nil
+}
+
 // parseTranscodeModelMap builds the ModelMap from repeated -transcode-model
 // values. With no mappings, identity fallback is used.
 func parseTranscodeModelMap(values []string) (transcode.ModelMap, error) {
@@ -716,6 +764,11 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		modelMap = modelMapFromTable(modelTable)
 	}
 
+	profileMap, err := parseTranscodeProfiles(p.TranscodeProfiles)
+	if err != nil {
+		return err
+	}
+
 	allowedLosses, negatedLosses, err := parseNegatedLosses(p.TranscodeAllowLosses...)
 	if err != nil {
 		return err
@@ -771,6 +824,9 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 			mappings[i].Mapping.ModelMap = modelMap
 		} else if len(modelMap.Exact) > 0 || !modelMap.AllowIdentity {
 			mappings[i].Mapping.ModelMap = modelMap
+		}
+		if len(profileMap.Profiles) > 0 {
+			mappings[i].Mapping.ProfileMap = profileMap
 		}
 		if hasExplicitTranscodeAuth || p.authPolicy != nil {
 			mappings[i].Mapping.Auth = authPolicy

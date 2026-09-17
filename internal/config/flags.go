@@ -208,6 +208,7 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.stringListVar(&p.TranscodeChatCapabilities, "transcode-chat-capability", "enable chat upstream capability or !name to deny (repeatable)")
 	r.stringListVar(&p.TranscodeAllowClientQuery, "transcode-allow-client-query", "forward client query parameter or !name to deny (repeatable)")
 	r.stringListVar(&p.TranscodeModelMap, "transcode-model", "map client model to upstream model: client=upstream (repeatable)")
+	r.stringListVar(&p.TranscodeProfiles, "transcode-profile", "map profile name to upstream model and reasoning tier: name=model:tier (repeatable; tier optional, omit for model-only mapping)")
 	r.int64Var(&p.TranscodeMaxRequestMB, "transcode-max-request-mb", defaultTranscodeMaxRequestMB, "max request body size retained for transcoding, in MiB")
 	r.int64Var(&p.TranscodeMaxResponseMB, "transcode-max-response-mb", defaultTranscodeMaxResponseMB, "max response body size retained for transcoding, in MiB")
 	r.stringVar(&p.TranscodeFlowLogDir, "transcode-flowlog-dir", "", "existing directory that receives one JSON record per transcoded exchange, capturing the full flow (client request, converted upstream request, upstream response, downstream response) unredacted; empty disables the recorder")

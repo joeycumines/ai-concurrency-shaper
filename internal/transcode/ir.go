@@ -277,6 +277,11 @@ type ExchangeContext struct {
 	// exchange (0 when no previous_response_id resolved), so the record
 	// call stores the depth the next resolution builds on.
 	RequestDepth int
+
+	// ResolvedReasoningTier carries the reasoning tier resolved from the
+	// profile map ("low", "medium", "high", or "" when unset). The render
+	// applies it to the upstream request when the capability is granted.
+	ResolvedReasoningTier string
 }
 
 // lossPolicy returns the exchange loss policy, or the strictest policy when

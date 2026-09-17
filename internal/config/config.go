@@ -178,6 +178,7 @@ type Provider struct {
 	TranscodeChatCapabilities  []string
 	TranscodeAllowClientQuery  []string
 	TranscodeModelMap          []string
+	TranscodeProfiles          []string
 	TranscodeMaxRequestMB      int64
 	TranscodeFlowLogDir        string
 	TranscodeMaxResponseMB     int64

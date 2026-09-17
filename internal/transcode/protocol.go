@@ -171,6 +171,7 @@ type Mapping struct {
 	ChatCapabilities ChatCapabilities
 	LossPolicy       LossPolicy
 	ModelMap         ModelMap
+	ProfileMap       ProfileMap
 	Auth             AuthPolicy
 
 	// AllowedClientQuery is the set of client query parameters permitted on

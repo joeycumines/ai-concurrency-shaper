@@ -1897,6 +1897,20 @@ func RenderResponsesRequest(
 		}
 	}
 
+	// Profile-resolved reasoning tier: when the client didn't specify
+	// reasoning effort or thinking, the profile's tier fills the gap.
+	// The Responses upstream always accepts reasoning.effort, so no
+	// capability gate is needed here.
+	if context != nil && context.ResolvedReasoningTier != "" {
+		if out.Reasoning == nil {
+			out.Reasoning = &ResponsesEnvelopeReasoning{}
+		}
+		if out.Reasoning.Effort == nil {
+			effort := context.ResolvedReasoningTier
+			out.Reasoning.Effort = &effort
+		}
+	}
+
 	body, err := json.Marshal(out)
 	if err != nil {
 		return nil, report, err
@@ -2370,6 +2384,17 @@ func RenderChatRequest(
 				return nil, report, err
 			}
 		}
+	}
+
+	// Profile-resolved reasoning tier: when the client didn't specify
+	// reasoning effort or thinking, the profile's tier fills the gap.
+	// Applied only when the capability is granted; otherwise the tier is
+	// inert (the upstream cannot honor it and no client-requested feature
+	// is being dropped).
+	if context != nil && context.ResolvedReasoningTier != "" &&
+		capabilities.ReasoningEffort && out.ReasoningEffort == nil {
+		effort := context.ResolvedReasoningTier
+		out.ReasoningEffort = &effort
 	}
 
 	body, err := json.Marshal(out)

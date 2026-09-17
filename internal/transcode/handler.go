@@ -614,14 +614,55 @@ func (h *TranscodeHandler) convertRequest(
 
 	// Resolve the client model through the mapping once the decoded request
 	// reveals it. The client-facing alias is returned in the response; the
-	// upstream model is used on the outbound request.
-	resolveModel := func(clientModel string) error {
+	// upstream model is used on the outbound request. Profile-aware
+	// resolution: if the client model matches a profile name, use the
+	// profile's model and tier; otherwise fall through to ModelMap.Resolve.
+	resolveModel := func(clientModel string, report *ConversionReport) error {
+		// Try profile resolution first.
+		if profileModel, profileTier, ok := h.cfg.Mapping.ProfileMap.ResolveProfile(clientModel); ok {
+			// Profile found. Resolve the profile's model through ModelMap.
+			mappingModel, err := h.cfg.Mapping.ModelMap.Resolve(profileModel)
+			if err != nil {
+				// Profile model is unmapped. Fall back to provider default
+				// with a Note.
+				if err := report.Note(
+					FeatureProfileRouting,
+					"model",
+					fmt.Sprintf("profile %q resolved to unmapped model %q; falling back to provider default", clientModel, profileModel),
+				); err != nil {
+					return err
+				}
+				// Use identity mapping for the fallback.
+				context.RequestedClientModel = clientModel
+				context.UpstreamModel = clientModel
+				context.ResolvedReasoningTier = profileTier
+				return nil
+			}
+			// Profile model is mapped. Record Note if tier collapsed.
+			if profileTier != "" && mappingModel.ReasoningTier != "" && profileTier != mappingModel.ReasoningTier {
+				if err := report.Note(
+					FeatureProfileRouting,
+					"model",
+					fmt.Sprintf("profile %q requested tier %q but model mapping pins tier %q", clientModel, profileTier, mappingModel.ReasoningTier),
+				); err != nil {
+					return err
+				}
+				context.ResolvedReasoningTier = mappingModel.ReasoningTier
+			} else {
+				context.ResolvedReasoningTier = profileTier
+			}
+			context.RequestedClientModel = mappingModel.ClientResponseModel
+			context.UpstreamModel = mappingModel.UpstreamModel
+			return nil
+		}
+		// No profile match. Fall through to ModelMap.Resolve.
 		mappingModel, err := h.cfg.Mapping.ModelMap.Resolve(clientModel)
 		if err != nil {
 			return h.nameServableModels(err)
 		}
 		context.RequestedClientModel = mappingModel.ClientResponseModel
 		context.UpstreamModel = mappingModel.UpstreamModel
+		context.ResolvedReasoningTier = mappingModel.ReasoningTier
 		return nil
 	}
 
@@ -642,7 +683,7 @@ func (h *TranscodeHandler) convertRequest(
 		// mode: an Accept-only stream request must not
 		// ask the upstream for JSON while the handler expects SSE.
 		result.Request.Stream = context.StreamIntent
-		if err := resolveModel(result.Request.ClientModel); err != nil {
+		if err := resolveModel(result.Request.ClientModel, &result.Report); err != nil {
 			return nil, nil, err
 		}
 		context.OriginalResponsesRequest = echo
@@ -718,7 +759,7 @@ func (h *TranscodeHandler) convertRequest(
 		// mode: an Accept-only stream request must not
 		// ask the upstream for JSON while the handler expects SSE.
 		result.Request.Stream = context.StreamIntent
-		if err := resolveModel(result.Request.ClientModel); err != nil {
+		if err := resolveModel(result.Request.ClientModel, &result.Report); err != nil {
 			return nil, nil, err
 		}
 		context.OriginalMessagesRequest = &MessagesRequestContext{
