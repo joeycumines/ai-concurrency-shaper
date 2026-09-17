@@ -207,6 +207,13 @@ const (
 	// policy-gated loss — the Note is the observability contract that the
 	// profile was not silently forwarded as an unknown upstream model.
 	FeatureProfileRouting Feature = "profile_routing"
+	// MultiAgentPriming is the Note-only key recorded when the
+	// multi-agent protocol reminder is injected into the leading system
+	// turn. It is never a policy-gated loss — the Note is the
+	// observability contract that the reminder was applied, so the
+	// client's own instructions stay byte-identical and the injection is
+	// visible in the per-request log.
+	FeatureMultiAgentPriming Feature = "multi_agent_priming"
 	// Logprobs covers response token log-probabilities that the client
 	// dialects cannot reproduce.
 	FeatureLogprobs Feature = "logprobs"

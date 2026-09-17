@@ -157,6 +157,18 @@ type ChatCapabilities struct {
 	// independent of ImageInput: an upstream can accept user images while
 	// rejecting image parts in tool messages.
 	ToolResultImages bool
+
+	// MultiAgentPriming injects a bounded protocol reminder into the
+	// leading system turn for models not trained on the harness
+	// orchestration protocol (spawn_agent/wait_agent/close_agent
+	// discipline). The reminder is appended AFTER the client's own
+	// instructions so the client's bytes and order stay byte-identical.
+	// Off by default; when enabled, every exchange that receives the
+	// injection is recorded as a Note (FeatureMultiAgentPriming). The
+	// reminder text is derived from the captured multi-agent namespace
+	// schema (close_agent/resume_agent/send_input/spawn_agent/wait_agent),
+	// not written from memory.
+	MultiAgentPriming bool
 }
 
 // Mapping declares one transcoded route: a POST client route in one client

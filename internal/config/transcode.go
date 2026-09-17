@@ -341,6 +341,7 @@ var chatCapabilityNames = []struct {
 	{"provider_reasoning_text", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningText }},
 	{"provider_reasoning_thinking", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningThinking }},
 	{"system_anywhere", func(c *transcode.ChatCapabilities) *bool { return &c.SystemAnywhere }},
+	{"multi_agent_priming", func(c *transcode.ChatCapabilities) *bool { return &c.MultiAgentPriming }},
 }
 
 func splitFlagNegations(
