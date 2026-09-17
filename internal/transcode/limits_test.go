@@ -321,3 +321,58 @@ func TestBodyLimitsMinimumOutputRejected(t *testing.T) {
 		t.Fatalf("the minimum values must be valid: %v", err)
 	}
 }
+
+// TestBudgetDimensionsEnumerated pins the row-43 budget oracle to code: every
+// stream/exchange bound constant must hold its documented value, and the
+// generated-frame/batch derivations must stay consistent with the echo and
+// exchange totals they derive from. A const change without updating this
+// test fails loudly instead of silently invalidating the stress row.
+func TestBudgetDimensionsEnumerated(t *testing.T) {
+	if maxStreamEchoBytes != 4<<20 {
+		t.Fatalf("maxStreamEchoBytes = %d, want 4MiB", maxStreamEchoBytes)
+	}
+	if maxStreamAccumulatedBytes != 1<<20 {
+		t.Fatalf("maxStreamAccumulatedBytes = %d, want 1MiB", maxStreamAccumulatedBytes)
+	}
+	if maxStreamTotalAccumulatedBytes != 4<<20 {
+		t.Fatalf("maxStreamTotalAccumulatedBytes = %d, want 4MiB", maxStreamTotalAccumulatedBytes)
+	}
+	if maxStreamOutputItems != 4096 || maxStreamPartsPerItem != 4096 || maxStreamToolCalls != 4096 {
+		t.Fatalf("items/parts/tools = %d/%d/%d, want 4096 each", maxStreamOutputItems, maxStreamPartsPerItem, maxStreamToolCalls)
+	}
+	if maxStreamConversionReportEntries != 4096 {
+		t.Fatalf("report entries = %d, want 4096", maxStreamConversionReportEntries)
+	}
+	if maxStreamTotalEvents != 1<<20 || maxStreamTotalParts != 1<<16 || maxStreamStateEntries != 1<<16 {
+		t.Fatalf("events/parts/state = %d/%d/%d", maxStreamTotalEvents, maxStreamTotalParts, maxStreamStateEntries)
+	}
+	if maxSSELineBytes != 1<<20 || maxSSEFrameBytes != 1<<20 {
+		t.Fatalf("sse line/frame = %d/%d, want 1MiB each", maxSSELineBytes, maxSSEFrameBytes)
+	}
+	if flowBodyCap != 64<<20 {
+		t.Fatalf("flowBodyCap = %d, want 64MiB", flowBodyCap)
+	}
+	// The generated-frame derivation must stay jointly derived from the
+	// exchange total and the echo bound (6x escaping each + 1MiB framing).
+	if want := 6*maxStreamTotalAccumulatedBytes + 6*maxStreamEchoBytes + 1<<20; DefaultGeneratedSSEFrameBytes != want {
+		t.Fatalf("frame = %d, want derivation %d", DefaultGeneratedSSEFrameBytes, want)
+	}
+	if want := 6*4*maxStreamTotalAccumulatedBytes + DefaultGeneratedSSEFrameBytes; DefaultGeneratedSSEBatchBytes != want {
+		t.Fatalf("batch = %d, want derivation %d", DefaultGeneratedSSEBatchBytes, want)
+	}
+	if DefaultGeneratedResponseBytes != 32<<20 {
+		t.Fatalf("generated response = %d, want 32MiB", DefaultGeneratedResponseBytes)
+	}
+	if maxStreamErrorTextBytes != 4<<10 {
+		t.Fatalf("error text = %d, want 4KiB", maxStreamErrorTextBytes)
+	}
+	if maxStreamPerEventFramingBytes != 256 {
+		t.Fatalf("per-event framing = %d, want 256", maxStreamPerEventFramingBytes)
+	}
+	// The exchange generated-total derivation must stay jointly derived
+	// from the terminal batch, the event budget times per-event framing,
+	// the 6x-escaped exchange total, and 1MiB slack.
+	if want := int64(DefaultGeneratedSSEBatchBytes) + int64(maxStreamTotalEvents)*maxStreamPerEventFramingBytes + 6*int64(maxStreamTotalAccumulatedBytes) + 1<<20; maxStreamGeneratedBytes != want {
+		t.Fatalf("generated total = %d, want derivation %d", maxStreamGeneratedBytes, want)
+	}
+}
