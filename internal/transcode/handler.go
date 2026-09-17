@@ -620,23 +620,10 @@ func (h *TranscodeHandler) convertRequest(
 	resolveModel := func(clientModel string, report *ConversionReport) error {
 		// Try profile resolution first.
 		if profileModel, profileTier, ok := h.cfg.Mapping.ProfileMap.ResolveProfile(clientModel); ok {
-			// Profile found. Resolve the profile's model through ModelMap.
+			// Profile found. Resolve the profile's target model through ModelMap.
 			mappingModel, err := h.cfg.Mapping.ModelMap.Resolve(profileModel)
 			if err != nil {
-				// Profile model is unmapped. Fall back to provider default
-				// with a Note.
-				if err := report.Note(
-					FeatureProfileRouting,
-					"model",
-					fmt.Sprintf("profile %q resolved to unmapped model %q; falling back to provider default", clientModel, profileModel),
-				); err != nil {
-					return err
-				}
-				// Use identity mapping for the fallback.
-				context.RequestedClientModel = clientModel
-				context.UpstreamModel = clientModel
-				context.ResolvedReasoningTier = profileTier
-				return nil
+				return h.nameServableModels(fmt.Errorf("profile %q targets unmapped model %q: %w", clientModel, profileModel, err))
 			}
 			// Profile model is mapped. Record Note if tier collapsed.
 			if profileTier != "" && mappingModel.ReasoningTier != "" && profileTier != mappingModel.ReasoningTier {
@@ -648,10 +635,12 @@ func (h *TranscodeHandler) convertRequest(
 					return err
 				}
 				context.ResolvedReasoningTier = mappingModel.ReasoningTier
-			} else {
+			} else if profileTier != "" {
 				context.ResolvedReasoningTier = profileTier
+			} else {
+				context.ResolvedReasoningTier = mappingModel.ReasoningTier
 			}
-			context.RequestedClientModel = mappingModel.ClientResponseModel
+			context.RequestedClientModel = clientModel
 			context.UpstreamModel = mappingModel.UpstreamModel
 			return nil
 		}

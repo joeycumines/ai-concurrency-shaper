@@ -766,6 +766,13 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	if err != nil {
 		return err
 	}
+	if len(profileMap.Profiles) > 0 && (tableProjected || len(modelMap.Exact) > 0 || !modelMap.AllowIdentity || modelMap.RequireExplicitMap) {
+		for name, prof := range profileMap.Profiles {
+			if _, err := modelMap.Resolve(prof.Model); err != nil {
+				return fmt.Errorf("invalid -transcode-profile %q: target model %q cannot be resolved: %w", name, prof.Model, err)
+			}
+		}
+	}
 
 	allowedLosses, negatedLosses, err := parseNegatedLosses(p.TranscodeAllowLosses...)
 	if err != nil {

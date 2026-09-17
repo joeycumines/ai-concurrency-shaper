@@ -25,7 +25,9 @@ func testHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) *TranscodeH
 	t.Helper()
 	// The common test defaults live on the mapping (HandlerConfig carries
 	// only Mapping, Upstream, and BodyLimits — ).
-	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	if mapping.ModelMap.Exact == nil && !mapping.ModelMap.AllowIdentity && !mapping.ModelMap.RequireExplicitMap {
+		mapping.ModelMap = ModelMap{AllowIdentity: true}
+	}
 	if mapping.LossPolicy.Allowed == nil {
 		mapping.LossPolicy = StrictLossPolicy()
 	}

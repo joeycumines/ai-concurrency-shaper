@@ -38,8 +38,7 @@ type ProfileMapping struct {
 }
 
 // ProfileMap resolves profile names to model+tier pairs. When a profile is
-// unmapped, the resolution falls back to the provider default model with a
-// Note.
+// resolved, its target model is resolved through the route's ModelMap.
 type ProfileMap struct {
 	Profiles map[string]ProfileMapping
 }
