@@ -544,6 +544,7 @@ func mergedChatCapabilities(
 		"provider_reasoning_text":     &out.ProviderReasoningText,
 		"provider_reasoning_thinking": &out.ProviderReasoningThinking,
 		"system_anywhere":             &out.SystemAnywhere,
+		"multi_agent_priming":         &out.MultiAgentPriming,
 	}
 	cli := map[string]bool{
 		"developer_role":              capabilities.DeveloperRole,
@@ -556,6 +557,7 @@ func mergedChatCapabilities(
 		"provider_reasoning_text":     capabilities.ProviderReasoningText,
 		"provider_reasoning_thinking": capabilities.ProviderReasoningThinking,
 		"system_anywhere":             capabilities.SystemAnywhere,
+		"multi_agent_priming":         capabilities.MultiAgentPriming,
 	}
 	for name, field := range fields {
 		_, deny := negated[name]

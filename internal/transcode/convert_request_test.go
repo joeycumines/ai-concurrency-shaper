@@ -262,3 +262,129 @@ func TestDecodeMessagesServerBlocksKeyed(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderChatMultiAgentPriming(t *testing.T) {
+	// Case 1: MultiAgentPriming: false (default)
+	req := CanonicalRequest{
+		ClientModel: "test-model",
+		Turns: []CanonicalTurn{
+			{
+				Role: CanonicalSystem,
+				Parts: []CanonicalPart{
+					CanonicalText{Text: "You are an AI assistant."},
+				},
+			},
+			{
+				Role: CanonicalUser,
+				Parts: []CanonicalPart{
+					CanonicalText{Text: "Help me write code."},
+				},
+			},
+		},
+	}
+	ctx := testExchangeContext()
+
+	// Off by default
+	renderedBytes, report, err := RenderChatRequest(req, ctx, ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("RenderChatRequest failed: %v", err)
+	}
+	var chatReq ChatRequest
+	if err := json.Unmarshal(renderedBytes, &chatReq); err != nil {
+		t.Fatalf("unmarshal rendered chat request: %v", err)
+	}
+	if len(chatReq.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(chatReq.Messages))
+	}
+	for _, loss := range report.Losses {
+		if loss.Feature == FeatureMultiAgentPriming {
+			t.Fatalf("unexpected multi_agent_priming Note when disabled: %+v", loss)
+		}
+	}
+	// Verify content was not modified
+	if *chatReq.Messages[0].Content.ContentBlocks[0].Text != "You are an AI assistant." {
+		t.Fatalf("expected untouched system message, got %q", *chatReq.Messages[0].Content.ContentBlocks[0].Text)
+	}
+
+	// Case 2: MultiAgentPriming: true with existing system message
+	renderedBytes, report, err = RenderChatRequest(req, ctx, ChatCapabilities{
+		MultiAgentPriming: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderChatRequest with MultiAgentPriming failed: %v", err)
+	}
+	if err := json.Unmarshal(renderedBytes, &chatReq); err != nil {
+		t.Fatalf("unmarshal rendered chat request: %v", err)
+	}
+	// Note must be recorded
+	foundNote := false
+	for _, loss := range report.Losses {
+		if loss.Feature == FeatureMultiAgentPriming && loss.Kind == NoteRecord {
+			foundNote = true
+			break
+		}
+	}
+	if !foundNote {
+		t.Fatalf("expected FeatureMultiAgentPriming Note in report, got: %+v", report.Losses)
+	}
+	// Check that leading system turn has the original text preserved AND the reminder appended
+	sysBlocks := chatReq.Messages[0].Content.ContentBlocks
+	if len(sysBlocks) != 2 {
+		t.Fatalf("expected 2 content blocks in leading system turn, got %d", len(sysBlocks))
+	}
+	if *sysBlocks[0].Text != "You are an AI assistant." {
+		t.Fatalf("client instructions corrupted: got %q", *sysBlocks[0].Text)
+	}
+	if *sysBlocks[1].Text != MultiAgentPrimingReminderText {
+		t.Fatalf("reminder text mismatch: got %q", *sysBlocks[1].Text)
+	}
+
+	// Case 3: MultiAgentPriming: true without existing system message (dialog only)
+	reqNoSys := CanonicalRequest{
+		ClientModel: "test-model",
+		Turns: []CanonicalTurn{
+			{
+				Role: CanonicalUser,
+				Parts: []CanonicalPart{
+					CanonicalText{Text: "Help me write code."},
+				},
+			},
+		},
+	}
+	renderedBytes, report, err = RenderChatRequest(reqNoSys, ctx, ChatCapabilities{
+		MultiAgentPriming: true,
+	})
+	if err != nil {
+		t.Fatalf("RenderChatRequest with MultiAgentPriming without sys message failed: %v", err)
+	}
+	if err := json.Unmarshal(renderedBytes, &chatReq); err != nil {
+		t.Fatalf("unmarshal rendered chat request: %v", err)
+	}
+	if len(chatReq.Messages) != 2 {
+		t.Fatalf("expected 2 messages (prepended system + user), got %d", len(chatReq.Messages))
+	}
+	if chatReq.Messages[0].Role != ChatMessageRoleSystem {
+		t.Fatalf("expected leading message to be system, got %s", chatReq.Messages[0].Role)
+	}
+	if *chatReq.Messages[0].Content.ContentBlocks[0].Text != MultiAgentPrimingReminderText {
+		t.Fatalf("expected reminder text, got %q", *chatReq.Messages[0].Content.ContentBlocks[0].Text)
+	}
+	if chatReq.Messages[1].Role != ChatMessageRoleUser {
+		t.Fatalf("expected second message to be user, got %s", chatReq.Messages[1].Role)
+	}
+
+	// Case 4: MultiAgentPriming: true with empty conversation must still be rejected
+	reqEmpty := CanonicalRequest{
+		ClientModel: "test-model",
+		Turns:       nil,
+	}
+	_, _, err = RenderChatRequest(reqEmpty, ctx, ChatCapabilities{
+		MultiAgentPriming: true,
+	})
+	if err == nil {
+		t.Fatal("expected empty conversation to be rejected even with MultiAgentPriming: true")
+	}
+	if !strings.Contains(err.Error(), "the source request has no Chat-representable messages") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}

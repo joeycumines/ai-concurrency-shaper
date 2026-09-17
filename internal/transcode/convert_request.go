@@ -2192,6 +2192,14 @@ func RenderChatRequest(
 		)
 	}
 
+	if capabilities.MultiAgentPriming {
+		primed, err := applyMultiAgentPriming(out.Messages, &report)
+		if err != nil {
+			return nil, report, err
+		}
+		out.Messages = primed
+	}
+
 	// Tools. The canonical schema is passed through byte-exact: it was
 	// validated as exactly one JSON object at decode, so no
 	// decode-and-remarshal round trip can corrupt its numbers. An absent schema is omitted, matching the source's
@@ -2541,4 +2549,67 @@ func responsesToolStrictField(
 		return wire.Field[bool]{}, err
 	}
 	return wire.Field[bool]{Value: false, Present: true}, nil
+}
+
+// MultiAgentPrimingReminderText is the bounded, documented multi-agent protocol
+// reminder injected into the leading system turn when the multi_agent_priming
+// capability is enabled. It derives directly from the captured multi_agent_v1
+// schema (close_agent, resume_agent, send_input, spawn_agent, wait_agent).
+const MultiAgentPrimingReminderText = `### Sub-Agent Orchestration Protocol Reminder
+When delegating work to sub-agents:
+1. Call spawn_agent to launch a sub-agent with a concrete, bounded task in message or items (model and reasoning_effort may be specified if required).
+2. Use wait_agent with the returned agent id in targets to wait for completion and receive final status/output.
+3. Call send_input with target and message or items to communicate with an active agent (set interrupt: true to redirect immediately).
+4. Call close_agent with target once an agent is completed or no longer needed.
+5. If an agent was closed and needs further work, call resume_agent with id to reopen it.`
+
+// applyMultiAgentPriming appends the protocol reminder to the leading system message,
+// creating a leading system message if none exists. It preserves the client's own
+// instructions byte-identically and records FeatureMultiAgentPriming as a Note.
+func applyMultiAgentPriming(messages []ChatMessage, report *ConversionReport) ([]ChatMessage, error) {
+	if err := report.Note(
+		FeatureMultiAgentPriming,
+		"messages[0].content",
+		"multi-agent protocol reminder appended to leading system turn",
+	); err != nil {
+		return nil, err
+	}
+
+	if len(messages) > 0 && messages[0].Role == ChatMessageRoleSystem {
+		// Append after existing content blocks in leading system turn
+		content := messages[0].Content
+		if content == nil {
+			content = &ChatMessageContent{}
+		}
+		if content.ContentStr != nil {
+			// Convert string content to text content block before appending
+			content.ContentBlocks = append(content.ContentBlocks, ChatContentBlock{
+				Type: ChatContentBlockTypeText,
+				Text: content.ContentStr,
+			})
+			content.ContentStr = nil
+		}
+		text := MultiAgentPrimingReminderText
+		content.ContentBlocks = append(content.ContentBlocks, ChatContentBlock{
+			Type: ChatContentBlockTypeText,
+			Text: &text,
+		})
+		messages[0].Content = content
+		return messages, nil
+	}
+
+	// No leading system message existed: prepend one
+	text := MultiAgentPrimingReminderText
+	sysMsg := ChatMessage{
+		Role: ChatMessageRoleSystem,
+		Content: &ChatMessageContent{
+			ContentBlocks: []ChatContentBlock{
+				{
+					Type: ChatContentBlockTypeText,
+					Text: &text,
+				},
+			},
+		},
+	}
+	return append([]ChatMessage{sysMsg}, messages...), nil
 }

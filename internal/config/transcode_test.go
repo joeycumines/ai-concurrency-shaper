@@ -360,6 +360,33 @@ func TestBuildTranscodeMappingsStrictDefaults(t *testing.T) {
 	}
 }
 
+// TestBuildTranscodeMappingsMultiAgentPriming proves multi_agent_priming is off
+// by default and turns on when specified in transcodeCLIOptions.
+func TestBuildTranscodeMappingsMultiAgentPriming(t *testing.T) {
+	// Off by default
+	mappings, err := buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	if mappings[0].Mapping.ChatCapabilities.MultiAgentPriming {
+		t.Fatal("multi_agent_priming must be off by default")
+	}
+
+	// Enabled via capabilities
+	mappings, err = buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{
+		capabilities: transcode.ChatCapabilities{MultiAgentPriming: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mappings[0].Mapping.ChatCapabilities.MultiAgentPriming {
+		t.Fatal("multi_agent_priming was not merged when specified")
+	}
+}
+
 // TestParseNegatedLosses verifies the -transcode-allow-loss values with
 // `!name` negations.
 func TestParseNegatedLosses(t *testing.T) {
