@@ -44,6 +44,7 @@ type SuiteConfig struct {
 	ModelRoutes    []ModelRoute
 	Fallback       http.Handler // optional fallback handler when 1 provider is available
 	Limits         transcode.BodyLimits
+	Strict         bool
 }
 
 // CatalogSuiteHandler serves catalog queries and routes model-specific completion
@@ -56,6 +57,7 @@ type CatalogSuiteHandler struct {
 	modelMap       map[string]http.Handler
 	fallback       http.Handler
 	limits         transcode.BodyLimits
+	strict         bool
 }
 
 // NewCatalogSuiteHandler builds a new CatalogSuiteHandler.
@@ -74,6 +76,7 @@ func NewCatalogSuiteHandler(cfg SuiteConfig) *CatalogSuiteHandler {
 		modelMap:       models,
 		fallback:       cfg.Fallback,
 		limits:         cfg.Limits.WithDefaults(),
+		strict:         cfg.Strict,
 	}
 }
 
@@ -99,8 +102,8 @@ func (h *CatalogSuiteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Any other route: if fallback handler exists, forward
-	if h.fallback != nil {
+	// Any other route: if fallback handler exists and suite is not strict, forward
+	if !h.strict && h.fallback != nil {
 		h.fallback.ServeHTTP(w, r)
 		return
 	}
@@ -151,7 +154,7 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 
 	target := h.modelMap[modelID]
 	if target == nil {
-		if h.fallback != nil {
+		if !h.strict && h.fallback != nil {
 			target = h.fallback
 		} else {
 			if len(h.modelMap) == 0 {

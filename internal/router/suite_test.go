@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -456,5 +457,82 @@ func TestCatalogSuite_ServeCompletion_AcceptedRequestBytesLimit(t *testing.T) {
 		t.Fatalf("expected 413 Request Entity Too Large, got %d: %s", rec2.Code, rec2.Body.String())
 	}
 }
+
+func TestCatalogSuite_StrictEnforcementAndFallbackIsolation(t *testing.T) {
+	var fallbackHits atomic.Int64
+	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("fallback response"))
+	})
+
+	dummyTarget := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("target response"))
+	})
+
+	// 1. Strict suite: Strict: true
+	strictSuite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:         "strict-suite",
+		Prefix:       "/strict",
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		Strict:       true,
+		Fallback:     fallback,
+		ModelRoutes: []router.ModelRoute{
+			{Model: "allowed-model", Handler: dummyTarget},
+		},
+	})
+
+	// 1a. Unmapped model completion request: must return 404 and NOT call fallback
+	reqUnmapped := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"unmapped-model"}`))
+	recUnmapped := httptest.NewRecorder()
+	strictSuite.ServeHTTP(recUnmapped, reqUnmapped)
+	if recUnmapped.Code != http.StatusNotFound {
+		t.Fatalf("strict unmapped completion code = %d, want 404", recUnmapped.Code)
+	}
+	if fallbackHits.Load() != 0 {
+		t.Fatalf("strict unmapped completion called fallback %d times, want 0", fallbackHits.Load())
+	}
+
+	// 1b. Non-completion route: must return 404 and NOT call fallback
+	reqNonCompl := httptest.NewRequest(http.MethodGet, "/v1/models/allowed-model/extra", nil)
+	recNonCompl := httptest.NewRecorder()
+	strictSuite.ServeHTTP(recNonCompl, reqNonCompl)
+	if recNonCompl.Code != http.StatusNotFound {
+		t.Fatalf("strict non-completion code = %d, want 404", recNonCompl.Code)
+	}
+	if fallbackHits.Load() != 0 {
+		t.Fatalf("strict non-completion called fallback %d times, want 0", fallbackHits.Load())
+	}
+
+	// 2. Non-strict suite: Strict: false
+	nonStrictSuite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:         "non-strict-suite",
+		Prefix:       "/non-strict",
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		Strict:       false,
+		Fallback:     fallback,
+		ModelRoutes: []router.ModelRoute{
+			{Model: "allowed-model", Handler: dummyTarget},
+		},
+	})
+
+	// 2a. Unmapped model completion request: must fall back to fallback handler
+	reqUnmapped2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"unmapped-model"}`))
+	recUnmapped2 := httptest.NewRecorder()
+	nonStrictSuite.ServeHTTP(recUnmapped2, reqUnmapped2)
+	if recUnmapped2.Code != http.StatusOK || !strings.Contains(recUnmapped2.Body.String(), "fallback response") {
+		t.Fatalf("non-strict unmapped completion code = %d: %s", recUnmapped2.Code, recUnmapped2.Body.String())
+	}
+
+	// 2b. Non-completion route: must fall back to fallback handler
+	reqNonCompl2 := httptest.NewRequest(http.MethodGet, "/v1/models/allowed-model/extra", nil)
+	recNonCompl2 := httptest.NewRecorder()
+	nonStrictSuite.ServeHTTP(recNonCompl2, reqNonCompl2)
+	if recNonCompl2.Code != http.StatusOK || !strings.Contains(recNonCompl2.Body.String(), "fallback response") {
+		t.Fatalf("non-strict non-completion code = %d: %s", recNonCompl2.Code, recNonCompl2.Body.String())
+	}
+}
+
 
 

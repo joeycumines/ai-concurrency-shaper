@@ -246,4 +246,98 @@ func TestConfig_Limits(t *testing.T) {
 	}
 }
 
+func TestProvider_EffectiveName(t *testing.T) {
+	p1 := &Provider{Name: "custom"}
+	if p1.EffectiveName() != "custom" {
+		t.Errorf("p1.EffectiveName() = %q, want custom", p1.EffectiveName())
+	}
+
+	p2 := &Provider{Upstream: "https://api.openai.com/v1"}
+	_ = p2.validateBasic(0, false)
+	if p2.EffectiveName() != "openai" {
+		t.Errorf("p2.EffectiveName() = %q, want openai", p2.EffectiveName())
+	}
+}
+
+func TestResolveCatalogSuites_ProviderValidation(t *testing.T) {
+	// Provider nonexistent should fail startup
+	cfg := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/suite;provider=nonexistent"},
+			ModelTable:    []string{"m1@openai=wire1"},
+		},
+		Providers: []*Provider{
+			{
+				Name:        "openai",
+				Upstream:    "https://api.openai.com",
+				Prefix:      "/openai",
+				Concurrency: 1,
+			},
+		},
+	}
+	if err := cfg.ResolveAndValidate(); err == nil {
+		t.Fatal("expected error for unconfigured provider in catalog suite, got nil")
+	}
+
+	// Provider existing should succeed
+	cfg2 := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/suite;provider=openai"},
+			ModelTable:    []string{"m1@openai=wire1"},
+		},
+		Providers: []*Provider{
+			{
+				Name:        "openai",
+				Upstream:    "https://api.openai.com",
+				Prefix:      "/openai",
+				Concurrency: 1,
+			},
+		},
+	}
+	if err := cfg2.ResolveAndValidate(); err != nil {
+		t.Fatalf("unexpected error for valid provider in catalog suite: %v", err)
+	}
+}
+
+func TestResolveCatalogSuites_StrictModelsValidation(t *testing.T) {
+	// Strict suite with model not in model table should fail startup
+	cfgStrict := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/suite=m1+unknown-model;strict=true"},
+			ModelTable:    []string{"m1@openai=wire1"},
+		},
+		Providers: []*Provider{
+			{
+				Name:        "openai",
+				Upstream:    "https://api.openai.com",
+				Prefix:      "/openai",
+				Concurrency: 1,
+			},
+		},
+	}
+	if err := cfgStrict.ResolveAndValidate(); err == nil {
+		t.Fatal("expected error for unknown model in strict catalog suite, got nil")
+	}
+
+	// Non-strict suite with model not in model table should succeed startup
+	cfgNonStrict := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/suite=m1+unknown-model;strict=false"},
+			ModelTable:    []string{"m1@openai=wire1"},
+		},
+		Providers: []*Provider{
+			{
+				Name:        "openai",
+				Upstream:    "https://api.openai.com",
+				Prefix:      "/openai",
+				Concurrency: 1,
+			},
+		},
+	}
+	if err := cfgNonStrict.ResolveAndValidate(); err != nil {
+		t.Fatalf("unexpected error for non-strict suite with unknown model: %v", err)
+	}
+}
+
+
 

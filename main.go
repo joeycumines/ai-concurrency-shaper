@@ -315,7 +315,7 @@ func run() error {
 		mets = append(mets, met)
 		js = append(js, j)
 		entries = append(entries, router.Provider{Name: pr.Name, Prefix: pr.Prefix, Proxy: p})
-		proxiesByName[pr.Name] = p
+		proxiesByName[pr.EffectiveName()] = p
 		singleProxy = p
 		logProviderConfig(pr)
 	}
@@ -376,6 +376,7 @@ func run() error {
 			ModelRoutes:    modelRoutes,
 			Fallback:       fallbackHandler,
 			Limits:         cfg.Limits(),
+			Strict:         suite.Strict,
 		})
 
 		entries = append(entries, router.Provider{

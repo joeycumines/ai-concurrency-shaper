@@ -175,6 +175,39 @@ func (c *Config) resolveCatalogSuites() error {
 				return fmt.Errorf("catalog suite prefix %q in %q overlaps with provider %q prefix %q", suite.Prefix, suite.Raw, effectiveName(p), p.Prefix)
 			}
 		}
+
+		// Validate that suite.Provider exists among configured providers
+		if suite.Provider != "" {
+			found := false
+			for _, p := range c.Providers {
+				if effectiveName(p) == suite.Provider {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("invalid -catalog-suite %q: provider %q not configured", suite.Raw, suite.Provider)
+			}
+		}
+
+		// When strict is true, validate that suite.Models exist in the model table
+		if suite.Strict && len(suite.Models) > 0 {
+			for _, sm := range suite.Models {
+				found := false
+				for _, entry := range c.modelTable {
+					if entry.Surrogate == sm {
+						if suite.Provider == "" || entry.Provider == suite.Provider {
+							found = true
+							break
+						}
+					}
+				}
+				if !found {
+					return fmt.Errorf("invalid -catalog-suite %q: model %q not found in model table", suite.Raw, sm)
+				}
+			}
+		}
+
 		suites = append(suites, suite)
 	}
 

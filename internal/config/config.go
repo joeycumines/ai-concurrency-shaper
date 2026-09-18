@@ -361,10 +361,10 @@ func (c *Config) ResolveAndValidate() error {
 	return nil
 }
 
-// effectiveName is the provider name the global model table references: the
+// EffectiveName is the provider name the global model table references: the
 // validated Name when set, otherwise the same host derivation validateMulti
 // applies, so the single-provider legacy mode has a stable table key too.
-func effectiveName(p *Provider) string {
+func (p *Provider) EffectiveName() string {
 	if p.Name != "" {
 		return p.Name
 	}
@@ -372,6 +372,10 @@ func effectiveName(p *Provider) string {
 		return ""
 	}
 	return deriveName(p.upstream.Hostname())
+}
+
+func effectiveName(p *Provider) string {
+	return p.EffectiveName()
 }
 
 // validateBasic validates a single provider's identity/connection values and
