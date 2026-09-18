@@ -185,8 +185,8 @@ func (h *CatalogSuiteHandler) writeEmptyCatalogOr404(w http.ResponseWriter, r *h
 	if shape == "" {
 		shape = transcode.CatalogShapeOpenAI
 	}
-	if strings.HasPrefix(r.URL.Path, transcode.CatalogPath+"/") {
-		modelID := strings.TrimPrefix(r.URL.Path, transcode.CatalogPath+"/")
+	if after, ok := strings.CutPrefix(r.URL.Path, transcode.CatalogPath+"/"); ok {
+		modelID := after
 		modelID = strings.Trim(modelID, "/")
 		writeModelNotFoundError(w, shape, modelID)
 		return

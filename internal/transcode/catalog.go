@@ -202,8 +202,8 @@ func (h *CatalogHandler) defaultShape() CatalogShape {
 // ServeHTTP renders the selected catalog document or single model item.
 func (h *CatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqPath := r.URL.Path
-	if strings.HasPrefix(reqPath, CatalogPath+"/") {
-		modelID := strings.TrimPrefix(reqPath, CatalogPath+"/")
+	if after, ok := strings.CutPrefix(reqPath, CatalogPath+"/"); ok {
+		modelID := after
 		modelID = strings.Trim(modelID, "/")
 		if modelID != "" {
 			h.serveSingleModel(w, r, modelID)

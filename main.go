@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -329,13 +330,7 @@ func run() error {
 				continue
 			}
 			if len(suite.Models) > 0 {
-				matched := false
-				for _, sm := range suite.Models {
-					if sm == m.Surrogate {
-						matched = true
-						break
-					}
-				}
+				matched := slices.Contains(suite.Models, m.Surrogate)
 				if !matched {
 					continue
 				}
@@ -393,7 +388,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
 
 	errCh := make(chan error, 2)
 

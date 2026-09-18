@@ -872,8 +872,7 @@ func TestStreamBoundProbes(t *testing.T) {
 		if err == nil {
 			t.Fatal("1MiB+1 text accepted")
 		}
-		var wire *UpstreamWireError
-		if !errors.As(err, &wire) {
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T: %v, want UpstreamWireError", err, err)
 		}
 		if !strings.Contains(err.Error(), "exceeds") {
@@ -895,7 +894,7 @@ func TestStreamBoundProbes(t *testing.T) {
 	})
 	t.Run("report overflow never fails", func(t *testing.T) {
 		var report ConversionReport
-		for i := 0; i < maxStreamConversionReportEntries+10; i++ {
+		for range maxStreamConversionReportEntries + 10 {
 			_ = report.Note(FeatureMissingEventName, "responses[].stream", "x")
 		}
 		found := false

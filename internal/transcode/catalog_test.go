@@ -708,4 +708,3 @@ func TestCatalogDefaultShape(t *testing.T) {
 		t.Errorf("unexpected doc: %s", rec.Body.String())
 	}
 }
-

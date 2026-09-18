@@ -475,4 +475,3 @@ func TestHandlerProfileResolution(t *testing.T) {
 		}
 	})
 }
-

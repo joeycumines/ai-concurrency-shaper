@@ -148,10 +148,10 @@ func TestContinuityChainDepthCapped(t *testing.T) {
 func TestContinuityConcurrentIsolation(t *testing.T) {
 	store := NewContinuityStore(ContinuityConfig{Capacity: 64, TTL: time.Hour})
 	done := make(chan bool, 16)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		id := strings.Repeat(string(rune('a'+i)), 4)
 		go func(id string, seed int) {
-			for j := 0; j < 25; j++ {
+			for j := range 25 {
 				text := strings.Repeat(id, j+1)
 				store.Record("m", id, []CanonicalTurn{{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: text}}}}, 0, false)
 				got, _, ok := store.Resolve("m", id)
@@ -178,7 +178,7 @@ func TestContinuityConcurrentIsolation(t *testing.T) {
 			done <- true
 		}(id, i)
 	}
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		if !<-done {
 			t.Fatal("concurrent isolation failed")
 		}

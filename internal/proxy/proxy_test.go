@@ -11772,5 +11772,3 @@ func TestProxy_HandlerForRouteKey(t *testing.T) {
 		t.Errorf("got %v, want nil for unconfigured catalog", cat)
 	}
 }
-
-

@@ -53,9 +53,9 @@ func parseCatalogSuite(raw string) (CatalogSuiteConfig, error) {
 	mount, modelsStr, hasModels := strings.Cut(left, "=")
 
 	var name, prefix string
-	if atIdx := strings.Index(mount, "@"); atIdx >= 0 {
-		name = mount[:atIdx]
-		prefix = mount[atIdx+1:]
+	if before, after, ok := strings.Cut(mount, "@"); ok {
+		name = before
+		prefix = after
 	} else {
 		prefix = mount
 	}
