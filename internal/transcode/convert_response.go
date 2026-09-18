@@ -770,8 +770,8 @@ func DecodeResponsesResponse(
 		{"background", envelope.Background != nil},
 		{"max_tool_calls", envelope.MaxToolCalls != nil},
 		{"prompt", envelope.Prompt != nil},
-		{"prompt_cache_key", envelope.PromptCacheKey != ""},
-		{"safety_identifier", envelope.SafetyIdentifier != ""},
+		{"prompt_cache_key", envelope.PromptCacheKey != nil},
+		{"safety_identifier", envelope.SafetyIdentifier != nil},
 	} {
 		if control.present {
 			response.Source.ResponsesControls = append(response.Source.ResponsesControls, control.name)
@@ -857,6 +857,11 @@ func DecodeResponsesResponse(
 			})
 
 		case *ResponsesReasoningOutputItem:
+			// The provider routing marker (ReasoningOutputItem.Format) is
+			// routing metadata, never model output: strip it before the
+			// item enters the canonical bytes so it cannot cross into any
+			// client dialect.
+			value.Format = nil
 			raw, err := json.Marshal(value)
 			if err != nil {
 				return CanonicalResponse{}, fmt.Errorf("output item %d: %w", i, err)
@@ -999,13 +1004,15 @@ func RenderResponsesResponse(
 			// The Responses function_call arguments field is a string:
 			// the model-generated raw text is preserved byte-exact
 			//.
+			callName, callNamespace := context.ToolNames.clientCallName(value.Name)
 			envelope.Output = append(envelope.Output, &ResponsesFunctionCallOutputItem{
 				ID:        context.IDs.New("fc_"),
 				Type:      "function_call",
 				Status:    ResponsesItemCompleted,
 				CallID:    value.CallID,
-				Name:      value.Name,
+				Name:      callName,
 				Arguments: value.Arguments.Raw,
+				Namespace: callNamespace,
 			})
 
 		case *CanonicalFunctionResultItem:
@@ -1020,6 +1027,11 @@ func RenderResponsesResponse(
 			if err := json.Unmarshal(value.Raw, &reasoning); err != nil {
 				return nil, report, fmt.Errorf("response reasoning item: %w", err)
 			}
+			// The decode path strips the provider routing marker before
+			// the canonical bytes are cut; clear it here as well so the
+			// emit site carries the guarantee locally instead of relying
+			// on the distant producer.
+			reasoning.Format = nil
 			envelope.Output = append(envelope.Output, &reasoning)
 
 		default:

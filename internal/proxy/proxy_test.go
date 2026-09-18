@@ -45,6 +45,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/retry"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
 func setup(t *testing.T, concurrency int, timeout time.Duration, patterns ...string) (*Proxy, *httptest.Server) {
@@ -11756,4 +11757,18 @@ func TestProxy_ConfigFrozenConcurrent(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+}
+
+func TestProxy_HandlerForRouteKey(t *testing.T) {
+	p, _ := setup(t, 1, 0)
+	key, err := transcode.NewRouteKey(http.MethodPost, "/v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := p.HandlerForRouteKey(key); h != nil {
+		t.Errorf("got %v, want nil for unconfigured key", h)
+	}
+	if cat := p.Catalog(); cat != nil {
+		t.Errorf("got %v, want nil for unconfigured catalog", cat)
+	}
 }

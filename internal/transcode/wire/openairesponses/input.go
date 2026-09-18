@@ -459,6 +459,8 @@ type FunctionCallInput struct {
 	CallID    string     `json:"call_id"`
 	Name      string     `json:"name"`
 	Arguments string     `json:"arguments"`
+	// Namespace is the optional tool-group qualifier; Name stays the bare child name.
+	Namespace string `json:"namespace,omitempty"`
 }
 
 func (*FunctionCallInput) isInputItem() {}
@@ -568,6 +570,8 @@ type FunctionCallOutputInput struct {
 	CallID string         `json:"call_id"`
 	Name   string         `json:"name,omitempty"`
 	Output FunctionOutput `json:"output"`
+	// Namespace is the optional tool-group qualifier; Name stays the bare child name.
+	Namespace string `json:"namespace,omitempty"`
 }
 
 func (*FunctionCallOutputInput) isInputItem() {}

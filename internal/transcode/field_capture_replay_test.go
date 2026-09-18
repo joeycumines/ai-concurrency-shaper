@@ -20,7 +20,9 @@ package transcode
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -217,6 +219,76 @@ func TestFieldCaptureCodexMultiturnRequestDecodes(t *testing.T) {
 	}
 }
 
+// TestFieldCaptureDataOnlyResponsesStreamReplays pins the data-only
+// Responses stream regression: the captured camel stream omits the SSE
+// event: name on every frame (a leading ": " comment frame then data-only
+// frames whose JSON `type` is authoritative, plus the gateway's opaque "p"
+// envelope extension, output[].phase, and the created-time null controls).
+// Replayed through the EXACT production converter it must complete the full
+// Anthropic lifecycle: exactly one message_stop, no error event, the content
+// delivered, and the ungated missing_event_name note recorded once.
+func TestFieldCaptureDataOnlyResponsesStreamReplays(t *testing.T) {
+	// The captured gateway envelope carries the pinned controls (a real
+	// safety_identifier, output[].phase, the created-time null fields), so
+	// the replay approves the controls loss and the usage components the
+	// Messages contract requires in addition to the note's own key.
+	policy := j6PermissivePolicy()
+	policy.Allowed[FeatureResponsesControls] = struct{}{}
+	policy.Allowed[FeatureOutputPhase] = struct{}{}
+	state := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		policy,
+		ChatCapabilities{},
+		"msg_1",
+		"gpt-4.1",
+		1,
+	)
+	converter := newResponsesToAnthropicConverter(state)
+	reader := newConvertingReaderWithLimits(
+		NewSSEReaderWithLimits(bytes.NewReader(testcorpus.FieldDataOnlyResponsesStreamSSE()), 0, 0),
+		converter, 0, 0, 0,
+	)
+	var output bytes.Buffer
+	buf := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			output.Write(buf[:n])
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+	}
+	if !reader.SawTerminal() {
+		t.Fatal("no terminal on the data-only captured stream")
+	}
+	if reader.SawErrorEvent() {
+		t.Fatal("data-only captured stream reported an error event")
+	}
+	body := output.String()
+	if got := strings.Count(body, "event: message_stop"); got != 1 {
+		t.Fatalf("message_stop count = %d, want exactly one: %q", got, body)
+	}
+	if !strings.Contains(body, "event: message_start") {
+		t.Fatalf("missing message_start: %q", body)
+	}
+	notes := 0
+	for _, loss := range state.report.Losses {
+		if loss.Feature == FeatureMissingEventName {
+			notes++
+			if loss.Kind != NoteRecord {
+				t.Fatalf("missing_event_name kind = %v, want NoteRecord", loss.Kind)
+			}
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("missing_event_name note count = %d, want exactly one", notes)
+	}
+}
+
 // responseSummary renders every canonical part of the response as one string
 // for substring assertions (test-only; the production renderers remain the
 // authoritative emission path and are exercised by the replay tests).
@@ -254,4 +326,66 @@ func turnSummary(turn CanonicalTurn) string {
 		}
 	}
 	return b.String()
+}
+
+// TestFieldCaptureCamelReasoningFormatDecodes replays the captured camel
+// native-Responses body whose reasoning output item carries the gateway's
+// opaque "format" routing marker (observed live 2026-09-17): the production tolerant
+// upstream decode must accept the modeled extension and never leak it to
+// the canonical bytes any client dialect renders.
+func TestFieldCaptureCamelReasoningFormatDecodes(t *testing.T) {
+	body := testcorpus.FieldCamelReasoningFormatJSON()
+	response, err := DecodeResponsesResponse(body)
+	if err != nil {
+		t.Fatalf("field capture rejected by production decode: %v", err)
+	}
+	if len(response.Items) != 2 {
+		t.Fatalf("items = %d, want 2 (reasoning + message)", len(response.Items))
+	}
+	raw, ok := response.Items[0].(*CanonicalReasoningItem)
+	if !ok {
+		t.Fatalf("item 0 = %T, want a reasoning item", response.Items[0])
+	}
+	// Key-absence, not value-absence: any format key leaks regardless of
+	// the marker spelling (or a null from a tag change). The render-side
+	// echo re-emits Raw verbatim, so pinning the canonical bytes pins the
+	// downstream wire for every client dialect.
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(raw.Raw, &rawMap); err != nil {
+		t.Fatalf("canonical reasoning bytes do not decode: %v", err)
+	}
+	if _, leaked := rawMap["format"]; leaked {
+		t.Fatalf("provider marker key leaked into canonical bytes: %s", raw.Raw)
+	}
+	// The message half still decodes: the marker did not disturb the item.
+	if _, ok := response.Items[1].(*CanonicalMessageItem); !ok {
+		t.Fatalf("item 1 = %T, want a message item", response.Items[1])
+	}
+	if got := responseSummary(response); !strings.Contains(got, "PONG") {
+		t.Fatalf("message text missing from decoded parts: %q", got)
+	}
+}
+
+// TestFieldCaptureClaudeServerToolDefinitionDecodes replays the captured
+// Claude Code web-search request: the type-discriminated server definition
+// must decode (admit) and drop under the anthropic_server_tools key — never
+// an unattributed unknown-field rejection.
+func TestFieldCaptureClaudeServerToolDefinitionDecodes(t *testing.T) {
+	body := testcorpus.FieldClaudeServerToolDefinitionJSON()
+	_, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	target := &UnsupportedFeatureError{}
+	if !errors.As(err, &target) {
+		t.Fatalf("err = %T: %v, want keyed rejection", err, err)
+	}
+	if target.Feature != string(FeatureAnthropicServerTools) {
+		t.Fatalf("feature = %q, want %q", target.Feature, FeatureAnthropicServerTools)
+	}
+	permissive := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicServerTools: {}}}
+	result, err := DecodeMessagesRequest(body, permissive)
+	if err != nil {
+		t.Fatalf("approved drop rejected: %v", err)
+	}
+	if len(result.Request.Tools) != 0 {
+		t.Fatalf("server tool leaked %d tools upstream", len(result.Request.Tools))
+	}
 }

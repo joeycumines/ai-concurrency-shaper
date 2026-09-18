@@ -968,6 +968,51 @@ func TestDecodeResponsesResponseFixture(t *testing.T) {
 	}
 }
 
+// TestDecodeResponsesResponseReasoningFormatExtension pins the camel
+// reasoning-item routing-marker fix (observed live 2026-09-17, camel native
+// Responses via messages->responses): the upstream
+// reasoning item carries the gateway routing marker
+// "format":"azure-openai-responses-v1". The marker is routing metadata,
+// never model output: decode must accept it and the canonical reasoning
+// bytes must strip it so it cannot cross into any client dialect.
+func TestDecodeResponsesResponseReasoningFormatExtension(t *testing.T) {
+	body := []byte(`{"id":"resp_x","object":"response","created_at":1,"model":"m","status":"completed",` +
+		`"output":[{"id":"rs_1","type":"reasoning","status":"completed","summary":[],` +
+		`"encrypted_content":"e","format":"azure-openai-responses-v1"},` +
+		`{"type":"message","id":"msg_1","role":"assistant","status":"completed",` +
+		`"content":[{"type":"output_text","text":"hi","annotations":[]}]}],` +
+		`"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)
+	response, err := DecodeResponsesResponse(body)
+	if err != nil {
+		t.Fatalf("decode with format extension: %v", err)
+	}
+	if len(response.Items) != 2 {
+		t.Fatalf("items = %d, want 2", len(response.Items))
+	}
+	raw, ok := response.Items[0].(*CanonicalReasoningItem)
+	if !ok {
+		t.Fatalf("item 0 = %T, want a reasoning item", response.Items[0])
+	}
+	// Key-absence, not value-absence: any format key leaks regardless of
+	// the marker spelling (or a null from a tag change).
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(raw.Raw, &rawMap); err != nil {
+		t.Fatalf("canonical reasoning bytes do not decode: %v", err)
+	}
+	if _, leaked := rawMap["format"]; leaked {
+		t.Fatalf("provider marker key leaked into canonical bytes: %s", raw.Raw)
+	}
+	// The stripped bytes must still decode as a reasoning item: the marker
+	// was the only thing removed.
+	var item openairesponses.ReasoningOutputItem
+	if err := json.Unmarshal(raw.Raw, &item); err != nil {
+		t.Fatalf("stripped reasoning bytes do not decode: %v", err)
+	}
+	if item.ID != "rs_1" || string(item.EncryptedContent) != "e" {
+		t.Fatalf("stripped item lost fields: %+v", item)
+	}
+}
+
 func TestRenderMessagesResponseReasoningLoss(t *testing.T) {
 	// The fixture has a reasoning item; rendering to Messages requires a loss,
 	// so under the strict policy rendering fails.
@@ -1647,7 +1692,7 @@ func TestDecodeResponsesRequestAllBuiltinNamespace(t *testing.T) {
 	foundZeroFlatten := false
 	for _, loss := range result.Report.Losses {
 		if loss.Feature == FeatureBuiltinTools &&
-			loss.Path == "tools[]" &&
+			loss.Path == "tools[namespace=ns]" &&
 			strings.Contains(loss.Detail, "no portable function tools") {
 			foundZeroFlatten = true
 		}
@@ -2028,5 +2073,37 @@ func TestDecodeResponsesRequestPreviousOutputEmptyStatus(t *testing.T) {
 	}`)
 	if _, _, err := DecodeResponsesRequest(bogus, StrictLossPolicy()); err == nil {
 		t.Fatal("bogus status accepted")
+	}
+}
+
+// TestDecodeResponsesResponseReasoningFormatStreamEvents pins the stream
+// half of the routing-marker fix (observed live 2026-09-17): SSE
+// output_item.added/done events share DecodeOutputItem with the
+// non-streaming path, so a format-carrying reasoning item must decode on
+// the stream path too.
+func TestDecodeResponsesResponseReasoningFormatStreamEvents(t *testing.T) {
+	added := []byte(`{"type":"response.output_item.added","sequence_number":1,"output_index":0,` +
+		`"item":{"id":"rs_1","type":"reasoning","status":"in_progress","summary":[],` +
+		`"encrypted_content":"e","format":"azure-openai-responses-v1"}}`)
+	event, err := openairesponses.DecodeEvent(added)
+	if err != nil {
+		t.Fatalf("added with format: %v", err)
+	}
+	addedEvent, ok := event.(*openairesponses.OutputItemAddedEvent)
+	if !ok {
+		t.Fatalf("added event = %T", event)
+	}
+	reasoning, ok := addedEvent.Item.(*openairesponses.ReasoningOutputItem)
+	if !ok {
+		t.Fatalf("added item = %T", addedEvent.Item)
+	}
+	if len(reasoning.Format) == 0 {
+		t.Fatal("added reasoning item lost the modeled marker")
+	}
+	done := []byte(`{"type":"response.output_item.done","sequence_number":2,"output_index":0,` +
+		`"item":{"id":"rs_1","type":"reasoning","status":"completed","summary":[],` +
+		`"format":"azure-openai-responses-v1"}}`)
+	if _, err := openairesponses.DecodeEvent(done); err != nil {
+		t.Fatalf("done with format: %v", err)
 	}
 }

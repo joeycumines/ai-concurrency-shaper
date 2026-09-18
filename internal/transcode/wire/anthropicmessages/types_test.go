@@ -7,6 +7,7 @@ package anthropicmessages
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
@@ -341,5 +342,51 @@ func TestStreamDeltaCitations(t *testing.T) {
 		delta.Citation.Type != CitationTypeWebSearchResultLocation ||
 		*delta.Citation.URL != "https://example.org" {
 		t.Fatalf("stream delta citation mismatch: %+v", delta)
+	}
+}
+
+// TestServerBlockAdmission pins the server-spelling wire contract: server-side
+// spellings decode (admit-and-tag) instead of failing strict decode, so the
+// convert layer can drop or reject them under the anthropic_server_tools
+// loss key; MCP spellings decode their tool_use/tool_result-equivalent
+// fields for the 1:1 mapping. Unknown spellings still reject.
+func TestServerBlockAdmission(t *testing.T) {
+	admitted := []string{
+		`{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{}}`,
+		`{"type":"web_search_tool_result","tool_use_id":"srv_1","content":"x"}`,
+		`{"type":"code_execution","id":"e1"}`,
+		`{"type":"code_execution_tool_result","tool_use_id":"e1","content":"ok"}`,
+		`{"type":"container_upload","file_id":"file_1"}`,
+	}
+	for _, raw := range admitted {
+		var block ContentBlock
+		if err := json.Unmarshal([]byte(raw), &block); err != nil {
+			t.Fatalf("server block rejected at wire decode: %s: %v", raw, err)
+		}
+		if len(block.ServerContent) == 0 {
+			t.Fatalf("server block lost its raw bytes: %s", raw)
+		}
+	}
+	mcpUse := `{"type":"mcp_tool_use","id":"call_1","name":"read","input":{"x":1}}`
+	var use ContentBlock
+	if err := json.Unmarshal([]byte(mcpUse), &use); err != nil {
+		t.Fatalf("mcp_tool_use rejected: %v", err)
+	}
+	if use.ID == nil || *use.ID != "call_1" || use.Name == nil || *use.Name != "read" {
+		t.Fatalf("mcp_tool_use fields not decoded: %+v", use)
+	}
+	mcpResult := `{"type":"mcp_tool_result","tool_use_id":"call_1","content":"done"}`
+	var result ContentBlock
+	if err := json.Unmarshal([]byte(mcpResult), &result); err != nil {
+		t.Fatalf("mcp_tool_result rejected: %v", err)
+	}
+	if result.ToolUseID == nil || *result.ToolUseID != "call_1" {
+		t.Fatalf("mcp_tool_result fields not decoded: %+v", result)
+	}
+	var bogus ContentBlock
+	if err := json.Unmarshal([]byte(`{"type":"quantum_compute"}`), &bogus); err == nil {
+		t.Fatal("unknown block type accepted")
+	} else if got := err.Error(); !strings.Contains(got, `unknown anthropic content block type "quantum_compute"`) {
+		t.Fatalf("unknown type err = %v, want the unattributed-type rejection", err)
 	}
 }

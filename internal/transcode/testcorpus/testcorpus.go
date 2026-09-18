@@ -67,6 +67,16 @@ var (
 	qwenReasoningStreamFieldSSE []byte
 	//go:embed testdata/field/codex_multiturn_request_field.json
 	codexMultiturnRequestFieldJSON []byte
+	//go:embed testdata/field/codex_namespace_request_field.json
+	codexNamespaceRequestFieldJSON []byte
+	//go:embed testdata/field/repeated_terminal_tail_field.sse
+	repeatedTerminalTailFieldSSE []byte
+	//go:embed testdata/field/data_only_responses_stream_field.sse
+	dataOnlyResponsesStreamFieldSSE []byte
+	//go:embed testdata/field/camel_reasoning_format_field.json
+	camelReasoningFormatFieldJSON []byte
+	//go:embed testdata/field/claude_server_tool_definition_field.json
+	claudeServerToolDefinitionFieldJSON []byte
 )
 
 // FieldQwenStreamSSE returns the qwen-style chat stream capture: choice-level
@@ -92,6 +102,56 @@ func FieldQwenReasoningStreamSSE() []byte { return qwenReasoningStreamFieldSSE }
 // a previous-output history item carrying "status": "" (the task-30 field
 // regression) between two user turns.
 func FieldCodexMultiturnRequestJSON() []byte { return codexMultiturnRequestFieldJSON }
+
+// FieldCodexNamespaceRequestJSON returns the captured Codex CLI (0.154.0)
+// Responses request carrying namespace tools (multi_agent_v1 and an MCP
+// namespace) alongside ordinary function tools and a web_search built-in.
+// The tools, their child schemas, and tool_choice are byte-verbatim from the
+// capture; the envelope is trimmed to the fields the replay test needs.
+func FieldCodexNamespaceRequestJSON() []byte { return codexNamespaceRequestFieldJSON }
+
+// FieldRepeatedTerminalTailSSE returns the captured dialagram
+// meta-muse-spark-1.3 stream tail in which the gateway redelivers the
+// terminal chunk — the same single choice, the same finish reason, an
+// insubstantial delta — with the usage accounting piggybacked, followed by
+// the [DONE] sentinel. The frames are shape-verbatim from the capture; the
+// tool-call argument payload is replaced with a neutral value.
+func FieldRepeatedTerminalTailSSE() []byte { return repeatedTerminalTailFieldSSE }
+
+// FieldDataOnlyResponsesStreamSSE returns the captured camel native-Responses
+// stream in which the gateway omits the SSE event: name on every frame: a
+// leading ": " comment frame then data-only frames whose JSON `type` is the
+// authoritative discriminator (the payloads also carry the gateway's opaque
+// "p" envelope extension and the pinned envelope controls, e.g.
+// output[].phase and table/prompt-cache nulls at created time). Sanitized:
+// the account id, generation id, and per-stream "p" token are replaced with
+// stable placeholders; the shape (key presence, null-vs-value, frame order)
+// is byte-faithful to the capture.
+func FieldDataOnlyResponsesStreamSSE() []byte { return dataOnlyResponsesStreamFieldSSE }
+
+// FieldCamelReasoningFormatJSON returns the captured camel native-Responses
+// non-streaming body in which the reasoning output item carries the
+// gateway's opaque "format" routing marker ("azure-openai-responses-v1").
+// Sanitized: the item id and encrypted blob are replaced with stable
+// placeholders. Byte-faithful to the capture are the item keys, the marker
+// spelling, and the status values; synthesized is the message half (the
+// exhibiting exchange carried a single reasoning item with usage 8/16/24,
+// while the fixture pairs the reasoning item with a PONG message at 8/6/14
+// so the decode path is exercised end to end).
+func FieldCamelReasoningFormatJSON() []byte { return camelReasoningFormatFieldJSON }
+
+// FieldClaudeServerToolDefinitionJSON returns a minimized isolation vector
+// for the Claude Code web-search server-tool shape: the tools array and
+// tool_choice are byte-faithful to the live capture
+// (scratch/flowlogs/000059-39619-POST-v1_messages.json), while the envelope
+// is minimized (model id kept as the live wire value, max_tokens reduced,
+// the text message flattened to a string, session keys dropped) so the test
+// asserts exactly the tools disposition and nothing else. A full-session
+// reproduction would additionally need the anthropic_controls approval (the
+// live body carries output_config).
+func FieldClaudeServerToolDefinitionJSON() []byte {
+	return claudeServerToolDefinitionFieldJSON
+}
 
 // ChatCompletionsRequestJSON returns the raw chat completions request fixture
 // bytes.

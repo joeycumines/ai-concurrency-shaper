@@ -23,8 +23,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,10 +36,11 @@ import (
 )
 
 // TestE2E_ComposedGateway_MultiProvider_TranscodeHarness proves the composed
-// end-to-end verification harness against a single gateway process serving 3 providers:
+// end-to-end verification harness against a single gateway process serving 4 providers:
 // 1. Anthropic mount (/anthropic) with Messages->Chat transcoding and Bearer auth.
 // 2. OpenAI mount (/openai) with Responses->Chat transcoding and Bearer auth.
 // 3. Passthrough mount (/passthrough) with transparent routing.
+// 4. Namespace-tool mount (/nsopenai) with Responses->Chat transcoding and Bearer auth.
 //
 // Verifies:
 // (a) Claude Code multi-turn shape with mid-conversation system turn & thinking budget.
@@ -45,6 +48,13 @@ import (
 // (c) Streaming SSE translation event-for-event with exactly one terminal event.
 // (d) Poison usage extension resilience on non-stream completions.
 // (e) Limiter/breaker and Prometheus /metrics aggregate accounting.
+// (f) Namespace tool flattening upstream and the bare-name + qualifier round trip
+//
+//	downstream, non-streaming, including the collision-qualified child.
+//
+// (g) The same round trip streamed, with the qualifier on every function_call shape.
+// (h) Replayed namespaced history rendering the flat name upstream.
+// (i) Method- and path-scoped dispatch: non-transcoded traffic stays verbatim.
 func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -148,6 +158,60 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	}))
 	t.Cleanup(upC.Close)
 
+	// Upstream D (namespace-tool provider target): the chat upstream for the
+	// namespace round-trip. It answers a chat completion with two tool calls —
+	// a namespaced child (spawn_agent) and a colliding child the transcoder must
+	// have flattened to ns_group__search — and records every request body so the
+	// test can prove the upstream never sees a namespace grouping.
+	var (
+		upDMu     sync.Mutex
+		upDBodies [][]byte
+		upDAuth   string
+	)
+	upD := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upDMu.Lock()
+		upDBodies = append(upDBodies, body)
+		upDAuth = r.Header.Get("Authorization")
+		upDMu.Unlock()
+
+		if r.URL.Path == "/v1/chat/completions" && r.Method == http.MethodPost {
+			var chatReq struct {
+				Stream bool `json:"stream"`
+			}
+			_ = json.Unmarshal(body, &chatReq)
+
+			if chatReq.Stream {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				flusher, _ := w.(http.Flusher)
+				frame := func(data string) {
+					_, _ = w.Write([]byte("data: " + data + "\n\n"))
+					if flusher != nil {
+						flusher.Flush()
+					}
+				}
+				frame(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_ns_1","type":"function","function":{"name":"spawn_agent","arguments":""}}]}}]}`)
+				frame(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"message\":\"x\"}"}}]}}]}`)
+				frame(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":1,"id":"call_ns_2","type":"function","function":{"name":"ns_group__search","arguments":""}}]}}]}`)
+				frame(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":1,"function":{"arguments":"{\"q\":\"y\"}"}}]}}]}`)
+				frame(`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","delta":{"role":"assistant","content":""}}]}`)
+				frame(`[DONE]`)
+				return
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"chatcmpl-ns","object":"chat.completion","created":1710000000,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_ns_1","type":"function","function":{"name":"spawn_agent","arguments":"{\"message\":\"x\"}"}},{"id":"call_ns_2","type":"function","function":{"name":"ns_group__search","arguments":"{\"q\":\"y\"}"}}]}}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"untranscoded_d":true,"method":%q,"path":%q}`, r.Method, r.URL.Path)
+	}))
+	t.Cleanup(upD.Close)
+
 	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen proxy: %v", err)
@@ -187,6 +251,14 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 		"-prefix", "/passthrough",
 		"-limit", "POST /v1/models:2",
 		"-retry", "0",
+		"--provider=nsopenai",
+		"-upstream", upD.URL,
+		"-prefix", "/nsopenai",
+		"-auth-source", "env:SHAPER_PROVIDER_NSOPENAI_KEY",
+		"-auth-mode", "bearer",
+		"-transcode-route", "responses@/v1/responses=chat-completions@/v1/chat/completions",
+		"-limit", "POST /v1/responses:1",
+		"-retry", "0",
 	)
 
 	var filteredEnv []string
@@ -198,6 +270,7 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	cmd.Env = append(filteredEnv,
 		"SHAPER_PROVIDER_ANTHROPIC_KEY=secret-anthropic-key-xyz",
 		"SHAPER_PROVIDER_OPENAI_KEY=secret-openai-key-abc",
+		"SHAPER_PROVIDER_NSOPENAI_KEY=secret-nsopenai-key-ns",
 	)
 
 	stdinR, err := os.Open(os.DevNull)
@@ -496,6 +569,223 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 		t.Errorf("upCHits = 0, want > 0")
 	}
 
+	// -------------------------------------------------------------------------
+	// (f) Namespace tool round trip: non-streaming
+	// -------------------------------------------------------------------------
+	upDCount := func() int {
+		upDMu.Lock()
+		defer upDMu.Unlock()
+		return len(upDBodies)
+	}
+	upDBodyAt := func(i int) string {
+		upDMu.Lock()
+		defer upDMu.Unlock()
+		if i < 0 || i >= len(upDBodies) {
+			t.Fatalf("upstream D has no request at index %d", i)
+		}
+		return string(upDBodies[i])
+	}
+
+	const nsTools = `[
+		{"type": "function", "name": "search", "description": "plain search", "strict": false,
+		 "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}},
+		{"type": "namespace", "name": "multi_agent_v1", "description": "agents", "tools": [
+			{"type": "function", "name": "spawn_agent", "description": "spawn", "strict": false,
+			 "parameters": {"type": "object", "properties": {"message": {"type": "string"}}}}]},
+		{"type": "namespace", "name": "ns_group", "description": "group", "tools": [
+			{"type": "function", "name": "search", "description": "grouped search", "strict": false,
+			 "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}]}
+	]`
+
+	nsBefore := upDCount()
+	reqNS, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/nsopenai/v1/responses",
+		strings.NewReader(`{"model": "gpt-4o", "input": "spawn and search", "tools": `+nsTools+`}`))
+	reqNS.Header.Set("Content-Type", "application/json")
+	respNS, err := httpClient.Do(reqNS)
+	if err != nil {
+		t.Fatalf("namespace non-stream request failed: %v", err)
+	}
+	bodyNS, _ := io.ReadAll(respNS.Body)
+	respNS.Body.Close()
+	if respNS.StatusCode != http.StatusOK {
+		t.Fatalf("namespace non-stream status = %d, want 200: %s", respNS.StatusCode, bodyNS)
+	}
+
+	upDNS := upDBodyAt(nsBefore)
+	if strings.Contains(upDNS, "namespace") {
+		t.Errorf("the namespace grouping leaked into the upstream chat request: %s", upDNS)
+	}
+	for _, want := range []string{`"name":"search"`, `"name":"spawn_agent"`, `"name":"ns_group__search"`} {
+		if !strings.Contains(upDNS, want) {
+			t.Errorf("upstream chat tools lack %s: %s", want, upDNS)
+		}
+	}
+	for _, want := range []string{
+		`"type":"function_call","status":"completed","call_id":"call_ns_1","name":"spawn_agent","arguments":"{\"message\":\"x\"}","namespace":"multi_agent_v1"`,
+		`"type":"function_call","status":"completed","call_id":"call_ns_2","name":"search","arguments":"{\"q\":\"y\"}","namespace":"ns_group"`,
+	} {
+		if !strings.Contains(string(bodyNS), want) {
+			t.Errorf("downstream function_call is missing %s from: %s", want, bodyNS)
+		}
+	}
+	if strings.Contains(string(bodyNS), "ns_group__search") {
+		t.Errorf("the flattened chat name leaked to the client: %s", bodyNS)
+	}
+
+	// -------------------------------------------------------------------------
+	// (g) Namespace tool round trip: streaming
+	// -------------------------------------------------------------------------
+	nsStreamBefore := upDCount()
+	reqNSStream, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/nsopenai/v1/responses",
+		strings.NewReader(`{"model": "gpt-4o", "input": "spawn", "stream": true, "tools": `+nsTools+`}`))
+	reqNSStream.Header.Set("Content-Type", "application/json")
+	respNSStream, err := httpClient.Do(reqNSStream)
+	if err != nil {
+		t.Fatalf("namespace stream request failed: %v", err)
+	}
+	if respNSStream.StatusCode != http.StatusOK {
+		t.Fatalf("namespace stream status = %d, want 200", respNSStream.StatusCode)
+	}
+	nsScanner := bufio.NewScanner(respNSStream.Body)
+	var nsEvents []string
+	var nsData strings.Builder
+	nsTerminals := 0
+	for nsScanner.Scan() {
+		line := nsScanner.Text()
+		if after, ok := strings.CutPrefix(line, "event: "); ok {
+			nsEvents = append(nsEvents, after)
+			if after == "response.completed" {
+				nsTerminals++
+			}
+		}
+		if after, ok := strings.CutPrefix(line, "data: "); ok {
+			nsData.WriteString(after)
+			nsData.WriteByte('\n')
+		}
+	}
+	if err := nsScanner.Err(); err != nil {
+		t.Fatalf("namespace stream scanner error: %v", err)
+	}
+	respNSStream.Body.Close()
+
+	if nsTerminals != 1 || len(nsEvents) == 0 || nsEvents[len(nsEvents)-1] != "response.completed" {
+		t.Errorf("namespace stream terminals = %d, last event = %q, want exactly one response.completed", nsTerminals, nsEvents)
+	}
+	if got := strings.Count(nsData.String(), `"namespace":"multi_agent_v1"`); got != 3 {
+		t.Errorf("streamed spawn_agent qualifier count = %d, want 3 (added, done, terminal): %s", got, nsData.String())
+	}
+	if got := strings.Count(nsData.String(), `"namespace":"ns_group"`); got != 3 {
+		t.Errorf("streamed collision qualifier count = %d, want 3 (added, done, terminal): %s", got, nsData.String())
+	}
+	for _, want := range []string{
+		`"type":"function_call","status":"in_progress","call_id":"call_ns_1","name":"spawn_agent","arguments":"","namespace":"multi_agent_v1"`,
+		`"type":"function_call","status":"completed","call_id":"call_ns_1","name":"spawn_agent","arguments":"{\"message\":\"x\"}","namespace":"multi_agent_v1"`,
+		`"type":"function_call","status":"in_progress","call_id":"call_ns_2","name":"search","arguments":"","namespace":"ns_group"`,
+		`"type":"function_call","status":"completed","call_id":"call_ns_2","name":"search","arguments":"{\"q\":\"y\"}","namespace":"ns_group"`,
+	} {
+		if !strings.Contains(nsData.String(), want) {
+			t.Errorf("streamed function_call is missing %s from: %s", want, nsData.String())
+		}
+	}
+	if strings.Contains(nsData.String(), "ns_group__search") {
+		t.Errorf("the flattened chat name leaked into the client stream: %s", nsData.String())
+	}
+	if upDNSS := upDBodyAt(nsStreamBefore); strings.Contains(upDNSS, "namespace") {
+		t.Errorf("the namespace grouping leaked into the streamed upstream request: %s", upDNSS)
+	}
+
+	// -------------------------------------------------------------------------
+	// (h) Namespace history replay renders the flat name upstream
+	// -------------------------------------------------------------------------
+	nsReplayBefore := upDCount()
+	reqNSReplay, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/nsopenai/v1/responses",
+		strings.NewReader(`{"model": "gpt-4o", "input": [
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]},
+			{"type": "function_call", "call_id": "call_ns_2", "name": "search", "namespace": "ns_group", "arguments": "{\"q\":\"y\"}"},
+			{"type": "function_call_output", "call_id": "call_ns_2", "output": "found"}
+		], "tools": `+nsTools+`}`))
+	reqNSReplay.Header.Set("Content-Type", "application/json")
+	respNSReplay, err := httpClient.Do(reqNSReplay)
+	if err != nil {
+		t.Fatalf("namespace replay request failed: %v", err)
+	}
+	bodyNSReplay, _ := io.ReadAll(respNSReplay.Body)
+	respNSReplay.Body.Close()
+	if respNSReplay.StatusCode != http.StatusOK {
+		t.Fatalf("namespace replay status = %d, want 200: %s", respNSReplay.StatusCode, bodyNSReplay)
+	}
+	upDNSReplay := upDBodyAt(nsReplayBefore)
+	var replayReq struct {
+		Messages []struct {
+			ToolCalls []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+			ToolCallID string `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(upDNSReplay), &replayReq); err != nil {
+		t.Fatalf("unmarshal replayed upstream body: %v", err)
+	}
+	flatCalls, pairings := 0, 0
+	for _, message := range replayReq.Messages {
+		for _, call := range message.ToolCalls {
+			if call.Function.Name == "ns_group__search" {
+				flatCalls++
+			}
+		}
+		if message.ToolCallID == "call_ns_2" {
+			pairings++
+		}
+	}
+	if flatCalls != 1 {
+		t.Errorf("replayed history must carry exactly one flattened tool call, got %d: %s", flatCalls, upDNSReplay)
+	}
+	if pairings != 1 {
+		t.Errorf("replayed history must pair the tool result with call_ns_2, got %d: %s", pairings, upDNSReplay)
+	}
+	if strings.Contains(upDNSReplay, "namespace") {
+		t.Errorf("replayed history leaked the namespace grouping upstream: %s", upDNSReplay)
+	}
+
+	// -------------------------------------------------------------------------
+	// (i) The transcode mapping stays method- and path-scoped
+	// -------------------------------------------------------------------------
+	probeBefore := upDCount()
+	const probeBody = `{"probe":"verbatim"}`
+	reqProbe, _ := http.NewRequest(http.MethodPost, "http://"+proxyAddr+"/nsopenai/v1/embeddings", strings.NewReader(probeBody))
+	respProbe, err := httpClient.Do(reqProbe)
+	if err != nil {
+		t.Fatalf("non-transcoded probe failed: %v", err)
+	}
+	probeRespBody, _ := io.ReadAll(respProbe.Body)
+	respProbe.Body.Close()
+	if respProbe.StatusCode != http.StatusOK || !strings.Contains(string(probeRespBody), "untranscoded_d") {
+		t.Errorf("non-transcoded probe status = %d body = %s", respProbe.StatusCode, probeRespBody)
+	}
+	if got := upDBodyAt(probeBefore); got != probeBody {
+		t.Errorf("non-transcoded probe body = %q, want verbatim %q", got, probeBody)
+	}
+
+	reqMethod, _ := http.NewRequest(http.MethodGet, "http://"+proxyAddr+"/nsopenai/v1/responses", nil)
+	respMethod, err := httpClient.Do(reqMethod)
+	if err != nil {
+		t.Fatalf("method-scoped probe failed: %v", err)
+	}
+	methodBody, _ := io.ReadAll(respMethod.Body)
+	respMethod.Body.Close()
+	if respMethod.StatusCode != http.StatusOK || !strings.Contains(string(methodBody), `"method":"GET"`) {
+		t.Errorf("GET on the transcode path must pass through transparently, got status %d body %s", respMethod.StatusCode, methodBody)
+	}
+
+	upDMu.Lock()
+	nsAuth := upDAuth
+	upDMu.Unlock()
+	if nsAuth != "Bearer secret-nsopenai-key-ns" {
+		t.Errorf("upstream D auth = %q, want the injected namespace-provider credential", nsAuth)
+	}
+
 	// Poll metrics endpoint
 	waitForMetrics := func(want string) {
 		client := &http.Client{Timeout: 1 * time.Second}
@@ -520,4 +810,435 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	waitForMetrics(`shaper_requests_total{provider="anthropic",status="2xx"}`)
 	waitForMetrics(`shaper_requests_total{provider="openai",status="2xx"}`)
 	waitForMetrics(`shaper_requests_total{provider="passthrough",status="2xx"}`)
+}
+
+// launcherMountPrefix mirrors the ecosystem launcher's mount derivation
+// (catalog.js mountPrefix): the first declared endpoint's path with a trailing
+// /v1 removed and trailing slashes trimmed.
+func launcherMountPrefix(endpoint string) string {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	return strings.TrimSuffix(path, "/v1")
+}
+
+// launcherShaperEnvVar mirrors the launcher's credential variable derivation
+// (catalog.js shaperEnvVar): SHAPER_PROVIDER_<requiredEnv[0] without a trailing
+// _API_KEY>_API_KEY.
+func launcherShaperEnvVar(requiredEnv []string) string {
+	declared := ""
+	if len(requiredEnv) > 0 {
+		declared = requiredEnv[0]
+	}
+	return "SHAPER_PROVIDER_" + strings.TrimSuffix(declared, "_API_KEY") + "_API_KEY"
+}
+
+// generatedAccess is one launcher-produced shaper mount.
+type generatedAccess struct {
+	provider    string
+	endpoint    string
+	upstream    string
+	requiredEnv []string
+	transcode   []string
+	models      []generatedModel
+}
+
+// generatedModel is one model-table entry the launcher emits for a mount.
+type generatedModel struct {
+	surrogate string
+	wire      string
+	facts     string
+}
+
+// generatedArgv produces the argv a launcher emits for the given accesses: the
+// global model-table entries at server scope (before the first marker), then one
+// provider section per access with its prefix and credential derived by the same
+// rules the launcher uses. It also returns the child environment entries.
+func generatedArgv(accesses []generatedAccess) ([]string, []string) {
+	var tableArgs []string
+	var sectionArgs []string
+	var env []string
+	for _, access := range accesses {
+		for _, model := range access.models {
+			tableArgs = append(tableArgs, "-model-table",
+				model.surrogate+"@"+access.provider+"="+model.wire+model.facts)
+		}
+		envVar := launcherShaperEnvVar(access.requiredEnv)
+		sectionArgs = append(sectionArgs, "--provider="+access.provider,
+			"-upstream", access.upstream,
+			"-prefix", launcherMountPrefix(access.endpoint),
+			"-auth-source", "env:"+envVar,
+			"-auth-mode", "bearer",
+		)
+		sectionArgs = append(sectionArgs, access.transcode...)
+		env = append(env, envVar+"=secret-"+access.provider)
+	}
+	return append(tableArgs, sectionArgs...), env
+}
+
+// TestE2E_ComposedGateway_ModelCatalog proves the generated-argv integration
+// surface end to end: a launcher-shaped command line starts the binary, the
+// per-mount catalogs list exactly each mount's declared surrogates, declared
+// models resolve to their wire ids upstream with the mount's own credential,
+// undeclared models are refused with the servable set, the listing never
+// touches an upstream, and a held completion does not delay discovery.
+func TestE2E_ComposedGateway_ModelCatalog(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/catalog-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	var (
+		dialagramHits atomic.Int64
+		dialagramAuth atomic.Value
+		dialagramBody atomic.Value
+		dialagramGate = make(chan struct{})
+		verbooHits    atomic.Int64
+		verbooAuth    atomic.Value
+		verbooBody    atomic.Value
+	)
+	chatResponse := func(model string) string {
+		return `{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"` + model + `",` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+	}
+	upstreamDialagram := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		dialagramHits.Add(1)
+		dialagramAuth.Store(r.Header.Get("Authorization"))
+		body, _ := io.ReadAll(r.Body)
+		dialagramBody.Store(string(body))
+		if strings.Contains(string(body), `"wire-slow"`) {
+			<-dialagramGate
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(chatResponse("wire")))
+	}))
+	t.Cleanup(upstreamDialagram.Close)
+	upstreamVerboo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		verbooHits.Add(1)
+		verbooAuth.Store(r.Header.Get("Authorization"))
+		body, _ := io.ReadAll(r.Body)
+		verbooBody.Store(string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(chatResponse("wire")))
+	}))
+	t.Cleanup(upstreamVerboo.Close)
+
+	accesses := []generatedAccess{
+		{
+			provider:    "dialagram",
+			endpoint:    "http://127.0.0.1:11239/dialagram/v1",
+			upstream:    upstreamDialagram.URL,
+			requiredEnv: []string{"DIALAGRAM_API_KEY"},
+			transcode:   []string{"-transcode-responses-chat", "-limit", "POST /v1/responses:1"},
+			models: []generatedModel{
+				{surrogate: "qwen-max", wire: "wire-qwen", facts: ";context=32000;max_output=8192"},
+				{surrogate: "qwen-slow", wire: "wire-slow"},
+			},
+		},
+		{
+			provider:    "verboo",
+			endpoint:    "http://127.0.0.1:11239/verboo",
+			upstream:    upstreamVerboo.URL,
+			requiredEnv: []string{"VERBOO_API_KEY"},
+			transcode:   []string{"-transcode-messages-chat"},
+			models: []generatedModel{
+				{surrogate: "glm-5.3-flash", wire: "wire-glm", facts: ";context=200000;efforts=low+high"},
+			},
+		},
+	}
+	generated, generatedEnv := generatedArgv(accesses)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	args := append([]string{"-bind", addr}, generated...)
+	var out safeBuffer
+	cmd := exec.Command(bin, args...)
+	var filteredEnv []string
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(env, "SHAPER_PROVIDER_") {
+			filteredEnv = append(filteredEnv, env)
+		}
+	}
+	cmd.Env = append(filteredEnv, generatedEnv...)
+	stdinR, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdinR.Close()
+	cmd.Stdin = stdinR
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			_ = cmd.Wait()
+		}
+	}()
+	if err := waitTCPReady(addr, 5*time.Second); err != nil {
+		t.Fatalf("gateway not ready: %v\n%s", err, out.String())
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	get := func(path string, headers map[string]string) (int, string) {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+addr+path, nil)
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+	post := func(path, payload string) (int, string) {
+		resp, err := client.Post("http://"+addr+path, "application/json", strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("POST %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+
+	// (a) Codex discovery on the Responses mount, then resolution through it.
+	status, body := get("/dialagram/v1/models?client_version=1", nil)
+	if status != http.StatusOK {
+		t.Fatalf("dialagram catalog status = %d: %s", status, body)
+	}
+	for _, want := range []string{`"slug":"qwen-max"`, `"slug":"qwen-slow"`, `"context_window":32000`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dialagram catalog missing %s: %s", want, body)
+		}
+	}
+	if strings.Contains(body, "wire-qwen") || strings.Contains(body, `"glm-5.3-flash"`) {
+		t.Errorf("dialagram catalog leaks a wire id or another mount's model: %s", body)
+	}
+	if dialagramHits.Load() != 0 || verbooHits.Load() != 0 {
+		t.Fatalf("catalog touched an upstream: %d/%d", dialagramHits.Load(), verbooHits.Load())
+	}
+
+	status, body = post("/dialagram/v1/responses", `{"model":"qwen-max","input":"hi"}`)
+	if status != http.StatusOK {
+		t.Fatalf("resolve status = %d: %s", status, body)
+	}
+	if got := dialagramBody.Load().(string); !strings.Contains(got, `"model":"wire-qwen"`) {
+		t.Errorf("upstream body did not carry the wire id: %s", got)
+	}
+	if !strings.Contains(body, `"model":"qwen-max"`) {
+		t.Errorf("downstream did not return the surrogate: %s", body)
+	}
+	if got := dialagramAuth.Load().(string); got != "Bearer secret-dialagram" {
+		t.Errorf("dialagram upstream credential = %q, want its own mount secret", got)
+	}
+
+	// (b) Anthropic discovery on the Messages mount, then resolution.
+	status, body = get("/verboo/v1/models", map[string]string{"Anthropic-Version": "2023-06-01"})
+	if status != http.StatusOK {
+		t.Fatalf("verboo catalog status = %d: %s", status, body)
+	}
+	if !strings.Contains(body, `"id":"glm-5.3-flash"`) || strings.Contains(body, "wire-glm") {
+		t.Errorf("verboo catalog body = %s", body)
+	}
+	if strings.Contains(body, "qwen-max") {
+		t.Errorf("verboo catalog leaked another mount's model: %s", body)
+	}
+	status, body = post("/verboo/v1/messages", `{"model":"glm-5.3-flash","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("verboo resolve status = %d: %s", status, body)
+	}
+	if got := verbooBody.Load().(string); !strings.Contains(got, `"model":"wire-glm"`) {
+		t.Errorf("verboo upstream body did not carry the wire id: %s", got)
+	}
+	if got := verbooAuth.Load().(string); got != "Bearer secret-verboo" {
+		t.Errorf("verboo upstream credential = %q, want its own mount secret", got)
+	}
+
+	// (c) An undeclared model is refused with the mount's servable set.
+	status, body = post("/dialagram/v1/responses", `{"model":"undeclared","input":"hi"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("undeclared status = %d: %s", status, body)
+	}
+	for _, want := range []string{"servable on this mount", "qwen-max", "qwen-slow"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("undeclared error missing %q: %s", want, body)
+		}
+	}
+
+	// (e) A held completion must not delay discovery.
+	held := make(chan int, 1)
+	go func() {
+		status, _ := post("/dialagram/v1/responses", `{"model":"qwen-slow","input":"hold"}`)
+		held <- status
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for dialagramHits.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	start := time.Now()
+	status, body = get("/dialagram/v1/models?client_version=1", nil)
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("catalog timed out behind the held completion after %v", elapsed)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("catalog behind a held slot = %d: %s", status, body)
+	}
+	close(dialagramGate)
+	if status := <-held; status != http.StatusOK {
+		t.Fatalf("held completion status = %d", status)
+	}
+
+	if dialagramHits.Load() != 2 || verbooHits.Load() != 1 {
+		t.Errorf("unexpected upstream hit counts: dialagram=%d verboo=%d", dialagramHits.Load(), verbooHits.Load())
+	}
+	if !strings.Contains(out.String(), "model table: 3 surrogates across 2 providers:") {
+		t.Errorf("startup log lacks the model-table summary:\n%s", out.String())
+	}
+}
+
+// TestE2E_ComposedGateway_LegacyModelMapEquivalence proves the documented
+// migration: a legacy per-provider -transcode-model configuration and its
+// -model-table equivalent serve byte-identical exchanges, and a configuration
+// carrying both fails startup loudly.
+func TestE2E_ComposedGateway_LegacyModelMapEquivalence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	bin := t.TempDir() + "/migration-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	var upstreamBody atomic.Value
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		upstreamBody.Store(string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"wire-m",` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	t.Cleanup(upstream.Close)
+
+	run := func(args []string) (string, string) {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		var out safeBuffer
+		cmd := exec.Command(bin, append([]string{"-bind", addr}, args...)...)
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(syscall.SIGTERM)
+				_ = cmd.Wait()
+			}
+		}()
+		if err := waitTCPReady(addr, 5*time.Second); err != nil {
+			t.Fatalf("gateway not ready: %v\n%s", err, out.String())
+		}
+		client := &http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Post("http://"+addr+"/openai/v1/responses", "application/json",
+			strings.NewReader(`{"model":"m","input":"hi"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		downstream, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d: %s", resp.StatusCode, downstream)
+		}
+		return upstreamBody.Load().(string), string(downstream)
+	}
+
+	normalize := func(s string) string {
+		s = regexp.MustCompile(`(resp|msg)_[0-9a-zA-Z]+`).ReplaceAllString(s, "$1_GENERATED")
+		s = regexp.MustCompile(`"created_at":\d+`).ReplaceAllString(s, `"created_at":0`)
+		return s
+	}
+
+	legacyUpstream, legacyDownstream := run([]string{
+		"--provider=openai",
+		"-upstream", upstream.URL,
+		"-prefix", "/openai",
+		"-transcode-responses-chat",
+		"-transcode-model", "m=wire-m",
+	})
+	tableUpstream, tableDownstream := run([]string{
+		"-model-table", "m@openai=wire-m",
+		"--provider=openai",
+		"-upstream", upstream.URL,
+		"-prefix", "/openai",
+		"-transcode-responses-chat",
+	})
+
+	if legacyUpstream != tableUpstream {
+		t.Errorf("upstream request differs across the migration:\nlegacy: %s\ntable:  %s", legacyUpstream, tableUpstream)
+	}
+	if normalize(legacyDownstream) != normalize(tableDownstream) {
+		t.Errorf("downstream response differs across the migration:\nlegacy: %s\ntable:  %s", legacyDownstream, tableDownstream)
+	}
+	if !strings.Contains(legacyDownstream, `"model":"m"`) || !strings.Contains(tableDownstream, `"model":"m"`) {
+		t.Errorf("the client-visible alias changed: %s / %s", legacyDownstream, tableDownstream)
+	}
+
+	// A mixed configuration must fail startup, naming both flags and the provider.
+	mixed := exec.Command(bin,
+		"-model-table", "m@openai=wire-m",
+		"--provider=openai",
+		"-upstream", upstream.URL,
+		"-prefix", "/openai",
+		"-transcode-responses-chat",
+		"-transcode-model", "m=wire-m",
+	)
+	out, err := mixed.CombinedOutput()
+	if err == nil {
+		t.Fatalf("mixed configuration started; want startup failure:\n%s", out)
+	}
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+		t.Errorf("mixed configuration error = %v, want exit 1", err)
+	}
+	for _, want := range []string{"-model-table and -transcode-model cannot be combined", `provider "openai"`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("mixed startup output missing %q:\n%s", want, out)
+		}
+	}
 }

@@ -1,7 +1,5 @@
 package transcode
 
-//go:generate go run ./gen/lossmatrix
-
 import (
 	"bytes"
 	"encoding/json"
@@ -15,7 +13,7 @@ import (
 // The granular loss registry. Every non-portable feature
 // is gated by exactly one granular, direction-specific loss key; the
 // registry below is the SINGLE source of truth for the CLI, the converters,
-// and the generated LOSS_MATRIX.md (drift-tested). The legacy broad
+// and the runtime reporting. The legacy broad
 // permission names that are NOT granular in their own right are REMOVED —
 // the feature is unreleased, so there are no deprecated aliases and no
 // startup expansion log (plan.md commit 6; replanLog entry 3). Names that
@@ -29,7 +27,7 @@ import (
 type Feature string
 
 // The granular loss keys. The order below is the canonical registry order
-// used by the generated LOSS_MATRIX.md.
+// used by the runtime reporting.
 const (
 	// PreviousResponseID covers the Responses previous_response_id request
 	// field (and Responses-specific conversation-state references such as
@@ -117,6 +115,23 @@ const (
 	// 293640 against a 293360 + 221 component sum on a 293K-token exchange
 	// failed the client, which retried 8 times).
 	FeatureUsageTotalMismatch Feature = "usage_total_mismatch"
+	// UsageTotalDerived covers a source usage tail that omitted exactly one
+	// of prompt/completion/total: the missing total is derived from the two
+	// present values (never defaulted to zero) and the derivation is
+	// recorded so it stays observable. Two or more missing totals cannot be
+	// derived and remain a typed upstream wire error.
+	FeatureUsageTotalDerived Feature = "usage_total_derived"
+	// ImageDetailOriginal covers the Responses-only image detail value
+	// "original": the Chat dialect defines only auto|low|high, so the value
+	// is mapped to "high" (the closest truthful semantic — the full-fidelity
+	// request) under this ungated note, never forwarded unvalidated.
+	FeatureImageDetailOriginal Feature = "image_detail_original"
+	// ImageDetailInvented covers an image rendered with a detail value the
+	// SOURCE dialect could not express (the Anthropic Messages image block
+	// has no detail field at all), where the proxy chooses the documented
+	// "auto" default: the invention is recorded as an ungated note so it is
+	// never mistaken for a client-requested value.
+	FeatureImageDetailInvented Feature = "image_detail_invented"
 	// UsageCacheReadUnknown covers a source that provided no cache-read
 	// token breakdown.
 	FeatureUsageCacheReadUnknown Feature = "usage_cache_read_unknown"
@@ -185,6 +200,20 @@ const (
 	FeatureAuthenticatedThinking Feature = "authenticated_thinking"
 	// TopK covers the top_k setting that the target cannot reproduce.
 	FeatureTopK Feature = "top_k"
+	// ProfileRouting is the Note-only key recorded when a profile name
+	// resolves through the profile map: a collapse onto a different tier
+	// than the profile requested, or a fallback to the provider default
+	// model because the profile's model is unmapped. It is never a
+	// policy-gated loss — the Note is the observability contract that the
+	// profile was not silently forwarded as an unknown upstream model.
+	FeatureProfileRouting Feature = "profile_routing"
+	// MultiAgentPriming is the Note-only key recorded when the
+	// multi-agent protocol reminder is injected into the leading system
+	// turn. It is never a policy-gated loss — the Note is the
+	// observability contract that the reminder was applied, so the
+	// client's own instructions stay byte-identical and the injection is
+	// visible in the per-request log.
+	FeatureMultiAgentPriming Feature = "multi_agent_priming"
 	// Logprobs covers response token log-probabilities that the client
 	// dialects cannot reproduce.
 	FeatureLogprobs Feature = "logprobs"
@@ -217,6 +246,17 @@ const (
 	// a chat request cannot express: an approved loss drops them from the
 	// upstream request, a rejection refuses the request.
 	FeatureBuiltinTools Feature = "builtin_tools"
+	// AnthropicServerTools covers Anthropic Messages server-side tools and
+	// server-executed content (type-discriminated tools[] definitions such as
+	// web_search_20250305, server_tool_use / web_search_tool_result /
+	// code_execution blocks, container_upload references): a chat upstream
+	// executes no server tools, so an approved loss drops them observably
+	// and a rejection refuses the request. Strict by default: approve with
+	// -transcode-allow-loss anthropic_server_tools. Client-side tools that
+	// happen to arrive under a server spelling (mcp_tool_use /
+	// mcp_tool_result, which carry the same fields as tool_use /
+	// tool_result) map 1:1 and never touch this key.
+	FeatureAnthropicServerTools Feature = "anthropic_server_tools"
 	// ResponseServiceTier covers the upstream chat service tier ACTUALLY
 	// SERVED (distinct from the requested tier): the client dialects cannot
 	// represent the tier served.
@@ -227,17 +267,30 @@ const (
 	// tool call with a synthesized id derived from the response id, recorded
 	// as an ungated note naming the source.
 	FeatureLegacyFunctionCall Feature = "legacy_function_call"
+	// MissingStreamSentinel covers an upstream chat stream that ended after
+	// a finishing chunk without the [DONE] sentinel: the completion is
+	// released on EOF (the refusal cannot be reported as a truncated
+	// exchange when every semantic terminal already arrived) and the quirk
+	// is recorded as an ungated note so it stays observable.
+	FeatureMissingStreamSentinel Feature = "missing_stream_sentinel"
+	// MissingEventName covers an upstream Responses stream whose SSE frames
+	// omit the event: name: the SSE event field is optional and the JSON
+	// type is the authoritative discriminator, so the event is routed by
+	// its decoded type and the provider quirk is recorded as an ungated
+	// note. A PRESENT name that disagrees with the JSON type stays a wire
+	// error.
+	FeatureMissingEventName Feature = "missing_event_name"
 )
 
-// lossEntry pairs a loss key with the documentation emitted in
-// LOSS_MATRIX.md. The registry order is canonical.
+// lossEntry pairs a loss key with the description used by the per-request log
+// and the startup summary. The registry order is canonical.
 type lossEntry struct {
 	Key         Feature
 	Description string
 }
 
 // lossRegistry is the ordered granular registry — the single source for the
-// CLI, the converters, and the generated LOSS_MATRIX.md.
+// CLI, the converters and the runtime reporting.
 var lossRegistry = []lossEntry{
 	{FeaturePreviousResponseID, "the Responses previous_response_id request field and item_reference conversation-state references cannot be reproduced in the target request; input item ids are also conversation-state references and their unconditional drop is noted observably"},
 	{FeatureRequestTopLogprobs, "the Responses top_logprobs request field cannot be reproduced in the target request"},
@@ -251,8 +304,13 @@ var lossRegistry = []lossEntry{
 	{FeatureToolResultMultimodalContent, "multimodal tool-result content cannot be carried by a Chat tool message; under this permission it is encoded as the tool_result_json_envelope text"},
 	{FeatureOutputItemBoundaries, "output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target"},
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
+	{FeatureMissingStreamSentinel, "the upstream chat stream ended after a finishing chunk without the [DONE] sentinel; the completion was released on EOF and the provider quirk recorded"},
+	{FeatureMissingEventName, "the upstream Responses stream omitted the SSE event: name; the event was routed by its JSON type and the provider quirk recorded"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},
 	{FeatureUsageTotalMismatch, "the source usage totals are arithmetically inconsistent (total_tokens != input + output); the emitted values are relayed with the mismatch recorded (the note names the emitted counts and, where a clamp corrected a component, the source numbers)"},
+	{FeatureUsageTotalDerived, "the source usage omitted exactly one total; it was derived from the two present values (never defaulted to zero) and the derivation recorded"},
+	{FeatureImageDetailOriginal, "the Responses-only image detail value original has no Chat equivalent; it was mapped to high (the full-fidelity request) and the mapping recorded"},
+	{FeatureImageDetailInvented, "the source dialect has no image detail field; the proxy chose the documented auto default and recorded the invention"},
 	{FeatureReportOverflow, "the conversion report reached its entry bound; further entries are aggregated into this note (observability saturation, never an exchange failure)"},
 	{FeatureUsageCacheReadUnknown, "the source provided no cache-read token breakdown; the required target usage breakdown cannot be reproduced"},
 	{FeatureUsageCacheWriteUnknown, "the source provided no cache-write token breakdown; the required target usage breakdown cannot be reproduced"},
@@ -276,15 +334,17 @@ var lossRegistry = []lossEntry{
 	{FeatureAnthropicControls, "the Anthropic Messages client-side envelope controls (context_management, output_config) have no representation in the target request; an approved loss drops them observably"},
 	{FeatureRequestCitations, "request citations on text blocks cannot be reproduced in the target request"},
 	{FeatureBuiltinTools, "Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject)"},
+	{FeatureAnthropicServerTools, "Anthropic Messages server-side tools and server-executed content (type-discriminated tools[] definitions, server_tool_use / web_search_tool_result / code_execution blocks, container_upload references) cannot be reproduced in a chat request; an approved loss drops them observably"},
 	{FeatureResponseServiceTier, "the upstream chat service tier actually served cannot be reproduced in the target"},
 	{FeatureLegacyFunctionCall, "the upstream chat response uses the legacy non-tool_calls function_call spelling; the single invocation maps to one canonical tool call with a synthesized id derived from the response id (the note names the synthesis)"},
 }
 
 // allLossKeys returns the set of every registered loss key.
 func allLossKeys() map[Feature]struct{} {
-	known := make(map[Feature]struct{}, len(lossRegistry))
-	for _, entry := range lossRegistry {
-		known[entry.Key] = struct{}{}
+	keys := RegisteredLossKeys()
+	known := make(map[Feature]struct{}, len(keys))
+	for _, key := range keys {
+		known[key] = struct{}{}
 	}
 	return known
 }

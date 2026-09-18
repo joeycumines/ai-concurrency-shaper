@@ -317,6 +317,53 @@ OfString        string
 OfInputItemList []ResponseInputItemUnion
 ```
 
+## Responses namespace tools (modeled extension beyond the pin)
+
+The v1.12.0 Responses pin predates the namespace-tool surface, so the
+following shapes are deliberate extensions, modeled from the current official
+contract and a real Codex CLI 0.154.0 capture (the transformer's client
+contract is strict, so an unmodeled field would reject the request):
+
+- A tool of `type:"namespace"` groups nested function tools
+  (`{"type":"namespace","name":...,"description":...,"tools":[...]}`); each
+  child carries `name`, `description`, `strict`, and an object `parameters`
+  schema. Namespace children are flattened into flat chat function tools; the
+  grouping itself is client-side structure the chat dialect cannot express and
+  is recorded as a note.
+- `function_call` output items, replayed `function_call` input items, and
+  `function_call_output` input items carry an optional `namespace` field
+  alongside the bare `name`. The qualifier is always this separate field; it
+  is never concatenated into the name.
+- The per-exchange flattening map (flat name to namespace + child) is the only
+  reverse lookup, so no separator is ever parsed out of a name. A child whose
+  bare name collides with a plain function tool or another namespace child is
+  qualified deterministically with `namespace + "__" + child`; when that
+  qualified name is itself already taken (a plain tool may legally be spelled
+  that way), a numeric suffix (`namespace__child_2`, `_3`, ...) keeps every
+  mapping invertible.
+- `tool_choice` has no namespaced selector in any inspected contract; the
+  flattened bare (or qualified) name is what a named choice addresses.
+
+Strictness is unchanged: these fields are modeled, and any other unknown field
+on the client contract still rejects.
+
+## Responses reasoning-item routing marker (modeled extension beyond the pin)
+
+A gateway serving the native Responses API may attach a `format` routing
+marker to reasoning output items (observed live 2026-09-17 on the camel
+mount: `"format":"azure-openai-responses-v1"` alongside `id`, `type`,
+`status`, `summary`, `encrypted_content`). The marker names the gateway's
+own response dialect, not model output: it is decoded into
+`ReasoningOutputItem.Format` as opaque raw JSON, stripped before the item
+enters the canonical bytes, and never forwarded into any client dialect
+(the strict output-item union would otherwise fail the exchange on it).
+Evidence: the exhibiting flow record
+`scratch/flowlogs/000010-17635-POST-v1_messages.json` (upstream model
+`openai/gpt-5.6-luna`; flow records are git-ignored scratch, so the durable
+evidence is the committed fixture
+`testcorpus/testdata/field/camel_reasoning_format_field.json`, accessor
+`FieldCamelReasoningFormatJSON` in `testcorpus.go`).
+
 ## Anthropic Messages inventory (message.go, v1.61.0)
 
 ### Message (non-stream response + message_start payload)
@@ -386,6 +433,36 @@ content_block_delta  index,required; delta (union),required
 content_block_stop   index,required
 ```
 
+## Anthropic server-side tools and content (modeled extension beyond the pin)
+
+The v1.61.0 pin predates the server-tool surface named here, so the
+following shapes are deliberate extensions, modeled from the official
+contract and a real Claude Code 2.1.273 capture. Every shape is admitted
+on the wire and decided under the `anthropic_server_tools` loss key (a
+chat upstream executes no server tools): approved, it drops observably;
+rejected, the request fails with the keyed error — never an unattributed
+unknown-type rejection.
+
+- Type-discriminated `tools[]` definitions (observed live 2026-09-17:
+  `{"type":"web_search_20250305","name":"web_search","max_uses":8}`):
+  admitted with raw params preserved (`Tool.Type` + `Tool.ServerParams`),
+  dropped under the key. Fixture:
+  `testcorpus/testdata/field/claude_server_tool_definition_field.json`
+  (accessor `FieldClaudeServerToolDefinitionJSON`).
+- Content blocks `server_tool_use`, `web_search_tool_result`,
+  `code_execution`, `code_execution_tool_result`, `container_upload`:
+  admitted with raw bytes preserved (`ContentBlock.ServerContent`),
+  dropped under the key. A fabricated function call would dangle with no
+  upstream executor, so mapping is refused by design.
+- Content blocks `mcp_tool_use` / `mcp_tool_result`: client-side tools
+  under a server spelling, carrying the `tool_use` / `tool_result`
+  fields exactly — mapped 1:1 onto the canonical function call/result
+  with no loss key.
+
+The key is strict by default: a session carrying server tools fails with
+the keyed error until the operator passes
+`-transcode-allow-loss anthropic_server_tools`.
+
 ## Model-vs-pin deltas (as of cycle J, task J11)
 
 Implemented J4/J5/J6/J7/J11:
@@ -413,10 +490,10 @@ review the schema diff per the update procedure.
 
 ## Modeled opaque provider extensions
 
-The pins above cover the official schemas. Real chat gateways additionally
+The pins above cover the official schemas. Real gateways additionally
 emit fields outside them; the wire shadows MODEL every observed spelling so
-its presence is an observed inert extension. They live in the OpenAI Chat
-dialect only. The table below lists every spelling the wire shadows model,
+its presence is an observed inert extension. The table below lists every
+chat-dialect spelling the wire shadows model,
 each with its fate after decode, and each is pinned by a committed unit test
 (spread across
 `chat_schema_test.go`, `chat_response_strict_test.go`,
@@ -468,7 +545,7 @@ table above + add it to the field-capture corpus:
 
 | Provider | Tolerated (discarded) extensions |
 | --- | --- |
-| OpenRouter | `cost`, `native_finish_reason`, `is_byok`, `cost_details`, `cache_write_tokens`, `video_tokens`, `image_tokens`, `error` |
+| OpenRouter / Dialagram | `cost`, `native_finish_reason`, `is_byok`, `cost_details`, `cache_write_tokens`, `video_tokens`, `image_tokens`, `error`; `delta.reasoning_details` (observed on `meta-muse-spark-1.3`, a sibling array of the modeled `reasoning` delta text — discarded, never forwarded, and never treated as output by the stream converter) |
 | vLLM | `prompt_logprobs`, `kv_transfer_params`, `ec_transfer_params`, `metrics` |
 | DeepSeek / open-weights | `logprobs.reasoning_content` (NOTE: `reasoning_content` at message/delta level IS modeled and maps to capability-gated text — see the table above; only the `logprobs`-nested spelling is discarded) |
 | LiteLLM / Verboo | `completion_cost`, `cache_cost` (modeled as opaque raw JSON in the table above, never forwarded) |
@@ -493,3 +570,59 @@ rejected. A new provider spelling belongs here, in the wire shadows next to
 its siblings, and in the corpus as a fixture — capture real bytes first
 (`make field-recapture` in the top-level `project.mk`; see the README section
 on provider extensions).
+
+### Post-terminal accounting redelivery (observed stream shape)
+
+Some gateways redeliver the terminal chunk with the usage accounting
+piggybacked on it instead of sending the bare `choices: []` usage-only tail
+that `stream_options.include_usage` defines (observed live on Dialagram
+`meta-muse-spark-1.3`: the finish chunk carries `finish_reason: "tool_calls"`
+with a role-only delta, `content: ""` and `reasoning: null`, and is then
+repeated on the same single choice with a role-only delta and `content: ""`
+plus the `usage` object attached; the official bare usage-only tail is the
+common shape, and the accumulate-on-repeat shape is absorbed with or without
+a usage object). The redelivery is pure accounting: the
+stream converter folds its usage into the terminal envelope, applies the
+same loss decisions (service tier, logprobs, unknown usage components), and
+emits no events. It is NOT new output — a post-finish chunk carrying
+content, reasoning, refusal, tool-call fragments, a non-empty legacy
+`function_call` payload, a different `finish_reason`, or more than one
+choice remains corrupt upstream wire and is rejected, exactly as before
+(the benign empty-string `function_call` fragment is absorbed the same way
+it is mid-stream).
+
+
+### Data-only stream frames (observed stream shape)
+
+Some gateways omit the SSE `event:` name on EVERY frame of a Responses
+stream (observed live on the camel mount's native `/v1/responses`: frames
+begin with a `: ` comment then carry only `data:` lines; the JSON payloads
+carry the full `type` discriminator, e.g.
+`{"p":"...","type":"response.created",...}`). The SSE specification makes
+the `event` field optional, and the Responses JSON `type` is the
+authoritative discriminator, so the converter routes such a frame by its
+decoded JSON type and records the provider quirk as the ungated
+`missing_event_name` note (once per stream, path `responses[].stream`).
+Tolerance is scoped to an ABSENT name only: a PRESENT name that disagrees
+with the JSON type remains a typed upstream wire error, exactly as before.
+The sanitized bytes of one such capture (the camel native-Responses mount)
+are committed at `testcorpus/testdata/field/data_only_responses_stream_field.sse`
+and replayed through the production converter by
+`TestFieldCaptureDataOnlyResponsesStreamReplays`.
+
+### Tool-message content blocks (observed upstream behaviour)
+
+The pinned Chat contract models the message content union as either a plain
+string or an array of content blocks (text / image_url), for ANY role. Real
+open-weights gateways differ in whether they accept image parts inside a
+`role: "tool"` message: some reject them, others carry them and pass the
+image to a vision model (observed live on the dialagram mount, whose
+`qwen-3.8-max` answered quadrant colours from an image delivered as multipart
+tool-message content). Because the acceptance is a property of the upstream,
+not of the pinned wire, the multipart tool-message rendering is gated behind
+the opt-in `tool_result_images` capability: without it, multimodal tool-result
+content keeps the observable `tool_result_json_envelope` text encoding
+(`tool_result_multimodal_content` + `tool_result_json_envelope` losses), which
+is the compatible default. A media type outside the Chat image vocabulary is
+an encoding error on BOTH paths (the envelope cannot data-URL it either), so
+it is never silently dropped.

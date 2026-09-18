@@ -446,6 +446,17 @@ func TestPrintUsage_CoversAllFlagsAndSections(t *testing.T) {
 			t.Errorf("usage missing default %q", want)
 		}
 	}
+
+	// The global model table is server scope: registered there, and rendered
+	// under the server flags rather than the provider flags.
+	if m, ok := flagMetadata()["model-table"]; !ok {
+		t.Error("usage: model-table flag is not registered")
+	} else if m.scope != scopeServer {
+		t.Errorf("model-table scope = %s, want server", m.scope)
+	}
+	if !strings.Contains(s, "\n  -model-table ") {
+		t.Errorf("usage missing the server-scope -model-table flag:\n%s", s)
+	}
 }
 
 // TestParse_AuthFlags_LegacyMode checks the upstream-authentication flags bind
@@ -554,5 +565,63 @@ func TestParse_TranscodeFlags_SectionedMode(t *testing.T) {
 		t.Error("expected mixed mode error when transcode flag is at server scope in sectioned mode")
 	} else if !errors.Is(err, ErrUsage) {
 		t.Errorf("err = %v, want ErrUsage", err)
+	}
+}
+
+// TestParse_ModelTableServerScopeLegacy binds the global table at top level in
+// legacy mode, on the Server and never on the implicit provider.
+func TestParse_ModelTableServerScopeLegacy(t *testing.T) {
+	cfg, err := Parse([]string{"-upstream", "https://x", "-model-table", "a@x=b"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if want := []string{"a@x=b"}; !reflect.DeepEqual(cfg.Server.ModelTable, want) {
+		t.Errorf("Server.ModelTable = %q, want %q", cfg.Server.ModelTable, want)
+	}
+	// The single implicit provider must resolve (so the table name is real).
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+}
+
+// TestParse_ModelTableServerScopeSectioned keeps the table on the Server when
+// --provider sections are used.
+func TestParse_ModelTableServerScopeSectioned(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-bind", ":9999",
+		"-model-table", "a@acme=b",
+		"--provider=acme",
+		"-upstream", "https://x",
+		"-prefix", "/acme",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if want := []string{"a@acme=b"}; !reflect.DeepEqual(cfg.Server.ModelTable, want) {
+		t.Errorf("Server.ModelTable = %q, want %q", cfg.Server.ModelTable, want)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+}
+
+// TestParse_ModelTableInProviderSectionRejected mirrors the mixed-mode check:
+// the server-scope table flag inside a --provider section is a usage error
+// (exit 2), never the provider FlagSet's generic unknown-flag failure.
+func TestParse_ModelTableInProviderSectionRejected(t *testing.T) {
+	_, err := Parse([]string{
+		"--provider=acme",
+		"-upstream", "https://x",
+		"-model-table", "a@acme=b",
+	})
+	if err == nil {
+		t.Fatal("Parse: want usage error")
+	}
+	want := `usage error: server options are not allowed in provider sections: "-model-table"`
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err, want)
+	}
+	if !errors.Is(err, ErrUsage) {
+		t.Errorf("err = %v, want ErrUsage wrapper", err)
 	}
 }

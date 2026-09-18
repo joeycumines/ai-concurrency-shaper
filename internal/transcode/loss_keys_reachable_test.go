@@ -223,7 +223,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 					CallID:  "call_1",
 					IsError: true,
 					Parts:   []CanonicalPart{CanonicalText{Text: "boom"}},
-				}, policy, &report)
+				}, ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
@@ -241,7 +241,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 						MediaType: "image/png",
 						URL:       "https://example.test/x.png",
 					}},
-				}, policy, &report)
+				}, ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
@@ -259,7 +259,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 						MediaType: "image/png",
 						URL:       "https://example.test/x.png",
 					}},
-				}, policy, &report)
+				}, ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
@@ -878,6 +878,21 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
+			// Anthropic server-side tools (the type-discriminated
+			// web_search_20250305 definition a real Claude Code session
+			// sends) are approved or rejected per the exchange policy;
+			// the approved drop is reported with the key, never as an
+			// unattributed unknown-field error.
+			key:  FeatureAnthropicServerTools,
+			perm: []Feature{FeatureAnthropicServerTools},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				result, err := DecodeMessagesRequest([]byte(
+					`{"model":"m","max_tokens":8,"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],"messages":[{"role":"user","content":"hi"}]}`,
+				), policy)
+				return result.Report, err
+			},
+		},
+		{
 			key:  FeatureResponseServiceTier,
 			perm: []Feature{FeatureResponseServiceTier},
 			run: func(policy LossPolicy) (ConversionReport, error) {
@@ -909,6 +924,182 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			run: func(policy LossPolicy) (ConversionReport, error) {
 				body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"function_call","message":{"role":"assistant","content":null,"function_call":{"name":"f","arguments":"{}"}}}]}`
 				_, report, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, policy)
+				return report, err
+			},
+		},
+		{
+			// An upstream chat stream that ends after a finishing chunk
+			// without the [DONE] sentinel releases the held terminal on EOF
+			// and records the provider quirk as an ungated note, so the
+			// scenario runs under the strict policy and records the key
+			// anyway.
+			key:  FeatureMissingStreamSentinel,
+			perm: []Feature{},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newChatResponsesStreamState(
+					testStreamContext(),
+					policy,
+					ChatCapabilities{},
+					"resp_1",
+					"gpt-4.1",
+					1710000000,
+					nil,
+				)
+				chunk := ChatStreamResponse{
+					ID:      "c",
+					Object:  "chat.completion.chunk",
+					Created: 1710000000,
+					Model:   "gpt-4.1",
+					Choices: []ChatChoice{{
+						Index:        0,
+						Delta:        &ChatStreamDelta{Content: new("hi")},
+						FinishReason: new("stop"),
+					}},
+				}
+				if _, err := state.Convert(chunk); err != nil {
+					return state.report, err
+				}
+				if _, err := state.FinalizeEOF(); err != nil {
+					return state.report, err
+				}
+				return state.report, nil
+			},
+		},
+		{
+			// A data-only upstream Responses stream (the SSE event: name
+			// omitted on every frame) routes each event by its decoded JSON
+			// type and records the provider quirk as an ungated note. The
+			// created envelope's wire JSON cannot carry the in-memory
+			// cache-write usage carrier, so the scenario's own-permission run
+			// also approves the usage component the Messages contract
+			// requires (the note itself needs no permission).
+			key:  FeatureMissingEventName,
+			perm: []Feature{FeatureUsageCacheWriteUnknown},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newAnthropicResponsesStreamState(
+					testStreamContext(), policy, ChatCapabilities{},
+					"msg_1", "claude-x", 1710000000,
+				)
+				converter := newResponsesToAnthropicConverter(state)
+				envelope := anthropicLifecycleEnvelope("resp_1")
+				envelope.Usage = &ResponsesUsage{
+					InputTokens:        10,
+					OutputTokens:       5,
+					TotalTokens:        15,
+					InputTokensDetails: &UsageInputTokensDetails{CachedTokens: 0},
+					OutputTokensDetails: &UsageOutputTokensDetails{
+						ReasoningTokens: 0,
+					},
+					CreatedCacheTokens: new(int64(0)),
+				}
+				payload, err := json.Marshal(ResponseCreatedEvent{
+					Type:           "response.created",
+					SequenceNumber: 0,
+					Response:       envelope,
+				})
+				if err != nil {
+					return state.report, err
+				}
+				if _, err := converter.Convert(SSEEvent{Data: payload}); err != nil {
+					return state.report, err
+				}
+				return state.report, nil
+			},
+		},
+		{
+			// A usage-only tail that omits exactly one total has it DERIVED
+			// from the two present values, recorded as the ungated
+			// usage_total_derived note (so the scenario runs under the
+			// strict policy). The pinned Messages contract needs the
+			// cache-write component the wire cannot carry, so the
+			// own-permission run also approves that usage key.
+			key: FeatureUsageTotalDerived,
+			perm: []Feature{
+				FeatureUsageCacheWriteUnknown,
+				FeatureUsageCacheReadUnknown,
+				FeatureUsageReasoningUnknown,
+			},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newChatResponsesStreamState(
+					testStreamContext(),
+					policy,
+					ChatCapabilities{},
+					"resp_1",
+					"gpt-4.1",
+					1710000000,
+					nil,
+				)
+				// Phase 1: a content-bearing finish chunk.
+				finish, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(
+					`{"id":"c","object":"chat.completion.chunk","created":1,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}`,
+				)})
+				if err != nil {
+					return state.report, err
+				}
+				if _, err := state.Convert(finish); err != nil {
+					return state.report, err
+				}
+				// Phase 2: the derived usage-only tail.
+				tail, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(
+					`{"id":"c","object":"chat.completion.chunk","created":1,"model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}`,
+				)})
+				if err != nil {
+					return state.report, err
+				}
+				if _, err := state.Convert(tail); err != nil {
+					return state.report, err
+				}
+				return state.report, nil
+			},
+		},
+		{
+			// An Anthropic-sourced image carries no detail field, so the
+			// proxy chooses the documented 'auto' default; the invention is
+			// an ungated note (strict policy records it).
+			key:  FeatureImageDetailInvented,
+			perm: []Feature{FeatureImageInput},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				request := CanonicalRequest{
+					ClientModel: "m",
+					Turns: []CanonicalTurn{{
+						Role: CanonicalUser,
+						Parts: []CanonicalPart{CanonicalImage{
+							MediaType: "image/png",
+							URL:       "https://example.test/x.png",
+						}},
+					}},
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				_, report, err := RenderChatRequest(request, context, ChatCapabilities{ImageInput: true})
+				return report, err
+			},
+		},
+		{
+			// The Responses-only detail 'original' maps to 'high' on the
+			// Chat target with an ungated note.
+			key:  FeatureImageDetailOriginal,
+			perm: []Feature{FeatureImageInput},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				request := CanonicalRequest{
+					ClientModel: "m",
+					Turns: []CanonicalTurn{{
+						Role: CanonicalUser,
+						Parts: []CanonicalPart{CanonicalImage{
+							MediaType: "image/png",
+							URL:       "https://example.test/x.png",
+							Detail:    "original",
+						}},
+					}},
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				_, report, err := RenderChatRequest(request, context, ChatCapabilities{ImageInput: true})
 				return report, err
 			},
 		},

@@ -29,6 +29,15 @@ const (
 	AnthropicContentBlockTypeToolResult       = anthropicmessages.ContentBlockTypeToolResult
 	AnthropicContentBlockTypeThinking         = anthropicmessages.ContentBlockTypeThinking
 	AnthropicContentBlockTypeRedactedThinking = anthropicmessages.ContentBlockTypeRedactedThinking
+	// Server-side spellings admitted on the wire; decided under the
+	// anthropic_server_tools loss key at the convert boundary.
+	AnthropicContentBlockTypeServerToolUse       = anthropicmessages.ContentBlockTypeServerToolUse
+	AnthropicContentBlockTypeWebSearchToolResult = anthropicmessages.ContentBlockTypeWebSearchToolResult
+	AnthropicContentBlockTypeMCPToolUse          = anthropicmessages.ContentBlockTypeMCPToolUse
+	AnthropicContentBlockTypeMCPToolResult       = anthropicmessages.ContentBlockTypeMCPToolResult
+	AnthropicContentBlockTypeCodeExecution       = anthropicmessages.ContentBlockTypeCodeExecution
+	AnthropicContentBlockTypeCodeExecutionResult = anthropicmessages.ContentBlockTypeCodeExecutionResult
+	AnthropicContentBlockTypeContainerUpload     = anthropicmessages.ContentBlockTypeContainerUpload
 )
 
 // AnthropicSourceType is the type of an image or document source.

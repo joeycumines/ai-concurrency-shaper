@@ -844,3 +844,67 @@ func TestStreamToolSnapshotBytesCounted(t *testing.T) {
 		t.Fatalf("error = %q, want the exchange-total violation", err.Error())
 	}
 }
+
+// TestStreamBoundProbes pins the row-43 wire-bound behavior synthetically:
+// each probe exceeds one budget by the minimum that must fail. The text and
+// report probes run through the production state machine and report;
+// the items probe drives the budget counter directly (the state machine's
+// item path needs a full tool-call lifecycle per item, so the counter is
+// the precise unit). Live gateways never emit these shapes on demand,
+// so the unit replay is the proof (the live scaffold covers the reachable
+// dimensions: report overflow, echo size, accumulated text).
+func TestStreamBoundProbes(t *testing.T) {
+	newState := func() *chatResponsesStreamState {
+		return newChatResponsesStreamState(
+			testStreamContext(),
+			StrictLossPolicy(),
+			ChatCapabilities{},
+			"resp_1",
+			"m",
+			1,
+			nil,
+		)
+	}
+	t.Run("accumulated text one byte over", func(t *testing.T) {
+		state := newState()
+		big := strings.Repeat("x", maxStreamAccumulatedBytes+1)
+		_, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: &big}, nil))
+		if err == nil {
+			t.Fatal("1MiB+1 text accepted")
+		}
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+			t.Fatalf("err = %T: %v, want UpstreamWireError", err, err)
+		}
+		if !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("err = %v, want bound language", err)
+		}
+	})
+	t.Run("items bound", func(t *testing.T) {
+		budget := newStreamBudget()
+		var err error
+		for i := 0; i <= maxStreamOutputItems; i++ {
+			err = budget.addItem()
+			if err != nil {
+				break
+			}
+		}
+		if err == nil {
+			t.Fatal("4097th item accepted")
+		}
+	})
+	t.Run("report overflow never fails", func(t *testing.T) {
+		var report ConversionReport
+		for range maxStreamConversionReportEntries + 10 {
+			_ = report.Note(FeatureMissingEventName, "responses[].stream", "x")
+		}
+		found := false
+		for _, loss := range report.Losses {
+			if loss.Feature == FeatureReportOverflow {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("report saturation did not record the overflow note")
+		}
+	})
+}

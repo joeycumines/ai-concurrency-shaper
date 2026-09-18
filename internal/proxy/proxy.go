@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,6 +97,7 @@ type proxyConfig struct {
 	limitAll               bool
 	transcodeMappings      []TranscodeMapping
 	authPolicy             *auth.AuthPolicy
+	modelCatalog           *transcode.CatalogConfig
 }
 
 // TranscodeMapping configures one transcoded route. The embedded
@@ -106,6 +108,22 @@ type TranscodeMapping struct {
 	// BodyLimits bounds request/response bodies on this route. Zero values
 	// fall back to the proxy defaults.
 	BodyLimits transcode.BodyLimits
+
+	// FlowLogDir, when non-empty, receives one JSON record per transcoded
+	// exchange capturing the full flow. The directory must already exist;
+	// New validates it before any handler is constructed. Records are
+	// unredacted (they include headers and bodies), so the directory is
+	// secret-bearing.
+	FlowLogDir string
+
+	// Continuity, when non-nil, is the opt-in bounded per-conversation
+	// store (OFF by default: nil keeps the existing observable
+	// previous_response_id loss). It is shared by every transcoded route
+	// of one provider; ContinuityKey scopes retained ids to the provider
+	// mapping that emitted them. The store pointer is shared, never
+	// cloned: chains accumulate across exchanges by design.
+	Continuity    *transcode.ContinuityStore
+	ContinuityKey string
 }
 
 // TranscodeOption configures transcoding route mappings.
@@ -683,6 +701,10 @@ type Proxy struct {
 	// method+path route key, built once at construction.
 	transcodeHandlerMap map[transcode.RouteKey]http.Handler
 
+	// catalog, when non-nil, answers this mount's GET /v1/models discovery
+	// request locally from the frozen model-table snapshot.
+	catalog *transcode.CatalogHandler
+
 	// authPolicy, when non-nil, strips client credential/protocol headers
 	// and attaches the upstream credential inside the Rewrite hook. nil
 	// forwards requests verbatim.
@@ -909,9 +931,12 @@ func New(opts ...Option) (*Proxy, error) {
 		}
 		h := transcode.NewTranscodeHandler(
 			transcode.HandlerConfig{
-				Mapping:    mapping,
-				Upstream:   cfg.upstream,
-				BodyLimits: m.BodyLimits,
+				Mapping:       mapping,
+				Upstream:      cfg.upstream,
+				BodyLimits:    m.BodyLimits,
+				FlowLogDir:    m.FlowLogDir,
+				Continuity:    m.Continuity,
+				ContinuityKey: m.ContinuityKey,
 			},
 			p.RoundTrip,
 			nil,
@@ -921,6 +946,17 @@ func New(opts ...Option) (*Proxy, error) {
 		if _, exists := p.transcodeHandlerMap[m.ClientRoute]; !exists {
 			p.transcodeHandlerMap[m.ClientRoute] = h
 		}
+	}
+
+	// The catalog is a local answer, not an upstream route: build its handler
+	// once here so an invalid snapshot is a startup error, never a
+	// first-request surprise.
+	if cfg.modelCatalog != nil {
+		catalogHandler, err := transcode.NewCatalogHandler(*cfg.modelCatalog)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: model catalog: %w", err)
+		}
+		p.catalog = catalogHandler
 	}
 
 	rp := &httputil.ReverseProxy{
@@ -1174,14 +1210,27 @@ func (p *Proxy) Journal() *journal.Journal {
 	return p.journal
 }
 
+// HandlerForRouteKey returns the transcode handler mapped to key, or nil.
+func (p *Proxy) HandlerForRouteKey(key transcode.RouteKey) http.Handler {
+	return p.transcodeHandlerMap[key]
+}
+
+// Catalog returns the mount's catalog handler, or nil when no catalog was configured.
+func (p *Proxy) Catalog() *transcode.CatalogHandler {
+	return p.catalog
+}
+
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The unlimited admission class exempts a request whose FIRST matching
 	// pattern declares :unlimited — including under -limit-all. The same
 	// first-match lookup drives limiter selection (acquireSlot/FindMatch),
-	// so classification and admission can never disagree.
+	// so classification and admission can never disagree. The catalog is a
+	// local answer with its own unlimited class: it is never limited, never
+	// queued, and never gated by the circuit breaker.
+	catalog := p.catalogServes(r)
 	limited := (p.limitAll || p.matcher.IsLimited(r.Method, r.URL.Path)) &&
-		!p.matcher.IsUnlimited(r.Method, r.URL.Path)
+		!p.matcher.IsUnlimited(r.Method, r.URL.Path) && !catalog
 
 	flightID := p.m.RegisterInFlight(r.Method, r.URL.Path, limited)
 	defer p.m.DeregisterInFlight(flightID)
@@ -1361,6 +1410,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// global limiter.
 	if limited {
 		p.serveLimited(rec, r, flightID)
+	} else if catalog {
+		p.serveCatalog(rec, r)
 	} else {
 		p.servePassthrough(rec, r, flightID)
 	}
@@ -3512,6 +3563,15 @@ func (m TranscodeMapping) Validate() error {
 	}
 	if err := m.BodyLimits.Validate(); err != nil {
 		return fmt.Errorf("body limits: %w", err)
+	}
+	if m.FlowLogDir != "" {
+		info, err := os.Stat(m.FlowLogDir)
+		if err != nil {
+			return fmt.Errorf("flow log directory: %w", err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("flow log directory %q is not a directory", m.FlowLogDir)
+		}
 	}
 	for key := range m.AllowedClientQuery {
 		if !validQueryName(key) {

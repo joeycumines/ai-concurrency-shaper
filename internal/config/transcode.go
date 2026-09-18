@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"sort"
@@ -208,6 +209,54 @@ func provisionalStrictnessLoss(m transcode.Mapping) transcode.Mapping {
 	return m
 }
 
+// parseTranscodeProfiles builds the ProfileMap from repeated -transcode-profile
+// values. Each value is "name=model:tier" or "name=model" (tier optional).
+// The tier, when present, must be in the closed effort vocabulary; an unknown
+// tier is rejected at parse time so a typo surfaces at startup rather than
+// silently falling through to the provider default.
+func parseTranscodeProfiles(values []string) (transcode.ProfileMap, error) {
+	profiles := make(map[string]transcode.ProfileMapping)
+	for _, value := range values {
+		name, rest, ok := strings.Cut(value, "=")
+		if !ok || name == "" || rest == "" {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: want name=model:tier or name=model",
+				value,
+			)
+		}
+		if _, dup := profiles[name]; dup {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"duplicate -transcode-profile name %q",
+				name,
+			)
+		}
+		model, tier, hasTier := strings.Cut(rest, ":")
+		if model == "" {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: model is empty",
+				value,
+			)
+		}
+		if hasTier && tier == "" {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: tier is empty after ':'",
+				value,
+			)
+		}
+		if hasTier && !transcode.ValidModelEffort(tier) {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: unknown tier %q (want one of %s)",
+				value, tier, strings.Join(transcode.ModelEfforts, ", "),
+			)
+		}
+		profiles[name] = transcode.ProfileMapping{
+			Model:         model,
+			ReasoningTier: tier,
+		}
+	}
+	return transcode.ProfileMap{Profiles: profiles}, nil
+}
+
 // parseTranscodeModelMap builds the ModelMap from repeated -transcode-model
 // values. With no mappings, identity fallback is used.
 func parseTranscodeModelMap(values []string) (transcode.ModelMap, error) {
@@ -284,6 +333,7 @@ var chatCapabilityNames = []struct {
 }{
 	{"developer_role", func(c *transcode.ChatCapabilities) *bool { return &c.DeveloperRole }},
 	{"image_input", func(c *transcode.ChatCapabilities) *bool { return &c.ImageInput }},
+	{"tool_result_images", func(c *transcode.ChatCapabilities) *bool { return &c.ToolResultImages }},
 	{"structured_outputs", func(c *transcode.ChatCapabilities) *bool { return &c.StructuredOutputs }},
 	{"parallel_tool_calls", func(c *transcode.ChatCapabilities) *bool { return &c.ParallelToolCalls }},
 	{"stop_sequences", func(c *transcode.ChatCapabilities) *bool { return &c.StopSequences }},
@@ -291,6 +341,7 @@ var chatCapabilityNames = []struct {
 	{"provider_reasoning_text", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningText }},
 	{"provider_reasoning_thinking", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningThinking }},
 	{"system_anywhere", func(c *transcode.ChatCapabilities) *bool { return &c.SystemAnywhere }},
+	{"multi_agent_priming", func(c *transcode.ChatCapabilities) *bool { return &c.MultiAgentPriming }},
 }
 
 func splitFlagNegations(
@@ -414,10 +465,12 @@ func parseClientQuery(
 
 var defaultTranscodeChatCapabilities = transcode.ChatCapabilities{
 	DeveloperRole:             false,
+	ImageInput:                true,
 	ParallelToolCalls:         true,
 	ReasoningEffort:           false,
 	ProviderReasoningText:     false,
 	ProviderReasoningThinking: true,
+	StopSequences:             true,
 	StructuredOutputs:         true,
 }
 
@@ -426,20 +479,24 @@ var defaultTranscodeAllowedQuery = map[string]struct{}{
 }
 
 var defaultTranscodeLosses = map[transcode.Feature]struct{}{
-	transcode.FeatureReasoningSummary:       {},
-	transcode.FeatureAuthenticatedThinking:  {},
-	transcode.FeatureMidConversationSystem:  {},
-	transcode.FeatureResponsesControls:      {},
-	transcode.FeatureAnthropicControls:      {},
-	transcode.FeatureRequestCitations:       {},
-	transcode.FeatureBuiltinTools:           {},
-	transcode.FeatureUsageUnknown:           {},
-	transcode.FeatureUsageCacheReadUnknown:  {},
-	transcode.FeatureUsageCacheWriteUnknown: {},
-	transcode.FeatureUsageReasoningUnknown:  {},
-	transcode.FeatureRequestReasoning:       {},
-	transcode.FeatureToolResultErrorStatus:  {},
-	transcode.FeatureDeveloperRole:          {},
+	transcode.FeatureReasoningSummary:            {},
+	transcode.FeatureAuthenticatedThinking:       {},
+	transcode.FeatureMidConversationSystem:       {},
+	transcode.FeatureResponsesControls:           {},
+	transcode.FeatureAnthropicControls:           {},
+	transcode.FeatureRequestCitations:            {},
+	transcode.FeatureBuiltinTools:                {},
+	transcode.FeatureUsageUnknown:                {},
+	transcode.FeatureUsageCacheReadUnknown:       {},
+	transcode.FeatureUsageCacheWriteUnknown:      {},
+	transcode.FeatureUsageReasoningUnknown:       {},
+	transcode.FeatureRequestReasoning:            {},
+	transcode.FeatureToolResultErrorStatus:       {},
+	transcode.FeatureToolResultMultimodalContent: {},
+	transcode.FeatureToolResultJSONEnvelope:      {},
+	transcode.FeatureDeveloperRole:               {},
+	transcode.FeatureResponseServiceTier:         {},
+	transcode.FeatureOutputPhase:                 {},
 }
 
 func mergedLossPolicy(
@@ -479,6 +536,7 @@ func mergedChatCapabilities(
 	fields := map[string]*bool{
 		"developer_role":              &out.DeveloperRole,
 		"image_input":                 &out.ImageInput,
+		"tool_result_images":          &out.ToolResultImages,
 		"structured_outputs":          &out.StructuredOutputs,
 		"parallel_tool_calls":         &out.ParallelToolCalls,
 		"stop_sequences":              &out.StopSequences,
@@ -486,10 +544,12 @@ func mergedChatCapabilities(
 		"provider_reasoning_text":     &out.ProviderReasoningText,
 		"provider_reasoning_thinking": &out.ProviderReasoningThinking,
 		"system_anywhere":             &out.SystemAnywhere,
+		"multi_agent_priming":         &out.MultiAgentPriming,
 	}
 	cli := map[string]bool{
 		"developer_role":              capabilities.DeveloperRole,
 		"image_input":                 capabilities.ImageInput,
+		"tool_result_images":          capabilities.ToolResultImages,
 		"structured_outputs":          capabilities.StructuredOutputs,
 		"parallel_tool_calls":         capabilities.ParallelToolCalls,
 		"stop_sequences":              capabilities.StopSequences,
@@ -497,6 +557,7 @@ func mergedChatCapabilities(
 		"provider_reasoning_text":     capabilities.ProviderReasoningText,
 		"provider_reasoning_thinking": capabilities.ProviderReasoningThinking,
 		"system_anywhere":             capabilities.SystemAnywhere,
+		"multi_agent_priming":         capabilities.MultiAgentPriming,
 	}
 	for name, field := range fields {
 		_, deny := negated[name]
@@ -626,12 +687,21 @@ func validateMBFlag(name string, value int64, shift uint) error {
 }
 
 // resolveTranscode resolves and validates all transcode configuration for a Provider.
-func (p *Provider) resolveTranscode() error {
+// modelTable is this provider's frozen subset of the global -model-table: nil or
+// empty means the table is not configured and the provider-scope -transcode-model
+// values are the only model-mapping source.
+func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	if err := validateMBFlag("-transcode-max-request-mb", p.TranscodeMaxRequestMB, 20); err != nil {
 		return err
 	}
 	if err := validateMBFlag("-transcode-max-response-mb", p.TranscodeMaxResponseMB, 20); err != nil {
 		return err
+	}
+	if p.TranscodeContinuityCap < 0 {
+		return fmt.Errorf("-transcode-continuity-capacity must be nonnegative, got %d", p.TranscodeContinuityCap)
+	}
+	if p.TranscodeContinuityTTL < 0 {
+		return fmt.Errorf("-transcode-continuity-ttl must be nonnegative, got %s", p.TranscodeContinuityTTL)
 	}
 
 	var parsedRoutes []proxy.TranscodeMapping
@@ -687,6 +757,22 @@ func (p *Provider) resolveTranscode() error {
 	if err != nil {
 		return err
 	}
+	tableProjected := len(modelTable) > 0
+	if tableProjected {
+		modelMap = modelMapFromTable(modelTable)
+	}
+
+	profileMap, err := parseTranscodeProfiles(p.TranscodeProfiles)
+	if err != nil {
+		return err
+	}
+	if len(profileMap.Profiles) > 0 && (tableProjected || len(modelMap.Exact) > 0 || !modelMap.AllowIdentity || modelMap.RequireExplicitMap) {
+		for name, prof := range profileMap.Profiles {
+			if _, err := modelMap.Resolve(prof.Model); err != nil {
+				return fmt.Errorf("invalid -transcode-profile %q: target model %q cannot be resolved: %w", name, prof.Model, err)
+			}
+		}
+	}
 
 	allowedLosses, negatedLosses, err := parseNegatedLosses(p.TranscodeAllowLosses...)
 	if err != nil {
@@ -736,8 +822,16 @@ func (p *Provider) resolveTranscode() error {
 		}
 		seen[mappings[i].ClientRoute] = struct{}{}
 
-		if len(modelMap.Exact) > 0 || !modelMap.AllowIdentity {
+		if tableProjected {
+			// The global table owns model resolution for every transcode-enabled
+			// provider: the projected map is stamped unconditionally, identity
+			// fallback is off, and unlisted surrogates fail as local client errors.
 			mappings[i].Mapping.ModelMap = modelMap
+		} else if len(modelMap.Exact) > 0 || !modelMap.AllowIdentity {
+			mappings[i].Mapping.ModelMap = modelMap
+		}
+		if len(profileMap.Profiles) > 0 {
+			mappings[i].Mapping.ProfileMap = profileMap
 		}
 		if hasExplicitTranscodeAuth || p.authPolicy != nil {
 			mappings[i].Mapping.Auth = authPolicy
@@ -752,6 +846,23 @@ func (p *Provider) resolveTranscode() error {
 		}
 		if p.TranscodeMaxResponseMB > 0 {
 			mappings[i].BodyLimits.SuccessfulResponseBytes = p.TranscodeMaxResponseMB << 20
+		}
+		mappings[i].FlowLogDir = p.TranscodeFlowLogDir
+
+		if p.TranscodeContinuity {
+			if p.continuityStore == nil {
+				p.continuityStore = transcode.NewContinuityStore(transcode.ContinuityConfig{
+					Capacity: p.TranscodeContinuityCap,
+					TTL:      p.TranscodeContinuityTTL,
+				})
+				log.Printf(
+					"transcode: continuity store enabled (capacity %d, ttl %s); previous_response_id resolves against retained chains, a miss degrades to the existing observable loss",
+					p.continuityStore.Capacity(),
+					p.continuityStore.TTL(),
+				)
+			}
+			mappings[i].Continuity = p.continuityStore
+			mappings[i].ContinuityKey = p.Name
 		}
 
 		if err := mappings[i].Mapping.Validate(); err != nil {

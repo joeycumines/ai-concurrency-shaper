@@ -5,6 +5,12 @@ Providing structural information here makes agents lazy, as they stop exploring 
 
 **Code must never reference session-scoped artefacts** — blueprint task numbers, review-round ids, incident nicknames: cite the observed behaviour or a commit instead, because a session reference is meaningless to anyone without the same context.
 
+**All configuration options must be defined as command line flags — notable exceptions include secrets — and environment variables, ESPECIALLY any environment variable parsed within business logic, are strictly banned.**
+
+**Meta tests are banned unless explicitly requested:** never add a test whose subject is other tests, documentation, or the presence or absence of an artefact rather than the program's own behaviour.
+
+**The proxy's scope is not limited to what an analysis finds convenient:** anything a client needs in order to work — including stateful harness behaviour such as agent/thread lifecycles, mailboxes, and profile routing — can only live here, so never rule work out as "out of scope".
+
 This is a **stealth reverse proxy** with bounded concurrency and a TUI dashboard.
 
 Ensure these characteristics:
@@ -57,7 +63,7 @@ The transcoder touches wire contracts of two different **roles**, and each role 
 
 **Tolerance is scoped, not blanket.** The upstream *envelope* (and the nested choice/message/usage objects) is the subject-to-change surface. The **content-block unions** and the **client request** are authoritative and stay strict: a `text` content block carrying `image_url`, or an unknown content-block `type`, is still rejected. This is the intelligent detection of a subject-to-change contract — it is a per-surface policy, not a per-field guess. On the OpenAI Responses upstream the OUTPUT ITEMS (and the content parts within them) likewise stay strict — they are content-bearing unions like the content-block unions, so an unknown output-item or content-part type is still rejected. The following ALWAYS reject on every surface (tolerance never relaxes them): duplicate JSON keys, illegal nulls on modeled fields, trailing values, malformed syntax, missing-required semantic fields, contradictory-union arm violations, and a **type-corrupt MODELED field** (e.g. `total_tokens:"two"` — a type error is never silently skipped). In the chat **stream**, the non-streaming `message` arm is a STRUCTURAL rejection (the streaming surface carries only deltas; a chunk carrying a `message` arm is corrupt wire, not a provider extension) — it is modeled in the shadow and rejected, so its content can never be silently dropped.
 
-**The directional loss model.** Loss is **directional** and **per-feature**; the canonical IR is the pivot. The granular loss registry (`LOSS_MATRIX.md`) is direction-scoped: request-side keys (`request_reasoning`, `multiple_system_turns`, `anthropic_controls`, `previous_response_id`) and response-side keys (`provider_reasoning_text`, `usage_unknown`, `response_service_tier`). The **same field can be inert in one direction and a rejection in the other** — e.g. `reasoning_content` is a response-side provider extension in Chat→Messages (capability-gated text or an approved loss) while a request-side reasoning control is the separate `request_reasoning` key. For each direction every feature is routed to exactly one of three outcomes:
+**The directional loss model.** Loss is **directional** and **per-feature**; the canonical IR is the pivot. The granular loss registry (`internal/transcode/losses.go`) is direction-scoped: request-side keys (`request_reasoning`, `multiple_system_turns`, `anthropic_controls`, `previous_response_id`) and response-side keys (`provider_reasoning_text`, `usage_unknown`, `response_service_tier`). The **same field can be inert in one direction and a rejection in the other** — e.g. `reasoning_content` is a response-side provider extension in Chat→Messages (capability-gated text or an approved loss) while a request-side reasoning control is the separate `request_reasoning` key. For each direction every feature is routed to exactly one of three outcomes:
 
 1. **Lossless** — the feature maps 1:1 to the target dialect and is forwarded.
 2. **Observable loss** — the feature is non-portable and approved for loss; it is dropped and the loss is **logged** (see "Loss observability" below).

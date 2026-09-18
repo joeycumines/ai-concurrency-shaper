@@ -100,17 +100,21 @@ func TestChatStreamRejectsMissingRequiredEnvelopeFields(t *testing.T) {
 			name: "malformed json",
 			body: `{"id":"c","object":"chat.completion.chunk",`,
 		},
+		// A tail missing exactly ONE total is no longer a rejection: it is
+		// derived (see TestChatStreamDerivesSingleMissingTotal). A tail
+		// missing TWO OR MORE totals cannot be derived and stays a wire
+		// error.
 		{
-			name: "usage omits prompt tokens",
-			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"completion_tokens":5,"total_tokens":5}}`,
+			name: "usage omits prompt and completion tokens",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"total_tokens":5}}`,
 		},
 		{
-			name: "usage omits completion tokens",
-			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":5,"total_tokens":5}}`,
+			name: "usage omits prompt tokens and total",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"completion_tokens":5}}`,
 		},
 		{
-			name: "usage omits total tokens",
-			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":5}}`,
+			name: "usage omits completion tokens and total",
+			body: `{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":5}}`,
 		},
 	}
 	for _, tt := range tests {
@@ -300,19 +304,21 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 	})
 }
 
-// TestChatStreamRequiresPinnedTerminal proves the [DONE] sentinel is the only
-// release of the held terminal: a stream that ends
-// after finish_reason without [DONE] is a typed upstream truncation — the
-// terminal batch is never released at EOF, the exchange is never reported as
-// a successful completion, and the client receives an error event.
-func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
+// TestChatStreamTerminalRelease proves the release rules of the held chat
+// terminal: the [DONE] sentinel releases it, and an upstream that ends after
+// a finishing chunk without the sentinel is released on EOF — every semantic
+// terminal already arrived, so refusing would misreport a real completion —
+// with the quirk recorded as an ungated note. A stream that ends WITHOUT any
+// finish_reason is still a typed upstream truncation: the client receives an
+// error event and the exchange is never reported as a successful completion.
+func TestChatStreamTerminalRelease(t *testing.T) {
 	finishChunk := `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}`
 	// A finish chunk that opened no items is a legitimate zero-output
 	// completion: the held terminal is empty but must still be pinned to the
 	// [DONE] sentinel.
 	emptyFinishChunk := `{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`
 
-	t.Run("state finalize without done", func(t *testing.T) {
+	t.Run("state finalize without done releases and notes", func(t *testing.T) {
 		state := newChatResponsesStreamState(
 			testStreamContext(),
 			StrictLossPolicy(),
@@ -335,16 +341,25 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		_, err := state.FinalizeEOF()
-		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
-			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+		events, err := state.FinalizeEOF()
+		if err != nil {
+			t.Fatalf("EOF after finish = %v, want a clean release", err)
 		}
-		if !strings.Contains(err.Error(), "[DONE]") {
-			t.Fatalf("error = %q, want the [DONE] violation", err.Error())
+		released := false
+		for _, event := range events {
+			if event.EventType() == "response.completed" {
+				released = true
+			}
+		}
+		if !released {
+			t.Fatalf("released events lack response.completed: %+v", events)
+		}
+		if !reportHasFeature(state.report, FeatureMissingStreamSentinel) {
+			t.Fatal("the missing-sentinel note is not recorded")
 		}
 	})
 
-	t.Run("reader truncation classification", func(t *testing.T) {
+	t.Run("reader releases on EOF after finish without done", func(t *testing.T) {
 		state := newChatResponsesStreamState(
 			testStreamContext(),
 			StrictLossPolicy(),
@@ -361,26 +376,62 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			converter, 0, 0, 0,
 		)
 		output, readErr := drainReader(t, reader)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			t.Fatalf("read err = %v, want a clean EOF", readErr)
+		}
+		if !reader.SawTerminal() {
+			t.Fatal("EOF after finish must release the held terminal")
+		}
+		if reader.SawErrorEvent() {
+			t.Fatal("the release is a completed exchange, not an error")
+		}
+		if !strings.Contains(output, "response.completed") {
+			t.Fatalf("missing success terminal: %q", output)
+		}
+		if !reportHasFeature(state.report, FeatureMissingStreamSentinel) {
+			t.Fatal("the missing-sentinel note is not recorded")
+		}
+		if got := classifyStreamObservation(streamObservation{
+			ReaderErr:         readErr,
+			SawErrorEvent:     reader.SawErrorEvent(),
+			SawTerminal:       reader.SawTerminal(),
+			UpstreamBodyError: reader.UpstreamBodyError(),
+		}); got != streamOutcomeSuccess {
+			t.Fatalf("classification = %v, want success", got)
+		}
+	})
+
+	t.Run("reader truncates before any finish", func(t *testing.T) {
+		state := newChatResponsesStreamState(
+			testStreamContext(),
+			StrictLossPolicy(),
+			ChatCapabilities{},
+			"resp_1",
+			"gpt-4.1",
+			1710000000,
+			nil,
+		)
+		converter := newChatToResponsesConverter(state)
+		reader := newConvertingReaderWithLimits(
+			NewSSEReaderWithLimits(strings.NewReader(
+				`data: {"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"hi"}}]}`+"\n\n"), 0, 0),
+			converter, 0, 0, 0,
+		)
+		output, readErr := drainReader(t, reader)
 		if readErr == nil || errors.Is(readErr, io.EOF) {
-			t.Fatalf("read err = %v, want the pinned-terminal truncation error", readErr)
+			t.Fatalf("read err = %v, want a truncation error", readErr)
 		}
 		if !errors.Is(readErr, errStreamTruncated) {
 			t.Fatalf("read err = %v, want an errStreamTruncated wrap", readErr)
 		}
-		if !strings.Contains(readErr.Error(), "[DONE]") {
-			t.Fatalf("read err = %q, want the [DONE] violation", readErr.Error())
+		if !strings.Contains(readErr.Error(), "before a terminal condition") {
+			t.Fatalf("read err = %q, want the before-terminal violation", readErr.Error())
 		}
 		if reader.SawTerminal() {
-			t.Fatal("EOF after finish without [DONE] must not report a success terminal")
+			t.Fatal("a stream without any finish_reason must not report success")
 		}
 		if !reader.SawErrorEvent() {
-			t.Fatal("truncation must emit a client error event")
-		}
-		if !strings.Contains(output, "event: error") {
-			t.Fatalf("client error event missing: %q", output)
-		}
-		if strings.Contains(output, "response.completed") {
-			t.Fatalf("EOF without [DONE] must not emit a success terminal: %q", output)
+			t.Fatalf("truncation must emit a client error event: %q", output)
 		}
 		if got := classifyStreamObservation(streamObservation{
 			ReaderErr:         readErr,
@@ -414,12 +465,24 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 		if _, err := converter.Convert(SSEEvent{Data: []byte(finishChunk)}); err != nil {
 			t.Fatal(err)
 		}
-		_, err := converter.FinalizeEOF()
-		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
-			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+		batch, err := converter.FinalizeEOF()
+		if err != nil {
+			t.Fatalf("EOF after finish = %v, want a clean release", err)
 		}
-		if !strings.Contains(err.Error(), "[DONE]") {
-			t.Fatalf("error = %q, want the [DONE] violation", err.Error())
+		if !batch.Terminal {
+			t.Fatal("the released batch is not terminal")
+		}
+		stopped := false
+		for _, frame := range batch.Events {
+			if frame.Type == "message_stop" {
+				stopped = true
+			}
+		}
+		if !stopped {
+			t.Fatalf("released frames lack message_stop: %+v", batch.Events)
+		}
+		if !reportHasFeature(chat.report, FeatureMissingStreamSentinel) {
+			t.Fatal("the missing-sentinel note is not recorded")
 		}
 	})
 
@@ -479,20 +542,20 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			converter, 0, 0, 0,
 		)
 		output, readErr := drainReader(t, reader)
-		if readErr == nil || errors.Is(readErr, io.EOF) {
-			t.Fatalf("read err = %v, want the pinned-terminal truncation error", readErr)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			t.Fatalf("read err = %v, want a clean EOF", readErr)
 		}
-		if !errors.Is(readErr, errStreamTruncated) {
-			t.Fatalf("read err = %v, want an errStreamTruncated wrap", readErr)
+		if !reader.SawTerminal() {
+			t.Fatal("EOF after a zero-output finish must release the held terminal")
 		}
-		if reader.SawTerminal() {
-			t.Fatal("zero-output EOF without [DONE] must not report a success terminal")
+		if reader.SawErrorEvent() {
+			t.Fatal("the zero-output release is a completed exchange, not an error")
 		}
-		if !reader.SawErrorEvent() {
-			t.Fatal("zero-output truncation must emit a client error event")
+		if !strings.Contains(output, "response.completed") {
+			t.Fatalf("missing success terminal: %q", output)
 		}
-		if strings.Contains(output, "response.completed") {
-			t.Fatalf("zero-output EOF without [DONE] must not emit a success terminal: %q", output)
+		if !reportHasFeature(state.report, FeatureMissingStreamSentinel) {
+			t.Fatal("the missing-sentinel note is not recorded")
 		}
 	})
 
@@ -546,12 +609,24 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 		if _, err := converter.Convert(SSEEvent{Data: []byte(emptyFinishChunk)}); err != nil {
 			t.Fatal(err)
 		}
-		_, err := converter.FinalizeEOF()
-		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
-			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+		batch, err := converter.FinalizeEOF()
+		if err != nil {
+			t.Fatalf("EOF after zero-output finish = %v, want a clean release", err)
 		}
-		if !strings.Contains(err.Error(), "[DONE]") {
-			t.Fatalf("error = %q, want the [DONE] violation", err.Error())
+		if !batch.Terminal {
+			t.Fatal("the released zero-output batch is not terminal")
+		}
+		stopped := false
+		for _, frame := range batch.Events {
+			if frame.Type == "message_stop" {
+				stopped = true
+			}
+		}
+		if !stopped {
+			t.Fatalf("released frames lack message_stop: %+v", batch.Events)
+		}
+		if !reportHasFeature(chat.report, FeatureMissingStreamSentinel) {
+			t.Fatal("the missing-sentinel note is not recorded")
 		}
 	})
 
@@ -625,6 +700,149 @@ func TestChatStreamRequiresPinnedTerminal(t *testing.T) {
 			t.Fatal("releaseTerminal after [DONE] must not release again")
 		}
 	})
+}
+
+// TestChatStreamReleasesCapturedMissingSentinelTail replays, verbatim, an
+// upstream chat stream captured live from a gateway that closed the
+// connection after the usage-only tail chunk without ever sending the [DONE]
+// sentinel. Every semantic terminal (finish_reason plus the usage
+// accounting) had already arrived, so the exchange must release the held
+// terminal at EOF: a clean message_stop with the usage applied, no error
+// event, and the missing_stream_sentinel note recorded on the conversion
+// report.
+func TestChatStreamReleasesCapturedMissingSentinelTail(t *testing.T) {
+	const captured = `data: {"choices":[{"delta":{"content":null,"reasoning_content":"We","role":"assistant"},"finish_reason":null,"index":0,"logprobs":null}],"created":1789526350,"id":"chatcmpl-f02e903cd786813e728847a3b9770bd6","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"content":null,"reasoning_content":" need answer exactly"},"finish_reason":null,"index":0,"logprobs":null}],"created":1789526350,"id":"chatcmpl-f02e903cd786813e728847a3b9770bd6","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"content":null,"reasoning_content":" STREAM_OK."},"finish_reason":null,"index":0,"logprobs":null}],"created":1789526350,"id":"chatcmpl-f02e903cd786813e728847a3b9770bd6","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"reasoning_content":null},"finish_reason":null,"index":0,"logprobs":null}],"created":1789526350,"id":"chatcmpl-f02e903cd786813e728847a3b9770bd6","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"content":"","reasoning_content":null},"finish_reason":"stop","index":0,"logprobs":null}],"created":1789526350,"id":"chatcmpl-f02e903cd786813e728847a3b9770bd6","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[],"created":1789526350,"id":"chatcmpl-f02e903cd786813e728847a3b9770bd6","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":{"completion_tokens":12,"completion_tokens_details":{"reasoning_tokens":8},"prompt_tokens":89,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":101}}
+
+
+`
+	chat := newChatResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"resp_1",
+		"deepseek-v4-flash-0731",
+		1789526350,
+		nil,
+	)
+	anthropic := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"msg_1",
+		"deepseek-v4-flash-0731",
+		1789526350,
+	)
+	converter := newChatToAnthropicConverter(chat, anthropic)
+	reader := newConvertingReaderWithLimits(
+		NewSSEReaderWithLimits(strings.NewReader(captured), 0, 0),
+		converter, 0, 0, 0,
+	)
+	output, readErr := drainReader(t, reader)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		t.Fatalf("read err = %v, want a clean EOF", readErr)
+	}
+	if !reader.SawTerminal() {
+		t.Fatal("the captured EOF after finish must release the held terminal")
+	}
+	if reader.SawErrorEvent() {
+		t.Fatal("the release is a completed exchange, not an error")
+	}
+	if !strings.Contains(output, "event: message_stop") {
+		t.Fatalf("missing message_stop: %q", output)
+	}
+	if strings.Contains(output, "event: error") {
+		t.Fatalf("released stream carries an error event: %q", output)
+	}
+	if !strings.Contains(output, `"output_tokens":12`) {
+		t.Fatalf("the usage tail was not applied: %q", output)
+	}
+	if !reportHasFeature(chat.report, FeatureMissingStreamSentinel) {
+		t.Fatal("the missing-sentinel note is not recorded")
+	}
+}
+
+// TestChatStreamReleasesCapturedClaudeCodeMissingSentinelTail replays,
+// verbatim, the upstream stream captured from a real Claude Code exchange
+// that failed pre-fix: role and reasoning-only deltas, a finishing chunk
+// with empty content, then the usage-only tail, and EOF with no [DONE].
+// The release must emit exactly one message_stop with no error event, apply
+// the usage accounting, and record the missing_stream_sentinel note.
+func TestChatStreamReleasesCapturedClaudeCodeMissingSentinelTail(t *testing.T) {
+	const captured = `data: {"choices":[{"delta":{"reasoning_content":null,"role":"assistant"},"finish_reason":null,"index":0,"logprobs":null}],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"reasoning_content":null},"finish_reason":null,"index":0,"logprobs":null}],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"reasoning_content":null},"finish_reason":null,"index":0,"logprobs":null}],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"reasoning_content":null},"finish_reason":null,"index":0,"logprobs":null}],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[{"delta":{"content":"","reasoning_content":null},"finish_reason":"stop","index":0,"logprobs":null}],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":null}
+
+data: {"choices":[],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2f2f44990","model":"deepseek-v4-flash-0731","object":"chat.completion.chunk","usage":{"completion_tokens":8,"completion_tokens_details":{"reasoning_tokens":0},"prompt_tokens":35411,"prompt_tokens_details":{"cached_tokens":0},"total_tokens":35419}}
+
+`
+	chat := newChatResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"resp_1",
+		"deepseek-v4-flash-0731",
+		1789525525,
+		nil,
+	)
+	anthropic := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"msg_1",
+		"deepseek-v4-flash-0731",
+		1789525525,
+	)
+	converter := newChatToAnthropicConverter(chat, anthropic)
+	reader := newConvertingReaderWithLimits(
+		NewSSEReaderWithLimits(strings.NewReader(captured), 0, 0),
+		converter, 0, 0, 0,
+	)
+	output, readErr := drainReader(t, reader)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		t.Fatalf("read err = %v, want a clean EOF", readErr)
+	}
+	if !reader.SawTerminal() {
+		t.Fatal("the captured EOF after finish must release the held terminal")
+	}
+	if reader.SawErrorEvent() {
+		t.Fatal("the release is a completed exchange, not an error")
+	}
+	if got := strings.Count(output, "event: message_stop"); got != 1 {
+		t.Fatalf("message_stop count = %d, want exactly one: %q", got, output)
+	}
+	if strings.Contains(output, "event: error") {
+		t.Fatalf("released stream carries an error event: %q", output)
+	}
+	if !strings.Contains(output, `"output_tokens":8`) {
+		t.Fatalf("the usage tail was not applied: %q", output)
+	}
+	if !reportHasFeature(chat.report, FeatureMissingStreamSentinel) {
+		t.Fatal("the missing-sentinel note is not recorded")
+	}
+	if got := classifyStreamObservation(streamObservation{
+		ReaderErr:         readErr,
+		SawErrorEvent:     reader.SawErrorEvent(),
+		SawTerminal:       reader.SawTerminal(),
+		UpstreamBodyError: reader.UpstreamBodyError(),
+	}); got != streamOutcomeSuccess {
+		t.Fatalf("classification = %v, want success", got)
+	}
 }
 
 // TestChatStreamReviewMalformedStreamIsUpstreamFailure proves the

@@ -237,3 +237,104 @@ func TestCLIRejectsImpossibleTranscodeConfigs(t *testing.T) {
 		})
 	}
 }
+
+// TestCLIRejectsModelTableConflicts proves the global model table's startup
+// rejections fire before any traffic is served.
+func TestCLIRejectsModelTableConflicts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name: "table and per-provider model map",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "https://api.openai.com",
+				"-transcode-responses-chat",
+				"-transcode-model", "a=b",
+				"-model-table", "c@openai=d",
+			},
+			wantErr: "cannot be combined",
+		},
+		{
+			name: "duplicate surrogate",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "https://api.openai.com",
+				"-model-table", "a@openai=b",
+				"-model-table", "a@openai=c",
+			},
+			wantErr: "duplicate -model-table surrogate",
+		},
+		{
+			name: "dangling provider",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "https://api.openai.com",
+				"-model-table", "a@acme=b",
+			},
+			wantErr: "unknown -model-table provider",
+		},
+		{
+			name: "invalid fact value",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "https://api.openai.com",
+				"-model-table", "s@openai=w;efforts=ultra",
+			},
+			wantErr: "unknown effort",
+		},
+		{
+			// A valid table must configure cleanly: only the bind may fail.
+			name: "happy table",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "https://api.openai.com",
+				"-transcode-responses-chat",
+				"-model-table", "a@openai=w;context=128000;default",
+			},
+			wantErr: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := runCLIStartup(t, tt.args...)
+			if tt.wantErr == "" {
+				if err != nil && !strings.Contains(out, "listen") && !strings.Contains(out, "bind") {
+					t.Fatalf("startup failed: %v\n%s", err, out)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("startup succeeded, want rejection: %s", out)
+			}
+			if !strings.Contains(out, tt.wantErr) {
+				t.Fatalf("output = %q, want %q", out, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestCLIModelTableSummaryLine proves the startup summary line carries the
+// configured table, sorted with its facts, before the listener binds.
+func TestCLIModelTableSummaryLine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	out, _ := runCLIStartup(t,
+		"-bind", "127.0.0.1:1",
+		"-upstream", "https://api.openai.com",
+		"-model-table", "b@openai=gpt-4o-mini;context=128000",
+		"-model-table", "a@openai=gpt-4o;context=128000;default;max_output=16384",
+	)
+	want := "model table: 2 surrogates across 1 providers: " +
+		"a@openai->gpt-4o(context=128000,default,max_output=16384), " +
+		"b@openai->gpt-4o-mini(context=128000)"
+	if !strings.Contains(out, want) {
+		t.Fatalf("startup output does not carry the summary line\nwant: %s\ngot:\n%s", want, out)
+	}
+}

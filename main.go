@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -39,6 +40,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/router"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
 )
 
@@ -119,6 +121,9 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 	}
 	for _, tm := range p.TranscodeMappings() {
 		opts = append(opts, proxy.WithTranscodeMapping(tm))
+	}
+	if catalog, ok := p.ModelCatalog(); ok {
+		opts = append(opts, proxy.WithModelCatalog(catalog))
 	}
 
 	prx, err := proxy.New(opts...)
@@ -201,6 +206,14 @@ func logProviderConfig(pr *config.Provider) {
 	}
 }
 
+func logCatalogSuiteConfig(suite config.CatalogSuiteConfig, modelCount int) {
+	format := string(suite.Format)
+	if format == "" {
+		format = "auto"
+	}
+	log.Printf("catalog suite: %s at %q: format=%s models=%d", suite.Name, suite.Prefix, format, modelCount)
+}
+
 // warnNoUpstreamAuth emits one honest startup line when multiple providers
 // are configured without any upstream authentication: requests are forwarded
 // verbatim, so each client must supply the correct provider credential.
@@ -280,13 +293,19 @@ func run() error {
 		return err
 	}
 
+	if summary := cfg.ModelTableSummary(); summary != "" {
+		log.Printf("%s", summary)
+	}
+
 	// Build a proxy for every provider and mount each at its prefix on the
 	// shared dispatcher. With a single (legacy) bare-root provider this is a
 	// transparent pass-through, so startup output is byte-identical to before.
 	var (
-		entries []router.Provider
-		mets    []*metrics.Collector
-		js      []*journal.Journal
+		entries       []router.Provider
+		mets          []*metrics.Collector
+		js            []*journal.Journal
+		proxiesByName = make(map[string]*proxy.Proxy)
+		singleProxy   *proxy.Proxy
 	)
 	for _, pr := range cfg.Providers {
 		p, met, j, err := buildProvider(pr)
@@ -296,9 +315,77 @@ func run() error {
 		mets = append(mets, met)
 		js = append(js, j)
 		entries = append(entries, router.Provider{Name: pr.Name, Prefix: pr.Prefix, Proxy: p})
+		proxiesByName[pr.EffectiveName()] = p
+		singleProxy = p
 		logProviderConfig(pr)
 	}
 	warnNoUpstreamAuth(cfg)
+
+	// Build catalog suites
+	allModels := cfg.ModelTable()
+	for _, suite := range cfg.CatalogSuites() {
+		var suiteModels []transcode.CatalogModel
+		for _, m := range allModels {
+			if suite.Provider != "" && m.Provider != suite.Provider {
+				continue
+			}
+			if len(suite.Models) > 0 {
+				matched := slices.Contains(suite.Models, m.Surrogate)
+				if !matched {
+					continue
+				}
+			}
+			suiteModels = append(suiteModels, m)
+		}
+
+		catHandler, err := transcode.NewCatalogHandler(transcode.CatalogConfig{
+			ProviderName:      suite.Name,
+			Models:            suiteModels,
+			ServesResponses:   true,
+			ServesMessages:    true,
+			ParallelToolCalls: true,
+			StructuredOutputs: true,
+			DefaultShape:      suite.Format,
+			Limits:            cfg.Limits(),
+		})
+		if err != nil {
+			return fmt.Errorf("catalog suite %q: %w", suite.Name, err)
+		}
+
+		var modelRoutes []router.ModelRoute
+		for _, sm := range suiteModels {
+			if targetProxy := proxiesByName[sm.Provider]; targetProxy != nil {
+				modelRoutes = append(modelRoutes, router.ModelRoute{
+					Model:    sm.Surrogate,
+					Provider: sm.Provider,
+					Handler:  targetProxy,
+				})
+			}
+		}
+
+		var fallbackHandler http.Handler
+		if len(cfg.Providers) == 1 && singleProxy != nil {
+			fallbackHandler = singleProxy
+		}
+
+		suiteHandler := router.NewCatalogSuiteHandler(router.SuiteConfig{
+			Name:           suite.Name,
+			Prefix:         suite.Prefix,
+			CatalogHandler: catHandler,
+			DefaultShape:   suite.Format,
+			ModelRoutes:    modelRoutes,
+			Fallback:       fallbackHandler,
+			Limits:         cfg.Limits(),
+			Strict:         suite.Strict,
+		})
+
+		entries = append(entries, router.Provider{
+			Name:   suite.Name,
+			Prefix: suite.Prefix,
+			Proxy:  suiteHandler,
+		})
+		logCatalogSuiteConfig(suite, len(suiteModels))
+	}
 
 	h, err := router.New(entries)
 	if err != nil {

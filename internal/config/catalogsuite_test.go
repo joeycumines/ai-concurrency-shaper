@@ -1,0 +1,340 @@
+// Copyright (C) 2026 Joseph Cumines
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package config
+
+import (
+	"reflect"
+	"testing"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
+)
+
+func TestParseCatalogSuite_Valid(t *testing.T) {
+	cases := []struct {
+		raw      string
+		wantName string
+		wantPfx  string
+		wantMods []string
+		wantFmt  transcode.CatalogShape
+		wantProv string
+		wantStr  bool
+	}{
+		{
+			raw:      "/fleet",
+			wantName: "fleet",
+			wantPfx:  "/fleet",
+			wantMods: nil,
+			wantFmt:  "",
+			wantProv: "",
+			wantStr:  true,
+		},
+		{
+			raw:      "custom@/suite1=gpt-4o+claude-3;format=codex;provider=prov1;strict=false",
+			wantName: "custom",
+			wantPfx:  "/suite1",
+			wantMods: []string{"gpt-4o", "claude-3"},
+			wantFmt:  transcode.CatalogShapeCodex,
+			wantProv: "prov1",
+			wantStr:  false,
+		},
+		{
+			raw:      "/all=*;format=anthropic",
+			wantName: "all",
+			wantPfx:  "/all",
+			wantMods: nil,
+			wantFmt:  transcode.CatalogShapeAnthropic,
+			wantProv: "",
+			wantStr:  true,
+		},
+		{
+			raw:      "my-openai@/openai-suite;format=openai",
+			wantName: "my-openai",
+			wantPfx:  "/openai-suite",
+			wantMods: nil,
+			wantFmt:  transcode.CatalogShapeOpenAI,
+			wantProv: "",
+			wantStr:  true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			cfg, err := parseCatalogSuite(tc.raw)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Name != tc.wantName {
+				t.Errorf("Name = %q, want %q", cfg.Name, tc.wantName)
+			}
+			if cfg.Prefix != tc.wantPfx {
+				t.Errorf("Prefix = %q, want %q", cfg.Prefix, tc.wantPfx)
+			}
+			if !reflect.DeepEqual(cfg.Models, tc.wantMods) {
+				t.Errorf("Models = %v, want %v", cfg.Models, tc.wantMods)
+			}
+			if cfg.Format != tc.wantFmt {
+				t.Errorf("Format = %q, want %q", cfg.Format, tc.wantFmt)
+			}
+			if cfg.Provider != tc.wantProv {
+				t.Errorf("Provider = %q, want %q", cfg.Provider, tc.wantProv)
+			}
+			if cfg.Strict != tc.wantStr {
+				t.Errorf("Strict = %v, want %v", cfg.Strict, tc.wantStr)
+			}
+		})
+	}
+}
+
+func TestParseCatalogSuite_Invalid(t *testing.T) {
+	invalids := []string{
+		"",
+		"noprefix",
+		"/suite;format=unknown",
+		"/suite;format=",
+		"/suite;provider=",
+		"/suite;unknown_opt=val",
+		"/suite=invalid!model",
+	}
+	for _, raw := range invalids {
+		t.Run(raw, func(t *testing.T) {
+			_, err := parseCatalogSuite(raw)
+			if err == nil {
+				t.Fatalf("expected error for %q, got nil", raw)
+			}
+		})
+	}
+}
+
+func TestResolveCatalogSuites_ZeroProviders(t *testing.T) {
+	// Zero providers with catalog suite configured: succeeds
+	cfg := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/catalog"},
+			ModelTable:    []string{"m1@p1=wire1;context=128000"},
+		},
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate failed for zero providers with catalog suite: %v", err)
+	}
+	suites := cfg.CatalogSuites()
+	if len(suites) != 1 || suites[0].Prefix != "/catalog" {
+		t.Fatalf("unexpected suites: %+v", suites)
+	}
+	models := cfg.ModelTable()
+	if len(models) != 1 || models[0].Surrogate != "m1" {
+		t.Fatalf("unexpected model table: %+v", models)
+	}
+}
+
+func TestResolveCatalogSuites_PrefixOverlap(t *testing.T) {
+	// Overlap between two catalog suites
+	cfg := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/suite", "/suite/sub"},
+		},
+	}
+	if err := cfg.ResolveAndValidate(); err == nil {
+		t.Fatal("expected error for overlapping catalog suites, got nil")
+	}
+
+	// Overlap between catalog suite and provider
+	cfg2 := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/openai"},
+		},
+		Providers: []*Provider{
+			{
+				Name:     "openai",
+				Upstream: "https://api.openai.com",
+				Prefix:   "/openai",
+			},
+		},
+	}
+	if err := cfg2.ResolveAndValidate(); err == nil {
+		t.Fatal("expected error for catalog suite overlapping with provider prefix, got nil")
+	}
+}
+
+func TestCleanCatalogPrefix_MultipleTrailingSlashes(t *testing.T) {
+	cases := []struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"/suite///", "/suite", false},
+		{"///", "", false},
+		{"/a/b//", "/a/b", false},
+		{"/c", "/c", false},
+		{"", "", false},
+		{"/", "", false},
+		{"bad", "", true},
+	}
+	for _, tc := range cases {
+		got, err := cleanCatalogPrefix(tc.input)
+		if tc.wantErr && err == nil {
+			t.Errorf("cleanCatalogPrefix(%q) expected error, got nil", tc.input)
+		} else if !tc.wantErr && err != nil {
+			t.Errorf("cleanCatalogPrefix(%q) unexpected error: %v", tc.input, err)
+		} else if got != tc.want {
+			t.Errorf("cleanCatalogPrefix(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestResolveCatalogSuites_DuplicateSuiteNames(t *testing.T) {
+	// Explicit duplicate name
+	cfg := &Config{
+		Server: Server{
+			CatalogSuites: []string{"custom@/suite1", "custom@/suite2"},
+		},
+	}
+	if err := cfg.ResolveAndValidate(); err == nil {
+		t.Fatal("expected error for duplicate explicit catalog suite names, got nil")
+	}
+
+	// Derived duplicate name (/a-b and /a/b both derive to "a-b")
+	cfg2 := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/a-b", "/a/b"},
+		},
+	}
+	if err := cfg2.ResolveAndValidate(); err == nil {
+		t.Fatal("expected error for duplicate derived catalog suite names, got nil")
+	}
+}
+
+func TestConfig_Limits(t *testing.T) {
+	// Defaults when no provider overrides exist
+	cfg := &Config{}
+	limits := cfg.Limits()
+	if limits.AcceptedRequestBytes != transcode.DefaultAcceptedRequestBytes {
+		t.Errorf("AcceptedRequestBytes = %d, want %d", limits.AcceptedRequestBytes, transcode.DefaultAcceptedRequestBytes)
+	}
+
+	// Provider overrides
+	cfgOverrides := &Config{
+		Providers: []*Provider{
+			{
+				TranscodeMaxRequestMB:  50,
+				TranscodeMaxResponseMB: 60,
+				RetryMaxBodyMB:         40,
+			},
+		},
+	}
+	limitsOverrides := cfgOverrides.Limits()
+	if limitsOverrides.DecodedRequestBytes != 50<<20 {
+		t.Errorf("DecodedRequestBytes = %d, want %d", limitsOverrides.DecodedRequestBytes, 50<<20)
+	}
+	if limitsOverrides.SuccessfulResponseBytes != 60<<20 {
+		t.Errorf("SuccessfulResponseBytes = %d, want %d", limitsOverrides.SuccessfulResponseBytes, 60<<20)
+	}
+	if limitsOverrides.RetryReplayBytes != 40<<20 {
+		t.Errorf("RetryReplayBytes = %d, want %d", limitsOverrides.RetryReplayBytes, 40<<20)
+	}
+}
+
+func TestProvider_EffectiveName(t *testing.T) {
+	p1 := &Provider{Name: "custom"}
+	if p1.EffectiveName() != "custom" {
+		t.Errorf("p1.EffectiveName() = %q, want custom", p1.EffectiveName())
+	}
+
+	p2 := &Provider{Upstream: "https://api.openai.com/v1"}
+	_ = p2.validateBasic(0, false)
+	if p2.EffectiveName() != "openai" {
+		t.Errorf("p2.EffectiveName() = %q, want openai", p2.EffectiveName())
+	}
+}
+
+func TestResolveCatalogSuites_ProviderValidation(t *testing.T) {
+	// Provider nonexistent should fail startup
+	cfg := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/suite;provider=nonexistent"},
+			ModelTable:    []string{"m1@openai=wire1"},
+		},
+		Providers: []*Provider{
+			{
+				Name:        "openai",
+				Upstream:    "https://api.openai.com",
+				Prefix:      "/openai",
+				Concurrency: 1,
+			},
+		},
+	}
+	if err := cfg.ResolveAndValidate(); err == nil {
+		t.Fatal("expected error for unconfigured provider in catalog suite, got nil")
+	}
+
+	// Provider existing should succeed
+	cfg2 := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/suite;provider=openai"},
+			ModelTable:    []string{"m1@openai=wire1"},
+		},
+		Providers: []*Provider{
+			{
+				Name:        "openai",
+				Upstream:    "https://api.openai.com",
+				Prefix:      "/openai",
+				Concurrency: 1,
+			},
+		},
+	}
+	if err := cfg2.ResolveAndValidate(); err != nil {
+		t.Fatalf("unexpected error for valid provider in catalog suite: %v", err)
+	}
+}
+
+func TestResolveCatalogSuites_StrictModelsValidation(t *testing.T) {
+	// Strict suite with model not in model table should fail startup
+	cfgStrict := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/suite=m1+unknown-model;strict=true"},
+			ModelTable:    []string{"m1@openai=wire1"},
+		},
+		Providers: []*Provider{
+			{
+				Name:        "openai",
+				Upstream:    "https://api.openai.com",
+				Prefix:      "/openai",
+				Concurrency: 1,
+			},
+		},
+	}
+	if err := cfgStrict.ResolveAndValidate(); err == nil {
+		t.Fatal("expected error for unknown model in strict catalog suite, got nil")
+	}
+
+	// Non-strict suite with model not in model table should succeed startup
+	cfgNonStrict := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/suite=m1+unknown-model;strict=false"},
+			ModelTable:    []string{"m1@openai=wire1"},
+		},
+		Providers: []*Provider{
+			{
+				Name:        "openai",
+				Upstream:    "https://api.openai.com",
+				Prefix:      "/openai",
+				Concurrency: 1,
+			},
+		},
+	}
+	if err := cfgNonStrict.ResolveAndValidate(); err != nil {
+		t.Fatalf("unexpected error for non-strict suite with unknown model: %v", err)
+	}
+}

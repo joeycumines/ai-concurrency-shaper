@@ -77,6 +77,16 @@ func (s Scope) String() string {
 type Config struct {
 	Server    Server
 	Providers []*Provider
+
+	// modelTable holds the parsed and validated -model-table entries, frozen
+	// by resolveModelTable during ResolveAndValidate. Empty means the table is
+	// not configured and every provider keeps its legacy model resolution.
+	modelTable []modelTableEntry
+	// modelTableByProvider holds, per effective provider name, the frozen
+	// entries that name that provider in input order.
+	modelTableByProvider map[string][]modelTableEntry
+	// catalogSuites holds the validated -catalog-suite mounts.
+	catalogSuites []CatalogSuiteConfig
 }
 
 // Server holds the server/global section settings (legacy -bind/-tui/-version).
@@ -87,6 +97,12 @@ type Server struct {
 	// MetricsBind is the dedicated listen address for the Prometheus
 	// /metrics endpoint (-metrics-bind). Empty disables the endpoint.
 	MetricsBind string
+	// ModelTable holds the raw -model-table entries: each occurrence names one
+	// global model identity as surrogate@provider=wire[;facts]. The table is a
+	// single global namespace; ResolveAndValidate parses and freezes it.
+	ModelTable []string
+	// CatalogSuites holds the raw -catalog-suite entries mounting virtual catalog suites.
+	CatalogSuites []string
 	// Help is set by -h/-help at server scope (or legacy top level): the
 	// caller prints usage and exits 0 instead of running the proxy.
 	Help bool
@@ -166,8 +182,13 @@ type Provider struct {
 	TranscodeChatCapabilities  []string
 	TranscodeAllowClientQuery  []string
 	TranscodeModelMap          []string
+	TranscodeProfiles          []string
 	TranscodeMaxRequestMB      int64
+	TranscodeFlowLogDir        string
 	TranscodeMaxResponseMB     int64
+	TranscodeContinuity        bool
+	TranscodeContinuityCap     int
+	TranscodeContinuityTTL     time.Duration
 	TranscodeAuth              string
 	TranscodeAuthSource        string
 	TranscodeAuthHeader        string
@@ -195,6 +216,12 @@ type Provider struct {
 	maxIdlePerHost    int
 	authPolicy        *auth.AuthPolicy
 	transcodeMappings []proxy.TranscodeMapping
+	// modelCatalog is this provider's frozen catalog snapshot, built from its
+	// model-table subset and resolved mappings. Nil when no table names it.
+	modelCatalog *transcode.CatalogConfig
+	// continuityStore is the shared continuity store for this provider's
+	// transcoded routes. Nil when continuity is not enabled.
+	continuityStore *transcode.ContinuityStore
 }
 
 // TranscodeMappings returns the resolved transcode route mappings for this provider,
@@ -300,7 +327,7 @@ type Account struct {
 //     normalize to trailing-slash-free paths and must not overlap; unnamed
 //     providers get derived names that must be unique.
 func (c *Config) ResolveAndValidate() error {
-	if len(c.Providers) == 0 {
+	if len(c.Providers) == 0 && len(c.Server.CatalogSuites) == 0 {
 		return errors.New("no providers configured")
 	}
 
@@ -318,12 +345,37 @@ func (c *Config) ResolveAndValidate() error {
 		}
 	}
 
+	if err := c.resolveModelTable(); err != nil {
+		return err
+	}
+
+	if err := c.resolveCatalogSuites(); err != nil {
+		return err
+	}
+
 	for i, p := range c.Providers {
-		if err := p.resolve(i, multi); err != nil {
+		if err := p.resolve(i, multi, c.modelTableByProvider[effectiveName(p)]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// EffectiveName is the provider name the global model table references: the
+// validated Name when set, otherwise the same host derivation validateMulti
+// applies, so the single-provider legacy mode has a stable table key too.
+func (p *Provider) EffectiveName() string {
+	if p.Name != "" {
+		return p.Name
+	}
+	if p.upstream == nil {
+		return ""
+	}
+	return deriveName(p.upstream.Hostname())
+}
+
+func effectiveName(p *Provider) string {
+	return p.EffectiveName()
 }
 
 // validateBasic validates a single provider's identity/connection values and
@@ -487,8 +539,9 @@ func validateMulti(providers []*Provider) error {
 }
 
 // resolve constructs the provider's runtime objects. It runs after validateBasic
-// and validateMulti, so the values are known-good.
-func (p *Provider) resolve(index int, multi bool) error {
+// and validateMulti, so the values are known-good. modelTable is this provider's
+// frozen subset of the global -model-table (nil when the table is not configured).
+func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) error {
 	ctx := func() string {
 		if !multi {
 			return ""
@@ -529,9 +582,11 @@ func (p *Provider) resolve(index int, multi bool) error {
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
 
-	if err := p.resolveTranscode(); err != nil {
+	if err := p.resolveTranscode(modelTable); err != nil {
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
+
+	p.resolveModelCatalog(modelTable)
 
 	p.maxIdlePerHost = proxy.MaxIdleConnsPerHost(p.GlobalConcurrency, p.Concurrency, patterns, p.routeLimiters, p.LimitAll)
 	return nil

@@ -146,6 +146,29 @@ type ChatCapabilities struct {
 	// under the mid_conversation_system loss policy (open-weights
 	// chat templates reject any system message after index 0).
 	SystemAnywhere bool
+
+	// ToolResultImages renders multimodal tool-result content as MULTIPART
+	// chat tool-message content blocks (text and image_url parts, order
+	// preserved) for upstreams that accept image parts inside a tool
+	// message. When unset — the default — the multimodal content is
+	// encoded as the deterministic tool_result_json_envelope text
+	// (tool_result_multimodal_content + tool_result_json_envelope losses),
+	// which makes a vision model blind to the image. This capability is
+	// independent of ImageInput: an upstream can accept user images while
+	// rejecting image parts in tool messages.
+	ToolResultImages bool
+
+	// MultiAgentPriming injects a bounded protocol reminder into the
+	// leading system turn for models not trained on the harness
+	// orchestration protocol (spawn_agent/wait_agent/close_agent
+	// discipline). The reminder is appended AFTER the client's own
+	// instructions so the client's bytes and order stay byte-identical.
+	// Off by default; when enabled, every exchange that receives the
+	// injection is recorded as a Note (FeatureMultiAgentPriming). The
+	// reminder text is derived from the captured multi-agent namespace
+	// schema (close_agent/resume_agent/send_input/spawn_agent/wait_agent),
+	// not written from memory.
+	MultiAgentPriming bool
 }
 
 // Mapping declares one transcoded route: a POST client route in one client
@@ -160,6 +183,7 @@ type Mapping struct {
 	ChatCapabilities ChatCapabilities
 	LossPolicy       LossPolicy
 	ModelMap         ModelMap
+	ProfileMap       ProfileMap
 	Auth             AuthPolicy
 
 	// AllowedClientQuery is the set of client query parameters permitted on

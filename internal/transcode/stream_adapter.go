@@ -70,7 +70,10 @@ func (c *chatToResponsesConverter) Convert(
 
 // FinalizeEOF reports a truncation error unless the stream terminated
 // correctly. The held terminal (which may be an empty batch for a
-// zero-output finish) is released ONLY by the [DONE] sentinel.
+// zero-output finish) is released by the [DONE] sentinel, or by EOF when
+// a finish_reason was already received — the missing sentinel is recorded
+// as an ungated note. A stream that ends without any finish_reason is
+// still a typed truncation error.
 func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
@@ -109,6 +112,10 @@ func marshalResponsesEvents(
 // Responses events, converted, and marshaled into Anthropic frames.
 type responsesToAnthropicConverter struct {
 	state *anthropicResponsesStreamState
+
+	// missingEventNameNoted gates the missing-event-name note to once per
+	// stream (a data-only gateway omits the name on every frame).
+	missingEventNameNoted bool
 }
 
 func newResponsesToAnthropicConverter(
@@ -141,18 +148,25 @@ func (c *responsesToAnthropicConverter) Convert(
 	if err != nil {
 		return convertedBatch{}, err
 	}
-	// Validate the SSE event name equals the JSON type. Responses streams
-	// require event: to be present and equal the JSON type tag (the
-	// package's own rule): an empty event name is
-	// a wire error, not a silent pass.
+	// The SSE event name must equal the JSON type tag when present. The SSE
+	// event field is optional and the Responses JSON type is the
+	// authoritative discriminator, so a data-only frame is routed by its
+	// decoded type and the provider quirk is recorded once per stream as an
+	// ungated note. A PRESENT name that disagrees with the JSON type is
+	// still a wire error.
 	if frame.Event == "" {
-		return convertedBatch{}, upstreamWireError(
-			UpstreamResponses,
-			http.StatusOK,
-			errors.New("responses stream event has no event name"),
-		)
-	}
-	if err := validateEventNameMatchesJSONType(frame); err != nil {
+		frame.Event = event.EventType()
+		if !c.missingEventNameNoted {
+			c.missingEventNameNoted = true
+			if err := c.state.report.Note(
+				FeatureMissingEventName,
+				"responses[].stream",
+				"the upstream stream omitted the SSE event: name; the event was routed by its JSON type",
+			); err != nil {
+				return convertedBatch{}, err
+			}
+		}
+	} else if err := validateEventNameMatchesJSONType(frame); err != nil {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamResponses,
 			http.StatusOK,
@@ -303,15 +317,22 @@ func (c *chatToAnthropicConverter) releaseTerminals() (convertedBatch, error) {
 	return batch, nil
 }
 
-// FinalizeEOF reports a truncation error unless the stream terminated
-// correctly. The Chat held terminal (which may be an empty batch for a
-// zero-output finish) is released ONLY by the [DONE] sentinel: EOF after finish_reason without [DONE] is a typed upstream
-// truncation, never a released terminal.
+// FinalizeEOF releases the Chat held terminal (which may be an empty batch
+// for a zero-output finish) when the upstream ended after a finishing chunk
+// without the [DONE] sentinel, recording the quirk as an ungated note. A
+// stream that ends WITHOUT any finish_reason is a typed upstream truncation,
+// never a released terminal.
 func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 	if c.chat.sawFinish && !c.chat.terminalReleased {
-		return convertedBatch{}, c.chat.wireError(errors.New(
-			"chat stream ended after finish_reason without the [DONE] sentinel",
-		))
+		if err := c.chat.noteMissingSentinel(); err != nil {
+			return convertedBatch{}, err
+		}
+		batch, err := c.releaseTerminals()
+		if err != nil {
+			return convertedBatch{}, err
+		}
+		batch.Terminal = true
+		return batch, nil
 	}
 	if c.chat.sawFinish || c.anthropic.sawTerminal {
 		return convertedBatch{Terminal: true}, nil

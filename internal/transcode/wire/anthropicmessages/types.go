@@ -40,6 +40,19 @@ const (
 	ContentBlockTypeToolResult       ContentBlockType = "tool_result"
 	ContentBlockTypeThinking         ContentBlockType = "thinking"
 	ContentBlockTypeRedactedThinking ContentBlockType = "redacted_thinking"
+	// Server-side content the transcoder admits on the wire but never
+	// forwards: the convert layer drops or rejects these under the
+	// anthropic_server_tools loss key (a chat upstream executes no server
+	// tools). mcp_tool_use / mcp_tool_result are client-side tools that
+	// map 1:1 onto tool_use / tool_result; the remaining spellings are
+	// server-executed or server references with no chat expression.
+	ContentBlockTypeServerToolUse       ContentBlockType = "server_tool_use"
+	ContentBlockTypeWebSearchToolResult ContentBlockType = "web_search_tool_result"
+	ContentBlockTypeMCPToolUse          ContentBlockType = "mcp_tool_use"
+	ContentBlockTypeMCPToolResult       ContentBlockType = "mcp_tool_result"
+	ContentBlockTypeCodeExecution       ContentBlockType = "code_execution"
+	ContentBlockTypeCodeExecutionResult ContentBlockType = "code_execution_tool_result"
+	ContentBlockTypeContainerUpload     ContentBlockType = "container_upload"
 )
 
 // SourceType is the type of an image or document source.
@@ -376,6 +389,13 @@ type ContentBlock struct {
 	// reports the drop observably (one deduped anthropic_controls note per
 	// exchange).
 	CacheControl any `json:"cache_control,omitempty"`
+
+	// ServerContent carries the raw JSON of an admitted-but-unforwardable
+	// server-side block (server_tool_use, web_search_tool_result,
+	// code_execution results, container_upload). The convert layer decides
+	// its fate under the anthropic_server_tools loss key; the wire layer
+	// never interprets it.
+	ServerContent json.RawMessage `json:"-"`
 }
 
 // UnmarshalJSON decodes the tagged union per-arm: each type admits exactly
@@ -492,6 +512,67 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 		block.Type = shadow.Type
 		block.Data = shadow.Data
 
+	case ContentBlockTypeServerToolUse,
+		ContentBlockTypeWebSearchToolResult,
+		ContentBlockTypeCodeExecution,
+		ContentBlockTypeCodeExecutionResult,
+		ContentBlockTypeContainerUpload:
+		// Server-executed content (or a server-side reference, for
+		// container_upload) a chat upstream cannot express. Admit the
+		// block with its raw bytes preserved; the convert layer drops or
+		// rejects it under the anthropic_server_tools loss key. The
+		// envelope shape is deliberately minimal (type only): server
+		// spellings vary by tool (id/name/input on server_tool_use,
+		// tool_use_id/content on results, file references on uploads),
+		// and any per-arm field modeling would only widen the surface
+		// that must stay unforwarded. wire.DecodeTolerant skips the
+		// unmodeled fields instead of rejecting them.
+		var shadow struct {
+			Type ContentBlockType `json:"type"`
+		}
+		if err := wire.DecodeTolerant(data, &shadow); err != nil {
+			return fmt.Errorf("%s block: %w", probe.Type, err)
+		}
+		block.Type = shadow.Type
+		block.ServerContent = append(block.ServerContent[:0], data...)
+
+	case ContentBlockTypeMCPToolUse:
+		// MCP tools are client-side tools under a server spelling: decode
+		// exactly the tool_use fields so the convert layer can map 1:1.
+		var shadow struct {
+			Type         ContentBlockType `json:"type"`
+			ID           *string          `json:"id"`
+			Name         *string          `json:"name"`
+			Input        json.RawMessage  `json:"input"`
+			CacheControl any              `json:"cache_control,omitempty"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("mcp_tool_use block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.ID = shadow.ID
+		block.Name = shadow.Name
+		block.Input = shadow.Input
+		block.CacheControl = shadow.CacheControl
+
+	case ContentBlockTypeMCPToolResult:
+		// Same as above, mirroring the tool_result fields.
+		var shadow struct {
+			Type         ContentBlockType `json:"type"`
+			ToolUseID    *string          `json:"tool_use_id"`
+			Content      *Content         `json:"content"`
+			IsError      *bool            `json:"is_error"`
+			CacheControl any              `json:"cache_control,omitempty"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("mcp_tool_result block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.ToolUseID = shadow.ToolUseID
+		block.Content = shadow.Content
+		block.IsError = shadow.IsError
+		block.CacheControl = shadow.CacheControl
+
 	default:
 		return fmt.Errorf("unknown anthropic content block type %q", probe.Type)
 	}
@@ -550,6 +631,35 @@ func (b ContentBlock) Validate() error {
 	case ContentBlockTypeRedactedThinking:
 		if b.Data == nil {
 			return errors.New("redacted_thinking block has no data")
+		}
+	case ContentBlockTypeServerToolUse,
+		ContentBlockTypeWebSearchToolResult,
+		ContentBlockTypeCodeExecution,
+		ContentBlockTypeCodeExecutionResult,
+		ContentBlockTypeContainerUpload:
+		if len(b.ServerContent) == 0 {
+			return fmt.Errorf("%s block has no preserved content", b.Type)
+		}
+	case ContentBlockTypeMCPToolUse:
+		if b.ID == nil || *b.ID == "" {
+			return errors.New("mcp_tool_use block has no id")
+		}
+		if b.Name == nil || *b.Name == "" {
+			return errors.New("mcp_tool_use block has no name")
+		}
+		if len(b.Input) == 0 {
+			return errors.New("mcp_tool_use block has no input")
+		}
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal(b.Input, &probe); err != nil {
+			return errors.New("mcp_tool_use input is not a JSON object")
+		}
+	case ContentBlockTypeMCPToolResult:
+		if b.ToolUseID == nil || *b.ToolUseID == "" {
+			return errors.New("mcp_tool_result block has no tool_use_id")
+		}
+		if b.Content == nil {
+			return errors.New("mcp_tool_result block has no content")
 		}
 	default:
 		return fmt.Errorf("unknown anthropic content block type %q", b.Type)
@@ -636,10 +746,22 @@ func (m Message) Validate() error {
 // schema JSON: it is validated as exactly one JSON object at the
 // canonical-IR boundary and passed through byte-exact, so numbers are never
 // decoded and remarshaled through a map.
+//
+// Server-side tools (type-discriminated definitions such as
+// web_search_20250305) are admitted on the wire with their raw bytes
+// preserved; the convert layer drops or rejects them under the
+// anthropic_server_tools loss key. A chat upstream executes no server
+// tools, so they are never forwarded.
 type Tool struct {
+	Type        string          `json:"type,omitempty"`
 	Name        string          `json:"name"`
 	Description *string         `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+
+	// ServerParams carries the raw JSON of a server-side tool definition
+	// (everything besides type/name/description/input_schema, e.g.
+	// max_uses). Preserved for the loss report; never forwarded.
+	ServerParams json.RawMessage `json:"-"`
 
 	// CacheControl is the Anthropic prompt-cache marker real clients
 	// (Claude Code) attach to tool definitions; a caching performance hint
@@ -648,10 +770,72 @@ type Tool struct {
 	CacheControl any `json:"cache_control,omitempty"`
 }
 
+// UnmarshalJSON admits function tools strictly and server-side tools with
+// their raw bytes preserved: a definition carrying a type discriminator is
+// a server tool (the official client contract tags them, e.g.
+// web_search_20250305), never a malformed function tool.
+func (t *Tool) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Type ContentBlockType `json:"type"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	if probe.Type == "" {
+		var function struct {
+			Name         string          `json:"name"`
+			Description  *string         `json:"description,omitempty"`
+			InputSchema  json.RawMessage `json:"input_schema,omitempty"`
+			CacheControl any             `json:"cache_control,omitempty"`
+		}
+		if err := wire.Decode(data, &function); err != nil {
+			return err
+		}
+		*t = Tool{
+			Name:         function.Name,
+			Description:  function.Description,
+			InputSchema:  function.InputSchema,
+			CacheControl: function.CacheControl,
+		}
+		return t.Validate()
+	}
+	var server struct {
+		Type         string          `json:"type"`
+		Name         string          `json:"name"`
+		Description  *string         `json:"description,omitempty"`
+		InputSchema  json.RawMessage `json:"input_schema,omitempty"`
+		CacheControl any             `json:"cache_control,omitempty"`
+		// MaxUses and every other server-side param ride inside
+		// ServerParams below; only the envelope fields the convert layer
+		// needs for the loss report are modeled. wire.Decode would reject
+		// the unmodeled params, so the params are captured with a
+		// tolerant decode instead.
+		MaxUses *int `json:"max_uses,omitempty"`
+	}
+	if err := wire.DecodeTolerant(data, &server); err != nil {
+		return fmt.Errorf("server tool definition: %w", err)
+	}
+	*t = Tool{
+		Type:         server.Type,
+		Name:         server.Name,
+		Description:  server.Description,
+		InputSchema:  server.InputSchema,
+		ServerParams: append(t.ServerParams[:0], data...),
+		CacheControl: server.CacheControl,
+	}
+	return t.Validate()
+}
+
 // Validate checks the tool shape.
 func (t Tool) Validate() error {
 	if t.Name == "" {
 		return errors.New("anthropic tool name is empty")
+	}
+	if t.Type != "" {
+		// A server-side definition needs only its identity: the params
+		// are never forwarded, so presence-checking them would reject
+		// shapes the convert layer is about to drop-or-reject anyway.
+		return nil
 	}
 	if t.InputSchema == nil {
 		return errors.New("anthropic tool has no input_schema")

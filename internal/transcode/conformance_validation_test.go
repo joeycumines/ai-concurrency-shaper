@@ -372,22 +372,35 @@ func TestSSEReadLineCROnly(t *testing.T) {
 	}
 }
 
-// TestResponsesStreamEmptyEventNameRejected proves a Responses stream frame
-// without an event name is rejected by the Responses→Anthropic adapter: the
-// package's own rule requires event: to be present and equal the JSON type
-// tag.
-func TestResponsesStreamEmptyEventNameRejected(t *testing.T) {
+// TestResponsesStreamEmptyEventNameAccepted proves a Responses stream frame
+// without an SSE event name is routed by its decoded JSON type (the SSE
+// event field is optional and the JSON type is the authoritative
+// discriminator) and the provider quirk is recorded as the ungated
+// missing_event_name note. A present-but-mismatched name is still rejected
+// (TestResponsesStreamMismatchedEventNameRejected).
+func TestResponsesStreamEmptyEventNameAccepted(t *testing.T) {
 	ctx := testStreamContext()
-	state := newAnthropicResponsesStreamState(ctx, StrictLossPolicy(), ChatCapabilities{}, "resp_1", "m", 1)
+	state := newAnthropicResponsesStreamState(ctx, j6PermissivePolicy(), ChatCapabilities{}, "resp_1", "m", 1)
 	converter := &responsesToAnthropicConverter{state: state}
 
-	// Empty event name + valid data → rejected by the adapter guard.
-	_, err := converter.Convert(SSEEvent{
+	// Empty event name + valid data -> routed by the JSON type, note once.
+	if _, err := converter.Convert(SSEEvent{
 		Event: "",
-		Data:  []byte(`{"type":"response.created","response":{"id":"resp_1","object":"response","created_at":1,"model":"m","status":"in_progress"}}`),
-	})
-	if err == nil {
-		t.Fatal("empty event name accepted by the Responses adapter")
+		Data:  []byte(`{"type":"response.created","response":{"id":"resp_1","object":"response","created_at":1,"model":"m","status":"in_progress","output":[]}}`),
+	}); err != nil {
+		t.Fatalf("empty event name rejected: %v", err)
+	}
+	notes := 0
+	for _, loss := range state.report.Losses {
+		if loss.Feature == FeatureMissingEventName {
+			notes++
+			if loss.Kind != NoteRecord {
+				t.Fatalf("missing_event_name kind = %v, want NoteRecord", loss.Kind)
+			}
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("missing_event_name note count = %d, want 1", notes)
 	}
 }
 

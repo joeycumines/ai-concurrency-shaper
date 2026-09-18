@@ -21,6 +21,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
@@ -215,6 +216,33 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 	}
 }
 
+// TestBuildTranscodeMappingsDefaultImageAndStopSequences pins the two
+// flagship-client defaults and their withdrawal: with no capability flags
+// image input and stop sequences are on; `!image_input` and
+// `!stop_sequences` withdraw them.
+func TestBuildTranscodeMappingsDefaultImageAndStopSequences(t *testing.T) {
+	mappings, err := buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	if cap := mappings[0].Mapping.ChatCapabilities; !cap.ImageInput || !cap.StopSequences {
+		t.Fatalf("capabilities = %+v, want image_input and stop_sequences on by default", cap)
+	}
+
+	mappings, err = buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{
+		negatedCapabilities: map[string]struct{}{"image_input": {}, "stop_sequences": {}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap := mappings[0].Mapping.ChatCapabilities; cap.ImageInput || cap.StopSequences {
+		t.Fatalf("capabilities = %+v, want both withdrawn by negation", cap)
+	}
+}
+
 // TestBuildTranscodeMappingsNegation proves `!name` negations withdraw the
 // sensible defaults on every CLI mapping.
 func TestBuildTranscodeMappingsNegation(t *testing.T) {
@@ -329,6 +357,33 @@ func TestBuildTranscodeMappingsStrictDefaults(t *testing.T) {
 	}
 	if !m.LossPolicy.Allows(transcode.FeatureTopK) {
 		t.Fatal("explicit positive loss lost under strict defaults")
+	}
+}
+
+// TestBuildTranscodeMappingsMultiAgentPriming proves multi_agent_priming is off
+// by default and turns on when specified in transcodeCLIOptions.
+func TestBuildTranscodeMappingsMultiAgentPriming(t *testing.T) {
+	// Off by default
+	mappings, err := buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	if mappings[0].Mapping.ChatCapabilities.MultiAgentPriming {
+		t.Fatal("multi_agent_priming must be off by default")
+	}
+
+	// Enabled via capabilities
+	mappings, err = buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{
+		capabilities: transcode.ChatCapabilities{MultiAgentPriming: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mappings[0].Mapping.ChatCapabilities.MultiAgentPriming {
+		t.Fatal("multi_agent_priming was not merged when specified")
 	}
 }
 
@@ -449,6 +504,32 @@ func TestParseChatCapabilities(t *testing.T) {
 	}
 	if _, ok := negated["system_anywhere"]; !ok {
 		t.Fatalf("negated = %v, want system_anywhere", negated)
+	}
+
+	// tool_result_images is an independent granular capability: it enables
+	// multipart image parts inside chat tool messages.
+	cap, negated, err = parseChatCapabilities([]string{"tool_result_images"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cap.ToolResultImages {
+		t.Fatalf("capabilities = %+v, want ToolResultImages", cap)
+	}
+	if cap.ImageInput {
+		t.Fatalf("capabilities = %+v, tool_result_images must not imply image_input", cap)
+	}
+	if len(negated) != 0 {
+		t.Fatalf("negated = %v, want none", negated)
+	}
+	cap, negated, err = parseChatCapabilities([]string{"!tool_result_images"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap.ToolResultImages {
+		t.Fatalf("capabilities = %+v, want ToolResultImages unset", cap)
+	}
+	if _, ok := negated["tool_result_images"]; !ok {
+		t.Fatalf("negated = %v, want tool_result_images", negated)
 	}
 }
 
@@ -650,7 +731,7 @@ func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 	if !mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureUsageUnknown) {
 		t.Fatal("loss policy not applied to the mapping")
 	}
-	if mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureOutputPhase) {
+	if mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureToolSchemaStrictness) {
 		t.Fatal("loss policy leaks unapproved features")
 	}
 }
@@ -1452,5 +1533,153 @@ func TestResolveAndValidate_MessagesResponses_StrictDefaultsRequiresLoss(t *test
 	}
 	if err := cfgWithLoss.ResolveAndValidate(); err != nil {
 		t.Fatalf("ResolveAndValidate (with loss): %v", err)
+	}
+}
+
+// TestResolveTranscodeContinuityFlags proves the opt-in continuity wiring:
+// off by default (no store on mappings); enabled shares one store across
+// the provider's mappings keyed by provider name; negative capacity/TTL
+// fail validation.
+func TestResolveTranscodeContinuityFlags(t *testing.T) {
+	base := func() *Provider {
+		return &Provider{
+			Name:                   "test-provider",
+			Upstream:               "https://upstream.example",
+			TranscodeResponsesChat: true,
+			TranscodeMessagesChat:  true,
+		}
+	}
+	// Off by default: no store.
+	off := base()
+	if err := off.resolveTranscode(nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range off.transcodeMappings {
+		if m.Continuity != nil {
+			t.Fatal("continuity store set by default, want nil (stateless default)")
+		}
+	}
+	// Enabled: one shared store, keyed by provider name.
+	on := base()
+	on.TranscodeContinuity = true
+	on.TranscodeContinuityCap = 4
+	if err := on.resolveTranscode(nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(on.transcodeMappings) != 2 {
+		t.Fatalf("mappings = %d, want 2", len(on.transcodeMappings))
+	}
+	first := on.transcodeMappings[0].Continuity
+	if first == nil {
+		t.Fatal("enabled mapping has no store")
+	}
+	for _, m := range on.transcodeMappings {
+		if m.Continuity != first {
+			t.Fatal("mappings do not share one store")
+		}
+		if m.ContinuityKey != "test-provider" {
+			t.Fatalf("key = %q, want provider name", m.ContinuityKey)
+		}
+	}
+	if first.Capacity() != 4 {
+		t.Fatalf("capacity = %d, want 4", first.Capacity())
+	}
+	// Distinct providers receive independent stores without cross-provider leakage.
+	on2 := base()
+	on2.Name = "second-provider"
+	on2.TranscodeContinuity = true
+	on2.TranscodeContinuityCap = 4
+	if err := on2.resolveTranscode(nil); err != nil {
+		t.Fatal(err)
+	}
+	second := on2.transcodeMappings[0].Continuity
+	if second == nil {
+		t.Fatal("second provider has no store")
+	}
+	if second == first {
+		t.Fatal("distinct providers shared the same continuity store instance")
+	}
+
+	// Negative capacity rejected.
+	neg := base()
+	neg.TranscodeContinuity = true
+	neg.TranscodeContinuityCap = -1
+	if err := neg.resolveTranscode(nil); err == nil {
+		t.Fatal("negative capacity accepted, want rejection")
+	}
+	// Negative TTL rejected.
+	negTTL := base()
+	negTTL.TranscodeContinuity = true
+	negTTL.TranscodeContinuityTTL = -time.Second
+	if err := negTTL.resolveTranscode(nil); err == nil {
+		t.Fatal("negative TTL accepted, want rejection")
+	}
+}
+
+// TestParseTranscodeProfiles verifies the -transcode-profile flag parsing:
+// name=model:tier and name=model forms, duplicate rejection, and closed
+// tier-vocabulary validation.
+func TestParseTranscodeProfiles(t *testing.T) {
+	empty, err := parseTranscodeProfiles(nil)
+	if err != nil {
+		t.Fatalf("empty: %v", err)
+	}
+	if len(empty.Profiles) != 0 {
+		t.Errorf("empty profiles = %d, want 0", len(empty.Profiles))
+	}
+
+	profiles, err := parseTranscodeProfiles([]string{
+		"scanner=gpt-4o-mini:low",
+		"analyst=gpt-4o:high",
+		"basic=gpt-4o-mini",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(profiles.Profiles) != 3 {
+		t.Fatalf("profiles = %d, want 3", len(profiles.Profiles))
+	}
+	scanner := profiles.Profiles["scanner"]
+	if scanner.Model != "gpt-4o-mini" || scanner.ReasoningTier != "low" {
+		t.Errorf("scanner = %+v, want model=gpt-4o-mini tier=low", scanner)
+	}
+	analyst := profiles.Profiles["analyst"]
+	if analyst.Model != "gpt-4o" || analyst.ReasoningTier != "high" {
+		t.Errorf("analyst = %+v, want model=gpt-4o tier=high", analyst)
+	}
+	basic := profiles.Profiles["basic"]
+	if basic.Model != "gpt-4o-mini" || basic.ReasoningTier != "" {
+		t.Errorf("basic = %+v, want model=gpt-4o-mini tier=''", basic)
+	}
+
+	for _, bad := range []string{
+		"noequals",
+		"=model",
+		"name=",
+		"name=model:",
+		"name=:tier",
+		"name=model:not-a-tier",
+	} {
+		if _, err := parseTranscodeProfiles([]string{bad}); err == nil {
+			t.Errorf("parseTranscodeProfiles(%q): want error", bad)
+		}
+	}
+	if _, err := parseTranscodeProfiles([]string{"a=m1", "a=m2"}); err == nil {
+		t.Error("duplicate name: want error")
+	}
+}
+
+// TestParseTranscodeProfilesAllTiers verifies every closed-vocabulary effort
+// tier parses as a profile tier.
+func TestParseTranscodeProfilesAllTiers(t *testing.T) {
+	for _, tier := range transcode.ModelEfforts {
+		profiles, err := parseTranscodeProfiles([]string{"p=m:" + tier})
+		if err != nil {
+			t.Errorf("tier %q: %v", tier, err)
+			continue
+		}
+		if profiles.Profiles["p"].ReasoningTier != tier {
+			t.Errorf("tier %q not preserved", tier)
+		}
 	}
 }

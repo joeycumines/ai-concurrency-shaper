@@ -2326,3 +2326,66 @@ func waitTCPReady(addr string, timeout time.Duration) error {
 	}
 	return fmt.Errorf("address %s did not become reachable", addr)
 }
+
+// TestModelTableScopeExitsTwo pins the server-scope table flag inside a
+// --provider section as a usage error: exit 2, error + "-h" hint on stderr,
+// no usage dump.
+func TestModelTableScopeExitsTwo(t *testing.T) {
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin, "--provider=a", "-upstream", "https://x", "-model-table", "x@a=y")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("want exit error, got %v (stdout %s)", err, out)
+	}
+	if code := exitErr.ExitCode(); code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	msg := stderr.String()
+	for _, want := range []string{"error:", "-h", "server options are not allowed in provider sections"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("stderr missing %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "Usage:") {
+		t.Errorf("stderr should hint at -h, not dump full usage:\n%s", msg)
+	}
+}
+
+// TestModelTableSemanticStillExitsOne pins a malformed table entry as a
+// semantic failure: exit 1, naming the flag, with no "-h" hint.
+func TestModelTableSemanticStillExitsOne(t *testing.T) {
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin, "-upstream", "https://x", "-model-table", "badentry")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	_, err := cmd.Output()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("want exit error, got %v", err)
+	}
+	if code := exitErr.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d, want 1 (semantic failure)", code)
+	}
+	msg := stderr.String()
+	if !strings.Contains(msg, "-model-table") {
+		t.Errorf("stderr should name the flag:\n%s", msg)
+	}
+	if strings.Contains(msg, "run with -h for usage") {
+		t.Errorf("semantic failures must not carry the usage hint:\n%s", msg)
+	}
+}
