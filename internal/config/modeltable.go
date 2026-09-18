@@ -17,6 +17,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strconv"
@@ -30,7 +31,9 @@ import (
 //	entry = surrogate "@" provider "=" wire [ ";" facts ]
 //	facts = fact *( ";" fact )
 //	fact  = context=pos-int | max_output=pos-int | efforts=effort+... |
-//	        modalities=modality+... | default | deprecated
+//	        modalities=modality+... | default | deprecated |
+//	        cost_input=non-neg-decimal | cost_output=non-neg-decimal |
+//	        tags=tag+... | description=desc | created=non-neg-int
 //
 // The first '=' splits the surrogate@provider left side from the wire id and
 // facts; the first '@' splits the surrogate from the provider; the first ';'
@@ -159,9 +162,9 @@ func parseModelTableEntry(raw string) (modelTableEntry, error) {
 			}
 			entry.Deprecated = true
 		case "cost_input", "cost_output":
-			f, ok := parseModelTablePositiveFloat(value)
+			f, ok := parseModelTableNonNegativeFloat(value)
 			if !hasValue || !ok {
-				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: invalid %s %q: want positive decimal", raw, key, value)
+				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: invalid %s %q: want non-negative decimal", raw, key, value)
 			}
 			if key == "cost_input" {
 				entry.CostInput = &f
@@ -236,12 +239,12 @@ func parseModelTablePositiveInt(value string) (int, bool) {
 	return n, true
 }
 
-func parseModelTablePositiveFloat(value string) (float64, bool) {
+func parseModelTableNonNegativeFloat(value string) (float64, bool) {
 	if value == "" || len(value) > 32 {
 		return 0, false
 	}
 	f, err := strconv.ParseFloat(value, 64)
-	if err != nil || f <= 0 {
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || math.Signbit(f) {
 		return 0, false
 	}
 	return f, true

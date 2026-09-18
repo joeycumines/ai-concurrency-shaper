@@ -18,6 +18,7 @@ package transcode
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -464,10 +465,10 @@ func validCatalogModel(model CatalogModel) bool {
 			return false
 		}
 	}
-	if model.CostInput != nil && *model.CostInput < 0 {
+	if model.CostInput != nil && (*model.CostInput < 0 || math.Signbit(*model.CostInput) || math.IsNaN(*model.CostInput) || math.IsInf(*model.CostInput, 0)) {
 		return false
 	}
-	if model.CostOutput != nil && *model.CostOutput < 0 {
+	if model.CostOutput != nil && (*model.CostOutput < 0 || math.Signbit(*model.CostOutput) || math.IsNaN(*model.CostOutput) || math.IsInf(*model.CostOutput, 0)) {
 		return false
 	}
 	if model.Created < 0 {

@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -260,6 +261,10 @@ func TestCatalogOpenAIEntryGolden(t *testing.T) {
 func TestCatalogMalformedEntrySkipped(t *testing.T) {
 	badContext := 0
 	badOut := -5
+	nanCost := math.NaN()
+	infCost := math.Inf(1)
+	negCost := -0.01
+	negZero := math.Copysign(0.0, -1.0)
 	cases := []struct {
 		name  string
 		model CatalogModel
@@ -268,6 +273,10 @@ func TestCatalogMalformedEntrySkipped(t *testing.T) {
 		{"bad max_output", CatalogModel{Surrogate: "bad", MaxOutput: &badOut}},
 		{"bad effort", CatalogModel{Surrogate: "bad", Efforts: []string{"bogus"}}},
 		{"bad modality", CatalogModel{Surrogate: "bad", Modalities: []string{"video"}}},
+		{"nan cost_input", CatalogModel{Surrogate: "bad", CostInput: &nanCost}},
+		{"inf cost_output", CatalogModel{Surrogate: "bad", CostOutput: &infCost}},
+		{"negative cost_input", CatalogModel{Surrogate: "bad", CostInput: &negCost}},
+		{"negative zero cost_output", CatalogModel{Surrogate: "bad", CostOutput: &negZero}},
 	}
 	context := 128000
 	for _, tc := range cases {
@@ -598,6 +607,73 @@ func TestCatalogRichFacts(t *testing.T) {
 	}
 	if codexEntry.CostInput == nil || *codexEntry.CostInput != 0.0015 {
 		t.Errorf("codex cost_input = %v", codexEntry.CostInput)
+	}
+}
+
+func TestCatalogZeroCostModel(t *testing.T) {
+	zeroIn := 0.0
+	zeroOut := 0.0
+	handler, err := NewCatalogHandler(CatalogConfig{
+		ProviderName: "TestProv",
+		Models: []CatalogModel{
+			{
+				Surrogate:  "free-model",
+				Provider:   "custom-provider",
+				CostInput:  &zeroIn,
+				CostOutput: &zeroOut,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// OpenAI shape
+	rec := catalogGet(t, handler, "/v1/models?format=openai", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("openai list status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var openAIDoc openAICatalogDocument
+	if err := json.Unmarshal(rec.Body.Bytes(), &openAIDoc); err != nil {
+		t.Fatal(err)
+	}
+	if len(openAIDoc.Data) != 1 {
+		t.Fatalf("openai models len = %d", len(openAIDoc.Data))
+	}
+	if openAIDoc.Data[0].Pricing == nil || *openAIDoc.Data[0].Pricing.Input != 0 || *openAIDoc.Data[0].Pricing.Output != 0 {
+		t.Errorf("unexpected pricing in openai doc: %+v", openAIDoc.Data[0].Pricing)
+	}
+
+	// Anthropic shape
+	rec = catalogGet(t, handler, "/v1/models?format=anthropic", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("anthropic list status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var anthropicDoc anthropicCatalogDocument
+	if err := json.Unmarshal(rec.Body.Bytes(), &anthropicDoc); err != nil {
+		t.Fatal(err)
+	}
+	if len(anthropicDoc.Data) != 1 {
+		t.Fatalf("anthropic models len = %d", len(anthropicDoc.Data))
+	}
+	if anthropicDoc.Data[0].Pricing == nil || *anthropicDoc.Data[0].Pricing.InputCost != 0 || *anthropicDoc.Data[0].Pricing.OutputCost != 0 {
+		t.Errorf("unexpected pricing in anthropic doc: %+v", anthropicDoc.Data[0].Pricing)
+	}
+
+	// Codex shape
+	rec = catalogGet(t, handler, "/v1/models?format=codex", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("codex list status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var codexDoc codexCatalogDocument
+	if err := json.Unmarshal(rec.Body.Bytes(), &codexDoc); err != nil {
+		t.Fatal(err)
+	}
+	if len(codexDoc.Models) != 1 {
+		t.Fatalf("codex models len = %d", len(codexDoc.Models))
+	}
+	if codexDoc.Models[0].CostInput == nil || *codexDoc.Models[0].CostInput != 0 || codexDoc.Models[0].CostOutput == nil || *codexDoc.Models[0].CostOutput != 0 {
+		t.Errorf("unexpected pricing in codex doc: %+v", codexDoc.Models[0])
 	}
 }
 

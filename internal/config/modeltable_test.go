@@ -203,6 +203,43 @@ func TestParseModelTableEntry_RichFacts(t *testing.T) {
 	}
 }
 
+// TestParseModelTableEntry_Costs verifies that non-negative decimal costs (including 0 and 0.0)
+// are accepted, while negative values, NaN, and Inf are rejected.
+func TestParseModelTableEntry_Costs(t *testing.T) {
+	entry, err := parseModelTableEntry("s@p=w;cost_input=0;cost_output=0.0")
+	if err != nil {
+		t.Fatalf("expected cost_input=0;cost_output=0.0 to succeed, got: %v", err)
+	}
+	if entry.CostInput == nil || *entry.CostInput != 0.0 {
+		t.Errorf("CostInput = %v, want 0.0", entry.CostInput)
+	}
+	if entry.CostOutput == nil || *entry.CostOutput != 0.0 {
+		t.Errorf("CostOutput = %v, want 0.0", entry.CostOutput)
+	}
+
+	badCases := []struct {
+		raw  string
+		want string
+	}{
+		{"s@p=w;cost_input=-1", `invalid -model-table "s@p=w;cost_input=-1": invalid cost_input "-1": want non-negative decimal`},
+		{"s@p=w;cost_input=-0", `invalid -model-table "s@p=w;cost_input=-0": invalid cost_input "-0": want non-negative decimal`},
+		{"s@p=w;cost_input=-0.0", `invalid -model-table "s@p=w;cost_input=-0.0": invalid cost_input "-0.0": want non-negative decimal`},
+		{"s@p=w;cost_input=-0.01", `invalid -model-table "s@p=w;cost_input=-0.01": invalid cost_input "-0.01": want non-negative decimal`},
+		{"s@p=w;cost_input=NaN", `invalid -model-table "s@p=w;cost_input=NaN": invalid cost_input "NaN": want non-negative decimal`},
+		{"s@p=w;cost_input=+Inf", `invalid -model-table "s@p=w;cost_input=+Inf": invalid cost_input "+Inf": want non-negative decimal`},
+		{"s@p=w;cost_input=-Inf", `invalid -model-table "s@p=w;cost_input=-Inf": invalid cost_input "-Inf": want non-negative decimal`},
+		{"s@p=w;cost_input=Inf", `invalid -model-table "s@p=w;cost_input=Inf": invalid cost_input "Inf": want non-negative decimal`},
+		{"s@p=w;cost_output=-1", `invalid -model-table "s@p=w;cost_output=-1": invalid cost_output "-1": want non-negative decimal`},
+		{"s@p=w;cost_output=NaN", `invalid -model-table "s@p=w;cost_output=NaN": invalid cost_output "NaN": want non-negative decimal`},
+		{"s@p=w;cost_output=+Inf", `invalid -model-table "s@p=w;cost_output=+Inf": invalid cost_output "+Inf": want non-negative decimal`},
+		{"s@p=w;cost_input=abc", `invalid -model-table "s@p=w;cost_input=abc": invalid cost_input "abc": want non-negative decimal`},
+		{"s@p=w;cost_input=", `invalid -model-table "s@p=w;cost_input=": invalid cost_input "": want non-negative decimal`},
+	}
+	for _, tc := range badCases {
+		assertModelTableParseError(t, tc.raw, tc.want)
+	}
+}
+
 // TestParseModelTableEntry_DuplicateFact rejects a repeated fact key.
 func TestParseModelTableEntry_DuplicateFact(t *testing.T) {
 	assertModelTableParseError(t, "s@p=w;context=1;context=2",
