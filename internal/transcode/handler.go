@@ -1229,7 +1229,9 @@ func (h *TranscodeHandler) streamResponse(
 				if echo := context.OriginalResponsesRequest; echo != nil && echo.Store != nil {
 					storeFalse = !*echo.Store
 				}
-				h.cfg.Continuity.Record(h.cfg.ContinuityKey, id, turns, depth, storeFalse)
+				if dropped := h.cfg.Continuity.RecordEvicted(h.cfg.ContinuityKey, id, turns, depth, storeFalse); dropped > 0 {
+					h.logRequestError(r, fmt.Errorf("[local_response_conversion_error] continuity store evicted %d chain(s) at capacity/TTL bound", dropped))
+				}
 			}
 		}
 	}

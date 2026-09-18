@@ -2563,42 +2563,61 @@ When delegating work to sub-agents:
 4. Call close_agent with target once an agent is completed or no longer needed.
 5. If an agent was closed and needs further work, call resume_agent with id to reopen it.`
 
-// applyMultiAgentPriming appends the protocol reminder to the leading system message,
-// creating a leading system message if none exists. It preserves the client's own
-// instructions byte-identically and records FeatureMultiAgentPriming as a Note.
+// applyMultiAgentPriming appends the protocol reminder to the leading system or
+// developer message, creating a leading system message if none exists. It preserves
+// the caller's messages and content structs without mutation, keeps raw string
+// content as strings, preserves developer roles, and records FeatureMultiAgentPriming
+// as an accurate Note for the branch taken.
 func applyMultiAgentPriming(messages []ChatMessage, report *ConversionReport) ([]ChatMessage, error) {
+	if len(messages) > 0 && (messages[0].Role == ChatMessageRoleSystem || messages[0].Role == ChatMessageRoleDeveloper) {
+		leadRole := messages[0].Role
+		noteDesc := "multi-agent protocol reminder appended to leading system turn"
+		if leadRole == ChatMessageRoleDeveloper {
+			noteDesc = "multi-agent protocol reminder appended to leading developer turn"
+		}
+		if err := report.Note(
+			FeatureMultiAgentPriming,
+			"messages[0].content",
+			noteDesc,
+		); err != nil {
+			return nil, err
+		}
+
+		cloned := make([]ChatMessage, len(messages))
+		copy(cloned, messages)
+
+		content := messages[0].Content
+		newContent := &ChatMessageContent{}
+		if content != nil && content.ContentStr != nil {
+			newStr := *content.ContentStr + "\n\n" + MultiAgentPrimingReminderText
+			newContent.ContentStr = &newStr
+		} else {
+			var newBlocks []ChatContentBlock
+			if content != nil && len(content.ContentBlocks) > 0 {
+				newBlocks = make([]ChatContentBlock, len(content.ContentBlocks), len(content.ContentBlocks)+1)
+				copy(newBlocks, content.ContentBlocks)
+			}
+			text := MultiAgentPrimingReminderText
+			newBlocks = append(newBlocks, ChatContentBlock{
+				Type: ChatContentBlockTypeText,
+				Text: &text,
+			})
+			newContent.ContentBlocks = newBlocks
+		}
+
+		cloned[0].Content = newContent
+		return cloned, nil
+	}
+
+	// No leading system or developer message existed: prepend one
 	if err := report.Note(
 		FeatureMultiAgentPriming,
-		"messages[0].content",
-		"multi-agent protocol reminder appended to leading system turn",
+		"messages[0]",
+		"multi-agent protocol reminder prepended as leading system turn",
 	); err != nil {
 		return nil, err
 	}
 
-	if len(messages) > 0 && messages[0].Role == ChatMessageRoleSystem {
-		// Append after existing content blocks in leading system turn
-		content := messages[0].Content
-		if content == nil {
-			content = &ChatMessageContent{}
-		}
-		if content.ContentStr != nil {
-			// Convert string content to text content block before appending
-			content.ContentBlocks = append(content.ContentBlocks, ChatContentBlock{
-				Type: ChatContentBlockTypeText,
-				Text: content.ContentStr,
-			})
-			content.ContentStr = nil
-		}
-		text := MultiAgentPrimingReminderText
-		content.ContentBlocks = append(content.ContentBlocks, ChatContentBlock{
-			Type: ChatContentBlockTypeText,
-			Text: &text,
-		})
-		messages[0].Content = content
-		return messages, nil
-	}
-
-	// No leading system message existed: prepend one
 	text := MultiAgentPrimingReminderText
 	sysMsg := ChatMessage{
 		Role: ChatMessageRoleSystem,
@@ -2611,5 +2630,8 @@ func applyMultiAgentPriming(messages []ChatMessage, report *ConversionReport) ([
 			},
 		},
 	}
-	return append([]ChatMessage{sysMsg}, messages...), nil
+	res := make([]ChatMessage, 0, len(messages)+1)
+	res = append(res, sysMsg)
+	res = append(res, messages...)
+	return res, nil
 }

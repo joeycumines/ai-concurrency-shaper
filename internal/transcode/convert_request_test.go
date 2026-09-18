@@ -388,3 +388,116 @@ func TestRenderChatMultiAgentPriming(t *testing.T) {
 		t.Fatalf("unexpected error message: %v", err)
 	}
 }
+
+func TestApplyMultiAgentPriming_NonMutatingStringPreservationAndDeveloperRole(t *testing.T) {
+	// 1. String preservation & non-mutation:
+	origStr := "System prompt string"
+	origContent := &ChatMessageContent{
+		ContentStr: &origStr,
+	}
+	messages := []ChatMessage{
+		{
+			Role:    ChatMessageRoleSystem,
+			Content: origContent,
+		},
+	}
+	var report ConversionReport
+	primed, err := applyMultiAgentPriming(messages, &report)
+	if err != nil {
+		t.Fatalf("applyMultiAgentPriming failed: %v", err)
+	}
+
+	// Verify input was NOT mutated
+	if messages[0].Content != origContent {
+		t.Errorf("input messages[0].Content pointer changed")
+	}
+	if origContent.ContentStr == nil || *origContent.ContentStr != "System prompt string" {
+		t.Errorf("original ContentStr was mutated: %v", origContent.ContentStr)
+	}
+	if origContent.ContentBlocks != nil {
+		t.Errorf("original ContentBlocks was mutated: %v", origContent.ContentBlocks)
+	}
+
+	// Verify output preserved string format
+	if primed[0].Content.ContentStr == nil {
+		t.Fatalf("primed[0].Content.ContentStr is nil (should have preserved string format)")
+	}
+	wantStr := "System prompt string\n\n" + MultiAgentPrimingReminderText
+	if *primed[0].Content.ContentStr != wantStr {
+		t.Errorf("primed[0].Content.ContentStr = %q, want %q", *primed[0].Content.ContentStr, wantStr)
+	}
+	if primed[0].Content.ContentBlocks != nil {
+		t.Errorf("primed[0].Content.ContentBlocks should be nil for string system prompt")
+	}
+
+	// 2. Developer role preservation:
+	devStr := "Developer prompt string"
+	devMessages := []ChatMessage{
+		{
+			Role:    ChatMessageRoleDeveloper,
+			Content: &ChatMessageContent{ContentStr: &devStr},
+		},
+		{
+			Role:    ChatMessageRoleUser,
+			Content: &ChatMessageContent{ContentStr: &origStr},
+		},
+	}
+	var reportDev ConversionReport
+	primedDev, err := applyMultiAgentPriming(devMessages, &reportDev)
+	if err != nil {
+		t.Fatalf("applyMultiAgentPriming on developer role failed: %v", err)
+	}
+	if len(primedDev) != 2 {
+		t.Fatalf("expected 2 messages, got %d (should not have prepended a system message)", len(primedDev))
+	}
+	if primedDev[0].Role != ChatMessageRoleDeveloper {
+		t.Errorf("primedDev[0].Role = %s, want developer", primedDev[0].Role)
+	}
+	// Note description should state appended to leading developer turn
+	foundDevNote := false
+	for _, l := range reportDev.Losses {
+		if l.Feature == FeatureMultiAgentPriming && strings.Contains(l.Detail, "developer turn") {
+			foundDevNote = true
+			break
+		}
+	}
+	if !foundDevNote {
+		t.Errorf("expected developer turn note in report, got: %+v", reportDev.Losses)
+	}
+
+	// 3. Prepending note accuracy when no system/developer turn exists:
+	userMessages := []ChatMessage{
+		{
+			Role:    ChatMessageRoleUser,
+			Content: &ChatMessageContent{ContentStr: &origStr},
+		},
+	}
+	var reportUser ConversionReport
+	primedUser, err := applyMultiAgentPriming(userMessages, &reportUser)
+	if err != nil {
+		t.Fatalf("applyMultiAgentPriming on user message failed: %v", err)
+	}
+	if len(primedUser) != 2 {
+		t.Fatalf("expected 2 messages (prepended system + user), got %d", len(primedUser))
+	}
+	foundPrependNote := false
+	for _, l := range reportUser.Losses {
+		if l.Feature == FeatureMultiAgentPriming && strings.Contains(l.Detail, "prepended") && l.Path == "messages[0]" {
+			foundPrependNote = true
+			break
+		}
+	}
+	if !foundPrependNote {
+		t.Errorf("expected prepended note with path messages[0], got: %+v", reportUser.Losses)
+	}
+
+	// 4. Empty slice case:
+	var reportEmpty ConversionReport
+	primedEmpty, err := applyMultiAgentPriming(nil, &reportEmpty)
+	if err != nil {
+		t.Fatalf("applyMultiAgentPriming on nil slice failed: %v", err)
+	}
+	if len(primedEmpty) != 1 || primedEmpty[0].Role != ChatMessageRoleSystem {
+		t.Fatalf("expected 1 prepended system message, got %d", len(primedEmpty))
+	}
+}

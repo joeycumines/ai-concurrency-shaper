@@ -1,14 +1,18 @@
 package transcode
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/testcorpus"
 )
 
 // TestContinuityStoreDisabledByDefault proves the statefulness decision at
@@ -500,5 +504,64 @@ func TestContinuityForeignIdRefusal(t *testing.T) {
 	_, _, ok = store.Resolve("provider2", "resp-a")
 	if ok {
 		t.Error("foreign provider should not resolve")
+	}
+}
+
+func TestContinuityStreamingEvictionLogging(t *testing.T) {
+	store := NewContinuityStore(ContinuityConfig{Capacity: 1, TTL: time.Hour})
+	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	mapping.AllowedClientQuery = map[string]struct{}{}
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:       mapping,
+			Upstream:      mustParseURL(t, "https://upstream.example"),
+			BodyLimits:    BodyLimits{AcceptedRequestBytes: 1 << 20, SuccessfulResponseBytes: 1 << 20},
+			Continuity:    store,
+			ContinuityKey: "test-map",
+		},
+		func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header: http.Header{
+					"Content-Type": []string{"text/event-stream"},
+				},
+				Body: io.NopCloser(bytes.NewReader(testcorpus.ChatCompletionsStreamSSE())),
+			}, nil
+		},
+		nil,
+	)
+
+	// Stream 1: records first chain
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"q1","stream":true}`))
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("stream 1 status = %d: %s", rec1.Code, rec1.Body.String())
+	}
+	if store.Len() != 1 {
+		t.Fatalf("store len after stream 1 = %d, want 1", store.Len())
+	}
+
+	// Stream 2: causes eviction, verify log output
+	var logBuf bytes.Buffer
+	origWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origWriter)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"q2","stream":true}`))
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("stream 2 status = %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	logOutput := logBuf.String()
+	wantLog := "continuity store evicted 1 chain(s) at capacity/TTL bound"
+	if !strings.Contains(logOutput, wantLog) {
+		t.Errorf("expected log output to contain %q, got: %q", wantLog, logOutput)
+	}
+	if !strings.Contains(logOutput, "[local_response_conversion_error]") {
+		t.Errorf("expected log output to contain [local_response_conversion_error], got: %q", logOutput)
 	}
 }
