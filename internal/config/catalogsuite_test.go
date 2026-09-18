@@ -167,3 +167,83 @@ func TestResolveCatalogSuites_PrefixOverlap(t *testing.T) {
 		t.Fatal("expected error for catalog suite overlapping with provider prefix, got nil")
 	}
 }
+
+func TestCleanCatalogPrefix_MultipleTrailingSlashes(t *testing.T) {
+	cases := []struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"/suite///", "/suite", false},
+		{"///", "", false},
+		{"/a/b//", "/a/b", false},
+		{"/c", "/c", false},
+		{"", "", false},
+		{"/", "", false},
+		{"bad", "", true},
+	}
+	for _, tc := range cases {
+		got, err := cleanCatalogPrefix(tc.input)
+		if tc.wantErr && err == nil {
+			t.Errorf("cleanCatalogPrefix(%q) expected error, got nil", tc.input)
+		} else if !tc.wantErr && err != nil {
+			t.Errorf("cleanCatalogPrefix(%q) unexpected error: %v", tc.input, err)
+		} else if got != tc.want {
+			t.Errorf("cleanCatalogPrefix(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestResolveCatalogSuites_DuplicateSuiteNames(t *testing.T) {
+	// Explicit duplicate name
+	cfg := &Config{
+		Server: Server{
+			CatalogSuites: []string{"custom@/suite1", "custom@/suite2"},
+		},
+	}
+	if err := cfg.ResolveAndValidate(); err == nil {
+		t.Fatal("expected error for duplicate explicit catalog suite names, got nil")
+	}
+
+	// Derived duplicate name (/a-b and /a/b both derive to "a-b")
+	cfg2 := &Config{
+		Server: Server{
+			CatalogSuites: []string{"/a-b", "/a/b"},
+		},
+	}
+	if err := cfg2.ResolveAndValidate(); err == nil {
+		t.Fatal("expected error for duplicate derived catalog suite names, got nil")
+	}
+}
+
+func TestConfig_Limits(t *testing.T) {
+	// Defaults when no provider overrides exist
+	cfg := &Config{}
+	limits := cfg.Limits()
+	if limits.AcceptedRequestBytes != transcode.DefaultAcceptedRequestBytes {
+		t.Errorf("AcceptedRequestBytes = %d, want %d", limits.AcceptedRequestBytes, transcode.DefaultAcceptedRequestBytes)
+	}
+
+	// Provider overrides
+	cfgOverrides := &Config{
+		Providers: []*Provider{
+			{
+				TranscodeMaxRequestMB:  50,
+				TranscodeMaxResponseMB: 60,
+				RetryMaxBodyMB:         40,
+			},
+		},
+	}
+	limitsOverrides := cfgOverrides.Limits()
+	if limitsOverrides.DecodedRequestBytes != 50<<20 {
+		t.Errorf("DecodedRequestBytes = %d, want %d", limitsOverrides.DecodedRequestBytes, 50<<20)
+	}
+	if limitsOverrides.SuccessfulResponseBytes != 60<<20 {
+		t.Errorf("SuccessfulResponseBytes = %d, want %d", limitsOverrides.SuccessfulResponseBytes, 60<<20)
+	}
+	if limitsOverrides.RetryReplayBytes != 40<<20 {
+		t.Errorf("RetryReplayBytes = %d, want %d", limitsOverrides.RetryReplayBytes, 40<<20)
+	}
+}
+
+

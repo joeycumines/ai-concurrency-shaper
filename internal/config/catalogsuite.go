@@ -138,13 +138,13 @@ func parseCatalogSuite(raw string) (CatalogSuiteConfig, error) {
 }
 
 func cleanCatalogPrefix(prefix string) (string, error) {
-	if prefix == "" || prefix == "/" {
+	if prefix == "" || strings.TrimRight(prefix, "/") == "" {
 		return "", nil
 	}
 	if !strings.HasPrefix(prefix, "/") {
 		return "", fmt.Errorf("prefix must start with /, got %q", prefix)
 	}
-	return strings.TrimSuffix(prefix, "/"), nil
+	return strings.TrimRight(prefix, "/"), nil
 }
 
 // resolveCatalogSuites parses, validates, and checks prefix non-overlap for all
@@ -160,8 +160,11 @@ func (c *Config) resolveCatalogSuites() error {
 		if err != nil {
 			return err
 		}
-		// Check overlap against earlier catalog suites
+		// Check uniqueness of suite name and overlap against earlier catalog suites
 		for _, prev := range suites {
+			if suite.Name == prev.Name {
+				return fmt.Errorf("duplicate catalog suite name %q in %q (previously defined in %q)", suite.Name, suite.Raw, prev.Raw)
+			}
 			if segmentsOverlap(suite.Prefix, prev.Prefix) {
 				return fmt.Errorf("catalog suite prefix %q in %q overlaps with catalog suite prefix %q", suite.Prefix, suite.Raw, prev.Prefix)
 			}
@@ -188,3 +191,30 @@ func (c *Config) CatalogSuites() []CatalogSuiteConfig {
 	}
 	return out
 }
+
+// Limits returns the effective body limits for global and suite endpoints.
+func (c *Config) Limits() transcode.BodyLimits {
+	var limits transcode.BodyLimits
+	for _, p := range c.Providers {
+		if p.TranscodeMaxRequestMB > 0 {
+			b := p.TranscodeMaxRequestMB << 20
+			if b > limits.DecodedRequestBytes {
+				limits.DecodedRequestBytes = b
+			}
+		}
+		if p.TranscodeMaxResponseMB > 0 {
+			b := p.TranscodeMaxResponseMB << 20
+			if b > limits.SuccessfulResponseBytes {
+				limits.SuccessfulResponseBytes = b
+			}
+		}
+		if p.RetryMaxBodyMB > 0 {
+			b := p.RetryMaxBodyMB << 20
+			if b > limits.RetryReplayBytes {
+				limits.RetryReplayBytes = b
+			}
+		}
+	}
+	return limits.WithDefaults()
+}
+

@@ -43,6 +43,7 @@ type SuiteConfig struct {
 	DefaultShape   transcode.CatalogShape
 	ModelRoutes    []ModelRoute
 	Fallback       http.Handler // optional fallback handler when 1 provider is available
+	Limits         transcode.BodyLimits
 }
 
 // CatalogSuiteHandler serves catalog queries and routes model-specific completion
@@ -54,6 +55,7 @@ type CatalogSuiteHandler struct {
 	defaultShape   transcode.CatalogShape
 	modelMap       map[string]http.Handler
 	fallback       http.Handler
+	limits         transcode.BodyLimits
 }
 
 // NewCatalogSuiteHandler builds a new CatalogSuiteHandler.
@@ -71,6 +73,7 @@ func NewCatalogSuiteHandler(cfg SuiteConfig) *CatalogSuiteHandler {
 		defaultShape:   cfg.DefaultShape,
 		modelMap:       models,
 		fallback:       cfg.Fallback,
+		limits:         cfg.Limits.WithDefaults(),
 	}
 }
 
@@ -127,8 +130,8 @@ func isCompletionRoute(path string) bool {
 func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Request) {
 	shape := h.shapeForCompletion(r)
 
-	// Read body with limit (up to 10MB) to peek model
-	const maxPeekBytes = 10 << 20
+	// Read body with limit to peek model
+	maxPeekBytes := h.limits.AcceptedRequestBytes
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxPeekBytes+1))
 	_ = r.Body.Close()
 	if err != nil {
@@ -162,7 +165,11 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 
 	// Restore request body for target
 	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
 	r.ContentLength = int64(len(body))
+	r.TransferEncoding = nil
 
 	target.ServeHTTP(w, r)
 }

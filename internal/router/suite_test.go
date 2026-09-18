@@ -343,3 +343,118 @@ func TestCatalogSuite_SubresourceNotCatalog(t *testing.T) {
 		t.Fatalf("expected fallback handler to be called for /v1/models/m1/extra, got code %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestCatalogSuite_ServeCompletion_GetBodyAndTransferEncoding(t *testing.T) {
+	var targetReq *http.Request
+	target := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetReq = r
+		w.WriteHeader(http.StatusOK)
+	})
+
+	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:         "test-suite",
+		Prefix:       "/suite",
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		ModelRoutes: []router.ModelRoute{
+			{Model: "m1", Handler: target},
+		},
+	})
+
+	bodyStr := `{"model":"m1","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(bodyStr))
+	req.TransferEncoding = []string{"chunked"}
+	rec := httptest.NewRecorder()
+
+	suite.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if targetReq == nil {
+		t.Fatal("target handler was not called")
+	}
+
+	// Verify r.GetBody is set and can be called multiple times to read the exact body
+	if targetReq.GetBody == nil {
+		t.Fatal("targetReq.GetBody is nil, want non-nil func for ReverseProxy compatibility")
+	}
+	for i := 0; i < 3; i++ {
+		rc, err := targetReq.GetBody()
+		if err != nil {
+			t.Fatalf("GetBody() call %d error: %v", i, err)
+		}
+		data, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			t.Fatalf("read GetBody() call %d: %v", i, err)
+		}
+		if string(data) != bodyStr {
+			t.Fatalf("GetBody() call %d = %q, want %q", i, string(data), bodyStr)
+		}
+	}
+
+	// Verify TransferEncoding is cleared and ContentLength is set
+	if len(targetReq.TransferEncoding) != 0 {
+		t.Errorf("targetReq.TransferEncoding = %v, want empty/nil", targetReq.TransferEncoding)
+	}
+	if targetReq.ContentLength != int64(len(bodyStr)) {
+		t.Errorf("targetReq.ContentLength = %d, want %d", targetReq.ContentLength, len(bodyStr))
+	}
+}
+
+func TestCatalogSuite_ServeCompletion_AcceptedRequestBytesLimit(t *testing.T) {
+	target := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// 1. Default limits (AcceptedRequestBytes = 32MB): an 11MB payload must succeed (> 10MB old limit)
+	suiteDefault := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:         "test-default",
+		Prefix:       "/suite",
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		ModelRoutes: []router.ModelRoute{
+			{Model: "m1", Handler: target},
+		},
+	})
+
+	// Create a payload > 10MB (e.g. 11MB) with {"model":"m1","pad":"..."}
+	padSize := 11 << 20
+	var buf bytes.Buffer
+	buf.WriteString(`{"model":"m1","pad":"`)
+	buf.Grow(padSize + 100)
+	buf.Write(bytes.Repeat([]byte("a"), padSize))
+	buf.WriteString(`"}`)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", &buf)
+	rec := httptest.NewRecorder()
+	suiteDefault.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for 11MB body with default 32MB limit, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 2. Custom limit (e.g. AcceptedRequestBytes = 1MB): a 2MB payload must be rejected with 413
+	suiteCustom := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:         "test-custom",
+		Prefix:       "/suite",
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		Limits: transcode.BodyLimits{
+			AcceptedRequestBytes: 1 << 20,
+		},
+		ModelRoutes: []router.ModelRoute{
+			{Model: "m1", Handler: target},
+		},
+	})
+
+	var buf2 bytes.Buffer
+	buf2.WriteString(`{"model":"m1","pad":"`)
+	buf2.Write(bytes.Repeat([]byte("b"), 2<<20))
+	buf2.WriteString(`"}`)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", &buf2)
+	rec2 := httptest.NewRecorder()
+	suiteCustom.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 Request Entity Too Large, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+

@@ -346,6 +346,7 @@ func run() error {
 			ParallelToolCalls: true,
 			StructuredOutputs: true,
 			DefaultShape:      suite.Format,
+			Limits:            cfg.Limits(),
 		})
 		if err != nil {
 			return fmt.Errorf("catalog suite %q: %w", suite.Name, err)
@@ -374,6 +375,7 @@ func run() error {
 			DefaultShape:   suite.Format,
 			ModelRoutes:    modelRoutes,
 			Fallback:       fallbackHandler,
+			Limits:         cfg.Limits(),
 		})
 
 		entries = append(entries, router.Provider{
