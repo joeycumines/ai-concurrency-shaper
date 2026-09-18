@@ -378,7 +378,7 @@ func TestCatalogSuite_ServeCompletion_GetBodyAndTransferEncoding(t *testing.T) {
 	if targetReq.GetBody == nil {
 		t.Fatal("targetReq.GetBody is nil, want non-nil func for ReverseProxy compatibility")
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		rc, err := targetReq.GetBody()
 		if err != nil {
 			t.Fatalf("GetBody() call %d error: %v", i, err)
@@ -533,6 +533,3 @@ func TestCatalogSuite_StrictEnforcementAndFallbackIsolation(t *testing.T) {
 		t.Fatalf("non-strict non-completion code = %d: %s", recNonCompl2.Code, recNonCompl2.Body.String())
 	}
 }
-
-
-

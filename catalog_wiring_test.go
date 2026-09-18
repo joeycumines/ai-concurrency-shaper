@@ -100,4 +100,3 @@ func TestCatalogSuiteWiring_SingleUnnamedProvider(t *testing.T) {
 		t.Errorf("modelRoute[0] = %+v, want model m provider openai", modelRoutes[0])
 	}
 }
-

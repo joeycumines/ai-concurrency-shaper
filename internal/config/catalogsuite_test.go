@@ -338,6 +338,3 @@ func TestResolveCatalogSuites_StrictModelsValidation(t *testing.T) {
 		t.Fatalf("unexpected error for non-strict suite with unknown model: %v", err)
 	}
 }
-
-
-
