@@ -784,3 +784,73 @@ func TestCatalogDefaultShape(t *testing.T) {
 		t.Errorf("unexpected doc: %s", rec.Body.String())
 	}
 }
+
+func TestCatalogCodexSingleModelPriority(t *testing.T) {
+	handler, err := NewCatalogHandler(CatalogConfig{
+		ProviderName: "TestProv",
+		Models: []CatalogModel{
+			{Surrogate: "alpha", Default: false},
+			{Surrogate: "beta", Default: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// In the listing, beta is default (priority 1), alpha follows (priority 2).
+	recList := catalogGet(t, handler, "/v1/models?format=codex", nil)
+	if recList.Code != http.StatusOK {
+		t.Fatalf("list status = %d", recList.Code)
+	}
+	var doc codexCatalogDocument
+	if err := json.Unmarshal(recList.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(doc.Models))
+	}
+
+	// alpha should have priority 2
+	recAlpha := catalogGet(t, handler, "/v1/models/alpha?format=codex", nil)
+	if recAlpha.Code != http.StatusOK {
+		t.Fatalf("alpha status = %d", recAlpha.Code)
+	}
+	var alphaEntry codexCatalogEntry
+	if err := json.Unmarshal(recAlpha.Body.Bytes(), &alphaEntry); err != nil {
+		t.Fatal(err)
+	}
+	if alphaEntry.Priority != 2 {
+		t.Errorf("alpha priority = %d, want 2", alphaEntry.Priority)
+	}
+
+	// beta should have priority 1
+	recBeta := catalogGet(t, handler, "/v1/models/beta?format=codex", nil)
+	if recBeta.Code != http.StatusOK {
+		t.Fatalf("beta status = %d", recBeta.Code)
+	}
+	var betaEntry codexCatalogEntry
+	if err := json.Unmarshal(recBeta.Body.Bytes(), &betaEntry); err != nil {
+		t.Fatal(err)
+	}
+	if betaEntry.Priority != 1 {
+		t.Errorf("beta priority = %d, want 1", betaEntry.Priority)
+	}
+}
+
+func TestCatalogSubresourceNotMatched(t *testing.T) {
+	handler, err := NewCatalogHandler(CatalogConfig{
+		ProviderName: "TestProv",
+		Models: []CatalogModel{
+			{Surrogate: "alpha"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Path with descendant subresource /v1/models/alpha/extra should not be handled as a single model endpoint
+	rec := catalogGet(t, handler, "/v1/models/alpha/extra", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for subresource, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

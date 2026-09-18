@@ -263,7 +263,7 @@ func TestCatalogTrailingSlashParity(t *testing.T) {
 
 	// A sub-resource is not the catalog: it passes through.
 	sub := httptest.NewRecorder()
-	p.ServeHTTP(sub, httptest.NewRequest(http.MethodGet, "/v1/models/alpha", nil))
+	p.ServeHTTP(sub, httptest.NewRequest(http.MethodGet, "/v1/models/alpha/extra", nil))
 	if sub.Code != http.StatusOK {
 		t.Fatalf("sub-resource status = %d, want upstream passthrough", sub.Code)
 	}
@@ -447,5 +447,45 @@ func TestCatalogServedWithOpenBreaker(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"models"`) {
 		t.Fatalf("catalog document missing: %s", rec.Body.String())
+	}
+}
+
+// TestCatalogSubresourcePassesThrough proves descendant paths under /v1/models/ (e.g. /v1/models/m1/extra)
+// are not intercepted as catalog endpoints and pass through to upstream.
+func TestCatalogSubresourcePassesThrough(t *testing.T) {
+	upstreamHit := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models/alpha/extra" {
+			upstreamHit = true
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("upstream subresource"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithModelCatalog(testCatalogConfig(128000)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models/alpha/extra", nil))
+	if !upstreamHit {
+		t.Fatalf("expected /v1/models/alpha/extra to pass through to upstream, got status %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Body.String() != "upstream subresource" {
+		t.Errorf("unexpected body: %q", rec.Body.String())
 	}
 }

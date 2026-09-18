@@ -241,3 +241,105 @@ func strconvQuote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+func TestCatalogSuite_TrailingSlashAndErrorFormat(t *testing.T) {
+	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:         "suite-empty",
+		Prefix:       "/empty",
+		DefaultShape: transcode.CatalogShapeOpenAI,
+	})
+
+	// /v1/models/ with trailing slash on empty suite must return 200 OK list, not 404
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/", nil)
+	rec := httptest.NewRecorder()
+	suite.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /v1/models/, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var listDoc struct {
+		Object string `json:"object"`
+		Data   []any  `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listDoc); err != nil {
+		t.Fatal(err)
+	}
+	if listDoc.Object != "list" {
+		t.Errorf("expected object=list, got %q", listDoc.Object)
+	}
+
+	// /v1/models/nonexistent on empty suite must return 404 with invalid_request_error and model_not_found
+	req404 := httptest.NewRequest(http.MethodGet, "/v1/models/nonexistent", nil)
+	rec404 := httptest.NewRecorder()
+	suite.ServeHTTP(rec404, req404)
+	if rec404.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec404.Code, rec404.Body.String())
+	}
+	var errDoc struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec404.Body.Bytes(), &errDoc); err != nil {
+		t.Fatal(err)
+	}
+	if errDoc.Error.Type != "invalid_request_error" {
+		t.Errorf("expected error type invalid_request_error, got %q", errDoc.Error.Type)
+	}
+	if errDoc.Error.Code != "model_not_found" {
+		t.Errorf("expected error code model_not_found, got %q", errDoc.Error.Code)
+	}
+
+	// Unmapped model on a suite with models should return 404 with invalid_request_error
+	dummyTarget := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+	suiteWithModel := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:         "suite-one",
+		Prefix:       "/one",
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		ModelRoutes: []router.ModelRoute{
+			{Model: "known-model", Handler: dummyTarget},
+		},
+	})
+	reqCompl404 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"unknown-model"}`))
+	recCompl404 := httptest.NewRecorder()
+	suiteWithModel.ServeHTTP(recCompl404, reqCompl404)
+	if recCompl404.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", recCompl404.Code, recCompl404.Body.String())
+	}
+	var complErrDoc struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(recCompl404.Body.Bytes(), &complErrDoc); err != nil {
+		t.Fatal(err)
+	}
+	if complErrDoc.Error.Type != "invalid_request_error" {
+		t.Errorf("expected completion error type invalid_request_error, got %q", complErrDoc.Error.Type)
+	}
+}
+
+func TestCatalogSuite_SubresourceNotCatalog(t *testing.T) {
+	// When a path has descendant segments beyond single model (e.g. /v1/models/m1/extra),
+	// it should NOT be handled as a catalog endpoint.
+	fallbackHit := false
+	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fallbackHit = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("fallback ok"))
+	})
+	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:         "suite-sub",
+		Prefix:       "/sub",
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		Fallback:     fallback,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models/m1/extra", nil)
+	rec := httptest.NewRecorder()
+	suite.ServeHTTP(rec, req)
+	if !fallbackHit {
+		t.Fatalf("expected fallback handler to be called for /v1/models/m1/extra, got code %d: %s", rec.Code, rec.Body.String())
+	}
+}

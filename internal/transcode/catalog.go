@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -202,14 +203,19 @@ func (h *CatalogHandler) defaultShape() CatalogShape {
 
 // ServeHTTP renders the selected catalog document or single model item.
 func (h *CatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	reqPath := r.URL.Path
+	reqPath := path.Clean(r.URL.Path)
 	if after, ok := strings.CutPrefix(reqPath, CatalogPath+"/"); ok {
-		modelID := after
-		modelID = strings.Trim(modelID, "/")
-		if modelID != "" {
+		modelID := strings.Trim(after, "/")
+		if modelID != "" && !strings.Contains(modelID, "/") {
 			h.serveSingleModel(w, r, modelID)
 			return
 		}
+		http.NotFound(w, r)
+		return
+	}
+	if reqPath != CatalogPath {
+		http.NotFound(w, r)
+		return
 	}
 
 	shape, err := h.catalogShapeFor(r)
@@ -348,22 +354,29 @@ func (h *CatalogHandler) serveSingleModel(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var found *CatalogModel
+	var (
+		foundIdx = -1
+		listed   []int
+	)
 	for i := range h.models {
-		if h.models[i].Surrogate == modelID && validCatalogModel(h.models[i]) {
-			found = &h.models[i]
-			break
+		if validCatalogModel(h.models[i]) {
+			listed = append(listed, i)
+			if h.models[i].Surrogate == modelID {
+				foundIdx = i
+			}
 		}
 	}
-	if found == nil {
+	if foundIdx < 0 {
 		h.writeModelNotFoundError(w, shape, modelID)
 		return
 	}
+	found := &h.models[foundIdx]
 
 	var document any
 	switch shape {
 	case CatalogShapeCodex:
-		document = h.codexEntry(*found, 1)
+		priorities := h.codexPriorities(listed)
+		document = h.codexEntry(*found, priorities[foundIdx])
 	case CatalogShapeAnthropic:
 		document = h.anthropicEntry(*found)
 	case CatalogShapeOpenAI:

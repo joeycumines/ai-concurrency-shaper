@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 
@@ -76,10 +77,10 @@ func NewCatalogSuiteHandler(cfg SuiteConfig) *CatalogSuiteHandler {
 // ServeHTTP handles requests to the catalog suite mount.
 // The incoming request path is already stripped of the suite prefix.
 func (h *CatalogSuiteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	reqPath := r.URL.Path
+	reqPath := path.Clean(r.URL.Path)
 
 	// Catalog discovery routes: GET /v1/models and GET /v1/models/{model}
-	if r.Method == http.MethodGet && (reqPath == transcode.CatalogPath || strings.HasPrefix(reqPath, transcode.CatalogPath+"/")) {
+	if r.Method == http.MethodGet && isCatalogRoute(reqPath) {
 		if h.catalogHandler != nil {
 			h.catalogHandler.ServeHTTP(w, r)
 			return
@@ -102,6 +103,16 @@ func (h *CatalogSuiteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 
 	http.NotFound(w, r)
+}
+
+func isCatalogRoute(path string) bool {
+	if path == transcode.CatalogPath {
+		return true
+	}
+	if rem, ok := strings.CutPrefix(path, transcode.CatalogPath+"/"); ok {
+		return rem != "" && !strings.Contains(rem, "/")
+	}
+	return false
 }
 
 func isCompletionRoute(path string) bool {
@@ -167,7 +178,7 @@ func peekModelField(body []byte) string {
 }
 
 func (h *CatalogSuiteHandler) shapeForCompletion(r *http.Request) transcode.CatalogShape {
-	switch r.URL.Path {
+	switch path.Clean(r.URL.Path) {
 	case "/v1/responses":
 		return transcode.CatalogShapeCodex
 	case "/v1/messages":
@@ -185,11 +196,13 @@ func (h *CatalogSuiteHandler) writeEmptyCatalogOr404(w http.ResponseWriter, r *h
 	if shape == "" {
 		shape = transcode.CatalogShapeOpenAI
 	}
-	if after, ok := strings.CutPrefix(r.URL.Path, transcode.CatalogPath+"/"); ok {
-		modelID := after
-		modelID = strings.Trim(modelID, "/")
-		writeModelNotFoundError(w, shape, modelID)
-		return
+	reqPath := path.Clean(r.URL.Path)
+	if after, ok := strings.CutPrefix(reqPath, transcode.CatalogPath+"/"); ok {
+		modelID := strings.Trim(after, "/")
+		if modelID != "" {
+			writeModelNotFoundError(w, shape, modelID)
+			return
+		}
 	}
 
 	var body []byte
@@ -211,6 +224,10 @@ func writeDialectError(w http.ResponseWriter, shape transcode.CatalogShape, stat
 	var body []byte
 	switch shape {
 	case transcode.CatalogShapeAnthropic:
+		errType := errTypeForStatus(status)
+		if status == http.StatusNotFound {
+			errType = "not_found_error"
+		}
 		body, _ = json.Marshal(struct {
 			Type  string `json:"type"`
 			Error struct {
@@ -223,7 +240,7 @@ func writeDialectError(w http.ResponseWriter, shape transcode.CatalogShape, stat
 				Type    string `json:"type"`
 				Message string `json:"message"`
 			}{
-				Type:    errTypeForStatus(status),
+				Type:    errType,
 				Message: message,
 			},
 		})
@@ -306,7 +323,7 @@ func writeModelNotFoundError(w http.ResponseWriter, shape transcode.CatalogShape
 func errTypeForStatus(status int) string {
 	switch status {
 	case http.StatusNotFound:
-		return "not_found_error"
+		return "invalid_request_error"
 	case http.StatusBadRequest:
 		return "invalid_request_error"
 	case http.StatusServiceUnavailable:

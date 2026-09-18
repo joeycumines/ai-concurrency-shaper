@@ -77,7 +77,13 @@ func (p *Proxy) catalogServes(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return key.Path == transcode.CatalogPath || (strings.HasPrefix(key.Path, transcode.CatalogPath+"/") && len(key.Path) > len(transcode.CatalogPath)+1)
+	if key.Path == transcode.CatalogPath {
+		return true
+	}
+	if rem, ok := strings.CutPrefix(key.Path, transcode.CatalogPath+"/"); ok {
+		return rem != "" && !strings.Contains(rem, "/")
+	}
+	return false
 }
 
 // serveCatalog answers a catalog request locally. The exchange is a clean
