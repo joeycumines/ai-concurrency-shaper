@@ -179,12 +179,12 @@
 // silent clean EOF. A failed, malformed, truncated, or cancelled exchange is
 // never reported as a successful model completion.
 //
-// # Wire pins and the loss matrix
+// # Wire pins and the loss keys
 //
 // contracts.lock.json is the authoritative contract registry; pins.md is
 // generated from it (go generate ./internal/transcode) and drift-tested.
-// LOSS_MATRIX.md is generated from the same loss-key registry the program
-// uses (gen/lossmatrix), so code and documentation cannot drift.
+// The loss keys are the granular registry in losses.go, surfaced through the
+// runtime reporting and never published to users.
 //
 // Authoritative contracts:
 // https://platform.openai.com/docs/api-reference/responses

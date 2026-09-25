@@ -523,9 +523,9 @@ ai-concurrency-shaper -upstream https://api.example.com -transcode-responses-cha
 ### Loss policy
 
 Every non-portable feature is gated by exactly one granular, direction-
-specific loss key (the complete registry is `internal/transcode/LOSS_MATRIX.md`,
-generated from the same registry the program uses). CLI mappings start from
-the sensible default approvals listed above; the programmatic API (zero
+specific loss key. CLI mappings start from
+the sensible default approvals (the startup summary names the set in effect);
+the programmatic API (zero
 `LossPolicy`) is **strict** and rejects every non-portable feature with a
 client-dialect error — nothing is silently dropped, defaulted, merged, or
 reinterpreted. The `-transcode-allow-loss` flag (repeatable, comma/space
