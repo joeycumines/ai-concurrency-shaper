@@ -2,6 +2,8 @@ package transcode
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // ModelMapping maps a client model identifier to the upstream model identifier
@@ -42,6 +44,27 @@ func (m ModelMap) Resolve(clientModel string) (ModelMapping, error) {
 			UpstreamModel:       clientModel,
 			ClientResponseModel: clientModel,
 		}, nil
+	}
+	if m.RequireExplicitMap {
+		names := make([]string, 0, len(m.Exact))
+		for name := range m.Exact {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		const maxServableModels = 20
+		shown := min(len(names), maxServableModels)
+		servable := strings.Join(names[:shown], ", ")
+		if shown < len(names) {
+			servable += fmt.Sprintf(" ... (+%d more)", len(names)-shown)
+		}
+		if servable == "" {
+			servable = "none"
+		}
+		return ModelMapping{}, fmt.Errorf(
+			"no upstream model mapping for client model %q; servable on this mount: %s",
+			clientModel,
+			servable,
+		)
 	}
 	return ModelMapping{}, fmt.Errorf(
 		"no upstream model mapping for client model %q",

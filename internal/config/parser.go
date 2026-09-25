@@ -116,6 +116,25 @@ func Parse(args []string) (*Config, error) {
 		case scopeAccount:
 			return nil, errors.New("account sections are not yet supported")
 		case scopeProvider:
+			// Mirror of the server-scope check above: a server-scoped flag
+			// inside a provider section is a command-line shape error, not the
+			// provider FlagSet's generic unknown-flag failure. Help is legal at
+			// every scope and is exempt. The walk mirrors tokenize: a
+			// value-taking flag consumes the lexeme that follows it, so a value
+			// that happens to spell a flag name is never misread as one.
+			for i := 0; i < len(s.lex); i++ {
+				tok := s.lex[i]
+				m, ok := flagMetadata()[flagTokenName(tok)]
+				if !ok {
+					continue
+				}
+				if m.scope == scopeServer && !m.isHelp {
+					return nil, fmt.Errorf("%w: server options are not allowed in provider sections: %q", ErrUsage, "-"+flagTokenName(tok))
+				}
+				if !strings.Contains(tok, "=") && !m.isBool {
+					i++
+				}
+			}
 			p := &Provider{}
 			ps := newFlagSet(fmt.Sprintf("provider section %d", len(cfg.Providers)+1))
 			registerProviderFlags(&registrar{fs: ps, meta: map[string]flagMeta{}}, p)

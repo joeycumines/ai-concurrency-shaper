@@ -129,6 +129,7 @@ func registerServerFlags(r *registrar, s *Server) {
 	r.boolVar(&s.TUI, "tui", false, "enable terminal dashboard")
 	r.boolVar(&s.Version, "version", false, "print version and exit")
 	r.stringVar(&s.MetricsBind, "metrics-bind", "", "dedicated listen address for the Prometheus /metrics endpoint (empty = disabled; server scope)")
+	r.stringListVar(&s.ModelTable, "model-table", "global model table entry: surrogate@provider=wire[;facts] (repeatable; server scope)")
 	registerHelp(r, &s.Help)
 }
 
