@@ -313,6 +313,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Reject Upgrade requests on transcoded routes: a 101 Switching
 	// Protocols response cannot be meaningfully schema-transcoded.
 	if isUpgradeRequest(r) {
+		h.logRequestError(r, fmt.Errorf("[%s] upgrade requests are not supported on transcoded routes", ProvenanceLocalRequestConversionError))
 		h.writeLocalError(r, w,
 			http.StatusBadRequest, "upgrade requests are not supported on transcoded routes",
 			ProvenanceLocalRequestConversionError)
@@ -330,6 +331,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Code:    "unsupported_content_encoding",
 			Message: "content-encoding is not supported on transcoded routes",
 		}
+		h.logRequestError(r, fmt.Errorf("[%s] content-encoding is not supported on transcoded routes", ProvenanceLocalRequestConversionError))
 		h.writeDialectHTTPError(r, w, apiErr, ProvenanceLocalRequestConversionError)
 		return
 	}
@@ -345,18 +347,20 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, errRequestBodyTooLarge) {
+			h.logRequestError(r, fmt.Errorf("[%s] request body too large", ProvenanceLocalRequestConversionError))
 			h.writeLocalError(r, w,
 				http.StatusRequestEntityTooLarge, "request body too large",
 				ProvenanceLocalRequestConversionError)
 			return
 		}
+		h.logRequestError(r, fmt.Errorf("[%s] read request body: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
 			http.StatusBadRequest, "read request body: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
 		return
 	}
-
 	fl.setClientBody(body)
+
 	// Decode the source request into the canonical IR and render the target
 	// request, resolving the model through the map.
 	upstreamBody, context, err := h.convertRequest(r, body)
@@ -376,14 +380,16 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errDecodedRequestTooLarge) || errors.Is(err, errEchoTooLarge) {
 			status = http.StatusRequestEntityTooLarge
 		}
+		h.logRequestError(r, fmt.Errorf("[%s] convert request: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
 			status, "convert request: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
 		return
 	}
-
 	fl.setUpstreamRequest(upstreamBody, context.StreamIntent)
+
 	if CommittedStreamFromContext(r.Context()) && !context.StreamIntent {
+		h.logRequestError(r, fmt.Errorf("[%s] stream:false is incompatible with committed event-stream representation", ProvenanceLocalRequestConversionError))
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadRequest,
 			Type:    "invalid_request_error",
@@ -405,6 +411,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errClientQueryParameter) ||
 			errors.Is(err, errAuthInboundCredential) {
 			status = http.StatusBadRequest
+			h.logRequestError(r, fmt.Errorf("[%s] build upstream request: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		} else {
 			log.Printf(
 				"transcode: %s %s: build upstream request: %v",
@@ -419,8 +426,8 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			ProvenanceLocalRequestConversionError)
 		return
 	}
-
 	fl.setUpstreamTarget(outReq)
+
 	resp, err := h.roundTrip(outReq)
 	// The response headers arrived: anchor Retry-After and the 403
 	// rate-signal classification here so body-read time is excluded from the
@@ -701,6 +708,7 @@ func (h *TranscodeHandler) convertRequest(
 		// The retained chain must include the reconstructed history, so the
 		// record call in convertResponse stores the post-merge turns.
 		context.RequestTurns = result.Request.Turns
+
 		var rendered []byte
 		var report ConversionReport
 		switch mapping.UpstreamProtocol {
@@ -1114,6 +1122,7 @@ func (h *TranscodeHandler) streamResponse(
 	if err != nil {
 		// writeLocalError -> writeDialectHTTPError records the outcome
 		// exactly once.
+		h.logRequestError(r, fmt.Errorf("[%s] build stream converter: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
 			http.StatusInternalServerError, "build stream converter: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
@@ -1193,6 +1202,7 @@ func (h *TranscodeHandler) streamResponse(
 		outcome.Provenance = ProvenanceLocalResponseConversionError
 		outcome.LocalFailure = true
 		outcome.DownstreamComplete = downstreamComplete
+		h.logStreamConversionError(r, observation.ReaderErr)
 	case streamOutcomeDownstreamFailure:
 		outcome.Provenance = ProvenanceDownstreamWriteError
 	default:
@@ -1971,12 +1981,62 @@ func (h *TranscodeHandler) boundErrorMessage(message string) string {
 	return message[:max]
 }
 
+// logSafeText makes text safe to place in ONE operator log line. Every byte
+// a client can influence must be neutralized: error text routinely embeds raw
+// client JSON (encoding/json puts the offending KEY into UnmarshalTypeError,
+// and a decoded key may contain a newline), and the request target is bounded
+// only by net/http's header limit. Without this, a single request could
+// inject a newline and forge a fully-formed "transcode: ..." operator line -
+// which the TUI log ring would then render as its own entry. Control
+// characters are escaped rather than dropped so the evidence survives, and the
+// result is length-bounded so one request cannot flood the log.
+func logSafeText(s string) string {
+	const maxLoggedField = 512
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r < 0x20 || r == 0x7f:
+			b.WriteString(`\x`)
+			const hex = "0123456789abcdef"
+			b.WriteByte(hex[(r>>4)&0xf])
+			b.WriteByte(hex[r&0xf])
+		default:
+			b.WriteRune(r)
+		}
+		if b.Len() >= maxLoggedField {
+			b.WriteString("…")
+			return b.String()
+		}
+	}
+	return b.String()
+}
+
 // logRequestError logs a local failure with its detail (never the client
 // message): local construction and conversion failures are logged,
 // sanitized, and reported neutrally (the conversion-failure path stays
 // observable to the operator).
 func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
-	log.Printf("transcode: %s %s: %v", r.Method, r.URL.Path, err)
+	log.Printf("transcode: %s %s: %v",
+		logSafeText(r.Method), logSafeText(r.URL.Path), logSafeText(err.Error()))
+}
+
+// logStreamConversionError records the operator-visible reason a live
+// translated stream failed locally: the client gets the dialect error event,
+// but without this line the log shows nothing. A stream that ran out without
+// a terminal has no converter error, only that fact.
+func (h *TranscodeHandler) logStreamConversionError(r *http.Request, cause error) {
+	detail := "the upstream stream ended before a terminal event and no local error event was written"
+	if cause != nil && !errors.Is(cause, io.EOF) {
+		detail = h.boundErrorMessage(cause.Error())
+	}
+	h.logRequestError(r, fmt.Errorf("[%s] convert stream response: %s", ProvenanceLocalResponseConversionError, detail))
 }
 
 // sanitizeUpstreamTransportError redacts credential-bearing URL query values
