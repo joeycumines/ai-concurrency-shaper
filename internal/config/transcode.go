@@ -489,6 +489,7 @@ var defaultTranscodeLosses = map[transcode.Feature]struct{}{
 	transcode.FeatureRequestReasoning:       {},
 	transcode.FeatureToolResultErrorStatus:  {},
 	transcode.FeatureDeveloperRole:          {},
+	transcode.FeatureImageDetailOriginal:    {},
 }
 
 func mergedLossPolicy(

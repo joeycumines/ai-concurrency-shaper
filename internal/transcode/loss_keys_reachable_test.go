@@ -8,6 +8,7 @@ package transcode
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -924,6 +925,37 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 				context := testExchangeContext()
 				context.LossPolicy = policy
 				_, report, err := RenderResponsesResponse(response, context)
+				return report, err
+			},
+		},
+		{
+			// The Responses-only "original" detail is a CLIENT-requested fidelity
+			// knob, so its downgrade to "high" is a policy-gated loss: the
+			// operator must approve it. The key is in defaultTranscodeLosses, so a
+			// default deployment already does.
+			key:  FeatureImageDetailOriginal,
+			perm: []Feature{FeatureImageDetailOriginal},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				var report ConversionReport
+				detail, err := chatImageDetail("original", "input[0].image", policy, &report)
+				if err != nil {
+					return report, err
+				}
+				if detail != "high" {
+					return report, fmt.Errorf("detail = %q, want high", detail)
+				}
+				return report, nil
+			},
+		},
+		{
+			// A source dialect with no detail field at all gets the documented
+			// "auto" default, recorded as an ungated invention note.
+			key:  FeatureImageDetailInvented,
+			perm: []Feature{},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				var report ConversionReport
+				_, err := chatImageDetail("", "input[0].image", policy, &report)
 				return report, err
 			},
 		},

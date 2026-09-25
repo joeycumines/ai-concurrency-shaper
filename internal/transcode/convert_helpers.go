@@ -365,6 +365,57 @@ func canonicalUserTurnToChatMessages(
 	return messages, nil
 }
 
+// chatImageDetail maps a canonical image detail to the Chat vocabulary
+// (auto|low|high). Any other unexpected value is rejected rather than
+// forwarded unvalidated. An empty value is the source dialect having no detail
+// field (an Anthropic image block), and the documented "auto" default is
+// chosen with the invention recorded as a note: that is PROXY-invented
+// content, not a client request, so it takes no policy decision.
+//
+// The Responses-only "original" is different: the CLIENT asked for it, and
+// mapping it to "high" downgrades a fidelity-only knob. AGENTS.md requires
+// such a mapping to be an observable POLICY-GATED loss so an operator can
+// refuse the downgrade, so it goes through Lose with the policy rather than
+// Note (which never consults the policy and would leave the operator no say).
+// The key is in defaultTranscodeLosses, so a default deployment keeps working
+// while an operator can still reject it.
+func chatImageDetail(
+	detail string,
+	path string,
+	policy LossPolicy,
+	report *ConversionReport,
+) (string, error) {
+	switch detail {
+	case "":
+		if err := report.Note(
+			FeatureImageDetailInvented,
+			path,
+			"the source carried no image detail; the documented 'auto' default was chosen (the source dialect may have no detail field, or the client omitted the optional one)",
+		); err != nil {
+			return "", err
+		}
+		return "auto", nil
+	case "auto", "low", "high":
+		return detail, nil
+	case "original":
+		if err := report.Lose(
+			policy,
+			FeatureImageDetailOriginal,
+			path,
+			"the Responses-only image detail 'original' has no Chat equivalent; it was mapped to 'high' (the closest truthful semantic, but a downgrade the operator can refuse)",
+		); err != nil {
+			return "", err
+		}
+		return "high", nil
+	default:
+		return "", &UnsupportedFeatureError{
+			Protocol: "chat",
+			Path:     path,
+			Feature:  "image detail " + detail,
+		}
+	}
+}
+
 // canonicalContentPartsToChatUserMessage renders text and image parts into a
 // user message. Image input is rendered as image_url blocks and requires the
 // configured capability.
@@ -404,11 +455,9 @@ func canonicalContentPartsToChatUserMessage(
 					return ChatMessage{}, fmt.Errorf("content part %d: %w", i, err)
 				}
 			}
-			detail := value.Detail
-			if detail == "" {
-				// The official Chat image detail defaults to auto; an empty
-				// value is not part of the wire enum.
-				detail = "auto"
+			detail, err := chatImageDetail(value.Detail, "messages[].content", policy, report)
+			if err != nil {
+				return ChatMessage{}, err
 			}
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeImage,
