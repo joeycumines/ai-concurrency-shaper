@@ -155,6 +155,21 @@ type CanonicalRequest struct {
 	Turns []CanonicalTurn
 	Tools []CanonicalTool
 
+	// RetainedTurns is the number of LEADING turns reconstructed from the
+	// opt-in continuity store rather than authored by the client on this
+	// request. It is 0 (no continuity) for every ordinary request.
+	//
+	// Request-side portability gates exist to police CLIENT input, so a gate
+	// must not charge the client for a position the client's own request did
+	// not create. Retained turns were already rendered once, in the exchange
+	// that produced the chain, so re-gating them re-litigates a decision that
+	// was already paid. Renderers use this count to treat a retained turn's
+	// position as the proxy's own: the same encoding still happens, but it is
+	// recorded as a Note (a sanctioned encoding, visible in the log) instead
+	// of a policy-gated loss that can reject a request the client authored
+	// cleanly.
+	RetainedTurns int
+
 	ToolChoice       *CanonicalToolChoice
 	ParallelTools    *bool
 	MaxOutputTokens  *int
@@ -214,6 +229,24 @@ type ExchangeContext struct {
 	//. A stream/JSON mismatch on the upstream response
 	// is an error rather than a silent mode change.
 	StreamIntent bool
+
+	// RequestTurns carries the decoded canonical request turns for the
+	// exchange, so the opt-in continuity store can retain the conversation
+	// that produced an emitted response id. It is set by convertRequest for
+	// Responses clients (after continuity resolution, so the retained chain
+	// already includes the reconstructed history) and left nil otherwise.
+	// Canonical parts are immutable after decode; the store copies the
+	// slice header, never the parts.
+	RequestTurns []CanonicalTurn
+
+	// RequestDepth carries the continuity resolution depth of this
+	// exchange (0 when no previous_response_id resolved), so the record
+	// call stores the depth the next resolution builds on.
+	RequestDepth int
+
+	// ResolvedReasoningTier carries the reasoning tier resolved from the
+	// profile map ("low", "medium", "high", or "" when unset). The render
+	// applies it to the upstream request when the capability is granted.
 	// ResolvedReasoningTier carries the reasoning tier resolved from the
 	// profile map ("low", "medium", "high", or "" when unset). The render
 	// applies it to the upstream request when the capability is granted.

@@ -107,6 +107,15 @@ type TranscodeMapping struct {
 	// BodyLimits bounds request/response bodies on this route. Zero values
 	// fall back to the proxy defaults.
 	BodyLimits transcode.BodyLimits
+
+	// Continuity, when non-nil, is the opt-in bounded per-conversation
+	// store (OFF by default: nil keeps the existing observable
+	// previous_response_id loss). It is shared by every transcoded route
+	// of one provider; ContinuityKey scopes retained ids to the provider
+	// mapping that emitted them. The store pointer is shared, never
+	// cloned: chains accumulate across exchanges by design.
+	Continuity    *transcode.ContinuityStore
+	ContinuityKey string
 }
 
 // TranscodeOption configures transcoding route mappings.
@@ -915,9 +924,11 @@ func New(opts ...Option) (*Proxy, error) {
 		}
 		h := transcode.NewTranscodeHandler(
 			transcode.HandlerConfig{
-				Mapping:    mapping,
-				Upstream:   cfg.upstream,
-				BodyLimits: m.BodyLimits,
+				Mapping:       mapping,
+				Upstream:      cfg.upstream,
+				BodyLimits:    m.BodyLimits,
+				Continuity:    m.Continuity,
+				ContinuityKey: m.ContinuityKey,
 			},
 			p.RoundTrip,
 			nil,

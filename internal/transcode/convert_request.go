@@ -1823,7 +1823,7 @@ func RenderChatRequest(
 	if echo := context.OriginalResponsesRequest; echo != nil {
 		out.User = echo.User
 		out.Store = echo.Store
-		if echo.PreviousResponseID != nil {
+		if echo.PreviousResponseID != nil && context.RequestDepth == 0 {
 			if err := report.Lose(
 				context.lossPolicy(),
 				FeaturePreviousResponseID,
@@ -1897,7 +1897,14 @@ func RenderChatRequest(
 	// multiple system turns is a sanctioned note under the same key.
 	rendered := make([]ChatMessage, 0, len(request.Turns))
 	systemChannel := make([]bool, 0, len(request.Turns))
+	// retainedChannel marks each rendered message as reconstructed from the
+	// continuity store rather than authored by this request, so a request-side
+	// gate can tell the two apart. The retained turns are a prefix of Turns.
+	retainedChannel := make([]bool, 0, len(request.Turns))
+	turnIndex := 0
 	for _, turn := range request.Turns {
+		retained := turnIndex < request.RetainedTurns
+		turnIndex++
 		switch turn.Role {
 		case CanonicalSystem:
 			message, err := canonicalTextTurnToChatMessage(turn, ChatMessageRoleSystem)
@@ -1906,6 +1913,7 @@ func RenderChatRequest(
 			}
 			rendered = append(rendered, message)
 			systemChannel = append(systemChannel, true)
+			retainedChannel = append(retainedChannel, retained)
 
 		case CanonicalDeveloper:
 			role := ChatMessageRoleDeveloper
@@ -1920,6 +1928,7 @@ func RenderChatRequest(
 			}
 			rendered = append(rendered, message)
 			systemChannel = append(systemChannel, channel)
+			retainedChannel = append(retainedChannel, retained)
 
 		case CanonicalUser:
 			messages, err := canonicalUserTurnToChatMessages(
@@ -1934,6 +1943,7 @@ func RenderChatRequest(
 			for _, message := range messages {
 				rendered = append(rendered, message)
 				systemChannel = append(systemChannel, false)
+				retainedChannel = append(retainedChannel, retained)
 			}
 
 		case CanonicalAssistant:
@@ -1943,6 +1953,7 @@ func RenderChatRequest(
 			}
 			rendered = append(rendered, message)
 			systemChannel = append(systemChannel, false)
+			retainedChannel = append(retainedChannel, retained)
 		}
 	}
 
@@ -1958,19 +1969,49 @@ func RenderChatRequest(
 			dialog    []ChatMessage
 		)
 		sawDialog := false
+		// midDialogAllRetained tracks whether every mid-dialog system message came
+		// from the continuity store rather than this request. A request-side gate
+		// polices CLIENT input, so a position the client's own request never
+		// created must not be charged to it.
+		midDialogAllRetained := true
 		for i, message := range rendered {
 			if !systemChannel[i] {
-				sawDialog = true
+				// Only a turn the CLIENT authored may move a later client system turn
+				// out of the leading position. Retained history sits in front of the
+				// client's own turns, so counting it would silently demote a client's
+				// instructions from index 0 to a mid-conversation system turn and then
+				// charge the client for a position the proxy created.
+				if !retainedChannel[i] {
+					sawDialog = true
+				}
 				dialog = append(dialog, message)
 				continue
 			}
 			if sawDialog {
 				midDialog = append(midDialog, message)
+				if !retainedChannel[i] {
+					midDialogAllRetained = false
+				}
 			} else {
 				leading = append(leading, message)
 			}
 		}
 		switch {
+		case len(midDialog) > 0 && midDialogAllRetained:
+			// The encoding is identical; only the policy decision differs. A
+			// retained position was already paid once when the chain was first
+			// rendered, so it is recorded as a visible Note instead of a loss
+			// that can reject a request the client authored cleanly.
+			if err := report.Note(
+				FeatureMidConversationSystem,
+				"messages[]",
+				"retained conversation history carried system turns after dialog turns; "+
+					"they consolidate into the leading system message (the position was already "+
+					"lost when the chain was first rendered, so it is not re-charged to this request)",
+			); err != nil {
+				return nil, report, err
+			}
+			out.Messages = append(out.Messages, joinChatSystemMessages(leading, midDialog))
 		case len(midDialog) > 0:
 			// The position/timing of system-channel content following
 			// dialog turns cannot survive; the consolidation is the

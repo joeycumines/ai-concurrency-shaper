@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"sort"
@@ -684,6 +685,12 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	if err := validateMBFlag("-transcode-max-response-mb", p.TranscodeMaxResponseMB, 20); err != nil {
 		return err
 	}
+	if p.TranscodeContinuityCap < 0 {
+		return fmt.Errorf("-transcode-continuity-capacity must be nonnegative, got %d", p.TranscodeContinuityCap)
+	}
+	if p.TranscodeContinuityTTL < 0 {
+		return fmt.Errorf("-transcode-continuity-ttl must be nonnegative, got %s", p.TranscodeContinuityTTL)
+	}
 
 	var parsedRoutes []proxy.TranscodeMapping
 	for _, r := range p.TranscodeRoutes {
@@ -835,6 +842,21 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		}
 		if p.TranscodeMaxResponseMB > 0 {
 			mappings[i].BodyLimits.SuccessfulResponseBytes = p.TranscodeMaxResponseMB << 20
+		}
+		if p.TranscodeContinuity {
+			if p.continuityStore == nil {
+				p.continuityStore = transcode.NewContinuityStore(transcode.ContinuityConfig{
+					Capacity: p.TranscodeContinuityCap,
+					TTL:      p.TranscodeContinuityTTL,
+				})
+				log.Printf(
+					"transcode: continuity store enabled (capacity %d, ttl %s); previous_response_id resolves against retained chains, a miss degrades to the existing observable loss",
+					p.continuityStore.Capacity(),
+					p.continuityStore.TTL(),
+				)
+			}
+			mappings[i].Continuity = p.continuityStore
+			mappings[i].ContinuityKey = p.Name
 		}
 
 		if err := mappings[i].Mapping.Validate(); err != nil {

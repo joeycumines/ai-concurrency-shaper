@@ -21,6 +21,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
@@ -1533,5 +1534,85 @@ func TestParseTranscodeProfilesAllTiers(t *testing.T) {
 		if profiles.Profiles["p"].ReasoningTier != tier {
 			t.Errorf("tier %q not preserved", tier)
 		}
+	}
+}
+
+// TestResolveTranscodeContinuityFlags proves the opt-in continuity wiring:
+// off by default (no store on mappings); enabled shares one store across
+// the provider's mappings keyed by provider name; negative capacity/TTL
+// fail validation.
+func TestResolveTranscodeContinuityFlags(t *testing.T) {
+	base := func() *Provider {
+		return &Provider{
+			Name:                   "test-provider",
+			Upstream:               "https://upstream.example",
+			TranscodeResponsesChat: true,
+			TranscodeMessagesChat:  true,
+		}
+	}
+	// Off by default: no store.
+	off := base()
+	if err := off.resolveTranscode(nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range off.transcodeMappings {
+		if m.Continuity != nil {
+			t.Fatal("continuity store set by default, want nil (stateless default)")
+		}
+	}
+	// Enabled: one shared store, keyed by provider name.
+	on := base()
+	on.TranscodeContinuity = true
+	on.TranscodeContinuityCap = 4
+	if err := on.resolveTranscode(nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(on.transcodeMappings) != 2 {
+		t.Fatalf("mappings = %d, want 2", len(on.transcodeMappings))
+	}
+	first := on.transcodeMappings[0].Continuity
+	if first == nil {
+		t.Fatal("enabled mapping has no store")
+	}
+	for _, m := range on.transcodeMappings {
+		if m.Continuity != first {
+			t.Fatal("mappings do not share one store")
+		}
+		if m.ContinuityKey != "test-provider" {
+			t.Fatalf("key = %q, want provider name", m.ContinuityKey)
+		}
+	}
+	if first.Capacity() != 4 {
+		t.Fatalf("capacity = %d, want 4", first.Capacity())
+	}
+	// Distinct providers receive independent stores without cross-provider leakage.
+	on2 := base()
+	on2.Name = "second-provider"
+	on2.TranscodeContinuity = true
+	on2.TranscodeContinuityCap = 4
+	if err := on2.resolveTranscode(nil); err != nil {
+		t.Fatal(err)
+	}
+	second := on2.transcodeMappings[0].Continuity
+	if second == nil {
+		t.Fatal("second provider has no store")
+	}
+	if second == first {
+		t.Fatal("distinct providers shared the same continuity store instance")
+	}
+
+	// Negative capacity rejected.
+	neg := base()
+	neg.TranscodeContinuity = true
+	neg.TranscodeContinuityCap = -1
+	if err := neg.resolveTranscode(nil); err == nil {
+		t.Fatal("negative capacity accepted, want rejection")
+	}
+	// Negative TTL rejected.
+	negTTL := base()
+	negTTL.TranscodeContinuity = true
+	negTTL.TranscodeContinuityTTL = -time.Second
+	if err := negTTL.resolveTranscode(nil); err == nil {
+		t.Fatal("negative TTL accepted, want rejection")
 	}
 }

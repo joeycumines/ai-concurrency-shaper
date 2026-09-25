@@ -184,6 +184,9 @@ type Provider struct {
 	TranscodeModelMap          []string
 	TranscodeProfiles          []string
 	TranscodeMaxRequestMB      int64
+	TranscodeContinuity        bool
+	TranscodeContinuityCap     int
+	TranscodeContinuityTTL     time.Duration
 	TranscodeMaxResponseMB     int64
 	TranscodeAuth              string
 	TranscodeAuthSource        string
@@ -215,6 +218,9 @@ type Provider struct {
 	// modelCatalog is this provider's frozen catalog snapshot, built from its
 	// model-table subset and resolved mappings. Nil when no table names it.
 	modelCatalog *transcode.CatalogConfig
+	// continuityStore is the shared continuity store for this provider's
+	// transcoded routes. Nil when continuity is not enabled.
+	continuityStore *transcode.ContinuityStore
 }
 
 // TranscodeMappings returns the resolved transcode route mappings for this provider,

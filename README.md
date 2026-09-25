@@ -330,6 +330,12 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-model` | provider | _(repeatable)_ | Map client model name to upstream model name (`client=upstream`), identity fallback when omitted. Cannot be combined with `-model-table` — see [Migrating from -transcode-model](#migrating-from--transcode-model) |
 | `-transcode-profile` | provider | _(repeatable)_ | Map profile name to upstream model and optional reasoning tier: `name=model[:tier]` (see [Agent profiles](#agent-profiles--transcode-profile)) |
 | `-transcode-auth` | provider | _(unset — inherits provider auth, else none)_ | Per-route target auth mode override (`auto`, `none`, `bearer`, `x-api-key`, `api-key`, `header`) |
+| `-transcode-continuity` | provider | `false` | Opt-in per-conversation continuity store for `previous_response_id` against stateless chat upstreams (see [Conversation continuity store](#conversation-continuity-store--transcode-continuity)) |
+
+| `-transcode-continuity-capacity` | provider | `1024` | Max retained conversation chains for the continuity store (0 = default 1024) |
+
+| `-transcode-continuity-ttl` | provider | `30m` | Max age of a retained conversation chain (0 = default 30m) |
+
 | `-transcode-auth-source` | provider | _(unset — inherits provider auth, else none)_ | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`, `provider`) |
 | `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header` |
 | `-transcode-anthropic-version` | provider | `2023-06-01` | Anthropic-Version header value when target auth mode resolves to `x-api-key` |
@@ -773,6 +779,15 @@ smaller than the minimum legal terminal or error frame are rejected at
 startup — a stream that could never emit its terminal is a configuration
 error, not a runtime surprise.
 
+### Conversation continuity store (-transcode-continuity)
+
+By default, request transcoding is stateless: each exchange is converted and forwarded independently. If a Responses client sends a follow-up request referencing `previous_response_id` against a stateless chat upstream (`/v1/chat/completions`), the chat API cannot resolve the historical conversation chain, resulting in an observable `previous_response_id` loss.
+
+`-transcode-continuity` (provider scope) enables an in-memory conversation continuity store for the provider's transcoded routes:
+- When enabled, the proxy stores canonical conversation turns indexed by emitted Responses IDs (`response.id`).
+- When a subsequent client request supplies `previous_response_id`, the store reconstructs the previous conversation chain and prepends it to the upstream chat request.
+- Store bounds are configured via `-transcode-continuity-capacity` (default 1024 chains) and `-transcode-continuity-ttl` (default 30m).
+- If a referenced ID has expired, was evicted, or is unknown, the request does not fail; it degrades to the standard observable loss.
 ### `count_tokens` against a chat-only upstream
 
 `POST /v1/messages/count_tokens` has no chat-completions equivalent, so it
