@@ -1186,6 +1186,7 @@ func TestProvider_TranscodeMappings_DeepCopyIsIsolated(t *testing.T) {
 		"-upstream", "https://api.openai.com",
 		"-transcode-responses-chat",
 		"-transcode-model", "client-m=upstream-m",
+		"-transcode-profile", "scanner=client-m:high",
 		"-transcode-allow-loss", "top_k",
 		"-transcode-allow-client-query", "custom_param",
 	})
@@ -1204,6 +1205,8 @@ func TestProvider_TranscodeMappings_DeepCopyIsIsolated(t *testing.T) {
 
 	// Mutate maps in m1
 	m1[0].Mapping.ModelMap.Exact["mutated"] = transcode.ModelMapping{UpstreamModel: "hacked"}
+	m1[0].Mapping.ProfileMap.Profiles["scanner"] = transcode.ProfileMapping{Model: "hacked", ReasoningTier: "low"}
+	m1[0].Mapping.ProfileMap.Profiles["injected"] = transcode.ProfileMapping{Model: "hacked"}
 	m1[0].Mapping.LossPolicy.Allowed[transcode.FeatureImageInput] = struct{}{}
 	m1[0].Mapping.AllowedClientQuery["hacked_param"] = struct{}{}
 
@@ -1211,6 +1214,16 @@ func TestProvider_TranscodeMappings_DeepCopyIsIsolated(t *testing.T) {
 	m2 := cfg.Providers[0].TranscodeMappings()
 	if _, ok := m2[0].Mapping.ModelMap.Exact["mutated"]; ok {
 		t.Error("mutation of ModelMap leaked into second copy")
+	}
+	scanner, ok := m2[0].Mapping.ProfileMap.Profiles["scanner"]
+	if !ok {
+		t.Fatal("scanner profile missing from second copy")
+	}
+	if scanner.Model != "client-m" || scanner.ReasoningTier != "high" {
+		t.Errorf("mutation of ProfileMap leaked into second copy: scanner = %+v", scanner)
+	}
+	if _, ok := m2[0].Mapping.ProfileMap.Profiles["injected"]; ok {
+		t.Error("insertion into ProfileMap leaked into second copy")
 	}
 	if _, ok := m2[0].Mapping.LossPolicy.Allowed[transcode.FeatureImageInput]; ok {
 		t.Error("mutation of LossPolicy leaked into second copy")
@@ -1452,5 +1465,73 @@ func TestResolveAndValidate_MessagesResponses_StrictDefaultsRequiresLoss(t *test
 	}
 	if err := cfgWithLoss.ResolveAndValidate(); err != nil {
 		t.Fatalf("ResolveAndValidate (with loss): %v", err)
+	}
+}
+
+// TestParseTranscodeProfiles verifies the -transcode-profile flag parsing:
+// name=model:tier and name=model forms, duplicate rejection, and closed
+// tier-vocabulary validation.
+func TestParseTranscodeProfiles(t *testing.T) {
+	empty, err := parseTranscodeProfiles(nil)
+	if err != nil {
+		t.Fatalf("empty: %v", err)
+	}
+	if len(empty.Profiles) != 0 {
+		t.Errorf("empty profiles = %d, want 0", len(empty.Profiles))
+	}
+
+	profiles, err := parseTranscodeProfiles([]string{
+		"scanner=gpt-4o-mini:low",
+		"analyst=gpt-4o:high",
+		"basic=gpt-4o-mini",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(profiles.Profiles) != 3 {
+		t.Fatalf("profiles = %d, want 3", len(profiles.Profiles))
+	}
+	scanner := profiles.Profiles["scanner"]
+	if scanner.Model != "gpt-4o-mini" || scanner.ReasoningTier != "low" {
+		t.Errorf("scanner = %+v, want model=gpt-4o-mini tier=low", scanner)
+	}
+	analyst := profiles.Profiles["analyst"]
+	if analyst.Model != "gpt-4o" || analyst.ReasoningTier != "high" {
+		t.Errorf("analyst = %+v, want model=gpt-4o tier=high", analyst)
+	}
+	basic := profiles.Profiles["basic"]
+	if basic.Model != "gpt-4o-mini" || basic.ReasoningTier != "" {
+		t.Errorf("basic = %+v, want model=gpt-4o-mini tier=''", basic)
+	}
+
+	for _, bad := range []string{
+		"noequals",
+		"=model",
+		"name=",
+		"name=model:",
+		"name=:tier",
+		"name=model:not-a-tier",
+	} {
+		if _, err := parseTranscodeProfiles([]string{bad}); err == nil {
+			t.Errorf("parseTranscodeProfiles(%q): want error", bad)
+		}
+	}
+	if _, err := parseTranscodeProfiles([]string{"a=m1", "a=m2"}); err == nil {
+		t.Error("duplicate name: want error")
+	}
+}
+
+// TestParseTranscodeProfilesAllTiers verifies every closed-vocabulary effort
+// tier parses as a profile tier.
+func TestParseTranscodeProfilesAllTiers(t *testing.T) {
+	for _, tier := range transcode.ModelEfforts {
+		profiles, err := parseTranscodeProfiles([]string{"p=m:" + tier})
+		if err != nil {
+			t.Errorf("tier %q: %v", tier, err)
+			continue
+		}
+		if profiles.Profiles["p"].ReasoningTier != tier {
+			t.Errorf("tier %q not preserved", tier)
+		}
 	}
 }

@@ -214,6 +214,10 @@ type ExchangeContext struct {
 	//. A stream/JSON mismatch on the upstream response
 	// is an error rather than a silent mode change.
 	StreamIntent bool
+	// ResolvedReasoningTier carries the reasoning tier resolved from the
+	// profile map ("low", "medium", "high", or "" when unset). The render
+	// applies it to the upstream request when the capability is granted.
+	ResolvedReasoningTier string
 }
 
 // lossPolicy returns the exchange loss policy, or the strictest policy when

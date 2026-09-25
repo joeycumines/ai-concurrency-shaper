@@ -328,6 +328,7 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-allow-loss` | provider | _(repeatable)_ | Approve non-portable semantic loss by granular key (or withdraw `!key`) |
 | `-transcode-strict-defaults` | provider | `false` | Strip all out-of-the-box chat capabilities, query parameters, and loss approvals |
 | `-transcode-model` | provider | _(repeatable)_ | Map client model name to upstream model name (`client=upstream`), identity fallback when omitted. Cannot be combined with `-model-table` — see [Migrating from -transcode-model](#migrating-from--transcode-model) |
+| `-transcode-profile` | provider | _(repeatable)_ | Map profile name to upstream model and optional reasoning tier: `name=model[:tier]` (see [Agent profiles](#agent-profiles--transcode-profile)) |
 | `-transcode-auth` | provider | _(unset — inherits provider auth, else none)_ | Per-route target auth mode override (`auto`, `none`, `bearer`, `x-api-key`, `api-key`, `header`) |
 | `-transcode-auth-source` | provider | _(unset — inherits provider auth, else none)_ | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`, `provider`) |
 | `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header` |
@@ -515,6 +516,20 @@ upstream sees the wire id, and responses echo the surrogate. Rollback is
 deleting the entries and restoring `-transcode-model`; a configuration
 carrying both fails startup naming the provider, so the migration is never
 half-applied silently.
+
+### Agent profiles (-transcode-profile)
+
+`-transcode-profile` (provider scope, repeatable) maps abstract agent profile names to concrete models and optional reasoning tiers:
+
+```
+name=model[:tier]
+```
+
+- `name`: profile identifier passed in the request `model` field (e.g. `scanner`, `analyst`).
+- `model`: target model identifier (a surrogate when `-model-table` is configured, or wire ID otherwise).
+- `tier`: optional reasoning effort tier (`low`, `medium`, `high`). Omit to keep the model's default reasoning configuration.
+
+When a client specifies a profile name in place of a model, the proxy resolves it to the target model and applies the reasoning tier before rendering the upstream request.
 
 ### Sensible defaults
 

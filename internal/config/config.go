@@ -182,6 +182,7 @@ type Provider struct {
 	TranscodeChatCapabilities  []string
 	TranscodeAllowClientQuery  []string
 	TranscodeModelMap          []string
+	TranscodeProfiles          []string
 	TranscodeMaxRequestMB      int64
 	TranscodeMaxResponseMB     int64
 	TranscodeAuth              string
@@ -232,6 +233,11 @@ func cloneTranscodeMapping(m proxy.TranscodeMapping) proxy.TranscodeMapping {
 		exact := make(map[string]transcode.ModelMapping, len(m.Mapping.ModelMap.Exact))
 		maps.Copy(exact, m.Mapping.ModelMap.Exact)
 		cloned.Mapping.ModelMap.Exact = exact
+	}
+	if m.Mapping.ProfileMap.Profiles != nil {
+		profiles := make(map[string]transcode.ProfileMapping, len(m.Mapping.ProfileMap.Profiles))
+		maps.Copy(profiles, m.Mapping.ProfileMap.Profiles)
+		cloned.Mapping.ProfileMap.Profiles = profiles
 	}
 	if m.Mapping.LossPolicy.Allowed != nil {
 		allowed := make(map[transcode.Feature]struct{}, len(m.Mapping.LossPolicy.Allowed))

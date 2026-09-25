@@ -200,6 +200,13 @@ const (
 	// AnthropicControls covers the Anthropic Messages client-side envelope
 	// controls (context_management, output_config): they are client/server
 	// conversation controls with no representation in the target request —
+	// ProfileRouting is the Note-only key recorded when a profile name
+	// resolves through the profile map: a collapse onto a different tier
+	// than the profile requested, or a fallback to the provider default
+	// model because the profile's model is unmapped. It is never a
+	// policy-gated loss — the Note is the observability contract that the
+	// profile was not silently forwarded as an unknown upstream model.
+	FeatureProfileRouting Feature = "profile_routing"
 	// output_config.budget_tokens duplicates the max_tokens output budget
 	// already carried by max_tokens, and context_management edits direct
 	// server-side context trimming. An approved loss drops them observably.

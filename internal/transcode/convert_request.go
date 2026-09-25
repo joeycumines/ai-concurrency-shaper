@@ -1730,6 +1730,26 @@ func RenderResponsesRequest(
 		}
 	}
 
+	// Profile-resolved reasoning tier: when the client specified neither a
+	// reasoning effort nor a thinking control, the profile's tier fills the
+	// gap. The gate is on the client's INTENT, not on whether an effort
+	// happened to be materialized: thinking "disabled" and "adaptive" are
+	// recorded as notes that deliberately emit no effort, and letting the
+	// profile tier materialize one here would contradict the note just
+	// written (thinking disabled would still reach the upstream as
+	// reasoning_effort) and would override the client's explicit choice.
+	// The Responses upstream always accepts reasoning.effort, so no
+	// capability gate is needed here.
+	if context != nil && context.ResolvedReasoningTier != "" && request.Thinking == nil {
+		if out.Reasoning == nil {
+			out.Reasoning = &ResponsesEnvelopeReasoning{}
+		}
+		if out.Reasoning.Effort == nil {
+			effort := context.ResolvedReasoningTier
+			out.Reasoning.Effort = &effort
+		}
+	}
+
 	body, err := json.Marshal(out)
 	if err != nil {
 		return nil, report, err
@@ -2186,6 +2206,22 @@ func RenderChatRequest(
 				return nil, report, err
 			}
 		}
+	}
+
+	// Profile-resolved reasoning tier: when the client specified neither a
+	// reasoning effort nor a thinking control, the profile's tier fills the
+	// gap. The gate is on the client's INTENT, not on whether an effort
+	// happened to be materialized — thinking "disabled" and "adaptive" are
+	// recorded as notes that deliberately emit no effort, and materializing
+	// one here would contradict the note and override the client's explicit
+	// choice. Applied only when the capability is granted; otherwise the tier
+	// is inert (the upstream cannot honor it and no client-requested feature
+	// is being dropped).
+	if context != nil && context.ResolvedReasoningTier != "" &&
+		request.Thinking == nil &&
+		capabilities.ReasoningEffort && out.ReasoningEffort == nil {
+		effort := context.ResolvedReasoningTier
+		out.ReasoningEffort = &effort
 	}
 
 	body, err := json.Marshal(out)
