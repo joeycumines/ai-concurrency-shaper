@@ -683,3 +683,42 @@ func (p *Provider) ModelCatalog() (transcode.CatalogConfig, bool) {
 	}
 	return out, true
 }
+
+// ModelTable returns a deep copy of the configured global model table entries as CatalogModel snapshots.
+func (c *Config) ModelTable() []transcode.CatalogModel {
+	if len(c.modelTable) == 0 {
+		return nil
+	}
+	out := make([]transcode.CatalogModel, len(c.modelTable))
+	for i, entry := range c.modelTable {
+		model := transcode.CatalogModel{
+			Surrogate:   entry.Surrogate,
+			Provider:    entry.Provider,
+			Efforts:     slices.Clone(entry.Efforts),
+			Modalities:  slices.Clone(entry.Modalities),
+			Default:     entry.Default,
+			Deprecated:  entry.Deprecated,
+			Tags:        slices.Clone(entry.Tags),
+			Description: entry.Description,
+			Created:     entry.Created,
+		}
+		if entry.Context != nil {
+			v := *entry.Context
+			model.Context = &v
+		}
+		if entry.MaxOutput != nil {
+			v := *entry.MaxOutput
+			model.MaxOutput = &v
+		}
+		if entry.CostInput != nil {
+			v := *entry.CostInput
+			model.CostInput = &v
+		}
+		if entry.CostOutput != nil {
+			v := *entry.CostOutput
+			model.CostOutput = &v
+		}
+		out[i] = model
+	}
+	return out
+}

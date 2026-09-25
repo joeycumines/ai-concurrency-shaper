@@ -91,7 +91,24 @@ func Parse(args []string) (*Config, error) {
 		if err := fs.Parse(serverSec.lex); err != nil {
 			return nil, err
 		}
-		cfg.Providers = []*Provider{p0}
+		// A suite-only legacy invocation has no implicit provider. If any
+		// provider option was supplied, keep the implicit provider so normal
+		// semantic validation still reports -upstream is required instead of
+		// silently discarding that option.
+		providerOptions := false
+		for i := 0; i < len(serverSec.lex); i++ {
+			meta, ok := flagMetadata()[flagTokenName(serverSec.lex[i])]
+			if !ok || meta.scope != scopeProvider {
+				continue
+			}
+			providerOptions = true
+			if !strings.Contains(serverSec.lex[i], "=") && !meta.isBool {
+				i++
+			}
+		}
+		if p0.Upstream != "" || len(cfg.Server.CatalogSuites) == 0 || providerOptions {
+			cfg.Providers = []*Provider{p0}
+		}
 		return cfg, nil
 	}
 

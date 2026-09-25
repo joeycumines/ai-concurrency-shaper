@@ -36,6 +36,7 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-bind` | server | `:8080` | Listen address |
 | `-metrics-bind` | server | _(unset)_ | Dedicated listen address for the Prometheus `/metrics` endpoint (see [Metrics Export](#metrics-export)); empty disables it |
 | `-model-table` | server | _(repeatable)_ | Global model identity entry `surrogate@provider=wire[;facts]` (see [Model identities](#model-identities-and-the-global-model-table)). Server scope, so with `--provider` sections every entry goes before the first marker |
+| `-catalog-suite` | server | _(repeatable)_ | Mount a virtual catalog suite: `[name@]prefix[=models][;options]` (see [Catalog suites](#catalog-suites-unified-endpoints-and-model-routing)). Server scope |
 | `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints). A `:unlimited` suffix (`POST /messages/count_tokens:unlimited`) exempts the route from limiting entirely, including under `-limit-all` |
 | `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
 | `-concurrency` | provider | `4` | Max concurrent limited requests |
@@ -201,7 +202,7 @@ A multi-provider configuration with no auth on some providers prints one startup
 
 #### Scope & Limitations
 
-Routing is **path-prefix only**: there is no model-ID translation or request-body inspection today. Clients choose a provider by targeting its mount (`/anthropic/...`, `/openai/...`); a single base URL with body-aware model routing is future work.
+Standard provider mounts route by **path prefix** (`/anthropic/...`, `/openai/...`). For a single unified endpoint with body-aware model routing across providers, use [Catalog suites](#catalog-suites-unified-endpoints-and-model-routing).
 
 Other explicit scope boundaries and deferred capabilities:
 - **No Downstream Client Authentication (M4)**: There is no downstream client authentication (anything that can reach the port can use every mounted provider). Transcoding's inbound credential mode is per-route forwarding/transcoding, not virtual-key admission.
@@ -438,6 +439,40 @@ declared list or `["text"]`, and `use_responses_lite` plus `support_verbosity`
 are `false` rather than optimistic claims. One malformed entry is skipped
 rather than failing the listing. A mount with no entries keeps
 `GET /v1/models` a transparent passthrough.
+
+### Catalog suites (unified endpoints and model routing)
+
+`-catalog-suite` (server scope, repeatable) mounts a virtual catalog suite that combines local model discovery with body-aware completion routing:
+
+```
+[name@]prefix[=models][;options]
+```
+
+- `prefix`: mount path (e.g. `/suite` or `/v1`).
+- `name`: optional display label (defaults to a sanitized prefix or `catalog`).
+- `models`: optional `+`-delimited list of model surrogates from `-model-table` to expose (defaults to all models in the global table).
+- Semicolon-delimited options (`key=value`):
+  - `format=codex|anthropic|openai|auto`: default catalog response dialect for discovery queries.
+  - `provider=name`: filter suite models to a single named provider.
+  - `strict=true|false`: when `false` and only one provider is configured, requests for unmapped models fall back to that provider; when `true` (or multiple providers exist), unmapped models return a client-dialect 404/400 error.
+
+Discovery endpoint `GET <prefix>/v1/models` is answered locally from the catalog without upstream calls or queueing. Completion endpoints `POST <prefix>/v1/messages` and `POST <prefix>/v1/responses` inspect the `model` field in the request body and dispatch only to a provider that has the matching transcoding route.
+
+Example:
+```sh
+ai-concurrency-shaper \
+  -model-table 'sonnet@anthropic=claude-3-5-sonnet-20241022' \
+  -model-table 'gpt4o@openai=gpt-4o' \
+  -catalog-suite '/suite=sonnet+gpt4o;format=auto' \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -transcode-messages-chat \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -transcode-responses-chat
+```
 
 ### Migrating from -transcode-model
 
