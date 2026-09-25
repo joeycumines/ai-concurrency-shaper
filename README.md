@@ -680,6 +680,13 @@ are modeled as a deliberate extension beyond the
 pinned OpenAI SDK revision; `internal/transcode/pins.md` records the exact
 shapes.
 
+- `tool_result_images` renders multimodal tool-result content as multipart
+  content blocks in a chat tool message, order preserved, for upstreams that
+  accept image parts there. Granting it is independent of `image_input` (an
+  upstream can accept user images while rejecting tool-message image parts),
+  but the multipart form itself needs the `image_url` vocabulary, so a mount
+  that withdraws `image_input` falls back to the envelope even with this on.
+
 ### Removing defaults
 
 The sensible defaults above exist so a minimal invocation works out of the

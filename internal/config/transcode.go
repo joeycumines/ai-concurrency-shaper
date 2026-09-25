@@ -333,6 +333,7 @@ var chatCapabilityNames = []struct {
 }{
 	{"developer_role", func(c *transcode.ChatCapabilities) *bool { return &c.DeveloperRole }},
 	{"image_input", func(c *transcode.ChatCapabilities) *bool { return &c.ImageInput }},
+	{"tool_result_images", func(c *transcode.ChatCapabilities) *bool { return &c.ToolResultImages }},
 	{"structured_outputs", func(c *transcode.ChatCapabilities) *bool { return &c.StructuredOutputs }},
 	{"parallel_tool_calls", func(c *transcode.ChatCapabilities) *bool { return &c.ParallelToolCalls }},
 	{"stop_sequences", func(c *transcode.ChatCapabilities) *bool { return &c.StopSequences }},
@@ -475,21 +476,23 @@ var defaultTranscodeAllowedQuery = map[string]struct{}{
 }
 
 var defaultTranscodeLosses = map[transcode.Feature]struct{}{
-	transcode.FeatureReasoningSummary:       {},
-	transcode.FeatureAuthenticatedThinking:  {},
-	transcode.FeatureMidConversationSystem:  {},
-	transcode.FeatureResponsesControls:      {},
-	transcode.FeatureAnthropicControls:      {},
-	transcode.FeatureRequestCitations:       {},
-	transcode.FeatureBuiltinTools:           {},
-	transcode.FeatureUsageUnknown:           {},
-	transcode.FeatureUsageCacheReadUnknown:  {},
-	transcode.FeatureUsageCacheWriteUnknown: {},
-	transcode.FeatureUsageReasoningUnknown:  {},
-	transcode.FeatureRequestReasoning:       {},
-	transcode.FeatureToolResultErrorStatus:  {},
-	transcode.FeatureDeveloperRole:          {},
-	transcode.FeatureImageDetailOriginal:    {},
+	transcode.FeatureReasoningSummary:            {},
+	transcode.FeatureAuthenticatedThinking:       {},
+	transcode.FeatureMidConversationSystem:       {},
+	transcode.FeatureResponsesControls:           {},
+	transcode.FeatureAnthropicControls:           {},
+	transcode.FeatureRequestCitations:            {},
+	transcode.FeatureBuiltinTools:                {},
+	transcode.FeatureUsageUnknown:                {},
+	transcode.FeatureUsageCacheReadUnknown:       {},
+	transcode.FeatureUsageCacheWriteUnknown:      {},
+	transcode.FeatureUsageReasoningUnknown:       {},
+	transcode.FeatureRequestReasoning:            {},
+	transcode.FeatureToolResultErrorStatus:       {},
+	transcode.FeatureDeveloperRole:               {},
+	transcode.FeatureToolResultMultimodalContent: {},
+	transcode.FeatureToolResultJSONEnvelope:      {},
+	transcode.FeatureImageDetailOriginal:         {},
 }
 
 func mergedLossPolicy(
@@ -536,10 +539,12 @@ func mergedChatCapabilities(
 		"provider_reasoning_text":     &out.ProviderReasoningText,
 		"provider_reasoning_thinking": &out.ProviderReasoningThinking,
 		"system_anywhere":             &out.SystemAnywhere,
+		"tool_result_images":          &out.ToolResultImages,
 	}
 	cli := map[string]bool{
 		"developer_role":              capabilities.DeveloperRole,
 		"image_input":                 capabilities.ImageInput,
+		"tool_result_images":          capabilities.ToolResultImages,
 		"structured_outputs":          capabilities.StructuredOutputs,
 		"parallel_tool_calls":         capabilities.ParallelToolCalls,
 		"stop_sequences":              capabilities.StopSequences,

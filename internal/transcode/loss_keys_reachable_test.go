@@ -224,7 +224,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 					CallID:  "call_1",
 					IsError: true,
 					Parts:   []CanonicalPart{CanonicalText{Text: "boom"}},
-				}, policy, &report)
+				}, ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
@@ -242,7 +242,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 						MediaType: "image/png",
 						URL:       "https://example.test/x.png",
 					}},
-				}, policy, &report)
+				}, ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
@@ -260,7 +260,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 						MediaType: "image/png",
 						URL:       "https://example.test/x.png",
 					}},
-				}, policy, &report)
+				}, ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
