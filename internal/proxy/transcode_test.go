@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1142,6 +1144,47 @@ func TestProxyTranscodeMessagesToChatStreaming(t *testing.T) {
 	}
 	if strings.Contains(body, `"type":"error"`) {
 		t.Fatalf("unexpected error event: %q", body)
+	}
+}
+
+// A configured flow log directory is validated at construction: a missing
+// path or a non-directory is a startup error, never a per-request surprise.
+func TestProxyTranscodeFlowLogDirValidated(t *testing.T) {
+	upstreamURL, err := url.Parse("https://upstream.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(dir string) error {
+		tm := transcodeMapping(testMessagesResponsesMapping(t))
+		tm.FlowLogDir = dir
+		_, err := New(
+			WithUpstream(upstreamURL),
+			WithMatcher(route.NewMatcher(nil)),
+			WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+			WithMetrics(metrics.NewCollector()),
+			WithTranscodeMapping(tm),
+		)
+		return err
+	}
+
+	if err := build(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("missing flow log directory accepted at construction")
+	} else if !strings.Contains(err.Error(), "flow log directory") {
+		t.Fatalf("missing directory error = %v", err)
+	}
+
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := build(file); err == nil {
+		t.Fatal("regular file accepted as a flow log directory")
+	} else if !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("non-directory error = %v", err)
+	}
+
+	if err := build(t.TempDir()); err != nil {
+		t.Fatalf("existing directory rejected: %v", err)
 	}
 }
 

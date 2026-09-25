@@ -843,6 +843,8 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		if p.TranscodeMaxResponseMB > 0 {
 			mappings[i].BodyLimits.SuccessfulResponseBytes = p.TranscodeMaxResponseMB << 20
 		}
+		mappings[i].FlowLogDir = p.TranscodeFlowLogDir
+
 		if p.TranscodeContinuity {
 			if p.continuityStore == nil {
 				p.continuityStore = transcode.NewContinuityStore(transcode.ContinuityConfig{
