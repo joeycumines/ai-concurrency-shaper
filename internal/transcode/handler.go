@@ -669,6 +669,7 @@ func (h *TranscodeHandler) convertRequest(
 			return nil, nil, err
 		}
 		context.OriginalResponsesRequest = echo
+		context.ToolNames = result.ToolNames
 		result.Request.ClientModel = context.UpstreamModel
 
 		// Opt-in continuity (statefulness decision: OFF by default — a nil

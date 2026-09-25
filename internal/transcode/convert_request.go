@@ -186,6 +186,15 @@ func DecodeResponsesRequest(
 	// this boundary; its bytes are preserved, never decoded and remarshaled
 	// through a map, so large integers, decimals, and exponents survive
 	// byte-exact.
+	//
+	// Flattening records every namespace child in a per-exchange map whose
+	// flat name is the bare child name while it is unique; a child that
+	// collides with a plain function name or an earlier namespace child is
+	// qualified deterministically. The map is the ONLY reverse lookup: the
+	// response renderer restores the namespace qualifier from it and never
+	// parses a separator out of a name.
+	reserved := plainToolNames(request.Tools)
+	names := &ToolNames{FlatToRef: map[string]ToolNameRef{}, RefToFlat: map[ToolNameRef]string{}}
 	for i, tool := range request.Tools {
 		switch tool.Type {
 		case "namespace":
@@ -197,7 +206,8 @@ func DecodeResponsesRequest(
 					err,
 				)
 			}
-			for j, nested := range flattened {
+			for j, child := range flattened {
+				nested := child.Tool
 				if len(nested.Parameters) > 0 {
 					if _, err := decodeJSONObject(string(nested.Parameters)); err != nil {
 						return DecodeResult{}, nil, fmt.Errorf(
@@ -209,7 +219,7 @@ func DecodeResponsesRequest(
 					}
 				}
 				result.Request.Tools = append(result.Request.Tools, CanonicalTool{
-					Name:        nested.Name,
+					Name:        chooseToolFlatName(names, reserved, child.Namespace, nested.Name),
 					Description: nested.Description,
 					JSONSchema:  nested.Parameters,
 					Strict:      fieldBoolPtr(nested.Strict),
@@ -247,6 +257,9 @@ func DecodeResponsesRequest(
 				return DecodeResult{}, nil, err
 			}
 		}
+	}
+	if len(names.RefToFlat) > 0 {
+		result.ToolNames = names
 	}
 
 	// Tool choice, reconciled against the tools that survive conversion: an
@@ -326,6 +339,8 @@ func DecodeResponsesRequest(
 		}
 		turns, err := responsesInputToTurns(
 			*request.Input,
+			names,
+			reserved,
 			policy,
 			&result.Report,
 			&result.Request.Artifacts,
@@ -400,6 +415,8 @@ func checkEchoSize(echo *ResponsesRequestEcho) error {
 // is preserved.
 func responsesInputToTurns(
 	input ResponsesInput,
+	names *ToolNames,
+	reserved map[string]struct{},
 	policy LossPolicy,
 	report *ConversionReport,
 	artifacts *SourceArtifacts,
@@ -489,9 +506,50 @@ func responsesInputToTurns(
 			if err != nil {
 				return nil, fmt.Errorf("input item %d: function call arguments: %w", i, err)
 			}
+			// Replayed history must use the same flat name the model was
+			// taught for a namespaced child, so the target never learns the bare form.
+			name := value.Name
+			if value.Namespace != "" {
+				if flat, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name}); ok {
+					name = flat
+				} else {
+					// The namespace is not declared by THIS request, so the
+					// qualifier cannot be mapped. Forwarding the bare name is
+					// only honest when nothing else owns it: if a surviving
+					// tool already answers to that name, the replayed call
+					// would be re-pointed at a DIFFERENT tool, which is a
+					// reinterpretation of client-sent history and never
+					// permitted. Otherwise the unqualified name is a genuine
+					// loss of the namespace, recorded under its own
+					// policy-gated key rather than a note that claimed the
+					// bare form was fine.
+					owned := false
+					if _, clash := reserved[name]; clash {
+						owned = true
+					} else if _, clash := names.FlatToRef[name]; clash {
+						owned = true
+					}
+					if owned {
+						return nil, errNamespacedReplayCollides(value, i)
+					}
+					if err := report.Lose(
+						policy,
+						FeatureNamespaceReplayUndeclared,
+						fmt.Sprintf("input[%d].namespace", i),
+						fmt.Sprintf(
+							"replayed call %q references namespace %q, which this request does not declare "+
+								"for that name; the upstream is not taught this name, so the replayed call may be unresolvable there",
+							value.Name,
+							value.Namespace,
+						),
+					); err != nil {
+						return nil, err
+					}
+				}
+			}
 			part := CanonicalFunctionCall{
 				CallID:    value.CallID,
-				Name:      value.Name,
+				Name:      name,
 				Arguments: raw,
 			}
 			turns = appendFunctionCallTurn(turns, part)
@@ -775,6 +833,78 @@ func rawMessage(value map[string]json.RawMessage) (json.RawMessage, error) {
 	return raw, nil
 }
 
+// plainToolNames returns the names of the request's ordinary function tools:
+// a namespace child never displaces a plain function's name.
+func plainToolNames(tools []openairesponses.Tool) map[string]struct{} {
+	reserved := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		if tool.Type == "function" && tool.Name != "" {
+			reserved[tool.Name] = struct{}{}
+		}
+	}
+	return reserved
+}
+
+// chooseToolFlatName returns the chat-facing flat name for a namespace child
+// and records it in the exchange map. The bare child name is used while it is
+// unique; a collision with a plain function name or an earlier child is
+// qualified as namespace + "__" + child, and a qualified name that is itself
+// taken is disambiguated with a numeric suffix. Every mapping stays
+// invertible, so no name is ever silently misattributed.
+func chooseToolFlatName(
+	names *ToolNames,
+	reserved map[string]struct{},
+	namespace string,
+	child string,
+) string {
+	ref := ToolNameRef{Namespace: namespace, Name: child}
+	if existing, ok := names.RefToFlat[ref]; ok {
+		return existing
+	}
+	if _, taken := reserved[child]; !taken {
+		if _, used := names.FlatToRef[child]; !used {
+			names.FlatToRef[child] = ref
+			names.RefToFlat[ref] = child
+			return child
+		}
+	}
+	base := namespace + "__" + child
+	qualified := base
+	for n := 2; ; n++ {
+		_, used := names.FlatToRef[qualified]
+		_, taken := reserved[qualified]
+		if !used && !taken {
+			break
+		}
+		qualified = fmt.Sprintf("%s_%d", base, n)
+	}
+	names.FlatToRef[qualified] = ref
+	names.RefToFlat[ref] = qualified
+	return qualified
+}
+
+// namespaceChild is one flattened namespace child together with the
+// namespace it was declared under: a nested namespace keeps its own name so
+// the response can restore the qualifier the client registered.
+type namespaceChild struct {
+	Namespace string
+	Tool      openairesponses.Tool
+}
+
+// errNamespacedReplayCollides reports a replayed function call whose namespace
+// this request does not declare when the bare name is already owned by a tool
+// that DID survive. Forwarding it would tell the upstream the model previously
+// called a different tool under the same name, reinterpreting client-sent
+// history, so the exchange is refused rather than silently misattributed.
+func errNamespacedReplayCollides(value *openairesponses.FunctionCallInput, index int) error {
+	return fmt.Errorf(
+		"input item %d: function call %q declares namespace %q, which this request does not "+
+			"declare for that name, and the name is already used by another declared tool; "+
+			"replaying it would attribute the call to that tool instead",
+		index, value.Name, value.Namespace,
+	)
+}
+
 // flattenNamespaceTool returns the nested function tools of a namespace
 // tool, recursing into nested namespaces. The grouping is client-side
 // structure a chat request cannot express; the nested function tools are
@@ -787,8 +917,8 @@ func flattenNamespaceTool(
 	tool openairesponses.Tool,
 	report *ConversionReport,
 	policy LossPolicy,
-) ([]openairesponses.Tool, error) {
-	var out []openairesponses.Tool
+) ([]namespaceChild, error) {
+	var out []namespaceChild
 	for i, nested := range tool.Tools {
 		switch nested.Type {
 		case "namespace":
@@ -798,7 +928,7 @@ func flattenNamespaceTool(
 			}
 			out = append(out, inner...)
 		case "function":
-			out = append(out, nested)
+			out = append(out, namespaceChild{Namespace: tool.Name, Tool: nested})
 		default:
 			if err := report.Lose(
 				policy,
@@ -821,7 +951,7 @@ func flattenNamespaceTool(
 		//.
 		if err := report.Note(
 			FeatureBuiltinTools,
-			"tools[]",
+			fmt.Sprintf("tools[namespace=%s]", tool.Name),
 			fmt.Sprintf(
 				"namespace tool %q carried no portable function tools (all nested tools dropped under the builtin_tools approval)",
 				tool.Name,
@@ -833,7 +963,7 @@ func flattenNamespaceTool(
 	}
 	if err := report.Note(
 		FeatureBuiltinTools,
-		"tools[]",
+		fmt.Sprintf("tools[namespace=%s]", tool.Name),
 		fmt.Sprintf(
 			"namespace tool %q flattened into %d function tool(s) for the chat request",
 			tool.Name,

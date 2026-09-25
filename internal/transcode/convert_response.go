@@ -999,13 +999,15 @@ func RenderResponsesResponse(
 			// The Responses function_call arguments field is a string:
 			// the model-generated raw text is preserved byte-exact
 			//.
+			callName, callNamespace := context.ToolNames.clientCallName(value.Name)
 			envelope.Output = append(envelope.Output, &ResponsesFunctionCallOutputItem{
 				ID:        context.IDs.New("fc_"),
 				Type:      "function_call",
 				Status:    ResponsesItemCompleted,
 				CallID:    value.CallID,
-				Name:      value.Name,
+				Name:      callName,
 				Arguments: value.Arguments.Raw,
+				Namespace: callNamespace,
 			})
 
 		case *CanonicalFunctionResultItem:

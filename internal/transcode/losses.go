@@ -87,6 +87,15 @@ const (
 	// acceptance). Deliberately NOT in lossRegistry: it is not a loss, so
 	// it is not policy-addressable via -transcode-allow-loss.
 	FeatureToolResultTextJoin Feature = "tool_result_text_join"
+	// NamespaceReplayUndeclared covers replayed history whose function call
+	// names a namespace this request does not declare. The qualifier cannot
+	// be mapped, so the upstream is not taught the name: the call is a
+	// policy-gated loss, NOT a note, because forwarding it unqualified can
+	// re-point the call at a different surviving tool. When the bare name IS
+	// owned by a surviving tool the conversion is refused outright instead -
+	// a reinterpretation of client-sent history is never a loss the operator
+	// can approve.
+	FeatureNamespaceReplayUndeclared Feature = "namespace_replay_undeclared"
 	// OutputItemBoundaries covers output item boundaries (and
 	// conversation-state output items such as function_call_output) that the
 	// target cannot reproduce: renderers may merge or drop items only under
@@ -254,6 +263,7 @@ var lossRegistry = []lossEntry{
 	{FeatureToolSchemaStrictness, "the source tool schema has no strictness semantic; the Responses function-tool contract requires explicit strict, emitted as strict:false under this permission"},
 	{FeatureToolResultErrorStatus, "the tool result error status cannot be reproduced in the target; the permissive encoding is the visible error_status_prefix text"},
 	{FeatureToolResultMultimodalContent, "multimodal tool-result content cannot be carried by a Chat tool message; under this permission it is encoded as the tool_result_json_envelope text"},
+	{FeatureNamespaceReplayUndeclared, "replayed function_call history names a namespace this request does not declare for that name; the qualifier cannot be mapped, so the upstream is not taught the name and the replayed call may be unresolvable there"},
 	{FeatureOutputItemBoundaries, "output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target"},
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},

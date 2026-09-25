@@ -264,6 +264,35 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
+			// A replayed function_call naming a namespace this request does not
+			// declare: the qualifier cannot be mapped, so the call is recorded
+			// as this loss rather than forwarded unqualified. The bare name here
+			// is owned by nothing, so the conversion is not refused outright.
+			key: FeatureNamespaceReplayUndeclared,
+			perm: []Feature{
+				FeatureNamespaceReplayUndeclared,
+				FeatureUsageCacheReadUnknown,
+				FeatureUsageCacheWriteUnknown,
+				FeatureUsageReasoningUnknown,
+				FeatureUsageUnknown,
+			},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				result, _, err := DecodeResponsesRequest([]byte(`{
+					"model": "m",
+					"tools": [
+						{"type": "namespace", "name": "declared", "description": "d", "tools": [
+							{"type": "function", "name": "known", "description": "x", "strict": false,
+							 "parameters": {"type": "object", "properties": {}}}]}
+					],
+					"input": [
+						{"type": "function_call", "call_id": "call_1", "name": "unknown",
+						 "namespace": "undeclared", "arguments": "{}"}
+					]
+				}`), policy)
+				return result.Report, err
+			},
+		},
+		{
 			key: FeatureOutputItemBoundaries,
 			perm: []Feature{
 				FeatureOutputItemBoundaries,

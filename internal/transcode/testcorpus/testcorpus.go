@@ -67,6 +67,8 @@ var (
 	qwenReasoningStreamFieldSSE []byte
 	//go:embed testdata/field/codex_multiturn_request_field.json
 	codexMultiturnRequestFieldJSON []byte
+	//go:embed testdata/field/codex_namespace_request_field.json
+	codexNamespaceRequestFieldJSON []byte
 )
 
 // FieldQwenStreamSSE returns the qwen-style chat stream capture: choice-level
@@ -92,6 +94,13 @@ func FieldQwenReasoningStreamSSE() []byte { return qwenReasoningStreamFieldSSE }
 // a previous-output history item carrying "status": "" (the task-30 field
 // regression) between two user turns.
 func FieldCodexMultiturnRequestJSON() []byte { return codexMultiturnRequestFieldJSON }
+
+// FieldCodexNamespaceRequestJSON returns the captured Codex CLI (0.154.0)
+// Responses request carrying namespace tools (multi_agent_v1 and an MCP
+// namespace) alongside ordinary function tools and a web_search built-in.
+// The tools, their child schemas, and tool_choice are byte-verbatim from the
+// capture; the envelope is trimmed to the fields the replay test needs.
+func FieldCodexNamespaceRequestJSON() []byte { return codexNamespaceRequestFieldJSON }
 
 // ChatCompletionsRequestJSON returns the raw chat completions request fixture
 // bytes.

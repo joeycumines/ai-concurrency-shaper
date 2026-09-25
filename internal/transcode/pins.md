@@ -317,6 +317,56 @@ OfString        string
 OfInputItemList []ResponseInputItemUnion
 ```
 
+## Responses namespace tools (modeled extension beyond the pin)
+
+The v1.12.0 Responses pin predates the namespace-tool surface, so the
+following shapes are deliberate extensions, modeled from the current official
+contract. The `type:"namespace"` tool shape is backed by a real Codex CLI
+0.154.0 capture; the call items' optional `namespace` field is modeled from
+the documented contract, because that capture contains no
+`function_call`/`function_call_output` items. (The transformer's client
+contract is strict, so an unmodeled field would reject the request):
+
+- A tool of `type:"namespace"` groups nested function tools
+  (`{"type":"namespace","name":...,"description":...,"tools":[...]}`); each
+  child carries `name`, `description`, `strict`, and an object `parameters`
+  schema. Namespace children are flattened into flat chat function tools; the
+  grouping itself is client-side structure the chat dialect cannot express and
+  is recorded as a note.
+- `function_call` output items, replayed `function_call` input items, and
+  `function_call_output` input items carry an optional `namespace` field
+  alongside the bare `name`. The qualifier is always this separate field; it
+  is never concatenated into the name.
+- The per-exchange flattening map (flat name to namespace + child) is the only
+  reverse lookup, so no separator is ever parsed out of a name. A child whose
+  bare name collides with a plain function tool or another namespace child is
+  qualified deterministically with `namespace + "__" + child`; when that
+  qualified name is itself already taken (a plain tool may legally be spelled
+  that way), a numeric suffix (`namespace__child_2`, `_3`, ...) keeps every
+  mapping invertible.
+- `tool_choice` has no namespaced selector in any inspected contract; the
+  flattened bare (or qualified) name is what a named choice addresses.
+
+Strictness is unchanged: these fields are modeled, and any other unknown field
+on the client contract still rejects.
+
+## Responses reasoning-item routing marker (modeled extension beyond the pin)
+
+A gateway serving the native Responses API may attach a `format` routing
+marker to reasoning output items (observed live 2026-09-17 on the camel
+mount: `"format":"azure-openai-responses-v1"` alongside `id`, `type`,
+`status`, `summary`, `encrypted_content`). The marker names the gateway's
+own response dialect, not model output: it is decoded into
+`ReasoningOutputItem.Format` as opaque raw JSON, stripped before the item
+enters the canonical bytes, and never forwarded into any client dialect
+(the strict output-item union would otherwise fail the exchange on it).
+Evidence: the exhibiting flow record
+`scratch/flowlogs/000010-17635-POST-v1_messages.json` (upstream model
+`openai/gpt-5.6-luna`; flow records are git-ignored scratch, so the durable
+evidence is the committed fixture
+`testcorpus/testdata/field/camel_reasoning_format_field.json`, accessor
+`FieldCamelReasoningFormatJSON` in `testcorpus.go`).
+
 ## Anthropic Messages inventory (message.go, v1.61.0)
 
 ### Message (non-stream response + message_start payload)
