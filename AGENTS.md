@@ -5,6 +5,12 @@ Providing structural information here makes agents lazy, as they stop exploring 
 
 **Code must never reference session-scoped artefacts** — blueprint task numbers, review-round ids, incident nicknames: cite the observed behaviour or a commit instead, because a session reference is meaningless to anyone without the same context.
 
+**All configuration options must be defined as command line flags — notable exceptions include secrets — and environment variables, ESPECIALLY any environment variable parsed within business logic, are strictly banned.**
+
+**Meta tests are banned unless explicitly requested:** never add a test whose subject is other tests, documentation, or the presence or absence of an artefact rather than the program's own behaviour.
+
+**The proxy's scope is not limited to what an analysis finds convenient:** anything a client needs in order to work — including stateful harness behaviour such as agent/thread lifecycles, mailboxes, and profile routing — can only live here, so never rule work out as "out of scope".
+
 This is a **stealth reverse proxy** with bounded concurrency and a TUI dashboard.
 
 Ensure these characteristics:

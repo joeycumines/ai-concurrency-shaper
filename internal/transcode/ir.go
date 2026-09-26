@@ -296,9 +296,6 @@ type ExchangeContext struct {
 	// ResolvedReasoningTier carries the reasoning tier resolved from the
 	// profile map ("low", "medium", "high", or "" when unset). The render
 	// applies it to the upstream request when the capability is granted.
-	// ResolvedReasoningTier carries the reasoning tier resolved from the
-	// profile map ("low", "medium", "high", or "" when unset). The render
-	// applies it to the upstream request when the capability is granted.
 	ResolvedReasoningTier string
 }
 

@@ -1987,11 +1987,12 @@ func RenderResponsesRequest(
 }
 
 // thinkingBudgetToEffort maps an Anthropic Messages thinking budget_tokens
-// value to the OpenAI chat reasoning_effort vocabulary. The thresholds are
-// the documented midpoints of the classic Claude Code effort budgets
+// value to the reasoning_effort vocabulary. The thresholds are the
+// documented midpoints of the classic Claude Code effort budgets
 // (minimal ~ 256, low ~ 1024, medium ~ 4096, high ~ 16384); the mapping is
-// deterministic, capped at "high" (the non-standard "xhigh" is never
-// synthesized), and reported as a named Note on every mapped exchange.
+// deterministic, capped at "high" (the canonical vocabulary includes xhigh
+// and max, but no documented budget maps above high, so the projection never
+// synthesizes one), and reported as a named Note on every mapped exchange.
 func thinkingBudgetToEffort(budget int) string {
 	switch {
 	case budget < 1024:
@@ -2052,6 +2053,12 @@ func RenderChatRequest(
 	if echo := context.OriginalResponsesRequest; echo != nil {
 		out.User = echo.User
 		out.Store = echo.Store
+		// Opt-in continuity (statefulness decision: OFF by default). When
+		// the store resolved this request's previous_response_id, the
+		// reconstructed history is already prepended to the rendered turns,
+		// so the field is consumed, not lost: skip the existing observable
+		// loss (the hit Note at decode already records the fact). A miss
+		// (RequestDepth 0) falls through to the loss, never a failure.
 		if echo.PreviousResponseID != nil && context.RequestDepth == 0 {
 			if err := report.Lose(
 				context.lossPolicy(),
@@ -2208,18 +2215,24 @@ func RenderChatRequest(
 			dialog    []ChatMessage
 		)
 		sawDialog := false
-		// midDialogAllRetained tracks whether every mid-dialog system message came
-		// from the continuity store rather than this request. A request-side gate
-		// polices CLIENT input, so a position the client's own request never
-		// created must not be charged to it.
+		// midDialogAllRetained tracks whether every mid-dialog system message
+		// came from the continuity store rather than this request. A
+		// request-side gate polices CLIENT input, so a position the client's
+		// own request never created must not be charged to it: a retained
+		// system turn after dialog turns is the proxy's own history, already
+		// consolidated once when the chain was first rendered. The encoding is
+		// identical; only the policy decision differs, so it is recorded as a
+		// Note (visible, never silent) instead of a loss that can reject a
+		// request the client authored cleanly.
 		midDialogAllRetained := true
 		for i, message := range rendered {
 			if !systemChannel[i] {
-				// Only a turn the CLIENT authored may move a later client system turn
-				// out of the leading position. Retained history sits in front of the
-				// client's own turns, so counting it would silently demote a client's
-				// instructions from index 0 to a mid-conversation system turn and then
-				// charge the client for a position the proxy created.
+				// Only a turn the CLIENT authored may move a later client
+				// system turn out of the leading position. Retained history
+				// sits in front of the client's own turns, so counting it
+				// would silently demote a client's instructions from index 0
+				// to a mid-conversation system turn and then charge the
+				// client for the position the proxy created.
 				if !retainedChannel[i] {
 					sawDialog = true
 				}
@@ -2237,16 +2250,10 @@ func RenderChatRequest(
 		}
 		switch {
 		case len(midDialog) > 0 && midDialogAllRetained:
-			// The encoding is identical; only the policy decision differs. A
-			// retained position was already paid once when the chain was first
-			// rendered, so it is recorded as a visible Note instead of a loss
-			// that can reject a request the client authored cleanly.
 			if err := report.Note(
 				FeatureMidConversationSystem,
 				"messages[]",
-				"retained conversation history carried system turns after dialog turns; "+
-					"they consolidate into the leading system message (the position was already "+
-					"lost when the chain was first rendered, so it is not re-charged to this request)",
+				"retained conversation history carried system turns after dialog turns; they consolidate into the leading system message (the position was already lost when the chain was first rendered, so it is not re-charged to this request)",
 			); err != nil {
 				return nil, report, err
 			}

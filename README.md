@@ -329,13 +329,10 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-strict-defaults` | provider | `false` | Strip all out-of-the-box chat capabilities, query parameters, and loss approvals |
 | `-transcode-model` | provider | _(repeatable)_ | Map client model name to upstream model name (`client=upstream`), identity fallback when omitted. Cannot be combined with `-model-table` — see [Migrating from -transcode-model](#migrating-from--transcode-model) |
 | `-transcode-profile` | provider | _(repeatable)_ | Map profile name to upstream model and optional reasoning tier: `name=model[:tier]` (see [Agent profiles](#agent-profiles--transcode-profile)) |
-| `-transcode-auth` | provider | _(unset — inherits provider auth, else none)_ | Per-route target auth mode override (`auto`, `none`, `bearer`, `x-api-key`, `api-key`, `header`) |
 | `-transcode-continuity` | provider | `false` | Opt-in per-conversation continuity store for `previous_response_id` against stateless chat upstreams (see [Conversation continuity store](#conversation-continuity-store--transcode-continuity)) |
-
 | `-transcode-continuity-capacity` | provider | `1024` | Max retained conversation chains for the continuity store (0 = default 1024) |
-
 | `-transcode-continuity-ttl` | provider | `30m` | Max age of a retained conversation chain (0 = default 30m) |
-
+| `-transcode-auth` | provider | _(unset — inherits provider auth, else none)_ | Per-route target auth mode override (`auto`, `none`, `bearer`, `x-api-key`, `api-key`, `header`) |
 | `-transcode-auth-source` | provider | _(unset — inherits provider auth, else none)_ | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`, `provider`) |
 | `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header` |
 | `-transcode-anthropic-version` | provider | `2023-06-01` | Anthropic-Version header value when target auth mode resolves to `x-api-key` |
@@ -547,43 +544,22 @@ the flags below extend the defaults, never replace them:
 
 | Layer | Default | Meaning |
 | --- | --- | --- |
-| Chat capabilities | `parallel_tool_calls`, `provider_reasoning_thinking` | a maximally compatible out-of-the-box core, enabled via `-transcode-chat-capability` (granular names: `developer_role`, `image_input`, `structured_outputs`, `parallel_tool_calls`, `stop_sequences`, `reasoning_effort`, `provider_reasoning_text`, `provider_reasoning_thinking`, `system_anywhere`). The fidelity-only knobs — `reasoning_effort` (a parameter several open-source servers reject) and `developer_role` (a role Qwen/Llama/DeepSeek chat templates do not know) — are deliberately opt-in: add them for upstreams that accept the modern surface |
+| Chat capabilities | `image_input`, `parallel_tool_calls`, `provider_reasoning_thinking`, `stop_sequences`, `structured_outputs` | A compatible out-of-the-box core, enabled via `-transcode-chat-capability` (available names: `developer_role`, `image_input`, `multi_agent_priming`, `parallel_tool_calls`, `provider_reasoning_text`, `provider_reasoning_thinking`, `reasoning_effort`, `stop_sequences`, `structured_outputs`, `system_anywhere`, `tool_result_images`). `image_input` and `stop_sequences` are required for common client traffic (such as Claude Code image attachments and stop sequence fields), so rejecting either locally would fail requests before querying upstream; withdraw them with `!image_input` or `!stop_sequences` for upstreams that reject those fields. `tool_result_images` (opt-in) renders multimodal tool-result content as multipart chat tool messages (text and image_url parts) for upstreams accepting tool message images; without it, content falls back to the observable `tool_result_json_envelope` text encoding. `structured_outputs` maps client `text.format` JSON schema definitions directly to chat `response_format`. For upstreams that reject structured outputs, withdraw the capability to fail locally with a typed error or approve the loss to proceed unconstrained with logged notification. |
 | Allowed client query | `beta` | Anthropic clients (Claude Code) gate every request with `?beta=true`; harmless on chat endpoints. Add more via `-transcode-allow-client-query` |
-| Loss policy | `reasoning_summary`, `authenticated_thinking`, `mid_conversation_system`, `responses_controls`, `anthropic_controls`, `builtin_tools`, `usage_unknown`, `usage_cache_read_unknown`, `usage_cache_write_unknown`, `usage_reasoning_unknown`, `request_reasoning`, `developer_role`, `tool_result_error_status` | the non-portable features real Responses/Messages client traffic triggers (reasoning summaries, Anthropic thinking blocks, system turns that cannot keep their position in a chat request, Responses and Anthropic envelope controls, built-in tools, usage breakdowns the chat upstreams do not always report, the effort/role knobs behind the opt-in capabilities, and the error status of a failed tool result); approved via `-transcode-allow-loss` on top of the defaults. Note: approving `responses_controls` tolerates `include`/`client_metadata`/`prompt_cache_key` and upstream-echoed controls — the conversation-state request controls (`background`, `max_tool_calls`, `prompt`, `safety_identifier`, `status`) are errors under every policy. The `tool_result_error_status` default is deliberate: Claude Code marks every failed tool call with `is_error: true`, so rejecting it makes the proxy unusable with the flagship client — the permissive encoding renders the visible `[tool_result_error]` prefix before the result content (the model still sees that the tool failed) and the decision is logged per exchange; withdraw it with `-transcode-allow-loss '!tool_result_error_status'` if you want strict rejection. A multi-part all-text tool result is joined into one string for a chat tool message as a sanctioned encoding (recorded as a note on every exchange; every content byte is preserved) |
+| Loss policy | the approvals a real client's traffic needs | the non-portable features real Responses/Messages client traffic triggers (reasoning summaries, Anthropic thinking blocks, system turns that cannot keep their position in a chat request, Responses and Anthropic envelope controls, the tier/phase controls a native Responses upstream echoes on its responses (`response_service_tier`, `output_phase`), built-in tools, usage breakdowns the chat upstreams do not always report, the effort/role knobs behind the opt-in capabilities, and the error status of a failed tool result); approved via `-transcode-allow-loss` on top of the defaults. Note: approving `responses_controls` tolerates `include`/`client_metadata`/`prompt_cache_key` and upstream-echoed controls — the conversation-state request controls (`background`, `max_tool_calls`, `prompt`, `safety_identifier`, `status`) are errors under every policy. The `tool_result_error_status` default is deliberate: Claude Code marks every failed tool call with `is_error: true`, so rejecting it makes the proxy unusable with the flagship client — the permissive encoding renders the visible `[tool_result_error]` prefix before the result content (the model still sees that the tool failed) and the decision is logged per exchange; withdraw it with `-transcode-allow-loss '!tool_result_error_status'` if you want strict rejection. A multi-part all-text tool result is joined into one string for a chat tool message as a sanctioned encoding (recorded as a note on every exchange; every content byte is preserved) |
 
-Capabilities are exercised only when the client actually uses the feature:
-`provider_reasoning_thinking` (the default) maps the chat provider
-reasoning response extension — spelled `reasoning` (OpenRouter style) or
-`reasoning_content` (the DeepSeek/Qwen convention open-weights gateways
-stream) — to NATIVE Anthropic thinking blocks so Claude Code renders it
-with its native thinking UI (live-verified against Claude Code 2.1.260:
-thinking blocks stream in the exact Anthropic lifecycle and replayed
-synthetic blocks are scrubbed before the upstream sees them);
-`provider_reasoning_text` maps the same field to client
-text; `provider_reasoning_thinking` maps the same field to NATIVE Anthropic
-thinking blocks so Claude Code renders it with its native thinking UI —
-each synthesized block carries the proxy's marker signature
-(`shaper-synth-thinking-1`), and the request path scrubs
-marker-signature thinking blocks out of replayed history before any
-upstream rendering, so the synthetic signature never reaches an upstream;
-`parallel_tool_calls` forwards the parallel-tool-calls setting. When both
-reasoning capabilities are enabled, `provider_reasoning_thinking` takes
-precedence. Without either, provider reasoning follows the
-`provider_reasoning_text` loss decision. To restore the old ordinary-text
-rendering, withdraw thinking and add text:
-`-transcode-chat-capability '!provider_reasoning_thinking' -transcode-chat-capability provider_reasoning_text`.
+Capabilities take effect when the client uses the corresponding feature:
+- `provider_reasoning_thinking` (the default) maps chat provider reasoning response extensions (`reasoning` or `reasoning_content`) to native Anthropic thinking blocks so Claude Code renders them with its native thinking UI. Each synthesized block carries the marker signature `shaper-synth-thinking-1`, and the request path scrubs marker-signature thinking blocks from replayed history before upstream rendering, preventing synthetic markers from leaking upstream.
+- `provider_reasoning_text` maps the same field to client text instead. When both reasoning capabilities are enabled, `provider_reasoning_thinking` takes precedence. Without either, provider reasoning follows the `provider_reasoning_text` loss decision. To map reasoning to ordinary text instead of thinking blocks:
+  `-transcode-chat-capability '!provider_reasoning_thinking' -transcode-chat-capability provider_reasoning_text`.
+- `parallel_tool_calls` forwards the parallel-tool-calls configuration.
+- `multi_agent_priming` injects a bounded sub-agent orchestration protocol reminder into the leading system or developer turn for chat targets, recorded as a per-exchange note (`multi_agent_priming`).
 
-Two
-capabilities are opt-in because generic upstreams reject what they render:
-`reasoning_effort` forwards the Responses `reasoning.effort` (and an
-Anthropic `thinking` budget, see below) as the chat `reasoning_effort`
-parameter — without it the knob drops observably under the default
-`request_reasoning` loss; `developer_role` preserves Responses
-developer-role messages — without it developer turns render as ordinary
-system messages and the distinction drop is observable under the default
-`developer_role` loss; `system_anywhere` renders system/developer turns
-positionally for upstreams that accept system messages anywhere (e.g.
-genuine OpenAI).
+Several capabilities remain opt-in because generic and open-weights upstreams reject what they render:
+- `reasoning_effort` forwards Responses `reasoning.effort` (and Anthropic `thinking` budgets) as the chat `reasoning_effort` parameter; without it, the parameter drops observably under the default `request_reasoning` loss.
+- `developer_role` preserves Responses developer-role messages; without it, developer turns render as standard system messages, recorded under the default `developer_role` loss.
+- `system_anywhere` renders system/developer turns positionally for upstreams that accept system messages anywhere in conversation history.
+- `tool_result_images` renders tool-result images as multipart content in chat tool messages.
 
 ### System message placement
 
@@ -741,12 +717,11 @@ knobs for an upstream that accepts them, or withdraw any default with a
 
 ```sh
 # Restore the modern-surface knobs for an upstream that accepts them
-# (reasoning_effort parameter and developer-role messages), keep every
-# default, and also add image_input:
+# (reasoning_effort parameter and developer-role messages), keeping every
+# default:
 ai-concurrency-shaper -upstream https://api.example.com -transcode-responses-chat \
   -transcode-chat-capability reasoning_effort \
-  -transcode-chat-capability developer_role \
-  -transcode-chat-capability image_input
+  -transcode-chat-capability developer_role
 
 # Withdraw a default loss approval (builtin_tools) so built-in tool requests
 # are rejected instead of dropped, or drop the default beta query forwarding:
@@ -867,6 +842,7 @@ By default, request transcoding is stateless: each exchange is converted and for
 - When a subsequent client request supplies `previous_response_id`, the store reconstructs the previous conversation chain and prepends it to the upstream chat request.
 - Store bounds are configured via `-transcode-continuity-capacity` (default 1024 chains) and `-transcode-continuity-ttl` (default 30m).
 - If a referenced ID has expired, was evicted, or is unknown, the request does not fail; it degrades to the standard observable loss.
+
 ### `count_tokens` against a chat-only upstream
 
 `POST /v1/messages/count_tokens` has no chat-completions equivalent, so it

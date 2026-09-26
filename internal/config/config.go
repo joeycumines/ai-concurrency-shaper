@@ -185,10 +185,10 @@ type Provider struct {
 	TranscodeProfiles          []string
 	TranscodeMaxRequestMB      int64
 	TranscodeFlowLogDir        string
+	TranscodeMaxResponseMB     int64
 	TranscodeContinuity        bool
 	TranscodeContinuityCap     int
 	TranscodeContinuityTTL     time.Duration
-	TranscodeMaxResponseMB     int64
 	TranscodeAuth              string
 	TranscodeAuthSource        string
 	TranscodeAuthHeader        string

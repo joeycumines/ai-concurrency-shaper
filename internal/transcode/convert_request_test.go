@@ -489,6 +489,13 @@ func TestMultiAgentPrimingRequiresDeclaredTools(t *testing.T) {
 	}
 }
 
+// TestDecodeMessagesServerToolDefinitionKeyed pins the live server-tool
+// capture (2026-09-17, Claude Code 2.1.273 web-search session via
+// messages->chat:
+// tools:[{type:web_search_20250305, name:web_search, max_uses:8}]): the
+// type-discriminated server definition must fail with the keyed
+// anthropic_server_tools error under strict policy (never an unattributed
+// unknown-field rejection), and drop observably under the approval.
 func TestDecodeMessagesServerToolDefinitionKeyed(t *testing.T) {
 	body := []byte(`{"model":"m","max_tokens":8,` +
 		`"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],` +
