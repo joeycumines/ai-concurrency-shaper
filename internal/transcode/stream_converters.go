@@ -8,6 +8,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -105,6 +106,11 @@ type chatResponsesStreamState struct {
 	items        []openResponsesItem
 	itemIndex    int64
 	pendingCalls map[int]*pendingToolCall // keyed by chat tool fragment index
+	// closedCalls holds tool calls sealed inline at a transition where the
+	// next content item had to open. They are already closed on the wire,
+	// so finish must not close them again, but the terminal envelope still
+	// carries them.
+	closedCalls []*pendingToolCall
 
 	// textBufs and refusalBufs accumulate streamed text and refusal per
 	// content part in strings.Builder, avoiding quadratic re-copying of the
@@ -502,6 +508,7 @@ func (s *chatResponsesStreamState) convertDelta(
 	// into one thinking block per delta (CC-FRAGMENTATION, operator-
 	// observed 2026-09-08 — Claude Code rendered one ∴ fragment per line).
 	hasOutput := (delta.Content != nil && *delta.Content != "") ||
+		(delta.Refusal != nil && *delta.Refusal != "") ||
 		len(delta.ToolCalls) > 0
 	if hasOutput {
 		closeEvents, err := s.closeOpenReasoningItem()
@@ -623,6 +630,18 @@ func (s *chatResponsesStreamState) convertDelta(
 				}
 			}
 			if len(s.items) == 0 || !s.isReasoningItem(&s.items[len(s.items)-1]) || reasoningClosed {
+				// A thinking block must not open while the preceding message's
+				// content block is still open: seal the message item at the
+				// transition, the way the reasoning item is sealed on the way
+				// into content and tool output. A started tool block must be
+				// sealed too — otherwise a tool_use block stays open while the
+				// thinking block opens.
+				closedMessage, err := s.closeOpenMessageItem()
+				if err != nil {
+					return nil, err
+				}
+				events = append(events, closedMessage...)
+				events = append(events, s.closePendingToolCalls()...)
 				if err := s.budget.addItem(); err != nil {
 					return nil, s.wireError(err)
 				}
@@ -747,15 +766,34 @@ func (s *chatResponsesStreamState) convertDelta(
 func (s *chatResponsesStreamState) openMessageItemForPart(
 	partType string,
 ) (*openResponsesItem, []ResponsesSSEEvent, error) {
-	// Open a new message item when the last item is not a message.
-	if len(s.items) == 0 || !s.items[len(s.items)-1].isMessage() {
+	// Open a new message item when the last item is not a message, or when it
+	// is a message already closed at a message→tool transition
+	// (closeOpenMessageItem): content arriving after the tool call renders as
+	// a NEW message item, exactly as resumed reasoning renders as a new
+	// thinking block, because the closed item is already sealed on the wire.
+	reuseTrailing := false
+	if len(s.items) > 0 {
+		if last := &s.items[len(s.items)-1]; last.isMessage() {
+			if message, ok := last.item.(*ResponsesOutputMessage); !ok || message.Status != ResponsesItemCompleted {
+				reuseTrailing = true
+			}
+		}
+	}
+	if !reuseTrailing {
+		// A new content item must not open while a tool call's block is still
+		// open: seal the pending calls at the transition.
+		closed := s.closePendingToolCalls()
 		added, err := s.openMessageItem()
 		if err != nil {
 			return nil, nil, err
 		}
-		// The output_item.added event is returned through the caller so it
-		// is emitted before the content_part.added of the first part.
-		return s.openMessageItemForPartWithEvents(partType, added)
+		// The output_item.added event is emitted before the
+		// content_part.added of the first part.
+		item, itemEvents, err := s.openMessageItemForPartWithEvents(partType, added)
+		if err != nil {
+			return nil, nil, err
+		}
+		return item, append(closed, itemEvents...), nil
 	}
 	return s.openMessageItemForPartWithEvents(partType, nil)
 }
@@ -844,6 +882,23 @@ func (s *chatResponsesStreamState) convertToolCall(
 			"legacy function_call mapped to one tool call with id synthesized from the chunk id ("+*call.ID+")",
 		); err != nil {
 			return nil, err
+		}
+	}
+
+	// A fragment carrying the id of a call that was already sealed inline
+	// cannot merge back: the sealed call's block closed on the wire, so any
+	// resolution would fork a duplicate call id into the terminal envelope
+	// (either by creating a new pending entry or by an unstarted pending
+	// call adopting the id through its fragment index). Reject it as corrupt
+	// upstream wire.
+	if call.ID != nil && *call.ID != "" {
+		for _, sealed := range s.closedCalls {
+			if sealed.callID == *call.ID {
+				return nil, s.wireError(fmt.Errorf(
+					"chat tool call fragment reuses the id %q of a sealed call",
+					*call.ID,
+				))
+			}
 		}
 	}
 
@@ -986,6 +1041,14 @@ func (s *chatResponsesStreamState) convertToolCall(
 	// builders), so the added event is already a detached snapshot and needs
 	// no copy.
 	if !pending.started && pending.callID != "" && pending.name != "" {
+		// The tool block must not open before the preceding message's content
+		// block is sealed, so the open message item is closed at the
+		// transition exactly as an open reasoning item is.
+		closed, err := s.closeOpenMessageItem()
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, closed...)
 		pending.itemID = s.ctx.IDs.New("fc_")
 		pending.started = true
 		callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
@@ -1099,6 +1162,134 @@ func (s *chatResponsesStreamState) closeOpenReasoningItem() ([]ResponsesSSEEvent
 	}, nil
 }
 
+// closeOpenMessageItem closes the trailing open message item inline at a
+// message→tool transition: each content part's done event, then
+// output_item.done — the same sequence finish() emits, but AT THE TRANSITION
+// so the next content block never opens before this one is sealed (anthropic
+// requires every block to be closed before the next opens). No-op when the
+// last item is not an open message item. The closed item stays in s.items
+// with a completed status: the terminal reconciliation still sees it, and
+// content arriving after the tool call opens a NEW message item (a completed
+// message item is never appended to).
+func (s *chatResponsesStreamState) closeOpenMessageItem() ([]ResponsesSSEEvent, error) {
+	if len(s.items) == 0 {
+		return nil, nil
+	}
+	item := &s.items[len(s.items)-1]
+	message, ok := item.item.(*ResponsesOutputMessage)
+	if !ok || message.Status != ResponsesItemInProgress {
+		return nil, nil
+	}
+	var events []ResponsesSSEEvent
+	for contentIndex, part := range message.Content {
+		key := chatPartKey{outputIndex: item.outputIndex, contentIndex: int64(contentIndex)}
+		switch value := part.(type) {
+		case *ResponsesOutputText:
+			if builder := s.textBufs[key]; builder != nil {
+				value.Text = builder.String()
+			}
+			events = append(events,
+				s.builder.TextDone(message.ID, item.outputIndex, int64(contentIndex), value.Text),
+				s.builder.ContentPartDone(message.ID, item.outputIndex, int64(contentIndex),
+					&ResponsesStreamOutputTextPart{
+						Type:        "output_text",
+						Text:        value.Text,
+						Annotations: []ResponsesAnnotation{},
+					}),
+			)
+		case *ResponsesOutputRefusal:
+			if builder := s.refusalBufs[key]; builder != nil {
+				value.Refusal = builder.String()
+			}
+			events = append(events,
+				s.builder.RefusalDone(message.ID, item.outputIndex, int64(contentIndex), value.Refusal),
+				s.builder.ContentPartDone(message.ID, item.outputIndex, int64(contentIndex),
+					&ResponsesStreamRefusalPart{
+						Type:    "refusal",
+						Refusal: value.Refusal,
+					}),
+			)
+		}
+	}
+	message.Status = ResponsesItemCompleted
+	events = append(events, s.builder.OutputItemDone(item.outputIndex, message))
+	return events, nil
+}
+
+// toolCallClosure builds the arguments-done and output_item.done events for
+// one started tool call: the arguments are materialized from the accumulated
+// fragments, an empty accumulation becoming the empty object.
+func (s *chatResponsesStreamState) toolCallClosure(pending *pendingToolCall) []ResponsesSSEEvent {
+	arguments := pending.complete.String()
+	if arguments == "" {
+		arguments = "{}"
+	}
+	callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
+	return []ResponsesSSEEvent{
+		s.builder.FunctionArgumentsDone(
+			pending.itemID,
+			pending.outputIndex,
+			arguments,
+		),
+		s.builder.OutputItemDone(
+			pending.outputIndex,
+			&ResponsesFunctionCallOutputItem{
+				ID:        pending.itemID,
+				Type:      "function_call",
+				Status:    ResponsesItemCompleted,
+				CallID:    pending.callID,
+				Name:      callName,
+				Arguments: arguments,
+				Namespace: callNamespace,
+			},
+		),
+	}
+}
+
+// pendingIndexes returns the fragment indexes of the pending tool calls in
+// ascending order so any emission over them is deterministic.
+func (s *chatResponsesStreamState) pendingIndexes() []int {
+	indexes := make([]int, 0, len(s.pendingCalls))
+	for index := range s.pendingCalls {
+		indexes = append(indexes, index)
+	}
+	sort.Ints(indexes)
+	return indexes
+}
+
+// pendingSlice returns the pending tool calls in fragment-index order.
+func (s *chatResponsesStreamState) pendingSlice() []*pendingToolCall {
+	indexes := s.pendingIndexes()
+	calls := make([]*pendingToolCall, 0, len(indexes))
+	for _, index := range indexes {
+		calls = append(calls, s.pendingCalls[index])
+	}
+	return calls
+}
+
+// closePendingToolCalls seals every started pending tool call inline at a
+// transition where the next content item must open, in fragment-index order
+// so the emitted order is deterministic. A call that never received an
+// identity is left for finish, which reports it as corrupt upstream data. The
+// sealed calls move to closedCalls: the terminal envelope still carries them,
+// and finish never closes them twice.
+func (s *chatResponsesStreamState) closePendingToolCalls() []ResponsesSSEEvent {
+	if len(s.pendingCalls) == 0 {
+		return nil
+	}
+	var events []ResponsesSSEEvent
+	for _, index := range s.pendingIndexes() {
+		pending := s.pendingCalls[index]
+		if !pending.started {
+			continue
+		}
+		events = append(events, s.toolCallClosure(pending)...)
+		s.closedCalls = append(s.closedCalls, pending)
+		delete(s.pendingCalls, index)
+	}
+	return events
+}
+
 // finish closes open items and builds the terminal event batch.
 func (s *chatResponsesStreamState) finish(
 	finishReason string,
@@ -1109,41 +1300,20 @@ func (s *chatResponsesStreamState) finish(
 	// empty, no name — ) then output_item.done. A
 	// fragment that never received an identity (id or name) is malformed
 	// upstream data: silently dropping it would hide the corruption behind a
-	// successful completion.
-	for _, pending := range s.pendingCalls {
+	// successful completion. The slice order is fragment-index order, so the
+	// terminal is deterministic (a map walk would randomize the done events
+	// and with them the downstream adapter's deferral order).
+	for _, pending := range s.pendingSlice() {
 		if !pending.started {
 			return nil, s.wireError(errors.New(
 				"chat tool call fragment ended without an id and name",
 			))
 		}
-		arguments := pending.complete.String()
-		if arguments == "" {
-			arguments = "{}"
-		}
 		// Model-generated arguments are preserved byte-exact: the Responses
 		// function_call arguments field is a string, and invalid model
 		// output is never an upstream defect. Only the
 		// snapshot-vs-accumulated identity check remains wire-corrupt.
-		callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
-		events = append(events,
-			s.builder.FunctionArgumentsDone(
-				pending.itemID,
-				pending.outputIndex,
-				arguments,
-			),
-			s.builder.OutputItemDone(
-				pending.outputIndex,
-				&ResponsesFunctionCallOutputItem{
-					ID:        pending.itemID,
-					Type:      "function_call",
-					Status:    ResponsesItemCompleted,
-					CallID:    pending.callID,
-					Name:      callName,
-					Arguments: arguments,
-					Namespace: callNamespace,
-				},
-			),
-		)
+		events = append(events, s.toolCallClosure(pending)...)
 	}
 
 	// Close open message items: content parts done, then output_item.done.
@@ -1155,6 +1325,12 @@ func (s *chatResponsesStreamState) finish(
 		item := &s.items[i]
 		message, ok := item.item.(*ResponsesOutputMessage)
 		if !ok {
+			continue
+		}
+		if message.Status == ResponsesItemCompleted {
+			// Already closed inline at a message→tool transition
+			// (closeOpenMessageItem): emitting the done events twice would
+			// duplicate a part.done on the wire.
 			continue
 		}
 		for contentIndex, part := range message.Content {
@@ -1386,27 +1562,29 @@ func (s *chatResponsesStreamState) finalOutputItems() []ResponsesOutputItem {
 	for i := range s.items {
 		ordered = append(ordered, indexed{index: s.items[i].outputIndex, item: s.items[i].item})
 	}
-	for _, pending := range s.pendingCalls {
-		if !pending.started {
-			continue
+	for _, group := range [][]*pendingToolCall{s.pendingSlice(), s.closedCalls} {
+		for _, pending := range group {
+			if !pending.started {
+				continue
+			}
+			arguments := pending.complete.String()
+			if arguments == "" {
+				arguments = "{}"
+			}
+			callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
+			ordered = append(ordered, indexed{
+				index: pending.outputIndex,
+				item: &ResponsesFunctionCallOutputItem{
+					ID:        pending.itemID,
+					Type:      "function_call",
+					Status:    ResponsesItemCompleted,
+					CallID:    pending.callID,
+					Name:      callName,
+					Arguments: arguments,
+					Namespace: callNamespace,
+				},
+			})
 		}
-		arguments := pending.complete.String()
-		if arguments == "" {
-			arguments = "{}"
-		}
-		callName, callNamespace := s.ctx.ToolNames.clientCallName(pending.name)
-		ordered = append(ordered, indexed{
-			index: pending.outputIndex,
-			item: &ResponsesFunctionCallOutputItem{
-				ID:        pending.itemID,
-				Type:      "function_call",
-				Status:    ResponsesItemCompleted,
-				CallID:    pending.callID,
-				Name:      callName,
-				Arguments: arguments,
-				Namespace: callNamespace,
-			},
-		})
 	}
 	for i := 1; i < len(ordered); i++ {
 		for j := i; j > 0 && ordered[j].index < ordered[j-1].index; j-- {
@@ -2018,6 +2196,16 @@ type anthropicResponsesStreamState struct {
 	// tool blocks buffered until call identity is complete.
 	pendingToolStart map[string]*pendingToolBlock // keyed by item_id
 
+	// deferredTools is the FIFO of reserved tool blocks that could not start
+	// because another content block was open, in block-index order. They are
+	// drained one at a time as each open block closes, so exactly one
+	// tool_use block is open at any moment.
+	deferredTools []*pendingToolBlock
+	// bufferedToolFragments holds, per deferred item id, the argument
+	// fragments received while the block was deferred, replayed in arrival
+	// order when the block starts.
+	bufferedToolFragments map[string][]string
+
 	// closedToolCalls records every function call closed by output_item.done:
 	// the terminal envelope's function items must reconcile against it
 	//.
@@ -2108,6 +2296,16 @@ type pendingToolBlock struct {
 	name        string
 	arguments   strings.Builder
 	started     bool
+
+	// deferred is set while the reserved block waits in deferredTools because
+	// another content block was open when its identity completed.
+	deferred bool
+	// done is set when the item's done arrived while the block was deferred:
+	// its stop (and the reconciled done-suffix) is emitted by the drain.
+	done bool
+	// doneSuffix holds reconciled snapshot bytes to emit as one
+	// input_json_delta at drain, after the buffered fragments.
+	doneSuffix string
 }
 
 // anthropicAddedItem records one output item observed via output_item.added.
@@ -2134,25 +2332,26 @@ func newAnthropicResponsesStreamState(
 	createdAt float64,
 ) *anthropicResponsesStreamState {
 	return &anthropicResponsesStreamState{
-		ctx:              ctx,
-		policy:           policy,
-		capabilities:     capabilities,
-		responseID:       responseID,
-		model:            model,
-		budget:           newStreamBudget(),
-		fsm:              newResponsesStreamFSM(),
-		createdAt:        createdAt,
-		lastSequence:     -1,
-		addedItems:       make(map[string]anthropicAddedItem),
-		doneItems:        make(map[string]struct{}),
-		partsSeen:        make(map[responsePartKey]string),
-		partCounts:       make(map[string]int),
-		textBufs:         make(map[responsePartKey]*strings.Builder),
-		refusalBufs:      make(map[responsePartKey]*strings.Builder),
-		pendingToolStart: make(map[string]*pendingToolBlock),
-		closedToolCalls:  make(map[string]anthropicClosedToolCall),
-		partBlocks:       make(map[responsePartKey]int64),
-		phaseGated:       make(map[string]struct{}),
+		ctx:                   ctx,
+		policy:                policy,
+		capabilities:          capabilities,
+		responseID:            responseID,
+		model:                 model,
+		budget:                newStreamBudget(),
+		fsm:                   newResponsesStreamFSM(),
+		createdAt:             createdAt,
+		lastSequence:          -1,
+		addedItems:            make(map[string]anthropicAddedItem),
+		doneItems:             make(map[string]struct{}),
+		partsSeen:             make(map[responsePartKey]string),
+		partCounts:            make(map[string]int),
+		textBufs:              make(map[responsePartKey]*strings.Builder),
+		refusalBufs:           make(map[responsePartKey]*strings.Builder),
+		pendingToolStart:      make(map[string]*pendingToolBlock),
+		bufferedToolFragments: make(map[string][]string),
+		closedToolCalls:       make(map[string]anthropicClosedToolCall),
+		partBlocks:            make(map[responsePartKey]int64),
+		phaseGated:            make(map[string]struct{}),
 	}
 }
 
@@ -2532,20 +2731,35 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 	}
 }
 
-// maybeStartToolBlock emits the tool_use content_block_start once the call
-// identity is complete, replaying nothing (argument fragments are emitted as
-// input_json_delta by later events).
+// maybeStartToolBlock starts the tool_use block once the call identity is
+// complete — but only when no other content block is open: the Anthropic
+// dialect carries exactly one open content block, so a block whose turn has
+// not come is deferred with its argument fragments and drained when the open
+// block closes. Argument fragments received meanwhile are replayed as
+// input_json_delta by the drain (never by later events), so a started block
+// never replays anything here.
 func (s *anthropicResponsesStreamState) maybeStartToolBlock(
 	pending *pendingToolBlock,
 ) ([]AnthropicStreamEvent, error) {
 	if pending.started || pending.callID == "" || pending.name == "" {
 		return nil, nil
 	}
+	if s.anyContentBlockOpen() {
+		if err := s.deferToolBlock(pending); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
 	pending.started = true
 	s.sawToolUse = true
+	return []AnthropicStreamEvent{s.toolBlockStartEvent(pending)}, nil
+}
+
+// toolBlockStartEvent builds the content_block_start for a tool block.
+func (s *anthropicResponsesStreamState) toolBlockStartEvent(pending *pendingToolBlock) AnthropicStreamEvent {
 	callID := pending.callID
 	name := pending.name
-	return []AnthropicStreamEvent{{
+	return AnthropicStreamEvent{
 		Type:  AnthropicStreamEventTypeContentBlockStart,
 		Index: new(int(pending.blockIndex)),
 		ContentBlock: &AnthropicContentBlock{
@@ -2554,7 +2768,102 @@ func (s *anthropicResponsesStreamState) maybeStartToolBlock(
 			Name:  &name,
 			Input: json.RawMessage("{}"),
 		},
-	}}, nil
+	}
+}
+
+// anyContentBlockOpen reports whether any content block is currently open:
+// a message part (text or refusal), a thinking block, or another started tool
+// block.
+func (s *anthropicResponsesStreamState) anyContentBlockOpen() bool {
+	if len(s.partBlocks) > 0 || s.reasoningBlockIndex != nil {
+		return true
+	}
+	for _, other := range s.pendingToolStart {
+		if other.started {
+			return true
+		}
+	}
+	return false
+}
+
+// deferToolBlock queues a reserved block whose start must wait, charging the
+// queue entry against the stream budget exactly once.
+func (s *anthropicResponsesStreamState) deferToolBlock(pending *pendingToolBlock) error {
+	if pending.deferred {
+		return nil
+	}
+	if err := s.budget.addStateEntries(1); err != nil {
+		return s.wireError(err)
+	}
+	pending.deferred = true
+	s.deferredTools = append(s.deferredTools, pending)
+	return nil
+}
+
+// drainDeferredTools starts the next deferred tool block when no content block
+// is open, replaying its buffered fragments and any reconciled done-suffix as
+// input_json_delta. When the item was already done while deferred, its stop is
+// emitted here and the call is recorded as closed, exactly as the direct path
+// would have. A drain cascades while deferred blocks can start and finish in
+// the same batch; a block that is not yet done stays open and ends it.
+func (s *anthropicResponsesStreamState) drainDeferredTools() ([]AnthropicStreamEvent, error) {
+	var events []AnthropicStreamEvent
+	// Cascade: a deferred block whose item already finished starts AND stops
+	// in this batch, freeing the wire for the next deferred block, so the
+	// loop continues while blocks can be drained. A block that is not yet
+	// done stays open and ends the cascade.
+	for len(s.deferredTools) > 0 && !s.anyContentBlockOpen() {
+		pending := s.deferredTools[0]
+		s.deferredTools = s.deferredTools[1:]
+		pending.deferred = false
+		pending.started = true
+		s.sawToolUse = true
+
+		events = append(events, s.toolBlockStartEvent(pending))
+		for _, fragment := range s.bufferedToolFragments[pending.itemID] {
+			partial := fragment
+			events = append(events, AnthropicStreamEvent{
+				Type:  AnthropicStreamEventTypeContentBlockDelta,
+				Index: new(int(pending.blockIndex)),
+				Delta: &AnthropicStreamDelta{
+					Type:        AnthropicStreamDeltaTypeInputJSONDelta,
+					PartialJSON: &partial,
+				},
+			})
+		}
+		delete(s.bufferedToolFragments, pending.itemID)
+		if pending.doneSuffix != "" {
+			partial := pending.doneSuffix
+			events = append(events, AnthropicStreamEvent{
+				Type:  AnthropicStreamEventTypeContentBlockDelta,
+				Index: new(int(pending.blockIndex)),
+				Delta: &AnthropicStreamDelta{
+					Type:        AnthropicStreamDeltaTypeInputJSONDelta,
+					PartialJSON: &partial,
+				},
+			})
+		}
+		if !pending.done {
+			break
+		}
+		events = append(events, AnthropicStreamEvent{
+			Type:  AnthropicStreamEventTypeContentBlockStop,
+			Index: new(int(pending.blockIndex)),
+		})
+		delete(s.pendingToolStart, pending.itemID)
+		arguments := pending.arguments.String()
+		if arguments == "" {
+			arguments = "{}"
+		}
+		s.closedToolCalls[pending.itemID] = anthropicClosedToolCall{
+			outputIndex: pending.outputIndex,
+			callID:      pending.callID,
+			name:        pending.name,
+			arguments:   arguments,
+		}
+		s.doneItems[pending.itemID] = struct{}{}
+	}
+	return events, nil
 }
 
 func (s *anthropicResponsesStreamState) outputItemDone(
@@ -2707,6 +3016,26 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		}
 		return nil, s.wireError(fmt.Errorf("tool block for item %q: %w", call.ID, err))
 	}
+	if err := validateFinalToolInput(arguments); err != nil {
+		// Anthropic tool_use.input requires an object: invalid
+		// model-generated arguments are a LOCAL unrepresentable output,
+		// never corrupt upstream wire.
+		return nil, &UnrepresentableError{
+			Protocol: "anthropic",
+			Path:     "content_block.input",
+			Detail:   fmt.Sprintf("tool block for item %q: %v", call.ID, err),
+		}
+	}
+
+	if pending.deferred && !pending.started {
+		// The block is still waiting for another open block to close: hold
+		// the reconciled bytes and the done fact; the drain emits the start,
+		// the buffered fragments, the suffix and the stop in order.
+		pending.done = true
+		pending.doneSuffix += suffix
+		return events, nil
+	}
+
 	if suffix != "" {
 		partial := suffix
 		events = append(events, AnthropicStreamEvent{
@@ -2717,16 +3046,6 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 				PartialJSON: &partial,
 			},
 		})
-	}
-	if err := validateFinalToolInput(arguments); err != nil {
-		// Anthropic tool_use.input requires an object: invalid
-		// model-generated arguments are a LOCAL unrepresentable output,
-		// never corrupt upstream wire.
-		return nil, &UnrepresentableError{
-			Protocol: "anthropic",
-			Path:     "content_block.input",
-			Detail:   fmt.Sprintf("tool block for item %q: %v", call.ID, err),
-		}
 	}
 
 	events = append(events, AnthropicStreamEvent{
@@ -2742,6 +3061,13 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		arguments:   arguments,
 	}
 	s.doneItems[call.ID] = struct{}{}
+
+	// The closed block may have freed the wire for the next deferred block.
+	drain, err := s.drainDeferredTools()
+	if err != nil {
+		return nil, err
+	}
+	events = append(events, drain...)
 
 	// The message envelope's content stays empty: content blocks arrive via
 	// content_block_start events (the official contract); message_start is
@@ -3023,10 +3349,16 @@ func (s *anthropicResponsesStreamState) contentPartDone(
 		))
 	}
 	delete(s.partBlocks, key)
-	return []AnthropicStreamEvent{{
+	events := []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockStop,
 		Index: new(int(index)),
-	}}, nil
+	}}
+	// The closed part may have freed the wire for the next deferred block.
+	drain, err := s.drainDeferredTools()
+	if err != nil {
+		return nil, err
+	}
+	return append(events, drain...), nil
 }
 
 // checkPartOutputIndex verifies an event targeting a content part carries
@@ -3080,8 +3412,16 @@ func (s *anthropicResponsesStreamState) functionArgumentsDelta(
 	// A block that never started (the added item lacked call identity, which
 	// is corrupt wire rejected at output_item.done) must not receive an
 	// input_json_delta without a content_block_start: the bytes are still
-	// accumulated so the eventual rejection is consistent.
+	// accumulated so the eventual rejection is consistent. A deferred block
+	// buffers each fragment (charged against the state-entry budget) for the
+	// drain to replay in arrival order.
 	if !pending.started {
+		if pending.deferred {
+			if err := s.budget.addStateEntries(1); err != nil {
+				return nil, s.wireError(err)
+			}
+			s.bufferedToolFragments[event.ItemID] = append(s.bufferedToolFragments[event.ItemID], event.Delta)
+		}
 		return startEvents, nil
 	}
 	partial := event.Delta
@@ -3141,6 +3481,10 @@ func (s *anthropicResponsesStreamState) functionArgumentsDone(
 				PartialJSON: &partial,
 			},
 		})
+	} else if pending.deferred && suffix != "" {
+		// The block has not started yet: hold the reconciled bytes for the
+		// drain, which emits them after the buffered fragments.
+		pending.doneSuffix += suffix
 	}
 	return events, nil
 }
@@ -3866,7 +4210,13 @@ func (s *anthropicResponsesStreamState) reasoningPartDone(
 		Index: new(int(*s.reasoningBlockIndex)),
 	}}
 	s.reasoningBlockIndex = nil
-	return events, nil
+	// The closed thinking block may have freed the wire for the next
+	// deferred block.
+	drain, err := s.drainDeferredTools()
+	if err != nil {
+		return nil, err
+	}
+	return append(events, drain...), nil
 }
 
 func stopReasonToAnthropic(stop CanonicalStopReason) AnthropicStopReason {
