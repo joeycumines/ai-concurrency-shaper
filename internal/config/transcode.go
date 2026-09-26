@@ -341,6 +341,7 @@ var chatCapabilityNames = []struct {
 	{"provider_reasoning_text", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningText }},
 	{"provider_reasoning_thinking", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningThinking }},
 	{"system_anywhere", func(c *transcode.ChatCapabilities) *bool { return &c.SystemAnywhere }},
+	{"multi_agent_priming", func(c *transcode.ChatCapabilities) *bool { return &c.MultiAgentPriming }},
 }
 
 func splitFlagNegations(
@@ -532,6 +533,7 @@ func mergedChatCapabilities(
 	fields := map[string]*bool{
 		"developer_role":              &out.DeveloperRole,
 		"image_input":                 &out.ImageInput,
+		"tool_result_images":          &out.ToolResultImages,
 		"structured_outputs":          &out.StructuredOutputs,
 		"parallel_tool_calls":         &out.ParallelToolCalls,
 		"stop_sequences":              &out.StopSequences,
@@ -539,7 +541,7 @@ func mergedChatCapabilities(
 		"provider_reasoning_text":     &out.ProviderReasoningText,
 		"provider_reasoning_thinking": &out.ProviderReasoningThinking,
 		"system_anywhere":             &out.SystemAnywhere,
-		"tool_result_images":          &out.ToolResultImages,
+		"multi_agent_priming":         &out.MultiAgentPriming,
 	}
 	cli := map[string]bool{
 		"developer_role":              capabilities.DeveloperRole,
@@ -552,6 +554,7 @@ func mergedChatCapabilities(
 		"provider_reasoning_text":     capabilities.ProviderReasoningText,
 		"provider_reasoning_thinking": capabilities.ProviderReasoningThinking,
 		"system_anywhere":             capabilities.SystemAnywhere,
+		"multi_agent_priming":         capabilities.MultiAgentPriming,
 	}
 	for name, field := range fields {
 		_, deny := negated[name]
