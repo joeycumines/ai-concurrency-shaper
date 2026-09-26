@@ -2185,7 +2185,15 @@ func RenderChatRequest(
 		)
 	}
 
-	if capabilities.MultiAgentPriming {
+	// The reminder is only truthful if the request actually declares the
+	// protocol it describes. Without this gate an operator could prime a
+	// mount whose request declares no sub-agent tools at all, and the model
+	// would be told to call spawn_agent against an upstream that was never
+	// sent it. Gate on the FLAT names this request will actually render, so
+	// the check stays true after namespace flattening: a top-level tool
+	// spelled like one of the five, or any child of the multi_agent_v1
+	// namespace (already flattened to its flat name at decode).
+	if capabilities.MultiAgentPriming && declaresMultiAgentTools(request.Tools, context) {
 		primed, err := applyMultiAgentPriming(out.Messages, &report)
 		if err != nil {
 			return nil, report, err
@@ -2561,6 +2569,46 @@ When delegating work to sub-agents:
 // the caller's messages and content structs without mutation, keeps raw string
 // content as strings, preserves developer roles, and records FeatureMultiAgentPriming
 // as an accurate Note for the branch taken.
+// multiAgentToolNames are the bare child names the priming reminder describes.
+var multiAgentToolNames = map[string]struct{}{
+	"spawn_agent": {}, "wait_agent": {}, "send_input": {},
+	"close_agent": {}, "resume_agent": {},
+}
+
+// multiAgentNamespace is the Codex namespace that groups those children.
+const multiAgentNamespace = "multi_agent_v1"
+
+// declaresMultiAgentTools reports whether this request will render at least
+// one of the sub-agent tools the reminder names. It checks the FLAT names the
+// upstream will actually see - a namespace child is looked up by its resolved
+// flat name, so a child that had to be collision-qualified still counts,
+// while a request that declares none of them is never primed.
+func declaresMultiAgentTools(tools []CanonicalTool, context *ExchangeContext) bool {
+	// Every entry here is already a flat function tool: namespace children
+	// were flattened to their resolved names at decode.
+	for _, tool := range tools {
+		if _, ok := multiAgentToolNames[tool.Name]; ok {
+			return true
+		}
+	}
+	// A namespace child reaches the upstream under its resolved FLAT name, so
+	// look the five up there too. The namespace NAME alone is not a contract
+	// about its children - a multi_agent_v1 group holding only `list_agents`
+	// would otherwise be primed with a reminder naming five tools the upstream
+	// was never sent.
+	if context != nil && context.ToolNames != nil {
+		for ref := range context.ToolNames.RefToFlat {
+			if ref.Namespace != multiAgentNamespace {
+				continue
+			}
+			if _, ok := multiAgentToolNames[ref.Name]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func applyMultiAgentPriming(messages []ChatMessage, report *ConversionReport) ([]ChatMessage, error) {
 	if len(messages) > 0 && (messages[0].Role == ChatMessageRoleSystem || messages[0].Role == ChatMessageRoleDeveloper) {
 		leadRole := messages[0].Role

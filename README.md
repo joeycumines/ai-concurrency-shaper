@@ -680,6 +680,15 @@ are modeled as a deliberate extension beyond the
 pinned OpenAI SDK revision; `internal/transcode/pins.md` records the exact
 shapes.
 
+- `multi_agent_priming` injects a bounded sub-agent orchestration protocol reminder into the
+  leading system (or developer) turn, appended after the client's own instructions so the
+  client's bytes and order are unchanged. It is injected only when the request actually
+  declares one of the sub-agent tools it names (checked by the flat names the upstream
+  will see, so a flattened namespace child still counts), and each injection is recorded
+  as a per-exchange note (`multi_agent_priming`) subject to the same report-entry bound
+  as any other finding. Chat upstreams only; on a Responses
+  upstream the capability is accepted and has no effect, as with the other chat-only
+  capabilities.
 - `tool_result_images` renders multimodal tool-result content as multipart
   content blocks in a chat tool message, order preserved, for upstreams that
   accept image parts there. Granting it is independent of `image_input` (an

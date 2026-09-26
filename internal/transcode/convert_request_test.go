@@ -173,6 +173,13 @@ func TestRenderChatMultiAgentPriming(t *testing.T) {
 	// Case 1: MultiAgentPriming: false (default)
 	req := CanonicalRequest{
 		ClientModel: "test-model",
+		// The reminder is only injected when the request actually declares a
+		// sub-agent tool, so the fixture must declare one.
+		Tools: []CanonicalTool{{
+			Name:        "spawn_agent",
+			Description: "Launch a sub-agent",
+			JSONSchema:  json.RawMessage(`{"type":"object"}`),
+		}},
 		Turns: []CanonicalTurn{
 			{
 				Role: CanonicalSystem,
@@ -248,6 +255,11 @@ func TestRenderChatMultiAgentPriming(t *testing.T) {
 	// Case 3: MultiAgentPriming: true without existing system message (dialog only)
 	reqNoSys := CanonicalRequest{
 		ClientModel: "test-model",
+		Tools: []CanonicalTool{{
+			Name:        "spawn_agent",
+			Description: "Launch a sub-agent",
+			JSONSchema:  json.RawMessage(`{"type":"object"}`),
+		}},
 		Turns: []CanonicalTurn{
 			{
 				Role: CanonicalUser,
@@ -405,5 +417,74 @@ func TestApplyMultiAgentPriming_NonMutatingStringPreservationAndDeveloperRole(t 
 	}
 	if len(primedEmpty) != 1 || primedEmpty[0].Role != ChatMessageRoleSystem {
 		t.Fatalf("expected 1 prepended system message, got %d", len(primedEmpty))
+	}
+}
+
+// TestMultiAgentPrimingRequiresDeclaredTools pins the gate: the reminder is
+// only injected when the request actually declares a sub-agent tool. Without
+// it, priming told a model to call spawn_agent against an upstream that was
+// never sent it - the failure mode the repo already guards against in the
+// other direction with FeatureNamespaceReplayUndeclared.
+func TestMultiAgentPrimingRequiresDeclaredTools(t *testing.T) {
+	sysTurn := []CanonicalTurn{
+		{Role: CanonicalSystem, Parts: []CanonicalPart{CanonicalText{Text: "You are an AI assistant."}}},
+		{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: "hi"}}},
+	}
+	// A namespace child counts even though it was flattened: the gate checks
+	// the FLAT names the upstream will actually see.
+	names := &ToolNames{
+		FlatToRef: map[string]ToolNameRef{"spawn_agent": {Namespace: "multi_agent_v1", Name: "spawn_agent"}},
+		RefToFlat: map[ToolNameRef]string{{Namespace: "multi_agent_v1", Name: "spawn_agent"}: "spawn_agent"},
+	}
+
+	for _, tc := range []struct {
+		name      string
+		tools     []CanonicalTool
+		toolNames *ToolNames
+		wantPrime bool
+	}{
+		{name: "no tools at all", wantPrime: false},
+		{name: "only an unrelated tool", tools: []CanonicalTool{{Name: "get_weather"}}, wantPrime: false},
+		{name: "a top-level tool spelled like a sub-agent tool", tools: []CanonicalTool{{Name: "spawn_agent"}}, wantPrime: true},
+		{name: "an unrelated top-level tool plus a flattened namespace child", tools: []CanonicalTool{{Name: "get_weather"}}, toolNames: names, wantPrime: true},
+		{
+			// The namespace NAME is not a contract about its children: a
+			// multi_agent_v1 group holding only list_agents must NOT be primed
+			// with a reminder naming five tools the upstream was never sent.
+			name:  "a multi_agent_v1 namespace holding none of the five",
+			tools: []CanonicalTool{{Name: "get_weather"}},
+			toolNames: &ToolNames{
+				FlatToRef: map[string]ToolNameRef{"list_agents": {Namespace: "multi_agent_v1", Name: "list_agents"}},
+				RefToFlat: map[ToolNameRef]string{{Namespace: "multi_agent_v1", Name: "list_agents"}: "list_agents"},
+			},
+			wantPrime: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := CanonicalRequest{ClientModel: "m", Tools: tc.tools, Turns: sysTurn}
+			ctx := testExchangeContext()
+			ctx.ToolNames = tc.toolNames
+			raw, report, err := RenderChatRequest(req, ctx, ChatCapabilities{MultiAgentPriming: true})
+			if err != nil {
+				t.Fatalf("RenderChatRequest: %v", err)
+			}
+			var chatReq ChatRequest
+			if err := strictDecode(raw, &chatReq); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			primed := strings.Contains(string(raw), "Sub-Agent")
+			if primed != tc.wantPrime {
+				t.Fatalf("primed = %v, want %v (raw: %s)", primed, tc.wantPrime, raw)
+			}
+			var noted bool
+			for _, l := range report.Losses {
+				if l.Feature == FeatureMultiAgentPriming {
+					noted = true
+				}
+			}
+			if noted != tc.wantPrime {
+				t.Errorf("note recorded = %v, want %v: the note must track the injection", noted, tc.wantPrime)
+			}
+		})
 	}
 }

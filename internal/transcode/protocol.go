@@ -146,6 +146,7 @@ type ChatCapabilities struct {
 	// under the mid_conversation_system loss policy (open-weights
 	// chat templates reject any system message after index 0).
 	SystemAnywhere bool
+
 	// ToolResultImages renders multimodal tool-result content as MULTIPART
 	// chat tool-message content blocks (text and image_url parts, order
 	// preserved) for upstreams that accept image parts inside a tool
@@ -155,6 +156,7 @@ type ChatCapabilities struct {
 	// which makes a vision model blind to the image. Granting it is
 	// independent of ImageInput - an upstream can accept user images while
 	// rejecting image parts in tool messages - but the MULTIPART FORM itself
+	// additionally needs the image_url content vocabulary, so a mount that
 	// withdraws ImageInput renders the envelope even with this capability on.
 	ToolResultImages bool
 
@@ -163,11 +165,12 @@ type ChatCapabilities struct {
 	// orchestration protocol (spawn_agent/wait_agent/close_agent
 	// discipline). The reminder is appended AFTER the client's own
 	// instructions so the client's bytes and order stay byte-identical.
-	// Off by default; when enabled, every exchange that receives the
-	// injection is recorded as a Note (FeatureMultiAgentPriming). The
-	// reminder text is derived from the captured multi-agent namespace
-	// schema (close_agent/resume_agent/send_input/spawn_agent/wait_agent),
-	// not written from memory.
+	// Off by default, and gated on the request actually declaring one of
+	// those tools (checked by their FLAT names), so the reminder never
+	// names a tool the upstream was not sent. Each injection records a
+	// Note (FeatureMultiAgentPriming) - subject to the same report-entry
+	// bound as every other finding. The reminder text is derived from the
+	// captured multi-agent namespace schema, not written from memory.
 	MultiAgentPriming bool
 }
 
