@@ -465,10 +465,12 @@ func parseClientQuery(
 
 var defaultTranscodeChatCapabilities = transcode.ChatCapabilities{
 	DeveloperRole:             false,
+	ImageInput:                true,
 	ParallelToolCalls:         true,
 	ReasoningEffort:           false,
 	ProviderReasoningText:     false,
 	ProviderReasoningThinking: true,
+	StopSequences:             true,
 	StructuredOutputs:         true,
 }
 
@@ -490,10 +492,12 @@ var defaultTranscodeLosses = map[transcode.Feature]struct{}{
 	transcode.FeatureUsageReasoningUnknown:       {},
 	transcode.FeatureRequestReasoning:            {},
 	transcode.FeatureToolResultErrorStatus:       {},
-	transcode.FeatureDeveloperRole:               {},
 	transcode.FeatureToolResultMultimodalContent: {},
 	transcode.FeatureToolResultJSONEnvelope:      {},
+	transcode.FeatureDeveloperRole:               {},
 	transcode.FeatureImageDetailOriginal:         {},
+	transcode.FeatureResponseServiceTier:         {},
+	transcode.FeatureOutputPhase:                 {},
 }
 
 func mergedLossPolicy(
