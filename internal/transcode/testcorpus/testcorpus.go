@@ -69,6 +69,8 @@ var (
 	codexMultiturnRequestFieldJSON []byte
 	//go:embed testdata/field/codex_namespace_request_field.json
 	codexNamespaceRequestFieldJSON []byte
+	//go:embed testdata/field/claude_server_tool_definition_field.json
+	claudeServerToolDefinitionFieldJSON []byte
 )
 
 // FieldQwenStreamSSE returns the qwen-style chat stream capture: choice-level
@@ -101,6 +103,19 @@ func FieldCodexMultiturnRequestJSON() []byte { return codexMultiturnRequestField
 // The tools, their child schemas, and tool_choice are byte-verbatim from the
 // capture; the envelope is trimmed to the fields the replay test needs.
 func FieldCodexNamespaceRequestJSON() []byte { return codexNamespaceRequestFieldJSON }
+
+// FieldClaudeServerToolDefinitionJSON returns a minimized isolation vector
+// for the Claude Code web-search server-tool shape: the tools array and
+// tool_choice are byte-faithful to the live capture
+// (scratch/flowlogs/000059-39619-POST-v1_messages.json), while the envelope
+// is minimized (model id kept as the live wire value, max_tokens reduced,
+// the text message flattened to a string, session keys dropped) so the test
+// asserts exactly the tools disposition and nothing else. A full-session
+// reproduction would additionally need the anthropic_controls approval (the
+// live body carries output_config).
+func FieldClaudeServerToolDefinitionJSON() []byte {
+	return claudeServerToolDefinitionFieldJSON
+}
 
 // ChatCompletionsRequestJSON returns the raw chat completions request fixture
 // bytes.

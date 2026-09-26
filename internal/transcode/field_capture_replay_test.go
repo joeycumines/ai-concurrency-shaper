@@ -255,3 +255,27 @@ func turnSummary(turn CanonicalTurn) string {
 	}
 	return b.String()
 }
+
+// TestFieldCaptureClaudeServerToolDefinitionDecodes replays the captured
+// Claude Code web-search request: the type-discriminated server definition
+// must decode (admit) and drop under the anthropic_server_tools key — never
+// an unattributed unknown-field rejection.
+func TestFieldCaptureClaudeServerToolDefinitionDecodes(t *testing.T) {
+	body := testcorpus.FieldClaudeServerToolDefinitionJSON()
+	_, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	target := &UnsupportedFeatureError{}
+	if !errors.As(err, &target) {
+		t.Fatalf("err = %T: %v, want keyed rejection", err, err)
+	}
+	if target.Feature != string(FeatureAnthropicServerTools) {
+		t.Fatalf("feature = %q, want %q", target.Feature, FeatureAnthropicServerTools)
+	}
+	permissive := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicServerTools: {}}}
+	result, err := DecodeMessagesRequest(body, permissive)
+	if err != nil {
+		t.Fatalf("approved drop rejected: %v", err)
+	}
+	if len(result.Request.Tools) != 0 {
+		t.Fatalf("server tool leaked %d tools upstream", len(result.Request.Tools))
+	}
+}

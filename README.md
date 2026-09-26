@@ -696,6 +696,38 @@ shapes.
   but the multipart form itself needs the `image_url` vocabulary, so a mount
   that withdraws `image_input` falls back to the envelope even with this on.
 
+### Anthropic server-side tools (web_search, code execution, MCP)
+
+Claude Code sends server-executed tool definitions in `tools[]` — a
+type-discriminated entry such as `web_search_20250305` or
+`code_execution_20250825` — and server-executed or server-referencing content
+blocks (`server_tool_use`, `web_search_tool_result`, `code_execution`,
+`code_execution_tool_result`, `container_upload`). A chat upstream executes
+no server tools, so these are dropped observably rather than forwarded, and a
+`server_tool_use` is never fabricated into a tool call: a call with no
+executor would dangle and corrupt tool pairing.
+
+The `anthropic_server_tools` key is a policy-gated loss and is **strict by
+default**: a Claude Code web-search session against a chat upstream fails
+with a named error until you approve it with
+`-transcode-allow-loss anthropic_server_tools`. The wire shapes are modeled
+beyond the pinned Anthropic Messages revision; `internal/transcode/pins.md`
+records them and the capture they came from.
+
+`mcp_tool_use` and `mcp_tool_result` are different: they are client-side
+tools that map 1:1 onto `tool_use` and `tool_result` and carry no loss. A
+real `mcp_tool_use` carries `server_name` (the MCP server that owns the
+tool), which is decoded.
+
+A `tools[]` entry is classified by its `type` discriminant. The
+client-function spellings — absent, or the explicit `"type":"function"` —
+are carried through as ordinary client function tools, and they decode
+strictly, so an unmodelled property on a client tool is still a loud error.
+**Any** other `type` takes the `anthropic_server_tools` loss decision, so a
+new Anthropic server tool becomes usable by approving the flag, with no
+proxy rebuild. It is never forwarded silently and never hard-rejected with
+an error the flag cannot clear.
+
 ### Removing defaults
 
 The sensible defaults above exist so a minimal invocation works out of the

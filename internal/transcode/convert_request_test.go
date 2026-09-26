@@ -488,3 +488,231 @@ func TestMultiAgentPrimingRequiresDeclaredTools(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeMessagesServerToolDefinitionKeyed(t *testing.T) {
+	body := []byte(`{"model":"m","max_tokens":8,` +
+		`"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],` +
+		`"messages":[{"role":"user","content":"hi"}]}`)
+	_, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	if err == nil {
+		t.Fatal("expected keyed rejection under strict policy, got nil")
+	}
+	target := &UnsupportedFeatureError{}
+	if !errors.As(err, &target) {
+		t.Fatalf("err = %T: %v, want UnsupportedFeatureError carrying the key", err, err)
+	}
+	if target.Feature != string(FeatureAnthropicServerTools) {
+		t.Fatalf("feature = %q, want %q", target.Feature, FeatureAnthropicServerTools)
+	}
+	permissive := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicServerTools: {}}}
+	result, err := DecodeMessagesRequest(body, permissive)
+	if err != nil {
+		t.Fatalf("approved drop rejected: %v", err)
+	}
+	if len(result.Request.Tools) != 0 {
+		t.Fatalf("server tool leaked %d tools upstream", len(result.Request.Tools))
+	}
+	found := false
+	for _, loss := range result.Report.Losses {
+		if loss.Feature == FeatureAnthropicServerTools {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("report = %+v, want the anthropic_server_tools loss", result.Report.Losses)
+	}
+}
+
+// TestDecodeMessagesServerBlocksKeyed pins the per-block dispositions:
+// server_tool_use drops under the key (never a synthesized function call),
+// mcp_tool_use maps 1:1 onto a function call with no loss key.
+func TestDecodeMessagesServerBlocksKeyed(t *testing.T) {
+	server := []byte(`{"model":"m","max_tokens":8,` +
+		`"messages":[{"role":"assistant","content":[{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{"q":"x"}}]}]}`)
+	_, err := DecodeMessagesRequest(server, StrictLossPolicy())
+	target := &UnsupportedFeatureError{}
+	if !errors.As(err, &target) {
+		t.Fatalf("server_tool_use err = %T: %v, want keyed rejection", err, err)
+	}
+	if target.Feature != string(FeatureAnthropicServerTools) {
+		t.Fatalf("feature = %q, want %q", target.Feature, FeatureAnthropicServerTools)
+	}
+	permissive := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicServerTools: {}}}
+	res, err := DecodeMessagesRequest(server, permissive)
+	if err != nil {
+		t.Fatalf("approved server drop rejected: %v", err)
+	}
+	for _, turn := range res.Request.Turns {
+		for _, part := range turn.Parts {
+			if _, ok := part.(CanonicalFunctionCall); ok {
+				t.Fatal("server_tool_use synthesized a function call with no upstream executor")
+			}
+		}
+	}
+	mcp := []byte(`{"model":"m","max_tokens":8,` +
+		`"messages":[{"role":"assistant","content":[{"type":"mcp_tool_use","id":"call_9","name":"read","input":{"x":1}}]}]}`)
+	mcpRes, err := DecodeMessagesRequest(mcp, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("mcp_tool_use rejected under strict policy: %v", err)
+	}
+	found := false
+	for _, turn := range mcpRes.Request.Turns {
+		for _, part := range turn.Parts {
+			if call, ok := part.(CanonicalFunctionCall); ok {
+				found = true
+				if call.CallID != "call_9" || call.Name != "read" {
+					t.Fatalf("mcp call identity = %+v, want call_9/read", call)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("mcp_tool_use did not map to a function call")
+	}
+	for _, loss := range mcpRes.Report.Losses {
+		if loss.Feature == FeatureAnthropicServerTools {
+			t.Fatalf("mcp mapping touched the server key: %+v", loss)
+		}
+	}
+}
+
+// TestAnthropicToolsTypeDiscriminantIsNotOverAdmitted pins the tools[]
+// classification. A `type` discriminant may take the SERVER path only for a
+// MODELLED server spelling. Admitting every non-empty type silently
+// reclassified a client function tool a gateway happened to spell
+// {"type":"function",...} into a "server tool" and dropped it under a key
+// whose name says server - a silent reinterpretation of client-sent input.
+// The explicit client-function spelling must be carried through, and any
+// other unmodelled type must be a client-dialect error, not a silent drop.
+func TestAnthropicToolsTypeDiscriminantIsNotOverAdmitted(t *testing.T) {
+	body := func(tools string) []byte {
+		return []byte(`{"model":"m","max_tokens":64,"tools":[` + tools + `],` +
+			`"messages":[{"role":"user","content":"hi"}]}`)
+	}
+	clientFn := `{"type":"function","name":"get_weather","input_schema":{"type":"object"}}`
+	untypedFn := `{"name":"get_weather","input_schema":{"type":"object"}}`
+
+	permissive := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicServerTools: {}}}
+
+	t.Run("explicit client function type is carried through", func(t *testing.T) {
+		result, err := DecodeMessagesRequest(body(clientFn), permissive)
+		if err != nil {
+			t.Fatalf("a client function tool must convert: %v", err)
+		}
+		if len(result.Request.Tools) != 1 || result.Request.Tools[0].Name != "get_weather" {
+			t.Fatalf("client function tool was not carried through: %+v", result.Request.Tools)
+		}
+		for _, l := range result.Report.Losses {
+			if l.Feature == FeatureAnthropicServerTools {
+				t.Errorf("a client function tool must not be filed as a server tool: %+v", l)
+			}
+		}
+	})
+
+	t.Run("unmodelled type is an observable keyed loss, not a hard error", func(t *testing.T) {
+		// A NEW Anthropic server tool must be survivable by approving the
+		// existing flag, with no proxy rebuild. A hard error whose feature
+		// string is not a registered key cannot be cleared that way.
+		result, err := DecodeMessagesRequest(body(`{"type":"mcp_toolset","name":"f"}`), permissive)
+		if err != nil {
+			t.Fatalf("an unmodelled type must convert under approval: %v", err)
+		}
+		if len(result.Request.Tools) != 0 {
+			t.Errorf("a non-function tool must never reach the upstream: %+v", result.Request.Tools)
+		}
+		var sawKeyedLoss bool
+		for _, l := range result.Report.Losses {
+			if l.Feature == FeatureAnthropicServerTools {
+				sawKeyedLoss = true
+			}
+		}
+		if !sawKeyedLoss {
+			t.Error("an unmodelled type must record the keyed loss, never vanish silently")
+		}
+	})
+
+	t.Run("unmodelled type is a KEYED error when the loss is not approved", func(t *testing.T) {
+		_, err := DecodeMessagesRequest(body(`{"type":"mcp_toolset","name":"f"}`), StrictLossPolicy())
+		if err == nil {
+			t.Fatal("want a rejection when anthropic_server_tools is not approved")
+		}
+		if !strings.Contains(err.Error(), string(FeatureAnthropicServerTools)) {
+			t.Errorf("error = %q, want it to name the registered key so -transcode-allow-loss can clear it", err.Error())
+		}
+	})
+
+	t.Run("modelled server type still takes the keyed loss", func(t *testing.T) {
+		result, err := DecodeMessagesRequest(
+			body(`{"type":"web_search_20250305","name":"web_search"}`), permissive)
+		if err != nil {
+			t.Fatalf("modelled server type must convert under approval: %v", err)
+		}
+		if len(result.Request.Tools) != 0 {
+			t.Errorf("a server tool must never reach the upstream: %+v", result.Request.Tools)
+		}
+		var sawServerLoss bool
+		for _, l := range result.Report.Losses {
+			if l.Feature == FeatureAnthropicServerTools {
+				sawServerLoss = true
+			}
+		}
+		if !sawServerLoss {
+			t.Error("a modelled server tool must record the keyed loss")
+		}
+	})
+
+	t.Run("untyped client function tool is unaffected", func(t *testing.T) {
+		result, err := DecodeMessagesRequest(body(untypedFn), permissive)
+		if err != nil {
+			t.Fatalf("untyped client function tool must convert: %v", err)
+		}
+		if len(result.Request.Tools) != 1 {
+			t.Errorf("tools = %+v, want the untyped function tool carried through", result.Request.Tools)
+		}
+	})
+}
+
+// TestMCPBlocksDecodeTheShapeTheContractActuallyEmits pins the wire shapes
+// against the OFFICIAL MCP-connector example, not against a hand-written
+// fixture. The earlier admission test used an mcp_tool_use with no
+// server_name, which is a shape that does not occur - so the strict shadow
+// omitted server_name and every real replayed conversation failed as an
+// unknown field.
+func TestMCPBlocksDecodeTheShapeTheContractActuallyEmits(t *testing.T) {
+	// Verbatim shape from the Anthropic MCP connector reference.
+	body := `{"model":"m","max_tokens":64,"messages":[
+		{"role":"user","content":"q"},
+		{"role":"assistant","content":[
+			{"type":"mcp_tool_use","id":"mcptoolu_014Q35RayjACSWkSj4X2yov1",
+			 "server_name":"example-mcp","name":"echo","input":{"param1":"value1"}}]},
+		{"role":"user","content":[
+			{"type":"mcp_tool_result","tool_use_id":"mcptoolu_014Q35RayjACSWkSj4X2yov1",
+			 "content":[{"type":"text","text":"result"}]}]}]}`
+
+	body = strings.ReplaceAll(body, "\n\t\t", "")
+	result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("a real MCP tool_use/tool_result pair must decode: %v", err)
+	}
+	var sawCall, sawResult bool
+	for _, turn := range result.Request.Turns {
+		for _, part := range turn.Parts {
+			switch part.(type) {
+			case CanonicalFunctionCall:
+				sawCall = true
+			case CanonicalFunctionResult:
+				sawResult = true
+			}
+		}
+	}
+	if !sawCall || !sawResult {
+		t.Errorf("MCP blocks must map 1:1 onto a call and a result: call=%v result=%v turns=%d",
+			sawCall, sawResult, len(result.Request.Turns))
+	}
+	// They are client-side tools, so the server-tool key must NOT fire.
+	for _, l := range result.Report.Losses {
+		if l.Feature == FeatureAnthropicServerTools {
+			t.Errorf("an mcp_tool_use must not touch the server-tool key: %+v", l)
+		}
+	}
+}
