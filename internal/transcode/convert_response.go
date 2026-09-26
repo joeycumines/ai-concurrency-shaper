@@ -1027,11 +1027,13 @@ func RenderResponsesResponse(
 			if err := json.Unmarshal(value.Raw, &reasoning); err != nil {
 				return nil, report, fmt.Errorf("response reasoning item: %w", err)
 			}
-			// The decode path strips the provider routing marker before
-			// the canonical bytes are cut; clear it here as well so the
-			// emit site carries the guarantee locally instead of relying
-			// on the distant producer.
-			reasoning.Format = nil
+			// No clear is needed here. The canonical item's raw bytes never
+			// carry the provider routing marker: the decode path strips it
+			// before the canonical bytes are cut, and that is the only live
+			// cut point. A defensive clear on this line was DEAD - verified by
+			// removing it and observing the rendered output unchanged, with
+			// and without the marker present in the raw bytes - so it is
+			// deleted rather than kept as unreachable "defence in depth".
 			envelope.Output = append(envelope.Output, &reasoning)
 
 		default:

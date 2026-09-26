@@ -151,8 +151,11 @@ func (c *responsesToAnthropicConverter) Convert(
 	// decoded type and the provider quirk is recorded once per stream as an
 	// ungated note. A PRESENT name that disagrees with the JSON type is
 	// still a wire error.
+	// No synthesized name is stored on the frame: routing below uses the
+	// decoded event's own Type, not this frame's Event field, and nothing
+	// reads frame.Event on this branch. Writing it implied the synthesized
+	// name was consumed downstream, which it is not.
 	if frame.Event == "" {
-		frame.Event = event.EventType()
 		if !c.missingEventNameNoted {
 			c.missingEventNameNoted = true
 			if err := c.state.report.Note(

@@ -273,6 +273,11 @@ const (
 	// type is the authoritative discriminator, so the event is routed by
 	// its decoded type and the provider quirk is recorded as an ungated
 	// note. A PRESENT name that disagrees with the JSON type stays a wire
+	// error.
+	// Deliberately NOT in lossRegistry: it is not a loss, so it is not
+	// policy-addressable via -transcode-allow-loss. The registry is
+	// unreachable for an unregistered const, so nothing else guards that -
+	// this comment is the contract, and losing it is a silent change.
 	FeatureMissingEventName Feature = "missing_event_name"
 )
 
