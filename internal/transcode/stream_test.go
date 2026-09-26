@@ -664,6 +664,143 @@ func TestWriteDialectEventNameMatchesType(t *testing.T) {
 	}
 }
 
+// drainResponsesToAnthropic translates a raw Responses SSE stream through a
+// fresh responses->anthropic converter and returns the downstream output and
+// the state carrying the conversion report.
+func drainResponsesToAnthropic(t *testing.T, raw []byte) (string, *anthropicResponsesStreamState) {
+	t.Helper()
+	state := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{},
+		"msg_1",
+		"gpt-4.1",
+		1,
+	)
+	converter := newResponsesToAnthropicConverter(state)
+	reader := newConvertingReaderWithLimits(
+		NewSSEReaderWithLimits(bytes.NewReader(raw), 0, 0),
+		converter, 0, 0, 0,
+	)
+	var output bytes.Buffer
+	buf := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			output.Write(buf[:n])
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+	}
+	if !reader.SawTerminal() {
+		t.Fatal("no terminal seen")
+	}
+	if reader.SawErrorEvent() {
+		t.Fatal("stream reported an error event")
+	}
+	return output.String(), state
+}
+
+// dataOnlyResponsesStreamSSE strips every event: line from the official
+// Responses stream fixture, producing the data-only shape a gateway that
+// omits SSE event names emits.
+func dataOnlyResponsesStreamSSE(t *testing.T) []byte {
+	t.Helper()
+	var dataOnly []byte
+	for line := range bytes.SplitSeq(testcorpus.ResponsesStreamSSE(), []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("event:")) {
+			continue
+		}
+		dataOnly = append(dataOnly, line...)
+		dataOnly = append(dataOnly, '\n')
+	}
+	if bytes.Contains(dataOnly, []byte("event:")) {
+		t.Fatal("fixture still carries event: lines")
+	}
+	return dataOnly
+}
+
+// TestResponsesStreamDataOnlyFramesTolerated proves an upstream Responses
+// stream that omits the SSE event: name on every frame (the SSE event field
+// is optional; the JSON type is the authoritative discriminator) translates
+// to the full Anthropic lifecycle: one terminal, no error event, the
+// content delivered, and the missing-event-name note recorded exactly once
+// as a NoteRecord.
+func TestResponsesStreamDataOnlyFramesTolerated(t *testing.T) {
+	body, state := drainResponsesToAnthropic(t, dataOnlyResponsesStreamSSE(t))
+	if got := strings.Count(body, "event: message_stop"); got != 1 {
+		t.Fatalf("message_stop count = %d, want exactly one: %q", got, body)
+	}
+	if !strings.Contains(body, "The weather in Tokyo is ") ||
+		!strings.Contains(body, "21\u00b0C and sunny.") {
+		t.Fatalf("content missing from the translated stream: %q", body)
+	}
+	notes := 0
+	for _, loss := range state.report.Losses {
+		if loss.Feature == FeatureMissingEventName {
+			notes++
+			if loss.Kind != NoteRecord {
+				t.Fatalf("missing_event_name kind = %v, want NoteRecord", loss.Kind)
+			}
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("missing_event_name note count = %d, want exactly one", notes)
+	}
+}
+
+// TestResponsesStreamEventNameToleranceOutputEquivalence proves the
+// tolerance is emission-neutral: translating the official fixture with its
+// event: names and with them stripped produces byte-identical downstream
+// output. The only difference is the conversion report (the data-only run
+// records the missing_event_name note).
+func TestResponsesStreamEventNameToleranceOutputEquivalence(t *testing.T) {
+	named, _ := drainResponsesToAnthropic(t, testcorpus.ResponsesStreamSSE())
+	dataOnly, _ := drainResponsesToAnthropic(t, dataOnlyResponsesStreamSSE(t))
+	if named != dataOnly {
+		t.Fatalf(
+			"data-only output differs from the named output:\nnamed:     %q\ndata-only: %q",
+			named, dataOnly,
+		)
+	}
+}
+
+// TestResponsesStreamMismatchedEventNameRejected proves the tolerance is
+// scoped to an ABSENT event name: a present name that disagrees with the
+// JSON type stays a typed upstream wire error.
+func TestResponsesStreamMismatchedEventNameRejected(t *testing.T) {
+	state := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		j6PermissivePolicy(),
+		ChatCapabilities{},
+		"msg_1",
+		"gpt-4.1",
+		1,
+	)
+	converter := newResponsesToAnthropicConverter(state)
+	frames := testcorpus.ParseSSEFrames(testcorpus.ResponsesStreamSSE())
+	if len(frames) == 0 {
+		t.Fatal("fixture has no frames")
+	}
+	_, err := converter.Convert(SSEEvent{
+		Event: "response.completed",
+		Data:  []byte(frames[0]),
+	})
+	if err == nil {
+		t.Fatal("mismatched event name accepted")
+	}
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	}
+	if !strings.Contains(err.Error(), "does not match JSON type") {
+		t.Fatalf("error = %q, want the mismatch violation", err.Error())
+	}
+}
+
 func TestFixtureResponsesStreamToAnthropicFrames(t *testing.T) {
 	// End-to-end through the adapter: the official-shaped Responses stream
 	// fixture translates to Anthropic frames.

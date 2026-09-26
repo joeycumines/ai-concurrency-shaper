@@ -271,6 +271,12 @@ type ReasoningOutputItem struct {
 	Summary          []ReasoningSummary  `json:"summary"`
 	Content          []ReasoningText     `json:"content,omitempty"`
 	EncryptedContent wire.NullOmitString `json:"encrypted_content,omitempty"`
+	// Format is an opaque provider extension (a gateway routing marker,
+	// observed live as "azure-openai-responses-v1" on a reasoning item).
+	// Decoded and discarded: the marker is routing metadata, never model
+	// output, so it must not cross into any client dialect. The field is
+	// cleared before the item is re-marshaled into canonical bytes.
+	Format json.RawMessage `json:"format,omitempty"`
 }
 
 func (*ReasoningOutputItem) isOutputItem() {}

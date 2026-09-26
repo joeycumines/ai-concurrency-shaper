@@ -268,17 +268,23 @@ const (
 	// tool call with a synthesized id derived from the response id, recorded
 	// as an ungated note naming the source.
 	FeatureLegacyFunctionCall Feature = "legacy_function_call"
+	// MissingEventName covers an upstream Responses stream whose SSE frames
+	// omit the event: name: the SSE event field is optional and the JSON
+	// type is the authoritative discriminator, so the event is routed by
+	// its decoded type and the provider quirk is recorded as an ungated
+	// note. A PRESENT name that disagrees with the JSON type stays a wire
+	FeatureMissingEventName Feature = "missing_event_name"
 )
 
-// lossEntry pairs a loss key with the documentation emitted in
-// LOSS_MATRIX.md. The registry order is canonical.
+// lossEntry pairs a loss key with the description used by the per-request log
+// and the startup summary. The registry order is canonical.
 type lossEntry struct {
 	Key         Feature
 	Description string
 }
 
 // lossRegistry is the ordered granular registry — the single source for the
-// CLI, the converters, and the generated LOSS_MATRIX.md.
+// CLI, the converters and the runtime reporting.
 var lossRegistry = []lossEntry{
 	{FeaturePreviousResponseID, "the Responses previous_response_id request field and item_reference conversation-state references cannot be reproduced in the target request; input item ids are also conversation-state references and their unconditional drop is noted observably"},
 	{FeatureRequestTopLogprobs, "the Responses top_logprobs request field cannot be reproduced in the target request"},

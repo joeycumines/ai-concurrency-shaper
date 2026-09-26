@@ -3587,8 +3587,8 @@ func (s *anthropicResponsesStreamState) loseControlsOnce(
 		{"background", envelope.Background != nil},
 		{"max_tool_calls", envelope.MaxToolCalls != nil},
 		{"prompt", envelope.Prompt != nil},
-		{"prompt_cache_key", envelope.PromptCacheKey != ""},
-		{"safety_identifier", envelope.SafetyIdentifier != ""},
+		{"prompt_cache_key", envelope.PromptCacheKey != nil},
+		{"safety_identifier", envelope.SafetyIdentifier != nil},
 	} {
 		if control.present {
 			present = append(present, control.name)

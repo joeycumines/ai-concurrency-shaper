@@ -267,8 +267,8 @@ func envelopeWithControls() ResponseEnvelope {
 		Background:       new(false),
 		MaxToolCalls:     new(int64(5)),
 		Prompt:           &ResponsesEnvelopePrompt{ID: "pt_1", Version: "v2"},
-		PromptCacheKey:   "cache_1",
-		SafetyIdentifier: "red_team",
+		PromptCacheKey:   new("cache_1"),
+		SafetyIdentifier: new("red_team"),
 		Usage: &ResponsesUsage{
 			InputTokens:         1,
 			OutputTokens:        1,

@@ -109,6 +109,10 @@ func marshalResponsesEvents(
 // Responses events, converted, and marshaled into Anthropic frames.
 type responsesToAnthropicConverter struct {
 	state *anthropicResponsesStreamState
+
+	// missingEventNameNoted gates the missing-event-name note to once per
+	// stream (a data-only gateway omits the name on every frame).
+	missingEventNameNoted bool
 }
 
 func newResponsesToAnthropicConverter(
@@ -141,18 +145,25 @@ func (c *responsesToAnthropicConverter) Convert(
 	if err != nil {
 		return convertedBatch{}, err
 	}
-	// Validate the SSE event name equals the JSON type. Responses streams
-	// require event: to be present and equal the JSON type tag (the
-	// package's own rule): an empty event name is
-	// a wire error, not a silent pass.
+	// The SSE event name must equal the JSON type tag when present. The SSE
+	// event field is optional and the Responses JSON type is the
+	// authoritative discriminator, so a data-only frame is routed by its
+	// decoded type and the provider quirk is recorded once per stream as an
+	// ungated note. A PRESENT name that disagrees with the JSON type is
+	// still a wire error.
 	if frame.Event == "" {
-		return convertedBatch{}, upstreamWireError(
-			UpstreamResponses,
-			http.StatusOK,
-			errors.New("responses stream event has no event name"),
-		)
-	}
-	if err := validateEventNameMatchesJSONType(frame); err != nil {
+		frame.Event = event.EventType()
+		if !c.missingEventNameNoted {
+			c.missingEventNameNoted = true
+			if err := c.state.report.Note(
+				FeatureMissingEventName,
+				"responses[].stream",
+				"the upstream stream omitted the SSE event: name; the event was routed by its JSON type",
+			); err != nil {
+				return convertedBatch{}, err
+			}
+		}
+	} else if err := validateEventNameMatchesJSONType(frame); err != nil {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamResponses,
 			http.StatusOK,

@@ -69,6 +69,10 @@ var (
 	codexMultiturnRequestFieldJSON []byte
 	//go:embed testdata/field/codex_namespace_request_field.json
 	codexNamespaceRequestFieldJSON []byte
+	//go:embed testdata/field/data_only_responses_stream_field.sse
+	dataOnlyResponsesStreamFieldSSE []byte
+	//go:embed testdata/field/camel_reasoning_format_field.json
+	camelReasoningFormatFieldJSON []byte
 	//go:embed testdata/field/claude_server_tool_definition_field.json
 	claudeServerToolDefinitionFieldJSON []byte
 )
@@ -103,6 +107,28 @@ func FieldCodexMultiturnRequestJSON() []byte { return codexMultiturnRequestField
 // The tools, their child schemas, and tool_choice are byte-verbatim from the
 // capture; the envelope is trimmed to the fields the replay test needs.
 func FieldCodexNamespaceRequestJSON() []byte { return codexNamespaceRequestFieldJSON }
+
+// FieldDataOnlyResponsesStreamSSE returns the captured camel native-Responses
+// stream in which the gateway omits the SSE event: name on every frame: a
+// leading ": " comment frame then data-only frames whose JSON `type` is the
+// authoritative discriminator (the payloads also carry the gateway's opaque
+// "p" envelope extension and the pinned envelope controls, e.g.
+// output[].phase and table/prompt-cache nulls at created time). Sanitized:
+// the account id, generation id, and per-stream "p" token are replaced with
+// stable placeholders; the shape (key presence, null-vs-value, frame order)
+// is byte-faithful to the capture.
+func FieldDataOnlyResponsesStreamSSE() []byte { return dataOnlyResponsesStreamFieldSSE }
+
+// FieldCamelReasoningFormatJSON returns the captured camel native-Responses
+// non-streaming body in which the reasoning output item carries the
+// gateway's opaque "format" routing marker ("azure-openai-responses-v1").
+// Sanitized: the item id and encrypted blob are replaced with stable
+// placeholders. Byte-faithful to the capture are the item keys, the marker
+// spelling, and the status values; synthesized is the message half (the
+// exhibiting exchange carried a single reasoning item with usage 8/16/24,
+// while the fixture pairs the reasoning item with a PONG message at 8/6/14
+// so the decode path is exercised end to end).
+func FieldCamelReasoningFormatJSON() []byte { return camelReasoningFormatFieldJSON }
 
 // FieldClaudeServerToolDefinitionJSON returns a minimized isolation vector
 // for the Claude Code web-search server-tool shape: the tools array and
