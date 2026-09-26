@@ -7,6 +7,7 @@ package transcode
 //.
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -83,6 +84,53 @@ func TestResponsesEnvelopeControlsAbsentNoLoss(t *testing.T) {
 	context.RequestedClientModel = "m"
 	if _, _, err := RenderMessagesResponse(response, context); err != nil {
 		t.Fatalf("render with no controls: %v", err)
+	}
+}
+
+// camelResponseEnvelope returns a sanitised copy of the native-Responses
+// gateway body shape that failed the strict decode before the nullable echo
+// fields: explicit nulls on optional envelope fields (error,
+// incomplete_details, max_tool_calls, previous_response_id, instructions,
+// prompt_cache_key, prompt_cache_options) alongside real values and
+// provider extensions (service_tier, output[].phase, usage cost fields).
+func camelResponseEnvelope() string {
+	return `{"id":"gen_1","object":"response","created_at":1,"model":"m","status":"completed","completed_at":2,"output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi","annotations":[],"logprobs":[]}],"phase":"final_answer"}],"error":null,"incomplete_details":null,"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":32,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"default","truncation":"disabled","store":false,"instructions":null,"text":{"format":{"type":"text"}},"reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":"detailed"},"safety_identifier":"acct_1","prompt_cache_key":null,"prompt_cache_options":null,"user":"acct_1","usage":{"input_tokens":15,"input_tokens_details":{"cached_tokens":0},"output_tokens":9,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":24,"cost":0,"is_byok":true},"openrouter_metadata":{"strategy":"fallback","attempt":1}}`
+}
+
+// TestResponsesCamelEnvelopeExplicitNullsDecode proves the camel-shaped
+// native-Responses envelope decodes with explicit nulls on optional fields
+// (they read as absent: the controls loss names only the present values)
+// while a null on a REQUIRED field and a type-corrupt modeled field still
+// reject as typed upstream wire errors.
+func TestResponsesCamelEnvelopeExplicitNullsDecode(t *testing.T) {
+	response, err := DecodeResponsesResponse([]byte(camelResponseEnvelope()))
+	if err != nil {
+		t.Fatalf("camel envelope decode: %v", err)
+	}
+	controls := strings.Join(response.Source.ResponsesControls, ",")
+	if !strings.Contains(controls, "safety_identifier") || !strings.Contains(controls, "background") {
+		t.Fatalf("controls = %v, want safety_identifier and background present", response.Source.ResponsesControls)
+	}
+	if strings.Contains(controls, "prompt_cache_key") {
+		t.Fatalf("controls = %v, explicit-null prompt_cache_key must read absent", response.Source.ResponsesControls)
+	}
+
+	// A null on a REQUIRED field is still malformed wire.
+	if _, err := DecodeResponsesResponse([]byte(strings.Replace(
+		camelResponseEnvelope(), `"model":"m"`, `"model":null`, 1,
+	))); err == nil {
+		t.Fatal("null on the required model field accepted")
+	} else if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("null model err = %T %v, want *UpstreamWireError", err, err)
+	}
+
+	// A type-corrupt modeled field is still malformed wire.
+	if _, err := DecodeResponsesResponse([]byte(strings.Replace(
+		camelResponseEnvelope(), `"max_output_tokens":32`, `"max_output_tokens":"many"`, 1,
+	))); err == nil {
+		t.Fatal("type-corrupt max_output_tokens accepted")
+	} else if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("type-corrupt err = %T %v, want *UpstreamWireError", err, err)
 	}
 }
 
