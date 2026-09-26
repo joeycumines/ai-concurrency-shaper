@@ -2136,7 +2136,12 @@ func RenderChatRequest(
 		turnIndex++
 		switch turn.Role {
 		case CanonicalSystem:
-			message, err := canonicalTextTurnToChatMessage(turn, ChatMessageRoleSystem)
+			message, err := canonicalTextTurnToChatMessage(
+				turn,
+				ChatMessageRoleSystem,
+				context.lossPolicy(),
+				&report,
+			)
 			if err != nil {
 				return nil, report, err
 			}
@@ -2151,7 +2156,12 @@ func RenderChatRequest(
 				role = ChatMessageRoleSystem
 				channel = true
 			}
-			message, err := canonicalTextTurnToChatMessage(turn, role)
+			message, err := canonicalTextTurnToChatMessage(
+				turn,
+				role,
+				context.lossPolicy(),
+				&report,
+			)
 			if err != nil {
 				return nil, report, err
 			}
@@ -2278,7 +2288,35 @@ func RenderChatRequest(
 	// client-dialect invalid-request error before any upstream request:
 	// messages:null or an invented empty user prompt are never emitted
 	//.
-	if len(out.Messages) == 0 {
+	// A source request with no Chat-representable messages is a
+	// client-dialect invalid-request error before any upstream request.
+	// A message whose content is a single EMPTY text block counts as
+	// non-representable: it arises only when every part of a system turn was
+	// dropped under an approved loss, and admitting it would send the
+	// upstream a conversation with no user turn at all. This keeps the
+	// Messages-to-Chat direction in agreement with the Responses target,
+	// which rejects the same source shape for the same reason.
+	isDegenerate := func(messages []ChatMessage) bool {
+		// Degenerate means EVERY message is a single EMPTY text block - the
+		// exact shape the empty-block synthesis produces when all of a
+		// system turn's parts were dropped. An assistant or tool message
+		// carrying real content is representable and must NOT be rejected
+		// just because the conversation has no user turn.
+		for _, m := range messages {
+			if m.Content == nil {
+				return false
+			}
+			blocks := m.Content.ContentBlocks
+			if len(blocks) != 1 || blocks[0].Type != ChatContentBlockTypeText {
+				return false
+			}
+			if blocks[0].Text == nil || *blocks[0].Text != "" {
+				return false
+			}
+		}
+		return true
+	}
+	if len(out.Messages) == 0 || isDegenerate(out.Messages) {
 		return nil, report, errors.New(
 			"the source request has no Chat-representable messages",
 		)
@@ -2568,7 +2606,11 @@ func loseInputPhase(
 }
 
 // loseSystemPart applies the loss/reject decision for a system prompt part
-// that cannot be expressed in the string-only create-request instructions
+// that cannot be expressed in the string-only create-request instructions.
+// An image or document follows the system_non_text_content loss decision
+// (approved drop, else typed rejection); any other non-text part is a stable
+// typed rejection — never a leaked Go type name, matching the chat-side
+// decision.
 func loseSystemPart(
 	policy LossPolicy,
 	report *ConversionReport,
@@ -2577,10 +2619,15 @@ func loseSystemPart(
 	switch part.(type) {
 	case CanonicalImage, CanonicalDocument:
 	default:
-		return fmt.Errorf(
-			"system prompt part %T cannot be expressed in the create-request instructions string",
-			part,
-		)
+		// Defensive: no request path reaches this arm today - the create-request
+		// render only ever passes an image or a document here. It names the
+		// offending part type so that IF it is ever reached the operator can
+		// diagnose it; a message that merely repeated the path would not.
+		return &UnsupportedFeatureError{
+			Protocol: "responses",
+			Path:     "instructions",
+			Feature:  fmt.Sprintf("system prompt part %T cannot be expressed in the create-request instructions string", part),
+		}
 	}
 	return report.Lose(
 		policy,

@@ -72,7 +72,12 @@
 //	                       string-only create-request instructions;
 //	                       multiple system turns and non-text system content
 //	                       are loss-gated (FeatureMultipleSystemTurns,
-//	                       FeatureSystemNonTextContent); for Chat targets
+//	                       FeatureSystemNonTextContent); for Chat targets the
+//	                       same key gates non-text parts of system/developer
+//	                       messages — an approved drop, else a typed
+//	                       rejection; an all-dropped turn renders one empty
+//	                       text block (the Responses target omits the
+//	                       instructions field instead); for Chat targets
 //	                       system-channel turns consolidate into one
 //	                       leading system message — a turn after dialog
 //	                       turns is loss-gated (FeatureMidConversation
