@@ -124,11 +124,29 @@ const (
 	// 293640 against a 293360 + 221 component sum on a 293K-token exchange
 	// failed the client, which retried 8 times).
 	FeatureUsageTotalMismatch Feature = "usage_total_mismatch"
+	// UsageTotalDerived covers a source usage tail that omitted exactly one
+	// of prompt/completion/total: the missing total is derived from the two
+	// present values (never defaulted to zero) and the derivation is
+	// recorded so it stays observable. Two or more missing totals cannot be
+	// derived and remain a typed upstream wire error.
+	FeatureUsageTotalDerived Feature = "usage_total_derived"
+	// UsageTotalMerged covers a repeated terminal frame whose accounting
+	// REPLACES the totals already recorded, rather than completing a missing
+	// one. It is a distinct event and gets a distinct key: operators grep the
+	// feature name, and filing a merge under "derived" would make the two
+	// indistinguishable in the per-request log. Deliberately NOT in
+	// lossRegistry - it is not a loss, so it is not policy-addressable.
+	FeatureUsageTotalMerged Feature = "usage_total_merged"
 	// ImageDetailOriginal covers the Responses-only image detail value
+	// "original": the Chat dialect defines only auto|low|high, so the value
 	// is mapped to "high" (the closest truthful semantic — the full-fidelity
-	// request) under this ungated note, never forwarded unvalidated.
+	// request), never forwarded unvalidated. The CLIENT asked for the
+	// fidelity, so the downgrade is a POLICY-GATED loss (report.Lose), not an
+	// ungated note: only the operator can refuse it. It is in
+	// defaultTranscodeLosses, so a default deployment keeps working.
 	FeatureImageDetailOriginal Feature = "image_detail_original"
 	// ImageDetailInvented covers an image rendered with a detail value the
+	// SOURCE dialect could not express (the Anthropic Messages image block
 	// has no detail field at all), where the proxy chooses the documented
 	// "auto" default: the invention is recorded as an ungated note so it is
 	// never mistaken for a client-requested value.
@@ -201,6 +219,13 @@ const (
 	FeatureAuthenticatedThinking Feature = "authenticated_thinking"
 	// TopK covers the top_k setting that the target cannot reproduce.
 	FeatureTopK Feature = "top_k"
+	// ProfileRouting is the Note-only key recorded when a profile name
+	// resolves through the profile map: a collapse onto a different tier
+	// than the profile requested, or a fallback to the provider default
+	// model because the profile's model is unmapped. It is never a
+	// policy-gated loss — the Note is the observability contract that the
+	// profile was not silently forwarded as an unknown upstream model.
+	FeatureProfileRouting Feature = "profile_routing"
 	// MultiAgentPriming is the Note-only key recorded when the
 	// multi-agent protocol reminder is injected into the leading system
 	// turn. It is never a policy-gated loss — the Note is the
@@ -225,13 +250,6 @@ const (
 	// AnthropicControls covers the Anthropic Messages client-side envelope
 	// controls (context_management, output_config): they are client/server
 	// conversation controls with no representation in the target request —
-	// ProfileRouting is the Note-only key recorded when a profile name
-	// resolves through the profile map: a collapse onto a different tier
-	// than the profile requested, or a fallback to the provider default
-	// model because the profile's model is unmapped. It is never a
-	// policy-gated loss — the Note is the observability contract that the
-	// profile was not silently forwarded as an unknown upstream model.
-	FeatureProfileRouting Feature = "profile_routing"
 	// output_config.budget_tokens duplicates the max_tokens output budget
 	// already carried by max_tokens, and context_management edits direct
 	// server-side context trimming. An approved loss drops them observably.
@@ -268,16 +286,25 @@ const (
 	// tool call with a synthesized id derived from the response id, recorded
 	// as an ungated note naming the source.
 	FeatureLegacyFunctionCall Feature = "legacy_function_call"
+	// MissingStreamSentinel covers an upstream chat stream that ended after
+	// a finishing chunk without the [DONE] sentinel: the completion is
+	// released on EOF (the refusal cannot be reported as a truncated
+	// exchange when every semantic terminal already arrived) and the quirk
+	// is recorded as an ungated note so it stays observable.
+	FeatureMissingStreamSentinel Feature = "missing_stream_sentinel"
 	// MissingEventName covers an upstream Responses stream whose SSE frames
 	// omit the event: name: the SSE event field is optional and the JSON
 	// type is the authoritative discriminator, so the event is routed by
 	// its decoded type and the provider quirk is recorded as an ungated
 	// note. A PRESENT name that disagrees with the JSON type stays a wire
 	// error.
-	// Deliberately NOT in lossRegistry: it is not a loss, so it is not
-	// policy-addressable via -transcode-allow-loss. The registry is
-	// unreachable for an unregistered const, so nothing else guards that -
-	// this comment is the contract, and losing it is a silent change.
+	//
+	// Registered, so the key carries a documented description and the
+	// reachability oracle covers it, but it is RECORDED through report.Note:
+	// it is a sanctioned encoding, never a policy decision, so no policy -
+	// not even one that names it - can suppress it. Note-only siblings that
+	// are not registered at all (usage_total_merged, profile_routing,
+	// multi_agent_priming) have no operator-facing name by design.
 	FeatureMissingEventName Feature = "missing_event_name"
 )
 
@@ -304,8 +331,11 @@ var lossRegistry = []lossEntry{
 	{FeatureNamespaceReplayUndeclared, "replayed function_call history names a namespace this request does not declare for that name; the qualifier cannot be mapped, so the upstream is not taught the name and the replayed call may be unresolvable there"},
 	{FeatureOutputItemBoundaries, "output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target"},
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
+	{FeatureMissingStreamSentinel, "the upstream chat stream ended after a finishing chunk without the [DONE] sentinel; the completion was released on EOF and the provider quirk recorded"},
+	{FeatureMissingEventName, "the upstream Responses stream omitted the SSE event: name; the event was routed by its JSON type and the provider quirk recorded"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},
 	{FeatureUsageTotalMismatch, "the source usage totals are arithmetically inconsistent (total_tokens != input + output); the emitted values are relayed with the mismatch recorded (the note names the emitted counts and, where a clamp corrected a component, the source numbers)"},
+	{FeatureUsageTotalDerived, "the source usage omitted exactly one total; it was derived from the two present values (never defaulted to zero) and the derivation recorded"},
 	{FeatureImageDetailOriginal, "the Responses-only image detail value original has no Chat equivalent; it was mapped to high (the full-fidelity request) and the mapping recorded"},
 	{FeatureImageDetailInvented, "the source dialect has no image detail field; the proxy chose the documented auto default and recorded the invention"},
 	{FeatureReportOverflow, "the conversion report reached its entry bound; further entries are aggregated into this note (observability saturation, never an exchange failure)"},

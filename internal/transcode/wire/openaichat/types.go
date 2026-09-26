@@ -689,6 +689,13 @@ type StreamChunk struct {
 	Choices           []Choice  `json:"choices"`
 	Usage             *LLMUsage `json:"usage,omitempty"`
 
+	// DerivedUsageTotal names a usage total this decoder derived from the
+	// other two because the upstream omitted it on the wire ("prompt_tokens",
+	// "completion_tokens", or "total_tokens"). It is an in-memory carrier,
+	// never part of the wire contract and never forwarded: the stream state
+	// records one note per exchange so the derivation stays observable.
+	DerivedUsageTotal string `json:"-"`
+
 	PromptTokenIDs any     `json:"prompt_token_ids,omitempty"`
 	PromptText     *string `json:"prompt_text,omitempty"`
 

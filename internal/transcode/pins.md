@@ -367,23 +367,6 @@ evidence is the committed fixture
 `testcorpus/testdata/field/camel_reasoning_format_field.json`, accessor
 `FieldCamelReasoningFormatJSON` in `testcorpus.go`).
 
-### Tool-message content blocks (observed upstream behaviour)
-
-The pinned Chat contract models the message content union as either a plain
-string or an array of content blocks (text / image_url), for ANY role. Real
-open-weights gateways differ in whether they accept image parts inside a
-`role: "tool"` message: some reject them, others carry them and pass the
-image to a vision model (observed live on the dialagram mount, whose
-`qwen-3.8-max` answered quadrant colours from an image delivered as multipart
-tool-message content). Because the acceptance is a property of the upstream,
-not of the pinned wire, the multipart tool-message rendering is gated behind
-the opt-in `tool_result_images` capability: without it, multimodal tool-result
-content keeps the observable `tool_result_json_envelope` text encoding
-(`tool_result_multimodal_content` + `tool_result_json_envelope` losses), which
-is the compatible default. A media type outside the Chat image vocabulary is
-an encoding error on BOTH paths (the envelope cannot data-URL it either), so
-it is never silently dropped.
-
 ## Anthropic Messages inventory (message.go, v1.61.0)
 
 ### Message (non-stream response + message_start payload)
@@ -510,10 +493,10 @@ review the schema diff per the update procedure.
 
 ## Modeled opaque provider extensions
 
-The pins above cover the official schemas. Real chat gateways additionally
+The pins above cover the official schemas. Real gateways additionally
 emit fields outside them; the wire shadows MODEL every observed spelling so
-its presence is an observed inert extension. They live in the OpenAI Chat
-dialect only. The table below lists every spelling the wire shadows model,
+its presence is an observed inert extension. The table below lists every
+chat-dialect spelling the wire shadows model,
 each with its fate after decode, and each is pinned by a committed unit test
 (spread across
 `chat_schema_test.go`, `chat_response_strict_test.go`,
@@ -565,7 +548,7 @@ table above + add it to the field-capture corpus:
 
 | Provider | Tolerated (discarded) extensions |
 | --- | --- |
-| OpenRouter | `cost`, `native_finish_reason`, `is_byok`, `cost_details`, `cache_write_tokens`, `video_tokens`, `image_tokens`, `error` |
+| OpenRouter / Dialagram | `cost`, `native_finish_reason`, `is_byok`, `cost_details`, `cache_write_tokens`, `video_tokens`, `image_tokens`, `error`; `delta.reasoning_details` (observed on `meta-muse-spark-1.3`, a sibling array of the modeled `reasoning` delta text — discarded, never forwarded, and never treated as output by the stream converter) |
 | vLLM | `prompt_logprobs`, `kv_transfer_params`, `ec_transfer_params`, `metrics` |
 | DeepSeek / open-weights | `logprobs.reasoning_content` (NOTE: `reasoning_content` at message/delta level IS modeled and maps to capability-gated text — see the table above; only the `logprobs`-nested spelling is discarded) |
 | LiteLLM / Verboo | `completion_cost`, `cache_cost` (modeled as opaque raw JSON in the table above, never forwarded) |
@@ -590,3 +573,59 @@ rejected. A new provider spelling belongs here, in the wire shadows next to
 its siblings, and in the corpus as a fixture — capture real bytes first
 (`make field-recapture` in the top-level `project.mk`; see the README section
 on provider extensions).
+
+### Post-terminal accounting redelivery (observed stream shape)
+
+Some gateways redeliver the terminal chunk with the usage accounting
+piggybacked on it instead of sending the bare `choices: []` usage-only tail
+that `stream_options.include_usage` defines (observed live on Dialagram
+`meta-muse-spark-1.3`: the finish chunk carries `finish_reason: "tool_calls"`
+with a role-only delta, `content: ""` and `reasoning: null`, and is then
+repeated on the same single choice with a role-only delta and `content: ""`
+plus the `usage` object attached; the official bare usage-only tail is the
+common shape, and the accumulate-on-repeat shape is absorbed with or without
+a usage object). The redelivery is pure accounting: the
+stream converter folds its usage into the terminal envelope, applies the
+same loss decisions (service tier, logprobs, unknown usage components), and
+emits no events. It is NOT new output — a post-finish chunk carrying
+content, reasoning, refusal, tool-call fragments, a non-empty legacy
+`function_call` payload, a different `finish_reason`, or more than one
+choice remains corrupt upstream wire and is rejected, exactly as before
+(the benign empty-string `function_call` fragment is absorbed the same way
+it is mid-stream).
+
+
+### Data-only stream frames (observed stream shape)
+
+Some gateways omit the SSE `event:` name on EVERY frame of a Responses
+stream (observed live on the camel mount's native `/v1/responses`: frames
+begin with a `: ` comment then carry only `data:` lines; the JSON payloads
+carry the full `type` discriminator, e.g.
+`{"p":"...","type":"response.created",...}`). The SSE specification makes
+the `event` field optional, and the Responses JSON `type` is the
+authoritative discriminator, so the converter routes such a frame by its
+decoded JSON type and records the provider quirk as the ungated
+`missing_event_name` note (once per stream, path `responses[].stream`).
+Tolerance is scoped to an ABSENT name only: a PRESENT name that disagrees
+with the JSON type remains a typed upstream wire error, exactly as before.
+The sanitized bytes of one such capture (the camel native-Responses mount)
+are committed at `testcorpus/testdata/field/data_only_responses_stream_field.sse`
+and replayed through the production converter by
+`TestFieldCaptureDataOnlyResponsesStreamReplays`.
+
+### Tool-message content blocks (observed upstream behaviour)
+
+The pinned Chat contract models the message content union as either a plain
+string or an array of content blocks (text / image_url), for ANY role. Real
+open-weights gateways differ in whether they accept image parts inside a
+`role: "tool"` message: some reject them, others carry them and pass the
+image to a vision model (observed live on the dialagram mount, whose
+`qwen-3.8-max` answered quadrant colours from an image delivered as multipart
+tool-message content). Because the acceptance is a property of the upstream,
+not of the pinned wire, the multipart tool-message rendering is gated behind
+the opt-in `tool_result_images` capability: without it, multimodal tool-result
+content keeps the observable `tool_result_json_envelope` text encoding
+(`tool_result_multimodal_content` + `tool_result_json_envelope` losses), which
+is the compatible default. A media type outside the Chat image vocabulary is
+an encoding error on BOTH paths (the envelope cannot data-URL it either), so
+it is never silently dropped.

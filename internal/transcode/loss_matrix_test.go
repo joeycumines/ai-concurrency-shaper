@@ -427,3 +427,15 @@ func reportHasFeature(report ConversionReport, feature Feature) bool {
 	}
 	return false
 }
+
+// reportDetail returns the detail of the first loss or note recorded for the
+// feature. The detail text is the operator's only view of WHAT happened, so a
+// test that pins observability has to read it, not just its presence.
+func reportDetail(report ConversionReport, feature Feature) (string, bool) {
+	for _, loss := range report.Losses {
+		if loss.Feature == feature {
+			return loss.Detail, true
+		}
+	}
+	return "", false
+}

@@ -263,7 +263,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 			PromptTokens:     10,
 			CompletionTokens: -1,
 			TotalTokens:      9,
-		})
+		}, "")
 		if !clamp.negativeCounts {
 			t.Fatalf("clamp = %+v, want negative counts recorded", clamp)
 		}
@@ -280,7 +280,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 			CompletionTokensDetails: &ChatCompletionTokensDetails{
 				ReasoningTokens: -1,
 			},
-		})
+		}, "")
 		if !clamp.negativeCounts || got.OutputTokensDetails.ReasoningTokens != 0 {
 			t.Fatalf("clamped usage = %+v (clamp %+v), want reasoning 0", got, clamp)
 		}
@@ -294,7 +294,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 			PromptTokensDetails: &ChatPromptTokensDetails{
 				CachedTokens: 50,
 			},
-		})
+		}, "")
 		if !clamp.cacheExceedsInput {
 			t.Fatalf("clamp = %+v, want cache-exceeds-input recorded", clamp)
 		}
@@ -311,7 +311,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 			PromptTokens:     10,
 			CompletionTokens: 5,
 			TotalTokens:      12,
-		})
+		}, "")
 		if got.TotalTokens != 12 {
 			t.Fatalf("total = %d, want the source's own 12", got.TotalTokens)
 		}
@@ -321,7 +321,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 	})
 
 	t.Run("chat nil usage returns nil", func(t *testing.T) {
-		got, clamp := chatUsageToResponsesUsage(nil)
+		got, clamp := chatUsageToResponsesUsage(nil, "")
 		if got != nil || !clamp.empty() {
 			t.Fatalf("nil usage = (%v, %+v), want (nil, empty)", got, clamp)
 		}

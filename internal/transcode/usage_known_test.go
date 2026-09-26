@@ -182,7 +182,7 @@ func TestUsageStreamingDetailObjectsPresence(t *testing.T) {
 		PromptTokens:     10,
 		CompletionTokens: 2,
 		TotalTokens:      12,
-	})
+	}, "")
 	if usage.InputTokensDetails == nil || usage.OutputTokensDetails == nil {
 		t.Fatalf("required detail objects missing: %+v", usage)
 	}
@@ -199,7 +199,7 @@ func TestUsageStreamingDetailObjectsPresence(t *testing.T) {
 		CompletionTokensDetails: &ChatCompletionTokensDetails{
 			ReasoningTokens: 4,
 		},
-	})
+	}, "")
 	if usage.InputTokensDetails == nil || usage.InputTokensDetails.CachedTokens != 3 {
 		t.Fatalf("cached = %+v", usage.InputTokensDetails)
 	}

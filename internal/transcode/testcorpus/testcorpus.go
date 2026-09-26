@@ -69,6 +69,8 @@ var (
 	codexMultiturnRequestFieldJSON []byte
 	//go:embed testdata/field/codex_namespace_request_field.json
 	codexNamespaceRequestFieldJSON []byte
+	//go:embed testdata/field/repeated_terminal_tail_field.sse
+	repeatedTerminalTailFieldSSE []byte
 	//go:embed testdata/field/data_only_responses_stream_field.sse
 	dataOnlyResponsesStreamFieldSSE []byte
 	//go:embed testdata/field/camel_reasoning_format_field.json
@@ -107,6 +109,14 @@ func FieldCodexMultiturnRequestJSON() []byte { return codexMultiturnRequestField
 // The tools, their child schemas, and tool_choice are byte-verbatim from the
 // capture; the envelope is trimmed to the fields the replay test needs.
 func FieldCodexNamespaceRequestJSON() []byte { return codexNamespaceRequestFieldJSON }
+
+// FieldRepeatedTerminalTailSSE returns the captured dialagram
+// meta-muse-spark-1.3 stream tail in which the gateway redelivers the
+// terminal chunk — the same single choice, the same finish reason, an
+// insubstantial delta — with the usage accounting piggybacked, followed by
+// the [DONE] sentinel. The frames are shape-verbatim from the capture; the
+// tool-call argument payload is replaced with a neutral value.
+func FieldRepeatedTerminalTailSSE() []byte { return repeatedTerminalTailFieldSSE }
 
 // FieldDataOnlyResponsesStreamSSE returns the captured camel native-Responses
 // stream in which the gateway omits the SSE event: name on every frame: a
