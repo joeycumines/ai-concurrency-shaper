@@ -645,6 +645,7 @@ func (p *Provider) resolveModelCatalog(modelTable []modelTableEntry) {
 		}
 		if !capabilitiesSet && mapping.UpstreamProtocol == transcode.UpstreamChatCompletions {
 			catalog.ParallelToolCalls = mapping.ChatCapabilities.ParallelToolCalls
+			catalog.StructuredOutputs = mapping.ChatCapabilities.StructuredOutputs
 			capabilitiesSet = true
 		}
 	}

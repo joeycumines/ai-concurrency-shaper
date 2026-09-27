@@ -492,3 +492,42 @@ func TestModelFactsDoNotAlterRendering(t *testing.T) {
 		t.Fatalf("facts altered the rendered upstream request:\nbare: %s\nfull: %s", bare, full)
 	}
 }
+
+// TestCatalogStructuredOutputsFollowsTheChatMapping pins the one place the
+// mount's resolved chat capability overrides the catalog's ecosystem default:
+// a chat mapping that WITHDRAWS structured_outputs must stop the catalog
+// advertising structured outputs, or the discovery document claims a
+// capability the mount does not have. The default is true; the mapping's
+// resolved value wins.
+func TestCatalogStructuredOutputsFollowsTheChatMapping(t *testing.T) {
+	serveCapabilities := func(extra ...string) string {
+		t.Helper()
+		args := []string{
+			"-upstream", "https://api.openai.com",
+			"-transcode-responses-chat",
+			"-model-table", "m@openai=wire-m;context=200000;default",
+		}
+		args = append(args, extra...)
+		cfg := resolveModelTableArgs(t, args...)
+		catalog, ok := cfg.Providers[0].ModelCatalog()
+		if !ok {
+			t.Fatal("provider has no catalog snapshot")
+		}
+		handler, err := transcode.NewCatalogHandler(catalog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models?format=messages", nil))
+		return rec.Body.String()
+	}
+
+	// Default: the ecosystem default advertises structured outputs.
+	if body := serveCapabilities(); !strings.Contains(body, `"structured_outputs":{"supported":true}`) {
+		t.Errorf("default catalog does not advertise structured outputs: %s", body)
+	}
+	// Withdrawn on the chat mapping: the catalog must stop claiming it.
+	if body := serveCapabilities("-transcode-chat-capability", "!structured_outputs"); strings.Contains(body, `"structured_outputs":{"supported":true}`) {
+		t.Errorf("catalog still advertises structured outputs after withdrawal: %s", body)
+	}
+}
