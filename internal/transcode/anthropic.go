@@ -1,7 +1,7 @@
 package transcode
 
 // The Anthropic Messages wire definitions live in the pinned wire package
-// wire/anthropicmessages (see contracts.lock.json); this file re-exports
+// wire/anthropicmessages; this file re-exports
 // them under the package's historical names so consumers compile unchanged.
 // New code should prefer the wire package names.
 

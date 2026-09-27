@@ -6,7 +6,7 @@ package transcode
 // streaming captures (dialagram meta-muse-spark-1.3, verboo
 // deepseek-v4-flash-0731) carry reasoning in the modeled `reasoning_content`
 // spelling. `reasoning_details` was observed only as a SIBLING array riding
-// alongside the modeled text — never as the sole carrier. The pins.md note
+// alongside the modeled text — never as the sole carrier. The pins note
 // records the same disposition: tolerated and discarded, never forwarded.
 //
 // These tests pin the honest behavior that finding implies: an array-only

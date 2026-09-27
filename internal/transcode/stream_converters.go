@@ -2322,7 +2322,7 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			}
 		}
 		// The legacy non-tool_calls function_call fragment spelling is a KNOWN
-		// official field (pinned in pins.md): the single invocation maps to
+		// official field of the pinned revision: the single invocation maps to
 		// one canonical tool call with a synthesized id, never a silent
 		// drop (which would leave the client with a tool_use stop reason
 		// and no tool call). A delta carrying both spellings at once is a

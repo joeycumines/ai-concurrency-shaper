@@ -809,3 +809,87 @@ func TestE2E_ComposedGateway_MultiProvider_TranscodeHarness(t *testing.T) {
 	waitForMetrics(`shaper_requests_total{provider="openai",status="2xx"}`)
 	waitForMetrics(`shaper_requests_total{provider="passthrough",status="2xx"}`)
 }
+
+// TestE2E_CatalogSuiteAgreesWithItsProvider pins the suite and the provider to
+// ONE capability answer for the same surrogate. Each builds its own catalog
+// handler, so a field left at its zero value in one of them makes the two
+// discovery documents contradict each other about the same model — the one
+// thing a capability document must never do. structured_outputs is the field
+// that drifted: the provider takes it from the mount's resolved chat
+// capability, the suite from its own config.
+func TestE2E_CatalogSuiteAgreesWithItsProvider(t *testing.T) {
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	proxyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen proxy: %v", err)
+	}
+	proxyAddr := proxyLn.Addr().String()
+	proxyLn.Close()
+
+	metricsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen metrics: %v", err)
+	}
+	metricsAddr := metricsLn.Addr().String()
+	metricsLn.Close()
+
+	cmd := exec.Command(bin,
+		"-bind", proxyAddr,
+		"-metrics-bind", metricsAddr,
+		// -model-table and -catalog-suite are server scope, so they go
+		// before the first --provider marker.
+		"-model-table", "m@openai=wire-m;context=200000;default",
+		"-catalog-suite", "suite@/s",
+		"--provider=openai",
+		"-upstream", "https://api.openai.com",
+		"-prefix", "/p",
+		"-transcode-responses-chat",
+		"-auth-source", "env:SHAPER_PROVIDER_OPENAI_KEY",
+		"-auth-mode", "bearer",
+	)
+	cmd.Env = append(os.Environ(), "SHAPER_PROVIDER_OPENAI_KEY=sk-test")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+	waitTCPReady(proxyAddr, 10*time.Second)
+
+	fetch := func(path string) string {
+		t.Helper()
+		resp, err := http.Get("http://" + proxyAddr + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s status = %d: %s", path, resp.StatusCode, body)
+		}
+		return string(body)
+	}
+	provBody := fetch("/p/v1/models?format=messages")
+	suiteBody := fetch("/s/v1/models?format=messages")
+
+	for _, want := range []string{
+		`"structured_outputs":{"supported":true}`,
+		`"effort":{"supported":`,
+		`"image_input":{"supported":`,
+	} {
+		if !strings.Contains(provBody, want) {
+			t.Fatalf("provider document missing %q, so the comparison is vacuous: %s", want, provBody)
+		}
+		if !strings.Contains(suiteBody, want) {
+			t.Errorf("suite document disagrees with the provider on %q:\n provider: %s\n suite:    %s",
+				want, provBody, suiteBody)
+		}
+	}
+}

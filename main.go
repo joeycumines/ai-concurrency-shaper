@@ -355,6 +355,7 @@ func run() error {
 			ServesResponses:   true,
 			ServesMessages:    true,
 			ParallelToolCalls: true,
+			StructuredOutputs: true,
 			DefaultShape:      suite.Format,
 			Limits:            suiteLimits,
 		})

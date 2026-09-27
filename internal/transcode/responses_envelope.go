@@ -1,7 +1,7 @@
 package transcode
 
 // The OpenAI Responses wire definitions live in the pinned wire package
-// wire/openairesponses (see contracts.lock.json); this file re-exports them
+// wire/openairesponses; this file re-exports them
 // under the package's historical names so consumers compile unchanged. New
 // code should prefer the wire package names.
 

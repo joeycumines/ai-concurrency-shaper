@@ -435,9 +435,13 @@ value; malformed escapes, semicolon separators, repeated selectors/cursors, and
 unknown keys are local 400s, never forwarded upstream.
 
 Wire ids never appear in any served document. Optional facts are omitted (or
-`null` where the client contract requires the key). Anthropic `capabilities`
-stays `null` because the table does not declare the complete capability matrix;
-claiming unsupported features would be less truthful than omitting them.
+`null` where the client contract requires the key). Anthropic `capabilities` is
+derived from what the table entry actually declares: effort support and its
+per-tier leaves from `efforts`, `image_input` from `modalities`, and
+`structured_outputs` from the mount's resolved chat capability, with everything
+the table does not declare reported as an honest negative rather than a
+fabricated yes. A model entry carrying no facts at all renders `capabilities:
+null` rather than an all-negative document.
 Codex-required fields are always present: `truncation_policy` uses the declared
 context or a conservative 32K-token fallback, `input_modalities` uses the
 declared list or `["text"]`, and `use_responses_lite` plus `support_verbosity`
@@ -653,8 +657,8 @@ selector (Codex sends `"auto"`), and a named choice addresses the flattened
 name: a bare child name is ambiguous when it collides with another tool, so
 the qualified `namespace__child` form is the one that stays addressable. Namespace tools
 are modeled as a deliberate extension beyond the
-pinned OpenAI SDK revision; `internal/transcode/pins.md` records the exact
-shapes.
+pinned OpenAI SDK revision; the wire shadow's modeled-extension comments record
+the exact shapes.
 
 - `multi_agent_priming` injects a bounded sub-agent orchestration protocol reminder into the
   leading system (or developer) turn, appended after the client's own instructions so the
@@ -687,7 +691,7 @@ The `anthropic_server_tools` key is a policy-gated loss and is **strict by
 default**: a Claude Code web-search session against a chat upstream fails
 with a named error until you approve it with
 `-transcode-allow-loss anthropic_server_tools`. The wire shapes are modeled
-beyond the pinned Anthropic Messages revision; `internal/transcode/pins.md`
+beyond the pinned Anthropic Messages revision (recorded at the top of the wire shadow)
 records them and the capture they came from.
 
 `mcp_tool_use` and `mcp_tool_result` are different: they are client-side
@@ -900,7 +904,7 @@ emit their own opaque extensions — `prompt_token_ids`, `prompt_text`,
 LiteLLM gateways), the top-level usage extensions (`reasoning_tokens`,
 `cached_tokens`, `prompt_cache_hit_tokens`, `prompt_cache_miss_tokens`),
 and `prompt_tokens_details.created_cache_tokens`; the table of modeled
-spellings lives in `internal/transcode/pins.md`.
+spellings are listed in the wire shadow's modeled-extension comments.
 
 The transcoder applies strictness by CONTRACT ROLE (see the "Transcoding
 invariants" section): the CLIENT request (OpenAI Responses / Anthropic
@@ -913,7 +917,7 @@ and never forwarded, and it never fails the request. This is why a field like
 `function_call` spelling is a known official field rather than an extension:
 the single invocation maps to one tool call with the id synthesized from the
 response id and recorded as the `legacy_function_call` note. Known provider-extension
-spellings are documented in `internal/transcode/pins.md`; a newly observed
+spellings are documented in the wire shadows; a newly observed
 spelling can be pinned there (and in the field-capture corpus) for
 observability.
 

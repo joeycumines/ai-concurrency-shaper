@@ -1,5 +1,5 @@
 // Package anthropicmessages implements the pinned Anthropic Messages wire
-// contract (source: anthropic-api 2023-06-01, see contracts.lock.json):
+// contract (source: anthropic-api 2023-06-01):
 // distinct strict types for the request, the response, and the stream
 // events.
 //

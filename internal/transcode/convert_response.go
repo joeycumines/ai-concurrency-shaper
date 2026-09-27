@@ -75,7 +75,7 @@ type chatMessageShadow struct {
 	Reasoning  *string              `json:"reasoning,omitempty"`
 
 	// FunctionCall is the legacy non-tool_calls tool-call spelling (a KNOWN
-	// official field, pinned in pins.md). It is modeled so a message carrying
+	// official field of the pinned revision). It is modeled so a message carrying
 	// it is structurally REJECTED — never silently dropped (a silent drop
 	// would leave the client with a tool_use stop reason and no tool call).
 	FunctionCall json.RawMessage `json:"function_call,omitempty"`
@@ -243,7 +243,7 @@ func DecodeChatResponseWithPolicy(
 		)
 	}
 	// The legacy non-tool_calls function_call spelling is a KNOWN official
-	// field (pinned in pins.md): the single invocation maps to one
+	// field of the pinned revision: the single invocation maps to one
 	// canonical tool call with a synthesized id, never a silent drop (which
 	// would leave the client with a tool_use stop reason and no tool call).
 	// A message carrying both spellings at once is a contradictory union.

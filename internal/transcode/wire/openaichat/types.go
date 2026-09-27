@@ -1,5 +1,5 @@
 // Package openaichat implements the pinned OpenAI Chat Completions wire
-// contract (source: openai-go v1.12.0, see contracts.lock.json): distinct
+// contract (source: openai-go v1.12.0): distinct
 // strict types for the create request, the non-stream response, and the
 // stream chunk.
 //
@@ -598,7 +598,7 @@ type StreamDelta struct {
 	ToolCalls        []ToolCallDelta `json:"tool_calls,omitempty"`
 
 	// FunctionCall is the legacy non-tool_calls tool-call fragment spelling
-	// (a KNOWN official field, pinned in pins.md). It is modeled so a delta
+	// (a KNOWN official field in the pinned revision). It is modeled so a delta
 	// carrying it is structurally REJECTED — never silently dropped.
 	FunctionCall json.RawMessage `json:"function_call,omitempty"`
 }
