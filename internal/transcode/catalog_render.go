@@ -192,23 +192,62 @@ type anthropicCatalogDocument struct {
 	HasMore bool                    `json:"has_more"`
 }
 
+type anthropicSupport struct {
+	Supported bool `json:"supported"`
+}
+
+type anthropicEffort struct {
+	Supported bool              `json:"supported"`
+	Low       *anthropicSupport `json:"low,omitempty"`
+	Medium    *anthropicSupport `json:"medium,omitempty"`
+	High      *anthropicSupport `json:"high,omitempty"`
+	Max       *anthropicSupport `json:"max,omitempty"`
+	XHigh     *anthropicSupport `json:"xhigh,omitempty"`
+}
+
+type anthropicThinking struct {
+	Supported bool `json:"supported"`
+	Types     struct {
+		Adaptive anthropicSupport `json:"adaptive"`
+		Enabled  anthropicSupport `json:"enabled"`
+	} `json:"types"`
+}
+
+type anthropicCapabilities struct {
+	Batch             anthropicSupport  `json:"batch"`
+	Citations         anthropicSupport  `json:"citations"`
+	CodeExecution     anthropicSupport  `json:"code_execution"`
+	ContextManagement anthropicSupport  `json:"context_management"`
+	Effort            anthropicEffort   `json:"effort"`
+	ImageInput        anthropicSupport  `json:"image_input"`
+	PDFInput          anthropicSupport  `json:"pdf_input"`
+	StructuredOutputs anthropicSupport  `json:"structured_outputs"`
+	Thinking          anthropicThinking `json:"thinking"`
+}
+
 type anthropicPricing struct {
 	InputCost  *float64 `json:"input_cost,omitempty"`
 	OutputCost *float64 `json:"output_cost,omitempty"`
 }
 
 type anthropicCatalogEntry struct {
-	Type           string            `json:"type"`
-	ID             string            `json:"id"`
-	DisplayName    string            `json:"display_name"`
-	CreatedAt      string            `json:"created_at"`
-	Description    string            `json:"description,omitempty"`
-	Tags           []string          `json:"tags,omitempty"`
-	Pricing        *anthropicPricing `json:"pricing,omitempty"`
-	MaxInputTokens *int              `json:"max_input_tokens"`
-	MaxTokens      *int              `json:"max_tokens"`
-	Capabilities   any               `json:"capabilities"`
+	Type           string                 `json:"type"`
+	ID             string                 `json:"id"`
+	DisplayName    string                 `json:"display_name"`
+	CreatedAt      string                 `json:"created_at"`
+	Description    string                 `json:"description,omitempty"`
+	Tags           []string               `json:"tags,omitempty"`
+	Pricing        *anthropicPricing      `json:"pricing,omitempty"`
+	MaxInputTokens *int                   `json:"max_input_tokens"`
+	MaxTokens      *int                   `json:"max_tokens"`
+	Capabilities   *anthropicCapabilities `json:"capabilities"`
 }
+
+// anthropicEffortLeaves are the effort names the Anthropic capabilities
+// object models as leaves: every canonical effort except minimal, which the
+// Anthropic contract has no slot for. A leaf is true only when the model's
+// table entry advertises it; otherwise it is the honest negative.
+var anthropicEffortLeaves = []string{"low", "medium", "high", "max", "xhigh"}
 
 func (h *CatalogHandler) anthropicDocument(query map[string][]string) (anthropicCatalogDocument, error) {
 	models := make([]CatalogModel, 0, len(h.models))
@@ -327,7 +366,47 @@ func (h *CatalogHandler) anthropicEntry(model CatalogModel) anthropicCatalogEntr
 			OutputCost: model.CostOutput,
 		}
 	}
+	if catalogHasFacts(model) {
+		capabilities := anthropicCapabilities{
+			Batch:             anthropicSupport{},
+			Citations:         anthropicSupport{},
+			CodeExecution:     anthropicSupport{},
+			ContextManagement: anthropicSupport{},
+			Effort:            anthropicEffort{Supported: len(model.Efforts) > 0},
+			ImageInput:        anthropicSupport{Supported: slices.Contains(model.Modalities, "image")},
+			PDFInput:          anthropicSupport{},
+			StructuredOutputs: anthropicSupport{Supported: h.structuredOutputs},
+		}
+		for _, leaf := range anthropicEffortLeaves {
+			leafCopy := anthropicSupport{Supported: slices.Contains(model.Efforts, leaf)}
+			switch leaf {
+			case "low":
+				capabilities.Effort.Low = &leafCopy
+			case "medium":
+				capabilities.Effort.Medium = &leafCopy
+			case "high":
+				capabilities.Effort.High = &leafCopy
+			case "max":
+				capabilities.Effort.Max = &leafCopy
+			case "xhigh":
+				capabilities.Effort.XHigh = &leafCopy
+			}
+		}
+		capabilities.Thinking = anthropicThinking{Supported: len(model.Efforts) > 0}
+		capabilities.Thinking.Types.Enabled.Supported = len(model.Efforts) > 0
+		entry.Capabilities = &capabilities
+	}
 	return entry
+}
+
+// catalogHasFacts reports whether the model carries any presentation fact; a
+// fact-free model serves a minimal entry (capabilities null, absent optional
+// fields) rather than a fabricated one.
+func catalogHasFacts(model CatalogModel) bool {
+	return model.Context != nil || model.MaxOutput != nil ||
+		len(model.Efforts) > 0 || len(model.Modalities) > 0 ||
+		model.CostInput != nil || model.CostOutput != nil ||
+		len(model.Tags) > 0 || model.Description != "" || model.Created > 0
 }
 
 type openAICatalogDocument struct {

@@ -178,6 +178,42 @@ func TestCatalogAnthropicEntryGolden(t *testing.T) {
 	if kimi.MaxInputTokens == nil || *kimi.MaxInputTokens != 262144 || kimi.MaxTokens == nil || *kimi.MaxTokens != 32768 {
 		t.Errorf("kimi tokens = %v/%v", kimi.MaxInputTokens, kimi.MaxTokens)
 	}
+	var capabilities map[string]any
+	if err := json.Unmarshal(kimi.Capabilities, &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	effort, _ := capabilities["effort"].(map[string]any)
+	if effort["supported"] != true {
+		t.Errorf("effort.supported = %v", effort["supported"])
+	}
+	if leaf, _ := effort["high"].(map[string]any); leaf["supported"] != true {
+		t.Errorf("high leaf = %v", effort["high"])
+	}
+	if leaf, _ := effort["low"].(map[string]any); leaf["supported"] != false {
+		t.Errorf("low leaf = %v", effort["low"])
+	}
+	if _, ok := effort["minimal"]; ok {
+		t.Error("effort carries a minimal leaf the Anthropic contract has no slot for")
+	}
+	if leaf, _ := capabilities["image_input"].(map[string]any); leaf["supported"] != true {
+		t.Errorf("image_input = %v", capabilities["image_input"])
+	}
+	if leaf, _ := capabilities["pdf_input"].(map[string]any); leaf["supported"] != false {
+		t.Errorf("pdf_input = %v", capabilities["pdf_input"])
+	}
+	for _, key := range []string{"batch", "citations", "code_execution", "context_management"} {
+		if leaf, _ := capabilities[key].(map[string]any); leaf["supported"] != false {
+			t.Errorf("%s = %v, want false", key, capabilities[key])
+		}
+	}
+	thinking, _ := capabilities["thinking"].(map[string]any)
+	if thinking["supported"] != true {
+		t.Errorf("thinking = %v", capabilities["thinking"])
+	}
+	types, _ := thinking["types"].(map[string]any)
+	if adaptive, _ := types["adaptive"].(map[string]any); adaptive["supported"] != false {
+		t.Errorf("thinking.types.adaptive = %v", types["adaptive"])
+	}
 
 	glm := document.Data[1]
 	if glm.MaxTokens != nil {
@@ -186,10 +222,17 @@ func TestCatalogAnthropicEntryGolden(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"max_tokens":null`) {
 		t.Errorf("glm-5.2 must carry max_tokens:null explicitly, not omit the key: %s", rec.Body.String())
 	}
-	for i, entry := range document.Data {
-		if string(entry.Capabilities) != "null" {
-			t.Errorf("data[%d].capabilities = %s, want null without a complete capability declaration", i, entry.Capabilities)
+	// A model that DOES carry facts serves the derived capability document. The
+	// fact-free entry is the deliberate exception: catalogHasFacts sends a
+	// minimal entry rather than a fabricated all-negative one.
+	for i, entry := range document.Data[:2] {
+		if string(entry.Capabilities) == "null" {
+			t.Errorf("data[%d].capabilities = null, want the derived capability document", i)
 		}
+	}
+	if string(document.Data[2].Capabilities) != "null" {
+		t.Errorf("bare-model capabilities = %s, want null for a fact-free entry",
+			document.Data[2].Capabilities)
 	}
 
 	bare := document.Data[2]

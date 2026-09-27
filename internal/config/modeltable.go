@@ -600,9 +600,9 @@ func (p *Provider) resolveModelCatalog(modelTable []modelTableEntry) {
 		ProviderName: effectiveName(p),
 		Models:       make([]transcode.CatalogModel, 0, len(modelTable)),
 		// Defaults match the ecosystem observation for mounts with no chat
-		// mapping; a chat mapping's resolved parallel-tool capability overrides
-		// below.
+		// mapping; a chat mapping's resolved capabilities override below.
 		ParallelToolCalls: true,
+		StructuredOutputs: true,
 	}
 	for _, entry := range modelTable {
 		model := transcode.CatalogModel{

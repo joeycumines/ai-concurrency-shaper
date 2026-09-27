@@ -96,6 +96,7 @@ type CatalogConfig struct {
 	ServesResponses   bool
 	ServesMessages    bool
 	ParallelToolCalls bool
+	StructuredOutputs bool
 	DefaultShape      CatalogShape
 	Limits            BodyLimits
 }
@@ -107,6 +108,7 @@ type CatalogHandler struct {
 	servesResponses   bool
 	servesMessages    bool
 	parallelToolCalls bool
+	structuredOutputs bool
 	defaultCatalog    CatalogShape
 	limits            BodyLimits
 }
@@ -150,6 +152,7 @@ func NewCatalogHandler(cfg CatalogConfig) (*CatalogHandler, error) {
 		servesResponses:   cfg.ServesResponses,
 		servesMessages:    cfg.ServesMessages,
 		parallelToolCalls: cfg.ParallelToolCalls,
+		structuredOutputs: cfg.StructuredOutputs,
 		defaultCatalog:    cfg.DefaultShape,
 		limits:            limits,
 	}, nil
