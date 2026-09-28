@@ -120,6 +120,7 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 		"-model-table", "chat-alias@opencode-go=wire-chat;context=1000000;via=chat",
 		"-model-table", "gpt-alias@opencode-go=wire-resp;context=400000;via=responses",
 		"-model-table", "zen-claude@zen=wire-msg;context=200000;via=messages",
+		"-model-table", "hdr-claude@opencode-hdr=wire-msg;context=200000;via=messages",
 		"-catalog-suite=/suite=claude-alias+chat-alias+gpt-alias;format=anthropic",
 		// An opencode Go mount: native routes plus the first-party preset.
 		"--provider=opencode-go",
@@ -136,6 +137,16 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 		"-upstream", srv.URL,
 		"-prefix", "/zen",
 		"-native-route", "messages@/v1/messages",
+		// A third mount pairing the preset with a CUSTOM-header
+		// credential, so the positive half is covered end to end too: a
+		// name the preset does not manage must still deliver the secret.
+		"--provider=opencode-hdr",
+		"-upstream", srv.URL,
+		"-prefix", "/opencode-hdr",
+		"-auth-source", "env:SHAPER_PROVIDER_OPENCODE_HDR_KEY",
+		"-auth-mode", "header:X-Custom-Cred",
+		"-opencode",
+		"-native-route", "messages@/v1/messages",
 	)
 	filteredEnv := []string{}
 	for _, env := range os.Environ() {
@@ -143,7 +154,9 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 			filteredEnv = append(filteredEnv, env)
 		}
 	}
-	cmd.Env = append(filteredEnv, "SHAPER_PROVIDER_OPENCODE_API_KEY=test-opencode-key")
+	cmd.Env = append(filteredEnv,
+		"SHAPER_PROVIDER_OPENCODE_API_KEY=test-opencode-key",
+		"SHAPER_PROVIDER_OPENCODE_HDR_KEY=custom-header-secret")
 	stdinR, err := os.Open(os.DevNull)
 	if err != nil {
 		t.Fatalf("open /dev/null: %v", err)
@@ -345,6 +358,35 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 	up.mu.Unlock()
 	if got := convHdrs.Get("X-Opencode-Client"); got == "" {
 		t.Fatal("converted request did not carry x-opencode-client: the preset must apply to the transcode path")
+	}
+
+	// The positive half: a custom header name the preset does not manage
+	// still carries the credential to the upstream, with the preset on and
+	// the client's own fingerprints stripped. Without this the guard could
+	// harden into a blanket ban and nothing would notice until a real
+	// operator's mount stopped authenticating.
+	code, body = post("/opencode-hdr/v1/messages",
+		`{"model":"hdr-claude","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{
+			"Content-Type":      "application/json",
+			"anthropic-version": "2023-06-01",
+			"X-App":             "cli",
+			"X-Stainless-Lang":  "js",
+		})
+	if code != 200 {
+		t.Fatalf("custom-header mount status = %d: %s", code, body)
+	}
+	up.mu.Lock()
+	hdrHdrs := up.hdrs
+	up.mu.Unlock()
+	if got := hdrHdrs.Get("X-Custom-Cred"); got != "custom-header-secret" {
+		t.Fatalf("upstream X-Custom-Cred = %q, want the configured credential delivered", got)
+	}
+	if v := hdrHdrs.Get("X-App"); v != "" {
+		t.Fatalf("upstream saw the client's X-App=%q; the preset must still strip it", v)
+	}
+	if v := hdrHdrs.Get("X-Stainless-Lang"); v != "" {
+		t.Fatalf("upstream saw the client's X-Stainless-Lang=%q; the preset must still strip it", v)
 	}
 
 	// A credential in a header the preset manages must be refused at

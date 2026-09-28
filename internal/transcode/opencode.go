@@ -36,6 +36,26 @@ const (
 	HeaderParentSessionID = "X-Parent-Session-Id"
 )
 
+// presetHeaderNames is the single registration point for every header
+// ApplyHeaders writes or removes. PresetManagedHeaderName is built from it and
+// the behavioural test reads it, so the guard against a credential being
+// silently destroyed and the preset's disposition table cannot drift apart on
+// the side a test can observe.
+//
+// KNOWN LIMITS, stated because they have already bitten. Go cannot reflect over
+// the writes in ApplyHeaders, so a header added to the preset WITHOUT being
+// listed here is invisible to every test: adding one means adding it here, and
+// it lives beside the constants for that reason rather than being restated in
+// the validation package, where it drifted once already. The drift check in the
+// test catches a listed name the preset no longer touches; it cannot catch a
+// name removed from this list, because a shorter list simply asserts less.
+var presetHeaderNames = []string{
+	"User-Agent",
+	HeaderOpencodeSession, HeaderOpencodeClient, HeaderOpencodeProject,
+	HeaderOpencodeRequest, HeaderSessionAffinity, HeaderSessionID,
+	HeaderParentSessionID,
+}
+
 const (
 	// DefaultOpencodeUserAgent is the pinned first-party User-Agent for
 	// the released-stable CLI shape `opencode/<version>`, observed
@@ -175,7 +195,7 @@ func (p OpencodePreset) ApplyHeaders(out, in http.Header, session string) {
 // upstream distinguish the actual client from opencode.
 func foreignClientHeader(name string) bool {
 	lower := strings.ToLower(name)
-	return strings.HasPrefix(lower, "x-stainless-") || lower == "x-app"
+	return (strings.HasPrefix(lower, "x-stainless-") || lower == "x-app")
 }
 
 // DeriveConversationKey returns a stable opaque session key from the

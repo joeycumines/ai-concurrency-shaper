@@ -211,40 +211,70 @@ func TestFirstUserText(t *testing.T) {
 }
 
 // TestPresetManagedCoversEveryHeaderThePresetTouches pins the credential
-// invariant BEHAVIOURALLY instead of against a hand-written list: whatever
-// ApplyHeaders writes or removes, that name must be preset-managed, because
-// the preset runs after authentication and would otherwise destroy the
-// secret. Seeding the outbound map with a sentinel the client did not send
-// makes every write observable as a change and every removal as an absence,
-// so a future preset header is covered the day it is added, with no test
-// edit. Hand-listed sets are how the eight-header gap survived a review.
+// invariant in every direction, and reads the preset's own registration list
+// so the two cannot drift apart. The failure it exists to prevent is silent:
+// the preset runs after authentication, so a name it writes or removes
+// destroys the secret auth just attached, and the client sees a bare 401 with
+// nothing logged. Each direction is made non-vacuous on purpose — an earlier
+// version of this test modelled the client as having sent nothing, so the
+// foreign-SDK strip never fired and those candidates could not have failed.
 func TestPresetManagedCoversEveryHeaderThePresetTouches(t *testing.T) {
 	const sentinel = "sentinel-value"
-	candidates := []string{
-		"User-Agent", "Content-Type", "Accept", "Authorization", "X-Api-Key",
-		"Api-Key", "Anthropic-Version", "Anthropic-Beta", "Host",
-		HeaderOpencodeClient, HeaderOpencodeSession, HeaderSessionAffinity,
-		HeaderSessionID, HeaderOpencodeRequest, HeaderOpencodeProject,
-		HeaderParentSessionID, "X-App", "X-Stainless-Lang", "X-Stainless-Token",
-		"X-Forwarded-For", "X-Request-Id", "Idempotency-Key", "X-Custom-Cred",
-		"Cookie", "Referer", "Origin", "X-Amz-Date", "X-Goog-Api-Key",
+	preset := OpencodePreset{Enabled: true, Provider: "zen"}
+
+	// Every registered preset header must be preset-managed, must be one the
+	// preset really touches (so the list cannot rot), and must be recognised
+	// in any spelling.
+	for _, name := range presetHeaderNames {
+		out := http.Header{}
+		out.Set(name, sentinel)
+		preset.ApplyHeaders(out, http.Header{}, "session-value")
+		if out.Get(name) == sentinel {
+			t.Errorf("presetHeaderNames lists %q but the preset does not touch it: the list has drifted", name)
+		}
+		if !PresetManagedHeaderName(name) {
+			t.Errorf("PresetManagedHeaderName(%q) = false, want true: the preset manages it", name)
+		}
+		if !PresetManagedHeaderName(strings.ToLower(name)) {
+			t.Errorf("PresetManagedHeaderName(%q) = false, want true (case-insensitive)", strings.ToLower(name))
+		}
 	}
-	for _, presetOn := range []bool{true, false} {
-		preset := OpencodePreset{Enabled: presetOn, Provider: "zen"}
-		for _, name := range candidates {
-			out := http.Header{}
-			out.Set(name, sentinel)
-			// The client sent nothing, so a forward-only header is removed
-			// and a preset-written header takes the preset's value.
-			preset.ApplyHeaders(out, http.Header{}, "session-value")
-			if out.Get(name) == sentinel {
-				continue // the preset left it alone
-			}
-			if !PresetManagedHeaderName(name) {
-				t.Errorf("presetOn=%v: ApplyHeaders rewrote or removed %q, so a credential "+
-					"in that header would be lost, but PresetManagedHeaderName(%q) = false",
-					presetOn, name, name)
-			}
+
+	// The foreign-SDK strip only fires on what the CLIENT sent, so the client
+	// must be modelled as having sent it or this half is vacuous.
+	for _, name := range []string{"X-App", "X-Stainless-Lang", "X-Stainless-Token"} {
+		in := http.Header{}
+		in.Set(name, sentinel)
+		out := http.Header{}
+		out.Set(name, sentinel)
+		preset.ApplyHeaders(out, in, "session-value")
+		if out.Get(name) == sentinel {
+			t.Errorf("%q survived: the client sent it and a real opencode client would not", name)
+		}
+		if !PresetManagedHeaderName(name) {
+			t.Errorf("PresetManagedHeaderName(%q) = false, want true", name)
+		}
+	}
+
+	// Names the preset does not manage stay usable for a credential, so the
+	// rule cannot harden into a blanket ban.
+	for _, name := range []string{
+		"X-Custom-Cred", "X-Request-Id", "Idempotency-Key", "Content-Type",
+		"Accept", "Anthropic-Version", "X-Forwarded-For", "Cookie",
+	} {
+		if PresetManagedHeaderName(name) {
+			t.Errorf("PresetManagedHeaderName(%q) = true, want false: the preset does not manage it", name)
+		}
+	}
+
+	// A disabled preset touches nothing, so those names remain legal.
+	disabled := OpencodePreset{Provider: "zen"}
+	for _, name := range append(append([]string{}, presetHeaderNames...), "X-App") {
+		out := http.Header{}
+		out.Set(name, sentinel)
+		disabled.ApplyHeaders(out, http.Header{}, "session-value")
+		if out.Get(name) != sentinel {
+			t.Errorf("disabled preset modified %q", name)
 		}
 	}
 }

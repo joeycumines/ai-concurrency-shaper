@@ -343,18 +343,17 @@ func ReservedHeaderName(name string) bool {
 // preset writes or removes on the outbound request. A credential cannot
 // ride such a name while the preset is on, because the preset would
 // overwrite or delete it after authentication has applied it. The set is
-// derived from the preset's own disposition table — the header constants
-// it Sets/Delss, User-Agent, and the foreign-SDK strip — so a new
-// fingerprint or a new preset header cannot silently reopen the hole.
+// the preset's own registration list plus the foreign-SDK strip, so a new
+// fingerprint cannot silently reopen the hole, and a new preset header
+// cannot either provided it is registered in presetHeaderNames.
 // The rule is preset-scoped: without -opencode the name is an ordinary
 // header and remains a legal credential target.
 func PresetManagedHeaderName(name string) bool {
-	switch http.CanonicalHeaderKey(name) {
-	case "User-Agent",
-		HeaderOpencodeSession, HeaderOpencodeClient, HeaderOpencodeProject,
-		HeaderOpencodeRequest, HeaderSessionAffinity, HeaderSessionID,
-		HeaderParentSessionID:
-		return true
+	canonical := http.CanonicalHeaderKey(name)
+	for _, managed := range presetHeaderNames {
+		if canonical == managed {
+			return true
+		}
 	}
 	return foreignClientHeader(name)
 }

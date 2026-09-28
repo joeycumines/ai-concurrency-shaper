@@ -194,23 +194,29 @@ func TestMappingValidate(t *testing.T) {
 // preset runs after auth, so the secret is destroyed on the way out and the
 // client sees a bare 401 with nothing logged.
 func TestPresetManagedHeaderNameDerivesThePresetDisposition(t *testing.T) {
-	presetWritesOrRemoves := []string{
-		"User-Agent", HeaderOpencodeClient, HeaderOpencodeSession,
-		HeaderSessionAffinity, HeaderSessionID, HeaderOpencodeRequest,
-		HeaderOpencodeProject, HeaderParentSessionID,
-		// the foreign-SDK strip
-		"X-App", "X-Stainless-Token", "x-stainless-lang",
-	}
-	for _, name := range presetWritesOrRemoves {
+	// Read the preset's own registration list rather than restating it: a
+	// second copy of the set is exactly how the two-header gap outlived the
+	// fix that introduced the list.
+	for _, name := range presetHeaderNames {
 		if !PresetManagedHeaderName(name) {
 			t.Errorf("PresetManagedHeaderName(%q) = false, want true: the preset manages it", name)
 		}
-		// Case-insensitive: the name arrives from a flag in any spelling.
 		if !PresetManagedHeaderName(strings.ToLower(name)) {
 			t.Errorf("PresetManagedHeaderName(%q) = false, want true (case-insensitive)", strings.ToLower(name))
 		}
 	}
-	for _, name := range []string{"X-Custom-Cred", "X-Api-Token", "Idempotency-Key", "X-Request-Id"} {
+	// The foreign-SDK strip is part of the managed set too.
+	for _, name := range []string{
+		"X-App", "X-Stainless-Token", "x-stainless-lang", "X-STAINLESS-CRED",
+	} {
+		if !PresetManagedHeaderName(name) {
+			t.Errorf("PresetManagedHeaderName(%q) = false, want true: the preset strips it", name)
+		}
+	}
+	for _, name := range []string{
+		"X-Custom-Cred", "X-Api-Token", "Idempotency-Key", "X-Request-Id",
+		"Content-Type", "Accept", "Authorization", "X-Api-Key",
+	} {
 		if PresetManagedHeaderName(name) {
 			t.Errorf("PresetManagedHeaderName(%q) = true, want false: the preset does not manage it", name)
 		}

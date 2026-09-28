@@ -851,7 +851,19 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 
 	// Apply model map, auth, body limits, and check duplicate client routes within this provider.
 	seen := make(map[transcode.RouteKey]struct{})
+	// The preset is built and stamped before the mappings are validated:
+	// the mapping's reserved-name rule consults Mapping.Opencode, so
+	// validating first left that predicate dead and deferred the refusal to
+	// proxy.New, where the operator saw a "proxy config:" prefix instead of
+	// the config error.
+	p.opencodePreset = transcode.OpencodePreset{
+		Enabled:   p.Opencode,
+		UserAgent: p.OpencodeUserAgent,
+		Client:    p.OpencodeClient,
+		Provider:  effectiveName(p),
+	}
 	for i := range mappings {
+		mappings[i].Mapping.Opencode = p.opencodePreset
 		if _, dup := seen[mappings[i].ClientRoute]; dup {
 			return fmt.Errorf(
 				"duplicate transcode mapping for client route %s %s",
@@ -961,15 +973,6 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 
 	p.transcodeMappings = mappings
 	p.nativeRoutes = nativeRoutes
-	p.opencodePreset = transcode.OpencodePreset{
-		Enabled:   p.Opencode,
-		UserAgent: p.OpencodeUserAgent,
-		Client:    p.OpencodeClient,
-		Provider:  effectiveName(p),
-	}
-	for i := range p.transcodeMappings {
-		p.transcodeMappings[i].Mapping.Opencode = p.opencodePreset
-	}
 	for i := range p.nativeRoutes {
 		p.nativeRoutes[i].Provider = effectiveName(p)
 	}
