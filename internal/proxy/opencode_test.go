@@ -83,8 +83,8 @@ func newPresetProxy(t *testing.T, cap *headerCapture, response string, opts ...O
 }
 
 // TestProxyPresetPassthroughHeaders proves a headerless passthrough request
-// leaves with the full first-party shape, while a client-supplied session
-// and User-Agent survive verbatim.
+// leaves with the full first-party shape, and that a client which named
+// itself keeps its session but not its User-Agent or client attribution.
 func TestProxyPresetPassthroughHeaders(t *testing.T) {
 	cap := &headerCapture{}
 	p := newPresetProxy(t, cap, `{"ok":true}`, WithOpencodePreset(testPreset()))

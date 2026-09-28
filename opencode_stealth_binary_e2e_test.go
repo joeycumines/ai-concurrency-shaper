@@ -28,6 +28,8 @@ type opencodeUpstream struct {
 	session string
 	ua      string
 	beta    string
+	auth    string
+	hdrs    http.Header
 	bodies  [][]byte
 }
 
@@ -43,6 +45,8 @@ func (u *opencodeUpstream) handler(w http.ResponseWriter, r *http.Request) {
 	u.session = r.Header.Get("X-Opencode-Session")
 	u.ua = r.Header.Get("User-Agent")
 	u.beta = r.URL.Query().Get("beta")
+	u.auth = r.Header.Get("Authorization")
+	u.hdrs = r.Header.Clone()
 	u.bodies = append(u.bodies, body)
 	u.mu.Unlock()
 
@@ -227,8 +231,9 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 		t.Fatalf("responses upstream path=%q model=%q, want /v1/responses wire-resp", path, model)
 	}
 
-	// The client credential must not have reached the upstream verbatim: the
-	// configured bearer is applied instead.
+	// The client credential must not reach the upstream: the configured
+	// bearer is applied instead, and the client's own value is never
+	// forwarded.
 	code, body = post("/suite/v1/messages",
 		`{"model":"claude-alias","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{
@@ -238,6 +243,35 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 		})
 	if code != 200 {
 		t.Fatalf("auth status = %d: %s", code, body)
+	}
+	up.mu.Lock()
+	gotAuth := up.auth
+	up.mu.Unlock()
+	if gotAuth != "Bearer test-opencode-key" {
+		t.Fatalf("upstream Authorization = %q, want the configured bearer (never the client's)", gotAuth)
+	}
+
+	// A different client SDK's fingerprint headers must not reach the
+	// upstream: they would reveal the actual client.
+	code, body = post("/suite/v1/messages",
+		`{"model":"claude-alias","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{
+			"Content-Type":        "application/json",
+			"anthropic-version":   "2023-06-01",
+			"X-Stainless-Lang":    "js",
+			"X-Stainless-Package": "anthropic",
+			"X-App":               "cli",
+		})
+	if code != 200 {
+		t.Fatalf("fingerprint status = %d: %s", code, body)
+	}
+	up.mu.Lock()
+	hdrs := up.hdrs
+	up.mu.Unlock()
+	for _, key := range []string{"X-Stainless-Lang", "X-Stainless-Package", "X-App"} {
+		if v := hdrs.Get(key); v != "" {
+			t.Fatalf("upstream saw foreign-client header %s=%q", key, v)
+		}
 	}
 
 	// Discovery through the suite.

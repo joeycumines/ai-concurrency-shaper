@@ -919,7 +919,11 @@ first-party request shape on every outbound path — transparent, native, and
 transcoded. The impersonation markers are preset-authoritative: the upstream
 sees the first-party `User-Agent` and `x-opencode-client` rather than whatever
 the client sent, so a client cannot identify itself through them. The session
-value is the client's own when it sent one, else derived. The client's own
+value is the client's own when it sent one, else derived. A different client
+SDK's fingerprint headers (`x-stainless-*`, `x-app`) are removed, since a real
+opencode client sends none of them and they would reveal the actual client;
+protocol headers the dialect requires (`content-type`, `accept`,
+`anthropic-version`, `anthropic-beta`) are untouched. The client's own
 identity/project/parent headers forward when present and are never fabricated.
 Session precedence is the client's `x-opencode-session`, then
 `x-session-affinity`, then `X-Session-Id`, then a stable value derived from the

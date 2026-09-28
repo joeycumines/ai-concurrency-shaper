@@ -58,12 +58,14 @@ const conversationKeyDomain = "opencode-conversation-v1"
 // OpencodePreset configures first-party opencode header emission for one
 // provider mount. Disabled (zero value) is a no-op: nothing is set, read,
 // or derived. Enabled, every outbound request carries the full header set
-// with values resolved inbound-first: genuine client values are preserved,
-// preset defaults fill only the gaps. Header values are never logged.
+// the upstream would see from a real opencode client, so a client that
+// named itself cannot identify itself through the impersonation markers.
+// Header values are never logged.
 type OpencodePreset struct {
 	Enabled bool
-	// UserAgent and Client default to the pinned first-party values when
-	// empty. Inbound values always win over both.
+	// UserAgent and Client are the first-party values the preset asserts
+	// upstream. They default to the pinned values when empty and are
+	// overridden only by these flags, never by the inbound request.
 	UserAgent string
 	Client    string
 	// Provider scopes derived session keys to the mount. Set from the
@@ -108,18 +110,32 @@ func (p OpencodePreset) ResolveSession(in http.Header, fallback string) string {
 
 // ApplyHeaders sets the full first-party header set on the outbound
 // request. It runs after authentication so the mock never clobbers
-// credentials and authentication never strips the mock. The impersonation
-// markers (User-Agent, client attribution) and the session value are
-// preset-authoritative — a client's own values would identify it or break
-// the gateway's session contract. Identity and project headers forward only
-// when the client sent them: they name the client's own conversation and are
-// never fabricated.
+// credentials and authentication never strips the mock.
+//
+// Three dispositions:
+//   - Preset-authoritative (overwrite inbound): the impersonation markers
+//     User-Agent and x-opencode-client, plus the session headers, which carry
+//     the value the caller resolved (the client's own when it sent one, else
+//     a derived key) so the gateway always sees one stable value.
+//   - Forward-only (never fabricated): x-opencode-request,
+//     x-opencode-project, x-parent-session-id — they name the client's own
+//     conversation and identity, so they pass through when present and are
+//     removed when absent.
+//   - Removed: headers a different client SDK uses to identify itself, which
+//     a real opencode client would not send and which would otherwise reveal
+//     the actual client. Protocol headers the dialect requires (content-type,
+//     accept, anthropic-version, anthropic-beta) are untouched.
 func (p OpencodePreset) ApplyHeaders(out, in http.Header, session string) {
 	if !p.Enabled {
 		return
 	}
 	out.Set("User-Agent", p.userAgent())
 	out.Set(HeaderOpencodeClient, p.client())
+	for name := range out {
+		if foreignClientHeader(name) {
+			out.Del(name)
+		}
+	}
 	if session != "" {
 		out.Set(HeaderOpencodeSession, session)
 		out.Set(HeaderSessionAffinity, session)
@@ -136,6 +152,16 @@ func (p OpencodePreset) ApplyHeaders(out, in http.Header, session string) {
 			out.Del(key)
 		}
 	}
+}
+
+// foreignClientHeader reports whether a header identifies a client SDK other
+// than opencode. The official Anthropic/OpenAI SDKs stamp x-stainless-*
+// fingerprints, and the Anthropic console stamps x-app; a real opencode
+// client (built on the AI SDK) sends neither, so leaving them would let the
+// upstream distinguish the actual client from opencode.
+func foreignClientHeader(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasPrefix(lower, "x-stainless-") || lower == "x-app"
 }
 
 // DeriveConversationKey returns a stable opaque session key from the

@@ -80,6 +80,27 @@ func TestOpencodeApplyHeaders(t *testing.T) {
 		t.Fatalf("client = %q, want the first-party value %q", got, DefaultOpencodeClient)
 	}
 
+	// A foreign client SDK's fingerprint headers are removed from the
+	// outbound set (which the surrounding pipeline seeds from the client),
+	// while protocol headers survive.
+	outForeign := http.Header{}
+	outForeign.Set("X-Stainless-Lang", "js")
+	outForeign.Set("X-Stainless-Package", "anthropic")
+	outForeign.Set("X-App", "cli")
+	outForeign.Set("Anthropic-Version", "2023-06-01")
+	outForeign.Set("Content-Type", "application/json")
+	OpencodePreset{Enabled: true, Provider: "zen"}.ApplyHeaders(outForeign, http.Header{}, "s")
+	for _, key := range []string{"X-Stainless-Lang", "X-Stainless-Package", "X-App"} {
+		if got := outForeign.Get(key); got != "" {
+			t.Fatalf("%s = %q, want removed", key, got)
+		}
+	}
+	for _, key := range []string{"Anthropic-Version", "Content-Type"} {
+		if got := outForeign.Get(key); got == "" {
+			t.Fatalf("%s removed, want the protocol header preserved", key)
+		}
+	}
+
 	// An explicit override is the way to assert a different first-party
 	// install's value.
 	outOverride := http.Header{}
