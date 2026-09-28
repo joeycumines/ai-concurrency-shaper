@@ -845,12 +845,12 @@ data: {"choices":[],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2
 	}
 }
 
-// TestChatStreamReviewMalformedStreamIsUpstreamFailure proves the
+// TestChatStreamMalformedStreamIsUpstreamFailure proves the
 // minimal malformed stream — a user-role delta chunk with no envelope fields,
 // terminated by [DONE] — is rejected with a client-dialect error event and
 // classified as an upstream failure: it can never become a successful
 // assistant response.
-func TestChatStreamReviewMalformedStreamIsUpstreamFailure(t *testing.T) {
+func TestChatStreamMalformedStreamIsUpstreamFailure(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
 		StrictLossPolicy(),

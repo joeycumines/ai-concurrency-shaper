@@ -852,7 +852,7 @@ func (w *returnGuardWriter) lateOps() int64 {
 	return w.late.Load()
 }
 
-// TestProxyTranscodeBreakerOutcomeWithRetries verifies gate 20 under the
+// TestProxyTranscodeBreakerOutcomeWithRetries verifies the behaviour under the
 // default CLI-like configuration: a retry-aware transport owns breaker
 // reporting (retryHandlesBreaker), yet a cancelled transcode stream must
 // still be classified from the explicit transcode outcome — never recorded

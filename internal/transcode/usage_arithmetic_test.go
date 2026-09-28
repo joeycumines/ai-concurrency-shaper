@@ -1,7 +1,7 @@
 package transcode
 
-// Usage arithmetic acceptance tests. History:
-// exact total == input + output and failed the exchange on mismatch.
+// Usage arithmetic acceptance tests. The decoder once required the exact
+// total to equal input + output and failed the exchange on mismatch.
 // Re-adjudicated after an observed gateway emitted a total a few dozen tokens
 // above the sum of its parts, failing a Claude Code exchange that then
 // retried: a mismatched total is an OBSERVABILITY fact — the source values

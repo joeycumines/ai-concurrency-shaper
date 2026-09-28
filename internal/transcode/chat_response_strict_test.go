@@ -149,11 +149,11 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 	}
 }
 
-// TestChatResponseReviewKCounterexampleIsRejected proves the exact
+// TestChatResponseNonStreamingCounterexampleIsRejected proves the exact
 // counterexample — a single choice with index zero, a user-role message, and
 // no finish_reason — is rejected as corrupt upstream wire and can never
 // become a successful assistant response.
-func TestChatResponseReviewKCounterexampleIsRejected(t *testing.T) {
+func TestChatResponseNonStreamingCounterexampleIsRejected(t *testing.T) {
 	body := []byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"user","content":"x"}}]}`)
 	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
 	var wireErr *UpstreamWireError

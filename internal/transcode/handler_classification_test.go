@@ -409,8 +409,7 @@ func TestRequestSideRacesStayLocal(t *testing.T) {
 
 // TestSuccessfulBodyReadCancellationDerivedAbort proves a cancellation-derived
 // successful-body read error with a cancelled context stays a client abort
-// (the JSON body-read suppression gate's positive direction,
-// blocker 8).
+// (the JSON body-read suppression gate's positive direction).
 func TestSuccessfulBodyReadCancellationDerivedAbort(t *testing.T) {
 	mapping := responsesMapping(t)
 	handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {

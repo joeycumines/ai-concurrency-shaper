@@ -1153,7 +1153,7 @@ func TestResolveAndValidate_TranscodeAuthDefaultsDocumented(t *testing.T) {
 }
 
 // TestResolveAndValidate_BodyLimits_Propagation verifies that Provider.RetryMaxBodyMB
-// propagates to each TranscodeMapping.BodyLimits.RetryReplayBytes where zero (H2).
+// propagates to each TranscodeMapping.BodyLimits.RetryReplayBytes where zero.
 func TestResolveAndValidate_BodyLimits_Propagation(t *testing.T) {
 	cfg, err := Parse([]string{
 		"-upstream", "https://api.openai.com",
@@ -1182,7 +1182,7 @@ func TestResolveAndValidate_BodyLimits_Propagation(t *testing.T) {
 // TestResolveAndValidate_FileSecretSource_RotationRequiresRestart proves that
 // file: credentials are resolved once at startup and wrapped as static secrets,
 // so in-place file modifications mid-run do not change the credential on either
-// passthrough or transcoded routes without a restart (H6).
+// passthrough or transcoded routes without a restart.
 func TestResolveAndValidate_FileSecretSource_RotationRequiresRestart(t *testing.T) {
 	dir := t.TempDir()
 	secretPath := dir + "/secret.key"

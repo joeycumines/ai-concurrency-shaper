@@ -155,8 +155,8 @@ func NewTranscodeHandler(
 	}
 	// The body limits contract (limits.go): zero values select the package
 	// defaults, computed ONCE here so zero never reaches handler logic — in
-	// particular, a zero DecodedRequestBytes is never treated as unlimited
-	//. The handler-side per-use fallbacks remain as
+	// particular, a zero DecodedRequestBytes is never treated as unlimited.
+	// The handler-side per-use fallbacks remain as
 	// defense-in-depth for any future construction path that bypasses this
 	// normalization.
 	cfg.BodyLimits = cfg.BodyLimits.WithDefaults()
@@ -545,7 +545,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The response media type must agree with the client's stream intent
-	// (merge gate 17): a streaming request cannot be answered with JSON and
+	// A streaming request cannot be answered with JSON and
 	// a non-streaming request cannot be answered with an SSE stream.
 	switch {
 	case isEventStream(resp):
@@ -620,12 +620,12 @@ func (h *TranscodeHandler) convertRequest(
 		IDs:          NewExchangeIDs(),
 		LossPolicy:   policy,
 		Capabilities: mapping.ChatCapabilities,
-		// Stream intent precedence (v1 blocker 1): the request body's
+		// Stream intent precedence: the request body's
 		// stream field, when explicitly present, is authoritative; only when
 		// absent does the client Accept header select the representation
 		// (parsed below with full media-range and q-value semantics — q=0
 		// excludes, malformed ranges are ignored). The response media type
-		// must agree with the resolved intent (merge gate 17).
+		// must agree with the resolved intent.
 		StreamIntent: AcceptIsEventStream(r.Header.Get("Accept")),
 	}
 
@@ -1006,7 +1006,7 @@ func (h *TranscodeHandler) jsonResponse(
 }
 
 // checkDecodedRequestSize rejects decoded requests that amplify beyond the
-// decoded-request body limit (merge gate 19: the decoded limit is separate
+// decoded-request body limit (the decoded limit is separate
 // from the accepted raw-body limit). The typed error renders as 413 in the
 // client dialect, never the generic conversion 400.
 func (h *TranscodeHandler) checkDecodedRequestSize(rendered []byte) error {

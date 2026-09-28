@@ -1198,7 +1198,7 @@ func RenderMessagesResponse(
 		return nil, report, err
 	}
 	// A failed exchange must never be reported as a successful Messages
-	// completion (merge gate 10). The upstream failure surfaces as a
+	// completion. The upstream failure surfaces as a
 	// client-dialect error, never as a message with a success stop reason.
 	if response.Status == CanonicalResponseFailed {
 		// A 2xx envelope reporting status "failed" is an upstream semantic
@@ -1404,8 +1404,8 @@ func RenderMessagesResponse(
 
 	// Anthropic usage semantics: input_tokens + cache_creation_input_tokens
 	// + cache_read_input_tokens = total. The uncached input is the total
-	// minus the cached breakdown, with checked nonnegative arithmetic
-	//. Unknown usage is never fabricated as zero facts:
+	// minus the cached breakdown, with checked nonnegative arithmetic.
+	// Unknown usage is never fabricated as zero facts:
 	// it is an explicit loss/reject decision.
 	if response.Usage.Unknown() {
 		if err := report.Lose(

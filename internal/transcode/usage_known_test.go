@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// usageCounterexample is the -6 fixture: all three totals
+// usageCounterexample is the fixture: all three totals
 // present, no breakdown detail objects.
 const usageCounterexample = `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`
 

@@ -10,7 +10,7 @@ import (
 )
 
 // Header render versus the headerRowCount cap divergence.
-func TestRepro_HeaderCapDivergence(t *testing.T) {
+func TestLayoutHeaderCapDivergence(t *testing.T) {
 	metas := make([]ProviderMeta, 15)
 	for i := range metas {
 		metas[i] = ProviderMeta{Name: fmt.Sprintf("provider-long-name-%c", 'a'+i), Concurrency: 4}
@@ -49,7 +49,7 @@ func TestRepro_HeaderCapDivergence(t *testing.T) {
 }
 
 // Repro B: row 0 budget fallback overflow
-func TestRepro_Row0FallbackOverflow(t *testing.T) {
+func TestLayoutRow0FallbackOverflow(t *testing.T) {
 	metas := []ProviderMeta{
 		{Name: "anthropic-eu-central", Concurrency: 4},
 		{Name: "openai-prod-longname", Concurrency: 8},
@@ -84,7 +84,7 @@ func TestRepro_Row0FallbackOverflow(t *testing.T) {
 }
 
 // Repro C: active chip force-append overflow
-func TestRepro_ActiveAppendOverflow(t *testing.T) {
+func TestLayoutActiveAppendOverflow(t *testing.T) {
 	// Need many providers and narrow width to trigger hasActive false path
 	// Current greedy packs in order so active last may be on last row already,
 	// but we can still check floorCost invariant
@@ -136,7 +136,7 @@ func TestRepro_ActiveAppendOverflow(t *testing.T) {
 }
 
 // Repro D: wheel hit-test off-by-one due to PaddingLeft 1
-func TestRepro_WheelPadding(t *testing.T) {
+func TestLayoutWheelPadding(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{
 		{Name: "acme", Concurrency: 4},
 		{Name: "anthropic", Concurrency: 8},
@@ -178,7 +178,7 @@ func TestRepro_WheelPadding(t *testing.T) {
 }
 
 // Repro E: palette vertical overflow (border)
-func TestRepro_PaletteVerticalOverflow(t *testing.T) {
+func TestLayoutPaletteVerticalOverflow(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{
 		{Name: "acme", Concurrency: 4},
 		{Name: "anthropic", Concurrency: 8},
@@ -204,7 +204,7 @@ func TestRepro_PaletteVerticalOverflow(t *testing.T) {
 }
 
 // Repro F: horizontal: palette frame width <= terminal width
-func TestRepro_PaletteHorizontal(t *testing.T) {
+func TestLayoutPaletteHorizontal(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Name: "acme", Concurrency: 4}})
 	for _, w := range []int{10, 15, 20, 80} {
 		m.width = w

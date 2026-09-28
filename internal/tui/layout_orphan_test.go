@@ -2,7 +2,7 @@
 //
 // Repro harness for fleet header single-letter orphan flaw.
 // Exists solely to pin and demonstrate the degenerate row0Budget behaviour
-// before the layout correction. Run via: go test -run TestRepro_FirstChipOrphan -count=1 -v
+// before the layout correction. Run via: go test -run TestLayoutFirstChipOrphan -count=1 -v
 
 package tui
 
@@ -14,7 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-func TestRepro_FirstChipOrphan(t *testing.T) {
+func TestLayoutFirstChipOrphan(t *testing.T) {
 	const historicalChipFloor = 3
 	// Reproduce the historical allocation at the width where the old layout
 	// reserved the already-truncated header body. The old implementation then
@@ -302,7 +302,7 @@ func TestRepro_FirstChipOrphan(t *testing.T) {
 	}
 }
 
-func TestRepro_Row0BudgetDegenerate(t *testing.T) {
+func TestLayoutRow0BudgetDegenerate(t *testing.T) {
 	metas := []ProviderMeta{
 		{Name: "anthropic-eu-central", Concurrency: 4},
 		{Name: "openai-prod-longname", Concurrency: 8},

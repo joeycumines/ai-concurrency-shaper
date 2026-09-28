@@ -280,7 +280,7 @@ func qwenReasoningStreamUpstream(t *testing.T) *httptest.Server {
 // default capability set that the regression traffic ran against: the
 // compatible core capability defaults (defaultTranscodeChatCapabilities) and
 // the default-approved losses this direction can exercise — the usage-timing
-// losses and the two compatibility-first request-side controls the commit-2
+// losses and the two compatibility-first request-side controls the shipped
 // defaults flipped (request_reasoning and developer_role: with
 // reasoning_effort and developer_role opt-in, the effort/budget knob and the
 // developer-role distinction drop observably). The mapping intentionally pins

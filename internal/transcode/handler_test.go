@@ -778,12 +778,12 @@ func TestHandlerDecodeFailure502IsLogged(t *testing.T) {
 	}
 }
 
-// TestHandlerReviewKChatCounterexampleIsUpstreamFailure proves the exact
-// -4 counterexample end to end: a single choice with index
+// TestHandlerChatCounterexampleIsUpstreamFailure proves the exact
+// counterexample end to end: a single choice with index
 // zero, a user-role message, and no finish_reason is rejected with a
 // client-dialect error and recorded as an upstream failure — it can never
 // become a successful assistant response.
-func TestHandlerReviewKChatCounterexampleIsUpstreamFailure(t *testing.T) {
+func TestHandlerChatCounterexampleIsUpstreamFailure(t *testing.T) {
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
 	mapping.LossPolicy = StrictLossPolicy()
@@ -1321,7 +1321,7 @@ func TestHandlerTruncatedStreamErrorEvent(t *testing.T) {
 func TestHandlerStreamIntentMismatch(t *testing.T) {
 	// A JSON response for a streaming request is an upstream protocol
 	// mismatch: the client requested SSE and the upstream returned JSON.
-	// Merge gate 17 requires the response media type to agree with the
+	// The response media type must agree with the
 	// stream intent; the exchange is rejected with a dialect-correct error.
 	mapping := responsesMapping(t)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
@@ -1941,7 +1941,7 @@ func (w *lateOpGuardWriter) flushCount() int {
 	return w.flushes
 }
 
-// TestHandlerMessagesFailedUpstreamNotSuccess verifies merge gate 10 for the
+// TestHandlerMessagesFailedUpstreamNotSuccess verifies the contract for the
 // non-streaming path: a 2xx Responses body with status "failed" must surface
 // as a client-dialect error, never as a successful Messages completion.
 func TestHandlerMessagesFailedUpstreamNotSuccess(t *testing.T) {

@@ -16,7 +16,7 @@ import (
 // and the runtime reporting. The legacy broad
 // permission names that are NOT granular in their own right are REMOVED —
 // the feature is unreleased, so there are no deprecated aliases and no
-// startup expansion log (plan.md commit 6; replanLog entry 3). Names that
+// startup expansion log. Names that
 // survived as granular keys keep their string (e.g. reasoning_summary,
 // image_input, top_k) with narrowed, single-semantic meaning. MIGRATION.md
 // documents the old-to-new mapping for pre-release users.

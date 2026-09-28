@@ -15,7 +15,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 )
 
-// TestProxy_QueueCommentsUpstream429EmitsFailedCloseAndRecordsFailure pins Defect H6:
+// TestProxy_QueueCommentsUpstream429EmitsFailedCloseAndRecordsFailure pins the behaviour:
 // When upstream returns a non-200 status (e.g. 429) after queue comments committed the
 // streaming 200 representation, the client must receive a failed-close comment (: queue-wait failed: upstream)
 // followed by a closed stream (never raw JSON), and the breaker must record an upstream failure
@@ -94,7 +94,7 @@ func TestProxy_QueueCommentsUpstream429EmitsFailedCloseAndRecordsFailure(t *test
 	}
 }
 
-// TestProxy_QueueCommentsHalfOpenProbeFailureDoesNotCloseBreaker pins Defect H6 probe handling:
+// TestProxy_QueueCommentsHalfOpenProbeFailureDoesNotCloseBreaker pins the probe handling:
 // A HALF_OPEN probe under queue-comments that receives an upstream failure must NOT record
 // success or close the circuit.
 func TestProxy_QueueCommentsHalfOpenProbeFailureDoesNotCloseBreaker(t *testing.T) {
@@ -174,7 +174,7 @@ func TestProxy_QueueCommentsHalfOpenProbeFailureDoesNotCloseBreaker(t *testing.T
 	}
 }
 
-// TestProxy_QueueCommentsExplicitStreamFalseDoesNotCommitQueueComments pins Defect H9:
+// TestProxy_QueueCommentsExplicitStreamFalseDoesNotCommitQueueComments pins the behaviour:
 // When a request sends Accept: text/event-stream but explicitly specifies "stream": false
 // in the JSON request body, queue comments must NOT be committed. The request must complete
 // cleanly as a standard non-streaming response.
@@ -245,7 +245,7 @@ func (rt *errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, rt.err
 }
 
-// TestProxy_TranscodedRetryCircuitOpenRenders503AndIncrementsCounter pins Defect H8:
+// TestProxy_TranscodedRetryCircuitOpenRenders503AndIncrementsCounter pins the behaviour:
 // When a transcoded route experiences ErrCircuitOpen (e.g. breaker opened between retries),
 // it must render native 503 Service Unavailable with a dialect-correct "circuit open" error
 // (never 502 upstream_transport_error), increment shaper_circuit_rejected_total, and avoid

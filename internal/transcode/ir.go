@@ -274,8 +274,8 @@ type ExchangeContext struct {
 
 	// StreamIntent records the resolved stream mode of the exchange: the
 	// request body's stream field when explicitly present, otherwise the
-	// client Accept header's most-preferred acceptable representation
-	//. A stream/JSON mismatch on the upstream response
+	// client Accept header's most-preferred acceptable representation.
+	// A stream/JSON mismatch on the upstream response
 	// is an error rather than a silent mode change.
 	StreamIntent bool
 

@@ -1,6 +1,6 @@
 package transcode
 
-// Review-z commit 2 acceptance tests for the semantic IR: the multimodal
+// Acceptance tests for the semantic IR: the multimodal
 // tool-result matrix, the role-invariant negative matrix, tool-argument
 // fidelity (byte-exact to Chat and Responses, unrepresentable to Messages,
 // never an upstream failure), and the empty-conversation rejection.
