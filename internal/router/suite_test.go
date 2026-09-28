@@ -704,6 +704,81 @@ func TestCatalogSuiteCompletionSurfaceIsVersionedResponsesAndMessages(t *testing
 	}
 }
 
+// TestCatalogSuiteCountTokensIsDialectShaped proves the Claude Code token
+// probe is answered in the Anthropic dialect (never a bare 404 page), both
+// when the route is declared and when it is not.
+func TestCatalogSuiteCountTokensIsDialectShaped(t *testing.T) {
+	var hits atomic.Int64
+	target := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"input_tokens":7}`))
+	})
+	catHandler, err := transcode.NewCatalogHandler(transcode.CatalogConfig{
+		ProviderName: "suite-ct",
+		Models:       []transcode.CatalogModel{{Surrogate: "msg-model", Provider: "provA"}},
+		DefaultShape: transcode.CatalogShapeAnthropic,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:           "suite-ct",
+		Prefix:         "/suite",
+		CatalogHandler: catHandler,
+		DefaultShape:   transcode.CatalogShapeAnthropic,
+		ModelRoutes: []router.ModelRoute{{
+			Model:           "msg-model",
+			Provider:        "provA",
+			Handler:         target,
+			SupportedRoutes: suiteRouteSet("/v1/messages", "/v1/messages/count_tokens"),
+		}},
+		Strict: true,
+	})
+	rtr, err := router.New([]router.Provider{{Name: "suite-ct", Prefix: "/suite", Proxy: suite}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Declared route: served.
+	req := httptest.NewRequest(http.MethodPost, "/suite/v1/messages/count_tokens",
+		bytes.NewBufferString(`{"model":"msg-model","messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	rtr.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("count_tokens status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("target hits = %d, want 1", hits.Load())
+	}
+
+	// Undeclared route: dialect-shaped error, not a bare page.
+	req = httptest.NewRequest(http.MethodPost, "/suite/v1/messages/count_tokens",
+		bytes.NewBufferString(`{"model":"unknown","messages":[]}`))
+	rec = httptest.NewRecorder()
+	rtr.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown model status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Fatalf("error content type = %q, want JSON", ct)
+	}
+	var envelope struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("error body not JSON: %v: %s", err, rec.Body.String())
+	}
+	if envelope.Type != "error" || envelope.Error.Message == "" {
+		t.Fatalf("error envelope = %+v, want the Anthropic shape", envelope)
+	}
+}
+
 func TestCatalogSuiteKnownOversizeContentLengthFailsBeforeProvider(t *testing.T) {
 	var targetHits atomic.Int64
 	target := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

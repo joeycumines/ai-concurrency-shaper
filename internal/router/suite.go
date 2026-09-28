@@ -189,7 +189,12 @@ func isCatalogRoute(path string) bool {
 
 func isCompletionRoute(path string) bool {
 	switch path {
-	case "/v1/responses", "/v1/messages", "/v1/chat/completions":
+	case "/v1/responses", "/v1/messages", "/v1/chat/completions",
+		// Claude Code probes token counting when a gateway advertises the
+		// Anthropic Messages format. It is optional (the client falls back
+		// to local estimation), but the answer must still be a
+		// dialect-shaped response rather than a bare 404 page.
+		"/v1/messages/count_tokens":
 		return true
 	default:
 		return false
@@ -304,7 +309,7 @@ func (h *CatalogSuiteHandler) shapeForCompletion(r *http.Request) transcode.Cata
 	switch path.Clean(r.URL.Path) {
 	case "/v1/responses":
 		return transcode.CatalogShapeCodex
-	case "/v1/messages":
+	case "/v1/messages", "/v1/messages/count_tokens":
 		return transcode.CatalogShapeAnthropic
 	default:
 		if h.defaultShape != "" {
