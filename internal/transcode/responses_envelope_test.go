@@ -1,10 +1,9 @@
 package transcode
 
-// J11 regression tests: the strict Responses envelope aligned with the
+// Regression tests: the strict Responses envelope aligned with the
 // pinned contract (openai-go v1.12.0) — every pinned envelope field decodes
 // as a typed shadow, the outbound instructions is always the create-request
-// string, and the envelope controls enter the explicit loss/reject decision
-//.
+// string, and the envelope controls enter the explicit loss/reject decision.
 
 import (
 	"errors"

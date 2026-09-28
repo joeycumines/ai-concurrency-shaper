@@ -1,6 +1,6 @@
 package transcode
 
-// J6 regression tests: unknown usage breakdowns
+// Regression tests: unknown usage breakdowns
 // are never emitted as factual zeros — the Responses and Messages renderers
 // loss-gate every wire-required component the source did not provide and
 // emit the required zeros only after the loss is approved, streaming behaves

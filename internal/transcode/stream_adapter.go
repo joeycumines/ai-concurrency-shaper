@@ -259,8 +259,7 @@ func (c *chatToAnthropicConverter) Convert(
 		// classifies as an upstream body failure and the reader stops
 		// immediately — never an empty non-terminal batch that would wait
 		// on an upstream keeping the connection open after [DONE]. The sawFinish guard is required because a zero-output
-		// finish holds an EMPTY batch that releaseTerminals still releases
-		//.
+		// finish holds an EMPTY batch that releaseTerminals still releases.
 		if !c.chat.sawFinish {
 			return convertedBatch{}, errChatDoneBeforeTerminal()
 		}

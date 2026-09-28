@@ -657,8 +657,7 @@ func renderChatToolResult(
 	parts := result.Parts
 	if result.IsError {
 		// The error status cannot be carried by a Chat tool message; the
-		// permissive encoding is the visible error_status_prefix text
-		//.
+		// permissive encoding is the visible error_status_prefix text.
 		if err := report.Lose(
 			policy,
 			FeatureToolResultErrorStatus,

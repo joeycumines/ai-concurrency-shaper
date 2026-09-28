@@ -63,7 +63,7 @@ func TestChatUsageMismatchStreamingRelayed(t *testing.T) {
 		TotalTokens:      20, // not 15
 	}
 	state := newChatResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"resp_1", "gpt-4.1", 1710000000, nil,
 	)
 	if _, err := state.Convert(chunk); err != nil {
@@ -85,7 +85,7 @@ func TestResponsesUsageMismatchStreamingRelayed(t *testing.T) {
 		TotalTokens:  20, // not 15
 	}
 	state := newAnthropicResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{ProviderReasoningThinking: true},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{ProviderReasoningThinking: true},
 		"msg_1", "claude-x", 1710000000,
 	)
 	if err := state.finalizeMessage(CanonicalStopEndTurn, usage); err != nil {
@@ -127,7 +127,7 @@ func TestChatUsageMismatchNonStreamingRelayed(t *testing.T) {
 		t.Fatalf("decode recorded the mismatch before the counts were emitted: %+v", report)
 	}
 	context := testExchangeContext()
-	context.LossPolicy = j6PermissivePolicy()
+	context.LossPolicy = permissiveLossPolicy()
 	context.RequestedClientModel = "m"
 	_, renderReport, err := RenderResponsesResponse(response, context)
 	if err != nil {
@@ -220,7 +220,7 @@ func TestUsageAbsentVsZeroPreserved(t *testing.T) {
 func TestStreamResponsesUsageMismatchRelayedAtTerminal(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
@@ -275,7 +275,7 @@ func TestStreamResponsesUsageMismatchRelayedAtTerminal(t *testing.T) {
 func TestStreamResponsesUsageMismatchRelayedAtCreated(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
@@ -307,12 +307,12 @@ func TestChatResponsesRenderDerivedTotalSaturates(t *testing.T) {
 	body := []byte(`{"object":"chat.completion","created":1,"model":"m",` +
 		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],` +
 		`"usage":{"prompt_tokens":9223372036854775807,"completion_tokens":1}}`)
-	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, j6PermissivePolicy())
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy())
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	context := testExchangeContext()
-	context.LossPolicy = j6PermissivePolicy()
+	context.LossPolicy = permissiveLossPolicy()
 	context.RequestedClientModel = "m"
 	rendered, report, err := RenderResponsesResponse(response, context)
 	if err != nil {
@@ -348,12 +348,12 @@ func TestChatResponsesRenderPostClampMismatchNoted(t *testing.T) {
 		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],` +
 		`"usage":{"prompt_tokens":-2,"completion_tokens":5,"total_tokens":3,` +
 		`"prompt_tokens_details":{"cached_tokens":1}}}`)
-	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, j6PermissivePolicy())
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy())
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	context := testExchangeContext()
-	context.LossPolicy = j6PermissivePolicy()
+	context.LossPolicy = permissiveLossPolicy()
 	context.RequestedClientModel = "m"
 	rendered, report, err := RenderResponsesResponse(response, context)
 	if err != nil {
@@ -391,7 +391,7 @@ func TestChatResponsesStreamPostClampMismatchNoted(t *testing.T) {
 		},
 	}
 	state := newChatResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"resp_1", "gpt-4.1", 1710000000, nil,
 	)
 	if _, err := state.Convert(chunk); err != nil {
@@ -499,7 +499,7 @@ func TestStreamUsageClampNotesGateOncePerKey(t *testing.T) {
 		},
 	}
 	state := newChatResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"resp_1", "gpt-4.1", 1710000000, nil,
 	)
 	for i := range 3 {
@@ -610,12 +610,12 @@ func TestUsageClampDetailFidelity(t *testing.T) {
 			`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],` +
 			`"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,` +
 			`"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":0}}}`)
-		response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, j6PermissivePolicy())
+		response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy())
 		if err != nil {
 			t.Fatalf("decode: %v", err)
 		}
 		context := testExchangeContext()
-		context.LossPolicy = j6PermissivePolicy()
+		context.LossPolicy = permissiveLossPolicy()
 		context.RequestedClientModel = "m"
 		rendered, report, err := RenderResponsesResponse(response, context)
 		if err != nil {
@@ -727,11 +727,11 @@ func TestUsageClampBoundsArePinned(t *testing.T) {
 // presenting the clamp-corrected values as source values.
 func TestComposedClampNoteRecordedOnce(t *testing.T) {
 	chat := newChatResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"resp_1", "gpt-4.1", 1710000000, nil,
 	)
 	anthropic := newAnthropicResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"msg_1", "gpt-4.1", 1710000000,
 	)
 	converter := newChatToAnthropicConverter(chat, anthropic)

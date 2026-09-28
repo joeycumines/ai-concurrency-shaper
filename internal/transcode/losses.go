@@ -113,7 +113,7 @@ const (
 	// report reaches its entry bound: further entries are dropped (their
 	// count tracked on the report), and the exchange completes — report
 	// saturation is an observability fact, never an exchange failure
-	// (CC-REPORT-BOUND).
+	// (the report-overflow bound).
 	FeatureReportOverflow Feature = "report_overflow"
 	// UsageTotalMismatch covers a source whose usage totals are
 	// arithmetically inconsistent (total_tokens != input + output). Real
@@ -476,7 +476,7 @@ type ConversionLoss struct {
 
 // ConversionReport accumulates approved losses for one conversion. When the
 // entry bound saturates, recording stops and Dropped counts the dropped
-// entries (the aggregated note carries the observable fact; CC-REPORT-BOUND).
+// entries (the aggregated note carries the observable fact; the report-overflow bound).
 type ConversionReport struct {
 	Losses []ConversionLoss
 	// Dropped counts entries discarded after the bound was reached. Zero
@@ -489,7 +489,7 @@ type ConversionReport struct {
 
 // reserve enforces the shared report bound for both entry paths. A report
 // overflow is an OBSERVABILITY saturation, never an exchange failure
-// (CC-REPORT-BOUND, operator-observed 2026-09-08: a 1.25MB Claude Code
+// (the report-overflow bound, operator-observed 2026-09-08: a 1.25MB Claude Code
 // agentic request replays hundreds of tool results per turn and exhausted
 // the 4096-entry bound, 502-ing the session — the report exists to make
 // losses observable, and failing the exchange for report growth inverts

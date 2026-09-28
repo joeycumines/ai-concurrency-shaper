@@ -75,7 +75,7 @@ func TestLegacyFunctionCallToAnthropicStream(t *testing.T) {
 		"resp_1", "m", 1, nil,
 	)
 	anthropic := newAnthropicResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"msg_1", "m", 1,
 	)
 	converter := newChatToAnthropicConverter(chat, anthropic)

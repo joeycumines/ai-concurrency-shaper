@@ -671,7 +671,7 @@ func drainResponsesToAnthropic(t *testing.T, raw []byte) (string, *anthropicResp
 	t.Helper()
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"gpt-4.1",
@@ -775,7 +775,7 @@ func TestResponsesStreamEventNameToleranceOutputEquivalence(t *testing.T) {
 func TestResponsesStreamMismatchedEventNameRejected(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"gpt-4.1",
@@ -806,7 +806,7 @@ func TestFixtureResponsesStreamToAnthropicFrames(t *testing.T) {
 	// fixture translates to Anthropic frames.
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"gpt-4.1",

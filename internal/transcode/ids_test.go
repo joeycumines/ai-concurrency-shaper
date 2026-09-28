@@ -1,6 +1,6 @@
 package transcode
 
-// Review-08 blocker 6 regression tests: exchange IDs are API object
+// Regression tests: exchange IDs are API object
 // identifiers, not internal indexes — every exchange must emit
 // collision-resistant IDs so clients keying response stores, tool-call
 // correlation, logs, and retry/dedup systems by these IDs never collide.

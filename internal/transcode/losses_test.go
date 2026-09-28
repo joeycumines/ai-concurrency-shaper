@@ -24,7 +24,7 @@ func TestParseLossFeatures(t *testing.T) {
 	}
 }
 
-// TestConversionReportOverflowAggregated pins the CC-REPORT-BOUND
+// TestConversionReportOverflowAggregated pins the the report-overflow bound
 // disposition (operator-observed 2026-09-08: a 1.25MB Claude Code agentic
 // request exhausted the 4096-entry bound and 502'd): overflow is an
 // observability saturation, never an exchange failure. Both entry paths

@@ -101,9 +101,9 @@ Toasts are self-colored on both palettes, so they stay legible regardless of the
 
 ## Resolved design issues
 
-- [x] 1–5 resolved by TUI-COLOR-01..05.
-- [x] Sparkline severity color resolved by TUI-COLOR-07.
-- [x] In-flight empty state dimming resolved by TUI-COLOR-08.
+- [x] 1–5 resolved by the five contrast findings.
+- [x] Sparkline severity color resolved by the sparkline contrast finding.
+- [x] In-flight empty state dimming resolved by the in-flight empty-state contrast finding.
 
 ## Open design issues to resolve
 

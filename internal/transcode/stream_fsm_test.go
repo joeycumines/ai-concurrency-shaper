@@ -1,6 +1,6 @@
 package transcode
 
-// Review-z commit 3 tests: the reusable Responses stream lifecycle FSM
+// Regression tests: the reusable Responses stream lifecycle FSM
 // (every rejection class has a transition test), the seven-dimension total
 // budget (the empty-part attack cannot allocate beyond it), and the atomic
 // terminal batch (an oversized batch is never partially delivered).

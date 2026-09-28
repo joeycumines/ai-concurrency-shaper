@@ -1,6 +1,6 @@
 package main
 
-// Review-z commit 6 acceptance: the CLI rejects every enumerated impossible
+// Acceptance: the CLI rejects every enumerated impossible
 // transcoding configuration at startup, and only the granular loss names are
 // accepted.
 

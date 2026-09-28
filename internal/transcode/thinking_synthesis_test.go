@@ -136,7 +136,7 @@ func TestNonMarkerThinkingBlocksKeepAuthenticatedBehavior(t *testing.T) {
 }
 
 // TestStreamReasoningContiguousDeltasOneThinkingBlock pins the
-// CC-FRAGMENTATION fix (operator-observed 2026-09-08): contiguous reasoning
+// one-block-per-delta fix (operator-observed 2026-09-08): contiguous reasoning
 // deltas must render as exactly ONE thinking block — the transition close
 // fires only when a delta actually carries content or tool output, never for
 // a reasoning-only delta. The pre-fix behavior sealed the reasoning item on
@@ -153,7 +153,7 @@ func TestStreamReasoningContiguousDeltasOneThinkingBlock(t *testing.T) {
 	)
 	anthropic := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		"msg_1",
 		"claude-x",
@@ -189,7 +189,7 @@ func TestStreamReasoningContiguousDeltasOneThinkingBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	if starts != 1 {
-		t.Fatalf("thinking content_block_start count = %d, want exactly 1 for contiguous reasoning deltas (one-block-per-delta is the CC-FRAGMENTATION regression)", starts)
+		t.Fatalf("thinking content_block_start count = %d, want exactly 1 for contiguous reasoning deltas (one-block-per-delta is the one-block-per-delta regression)", starts)
 	}
 	if thinkingDeltas != 3 {
 		t.Fatalf("thinking_delta count = %d, want 3 (all fragments in the one block)", thinkingDeltas)
@@ -208,7 +208,7 @@ func TestStreamReasoningRendersThinkingLifecycle(t *testing.T) {
 	)
 	anthropic := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		"msg_1",
 		"claude-x",
@@ -305,7 +305,7 @@ func TestStreamReasoningRendersThinkingLifecycle(t *testing.T) {
 func TestAnthropicStreamReasoningInterleavedPartsRejected(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		"msg_1",
 		"claude-x",
@@ -350,7 +350,7 @@ func TestAnthropicStreamReasoningInterleavedPartsRejected(t *testing.T) {
 func TestAnthropicStreamReasoningNilIndexGuarded(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		"msg_1",
 		"claude-x",

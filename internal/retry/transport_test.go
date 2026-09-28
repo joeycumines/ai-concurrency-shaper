@@ -2224,7 +2224,7 @@ func TestRetry_ParseRetryAfter_Consulted(t *testing.T) {
 }
 
 func TestRetry_RetryWaitAccountsForDrainBody(t *testing.T) {
-	// Review-15 regression: verify that the retry transport does NOT
+	// Regression: verify that the retry transport does NOT
 	// over-sleep by body-drain duration. Before the fix, the transport
 	// passed retryNow,retryNow to ParseRetryAfter, zeroing proxyElapsed.
 	// If drainBody took 500ms and the upstream sent Retry-After: 1 (1s),
@@ -2286,7 +2286,7 @@ func TestRetry_RetryWaitAccountsForDrainBody(t *testing.T) {
 }
 
 func TestRetry_RetryWaitHTTPDateRemaining(t *testing.T) {
-	// Review-15 regression: verify that HTTP-date Retry-After with Date
+	// Regression: verify that HTTP-date Retry-After with Date
 	// header correctly computes remaining delay after body drain. Before
 	// the fix, the transport passed retryNow,retryNow which zeroed
 	// proxyElapsed, causing intendedDelta to be returned as the wait

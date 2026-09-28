@@ -2,7 +2,7 @@ package transcode
 
 // Evidence tests: the chat delta `reasoning_details` array.
 //
-// LIVE FINDING (2026-09-16 live capture from the operator gateway): raw
+// Observed live (captured from an operator gateway): raw
 // streaming captures (dialagram meta-muse-spark-1.3, verboo
 // deepseek-v4-flash-0731) carry reasoning in the modeled `reasoning_content`
 // spelling. `reasoning_details` was observed only as a SIBLING array riding
@@ -57,7 +57,7 @@ func TestChatStreamArrayOnlyReasoningTolerated(t *testing.T) {
 func TestChatStreamArrayOnlyReasoningNeverBecomesOutput(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		"resp_1",
 		"gpt-4.1",

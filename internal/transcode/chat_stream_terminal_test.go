@@ -1,7 +1,6 @@
 package transcode
 
-// J1 regression tests:
-//
+// Regression tests: //
 //  - response.output_item.added is a DETACHED snapshot of the message as it
 //    exists at creation (item.content == [] on the first ordinary text
 //    delta), never the live item that subsequent events mutate;
@@ -313,7 +312,7 @@ func TestChatStreamComposedPrematureDone(t *testing.T) {
 	)
 	anthropic := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
@@ -356,7 +355,7 @@ func TestChatStreamComposedPrematureDone(t *testing.T) {
 	)
 	anthropic2 := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",

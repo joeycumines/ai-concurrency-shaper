@@ -1,6 +1,6 @@
 package transcode
 
-// Review-08 blocker 8 regression tests: the upstream-failure classification
+// Regression tests: the upstream-failure classification
 // doctrine — a 2xx upstream response with the wrong representation, a
 // transport or body failure racing a client cancellation, and a failed
 // non-2xx error-body transfer are all definitive upstream failures, never

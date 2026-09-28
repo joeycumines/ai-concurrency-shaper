@@ -163,7 +163,7 @@ func TestChatStreamImpossibleDerivationIsNotRejected(t *testing.T) {
 func TestChatStreamDerivedTotalNotedPreFinish(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
@@ -208,7 +208,7 @@ func TestChatStreamDerivedTotalNeverPresentedAsSourceFact(t *testing.T) {
 		}
 		state := newChatResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"resp_1",
 			"gpt-4.1",
@@ -242,7 +242,7 @@ func TestChatStreamDerivedTotalNeverPresentedAsSourceFact(t *testing.T) {
 		}
 		state := newChatResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"resp_1",
 			"gpt-4.1",
@@ -317,7 +317,7 @@ func TestChatStreamOverflowSaturates(t *testing.T) {
 func TestChatStreamDerivedTotalRecordedOnce(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
@@ -371,7 +371,7 @@ func TestChatStreamDerivedTotalRecordedOnce(t *testing.T) {
 func TestChatStreamDerivedTotalNotedPerKeyNotPerStream(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"resp_1",
 		"gpt-4.1",
@@ -436,7 +436,7 @@ func TestChatStreamRepeatedTerminalMergeIsRecorded(t *testing.T) {
 
 	t.Run("differing_repeat_is_recorded", func(t *testing.T) {
 		state := newChatResponsesStreamState(
-			testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+			testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 			"resp_1", "gpt-4.1", 1, nil,
 		)
 		finish, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(finishChunk)})
@@ -469,7 +469,7 @@ func TestChatStreamRepeatedTerminalMergeIsRecorded(t *testing.T) {
 
 	t.Run("identical_repeat_is_quiet", func(t *testing.T) {
 		state := newChatResponsesStreamState(
-			testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+			testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 			"resp_1", "gpt-4.1", 1, nil,
 		)
 		finish, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(finishChunk)})

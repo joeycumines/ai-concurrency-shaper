@@ -1,6 +1,6 @@
 package transcode
 
-// J4 regression tests: the non-streaming Chat
+// Regression tests: the non-streaming Chat
 // response decode is presence-aware and strict — the pinned required fields
 // (object, one choice, choice index 0, finish_reason, message with role
 // assistant, complete tool-call identity) must be explicitly present, never

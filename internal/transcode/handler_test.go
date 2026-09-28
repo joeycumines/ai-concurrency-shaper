@@ -546,7 +546,7 @@ func TestHandlerUpstreamErrorMessagesDialect(t *testing.T) {
 }
 
 // TestHandlerUpstreamErrorDialectStreamingRequest pins the streaming half of
-// the upstream-error contract (field regression 2026-08-22, the observed
+// the upstream-error contract (observed field regression, the observed
 // codex /v1/responses 400s): a STREAMING client request whose upstream
 // answers non-2xx receives the UPSTREAM status with the error body re-rendered
 // in the CLIENT dialect — the branch runs before stream dispatch (the
@@ -1170,7 +1170,7 @@ func TestExplicitStreamFalseIsNotOverridden(t *testing.T) {
 	t.Run("messages-client", func(t *testing.T) {
 		// The Chat fixture's usage_timing breakdown is not portable to
 		// Messages; the permissive policy approves that response-side loss.
-		assertNonStreaming(t, string(ClientMessages), j6PermissivePolicy(),
+		assertNonStreaming(t, string(ClientMessages), permissiveLossPolicy(),
 			`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":false}`)
 	})
 }
@@ -1238,7 +1238,7 @@ func TestExplicitStreamTrueOverridesJsonAccept(t *testing.T) {
 func TestHandlerStreamingMessagesToResponses(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
-	mapping.LossPolicy = j6PermissivePolicy()
+	mapping.LossPolicy = permissiveLossPolicy()
 	mapping.Auth = AuthPolicy{Mode: AuthNone}
 	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
 	mapping.AllowedClientQuery = map[string]struct{}{}

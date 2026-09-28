@@ -197,7 +197,7 @@ func TestStreamRepeatedTerminalChunkRejectsSubstantivePayload(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			state := newChatResponsesStreamState(
 				testStreamContext(),
-				j6PermissivePolicy(),
+				permissiveLossPolicy(),
 				ChatCapabilities{},
 				"resp_1",
 				"m",
@@ -232,7 +232,7 @@ func TestStreamRepeatedTerminalChunkRejectsSubstantivePayload(t *testing.T) {
 func TestStreamRepeatedTerminalChunkRejectsIdentityMismatch(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"resp_1",
 		"m",
@@ -300,7 +300,7 @@ func TestStreamRepeatedTerminalChunkLossPolicy(t *testing.T) {
 	}
 
 	relaxed := newChatResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{}, "resp_1", "m", 1710000000, nil,
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{}, "resp_1", "m", 1710000000, nil,
 	)
 	if err := stream(relaxed, &openaichat.LLMUsage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2}); err != nil {
 		t.Fatalf("permissive policy rejected the redelivery: %v", err)
@@ -320,7 +320,7 @@ func TestStreamRepeatedTerminalChunkLossPolicy(t *testing.T) {
 func TestStreamRepeatedTerminalChunkFoldsUsage(t *testing.T) {
 	state := newChatResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"resp_1",
 		"m",
@@ -395,7 +395,7 @@ func finishedChatStreamState(t *testing.T) *chatResponsesStreamState {
 	t.Helper()
 	state := newChatResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"resp_1",
 		"m",

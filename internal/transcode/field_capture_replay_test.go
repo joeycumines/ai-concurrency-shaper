@@ -232,7 +232,7 @@ func TestFieldCaptureDataOnlyResponsesStreamReplays(t *testing.T) {
 	// safety_identifier, output[].phase, the created-time null fields), so
 	// the replay approves the controls loss and the usage components the
 	// Messages contract requires in addition to the note's own key.
-	policy := j6PermissivePolicy()
+	policy := permissiveLossPolicy()
 	policy.Allowed[FeatureResponsesControls] = struct{}{}
 	policy.Allowed[FeatureOutputPhase] = struct{}{}
 	state := newAnthropicResponsesStreamState(

@@ -130,8 +130,7 @@ func TestReadSSEEventEOFWithPendingFrame(t *testing.T) {
 
 func TestReadSSEEventOversizedLineFatal(t *testing.T) {
 	// A line exceeding maxSSELineBytes is fatal for the exchange: the typed
-	// size error is returned and a following valid frame is never parsed
-	//.
+	// size error is returned and a following valid frame is never parsed.
 	var builder strings.Builder
 	builder.WriteString("data: ")
 	builder.WriteString(strings.Repeat("x", maxSSELineBytes))

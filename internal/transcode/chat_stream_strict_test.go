@@ -1,6 +1,6 @@
 package transcode
 
-// Review-08 blocker 2 regression tests: the Chat stream chunk decode is
+// Regression tests: the Chat stream chunk decode is
 // strict and presence-aware (the pinned envelope fields are required, never
 // zero-defaulted), non-assistant roles are rejected rather than relabeled,
 // tool-call fragments enforce the pinned index and type and keep immutable
@@ -455,7 +455,7 @@ func TestChatStreamTerminalRelease(t *testing.T) {
 		)
 		anthropic := newAnthropicResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"msg_1",
 			"gpt-4.1",
@@ -498,7 +498,7 @@ func TestChatStreamTerminalRelease(t *testing.T) {
 		)
 		anthropic := newAnthropicResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"msg_1",
 			"gpt-4.1",
@@ -599,7 +599,7 @@ func TestChatStreamTerminalRelease(t *testing.T) {
 		)
 		anthropic := newAnthropicResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"msg_1",
 			"gpt-4.1",
@@ -642,7 +642,7 @@ func TestChatStreamTerminalRelease(t *testing.T) {
 		)
 		anthropic := newAnthropicResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"msg_1",
 			"gpt-4.1",
@@ -727,7 +727,7 @@ data: {"choices":[],"created":1789526350,"id":"chatcmpl-f02e903cd786813e728847a3
 `
 	chat := newChatResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		"resp_1",
 		"deepseek-v4-flash-0731",
@@ -736,7 +736,7 @@ data: {"choices":[],"created":1789526350,"id":"chatcmpl-f02e903cd786813e728847a3
 	)
 	anthropic := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		"msg_1",
 		"deepseek-v4-flash-0731",
@@ -793,7 +793,7 @@ data: {"choices":[],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2
 `
 	chat := newChatResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		"resp_1",
 		"deepseek-v4-flash-0731",
@@ -802,7 +802,7 @@ data: {"choices":[],"created":1789525525,"id":"chatcmpl-6f1f4d72635a635009d16cf2
 	)
 	anthropic := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		"msg_1",
 		"deepseek-v4-flash-0731",

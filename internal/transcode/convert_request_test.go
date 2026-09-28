@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestDecodeResponsesRequestNullEncryptedContent pins the CODEX-NULL fix
+// TestDecodeResponsesRequestNullEncryptedContent pins the null-content fix
 // (operator-observed 2026-09-08): codex-tui sends reasoning input items with
 // encrypted_content and reasoning_text.signature explicitly null (JSON null,
 // not absent). The strict client decode rejected the null on the modeled

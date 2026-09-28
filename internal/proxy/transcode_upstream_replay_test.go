@@ -54,7 +54,7 @@ func replayUpstream(t *testing.T) (*httptest.Server, func() [][]byte) {
 // Codex sessions survive turn 2+ against the proxy.
 func TestReplayCodexTwoTurn(t *testing.T) {
 	upstream, captured := replayUpstream(t)
-	p := j2LimitedProxy(t, upstream, nil)
+	p := limitedResponsesProxy(t, upstream, nil)
 
 	// Turn 1: the initial user prompt.
 	req1 := httptest.NewRequest(
@@ -204,7 +204,7 @@ func TestReplayPoisonUsageSuccess(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 
 	// Retries and the production replay cap armed so the single-hit
 	// assertion exercises the real retry decision.
@@ -255,7 +255,7 @@ func TestReplayPoisonUsageSuccess(t *testing.T) {
 }
 
 // qwenReasoningStreamUpstream replays the observed yolo/qwen streaming
-// behavior (field regression 2026-08-22): role + reasoning_content deltas
+// behavior (observed field regression): role + reasoning_content deltas
 // (the DeepSeek/Qwen spelling), then answer content, then the finish chunk
 // and the [DONE] sentinel.
 func qwenReasoningStreamUpstream(t *testing.T) *httptest.Server {
@@ -433,7 +433,7 @@ func TestReplayQwenReasoningContentNonStream(t *testing.T) {
 }
 
 // matchedStopStreamUpstream replays the observed yolo/qwen streaming behavior
-// (field regression 2026-08-24): content deltas, then a finish chunk whose
+// (observed field regression): content deltas, then a finish chunk whose
 // choice carries the opaque `matched_stop` extension alongside finish_reason,
 // then the [DONE] sentinel.
 func matchedStopStreamUpstream(t *testing.T) (*httptest.Server, *int) {
@@ -464,7 +464,7 @@ func matchedStopStreamUpstream(t *testing.T) (*httptest.Server, *int) {
 func TestReplayMatchedStopMessagesStream(t *testing.T) {
 	upstream, hits := matchedStopStreamUpstream(t)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	u, _ := url.Parse(upstream.URL)
 	pattern, err := route.Parse("POST /v1/messages")
 	if err != nil {

@@ -1,6 +1,6 @@
 package transcode
 
-// J7 regression tests: the loss-policy semantic matrix and response-side
+// Regression tests: the loss-policy semantic matrix and response-side
 // reporting.
 
 import (

@@ -1,6 +1,6 @@
 package transcode
 
-// Review-z commit 2 acceptance tests: every granular loss key is reachable
+// Acceptance tests: every granular loss key is reachable
 // (a real conversion records it), rejected under strict policy, and allowed
 // only by its own permission; invalid model-generated tool arguments convert
 // byte-exact to Chat and Responses, produce a client-dialect unrepresentable
@@ -492,7 +492,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
-			// CC-REPORT-BOUND: the aggregated overflow note is reachable by
+			// the report-overflow bound: the aggregated overflow note is reachable by
 			// simply saturating the report; it is a Note (no policy gate).
 			key:  FeatureReportOverflow,
 			perm: []Feature{},

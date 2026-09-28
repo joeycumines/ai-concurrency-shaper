@@ -519,7 +519,7 @@ func TestFunctionCallOutputResultBranches(t *testing.T) {
 	}
 }
 
-// TestPreviousOutputMessageEmptyStatus (field regression 2026-08-24):
+// TestPreviousOutputMessageEmptyStatus (observed field regression):
 // real codex resume traffic sends a previous-output history item carrying
 // "status": "" — the sibling input items (FunctionCallInput,
 // FunctionCallOutputInput, ReasoningInput) treat an absent status as optional

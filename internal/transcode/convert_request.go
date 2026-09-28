@@ -947,8 +947,7 @@ func flattenNamespaceTool(
 		// Every nested tool was a dropped built-in. The top-level rule for
 		// an all-built-in tools list is accept-and-drop under the approval,
 		// and the tool_choice reconciliation owns the no-tools-left case —
-		// a namespace is never a different, harder rule than the top level
-		//.
+		// a namespace is never a different, harder rule than the top level.
 		if err := report.Note(
 			FeatureBuiltinTools,
 			fmt.Sprintf("tools[namespace=%s]", tool.Name),
@@ -1247,8 +1246,7 @@ func DecodeMessagesRequest(
 
 	// Tools. The input_schema raw bytes are preserved — validated as exactly
 	// one JSON object at this boundary, never decoded and remarshaled through
-	// a map, so large integers, decimals, and exponents survive byte-exact
-	//.
+	// a map, so large integers, decimals, and exponents survive byte-exact.
 	// Server-side definitions (type-discriminated, e.g. web_search_20250305)
 	// are the anthropic_server_tools loss decision — approved, they drop
 	// observably; rejected, the request fails with a keyed error — never a
@@ -2293,8 +2291,7 @@ func RenderChatRequest(
 
 	// A source request with no Chat-representable messages is a
 	// client-dialect invalid-request error before any upstream request:
-	// messages:null or an invented empty user prompt are never emitted
-	//.
+	// messages:null or an invented empty user prompt are never emitted.
 	// A source request with no Chat-representable messages is a
 	// client-dialect invalid-request error before any upstream request.
 	// A message whose content is a single EMPTY text block counts as
@@ -2447,8 +2444,7 @@ func RenderChatRequest(
 		}
 	}
 	// The reasoning summary style has no Chat representation: only the
-	// effort is portable, so the summary request is a loss/reject decision
-	//.
+	// effort is portable, so the summary request is a loss/reject decision.
 	if context != nil && context.OriginalResponsesRequest != nil &&
 		context.OriginalResponsesRequest.Reasoning != nil &&
 		context.OriginalResponsesRequest.Reasoning.Summary != nil {

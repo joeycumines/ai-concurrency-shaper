@@ -223,7 +223,7 @@ func TestHandlerProfileResolution(t *testing.T) {
 			UpstreamProtocol: UpstreamChatCompletions,
 			ClientRoute:      RouteKey{Method: http.MethodPost, Path: "/v1/responses"},
 			UpstreamPath:     "/v1/chat/completions",
-			LossPolicy:       j6PermissivePolicy(),
+			LossPolicy:       permissiveLossPolicy(),
 			ProfileMap: ProfileMap{
 				Profiles: map[string]ProfileMapping{
 					"scanner": {Model: "gpt-4o-mini", ReasoningTier: "low"},
@@ -311,7 +311,7 @@ func TestHandlerProfileResolution(t *testing.T) {
 			UpstreamProtocol: UpstreamChatCompletions,
 			ClientRoute:      RouteKey{Method: http.MethodPost, Path: "/v1/responses"},
 			UpstreamPath:     "/v1/chat/completions",
-			LossPolicy:       j6PermissivePolicy(),
+			LossPolicy:       permissiveLossPolicy(),
 			ProfileMap: ProfileMap{
 				Profiles: map[string]ProfileMapping{
 					"analyst": {Model: "gpt-4o", ReasoningTier: "high"},
@@ -434,7 +434,7 @@ func TestHandlerProfileResolution(t *testing.T) {
 			UpstreamProtocol: UpstreamChatCompletions,
 			ClientRoute:      RouteKey{Method: http.MethodPost, Path: "/v1/responses"},
 			UpstreamPath:     "/v1/chat/completions",
-			LossPolicy:       j6PermissivePolicy(),
+			LossPolicy:       permissiveLossPolicy(),
 			ProfileMap: ProfileMap{
 				Profiles: map[string]ProfileMapping{
 					"high-profile": {Model: "pinned-model", ReasoningTier: "high"},
@@ -490,7 +490,7 @@ func TestProfileTierDoesNotOverrideClientThinkingControl(t *testing.T) {
 				UpstreamProtocol: UpstreamChatCompletions,
 				ClientRoute:      RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
 				UpstreamPath:     "/v1/chat/completions",
-				LossPolicy:       j6PermissivePolicy(),
+				LossPolicy:       permissiveLossPolicy(),
 				ProfileMap: ProfileMap{
 					Profiles: map[string]ProfileMapping{
 						"scanner": {Model: "gpt-5", ReasoningTier: "high"},
@@ -565,7 +565,7 @@ func TestUnmappedModelErrorIsNotDoubleListed(t *testing.T) {
 		UpstreamProtocol: UpstreamChatCompletions,
 		ClientRoute:      RouteKey{Method: http.MethodPost, Path: "/v1/responses"},
 		UpstreamPath:     "/v1/chat/completions",
-		LossPolicy:       j6PermissivePolicy(),
+		LossPolicy:       permissiveLossPolicy(),
 		ModelMap:         ModelMap{Exact: exact, RequireExplicitMap: true},
 		ChatCapabilities: ChatCapabilities{ReasoningEffort: true},
 	}

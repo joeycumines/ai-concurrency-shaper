@@ -206,7 +206,7 @@ func TestChatStreamMaximalEchoReleases(t *testing.T) {
 func TestResponsesAnthropicToolIdentityCharged(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"m",
@@ -431,7 +431,7 @@ func TestPerEventFramingChargeCoversAllShapes(t *testing.T) {
 
 	// --- responses -> anthropic: every render shape ---
 	anthropicState := newAnthropicResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{ProviderReasoningThinking: true},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{ProviderReasoningThinking: true},
 		"msg_1", "claude-x", 1710000000,
 	)
 	created := ResponseCreatedEvent{

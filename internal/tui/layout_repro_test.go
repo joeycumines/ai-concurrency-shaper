@@ -9,7 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// Repro A: header render vs headerRowCount cap divergence
+// Header render versus the headerRowCount cap divergence.
 func TestRepro_HeaderCapDivergence(t *testing.T) {
 	metas := make([]ProviderMeta, 15)
 	for i := range metas {

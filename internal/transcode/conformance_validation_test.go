@@ -380,7 +380,7 @@ func TestSSEReadLineCROnly(t *testing.T) {
 // (TestResponsesStreamMismatchedEventNameRejected).
 func TestResponsesStreamEmptyEventNameAccepted(t *testing.T) {
 	ctx := testStreamContext()
-	state := newAnthropicResponsesStreamState(ctx, j6PermissivePolicy(), ChatCapabilities{}, "resp_1", "m", 1)
+	state := newAnthropicResponsesStreamState(ctx, permissiveLossPolicy(), ChatCapabilities{}, "resp_1", "m", 1)
 	converter := &responsesToAnthropicConverter{state: state}
 
 	// Empty event name + valid data -> routed by the JSON type, note once.

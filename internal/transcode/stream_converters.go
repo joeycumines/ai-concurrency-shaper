@@ -755,7 +755,7 @@ func (s *chatResponsesStreamState) convertDelta(
 	// The close fires ONLY at a real transition — a delta that actually
 	// carries content or tool output. A reasoning-only delta must NOT
 	// close the item: sealing it here would fragment contiguous reasoning
-	// into one thinking block per delta (CC-FRAGMENTATION, operator-
+	// into one thinking block per delta (one-block-per-delta, operator-
 	// observed 2026-09-08 — Claude Code rendered one ∴ fragment per line).
 	hasOutput := (delta.Content != nil && *delta.Content != "") ||
 		(delta.Refusal != nil && *delta.Refusal != "") ||
@@ -2286,8 +2286,7 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 			)
 		}
 		// A present delta role must be assistant: a non-assistant role is
-		// corrupt upstream wire, never relabeled as assistant output
-		//.
+		// corrupt upstream wire, never relabeled as assistant output.
 		if choice.Delta.Role != nil && *choice.Delta.Role != "assistant" {
 			return ChatStreamResponse{}, upstreamWireError(
 				UpstreamChatCompletions,
@@ -2560,13 +2559,11 @@ type anthropicResponsesStreamState struct {
 	bufferedToolFragments map[string][]string
 
 	// closedToolCalls records every function call closed by output_item.done:
-	// the terminal envelope's function items must reconcile against it
-	//.
+	// the terminal envelope's function items must reconcile against it.
 	closedToolCalls map[string]anthropicClosedToolCall
 
 	// partBlocks maps the Responses content part — keyed by owning item and
-	// content index — to the
-	// Anthropic block index it opened. The composed chat->anthropic
+	// content index — to the Anthropic block index it opened. The composed chat->anthropic
 	// direction keeps text and refusal parts open simultaneously, so deltas
 	// must target their own block, never the lowest open one.
 	partBlocks map[responsePartKey]int64
@@ -2591,10 +2588,9 @@ type anthropicResponsesStreamState struct {
 	// once per stream.
 	reasoningLossRecorded bool
 
-	// usageComponentsLossRecorded gates the required-usage-component loss
-	// the Messages wire requires breakdown fields the
-	// Responses source never provides, and the decision is recorded exactly
-	// once per stream.
+	// usageComponentsLossRecorded gates the required-usage-component loss:
+	// the Messages wire requires breakdown fields the Responses source never
+	// provides, and the decision is recorded exactly once per stream.
 	usageComponentsLossRecorded bool
 
 	// usageClampNotes gates the usage-clamp notes (usage_cache_exceeds_input,
@@ -2922,8 +2918,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 			return nil, err
 		}
 		// The required Messages breakdown components the source did not
-		// provide enter the loss decision before the zeros are emitted
-		//.
+		// provide enter the loss decision before the zeros are emitted.
 		if err := s.loseUnknownUsageComponentsOnce(envelope.Usage); err != nil {
 			return nil, err
 		}
@@ -2943,8 +2938,7 @@ func (s *anthropicResponsesStreamState) messageStart(
 			return nil, err
 		}
 		// The Messages wire requires output_tokens_details on the usage
-		// object: the zeros are emitted only after the approved loss above
-		//.
+		// object: the zeros are emitted only after the approved loss above.
 		s.message.Usage = &AnthropicUsage{
 			OutputTokensDetails: &AnthropicOutputTokensDetails{},
 		}
@@ -3005,8 +2999,7 @@ func (s *anthropicResponsesStreamState) outputItemAdded(
 	event ResponseOutputItemAddedEvent,
 ) ([]AnthropicStreamEvent, error) {
 	// Item identities are unique across the stream: a duplicate
-	// output_item.added for the same item id is corrupt upstream wire
-	//.
+	// output_item.added for the same item id is corrupt upstream wire.
 	itemType := itemTypeName(event.Item)
 	itemID := responsesOutputItemID(event.Item)
 	if _, exists := s.addedItems[itemID]; exists {
@@ -3318,8 +3311,7 @@ func (s *anthropicResponsesStreamState) outputItemDone(
 		return nil, s.wireError(fmt.Errorf("tool block for item %q was never started", call.ID))
 	}
 	// Identity comes from the item-added lifecycle: the added item must have
-	// carried the call identity, and the done snapshot must not drift from it
-	//.
+	// carried the call identity, and the done snapshot must not drift from it.
 	if pending.callID == "" || pending.name == "" {
 		return nil, s.wireError(fmt.Errorf(
 			"tool block for item %q was added without call identity",
@@ -4232,8 +4224,7 @@ func (s *anthropicResponsesStreamState) failed(
 ) ([]AnthropicStreamEvent, error) {
 	// A failed Responses stream must become an Anthropic error event, never
 	// end_turn. The failure terminal may only follow response.created: a
-	// failed envelope before the created envelope is a corrupt lifecycle
-	//.
+	// failed envelope before the created envelope is a corrupt lifecycle.
 	if !s.messageSent {
 		return nil, s.wireError(errors.New(
 			"responses stream terminal before response.created",
@@ -4339,8 +4330,7 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 			return err
 		}
 		// The Messages wire requires output_tokens_details on the usage
-		// object: the zeros are emitted only after the approved loss above
-		//.
+		// object: the zeros are emitted only after the approved loss above.
 		s.usage = &AnthropicUsage{
 			OutputTokensDetails: &AnthropicOutputTokensDetails{},
 		}
@@ -4423,8 +4413,7 @@ func responsesUsageToAnthropicUsage(usage *ResponsesUsage, presence usagePresenc
 	// it.
 	// Checked, architecture-independent int64-to-int conversion before
 	// rendering Messages usage: a count that cannot be represented on this
-	// platform (32-bit builds) is a typed error, never a silent overflow
-	//.
+	// platform (32-bit builds) is a typed error, never a silent overflow.
 	uncached, err := checkedInt64ToInt(usage.InputTokens - cached - cacheWrite)
 	if err != nil {
 		return nil, clamp, &UsageArithmeticError{Detail: "input tokens: " + err.Error()}

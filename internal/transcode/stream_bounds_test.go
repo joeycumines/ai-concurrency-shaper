@@ -1,6 +1,6 @@
 package transcode
 
-// J9 regression tests: stream bookkeeping is
+// Regression tests: stream bookkeeping is
 // bounded and non-quadratic — text and refusal accumulate in builders, the
 // repeated per-chunk envelope losses are recorded once per stream, and
 // cumulative semantic state beyond the configured bound is rejected as
@@ -176,7 +176,7 @@ func TestChatStreamTextCumulativeBound(t *testing.T) {
 func TestResponsesStreamToolArgumentsCumulativeBound(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"m",
@@ -274,7 +274,7 @@ func TestStreamTotalStateBound(t *testing.T) {
 	t.Run("output item count", func(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"msg_1",
 			"m",
@@ -307,7 +307,7 @@ func TestStreamTotalStateBound(t *testing.T) {
 	t.Run("content parts per item", func(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"msg_1",
 			"m",
@@ -395,7 +395,7 @@ func TestGeneratedFrameBoundAfterJSONEscaping(t *testing.T) {
 func TestResponsesMaximalPartAcceptedAndReleasable(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"m",
@@ -470,7 +470,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 				t.Fatalf("entry %d: %v", i, err)
 			}
 		}
-		// CC-REPORT-BOUND: the overflow is absorbed (one aggregated note,
+		// the report-overflow bound: the overflow is absorbed (one aggregated note,
 		// dropped-count incremented) — never an exchange failure.
 		err := report.Lose(policy, FeatureResponseServiceTier, "x", "y")
 		if err != nil {
@@ -580,7 +580,7 @@ func TestStreamBoundaryHelpers(t *testing.T) {
 	t.Run("anthropic frame bound after escaping", func(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"msg_1",
 			"m",
@@ -627,7 +627,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 	t.Run("anthropic per-item text bound", func(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"msg_1",
 			"m",
@@ -684,7 +684,7 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 	t.Run("anthropic tool call count", func(t *testing.T) {
 		state := newAnthropicResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"msg_1",
 			"m",
@@ -781,7 +781,7 @@ func TestChatStreamReasoningReportRecordedOnce(t *testing.T) {
 func TestStreamToolSnapshotBytesCounted(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"m",

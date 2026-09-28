@@ -1339,7 +1339,7 @@ func TestResolveAndValidate_Transcode_RetryReplayBytes_ZeroWhenRetriesDisabled(t
 
 // TestResolveAndValidate_TranscodeMaxBodyMB_DefaultsAndOverrides tests that
 // transcode request and response memory limits default to 10 MiB out of the box
-// and can be customized via flags (Review 19 #A3, Review 20 #1).
+// and can be customized via flags.
 func TestResolveAndValidate_TranscodeMaxBodyMB_DefaultsAndOverrides(t *testing.T) {
 	// 1. Defaults: 10 MiB
 	cfgDefault, err := Parse([]string{
@@ -1408,7 +1408,7 @@ func TestResolveAndValidate_TranscodeMaxBodyMB_DefaultsAndOverrides(t *testing.T
 
 // TestResolveAndValidate_TranscodeAuth_InvalidModesAndCustomHeaders verifies
 // that invalid auth modes and invalid/reserved custom header names fail startup
-// validation (Review 19 #C1).
+// validation.
 func TestResolveAndValidate_TranscodeAuth_InvalidModesAndCustomHeaders(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1483,7 +1483,7 @@ func TestResolveAndValidate_TranscodeAuth_InvalidModesAndCustomHeaders(t *testin
 
 // TestParseNegatedLosses_AllCanonicalFeatures verifies that every canonical
 // Feature can be passed positively or with '!' negation and is correctly mapped
-// without silent drop (Review 19 #C2).
+// without silent drop.
 func TestParseNegatedLosses_AllCanonicalFeatures(t *testing.T) {
 	for _, feat := range transcode.RegisteredLossKeys() {
 		name := string(feat)
@@ -1516,7 +1516,7 @@ func TestParseNegatedLosses_AllCanonicalFeatures(t *testing.T) {
 
 // TestResolveAndValidate_MessagesResponses_StrictDefaultsRequiresLoss verifies
 // that -transcode-messages-responses under -transcode-strict-defaults demands
-// explicit -transcode-allow-loss tool_schema_strictness (Review 19 #C3).
+// explicit -transcode-allow-loss tool_schema_strictness.
 func TestResolveAndValidate_MessagesResponses_StrictDefaultsRequiresLoss(t *testing.T) {
 	// Without explicit loss approval under strict defaults -> fail
 	cfgWithoutLoss, err := Parse([]string{

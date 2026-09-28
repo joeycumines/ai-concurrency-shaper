@@ -552,8 +552,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !context.StreamIntent {
 			// The upstream returned the wrong representation for the
 			// negotiated mode: corrupt upstream wire, an upstream failure
-			// that fails a half-open probe and applies the failure hold
-			//.
+			// that fails a half-open probe and applies the failure hold.
 			h.writeLocalError(r, w,
 				http.StatusBadGateway,
 				"upstream returned a stream for a non-streaming request",
@@ -1178,8 +1177,7 @@ func (h *TranscodeHandler) streamResponse(
 	// not be recorded as a clean completion. The streaming path needs no
 	// short-write check of its own: every downstream frame is written
 	// through sealedSSEWriter.writeAll, which treats a partial write as
-	// io.ErrShortWrite, and the writer's first error surfaces as WriterErr
-	//.
+	// io.ErrShortWrite, and the writer's first error surfaces as WriterErr.
 	downstreamComplete := observation.WriterErr == nil && observation.SealErr == nil
 
 	// Classify the outcome from explicit provenance. The classification is
@@ -1962,7 +1960,7 @@ func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.
 	}
 	if report.Dropped > 0 {
 		entries = append(entries, fmt.Sprintf(
-			"note: report_overflow: %d further entries dropped after the bound (CC-REPORT-BOUND)",
+			"note: report_overflow: %d further entries dropped after the bound (the report-overflow bound)",
 			report.Dropped,
 		))
 	}

@@ -247,8 +247,7 @@ func (l BodyLimits) Validate() error {
 	// Output limits below the minimum legal terminal or error frame make
 	// completion impossible: zero values select the package defaults
 	// (WithDefaults) and are skipped here; a small-but-positive limit that
-	// could never carry the smallest legal frame is a construction error
-	//.
+	// could never carry the smallest legal frame is a construction error.
 	if l.GeneratedSSEFrameBytes > 0 && l.GeneratedSSEFrameBytes < MinGeneratedFrameBytes {
 		return minGeneratedOutputError("GeneratedSSEFrameBytes", l.GeneratedSSEFrameBytes, MinGeneratedFrameBytes)
 	}
