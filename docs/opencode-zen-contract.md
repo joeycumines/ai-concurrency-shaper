@@ -2,9 +2,8 @@
 
 Observed 2026-09-28 from public endpoints (no credentials involved) plus the
 first-party client source. This is the reference the per-model native routing
-and the `-opencode` preset are built against. It is tracked so a fresh clone
-retains the contract; `blueprint.json` and `WIP.md` are excluded from git by
-repo-local `.git/info/exclude`.
+and the `-opencode` preset are built against, tracked so it survives a fresh
+clone.
 
 ## Model discovery
 
