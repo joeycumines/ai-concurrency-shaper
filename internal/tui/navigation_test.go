@@ -426,7 +426,7 @@ func TestSwitchTab_ResetsCursorAndScroll(t *testing.T) {
 	}
 }
 
-func TestPageDown_TUI06(t *testing.T) {
+func TestPageDown(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
@@ -438,7 +438,7 @@ func TestPageDown_TUI06(t *testing.T) {
 	}
 }
 
-func TestPageUp_TUI06(t *testing.T) {
+func TestPageUp(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
@@ -451,7 +451,7 @@ func TestPageUp_TUI06(t *testing.T) {
 	}
 }
 
-func TestHomeKey_TUI06(t *testing.T) {
+func TestHomeKey(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
@@ -464,7 +464,7 @@ func TestHomeKey_TUI06(t *testing.T) {
 	}
 }
 
-func TestEndKey_TUI06(t *testing.T) {
+func TestEndKey(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
@@ -476,7 +476,7 @@ func TestEndKey_TUI06(t *testing.T) {
 	}
 }
 
-func TestCtrlU_TUI06(t *testing.T) {
+func TestCtrlU(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
@@ -489,7 +489,7 @@ func TestCtrlU_TUI06(t *testing.T) {
 	}
 }
 
-func TestCtrlD_TUI06(t *testing.T) {
+func TestCtrlD(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24

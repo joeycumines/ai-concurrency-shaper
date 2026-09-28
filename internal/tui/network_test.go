@@ -234,7 +234,7 @@ func TestRoutesTabDeterministicSort(t *testing.T) {
 	}
 }
 
-func TestPerRouteRate_TUI10(t *testing.T) {
+func TestPerRouteRate(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
