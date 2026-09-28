@@ -157,7 +157,10 @@ func (p OpencodePreset) ApplyHeaders(out, in http.Header, session string) {
 		// Only what the CLIENT sent identifies the client. A header the
 		// pipeline applied — a custom authentication header above all — is
 		// absent from the inbound set, so scoping the strip to the inbound
-		// set keeps a configured credential intact. (Choosing a managed
+		// set keeps a configured credential intact. Note this scopes the
+		// PRESET: credential stripping runs earlier and separately, and it
+		// removes anthropic-version and anthropic-beta on any mount with a
+		// configured credential, on the transparent path too. (Choosing a managed
 		// name as the credential header is refused at config time by
 		// PresetManagedHeaderName.) The inbound/outbound maps are both
 		// canonicalized by net/http and by Set/Del, so the ranged key and

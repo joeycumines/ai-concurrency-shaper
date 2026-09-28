@@ -921,9 +921,14 @@ sees the first-party `User-Agent` and `x-opencode-client` rather than whatever
 the client sent, so a client cannot identify itself through them. The session
 value is the client's own when it sent one, else derived. A different client
 SDK's fingerprint headers (`x-stainless-*`, `x-app`) are removed, since a real
-opencode client sends none of them and they would reveal the actual client;
-protocol headers the dialect requires (`content-type`, `accept`,
-`anthropic-version`, `anthropic-beta`) are untouched. The client's own
+opencode client sends none of them and they would reveal the actual client.
+The preset itself leaves the dialect's protocol headers alone. Note that on a
+mount with an upstream credential configured, `anthropic-version` and
+`anthropic-beta` are removed by credential stripping before the preset runs, on
+the transparent path as well as the native one; a transcoded mapping restores
+`anthropic-version` from its auth policy, a native route does not. If you point a
+native Messages route at an endpoint that requires the header, set it upstream-side
+or use a transcoded mapping. The client's own
 identity/project/parent headers forward when present and are never fabricated.
 Because the preset applies after authentication, a name it writes or removes
 cannot also carry the upstream credential: `-auth-mode header:<name>` is
