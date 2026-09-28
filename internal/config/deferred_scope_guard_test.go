@@ -28,7 +28,7 @@ import (
 // TestDeferredVisionClauses_TypesRemainAbsent asserts that deferred/niche vision
 // types (client auth, session affinity/stickiness, client identity/LocalAddr rotation)
 // remain absent from the codebase. Reintroducing any of these must be a deliberate,
-// blueprint-documented design change rather than accidental drift.
+// documented design change rather than accidental drift.
 func TestDeferredVisionClauses_TypesRemainAbsent(t *testing.T) {
 	forbiddenTypeNames := []string{
 		"AffinityConfig",
@@ -69,7 +69,7 @@ func TestDeferredVisionClauses_TypesRemainAbsent(t *testing.T) {
 			}
 			for _, forbidden := range forbiddenTypeNames {
 				if typeSpec.Name.Name == forbidden {
-					t.Errorf("found forbidden deferred type %q in %s; reintroducing this capability requires an explicit blueprint change", forbidden, path)
+					t.Errorf("found forbidden deferred type %q in %s; reintroducing this capability requires an explicit documented design change", forbidden, path)
 				}
 			}
 			return true

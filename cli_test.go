@@ -494,7 +494,7 @@ func freePort(t *testing.T) int {
 	return port
 }
 
-// TestRunProxyBindFailureDoesNotStartMetricsListener pins GAP-007 in-process:
+// TestRunProxyBindFailureDoesNotStartMetricsListener pins the bind ordering in-process:
 // run() binds the proxy listener FIRST, so when the proxy bind fails the
 // metrics server is never created and its address stays free after run()
 // returns. With the old metrics-first ordering the metrics listener survived

@@ -1020,7 +1020,7 @@ func TestProxyTranscodeBreakerFailureCountedOnce(t *testing.T) {
 }
 
 // TestProxyTranscodeRateLimitClassification verifies the response-aware
-// failure classification parity with the native path (round-4 fix): a 403
+// failure classification parity with the native path: a 403
 // carrying x-ratelimit-* headers is an upstream failure, and Retry-After: 0
 // is not.
 func TestProxyTranscodeRateLimitClassification(t *testing.T) {

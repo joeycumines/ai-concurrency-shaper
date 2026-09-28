@@ -2,11 +2,11 @@ package transcode
 
 // Usage arithmetic acceptance tests. History:
 // exact total == input + output and failed the exchange on mismatch.
-// CC-USAGE-ARITHMETIC (operator-observed 2026-09-08: a real glm gateway
-// emitted total 293640 vs sum 293581, 502-ing Claude Code 8 retries on a
-// 293K-token session) re-adjudicated the disposition: a mismatched total is
-// an OBSERVABILITY fact — the source values are relayed as-is and the
-// mismatch is recorded as a usage_total_mismatch note. The
+// Re-adjudicated after an observed gateway emitted a total a few dozen tokens
+// above the sum of its parts, failing a Claude Code exchange that then
+// retried: a mismatched total is an OBSERVABILITY fact — the source values
+// are relayed as-is and the mismatch is recorded as a usage_total_mismatch
+// note. The
 // architecture-independent int64-to-int width checks and the
 // absent-vs-zero usage fidelity pins are unchanged.
 
@@ -98,7 +98,7 @@ func TestResponsesUsageMismatchStreamingRelayed(t *testing.T) {
 }
 
 // TestResponsesUsageMismatchNonStreamingRelayed proves the non-streaming
-// responses decode relays a contract-violating total (CC-USAGE-ARITHMETIC).
+// responses decode relays a contract-violating total (usage arithmetic).
 func TestResponsesUsageMismatchNonStreamingRelayed(t *testing.T) {
 	body := []byte(`{"object":"response","id":"resp_1","created_at":1.0,"model":"m","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":20,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`)
 	response, err := DecodeResponsesResponse(body)
@@ -214,7 +214,7 @@ func TestUsageAbsentVsZeroPreserved(t *testing.T) {
 }
 
 // TestStreamResponsesUsageMismatchRelayedAtTerminal pins the stream-path
-// disposition (CC-USAGE-ARITHMETIC): a mismatched total on the terminal
+// disposition (usage arithmetic): a mismatched total on the terminal
 // envelope is recorded as a usage_total_mismatch note and the stream
 // completes with the source's own usage — never a 502.
 func TestStreamResponsesUsageMismatchRelayedAtTerminal(t *testing.T) {
@@ -271,7 +271,7 @@ func TestStreamResponsesUsageMismatchRelayedAtTerminal(t *testing.T) {
 
 // TestStreamResponsesUsageMismatchRelayedAtCreated pins the messageStart
 // call site: a mismatched total on response.created is recorded and the
-// stream continues (CC-USAGE-ARITHMETIC).
+// stream continues (usage arithmetic).
 func TestStreamResponsesUsageMismatchRelayedAtCreated(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),

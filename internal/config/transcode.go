@@ -343,7 +343,7 @@ func parseTranscodeAuth(
 		// mode requires a secret source or inbound credentials") instead of
 		// silently forwarding the CLIENT credential upstream — the visible
 		// startup failure is preferable to an implicit credential export
-		// (GAP-005 adjudication principle).
+		// (fail-closed principle).
 	default:
 		secret, err := secretSource(source)
 		if err != nil {

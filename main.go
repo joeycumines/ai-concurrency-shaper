@@ -436,7 +436,7 @@ func run() error {
 
 	// Bind the proxy listener FIRST: a bind failure returns immediately,
 	// before any metrics server exists, so the metrics listener can never
-	// leak on this path (GAP-007). If the metrics bind fails afterwards,
+	// leak on this path. If the metrics bind fails afterwards,
 	// the deferred Close releases the proxy listener.
 	ln, err := net.Listen("tcp", cfg.Server.Bind)
 	if err != nil {

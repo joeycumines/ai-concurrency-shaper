@@ -179,10 +179,9 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 	}
 	for i, m := range mappings {
 		cap := m.Mapping.ChatCapabilities
-		// The default reasoning rendering is provider_reasoning_thinking
-		// (REASONING-DISPLAY, operator directive 2026-09-07/08): provider
-		// reasoning renders as native thinking blocks; the text mapping is
-		// the explicit opt-out.
+		// The default reasoning rendering is provider_reasoning_thinking:
+		// provider reasoning renders as native thinking blocks; the text
+		// mapping is the explicit opt-out.
 		if !cap.ProviderReasoningThinking || !cap.ParallelToolCalls {
 			t.Errorf("mapping %d capabilities = %+v, want the compatible core", i, cap)
 		}
@@ -1022,7 +1021,7 @@ func TestResolveAndValidate_TranscodeAuthInheritance(t *testing.T) {
 }
 
 // TestResolveAndValidate_TranscodeAuthDefaultsDocumented pins the DOCUMENTED
-// transcode auth contract (GAP-005 adjudication): with no transcode auth
+// transcode auth contract (adjudicated fail-closed default): with no transcode auth
 // flags the route inherits the provider auth when configured and strips to
 // AuthNone otherwise — never auto/inbound; inbound credential forwarding and
 // provider inheritance are both explicit opt-ins.

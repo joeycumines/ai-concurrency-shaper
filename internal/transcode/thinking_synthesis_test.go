@@ -1,7 +1,7 @@
 package transcode
 
-// THINK-2 (operator-adjudicated design, 2026-09-07): native thinking
-// rendering via marker-signature synthesis + request scrubbing.
+// Native thinking rendering via marker-signature synthesis plus request
+// scrubbing (operator-adjudicated design, 2026-09-07).
 //
 // With the provider_reasoning_thinking capability, provider plaintext
 // reasoning renders as NATIVE Anthropic thinking blocks carrying

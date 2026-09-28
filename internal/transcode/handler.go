@@ -177,7 +177,7 @@ func NewTranscodeHandler(
 	}
 	upstream := *cfg.Upstream
 	cfg.Upstream = &upstream
-	// Startup observability (GAP-011, operator choice: aggregate + startup
+	// Startup observability (operator choice: aggregate + startup
 	// summary): log the route's approved-loss profile once at construction,
 	// so the operator sees what this route will observably lose. The
 	// per-request approved-loss line (logConversionReport) is the

@@ -607,7 +607,7 @@ func TestInFlightEntry_TotalAge(t *testing.T) {
 
 func TestCollector_ResetConcurrent(t *testing.T) {
 	// Verify that Reset() does not underflow the active counter when
-	// DecActive() is called concurrently (the original bug from GAP-005).
+	// DecActive() is called concurrently (the original concurrency bug).
 	c := NewCollector()
 
 	const inFlight = 100

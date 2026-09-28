@@ -235,7 +235,7 @@ func TestValidateCanonicalResponseNegativeMatrix(t *testing.T) {
 	})
 
 	t.Run("inconsistent total (mismatch)", func(t *testing.T) {
-		// CC-USAGE-ARITHMETIC: a total that is not the exact sum of input +
+		// usage arithmetic: a total that is not the exact sum of input +
 		// output is an observability fact (real gateways emit it), relayed
 		// as-is — never an exchange failure.
 		r := base()

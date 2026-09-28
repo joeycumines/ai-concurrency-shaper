@@ -213,7 +213,7 @@ func DecodeChatResponseWithPolicy(
 	// only message, not delta. This is a KNOWN field, not a provider
 	// extension, so rejecting it does not weaken the envelope's
 	// unknown-field tolerance, and it prevents the delta content from being
-	// silently dropped (GAP-012 parity).
+	// silently dropped (structural-rejection parity).
 	if shadowChoice.Delta != nil {
 		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
