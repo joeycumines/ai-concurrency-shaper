@@ -153,6 +153,11 @@ func TestProxyPresetDisabledUntouched(t *testing.T) {
 			t.Fatalf("%s = %q, want absent without the preset", key, got)
 		}
 	}
+	cap.mu.Lock()
+	defer cap.mu.Unlock()
+	if string(cap.body) != `{}` {
+		t.Fatalf("upstream body = %q, want verbatim {}", cap.body)
+	}
 }
 
 // TestProxyPresetSurvivesTranscode proves the session set survives request

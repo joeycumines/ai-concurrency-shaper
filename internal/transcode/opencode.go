@@ -123,7 +123,7 @@ func (p OpencodePreset) ApplyHeaders(out, in http.Header, session string) {
 		out.Del(HeaderSessionID)
 	}
 	for _, key := range []string{HeaderOpencodeRequest, HeaderOpencodeProject, HeaderParentSessionID} {
-		if v := in.Get(key); v != "" {
+		if v := strings.TrimSpace(in.Get(key)); v != "" {
 			out.Set(key, v)
 		} else {
 			out.Del(key)
