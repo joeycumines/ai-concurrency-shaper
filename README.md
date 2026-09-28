@@ -339,6 +339,10 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-max-request-mb` | provider | `10` | Max unmarshaled request body size (MB) for transcoding |
 | `-transcode-max-response-mb` | provider | `10` | Max unmarshaled non-streaming response body size (MB) for transcoding |
 | `-transcode-flowlog-dir` | provider | `` (disabled) | Existing directory that receives one unredacted JSON record per transcoded exchange, capturing the full flow (client request, converted upstream request, upstream response, downstream response); empty disables the recorder |
+| `-native-route` | provider | _(repeatable)_ | Natively served route: `protocol@path` with protocol `responses`, `messages`, or `chat`. A request whose model's `via` dialect matches is forwarded with only the model identifier rewritten; a mismatch falls through to any transcode mapping on the same path (see [Native passthrough](#native-passthrough)) |
+| `-opencode` | provider | `false` | Emit the opencode first-party request shape upstream: `User-Agent`, `x-opencode-client`, session affinity and identity headers (see [opencode Zen and Go](#opencode-zen-and-go)) |
+| `-opencode-user-agent` | provider | `opencode/1.18.33` | `User-Agent` sent under `-opencode` when the client did not supply one |
+| `-opencode-client` | provider | `cli` | `x-opencode-client` sent under `-opencode` when the client did not supply one |
 
 ### Route examples
 
@@ -861,6 +865,84 @@ slot, and is exactly the workaround real gateways (Bifrost) rejected. The
 operational pain with this route is not the 404 but queueing — fix it with
 the limiter-class workaround in [Client-visible queue
 semantics](#client-visible-queue-semantics).
+
+### Native passthrough
+
+Some upstreams serve different models on different dialects — a provider may
+answer `claude-*` on `/v1/messages`, `gpt-*` on `/v1/responses`, and
+`deepseek-*` on `/v1/chat/completions`. Forcing every model through one
+conversion loses the model's native shape and can make the upstream reject the
+exchange.
+
+`-native-route protocol@path` (provider scope, repeatable) declares a route
+that a model can be served on **without conversion**, and the `via` fact on a
+`-model-table` entry names the dialect each model is native to:
+
+```sh
+ai-concurrency-shaper -upstream https://opencode.ai/zen/go -name zen-go \
+  -model-table 'qwen3.7-max@zen-go=qwen3.7-max;context=500000;via=messages' \
+  -model-table 'deepseek-v4-flash@zen-go=deepseek-v4-flash;context=1000000;via=chat' \
+  -native-route messages@/v1/messages \
+  -native-route chat@/v1/chat/completions
+```
+
+A request is forwarded with only the model identifier rewritten when its
+model's `via` dialect matches the route protocol; non-streaming responses get
+the client-facing name restored, and streaming responses pass through
+byte-identically. Validation is structural only (duplicate keys, trailing
+values, malformed syntax, and a usable `model` field) — the upstream owns its
+own dialect's field coverage, so its dialect-correct error is authoritative.
+
+A native route may **share its path** with a transcode mapping. Dispatch tries
+native first and falls through to the mapping when the model's dialect
+differs, so one path can serve some models natively and convert the rest:
+
+```sh
+# qwen3.7-max is served natively on /v1/messages;
+# deepseek-v4-flash is converted from Messages to Chat on the same path.
+ai-concurrency-shaper -upstream https://opencode.ai/zen/go -name zen-go \
+  -model-table 'qwen3.7-max@zen-go=qwen3.7-max;via=messages' \
+  -model-table 'deepseek-v4-flash@zen-go=deepseek-v4-flash;via=chat' \
+  -native-route messages@/v1/messages -transcode-messages-chat
+```
+
+A known model sent to a path with no route or mapping for its dialect fails
+closed with a dialect-shaped 404 naming its native dialect, rather than
+forwarding a surrogate the upstream does not know.
+
+### opencode Zen and Go
+
+OpenCode routes requests to different backend providers per conversation and
+requires a stable session value to pin them (`x-opencode-session`); a request
+without one fails upstream. `-opencode` (provider scope) reproduces the
+first-party request shape on every outbound path — transparent, native, and
+transcoded: `User-Agent`, `x-opencode-client`, the session value, and the
+client's own identity/project/parent headers when it sent them (they are never
+fabricated). Session precedence is the client's `x-opencode-session`, then
+`x-session-affinity`, then `X-Session-Id`, then a stable value derived from the
+conversation's own first user turn. Header values are never logged. Mounts
+without `-opencode` forward byte-identically.
+
+```sh
+export SHAPER_PROVIDER_OPENCODE_API_KEY=...
+ai-concurrency-shaper -bind=127.0.0.1:11239 \
+  --provider=opencode-go -upstream=https://opencode.ai/zen/go -prefix=/opencode-go \
+    -auth-source=env:SHAPER_PROVIDER_OPENCODE_API_KEY -auth-mode=auto \
+    -opencode \
+    -model-table 'qwen3.7-max@opencode-go=qwen3.7-max;via=messages' \
+    -model-table 'deepseek-v4-flash@opencode-go=deepseek-v4-flash;via=chat' \
+    -native-route messages@/v1/messages \
+    -native-route chat@/v1/chat/completions \
+    -transcode-messages-chat -transcode-responses-chat
+```
+
+A mount whose upstream host is not `opencode.ai` logs a startup note when the
+preset is enabled, so the impersonation never happens silently. The pinned
+`User-Agent` follows the released-stable client shape and is overridable with
+`-opencode-user-agent`; re-pin it by reading the installed client's own
+`User-Agent`. The observed upstream contract (model families, native paths,
+session enforcement, keyless behavior) is recorded in
+[`docs/opencode-zen-contract.md`](docs/opencode-zen-contract.md).
 
 ### Failure taxonomy
 
