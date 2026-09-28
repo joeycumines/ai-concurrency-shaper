@@ -1,8 +1,8 @@
 package main
 
 // Native-route CLI acceptance: valid native declarations pass
-// configuration (only the unreachable bind may fail), while colliding and
-// malformed declarations fail before any traffic is served.
+// configuration (only the unreachable bind may fail), while malformed
+// declarations fail before any traffic is served.
 
 import (
 	"strings"
@@ -10,7 +10,8 @@ import (
 )
 
 // TestCLIValidNativeConfigPasses proves a natively served provider with
-// table coverage and via dialects clears startup validation.
+// table coverage and via dialects clears startup validation, including a
+// native route that shares its client route with a transcode mapping.
 func TestCLIValidNativeConfigPasses(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -21,6 +22,7 @@ func TestCLIValidNativeConfigPasses(t *testing.T) {
 		"-name", "zen",
 		"-model-table", "m@zen=wire;via=messages",
 		"-model-table", "c@zen=chat-wire;via=chat",
+		"-transcode-messages-chat",
 		"-native-route", "messages@/v1/messages",
 		"-native-route", "chat@/v1/chat/completions",
 	)
@@ -32,14 +34,16 @@ func TestCLIValidNativeConfigPasses(t *testing.T) {
 	if !strings.Contains(out, "native: 2 route(s): messages@/v1/messages, chat@/v1/chat/completions") {
 		t.Fatalf("output missing native startup line: %s", out)
 	}
-	if strings.Contains(out, "invalid -model-table") ||
-		strings.Contains(out, "native route") && strings.Contains(out, "collides") {
+	if !strings.Contains(out, "transcode: 1 route(s): messages@/v1/messages=chat-completions@/v1/chat/completions") {
+		t.Fatalf("output missing transcode startup line: %s", out)
+	}
+	if strings.Contains(out, "invalid -model-table") {
 		t.Fatalf("valid native config rejected: %s", out)
 	}
 }
 
-// TestCLIRejectsBadNativeConfigs proves malformed and colliding native
-// declarations fail at startup.
+// TestCLIRejectsBadNativeConfigs proves malformed native declarations fail
+// at startup.
 func TestCLIRejectsBadNativeConfigs(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -49,18 +53,6 @@ func TestCLIRejectsBadNativeConfigs(t *testing.T) {
 		args    []string
 		wantErr string
 	}{
-		{
-			name: "native collides with transcode mapping",
-			args: []string{
-				"-bind", "127.0.0.1:1",
-				"-upstream", "http://127.0.0.1:1",
-				"-name", "zen",
-				"-model-table", "m@zen=wire;via=messages",
-				"-transcode-messages-chat",
-				"-native-route", "messages@/v1/messages",
-			},
-			wantErr: "collides with a transcode mapping",
-		},
 		{
 			name: "unknown native protocol",
 			args: []string{

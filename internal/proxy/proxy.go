@@ -985,9 +985,10 @@ func New(opts ...Option) (*Proxy, error) {
 	}
 
 	// Native routes share the transparent engine with model-identifier
-	// rewriting. A native key colliding with a transcode key or another
-	// native key is a startup error: the dispatch order would otherwise
-	// decide silently.
+	// rewriting. Dispatch tries native first; a model whose dialect differs
+	// falls through to the transcode mapping on the same route when one
+	// exists (that is how one path serves both natively and by
+	// conversion). Duplicate native keys are rejected.
 	p.nativeRouteMap = make(map[transcode.RouteKey]*NativeRoute, len(cfg.nativeRoutes))
 	for i := range cfg.nativeRoutes {
 		// Copy into proxy-owned storage so caller mutation after New
@@ -995,10 +996,6 @@ func New(opts ...Option) (*Proxy, error) {
 		p.nativeRoutes = append(p.nativeRoutes, cfg.nativeRoutes[i])
 		nr := &p.nativeRoutes[len(p.nativeRoutes)-1]
 		nr.ModelMap = cloneModelMap(nr.ModelMap)
-		if _, dup := seenTranscodeRoutes[nr.RouteKey]; dup {
-			return nil, fmt.Errorf("proxy: native route %s %s collides with a transcode client route",
-				nr.RouteKey.Method, nr.RouteKey.Path)
-		}
 		if _, dup := p.nativeRouteMap[nr.RouteKey]; dup {
 			return nil, fmt.Errorf("proxy: duplicate native route %s %s",
 				nr.RouteKey.Method, nr.RouteKey.Path)

@@ -92,13 +92,6 @@ func TestResolveTranscode_NativeRoutes(t *testing.T) {
 	assertModelTableSemanticError(t, []string{
 		"-upstream", "https://api.example.com",
 		"-model-table", "s@example=wire;via=messages",
-		"-transcode-messages-chat",
-		"-native-route", "messages@/v1/messages",
-	}, "native route POST /v1/messages collides with a transcode mapping for the same client route")
-
-	assertModelTableSemanticError(t, []string{
-		"-upstream", "https://api.example.com",
-		"-model-table", "s@example=wire;via=messages",
 		"-native-route", "messages@/v1/messages",
 		"-native-route", "messages@/v1/messages",
 	}, "duplicate native route for client route POST /v1/messages")
@@ -167,6 +160,27 @@ func TestResolveTranscode_OpencodePreset(t *testing.T) {
 		t.Fatal("preset enabled without -opencode")
 	}
 }
+
+// TestResolveTranscode_NativeSharesRouteWithTranscode proves a native
+// route may share its client route with a transcode mapping so one path
+// serves both natively and by conversion.
+func TestResolveTranscode_NativeSharesRouteWithTranscode(t *testing.T) {
+	cfg := resolveModelTableArgs(t,
+		"-upstream", "https://api.example.com",
+		"-model-table", "s@example=wire;via=messages",
+		"-transcode-messages-chat",
+		"-native-route", "messages@/v1/messages",
+	)
+	if n := len(cfg.Providers[0].NativeRoutes()); n != 1 {
+		t.Fatalf("native routes = %d, want 1", n)
+	}
+	if n := len(cfg.Providers[0].TranscodeMappings()); n != 1 {
+		t.Fatalf("transcode mappings = %d, want 1", n)
+	}
+}
+
+// TestResolveTranscode_NativeOnlyProviderCovered proves a provider with only
+// native routes (no transcode mappings) resolves its table and catalog.
 func TestResolveTranscode_NativeOnlyProviderCovered(t *testing.T) {
 	cfg := resolveModelTableArgs(t,
 		"-upstream", "https://api.example.com",

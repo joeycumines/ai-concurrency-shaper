@@ -916,13 +916,10 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		if err != nil {
 			return err
 		}
-		if _, dup := seen[nr.RouteKey]; dup {
-			return fmt.Errorf(
-				"native route %s %s collides with a transcode mapping for the same client route",
-				nr.RouteKey.Method,
-				nr.RouteKey.Path,
-			)
-		}
+		// A native route MAY share its client route with a transcode
+		// mapping: dispatch tries native first and falls through to the
+		// mapping when the model's dialect differs, so one path can serve
+		// both natively and by conversion.
 		if _, dup := nativeSeen[nr.RouteKey]; dup {
 			return fmt.Errorf(
 				"duplicate native route for client route %s %s",

@@ -37,11 +37,16 @@ const (
 )
 
 const (
-	// DefaultOpencodeUserAgent is the pinned first-party User-Agent,
-	// observed 2026-09-28 (local CLI 2.0.3, channel allowlist
-	// dev/beta/next/prod). Re-pin per the recorded rule: verify against
-	// the latest stable release, update the default and its test pin.
-	DefaultOpencodeUserAgent = "opencode/prod/2.0.3/opencode"
+	// DefaultOpencodeUserAgent is the pinned first-party User-Agent for
+	// the released-stable CLI shape `opencode/<version>`, observed
+	// 2026-09-28 against npm opencode-ai@1.18.33 (the published stable
+	// release) and its request-preparation source. The in-development
+	// 2.x line emits `opencode/<channel>/<version>/<name>`; the exact
+	// string is version-specific, so an operator matching a specific
+	// install overrides it with -opencode-user-agent. Re-pin per the
+	// recorded rule: read the installed release's own User-Agent and
+	// update this default.
+	DefaultOpencodeUserAgent = "opencode/1.18.33"
 	// DefaultOpencodeClient is the first-party client attribution.
 	DefaultOpencodeClient = "cli"
 )

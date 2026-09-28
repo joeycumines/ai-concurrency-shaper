@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
@@ -215,6 +216,46 @@ func TestProxyPresetSurvivesTranscode(t *testing.T) {
 	}
 	if first != second {
 		t.Fatalf("sessions differ across turns (%q vs %q): same history must reuse the value", first, second)
+	}
+	if got := cap.get("User-Agent"); got != transcode.DefaultOpencodeUserAgent {
+		t.Fatalf("UA = %q, want default", got)
+	}
+}
+
+// TestProxyPresetWithAuth proves ordering: the upstream credential is
+// injected AND the first-party session is present, with the client
+// credential stripped — the preset never depends on or clobbers auth.
+func TestProxyPresetWithAuth(t *testing.T) {
+	cap := &headerCapture{}
+	srv := httptest.NewServer(cap.handler(`{"ok":true}`))
+	t.Cleanup(srv.Close)
+	upstreamURL, _ := url.Parse(srv.URL)
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithOpencodePreset(testPreset()),
+		WithAuthPolicy(&auth.AuthPolicy{
+			Mode:   auth.AuthBearer,
+			Secret: auth.NewStaticSecretSource("cfg-secret"),
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/models", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer client-secret")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	if got := cap.get("Authorization"); got != "Bearer cfg-secret" {
+		t.Fatalf("upstream Authorization = %q, want the configured credential", got)
+	}
+	if got := cap.get("X-Opencode-Session"); got == "" {
+		t.Fatal("session missing alongside auth")
 	}
 	if got := cap.get("User-Agent"); got != transcode.DefaultOpencodeUserAgent {
 		t.Fatalf("UA = %q, want default", got)

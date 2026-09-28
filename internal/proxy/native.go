@@ -254,11 +254,15 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		// intact, preserving legacy transparent behavior.
 		return restoreOriginal(), nativeMiss
 	}
-	// Known model, wrong dialect for this route: fail closed locally
-	// naming the model's native dialect. Forwarding verbatim would send a
-	// surrogate the upstream does not know (or worse, serve it only when
-	// the names happen to coincide).
+	// Known model, wrong dialect for this route. When a transcode mapping
+	// covers the same client route, fall through so the mapping can
+	// convert to the model's native target; otherwise fail closed locally
+	// naming the model's native dialect, because forwarding verbatim would
+	// send a surrogate the upstream does not know.
 	if mapping.Via != nr.Protocol {
+		if _, fallback := p.transcodeHandlerMap[nr.RouteKey]; fallback {
+			return restoreOriginal(), nativeMiss
+		}
 		writeNativeDialectError(w, nr.Protocol, http.StatusNotFound,
 			fmt.Sprintf("model %q is natively served as %s, not on %s", clientModel, mapping.Via, nr.RouteKey.Path))
 		return r, nativeError

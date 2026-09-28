@@ -35,7 +35,6 @@ import (
 
 // nativeUpstream is a recording fake upstream for native-route tests.
 type nativeUpstream struct {
-	t        *testing.T
 	mu       sync.Mutex
 	path     string
 	model    string
@@ -325,8 +324,10 @@ func TestProxyNativeStreamByteIdentical(t *testing.T) {
 	}
 }
 
-// TestProxyNativeRouteValidation proves colliding and malformed native
-// declarations fail at construction.
+// TestProxyNativeRouteValidation proves malformed native declarations fail
+// at construction, while a native route may SHARE its client route with a
+// transcode mapping (native-first dispatch, conversion on dialect
+// mismatch).
 func TestProxyNativeRouteValidation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	t.Cleanup(srv.Close)
@@ -349,8 +350,8 @@ func TestProxyNativeRouteValidation(t *testing.T) {
 		Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
 	}}
 
-	if _, err := New(append(base, WithNativeRoutes(native), WithTranscodeMapping(transcodeMapping))...); err == nil {
-		t.Fatal("native/transcode key collision: want construction error, got nil")
+	if _, err := New(append(base, WithNativeRoutes(native), WithTranscodeMapping(transcodeMapping))...); err != nil {
+		t.Fatalf("native route sharing a client route with a transcode mapping: %v", err)
 	}
 	if _, err := New(append(base, WithNativeRoutes(native, native))...); err == nil {
 		t.Fatal("duplicate native route: want construction error, got nil")
@@ -365,6 +366,73 @@ func TestProxyNativeRouteValidation(t *testing.T) {
 		RouteKey: msgKey, Protocol: "bogus", ModelMap: nativeTestModelMap(),
 	}))...); err == nil {
 		t.Fatal("unknown native protocol: want construction error, got nil")
+	}
+}
+
+// TestProxyNativeFirstThenTranscode proves one path serves both: a model
+// whose dialect matches the native route is forwarded natively, while a
+// different-dialect model on the same path falls through to the transcode
+// mapping.
+func TestProxyNativeFirstThenTranscode(t *testing.T) {
+	up := &nativeUpstream{response: `{"type":"message","model":"wire-msg"}`}
+	srv := httptest.NewServer(http.HandlerFunc(up.handler))
+	t.Cleanup(srv.Close)
+	upstreamURL, _ := url.Parse(srv.URL)
+
+	// messages-native and chat-native models in one map; the native route
+	// covers /v1/messages, the mapping converts the chat-native model.
+	shared := nativeTestModelMap()
+	msgKey, _ := transcode.NewRouteKey(http.MethodPost, "/v1/messages")
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithNativeRoutes(NativeRoute{
+			RouteKey: msgKey, Protocol: transcode.NativeMessages, ModelMap: shared,
+		}),
+		WithTranscodeMapping(TranscodeMapping{Mapping: transcode.Mapping{
+			ClientRoute:      msgKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			UpstreamPath:     "/v1/chat/completions",
+			LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+				transcode.FeatureUsageCacheReadUnknown:  {},
+				transcode.FeatureUsageCacheWriteUnknown: {},
+				transcode.FeatureUsageReasoningUnknown:  {},
+				transcode.FeatureUsageUnknown:           {},
+				transcode.FeatureRequestReasoning:       {},
+				transcode.FeatureDeveloperRole:          {},
+			}},
+			ModelMap: shared,
+			Auth:     transcode.AuthPolicy{Mode: transcode.AuthNone},
+		}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Native: messages-native model.
+	rec := postNative(t, p, "/v1/messages",
+		`{"model":"msg-model","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("native status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if path, model, _ := up.got(); path != "/v1/messages" || model != "wire-msg" {
+		t.Fatalf("native path=%q model=%q, want /v1/messages wire-msg", path, model)
+	}
+
+	// Converted: chat-native model on the same path falls through.
+	up.mu.Lock()
+	up.response = `{"id":"chatcmpl-1","object":"chat.completion","created":1710000000,"model":"wire-chat","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+	up.mu.Unlock()
+	rec = postNative(t, p, "/v1/messages",
+		`{"model":"chat-model","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("converted status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if path, model, _ := up.got(); path != "/v1/chat/completions" || model != "wire-chat" {
+		t.Fatalf("converted path=%q model=%q, want /v1/chat/completions wire-chat", path, model)
 	}
 }
 

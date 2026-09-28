@@ -101,6 +101,13 @@ func TestOpencodeStealthSuiteEndToEnd(t *testing.T) {
 		}
 		return proxy.NativeRoute{RouteKey: key, Protocol: protocol, ModelMap: modelMap, Provider: "zen"}
 	}
+	// The messages path carries BOTH a native route and a chat conversion:
+	// one path serves messages-native models natively and chat-native
+	// models by conversion.
+	msgChatKey, err := transcode.NewRouteKey(http.MethodPost, "/v1/messages")
+	if err != nil {
+		t.Fatal(err)
+	}
 	p, err := proxy.New(
 		proxy.WithUpstream(upstreamURL),
 		proxy.WithMatcher(route.NewMatcher(nil)),
@@ -111,6 +118,24 @@ func TestOpencodeStealthSuiteEndToEnd(t *testing.T) {
 			native(transcode.NativeResponses, "/v1/responses"),
 			native(transcode.NativeChat, "/v1/chat/completions"),
 		),
+		proxy.WithTranscodeMapping(proxy.TranscodeMapping{Mapping: transcode.Mapping{
+			ClientRoute:      msgChatKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			UpstreamPath:     "/v1/chat/completions",
+			LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+				transcode.FeatureUsageCacheReadUnknown:  {},
+				transcode.FeatureUsageCacheWriteUnknown: {},
+				transcode.FeatureUsageReasoningUnknown:  {},
+				transcode.FeatureUsageUnknown:           {},
+				transcode.FeatureRequestReasoning:       {},
+				transcode.FeatureDeveloperRole:          {},
+			}},
+			ModelMap:           modelMap,
+			Auth:               transcode.AuthPolicy{Mode: transcode.AuthNone},
+			AllowedClientQuery: map[string]struct{}{"beta": {}},
+			Opencode:           transcode.OpencodePreset{Enabled: true, Provider: "zen"},
+		}}),
 		proxy.WithOpencodePreset(transcode.OpencodePreset{Enabled: true, Provider: "zen"}),
 	)
 	if err != nil {
@@ -202,6 +227,9 @@ func TestOpencodeStealthSuiteEndToEnd(t *testing.T) {
 			"/v1/responses", "wire-resp", "gpt-alias"},
 		{"chat", "/suite/v1/chat/completions",
 			`{"model":"chat-alias","messages":[{"role":"user","content":"hi"}]}`,
+			"/v1/chat/completions", "wire-chat", "chat-alias"},
+		{"messages-client to chat-native", "/suite/v1/messages?beta=true",
+			`{"model":"chat-alias","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
 			"/v1/chat/completions", "wire-chat", "chat-alias"},
 	}
 	for _, tc := range cases {
