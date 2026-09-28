@@ -61,10 +61,10 @@ func TestScratch_OpencodeRepro(t *testing.T) {
 				transcode.FeatureRequestReasoning:       {},
 				transcode.FeatureDeveloperRole:          {},
 			}},
-			ModelMap:             transcode.ModelMap{AllowIdentity: true},
-			Auth:                 transcode.AuthPolicy{Mode: transcode.AuthNone},
-			AllowedClientQuery:   map[string]struct{}{"beta": {}},
-			ChatCapabilities:     transcode.ChatCapabilities{ParallelToolCalls: true},
+			ModelMap:           transcode.ModelMap{AllowIdentity: true},
+			Auth:               transcode.AuthPolicy{Mode: transcode.AuthNone},
+			AllowedClientQuery: map[string]struct{}{"beta": {}},
+			ChatCapabilities:   transcode.ChatCapabilities{ParallelToolCalls: true},
 		}}),
 	)
 	if err != nil {
@@ -85,9 +85,9 @@ func TestScratch_OpencodeRepro(t *testing.T) {
 		CatalogHandler: cat,
 		DefaultShape:   transcode.CatalogShapeAnthropic,
 		ModelRoutes: []router.ModelRoute{{
-			Model:     "qwen3.7-max",
-			Provider:  "zen",
-			Handler:   p,
+			Model:    "qwen3.7-max",
+			Provider: "zen",
+			Handler:  p,
 			SupportedRoutes: map[transcode.RouteKey]struct{}{
 				{Method: http.MethodPost, Path: "/v1/messages"}: {},
 			},
