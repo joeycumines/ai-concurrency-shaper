@@ -183,7 +183,7 @@ func TestParseModelTableEntry_EmptyFact(t *testing.T) {
 // TestParseModelTableEntry_UnknownFact rejects an unmodelled fact key.
 func TestParseModelTableEntry_UnknownFact(t *testing.T) {
 	assertModelTableParseError(t, "s@p=w;foo=1",
-		`invalid -model-table "s@p=w;foo=1": unknown fact "foo" (want context, max_output, efforts, modalities, default, deprecated, cost_input, cost_output, tags, description, created)`)
+		`invalid -model-table "s@p=w;foo=1": unknown fact "foo" (want context, max_output, efforts, modalities, default, deprecated, cost_input, cost_output, tags, description, created, via)`)
 }
 
 func TestParseModelTableEntry_RichFacts(t *testing.T) {

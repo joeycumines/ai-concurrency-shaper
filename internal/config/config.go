@@ -177,22 +177,25 @@ type Provider struct {
 	TranscodeResponsesChat     bool
 	TranscodeMessagesChat      bool
 	TranscodeMessagesResponses bool
-	TranscodeStrictDefaults    bool
-	TranscodeAllowLosses       []string
-	TranscodeChatCapabilities  []string
-	TranscodeAllowClientQuery  []string
-	TranscodeModelMap          []string
-	TranscodeProfiles          []string
-	TranscodeMaxRequestMB      int64
-	TranscodeFlowLogDir        string
-	TranscodeMaxResponseMB     int64
-	TranscodeContinuity        bool
-	TranscodeContinuityCap     int
-	TranscodeContinuityTTL     time.Duration
-	TranscodeAuth              string
-	TranscodeAuthSource        string
-	TranscodeAuthHeader        string
-	TranscodeAnthropicVersion  string
+	// NativeRouteFlags holds the raw -native-route values; resolved into
+	// NativeRoute declarations by resolveTranscode.
+	NativeRouteFlags          []string
+	TranscodeStrictDefaults   bool
+	TranscodeAllowLosses      []string
+	TranscodeChatCapabilities []string
+	TranscodeAllowClientQuery []string
+	TranscodeModelMap         []string
+	TranscodeProfiles         []string
+	TranscodeMaxRequestMB     int64
+	TranscodeFlowLogDir       string
+	TranscodeMaxResponseMB    int64
+	TranscodeContinuity       bool
+	TranscodeContinuityCap    int
+	TranscodeContinuityTTL    time.Duration
+	TranscodeAuth             string
+	TranscodeAuthSource       string
+	TranscodeAuthHeader       string
+	TranscodeAnthropicVersion string
 
 	// ---- Circuit breaker (provider scope) ----
 
@@ -216,6 +219,7 @@ type Provider struct {
 	maxIdlePerHost    int
 	authPolicy        *auth.AuthPolicy
 	transcodeMappings []proxy.TranscodeMapping
+	nativeRoutes      []proxy.NativeRoute
 	// modelCatalog is this provider's frozen catalog snapshot, built from its
 	// model-table subset and resolved mappings. Nil when no table names it.
 	modelCatalog *transcode.CatalogConfig
@@ -257,6 +261,22 @@ func cloneTranscodeMapping(m proxy.TranscodeMapping) proxy.TranscodeMapping {
 		cloned.Mapping.AllowedClientQuery = query
 	}
 	return cloned
+}
+
+// NativeRoutes returns the resolved natively served routes for this
+// provider, deep-cloning internal maps to prevent caller mutations.
+func (p *Provider) NativeRoutes() []proxy.NativeRoute {
+	out := make([]proxy.NativeRoute, len(p.nativeRoutes))
+	for i, n := range p.nativeRoutes {
+		cloned := n
+		if n.ModelMap.Exact != nil {
+			exact := make(map[string]transcode.ModelMapping, len(n.ModelMap.Exact))
+			maps.Copy(exact, n.ModelMap.Exact)
+			cloned.ModelMap.Exact = exact
+		}
+		out[i] = cloned
+	}
+	return out
 }
 
 // UpstreamURL returns the parsed upstream URL.

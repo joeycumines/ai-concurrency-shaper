@@ -37,6 +37,30 @@ const (
 	UpstreamChatCompletions UpstreamProtocol = "chat-completions"
 )
 
+// NativeProtocol names the upstream dialect a model serves without
+// conversion. Unlike the transcode directions above it includes chat: a
+// native chat route forwards the client document with only the model
+// identifier rewritten, never transcoded. Chat is still never a transcode
+// client protocol.
+type NativeProtocol string
+
+const (
+	NativeResponses NativeProtocol = "responses"
+	NativeMessages  NativeProtocol = "messages"
+	NativeChat      NativeProtocol = "chat"
+)
+
+// ParseNativeProtocol resolves the -model-table via fact and -native-route
+// protocol vocabulary to a NativeProtocol.
+func ParseNativeProtocol(value string) (NativeProtocol, error) {
+	switch NativeProtocol(value) {
+	case NativeResponses, NativeMessages, NativeChat:
+		return NativeProtocol(value), nil
+	default:
+		return "", fmt.Errorf("unknown native protocol %q (want responses, messages, or chat)", value)
+	}
+}
+
 // RouteKey fixes the path-only dispatch bug. Method is normalized once at
 // construction and is part of the lookup key.
 type RouteKey struct {

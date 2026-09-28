@@ -189,7 +189,7 @@ func isCatalogRoute(path string) bool {
 
 func isCompletionRoute(path string) bool {
 	switch path {
-	case "/v1/responses", "/v1/messages":
+	case "/v1/responses", "/v1/messages", "/v1/chat/completions":
 		return true
 	default:
 		return false

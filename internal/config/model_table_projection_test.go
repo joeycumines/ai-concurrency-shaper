@@ -114,13 +114,13 @@ func TestModelTable_UnknownProviderRejected(t *testing.T) {
 }
 
 // TestModelTable_PassthroughOnlyProviderRejected keeps the catalog's
-// resolvability invariant true: a mount with no transcoded route has no model
-// resolution path, so it cannot advertise table-backed aliases.
+// resolvability invariant true: a mount with no transcoded or native route
+// has no model resolution path, so it cannot advertise table-backed aliases.
 func TestModelTable_PassthroughOnlyProviderRejected(t *testing.T) {
 	assertModelTableSemanticError(t, []string{
 		"-upstream", "https://api.openai.com",
 		"-model-table", "alias@openai=wire-model",
-	}, `invalid -model-table provider "openai": provider has no transcode routes, so catalog model identities cannot be resolved`)
+	}, `invalid -model-table provider "openai": provider has no transcode or native routes, so catalog model identities cannot be resolved`)
 }
 
 // TestModelTable_CoverageRequiresEntryPerTranscodedProvider requires every

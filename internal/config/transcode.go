@@ -209,6 +209,36 @@ func provisionalStrictnessLoss(m transcode.Mapping) transcode.Mapping {
 	return m
 }
 
+// parseNativeRoute parses one -native-route value of the form
+// protocol@path, where protocol is responses, messages, or chat. Unlike
+// -transcode-route, chat is legal here: native routes forward the document
+// with only the model identifier rewritten, never transcoded.
+func parseNativeRoute(value string) (proxy.NativeRoute, error) {
+	at := strings.Index(value, "@")
+	if at <= 0 || at == len(value)-1 {
+		return proxy.NativeRoute{}, fmt.Errorf(
+			"invalid native route %q: want protocol@path",
+			value,
+		)
+	}
+	protocol, err := transcode.ParseNativeProtocol(value[:at])
+	if err != nil {
+		return proxy.NativeRoute{}, fmt.Errorf("invalid native route %q: %w", value, err)
+	}
+	path := value[at+1:]
+	if !strings.HasPrefix(path, "/") {
+		return proxy.NativeRoute{}, fmt.Errorf("invalid native route %q: path %q must be absolute", value, path)
+	}
+	routeKey, err := transcode.NewRouteKey(httpMethodPost, path)
+	if err != nil {
+		return proxy.NativeRoute{}, fmt.Errorf("invalid native route %q: %w", value, err)
+	}
+	return proxy.NativeRoute{
+		RouteKey: routeKey,
+		Protocol: protocol,
+	}, nil
+}
+
 // parseTranscodeProfiles builds the ProfileMap from repeated -transcode-profile
 // values. Each value is "name=model:tier" or "name=model" (tier optional).
 // The tier, when present, must be in the closed effort vocabulary; an unknown
@@ -879,6 +909,55 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		}
 	}
 
+	var nativeRoutes []proxy.NativeRoute
+	nativeSeen := make(map[transcode.RouteKey]struct{})
+	for _, raw := range p.NativeRouteFlags {
+		nr, err := parseNativeRoute(raw)
+		if err != nil {
+			return err
+		}
+		if _, dup := seen[nr.RouteKey]; dup {
+			return fmt.Errorf(
+				"native route %s %s collides with a transcode mapping for the same client route",
+				nr.RouteKey.Method,
+				nr.RouteKey.Path,
+			)
+		}
+		if _, dup := nativeSeen[nr.RouteKey]; dup {
+			return fmt.Errorf(
+				"duplicate native route for client route %s %s",
+				nr.RouteKey.Method,
+				nr.RouteKey.Path,
+			)
+		}
+		nativeSeen[nr.RouteKey] = struct{}{}
+		nativeRoutes = append(nativeRoutes, nr)
+	}
+	for i := range nativeRoutes {
+		// Native routes share the provider's model resolution: the
+		// projected table (with Via dialects) or the explicit map. With
+		// neither, identity fallback applies and Via stays unknown, so
+		// every request declines native and falls through.
+		if tableProjected {
+			nativeRoutes[i].ModelMap = modelMap
+		} else if len(modelMap.Exact) > 0 || !modelMap.AllowIdentity {
+			nativeRoutes[i].ModelMap = modelMap
+		} else {
+			nativeRoutes[i].ModelMap = transcode.ModelMap{AllowIdentity: true}
+		}
+		if p.TranscodeMaxRequestMB > 0 {
+			nativeRoutes[i].BodyLimits.DecodedRequestBytes = p.TranscodeMaxRequestMB << 20
+		}
+		if p.TranscodeMaxResponseMB > 0 {
+			nativeRoutes[i].BodyLimits.SuccessfulResponseBytes = p.TranscodeMaxResponseMB << 20
+		}
+		if err := nativeRoutes[i].Validate(); err != nil {
+			return fmt.Errorf("native route %s %s: %w",
+				nativeRoutes[i].RouteKey.Method, nativeRoutes[i].RouteKey.Path, err)
+		}
+	}
+
 	p.transcodeMappings = mappings
+	p.nativeRoutes = nativeRoutes
 	return nil
 }

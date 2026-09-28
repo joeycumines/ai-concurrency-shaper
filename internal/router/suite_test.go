@@ -619,15 +619,88 @@ func TestCatalogSuiteRejectsUnsupportedProviderRoute(t *testing.T) {
 	}
 }
 
+func TestCatalogSuite_ChatCompletionRouted(t *testing.T) {
+	var hits atomic.Int64
+	target := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	catHandler, err := transcode.NewCatalogHandler(transcode.CatalogConfig{
+		ProviderName: "suite-chat",
+		Models:       []transcode.CatalogModel{{Surrogate: "chat-model", Provider: "provC"}},
+		DefaultShape: transcode.CatalogShapeOpenAI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:           "suite-chat",
+		Prefix:         "/suite",
+		CatalogHandler: catHandler,
+		ModelRoutes: []router.ModelRoute{{
+			Model:    "chat-model",
+			Provider: "provC",
+			Handler:  target,
+			SupportedRoutes: map[transcode.RouteKey]struct{}{
+				{Method: http.MethodPost, Path: "/v1/chat/completions"}: {},
+			},
+		}},
+		Strict: true,
+	})
+	rtr, err := router.New([]router.Provider{
+		{Name: "suite-chat", Prefix: "/suite", Proxy: suite},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Routed: POST /suite/v1/chat/completions with a covered model.
+	req := httptest.NewRequest(http.MethodPost, "/suite/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"chat-model","messages":[]}`))
+	rec := httptest.NewRecorder()
+	rtr.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat completion status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("target hits = %d, want 1", hits.Load())
+	}
+
+	// Unknown model on the chat route: 404 in the OpenAI dialect.
+	req = httptest.NewRequest(http.MethodPost, "/suite/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"nope","messages":[]}`))
+	rec = httptest.NewRecorder()
+	rtr.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown model status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("error body: %v", err)
+	}
+	if _, ok := doc["error"]; !ok {
+		t.Fatalf("body = %s, want OpenAI error envelope", rec.Body.String())
+	}
+}
+
 func TestCatalogSuiteCompletionSurfaceIsVersionedResponsesAndMessages(t *testing.T) {
 	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{Strict: true})
-	for _, target := range []string{"/v1/chat/completions", "/chat/completions", "/responses", "/messages"} {
+	for _, target := range []string{"/chat/completions", "/responses", "/messages"} {
 		req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(`{"model":"m"}`))
 		rec := httptest.NewRecorder()
 		suite.ServeHTTP(rec, req)
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("%s status = %d, want 404", target, rec.Code)
 		}
+	}
+	// POST /v1/chat/completions is a completion route (natively served
+	// chat models): on an empty strict suite it reports no provider,
+	// exactly like its /v1/responses and /v1/messages siblings.
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	rec := httptest.NewRecorder()
+	suite.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("/v1/chat/completions status = %d, want 503", rec.Code)
 	}
 }
 

@@ -122,6 +122,9 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 	for _, tm := range p.TranscodeMappings() {
 		opts = append(opts, proxy.WithTranscodeMapping(tm))
 	}
+	for _, nr := range p.NativeRoutes() {
+		opts = append(opts, proxy.WithNativeRoutes(nr))
+	}
 	if catalog, ok := p.ModelCatalog(); ok {
 		opts = append(opts, proxy.WithModelCatalog(catalog))
 	}
@@ -203,6 +206,13 @@ func logProviderConfig(pr *config.Provider) {
 				m.UpstreamProtocol, m.UpstreamPath))
 		}
 		log.Printf("transcode: %d route(s): %s", len(mappings), strings.Join(parts, ", "))
+	}
+	if routes := pr.NativeRoutes(); len(routes) > 0 {
+		var parts []string
+		for _, n := range routes {
+			parts = append(parts, fmt.Sprintf("%s@%s", n.Protocol, n.RouteKey.Path))
+		}
+		log.Printf("native: %d route(s): %s", len(routes), strings.Join(parts, ", "))
 	}
 }
 
@@ -321,6 +331,9 @@ func run() error {
 		providerRoutes := make(map[transcode.RouteKey]struct{})
 		for _, mapping := range pr.TranscodeMappings() {
 			providerRoutes[mapping.ClientRoute] = struct{}{}
+		}
+		for _, native := range pr.NativeRoutes() {
+			providerRoutes[native.RouteKey] = struct{}{}
 		}
 		proxiesByName[providerName] = p
 		routesByProvider[providerName] = providerRoutes

@@ -204,6 +204,7 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.boolVar(&p.TranscodeResponsesChat, "transcode-responses-chat", false, "preset: map POST /v1/responses to upstream /v1/chat/completions")
 	r.boolVar(&p.TranscodeMessagesChat, "transcode-messages-chat", false, "preset: map POST /v1/messages to upstream /v1/chat/completions")
 	r.boolVar(&p.TranscodeMessagesResponses, "transcode-messages-responses", false, "preset: map POST /v1/messages to upstream /v1/responses")
+	r.stringListVar(&p.NativeRouteFlags, "native-route", "repeatable natively served route: protocol@path with protocol responses|messages|chat (model identifier rewritten, body otherwise forwarded verbatim)")
 	r.boolVar(&p.TranscodeStrictDefaults, "transcode-strict-defaults", false, "disable default loss approvals, capabilities, and query forwarding")
 	r.stringListVar(&p.TranscodeAllowLosses, "transcode-allow-loss", "approved non-portable feature or !name to deny (repeatable)")
 	r.stringListVar(&p.TranscodeChatCapabilities, "transcode-chat-capability", "enable chat upstream capability or !name to deny (repeatable)")

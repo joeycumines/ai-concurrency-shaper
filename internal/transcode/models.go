@@ -19,6 +19,11 @@ type ModelMapping struct {
 	// converted response. It should normally equal ClientModel.
 	ClientResponseModel string
 
+	// Via names the model's native upstream dialect when known, so a
+	// natively served route can select model-rewrite forwarding instead of
+	// conversion. Empty means unknown: legacy behavior, never native.
+	Via NativeProtocol
+
 	// ReasoningTier pins the reasoning effort tier for this model ("low",
 	// "medium", "high", or "" when unset). Empty means no tier override.
 	ReasoningTier string

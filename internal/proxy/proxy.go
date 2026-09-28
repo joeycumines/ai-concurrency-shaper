@@ -96,6 +96,7 @@ type proxyConfig struct {
 	adaptiveHeadroomWindow time.Duration
 	limitAll               bool
 	transcodeMappings      []TranscodeMapping
+	nativeRoutes           []NativeRoute
 	authPolicy             *auth.AuthPolicy
 	modelCatalog           *transcode.CatalogConfig
 }
@@ -697,9 +698,18 @@ type Proxy struct {
 	// transcodeHandlers serves transcoded routes, one per mapping.
 	transcodeHandlers []*transcode.TranscodeHandler
 
+	// nativeRoutes owns the natively served route declarations; the map
+	// below points into this slice.
+	nativeRoutes []NativeRoute
+
 	// transcodeHandlerMap provides O(1) lookup of transcode handlers by
 	// method+path route key, built once at construction.
 	transcodeHandlerMap map[transcode.RouteKey]http.Handler
+
+	// nativeRouteMap provides O(1) lookup of natively served routes by
+	// method+path route key, built once at construction. A native miss
+	// falls through to the transcode lookup.
+	nativeRouteMap map[transcode.RouteKey]*NativeRoute
 
 	// catalog, when non-nil, answers this mount's GET /v1/models discovery
 	// request locally from the frozen model-table snapshot. Catalog behavior
@@ -949,6 +959,28 @@ func New(opts ...Option) (*Proxy, error) {
 		}
 	}
 
+	// Native routes share the transparent engine with model-identifier
+	// rewriting. A native key colliding with a transcode key or another
+	// native key is a startup error: the dispatch order would otherwise
+	// decide silently.
+	p.nativeRouteMap = make(map[transcode.RouteKey]*NativeRoute, len(cfg.nativeRoutes))
+	for i := range cfg.nativeRoutes {
+		// Copy into proxy-owned storage so caller mutation after New
+		// cannot change live routing or race with requests.
+		p.nativeRoutes = append(p.nativeRoutes, cfg.nativeRoutes[i])
+		nr := &p.nativeRoutes[len(p.nativeRoutes)-1]
+		nr.ModelMap = cloneModelMap(nr.ModelMap)
+		if _, dup := seenTranscodeRoutes[nr.RouteKey]; dup {
+			return nil, fmt.Errorf("proxy: native route %s %s collides with a transcode client route",
+				nr.RouteKey.Method, nr.RouteKey.Path)
+		}
+		if _, dup := p.nativeRouteMap[nr.RouteKey]; dup {
+			return nil, fmt.Errorf("proxy: duplicate native route %s %s",
+				nr.RouteKey.Method, nr.RouteKey.Path)
+		}
+		p.nativeRouteMap[nr.RouteKey] = nr
+	}
+
 	// The catalog is a local answer, not an upstream route: build its handler
 	// once here so an invalid snapshot is a startup error, never a
 	// first-request surprise.
@@ -989,7 +1021,13 @@ func New(opts ...Option) (*Proxy, error) {
 		},
 		Transport: p,
 		ModifyResponse: func(res *http.Response) error {
-			return validateSwitchingProtocolsResponse(res)
+			if err := validateSwitchingProtocolsResponse(res); err != nil {
+				return err
+			}
+			// Natively served exchanges restore the client-facing model
+			// alias on non-streaming JSON responses; everything else
+			// passes through untouched.
+			return rewriteNativeResponseAlias(res)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if rec, ok := w.(*statusRecorder); ok {
@@ -1681,7 +1719,21 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 				localPanic = true
 			}
 		}()
-		if handler := p.lookupTranscodeHandler(r); handler != nil {
+		if nr := p.lookupNativeRoute(r); nr != nil {
+			// A natively served route rewrites the model identifier and
+			// continues through the transparent engine; a miss carries
+			// the restored request into the transcode lookup below.
+			if out, action := p.nativeRouteAction(w, r, nr); action == nativeServe {
+				p.inner.ServeHTTP(w, out)
+			} else if action == nativeMiss {
+				r = out
+				if handler := p.lookupTranscodeHandler(r); handler != nil {
+					p.serveTranscodeHandler(w, r, handler)
+				} else {
+					p.inner.ServeHTTP(w, r)
+				}
+			}
+		} else if handler := p.lookupTranscodeHandler(r); handler != nil {
 			p.serveTranscodeHandler(w, r, handler)
 		} else {
 			p.inner.ServeHTTP(w, r)
@@ -2130,7 +2182,21 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 				localPanic = true
 			}
 		}()
-		if handler := p.lookupTranscodeHandler(r); handler != nil {
+		if nr := p.lookupNativeRoute(r); nr != nil {
+			// A natively served route rewrites the model identifier and
+			// continues through the transparent engine; a miss carries
+			// the restored request into the transcode lookup below.
+			if out, action := p.nativeRouteAction(w, r, nr); action == nativeServe {
+				p.inner.ServeHTTP(w, out)
+			} else if action == nativeMiss {
+				r = out
+				if handler := p.lookupTranscodeHandler(r); handler != nil {
+					p.serveTranscodeHandler(w, r, handler)
+				} else {
+					p.inner.ServeHTTP(w, r)
+				}
+			}
+		} else if handler := p.lookupTranscodeHandler(r); handler != nil {
 			p.serveTranscodeHandler(w, r, handler)
 		} else {
 			p.inner.ServeHTTP(w, r)
@@ -2171,7 +2237,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	// Feed failure/success signals to the circuit breaker from the
 	// immutable exchange result. Without retries, the proxy reports the
 	// whole exchange. With retry-enabled breaker reporting, the retry
-	// transport records failures immediately (attempt.FailureRecorded) but
+	// transport reports failures immediately (attempt.FailureRecorded) but
 	// defers 2xx success via the request context; the proxy records that
 	// success only after ReverseProxy has copied the response body without
 	// an abort. A transcoded exchange contributes explicit outcome

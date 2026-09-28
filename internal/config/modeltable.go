@@ -33,7 +33,14 @@ import (
 //	fact  = context=pos-int | max_output=pos-int | efforts=effort+... |
 //	        modalities=modality+... | default | deprecated |
 //	        cost_input=non-neg-decimal | cost_output=non-neg-decimal |
-//	        tags=tag+... | description=desc | created=non-neg-int
+//	        tags=tag+... | description=desc | created=non-neg-int |
+//	        via=native-dialect
+//
+// via is the one routing-active fact: it names the model's native upstream
+// dialect (responses, messages, or chat) so natively served routes can
+// forward with only the model identifier rewritten. Every other fact stays
+// presentation-only: validated and frozen for the served catalog, never read
+// by a resolution or rendering path.
 //
 // The first '=' splits the surrogate@provider left side from the wire id and
 // facts; the first '@' splits the surrogate from the provider; the first ';'
@@ -56,7 +63,7 @@ const (
 )
 
 const (
-	modelTableFactVocabulary = "context, max_output, efforts, modalities, default, deprecated, cost_input, cost_output, tags, description, created"
+	modelTableFactVocabulary = "context, max_output, efforts, modalities, default, deprecated, cost_input, cost_output, tags, description, created, via"
 )
 
 // modelTableEntry is one parsed -model-table entry. Facts stay inert here; only
@@ -76,7 +83,10 @@ type modelTableEntry struct {
 	Tags        []string
 	Description string
 	Created     int64
-	Raw         string
+	// Via is the one routing-active fact: the model's native upstream
+	// dialect for natively served routes. Empty means unknown.
+	Via transcode.NativeProtocol
+	Raw string
 }
 
 // parseModelTableEntry parses and validates one raw -model-table value. Every
@@ -204,6 +214,15 @@ func parseModelTableEntry(raw string) (modelTableEntry, error) {
 				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: invalid created %q: want an RFC3339 year 1970-9999 timestamp", raw, value)
 			}
 			entry.Created = n
+		case "via":
+			if !hasValue || value == "" {
+				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: empty via fact", raw)
+			}
+			via, err := transcode.ParseNativeProtocol(value)
+			if err != nil {
+				return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: %w", raw, err)
+			}
+			entry.Via = via
 		default:
 			return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: unknown fact %q (want %s)", raw, key, modelTableFactVocabulary)
 		}
@@ -441,11 +460,19 @@ func (c *Config) resolveModelTable() error {
 		}
 	}
 	for _, p := range c.Providers {
-		if len(byProvider[effectiveName(p)]) > 0 && !hasTranscodeRoutes(p) {
+		if len(byProvider[effectiveName(p)]) > 0 && !hasTranscodeRoutes(p) && !hasNativeRoutes(p) {
 			return fmt.Errorf(
-				"invalid -model-table provider %q: provider has no transcode routes, so catalog model identities cannot be resolved",
+				"invalid -model-table provider %q: provider has no transcode or native routes, so catalog model identities cannot be resolved",
 				effectiveName(p),
 			)
+		}
+	}
+	for _, p := range c.Providers {
+		if !hasNativeRoutes(p) {
+			continue
+		}
+		if len(byProvider[effectiveName(p)]) == 0 {
+			return fmt.Errorf("provider %q has native routes but no -model-table entry names it", effectiveName(p))
 		}
 	}
 
@@ -464,6 +491,12 @@ func hasTranscodeRoutes(p *Provider) bool {
 		p.TranscodeResponsesChat ||
 		p.TranscodeMessagesChat ||
 		p.TranscodeMessagesResponses
+}
+
+// hasNativeRoutes reports whether the provider declares any natively
+// served route.
+func hasNativeRoutes(p *Provider) bool {
+	return len(p.NativeRouteFlags) > 0
 }
 
 func cloneModelTableEntry(entry modelTableEntry) modelTableEntry {
@@ -561,6 +594,9 @@ func (e modelTableEntry) factSuffix() string {
 	if len(e.Tags) > 0 {
 		parts = append(parts, "tags="+strings.Join(e.Tags, "+"))
 	}
+	if e.Via != "" {
+		parts = append(parts, "via="+string(e.Via))
+	}
 	if len(parts) == 0 {
 		return ""
 	}
@@ -579,6 +615,7 @@ func modelMapFromTable(subset []modelTableEntry) transcode.ModelMap {
 			ClientModel:         entry.Surrogate,
 			UpstreamModel:       entry.Wire,
 			ClientResponseModel: entry.Surrogate,
+			Via:                 entry.Via,
 		}
 	}
 	return transcode.ModelMap{
@@ -647,6 +684,14 @@ func (p *Provider) resolveModelCatalog(modelTable []modelTableEntry) {
 			catalog.ParallelToolCalls = mapping.ChatCapabilities.ParallelToolCalls
 			catalog.StructuredOutputs = mapping.ChatCapabilities.StructuredOutputs
 			capabilitiesSet = true
+		}
+	}
+	for i := range p.nativeRoutes {
+		switch p.nativeRoutes[i].Protocol {
+		case transcode.NativeResponses:
+			catalog.ServesResponses = true
+		case transcode.NativeMessages:
+			catalog.ServesMessages = true
 		}
 	}
 	p.modelCatalog = &catalog
