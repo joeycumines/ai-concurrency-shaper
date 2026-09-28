@@ -99,6 +99,7 @@ type proxyConfig struct {
 	nativeRoutes           []NativeRoute
 	authPolicy             *auth.AuthPolicy
 	modelCatalog           *transcode.CatalogConfig
+	opencode               transcode.OpencodePreset
 }
 
 // TranscodeMapping configures one transcoded route. The embedded
@@ -150,6 +151,25 @@ func (o *TranscodeOption) applyProxyOption(cfg *proxyConfig) error {
 }
 
 var _ Option = (*TranscodeOption)(nil)
+
+// OpencodePresetOption enables first-party opencode header emission on
+// the transparent engine. The zero preset is disabled and changes nothing.
+type OpencodePresetOption struct {
+	preset transcode.OpencodePreset
+}
+
+// WithOpencodePreset returns an option that enables first-party header
+// emission with the given preset.
+func WithOpencodePreset(preset transcode.OpencodePreset) *OpencodePresetOption {
+	return &OpencodePresetOption{preset: preset}
+}
+
+func (o *OpencodePresetOption) applyProxyOption(cfg *proxyConfig) error {
+	cfg.opencode = o.preset
+	return nil
+}
+
+var _ Option = (*OpencodePresetOption)(nil)
 
 // --- Concrete Options ---
 
@@ -711,6 +731,10 @@ type Proxy struct {
 	// falls through to the transcode lookup.
 	nativeRouteMap map[transcode.RouteKey]*NativeRoute
 
+	// opencode, when enabled, emits the first-party header set on the
+	// transparent engine's outbound requests (after authentication).
+	opencode transcode.OpencodePreset
+
 	// catalog, when non-nil, answers this mount's GET /v1/models discovery
 	// request locally from the frozen model-table snapshot. Catalog behavior
 	// lives in catalog.go; only the central Proxy lifecycle hook remains here.
@@ -917,6 +941,7 @@ func New(opts ...Option) (*Proxy, error) {
 		adaptiveHeadroomWindow: cfg.adaptiveHeadroomWindow,
 		limitAll:               cfg.limitAll,
 		authPolicy:             cfg.authPolicy,
+		opencode:               cfg.opencode,
 	}
 
 	// Build one transcode handler per mapping, each forwarding through the
@@ -1017,6 +1042,18 @@ func New(opts ...Option) (*Proxy, error) {
 					slog.Error("upstream auth failed; forwarding stripped-only", "error", err)
 					auth.StripCredentials(pr.Out.Header)
 				}
+			}
+			if cfg.opencode.Enabled {
+				// First-party headers go on after authentication: the mock
+				// never clobbers credentials. The conversation key stashed
+				// by the native path wins; otherwise the key derives from
+				// the client address (this path never inspects the body).
+				fallback := transcode.DeriveClientKey(cfg.opencode.Provider, pr.In.RemoteAddr)
+				if alias, ok := nativeAliasFromContext(pr.In.Context()); ok && alias.convKey != "" {
+					fallback = alias.convKey
+				}
+				session := cfg.opencode.ResolveSession(pr.In.Header, fallback)
+				cfg.opencode.ApplyHeaders(pr.Out.Header, pr.In.Header, session)
 			}
 		},
 		Transport: p,

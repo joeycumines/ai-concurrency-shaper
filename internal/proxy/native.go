@@ -43,6 +43,10 @@ type NativeRoute struct {
 	RouteKey transcode.RouteKey
 	Protocol transcode.NativeProtocol
 
+	// Provider scopes derived conversation keys to the mount. Stamped
+	// from the provider's effective name at resolve time.
+	Provider string
+
 	// ModelMap resolves surrogates to wire models and carries each
 	// mapping's Via dialect. Entries without Via never serve natively.
 	ModelMap transcode.ModelMap
@@ -101,12 +105,18 @@ func (o *NativeOption) applyProxyOption(cfg *proxyConfig) error {
 var _ Option = (*NativeOption)(nil)
 
 // nativeAlias carries the model rewrite applied to a natively served
-// request so the response path can restore the client-facing alias.
+// request so the response path can restore the client-facing alias. It
+// also carries the conversation key for first-party header emission
+// downstream in the rewrite hook.
 type nativeAlias struct {
 	surrogate string
 	wire      string
 	// respCap bounds the response body inspected for the alias restore.
 	respCap int64
+	// convKey is the stable conversation key derived from the request
+	// document (model plus first user text), or "" when derivation had
+	// no user text to work with.
+	convKey string
 }
 
 type nativeAliasKey struct{}
@@ -277,10 +287,15 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	}
 	rewritten.ContentLength = int64(len(out))
 	rewritten.TransferEncoding = nil
+	convKey := transcode.DeriveClientKey(nr.Provider, r.RemoteAddr)
+	if firstText := transcode.FirstUserText(nr.Protocol, body); firstText != "" {
+		convKey = transcode.DeriveConversationKey(nr.Provider, clientModel, firstText)
+	}
 	return rewritten.WithContext(withNativeAlias(rewritten.Context(), nativeAlias{
 		surrogate: mapping.ClientResponseModel,
 		wire:      mapping.UpstreamModel,
 		respCap:   limits.SuccessfulResponseBytes,
+		convKey:   convKey,
 	})), nativeServe
 }
 

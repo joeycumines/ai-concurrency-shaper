@@ -179,7 +179,13 @@ type Provider struct {
 	TranscodeMessagesResponses bool
 	// NativeRouteFlags holds the raw -native-route values; resolved into
 	// NativeRoute declarations by resolveTranscode.
-	NativeRouteFlags          []string
+	NativeRouteFlags []string
+	// Opencode enables first-party header emission for this provider.
+	Opencode bool
+	// OpencodeUserAgent and OpencodeClient override the pinned
+	// first-party values when the client did not supply its own.
+	OpencodeUserAgent         string
+	OpencodeClient            string
 	TranscodeStrictDefaults   bool
 	TranscodeAllowLosses      []string
 	TranscodeChatCapabilities []string
@@ -220,6 +226,7 @@ type Provider struct {
 	authPolicy        *auth.AuthPolicy
 	transcodeMappings []proxy.TranscodeMapping
 	nativeRoutes      []proxy.NativeRoute
+	opencodePreset    transcode.OpencodePreset
 	// modelCatalog is this provider's frozen catalog snapshot, built from its
 	// model-table subset and resolved mappings. Nil when no table names it.
 	modelCatalog *transcode.CatalogConfig
@@ -277,6 +284,12 @@ func (p *Provider) NativeRoutes() []proxy.NativeRoute {
 		out[i] = cloned
 	}
 	return out
+}
+
+// OpencodePreset returns the resolved first-party header preset for this
+// provider. The zero preset is disabled.
+func (p *Provider) OpencodePreset() transcode.OpencodePreset {
+	return p.opencodePreset
 }
 
 // UpstreamURL returns the parsed upstream URL.

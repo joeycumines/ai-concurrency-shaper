@@ -122,8 +122,51 @@ func TestResolveTranscode_NativeRoutes(t *testing.T) {
 	}, `invalid native route "bogus@/v1/messages": unknown native protocol "bogus" (want responses, messages, or chat)`)
 }
 
-// TestResolveTranscode_NativeOnlyProviderCovered proves a provider with only
-// native routes (no transcode mappings) resolves its table and catalog.
+// TestResolveTranscode_OpencodePreset proves the -opencode flags resolve
+// into the preset stamped on every mapping and native route.
+func TestResolveTranscode_OpencodePreset(t *testing.T) {
+	cfg := resolveModelTableArgs(t,
+		"-upstream", "https://opencode.ai/zen",
+		"-name", "zen",
+		"-model-table", "s@zen=wire;via=messages",
+		"-transcode-messages-chat",
+		"-native-route", "chat@/v1/chat/completions",
+		"-opencode",
+		"-opencode-client", "tui",
+	)
+	preset := cfg.Providers[0].OpencodePreset()
+	if !preset.Enabled {
+		t.Fatal("preset not enabled")
+	}
+	if preset.Provider != "zen" {
+		t.Fatalf("preset provider = %q, want zen", preset.Provider)
+	}
+	if preset.Client != "tui" {
+		t.Fatalf("preset client = %q, want tui", preset.Client)
+	}
+	if preset.UserAgent != transcode.DefaultOpencodeUserAgent {
+		t.Fatalf("preset UA = %q, want default", preset.UserAgent)
+	}
+	for _, m := range cfg.Providers[0].TranscodeMappings() {
+		if !m.Mapping.Opencode.Enabled || m.Mapping.Opencode.Provider != "zen" {
+			t.Fatalf("mapping preset = %+v, want enabled zen scope", m.Mapping.Opencode)
+		}
+	}
+	for _, n := range cfg.Providers[0].NativeRoutes() {
+		if n.Provider != "zen" {
+			t.Fatalf("native route provider = %q, want zen", n.Provider)
+		}
+	}
+
+	off := resolveModelTableArgs(t,
+		"-upstream", "https://opencode.ai/zen",
+		"-model-table", "s@opencode=w;via=messages",
+		"-native-route", "messages@/v1/messages",
+	)
+	if off.Providers[0].OpencodePreset().Enabled {
+		t.Fatal("preset enabled without -opencode")
+	}
+}
 func TestResolveTranscode_NativeOnlyProviderCovered(t *testing.T) {
 	cfg := resolveModelTableArgs(t,
 		"-upstream", "https://api.example.com",

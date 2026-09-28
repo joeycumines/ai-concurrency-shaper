@@ -20,6 +20,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
 // flagMeta records where a flag is legal and whether it is a boolean, for the
@@ -205,6 +207,9 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.boolVar(&p.TranscodeMessagesChat, "transcode-messages-chat", false, "preset: map POST /v1/messages to upstream /v1/chat/completions")
 	r.boolVar(&p.TranscodeMessagesResponses, "transcode-messages-responses", false, "preset: map POST /v1/messages to upstream /v1/responses")
 	r.stringListVar(&p.NativeRouteFlags, "native-route", "repeatable natively served route: protocol@path with protocol responses|messages|chat (model identifier rewritten, body otherwise forwarded verbatim)")
+	r.boolVar(&p.Opencode, "opencode", false, "emit the first-party opencode request shape upstream (User-Agent, session affinity, client attribution)")
+	r.stringVar(&p.OpencodeUserAgent, "opencode-user-agent", transcode.DefaultOpencodeUserAgent, "User-Agent sent under -opencode when the client did not supply one")
+	r.stringVar(&p.OpencodeClient, "opencode-client", transcode.DefaultOpencodeClient, "x-opencode-client sent under -opencode when the client did not supply one")
 	r.boolVar(&p.TranscodeStrictDefaults, "transcode-strict-defaults", false, "disable default loss approvals, capabilities, and query forwarding")
 	r.stringListVar(&p.TranscodeAllowLosses, "transcode-allow-loss", "approved non-portable feature or !name to deny (repeatable)")
 	r.stringListVar(&p.TranscodeChatCapabilities, "transcode-chat-capability", "enable chat upstream capability or !name to deny (repeatable)")

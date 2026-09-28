@@ -959,5 +959,17 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 
 	p.transcodeMappings = mappings
 	p.nativeRoutes = nativeRoutes
+	p.opencodePreset = transcode.OpencodePreset{
+		Enabled:   p.Opencode,
+		UserAgent: p.OpencodeUserAgent,
+		Client:    p.OpencodeClient,
+		Provider:  effectiveName(p),
+	}
+	for i := range p.transcodeMappings {
+		p.transcodeMappings[i].Mapping.Opencode = p.opencodePreset
+	}
+	for i := range p.nativeRoutes {
+		p.nativeRoutes[i].Provider = effectiveName(p)
+	}
 	return nil
 }

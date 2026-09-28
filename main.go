@@ -125,6 +125,7 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 	for _, nr := range p.NativeRoutes() {
 		opts = append(opts, proxy.WithNativeRoutes(nr))
 	}
+	opts = append(opts, proxy.WithOpencodePreset(p.OpencodePreset()))
 	if catalog, ok := p.ModelCatalog(); ok {
 		opts = append(opts, proxy.WithModelCatalog(catalog))
 	}
@@ -213,6 +214,18 @@ func logProviderConfig(pr *config.Provider) {
 			parts = append(parts, fmt.Sprintf("%s@%s", n.Protocol, n.RouteKey.Path))
 		}
 		log.Printf("native: %d route(s): %s", len(routes), strings.Join(parts, ", "))
+	}
+	if preset := pr.OpencodePreset(); preset.Enabled {
+		host := ""
+		if u := pr.UpstreamURL(); u != nil {
+			host = u.Hostname()
+		}
+		if host != "opencode.ai" && !strings.HasSuffix(host, ".opencode.ai") {
+			log.Printf("note: -opencode preset enabled for provider %q whose upstream host %q is not opencode.ai (first-party headers go wherever the mount points)",
+				pr.EffectiveName(), host)
+		} else {
+			log.Printf("opencode preset: provider %q emits the first-party request shape", pr.EffectiveName())
+		}
 	}
 }
 

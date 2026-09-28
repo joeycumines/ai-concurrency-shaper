@@ -428,6 +428,19 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	fl.setUpstreamTarget(outReq)
 
+	if preset := h.cfg.Mapping.Opencode; preset.Enabled {
+		// First-party headers go on after authentication (applied
+		// inside buildUpstreamRequest): the mock never clobbers
+		// credentials. The conversation key derives from the client
+		// document the handler already holds; without user text it
+		// degrades to the client-derived key.
+		key := DeriveClientKey(preset.Provider, r.RemoteAddr)
+		if firstText := FirstUserText(clientProtocolToNative(h.cfg.Mapping.ClientProtocol), body); firstText != "" {
+			key = DeriveConversationKey(preset.Provider, context.UpstreamModel, firstText)
+		}
+		preset.ApplyHeaders(outReq.Header, r.Header, preset.ResolveSession(r.Header, key))
+	}
+
 	resp, err := h.roundTrip(outReq)
 	// The response headers arrived: anchor Retry-After and the 403
 	// rate-signal classification here so body-read time is excluded from the

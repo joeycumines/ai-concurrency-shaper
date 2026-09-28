@@ -213,6 +213,10 @@ type Mapping struct {
 	ProfileMap       ProfileMap
 	Auth             AuthPolicy
 
+	// Opencode, when enabled, emits the first-party header set on the
+	// converted upstream request after authentication.
+	Opencode OpencodePreset
+
 	// AllowedClientQuery is the set of client query parameters permitted on
 	// the transcoded route. Unknown client query parameters are rejected.
 	AllowedClientQuery map[string]struct{}
