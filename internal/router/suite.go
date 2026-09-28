@@ -174,7 +174,15 @@ func (h *CatalogSuiteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	http.NotFound(w, r)
+	// An unmatched path on a suite mount answers in the suite's own dialect,
+	// like every other error it emits. Go's bare "404 page not found" in
+	// text/plain leaks the implementation into an otherwise dialect-correct
+	// API and is inconsistent with the count_tokens handling above, whose
+	// comment states the rule: the answer must be dialect-shaped rather than
+	// a bare 404 page. The shape comes from the default, because an unknown
+	// path names no dialect of its own.
+	h.writeDialectError(w, h.defaultCatalogShape(), http.StatusNotFound,
+		"not found on this suite mount")
 }
 
 func isCatalogRoute(path string) bool {
@@ -324,10 +332,7 @@ func (h *CatalogSuiteHandler) shapeForCompletion(r *http.Request) transcode.Cata
 }
 
 func (h *CatalogSuiteHandler) writeEmptyCatalogOr404(w http.ResponseWriter, r *http.Request) {
-	shape := h.defaultShape
-	if shape == "" {
-		shape = transcode.CatalogShapeOpenAI
-	}
+	shape := h.defaultCatalogShape()
 	reqPath := path.Clean(r.URL.Path)
 	if after, ok := strings.CutPrefix(reqPath, transcode.CatalogPath+"/"); ok {
 		modelID := strings.Trim(after, "/")
@@ -350,6 +355,16 @@ func (h *CatalogSuiteHandler) writeEmptyCatalogOr404(w http.ResponseWriter, r *h
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+}
+
+// defaultCatalogShape is the suite's configured catalog dialect, defaulting to
+// OpenAI when none is set — the same fallback writeEmptyCatalogOr404 uses, so
+// discovery and an unmatched path agree on the suite's shape.
+func (h *CatalogSuiteHandler) defaultCatalogShape() transcode.CatalogShape {
+	if h.defaultShape != "" {
+		return h.defaultShape
+	}
+	return transcode.CatalogShapeOpenAI
 }
 
 func (h *CatalogSuiteHandler) writeDialectError(w http.ResponseWriter, shape transcode.CatalogShape, status int, message string) {

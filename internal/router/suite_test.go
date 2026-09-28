@@ -186,6 +186,38 @@ func TestCatalogSuite_DiscoveryAndRouting(t *testing.T) {
 		}
 	}
 
+	// 5b. An unmatched path answers in the suite's own dialect, never Go's
+	// bare text/plain 404 page. Every other error this handler emits is
+	// dialect-shaped, and a suite that advertises an Anthropic catalog must
+	// not answer a stray probe in net/http's error page.
+	{
+		for _, tc := range []struct {
+			name   string
+			method string
+			path   string
+			want   string
+		}{
+			{"post unknown path", http.MethodPost, "/suite/v1/nonsense", `"type":"error"`},
+			{"get unknown path", http.MethodGet, "/suite/nope", `"error"`},
+		} {
+			req := httptest.NewRequest(tc.method, tc.path, bytes.NewBufferString(`{}`))
+			rec := httptest.NewRecorder()
+			rtr.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("%s: expected 404, got %d: %s", tc.name, rec.Code, rec.Body.String())
+			}
+			if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+				t.Fatalf("%s: Content-Type = %q, want JSON", tc.name, ct)
+			}
+			if strings.Contains(rec.Body.String(), "page not found") {
+				t.Fatalf("%s: body = %q, want a dialect error, not Go's 404 page", tc.name, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.want) {
+				t.Fatalf("%s: body = %q, want the dialect envelope %s", tc.name, rec.Body.String(), tc.want)
+			}
+		}
+	}
+
 	// 6. Unknown model -> 404 in client dialect
 	{
 		req := httptest.NewRequest(http.MethodPost, "/suite/v1/messages", bytes.NewBufferString(`{"model":"model-unknown"}`))
