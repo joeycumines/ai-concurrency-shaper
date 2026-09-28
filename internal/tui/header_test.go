@@ -308,7 +308,7 @@ func TestMultiProviderHeaderShowsNames(t *testing.T) {
 }
 
 // TestFleetStrip_AggregateObservability pins the one-line fleet strip atop the
-// TUI in multi-provider mode (M6/G8).
+// TUI in multi-provider mode.
 func TestFleetStrip_AggregateObservability(t *testing.T) {
 	metas := []ProviderMeta{
 		{Name: "openai", Concurrency: 8},

@@ -397,8 +397,8 @@ func TestHandlerContentEncoding415(t *testing.T) {
 }
 
 func TestHandlerContentEncodingIdentityAccepted(t *testing.T) {
-	// The identity content encoding is the no-op and must be accepted
-	//; only non-identity encodings are unsupported.
+	// The identity content encoding is the no-op and must be accepted;
+	// only non-identity encodings are unsupported.
 	mapping := responsesMapping(t)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
 		return &http.Response{

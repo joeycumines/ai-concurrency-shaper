@@ -246,8 +246,8 @@ func (p InputContentParts) MarshalJSON() ([]byte, error) {
 // Output-type parts (output_text, refusal) are decoded through the same
 // OutputText/OutputRefusal types the response side uses — reused via the
 // input-part marker below rather than thin adapters — because the field
-// shapes are identical and the canonical mapping reads only .Text/.Refusal
-// . This dispatcher has no context, so the consumers gate
+// shapes are identical and the canonical mapping reads only .Text/.Refusal.
+// This dispatcher has no context, so the consumers gate
 // legality: EasyInputMessage.Validate admits output parts only for the
 // assistant role, and FunctionOutput.Validate rejects them everywhere.
 func DecodeInputContentPart(data []byte) (InputContentPart, error) {

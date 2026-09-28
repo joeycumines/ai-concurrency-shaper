@@ -414,8 +414,8 @@ func TestResponsesInstructionsMultiTurnAndParts(t *testing.T) {
 // once — the gate must not latch on a control-free first envelope
 func TestStreamingEnvelopeControlsLateAppearance(t *testing.T) {
 	// Strict for controls: the usage-timing loss (the required
-	// cache-creation breakdown the Responses source never provides,
-	// ) must be allowed so the created envelope passes and
+	// cache-creation breakdown the Responses source never provides) must
+	// be allowed so the created envelope passes and
 	// the late controls are the only rejection.
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),

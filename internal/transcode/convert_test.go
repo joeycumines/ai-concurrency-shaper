@@ -1717,8 +1717,8 @@ func TestDecodeResponsesRequestAllBuiltinNamespace(t *testing.T) {
 }
 
 func TestDecodeResponsesRequestCodexTurnTwoHistory(t *testing.T) {
-	// Byte-faithful replay of the field-observed Codex turn-2 shape
-	// : the assistant history item carries output_text with NO
+	// Byte-faithful replay of the field-observed Codex turn-2 shape:
+	// the assistant history item carries output_text with NO
 	// annotations key. Pre-fix this failed locally in 14ms with
 	// "output_text annotations must be present; use an empty array".
 	body := []byte(`{

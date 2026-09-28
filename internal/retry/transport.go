@@ -467,8 +467,8 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 					wait = ra
 				}
 			}
-			// Enforce minimum retry delay floor for downstream accounting
-			// . This gives the downstream time to
+			// Enforce minimum retry delay floor for downstream accounting.
+			// This gives the downstream time to
 			// complete its cleanup before the retry arrives. Retry-After
 			// values already override this when larger.
 			if t.MinRetryDelay > 0 && wait < t.MinRetryDelay {

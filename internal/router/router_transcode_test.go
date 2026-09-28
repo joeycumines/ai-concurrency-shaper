@@ -484,7 +484,7 @@ func TestRouter_BareVsPrefixedTrailingSlashParity(t *testing.T) {
 
 // TestRouter_Transcode_HeaderAllowlisting_PerRoute proves that header allowlisting
 // is per-route and never forwards client credentials or arbitrary headers across
-// providers (G5).
+// providers.
 func TestRouter_Transcode_HeaderAllowlisting_PerRoute(t *testing.T) {
 	var upstreamHeader atomic.Value
 

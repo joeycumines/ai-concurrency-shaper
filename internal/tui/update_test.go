@@ -660,7 +660,7 @@ func TestResetStatsSendNeverBlocks(t *testing.T) {
 }
 
 // TestFleetStrip_AggregateObservability pins the one-line fleet strip atop the
-// TUI in multi-provider mode (M6/G8).
+// TUI in multi-provider mode.
 
 func TestDashboardScrollsWithKeyboard(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})

@@ -121,7 +121,7 @@ func TestDecodeMessagesRequestThinkingRejections(t *testing.T) {
 
 // TestMessagesThinkingDisabledNoted pins that `thinking: disabled` — an
 // explicit client-asserted behavior, not an omission — is observably reported
-// at render, exactly like adaptive (analysis doc 05 §4 / G8).
+// at render, exactly like adaptive.
 func TestMessagesThinkingDisabledNoted(t *testing.T) {
 	_, report, err := decodeThinking(t, `{"type":"disabled"}`, ChatCapabilities{ReasoningEffort: true})
 	if err != nil {

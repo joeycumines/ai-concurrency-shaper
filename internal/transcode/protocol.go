@@ -159,8 +159,7 @@ type ChatCapabilities struct {
 	// marker-signature thinking blocks out of replayed history before any
 	// upstream rendering — the synthetic signature never reaches an
 	// upstream. Claude Code renders these blocks with its native thinking
-	// UI (operator-adjudicated design, 2026-09-07; see
-	// knowledgeBase.thinking_synthesis_design).
+	// UI (operator-adjudicated design, 2026-09-07).
 	ProviderReasoningThinking bool
 
 	// SystemAnywhere renders system/developer turns positionally exactly as

@@ -4309,8 +4309,8 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 			return err
 		}
 		// The required Messages breakdown components the source did not
-		// provide enter the loss decision before the zeros are emitted
-		//; gated once per stream.
+		// provide enter the loss decision before the zeros are emitted;
+		// gated once per stream.
 		if err := s.loseUnknownUsageComponentsOnce(usage); err != nil {
 			return err
 		}

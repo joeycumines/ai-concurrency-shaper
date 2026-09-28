@@ -717,8 +717,8 @@ func TestStreamBoundaryHelpers2(t *testing.T) {
 	})
 
 	t.Run("append batch frame bound", func(t *testing.T) {
-		// The generated-frame default moved above the accumulated bound
-		// , so the structural check is anchored at
+		// The generated-frame default moved above the accumulated bound,
+		// so the structural check is anchored at
 		// the new default: one frame over DefaultGeneratedSSEFrameBytes.
 		reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(strings.NewReader(""), 0, 0), &fixedConverter{}, 0, 0, 0)
 		err := reader.appendBatch(convertedBatch{Events: []frameEvent{{

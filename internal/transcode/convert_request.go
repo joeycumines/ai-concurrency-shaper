@@ -705,8 +705,8 @@ func responsesInputContentPartToCanonical(
 		}, nil
 
 	case *ResponsesOutputText:
-		// Assistant easy-message history turns carry output-type parts
-		// ; they map exactly like
+		// Assistant easy-message history turns carry output-type parts;
+		// they map exactly like
 		// responsesOutputContentToCanonical — only .Text/.Refusal reach the
 		// IR, annotations never do.
 		return CanonicalText{Text: value.Text}, nil
@@ -1054,7 +1054,7 @@ func DecodeMessagesRequest(
 	// to text blocks, tools, and the system prompt. It is a pure performance
 	// hint with no semantic content and no portable equivalent, so it is a
 	// sanctioned observable elision — one deduped note per exchange, never a
-	// policy gate and never a silent drop (analysis G3).
+	// policy gate and never a silent drop.
 	cacheControlNoted := false
 	noteCacheControl := func() error {
 		if cacheControlNoted {
@@ -2524,7 +2524,7 @@ func RenderChatRequest(
 		case "disabled":
 			// An explicit client-asserted no-thinking is observable, like
 			// adaptive: the elision maps to the absence of chat
-			// reasoning_effort and is reported (analysis doc 05 §4 / G8).
+			// reasoning_effort and is reported.
 			if err := report.Note(
 				FeatureRequestReasoning,
 				"thinking",

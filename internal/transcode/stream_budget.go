@@ -143,8 +143,8 @@ const (
 	// covered 2^20 events × 221 B ≈ 221 MiB of fixed overhead).
 	maxStreamPerEventFramingBytes = 256
 	// maxStreamGeneratedBytes bounds the total generated downstream bytes of
-	// one exchange. Derived jointly with the terminal-release bounds
-	// : the worst-case accepted release
+	// one exchange. Derived jointly with the terminal-release bounds:
+	// the worst-case accepted release
 	// emits the streamed deltas (payload at 6x escaping + every event's
 	// fixed framing overhead) PLUS the terminal batch
 	// (DefaultGeneratedSSEBatchBytes) PLUS 1 MiB slack, and can never fire

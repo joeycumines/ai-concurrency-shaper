@@ -494,9 +494,8 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// http.Client-based transport produces *url.Error with the complete
 		// request URL, including a credential-bearing upstream base query).
 		// The detail is logged server-side with sensitive URL query values
-		// redacted; the client message is neutral (the native passthrough
-		// path likewise sends a fixed body;
-		// ).
+		// redacted; the client message is neutral, exactly as the native
+		// passthrough path sends a fixed body.
 		h.logRequestError(r, sanitizeUpstreamTransportError(err))
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadGateway,

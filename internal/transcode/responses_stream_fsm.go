@@ -46,8 +46,7 @@ const (
 )
 
 // fsmItem is the FSM's per-item state. Accumulated text/refusal/arguments
-// use strings.Builder to avoid quadratic re-copying on every delta (the
-// ).
+// use strings.Builder to avoid quadratic re-copying on every delta.
 type fsmItem struct {
 	outputIndex int64
 	kind        string // message, function_call, function_call_output, reasoning

@@ -365,8 +365,8 @@ func DecodeChatResponseWithPolicy(
 	// Usage. The Known flags reflect the shadow's explicit presence: the
 	// Chat usage totals are modeled omitempty (defensively — the pinned
 	// contract marks them required, so a conforming upstream always sends
-	// them, but presence is distinguishable only through the probe;
-	// ). Cache-write tokens come from the
+	// them, but presence is distinguishable only through the probe).
+	// Cache-write tokens come from the
 	// created_cache_tokens provider extension: a provider that reports it
 	// makes the Messages cache-creation component known; one that does not
 	// leaves the loss-gated unknown decision.
