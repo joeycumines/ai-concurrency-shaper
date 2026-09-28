@@ -81,15 +81,19 @@ func TestOpencodeApplyHeaders(t *testing.T) {
 	}
 
 	// A foreign client SDK's fingerprint headers are removed from the
-	// outbound set (which the surrounding pipeline seeds from the client),
-	// while protocol headers survive.
+	// outbound set when the CLIENT sent them (which is how the surrounding
+	// pipeline seeds it), while protocol headers survive.
+	inForeign := http.Header{}
+	inForeign.Set("X-Stainless-Lang", "js")
+	inForeign.Set("X-Stainless-Package", "anthropic")
+	inForeign.Set("X-App", "cli")
 	outForeign := http.Header{}
-	outForeign.Set("X-Stainless-Lang", "js")
-	outForeign.Set("X-Stainless-Package", "anthropic")
-	outForeign.Set("X-App", "cli")
+	for k, v := range inForeign {
+		outForeign[k] = v
+	}
 	outForeign.Set("Anthropic-Version", "2023-06-01")
 	outForeign.Set("Content-Type", "application/json")
-	OpencodePreset{Enabled: true, Provider: "zen"}.ApplyHeaders(outForeign, http.Header{}, "s")
+	OpencodePreset{Enabled: true, Provider: "zen"}.ApplyHeaders(outForeign, inForeign, "s")
 	for _, key := range []string{"X-Stainless-Lang", "X-Stainless-Package", "X-App"} {
 		if got := outForeign.Get(key); got != "" {
 			t.Fatalf("%s = %q, want removed", key, got)
@@ -98,6 +102,21 @@ func TestOpencodeApplyHeaders(t *testing.T) {
 	for _, key := range []string{"Anthropic-Version", "Content-Type"} {
 		if got := outForeign.Get(key); got == "" {
 			t.Fatalf("%s removed, want the protocol header preserved", key)
+		}
+	}
+
+	// A header the pipeline applied — a custom authentication header is the
+	// real case — is NOT in the inbound set and must survive the strip,
+	// even when its name is one the preset removes from client traffic.
+	// Regression: the strip once ran over the whole outbound map, so
+	// `-auth-mode header:X-App -opencode` silently lost the credential.
+	outAuth := http.Header{}
+	outAuth.Set("X-App", "configured-credential")
+	outAuth.Set("X-Stainless-Token", "configured-credential")
+	OpencodePreset{Enabled: true, Provider: "zen"}.ApplyHeaders(outAuth, http.Header{}, "s")
+	for _, key := range []string{"X-App", "X-Stainless-Token"} {
+		if got := outAuth.Get(key); got != "configured-credential" {
+			t.Fatalf("%s = %q, want the configured credential preserved", key, got)
 		}
 	}
 

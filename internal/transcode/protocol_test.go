@@ -297,6 +297,26 @@ func TestMappingValidateConfiguration(t *testing.T) {
 			},
 			wantErr: "reserved",
 		},
+		{
+			// The opencode preset removes these from client traffic, so
+			// with the preset on they are pipeline-managed names and
+			// cannot carry a credential. Otherwise
+			// `-auth-mode header:X-App -opencode` loses the secret.
+			name: "opencode-stripped custom auth header",
+			mutate: func(m *Mapping) {
+				m.Opencode = OpencodePreset{Enabled: true, Provider: "zen"}
+				m.Auth = AuthPolicy{Mode: AuthCustomHeader, CustomHeader: "X-App", Inbound: true}
+			},
+			wantErr: "reserved",
+		},
+		{
+			name: "x-stainless-prefixed custom auth header",
+			mutate: func(m *Mapping) {
+				m.Opencode = OpencodePreset{Enabled: true, Provider: "zen"}
+				m.Auth = AuthPolicy{Mode: AuthCustomHeader, CustomHeader: "X-Stainless-Token", Inbound: true}
+			},
+			wantErr: "reserved",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

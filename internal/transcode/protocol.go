@@ -288,7 +288,8 @@ func (m Mapping) Validate() error {
 					m.Auth.CustomHeader,
 				)
 			}
-			if reservedTranscodeHeaderName(m.Auth.CustomHeader) {
+			if reservedTranscodeHeaderName(m.Auth.CustomHeader) ||
+				(m.Opencode.Enabled && PresetManagedHeaderName(m.Auth.CustomHeader)) {
 				return fmt.Errorf(
 					"auth policy: custom header name %q is reserved by the proxy pipeline",
 					m.Auth.CustomHeader,
@@ -328,12 +329,35 @@ func (m Mapping) Validate() error {
 	return nil
 }
 
+// ReservedHeaderName reports whether the header name is managed by the proxy
+// pipeline on every mount and therefore cannot carry a custom authentication
+// credential: the pipeline would strip, clobber, or rewrite it, so the secret
+// would be lost or leaked. Exported so configuration validation enforces the
+// same single list on every mount that can apply a credential, not only on
+// transcode mappings.
+func ReservedHeaderName(name string) bool {
+	return reservedTranscodeHeaderName(name)
+}
+
+// PresetManagedHeaderName reports whether the name is one the opencode
+// preset removes from client traffic: a foreign client-SDK fingerprint
+// (x-app, x-stainless-*). A credential cannot ride such a name when the
+// preset is enabled, because the preset would remove what the client sent
+// under it. The rule is preset-scoped: without -opencode the name is an
+// ordinary header and remains a legal credential target.
+func PresetManagedHeaderName(name string) bool {
+	lower := strings.ToLower(name)
+	return lower == "x-app" || strings.HasPrefix(lower, "x-stainless-")
+}
+
 // reservedTranscodeHeaderName reports whether the header name is managed by
 // the proxy pipeline and therefore cannot be a custom authentication header:
 // auth stripping (including the x-amz-*/x-goog-* cloud-signature prefixes),
 // hop-by-hop removal, representation sanitization, forwarded-header
 // deletion, and anti-compression would remove or rewrite it — the secret
-// would be stripped, clobbered, or leaked.
+// would be stripped, clobbered, or leaked. The opencode preset's
+// foreign-client-SDK strip is additionally managed when the preset is on;
+// see PresetManagedHeaderName.
 func reservedTranscodeHeaderName(name string) bool {
 	lower := strings.ToLower(name)
 	switch lower {

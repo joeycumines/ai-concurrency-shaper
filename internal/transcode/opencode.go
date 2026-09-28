@@ -123,8 +123,10 @@ func (p OpencodePreset) ResolveSession(in http.Header, fallback string) string {
 //     removed when absent.
 //   - Removed: headers a different client SDK uses to identify itself, which
 //     a real opencode client would not send and which would otherwise reveal
-//     the actual client. Protocol headers the dialect requires (content-type,
-//     accept, anthropic-version, anthropic-beta) are untouched.
+//     the actual client. Only headers the client actually sent are removed,
+//     never a header the pipeline applied. Protocol headers the dialect
+//     requires (content-type, accept, anthropic-version, anthropic-beta) are
+//     untouched.
 func (p OpencodePreset) ApplyHeaders(out, in http.Header, session string) {
 	if !p.Enabled {
 		return
@@ -132,7 +134,19 @@ func (p OpencodePreset) ApplyHeaders(out, in http.Header, session string) {
 	out.Set("User-Agent", p.userAgent())
 	out.Set(HeaderOpencodeClient, p.client())
 	for name := range out {
-		if foreignClientHeader(name) {
+		// Only what the CLIENT sent identifies the client. A header the
+		// pipeline applied — a custom authentication header above all — is
+		// absent from the inbound set, so scoping the strip to the inbound
+		// set keeps a configured credential intact. (Choosing a managed
+		// name as the credential header is refused at config time by
+		// PresetManagedHeaderName.) The inbound/outbound maps are both
+		// canonicalized by net/http and by Set/Del, so the ranged key and
+		// the Del target agree; revisit if a third call site ever hands
+		// over a map written with raw map keys.
+		if !foreignClientHeader(name) {
+			continue
+		}
+		if _, fromClient := in[http.CanonicalHeaderKey(name)]; fromClient {
 			out.Del(name)
 		}
 	}

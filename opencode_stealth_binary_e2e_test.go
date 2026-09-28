@@ -33,10 +33,17 @@ type opencodeUpstream struct {
 	bodies  [][]byte
 }
 
+// chatSSE is the upstream streaming reply used by the chat-completions
+// cases: two chunks (content, then finish) and the sentinel.
+const chatSSE = "data: {\"id\":\"chatcmpl-s\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"wire-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"streamed\"},\"finish_reason\":null}]}\n\n" +
+	"data: {\"id\":\"chatcmpl-s\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"wire-chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+	"data: [DONE]\n\n"
+
 func (u *opencodeUpstream) handler(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	var probe struct {
-		Model string `json:"model"`
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
 	}
 	_ = json.Unmarshal(body, &probe)
 	u.mu.Lock()
@@ -49,6 +56,16 @@ func (u *opencodeUpstream) handler(w http.ResponseWriter, r *http.Request) {
 	u.hdrs = r.Header.Clone()
 	u.bodies = append(u.bodies, body)
 	u.mu.Unlock()
+
+	if probe.Stream && r.URL.Path == "/v1/chat/completions" {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		_, _ = w.Write([]byte(chatSSE))
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	switch r.URL.Path {
@@ -272,6 +289,62 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 		if v := hdrs.Get(key); v != "" {
 			t.Fatalf("upstream saw foreign-client header %s=%q", key, v)
 		}
+	}
+
+	// Streaming on a native route is a byte-identical relay, and the
+	// upstream still sees the first-party shape.
+	code, body = post("/suite/v1/chat/completions",
+		`{"model":"chat-alias","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{"Content-Type": "application/json", "Accept": "text/event-stream"})
+	if code != 200 {
+		t.Fatalf("native stream status = %d: %s", code, body)
+	}
+	if body != chatSSE {
+		t.Fatalf("native stream altered the upstream bytes:\n got: %q\nwant: %q", body, chatSSE)
+	}
+	if path, model, session, ua, _ = up.got(); path != "/v1/chat/completions" || model != "wire-chat" {
+		t.Fatalf("native stream upstream path=%q model=%q", path, model)
+	}
+	if session == "" || !strings.HasPrefix(ua, "opencode/") {
+		t.Fatalf("native stream upstream session=%q ua=%q, want the preset shape", session, ua)
+	}
+
+	// Streaming through the converted route: the client sees an Anthropic
+	// event stream with exactly one terminal, and the preset is applied to
+	// the converted request the upstream receives.
+	code, body = post("/suite/v1/messages",
+		`{"model":"chat-alias","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{
+			"Content-Type":      "application/json",
+			"Accept":            "text/event-stream",
+			"anthropic-version": "2023-06-01",
+		})
+	if code != 200 {
+		t.Fatalf("converted stream status = %d: %s", code, body)
+	}
+	for _, want := range []string{"message_start", "content_block_delta", `"text_delta"`, `"streamed"`, "message_stop"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("converted stream missing %s:\n%s", want, body)
+		}
+	}
+	if n := strings.Count(body, "event: message_stop"); n != 1 {
+		t.Fatalf("converted stream emitted %d message_stop events, want exactly one:\n%s", n, body)
+	}
+	if strings.Contains(body, "[DONE]") {
+		t.Fatalf("converted stream leaked the chat sentinel:\n%s", body)
+	}
+	path, model, session, ua, _ = up.got()
+	if path != "/v1/chat/completions" || model != "wire-chat" {
+		t.Fatalf("converted stream upstream path=%q model=%q", path, model)
+	}
+	if session == "" || !strings.HasPrefix(ua, "opencode/") {
+		t.Fatalf("converted stream upstream session=%q ua=%q, want the preset shape", session, ua)
+	}
+	up.mu.Lock()
+	convHdrs := up.hdrs
+	up.mu.Unlock()
+	if got := convHdrs.Get("X-Opencode-Client"); got == "" {
+		t.Fatal("converted request did not carry x-opencode-client: the preset must apply to the transcode path")
 	}
 
 	// Discovery through the suite.
