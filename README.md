@@ -341,8 +341,8 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-flowlog-dir` | provider | `` (disabled) | Existing directory that receives one unredacted JSON record per transcoded exchange, capturing the full flow (client request, converted upstream request, upstream response, downstream response); empty disables the recorder |
 | `-native-route` | provider | _(repeatable)_ | Natively served route: `protocol@path` with protocol `responses`, `messages`, or `chat`. A request whose model's `via` dialect matches is forwarded with only the model identifier rewritten; a mismatch falls through to any transcode mapping on the same path (see [Native passthrough](#native-passthrough)) |
 | `-opencode` | provider | `false` | Emit the opencode first-party request shape upstream: `User-Agent`, `x-opencode-client`, session affinity and identity headers (see [opencode Zen and Go](#opencode-zen-and-go)) |
-| `-opencode-user-agent` | provider | `opencode/1.18.33` | `User-Agent` sent under `-opencode` when the client did not supply one |
-| `-opencode-client` | provider | `cli` | `x-opencode-client` sent under `-opencode` when the client did not supply one |
+| `-opencode-user-agent` | provider | `opencode/1.18.33` | `User-Agent` the `-opencode` preset asserts upstream |
+| `-opencode-client` | provider | `cli` | `x-opencode-client` the `-opencode` preset asserts upstream |
 
 ### Route examples
 
@@ -916,9 +916,12 @@ OpenCode routes requests to different backend providers per conversation and
 requires a stable session value to pin them (`x-opencode-session`); a request
 without one fails upstream. `-opencode` (provider scope) reproduces the
 first-party request shape on every outbound path — transparent, native, and
-transcoded: `User-Agent`, `x-opencode-client`, the session value, and the
-client's own identity/project/parent headers when it sent them (they are never
-fabricated). Session precedence is the client's `x-opencode-session`, then
+transcoded. The impersonation markers are preset-authoritative: the upstream
+sees the first-party `User-Agent` and `x-opencode-client` rather than whatever
+the client sent, so a client cannot identify itself through them. The session
+value is the client's own when it sent one, else derived. The client's own
+identity/project/parent headers forward when present and are never fabricated.
+Session precedence is the client's `x-opencode-session`, then
 `x-session-affinity`, then `X-Session-Id`, then a stable value derived from the
 conversation's own first user turn. Header values are never logged. Mounts
 without `-opencode` forward byte-identically.

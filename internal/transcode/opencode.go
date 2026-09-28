@@ -71,25 +71,24 @@ type OpencodePreset struct {
 	Provider string
 }
 
-// userAgent resolves the effective User-Agent: inbound first, then the
-// configured value, then the pinned default.
-func (p OpencodePreset) userAgent(in http.Header) string {
-	if v := strings.TrimSpace(in.Get("User-Agent")); v != "" {
+// userAgent resolves the outbound User-Agent. The preset exists to make the
+// upstream see a first-party client, so its value is authoritative: a client
+// that sent its own User-Agent would otherwise identify itself verbatim to
+// opencode. The configured value wins over the pinned default, and inbound is
+// never forwarded.
+func (p OpencodePreset) userAgent() string {
+	if v := strings.TrimSpace(p.UserAgent); v != "" {
 		return v
-	}
-	if strings.TrimSpace(p.UserAgent) != "" {
-		return strings.TrimSpace(p.UserAgent)
 	}
 	return DefaultOpencodeUserAgent
 }
 
-// client resolves the effective client attribution the same way.
-func (p OpencodePreset) client(in http.Header) string {
-	if v := strings.TrimSpace(in.Get(HeaderOpencodeClient)); v != "" {
+// client resolves the outbound client attribution the same way: the preset
+// asserts the first-party value rather than echoing a client that named
+// itself.
+func (p OpencodePreset) client() string {
+	if v := strings.TrimSpace(p.Client); v != "" {
 		return v
-	}
-	if strings.TrimSpace(p.Client) != "" {
-		return strings.TrimSpace(p.Client)
 	}
 	return DefaultOpencodeClient
 }
@@ -109,15 +108,18 @@ func (p OpencodePreset) ResolveSession(in http.Header, fallback string) string {
 
 // ApplyHeaders sets the full first-party header set on the outbound
 // request. It runs after authentication so the mock never clobbers
-// credentials and authentication never strips the mock. Identity and
-// project headers forward only when the client sent them: they name the
-// client's own conversation and are never fabricated.
+// credentials and authentication never strips the mock. The impersonation
+// markers (User-Agent, client attribution) and the session value are
+// preset-authoritative — a client's own values would identify it or break
+// the gateway's session contract. Identity and project headers forward only
+// when the client sent them: they name the client's own conversation and are
+// never fabricated.
 func (p OpencodePreset) ApplyHeaders(out, in http.Header, session string) {
 	if !p.Enabled {
 		return
 	}
-	out.Set("User-Agent", p.userAgent(in))
-	out.Set(HeaderOpencodeClient, p.client(in))
+	out.Set("User-Agent", p.userAgent())
+	out.Set(HeaderOpencodeClient, p.client())
 	if session != "" {
 		out.Set(HeaderOpencodeSession, session)
 		out.Set(HeaderSessionAffinity, session)

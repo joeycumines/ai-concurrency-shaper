@@ -120,17 +120,23 @@ func TestProxyPresetPassthroughHeaders(t *testing.T) {
 		t.Fatalf("project = %q, want absent", got)
 	}
 
-	// Client-supplied identity preserved verbatim.
+	// A client that named itself must not identify itself upstream: the
+	// session is preserved (it is the conversation's own value), while the
+	// impersonation markers assert the first-party values.
 	do(map[string]string{
 		"X-Opencode-Session": "client-sess",
-		"User-Agent":         "opencode/prod/9.9.9/opencode",
+		"User-Agent":         "claude-cli/2.1.0 (external, cli)",
+		"X-Opencode-Client":  "some-other-tool",
 		"X-Opencode-Request": "user-7",
 	})
 	if got := cap.get("X-Opencode-Session"); got != "client-sess" {
 		t.Fatalf("session = %q, want client-sess", got)
 	}
-	if got := cap.get("User-Agent"); got != "opencode/prod/9.9.9/opencode" {
-		t.Fatalf("UA = %q, want inbound preserved", got)
+	if got := cap.get("User-Agent"); got != transcode.DefaultOpencodeUserAgent {
+		t.Fatalf("UA = %q, want the first-party value", got)
+	}
+	if got := cap.get("X-Opencode-Client"); got != transcode.DefaultOpencodeClient {
+		t.Fatalf("client = %q, want the first-party value", got)
 	}
 	if got := cap.get("X-Opencode-Request"); got != "user-7" {
 		t.Fatalf("request = %q, want forwarded", got)

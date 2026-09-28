@@ -61,26 +61,40 @@ func TestOpencodeSessionPrecedence(t *testing.T) {
 	}
 }
 
-// TestOpencodeApplyHeaders proves the full first-party shape: inbound
-// identity preserved, defaults fill gaps, identity/project/parent forward
-// only when present, and disabled is a no-op.
+// TestOpencodeApplyHeaders proves the full first-party shape: the
+// impersonation markers and the session are preset-authoritative (a client
+// that named itself must not identify itself upstream), identity/project/
+// parent forward only when present, and disabled is a no-op.
 func TestOpencodeApplyHeaders(t *testing.T) {
 	in := http.Header{}
-	in.Set("User-Agent", "opencode/prod/9.9.9/opencode")
+	in.Set("User-Agent", "claude-cli/2.1.0 (external, cli)")
+	in.Set(HeaderOpencodeClient, "some-other-tool")
 	in.Set(HeaderOpencodeRequest, "user-1")
 	out := http.Header{}
 	OpencodePreset{Enabled: true, Provider: "zen"}.ApplyHeaders(out, in, "sess-1")
 
-	if got := out.Get("User-Agent"); got != "opencode/prod/9.9.9/opencode" {
-		t.Fatalf("User-Agent = %q, want inbound preserved", got)
+	if got := out.Get("User-Agent"); got != DefaultOpencodeUserAgent {
+		t.Fatalf("User-Agent = %q, want the first-party value %q", got, DefaultOpencodeUserAgent)
+	}
+	if got := out.Get(HeaderOpencodeClient); got != DefaultOpencodeClient {
+		t.Fatalf("client = %q, want the first-party value %q", got, DefaultOpencodeClient)
+	}
+
+	// An explicit override is the way to assert a different first-party
+	// install's value.
+	outOverride := http.Header{}
+	OpencodePreset{Enabled: true, Provider: "zen", UserAgent: "opencode/2.0.3", Client: "tui"}.
+		ApplyHeaders(outOverride, in, "sess-1")
+	if got := outOverride.Get("User-Agent"); got != "opencode/2.0.3" {
+		t.Fatalf("override User-Agent = %q", got)
+	}
+	if got := outOverride.Get(HeaderOpencodeClient); got != "tui" {
+		t.Fatalf("override client = %q", got)
 	}
 	for _, key := range []string{HeaderOpencodeSession, HeaderSessionAffinity, HeaderSessionID} {
 		if got := out.Get(key); got != "sess-1" {
 			t.Fatalf("%s = %q, want sess-1", key, got)
 		}
-	}
-	if got := out.Get(HeaderOpencodeClient); got != DefaultOpencodeClient {
-		t.Fatalf("client = %q, want default %q", got, DefaultOpencodeClient)
 	}
 	if got := out.Get(HeaderOpencodeRequest); got != "user-1" {
 		t.Fatalf("request = %q, want forwarded", got)
