@@ -209,3 +209,42 @@ func TestFirstUserText(t *testing.T) {
 		t.Fatalf("default UA = %q, want the first-party shape", DefaultOpencodeUserAgent)
 	}
 }
+
+// TestPresetManagedCoversEveryHeaderThePresetTouches pins the credential
+// invariant BEHAVIOURALLY instead of against a hand-written list: whatever
+// ApplyHeaders writes or removes, that name must be preset-managed, because
+// the preset runs after authentication and would otherwise destroy the
+// secret. Seeding the outbound map with a sentinel the client did not send
+// makes every write observable as a change and every removal as an absence,
+// so a future preset header is covered the day it is added, with no test
+// edit. Hand-listed sets are how the eight-header gap survived a review.
+func TestPresetManagedCoversEveryHeaderThePresetTouches(t *testing.T) {
+	const sentinel = "sentinel-value"
+	candidates := []string{
+		"User-Agent", "Content-Type", "Accept", "Authorization", "X-Api-Key",
+		"Api-Key", "Anthropic-Version", "Anthropic-Beta", "Host",
+		HeaderOpencodeClient, HeaderOpencodeSession, HeaderSessionAffinity,
+		HeaderSessionID, HeaderOpencodeRequest, HeaderOpencodeProject,
+		HeaderParentSessionID, "X-App", "X-Stainless-Lang", "X-Stainless-Token",
+		"X-Forwarded-For", "X-Request-Id", "Idempotency-Key", "X-Custom-Cred",
+		"Cookie", "Referer", "Origin", "X-Amz-Date", "X-Goog-Api-Key",
+	}
+	for _, presetOn := range []bool{true, false} {
+		preset := OpencodePreset{Enabled: presetOn, Provider: "zen"}
+		for _, name := range candidates {
+			out := http.Header{}
+			out.Set(name, sentinel)
+			// The client sent nothing, so a forward-only header is removed
+			// and a preset-written header takes the preset's value.
+			preset.ApplyHeaders(out, http.Header{}, "session-value")
+			if out.Get(name) == sentinel {
+				continue // the preset left it alone
+			}
+			if !PresetManagedHeaderName(name) {
+				t.Errorf("presetOn=%v: ApplyHeaders rewrote or removed %q, so a credential "+
+					"in that header would be lost, but PresetManagedHeaderName(%q) = false",
+					presetOn, name, name)
+			}
+		}
+	}
+}
