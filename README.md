@@ -925,6 +925,14 @@ opencode client sends none of them and they would reveal the actual client;
 protocol headers the dialect requires (`content-type`, `accept`,
 `anthropic-version`, `anthropic-beta`) are untouched. The client's own
 identity/project/parent headers forward when present and are never fabricated.
+Because the preset applies after authentication, a name it writes or removes
+cannot also carry the upstream credential: `-auth-mode header:<name>` is
+refused at startup for every name the preset manages (`user-agent`,
+`x-opencode-client`, the session trio, the request/project/parent headers, and
+the foreign fingerprints) while `-opencode` is on, and for the pipeline-managed
+names generally regardless of it. The rule is preset-scoped — those names remain
+legal credential targets with `-opencode` off — and a custom name such as
+`header:X-Api-Token` works with the preset on.
 Session precedence is the client's `x-opencode-session`, then
 `x-session-affinity`, then `X-Session-Id`, then a stable value derived from the
 conversation's own first user turn. Header values are never logged. Mounts

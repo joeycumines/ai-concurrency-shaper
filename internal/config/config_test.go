@@ -1076,7 +1076,11 @@ func TestResolveAndValidate_AuthHeaderSpellings(t *testing.T) {
 	// directions: with -opencode they cannot carry a credential, without it
 	// they are ordinary headers and remain legal.
 	t.Run("preset-managed header refused only with -opencode", func(t *testing.T) {
-		for _, name := range []string{"X-App", "X-Stainless-Token"} {
+		for _, name := range []string{
+			"X-App", "X-Stainless-Token", "User-Agent", "X-Opencode-Client",
+			"X-Opencode-Session", "X-Session-Affinity", "X-Session-Id",
+			"X-Opencode-Request", "X-Opencode-Project", "X-Parent-Session-Id",
+		} {
 			on := &Provider{Name: "a", Upstream: "https://x.example", Concurrency: 4,
 				AuthSource: "env:G_KEY", AuthMode: "header", AuthHeader: name, Opencode: true}
 			t.Setenv("G_KEY", "g")

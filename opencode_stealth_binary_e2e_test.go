@@ -347,6 +347,38 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 		t.Fatal("converted request did not carry x-opencode-client: the preset must apply to the transcode path")
 	}
 
+	// A credential in a header the preset manages must be refused at
+	// startup, not silently deleted on the way out. The preset runs after
+	// authentication, so any name it Sets or Dels would otherwise swallow
+	// the secret and leave the client with a bare 401 and no log trace.
+	// This is the end-to-end guard for that ordering: the unit tests cannot
+	// see it because they never apply auth and the preset in sequence.
+	for _, managed := range []string{
+		"X-App", "X-Stainless-Token", "User-Agent", "X-Opencode-Client",
+		"X-Opencode-Session", "X-Session-Affinity", "X-Session-Id",
+		"X-Opencode-Request", "X-Opencode-Project", "X-Parent-Session-Id",
+	} {
+		output, startErr := startWithAuthMode(t, bin, srv.URL, "header:"+managed, true)
+		if startErr == nil {
+			t.Fatalf("-auth-mode header:%s with -opencode started; the preset would delete the credential", managed)
+		}
+		// The refusal is reported on the process output; err is only the
+		// exit status.
+		if !strings.Contains(output, "reserved") {
+			t.Fatalf("-auth-mode header:%s: output = %q, want a reserved-name refusal", managed, output)
+		}
+		if strings.Contains(output, "test-opencode-key") {
+			t.Fatalf("-auth-mode header:%s: the startup output leaked the credential", managed)
+		}
+	}
+
+	// The same name is a legal credential target with the preset off, and a
+	// non-managed name is legal with it on: the rule is preset-scoped in
+	// both directions, not a blanket ban.
+	if _, startErr := startWithAuthMode(t, bin, srv.URL, "header:X-Opencode-Project", false); startErr != nil {
+		t.Fatalf("header:X-Opencode-Project without -opencode: %v, want accepted", startErr)
+	}
+
 	// Discovery through the suite.
 	resp, err := client.Get("http://" + proxyAddr + "/suite/v1/models?limit=1000")
 	if err != nil {
@@ -384,5 +416,63 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 	}
 	if strings.Contains(logs, "client-supplied-should-not-cross") {
 		t.Fatal("client credential appeared in the proxy log")
+	}
+}
+
+// startWithAuthMode runs the real binary with a custom-header auth mode and
+// reports what it printed and whether it refused to start. It exists because
+// the ordering this guards is invisible to the unit tests: the preset applies
+// AFTER authentication, so a name the preset manages silently destroys the
+// secret that auth just attached. The only faithful check drives both, in
+// sequence, in one process.
+func startWithAuthMode(t *testing.T, bin, upstreamURL, authMode string, preset bool) (string, error) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	args := []string{
+		"-bind", addr, "-tui=false",
+		"-model-table", "claude-alias@opencode-go=wire-msg;context=200000;via=messages",
+		"--provider=opencode-go",
+		"-upstream", upstreamURL,
+		"-prefix", "/opencode-go",
+		"-native-route", "messages@/v1/messages",
+		"-auth-source", "env:SHAPER_PROVIDER_OPENCODE_API_KEY",
+		"-auth-mode", authMode,
+	}
+	if preset {
+		args = append(args, "-opencode")
+	}
+	cmd := exec.Command(bin, args...)
+	env := []string{}
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "SHAPER_PROVIDER_") {
+			env = append(env, e)
+		}
+	}
+	cmd.Env = append(env, "SHAPER_PROVIDER_OPENCODE_API_KEY=test-opencode-key")
+	var buf safeBuffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		return buf.String(), err
+	}
+	// A refusal exits on its own during config validation. An accepted
+	// configuration starts listening and runs until stopped, so waiting for
+	// exit would block forever: give it a grace period, then stop it and
+	// report that it came up.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return buf.String(), err
+	case <-time.After(2 * time.Second):
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		<-done
+		return buf.String(), nil
 	}
 }

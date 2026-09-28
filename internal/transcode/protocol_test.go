@@ -185,6 +185,38 @@ func TestMappingValidate(t *testing.T) {
 	}
 }
 
+// TestPresetManagedHeaderNameDerivesThePresetDisposition pins the complete
+// set: every header the preset WRITES or REMOVES is preset-managed, so none
+// of them can carry a credential while the preset is on. The set is derived
+// from the preset's own constants rather than restated, which is the point —
+// a new preset header or SDK fingerprint must not silently reopen the
+// credential-loss hole. The failure this prevents is the silent one: the
+// preset runs after auth, so the secret is destroyed on the way out and the
+// client sees a bare 401 with nothing logged.
+func TestPresetManagedHeaderNameDerivesThePresetDisposition(t *testing.T) {
+	presetWritesOrRemoves := []string{
+		"User-Agent", HeaderOpencodeClient, HeaderOpencodeSession,
+		HeaderSessionAffinity, HeaderSessionID, HeaderOpencodeRequest,
+		HeaderOpencodeProject, HeaderParentSessionID,
+		// the foreign-SDK strip
+		"X-App", "X-Stainless-Token", "x-stainless-lang",
+	}
+	for _, name := range presetWritesOrRemoves {
+		if !PresetManagedHeaderName(name) {
+			t.Errorf("PresetManagedHeaderName(%q) = false, want true: the preset manages it", name)
+		}
+		// Case-insensitive: the name arrives from a flag in any spelling.
+		if !PresetManagedHeaderName(strings.ToLower(name)) {
+			t.Errorf("PresetManagedHeaderName(%q) = false, want true (case-insensitive)", strings.ToLower(name))
+		}
+	}
+	for _, name := range []string{"X-Custom-Cred", "X-Api-Token", "Idempotency-Key", "X-Request-Id"} {
+		if PresetManagedHeaderName(name) {
+			t.Errorf("PresetManagedHeaderName(%q) = true, want false: the preset does not manage it", name)
+		}
+	}
+}
+
 // TestMappingValidateConfiguration proves the immutable configuration
 // dimensions fail at startup validation.
 func TestMappingValidateConfiguration(t *testing.T) {
@@ -294,26 +326,6 @@ func TestMappingValidateConfiguration(t *testing.T) {
 			name: "x-amz-prefixed custom auth header",
 			mutate: func(m *Mapping) {
 				m.Auth = AuthPolicy{Mode: AuthCustomHeader, CustomHeader: "X-Amz-Date", Inbound: true}
-			},
-			wantErr: "reserved",
-		},
-		{
-			// The opencode preset removes these from client traffic, so
-			// with the preset on they are pipeline-managed names and
-			// cannot carry a credential. Otherwise
-			// `-auth-mode header:X-App -opencode` loses the secret.
-			name: "opencode-stripped custom auth header",
-			mutate: func(m *Mapping) {
-				m.Opencode = OpencodePreset{Enabled: true, Provider: "zen"}
-				m.Auth = AuthPolicy{Mode: AuthCustomHeader, CustomHeader: "X-App", Inbound: true}
-			},
-			wantErr: "reserved",
-		},
-		{
-			name: "x-stainless-prefixed custom auth header",
-			mutate: func(m *Mapping) {
-				m.Opencode = OpencodePreset{Enabled: true, Provider: "zen"}
-				m.Auth = AuthPolicy{Mode: AuthCustomHeader, CustomHeader: "X-Stainless-Token", Inbound: true}
 			},
 			wantErr: "reserved",
 		},

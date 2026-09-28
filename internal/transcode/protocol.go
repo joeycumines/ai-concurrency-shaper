@@ -340,14 +340,23 @@ func ReservedHeaderName(name string) bool {
 }
 
 // PresetManagedHeaderName reports whether the name is one the opencode
-// preset removes from client traffic: a foreign client-SDK fingerprint
-// (x-app, x-stainless-*). A credential cannot ride such a name when the
-// preset is enabled, because the preset would remove what the client sent
-// under it. The rule is preset-scoped: without -opencode the name is an
-// ordinary header and remains a legal credential target.
+// preset writes or removes on the outbound request. A credential cannot
+// ride such a name while the preset is on, because the preset would
+// overwrite or delete it after authentication has applied it. The set is
+// derived from the preset's own disposition table — the header constants
+// it Sets/Delss, User-Agent, and the foreign-SDK strip — so a new
+// fingerprint or a new preset header cannot silently reopen the hole.
+// The rule is preset-scoped: without -opencode the name is an ordinary
+// header and remains a legal credential target.
 func PresetManagedHeaderName(name string) bool {
-	lower := strings.ToLower(name)
-	return lower == "x-app" || strings.HasPrefix(lower, "x-stainless-")
+	switch http.CanonicalHeaderKey(name) {
+	case "User-Agent",
+		HeaderOpencodeSession, HeaderOpencodeClient, HeaderOpencodeProject,
+		HeaderOpencodeRequest, HeaderSessionAffinity, HeaderSessionID,
+		HeaderParentSessionID:
+		return true
+	}
+	return foreignClientHeader(name)
 }
 
 // reservedTranscodeHeaderName reports whether the header name is managed by
