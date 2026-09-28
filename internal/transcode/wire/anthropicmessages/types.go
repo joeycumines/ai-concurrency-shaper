@@ -489,8 +489,8 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 		// Build with Claude → Prompt caching, "What cannot be cached"), so a
 		// block carrying it is a contract violation on the client side and
 		// the typed unknown-field rejection below is the correct strict-side
-		// behavior — pinned by TestThinkingBlockCacheControlRejected (gate
-		// run 1 informational note 1).
+		// behavior — pinned by TestThinkingBlockCacheControlRejected and
+		// verified against the vendor's prompt-caching documentation.
 		var shadow struct {
 			Type      ContentBlockType `json:"type"`
 			Thinking  *string          `json:"thinking"`

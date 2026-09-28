@@ -652,7 +652,7 @@ func TestHandlerLocalConversion502NotUpstreamFailure(t *testing.T) {
 }
 
 // TestHandlerCorruptUpstreamResponseIsUpstreamFailure proves the
-// finding-3 counterexample: a 200 response that is not a valid instance of
+// counterexample: a 200 response that is not a valid instance of
 // the supported Chat subset (here: an object that is not a chat completion
 // at all) is corrupt upstream wire — recorded as an upstream body failure
 // with UpstreamFailure=true, never a local conversion failure.

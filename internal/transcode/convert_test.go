@@ -298,8 +298,8 @@ func TestDecodeResponsesRequestNamespaceNestedBuiltinTools(t *testing.T) {
 	}
 }
 
-// TestDecodeResponsesRequestToolChoiceReconciliation reproduces
-// finding 5: an approved built-in tool drop must reconcile tool_choice against
+// TestDecodeResponsesRequestToolChoiceReconciliation reproduces the defect:
+// an approved built-in tool drop must reconcile tool_choice against
 // the tools that actually survive, or the converter renders an invalid
 // upstream request (tool_choice "required" or a named function with zero
 // tools).
@@ -1806,7 +1806,7 @@ func TestDecodeResponsesRequestIdStrippedAssistantHistory(t *testing.T) {
 }
 
 func TestDecodeResponsesRequestFunctionOutputOutputPartRejected(t *testing.T) {
-	// Review F1 pin (decode level): output-type parts stay rejected inside
+	// Decode-level pin: output-type parts stay rejected inside
 	// function_call_output payloads. Decode precedes loss-policy
 	// evaluation, so StrictLossPolicy() here covers every policy: no policy
 	// can reach this rejection at all.

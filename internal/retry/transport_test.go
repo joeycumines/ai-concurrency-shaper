@@ -1852,7 +1852,7 @@ func TestRetry_LargeBodyClientCancelNotReportedToBreaker(t *testing.T) {
 	// the context.Canceled is NOT reported to the circuit breaker in the
 	// body-too-large path. This is the large-body counterpart to
 	// TestRetry_ClientDisconnectNotReportedToBreaker and covers the
-	// isClientCancel guard added in R24-02.
+	// isClientCancel guard.
 	b, err := circuitbreaker.New(
 		circuitbreaker.WithFailureThreshold(1),
 		circuitbreaker.WithWindow(10*time.Second),
@@ -2020,7 +2020,7 @@ func TestRetry_NilBodyStillRetries(t *testing.T) {
 }
 
 func TestRetry_BoundedDrainOnLargeErrorBody(t *testing.T) {
-	// R26-03 regression test: Verify that the body drain on retryable error
+	// Regression test: Verify that the body drain on retryable error
 	// responses is bounded to 4KB regardless of actual body size. Before the
 	// fix, a malicious upstream returning 5xx with an infinite streaming body
 	// could block the retry goroutine indefinitely — a trivial DoS vector.

@@ -260,7 +260,7 @@ type ExchangeContext struct {
 	// Capabilities is the mapping's independent-verification gate for
 	// fidelity-only rendering decisions, e.g. realizing an Anthropic thinking
 	// budget as Responses reasoning.effort. Copied from the mapping, like
-	// LossPolicy (request_reasoning-default-native-path).
+	// LossPolicy.
 	Capabilities ChatCapabilities
 
 	// Request-derived state required to reconstruct the client response
@@ -346,8 +346,7 @@ func RequirePortableArtifacts(
 	// decision, not an artifact gate: the Chat and Responses renderers map an
 	// enabled budget to a reasoning effort when the exchange grants the
 	// capability and record the request_reasoning loss elsewhere, so a budget
-	// is never silently dropped nor double-reported (high finding
-	// request_reasoning-default-native-path).
+	// is never silently dropped nor double-reported.
 	return nil
 }
 

@@ -1881,7 +1881,7 @@ func RenderResponsesRequest(
 	// client's thinking request maps to Responses reasoning.effort when the
 	// exchange grants the ReasoningEffort capability (mapping
 	// ExchangeContext.Capabilities). The mapping is explicit and documented —
-	// never silent (high finding request_reasoning-default-native-path):
+	// never silent:
 	//
 	//  - "adaptive"  the client delegated the thinking decision to the
 	//                model; the absence of reasoning.effort is the exact

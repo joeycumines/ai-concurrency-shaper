@@ -99,8 +99,8 @@ func FieldQwenNonstreamJSON() []byte { return qwenNonstreamFieldJSON }
 func FieldQwenReasoningStreamSSE() []byte { return qwenReasoningStreamFieldSSE }
 
 // FieldCodexMultiturnRequestJSON returns the codex resume request capture:
-// a previous-output history item carrying "status": "" (the task-30 field
-// regression) between two user turns.
+// a previous-output history item carrying "status": "" (the empty-status
+// field regression) between two user turns.
 func FieldCodexMultiturnRequestJSON() []byte { return codexMultiturnRequestFieldJSON }
 
 // FieldCodexNamespaceRequestJSON returns the captured Codex CLI (0.154.0)

@@ -89,8 +89,8 @@ func fire(ps *parkedServer) {
 	}()
 }
 
-// TestShutdownServersDrainsBothUnderStall pins the fix for the finding
-// that sequentially shutting the metrics and proxy servers down against ONE
+// TestShutdownServersDrainsBothUnderStall pins the shutdown ordering: that
+// sequentially shutting the metrics and proxy servers down against ONE
 // shared context lets the first consumer starve the second: stdlib answers an
 // already-expired context after a single idle-conn poll, abandoning the
 // proxy's active connections instead of draining them.

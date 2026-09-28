@@ -2145,7 +2145,7 @@ type chatStreamChoiceShadow struct {
 	// MatchedStop mirrors the wire Choice extension (2026-08-24);
 	// delta level is unobserved — the raw-upstream probe places the field on
 	// the choice of every chunk — so ChatStreamDelta deliberately carries no
-	// twin (gate record run 5, finding 5).
+	// twin: the placement was observed only on a live upstream probe.
 	MatchedStop any `json:"matched_stop,omitempty"`
 }
 
@@ -4486,9 +4486,9 @@ func (s *anthropicResponsesStreamState) reasoningPartAdded(
 		// content blocks: the Responses FSM tracks reasoning phase per
 		// item, so interleaved part lifecycles across items are FSM-legal
 		// but unrenderable — reject as corrupt upstream wire rather than
-		// misattribute deltas into the wrong block.
-		// ses_f82433a3affeYcnpN3ETKBmQxz; the previous behavior panicked
-		// on the nil'd index after the first part closed).
+		// misattribute deltas into the wrong block. Observed live: the
+		// previous behavior panicked on the nil'd index once the first
+		// part had closed.
 		return nil, s.wireError(fmt.Errorf(
 			"reasoning summary part added for %q while a thinking block is open",
 			event.ItemID,

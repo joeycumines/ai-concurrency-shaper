@@ -245,8 +245,8 @@ func TestMessagesThinkingRejectedOnResponsesTarget(t *testing.T) {
 	}
 }
 
-// TestMessagesThinkingBudgetMapsToResponsesEffort is the reproduction
-// for the high finding request_reasoning-default-native-path: an explicit
+// TestMessagesThinkingBudgetMapsToResponsesEffort is the reproduction:
+// an explicit
 // Anthropic thinking budget must map to Responses reasoning.effort when the
 // exchange grants the ReasoningEffort capability, instead of being consumed as
 // an approved request_reasoning loss that never appears on the upstream

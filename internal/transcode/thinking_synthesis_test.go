@@ -291,8 +291,8 @@ func TestStreamReasoningRendersThinkingLifecycle(t *testing.T) {
 	}
 }
 
-// TestAnthropicStreamReasoningInterleavedPartsRejected pins the rule
-// finding (ses_f82433a3affeYcnpN3ETKBmQxz, 2026-09-08): the Responses FSM
+// TestAnthropicStreamReasoningInterleavedPartsRejected pins a live
+// rejection: the Responses FSM
 // tracks reasoning phase per item, so two items can concurrently hold open
 // summary parts, but the Anthropic dialect cannot represent two
 // concurrently-open content blocks — the render state holds exactly one

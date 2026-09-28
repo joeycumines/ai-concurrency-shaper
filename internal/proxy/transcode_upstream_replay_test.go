@@ -1,10 +1,9 @@
 package proxy
 
-// E2E replay conformance suite: the three field
-// failure modes replayed END-TO-END
-// through Proxy.ServeHTTP with transcode mappings, against httptest chat
-// upstreams. Each scenario uses the exact captured client shapes; each
-// asserts the field failure is dead at the proxy boundary.
+// E2E replay conformance suite: the three observed field failure modes
+// replayed END-TO-END through Proxy.ServeHTTP with transcode mappings,
+// against httptest chat upstreams. Each scenario uses the exact captured
+// client shapes; each asserts the failure is dead at the proxy boundary.
 
 import (
 	"bytes"

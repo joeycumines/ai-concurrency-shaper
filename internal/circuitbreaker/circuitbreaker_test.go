@@ -1573,7 +1573,7 @@ func TestBreaker_PenaltyOverflowSafe(t *testing.T) {
 }
 
 func TestBreaker_EpochTrackingPreventsStaleProbeCorruption(t *testing.T) {
-	// R26-01 regression test: Verify that when Probe B (epoch 2) succeeds after
+	// Regression test: Verify that when Probe B (epoch 2) succeeds after
 	// Probe A (epoch 1) times out, Probe A's subsequent failure is discarded by
 	// epoch mismatch. Without epoch tracking, the stale failure from Probe A would
 	// re-trip a recovered circuit, causing spurious OPEN cycles.
@@ -1631,7 +1631,7 @@ func TestBreaker_EpochTrackingPreventsStaleProbeCorruption(t *testing.T) {
 }
 
 func TestBreaker_StaleSuccessDiscarded(t *testing.T) {
-	// R26-01 regression test: Verify that when Probe A (epoch 1) times out and
+	// Regression test: Verify that when Probe A (epoch 1) times out and
 	// Probe B (epoch 2) is dispatched, both stale failures and stale successes
 	// from Probe A are discarded by epoch mismatch.
 	b, err := New(WithFailureThreshold(1), WithWindow(10*time.Second), WithOpenTimeout(50*time.Millisecond), WithMaxOpenTimeout(200*time.Millisecond))
@@ -1715,7 +1715,7 @@ func TestBreaker_StaleSuccessDiscarded(t *testing.T) {
 }
 
 func TestBreaker_OpenTimeoutOverflowSafe(t *testing.T) {
-	// R26-05 regression test: Verify that with a very large openTimeout (5 hours)
+	// Regression test: Verify that with a very large openTimeout (5 hours)
 	// and high backoffMultiple values, openTimeout() returns maxOpenTimeout, not
 	// a negative number from int64 overflow. Before the fix, 5h * 1<<19 produced
 	// a negative Duration.
