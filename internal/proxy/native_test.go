@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -285,7 +286,9 @@ func TestProxyNativeLocalErrors(t *testing.T) {
 		body string
 	}{
 		{"unknown model", `{"model":"nope","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`},
-		{"missing max_tokens", `{"model":"msg-model","messages":[{"role":"user","content":"hi"}]}`},
+		// Semantic completeness beyond the model identifier (e.g.
+		// max_tokens) is the upstream's job on a verbatim path, so a
+		// wellformed document without it forwards instead of failing.
 		{"missing model", `{"max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`},
 		{"malformed", `{"model":`},
 	}
@@ -363,6 +366,159 @@ func TestProxyNativeRouteValidation(t *testing.T) {
 	}))...); err == nil {
 		t.Fatal("unknown native protocol: want construction error, got nil")
 	}
+}
+
+// TestProxyNativeForwardsServableControls proves in-dialect controls that
+// the conversion loss policy would drop (top_k, background) pass through
+// to the native upstream that serves them.
+func TestProxyNativeForwardsServableControls(t *testing.T) {
+	var mu sync.Mutex
+	var gotTopK *int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var probe struct {
+			TopK *int `json:"top_k"`
+		}
+		_ = json.Unmarshal(body, &probe)
+		mu.Lock()
+		gotTopK = probe.TopK
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"message","model":"wire-msg"}`))
+	}))
+	t.Cleanup(srv.Close)
+	upstreamURL, _ := url.Parse(srv.URL)
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithNativeRoutes(nativeRoute(t, transcode.NativeMessages, "/v1/messages")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := postNative(t, p, "/v1/messages",
+		`{"model":"msg-model","max_tokens":5,"top_k":5,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotTopK == nil || *gotTopK != 5 {
+		t.Fatalf("upstream top_k = %v, want 5", gotTopK)
+	}
+
+	up2srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var probe struct {
+			Background *bool  `json:"background"`
+			Model      string `json:"model"`
+		}
+		_ = json.Unmarshal(body, &probe)
+		if probe.Background == nil || !*probe.Background {
+			t.Errorf("upstream background = %v, want true", probe.Background)
+		}
+		if probe.Model != "wire-resp" {
+			t.Errorf("upstream model = %q, want wire-resp", probe.Model)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"response","model":"wire-resp"}`))
+	}))
+	t.Cleanup(up2srv.Close)
+	up2URL, _ := url.Parse(up2srv.URL)
+	p2, err := New(
+		WithUpstream(up2URL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithNativeRoutes(nativeRoute(t, transcode.NativeResponses, "/v1/responses")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = postNative(t, p2, "/v1/responses", `{"model":"resp-model","input":"hi","background":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("responses status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestProxyNativeOverCapResponseUntouched proves responses over the alias
+// inspection bound pass through byte-identical instead of truncating,
+// with both declared and chunked lengths.
+func TestProxyNativeOverCapResponseUntouched(t *testing.T) {
+	big := `{"type":"message","model":"wire-msg","content":"` + strings.Repeat("x", 256) + `"}`
+	newCappedProxy := func(t *testing.T, handler http.HandlerFunc) *Proxy {
+		t.Helper()
+		srv := httptest.NewServer(handler)
+		t.Cleanup(srv.Close)
+		upstreamURL, _ := url.Parse(srv.URL)
+		key, _ := transcode.NewRouteKey(http.MethodPost, "/v1/messages")
+		p, err := New(
+			WithUpstream(upstreamURL),
+			WithMatcher(route.NewMatcher(nil)),
+			WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+			WithMetrics(metrics.NewCollector()),
+			WithNativeRoutes(NativeRoute{
+				RouteKey: key,
+				Protocol: transcode.NativeMessages,
+				ModelMap: nativeTestModelMap(),
+				BodyLimits: transcode.BodyLimits{
+					AcceptedRequestBytes:    1 << 20,
+					DecodedRequestBytes:     1 << 20,
+					SuccessfulResponseBytes: 64,
+				},
+			}),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	body := `{"model":"msg-model","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`
+
+	t.Run("declared length", func(t *testing.T) {
+		p := newCappedProxy(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", strconv.Itoa(len(big)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(big))
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if got := rec.Body.String(); got != big {
+			t.Fatalf("downstream = %d bytes, want byte-identical %d bytes", len(got), len(big))
+		}
+	})
+
+	t.Run("chunked", func(t *testing.T) {
+		p := newCappedProxy(t, func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			if fl, ok := w.(http.Flusher); ok {
+				fl.Flush()
+			}
+			_, _ = w.Write([]byte(big))
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if got := rec.Body.String(); got != big {
+			t.Fatalf("downstream = %d bytes, want byte-identical %d bytes", len(got), len(big))
+		}
+	})
 }
 
 // TestProxyNativeForwardsQueryAndHeaders proves the native path keeps the

@@ -26,6 +26,9 @@ import (
 	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/anthropicmessages"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
 // NativeRoute declares one natively served client route: the request
@@ -33,9 +36,9 @@ import (
 // document is otherwise forwarded verbatim through the transparent engine
 // (limiter, retry, breaker, metrics, journal). It is not transcoding: no
 // canonical IR is involved, so the transcoding direction rules do not apply
-// and chat is a legal native protocol. A request whose model resolves to a
-// Via dialect other than the route protocol is not native and falls through
-// to the transcode lookup.
+// and chat is a legal native protocol. A request whose model resolves
+// without a known Via dialect falls through untouched; a known model on the
+// wrong dialect fails closed locally.
 type NativeRoute struct {
 	RouteKey transcode.RouteKey
 	Protocol transcode.NativeProtocol
@@ -145,9 +148,10 @@ const (
 )
 
 // nativeRouteAction validates a natively served request and rewrites its
-// model identifier from surrogate to wire. Via mismatch is a miss (fall
-// through to transcode/transparent handling); every other failure is a
-// locally written dialect error.
+// model identifier from surrogate to wire. An unknown Via dialect is a
+// miss (fall through with the body intact); a known model on the wrong
+// dialect fails closed with a local dialect error; every other failure is
+// likewise local.
 func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *NativeRoute) (*http.Request, nativeAction) {
 	if isNativeUpgrade(r) {
 		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
@@ -187,19 +191,27 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		return &out
 	}
 
-	// Strict validation gates the client contract: responses and messages
-	// decode with the pinned strict wire decoders under an empty loss
-	// policy (same dialect in and out loses nothing); chat has no pinned
-	// client decoder, so it enforces JSON wellformedness plus a string
-	// model field instead.
+	// Structural validation gates the client contract: the pinned wire
+	// decoder rejects corrupt documents (duplicate keys, unknown fields,
+	// illegal nulls, trailing values, malformed syntax) without the
+	// conversion feature-loss layer — same-dialect forwarding loses
+	// nothing, so in-dialect controls the loss policy would drop (top_k,
+	// output_config, background, prompt_cache_key) pass through to the
+	// native upstream that serves them. Chat has no pinned client
+	// decoder, so it enforces JSON wellformedness plus a string model
+	// field instead. Semantic completeness beyond the model identifier
+	// (e.g. max_tokens) is the upstream's job on a verbatim path: its
+	// dialect-correct error is authoritative.
 	switch nr.Protocol {
 	case transcode.NativeResponses:
-		if _, _, err := transcode.DecodeResponsesRequest(body, transcode.LossPolicy{}); err != nil {
+		var shadow openairesponses.Request
+		if err := wire.Decode(body, &shadow); err != nil {
 			writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: "+err.Error())
 			return r, nativeError
 		}
 	case transcode.NativeMessages:
-		if _, err := transcode.DecodeMessagesRequest(body, transcode.LossPolicy{}); err != nil {
+		var shadow anthropicmessages.Request
+		if err := wire.Decode(body, &shadow); err != nil {
 			writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: "+err.Error())
 			return r, nativeError
 		}
@@ -275,8 +287,8 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 // rewriteNativeResponseAlias restores the client-facing model alias on a
 // natively served non-streaming JSON response. It is tolerant by design:
 // the upstream contract is subject to change, so any unexpected shape,
-// encoding, or size passes through untouched. Streaming responses are never
-// buffered and stay byte-identical.
+// encoding, or size passes through untouched — never truncated, never
+// failed. Streaming responses are never buffered and stay byte-identical.
 func rewriteNativeResponseAlias(res *http.Response) error {
 	if res == nil || res.Request == nil {
 		return nil
@@ -303,47 +315,71 @@ func rewriteNativeResponseAlias(res *http.Response) error {
 	if cap <= 0 {
 		return nil
 	}
-	body, err := io.ReadAll(io.LimitReader(res.Body, cap+1))
-	_ = res.Body.Close()
-	if err != nil {
+	// A declared length over the inspection bound skips buffering
+	// entirely: the body streams through untouched.
+	if res.ContentLength > cap {
 		return nil
 	}
-	if int64(len(body)) > cap {
-		// Over the inspection bound: the body is already consumed, so
-		// restore it verbatim rather than failing the exchange.
-		res.Body = io.NopCloser(bytes.NewReader(body))
+	// Unknown or fitting lengths are probed without consuming: an
+	// over-bound body is re-concatenated ahead of the unread remainder,
+	// so the exchange can never truncate.
+	probe, err := io.ReadAll(io.LimitReader(res.Body, cap+1))
+	if err != nil {
+		res.Body = &nativePrefixBody{Reader: io.MultiReader(bytes.NewReader(probe), res.Body), closer: res.Body}
 		return nil
+	}
+	if int64(len(probe)) > cap {
+		res.Body = &nativePrefixBody{Reader: io.MultiReader(bytes.NewReader(probe), res.Body), closer: res.Body}
+		return nil
+	}
+	// Within bounds the limit reader reached EOF: probe holds the full
+	// body, so the original can be closed and replaced safely.
+	_ = res.Body.Close()
+	restore := func() {
+		res.Body = io.NopCloser(bytes.NewReader(probe))
 	}
 	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(body, &doc); err != nil {
-		res.Body = io.NopCloser(bytes.NewReader(body))
+	if err := json.Unmarshal(probe, &doc); err != nil {
+		restore()
 		return nil
 	}
 	rawModel, ok := doc["model"]
 	if !ok {
-		res.Body = io.NopCloser(bytes.NewReader(body))
+		restore()
 		return nil
 	}
 	var wire string
 	if err := json.Unmarshal(rawModel, &wire); err != nil || wire != alias.wire {
-		res.Body = io.NopCloser(bytes.NewReader(body))
+		restore()
 		return nil
 	}
 	restored, err := json.Marshal(alias.surrogate)
 	if err != nil {
-		res.Body = io.NopCloser(bytes.NewReader(body))
+		restore()
 		return nil
 	}
 	doc["model"] = restored
 	out, err := json.Marshal(doc)
 	if err != nil {
-		res.Body = io.NopCloser(bytes.NewReader(body))
+		restore()
 		return nil
 	}
 	res.Body = io.NopCloser(bytes.NewReader(out))
 	res.ContentLength = int64(len(out))
 	res.Header.Set("Content-Length", strconv.Itoa(len(out)))
 	return nil
+}
+
+// nativePrefixBody re-concatenates probed bytes ahead of an unconsumed
+// remainder. Close propagates to the original body so the upstream
+// connection is never leaked by the inspection.
+type nativePrefixBody struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (b *nativePrefixBody) Close() error {
+	return b.closer.Close()
 }
 
 // isNativeUpgrade reports whether the request asks for a protocol upgrade,
