@@ -683,6 +683,55 @@ func TestCatalogSuite_ChatCompletionRouted(t *testing.T) {
 	}
 }
 
+// TestCatalogSuiteChatErrorShapeIsOpenAI proves a chat error is rendered
+// in the OpenAI envelope even when the suite catalog defaults to the
+// Anthropic shape: the route's dialect wins over the suite default.
+func TestCatalogSuiteChatErrorShapeIsOpenAI(t *testing.T) {
+	catHandler, err := transcode.NewCatalogHandler(transcode.CatalogConfig{
+		ProviderName: "suite-chat-shape",
+		Models:       []transcode.CatalogModel{{Surrogate: "chat-model", Provider: "provC"}},
+		DefaultShape: transcode.CatalogShapeAnthropic,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:           "suite-chat-shape",
+		Prefix:         "/suite",
+		CatalogHandler: catHandler,
+		DefaultShape:   transcode.CatalogShapeAnthropic,
+		ModelRoutes: []router.ModelRoute{{
+			Model:           "chat-model",
+			Provider:        "provC",
+			Handler:         http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
+			SupportedRoutes: suiteRouteSet("/v1/chat/completions"),
+		}},
+		Strict: true,
+	})
+	rtr, err := router.New([]router.Provider{{Name: "suite-chat-shape", Prefix: "/suite", Proxy: suite}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/suite/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"unknown","messages":[]}`))
+	rec := httptest.NewRecorder()
+	rtr.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("error body not JSON: %v: %s", err, rec.Body.String())
+	}
+	if _, ok := doc["error"]; !ok {
+		t.Fatalf("body = %s, want the OpenAI error envelope", rec.Body.String())
+	}
+	if _, anthropic := doc["type"]; anthropic {
+		t.Fatalf("body = %s, want no Anthropic top-level type on the chat route", rec.Body.String())
+	}
+}
+
 func TestCatalogSuiteCompletionSurfaceIsVersionedResponsesAndMessages(t *testing.T) {
 	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{Strict: true})
 	for _, target := range []string{"/chat/completions", "/responses", "/messages"} {

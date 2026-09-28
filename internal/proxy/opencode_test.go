@@ -262,6 +262,92 @@ func TestProxyPresetWithAuth(t *testing.T) {
 	}
 }
 
+// TestProxyPresetSessionStableAcrossPaths proves one conversation keeps
+// one session value whether it is served natively or converted: the key
+// derives from the client model on every path.
+func TestProxyPresetSessionStableAcrossPaths(t *testing.T) {
+	const question = "same question"
+	body := `{"model":"m","max_tokens":5,"messages":[{"role":"user","content":"` + question + `"}]}`
+
+	// Native path: m is messages-native.
+	nativeCap := &headerCapture{}
+	nativeSrv := httptest.NewServer(nativeCap.handler(`{"type":"message","model":"wire-msg"}`))
+	t.Cleanup(nativeSrv.Close)
+	nativeURL, _ := url.Parse(nativeSrv.URL)
+	msgKey, _ := transcode.NewRouteKey(http.MethodPost, "/v1/messages")
+	nativeMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+		"m": {ClientModel: "m", UpstreamModel: "wire-msg", ClientResponseModel: "m", Via: transcode.NativeMessages},
+	}, AllowIdentity: false, RequireExplicitMap: true}
+	nativeProxy, err := New(
+		WithUpstream(nativeURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithOpencodePreset(testPreset()),
+		WithNativeRoutes(NativeRoute{RouteKey: msgKey, Protocol: transcode.NativeMessages, ModelMap: nativeMap, Provider: "zen"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Converted path: the same model rendered to a chat upstream.
+	convCap := &headerCapture{}
+	convSrv := httptest.NewServer(convCap.handler(`{"id":"chatcmpl-1","object":"chat.completion","created":1710000000,"model":"wire-chat","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	t.Cleanup(convSrv.Close)
+	convURL, _ := url.Parse(convSrv.URL)
+	convMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+		"m": {ClientModel: "m", UpstreamModel: "wire-chat", ClientResponseModel: "m", Via: transcode.NativeChat},
+	}, AllowIdentity: false, RequireExplicitMap: true}
+	convProxy, err := New(
+		WithUpstream(convURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(TranscodeMapping{Mapping: transcode.Mapping{
+			ClientRoute:      msgKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			UpstreamPath:     "/v1/chat/completions",
+			LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+				transcode.FeatureUsageCacheReadUnknown:  {},
+				transcode.FeatureUsageCacheWriteUnknown: {},
+				transcode.FeatureUsageReasoningUnknown:  {},
+				transcode.FeatureUsageUnknown:           {},
+				transcode.FeatureRequestReasoning:       {},
+				transcode.FeatureDeveloperRole:          {},
+			}},
+			ModelMap: convMap,
+			Auth:     transcode.AuthPolicy{Mode: transcode.AuthNone},
+			Opencode: testPreset(),
+		}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	send := func(p *Proxy) string {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		return ""
+	}
+	send(nativeProxy)
+	send(convProxy)
+	nativeSession := nativeCap.get("X-Opencode-Session")
+	convSession := convCap.get("X-Opencode-Session")
+	if nativeSession == "" || convSession == "" {
+		t.Fatalf("sessions missing: native=%q converted=%q", nativeSession, convSession)
+	}
+	if nativeSession != convSession {
+		t.Fatalf("session differs across native (%q) and converted (%q) serving of one conversation",
+			nativeSession, convSession)
+	}
+}
+
 // TestProxyPresetNativeSession proves the native path derives the
 // conversation key from the document: repeated turns reuse it.
 func TestProxyPresetNativeSession(t *testing.T) {
