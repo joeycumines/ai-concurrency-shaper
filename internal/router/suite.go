@@ -311,6 +311,10 @@ func (h *CatalogSuiteHandler) shapeForCompletion(r *http.Request) transcode.Cata
 		return transcode.CatalogShapeCodex
 	case "/v1/messages", "/v1/messages/count_tokens":
 		return transcode.CatalogShapeAnthropic
+	case "/v1/chat/completions":
+		// Chat completions is an OpenAI-shaped API; its errors must not
+		// be rendered in whatever shape the suite's catalog defaults to.
+		return transcode.CatalogShapeOpenAI
 	default:
 		if h.defaultShape != "" {
 			return h.defaultShape

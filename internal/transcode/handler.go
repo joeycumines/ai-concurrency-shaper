@@ -432,11 +432,16 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// First-party headers go on after authentication (applied
 		// inside buildUpstreamRequest): the mock never clobbers
 		// credentials. The conversation key derives from the client
-		// document the handler already holds; without user text it
-		// degrades to the client-derived key.
+		// model so the same conversation keeps one key whether it is
+		// served natively or converted; without user text it degrades to
+		// the client-derived key.
+		keyModel := context.RequestedClientModel
+		if keyModel == "" {
+			keyModel = context.UpstreamModel
+		}
 		key := DeriveClientKey(preset.Provider, r.RemoteAddr)
 		if firstText := FirstUserText(clientProtocolToNative(h.cfg.Mapping.ClientProtocol), body); firstText != "" {
-			key = DeriveConversationKey(preset.Provider, context.UpstreamModel, firstText)
+			key = DeriveConversationKey(preset.Provider, keyModel, firstText)
 		}
 		preset.ApplyHeaders(outReq.Header, r.Header, preset.ResolveSession(r.Header, key))
 	}

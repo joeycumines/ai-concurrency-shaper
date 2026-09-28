@@ -589,6 +589,97 @@ func TestProxyNativeOverCapResponseUntouched(t *testing.T) {
 	})
 }
 
+// TestProxyNativeForwardsDocumentedOptionalFields proves the native path
+// does not import the conversion contract's field coverage: documented
+// optional in-dialect fields the pinned shadows do not model, and a
+// Responses function tool without an explicit strict, still reach the
+// upstream.
+func TestProxyNativeForwardsDocumentedOptionalFields(t *testing.T) {
+	var mu sync.Mutex
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotBody = body
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"type":"message","model":"wire-msg"}`))
+	}))
+	t.Cleanup(srv.Close)
+	upstreamURL, _ := url.Parse(srv.URL)
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithNativeRoutes(nativeRoute(t, transcode.NativeMessages, "/v1/messages")),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"model":"msg-model","max_tokens":5,"service_tier":"auto","container":null,` +
+		`"cache_control":{"type":"ephemeral"},"messages":[{"role":"user","content":"hi"}]}`
+	rec := postNative(t, p, "/v1/messages", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("messages status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	got := string(gotBody)
+	mu.Unlock()
+	for _, want := range []string{`"service_tier":"auto"`, `"cache_control":{"type":"ephemeral"}`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("upstream body lost %s: %s", want, got)
+		}
+	}
+	if want := `"model":"wire-msg"`; !strings.Contains(got, want) {
+		t.Fatalf("upstream body missing the wire model: %s", got)
+	}
+	// Every byte outside the model value is preserved exactly.
+	if want := strings.Replace(body, `"model":"msg-model"`, `"model":"wire-msg"`, 1); got != want {
+		t.Fatalf("body not byte-preserving:\n got %s\nwant %s", got, want)
+	}
+
+	// Responses function tool without an explicit strict.
+	up2 := &nativeUpstream{response: `{"object":"response","model":"wire-resp"}`}
+	p2, _ := newNativeProxy(t, up2, nativeRoute(t, transcode.NativeResponses, "/v1/responses"))
+	rec = postNative(t, p2, "/v1/responses",
+		`{"model":"resp-model","input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("responses status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestProxyNativeRejectsStructuralCorruption proves the always-reject set
+// still holds on the native path: duplicate keys, trailing values, and
+// malformed syntax are local 400s that never reach the upstream.
+func TestProxyNativeRejectsStructuralCorruption(t *testing.T) {
+	up := &nativeUpstream{response: `{"type":"message","model":"wire-msg"}`}
+	p, _ := newNativeProxy(t, up, nativeRoute(t, transcode.NativeMessages, "/v1/messages"))
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"duplicate top-level key", `{"model":"msg-model","max_tokens":5,"max_tokens":6,"messages":[]}`},
+		{"duplicate nested key", `{"model":"msg-model","max_tokens":5,"messages":[{"role":"user","content":"hi","content":"ho"}]}`},
+		{"trailing value", `{"model":"msg-model","max_tokens":5,"messages":[]}{}`},
+		{"malformed", `{"model":`},
+		{"non-object", `[1,2,3]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postNative(t, p, "/v1/messages", tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+			if path, _, _ := up.got(); path != "" {
+				t.Fatalf("upstream reached at %q, want no contact", path)
+			}
+		})
+	}
+}
+
 // TestProxyNativeForwardsQueryAndHeaders proves the native path keeps the
 // transparent contract: client query and non-credential headers reach the
 // upstream verbatim.

@@ -943,7 +943,12 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 			nativeRoutes[i].ModelMap = transcode.ModelMap{AllowIdentity: true}
 		}
 		if p.TranscodeMaxRequestMB > 0 {
-			nativeRoutes[i].BodyLimits.DecodedRequestBytes = p.TranscodeMaxRequestMB << 20
+			// The native path reads the whole body to rewrite the model
+			// identifier, so both its read cap and its rewritten-body cap
+			// follow the provider's declared request bound.
+			b := p.TranscodeMaxRequestMB << 20
+			nativeRoutes[i].BodyLimits.DecodedRequestBytes = b
+			nativeRoutes[i].BodyLimits.AcceptedRequestBytes = b
 		}
 		if p.TranscodeMaxResponseMB > 0 {
 			nativeRoutes[i].BodyLimits.SuccessfulResponseBytes = p.TranscodeMaxResponseMB << 20

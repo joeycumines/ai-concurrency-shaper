@@ -27,8 +27,6 @@ import (
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
-	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/anthropicmessages"
-	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
 // NativeRoute declares one natively served client route: the request
@@ -201,35 +199,19 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		return &out
 	}
 
-	// Structural validation gates the client contract: the pinned wire
-	// decoder rejects corrupt documents (duplicate keys, unknown fields,
-	// illegal nulls, trailing values, malformed syntax) without the
-	// conversion feature-loss layer — same-dialect forwarding loses
-	// nothing, so in-dialect controls the loss policy would drop (top_k,
-	// output_config, background, prompt_cache_key) pass through to the
-	// native upstream that serves them. Chat has no pinned client
-	// decoder, so it enforces JSON wellformedness plus a string model
-	// field instead. Semantic completeness beyond the model identifier
-	// (e.g. max_tokens) is the upstream's job on a verbatim path: its
-	// dialect-correct error is authoritative.
-	switch nr.Protocol {
-	case transcode.NativeResponses:
-		var shadow openairesponses.Request
-		if err := wire.Decode(body, &shadow); err != nil {
-			writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: "+err.Error())
-			return r, nativeError
-		}
-	case transcode.NativeMessages:
-		var shadow anthropicmessages.Request
-		if err := wire.Decode(body, &shadow); err != nil {
-			writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: "+err.Error())
-			return r, nativeError
-		}
-	}
-
+	// Structural validation only. A native path converts nothing, so the
+	// client contract's feature-coverage rules do not apply: every field
+	// the upstream can serve — modeled or not, required or optional —
+	// must pass through. The tolerant wire decode still enforces the
+	// always-reject structural set (duplicate keys at any depth, trailing
+	// values, malformed syntax) because that protects this proxy's own
+	// parsing, and it skips unknown envelope fields so documented
+	// optional controls (service_tier, cache_control, tools without an
+	// explicit strict, ...) reach the upstream that owns them. The
+	// dialect's own error is authoritative for anything semantic.
 	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(body, &doc); err != nil {
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: malformed JSON")
+	if err := wire.DecodeTolerant(body, &doc); err != nil {
+		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: "+err.Error())
 		return r, nativeError
 	}
 	rawModel, ok := doc["model"]
@@ -268,14 +250,8 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		return r, nativeError
 	}
 
-	wire, err := json.Marshal(mapping.UpstreamModel)
-	if err != nil {
-		writeNativeDialectError(w, nr.Protocol, http.StatusInternalServerError, "natively served request: internal error")
-		return r, nativeError
-	}
-	doc["model"] = wire
-	out, err := json.Marshal(doc)
-	if err != nil {
+	out, ok := rewriteTopLevelModel(body, mapping.UpstreamModel)
+	if !ok {
 		writeNativeDialectError(w, nr.Protocol, http.StatusInternalServerError, "natively served request: internal error")
 		return r, nativeError
 	}
@@ -301,6 +277,68 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		respCap:   limits.SuccessfulResponseBytes,
 		convKey:   convKey,
 	})), nativeServe
+}
+
+// rewriteTopLevelModel returns body with the top-level "model" value
+// replaced by wireModel, preserving every other byte exactly. It reports
+// false when the document has no top-level model member (already rejected
+// earlier) or is not a JSON object.
+func rewriteTopLevelModel(body []byte, wireModel string) ([]byte, bool) {
+	quoted, err := json.Marshal(wireModel)
+	if err != nil {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, false
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return nil, false
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, false
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return nil, false
+		}
+		afterKey := dec.InputOffset()
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, false
+		}
+		valueEnd := dec.InputOffset()
+		if key != "model" {
+			continue
+		}
+		// The value begins at the first non-space byte after the ':'
+		// that follows the key.
+		start := int(afterKey)
+		for start < len(body) && body[start] != ':' {
+			start++
+		}
+		if start >= len(body) {
+			return nil, false
+		}
+		start++
+		for start < len(body) && (body[start] == ' ' || body[start] == '\t' ||
+			body[start] == '\n' || body[start] == '\r') {
+			start++
+		}
+		end := int(valueEnd)
+		if start > end {
+			return nil, false
+		}
+		out := make([]byte, 0, len(body)-(end-start)+len(quoted))
+		out = append(out, body[:start]...)
+		out = append(out, quoted...)
+		out = append(out, body[end:]...)
+		return out, true
+	}
+	return nil, false
 }
 
 // rewriteNativeResponseAlias restores the client-facing model alias on a

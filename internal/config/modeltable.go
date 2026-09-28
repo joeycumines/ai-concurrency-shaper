@@ -17,6 +17,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"slices"
 	"sort"
@@ -473,6 +474,28 @@ func (c *Config) resolveModelTable() error {
 		}
 		if len(byProvider[effectiveName(p)]) == 0 {
 			return fmt.Errorf("provider %q has native routes but no -model-table entry names it", effectiveName(p))
+		}
+	}
+	// A native route only engages for a model whose entry declares its
+	// dialect. Warn when none do: the route would otherwise sit inert and
+	// every request would fall through to transcode or transparent
+	// handling without the model rewrite.
+	for _, p := range c.Providers {
+		if !hasNativeRoutes(p) {
+			continue
+		}
+		hasVia := false
+		for _, entry := range byProvider[effectiveName(p)] {
+			if entry.Via != "" {
+				hasVia = true
+				break
+			}
+		}
+		if !hasVia {
+			log.Printf(
+				"note: provider %q declares -native-route but no -model-table entry carries via=; native serving stays inert until a model declares its dialect",
+				effectiveName(p),
+			)
 		}
 	}
 
