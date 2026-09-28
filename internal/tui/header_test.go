@@ -379,4 +379,4 @@ func TestFleetStrip_AggregateObservability(t *testing.T) {
 	}
 }
 
-// ─── T01: horizontal scrolling on the Network tab ───
+// ─── Horizontal scrolling on the Network tab ───

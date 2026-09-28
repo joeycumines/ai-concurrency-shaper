@@ -501,7 +501,7 @@ func TestCtrlD_TUI06(t *testing.T) {
 	}
 }
 
-// ─── TUI-07: logRing / logWriter ───
+// ─── logRing / logWriter ───
 
 func TestSwitchTab_SetsModeBrowse(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})

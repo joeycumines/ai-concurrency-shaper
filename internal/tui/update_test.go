@@ -434,7 +434,7 @@ func TestRenderLogs_WithFilter(t *testing.T) {
 	}
 }
 
-// ─── TUI-09: Network Filtering / Rendering ───
+// ─── Network Filtering / Rendering ───
 
 func TestCanInspect_Dashboard(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})

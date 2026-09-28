@@ -180,7 +180,7 @@ func TestRenderNetwork_WithFilterIndicators(t *testing.T) {
 	}
 }
 
-// ─── TUI-10: Scrollbar, Status Bar, canInspect, Overlays ───
+// ─── Scrollbar, Status Bar, canInspect, Overlays ───
 
 func TestRoutesTabSortedByTotal(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})

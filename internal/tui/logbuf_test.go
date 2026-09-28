@@ -144,7 +144,7 @@ func TestLogRing_ConcurrentWrite(t *testing.T) {
 	}
 }
 
-// ─── TUI-08: visibleLogLines / renderLogs ───
+// ─── visibleLogLines / renderLogs ───
 
 func TestLogBuffer_ReadNew_Sequential(t *testing.T) {
 	b := NewLogBuffer(8)

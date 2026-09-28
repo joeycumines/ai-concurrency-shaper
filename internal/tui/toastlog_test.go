@@ -637,7 +637,7 @@ func TestHandleLogLines_EmptyMsgStillToasts(t *testing.T) {
 	}
 }
 
-// TestHandleLogLines_DistinctAttributesToastSeparately exercises the T20 fix end
+// TestHandleLogLines_DistinctAttributesToastSeparately exercises the fix end
 // to end through the toast path.
 func TestHandleLogLines_DistinctAttributesToastSeparately(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
