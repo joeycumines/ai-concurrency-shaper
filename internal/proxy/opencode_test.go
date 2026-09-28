@@ -391,3 +391,79 @@ func TestProxyPresetNativeSession(t *testing.T) {
 		t.Fatalf("sessions differ across turns (%q vs %q)", first, second)
 	}
 }
+
+// TestProxyPresetIdentityShapes proves the preset identifies a conversation
+// under every shape a real client uses: requests carrying an explicit
+// session id, stateless requests that resend the full content each turn,
+// and a mixture of the two. The explicit id always wins; a content-only
+// request derives a value that is stable across turns; and a client that
+// sends an id on one turn and none on the next keeps the derived value for
+// the id-less turn rather than losing affinity.
+func TestProxyPresetIdentityShapes(t *testing.T) {
+	cap := &headerCapture{}
+	srv := httptest.NewServer(cap.handler(`{"type":"message","model":"wire-msg"}`))
+	t.Cleanup(srv.Close)
+	upstreamURL, _ := url.Parse(srv.URL)
+	key, _ := transcode.NewRouteKey(http.MethodPost, "/v1/messages")
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithOpencodePreset(testPreset()),
+		WithNativeRoutes(NativeRoute{
+			RouteKey: key,
+			Protocol: transcode.NativeMessages,
+			ModelMap: nativeTestModelMap(),
+			Provider: "zen",
+		}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// full is a chat-completions-shaped stateless turn: the whole history
+	// is resent every time, so the first user turn identifies it.
+	full := func(turn string) string {
+		return `{"model":"msg-model","max_tokens":5,"messages":[` +
+			`{"role":"user","content":"kick off"},` +
+			`{"role":"assistant","content":"ok"},` +
+			`{"role":"user","content":"` + turn + `"}]}`
+	}
+
+	send := func(body, session string) string {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if session != "" {
+			req.Header.Set("X-Opencode-Session", session)
+		}
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+		}
+		return cap.get("X-Opencode-Session")
+	}
+
+	// Full-content resends, no id: one stable derived value.
+	contentOnlyA := send(full("second turn"), "")
+	contentOnlyB := send(full("third turn"), "")
+	if contentOnlyA == "" || contentOnlyA != contentOnlyB {
+		t.Fatalf("content-only identity unstable: %q then %q", contentOnlyA, contentOnlyB)
+	}
+
+	// A different opening turn is a different conversation.
+	other := send(`{"model":"msg-model","max_tokens":5,"messages":[{"role":"user","content":"another kick off"}]}`, "")
+	if other == contentOnlyA {
+		t.Fatalf("distinct conversations share the derived value %q", other)
+	}
+
+	// Explicit id wins, and the id-less turn after it keeps the derived
+	// value (the mixed shape).
+	if got := send(full("second turn"), "client-provided-id"); got != "client-provided-id" {
+		t.Fatalf("explicit id not honoured: got %q", got)
+	}
+	if got := send(full("fourth turn"), ""); got != contentOnlyA {
+		t.Fatalf("mixed shape lost affinity: got %q, want %q", got, contentOnlyA)
+	}
+}
