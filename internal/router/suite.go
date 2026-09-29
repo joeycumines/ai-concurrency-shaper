@@ -211,12 +211,15 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 	controller := http.NewResponseController(w)
 	// The deadline guards the inspection read and nothing else, so it comes
 	// off the moment the body is in hand — before the target handler runs.
-	// Left armed, a connection or stream timer would outlive the inspection
-	// it exists for: net/http happens to clear an HTTP/1.1 connection
-	// deadline itself when the request body hits EOF, but the HTTP/2 stream
-	// deadline is a self-firing time.AfterFunc that body EOF never stops. The
-	// deferred clear stays as the backstop for the error paths, where the
-	// inspection ended before EOF.
+	// Left armed it would outlive the inspection it exists for, and nothing
+	// about the body reliably disarms it: on HTTP/1.1 the server clears its
+	// own read deadline from its next-read bookkeeping, which can run after
+	// this handler has already returned, so an armed deadline would be live
+	// for the whole target exchange. On HTTP/2 the stream deadline is a
+	// self-firing time.AfterFunc that only an explicit zero deadline stops.
+	// Lifting it is therefore this handler's job, and it is done before
+	// dispatch rather than left to the protocol. The deferred clear stays as
+	// the backstop for the error paths, where the inspection ended before EOF.
 	deadlineArmed := controller.SetReadDeadline(time.Now().Add(h.inspectionTimeout)) == nil
 	clearDeadline := func() {
 		if deadlineArmed {

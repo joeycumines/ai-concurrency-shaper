@@ -268,8 +268,7 @@ func TestSigningTransportClosesTheBodyWhenSigningFails(t *testing.T) {
 		_ = resp.Body.Close()
 		t.Fatal("RoundTrip succeeded despite the signer refusing")
 	}
-	var signingErr *SigningError
-	if !errors.As(err, &signingErr) {
+	if _, ok := errors.AsType[*SigningError](err); !ok {
 		t.Fatalf("error = %v, want a *SigningError", err)
 	}
 	if inner.calls != 0 {

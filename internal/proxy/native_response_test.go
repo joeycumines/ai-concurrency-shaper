@@ -63,6 +63,51 @@ func TestProxyNativeStructuralErrorIsBounded(t *testing.T) {
 	}
 }
 
+// TestProxyNativeWrongDialectErrorIsBounded covers the fourth and last local
+// rejection that can carry client text: a known model sent to the wrong
+// native dialect, whose 404 quotes the model identifier. It is a separate
+// boundNativeMessage call from the unmapped-model one, so it needs its own
+// proof.
+func TestProxyNativeWrongDialectErrorIsBounded(t *testing.T) {
+	up := &nativeUpstream{response: `{}`}
+	route := nativeRoute(t, transcode.NativeMessages, "/v1/messages")
+	// A known model, served as chat, requested on the messages route. Its
+	// identifier is large enough to dominate the error document.
+	name := "chat-" + strings.Repeat("<", 200<<10)
+	route.ModelMap.Exact[name] = transcode.ModelMapping{
+		ClientModel:         name,
+		UpstreamModel:       "wire-huge",
+		ClientResponseModel: name,
+		Via:                 transcode.NativeChat,
+	}
+	p, _ := newNativeProxy(t, up, route)
+
+	rec := postNative(t, p, "/v1/messages",
+		`{"model":"`+name+`","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: a known model on the wrong dialect must fail closed locally",
+			rec.Code)
+	}
+	if got, limit := rec.Body.Len(), 32<<10; got > limit {
+		t.Fatalf("error body is %d bytes for a %d byte model identifier (limit %d): "+
+			"the wrong-dialect rejection reflected an unbounded client string", got, len(name), limit)
+	}
+	// Only the message PREFIX survives the bound, so the dialect name the
+	// message would end with is legitimately cut; the envelope is what proves
+	// the local 404 shape reached the client.
+	if !strings.Contains(rec.Body.String(), "not_found_error") {
+		t.Fatalf("body = %s, want the dialect-shaped not_found envelope", firstBytes(rec.Body.String()))
+	}
+}
+
+// firstBytes keeps a failure message readable when the body is enormous.
+func firstBytes(s string) string {
+	if len(s) > 200 {
+		return s[:200] + "..."
+	}
+	return s
+}
+
 // TestProxyNativeResponseRewritesOnlyTheModelValue is the response-side twin
 // of the request-side byte-fidelity test. Restoring the alias must replace the
 // model value and nothing else: the upstream's own key order, spacing, and

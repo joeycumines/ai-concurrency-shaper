@@ -32,8 +32,34 @@ POST https://opencode.ai/zen/go/v1/chat/completions
 -> 401 {"type":"error","error":{"type":"AuthError","message":"Missing API key."}}
 ```
 
-There is no keyless tier to support; authenticated `-auth-source` bearer auth is
-the only working shape.
+Authenticated `-auth-source` bearer auth is therefore the only working shape —
+but the **free** tiers answer differently, and that difference is the most
+informative signal in this document. Re-observed 2026-09-29:
+
+| Request | Result |
+| --- | --- |
+| `POST /zen/v1/chat/completions`, free tier, no auth | `403 {"type":"error","error":{"type":"FreeTierError","message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}` |
+| the same, plus the first-party `-opencode` header set | `403 FreeTierError`, unchanged |
+| the same, plus a syntactically valid but wrong bearer token | `401 AuthError: Invalid API key.` |
+| `GET /zen/v1/models`, no auth | `200`; 83 models, 11 of them `*-free` or `*-contributor` |
+
+Two facts follow, and neither is visible from a paid-model probe alone:
+
+- The free tier is **account-gated, not anonymous**. A request with no
+  credential reaches a *tier* check rather than an *auth* check, and only a
+  valid key clears it — a wrong key returns the ordinary `Invalid API key`. So
+  the free offering is real and is free *within an account*; it is not free
+  *without* one. "Pool anonymous connections" cannot be satisfied by an
+  unauthenticated mount, whatever the request shape.
+- The `-opencode` preset does not unlock it. The refusal is not a missing-header
+  condition, so impersonating the first-party client is neither necessary nor
+  sufficient here. `-opencode` remains required for session pinning on the
+  authenticated mounts, for the separate reason recorded above.
+
+An earlier revision of this section concluded "there is no keyless tier to
+support" from paid models only. That conclusion holds for inference, but it
+erased the free tier's own error class, which is precisely what tells a reader
+that the gate is an account rather than a request shape.
 
 ## Native dialect per family
 
