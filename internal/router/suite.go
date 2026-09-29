@@ -16,7 +16,6 @@
 package router
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,7 +25,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -34,25 +32,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
 
-const (
-	catalogSuiteBufferBudgetBytes = 64 << 20
-	catalogSuiteBufferWait        = 30 * time.Second
-	catalogSuiteMinErrorBytes     = 128
-)
-
-// CatalogSuiteAdmission bounds aggregate bytes held by model inspection across
-// every suite mounted on one server. Each slot reserves one full per-request
-// body allowance, so configured request size and the fixed budget bound total
-// buffering even when a configuration mounts multiple suites.
-type CatalogSuiteAdmission struct {
-	slots chan struct{}
-}
-
-func NewCatalogSuiteAdmission(limits transcode.BodyLimits) *CatalogSuiteAdmission {
-	limits = limits.WithDefaults()
-	slots := max(1, int(catalogSuiteBufferBudgetBytes/max(int64(1), limits.AcceptedRequestBytes)))
-	return &CatalogSuiteAdmission{slots: make(chan struct{}, slots)}
-}
+const catalogSuiteMinErrorBytes = 128
 
 // ModelRoute maps a model identifier to the provider handler responsible for serving it.
 type ModelRoute struct {
@@ -119,7 +99,7 @@ func NewCatalogSuiteHandler(cfg SuiteConfig) *CatalogSuiteHandler {
 	}
 	inspectionTimeout := cfg.InspectionTimeout
 	if inspectionTimeout <= 0 {
-		inspectionTimeout = catalogSuiteBufferWait
+		inspectionTimeout = catalogSuiteInspectionWait
 	}
 	return &CatalogSuiteHandler{
 		name:              cfg.Name,
@@ -217,7 +197,7 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 		h.writeDialectError(w, shape, http.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
-	releaseSlot, ok := h.acquireBufferSlot(w, r, shape)
+	releaseSlot, ok := h.acquireBufferSlot(r)
 	if !ok {
 		return
 	}
@@ -229,10 +209,22 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 	}()
 
 	controller := http.NewResponseController(w)
-	readDeadlineSet := controller.SetReadDeadline(time.Now().Add(h.inspectionTimeout)) == nil
-	if readDeadlineSet {
-		defer func() { _ = controller.SetReadDeadline(time.Time{}) }()
+	// The deadline guards the inspection read and nothing else, so it comes
+	// off the moment the body is in hand — before the target handler runs.
+	// Left armed, a connection or stream timer would outlive the inspection
+	// it exists for: net/http happens to clear an HTTP/1.1 connection
+	// deadline itself when the request body hits EOF, but the HTTP/2 stream
+	// deadline is a self-firing time.AfterFunc that body EOF never stops. The
+	// deferred clear stays as the backstop for the error paths, where the
+	// inspection ended before EOF.
+	deadlineArmed := controller.SetReadDeadline(time.Now().Add(h.inspectionTimeout)) == nil
+	clearDeadline := func() {
+		if deadlineArmed {
+			deadlineArmed = false
+			_ = controller.SetReadDeadline(time.Time{})
+		}
 	}
+	defer clearDeadline()
 
 	var timedOut atomic.Bool
 	if r.Body != nil {
@@ -244,6 +236,7 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 		body, err := io.ReadAll(io.LimitReader(originalBody, maxPeekBytes+1))
 		timer.Stop()
 		_ = originalBody.Close()
+		clearDeadline()
 		if timedOut.Load() || errors.Is(err, os.ErrDeadlineExceeded) {
 			h.writeDialectError(w, shape, http.StatusRequestTimeout, "timed out reading request body")
 			return
@@ -284,111 +277,25 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		bodyLen := int64(len(body))
+		// The catalog is finished with the body. The target takes ownership
+		// and the admission token comes back as soon as it spends the body,
+		// rather than when the target's own upstream exchange finishes; the
+		// backstop covers a target that returns or panics without touching
+		// the body at all.
 		handoff := newCatalogHandoff(body, releaseSlot)
 		slotHandedOff = true
-		body = nil // clear local stack reference so memory is not held by serveCompletion frame
-
-		// Ensure that if target.handler returns or panics without reading or closing
-		// the body, the admission slot is always released.
 		defer handoff.drain()
 
-		r.Body = handoff.newBody()
+		r.Body = handoff.primaryBody()
 		r.GetBody = func() (io.ReadCloser, error) {
-			return handoff.newBody(), nil
+			return handoff.replayBody(), nil
 		}
-		r.ContentLength = bodyLen
+		r.ContentLength = int64(len(body))
 		r.TransferEncoding = nil
 		target.handler.ServeHTTP(w, r)
 		return
 	}
 	h.writeDialectError(w, shape, http.StatusBadRequest, "missing request body")
-}
-
-func (h *CatalogSuiteHandler) acquireBufferSlot(w http.ResponseWriter, r *http.Request, shape transcode.CatalogShape) (func(), bool) {
-	timer := time.NewTimer(h.inspectionTimeout)
-	defer timer.Stop()
-	select {
-	case h.admission.slots <- struct{}{}:
-		var once sync.Once
-		release := func() {
-			once.Do(func() {
-				<-h.admission.slots
-			})
-		}
-		return release, true
-	case <-r.Context().Done():
-		return nil, false
-	case <-timer.C:
-		h.writeDialectError(w, shape, http.StatusServiceUnavailable, "catalog suite is busy")
-		return nil, false
-	}
-}
-
-type catalogHandoff struct {
-	data        []byte
-	releaseOnce sync.Once
-	releaseSlot func()
-}
-
-func newCatalogHandoff(data []byte, releaseSlot func()) *catalogHandoff {
-	return &catalogHandoff{
-		data:        data,
-		releaseSlot: releaseSlot,
-	}
-}
-
-func (h *catalogHandoff) drain() {
-	h.releaseOnce.Do(func() {
-		if h.releaseSlot != nil {
-			h.releaseSlot()
-		}
-	})
-}
-
-func (h *catalogHandoff) newBody() io.ReadCloser {
-	return &catalogHandoffBody{
-		reader:  bytes.NewReader(h.data),
-		onDrain: h.drain,
-	}
-}
-
-type catalogHandoffBody struct {
-	mu        sync.Mutex
-	reader    *bytes.Reader
-	closed    bool
-	drainOnce sync.Once
-	onDrain   func()
-}
-
-func (b *catalogHandoffBody) Read(p []byte) (int, error) {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return 0, http.ErrBodyReadAfterClose
-	}
-	n, err := b.reader.Read(p)
-	b.mu.Unlock()
-	if err == io.EOF {
-		b.drain()
-	}
-	return n, err
-}
-
-func (b *catalogHandoffBody) Close() error {
-	b.mu.Lock()
-	b.closed = true
-	b.mu.Unlock()
-	b.drain()
-	return nil
-}
-
-func (b *catalogHandoffBody) drain() {
-	b.drainOnce.Do(func() {
-		if b.onDrain != nil {
-			b.onDrain()
-		}
-	})
 }
 
 func peekModelField(body []byte) (string, error) {

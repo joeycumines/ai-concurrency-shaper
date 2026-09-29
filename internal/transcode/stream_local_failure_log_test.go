@@ -112,19 +112,16 @@ func TestOperatorLogLineCannotBeForgedByClientText(t *testing.T) {
 	if lines := strings.Split(out, "\n"); len(lines) != 1 {
 		t.Fatalf("log has %d physical lines, want exactly 1:\n%s", len(lines), out)
 	}
-	// The attacker's text may still appear INLINE (it is evidence), but it must
-	// no longer be able to START a line: only the real prefix may precede it.
-	before, _, ok := strings.Cut(out, forged)
-	if ok {
-		prefix := before
-		if strings.HasPrefix(strings.TrimSpace(prefix), "transcode:") && len(prefix) < 2 {
-			t.Errorf("attacker text begins a second operator line:\n%s", out)
-		}
-		if !strings.HasSuffix(prefix, `\n`) {
-			t.Errorf("attacker text is not visibly escaped inline:\n%s", out)
-		}
-	}
-	if !strings.Contains(out, `\n`) {
-		t.Errorf("expected the embedded newline to be escaped as \\n in:\n%s", out)
+	// The attacker's text may still appear INLINE (it is evidence of what the
+	// client sent), but everything after the logger's own timestamp must be
+	// the real operator line: the fixed attribution first, then the detail
+	// with its newlines escaped. Pinning the whole line is what makes a
+	// forgery observable. The check this replaces could not: it required a
+	// prefix to start with "transcode:" AND be shorter than two bytes, which
+	// is unsatisfiable the moment the real prefix precedes the text, so it
+	// passed whatever the logger emitted.
+	wantLine := `transcode: POST /v1/responses: convert request: a\n` + forged + `\nb`
+	if !strings.HasSuffix(out, wantLine) {
+		t.Errorf("operator line does not end with the attributed, escaped line %q:\n%s", wantLine, out)
 	}
 }
