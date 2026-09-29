@@ -73,8 +73,10 @@ func TestCatalogSuiteHandoffBodyClosesWhileWriteInFlight(t *testing.T) {
 		Strict:       true,
 		DefaultShape: transcode.CatalogShapeOpenAI,
 		Limits:       transcode.BodyLimits{AcceptedRequestBytes: 128 << 20},
-		// Short so a leaked token surfaces as a prompt 503 rather than the
-		// full default wait. The first request is finished by the time the
+		// Short so a leaked token surfaces promptly rather than after the
+		// full default body-inspection wait. Admission itself never times out:
+		// a leaked token shows up as this test hanging, which waitFor turns
+		// into a failure. The first request is finished by the time the
 		// second starts, so an admitted slot is immediate.
 		InspectionTimeout: 2 * time.Second,
 		Admission:         admission,
@@ -122,7 +124,7 @@ func TestCatalogSuiteHandoffBodyClosesWhileWriteInFlight(t *testing.T) {
 	waitFor(t, "the target to close the body while the copy is in flight", closed, 5*time.Second)
 
 	// The close returned without waiting for the parked write, so the token
-	// is back and a second request is served instead of 503-ing.
+	// is back and the one-slot pool admits a second request immediately.
 	rec2 := httptest.NewRecorder()
 	suite.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m2"}`)))
 	if rec2.Code != http.StatusOK {
@@ -142,6 +144,81 @@ func TestCatalogSuiteHandoffBodyClosesWhileWriteInFlight(t *testing.T) {
 	}
 	failures.check(t)
 }
+
+// TestCatalogSuiteHandoffBodySurvivesAPanickingDestination pins the unlock in
+// WriteTo. The destination is caller code: bytes.Reader.WriteTo panics on a
+// writer that reports more bytes than it was given, and a target that recovers
+// goes on using the body. If the panic escaped with the body mutex still held,
+// every later operation on that body would block for good, the handler would
+// never return, and the handler-return backstop would never release the
+// admission token — so one bad writer would cost the pool a slot permanently.
+func TestCatalogSuiteHandoffBodySurvivesAPanickingDestination(t *testing.T) {
+	admission := oneSlotAdmission()
+	failures := make(targetFailures, 4)
+	payload := `{"model":"m1","data":"payload"}`
+
+	panicked := make(chan struct{})
+	var req2Hits atomic.Int64
+	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Strict:       true,
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		Limits:       transcode.BodyLimits{AcceptedRequestBytes: 128 << 20},
+		Admission:    admission,
+		ModelRoutes: []router.ModelRoute{
+			{Model: "m1", Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				func() {
+					defer func() {
+						if rec := recover(); rec == nil {
+							failures.send("an over-reporting destination did not panic")
+						}
+						close(panicked)
+					}()
+					_, _ = io.Copy(overReportingSink{}, r.Body)
+				}()
+				// The target keeps using the body after recovering, which is
+				// exactly the case that turns a held mutex into a deadlock.
+				if _, err := io.ReadAll(r.Body); err != nil {
+					failures.send("read after a panicking write: %v", err)
+				}
+				w.WriteHeader(http.StatusOK)
+			}), SupportedRoutes: allSuiteRoutes()},
+			{Model: "m2", Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				req2Hits.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}), SupportedRoutes: allSuiteRoutes()},
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	suite.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(payload)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	failures.check(t)
+	select {
+	case <-panicked:
+	default:
+		t.Fatal("the target never observed the destination panic")
+	}
+
+	// The one-slot pool must still admit: the token came back either when the
+	// tail was spent or at handler return.
+	rec2 := httptest.NewRecorder()
+	suite.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m2"}`)))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("status after a panicking destination = %d, want 200: "+
+			"the body stayed locked, so the token was never returned: %s", rec2.Code, rec2.Body.String())
+	}
+	if req2Hits.Load() != 1 {
+		t.Fatalf("req2 target hits = %d, want 1", req2Hits.Load())
+	}
+}
+
+// overReportingSink claims more bytes than it was handed, which is what makes
+// bytes.Reader.WriteTo panic.
+type overReportingSink struct{}
+
+func (overReportingSink) Write(p []byte) (int, error) { return len(p) + 1, nil }
 
 // TestCatalogSuiteHandoffBodySerializesReadAgainstWrite pins the invariant
 // WriteTo's offset arithmetic depends on: every operation that moves the

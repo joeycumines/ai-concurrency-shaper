@@ -44,12 +44,13 @@ const (
 // first.
 //
 // A request that finds the pool full WAITS for a slot. It is never turned away.
-// The wait is free of the memory the pool bounds: a request is not read until
-// it holds a slot, so a waiting request holds no buffered bytes and no
-// goroutine is doing work on its behalf. Refusing instead would only hand the
-// retry decision to the client, which is precisely what blocking request
-// semantics are meant to avoid. The wait ends when a slot frees or the client
-// disconnects.
+// What the wait costs is not the memory the pool bounds — a request is not
+// read until it holds a slot, so a waiting request buffers nothing — but it
+// is not free either: each waiter parks a goroutine and holds one idle
+// connection whose request body was never read, and nothing here caps the
+// number of them. Refusing instead would only hand the retry decision to the
+// client, which is precisely what blocking request semantics are meant to
+// avoid. The wait ends when a slot frees or the client disconnects.
 //
 // The release window is wider than the catalog's own work. It spans the
 // target's admission wait as well, because a target that has not read the body
@@ -200,16 +201,24 @@ func (b *catalogHandoffBody) Read(p []byte) (int, error) {
 // concurrent Read move the offset and leave this advance resolving against a
 // stale base. A short write leaves bytes behind, so the release still keys off
 // exhaustion rather than off the return of this method.
+//
+// The unlock is deferred because the destination is caller code and may panic
+// — bytes.Reader.WriteTo itself panics on a destination that reports more
+// bytes than it was given. A bare Lock/Unlock pair would leave b.mu held for
+// good, and because the target may recover that panic and go on to use the
+// body, the handler would never return and the handler-return backstop would
+// never release the admission token either. One wedged body would then cost
+// the pool a slot for the life of the mount. A panicking write skips the
+// release here, which is correct: the body is not spent, and the backstop
+// returns the token when the handler unwinds.
 func (b *catalogHandoffBody) WriteTo(w io.Writer) (int64, error) {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.closed.Load() {
-		b.mu.Unlock()
 		return 0, http.ErrBodyReadAfterClose
 	}
 	n, err := b.reader.WriteTo(w)
-	spent := b.spent()
-	b.mu.Unlock()
-	if spent {
+	if b.spent() {
 		b.release()
 	}
 	return n, err

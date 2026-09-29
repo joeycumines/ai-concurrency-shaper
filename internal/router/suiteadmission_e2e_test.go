@@ -206,7 +206,22 @@ func TestCatalogSuiteSaturatedProviderNeverTurnsAClientAway(t *testing.T) {
 	// parked upstream exchanges before either test server waits on them.
 	t.Cleanup(hold.release)
 
+	// codes is written by the request goroutines and read by this one, so it
+	// goes through a mutex rather than being read while a worker may still be
+	// storing into it.
+	var mu sync.Mutex
 	codes := make([]int, numRequests)
+	record := func(id, code int) {
+		mu.Lock()
+		defer mu.Unlock()
+		codes[id] = code
+	}
+	answered := func() []int {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]int(nil), codes...)
+	}
+
 	var wg sync.WaitGroup
 	for i := range numRequests {
 		wg.Add(1)
@@ -215,29 +230,24 @@ func TestCatalogSuiteSaturatedProviderNeverTurnsAClientAway(t *testing.T) {
 			body := fmt.Sprintf(`{"model":"m","req":%d}`, id)
 			resp, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(body))
 			if err != nil {
+				record(id, -1)
 				t.Errorf("request %d: %v", id, err)
 				return
 			}
 			_, _ = io.Copy(io.Discard, resp.Body)
 			_ = resp.Body.Close()
-			codes[id] = resp.StatusCode
+			record(id, resp.StatusCode)
 		}(i)
 	}
 
 	// The provider is saturated and holding. Every request must still be
 	// waiting: none answered with a success it could not have had, and none
 	// turned away with an error.
-	saturatedFor := time.After(3 * time.Second)
-	settled := false
-	for !settled {
-		select {
-		case <-saturatedFor:
-			settled = true
-		default:
-			time.Sleep(20 * time.Millisecond)
-		}
-	}
-	for i, code := range codes {
+	// A single bounded wait expresses that; the requests cannot complete while
+	// the provider holds every slot, so this is an observation window, not a
+	// synchronization point.
+	time.Sleep(3 * time.Second)
+	for i, code := range answered() {
 		if code != 0 {
 			t.Fatalf("request %d was answered with %d while every provider slot was busy: "+
 				"a saturated provider must make the client wait, never answer", i, code)
@@ -250,7 +260,7 @@ func TestCatalogSuiteSaturatedProviderNeverTurnsAClientAway(t *testing.T) {
 	// Let the provider drain. Every request must now be served, in waves.
 	hold.release()
 	wg.Wait()
-	for i, code := range codes {
+	for i, code := range answered() {
 		if code != http.StatusOK {
 			t.Errorf("request %d status = %d, want 200: a saturated provider must never turn a client away", i, code)
 		}
@@ -323,7 +333,8 @@ func TestCatalogSuiteSignedRouteReleasesAdmissionBeforeUpstream(t *testing.T) {
 			mapping := helperResponsesToChatMapping(t)
 			mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthExternalSigner, Signer: tc.signer}
 			// A single slot: a token held across the first exchange would
-			// make the second request 503 rather than reach the upstream.
+			// leave the second request waiting for an exchange that never
+			// ends, so it would never reach the upstream.
 			p, err := proxy.New(
 				proxy.WithUpstream(upstreamURL),
 				proxy.WithMatcher(route.NewMatcher(nil)),

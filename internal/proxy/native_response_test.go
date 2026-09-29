@@ -114,10 +114,10 @@ func TestProxyNativeLocalErrorBoundsTheClientModel(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: the unmapped model must fail resolution locally", rec.Code)
 	}
-	// The message is clamped to ErrorMessageBytes before rendering, so the
-	// document is bounded by that, generously escaped. Without the clamp it
-	// is six times the 200 KiB identifier.
-	if got, limit := rec.Body.Len(), 64<<10; got > limit {
+	// The message is clamped to ErrorMessageBytes (4 KiB) before rendering, and
+	// the dialect writer escapes up to six fold, so the document must land
+	// under 24 KiB. Without the clamp it is six times the 200 KiB identifier.
+	if got, limit := rec.Body.Len(), 32<<10; got > limit {
 		t.Fatalf("error body is %d bytes for a %d byte model identifier (limit %d): "+
 			"the local rejection reflected an unbounded client string", got, len(huge), limit)
 	}
@@ -176,6 +176,27 @@ func TestProxyNativeStreamByteIdentical(t *testing.T) {
 	}
 }
 
+// TestProxyNativeResponseWithDuplicateModelIsUntouched proves an ambiguous
+// document is left alone rather than half-rewritten. A client reads whichever
+// duplicate its parser resolves to, so replacing only the first could write
+// the client alias into a slot nobody reads while the value the client does
+// read still carries the upstream model — the exact leak the restore exists to
+// prevent. Forwarding the document intact is the honest outcome.
+func TestProxyNativeResponseWithDuplicateModelIsUntouched(t *testing.T) {
+	upstream := `{"model":"other","type":"message","model":"wire-msg","content":"hi"}`
+	up := &nativeUpstream{response: upstream}
+	p, _ := newNativeProxy(t, up, nativeRoute(t, transcode.NativeMessages, "/v1/messages"))
+
+	rec := postNative(t, p, "/v1/messages",
+		`{"model":"msg-model","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != upstream {
+		t.Fatalf("body = %q, want the ambiguous document forwarded byte-identical: %q", got, upstream)
+	}
+}
+
 // TestProxyNativeResponseBoundIsExact pins the edge of the alias inspection
 // bound. A body of exactly the bound is still inspected, so the alias is
 // restored; one byte more is not inspected at all and passes through
@@ -192,11 +213,27 @@ func TestProxyNativeResponseBoundIsExact(t *testing.T) {
 		t.Fatalf("fixture is %d bytes, want exactly %d", len(exact), bound)
 	}
 
-	newCappedProxy := func(t *testing.T, response string) *Proxy {
+	// declared controls whether the upstream advertises a Content-Length. With
+	// one, the response is skipped on the declared-length check and never
+	// reaches the probe; without one the probe is what decides. Both paths
+	// have to be pinned at the boundary, because they are separate arithmetic.
+	//
+	// Merely omitting the header is not enough: net/http buffers a small
+	// handler response and sets Content-Length itself, so the chunked case has
+	// to flush the headers first to actually commit to chunked encoding.
+	newCappedProxy := func(t *testing.T, response string, declared bool) *Proxy {
 		t.Helper()
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_, _ = io.ReadAll(r.Body)
 			w.Header().Set("Content-Type", "application/json")
+			if declared {
+				w.Header().Set("Content-Length", strconv.Itoa(len(response)))
+			} else {
+				w.WriteHeader(http.StatusOK)
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
+				}
+			}
 			_, _ = w.Write([]byte(response))
 		}))
 		t.Cleanup(srv.Close)
@@ -226,7 +263,7 @@ func TestProxyNativeResponseBoundIsExact(t *testing.T) {
 	request := `{"model":"msg-model","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`
 
 	t.Run("exactly at the bound is inspected", func(t *testing.T) {
-		p := newCappedProxy(t, exact)
+		p := newCappedProxy(t, exact, true)
 		rec := postNative(t, p, "/v1/messages", request)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
@@ -237,7 +274,29 @@ func TestProxyNativeResponseBoundIsExact(t *testing.T) {
 	})
 
 	t.Run("one byte over is untouched", func(t *testing.T) {
-		p := newCappedProxy(t, over)
+		p := newCappedProxy(t, over, true)
+		rec := postNative(t, p, "/v1/messages", request)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		if rec.Body.String() != over {
+			t.Fatalf("body = %q, want it forwarded byte-identical over the bound", rec.Body.String())
+		}
+	})
+
+	t.Run("chunked at the bound is inspected", func(t *testing.T) {
+		p := newCappedProxy(t, exact, false)
+		rec := postNative(t, p, "/v1/messages", request)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"model":"msg-model"`) {
+			t.Fatalf("body = %s, want the alias restored on a chunked body at the bound", rec.Body.String())
+		}
+	})
+
+	t.Run("chunked one byte over is untouched", func(t *testing.T) {
+		p := newCappedProxy(t, over, false)
 		rec := postNative(t, p, "/v1/messages", request)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())

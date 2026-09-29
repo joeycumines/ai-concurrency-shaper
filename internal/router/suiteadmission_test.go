@@ -575,8 +575,10 @@ func TestCatalogSuiteHandoffReleasesAdmissionOnPanic(t *testing.T) {
 		Strict:       true,
 		DefaultShape: transcode.CatalogShapeOpenAI,
 		Limits:       transcode.BodyLimits{AcceptedRequestBytes: 128 << 20},
-		// Short so a leaked token surfaces as a prompt 503 instead of the
-		// full default wait. The first request is already finished when the
+		// Short so a leaked token surfaces promptly rather than after the
+		// full default body-inspection wait. Admission itself never times out:
+		// a leaked token shows up as this test hanging, which waitFor turns
+		// into a failure. The first request is already finished when the
 		// second one starts, so an admitted slot is immediate.
 		InspectionTimeout: 2 * time.Second,
 		Admission:         admission,
@@ -620,8 +622,10 @@ func TestCatalogSuiteSafetyReleaseOnEarlyReturn(t *testing.T) {
 		Strict:       true,
 		DefaultShape: transcode.CatalogShapeOpenAI,
 		Limits:       transcode.BodyLimits{AcceptedRequestBytes: 128 << 20},
-		// Short so a leaked token surfaces as a prompt 503 instead of the
-		// full default wait. The first request is already finished when the
+		// Short so a leaked token surfaces promptly rather than after the
+		// full default body-inspection wait. Admission itself never times out:
+		// a leaked token shows up as this test hanging, which waitFor turns
+		// into a failure. The first request is already finished when the
 		// second one starts, so an admitted slot is immediate.
 		InspectionTimeout: 2 * time.Second,
 		Admission:         admission,

@@ -306,8 +306,9 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 
 // rewriteTopLevelModel returns body with the top-level "model" value
 // replaced by wireModel, preserving every other byte exactly. It reports
-// false when the document has no top-level model member (already rejected
-// earlier) or is not a JSON object.
+// false when the document is not a JSON object, has no single top-level model
+// member, or has more than one — a duplicate is left untouched because which
+// value a client reads is its parser's decision, not ours.
 func rewriteTopLevelModel(body []byte, wireModel string) ([]byte, bool) {
 	quoted, err := json.Marshal(wireModel)
 	if err != nil {
@@ -321,6 +322,8 @@ func rewriteTopLevelModel(body []byte, wireModel string) ([]byte, bool) {
 	if d, ok := tok.(json.Delim); !ok || d != '{' {
 		return nil, false
 	}
+	var out []byte
+	found := false
 	for dec.More() {
 		keyTok, err := dec.Token()
 		if err != nil {
@@ -338,6 +341,15 @@ func rewriteTopLevelModel(body []byte, wireModel string) ([]byte, bool) {
 		valueEnd := dec.InputOffset()
 		if key != "model" {
 			continue
+		}
+		if found {
+			// Two top-level model keys. Which one a client reads is decided by
+			// its parser, not by us, so replacing one of them could put the
+			// client alias somewhere no parser looks while the value it does
+			// read keeps the upstream model. Leaving the document alone is the
+			// honest outcome, and it is the same rule the request path gets
+			// from the always-reject duplicate-key check.
+			return nil, false
 		}
 		// The value begins at the first non-space byte after the ':'
 		// that follows the key.
@@ -357,13 +369,16 @@ func rewriteTopLevelModel(body []byte, wireModel string) ([]byte, bool) {
 		if start > end {
 			return nil, false
 		}
-		out := make([]byte, 0, len(body)-(end-start)+len(quoted))
+		out = make([]byte, 0, len(body)-(end-start)+len(quoted))
 		out = append(out, body[:start]...)
 		out = append(out, quoted...)
 		out = append(out, body[end:]...)
-		return out, true
+		found = true
 	}
-	return nil, false
+	if !found {
+		return nil, false
+	}
+	return out, true
 }
 
 // rewriteNativeResponseAlias restores the client-facing model alias on a
@@ -483,6 +498,9 @@ func isNativeUpgrade(r *http.Request) bool {
 // megabytes, so without this bound a client could make the proxy emit a
 // hundredfold larger error document than the request it sent. The sibling
 // paths bound the same input the same way.
+// A non-positive max means "no configured bound" and returns the message
+// whole, matching boundSuiteMessage and boundCatalogMessage. It is unreachable
+// from the native path, which always reads its limit through WithDefaults.
 func boundNativeMessage(message string, max int) string {
 	if max <= 0 || len(message) <= max {
 		return message
