@@ -37,6 +37,32 @@ import (
 // value is semantically invisible to a JSON decoder and still a violation.
 // Routing and request-side validation are in native_test.go.
 
+// TestProxyNativeStructuralErrorIsBounded covers the third local rejection,
+// the one that quotes a key name straight out of the request: the tolerant
+// decode reports a duplicate key as `duplicate JSON key %q`, so that message
+// text is client-controlled and the dialect writer escapes it. Every local
+// rejection on this path has to be bounded, not just the ones that quote the
+// model identifier.
+func TestProxyNativeStructuralErrorIsBounded(t *testing.T) {
+	up := &nativeUpstream{response: `{}`}
+	p, _ := newNativeProxy(t, up, nativeRoute(t, transcode.NativeMessages, "/v1/messages"))
+
+	// A duplicated key whose name is the client-controlled payload.
+	huge := strings.Repeat("<", 200<<10)
+	body := `{"model":"msg-model","` + huge + `":1,"` + huge + `":2}`
+	rec := postNative(t, p, "/v1/messages", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: a duplicate key must be refused: %s", rec.Code, rec.Body.String())
+	}
+	if got, limit := rec.Body.Len(), 32<<10; got > limit {
+		t.Fatalf("error body is %d bytes for a %d byte request (limit %d): "+
+			"the structural rejection reflected an unbounded client string", got, len(body), limit)
+	}
+	if !strings.Contains(rec.Body.String(), `duplicate JSON key`) {
+		t.Fatalf("body = %s, want it to name the duplicate key", rec.Body.String())
+	}
+}
+
 // TestProxyNativeResponseRewritesOnlyTheModelValue is the response-side twin
 // of the request-side byte-fidelity test. Restoring the alias must replace the
 // model value and nothing else: the upstream's own key order, spacing, and

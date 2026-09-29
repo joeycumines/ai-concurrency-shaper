@@ -73,11 +73,12 @@ func TestCatalogSuiteHandoffBodyClosesWhileWriteInFlight(t *testing.T) {
 		Strict:       true,
 		DefaultShape: transcode.CatalogShapeOpenAI,
 		Limits:       transcode.BodyLimits{AcceptedRequestBytes: 128 << 20},
-		// Short so a leaked token surfaces promptly rather than after the
-		// full default body-inspection wait. Admission itself never times out:
-		// a leaked token shows up as this test hanging, which waitFor turns
-		// into a failure. The first request is finished by the time the
-		// second starts, so an admitted slot is immediate.
+		// InspectionTimeout does NOT bound admission any more -- a request
+		// that finds the pool full waits, and only a freed slot or the
+		// client's context ends that. So a leaked token here shows up as the
+		// waitFor below timing out, not as a prompt 503. The first request is
+		// finished by the time the second starts, so an admitted slot is
+		// immediate.
 		InspectionTimeout: 2 * time.Second,
 		Admission:         admission,
 		ModelRoutes: []router.ModelRoute{

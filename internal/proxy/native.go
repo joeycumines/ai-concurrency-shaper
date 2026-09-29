@@ -203,7 +203,10 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	body, err := io.ReadAll(io.LimitReader(r.Body, limits.AcceptedRequestBytes+1))
 	_ = r.Body.Close()
 	if err != nil {
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "read request body: "+err.Error())
+		// Bounded for the same reason as the decode failure below: the text
+		// originates in the transport and need not be free of request bytes.
+		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
+			boundNativeMessage("read request body: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
 	if int64(len(body)) > limits.AcceptedRequestBytes {
@@ -233,7 +236,11 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	// dialect's own error is authoritative for anything semantic.
 	var doc map[string]json.RawMessage
 	if err := wire.DecodeTolerant(body, &doc); err != nil {
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: "+err.Error())
+		// The decode error can quote a key name straight out of the request
+		// ("duplicate JSON key %q"), so it is client-controlled text and is
+		// bounded like every other client string this path reflects.
+		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
+			boundNativeMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
 	rawModel, ok := doc["model"]

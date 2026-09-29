@@ -73,11 +73,13 @@ func (p ProfileMap) ResolveProfile(profileName string) (clientModel string, tier
 // instead. A natively served response is a different surface — it is forwarded
 // byte-identically apart from the model value, so the alias restore is a
 // surgical rewrite that leaves the body alone unless it is application/json,
-// unencoded, within the inspection bound, readable without error, and actually
-// naming the wire model. The two that matter to a caller are a stream, where
-// byte-identity wins outright, and a body over the inspection bound, where the
-// proxy refuses to buffer without limit. On both the upstream model does reach
-// the client, deliberately.
+// unencoded, within the inspection bound, readable without error, naming the
+// wire model, and unambiguous about which key that is. The cases a caller will
+// actually meet are a stream, where byte-identity wins outright; a body over
+// the inspection bound, where the proxy refuses to buffer without limit; and a
+// document with two top-level model keys, where the rewrite is refused rather
+// than applied to a key the client's parser may not read. On all three the
+// upstream model does reach the client, deliberately.
 func (m ModelMap) Resolve(clientModel string) (ModelMapping, error) {
 	if mapping, ok := m.Exact[clientModel]; ok {
 		if mapping.ClientResponseModel == "" {

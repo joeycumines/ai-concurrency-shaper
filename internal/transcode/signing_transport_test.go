@@ -89,6 +89,67 @@ func (c *closeSpy) Close() error {
 	return nil
 }
 
+// substitutingSigner installs a body of its own, then optionally fails. The
+// transport keeps such a body because that is what the signer signed and
+// wants sent, but when the attempt is abandoned nothing else holds a reference
+// to it, so the transport is the only thing that can close it.
+type substitutingSigner struct {
+	body io.ReadCloser
+	err  error
+}
+
+func (s *substitutingSigner) Sign(_ context.Context, req *http.Request) error {
+	req.Body = s.body
+	return s.err
+}
+
+// TestSigningTransportClosesASubstitutedBodyItAbandons covers both paths where
+// a signer-installed body is dropped rather than sent: the signer failing, and
+// the rebuildable path replacing it with a fresh GetBody reader. Neither leaks.
+func TestSigningTransportClosesASubstitutedBodyItAbandons(t *testing.T) {
+	const body = `{"model":"m","input":"hello"}`
+
+	t.Run("signer fails", func(t *testing.T) {
+		spy := &closeSpy{Reader: strings.NewReader(body)}
+		inner := &recordingTransport{}
+		transport := &SigningTransport{Inner: inner}
+
+		req := signingRequest(body, true)
+		req = req.WithContext(WithRequestSigner(req.Context(), &substitutingSigner{
+			body: spy, err: errors.New("signer exploded"),
+		}))
+		if _, err := transport.RoundTrip(req); err == nil {
+			t.Fatal("RoundTrip succeeded, want the signer's error")
+		}
+		if spy.closes != 1 {
+			t.Fatalf("substituted body closed %d times, want 1: a body only the transport holds must not leak", spy.closes)
+		}
+		if inner.calls != 0 {
+			t.Fatalf("inner transport calls = %d, want 0", inner.calls)
+		}
+	})
+
+	t.Run("replaced by a rebuild", func(t *testing.T) {
+		spy := &closeSpy{Reader: strings.NewReader(body)}
+		inner := &recordingTransport{}
+		transport := &SigningTransport{Inner: inner}
+
+		req := signingRequest(body, true)
+		req = req.WithContext(WithRequestSigner(req.Context(), &substitutingSigner{body: spy}))
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip: %v", err)
+		}
+		_ = resp.Body.Close()
+		if spy.closes != 1 {
+			t.Fatalf("substituted body closed %d times, want 1: it was replaced on the request, so nobody else will close it", spy.closes)
+		}
+		if inner.sent != body {
+			t.Fatalf("upstream body = %q, want the rebuilt payload", inner.sent)
+		}
+	})
+}
+
 func signingRequest(body string, withGetBody bool) *http.Request {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
 		"https://upstream.example/v1/chat/completions", bytes.NewReader([]byte(body)))

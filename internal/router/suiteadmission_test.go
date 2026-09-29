@@ -575,10 +575,11 @@ func TestCatalogSuiteHandoffReleasesAdmissionOnPanic(t *testing.T) {
 		Strict:       true,
 		DefaultShape: transcode.CatalogShapeOpenAI,
 		Limits:       transcode.BodyLimits{AcceptedRequestBytes: 128 << 20},
-		// Short so a leaked token surfaces promptly rather than after the
-		// full default body-inspection wait. Admission itself never times out:
-		// a leaked token shows up as this test hanging, which waitFor turns
-		// into a failure. The first request is already finished when the
+		// InspectionTimeout does NOT bound admission any more -- a request
+		// that finds the pool full waits, and only a freed slot or the
+		// client's context ends that. So a leaked token here shows up as the
+		// follow-up request below hanging until the package timeout, not as a
+		// prompt failure. The first request is already finished when the
 		// second one starts, so an admitted slot is immediate.
 		InspectionTimeout: 2 * time.Second,
 		Admission:         admission,
@@ -622,10 +623,11 @@ func TestCatalogSuiteSafetyReleaseOnEarlyReturn(t *testing.T) {
 		Strict:       true,
 		DefaultShape: transcode.CatalogShapeOpenAI,
 		Limits:       transcode.BodyLimits{AcceptedRequestBytes: 128 << 20},
-		// Short so a leaked token surfaces promptly rather than after the
-		// full default body-inspection wait. Admission itself never times out:
-		// a leaked token shows up as this test hanging, which waitFor turns
-		// into a failure. The first request is already finished when the
+		// InspectionTimeout does NOT bound admission any more -- a request
+		// that finds the pool full waits, and only a freed slot or the
+		// client's context ends that. So a leaked token here shows up as the
+		// follow-up request below hanging until the package timeout, not as a
+		// prompt failure. The first request is already finished when the
 		// second one starts, so an admitted slot is immediate.
 		InspectionTimeout: 2 * time.Second,
 		Admission:         admission,

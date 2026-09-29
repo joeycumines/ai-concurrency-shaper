@@ -153,8 +153,23 @@ func (t *SigningTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	// finalization. GetBody returns a fresh reader positioned at the start, so
 	// the body is already rewound for the signed send; a fresh body is fetched
 	// again when the signer consumed it (GetBody is re-invocable).
-	if err := signer.Sign(req.Context(), clone); err != nil {
-		return nil, discardAttempt(rebuilt, err)
+	signErr := signer.Sign(req.Context(), clone)
+	// A body the SIGNER installed is this transport's to clean up whenever the
+	// attempt is abandoned or the body is replaced: nothing else holds a
+	// reference to it, so nothing else will close it. On the send path it is
+	// what goes on the wire, and the transport owns it from there.
+	var substituted io.ReadCloser
+	if clone.Body != rebuilt && !(attempt != nil && clone.Body == attempt) {
+		substituted = clone.Body
+	}
+	closeSubstituted := func() {
+		if substituted != nil {
+			_ = substituted.Close()
+		}
+	}
+	if signErr != nil {
+		closeSubstituted()
+		return nil, discardAttempt(rebuilt, signErr)
 	}
 	// Only the body the signer left in place is this transport's to judge. A
 	// signer that put its own body on the request keeps it, exactly as the
@@ -171,11 +186,14 @@ func (t *SigningTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if req.GetBody != nil {
 		body, err := req.GetBody()
 		if err != nil {
+			closeSubstituted()
 			return nil, discardAttempt(rebuilt, fmt.Errorf("rebuild request body: %w", err))
 		}
 		if rebuilt != nil {
 			_ = rebuilt.Close()
 		}
+		// Being replaced, so it is this transport's to close.
+		closeSubstituted()
 		clone.Body = body
 	}
 	return t.Inner.RoundTrip(clone)
