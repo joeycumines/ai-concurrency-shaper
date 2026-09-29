@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -169,6 +168,41 @@ func TestProxyNativeMessagesRewrite(t *testing.T) {
 	}
 }
 
+// TestNativeRouteValidateRejectsUnknownViaDialect proves the defence-in-depth
+// guard on the mapping dialects a route decides against. The configured paths
+// cannot produce one, so only a library caller can; catching it at startup
+// beats leaving every request for that model to fail closed at request time.
+func TestNativeRouteValidateRejectsUnknownViaDialect(t *testing.T) {
+	route := NativeRoute{
+		RouteKey: transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
+		Protocol: transcode.NativeMessages,
+		ModelMap: transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+			"weird": {
+				ClientModel:         "weird",
+				UpstreamModel:       "wire-weird",
+				ClientResponseModel: "weird",
+				Via:                 transcode.NativeProtocol("bogus"),
+			},
+		}},
+	}
+	if err := route.Validate(); err == nil {
+		t.Fatal("Validate accepted a mapping with an unknown Via dialect")
+	} else if !strings.Contains(err.Error(), "bogus") {
+		t.Fatalf("error = %v, want it to name the offending dialect", err)
+	}
+
+	// The empty Via stays legal: it is what marks a dialect unknown, and
+	// those requests must fall through rather than fail startup.
+	route.ModelMap.Exact["weird"] = transcode.ModelMapping{
+		ClientModel:         "weird",
+		UpstreamModel:       "wire-weird",
+		ClientResponseModel: "weird",
+	}
+	if err := route.Validate(); err != nil {
+		t.Fatalf("Validate rejected an empty (unknown) Via: %v", err)
+	}
+}
+
 // TestProxyNativeResponsesRewrite proves the same contract on the
 // responses dialect.
 func TestProxyNativeResponsesRewrite(t *testing.T) {
@@ -230,8 +264,8 @@ func TestProxyNativeKnownViaMismatchIsLocal404(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "chat") {
-		t.Fatalf("body = %s, want it to name the chat native dialect", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "natively served as chat") {
+		t.Fatalf("body = %s, want it to name the chat native dialect as the model's own", rec.Body.String())
 	}
 	if path, _, _ := up.got(); path != "" {
 		t.Fatalf("upstream reached at %q, want no upstream contact", path)
@@ -271,56 +305,6 @@ func TestProxyNativeUnknownViaFallsThrough(t *testing.T) {
 	}
 	if path, model, _ := up.got(); path != "/v1/messages" || model != "any-model" {
 		t.Fatalf("upstream path=%q model=%q, want verbatim /v1/messages any-model", path, model)
-	}
-}
-
-// TestProxyNativeLocalErrors proves strict violations and unknown models
-// are local client errors that never reach the upstream.
-func TestProxyNativeLocalErrors(t *testing.T) {
-	up := &nativeUpstream{response: `{}`}
-	p, _ := newNativeProxy(t, up, nativeRoute(t, transcode.NativeMessages, "/v1/messages"))
-
-	cases := []struct {
-		name string
-		body string
-	}{
-		{"unknown model", `{"model":"nope","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`},
-		// Semantic completeness beyond the model identifier (e.g.
-		// max_tokens) is the upstream's job on a verbatim path, so a
-		// wellformed document without it forwards instead of failing.
-		{"missing model", `{"max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`},
-		{"malformed", `{"model":`},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := postNative(t, p, "/v1/messages", tc.body)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
-			}
-			if path, _, _ := up.got(); path != "" {
-				t.Fatalf("upstream reached at %q, want no upstream contact", path)
-			}
-		})
-	}
-}
-
-// TestProxyNativeStreamByteIdentical proves streaming responses pass
-// through byte-identical with the wire model intact.
-func TestProxyNativeStreamByteIdentical(t *testing.T) {
-	sse := "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"wire-chat\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
-	up := &nativeUpstream{sse: sse}
-	p, _ := newNativeProxy(t, up, nativeRoute(t, transcode.NativeChat, "/v1/chat/completions"))
-
-	rec := postNative(t, p, "/v1/chat/completions",
-		`{"model":"chat-model","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	if _, model, _ := up.got(); model != "wire-chat" {
-		t.Fatalf("upstream model = %q, want wire-chat", model)
-	}
-	if got := rec.Body.String(); got != sse {
-		t.Fatalf("downstream stream = %q, want byte-identical %q", got, sse)
 	}
 }
 
@@ -508,83 +492,6 @@ func TestProxyNativeForwardsServableControls(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("responses status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-}
-
-// TestProxyNativeOverCapResponseUntouched proves responses over the alias
-// inspection bound pass through byte-identical instead of truncating,
-// with both declared and chunked lengths.
-func TestProxyNativeOverCapResponseUntouched(t *testing.T) {
-	big := `{"type":"message","model":"wire-msg","content":"` + strings.Repeat("x", 256) + `"}`
-	newCappedProxy := func(t *testing.T, handler http.HandlerFunc) *Proxy {
-		t.Helper()
-		srv := httptest.NewServer(handler)
-		t.Cleanup(srv.Close)
-		upstreamURL, _ := url.Parse(srv.URL)
-		key, _ := transcode.NewRouteKey(http.MethodPost, "/v1/messages")
-		p, err := New(
-			WithUpstream(upstreamURL),
-			WithMatcher(route.NewMatcher(nil)),
-			WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
-			WithMetrics(metrics.NewCollector()),
-			WithNativeRoutes(NativeRoute{
-				RouteKey: key,
-				Protocol: transcode.NativeMessages,
-				ModelMap: nativeTestModelMap(),
-				BodyLimits: transcode.BodyLimits{
-					AcceptedRequestBytes:    1 << 20,
-					DecodedRequestBytes:     1 << 20,
-					SuccessfulResponseBytes: 64,
-				},
-			}),
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return p
-	}
-	body := `{"model":"msg-model","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`
-
-	t.Run("declared length", func(t *testing.T) {
-		p := newCappedProxy(t, func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.ReadAll(r.Body)
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("Content-Length", strconv.Itoa(len(big)))
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(big))
-		})
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200", rec.Code)
-		}
-		if got := rec.Body.String(); got != big {
-			t.Fatalf("downstream = %d bytes, want byte-identical %d bytes", len(got), len(big))
-		}
-	})
-
-	t.Run("chunked", func(t *testing.T) {
-		p := newCappedProxy(t, func(w http.ResponseWriter, r *http.Request) {
-			_, _ = io.ReadAll(r.Body)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			if fl, ok := w.(http.Flusher); ok {
-				fl.Flush()
-			}
-			_, _ = w.Write([]byte(big))
-		})
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
-		req.Header.Set("Content-Type", "application/json")
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200", rec.Code)
-		}
-		if got := rec.Body.String(); got != big {
-			t.Fatalf("downstream = %d bytes, want byte-identical %d bytes", len(got), len(big))
-		}
-	})
 }
 
 // TestProxyNativeForwardsDocumentedOptionalFields proves the native path

@@ -77,6 +77,21 @@ func (r NativeRoute) Validate() error {
 			r.RouteKey.Path,
 		)
 	}
+	// A mapping's Via is the dialect this route decides against, so a value
+	// outside the closed vocabulary could never match a route's Protocol and
+	// would leave every request for that model failing closed at request
+	// time. The configured paths cannot produce one, so this is defence in
+	// depth for a library caller.
+	for clientModel, m := range r.ModelMap.Exact {
+		switch m.Via {
+		case "", transcode.NativeResponses, transcode.NativeMessages, transcode.NativeChat:
+		default:
+			return fmt.Errorf(
+				"native route %s %s: model %q declares unknown native dialect %q (want responses, messages, or chat)",
+				r.RouteKey.Method, r.RouteKey.Path, clientModel, m.Via,
+			)
+		}
+	}
 	return nil
 }
 
@@ -160,6 +175,13 @@ const (
 // miss (fall through with the body intact); a known model on the wrong
 // dialect fails closed with a local dialect error; every other failure is
 // likewise local.
+//
+// The framing checks (upgrade, content-encoding, body size) run BEFORE the
+// model is resolved, so a request carrying any of them is refused locally
+// even for a model that would have taken the miss branch and been forwarded
+// verbatim. That is deliberate and matches how a transcoded route behaves —
+// these are requests the native engine cannot represent at all — but it does
+// mean transparency is not unconditional for those three shapes.
 func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *NativeRoute) (*http.Request, nativeAction) {
 	if isNativeUpgrade(r) {
 		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
@@ -227,7 +249,8 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 
 	mapping, err := nr.ModelMap.Resolve(clientModel)
 	if err != nil {
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: "+err.Error())
+		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
+			boundNativeMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
 	if mapping.Via == "" {
@@ -246,7 +269,9 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 			return restoreOriginal(), nativeMiss
 		}
 		writeNativeDialectError(w, nr.Protocol, http.StatusNotFound,
-			fmt.Sprintf("model %q is natively served as %s, not on %s", clientModel, mapping.Via, nr.RouteKey.Path))
+			boundNativeMessage(
+				fmt.Sprintf("model %q is natively served as %s, not on %s", clientModel, mapping.Via, nr.RouteKey.Path),
+				limits.ErrorMessageBytes))
 		return r, nativeError
 	}
 
@@ -368,24 +393,24 @@ func rewriteNativeResponseAlias(res *http.Response) error {
 	if res.Body == nil {
 		return nil
 	}
-	cap := alias.respCap
-	if cap <= 0 {
+	bound := alias.respCap
+	if bound <= 0 {
 		return nil
 	}
 	// A declared length over the inspection bound skips buffering
 	// entirely: the body streams through untouched.
-	if res.ContentLength > cap {
+	if res.ContentLength > bound {
 		return nil
 	}
 	// Unknown or fitting lengths are probed without consuming: an
 	// over-bound body is re-concatenated ahead of the unread remainder,
 	// so the exchange can never truncate.
-	probe, err := io.ReadAll(io.LimitReader(res.Body, cap+1))
+	probe, err := io.ReadAll(io.LimitReader(res.Body, bound+1))
 	if err != nil {
 		res.Body = &nativePrefixBody{Reader: io.MultiReader(bytes.NewReader(probe), res.Body), closer: res.Body}
 		return nil
 	}
-	if int64(len(probe)) > cap {
+	if int64(len(probe)) > bound {
 		res.Body = &nativePrefixBody{Reader: io.MultiReader(bytes.NewReader(probe), res.Body), closer: res.Body}
 		return nil
 	}
@@ -395,29 +420,26 @@ func rewriteNativeResponseAlias(res *http.Response) error {
 	restore := func() {
 		res.Body = io.NopCloser(bytes.NewReader(probe))
 	}
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(probe, &doc); err != nil {
+	// Only a response that actually carries the wire model is rewritten. One
+	// naming anything else — a provider alias, a multi-model reply — is
+	// forwarded exactly as it arrived, because stomping it with the client
+	// alias would misreport what the upstream said.
+	var named struct {
+		Model *string `json:"model"`
+	}
+	if err := json.Unmarshal(probe, &named); err != nil ||
+		named.Model == nil || *named.Model != alias.wire {
 		restore()
 		return nil
 	}
-	rawModel, ok := doc["model"]
+	// The rewrite is surgical, exactly as on the request side: only the model
+	// value is replaced, so every other byte the upstream sent reaches the
+	// client unchanged. Re-encoding the document instead would reorder
+	// top-level keys, collapse duplicates, and re-escape every '<', '>' and
+	// '&' as \uXXXX — a sixfold amplification of ordinary model output, with
+	// nothing bounding the result.
+	out, ok := rewriteTopLevelModel(probe, alias.surrogate)
 	if !ok {
-		restore()
-		return nil
-	}
-	var wire string
-	if err := json.Unmarshal(rawModel, &wire); err != nil || wire != alias.wire {
-		restore()
-		return nil
-	}
-	restored, err := json.Marshal(alias.surrogate)
-	if err != nil {
-		restore()
-		return nil
-	}
-	doc["model"] = restored
-	out, err := json.Marshal(doc)
-	if err != nil {
 		restore()
 		return nil
 	}
@@ -452,6 +474,23 @@ func isNativeUpgrade(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// boundNativeMessage truncates an error message to max bytes. The dialect
+// writer marshals the message with HTML escaping, so a message carrying a
+// client's model identifier is amplified about six fold on the wire; a model
+// identifier is client-controlled and the accepted request body is tens of
+// megabytes, so without this bound a client could make the proxy emit a
+// hundredfold larger error document than the request it sent. The sibling
+// paths bound the same input the same way.
+func boundNativeMessage(message string, max int) string {
+	if max <= 0 || len(message) <= max {
+		return message
+	}
+	if max > 3 {
+		return message[:max-3] + "…"
+	}
+	return message[:max]
 }
 
 // writeNativeDialectError renders a local error in the route's client

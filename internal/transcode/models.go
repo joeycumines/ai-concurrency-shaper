@@ -68,8 +68,13 @@ func (p ProfileMap) ResolveProfile(profileName string) (clientModel string, tier
 
 // Resolve returns the mapping for the client model. With identity fallback,
 // an unmapped model is passed through unchanged; otherwise it is an error.
-// The actual upstream model is never leaked into the client response: the
-// client-facing alias is returned instead.
+// It does not itself decide what the client sees: on a CONVERTED response the
+// upstream model is never leaked, because the client-facing alias is rendered
+// instead. A natively served response is a different surface — it is forwarded
+// byte-identically apart from the model value, so the alias restore is a
+// surgical rewrite that is skipped on a stream (byte-identity wins) and on a
+// body over the inspection bound (the proxy refuses to buffer without limit).
+// On those two the upstream model does reach the client, deliberately.
 func (m ModelMap) Resolve(clientModel string) (ModelMapping, error) {
 	if mapping, ok := m.Exact[clientModel]; ok {
 		if mapping.ClientResponseModel == "" {
