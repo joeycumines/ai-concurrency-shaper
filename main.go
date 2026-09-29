@@ -605,13 +605,17 @@ func run() error {
 // then gracefully shuts down every server and reports the outcome: nil for a
 // signal-initiated shutdown, otherwise the failing server's error.
 //
-// The servers' listeners are already bound by the caller. Serve failures are
-// reported non-blockingly so one failing server can never wedge the
-// coordinator behind a full channel. stop cancels the signal context,
-// releasing downstream context consumers (the TUI poller) on the
-// fatal-error path; it is idempotent, so the signal path needs no explicit
-// call. On a server failure the original error is preserved and returned;
-// a shutdown that cannot complete within its grace is logged, never
+// The servers' listeners are already bound by the caller, and this function
+// takes ownership of both ln and metricsLn: they are closed before it returns
+// on either exit path, so a caller must not reuse them afterwards. That closure
+// is synchronous rather than delegated to the Serve goroutines — see the
+// comment in the shutdown closure for why the stdlib's Shutdown alone cannot
+// guarantee it. Serve failures are reported non-blockingly so one failing
+// server can never wedge the coordinator behind a full channel. stop cancels
+// the signal context, releasing downstream context consumers (the TUI poller)
+// on the fatal-error path; it is idempotent, so the signal path needs no
+// explicit call. On a server failure the original error is preserved and
+// returned; a shutdown that cannot complete within its grace is logged, never
 // substituted for the server error.
 func runServerLifecycle(
 	ctx context.Context,
@@ -650,6 +654,24 @@ func runServerLifecycle(
 		servers = append(servers, srv)
 		if err := shutdownServers(5*time.Second, servers...); err != nil {
 			slog.Warn("graceful shutdown incomplete", "err", err)
+		}
+		// http.Server.Shutdown closes only the listeners the server has
+		// tracked, and a listener is tracked inside Serve, not before it. A
+		// server whose Serve goroutine has not reached trackListener yet is
+		// therefore invisible to Shutdown, which would return with that
+		// address still bound and the release deferred to the goroutine's own
+		// deferred Close. The proxy's Serve can fail immediately (a listener
+		// closed underneath it), driving this path before the metrics Serve
+		// goroutine has been scheduled at all, so the window is real and
+		// reachable. Close the listeners the caller handed in so that the
+		// "listeners are released when this returns" contract holds
+		// synchronously instead of eventually. Close is idempotent here: an
+		// already-closed listener just reports net.ErrClosed, and Serve's own
+		// deferred Close then repeats it harmlessly.
+		for _, listener := range []net.Listener{metricsLn, ln} {
+			if listener != nil {
+				_ = listener.Close()
+			}
 		}
 	}
 
