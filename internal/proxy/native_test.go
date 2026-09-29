@@ -341,14 +341,13 @@ func TestProxyNativeRouteValidation(t *testing.T) {
 
 	msgKey, _ := transcode.NewRouteKey(http.MethodPost, "/v1/messages")
 	native := NativeRoute{RouteKey: msgKey, Protocol: transcode.NativeMessages, ModelMap: nativeTestModelMap()}
-	transcodeMapping := TranscodeMapping{Mapping: transcode.Mapping{
+	transcodeMapping := TranscodeMapping{
 		ClientRoute:      msgKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
-	}}
+		Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone}}
 
 	if _, err := New(append(base, WithNativeRoutes(native), WithTranscodeMapping(transcodeMapping))...); err != nil {
 		t.Fatalf("native route sharing a client route with a transcode mapping: %v", err)
@@ -391,7 +390,7 @@ func TestProxyNativeFirstThenTranscode(t *testing.T) {
 		WithNativeRoutes(NativeRoute{
 			RouteKey: msgKey, Protocol: transcode.NativeMessages, ModelMap: shared,
 		}),
-		WithTranscodeMapping(TranscodeMapping{Mapping: transcode.Mapping{
+		WithTranscodeMapping(TranscodeMapping{
 			ClientRoute:      msgKey,
 			ClientProtocol:   transcode.ClientMessages,
 			UpstreamProtocol: transcode.UpstreamChatCompletions,
@@ -405,8 +404,7 @@ func TestProxyNativeFirstThenTranscode(t *testing.T) {
 				transcode.FeatureDeveloperRole:          {},
 			}},
 			ModelMap: shared,
-			Auth:     transcode.AuthPolicy{Mode: transcode.AuthNone},
-		}}),
+			Auth:     transcode.AuthPolicy{Mode: transcode.AuthNone}}),
 	)
 	if err != nil {
 		t.Fatal(err)

@@ -114,9 +114,9 @@ func TestOperatorLogLineCannotBeForgedByClientText(t *testing.T) {
 	}
 	// The attacker's text may still appear INLINE (it is evidence), but it must
 	// no longer be able to START a line: only the real prefix may precede it.
-	idx := strings.Index(out, forged)
-	if idx >= 0 {
-		prefix := out[:idx]
+	before, _, ok := strings.Cut(out, forged)
+	if ok {
+		prefix := before
 		if strings.HasPrefix(strings.TrimSpace(prefix), "transcode:") && len(prefix) < 2 {
 			t.Errorf("attacker text begins a second operator line:\n%s", out)
 		}

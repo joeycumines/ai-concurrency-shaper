@@ -8,6 +8,7 @@ package transcode
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -1159,13 +1160,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			// misclassification - the scenario would pass as a loss and as a
 			// note alike). A note's perm list holds only the SIBLING losses the
 			// exchange separately needs.
-			grantsSelf := false
-			for _, key := range s.perm {
-				if key == s.key {
-					grantsSelf = true
-					break
-				}
-			}
+			grantsSelf := slices.Contains(s.perm, s.key)
 			if s.note && grantsSelf {
 				t.Fatalf(
 					"%q is a note but its perm list grants the key itself; the "+

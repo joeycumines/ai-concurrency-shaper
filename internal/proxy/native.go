@@ -445,7 +445,7 @@ func isNativeUpgrade(r *http.Request) bool {
 	if r == nil || r.Header == nil {
 		return false
 	}
-	for _, token := range strings.Split(r.Header.Get("Connection"), ",") {
+	for token := range strings.SplitSeq(r.Header.Get("Connection"), ",") {
 		if strings.EqualFold(strings.TrimSpace(token), "upgrade") &&
 			r.Header.Get("Upgrade") != "" {
 			return true

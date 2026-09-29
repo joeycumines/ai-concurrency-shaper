@@ -26,6 +26,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -216,10 +217,16 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 		h.writeDialectError(w, shape, http.StatusRequestEntityTooLarge, "request body too large")
 		return
 	}
-	if !h.acquireBufferSlot(w, r, shape) {
+	releaseSlot, ok := h.acquireBufferSlot(w, r, shape)
+	if !ok {
 		return
 	}
-	defer func() { <-h.admission.slots }()
+	var slotHandedOff bool
+	defer func() {
+		if !slotHandedOff {
+			releaseSlot()
+		}
+	}()
 
 	controller := http.NewResponseController(w)
 	readDeadlineSet := controller.SetReadDeadline(time.Now().Add(h.inspectionTimeout)) == nil
@@ -277,11 +284,20 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		r.Body = io.NopCloser(bytes.NewReader(body))
+		bodyLen := int64(len(body))
+		handoff := newCatalogHandoff(body, releaseSlot)
+		slotHandedOff = true
+		body = nil // clear local stack reference so memory is not held by serveCompletion frame
+
+		// Ensure that if target.handler returns or panics without reading or closing
+		// the body, the admission slot is always released.
+		defer handoff.drain()
+
+		r.Body = handoff.newBody()
 		r.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(body)), nil
+			return handoff.newBody(), nil
 		}
-		r.ContentLength = int64(len(body))
+		r.ContentLength = bodyLen
 		r.TransferEncoding = nil
 		target.handler.ServeHTTP(w, r)
 		return
@@ -289,18 +305,90 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 	h.writeDialectError(w, shape, http.StatusBadRequest, "missing request body")
 }
 
-func (h *CatalogSuiteHandler) acquireBufferSlot(w http.ResponseWriter, r *http.Request, shape transcode.CatalogShape) bool {
+func (h *CatalogSuiteHandler) acquireBufferSlot(w http.ResponseWriter, r *http.Request, shape transcode.CatalogShape) (func(), bool) {
 	timer := time.NewTimer(h.inspectionTimeout)
 	defer timer.Stop()
 	select {
 	case h.admission.slots <- struct{}{}:
-		return true
+		var once sync.Once
+		release := func() {
+			once.Do(func() {
+				<-h.admission.slots
+			})
+		}
+		return release, true
 	case <-r.Context().Done():
-		return false
+		return nil, false
 	case <-timer.C:
 		h.writeDialectError(w, shape, http.StatusServiceUnavailable, "catalog suite is busy")
-		return false
+		return nil, false
 	}
+}
+
+type catalogHandoff struct {
+	data        []byte
+	releaseOnce sync.Once
+	releaseSlot func()
+}
+
+func newCatalogHandoff(data []byte, releaseSlot func()) *catalogHandoff {
+	return &catalogHandoff{
+		data:        data,
+		releaseSlot: releaseSlot,
+	}
+}
+
+func (h *catalogHandoff) drain() {
+	h.releaseOnce.Do(func() {
+		if h.releaseSlot != nil {
+			h.releaseSlot()
+		}
+	})
+}
+
+func (h *catalogHandoff) newBody() io.ReadCloser {
+	return &catalogHandoffBody{
+		reader:  bytes.NewReader(h.data),
+		onDrain: h.drain,
+	}
+}
+
+type catalogHandoffBody struct {
+	mu        sync.Mutex
+	reader    *bytes.Reader
+	closed    bool
+	drainOnce sync.Once
+	onDrain   func()
+}
+
+func (b *catalogHandoffBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return 0, http.ErrBodyReadAfterClose
+	}
+	n, err := b.reader.Read(p)
+	b.mu.Unlock()
+	if err == io.EOF {
+		b.drain()
+	}
+	return n, err
+}
+
+func (b *catalogHandoffBody) Close() error {
+	b.mu.Lock()
+	b.closed = true
+	b.mu.Unlock()
+	b.drain()
+	return nil
+}
+
+func (b *catalogHandoffBody) drain() {
+	b.drainOnce.Do(func() {
+		if b.onDrain != nil {
+			b.onDrain()
+		}
+	})
 }
 
 func peekModelField(body []byte) (string, error) {

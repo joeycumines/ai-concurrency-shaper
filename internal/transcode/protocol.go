@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -350,10 +351,8 @@ func ReservedHeaderName(name string) bool {
 // header and remains a legal credential target.
 func PresetManagedHeaderName(name string) bool {
 	canonical := http.CanonicalHeaderKey(name)
-	for _, managed := range presetHeaderNames {
-		if canonical == managed {
-			return true
-		}
+	if slices.Contains(presetHeaderNames, canonical) {
+		return true
 	}
 	return foreignClientHeader(name)
 }

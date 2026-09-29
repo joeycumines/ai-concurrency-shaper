@@ -118,7 +118,7 @@ func TestOpencodeStealthSuiteEndToEnd(t *testing.T) {
 			native(transcode.NativeResponses, "/v1/responses"),
 			native(transcode.NativeChat, "/v1/chat/completions"),
 		),
-		proxy.WithTranscodeMapping(proxy.TranscodeMapping{Mapping: transcode.Mapping{
+		proxy.WithTranscodeMapping(proxy.TranscodeMapping{
 			ClientRoute:      msgChatKey,
 			ClientProtocol:   transcode.ClientMessages,
 			UpstreamProtocol: transcode.UpstreamChatCompletions,
@@ -134,8 +134,7 @@ func TestOpencodeStealthSuiteEndToEnd(t *testing.T) {
 			ModelMap:           modelMap,
 			Auth:               transcode.AuthPolicy{Mode: transcode.AuthNone},
 			AllowedClientQuery: map[string]struct{}{"beta": {}},
-			Opencode:           transcode.OpencodePreset{Enabled: true, Provider: "zen"},
-		}}),
+			Opencode:           transcode.OpencodePreset{Enabled: true, Provider: "zen"}}),
 		proxy.WithOpencodePreset(transcode.OpencodePreset{Enabled: true, Provider: "zen"}),
 	)
 	if err != nil {

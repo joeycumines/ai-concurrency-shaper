@@ -183,7 +183,7 @@ func TestProxyPresetSurvivesTranscode(t *testing.T) {
 		WithMatcher(route.NewMatcher(nil)),
 		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
 		WithMetrics(metrics.NewCollector()),
-		WithTranscodeMapping(TranscodeMapping{Mapping: transcode.Mapping{
+		WithTranscodeMapping(TranscodeMapping{
 			ClientRoute:      key,
 			ClientProtocol:   transcode.ClientMessages,
 			UpstreamProtocol: transcode.UpstreamChatCompletions,
@@ -198,8 +198,7 @@ func TestProxyPresetSurvivesTranscode(t *testing.T) {
 			}},
 			ModelMap: transcode.ModelMap{AllowIdentity: true},
 			Auth:     transcode.AuthPolicy{Mode: transcode.AuthNone},
-			Opencode: preset,
-		}}),
+			Opencode: preset}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -309,7 +308,7 @@ func TestProxyPresetSessionStableAcrossPaths(t *testing.T) {
 		WithMatcher(route.NewMatcher(nil)),
 		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
 		WithMetrics(metrics.NewCollector()),
-		WithTranscodeMapping(TranscodeMapping{Mapping: transcode.Mapping{
+		WithTranscodeMapping(TranscodeMapping{
 			ClientRoute:      msgKey,
 			ClientProtocol:   transcode.ClientMessages,
 			UpstreamProtocol: transcode.UpstreamChatCompletions,
@@ -324,8 +323,7 @@ func TestProxyPresetSessionStableAcrossPaths(t *testing.T) {
 			}},
 			ModelMap: convMap,
 			Auth:     transcode.AuthPolicy{Mode: transcode.AuthNone},
-			Opencode: testPreset(),
-		}}),
+			Opencode: testPreset()}),
 	)
 	if err != nil {
 		t.Fatal(err)

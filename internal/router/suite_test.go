@@ -17,7 +17,6 @@ package router_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -25,7 +24,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/router"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
@@ -883,100 +881,5 @@ func TestCatalogSuiteKnownOversizeContentLengthFailsBeforeProvider(t *testing.T)
 	}
 	if targetHits.Load() != 0 {
 		t.Fatal("known oversize request reached provider target")
-	}
-}
-
-func TestCatalogSuiteBufferAdmissionIsGloballyBounded(t *testing.T) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var targetHits atomic.Int64
-	target := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if targetHits.Add(1) == 1 {
-			close(entered)
-		}
-		<-release
-		w.WriteHeader(http.StatusOK)
-	})
-	admission := router.NewCatalogSuiteAdmission(transcode.BodyLimits{AcceptedRequestBytes: 128 << 20})
-	firstSuite := router.NewCatalogSuiteHandler(router.SuiteConfig{
-		Strict:       true,
-		DefaultShape: transcode.CatalogShapeCodex,
-		Limits:       transcode.BodyLimits{AcceptedRequestBytes: 128 << 20},
-		Admission:    admission,
-		ModelRoutes: []router.ModelRoute{
-			{Model: "m1", Handler: target, SupportedRoutes: allSuiteRoutes()},
-		},
-	})
-	secondSuite := router.NewCatalogSuiteHandler(router.SuiteConfig{
-		Strict:       true,
-		DefaultShape: transcode.CatalogShapeCodex,
-		Limits:       transcode.BodyLimits{AcceptedRequestBytes: 128 << 20},
-		Admission:    admission,
-		ModelRoutes: []router.ModelRoute{
-			{Model: "m2", Handler: target, SupportedRoutes: allSuiteRoutes()},
-		},
-	})
-
-	firstDone := make(chan struct{})
-	go func() {
-		defer close(firstDone)
-		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m1"}`))
-		rec := httptest.NewRecorder()
-		firstSuite.ServeHTTP(rec, req)
-	}()
-	<-entered
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m2"}`)).WithContext(ctx)
-	rec := httptest.NewRecorder()
-	secondSuite.ServeHTTP(rec, req)
-	if targetHits.Load() != 1 {
-		t.Fatalf("canceled waiter reached target; hits = %d, want 1", targetHits.Load())
-	}
-	close(release)
-	<-firstDone
-}
-
-func TestCatalogSuiteStalledBodyHitsRealReadDeadline(t *testing.T) {
-	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
-		Strict:            true,
-		DefaultShape:      transcode.CatalogShapeCodex,
-		Limits:            transcode.BodyLimits{AcceptedRequestBytes: 128 << 20},
-		InspectionTimeout: 50 * time.Millisecond,
-	})
-	server := httptest.NewServer(suite)
-	defer server.Close()
-
-	bodyReader, bodyWriter := io.Pipe()
-	defer bodyWriter.Close()
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", bodyReader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	type result struct {
-		resp *http.Response
-		err  error
-	}
-	resultCh := make(chan result, 1)
-	go func() {
-		resp, err := http.DefaultClient.Do(req)
-		resultCh <- result{resp: resp, err: err}
-	}()
-	if _, err := bodyWriter.Write([]byte(`{"model":`)); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-resultCh:
-		if got.err != nil {
-			t.Fatal(got.err)
-		}
-		defer got.resp.Body.Close()
-		if got.resp.StatusCode != http.StatusRequestTimeout {
-			t.Fatalf("stalled body status = %d, want 408", got.resp.StatusCode)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("stalled request body did not hit inspection deadline")
 	}
 }

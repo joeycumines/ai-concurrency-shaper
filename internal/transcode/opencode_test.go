@@ -16,6 +16,7 @@
 package transcode
 
 import (
+	"maps"
 	"net/http"
 	"strings"
 	"testing"
@@ -88,9 +89,7 @@ func TestOpencodeApplyHeaders(t *testing.T) {
 	inForeign.Set("X-Stainless-Package", "anthropic")
 	inForeign.Set("X-App", "cli")
 	outForeign := http.Header{}
-	for k, v := range inForeign {
-		outForeign[k] = v
-	}
+	maps.Copy(outForeign, inForeign)
 	outForeign.Set("Anthropic-Version", "2023-06-01")
 	outForeign.Set("Content-Type", "application/json")
 	OpencodePreset{Enabled: true, Provider: "zen"}.ApplyHeaders(outForeign, inForeign, "s")

@@ -159,7 +159,7 @@ func cleanCatalogPrefix(prefix string) (string, error) {
 	if !strings.HasPrefix(prefix, "/") {
 		return "", fmt.Errorf("prefix must start with /, got %q", prefix)
 	}
-	for _, segment := range strings.Split(prefix, "/") {
+	for segment := range strings.SplitSeq(prefix, "/") {
 		if segment == "." || segment == ".." {
 			return "", fmt.Errorf("prefix must not contain dot segments, got %q", prefix)
 		}
