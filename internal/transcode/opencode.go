@@ -24,8 +24,11 @@ import (
 	"strings"
 )
 
-// First-party opencode header names. The pinned client sends the whole set
-// together; the preset reproduces that shape on every outbound request.
+// First-party opencode header names. The pinned client emits these as two
+// alternative sets: an opencode-family provider gets the x-opencode-* names,
+// while every other provider gets the session-affinity pair instead. The
+// preset reproduces the opencode branch on every outbound request, and treats
+// the affinity pair as names it removes.
 const (
 	HeaderOpencodeSession = "X-Opencode-Session"
 	HeaderOpencodeClient  = "X-Opencode-Client"
@@ -118,7 +121,11 @@ func (p OpencodePreset) client() string {
 // ResolveSession returns the outbound session value: the first present
 // inbound identity header (x-opencode-session, x-session-affinity,
 // X-Session-Id), else the caller-derived stable fallback. Callers always
-// supply a synthesized fallback, so the preset always emits.
+// supply a synthesized fallback, so the preset always emits. The affinity
+// names are accepted here as inbound tolerance only — a client that uses them
+// still gets its value carried, but outbound it travels as
+// x-opencode-session, which is the only session name the first-party client
+// sends to an opencode provider.
 func (p OpencodePreset) ResolveSession(in http.Header, fallback string) string {
 	for _, key := range []string{HeaderOpencodeSession, HeaderSessionAffinity, HeaderSessionID} {
 		if v := strings.TrimSpace(in.Get(key)); v != "" {
@@ -132,21 +139,35 @@ func (p OpencodePreset) ResolveSession(in http.Header, fallback string) string {
 // request. It runs after authentication so the mock never clobbers
 // credentials and authentication never strips the mock.
 //
+// The first-party client emits one of TWO header sets, chosen by whether the
+// model's provider id starts with "opencode": an opencode provider gets
+// x-opencode-session (plus x-opencode-client and the opencode User-Agent),
+// while every other provider gets x-session-affinity and X-Session-Id
+// instead. This preset exists to impersonate the client on an opencode mount,
+// so it emits that branch and only that branch. Emitting both would produce a
+// combination no real client ever sends, which is itself a signature the
+// upstream could key on.
+//
 // Three dispositions:
 //   - Preset-authoritative (overwrite inbound): the impersonation markers
-//     User-Agent and x-opencode-client, plus the session headers, which carry
-//     the value the caller resolved (the client's own when it sent one, else
-//     a derived key) so the gateway always sees one stable value.
+//     User-Agent and x-opencode-client, plus the session header, which carries
+//     the value the caller resolved (the client's own when it sent one, else a
+//     derived key) so the gateway always sees one stable value.
 //   - Forward-only (never fabricated): x-opencode-request,
 //     x-opencode-project, x-parent-session-id — they name the client's own
 //     conversation and identity, so they pass through when present and are
 //     removed when absent.
-//   - Removed: headers a different client SDK uses to identify itself, which
-//     a real opencode client would not send and which would otherwise reveal
-//     the actual client. Only headers the client actually sent are removed,
-//     never a header the pipeline applied. Protocol headers the dialect
-//     requires (content-type, accept, anthropic-version, anthropic-beta) are
-//     untouched.
+//   - Removed: x-session-affinity and X-Session-Id (the non-opencode branch,
+//     which a real client would not send here) are deleted unconditionally, and
+//     the headers a different client SDK uses to identify itself are deleted
+//     when the client sent them — which would otherwise reveal the actual
+//     client. The foreign-SDK strip is scoped to the inbound set on purpose:
+//     only headers the client actually sent are removed, never a header the
+//     pipeline applied. (The unconditional affinity deletion is safe for the
+//     same reason: choosing a preset-managed name as the credential header is
+//     refused at config time by PresetManagedHeaderName.) Protocol headers the
+//     dialect requires (content-type, accept, anthropic-version,
+//     anthropic-beta) are untouched.
 func (p OpencodePreset) ApplyHeaders(out, in http.Header, session string) {
 	if !p.Enabled {
 		return
@@ -175,13 +196,16 @@ func (p OpencodePreset) ApplyHeaders(out, in http.Header, session string) {
 	}
 	if session != "" {
 		out.Set(HeaderOpencodeSession, session)
-		out.Set(HeaderSessionAffinity, session)
-		out.Set(HeaderSessionID, session)
 	} else {
 		out.Del(HeaderOpencodeSession)
-		out.Del(HeaderSessionAffinity)
-		out.Del(HeaderSessionID)
 	}
+	// x-session-affinity and X-Session-Id belong to the client's NON-opencode
+	// branch, so a real client never sends them to an opencode provider.
+	// Deleting rather than setting them also stops an inbound copy (a client
+	// that happens to use those names) from passing through and reintroducing
+	// the union. Their values are still honoured when resolving the session.
+	out.Del(HeaderSessionAffinity)
+	out.Del(HeaderSessionID)
 	for _, key := range []string{HeaderOpencodeRequest, HeaderOpencodeProject, HeaderParentSessionID} {
 		if v := strings.TrimSpace(in.Get(key)); v != "" {
 			out.Set(key, v)

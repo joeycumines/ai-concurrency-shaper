@@ -106,9 +106,12 @@ func TestProxyPresetPassthroughHeaders(t *testing.T) {
 	if got := cap.get("X-Opencode-Session"); got == "" {
 		t.Fatal("synthesized session missing")
 	}
-	first := cap.get("X-Opencode-Session")
-	if got := cap.get("X-Session-Affinity"); got != first {
-		t.Fatalf("affinity = %q, want the session value %q", got, first)
+	// The session must travel under the opencode-branch name ONLY: a real
+	// client talking to an opencode provider never sends the affinity pair.
+	for _, key := range []string{"X-Session-Affinity", "X-Session-Id"} {
+		if got := cap.get(key); got != "" {
+			t.Fatalf("%s = %q, want absent: it belongs to the non-opencode branch", key, got)
+		}
 	}
 	if got := cap.get("User-Agent"); got != transcode.DefaultOpencodeUserAgent {
 		t.Fatalf("UA = %q, want default", got)
@@ -144,7 +147,9 @@ func TestProxyPresetPassthroughHeaders(t *testing.T) {
 }
 
 // TestProxyPresetDisabledUntouched proves mounts without the preset forward
-// verbatim: no session, UA, or client headers are added.
+// verbatim: no session, UA, or client headers are added. It also proves a
+// client's own session names pass through untouched when the preset is off,
+// which keeps the strip preset-scoped rather than a blanket deletion.
 func TestProxyPresetDisabledUntouched(t *testing.T) {
 	cap := &headerCapture{}
 	p := newPresetProxy(t, cap, `{"ok":true}`)

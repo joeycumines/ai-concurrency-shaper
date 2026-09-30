@@ -80,23 +80,49 @@ dialect is converted by the existing transcode mappings.
 
 OpenCode Go requires a stable per-conversation session value; a request without
 it fails (`400 MissingSessionID` / "Model is unavailable" /
-"cannot be routed efficiently"). The first-party client sends the session,
-affinity, and client-attribution headers together on every request; the
-gateway sticks consecutive requests from one session to one backend provider
-and strips the `x-opencode-*` headers before forwarding to that backend.
+"cannot be routed efficiently"). The first-party client sends the session and
+client-attribution headers for its provider family; the gateway sticks
+consecutive requests from one session to one backend provider and strips the
+`x-opencode-*` headers before forwarding to a legacy backend.
 
-First-party header set (from the pinned client source, `packages/core/src/session/model-request.ts`
-on the in-development 2.x line, and the released-stable request-preparation code
-on the 1.x line):
+First-party header set (from the pinned client source,
+`packages/opencode/src/session/llm/request.ts` on the in-development 2.x line
+and on the released-stable v1.18.33 line, verified identical):
 
 ```
-x-opencode-session:  <session id>
-x-opencode-client:   <client name>            (artifact / flag; "cli" for the CLI)
-x-opencode-project:  <project id>             (only when the client has one)
-x-opencode-request:  <user/request id>        (older clients only; the gateway strips it)
+provider id starts with "opencode" (e.g. opencode, opencode-go):
+  x-opencode-session:  <session id>
+  x-opencode-client:   <client name>            (OPENCODE_CLIENT; "cli" default)
+  x-opencode-project:  <project id>             (only when the client has one)
+  x-opencode-request:  <user/request id>
+  User-Agent:          opencode/<version>
+
+every other provider:
+  x-session-affinity:  <session id>
+  X-Session-Id:        <session id>
+  User-Agent:          opencode/<version>
+```
+
+The two sets are ALTERNATIVES keyed on the provider id, never a union: no
+real client sends x-opencode-session AND x-session-affinity together. An
+earlier revision of this section claimed the client sends "the session,
+affinity, and client-attribution headers together on every request"; that is
+false against the pinned source and the `-opencode` preset was emitting that
+union, which is itself a fingerprint.
+
+Both branches add, when present:
+
+```
 x-parent-session-id: <parent session id>      (only for sub-agent sessions)
-User-Agent:          opencode/<version>       (released shape; 2.x adds channel/name)
 ```
+
+The `User-Agent` on the LLM request path is exactly `opencode/<InstallationVersion>`
+on both the released-stable (v1.18.33) and in-development lines —
+`opencode/1.18.33` for the published release. A separate `userAgent()` helper in
+`packages/opencode/src/installation/index.ts` emits the channel-qualified
+`opencode/<channel>/<version>/<client>` form for other surfaces; the exact
+string is version-specific either way, so an operator matching a specific
+install overrides it with `-opencode-user-agent`.
 
 The gateway's own fallback, when the header is absent, is the workspace id or
 the client IP. The proxy mirrors that: inbound identity first, then a stable

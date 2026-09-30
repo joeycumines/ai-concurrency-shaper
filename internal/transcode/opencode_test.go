@@ -62,10 +62,11 @@ func TestOpencodeSessionPrecedence(t *testing.T) {
 	}
 }
 
-// TestOpencodeApplyHeaders proves the full first-party shape: the
-// impersonation markers and the session are preset-authoritative (a client
-// that named itself must not identify itself upstream), identity/project/
-// parent forward only when present, and disabled is a no-op.
+// TestOpencodeApplyHeaders proves the full first-party shape for an opencode
+// provider: the impersonation markers and the session are preset-authoritative
+// (a client that named itself must not identify itself upstream), the session
+// travels only under the opencode-branch name, identity/project/parent forward
+// only when present, and disabled is a no-op.
 func TestOpencodeApplyHeaders(t *testing.T) {
 	in := http.Header{}
 	in.Set("User-Agent", "claude-cli/2.1.0 (external, cli)")
@@ -130,9 +131,17 @@ func TestOpencodeApplyHeaders(t *testing.T) {
 	if got := outOverride.Get(HeaderOpencodeClient); got != "tui" {
 		t.Fatalf("override client = %q", got)
 	}
-	for _, key := range []string{HeaderOpencodeSession, HeaderSessionAffinity, HeaderSessionID} {
-		if got := out.Get(key); got != "sess-1" {
-			t.Fatalf("%s = %q, want sess-1", key, got)
+	if got := out.Get(HeaderOpencodeSession); got != "sess-1" {
+		t.Fatalf("%s = %q, want sess-1", HeaderOpencodeSession, got)
+	}
+	// The pinned first-party client emits x-session-affinity and X-Session-Id
+	// only for providers whose id does NOT start with "opencode". On an
+	// opencode mount it sends x-opencode-session instead, so the preset must
+	// not emit the pair: doing so is a header combination no real client ever
+	// sends.
+	for _, key := range []string{HeaderSessionAffinity, HeaderSessionID} {
+		if got := out.Get(key); got != "" {
+			t.Fatalf("%s = %q, want absent: it belongs to the non-opencode branch", key, got)
 		}
 	}
 	if got := out.Get(HeaderOpencodeRequest); got != "user-1" {
@@ -140,6 +149,25 @@ func TestOpencodeApplyHeaders(t *testing.T) {
 	}
 	if got := out.Get(HeaderOpencodeProject); got != "" {
 		t.Fatalf("project = %q, want absent (never fabricated)", got)
+	}
+
+	// A client that uses the non-opencode session names must not have them
+	// forwarded: deleting them (rather than merely not setting them) is what
+	// stops an inbound copy from reintroducing the union.
+	inAffinity := http.Header{}
+	inAffinity.Set(HeaderSessionAffinity, "aff")
+	inAffinity.Set(HeaderSessionID, "sid")
+	outAffinity := http.Header{}
+	maps.Copy(outAffinity, inAffinity)
+	OpencodePreset{Enabled: true, Provider: "zen"}.ApplyHeaders(outAffinity, inAffinity, "sess-1")
+	for _, key := range []string{HeaderSessionAffinity, HeaderSessionID} {
+		if got := outAffinity.Get(key); got != "" {
+			t.Fatalf("%s = %q, want removed: the client sent it but a real opencode client would not", key, got)
+		}
+	}
+	// The value is still carried, under the name the opencode branch uses.
+	if got := outAffinity.Get(HeaderOpencodeSession); got != "sess-1" {
+		t.Fatalf("session = %q, want the resolved value carried as %s", got, HeaderOpencodeSession)
 	}
 
 	// Defaults fill gaps.
