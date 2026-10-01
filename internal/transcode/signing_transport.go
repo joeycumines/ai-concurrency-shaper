@@ -61,8 +61,13 @@ func (e *SigningError) IsNonRetryable() bool { return true }
 // see errSignerConsumedUnrebuildableBody. That refusal watches the body this
 // transport installed, so it holds for a signer that leaves the body it was
 // given in place; a signer that substitutes a body of its own is taken at its
-// word and whatever it installed is what gets sent, re-fetched through GetBody
-// when the request is rebuildable.
+// word and what it installed is what gets sent, byte for byte, on this and
+// every later attempt that also substituted (the rebuild is skipped so the
+// wire never carries an unsigned document; the body fetched for signing is
+// closed once the send body is decided). When the signer fails without
+// substituting, the plain rebuild is fetched for the send as before, so a
+// consumed body is still repaired; the rebuild still runs whenever the signer
+// leaves the transport-fetched body alone.
 type SigningTransport struct {
 	Inner http.RoundTripper
 }
@@ -183,17 +188,23 @@ func (t *SigningTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		// tracking wrapper stays out of the request entirely.
 		clone.Body = attempt.ReadCloser
 	}
-	if req.GetBody != nil {
+	// A rebuildable request re-fetches its body for the send ONLY when the
+	// signer left the fetched body in place (it may have consumed it while
+	// signing). A signer that substituted a body of its own is taken at its
+	// word: what it signed is what goes on the wire, byte for byte —
+	// re-fetching here would send bytes the signature never covered. The
+	// body fetched for signing is this attempt's own, so it is closed on
+	// every path past this point: replaced below, or riding the send as a
+	// substituted body.
+	if rebuilt != nil {
+		_ = rebuilt.Close()
+		rebuilt = nil
+	}
+	if req.GetBody != nil && substituted == nil {
 		body, err := req.GetBody()
 		if err != nil {
-			closeSubstituted()
-			return nil, discardAttempt(rebuilt, fmt.Errorf("rebuild request body: %w", err))
+			return nil, discardAttempt(nil, fmt.Errorf("rebuild request body: %w", err))
 		}
-		if rebuilt != nil {
-			_ = rebuilt.Close()
-		}
-		// Being replaced, so it is this transport's to close.
-		closeSubstituted()
 		clone.Body = body
 	}
 	return t.Inner.RoundTrip(clone)

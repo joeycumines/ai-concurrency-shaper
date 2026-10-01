@@ -461,13 +461,7 @@ func fallbackSuiteErrorBody(shape transcode.CatalogShape, status int) []byte {
 }
 
 func boundSuiteMessage(message string, max int) string {
-	if max <= 0 || len(message) <= max {
-		return message
-	}
-	if max > 3 {
-		return message[:max-3] + "…"
-	}
-	return message[:max]
+	return transcode.BoundErrorMessage(message, max)
 }
 
 func (h *CatalogSuiteHandler) writeModelNotFoundError(w http.ResponseWriter, shape transcode.CatalogShape, modelID string) {

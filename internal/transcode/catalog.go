@@ -389,15 +389,9 @@ func (h *CatalogHandler) writeErrorBody(w http.ResponseWriter, shape CatalogShap
 }
 
 // boundCatalogMessage truncates an error message at the configured bound with
-// the same ellipsis discipline as the transcode handler.
+// the shared ellipsis discipline.
 func boundCatalogMessage(message string, max int) string {
-	if max <= 0 || len(message) <= max {
-		return message
-	}
-	if max > 3 {
-		return message[:max-3] + "…"
-	}
-	return message[:max]
+	return BoundErrorMessage(message, max)
 }
 
 func (h *CatalogHandler) serveSingleModel(w http.ResponseWriter, r *http.Request, modelID string) {

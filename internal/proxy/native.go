@@ -126,9 +126,10 @@ type nativeAlias struct {
 	wire      string
 	// respCap bounds the response body inspected for the alias restore.
 	respCap int64
-	// convKey is the stable conversation key derived from the request
-	// document (model plus first user text), or "" when derivation had
-	// no user text to work with.
+	// convKey is the stable conversation key the rewrite hook should prefer:
+	// derived from the request document (model plus first user text) when it
+	// carries user text, else from the client address. It is never empty,
+	// so the hook's empty-check is a no-op kept for defence in depth.
 	convKey string
 }
 
@@ -267,10 +268,13 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		return restoreOriginal(), nativeMiss
 	}
 	// Known model, wrong dialect for this route. When a transcode mapping
-	// covers the same client route, fall through so the mapping can
-	// convert to the model's native target; otherwise fail closed locally
-	// naming the model's native dialect, because forwarding verbatim would
-	// send a surrogate the upstream does not know.
+	// covers the same client route, fall through so the exchange is served
+	// by conversion instead — note the mapping renders whatever upstream
+	// protocol it was configured with, which need not be the model's Via
+	// dialect; the mapping is the operator's chosen serving mode for this
+	// route. Without such a mapping, fail closed locally naming the model's
+	// native dialect, because forwarding verbatim would send a surrogate
+	// the upstream does not know.
 	if mapping.Via != nr.Protocol {
 		if _, fallback := p.transcodeHandlerMap[nr.RouteKey]; fallback {
 			return restoreOriginal(), nativeMiss
@@ -484,14 +488,21 @@ func (b *nativePrefixBody) Close() error {
 }
 
 // isNativeUpgrade reports whether the request asks for a protocol upgrade,
-// which natively served routes reject like transcoded routes do.
+// which natively served routes reject like transcoded routes do. The
+// detection mirrors the transcode handler's isUpgradeRequest: either a
+// present Upgrade header or a Connection token naming upgrade marks an
+// upgrade-shaped request, so both boundaries classify identically — an
+// upgrade rejected on a transcoded route is rejected on a native route too,
+// never silently forwarded where one path refuses it.
 func isNativeUpgrade(r *http.Request) bool {
 	if r == nil || r.Header == nil {
 		return false
 	}
+	if r.Header.Get("Upgrade") != "" {
+		return true
+	}
 	for token := range strings.SplitSeq(r.Header.Get("Connection"), ",") {
-		if strings.EqualFold(strings.TrimSpace(token), "upgrade") &&
-			r.Header.Get("Upgrade") != "" {
+		if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
 			return true
 		}
 	}
@@ -509,22 +520,28 @@ func isNativeUpgrade(r *http.Request) bool {
 // whole, matching boundSuiteMessage and boundCatalogMessage. It is unreachable
 // from the native path, which always reads its limit through WithDefaults.
 func boundNativeMessage(message string, max int) string {
-	if max <= 0 || len(message) <= max {
-		return message
-	}
-	if max > 3 {
-		return message[:max-3] + "…"
-	}
-	return message[:max]
+	return transcode.BoundErrorMessage(message, max)
 }
 
 // writeNativeDialectError renders a local error in the route's client
 // dialect. Chat has no client error shape of its own, so it uses the
 // OpenAI (responses) envelope like every other non-messages path.
+//
+// A 5xx from this path is a proxy-local defect (the upstream was never
+// seen), so it sets the recorder's proxyGeneratedError fact: the exchange
+// classification must count it as a local failure, never an upstream one —
+// a purely local bug must not open the circuit breaker against a healthy
+// upstream. Client-fault statuses (4xx) leave no marker; they are not
+// upstream health signals either way.
 func writeNativeDialectError(w http.ResponseWriter, protocol transcode.NativeProtocol, status int, message string) {
 	target := transcode.ClientResponses
 	if protocol == transcode.NativeMessages {
 		target = transcode.ClientMessages
+	}
+	if status >= 500 {
+		if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
+			rec.proxyGeneratedError = true
+		}
 	}
 	_ = transcode.WriteDialectHTTPError(w, target, transcode.CanonicalAPIError{
 		Status:  status,

@@ -134,6 +134,11 @@ func parseModelTableEntry(raw string) (modelTableEntry, error) {
 			return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: empty fact", raw)
 		}
 		key, value, hasValue := strings.Cut(segment, "=")
+		// The empty-fact guard above deliberately tolerates surrounding
+		// whitespace on a description segment (its value may be padded), so
+		// the key can arrive padded too. Trim it so the tolerated spelling
+		// reaches the fact switch instead of dying as an unknown fact.
+		key = strings.TrimSpace(key)
 		if _, dup := seen[key]; dup {
 			return modelTableEntry{}, fmt.Errorf("invalid -model-table %q: duplicate fact %q", raw, key)
 		}

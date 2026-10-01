@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -231,10 +232,7 @@ func foreignClientHeader(name string) bool {
 // conversation across tool calls without tracking state. Volatile and
 // tool-call content never enters the hash.
 func DeriveConversationKey(provider, model, firstUserText string) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		conversationKeyDomain, provider, model, firstUserText,
-	}, "\x00")))
-	return hex.EncodeToString(sum[:])[:32]
+	return deriveSessionKey(provider, model, firstUserText)
 }
 
 // DeriveClientKey returns a stable opaque session key from the client
@@ -245,9 +243,16 @@ func DeriveClientKey(provider, remoteAddr string) string {
 	if err != nil {
 		host = remoteAddr
 	}
-	sum := sha256.Sum256([]byte(strings.Join([]string{
-		conversationKeyDomain, provider, strings.TrimSpace(host),
-	}, "\x00")))
+	return deriveSessionKey(provider, strings.TrimSpace(host))
+}
+
+// deriveSessionKey is the one key-construction stanza: sha256 over the
+// domain separator plus the caller's fields joined on NUL, hex-encoded and
+// cut to 32 characters. Every session key goes through it, so the
+// domain-separation invariant lives in exactly one place.
+func deriveSessionKey(parts ...string) string {
+	fields := append([]string{conversationKeyDomain}, parts...)
+	sum := sha256.Sum256([]byte(strings.Join(fields, "\x00")))
 	return hex.EncodeToString(sum[:])[:32]
 }
 
@@ -296,27 +301,7 @@ func firstChatUserText(messages []json.RawMessage) string {
 		if err := json.Unmarshal(raw, &m); err != nil || m.Role != "user" {
 			continue
 		}
-		var text string
-		if err := json.Unmarshal(m.Content, &text); err == nil {
-			if strings.TrimSpace(text) != "" {
-				return text
-			}
-			continue
-		}
-		var parts []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal(m.Content, &parts); err != nil {
-			continue
-		}
-		var b strings.Builder
-		for _, part := range parts {
-			if part.Type == "text" {
-				b.WriteString(part.Text)
-			}
-		}
-		if out := b.String(); strings.TrimSpace(out) != "" {
+		if out := firstStringOrTextParts(m.Content, "text"); out != "" {
 			return out
 		}
 	}
@@ -348,29 +333,40 @@ func firstResponsesUserText(input json.RawMessage) string {
 		if item.Role != "" && item.Role != "user" {
 			continue
 		}
-		var s string
-		if err := json.Unmarshal(item.Content, &s); err == nil {
-			if strings.TrimSpace(s) != "" {
-				return s
-			}
-			continue
-		}
-		var parts []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal(item.Content, &parts); err != nil {
-			continue
-		}
-		var b strings.Builder
-		for _, part := range parts {
-			if part.Type == "input_text" || part.Type == "text" {
-				b.WriteString(part.Text)
-			}
-		}
-		if out := b.String(); strings.TrimSpace(out) != "" {
+		if out := firstStringOrTextParts(item.Content, "input_text", "text"); out != "" {
 			return out
 		}
+	}
+	return ""
+}
+
+// firstStringOrTextParts reads one message's content as a plain string
+// verbatim, else as an array of parts whose type is in acceptedTypes,
+// returning the concatenation of their text. A blank result (string or
+// parts) is reported as "" so the caller keeps scanning later messages.
+func firstStringOrTextParts(content json.RawMessage, acceptedTypes ...string) string {
+	var text string
+	if err := json.Unmarshal(content, &text); err == nil {
+		if strings.TrimSpace(text) != "" {
+			return text
+		}
+		return ""
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &parts); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range parts {
+		if slices.Contains(acceptedTypes, part.Type) {
+			b.WriteString(part.Text)
+		}
+	}
+	if out := b.String(); strings.TrimSpace(out) != "" {
+		return out
 	}
 	return ""
 }

@@ -1556,6 +1556,27 @@ func (p *Proxy) lookupTranscodeHandler(r *http.Request) http.Handler {
 	return p.transcodeHandlerMap[key]
 }
 
+// dispatchAfterNativeRoute answers one request whose method+path sits on a
+// natively served route. Native-first: a model served on its own dialect is
+// rewritten and forwarded through the transparent engine; a model whose
+// dialect differs falls through to the transcode mapping on the same route
+// when one exists, and otherwise rides the transparent engine verbatim.
+// nativeError requests were already answered by the native path, so this
+// does nothing for them.
+func (p *Proxy) dispatchAfterNativeRoute(w http.ResponseWriter, r *http.Request, nr *NativeRoute) {
+	out, action := p.nativeRouteAction(w, r, nr)
+	switch action {
+	case nativeServe:
+		p.inner.ServeHTTP(w, out)
+	case nativeMiss:
+		if handler := p.lookupTranscodeHandler(out); handler != nil {
+			p.serveTranscodeHandler(w, out, handler)
+		} else {
+			p.inner.ServeHTTP(w, out)
+		}
+	}
+}
+
 func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightID uint64) {
 	var localPanic bool
 	var upstreamAbortFailure bool
@@ -1754,19 +1775,7 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 			}
 		}()
 		if nr := p.lookupNativeRoute(r); nr != nil {
-			// A natively served route rewrites the model identifier and
-			// continues through the transparent engine; a miss carries
-			// the restored request into the transcode lookup below.
-			if out, action := p.nativeRouteAction(w, r, nr); action == nativeServe {
-				p.inner.ServeHTTP(w, out)
-			} else if action == nativeMiss {
-				r = out
-				if handler := p.lookupTranscodeHandler(r); handler != nil {
-					p.serveTranscodeHandler(w, r, handler)
-				} else {
-					p.inner.ServeHTTP(w, r)
-				}
-			}
+			p.dispatchAfterNativeRoute(w, r, nr)
 		} else if handler := p.lookupTranscodeHandler(r); handler != nil {
 			p.serveTranscodeHandler(w, r, handler)
 		} else {
@@ -2217,19 +2226,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			}
 		}()
 		if nr := p.lookupNativeRoute(r); nr != nil {
-			// A natively served route rewrites the model identifier and
-			// continues through the transparent engine; a miss carries
-			// the restored request into the transcode lookup below.
-			if out, action := p.nativeRouteAction(w, r, nr); action == nativeServe {
-				p.inner.ServeHTTP(w, out)
-			} else if action == nativeMiss {
-				r = out
-				if handler := p.lookupTranscodeHandler(r); handler != nil {
-					p.serveTranscodeHandler(w, r, handler)
-				} else {
-					p.inner.ServeHTTP(w, r)
-				}
-			}
+			p.dispatchAfterNativeRoute(w, r, nr)
 		} else if handler := p.lookupTranscodeHandler(r); handler != nil {
 			p.serveTranscodeHandler(w, r, handler)
 		} else {
@@ -2408,6 +2405,14 @@ func writeQueueRejected(w http.ResponseWriter, depthLimit int, waiters int64) {
 }
 
 func isUpstreamFailureStatus(rec *statusRecorder, now time.Time, ctxErr error) bool {
+	// A proxy-generated error WITHOUT a real transport error behind it never
+	// saw the upstream: it is a local defect, not an upstream health signal
+	// (panic 502, queue rejection, the native path's local 5xx). A 502 that
+	// wraps a genuine transport error (rec.transportErr) still classifies as
+	// upstream — hasRealProxyTransportError names exactly that shape.
+	if rec != nil && rec.proxyGeneratedError && !rec.hasRealProxyTransportError(ctxErr) {
+		return false
+	}
 	if rec != nil && (rec.localUpgradeFailure || rec.retryCircuitOpen()) {
 		return false
 	}
@@ -2594,7 +2599,11 @@ func classifyNativeExchange(
 	result.upstreamSuccess = !result.upstreamFailure && !result.clientAborted &&
 		isBreakerSuccessStatus(rec, now, epoch, ctxErr)
 	result.retryAfter = parseRetryAfterFromRecorder(rec, now)
-	result.localFailure = rec.status == http.StatusBadGateway && rec.proxyGeneratedError
+	// proxyGeneratedError marks an error this proxy produced without seeing
+	// the upstream — the 502 panic handler, queue rejection, and the native
+	// path's own 5xx local errors. Those are local failures, never upstream
+	// health signals: a purely local defect must not open the breaker.
+	result.localFailure = rec.proxyGeneratedError
 	result.suppressibleAbort = rec.suppressibleClientAbort(ctxErr)
 	return result
 }
