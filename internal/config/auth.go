@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
 // UnprotectedProviderCount returns how many configured providers have no
@@ -147,6 +148,17 @@ func (p *Provider) buildAuthPolicy() error {
 		headerName, herr = resolveAuthHeader(p.AuthMode, modeArg, p.AuthHeader)
 		if herr != nil {
 			return herr
+		}
+		// The pipeline manages this name (it strips, clobbers, or rewrites
+		// it), so a credential placed there would be silently lost. Enforced
+		// on every mount, not just transcode ones. The opencode preset's
+		// foreign-client-SDK strip is additionally managed, but only while
+		// the preset is on — without it the name is an ordinary header.
+		if transcode.ReservedHeaderName(headerName) ||
+			(p.Opencode && transcode.PresetManagedHeaderName(headerName)) {
+			return fmt.Errorf(
+				"-auth-header %q is reserved by the proxy pipeline", headerName,
+			)
 		}
 	}
 

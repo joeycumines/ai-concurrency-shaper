@@ -1,6 +1,6 @@
 package transcode
 
-// J2 regression tests: schema-bearing JSON
+// Regression tests: schema-bearing JSON
 // (Anthropic input_schema, Chat function parameters, Chat json_schema
 // response_format, Responses tool parameters and text.format schema) crosses
 // every wire and canonical representation as validated json.RawMessage, so

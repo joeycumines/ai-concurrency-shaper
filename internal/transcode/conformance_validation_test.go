@@ -235,7 +235,7 @@ func TestValidateCanonicalResponseNegativeMatrix(t *testing.T) {
 	})
 
 	t.Run("inconsistent total (mismatch)", func(t *testing.T) {
-		// CC-USAGE-ARITHMETIC: a total that is not the exact sum of input +
+		// usage arithmetic: a total that is not the exact sum of input +
 		// output is an observability fact (real gateways emit it), relayed
 		// as-is — never an exchange failure.
 		r := base()
@@ -263,7 +263,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 			PromptTokens:     10,
 			CompletionTokens: -1,
 			TotalTokens:      9,
-		})
+		}, "")
 		if !clamp.negativeCounts {
 			t.Fatalf("clamp = %+v, want negative counts recorded", clamp)
 		}
@@ -280,7 +280,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 			CompletionTokensDetails: &ChatCompletionTokensDetails{
 				ReasoningTokens: -1,
 			},
-		})
+		}, "")
 		if !clamp.negativeCounts || got.OutputTokensDetails.ReasoningTokens != 0 {
 			t.Fatalf("clamped usage = %+v (clamp %+v), want reasoning 0", got, clamp)
 		}
@@ -294,7 +294,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 			PromptTokensDetails: &ChatPromptTokensDetails{
 				CachedTokens: 50,
 			},
-		})
+		}, "")
 		if !clamp.cacheExceedsInput {
 			t.Fatalf("clamp = %+v, want cache-exceeds-input recorded", clamp)
 		}
@@ -311,7 +311,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 			PromptTokens:     10,
 			CompletionTokens: 5,
 			TotalTokens:      12,
-		})
+		}, "")
 		if got.TotalTokens != 12 {
 			t.Fatalf("total = %d, want the source's own 12", got.TotalTokens)
 		}
@@ -321,7 +321,7 @@ func TestUsageConversionClampsInconsistency(t *testing.T) {
 	})
 
 	t.Run("chat nil usage returns nil", func(t *testing.T) {
-		got, clamp := chatUsageToResponsesUsage(nil)
+		got, clamp := chatUsageToResponsesUsage(nil, "")
 		if got != nil || !clamp.empty() {
 			t.Fatalf("nil usage = (%v, %+v), want (nil, empty)", got, clamp)
 		}
@@ -372,22 +372,35 @@ func TestSSEReadLineCROnly(t *testing.T) {
 	}
 }
 
-// TestResponsesStreamEmptyEventNameRejected proves a Responses stream frame
-// without an event name is rejected by the Responses→Anthropic adapter: the
-// package's own rule requires event: to be present and equal the JSON type
-// tag.
-func TestResponsesStreamEmptyEventNameRejected(t *testing.T) {
+// TestResponsesStreamEmptyEventNameAccepted proves a Responses stream frame
+// without an SSE event name is routed by its decoded JSON type (the SSE
+// event field is optional and the JSON type is the authoritative
+// discriminator) and the provider quirk is recorded as the ungated
+// missing_event_name note. A present-but-mismatched name is still rejected
+// (TestResponsesStreamMismatchedEventNameRejected).
+func TestResponsesStreamEmptyEventNameAccepted(t *testing.T) {
 	ctx := testStreamContext()
-	state := newAnthropicResponsesStreamState(ctx, StrictLossPolicy(), ChatCapabilities{}, "resp_1", "m", 1)
+	state := newAnthropicResponsesStreamState(ctx, permissiveLossPolicy(), ChatCapabilities{}, "resp_1", "m", 1)
 	converter := &responsesToAnthropicConverter{state: state}
 
-	// Empty event name + valid data → rejected by the adapter guard.
-	_, err := converter.Convert(SSEEvent{
+	// Empty event name + valid data -> routed by the JSON type, note once.
+	if _, err := converter.Convert(SSEEvent{
 		Event: "",
-		Data:  []byte(`{"type":"response.created","response":{"id":"resp_1","object":"response","created_at":1,"model":"m","status":"in_progress"}}`),
-	})
-	if err == nil {
-		t.Fatal("empty event name accepted by the Responses adapter")
+		Data:  []byte(`{"type":"response.created","response":{"id":"resp_1","object":"response","created_at":1,"model":"m","status":"in_progress","output":[]}}`),
+	}); err != nil {
+		t.Fatalf("empty event name rejected: %v", err)
+	}
+	notes := 0
+	for _, loss := range state.report.Losses {
+		if loss.Feature == FeatureMissingEventName {
+			notes++
+			if loss.Kind != NoteRecord {
+				t.Fatalf("missing_event_name kind = %v, want NoteRecord", loss.Kind)
+			}
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("missing_event_name note count = %d, want 1", notes)
 	}
 }
 

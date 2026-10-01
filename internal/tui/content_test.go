@@ -383,7 +383,7 @@ func TestHScroll_ShiftsAllDataRows(t *testing.T) {
 	}
 }
 
-// ─── T02: horizontal scrolling on the Logs tab ───
+// ─── Horizontal scrolling on the Logs tab ───
 
 func TestHScroll_LogsShiftsTruncationWindow(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
@@ -491,4 +491,4 @@ func TestHScroll_LogsDoesNotPauseFollow(t *testing.T) {
 	}
 }
 
-// ─── T03: Logs detail view ───
+// ─── Logs detail view ───

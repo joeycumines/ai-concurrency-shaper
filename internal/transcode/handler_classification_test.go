@@ -1,6 +1,6 @@
 package transcode
 
-// Review-08 blocker 8 regression tests: the upstream-failure classification
+// Regression tests: the upstream-failure classification
 // doctrine — a 2xx upstream response with the wrong representation, a
 // transport or body failure racing a client cancellation, and a failed
 // non-2xx error-body transfer are all definitive upstream failures, never
@@ -409,8 +409,7 @@ func TestRequestSideRacesStayLocal(t *testing.T) {
 
 // TestSuccessfulBodyReadCancellationDerivedAbort proves a cancellation-derived
 // successful-body read error with a cancelled context stays a client abort
-// (the JSON body-read suppression gate's positive direction,
-// blocker 8).
+// (the JSON body-read suppression gate's positive direction).
 func TestSuccessfulBodyReadCancellationDerivedAbort(t *testing.T) {
 	mapping := responsesMapping(t)
 	handler, outcomes := outcomeCaptureHandler(t, mapping, func(req *http.Request) (*http.Response, error) {

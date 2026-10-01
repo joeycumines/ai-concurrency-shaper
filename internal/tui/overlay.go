@@ -365,7 +365,46 @@ func (m Model) renderHelpOverlay() string {
 }
 
 func (m Model) renderFooter() string {
-	keys := " 1-6:tab │ j/k:scroll │ h/l:hscroll │ PgUp/PgDn │ Home/End │ Ctrl-U/D │ /:filter │ t:type │ s:status │ c:reset │ ?:help │ q:quit "
+	segs := []string{
+		" 1-6:tab", "j/k:scroll", "h/l:hscroll", "PgUp/PgDn", "Home/End",
+		"Ctrl-U/D", "/:filter", "t:type", "s:status", "c:reset", "?:help", "q:quit ",
+	}
+	// Fit the footer to the terminal width: drop middle segments first so the
+	// leading tab hint and the trailing quit/help hints survive at any width
+	// (a fixed 129-col footer silently hid q:quit below 160 columns).
+	join := func(parts []string) string {
+		var out strings.Builder
+		out.WriteString(parts[0])
+		for _, p := range parts[1:] {
+			out.WriteString(" │ " + p)
+		}
+		return out.String()
+	}
+	keys := join(segs)
+	for uniseg.StringWidth(keys) > m.width && len(segs) > 2 {
+		// Drop the middle element, keeping the leading tab hint and the
+		// trailing quit/help hints longest. The slice must be derived from the
+		// current length: once repeated drops shrink segs, a fixed index would
+		// run past the end and panic on narrow terminals.
+		mid := len(segs) / 2
+		segs = append(segs[:mid:mid], segs[mid+1:]...)
+		keys = join(segs)
+	}
+	if uniseg.StringWidth(keys) > m.width {
+		// No uniseg.Truncate in this dependency version — trim by printable
+		// width, rune by rune.
+		out := make([]rune, 0, len(keys))
+		w := 0
+		for _, r := range keys {
+			rw := uniseg.StringWidth(string(r))
+			if w+rw > m.width {
+				break
+			}
+			out = append(out, r)
+			w += rw
+		}
+		keys = string(out)
+	}
 	return m.styles.footerStyle.Render(keys)
 }
 

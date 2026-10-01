@@ -1,6 +1,6 @@
 package transcode
 
-// Review-08 blocker 11 regression tests: writeAll is single-shot — a partial
+// Regression tests: writeAll is single-shot — a partial
 // write with a nil error is io.ErrShortWrite, never retried into a false
 // success, so a short write can never be recorded as a clean completion.
 

@@ -230,7 +230,7 @@ func TestPTY_MultiProviderTeardown(t *testing.T) {
 	}
 }
 
-// TestPTY_ThreeProvidersFleetStrip proves the fleet aggregate observability strip (M6/G8)
+// TestPTY_ThreeProvidersFleetStrip proves the fleet aggregate observability strip
 // with 3 providers in a real terminal at 80-col.
 func TestPTY_ThreeProvidersFleetStrip(t *testing.T) {
 	up1, up2, up3 := gatedUpstream(t), gatedUpstream(t), gatedUpstream(t)

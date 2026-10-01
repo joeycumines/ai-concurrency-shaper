@@ -1,6 +1,6 @@
 package transcode
 
-// Review-z commit 1 acceptance: all six malformed-JSON categories are
+// Acceptance: all six malformed-JSON categories are
 // rejected with typed wire.DecodeError at the decode boundaries — they can
 // never reach the converters. Each category is exercised through the real
 // entry points (request decode, upstream response decode, upstream stream

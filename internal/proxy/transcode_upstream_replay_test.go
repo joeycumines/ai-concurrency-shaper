@@ -1,10 +1,9 @@
 package proxy
 
-// E2E replay conformance suite: the three field
-// failure modes replayed END-TO-END
-// through Proxy.ServeHTTP with transcode mappings, against httptest chat
-// upstreams. Each scenario uses the exact captured client shapes; each
-// asserts the field failure is dead at the proxy boundary.
+// E2E replay conformance suite: the three observed field failure modes
+// replayed END-TO-END through Proxy.ServeHTTP with transcode mappings,
+// against httptest chat upstreams. Each scenario uses the exact captured
+// client shapes; each asserts the failure is dead at the proxy boundary.
 
 import (
 	"bytes"
@@ -55,7 +54,7 @@ func replayUpstream(t *testing.T) (*httptest.Server, func() [][]byte) {
 // Codex sessions survive turn 2+ against the proxy.
 func TestReplayCodexTwoTurn(t *testing.T) {
 	upstream, captured := replayUpstream(t)
-	p := j2LimitedProxy(t, upstream, nil)
+	p := limitedResponsesProxy(t, upstream, nil)
 
 	// Turn 1: the initial user prompt.
 	req1 := httptest.NewRequest(
@@ -205,7 +204,7 @@ func TestReplayPoisonUsageSuccess(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 
 	// Retries and the production replay cap armed so the single-hit
 	// assertion exercises the real retry decision.
@@ -256,7 +255,7 @@ func TestReplayPoisonUsageSuccess(t *testing.T) {
 }
 
 // qwenReasoningStreamUpstream replays the observed yolo/qwen streaming
-// behavior (field regression 2026-08-22): role + reasoning_content deltas
+// behavior (observed field regression): role + reasoning_content deltas
 // (the DeepSeek/Qwen spelling), then answer content, then the finish chunk
 // and the [DONE] sentinel.
 func qwenReasoningStreamUpstream(t *testing.T) *httptest.Server {
@@ -281,7 +280,7 @@ func qwenReasoningStreamUpstream(t *testing.T) *httptest.Server {
 // default capability set that the regression traffic ran against: the
 // compatible core capability defaults (defaultTranscodeChatCapabilities) and
 // the default-approved losses this direction can exercise — the usage-timing
-// losses and the two compatibility-first request-side controls the commit-2
+// losses and the two compatibility-first request-side controls the shipped
 // defaults flipped (request_reasoning and developer_role: with
 // reasoning_effort and developer_role opt-in, the effort/budget knob and the
 // developer-role distinction drop observably). The mapping intentionally pins
@@ -434,7 +433,7 @@ func TestReplayQwenReasoningContentNonStream(t *testing.T) {
 }
 
 // matchedStopStreamUpstream replays the observed yolo/qwen streaming behavior
-// (field regression 2026-08-24): content deltas, then a finish chunk whose
+// (observed field regression): content deltas, then a finish chunk whose
 // choice carries the opaque `matched_stop` extension alongside finish_reason,
 // then the [DONE] sentinel.
 func matchedStopStreamUpstream(t *testing.T) (*httptest.Server, *int) {
@@ -465,7 +464,7 @@ func matchedStopStreamUpstream(t *testing.T) (*httptest.Server, *int) {
 func TestReplayMatchedStopMessagesStream(t *testing.T) {
 	upstream, hits := matchedStopStreamUpstream(t)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	u, _ := url.Parse(upstream.URL)
 	pattern, err := route.Parse("POST /v1/messages")
 	if err != nil {

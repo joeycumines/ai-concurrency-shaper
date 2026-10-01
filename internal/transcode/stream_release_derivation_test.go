@@ -1,7 +1,7 @@
 package transcode
 
 // The release-bound derivation is closed on
-// every axis the round-3 gate falsified — the per-event framing overhead
+// every axis that can falsify it — the per-event framing overhead
 // times the event budget, the 6x-escaped request echo (bounded at
 // decode), and tool-call identity rendered into the terminal envelope
 // (charged against the exchange accumulated total).
@@ -46,7 +46,7 @@ func (r *sseReplayReader) Read(p []byte) (int, error) {
 // a legal stream of single-byte deltas is bounded by the EVENT budget, and
 // its generated total is dominated by per-event framing overhead (~221 bytes
 // per chat→responses text-delta frame, measured), not payload escaping. The
-// pre-round-4 generated total (terminal batch + 6x semantics + 1 MiB) died
+// former generated total (terminal batch + 6x semantics + 1 MiB) died
 // at ~69% of the event budget with SSEBoundError; the derivation now carries
 // maxStreamTotalEvents x maxStreamPerEventFramingBytes, so an exchange at
 // the full event budget completes its [DONE] release.
@@ -89,7 +89,7 @@ func TestChatStreamFramingOverheadCompletesRelease(t *testing.T) {
 // echo is bounded at decode (maxStreamEchoBytes, fail-closed 413 resource
 // limit) because it re-marshals into every generated envelope frame at up to
 // 6x JSON escaping. A '<'-heavy echo above the bound is rejected at decode —
-// accepted by the pre-round-4 code (raw body well under AcceptedRequestBytes),
+// accepted by the former code (raw body well under AcceptedRequestBytes),
 // which then failed the first upstream frame.
 func TestResponsesRequestEchoCapped(t *testing.T) {
 	t.Run("escaping-heavy instructions above the bound rejected", func(t *testing.T) {
@@ -138,7 +138,7 @@ func TestResponsesRequestEchoCapped(t *testing.T) {
 	})
 	t.Run("escaping-heavy user above the bound rejected", func(t *testing.T) {
 		// The rendered members beyond instructions are measured too.
-		// round 5): a '<'-heavy user field renders at 6x into every envelope.
+		// A '<'-heavy user field renders at 6x into every envelope.
 		body := fmt.Sprintf(
 			`{"model":"m","input":"x","user":%q}`,
 			strings.Repeat("<", maxStreamEchoBytes),
@@ -197,7 +197,7 @@ func TestChatStreamMaximalEchoReleases(t *testing.T) {
 	}
 }
 
-// TestResponsesAnthropicToolIdentityCharged pins the round-5 gate finding:
+// TestResponsesAnthropicToolIdentityCharged pins the identity charging:
 // the DIRECT Responses→Anthropic direction charges tool-call identity (call
 // id, function name) against the exchange accumulated total, exactly like
 // the chat direction — identity renders into the generated tool_use block
@@ -206,7 +206,7 @@ func TestChatStreamMaximalEchoReleases(t *testing.T) {
 func TestResponsesAnthropicToolIdentityCharged(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"m",
@@ -250,7 +250,7 @@ func TestResponsesAnthropicToolIdentityCharged(t *testing.T) {
 			continue
 		}
 		if err == nil {
-			t.Fatal("identity beyond the exchange total must be rejected (round 5)")
+			t.Fatal("identity beyond the exchange total must be rejected")
 		}
 		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 			t.Fatalf("err = %T %v, want UpstreamWireError", err, err)
@@ -310,7 +310,7 @@ func TestChatStreamToolIdentityCharged(t *testing.T) {
 	})
 }
 
-// TestEchoCapLiveHandler413 pins the round-5 gate finding: the echo cap
+// TestEchoCapLiveHandler413 pins the live-handler classification: the echo cap
 // rejects through the LIVE handler as a 413 for both a streaming and a
 // non-streaming Responses request (the decode hook runs before stream
 // negotiation, so the classification must not depend on the stream intent).
@@ -431,7 +431,7 @@ func TestPerEventFramingChargeCoversAllShapes(t *testing.T) {
 
 	// --- responses -> anthropic: every render shape ---
 	anthropicState := newAnthropicResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{ProviderReasoningThinking: true},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{ProviderReasoningThinking: true},
 		"msg_1", "claude-x", 1710000000,
 	)
 	created := ResponseCreatedEvent{

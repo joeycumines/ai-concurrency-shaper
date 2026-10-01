@@ -1,7 +1,7 @@
 package transcode
 
-// J4 regression tests: the Chat schema aligned with the pinned contract
-// (openai-go v1.12.0, internal/transcode/pins.md) — logprobs/service_tier
+// Regression tests: the Chat schema aligned with the pinned contract
+// (openai-go v1.12.0) — logprobs/service_tier
 // model every pinned field, and the tool-call wire types
 // are split into the non-stream shape (no index) and the streaming delta
 // (index-carrying).

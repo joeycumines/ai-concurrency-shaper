@@ -124,6 +124,47 @@ type CanonicalToolChoice struct {
 	Name string
 }
 
+// ToolNameRef identifies the Responses namespace + bare child name a
+// chat-facing flat function name was flattened from. Namespace is empty for
+// an ordinary function tool.
+type ToolNameRef struct {
+	Namespace string
+	Name      string
+}
+
+// ToolNames maps a Responses client's flattened namespace tools to the flat
+// function names rendered into a chat request. Flat names are unique (a
+// colliding child is qualified), so both directions are exact and this map is
+// the only reverse-lookup mechanism: separators are never parsed.
+type ToolNames struct {
+	FlatToRef map[string]ToolNameRef
+	RefToFlat map[ToolNameRef]string
+}
+
+// clientCallName maps a flattened chat function name back to the Responses
+// client's view: a namespace child renders its bare name plus the separate
+// qualifier; an ordinary function renders unchanged.
+func (t *ToolNames) clientCallName(flat string) (name string, namespace string) {
+	if t == nil {
+		return flat, ""
+	}
+	ref, ok := t.FlatToRef[flat]
+	if !ok {
+		return flat, ""
+	}
+	return ref.Name, ref.Namespace
+}
+
+// flatName returns the chat-facing flat name for a namespace child, reporting
+// false when the exchange did not declare that tool.
+func (t *ToolNames) flatName(ref ToolNameRef) (string, bool) {
+	if t == nil || ref.Namespace == "" {
+		return "", false
+	}
+	flat, ok := t.RefToFlat[ref]
+	return flat, ok
+}
+
 // CanonicalStructuredOutput is a structured-output schema.
 type CanonicalStructuredOutput struct {
 	Name        string
@@ -155,6 +196,21 @@ type CanonicalRequest struct {
 	Turns []CanonicalTurn
 	Tools []CanonicalTool
 
+	// RetainedTurns is the number of LEADING turns reconstructed from the
+	// opt-in continuity store rather than authored by the client on this
+	// request. It is 0 (no continuity) for every ordinary request.
+	//
+	// Request-side portability gates exist to police CLIENT input, so a gate
+	// must not charge the client for a position the client's own request did
+	// not create. Retained turns were already rendered once, in the exchange
+	// that produced the chain, so re-gating them re-litigates a decision that
+	// was already paid. Renderers use this count to treat a retained turn's
+	// position as the proxy's own: the same encoding still happens, but it is
+	// recorded as a Note (a sanctioned encoding, visible in the log) instead
+	// of a policy-gated loss that can reject a request the client authored
+	// cleanly.
+	RetainedTurns int
+
 	ToolChoice       *CanonicalToolChoice
 	ParallelTools    *bool
 	MaxOutputTokens  *int
@@ -176,6 +232,11 @@ type CanonicalRequest struct {
 type DecodeResult struct {
 	Request CanonicalRequest
 	Report  ConversionReport
+
+	// ToolNames is the namespace flattening map of a Responses request that
+	// declared namespace tools (nil otherwise). It travels with the exchange
+	// so the response renderer can restore the namespace qualifier.
+	ToolNames *ToolNames
 
 	// StreamSet is true when the request body explicitly carried a stream
 	// field (true or false). The handler applies the documented stream-intent
@@ -199,7 +260,7 @@ type ExchangeContext struct {
 	// Capabilities is the mapping's independent-verification gate for
 	// fidelity-only rendering decisions, e.g. realizing an Anthropic thinking
 	// budget as Responses reasoning.effort. Copied from the mapping, like
-	// LossPolicy (request_reasoning-default-native-path).
+	// LossPolicy.
 	Capabilities ChatCapabilities
 
 	// Request-derived state required to reconstruct the client response
@@ -208,12 +269,34 @@ type ExchangeContext struct {
 	OriginalResponsesRequest *ResponsesRequestEcho
 	OriginalMessagesRequest  *MessagesRequestContext
 
+	// ToolNames is the request's namespace flattening map (nil when none was declared).
+	ToolNames *ToolNames
+
 	// StreamIntent records the resolved stream mode of the exchange: the
 	// request body's stream field when explicitly present, otherwise the
-	// client Accept header's most-preferred acceptable representation
-	//. A stream/JSON mismatch on the upstream response
+	// client Accept header's most-preferred acceptable representation.
+	// A stream/JSON mismatch on the upstream response
 	// is an error rather than a silent mode change.
 	StreamIntent bool
+
+	// RequestTurns carries the decoded canonical request turns for the
+	// exchange, so the opt-in continuity store can retain the conversation
+	// that produced an emitted response id. It is set by convertRequest for
+	// Responses clients (after continuity resolution, so the retained chain
+	// already includes the reconstructed history) and left nil otherwise.
+	// Canonical parts are immutable after decode; the store copies the
+	// slice header, never the parts.
+	RequestTurns []CanonicalTurn
+
+	// RequestDepth carries the continuity resolution depth of this
+	// exchange (0 when no previous_response_id resolved), so the record
+	// call stores the depth the next resolution builds on.
+	RequestDepth int
+
+	// ResolvedReasoningTier carries the reasoning tier resolved from the
+	// profile map ("low", "medium", "high", or "" when unset). The render
+	// applies it to the upstream request when the capability is granted.
+	ResolvedReasoningTier string
 }
 
 // lossPolicy returns the exchange loss policy, or the strictest policy when
@@ -263,8 +346,7 @@ func RequirePortableArtifacts(
 	// decision, not an artifact gate: the Chat and Responses renderers map an
 	// enabled budget to a reasoning effort when the exchange grants the
 	// capability and record the request_reasoning loss elsewhere, so a budget
-	// is never silently dropped nor double-reported (high finding
-	// request_reasoning-default-native-path).
+	// is never silently dropped nor double-reported.
 	return nil
 }
 

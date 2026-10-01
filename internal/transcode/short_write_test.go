@@ -1,6 +1,6 @@
 package transcode
 
-// J7 regression tests: a recorder-detected
+// Regression tests: a recorder-detected
 // short write can never be a clean completion.
 
 import (

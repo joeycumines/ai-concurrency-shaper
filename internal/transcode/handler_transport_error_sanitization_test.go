@@ -62,7 +62,7 @@ func TestTransportErrorBodyNeverContainsUpstreamURL(t *testing.T) {
 }
 
 // TestTransportErrorLogRedactsNestedChainURLs pins the log-side redaction of
-// nested url.Error chains (reviewer F1 parity with the native sanitizer): a
+// nested url.Error chains (parity with the native sanitizer): a
 // custom transport wrapping an inner url.Error must not leak the inner
 // credential-bearing query into the logged detail.
 func TestTransportErrorLogRedactsNestedChainURLs(t *testing.T) {

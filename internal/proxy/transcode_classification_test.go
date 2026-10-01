@@ -26,9 +26,9 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
-// j2Breaker returns a breaker with a small base penalty so holds are
+// testBreaker returns a breaker with a small base penalty so holds are
 // measurable: PenaltyDuration is nonzero even at zero consecutive failures.
-func j2Breaker(t *testing.T) *circuitbreaker.Breaker {
+func testBreaker(t *testing.T) *circuitbreaker.Breaker {
 	t.Helper()
 	breaker, err := circuitbreaker.New(
 		circuitbreaker.WithFailureThreshold(100),
@@ -41,9 +41,9 @@ func j2Breaker(t *testing.T) *circuitbreaker.Breaker {
 	return breaker
 }
 
-// j2LimitedProxy builds a proxy with a limited POST /v1/responses route, a
+// limitedResponsesProxy builds a proxy with a limited POST /v1/responses route, a
 // slot limiter of capacity 1, and the given breaker (nil allowed).
-func j2LimitedProxy(t *testing.T, upstream *httptest.Server, breaker *circuitbreaker.Breaker) *Proxy {
+func limitedResponsesProxy(t *testing.T, upstream *httptest.Server, breaker *circuitbreaker.Breaker) *Proxy {
 	t.Helper()
 	pattern, err := route.Parse("POST /v1/responses")
 	if err != nil {
@@ -81,8 +81,8 @@ func TestProxyTranscodeLocalConversion502NoPhantomHold(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
-	p := j2LimitedProxy(t, upstream, breaker)
+	breaker := testBreaker(t)
+	p := limitedResponsesProxy(t, upstream, breaker)
 
 	// PenaltyDuration is nonzero at zero consecutive failures: the base
 	// penalty alone would hold the slot if the local 502 were misclassified.
@@ -132,8 +132,8 @@ func TestProxyTranscodeCorruptUpstreamJSONAppliesPhantomHold(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
-	p := j2LimitedProxy(t, upstream, breaker)
+	breaker := testBreaker(t)
+	p := limitedResponsesProxy(t, upstream, breaker)
 
 	// PenaltyDuration is nonzero at zero consecutive failures: the base
 	// penalty alone holds the slot when the corrupt wire is correctly
@@ -189,7 +189,7 @@ func TestProxyTranscodePoisonUsage200IsNeverRetried(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	pattern, err := route.Parse("POST /v1/responses")
 	if err != nil {
 		t.Fatal(err)
@@ -247,9 +247,9 @@ func TestProxyTranscodeTruncatedStreamAppliesPhantomHold(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	before := breaker.Stats()
-	p := j2LimitedProxy(t, upstream, breaker)
+	p := limitedResponsesProxy(t, upstream, breaker)
 
 	req1 := httptest.NewRequest(
 		http.MethodPost,
@@ -298,9 +298,9 @@ func TestProxyTranscodeRateLimit403HoldAndBreakerFailure(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	before := breaker.Stats()
-	p := j2LimitedProxy(t, upstream, breaker)
+	p := limitedResponsesProxy(t, upstream, breaker)
 
 	req1 := httptest.NewRequest(
 		http.MethodPost,
@@ -373,7 +373,7 @@ func TestProxyTranscodeUpstreamErrorFrameWriteFailureNotClean(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	before := breaker.Stats()
 	collector := metrics.NewCollector()
 
@@ -561,7 +561,7 @@ func TestProxyTranscodeOversizedSSEFatalNotShortenedSuccess(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	before := breaker.Stats()
 
 	pattern, err := route.Parse("POST /v1/responses")
@@ -650,7 +650,7 @@ func TestProxyTranscodeAbortNotCleanCompletion(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	breakerBefore := breaker.Stats()
 	collector := metrics.NewCollector()
 	j := journal.New(64, 1<<20)
@@ -748,7 +748,7 @@ func TestProxyTranscodeShortWriteNotCleanCompletion(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	breakerBefore := breaker.Stats()
 	collector := metrics.NewCollector()
 	j := journal.New(64, 1<<20)
@@ -843,9 +843,9 @@ func TestProxyTranscodeInBandChatErrorFrameIsUpstreamFailure(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	before := breaker.Stats()
-	p := j2LimitedProxy(t, upstream, breaker)
+	p := limitedResponsesProxy(t, upstream, breaker)
 
 	req1 := httptest.NewRequest(
 		http.MethodPost,
@@ -895,7 +895,7 @@ func TestProxyTranscodeNonStreamFailedEnvelopeIsUpstreamFailure(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	before := breaker.Stats()
 	pattern, err := route.Parse("POST /v1/messages")
 	if err != nil {
@@ -942,7 +942,7 @@ func TestProxyTranscodeNonStreamFailedEnvelopeIsUpstreamFailure(t *testing.T) {
 	}))
 	t.Cleanup(upstream2.Close)
 
-	breaker2 := j2Breaker(t)
+	breaker2 := testBreaker(t)
 	before2 := breaker2.Stats()
 	pattern2, err := route.Parse("POST /v1/messages")
 	if err != nil {
@@ -1132,9 +1132,9 @@ func TestProxyTranscodeMidStreamBodyErrorIsUpstreamFailure(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	before := breaker.Stats()
-	p := j2LimitedProxy(t, upstream, breaker)
+	p := limitedResponsesProxy(t, upstream, breaker)
 
 	req1 := httptest.NewRequest(
 		http.MethodPost,
@@ -1182,9 +1182,9 @@ func TestProxyTranscodeWrongMediaTypeAppliesPhantomHold(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	before := breaker.Stats()
-	p := j2LimitedProxy(t, upstream, breaker)
+	p := limitedResponsesProxy(t, upstream, breaker)
 
 	// The non-streaming request is answered with a stream: the wrong
 	// representation must fail the breaker.
@@ -1517,7 +1517,7 @@ func TestProxyExternalSignerFailureIsLocal(t *testing.T) {
 
 	mapping := testResponsesMapping(t)
 	mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthExternalSigner, Signer: failingSigner{}}
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	p := newTranscodeProxyUpstreamBreaker(t, upstream, breaker, transcodeMapping(mapping))
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"m","input":"hi"}`))
@@ -1633,7 +1633,7 @@ func TestProxyExternalSignerFailureWithRetriesIsLocal(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	breaker := j2Breaker(t)
+	breaker := testBreaker(t)
 	mapping := testResponsesMapping(t)
 	mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthExternalSigner, Signer: failingSigner{}}
 

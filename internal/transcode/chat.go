@@ -1,7 +1,7 @@
 package transcode
 
 // The OpenAI Chat Completions wire definitions live in the pinned wire
-// package wire/openaichat (see contracts.lock.json); this file re-exports
+// package wire/openaichat; this file re-exports
 // them under the package's historical names so consumers compile unchanged.
 // New code should prefer the wire package names.
 //

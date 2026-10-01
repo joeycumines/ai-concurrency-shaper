@@ -1,6 +1,6 @@
 package transcode
 
-// J4 regression tests: the non-streaming Chat
+// Regression tests: the non-streaming Chat
 // response decode is presence-aware and strict — the pinned required fields
 // (object, one choice, choice index 0, finish_reason, message with role
 // assistant, complete tool-call identity) must be explicitly present, never
@@ -149,11 +149,11 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 	}
 }
 
-// TestChatResponseReviewKCounterexampleIsRejected proves the exact
+// TestChatResponseNonStreamingCounterexampleIsRejected proves the exact
 // counterexample — a single choice with index zero, a user-role message, and
 // no finish_reason — is rejected as corrupt upstream wire and can never
 // become a successful assistant response.
-func TestChatResponseReviewKCounterexampleIsRejected(t *testing.T) {
+func TestChatResponseNonStreamingCounterexampleIsRejected(t *testing.T) {
 	body := []byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"user","content":"x"}}]}`)
 	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
 	var wireErr *UpstreamWireError
@@ -339,5 +339,24 @@ func TestChatResponseDecodesMatchedStopMessageExtension(t *testing.T) {
 	bogus := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x","bogus_field":1}}]}`
 	if _, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy()); err != nil {
 		t.Fatalf("unknown message field tolerated decode = %v, want success", err)
+	}
+}
+
+// TestChatResponseUnknownFinishReasonRefused pins the unknown-finish_reason
+// refusal set on both paths: an unknown chat finish_reason on the Chat
+// directions stays a keyed refusal (never absorbed, never defaulted to stop),
+// non-stream and stream alike.
+func TestChatResponseUnknownFinishReasonRefused(t *testing.T) {
+	body := []byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"frobnicate","message":{"role":"assistant","content":"x"}}]}`)
+	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	target := &UnsupportedFeatureError{}
+	if !errors.As(err, &target) {
+		t.Fatalf("err = %T: %v, want keyed refusal", err, err)
+	}
+	state := newChatResponsesStreamState(testStreamContext(), StrictLossPolicy(), ChatCapabilities{}, "resp_1", "m", 1, nil)
+	_, err = state.Convert(chatChunk(t, ChatStreamDelta{}, new("frobnicate")))
+	target = &UnsupportedFeatureError{}
+	if !errors.As(err, &target) {
+		t.Fatalf("stream err = %T: %v, want keyed refusal", err, err)
 	}
 }

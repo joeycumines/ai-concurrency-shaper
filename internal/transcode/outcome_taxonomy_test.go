@@ -1,6 +1,6 @@
 package transcode
 
-// Review-z commit 4 acceptance tests: the eight-row failure taxonomy, the
+// Acceptance tests: the eight-row failure taxonomy, the
 // per-attempt signing transport, and the anchored Retry-After (the recorder
 // header fallback is gone for transcoded exchanges).
 

@@ -1,10 +1,11 @@
 package main
 
-// Review-z commit 6 acceptance: the CLI rejects every enumerated impossible
+// Acceptance: the CLI rejects every enumerated impossible
 // transcoding configuration at startup, and only the granular loss names are
 // accepted.
 
 import (
+	"bytes"
 	"os/exec"
 	"strings"
 	"testing"
@@ -235,5 +236,170 @@ func TestCLIRejectsImpossibleTranscodeConfigs(t *testing.T) {
 				t.Fatalf("output = %q, want %q", out, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestCLIRejectsModelTableConflicts proves the global model table's startup
+// rejections fire before any traffic is served.
+func TestCLIRejectsModelTableConflicts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name: "table and per-provider model map",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "https://api.openai.com",
+				"-transcode-responses-chat",
+				"-transcode-model", "a=b",
+				"-model-table", "c@openai=d",
+			},
+			wantErr: "cannot be combined",
+		},
+		{
+			name: "duplicate surrogate",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "https://api.openai.com",
+				"-model-table", "a@openai=b",
+				"-model-table", "a@openai=c",
+			},
+			wantErr: "duplicate -model-table surrogate",
+		},
+		{
+			name: "dangling provider",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "https://api.openai.com",
+				"-model-table", "a@acme=b",
+			},
+			wantErr: "unknown -model-table provider",
+		},
+		{
+			name: "invalid fact value",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "https://api.openai.com",
+				"-model-table", "s@openai=w;efforts=ultra",
+			},
+			wantErr: "unknown effort",
+		},
+		{
+			// A valid table must configure cleanly: only the bind may fail.
+			name: "happy table",
+			args: []string{
+				"-bind", "127.0.0.1:1",
+				"-upstream", "https://api.openai.com",
+				"-transcode-responses-chat",
+				"-model-table", "a@openai=w;context=128000;default",
+			},
+			wantErr: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out, err := runCLIStartup(t, tt.args...)
+			if tt.wantErr == "" {
+				if err != nil && !strings.Contains(out, "listen") && !strings.Contains(out, "bind") {
+					t.Fatalf("startup failed: %v\n%s", err, out)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("startup succeeded, want rejection: %s", out)
+			}
+			if !strings.Contains(out, tt.wantErr) {
+				t.Fatalf("output = %q, want %q", out, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestCLIModelTableSummaryLine proves the startup summary line carries the
+// configured table, sorted with its facts, before the listener binds.
+func TestCLIModelTableSummaryLine(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	out, _ := runCLIStartup(t,
+		"-bind", "127.0.0.1:1",
+		"-upstream", "https://api.openai.com",
+		"-transcode-responses-chat",
+		"-model-table", "b@openai=gpt-4o-mini;context=128000",
+		"-model-table", "a@openai=gpt-4o;context=128000;default;max_output=16384",
+	)
+	want := "model table: 2 surrogates across 1 providers: " +
+		"a@openai->gpt-4o(context=128000,default,max_output=16384), " +
+		"b@openai->gpt-4o-mini(context=128000)"
+	if !strings.Contains(out, want) {
+		t.Fatalf("startup output does not carry the summary line\nwant: %s\ngot:\n%s", want, out)
+	}
+}
+
+// TestModelTableScopeExitsTwo pins the server-scope table flag inside a
+// --provider section as a usage error: exit 2, error + "-h" hint on stderr,
+// no usage dump.
+func TestModelTableScopeExitsTwo(t *testing.T) {
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin, "--provider=a", "-upstream", "https://x", "-model-table", "x@a=y")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("want exit error, got %v (stdout %s)", err, out)
+	}
+	if code := exitErr.ExitCode(); code != 2 {
+		t.Errorf("exit code = %d, want 2", code)
+	}
+	msg := stderr.String()
+	for _, want := range []string{"error:", "-h", "server options are not allowed in provider sections"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("stderr missing %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "Usage:") {
+		t.Errorf("stderr should hint at -h, not dump full usage:\n%s", msg)
+	}
+}
+
+// TestModelTableSemanticStillExitsOne pins a malformed table entry as a
+// semantic failure: exit 1, naming the flag, with no "-h" hint.
+func TestModelTableSemanticStillExitsOne(t *testing.T) {
+	bin := t.TempDir() + "/test-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bin, "-upstream", "https://x", "-model-table", "badentry")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	_, err := cmd.Output()
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("want exit error, got %v", err)
+	}
+	if code := exitErr.ExitCode(); code != 1 {
+		t.Errorf("exit code = %d, want 1 (semantic failure)", code)
+	}
+	msg := stderr.String()
+	if !strings.Contains(msg, "-model-table") {
+		t.Errorf("stderr should name the flag:\n%s", msg)
+	}
+	if strings.Contains(msg, "run with -h for usage") {
+		t.Errorf("semantic failures must not carry the usage hint:\n%s", msg)
 	}
 }

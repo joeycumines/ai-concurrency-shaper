@@ -1,6 +1,6 @@
 package transcode
 
-// J5 regression tests: tagged unions decode
+// Regression tests: tagged unions decode
 // per-arm — each type admits exactly its own fields with DisallowUnknownFields,
 // so contradictory arms are rejected at decode instead of having their data
 // silently discarded.

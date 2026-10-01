@@ -25,7 +25,9 @@ func testHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) *TranscodeH
 	t.Helper()
 	// The common test defaults live on the mapping (HandlerConfig carries
 	// only Mapping, Upstream, and BodyLimits — ).
-	mapping.ModelMap = ModelMap{AllowIdentity: true}
+	if mapping.ModelMap.Exact == nil && !mapping.ModelMap.AllowIdentity && !mapping.ModelMap.RequireExplicitMap {
+		mapping.ModelMap = ModelMap{AllowIdentity: true}
+	}
 	if mapping.LossPolicy.Allowed == nil {
 		mapping.LossPolicy = StrictLossPolicy()
 	}
@@ -395,8 +397,8 @@ func TestHandlerContentEncoding415(t *testing.T) {
 }
 
 func TestHandlerContentEncodingIdentityAccepted(t *testing.T) {
-	// The identity content encoding is the no-op and must be accepted
-	//; only non-identity encodings are unsupported.
+	// The identity content encoding is the no-op and must be accepted;
+	// only non-identity encodings are unsupported.
 	mapping := responsesMapping(t)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
 		return &http.Response{
@@ -544,7 +546,7 @@ func TestHandlerUpstreamErrorMessagesDialect(t *testing.T) {
 }
 
 // TestHandlerUpstreamErrorDialectStreamingRequest pins the streaming half of
-// the upstream-error contract (field regression 2026-08-22, the observed
+// the upstream-error contract (observed field regression, the observed
 // codex /v1/responses 400s): a STREAMING client request whose upstream
 // answers non-2xx receives the UPSTREAM status with the error body re-rendered
 // in the CLIENT dialect — the branch runs before stream dispatch (the
@@ -650,7 +652,7 @@ func TestHandlerLocalConversion502NotUpstreamFailure(t *testing.T) {
 }
 
 // TestHandlerCorruptUpstreamResponseIsUpstreamFailure proves the
-// finding-3 counterexample: a 200 response that is not a valid instance of
+// counterexample: a 200 response that is not a valid instance of
 // the supported Chat subset (here: an object that is not a chat completion
 // at all) is corrupt upstream wire — recorded as an upstream body failure
 // with UpstreamFailure=true, never a local conversion failure.
@@ -776,12 +778,12 @@ func TestHandlerDecodeFailure502IsLogged(t *testing.T) {
 	}
 }
 
-// TestHandlerReviewKChatCounterexampleIsUpstreamFailure proves the exact
-// -4 counterexample end to end: a single choice with index
+// TestHandlerChatCounterexampleIsUpstreamFailure proves the exact
+// counterexample end to end: a single choice with index
 // zero, a user-role message, and no finish_reason is rejected with a
 // client-dialect error and recorded as an upstream failure — it can never
 // become a successful assistant response.
-func TestHandlerReviewKChatCounterexampleIsUpstreamFailure(t *testing.T) {
+func TestHandlerChatCounterexampleIsUpstreamFailure(t *testing.T) {
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
 	mapping.LossPolicy = StrictLossPolicy()
@@ -1168,7 +1170,7 @@ func TestExplicitStreamFalseIsNotOverridden(t *testing.T) {
 	t.Run("messages-client", func(t *testing.T) {
 		// The Chat fixture's usage_timing breakdown is not portable to
 		// Messages; the permissive policy approves that response-side loss.
-		assertNonStreaming(t, string(ClientMessages), j6PermissivePolicy(),
+		assertNonStreaming(t, string(ClientMessages), permissiveLossPolicy(),
 			`{"model":"m","max_tokens":100,"messages":[{"role":"user","content":"hi"}],"stream":false}`)
 	})
 }
@@ -1236,7 +1238,7 @@ func TestExplicitStreamTrueOverridesJsonAccept(t *testing.T) {
 func TestHandlerStreamingMessagesToResponses(t *testing.T) {
 	mapping := messagesMapping(t, UpstreamResponses)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
-	mapping.LossPolicy = j6PermissivePolicy()
+	mapping.LossPolicy = permissiveLossPolicy()
 	mapping.Auth = AuthPolicy{Mode: AuthNone}
 	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
 	mapping.AllowedClientQuery = map[string]struct{}{}
@@ -1319,7 +1321,7 @@ func TestHandlerTruncatedStreamErrorEvent(t *testing.T) {
 func TestHandlerStreamIntentMismatch(t *testing.T) {
 	// A JSON response for a streaming request is an upstream protocol
 	// mismatch: the client requested SSE and the upstream returned JSON.
-	// Merge gate 17 requires the response media type to agree with the
+	// The response media type must agree with the
 	// stream intent; the exchange is rejected with a dialect-correct error.
 	mapping := responsesMapping(t)
 	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
@@ -1939,7 +1941,7 @@ func (w *lateOpGuardWriter) flushCount() int {
 	return w.flushes
 }
 
-// TestHandlerMessagesFailedUpstreamNotSuccess verifies merge gate 10 for the
+// TestHandlerMessagesFailedUpstreamNotSuccess verifies the contract for the
 // non-streaming path: a 2xx Responses body with status "failed" must surface
 // as a client-dialect error, never as a successful Messages completion.
 func TestHandlerMessagesFailedUpstreamNotSuccess(t *testing.T) {
@@ -2337,5 +2339,252 @@ func TestHandlerResponsesRequestMissingToolStrictRejected(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "strict") {
 		t.Fatalf("error body does not name strict: %s", rec.Body.String())
+	}
+}
+
+// TestHandlerModelTableHitReturnsSurrogate proves a projected surrogate reaches
+// the upstream as its wire id and returns to the client as the surrogate.
+//
+// The request model, ClientModel, and ClientResponseModel are all set to
+// DISTINCT values on purpose. With them equal, the test would also pass if the
+// response model came from ClientModel or from an echo of the request - it
+// could only prove "not the wire model". The table projector can set them
+// differently (internal/config/modeltable.go), so the test does too.
+func TestHandlerModelTableHitReturnsSurrogate(t *testing.T) {
+	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{
+		Exact: map[string]ModelMapping{
+			"opus": {
+				ClientModel:         "client-internal-name",
+				UpstreamModel:       "claude-opus-4-1",
+				ClientResponseModel: "public-surrogate",
+			},
+		},
+		AllowIdentity:      false,
+		RequireExplicitMap: true,
+	}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes:    1 << 20,
+				SuccessfulResponseBytes: 1 << 20,
+			},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			body, _ := io.ReadAll(req.Body)
+			var chat ChatRequest
+			if err := strictDecode(body, &chat); err != nil {
+				t.Fatalf("upstream request: %v\n%s", err, body)
+			}
+			if chat.Model != "claude-opus-4-1" {
+				t.Fatalf("upstream model = %q, want the wire id", chat.Model)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewReader(testcorpus.ChatCompletionsResponseJSON())),
+			}, nil
+		},
+		nil,
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"opus","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var envelope ResponseEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Model != "public-surrogate" {
+		t.Fatalf("client response model = %q, want the ClientResponseModel surrogate "+
+			"(not the wire id, not ClientModel, not an echo of the request)", envelope.Model)
+	}
+	if strings.Contains(rec.Body.String(), "claude-opus-4-1") {
+		t.Fatal("the upstream wire id leaked into the client response")
+	}
+}
+
+// TestHandlerModelTableMissNamesServables proves an unlisted model is a local
+// 400 that names only the mount's servable surrogates, and that the miss is
+// logged as a local request-conversion failure.
+func TestHandlerModelTableMissNamesServables(t *testing.T) {
+	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{
+		RequireExplicitMap: true,
+		Exact: map[string]ModelMapping{
+			"known": {ClientModel: "known", UpstreamModel: "upstream-known"},
+		},
+	}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
+	logged := captureLog(t)
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes: 1 << 20,
+			},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			t.Fatal("round trip must not be called")
+			return nil, nil
+		},
+		nil,
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"unknown","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	body := rec.Body.String()
+	var errEnvelope struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errEnvelope); err != nil {
+		t.Fatalf("error body is not JSON: %v\n%s", err, body)
+	}
+	// ModelMap.Resolve emits the servable set itself, bounded to
+	// maxServableModels, so it appears exactly once here. The parenthesised
+	// form this test once expected came from a decorator that appended a SECOND,
+	// uncapped copy and defeated that bound.
+	want := `convert request: no upstream model mapping for client model "unknown"; servable on this mount: known`
+	if errEnvelope.Error.Message != want {
+		t.Fatalf("error message = %q, want %q", errEnvelope.Error.Message, want)
+	}
+	if strings.Contains(body, "upstream-known") {
+		t.Fatalf("body leaked the upstream wire id: %s", body)
+	}
+	line := logged.String()
+	if !strings.Contains(line, "[local_request_conversion_error] convert request:") {
+		t.Fatalf("log does not record the local conversion error: %s", line)
+	}
+	if strings.Contains(line, "upstream-known") {
+		t.Fatalf("log leaked the upstream wire id: %s", line)
+	}
+}
+
+// TestHandlerModelTableMissListsOnlyMountServables proves the servable list is
+// scoped to the mount's own projected map, never the fleet's.
+func TestHandlerModelTableMissListsOnlyMountServables(t *testing.T) {
+	newHandler := func(t *testing.T, exact map[string]ModelMapping) *TranscodeHandler {
+		t.Helper()
+		mapping := responsesMapping(t)
+		mapping.ModelMap = ModelMap{Exact: exact, RequireExplicitMap: true}
+		mapping.LossPolicy = StrictLossPolicy()
+		mapping.Auth = AuthPolicy{Mode: AuthNone}
+		return NewTranscodeHandler(
+			HandlerConfig{
+				Mapping:  mapping,
+				Upstream: mustParseURL(t, "https://upstream.example"),
+				BodyLimits: BodyLimits{
+					AcceptedRequestBytes: 1 << 20,
+				},
+			},
+			func(req *http.Request) (*http.Response, error) {
+				t.Fatal("round trip must not be called")
+				return nil, nil
+			},
+			nil,
+		)
+	}
+
+	mountA := newHandler(t, map[string]ModelMapping{
+		"a": {ClientModel: "a", UpstreamModel: "wire-a"},
+		"b": {ClientModel: "b", UpstreamModel: "wire-b"},
+	})
+	newHandler(t, map[string]ModelMapping{
+		"c": {ClientModel: "c", UpstreamModel: "wire-c"},
+	})
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"c","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	mountA.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "; servable on this mount: a, b") {
+		t.Fatalf("body does not name this mount's set: %s", body)
+	}
+	for _, leaked := range []string{"wire-a", "wire-b", "wire-c"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("body leaked %q: %s", leaked, body)
+		}
+	}
+}
+
+// TestHandlerLegacyModelMapMissKeepsMessage pins the zero-table path: a legacy
+// per-provider model map (not the closed projection) keeps its exact historical
+// unknown-model message.
+func TestHandlerLegacyModelMapMissKeepsMessage(t *testing.T) {
+	mapping := responsesMapping(t)
+	mapping.ModelMap = ModelMap{
+		AllowIdentity: false,
+		Exact: map[string]ModelMapping{
+			"known": {ClientModel: "known", UpstreamModel: "upstream-known"},
+		},
+	}
+	mapping.LossPolicy = StrictLossPolicy()
+	mapping.Auth = AuthPolicy{Mode: AuthNone}
+
+	handler := NewTranscodeHandler(
+		HandlerConfig{
+			Mapping:  mapping,
+			Upstream: mustParseURL(t, "https://upstream.example"),
+			BodyLimits: BodyLimits{
+				AcceptedRequestBytes: 1 << 20,
+			},
+		},
+		func(req *http.Request) (*http.Response, error) {
+			t.Fatal("round trip must not be called")
+			return nil, nil
+		},
+		nil,
+	)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/responses",
+		strings.NewReader(`{"model":"unknown","input":"x"}`),
+	)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var errEnvelope struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	want := `convert request: no upstream model mapping for client model "unknown"`
+	if errEnvelope.Error.Message != want {
+		t.Fatalf("legacy miss message = %q, want %q", errEnvelope.Error.Message, want)
 	}
 }

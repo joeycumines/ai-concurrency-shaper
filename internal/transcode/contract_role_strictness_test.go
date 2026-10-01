@@ -201,8 +201,8 @@ func TestLogConversionReportNoteUnderAllowedKeyProvesKindWins(t *testing.T) {
 }
 
 // TestContractRoleNonStreamDeltaArmRejected proves the streaming-only delta arm
-// is a STRUCTURAL rejection on the non-streaming chat response (GAP-012
-// parity), so its content can never be silently dropped.
+// is a STRUCTURAL rejection on the non-streaming chat response (structural
+// rejection parity), so its content can never be silently dropped.
 func TestContractRoleNonStreamDeltaArmRejected(t *testing.T) {
 	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","delta":{"content":"SHOULD NOT BE DROPPED"},"message":{"role":"assistant","content":"ok"}}]}`
 	if _, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy()); err == nil {

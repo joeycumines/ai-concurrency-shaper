@@ -89,8 +89,8 @@ func fire(ps *parkedServer) {
 	}()
 }
 
-// TestShutdownServersDrainsBothUnderStall pins the fix for the finding
-// that sequentially shutting the metrics and proxy servers down against ONE
+// TestShutdownServersDrainsBothUnderStall pins the shutdown ordering: that
+// sequentially shutting the metrics and proxy servers down against ONE
 // shared context lets the first consumer starve the second: stdlib answers an
 // already-expired context after a single idle-conn poll, abandoning the
 // proxy's active connections instead of draining them.
@@ -131,7 +131,7 @@ func TestShutdownServersDrainsBothUnderStall(t *testing.T) {
 	}
 }
 
-// TestRunServerLifecycleFatalErrorShutsDownBoth pins the GAP-009 contract:
+// TestRunServerLifecycleFatalErrorShutsDownBoth pins the fatal-error shutdown contract:
 // a server Serve ending with an unexpected error must stop() the signal
 // context, gracefully shut down every server (their listeners are
 // released), and return the ORIGINAL server error — never a nil, never a
@@ -176,11 +176,37 @@ func TestRunServerLifecycleFatalErrorShutsDownBoth(t *testing.T) {
 	}
 	// Both servers were shut down gracefully: their listeners are released.
 	for _, addr := range []string{failAddr, metricsAddr} {
-		if ln, err := net.Listen("tcp", addr); err != nil {
-			t.Errorf("address %s still bound after shutdown: %v", addr, err)
-		} else {
+		requireAddressReleased(t, addr)
+	}
+}
+
+// requireAddressReleased asserts that addr can be bound again, which is how
+// "the listener was released" is observed from outside the process.
+//
+// The retry is not papering over a leak: runServerLifecycle closes the
+// listener before it returns, so an address still bound once the window
+// expires is a real defect and is reported as one. What the retry absorbs is
+// a close-to-rebind latency artifact on Darwin, where the Go-level close has
+// already happened but the port is not yet reusable — reproducible on a
+// harness that contains no runServerLifecycle at all and only does Serve,
+// Shutdown, an explicit Close and an immediate rebind, at a comparable rate.
+// Testing the first bind instead of the eventual one measures the kernel's
+// port-reuse timing, which is not what this test is about.
+func requireAddressReleased(t *testing.T, addr string) {
+	t.Helper()
+	const window = 2 * time.Second
+	deadline := time.Now().Add(window)
+	for {
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
 			_ = ln.Close()
+			return
 		}
+		if !time.Now().Before(deadline) {
+			t.Errorf("address %s still bound %s after shutdown: %v", addr, window, err)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -225,11 +251,7 @@ func TestRunServerLifecycleSignalShutdown(t *testing.T) {
 	if stopCalled.Load() {
 		t.Fatal("stop must not be called on the signal path (context is already canceled)")
 	}
-	if ln, err := net.Listen("tcp", addr); err != nil {
-		t.Errorf("address %s still bound after shutdown: %v", addr, err)
-	} else {
-		_ = ln.Close()
-	}
+	requireAddressReleased(t, addr)
 }
 
 // TestSequentialShutdownStarvesSecondServer demonstrates the defect the

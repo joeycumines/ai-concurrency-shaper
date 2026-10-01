@@ -327,7 +327,7 @@ func mappingWithRouteKey(t *testing.T, keyPath string) transcode.Mapping {
 	return m
 }
 
-// TestRouter_BareVsPrefixedTrailingSlashParity pins the F-6/H5 class behavior:
+// TestRouter_BareVsPrefixedTrailingSlashParity pins the class behaviour:
 //   - Under a bare mount (Prefix=""), the router normalizes r.URL.Path through
 //     joinSegments(segments(r.URL.Path)) and clears RawPath so POST /v1/responses/
 //     normalizes to /v1/responses and matches the RouteKey.
@@ -423,7 +423,7 @@ func TestRouter_BareVsPrefixedTrailingSlashParity(t *testing.T) {
 		}
 	}
 
-	// Bare mount with trailing slash /v1/responses/ -> normalized in router to /v1/responses -> transcoded (F-6/H5 parity)
+	// Bare mount with trailing slash /v1/responses/ -> normalized in router to /v1/responses -> transcoded (parity)
 	{
 		resp, err := client.Post(srvBare.URL+"/v1/responses/", "application/json", strings.NewReader(`{"model":"m","input":"x"}`))
 		if err != nil {
@@ -484,7 +484,7 @@ func TestRouter_BareVsPrefixedTrailingSlashParity(t *testing.T) {
 
 // TestRouter_Transcode_HeaderAllowlisting_PerRoute proves that header allowlisting
 // is per-route and never forwards client credentials or arbitrary headers across
-// providers (G5).
+// providers.
 func TestRouter_Transcode_HeaderAllowlisting_PerRoute(t *testing.T) {
 	var upstreamHeader atomic.Value
 

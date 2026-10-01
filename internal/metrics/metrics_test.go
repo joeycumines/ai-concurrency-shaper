@@ -222,7 +222,7 @@ func TestCollector_Throughput(t *testing.T) {
 }
 
 func TestCollector_ThroughputAccuracy(t *testing.T) {
-	// R33-02 regression test: Verify that Throughput() returns approximately
+	// Regression test: Verify that Throughput() returns approximately
 	// correct RPS — not 100-200x inflated. Before the fix, Throughput()
 	// divided the total count across all 100 ring buffer slots by
 	// time.Since(tpLastTick), where tpLastTick was updated every ~100ms
@@ -318,7 +318,7 @@ func TestCollector_ThroughputSteadyState(t *testing.T) {
 }
 
 func TestCollector_ThroughputDecaysAfterTrafficStops(t *testing.T) {
-	// R34-04 regression test: Verify that Throughput() drops toward zero after
+	// Regression test: Verify that Throughput() drops toward zero after
 	// traffic stops. Before the fix, Throughput() and ThroughputSparkline()
 	// did not advance the ring buffer window at read time, so stale non-zero
 	// RPS was reported indefinitely after the last request.
@@ -353,7 +353,7 @@ func TestCollector_ThroughputDecaysAfterTrafficStops(t *testing.T) {
 }
 
 func TestCollector_ThroughputSparklineDecaysAfterTrafficStops(t *testing.T) {
-	// R34-04 regression test: Same as TestCollector_ThroughputDecaysAfterTrafficStops
+	// Regression test: Same as TestCollector_ThroughputDecaysAfterTrafficStops
 	// but for the sparkline path.
 	c := NewCollector()
 	c.tpSlots = 10
@@ -419,7 +419,7 @@ func TestCollector_ThroughputNoIdleTimeDebtAfterLongPause(t *testing.T) {
 }
 
 func TestCollector_ThroughputNoDriftOverTime(t *testing.T) {
-	// R34-05 regression test: Verify that additive tpLastTick advancement
+	// Regression test: Verify that additive tpLastTick advancement
 	// prevents cumulative drift. Before the fix, tpLastTick = now discarded
 	// the fractional remainder on each advancement (e.g., 190ms elapsed with
 	// 100ms granules → adv=1, 90ms lost). Over many iterations this caused
@@ -607,7 +607,7 @@ func TestInFlightEntry_TotalAge(t *testing.T) {
 
 func TestCollector_ResetConcurrent(t *testing.T) {
 	// Verify that Reset() does not underflow the active counter when
-	// DecActive() is called concurrently (the original bug from GAP-005).
+	// DecActive() is called concurrently (the original concurrency bug).
 	c := NewCollector()
 
 	const inFlight = 100

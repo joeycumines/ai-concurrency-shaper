@@ -1,0 +1,520 @@
+package main
+
+// Out-of-process acceptance for the opencode stealth shape: the real binary
+// is started with an opencode-provider configuration (native routes, the via
+// model table, the first-party header preset, a catalog suite) and driven
+// over real sockets with claude-code-shaped traffic.
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+)
+
+type opencodeUpstream struct {
+	mu      sync.Mutex
+	path    string
+	model   string
+	session string
+	ua      string
+	beta    string
+	auth    string
+	hdrs    http.Header
+	bodies  [][]byte
+}
+
+// chatSSE is the upstream streaming reply used by the chat-completions
+// cases: two chunks (content, then finish) and the sentinel.
+const chatSSE = "data: {\"id\":\"chatcmpl-s\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"wire-chat\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"streamed\"},\"finish_reason\":null}]}\n\n" +
+	"data: {\"id\":\"chatcmpl-s\",\"object\":\"chat.completion.chunk\",\"created\":1710000000,\"model\":\"wire-chat\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+	"data: [DONE]\n\n"
+
+func (u *opencodeUpstream) handler(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	var probe struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	_ = json.Unmarshal(body, &probe)
+	u.mu.Lock()
+	u.path = r.URL.Path
+	u.model = probe.Model
+	u.session = r.Header.Get("X-Opencode-Session")
+	u.ua = r.Header.Get("User-Agent")
+	u.beta = r.URL.Query().Get("beta")
+	u.auth = r.Header.Get("Authorization")
+	u.hdrs = r.Header.Clone()
+	u.bodies = append(u.bodies, body)
+	u.mu.Unlock()
+
+	if probe.Stream && r.URL.Path == "/v1/chat/completions" {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		_, _ = w.Write([]byte(chatSSE))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	switch r.URL.Path {
+	case "/v1/messages":
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"wire-msg","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
+	case "/v1/chat/completions":
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1710000000,"model":"wire-chat","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	case "/v1/responses":
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","model":"wire-resp","status":"completed","output":[]}`))
+	default:
+		_, _ = w.Write([]byte(`{}`))
+	}
+}
+
+func (u *opencodeUpstream) got() (path, model, session, ua, beta string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.path, u.model, u.session, u.ua, u.beta
+}
+
+// TestE2E_OpencodeStealth_RealBinary drives the exact configuration shape the
+// operator runs for an opencode provider: native messages and chat routes, the
+// via model table, -opencode, and a catalog suite in front.
+func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	bin := t.TempDir() + "/opencode-shaper"
+	build := exec.Command("go", "build", "-o", bin, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build failed: %v\n%s", err, out)
+	}
+
+	up := &opencodeUpstream{}
+	srv := httptest.NewServer(http.HandlerFunc(up.handler))
+	t.Cleanup(srv.Close)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxyAddr := ln.Addr().String()
+	ln.Close()
+
+	var out safeBuffer
+	cmd := exec.Command(bin,
+		// Server scope: the global table and the suite mount.
+		"-bind", proxyAddr,
+		"-model-table", "claude-alias@opencode-go=wire-msg;context=200000;via=messages",
+		"-model-table", "chat-alias@opencode-go=wire-chat;context=1000000;via=chat",
+		"-model-table", "gpt-alias@opencode-go=wire-resp;context=400000;via=responses",
+		"-model-table", "zen-claude@zen=wire-msg;context=200000;via=messages",
+		"-model-table", "hdr-claude@opencode-hdr=wire-msg;context=200000;via=messages",
+		"-catalog-suite=/suite=claude-alias+chat-alias+gpt-alias;format=anthropic",
+		// An opencode Go mount: native routes plus the first-party preset.
+		"--provider=opencode-go",
+		"-upstream", srv.URL,
+		"-prefix", "/opencode-go",
+		"-auth-source", "env:SHAPER_PROVIDER_OPENCODE_API_KEY",
+		"-auth-mode", "bearer",
+		"-opencode",
+		"-native-route", "messages@/v1/messages",
+		"-native-route", "chat@/v1/chat/completions",
+		"-native-route", "responses@/v1/responses",
+		"-transcode-messages-chat",
+		"--provider=zen",
+		"-upstream", srv.URL,
+		"-prefix", "/zen",
+		"-native-route", "messages@/v1/messages",
+		// A third mount pairing the preset with a CUSTOM-header
+		// credential, so the positive half is covered end to end too: a
+		// name the preset does not manage must still deliver the secret.
+		"--provider=opencode-hdr",
+		"-upstream", srv.URL,
+		"-prefix", "/opencode-hdr",
+		"-auth-source", "env:SHAPER_PROVIDER_OPENCODE_HDR_KEY",
+		"-auth-mode", "header:X-Custom-Cred",
+		"-opencode",
+		"-native-route", "messages@/v1/messages",
+	)
+	filteredEnv := []string{}
+	for _, env := range os.Environ() {
+		if !strings.HasPrefix(env, "SHAPER_PROVIDER_") {
+			filteredEnv = append(filteredEnv, env)
+		}
+	}
+	cmd.Env = append(filteredEnv,
+		"SHAPER_PROVIDER_OPENCODE_API_KEY=test-opencode-key",
+		"SHAPER_PROVIDER_OPENCODE_HDR_KEY=custom-header-secret")
+	stdinR, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	defer stdinR.Close()
+	cmd.Stdin = stdinR
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			_ = cmd.Wait()
+		}
+	}()
+	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
+		t.Fatalf("proxy addr: %v\noutput:\n%s", err, out.String())
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	post := func(target, body string, headers map[string]string) (int, string) {
+		req, err := http.NewRequest(http.MethodPost, "http://"+proxyAddr+target, bytes.NewBufferString(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("POST %s: %v\noutput:\n%s", target, err, out.String())
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+
+	claudeHeaders := map[string]string{
+		"Content-Type":      "application/json",
+		"anthropic-version": "2023-06-01",
+	}
+
+	// Headerless claude-code shape through the suite: the reported failure.
+	code, body := post("/suite/v1/messages?beta=true",
+		`{"model":"claude-alias","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`, claudeHeaders)
+	if code != 200 {
+		t.Fatalf("messages status = %d: %s", code, body)
+	}
+	path, model, session, ua, beta := up.got()
+	if path != "/v1/messages" || model != "wire-msg" {
+		t.Fatalf("upstream path=%q model=%q, want /v1/messages wire-msg", path, model)
+	}
+	if session == "" {
+		t.Fatal("upstream session missing: a headerless client must still carry one")
+	}
+	if !strings.HasPrefix(ua, "opencode/") {
+		t.Fatalf("upstream User-Agent = %q, want the first-party shape (a client's own User-Agent must not reach the upstream)", ua)
+	}
+	if beta != "true" {
+		t.Fatalf("upstream beta = %q, want the client query preserved", beta)
+	}
+	var msgs struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(body), &msgs); err != nil {
+		t.Fatalf("messages body: %v", err)
+	}
+	if msgs.Model != "claude-alias" {
+		t.Fatalf("client-facing model = %q, want the alias restored", msgs.Model)
+	}
+
+	// Chat-native model on its own dialect, through the suite.
+	code, body = post("/suite/v1/chat/completions",
+		`{"model":"chat-alias","messages":[{"role":"user","content":"hi"}]}`, map[string]string{"Content-Type": "application/json"})
+	if code != 200 {
+		t.Fatalf("chat status = %d: %s", code, body)
+	}
+	if path, model, _, _, _ = up.got(); path != "/v1/chat/completions" || model != "wire-chat" {
+		t.Fatalf("chat upstream path=%q model=%q, want /v1/chat/completions wire-chat", path, model)
+	}
+
+	// A Messages client naming a chat-native model converts on the same path
+	// the native route occupies.
+	code, body = post("/suite/v1/messages",
+		`{"model":"chat-alias","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`, claudeHeaders)
+	if code != 200 {
+		t.Fatalf("converted status = %d: %s", code, body)
+	}
+	if path, model, _, _, _ = up.got(); path != "/v1/chat/completions" || model != "wire-chat" {
+		t.Fatalf("converted upstream path=%q model=%q, want /v1/chat/completions wire-chat", path, model)
+	}
+
+	// Responses-native model on its own dialect.
+	code, body = post("/suite/v1/responses", `{"model":"gpt-alias","input":"hi"}`,
+		map[string]string{"Content-Type": "application/json"})
+	if code != 200 {
+		t.Fatalf("responses status = %d: %s", code, body)
+	}
+	if path, model, _, _, _ = up.got(); path != "/v1/responses" || model != "wire-resp" {
+		t.Fatalf("responses upstream path=%q model=%q, want /v1/responses wire-resp", path, model)
+	}
+
+	// The client credential must not reach the upstream: the configured
+	// bearer is applied instead, and the client's own value is never
+	// forwarded.
+	code, body = post("/suite/v1/messages",
+		`{"model":"claude-alias","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{
+			"Content-Type":      "application/json",
+			"anthropic-version": "2023-06-01",
+			"Authorization":     "Bearer client-supplied-should-not-cross",
+		})
+	if code != 200 {
+		t.Fatalf("auth status = %d: %s", code, body)
+	}
+	up.mu.Lock()
+	gotAuth := up.auth
+	up.mu.Unlock()
+	if gotAuth != "Bearer test-opencode-key" {
+		t.Fatalf("upstream Authorization = %q, want the configured bearer (never the client's)", gotAuth)
+	}
+
+	// A different client SDK's fingerprint headers must not reach the
+	// upstream: they would reveal the actual client.
+	code, body = post("/suite/v1/messages",
+		`{"model":"claude-alias","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{
+			"Content-Type":        "application/json",
+			"anthropic-version":   "2023-06-01",
+			"X-Stainless-Lang":    "js",
+			"X-Stainless-Package": "anthropic",
+			"X-App":               "cli",
+		})
+	if code != 200 {
+		t.Fatalf("fingerprint status = %d: %s", code, body)
+	}
+	up.mu.Lock()
+	hdrs := up.hdrs
+	up.mu.Unlock()
+	for _, key := range []string{"X-Stainless-Lang", "X-Stainless-Package", "X-App"} {
+		if v := hdrs.Get(key); v != "" {
+			t.Fatalf("upstream saw foreign-client header %s=%q", key, v)
+		}
+	}
+
+	// Streaming on a native route is a byte-identical relay, and the
+	// upstream still sees the first-party shape.
+	code, body = post("/suite/v1/chat/completions",
+		`{"model":"chat-alias","stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{"Content-Type": "application/json", "Accept": "text/event-stream"})
+	if code != 200 {
+		t.Fatalf("native stream status = %d: %s", code, body)
+	}
+	if body != chatSSE {
+		t.Fatalf("native stream altered the upstream bytes:\n got: %q\nwant: %q", body, chatSSE)
+	}
+	if path, model, session, ua, _ = up.got(); path != "/v1/chat/completions" || model != "wire-chat" {
+		t.Fatalf("native stream upstream path=%q model=%q", path, model)
+	}
+	if session == "" || !strings.HasPrefix(ua, "opencode/") {
+		t.Fatalf("native stream upstream session=%q ua=%q, want the preset shape", session, ua)
+	}
+
+	// Streaming through the converted route: the client sees an Anthropic
+	// event stream with exactly one terminal, and the preset is applied to
+	// the converted request the upstream receives.
+	code, body = post("/suite/v1/messages",
+		`{"model":"chat-alias","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{
+			"Content-Type":      "application/json",
+			"Accept":            "text/event-stream",
+			"anthropic-version": "2023-06-01",
+		})
+	if code != 200 {
+		t.Fatalf("converted stream status = %d: %s", code, body)
+	}
+	for _, want := range []string{"message_start", "content_block_delta", `"text_delta"`, `"streamed"`, "message_stop"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("converted stream missing %s:\n%s", want, body)
+		}
+	}
+	if n := strings.Count(body, "event: message_stop"); n != 1 {
+		t.Fatalf("converted stream emitted %d message_stop events, want exactly one:\n%s", n, body)
+	}
+	if strings.Contains(body, "[DONE]") {
+		t.Fatalf("converted stream leaked the chat sentinel:\n%s", body)
+	}
+	path, model, session, ua, _ = up.got()
+	if path != "/v1/chat/completions" || model != "wire-chat" {
+		t.Fatalf("converted stream upstream path=%q model=%q", path, model)
+	}
+	if session == "" || !strings.HasPrefix(ua, "opencode/") {
+		t.Fatalf("converted stream upstream session=%q ua=%q, want the preset shape", session, ua)
+	}
+	up.mu.Lock()
+	convHdrs := up.hdrs
+	up.mu.Unlock()
+	if got := convHdrs.Get("X-Opencode-Client"); got == "" {
+		t.Fatal("converted request did not carry x-opencode-client: the preset must apply to the transcode path")
+	}
+
+	// The positive half: a custom header name the preset does not manage
+	// still carries the credential to the upstream, with the preset on and
+	// the client's own fingerprints stripped. Without this the guard could
+	// harden into a blanket ban and nothing would notice until a real
+	// operator's mount stopped authenticating.
+	code, body = post("/opencode-hdr/v1/messages",
+		`{"model":"hdr-claude","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
+		map[string]string{
+			"Content-Type":      "application/json",
+			"anthropic-version": "2023-06-01",
+			"X-App":             "cli",
+			"X-Stainless-Lang":  "js",
+		})
+	if code != 200 {
+		t.Fatalf("custom-header mount status = %d: %s", code, body)
+	}
+	up.mu.Lock()
+	hdrHdrs := up.hdrs
+	up.mu.Unlock()
+	if got := hdrHdrs.Get("X-Custom-Cred"); got != "custom-header-secret" {
+		t.Fatalf("upstream X-Custom-Cred = %q, want the configured credential delivered", got)
+	}
+	if v := hdrHdrs.Get("X-App"); v != "" {
+		t.Fatalf("upstream saw the client's X-App=%q; the preset must still strip it", v)
+	}
+	if v := hdrHdrs.Get("X-Stainless-Lang"); v != "" {
+		t.Fatalf("upstream saw the client's X-Stainless-Lang=%q; the preset must still strip it", v)
+	}
+
+	// A credential in a header the preset manages must be refused at
+	// startup, not silently deleted on the way out. The preset runs after
+	// authentication, so any name it Sets or Dels would otherwise swallow
+	// the secret and leave the client with a bare 401 and no log trace.
+	// This is the end-to-end guard for that ordering: the unit tests cannot
+	// see it because they never apply auth and the preset in sequence.
+	for _, managed := range []string{
+		"X-App", "X-Stainless-Token", "User-Agent", "X-Opencode-Client",
+		"X-Opencode-Session", "X-Session-Affinity", "X-Session-Id",
+		"X-Opencode-Request", "X-Opencode-Project", "X-Parent-Session-Id",
+	} {
+		output, startErr := startWithAuthMode(t, bin, srv.URL, "header:"+managed, true)
+		if startErr == nil {
+			t.Fatalf("-auth-mode header:%s with -opencode started; the preset would delete the credential", managed)
+		}
+		// The refusal is reported on the process output; err is only the
+		// exit status.
+		if !strings.Contains(output, "reserved") {
+			t.Fatalf("-auth-mode header:%s: output = %q, want a reserved-name refusal", managed, output)
+		}
+		if strings.Contains(output, "test-opencode-key") {
+			t.Fatalf("-auth-mode header:%s: the startup output leaked the credential", managed)
+		}
+	}
+
+	// The same name is a legal credential target with the preset off, and a
+	// non-managed name is legal with it on: the rule is preset-scoped in
+	// both directions, not a blanket ban.
+	if _, startErr := startWithAuthMode(t, bin, srv.URL, "header:X-Opencode-Project", false); startErr != nil {
+		t.Fatalf("header:X-Opencode-Project without -opencode: %v, want accepted", startErr)
+	}
+
+	// Discovery through the suite.
+	resp, err := client.Get("http://" + proxyAddr + "/suite/v1/models?limit=1000")
+	if err != nil {
+		t.Fatalf("discovery: %v\noutput:\n%s", err, out.String())
+	}
+	defer resp.Body.Close()
+	disc, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("discovery status = %d: %s", resp.StatusCode, disc)
+	}
+	var doc struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(disc, &doc); err != nil {
+		t.Fatalf("discovery body: %v: %s", err, disc)
+	}
+	if len(doc.Data) != 3 {
+		t.Fatalf("discovery listed %d models, want 3: %s", len(doc.Data), disc)
+	}
+
+	// The startup log must state the resolved routing, so an operator can see
+	// what the mount will do.
+	logs := out.String()
+	for _, want := range []string{
+		"native: 3 route(s): messages@/v1/messages, chat@/v1/chat/completions, responses@/v1/responses",
+		// The upstream here is a local fake, so the preset reports the
+		// off-host note rather than claiming an opencode.ai mount.
+		`note: -opencode preset enabled for provider "opencode-go" whose upstream host "127.0.0.1" is not opencode.ai`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("startup log missing %q:\n%s", want, logs)
+		}
+	}
+	if strings.Contains(logs, "client-supplied-should-not-cross") {
+		t.Fatal("client credential appeared in the proxy log")
+	}
+}
+
+// startWithAuthMode runs the real binary with a custom-header auth mode and
+// reports what it printed and whether it refused to start. It exists because
+// the ordering this guards is invisible to the unit tests: the preset applies
+// AFTER authentication, so a name the preset manages silently destroys the
+// secret that auth just attached. The only faithful check drives both, in
+// sequence, in one process.
+func startWithAuthMode(t *testing.T, bin, upstreamURL, authMode string, preset bool) (string, error) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	args := []string{
+		"-bind", addr, "-tui=false",
+		"-model-table", "claude-alias@opencode-go=wire-msg;context=200000;via=messages",
+		"--provider=opencode-go",
+		"-upstream", upstreamURL,
+		"-prefix", "/opencode-go",
+		"-native-route", "messages@/v1/messages",
+		"-auth-source", "env:SHAPER_PROVIDER_OPENCODE_API_KEY",
+		"-auth-mode", authMode,
+	}
+	if preset {
+		args = append(args, "-opencode")
+	}
+	cmd := exec.Command(bin, args...)
+	env := []string{}
+	for _, e := range os.Environ() {
+		if !strings.HasPrefix(e, "SHAPER_PROVIDER_") {
+			env = append(env, e)
+		}
+	}
+	cmd.Env = append(env, "SHAPER_PROVIDER_OPENCODE_API_KEY=test-opencode-key")
+	var buf safeBuffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		return buf.String(), err
+	}
+	// A refusal exits on its own during config validation. An accepted
+	// configuration starts listening and runs until stopped, so waiting for
+	// exit would block forever: give it a grace period, then stop it and
+	// report that it came up.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return buf.String(), err
+	case <-time.After(2 * time.Second):
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		<-done
+		return buf.String(), nil
+	}
+}

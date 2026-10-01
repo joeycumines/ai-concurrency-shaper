@@ -1,5 +1,5 @@
 // Package openaichat implements the pinned OpenAI Chat Completions wire
-// contract (source: openai-go v1.12.0, see contracts.lock.json): distinct
+// contract (source: openai-go v1.12.0): distinct
 // strict types for the create request, the non-stream response, and the
 // stream chunk.
 //
@@ -598,7 +598,7 @@ type StreamDelta struct {
 	ToolCalls        []ToolCallDelta `json:"tool_calls,omitempty"`
 
 	// FunctionCall is the legacy non-tool_calls tool-call fragment spelling
-	// (a KNOWN official field, pinned in pins.md). It is modeled so a delta
+	// (a KNOWN official field in the pinned revision). It is modeled so a delta
 	// carrying it is structurally REJECTED — never silently dropped.
 	FunctionCall json.RawMessage `json:"function_call,omitempty"`
 }
@@ -688,6 +688,13 @@ type StreamChunk struct {
 	SystemFingerprint string    `json:"system_fingerprint,omitempty"`
 	Choices           []Choice  `json:"choices"`
 	Usage             *LLMUsage `json:"usage,omitempty"`
+
+	// DerivedUsageTotal names a usage total this decoder derived from the
+	// other two because the upstream omitted it on the wire ("prompt_tokens",
+	// "completion_tokens", or "total_tokens"). It is an in-memory carrier,
+	// never part of the wire contract and never forwarded: the stream state
+	// records one note per exchange so the derivation stays observable.
+	DerivedUsageTotal string `json:"-"`
 
 	PromptTokenIDs any     `json:"prompt_token_ids,omitempty"`
 	PromptText     *string `json:"prompt_text,omitempty"`

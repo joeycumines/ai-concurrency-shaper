@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -39,6 +40,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/router"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
 )
 
@@ -120,6 +122,13 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 	for _, tm := range p.TranscodeMappings() {
 		opts = append(opts, proxy.WithTranscodeMapping(tm))
 	}
+	for _, nr := range p.NativeRoutes() {
+		opts = append(opts, proxy.WithNativeRoutes(nr))
+	}
+	opts = append(opts, proxy.WithOpencodePreset(p.OpencodePreset()))
+	if catalog, ok := p.ModelCatalog(); ok {
+		opts = append(opts, proxy.WithModelCatalog(catalog))
+	}
 
 	prx, err := proxy.New(opts...)
 	if err != nil {
@@ -199,6 +208,33 @@ func logProviderConfig(pr *config.Provider) {
 		}
 		log.Printf("transcode: %d route(s): %s", len(mappings), strings.Join(parts, ", "))
 	}
+	if routes := pr.NativeRoutes(); len(routes) > 0 {
+		var parts []string
+		for _, n := range routes {
+			parts = append(parts, fmt.Sprintf("%s@%s", n.Protocol, n.RouteKey.Path))
+		}
+		log.Printf("native: %d route(s): %s", len(routes), strings.Join(parts, ", "))
+	}
+	if preset := pr.OpencodePreset(); preset.Enabled {
+		host := ""
+		if u := pr.UpstreamURL(); u != nil {
+			host = u.Hostname()
+		}
+		if host != "opencode.ai" && !strings.HasSuffix(host, ".opencode.ai") {
+			log.Printf("note: -opencode preset enabled for provider %q whose upstream host %q is not opencode.ai (first-party headers go wherever the mount points)",
+				pr.EffectiveName(), host)
+		} else {
+			log.Printf("opencode preset: provider %q emits the first-party request shape", pr.EffectiveName())
+		}
+	}
+}
+
+func logCatalogSuiteConfig(suite config.CatalogSuiteConfig, modelCount int) {
+	format := string(suite.Format)
+	if format == "" {
+		format = "auto"
+	}
+	log.Printf("catalog suite: %s at %q: format=%s models=%d", suite.Name, suite.Prefix, format, modelCount)
 }
 
 // warnNoUpstreamAuth emits one honest startup line when multiple providers
@@ -280,13 +316,21 @@ func run() error {
 		return err
 	}
 
+	if summary := cfg.ModelTableSummary(); summary != "" {
+		log.Printf("%s", summary)
+	}
+
 	// Build a proxy for every provider and mount each at its prefix on the
 	// shared dispatcher. With a single (legacy) bare-root provider this is a
 	// transparent pass-through, so startup output is byte-identical to before.
 	var (
-		entries []router.Provider
-		mets    []*metrics.Collector
-		js      []*journal.Journal
+		entries          []router.Provider
+		mets             []*metrics.Collector
+		js               []*journal.Journal
+		proxiesByName    = make(map[string]*proxy.Proxy)
+		routesByProvider = make(map[string]map[transcode.RouteKey]struct{})
+		singleProxy      *proxy.Proxy
+		singleRoutes     map[transcode.RouteKey]struct{}
 	)
 	for _, pr := range cfg.Providers {
 		p, met, j, err := buildProvider(pr)
@@ -296,9 +340,92 @@ func run() error {
 		mets = append(mets, met)
 		js = append(js, j)
 		entries = append(entries, router.Provider{Name: pr.Name, Prefix: pr.Prefix, Proxy: p})
+		providerName := pr.EffectiveName()
+		providerRoutes := make(map[transcode.RouteKey]struct{})
+		for _, mapping := range pr.TranscodeMappings() {
+			providerRoutes[mapping.ClientRoute] = struct{}{}
+		}
+		for _, native := range pr.NativeRoutes() {
+			providerRoutes[native.RouteKey] = struct{}{}
+		}
+		proxiesByName[providerName] = p
+		routesByProvider[providerName] = providerRoutes
+		singleProxy = p
+		singleRoutes = providerRoutes
 		logProviderConfig(pr)
 	}
 	warnNoUpstreamAuth(cfg)
+
+	// Build catalog suites
+	allModels := cfg.ModelTable()
+	suiteLimits := cfg.Limits()
+	suiteAdmission := router.NewCatalogSuiteAdmission(suiteLimits)
+	for _, suite := range cfg.CatalogSuites() {
+		var suiteModels []transcode.CatalogModel
+		for _, m := range allModels {
+			if suite.Provider != "" && m.Provider != suite.Provider {
+				continue
+			}
+			if len(suite.Models) > 0 {
+				matched := slices.Contains(suite.Models, m.Surrogate)
+				if !matched {
+					continue
+				}
+			}
+			suiteModels = append(suiteModels, m)
+		}
+
+		catHandler, err := transcode.NewCatalogHandler(transcode.CatalogConfig{
+			ProviderName:      suite.Name,
+			Models:            suiteModels,
+			ServesResponses:   true,
+			ServesMessages:    true,
+			ParallelToolCalls: true,
+			StructuredOutputs: true,
+			DefaultShape:      suite.Format,
+			Limits:            suiteLimits,
+		})
+		if err != nil {
+			return fmt.Errorf("catalog suite %q: %w", suite.Name, err)
+		}
+
+		var modelRoutes []router.ModelRoute
+		for _, sm := range suiteModels {
+			if targetProxy := proxiesByName[sm.Provider]; targetProxy != nil {
+				modelRoutes = append(modelRoutes, router.ModelRoute{
+					Model:           sm.Surrogate,
+					Provider:        sm.Provider,
+					Handler:         targetProxy,
+					SupportedRoutes: routesByProvider[sm.Provider],
+				})
+			}
+		}
+
+		var fallbackHandler http.Handler
+		if len(cfg.Providers) == 1 && singleProxy != nil {
+			fallbackHandler = singleProxy
+		}
+
+		suiteHandler := router.NewCatalogSuiteHandler(router.SuiteConfig{
+			Name:           suite.Name,
+			Prefix:         suite.Prefix,
+			CatalogHandler: catHandler,
+			DefaultShape:   suite.Format,
+			ModelRoutes:    modelRoutes,
+			Fallback:       fallbackHandler,
+			FallbackRoutes: singleRoutes,
+			Limits:         suiteLimits,
+			Admission:      suiteAdmission,
+			Strict:         suite.Strict,
+		})
+
+		entries = append(entries, router.Provider{
+			Name:   suite.Name,
+			Prefix: suite.Prefix,
+			Proxy:  suiteHandler,
+		})
+		logCatalogSuiteConfig(suite, len(suiteModels))
+	}
 
 	h, err := router.New(entries)
 	if err != nil {
@@ -309,7 +436,7 @@ func run() error {
 
 	// Bind the proxy listener FIRST: a bind failure returns immediately,
 	// before any metrics server exists, so the metrics listener can never
-	// leak on this path (GAP-007). If the metrics bind fails afterwards,
+	// leak on this path. If the metrics bind fails afterwards,
 	// the deferred Close releases the proxy listener.
 	ln, err := net.Listen("tcp", cfg.Server.Bind)
 	if err != nil {
@@ -478,13 +605,17 @@ func run() error {
 // then gracefully shuts down every server and reports the outcome: nil for a
 // signal-initiated shutdown, otherwise the failing server's error.
 //
-// The servers' listeners are already bound by the caller. Serve failures are
-// reported non-blockingly so one failing server can never wedge the
-// coordinator behind a full channel. stop cancels the signal context,
-// releasing downstream context consumers (the TUI poller) on the
-// fatal-error path; it is idempotent, so the signal path needs no explicit
-// call. On a server failure the original error is preserved and returned;
-// a shutdown that cannot complete within its grace is logged, never
+// The servers' listeners are already bound by the caller, and this function
+// takes ownership of both ln and metricsLn: they are closed before it returns
+// on either exit path, so a caller must not reuse them afterwards. That closure
+// is synchronous rather than delegated to the Serve goroutines — see the
+// comment in the shutdown closure for why the stdlib's Shutdown alone cannot
+// guarantee it. Serve failures are reported non-blockingly so one failing
+// server can never wedge the coordinator behind a full channel. stop cancels
+// the signal context, releasing downstream context consumers (the TUI poller)
+// on the fatal-error path; it is idempotent, so the signal path needs no
+// explicit call. On a server failure the original error is preserved and
+// returned; a shutdown that cannot complete within its grace is logged, never
 // substituted for the server error.
 func runServerLifecycle(
 	ctx context.Context,
@@ -523,6 +654,24 @@ func runServerLifecycle(
 		servers = append(servers, srv)
 		if err := shutdownServers(5*time.Second, servers...); err != nil {
 			slog.Warn("graceful shutdown incomplete", "err", err)
+		}
+		// http.Server.Shutdown closes only the listeners the server has
+		// tracked, and a listener is tracked inside Serve, not before it. A
+		// server whose Serve goroutine has not reached trackListener yet is
+		// therefore invisible to Shutdown, which would return with that
+		// address still bound and the release deferred to the goroutine's own
+		// deferred Close. The proxy's Serve can fail immediately (a listener
+		// closed underneath it), driving this path before the metrics Serve
+		// goroutine has been scheduled at all, so the window is real and
+		// reachable. Close the listeners the caller handed in so that the
+		// "listeners are released when this returns" contract holds
+		// synchronously instead of eventually. Close is idempotent here: an
+		// already-closed listener just reports net.ErrClosed, and Serve's own
+		// deferred Close then repeats it harmlessly.
+		for _, listener := range []net.Listener{metricsLn, ln} {
+			if listener != nil {
+				_ = listener.Close()
+			}
 		}
 	}
 

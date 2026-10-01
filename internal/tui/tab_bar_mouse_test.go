@@ -272,8 +272,8 @@ func TestTabAtUsesActiveStyleWidth(t *testing.T) {
 	}
 }
 
-// TestMouseClickTabBarEmptySpaceKeepsFollowLogs verifies the regression fixed
-// in T3: clicking empty space on the tab bar (Y=1, beyond the rendered bar but
+// TestMouseClickTabBarEmptySpaceKeepsFollowLogs verifies the regression:
+// clicking empty space on the tab bar (Y=1, beyond the rendered bar but
 // within the terminal) while on the Logs tab must NOT disable followLogs.
 // Before this fix, handleMouseClick unconditionally set followLogs=false at
 // the top, so an inadvertent click on the empty tab-bar margin silently killed
@@ -300,7 +300,7 @@ func TestMouseClickTabBarEmptySpaceKeepsFollowLogs(t *testing.T) {
 
 // TestMouseClickContentAreaPausesFollowLogs verifies that a genuine content-
 // area click (below the tab bar) on the Logs tab still pauses followLogs.
-// This is the intended behaviour that T3 preserves.
+// This is the intended behaviour.
 func TestMouseClickContentAreaPausesFollowLogs(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80

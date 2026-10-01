@@ -1,6 +1,6 @@
 package transcode
 
-// J6 regression tests: Responses→Messages stream identity, reasoning loss,
+// Regression tests: Responses→Messages stream identity, reasoning loss,
 // stop nullability, and usage.
 
 import (
@@ -15,7 +15,7 @@ import (
 func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
@@ -153,7 +153,7 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 	// Permissive: exactly one loss recorded across all four event types.
 	state = newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
@@ -225,7 +225,7 @@ func TestAnthropicStreamReasoningLossExactlyOnce(t *testing.T) {
 func TestAnthropicStreamMessageStartNullStopFields(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
@@ -391,7 +391,7 @@ func TestAnthropicUsageStreamNonStreamAgree(t *testing.T) {
 		t.Fatal(err)
 	}
 	context := testExchangeContext()
-	context.LossPolicy = j6PermissivePolicy()
+	context.LossPolicy = permissiveLossPolicy()
 	context.RequestedClientModel = "m"
 	rendered, _, err := RenderMessagesResponse(response, context)
 	if err != nil {
@@ -408,7 +408,7 @@ func TestAnthropicUsageStreamNonStreamAgree(t *testing.T) {
 	// Stream path.
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
@@ -480,7 +480,7 @@ func TestAnthropicNonStreamUnknownUsageLoss(t *testing.T) {
 		t.Fatal("strict policy accepted unknown usage")
 	}
 	permissiveContext := testExchangeContext()
-	permissiveContext.LossPolicy = j6PermissivePolicy()
+	permissiveContext.LossPolicy = permissiveLossPolicy()
 	permissiveContext.RequestedClientModel = "m"
 	rendered, _, err := RenderMessagesResponse(response, permissiveContext)
 	if err != nil {

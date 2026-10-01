@@ -1,6 +1,6 @@
 package transcode
 
-// J3 regression tests: corrupt upstream wire and
+// Regression tests: corrupt upstream wire and
 // protocol data must classify as an upstream failure — never a local
 // conversion failure — via the typed UpstreamWireError, while valid source
 // features the transcoder knows but does not support (UnsupportedFeatureError)
@@ -358,7 +358,7 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 			case "responses":
 				state := newAnthropicResponsesStreamState(
 					testStreamContext(),
-					j6PermissivePolicy(),
+					permissiveLossPolicy(),
 					ChatCapabilities{},
 					"msg_1",
 					"m",
@@ -380,7 +380,7 @@ func TestUpstreamWireStreamMatrix(t *testing.T) {
 				)
 				anthropic := newAnthropicResponsesStreamState(
 					testStreamContext(),
-					j6PermissivePolicy(),
+					permissiveLossPolicy(),
 					ChatCapabilities{},
 					"msg_1",
 					"m",

@@ -104,7 +104,7 @@ func TestSourceInconsistentUsageClampedAndNoted(t *testing.T) {
 			},
 		}
 		context := testExchangeContext()
-		context.LossPolicy = j6PermissivePolicy()
+		context.LossPolicy = permissiveLossPolicy()
 		context.RequestedClientModel = "m"
 		body, report, err := RenderMessagesResponse(response, context)
 		if err != nil {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -36,6 +37,30 @@ const (
 	UpstreamMessages        UpstreamProtocol = "messages"
 	UpstreamChatCompletions UpstreamProtocol = "chat-completions"
 )
+
+// NativeProtocol names the upstream dialect a model serves without
+// conversion. Unlike the transcode directions above it includes chat: a
+// native chat route forwards the client document with only the model
+// identifier rewritten, never transcoded. Chat is still never a transcode
+// client protocol.
+type NativeProtocol string
+
+const (
+	NativeResponses NativeProtocol = "responses"
+	NativeMessages  NativeProtocol = "messages"
+	NativeChat      NativeProtocol = "chat"
+)
+
+// ParseNativeProtocol resolves the -model-table via fact and -native-route
+// protocol vocabulary to a NativeProtocol.
+func ParseNativeProtocol(value string) (NativeProtocol, error) {
+	switch NativeProtocol(value) {
+	case NativeResponses, NativeMessages, NativeChat:
+		return NativeProtocol(value), nil
+	default:
+		return "", fmt.Errorf("unknown native protocol %q (want responses, messages, or chat)", value)
+	}
+}
 
 // RouteKey fixes the path-only dispatch bug. Method is normalized once at
 // construction and is part of the lookup key.
@@ -135,8 +160,7 @@ type ChatCapabilities struct {
 	// marker-signature thinking blocks out of replayed history before any
 	// upstream rendering — the synthetic signature never reaches an
 	// upstream. Claude Code renders these blocks with its native thinking
-	// UI (operator-adjudicated design, 2026-09-07; see
-	// knowledgeBase.thinking_synthesis_design).
+	// UI (operator-adjudicated design, 2026-09-07).
 	ProviderReasoningThinking bool
 
 	// SystemAnywhere renders system/developer turns positionally exactly as
@@ -146,6 +170,32 @@ type ChatCapabilities struct {
 	// under the mid_conversation_system loss policy (open-weights
 	// chat templates reject any system message after index 0).
 	SystemAnywhere bool
+
+	// ToolResultImages renders multimodal tool-result content as MULTIPART
+	// chat tool-message content blocks (text and image_url parts, order
+	// preserved) for upstreams that accept image parts inside a tool
+	// message. When unset — the default — the multimodal content is
+	// encoded as the deterministic tool_result_json_envelope text
+	// (tool_result_multimodal_content + tool_result_json_envelope losses),
+	// which makes a vision model blind to the image. Granting it is
+	// independent of ImageInput - an upstream can accept user images while
+	// rejecting image parts in tool messages - but the MULTIPART FORM itself
+	// additionally needs the image_url content vocabulary, so a mount that
+	// withdraws ImageInput renders the envelope even with this capability on.
+	ToolResultImages bool
+
+	// MultiAgentPriming injects a bounded protocol reminder into the
+	// leading system turn for models not trained on the harness
+	// orchestration protocol (spawn_agent/wait_agent/close_agent
+	// discipline). The reminder is appended AFTER the client's own
+	// instructions so the client's bytes and order stay byte-identical.
+	// Off by default, and gated on the request actually declaring one of
+	// those tools (checked by their FLAT names), so the reminder never
+	// names a tool the upstream was not sent. Each injection records a
+	// Note (FeatureMultiAgentPriming) - subject to the same report-entry
+	// bound as every other finding. The reminder text is derived from the
+	// captured multi-agent namespace schema, not written from memory.
+	MultiAgentPriming bool
 }
 
 // Mapping declares one transcoded route: a POST client route in one client
@@ -160,7 +210,12 @@ type Mapping struct {
 	ChatCapabilities ChatCapabilities
 	LossPolicy       LossPolicy
 	ModelMap         ModelMap
+	ProfileMap       ProfileMap
 	Auth             AuthPolicy
+
+	// Opencode, when enabled, emits the first-party header set on the
+	// converted upstream request after authentication.
+	Opencode OpencodePreset
 
 	// AllowedClientQuery is the set of client query parameters permitted on
 	// the transcoded route. Unknown client query parameters are rejected.
@@ -234,7 +289,8 @@ func (m Mapping) Validate() error {
 					m.Auth.CustomHeader,
 				)
 			}
-			if reservedTranscodeHeaderName(m.Auth.CustomHeader) {
+			if reservedTranscodeHeaderName(m.Auth.CustomHeader) ||
+				(m.Opencode.Enabled && PresetManagedHeaderName(m.Auth.CustomHeader)) {
 				return fmt.Errorf(
 					"auth policy: custom header name %q is reserved by the proxy pipeline",
 					m.Auth.CustomHeader,
@@ -274,12 +330,41 @@ func (m Mapping) Validate() error {
 	return nil
 }
 
+// ReservedHeaderName reports whether the header name is managed by the proxy
+// pipeline on every mount and therefore cannot carry a custom authentication
+// credential: the pipeline would strip, clobber, or rewrite it, so the secret
+// would be lost or leaked. Exported so configuration validation enforces the
+// same single list on every mount that can apply a credential, not only on
+// transcode mappings.
+func ReservedHeaderName(name string) bool {
+	return reservedTranscodeHeaderName(name)
+}
+
+// PresetManagedHeaderName reports whether the name is one the opencode
+// preset writes or removes on the outbound request. A credential cannot
+// ride such a name while the preset is on, because the preset would
+// overwrite or delete it after authentication has applied it. The set is
+// the preset's own registration list plus the foreign-SDK strip, so a new
+// fingerprint cannot silently reopen the hole, and a new preset header
+// cannot either provided it is registered in presetHeaderNames.
+// The rule is preset-scoped: without -opencode the name is an ordinary
+// header and remains a legal credential target.
+func PresetManagedHeaderName(name string) bool {
+	canonical := http.CanonicalHeaderKey(name)
+	if slices.Contains(presetHeaderNames, canonical) {
+		return true
+	}
+	return foreignClientHeader(name)
+}
+
 // reservedTranscodeHeaderName reports whether the header name is managed by
 // the proxy pipeline and therefore cannot be a custom authentication header:
 // auth stripping (including the x-amz-*/x-goog-* cloud-signature prefixes),
 // hop-by-hop removal, representation sanitization, forwarded-header
 // deletion, and anti-compression would remove or rewrite it — the secret
-// would be stripped, clobbered, or leaked.
+// would be stripped, clobbered, or leaked. The opencode preset's
+// foreign-client-SDK strip is additionally managed when the preset is on;
+// see PresetManagedHeaderName.
 func reservedTranscodeHeaderName(name string) bool {
 	lower := strings.ToLower(name)
 	switch lower {

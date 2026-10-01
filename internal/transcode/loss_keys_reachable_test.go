@@ -1,6 +1,6 @@
 package transcode
 
-// Review-z commit 2 acceptance tests: every granular loss key is reachable
+// Acceptance tests: every granular loss key is reachable
 // (a real conversion records it), rejected under strict policy, and allowed
 // only by its own permission; invalid model-generated tool arguments convert
 // byte-exact to Chat and Responses, produce a client-dialect unrepresentable
@@ -8,6 +8,7 @@ package transcode
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -223,7 +224,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 					CallID:  "call_1",
 					IsError: true,
 					Parts:   []CanonicalPart{CanonicalText{Text: "boom"}},
-				}, policy, &report)
+				}, ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
@@ -241,7 +242,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 						MediaType: "image/png",
 						URL:       "https://example.test/x.png",
 					}},
-				}, policy, &report)
+				}, ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
@@ -259,8 +260,37 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 						MediaType: "image/png",
 						URL:       "https://example.test/x.png",
 					}},
-				}, policy, &report)
+				}, ChatCapabilities{}, policy, &report)
 				return report, err
+			},
+		},
+		{
+			// A replayed function_call naming a namespace this request does not
+			// declare: the qualifier cannot be mapped, so the call is recorded
+			// as this loss rather than forwarded unqualified. The bare name here
+			// is owned by nothing, so the conversion is not refused outright.
+			key: FeatureNamespaceReplayUndeclared,
+			perm: []Feature{
+				FeatureNamespaceReplayUndeclared,
+				FeatureUsageCacheReadUnknown,
+				FeatureUsageCacheWriteUnknown,
+				FeatureUsageReasoningUnknown,
+				FeatureUsageUnknown,
+			},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				result, _, err := DecodeResponsesRequest([]byte(`{
+					"model": "m",
+					"tools": [
+						{"type": "namespace", "name": "declared", "description": "d", "tools": [
+							{"type": "function", "name": "known", "description": "x", "strict": false,
+							 "parameters": {"type": "object", "properties": {}}}]}
+					],
+					"input": [
+						{"type": "function_call", "call_id": "call_1", "name": "unknown",
+						 "namespace": "undeclared", "arguments": "{}"}
+					]
+				}`), policy)
+				return result.Report, err
 			},
 		},
 		{
@@ -463,7 +493,7 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
-			// CC-REPORT-BOUND: the aggregated overflow note is reachable by
+			// the report-overflow bound: the aggregated overflow note is reachable by
 			// simply saturating the report; it is a Note (no policy gate).
 			key:  FeatureReportOverflow,
 			perm: []Feature{},
@@ -878,6 +908,21 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 			},
 		},
 		{
+			// Anthropic server-side tools (the type-discriminated
+			// web_search_20250305 definition a real Claude Code session
+			// sends) are approved or rejected per the exchange policy;
+			// the approved drop is reported with the key, never as an
+			// unattributed unknown-field error.
+			key:  FeatureAnthropicServerTools,
+			perm: []Feature{FeatureAnthropicServerTools},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				result, err := DecodeMessagesRequest([]byte(
+					`{"model":"m","max_tokens":8,"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":8}],"messages":[{"role":"user","content":"hi"}]}`,
+				), policy)
+				return result.Report, err
+			},
+		},
+		{
 			key:  FeatureResponseServiceTier,
 			perm: []Feature{FeatureResponseServiceTier},
 			run: func(policy LossPolicy) (ConversionReport, error) {
@@ -912,6 +957,183 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 				return report, err
 			},
 		},
+		{
+			// An upstream chat stream that ends after a finishing chunk
+			// without the [DONE] sentinel releases the held terminal on EOF
+			// and records the provider quirk as an ungated note, so the
+			// scenario runs under the strict policy and records the key
+			// anyway.
+			key:  FeatureMissingStreamSentinel,
+			perm: []Feature{},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newChatResponsesStreamState(
+					testStreamContext(),
+					policy,
+					ChatCapabilities{},
+					"resp_1",
+					"gpt-4.1",
+					1710000000,
+					nil,
+				)
+				chunk := ChatStreamResponse{
+					ID:      "c",
+					Object:  "chat.completion.chunk",
+					Created: 1710000000,
+					Model:   "gpt-4.1",
+					Choices: []ChatChoice{{
+						Index:        0,
+						Delta:        &ChatStreamDelta{Content: new("hi")},
+						FinishReason: new("stop"),
+					}},
+				}
+				if _, err := state.Convert(chunk); err != nil {
+					return state.report, err
+				}
+				if _, err := state.FinalizeEOF(); err != nil {
+					return state.report, err
+				}
+				return state.report, nil
+			},
+		},
+		{
+			// A data-only upstream Responses stream (the SSE event: name
+			// omitted on every frame) routes each event by its decoded JSON
+			// type and records the provider quirk as an ungated note. The
+			// created envelope's wire JSON cannot carry the in-memory
+			// cache-write usage carrier, so the scenario's own-permission run
+			// also approves the usage component the Messages contract
+			// requires (the note itself needs no permission).
+			key:  FeatureMissingEventName,
+			perm: []Feature{FeatureUsageCacheWriteUnknown},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newAnthropicResponsesStreamState(
+					testStreamContext(), policy, ChatCapabilities{},
+					"msg_1", "claude-x", 1710000000,
+				)
+				converter := newResponsesToAnthropicConverter(state)
+				envelope := anthropicLifecycleEnvelope("resp_1")
+				envelope.Usage = &ResponsesUsage{
+					InputTokens:        10,
+					OutputTokens:       5,
+					TotalTokens:        15,
+					InputTokensDetails: &UsageInputTokensDetails{CachedTokens: 0},
+					OutputTokensDetails: &UsageOutputTokensDetails{
+						ReasoningTokens: 0,
+					},
+					CreatedCacheTokens: new(int64(0)),
+				}
+				payload, err := json.Marshal(ResponseCreatedEvent{
+					Type:           "response.created",
+					SequenceNumber: 0,
+					Response:       envelope,
+				})
+				if err != nil {
+					return state.report, err
+				}
+				if _, err := converter.Convert(SSEEvent{Data: payload}); err != nil {
+					return state.report, err
+				}
+				return state.report, nil
+			},
+		},
+		{
+			// A usage-only tail that omits exactly one total has it DERIVED
+			// from the two present values, recorded as the ungated
+			// usage_total_derived note (so the scenario runs under the
+			// strict policy). The pinned Messages contract needs the
+			// cache-write component the wire cannot carry, so the
+			// own-permission run also approves that usage key.
+			key: FeatureUsageTotalDerived,
+			perm: []Feature{
+				FeatureUsageCacheWriteUnknown,
+				FeatureUsageCacheReadUnknown,
+				FeatureUsageReasoningUnknown,
+			},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				state := newChatResponsesStreamState(
+					testStreamContext(),
+					policy,
+					ChatCapabilities{},
+					"resp_1",
+					"gpt-4.1",
+					1710000000,
+					nil,
+				)
+				// Phase 1: a content-bearing finish chunk.
+				finish, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(
+					`{"id":"c","object":"chat.completion.chunk","created":1,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}`,
+				)})
+				if err != nil {
+					return state.report, err
+				}
+				if _, err := state.Convert(finish); err != nil {
+					return state.report, err
+				}
+				// Phase 2: the derived usage-only tail.
+				tail, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(
+					`{"id":"c","object":"chat.completion.chunk","created":1,"model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}`,
+				)})
+				if err != nil {
+					return state.report, err
+				}
+				if _, err := state.Convert(tail); err != nil {
+					return state.report, err
+				}
+				return state.report, nil
+			},
+		},
+		{
+			// An Anthropic-sourced image carries no detail field, so the
+			// proxy chooses the documented 'auto' default; the invention is
+			// an ungated note (strict policy records it).
+			key:  FeatureImageDetailInvented,
+			perm: []Feature{FeatureImageInput},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				request := CanonicalRequest{
+					ClientModel: "m",
+					Turns: []CanonicalTurn{{
+						Role: CanonicalUser,
+						Parts: []CanonicalPart{CanonicalImage{
+							MediaType: "image/png",
+							URL:       "https://example.test/x.png",
+						}},
+					}},
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				_, report, err := RenderChatRequest(request, context, ChatCapabilities{ImageInput: true})
+				return report, err
+			},
+		},
+		{
+			// The Responses-only detail 'original' maps to 'high' on the
+			// Chat target. The CLIENT asked for it, so the downgrade is a
+			// fidelity-only knob and must be a POLICY-GATED loss, not an
+			// ungated note: an operator can refuse the downgrade.
+			key:  FeatureImageDetailOriginal,
+			perm: []Feature{FeatureImageDetailOriginal, FeatureImageInput},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				request := CanonicalRequest{
+					ClientModel: "m",
+					Turns: []CanonicalTurn{{
+						Role: CanonicalUser,
+						Parts: []CanonicalPart{CanonicalImage{
+							MediaType: "image/png",
+							URL:       "https://example.test/x.png",
+							Detail:    "original",
+						}},
+					}},
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				_, report, err := RenderChatRequest(request, context, ChatCapabilities{ImageInput: true})
+				return report, err
+			},
+		},
 	}
 
 	// The scenario matrix must cover every registered key exactly once.
@@ -930,17 +1152,41 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 
 	for _, s := range scenarios {
 		t.Run(string(s.key), func(t *testing.T) {
-			// Notes are sanctioned encodings, not policy decisions: they
-			// record under every policy including strict. Gated losses must
-			// reject under strict.
+			// The perm list is what makes the own-permission run below a
+			// Note-vs-loss discriminator, so its shape is part of the contract:
+			// a GATED loss must be granted by its own perm list (that is what
+			// makes strict reject and this run accept), and a NOTE must NOT be
+			// (a note consults no policy, so listing its key there would hide a
+			// misclassification - the scenario would pass as a loss and as a
+			// note alike). A note's perm list holds only the SIBLING losses the
+			// exchange separately needs.
+			grantsSelf := slices.Contains(s.perm, s.key)
+			if s.note && grantsSelf {
+				t.Fatalf(
+					"%q is a note but its perm list grants the key itself; the "+
+						"own-permission run can no longer distinguish a note from a loss",
+					s.key,
+				)
+			}
+			if !s.note && !grantsSelf {
+				t.Fatalf(
+					"%q is a gated loss but its perm list does not grant the key; "+
+						"the own-permission run would reject for the wrong reason",
+					s.key,
+				)
+			}
+			// Notes are sanctioned encodings, not policy decisions: they record
+			// under every policy including strict. Gated losses must reject
+			// under strict.
 			if !s.note {
 				if _, err := s.run(strict); err == nil {
 					t.Fatal("strict policy accepted the loss")
 				}
 			}
 			// A policy allowing exactly this scenario's own permissions must
-			// complete the scenario and record the key (allowed by its own
-			// permission; a perm list missing a required key fails here).
+			// complete the scenario and record the key. For a note that policy
+			// does NOT name the key, so this run is also the proof that the key
+			// was recorded without any policy decision.
 			other := permissive(s.perm...)
 			report, err := s.run(other)
 			if err != nil || !reportHasFeature(report, s.key) {

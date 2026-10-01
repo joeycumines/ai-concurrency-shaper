@@ -14,11 +14,10 @@
 //     variant produces a typed error in the client dialect; nothing is
 //     silently dropped, defaulted, merged, or reinterpreted. The modeled
 //     opaque provider extensions of the Chat dialect — off-schema fields
-//     real gateways emit, inventoried with their decode fates in pins.md's
-//     "Modeled opaque provider extensions" table — are a deliberate,
-//     documented exception to strictness, pinned by committed unit tests
-//     and, for the spellings that caused live field regressions, replayed
-//     by the field-capture corpus (testcorpus/testdata/field/).
+//     real gateways emit — are a deliberate, documented exception to
+//     strictness, pinned by committed unit tests and, for the spellings
+//     that caused live field regressions, replayed by the field-capture
+//     corpus (testcorpus/testdata/field/).
 //   - Anthropic thinking blocks are preserved byte-for-byte only for the same
 //     protocol; they are never synthesized, and OpenAI reasoning is never
 //     relabeled as authenticated thinking.
@@ -72,7 +71,12 @@
 //	                       string-only create-request instructions;
 //	                       multiple system turns and non-text system content
 //	                       are loss-gated (FeatureMultipleSystemTurns,
-//	                       FeatureSystemNonTextContent); for Chat targets
+//	                       FeatureSystemNonTextContent); for Chat targets the
+//	                       same key gates non-text parts of system/developer
+//	                       messages — an approved drop, else a typed
+//	                       rejection; an all-dropped turn renders one empty
+//	                       text block (the Responses target omits the
+//	                       instructions field instead); for Chat targets
 //	                       system-channel turns consolidate into one
 //	                       leading system message — a turn after dialog
 //	                       turns is loss-gated (FeatureMidConversation
@@ -179,12 +183,14 @@
 // silent clean EOF. A failed, malformed, truncated, or cancelled exchange is
 // never reported as a successful model completion.
 //
-// # Wire pins and the loss matrix
+// # Wire shapes and the loss keys
 //
-// contracts.lock.json is the authoritative contract registry; pins.md is
-// generated from it (go generate ./internal/transcode) and drift-tested.
-// LOSS_MATRIX.md is generated from the same loss-key registry the program
-// uses (gen/lossmatrix), so code and documentation cannot drift.
+// Each wire shape is a hand-written shadow in internal/transcode/wire,
+// declaring the source it was derived from (for example openai-go v1.12.0 or
+// anthropic-api 2023-06-01) at the top of the file. A shape that models a
+// field beyond that revision says so in a comment at the field. The loss keys
+// are the granular registry in losses.go, surfaced through the runtime
+// reporting and never published to users.
 //
 // Authoritative contracts:
 // https://platform.openai.com/docs/api-reference/responses

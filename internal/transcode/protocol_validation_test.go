@@ -1,6 +1,6 @@
 package transcode
 
-// J13 regression tests: the remaining protocol-validation details — exact media-type matching, the base64 data-URL parameter,
+// Regression tests: the remaining protocol-validation details — exact media-type matching, the base64 data-URL parameter,
 // and Anthropic source union exclusivity.
 
 import (

@@ -3,10 +3,10 @@ package transcode
 // Test honesty: three regression tests that pin
 // behavior whose tests could no longer fail on the fixed code.
 //
-// 1. GAP-018 dedup: the aggregated loss line collapses duplicate
+// 1. Dedup: the aggregated loss line collapses duplicate
 //    feature@path entries preserving first-seen order — pinned by removing
 //    the seen-map mentally: without dedup the line would list the duplicate.
-// 2. GAP-008/021 decode-acceptance: the field-capture fixtures carry
+// 2. Decode acceptance: the field-capture fixtures carry
 //    cache_cost/completion_cost; the replay tests assert decode succeeds and
 //    the fields never render — the decode-ACCEPTANCE half is pinned here by
 //    asserting the modeled shadow fields are present after decode.
@@ -69,7 +69,7 @@ func TestLogConversionReportDedupesFeaturePathsInFirstSeenOrder(t *testing.T) {
 }
 
 func TestFieldCaptureFixturesDecodeWithModeledCostFields(t *testing.T) {
-	// GAP-008/021 decode-acceptance half: the modeled CacheCost and
+	// Decode-acceptance half: the modeled CacheCost and
 	// CompletionCost shadow fields must be PRESENT after decode (the
 	// tolerant decode alone would also succeed with the fields deleted from
 	// the shadows — this pins that they are modeled).

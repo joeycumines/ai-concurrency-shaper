@@ -1,0 +1,28 @@
+: 
+
+data: {"p": "sanitized", "type":"response.created","response":{"id":"gen_sanitized","object":"response","created_at":1789533439,"model":"openai/gpt-5.6-luna","status":"in_progress","completed_at":null,"output":[],"error":null,"incomplete_details":null,"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":24,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":null,"text":{"format":{"type":"text"}},"reasoning":null,"safety_identifier":"acct_sanitized","prompt_cache_key":null,"prompt_cache_options":null,"user":"acct_sanitized","usage":null},"sequence_number":0}
+
+data: {"p": "sanitized", "type":"response.in_progress","response":{"id":"gen_sanitized","object":"response","created_at":1789533439,"model":"openai/gpt-5.6-luna","status":"in_progress","completed_at":null,"output":[],"error":null,"incomplete_details":null,"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":24,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"auto","truncation":"disabled","store":false,"instructions":null,"text":{"format":{"type":"text"}},"reasoning":null,"safety_identifier":"acct_sanitized","prompt_cache_key":null,"prompt_cache_options":null,"user":"acct_sanitized","usage":null},"sequence_number":1}
+
+data: {"p": "sanitized", "type":"response.output_item.added","output_index":0,"item":{"id":"msg_sanitized","type":"message","status":"in_progress","role":"assistant","content":[],"phase":"final_answer"},"sequence_number":2}
+
+data: {"p": "sanitized", "type":"response.content_part.added","output_index":0,"item_id":"msg_sanitized","content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]},"sequence_number":3}
+
+data: {"p": "sanitized", "type":"response.output_text.delta","output_index":0,"item_id":"msg_sanitized","content_index":0,"delta":"CAM","logprobs":[],"sequence_number":4}
+
+data: {"p": "sanitized", "type":"response.output_text.delta","output_index":0,"item_id":"msg_sanitized","content_index":0,"delta":"EL","logprobs":[],"sequence_number":5}
+
+data: {"p": "sanitized", "type":"response.output_text.delta","output_index":0,"item_id":"msg_sanitized","content_index":0,"delta":"_STREAM","logprobs":[],"sequence_number":6}
+
+data: {"p": "sanitized", "type":"response.output_text.delta","output_index":0,"item_id":"msg_sanitized","content_index":0,"delta":"_FIXED","logprobs":[],"sequence_number":7}
+
+data: {"p": "sanitized", "type":"response.output_text.done","output_index":0,"item_id":"msg_sanitized","content_index":0,"text":"CAMEL_STREAM_FIXED","logprobs":[],"sequence_number":8}
+
+data: {"p": "sanitized", "type":"response.content_part.done","output_index":0,"item_id":"msg_sanitized","content_index":0,"part":{"type":"output_text","text":"CAMEL_STREAM_FIXED","annotations":[],"logprobs":[]},"sequence_number":9}
+
+data: {"p": "sanitized", "type":"response.output_item.done","output_index":0,"item":{"id":"msg_sanitized","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"CAMEL_STREAM_FIXED","annotations":[],"logprobs":[]}],"phase":"final_answer"},"sequence_number":10}
+
+data: {"p": "sanitized", "type":"response.completed","response":{"id":"gen_sanitized","object":"response","created_at":1789533439,"model":"openai/gpt-5.6-luna","status":"completed","completed_at":1789533440,"output":[{"id":"msg_sanitized","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"CAMEL_STREAM_FIXED","annotations":[],"logprobs":[]}],"phase":"final_answer"}],"error":null,"incomplete_details":null,"tools":[],"tool_choice":"auto","parallel_tool_calls":true,"max_output_tokens":24,"temperature":1,"top_p":1,"presence_penalty":0,"frequency_penalty":0,"top_logprobs":0,"max_tool_calls":null,"metadata":{},"background":false,"previous_response_id":null,"service_tier":"default","truncation":"disabled","store":false,"instructions":null,"text":{"format":{"type":"text"}},"reasoning":{"context":"all_turns","effort":"medium","mode":"standard","summary":"detailed"},"safety_identifier":"acct_sanitized","prompt_cache_key":null,"prompt_cache_options":null,"user":"acct_sanitized","usage":{"input_tokens":14,"input_tokens_details":{"cached_tokens":0},"output_tokens":8,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":22,"cost":0,"is_byok":true,"cost_details":{"upstream_inference_cost":0.0000124,"upstream_inference_input_cost":0.0000028,"upstream_inference_output_cost":0.0000096}},"openrouter_metadata":{"requested":"openai/gpt-5.6-luna,meta/muse-spark-1.3-contributor","strategy":"fallback","region":"BNE","summary":"strategy=fallback, available=7, selected=Azure, byok","attempt":1,"is_byok":true,"endpoints":{"total":8,"available":[{"provider":"Azure","model":"openai/gpt-5.6-luna-20260709","selected":true},{"provider":"Azure","model":"openai/gpt-5.6-luna-20260709","selected":false},{"provider":"Amazon Bedrock","model":"openai/gpt-5.6-luna-20260709","selected":false},{"provider":"OpenAI","model":"openai/gpt-5.6-luna-20260709","selected":false},{"provider":"Azure","model":"openai/gpt-5.6-luna-20260709","selected":true},{"provider":"Azure","model":"openai/gpt-5.6-luna-20260709","selected":false},{"provider":"Meta","model":"meta/muse-spark-1.3-contributor-20260902","selected":false}]},"generation_time":1213}},"sequence_number":11}
+
+data: [DONE]
+

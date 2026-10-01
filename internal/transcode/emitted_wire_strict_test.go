@@ -86,7 +86,7 @@ func TestEmittedWireChatRequestStrictConformance(t *testing.T) {
 // against the AnthropicStreamEvent schema.
 func TestEmittedWireAnthropicStreamEventsStrictConformance(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{}, "resp_1", "m", 1,
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{}, "resp_1", "m", 1,
 	)
 	input := []string{
 		`{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1,"status":"in_progress","model":"m","output":[],"parallel_tool_calls":true,"tools":[],"tool_choice":"auto"}}`,
@@ -123,7 +123,7 @@ func TestEmittedWireAnthropicStreamEventsStrictConformance(t *testing.T) {
 // strict-decodes against the package event types.
 func TestEmittedWireResponsesStreamEventsStrictConformance(t *testing.T) {
 	state := newChatResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(),
+		testStreamContext(), permissiveLossPolicy(),
 		ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
 		"resp_1", "m", 1, nil,
 	)

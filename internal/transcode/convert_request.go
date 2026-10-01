@@ -186,6 +186,15 @@ func DecodeResponsesRequest(
 	// this boundary; its bytes are preserved, never decoded and remarshaled
 	// through a map, so large integers, decimals, and exponents survive
 	// byte-exact.
+	//
+	// Flattening records every namespace child in a per-exchange map whose
+	// flat name is the bare child name while it is unique; a child that
+	// collides with a plain function name or an earlier namespace child is
+	// qualified deterministically. The map is the ONLY reverse lookup: the
+	// response renderer restores the namespace qualifier from it and never
+	// parses a separator out of a name.
+	reserved := plainToolNames(request.Tools)
+	names := &ToolNames{FlatToRef: map[string]ToolNameRef{}, RefToFlat: map[ToolNameRef]string{}}
 	for i, tool := range request.Tools {
 		switch tool.Type {
 		case "namespace":
@@ -197,7 +206,8 @@ func DecodeResponsesRequest(
 					err,
 				)
 			}
-			for j, nested := range flattened {
+			for j, child := range flattened {
+				nested := child.Tool
 				if len(nested.Parameters) > 0 {
 					if _, err := decodeJSONObject(string(nested.Parameters)); err != nil {
 						return DecodeResult{}, nil, fmt.Errorf(
@@ -209,7 +219,7 @@ func DecodeResponsesRequest(
 					}
 				}
 				result.Request.Tools = append(result.Request.Tools, CanonicalTool{
-					Name:        nested.Name,
+					Name:        chooseToolFlatName(names, reserved, child.Namespace, nested.Name),
 					Description: nested.Description,
 					JSONSchema:  nested.Parameters,
 					Strict:      fieldBoolPtr(nested.Strict),
@@ -247,6 +257,9 @@ func DecodeResponsesRequest(
 				return DecodeResult{}, nil, err
 			}
 		}
+	}
+	if len(names.RefToFlat) > 0 {
+		result.ToolNames = names
 	}
 
 	// Tool choice, reconciled against the tools that survive conversion: an
@@ -326,6 +339,8 @@ func DecodeResponsesRequest(
 		}
 		turns, err := responsesInputToTurns(
 			*request.Input,
+			names,
+			reserved,
 			policy,
 			&result.Report,
 			&result.Request.Artifacts,
@@ -400,6 +415,8 @@ func checkEchoSize(echo *ResponsesRequestEcho) error {
 // is preserved.
 func responsesInputToTurns(
 	input ResponsesInput,
+	names *ToolNames,
+	reserved map[string]struct{},
 	policy LossPolicy,
 	report *ConversionReport,
 	artifacts *SourceArtifacts,
@@ -489,9 +506,50 @@ func responsesInputToTurns(
 			if err != nil {
 				return nil, fmt.Errorf("input item %d: function call arguments: %w", i, err)
 			}
+			// Replayed history must use the same flat name the model was
+			// taught for a namespaced child, so the target never learns the bare form.
+			name := value.Name
+			if value.Namespace != "" {
+				if flat, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name}); ok {
+					name = flat
+				} else {
+					// The namespace is not declared by THIS request, so the
+					// qualifier cannot be mapped. Forwarding the bare name is
+					// only honest when nothing else owns it: if a surviving
+					// tool already answers to that name, the replayed call
+					// would be re-pointed at a DIFFERENT tool, which is a
+					// reinterpretation of client-sent history and never
+					// permitted. Otherwise the unqualified name is a genuine
+					// loss of the namespace, recorded under its own
+					// policy-gated key rather than a note that claimed the
+					// bare form was fine.
+					owned := false
+					if _, clash := reserved[name]; clash {
+						owned = true
+					} else if _, clash := names.FlatToRef[name]; clash {
+						owned = true
+					}
+					if owned {
+						return nil, errNamespacedReplayCollides(value, i)
+					}
+					if err := report.Lose(
+						policy,
+						FeatureNamespaceReplayUndeclared,
+						fmt.Sprintf("input[%d].namespace", i),
+						fmt.Sprintf(
+							"replayed call %q references namespace %q, which this request does not declare "+
+								"for that name; the upstream is not taught this name, so the replayed call may be unresolvable there",
+							value.Name,
+							value.Namespace,
+						),
+					); err != nil {
+						return nil, err
+					}
+				}
+			}
 			part := CanonicalFunctionCall{
 				CallID:    value.CallID,
-				Name:      value.Name,
+				Name:      name,
 				Arguments: raw,
 			}
 			turns = appendFunctionCallTurn(turns, part)
@@ -647,8 +705,8 @@ func responsesInputContentPartToCanonical(
 		}, nil
 
 	case *ResponsesOutputText:
-		// Assistant easy-message history turns carry output-type parts
-		// ; they map exactly like
+		// Assistant easy-message history turns carry output-type parts;
+		// they map exactly like
 		// responsesOutputContentToCanonical — only .Text/.Refusal reach the
 		// IR, annotations never do.
 		return CanonicalText{Text: value.Text}, nil
@@ -775,6 +833,78 @@ func rawMessage(value map[string]json.RawMessage) (json.RawMessage, error) {
 	return raw, nil
 }
 
+// plainToolNames returns the names of the request's ordinary function tools:
+// a namespace child never displaces a plain function's name.
+func plainToolNames(tools []openairesponses.Tool) map[string]struct{} {
+	reserved := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		if tool.Type == "function" && tool.Name != "" {
+			reserved[tool.Name] = struct{}{}
+		}
+	}
+	return reserved
+}
+
+// chooseToolFlatName returns the chat-facing flat name for a namespace child
+// and records it in the exchange map. The bare child name is used while it is
+// unique; a collision with a plain function name or an earlier child is
+// qualified as namespace + "__" + child, and a qualified name that is itself
+// taken is disambiguated with a numeric suffix. Every mapping stays
+// invertible, so no name is ever silently misattributed.
+func chooseToolFlatName(
+	names *ToolNames,
+	reserved map[string]struct{},
+	namespace string,
+	child string,
+) string {
+	ref := ToolNameRef{Namespace: namespace, Name: child}
+	if existing, ok := names.RefToFlat[ref]; ok {
+		return existing
+	}
+	if _, taken := reserved[child]; !taken {
+		if _, used := names.FlatToRef[child]; !used {
+			names.FlatToRef[child] = ref
+			names.RefToFlat[ref] = child
+			return child
+		}
+	}
+	base := namespace + "__" + child
+	qualified := base
+	for n := 2; ; n++ {
+		_, used := names.FlatToRef[qualified]
+		_, taken := reserved[qualified]
+		if !used && !taken {
+			break
+		}
+		qualified = fmt.Sprintf("%s_%d", base, n)
+	}
+	names.FlatToRef[qualified] = ref
+	names.RefToFlat[ref] = qualified
+	return qualified
+}
+
+// namespaceChild is one flattened namespace child together with the
+// namespace it was declared under: a nested namespace keeps its own name so
+// the response can restore the qualifier the client registered.
+type namespaceChild struct {
+	Namespace string
+	Tool      openairesponses.Tool
+}
+
+// errNamespacedReplayCollides reports a replayed function call whose namespace
+// this request does not declare when the bare name is already owned by a tool
+// that DID survive. Forwarding it would tell the upstream the model previously
+// called a different tool under the same name, reinterpreting client-sent
+// history, so the exchange is refused rather than silently misattributed.
+func errNamespacedReplayCollides(value *openairesponses.FunctionCallInput, index int) error {
+	return fmt.Errorf(
+		"input item %d: function call %q declares namespace %q, which this request does not "+
+			"declare for that name, and the name is already used by another declared tool; "+
+			"replaying it would attribute the call to that tool instead",
+		index, value.Name, value.Namespace,
+	)
+}
+
 // flattenNamespaceTool returns the nested function tools of a namespace
 // tool, recursing into nested namespaces. The grouping is client-side
 // structure a chat request cannot express; the nested function tools are
@@ -787,8 +917,8 @@ func flattenNamespaceTool(
 	tool openairesponses.Tool,
 	report *ConversionReport,
 	policy LossPolicy,
-) ([]openairesponses.Tool, error) {
-	var out []openairesponses.Tool
+) ([]namespaceChild, error) {
+	var out []namespaceChild
 	for i, nested := range tool.Tools {
 		switch nested.Type {
 		case "namespace":
@@ -798,7 +928,7 @@ func flattenNamespaceTool(
 			}
 			out = append(out, inner...)
 		case "function":
-			out = append(out, nested)
+			out = append(out, namespaceChild{Namespace: tool.Name, Tool: nested})
 		default:
 			if err := report.Lose(
 				policy,
@@ -817,11 +947,10 @@ func flattenNamespaceTool(
 		// Every nested tool was a dropped built-in. The top-level rule for
 		// an all-built-in tools list is accept-and-drop under the approval,
 		// and the tool_choice reconciliation owns the no-tools-left case —
-		// a namespace is never a different, harder rule than the top level
-		//.
+		// a namespace is never a different, harder rule than the top level.
 		if err := report.Note(
 			FeatureBuiltinTools,
-			"tools[]",
+			fmt.Sprintf("tools[namespace=%s]", tool.Name),
 			fmt.Sprintf(
 				"namespace tool %q carried no portable function tools (all nested tools dropped under the builtin_tools approval)",
 				tool.Name,
@@ -833,7 +962,7 @@ func flattenNamespaceTool(
 	}
 	if err := report.Note(
 		FeatureBuiltinTools,
-		"tools[]",
+		fmt.Sprintf("tools[namespace=%s]", tool.Name),
 		fmt.Sprintf(
 			"namespace tool %q flattened into %d function tool(s) for the chat request",
 			tool.Name,
@@ -847,6 +976,11 @@ func flattenNamespaceTool(
 
 // DecodeMessagesRequest decodes an Anthropic Messages request body into the
 // canonical IR.
+// anthropicClientFunctionToolType is the explicit spelling of an ordinary
+// client-side function tool. It is NOT a server tool: a gateway that sends
+// it must still get the tool forwarded, not dropped under a server key.
+const anthropicClientFunctionToolType = "function"
+
 func DecodeMessagesRequest(
 	body []byte,
 	policy LossPolicy,
@@ -920,7 +1054,7 @@ func DecodeMessagesRequest(
 	// to text blocks, tools, and the system prompt. It is a pure performance
 	// hint with no semantic content and no portable equivalent, so it is a
 	// sanctioned observable elision — one deduped note per exchange, never a
-	// policy gate and never a silent drop (analysis G3).
+	// policy gate and never a silent drop.
 	cacheControlNoted := false
 	noteCacheControl := func() error {
 		if cacheControlNoted {
@@ -1112,9 +1246,45 @@ func DecodeMessagesRequest(
 
 	// Tools. The input_schema raw bytes are preserved — validated as exactly
 	// one JSON object at this boundary, never decoded and remarshaled through
-	// a map, so large integers, decimals, and exponents survive byte-exact
-	//.
+	// a map, so large integers, decimals, and exponents survive byte-exact.
+	// Server-side definitions (type-discriminated, e.g. web_search_20250305)
+	// are the anthropic_server_tools loss decision — approved, they drop
+	// observably; rejected, the request fails with a keyed error — never a
+	// silent pass and never forwarded to a chat upstream that executes no
+	// server tools.
 	for i, tool := range envelope.Tools {
+		// A tools[] entry is classified by its `type` discriminant. Only the
+		// client-function spellings - absent, or the explicit "function" - are
+		// carried through. Everything else takes the anthropic_server_tools
+		// LOSS decision: approved, it drops observably; rejected, the request
+		// fails with a keyed error the operator can actually clear.
+		//
+		// This is deliberately a catch-all rather than a whitelist of known
+		// server spellings. A whitelist would make every NEW Anthropic server
+		// tool a hard error until the proxy is rebuilt, and the error could not
+		// be cleared with the documented flag because its feature string was
+		// not a registered key. Routing the whole class through the existing
+		// policy-gated key keeps new server tools survivable by approving the
+		// flag, while never dropping one silently.
+		//
+		// Admitting EVERY non-empty type would be wrong in the other
+		// direction: a client function tool a gateway spells
+		// {"type":"function",...} must still be forwarded, not filed as a
+		// server tool.
+		if tool.Type != "" && tool.Type != anthropicClientFunctionToolType {
+			if err := result.Report.Lose(
+				policy,
+				FeatureAnthropicServerTools,
+				fmt.Sprintf("tools[%d]", i),
+				fmt.Sprintf(
+					"the %q server-side tool cannot be reproduced in a chat request",
+					tool.Type,
+				),
+			); err != nil {
+				return DecodeResult{}, err
+			}
+			continue
+		}
 		if err := tool.Validate(); err != nil {
 			return DecodeResult{}, fmt.Errorf("messages tools[%d]: %w", i, err)
 		}
@@ -1219,12 +1389,13 @@ func canonicalizeAnthropicToolChoice(
 // reference a surviving tool under every policy — a dangling reference is
 // malformed no matter how many tools the client sent. A mode choice is only
 // reconciled when the client DID send tools and the converter dropped them
-// all (built-in-tool loss): "required" against zero tools is a client-dialect
-// error (the converter would otherwise render an invalid upstream request),
-// and "auto" is dropped with an observable note because an empty tool list
-// leaves it meaningless. When the client sent no tools at all the choice
-// passes through untouched — the upstream judges that incoherence, not the
-// converter (TestDecodeResponsesRequestToolChoiceRequired pins it).
+// all (built-in-tool or server-tool loss): "required" against zero tools is
+// a client-dialect error (the converter would otherwise render an invalid
+// upstream request), and "auto" is dropped with an observable note because
+// an empty tool list leaves it meaningless. When the client sent no tools
+// at all the choice passes through untouched — the upstream judges that
+// incoherence, not the converter (TestDecodeResponsesRequestToolChoiceRequired
+// pins it).
 func reconcileToolChoice(
 	choice *CanonicalToolChoice,
 	requestToolCount int,
@@ -1251,7 +1422,7 @@ func reconcileToolChoice(
 	switch choice.Mode {
 	case "required":
 		return nil, errors.New(
-			"tool_choice required but no portable tools remain after the builtin_tools loss",
+			"tool_choice required but no portable tools remain after the tool loss",
 		)
 	case "auto":
 		if err := report.Note(
@@ -1365,6 +1536,62 @@ func anthropicContentToCanonical(
 				artifacts.AnthropicThinkingBlocks,
 				raw,
 			)
+
+		case AnthropicContentBlockTypeMCPToolUse:
+			// MCP tools are client-side tools under a server spelling:
+			// the fields are identical to tool_use, so the mapping is 1:1
+			// with no loss key.
+			arguments, err := decodeJSONObject(string(block.Input))
+			if err != nil {
+				return nil, fmt.Errorf("content block %d: mcp_tool_use input: %w", i, err)
+			}
+			raw, err := rawMessage(arguments)
+			if err != nil {
+				return nil, fmt.Errorf("content block %d: mcp_tool_use input: %w", i, err)
+			}
+			parts = append(parts, CanonicalFunctionCall{
+				CallID:    *block.ID,
+				Name:      *block.Name,
+				Arguments: raw,
+			})
+
+		case AnthropicContentBlockTypeMCPToolResult:
+			resultParts, err := anthropicContentToCanonical(
+				*block.Content,
+				policy,
+				report,
+				artifacts,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("content block %d: mcp_tool_result: %w", i, err)
+			}
+			isError := block.IsError != nil && *block.IsError
+			parts = append(parts, CanonicalFunctionResult{
+				CallID:  *block.ToolUseID,
+				IsError: isError,
+				Parts:   resultParts,
+			})
+
+		case AnthropicContentBlockTypeServerToolUse,
+			AnthropicContentBlockTypeWebSearchToolResult,
+			AnthropicContentBlockTypeCodeExecution,
+			AnthropicContentBlockTypeCodeExecutionResult,
+			AnthropicContentBlockTypeContainerUpload:
+			// Server-executed content a chat upstream cannot express: a
+			// fabricated CanonicalFunctionCall would dangle with no
+			// upstream executor and corrupt tool pairing, so the only
+			// honest outcomes are a keyed drop or a keyed rejection.
+			if err := report.Lose(
+				policy,
+				FeatureAnthropicServerTools,
+				fmt.Sprintf("messages[].content[%d]", i),
+				fmt.Sprintf(
+					"the %q server-side block cannot be reproduced in a chat request",
+					string(block.Type),
+				),
+			); err != nil {
+				return nil, err
+			}
 
 		default:
 			return nil, fmt.Errorf("content block %d: unknown type %q", i, block.Type)
@@ -1652,7 +1879,7 @@ func RenderResponsesRequest(
 	// client's thinking request maps to Responses reasoning.effort when the
 	// exchange grants the ReasoningEffort capability (mapping
 	// ExchangeContext.Capabilities). The mapping is explicit and documented —
-	// never silent (high finding request_reasoning-default-native-path):
+	// never silent:
 	//
 	//  - "adaptive"  the client delegated the thinking decision to the
 	//                model; the absence of reasoning.effort is the exact
@@ -1730,6 +1957,26 @@ func RenderResponsesRequest(
 		}
 	}
 
+	// Profile-resolved reasoning tier: when the client specified neither a
+	// reasoning effort nor a thinking control, the profile's tier fills the
+	// gap. The gate is on the client's INTENT, not on whether an effort
+	// happened to be materialized: thinking "disabled" and "adaptive" are
+	// recorded as notes that deliberately emit no effort, and letting the
+	// profile tier materialize one here would contradict the note just
+	// written (thinking disabled would still reach the upstream as
+	// reasoning_effort) and would override the client's explicit choice.
+	// The Responses upstream always accepts reasoning.effort, so no
+	// capability gate is needed here.
+	if context != nil && context.ResolvedReasoningTier != "" && request.Thinking == nil {
+		if out.Reasoning == nil {
+			out.Reasoning = &ResponsesEnvelopeReasoning{}
+		}
+		if out.Reasoning.Effort == nil {
+			effort := context.ResolvedReasoningTier
+			out.Reasoning.Effort = &effort
+		}
+	}
+
 	body, err := json.Marshal(out)
 	if err != nil {
 		return nil, report, err
@@ -1738,11 +1985,12 @@ func RenderResponsesRequest(
 }
 
 // thinkingBudgetToEffort maps an Anthropic Messages thinking budget_tokens
-// value to the OpenAI chat reasoning_effort vocabulary. The thresholds are
-// the documented midpoints of the classic Claude Code effort budgets
+// value to the reasoning_effort vocabulary. The thresholds are the
+// documented midpoints of the classic Claude Code effort budgets
 // (minimal ~ 256, low ~ 1024, medium ~ 4096, high ~ 16384); the mapping is
-// deterministic, capped at "high" (the non-standard "xhigh" is never
-// synthesized), and reported as a named Note on every mapped exchange.
+// deterministic, capped at "high" (the canonical vocabulary includes xhigh
+// and max, but no documented budget maps above high, so the projection never
+// synthesizes one), and reported as a named Note on every mapped exchange.
 func thinkingBudgetToEffort(budget int) string {
 	switch {
 	case budget < 1024:
@@ -1803,7 +2051,13 @@ func RenderChatRequest(
 	if echo := context.OriginalResponsesRequest; echo != nil {
 		out.User = echo.User
 		out.Store = echo.Store
-		if echo.PreviousResponseID != nil {
+		// Opt-in continuity (statefulness decision: OFF by default). When
+		// the store resolved this request's previous_response_id, the
+		// reconstructed history is already prepended to the rendered turns,
+		// so the field is consumed, not lost: skip the existing observable
+		// loss (the hit Note at decode already records the fact). A miss
+		// (RequestDepth 0) falls through to the loss, never a failure.
+		if echo.PreviousResponseID != nil && context.RequestDepth == 0 {
 			if err := report.Lose(
 				context.lossPolicy(),
 				FeaturePreviousResponseID,
@@ -1877,15 +2131,28 @@ func RenderChatRequest(
 	// multiple system turns is a sanctioned note under the same key.
 	rendered := make([]ChatMessage, 0, len(request.Turns))
 	systemChannel := make([]bool, 0, len(request.Turns))
+	// retainedChannel marks each rendered message as reconstructed from the
+	// continuity store rather than authored by this request, so a request-side
+	// gate can tell the two apart. The retained turns are a prefix of Turns.
+	retainedChannel := make([]bool, 0, len(request.Turns))
+	turnIndex := 0
 	for _, turn := range request.Turns {
+		retained := turnIndex < request.RetainedTurns
+		turnIndex++
 		switch turn.Role {
 		case CanonicalSystem:
-			message, err := canonicalTextTurnToChatMessage(turn, ChatMessageRoleSystem)
+			message, err := canonicalTextTurnToChatMessage(
+				turn,
+				ChatMessageRoleSystem,
+				context.lossPolicy(),
+				&report,
+			)
 			if err != nil {
 				return nil, report, err
 			}
 			rendered = append(rendered, message)
 			systemChannel = append(systemChannel, true)
+			retainedChannel = append(retainedChannel, retained)
 
 		case CanonicalDeveloper:
 			role := ChatMessageRoleDeveloper
@@ -1894,12 +2161,18 @@ func RenderChatRequest(
 				role = ChatMessageRoleSystem
 				channel = true
 			}
-			message, err := canonicalTextTurnToChatMessage(turn, role)
+			message, err := canonicalTextTurnToChatMessage(
+				turn,
+				role,
+				context.lossPolicy(),
+				&report,
+			)
 			if err != nil {
 				return nil, report, err
 			}
 			rendered = append(rendered, message)
 			systemChannel = append(systemChannel, channel)
+			retainedChannel = append(retainedChannel, retained)
 
 		case CanonicalUser:
 			messages, err := canonicalUserTurnToChatMessages(
@@ -1914,6 +2187,7 @@ func RenderChatRequest(
 			for _, message := range messages {
 				rendered = append(rendered, message)
 				systemChannel = append(systemChannel, false)
+				retainedChannel = append(retainedChannel, retained)
 			}
 
 		case CanonicalAssistant:
@@ -1923,6 +2197,7 @@ func RenderChatRequest(
 			}
 			rendered = append(rendered, message)
 			systemChannel = append(systemChannel, false)
+			retainedChannel = append(retainedChannel, retained)
 		}
 	}
 
@@ -1938,19 +2213,49 @@ func RenderChatRequest(
 			dialog    []ChatMessage
 		)
 		sawDialog := false
+		// midDialogAllRetained tracks whether every mid-dialog system message
+		// came from the continuity store rather than this request. A
+		// request-side gate polices CLIENT input, so a position the client's
+		// own request never created must not be charged to it: a retained
+		// system turn after dialog turns is the proxy's own history, already
+		// consolidated once when the chain was first rendered. The encoding is
+		// identical; only the policy decision differs, so it is recorded as a
+		// Note (visible, never silent) instead of a loss that can reject a
+		// request the client authored cleanly.
+		midDialogAllRetained := true
 		for i, message := range rendered {
 			if !systemChannel[i] {
-				sawDialog = true
+				// Only a turn the CLIENT authored may move a later client
+				// system turn out of the leading position. Retained history
+				// sits in front of the client's own turns, so counting it
+				// would silently demote a client's instructions from index 0
+				// to a mid-conversation system turn and then charge the
+				// client for the position the proxy created.
+				if !retainedChannel[i] {
+					sawDialog = true
+				}
 				dialog = append(dialog, message)
 				continue
 			}
 			if sawDialog {
 				midDialog = append(midDialog, message)
+				if !retainedChannel[i] {
+					midDialogAllRetained = false
+				}
 			} else {
 				leading = append(leading, message)
 			}
 		}
 		switch {
+		case len(midDialog) > 0 && midDialogAllRetained:
+			if err := report.Note(
+				FeatureMidConversationSystem,
+				"messages[]",
+				"retained conversation history carried system turns after dialog turns; they consolidate into the leading system message (the position was already lost when the chain was first rendered, so it is not re-charged to this request)",
+			); err != nil {
+				return nil, report, err
+			}
+			out.Messages = append(out.Messages, joinChatSystemMessages(leading, midDialog))
 		case len(midDialog) > 0:
 			// The position/timing of system-channel content following
 			// dialog turns cannot survive; the consolidation is the
@@ -1986,12 +2291,55 @@ func RenderChatRequest(
 
 	// A source request with no Chat-representable messages is a
 	// client-dialect invalid-request error before any upstream request:
-	// messages:null or an invented empty user prompt are never emitted
-	//.
-	if len(out.Messages) == 0 {
+	// messages:null or an invented empty user prompt are never emitted.
+	// A source request with no Chat-representable messages is a
+	// client-dialect invalid-request error before any upstream request.
+	// A message whose content is a single EMPTY text block counts as
+	// non-representable: it arises only when every part of a system turn was
+	// dropped under an approved loss, and admitting it would send the
+	// upstream a conversation with no user turn at all. This keeps the
+	// Messages-to-Chat direction in agreement with the Responses target,
+	// which rejects the same source shape for the same reason.
+	isDegenerate := func(messages []ChatMessage) bool {
+		// Degenerate means EVERY message is a single EMPTY text block - the
+		// exact shape the empty-block synthesis produces when all of a
+		// system turn's parts were dropped. An assistant or tool message
+		// carrying real content is representable and must NOT be rejected
+		// just because the conversation has no user turn.
+		for _, m := range messages {
+			if m.Content == nil {
+				return false
+			}
+			blocks := m.Content.ContentBlocks
+			if len(blocks) != 1 || blocks[0].Type != ChatContentBlockTypeText {
+				return false
+			}
+			if blocks[0].Text == nil || *blocks[0].Text != "" {
+				return false
+			}
+		}
+		return true
+	}
+	if len(out.Messages) == 0 || isDegenerate(out.Messages) {
 		return nil, report, errors.New(
 			"the source request has no Chat-representable messages",
 		)
+	}
+
+	// The reminder is only truthful if the request actually declares the
+	// protocol it describes. Without this gate an operator could prime a
+	// mount whose request declares no sub-agent tools at all, and the model
+	// would be told to call spawn_agent against an upstream that was never
+	// sent it. Gate on the FLAT names this request will actually render, so
+	// the check stays true after namespace flattening: a top-level tool
+	// spelled like one of the five, or any child of the multi_agent_v1
+	// namespace (already flattened to its flat name at decode).
+	if capabilities.MultiAgentPriming && declaresMultiAgentTools(request.Tools, context) {
+		primed, err := applyMultiAgentPriming(out.Messages, &report)
+		if err != nil {
+			return nil, report, err
+		}
+		out.Messages = primed
 	}
 
 	// Tools. The canonical schema is passed through byte-exact: it was
@@ -2096,8 +2444,7 @@ func RenderChatRequest(
 		}
 	}
 	// The reasoning summary style has no Chat representation: only the
-	// effort is portable, so the summary request is a loss/reject decision
-	//.
+	// effort is portable, so the summary request is a loss/reject decision.
 	if context != nil && context.OriginalResponsesRequest != nil &&
 		context.OriginalResponsesRequest.Reasoning != nil &&
 		context.OriginalResponsesRequest.Reasoning.Summary != nil {
@@ -2177,7 +2524,7 @@ func RenderChatRequest(
 		case "disabled":
 			// An explicit client-asserted no-thinking is observable, like
 			// adaptive: the elision maps to the absence of chat
-			// reasoning_effort and is reported (analysis doc 05 §4 / G8).
+			// reasoning_effort and is reported.
 			if err := report.Note(
 				FeatureRequestReasoning,
 				"thinking",
@@ -2186,6 +2533,22 @@ func RenderChatRequest(
 				return nil, report, err
 			}
 		}
+	}
+
+	// Profile-resolved reasoning tier: when the client specified neither a
+	// reasoning effort nor a thinking control, the profile's tier fills the
+	// gap. The gate is on the client's INTENT, not on whether an effort
+	// happened to be materialized — thinking "disabled" and "adaptive" are
+	// recorded as notes that deliberately emit no effort, and materializing
+	// one here would contradict the note and override the client's explicit
+	// choice. Applied only when the capability is granted; otherwise the tier
+	// is inert (the upstream cannot honor it and no client-requested feature
+	// is being dropped).
+	if context != nil && context.ResolvedReasoningTier != "" &&
+		request.Thinking == nil &&
+		capabilities.ReasoningEffort && out.ReasoningEffort == nil {
+		effort := context.ResolvedReasoningTier
+		out.ReasoningEffort = &effort
 	}
 
 	body, err := json.Marshal(out)
@@ -2246,7 +2609,11 @@ func loseInputPhase(
 }
 
 // loseSystemPart applies the loss/reject decision for a system prompt part
-// that cannot be expressed in the string-only create-request instructions
+// that cannot be expressed in the string-only create-request instructions.
+// An image or document follows the system_non_text_content loss decision
+// (approved drop, else typed rejection); any other non-text part is a stable
+// typed rejection — never a leaked Go type name, matching the chat-side
+// decision.
 func loseSystemPart(
 	policy LossPolicy,
 	report *ConversionReport,
@@ -2255,10 +2622,15 @@ func loseSystemPart(
 	switch part.(type) {
 	case CanonicalImage, CanonicalDocument:
 	default:
-		return fmt.Errorf(
-			"system prompt part %T cannot be expressed in the create-request instructions string",
-			part,
-		)
+		// Defensive: no request path reaches this arm today - the create-request
+		// render only ever passes an image or a document here. It names the
+		// offending part type so that IF it is ever reached the operator can
+		// diagnose it; a message that merely repeated the path would not.
+		return &UnsupportedFeatureError{
+			Protocol: "responses",
+			Path:     "instructions",
+			Feature:  fmt.Sprintf("system prompt part %T cannot be expressed in the create-request instructions string", part),
+		}
 	}
 	return report.Lose(
 		policy,
@@ -2327,4 +2699,129 @@ func responsesToolStrictField(
 		return wire.Field[bool]{}, err
 	}
 	return wire.Field[bool]{Value: false, Present: true}, nil
+}
+
+// MultiAgentPrimingReminderText is the bounded, documented multi-agent protocol
+// reminder injected into the leading system turn when the multi_agent_priming
+// capability is enabled. It derives directly from the captured multi_agent_v1
+// schema (close_agent, resume_agent, send_input, spawn_agent, wait_agent).
+const MultiAgentPrimingReminderText = `### Sub-Agent Orchestration Protocol Reminder
+When delegating work to sub-agents:
+1. Call spawn_agent to launch a sub-agent with a concrete, bounded task in message or items (model and reasoning_effort may be specified if required).
+2. Use wait_agent with the returned agent id in targets to wait for completion and receive final status/output.
+3. Call send_input with target and message or items to communicate with an active agent (set interrupt: true to redirect immediately).
+4. Call close_agent with target once an agent is completed or no longer needed.
+5. If an agent was closed and needs further work, call resume_agent with id to reopen it.`
+
+// applyMultiAgentPriming appends the protocol reminder to the leading system or
+// developer message, creating a leading system message if none exists. It preserves
+// the caller's messages and content structs without mutation, keeps raw string
+// content as strings, preserves developer roles, and records FeatureMultiAgentPriming
+// as an accurate Note for the branch taken.
+// multiAgentToolNames are the bare child names the priming reminder describes.
+var multiAgentToolNames = map[string]struct{}{
+	"spawn_agent": {}, "wait_agent": {}, "send_input": {},
+	"close_agent": {}, "resume_agent": {},
+}
+
+// multiAgentNamespace is the Codex namespace that groups those children.
+const multiAgentNamespace = "multi_agent_v1"
+
+// declaresMultiAgentTools reports whether this request will render at least
+// one of the sub-agent tools the reminder names. It checks the FLAT names the
+// upstream will actually see - a namespace child is looked up by its resolved
+// flat name, so a child that had to be collision-qualified still counts,
+// while a request that declares none of them is never primed.
+func declaresMultiAgentTools(tools []CanonicalTool, context *ExchangeContext) bool {
+	// Every entry here is already a flat function tool: namespace children
+	// were flattened to their resolved names at decode.
+	for _, tool := range tools {
+		if _, ok := multiAgentToolNames[tool.Name]; ok {
+			return true
+		}
+	}
+	// A namespace child reaches the upstream under its resolved FLAT name, so
+	// look the five up there too. The namespace NAME alone is not a contract
+	// about its children - a multi_agent_v1 group holding only `list_agents`
+	// would otherwise be primed with a reminder naming five tools the upstream
+	// was never sent.
+	if context != nil && context.ToolNames != nil {
+		for ref := range context.ToolNames.RefToFlat {
+			if ref.Namespace != multiAgentNamespace {
+				continue
+			}
+			if _, ok := multiAgentToolNames[ref.Name]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func applyMultiAgentPriming(messages []ChatMessage, report *ConversionReport) ([]ChatMessage, error) {
+	if len(messages) > 0 && (messages[0].Role == ChatMessageRoleSystem || messages[0].Role == ChatMessageRoleDeveloper) {
+		leadRole := messages[0].Role
+		noteDesc := "multi-agent protocol reminder appended to leading system turn"
+		if leadRole == ChatMessageRoleDeveloper {
+			noteDesc = "multi-agent protocol reminder appended to leading developer turn"
+		}
+		if err := report.Note(
+			FeatureMultiAgentPriming,
+			"messages[0].content",
+			noteDesc,
+		); err != nil {
+			return nil, err
+		}
+
+		cloned := make([]ChatMessage, len(messages))
+		copy(cloned, messages)
+
+		content := messages[0].Content
+		newContent := &ChatMessageContent{}
+		if content != nil && content.ContentStr != nil {
+			newStr := *content.ContentStr + "\n\n" + MultiAgentPrimingReminderText
+			newContent.ContentStr = &newStr
+		} else {
+			var newBlocks []ChatContentBlock
+			if content != nil && len(content.ContentBlocks) > 0 {
+				newBlocks = make([]ChatContentBlock, len(content.ContentBlocks), len(content.ContentBlocks)+1)
+				copy(newBlocks, content.ContentBlocks)
+			}
+			text := MultiAgentPrimingReminderText
+			newBlocks = append(newBlocks, ChatContentBlock{
+				Type: ChatContentBlockTypeText,
+				Text: &text,
+			})
+			newContent.ContentBlocks = newBlocks
+		}
+
+		cloned[0].Content = newContent
+		return cloned, nil
+	}
+
+	// No leading system or developer message existed: prepend one
+	if err := report.Note(
+		FeatureMultiAgentPriming,
+		"messages[0]",
+		"multi-agent protocol reminder prepended as leading system turn",
+	); err != nil {
+		return nil, err
+	}
+
+	text := MultiAgentPrimingReminderText
+	sysMsg := ChatMessage{
+		Role: ChatMessageRoleSystem,
+		Content: &ChatMessageContent{
+			ContentBlocks: []ChatContentBlock{
+				{
+					Type: ChatContentBlockTypeText,
+					Text: &text,
+				},
+			},
+		},
+	}
+	res := make([]ChatMessage, 0, len(messages)+1)
+	res = append(res, sysMsg)
+	res = append(res, messages...)
+	return res, nil
 }

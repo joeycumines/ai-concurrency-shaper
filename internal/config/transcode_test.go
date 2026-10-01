@@ -21,6 +21,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
@@ -178,10 +179,9 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 	}
 	for i, m := range mappings {
 		cap := m.Mapping.ChatCapabilities
-		// The default reasoning rendering is provider_reasoning_thinking
-		// (REASONING-DISPLAY, operator directive 2026-09-07/08): provider
-		// reasoning renders as native thinking blocks; the text mapping is
-		// the explicit opt-out.
+		// The default reasoning rendering is provider_reasoning_thinking:
+		// provider reasoning renders as native thinking blocks; the text
+		// mapping is the explicit opt-out.
 		if !cap.ProviderReasoningThinking || !cap.ParallelToolCalls {
 			t.Errorf("mapping %d capabilities = %+v, want the compatible core", i, cap)
 		}
@@ -212,6 +212,33 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 		if _, ok := m.Mapping.AllowedClientQuery["foo"]; !ok {
 			t.Errorf("mapping %d: CLI query not merged", i)
 		}
+	}
+}
+
+// TestBuildTranscodeMappingsDefaultImageAndStopSequences pins the two
+// flagship-client defaults and their withdrawal: with no capability flags
+// image input and stop sequences are on; `!image_input` and
+// `!stop_sequences` withdraw them.
+func TestBuildTranscodeMappingsDefaultImageAndStopSequences(t *testing.T) {
+	mappings, err := buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	if cap := mappings[0].Mapping.ChatCapabilities; !cap.ImageInput || !cap.StopSequences {
+		t.Fatalf("capabilities = %+v, want image_input and stop_sequences on by default", cap)
+	}
+
+	mappings, err = buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{
+		negatedCapabilities: map[string]struct{}{"image_input": {}, "stop_sequences": {}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap := mappings[0].Mapping.ChatCapabilities; cap.ImageInput || cap.StopSequences {
+		t.Fatalf("capabilities = %+v, want both withdrawn by negation", cap)
 	}
 }
 
@@ -332,6 +359,33 @@ func TestBuildTranscodeMappingsStrictDefaults(t *testing.T) {
 	}
 }
 
+// TestBuildTranscodeMappingsMultiAgentPriming proves multi_agent_priming is off
+// by default and turns on when specified in transcodeCLIOptions.
+func TestBuildTranscodeMappingsMultiAgentPriming(t *testing.T) {
+	// Off by default
+	mappings, err := buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	if mappings[0].Mapping.ChatCapabilities.MultiAgentPriming {
+		t.Fatal("multi_agent_priming must be off by default")
+	}
+
+	// Enabled via capabilities
+	mappings, err = buildTranscodeMappings(nil, true, false, false, transcodeCLIOptions{
+		capabilities: transcode.ChatCapabilities{MultiAgentPriming: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !mappings[0].Mapping.ChatCapabilities.MultiAgentPriming {
+		t.Fatal("multi_agent_priming was not merged when specified")
+	}
+}
+
 // TestParseNegatedLosses verifies the -transcode-allow-loss values with
 // `!name` negations.
 func TestParseNegatedLosses(t *testing.T) {
@@ -449,6 +503,32 @@ func TestParseChatCapabilities(t *testing.T) {
 	}
 	if _, ok := negated["system_anywhere"]; !ok {
 		t.Fatalf("negated = %v, want system_anywhere", negated)
+	}
+
+	// tool_result_images is an independent granular capability: it enables
+	// multipart image parts inside chat tool messages.
+	cap, negated, err = parseChatCapabilities([]string{"tool_result_images"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cap.ToolResultImages {
+		t.Fatalf("capabilities = %+v, want ToolResultImages", cap)
+	}
+	if cap.ImageInput {
+		t.Fatalf("capabilities = %+v, tool_result_images must not imply image_input", cap)
+	}
+	if len(negated) != 0 {
+		t.Fatalf("negated = %v, want none", negated)
+	}
+	cap, negated, err = parseChatCapabilities([]string{"!tool_result_images"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap.ToolResultImages {
+		t.Fatalf("capabilities = %+v, want ToolResultImages unset", cap)
+	}
+	if _, ok := negated["tool_result_images"]; !ok {
+		t.Fatalf("negated = %v, want tool_result_images", negated)
 	}
 }
 
@@ -650,7 +730,7 @@ func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 	if !mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureUsageUnknown) {
 		t.Fatal("loss policy not applied to the mapping")
 	}
-	if mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureOutputPhase) {
+	if mappings[0].Mapping.LossPolicy.Allows(transcode.FeatureToolSchemaStrictness) {
 		t.Fatal("loss policy leaks unapproved features")
 	}
 }
@@ -941,7 +1021,7 @@ func TestResolveAndValidate_TranscodeAuthInheritance(t *testing.T) {
 }
 
 // TestResolveAndValidate_TranscodeAuthDefaultsDocumented pins the DOCUMENTED
-// transcode auth contract (GAP-005 adjudication): with no transcode auth
+// transcode auth contract (adjudicated fail-closed default): with no transcode auth
 // flags the route inherits the provider auth when configured and strips to
 // AuthNone otherwise — never auto/inbound; inbound credential forwarding and
 // provider inheritance are both explicit opt-ins.
@@ -1073,7 +1153,7 @@ func TestResolveAndValidate_TranscodeAuthDefaultsDocumented(t *testing.T) {
 }
 
 // TestResolveAndValidate_BodyLimits_Propagation verifies that Provider.RetryMaxBodyMB
-// propagates to each TranscodeMapping.BodyLimits.RetryReplayBytes where zero (H2).
+// propagates to each TranscodeMapping.BodyLimits.RetryReplayBytes where zero.
 func TestResolveAndValidate_BodyLimits_Propagation(t *testing.T) {
 	cfg, err := Parse([]string{
 		"-upstream", "https://api.openai.com",
@@ -1102,7 +1182,7 @@ func TestResolveAndValidate_BodyLimits_Propagation(t *testing.T) {
 // TestResolveAndValidate_FileSecretSource_RotationRequiresRestart proves that
 // file: credentials are resolved once at startup and wrapped as static secrets,
 // so in-place file modifications mid-run do not change the credential on either
-// passthrough or transcoded routes without a restart (H6).
+// passthrough or transcoded routes without a restart.
 func TestResolveAndValidate_FileSecretSource_RotationRequiresRestart(t *testing.T) {
 	dir := t.TempDir()
 	secretPath := dir + "/secret.key"
@@ -1186,6 +1266,7 @@ func TestProvider_TranscodeMappings_DeepCopyIsIsolated(t *testing.T) {
 		"-upstream", "https://api.openai.com",
 		"-transcode-responses-chat",
 		"-transcode-model", "client-m=upstream-m",
+		"-transcode-profile", "scanner=client-m:high",
 		"-transcode-allow-loss", "top_k",
 		"-transcode-allow-client-query", "custom_param",
 	})
@@ -1204,6 +1285,8 @@ func TestProvider_TranscodeMappings_DeepCopyIsIsolated(t *testing.T) {
 
 	// Mutate maps in m1
 	m1[0].Mapping.ModelMap.Exact["mutated"] = transcode.ModelMapping{UpstreamModel: "hacked"}
+	m1[0].Mapping.ProfileMap.Profiles["scanner"] = transcode.ProfileMapping{Model: "hacked", ReasoningTier: "low"}
+	m1[0].Mapping.ProfileMap.Profiles["injected"] = transcode.ProfileMapping{Model: "hacked"}
 	m1[0].Mapping.LossPolicy.Allowed[transcode.FeatureImageInput] = struct{}{}
 	m1[0].Mapping.AllowedClientQuery["hacked_param"] = struct{}{}
 
@@ -1211,6 +1294,16 @@ func TestProvider_TranscodeMappings_DeepCopyIsIsolated(t *testing.T) {
 	m2 := cfg.Providers[0].TranscodeMappings()
 	if _, ok := m2[0].Mapping.ModelMap.Exact["mutated"]; ok {
 		t.Error("mutation of ModelMap leaked into second copy")
+	}
+	scanner, ok := m2[0].Mapping.ProfileMap.Profiles["scanner"]
+	if !ok {
+		t.Fatal("scanner profile missing from second copy")
+	}
+	if scanner.Model != "client-m" || scanner.ReasoningTier != "high" {
+		t.Errorf("mutation of ProfileMap leaked into second copy: scanner = %+v", scanner)
+	}
+	if _, ok := m2[0].Mapping.ProfileMap.Profiles["injected"]; ok {
+		t.Error("insertion into ProfileMap leaked into second copy")
 	}
 	if _, ok := m2[0].Mapping.LossPolicy.Allowed[transcode.FeatureImageInput]; ok {
 		t.Error("mutation of LossPolicy leaked into second copy")
@@ -1246,7 +1339,7 @@ func TestResolveAndValidate_Transcode_RetryReplayBytes_ZeroWhenRetriesDisabled(t
 
 // TestResolveAndValidate_TranscodeMaxBodyMB_DefaultsAndOverrides tests that
 // transcode request and response memory limits default to 10 MiB out of the box
-// and can be customized via flags (Review 19 #A3, Review 20 #1).
+// and can be customized via flags.
 func TestResolveAndValidate_TranscodeMaxBodyMB_DefaultsAndOverrides(t *testing.T) {
 	// 1. Defaults: 10 MiB
 	cfgDefault, err := Parse([]string{
@@ -1315,7 +1408,7 @@ func TestResolveAndValidate_TranscodeMaxBodyMB_DefaultsAndOverrides(t *testing.T
 
 // TestResolveAndValidate_TranscodeAuth_InvalidModesAndCustomHeaders verifies
 // that invalid auth modes and invalid/reserved custom header names fail startup
-// validation (Review 19 #C1).
+// validation.
 func TestResolveAndValidate_TranscodeAuth_InvalidModesAndCustomHeaders(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -1390,7 +1483,7 @@ func TestResolveAndValidate_TranscodeAuth_InvalidModesAndCustomHeaders(t *testin
 
 // TestParseNegatedLosses_AllCanonicalFeatures verifies that every canonical
 // Feature can be passed positively or with '!' negation and is correctly mapped
-// without silent drop (Review 19 #C2).
+// without silent drop.
 func TestParseNegatedLosses_AllCanonicalFeatures(t *testing.T) {
 	for _, feat := range transcode.RegisteredLossKeys() {
 		name := string(feat)
@@ -1423,7 +1516,7 @@ func TestParseNegatedLosses_AllCanonicalFeatures(t *testing.T) {
 
 // TestResolveAndValidate_MessagesResponses_StrictDefaultsRequiresLoss verifies
 // that -transcode-messages-responses under -transcode-strict-defaults demands
-// explicit -transcode-allow-loss tool_schema_strictness (Review 19 #C3).
+// explicit -transcode-allow-loss tool_schema_strictness.
 func TestResolveAndValidate_MessagesResponses_StrictDefaultsRequiresLoss(t *testing.T) {
 	// Without explicit loss approval under strict defaults -> fail
 	cfgWithoutLoss, err := Parse([]string{
@@ -1452,5 +1545,153 @@ func TestResolveAndValidate_MessagesResponses_StrictDefaultsRequiresLoss(t *test
 	}
 	if err := cfgWithLoss.ResolveAndValidate(); err != nil {
 		t.Fatalf("ResolveAndValidate (with loss): %v", err)
+	}
+}
+
+// TestResolveTranscodeContinuityFlags proves the opt-in continuity wiring:
+// off by default (no store on mappings); enabled shares one store across
+// the provider's mappings keyed by provider name; negative capacity/TTL
+// fail validation.
+func TestResolveTranscodeContinuityFlags(t *testing.T) {
+	base := func() *Provider {
+		return &Provider{
+			Name:                   "test-provider",
+			Upstream:               "https://upstream.example",
+			TranscodeResponsesChat: true,
+			TranscodeMessagesChat:  true,
+		}
+	}
+	// Off by default: no store.
+	off := base()
+	if err := off.resolveTranscode(nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range off.transcodeMappings {
+		if m.Continuity != nil {
+			t.Fatal("continuity store set by default, want nil (stateless default)")
+		}
+	}
+	// Enabled: one shared store, keyed by provider name.
+	on := base()
+	on.TranscodeContinuity = true
+	on.TranscodeContinuityCap = 4
+	if err := on.resolveTranscode(nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(on.transcodeMappings) != 2 {
+		t.Fatalf("mappings = %d, want 2", len(on.transcodeMappings))
+	}
+	first := on.transcodeMappings[0].Continuity
+	if first == nil {
+		t.Fatal("enabled mapping has no store")
+	}
+	for _, m := range on.transcodeMappings {
+		if m.Continuity != first {
+			t.Fatal("mappings do not share one store")
+		}
+		if m.ContinuityKey != "test-provider" {
+			t.Fatalf("key = %q, want provider name", m.ContinuityKey)
+		}
+	}
+	if first.Capacity() != 4 {
+		t.Fatalf("capacity = %d, want 4", first.Capacity())
+	}
+	// Distinct providers receive independent stores without cross-provider leakage.
+	on2 := base()
+	on2.Name = "second-provider"
+	on2.TranscodeContinuity = true
+	on2.TranscodeContinuityCap = 4
+	if err := on2.resolveTranscode(nil); err != nil {
+		t.Fatal(err)
+	}
+	second := on2.transcodeMappings[0].Continuity
+	if second == nil {
+		t.Fatal("second provider has no store")
+	}
+	if second == first {
+		t.Fatal("distinct providers shared the same continuity store instance")
+	}
+
+	// Negative capacity rejected.
+	neg := base()
+	neg.TranscodeContinuity = true
+	neg.TranscodeContinuityCap = -1
+	if err := neg.resolveTranscode(nil); err == nil {
+		t.Fatal("negative capacity accepted, want rejection")
+	}
+	// Negative TTL rejected.
+	negTTL := base()
+	negTTL.TranscodeContinuity = true
+	negTTL.TranscodeContinuityTTL = -time.Second
+	if err := negTTL.resolveTranscode(nil); err == nil {
+		t.Fatal("negative TTL accepted, want rejection")
+	}
+}
+
+// TestParseTranscodeProfiles verifies the -transcode-profile flag parsing:
+// name=model:tier and name=model forms, duplicate rejection, and closed
+// tier-vocabulary validation.
+func TestParseTranscodeProfiles(t *testing.T) {
+	empty, err := parseTranscodeProfiles(nil)
+	if err != nil {
+		t.Fatalf("empty: %v", err)
+	}
+	if len(empty.Profiles) != 0 {
+		t.Errorf("empty profiles = %d, want 0", len(empty.Profiles))
+	}
+
+	profiles, err := parseTranscodeProfiles([]string{
+		"scanner=gpt-4o-mini:low",
+		"analyst=gpt-4o:high",
+		"basic=gpt-4o-mini",
+	})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(profiles.Profiles) != 3 {
+		t.Fatalf("profiles = %d, want 3", len(profiles.Profiles))
+	}
+	scanner := profiles.Profiles["scanner"]
+	if scanner.Model != "gpt-4o-mini" || scanner.ReasoningTier != "low" {
+		t.Errorf("scanner = %+v, want model=gpt-4o-mini tier=low", scanner)
+	}
+	analyst := profiles.Profiles["analyst"]
+	if analyst.Model != "gpt-4o" || analyst.ReasoningTier != "high" {
+		t.Errorf("analyst = %+v, want model=gpt-4o tier=high", analyst)
+	}
+	basic := profiles.Profiles["basic"]
+	if basic.Model != "gpt-4o-mini" || basic.ReasoningTier != "" {
+		t.Errorf("basic = %+v, want model=gpt-4o-mini tier=''", basic)
+	}
+
+	for _, bad := range []string{
+		"noequals",
+		"=model",
+		"name=",
+		"name=model:",
+		"name=:tier",
+		"name=model:not-a-tier",
+	} {
+		if _, err := parseTranscodeProfiles([]string{bad}); err == nil {
+			t.Errorf("parseTranscodeProfiles(%q): want error", bad)
+		}
+	}
+	if _, err := parseTranscodeProfiles([]string{"a=m1", "a=m2"}); err == nil {
+		t.Error("duplicate name: want error")
+	}
+}
+
+// TestParseTranscodeProfilesAllTiers verifies every closed-vocabulary effort
+// tier parses as a profile tier.
+func TestParseTranscodeProfilesAllTiers(t *testing.T) {
+	for _, tier := range transcode.ModelEfforts {
+		profiles, err := parseTranscodeProfiles([]string{"p=m:" + tier})
+		if err != nil {
+			t.Errorf("tier %q: %v", tier, err)
+			continue
+		}
+		if profiles.Profiles["p"].ReasoningTier != tier {
+			t.Errorf("tier %q not preserved", tier)
+		}
 	}
 }

@@ -1,6 +1,6 @@
 package transcode
 
-// Review-08 blocker 6 regression tests: exchange IDs are API object
+// Regression tests: exchange IDs are API object
 // identifiers, not internal indexes — every exchange must emit
 // collision-resistant IDs so clients keying response stores, tool-call
 // correlation, logs, and retry/dedup systems by these IDs never collide.
@@ -17,8 +17,7 @@ import (
 // exchanges never collide: the random per-exchange prefix makes
 // cross-exchange collisions effectively impossible, while the local counter
 // keeps ordering within one exchange monotonic. The
-// emitted shape is msg_<32 lowercase hex>_<counter> (128 random bits,
-// ).
+// emitted shape is msg_<32 lowercase hex>_<counter> (128 random bits).
 func TestGeneratedIDsAreUniqueAcrossExchanges(t *testing.T) {
 	const (
 		exchanges   = 4096

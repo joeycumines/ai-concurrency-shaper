@@ -2,7 +2,7 @@
 //
 // Repro harness for fleet header single-letter orphan flaw.
 // Exists solely to pin and demonstrate the degenerate row0Budget behaviour
-// before the layout correction. Run via: go test -run TestRepro_FirstChipOrphan -count=1 -v
+// before the layout correction. Run via: go test -run TestLayoutFirstChipOrphan -count=1 -v
 
 package tui
 
@@ -14,7 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-func TestRepro_FirstChipOrphan(t *testing.T) {
+func TestLayoutFirstChipOrphan(t *testing.T) {
 	const historicalChipFloor = 3
 	// Reproduce the historical allocation at the width where the old layout
 	// reserved the already-truncated header body. The old implementation then
@@ -298,50 +298,6 @@ func TestRepro_FirstChipOrphan(t *testing.T) {
 					t.Fatalf("fleet %q w=%d: header line %d width %d exceeds %d after fix", fleet.name, w, i, lipgloss.Width(line), w)
 				}
 			}
-		}
-	}
-}
-
-func TestRepro_Row0BudgetDegenerate(t *testing.T) {
-	metas := []ProviderMeta{
-		{Name: "anthropic-eu-central", Concurrency: 4},
-		{Name: "openai-prod-longname", Concurrency: 8},
-		{Name: "acme-edge-provider", Concurrency: 12},
-	}
-	t.Logf("row0Budget degenerate check across widths 20-150 (h=24, active=0)")
-	for _, w := range []int{20, 30, 40, 60, 80, 100, 120, 150} {
-		m := NewModelForProviders(metas)
-		m.width = w
-		m.height = 24
-		m.active = 0
-		m.syncActive()
-		row0Budget := m.width - 2 - lipgloss.Width(m.headerBody(true)) - 1
-		fullBudget := m.width - 2
-		rows := m.chipRowsLayout()
-		var row0Info string
-		if len(rows) > 0 {
-			row0Info = fmt.Sprintf("row0 providers=%v widths=%v", rows[0].providers, func() []int {
-				var ws []int
-				for _, p := range rows[0].parts {
-					ws = append(ws, lipgloss.Width(p))
-				}
-				return ws
-			}())
-			if len(rows[0].parts) > 0 {
-				label0 := " " + m.providerLabel(0) + " "
-				natural0 := lipgloss.Width(m.styles.chipActiveStyle.Render(label0))
-				alloc0 := lipgloss.Width(rows[0].parts[0])
-				truncated := alloc0 < natural0
-				row0Info += fmt.Sprintf(" firstChip %d/%d truncated=%v", alloc0, natural0, truncated)
-			} else {
-				row0Info += " (empty row0)"
-			}
-		} else {
-			row0Info = "no rows (elided)"
-		}
-		t.Logf(" w=%3d: row0Budget=%3d fullBudget=%3d body(true)=%q width=%d -> %s", w, row0Budget, fullBudget, stripANSI(m.headerBody(true)), lipgloss.Width(m.headerBody(true)), row0Info)
-		if w >= 20 && w <= 100 && row0Budget == chipFloor {
-			t.Logf("  -> degenerate: row0Budget==chipFloor (%d) for width %d", chipFloor, w)
 		}
 	}
 }
