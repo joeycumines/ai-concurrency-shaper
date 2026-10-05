@@ -502,10 +502,10 @@ func boundedErrorMessageLimit(err error, max int) string {
 // discipline (three-byte ellipsis carved out of the bound; a non-positive
 // max returns the message whole, meaning "no configured bound"). It is the
 // one truncation helper for client-controlled text a dialect error reflects
-// back — catalog, suite, and native paths all delegate here, so the bound
-// policy cannot drift between paths that render the same input.
+// back — catalog, suite, native, and handler paths all delegate here, so the
+// bound policy cannot drift between paths that render the same input.
 func BoundErrorMessage(message string, max int) string {
-	if len(message) <= max {
+	if max <= 0 || len(message) <= max {
 		return message
 	}
 	// The ellipsis must not push the text past the configured bound.

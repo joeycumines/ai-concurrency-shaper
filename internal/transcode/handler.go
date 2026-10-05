@@ -355,7 +355,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.logRequestError(r, fmt.Errorf("[%s] read request body: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
-			http.StatusBadRequest, "read request body: "+err.Error(),
+			http.StatusBadRequest, "read request body: "+h.boundErrorMessage(err.Error()),
 			ProvenanceLocalRequestConversionError)
 		return
 	}
@@ -382,7 +382,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.logRequestError(r, fmt.Errorf("[%s] convert request: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
-			status, "convert request: "+err.Error(),
+			status, "convert request: "+h.boundErrorMessage(err.Error()),
 			ProvenanceLocalRequestConversionError)
 		return
 	}
@@ -407,19 +407,14 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// resolution, signing) never leak details such as file paths into
 		// the client message; the detail is logged.
 		status := http.StatusInternalServerError
-		message := "build upstream request: " + err.Error()
+		message := "build upstream request: internal error"
 		if errors.Is(err, errClientQueryParameter) ||
 			errors.Is(err, errAuthInboundCredential) {
 			status = http.StatusBadRequest
 			h.logRequestError(r, fmt.Errorf("[%s] build upstream request: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
+			message = "build upstream request: " + h.boundErrorMessage(err.Error())
 		} else {
-			log.Printf(
-				"transcode: %s %s: build upstream request: %v",
-				r.Method,
-				r.URL.Path,
-				err,
-			)
-			message = "build upstream request: internal error"
+			h.logRequestError(r, fmt.Errorf("[%s] build upstream request: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		}
 		h.writeLocalError(r, w,
 			status, message,
@@ -1985,22 +1980,10 @@ func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.
 }
 
 // boundErrorMessage truncates a client-visible error message to the
-// configured ErrorMessageBytes bound. Every error
-// writing path goes through it, so no upstream error body can amplify
-// client-visible text beyond the bound.
+// configured ErrorMessageBytes bound. It delegates to the shared
+// BoundErrorMessage so the bound policy has exactly one home.
 func (h *TranscodeHandler) boundErrorMessage(message string) string {
-	max := h.cfg.BodyLimits.ErrorMessageBytes
-	if max <= 0 {
-		return message
-	}
-	if len(message) <= max {
-		return message
-	}
-	// The ellipsis must not push the message past the configured bound.
-	if max > 3 {
-		return message[:max-3] + "…"
-	}
-	return message[:max]
+	return BoundErrorMessage(message, h.cfg.BodyLimits.ErrorMessageBytes)
 }
 
 // logSafeText makes text safe to place in ONE operator log line. Every byte

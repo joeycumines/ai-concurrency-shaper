@@ -321,13 +321,12 @@ func marshalCatalogDocument(document any, limit int64) ([]byte, error) {
 }
 
 // writeDialectError writes a bounded dialect error envelope. The message bound
-// keeps a hostile servable list from amplifying client-visible text.
+// keeps a hostile servable list from amplifying client-visible text. The
+// type/code come from the shared status mapping so the catalog renders one
+// status as one type/code, like every other client-facing error surface.
 func (h *CatalogHandler) writeDialectError(w http.ResponseWriter, shape CatalogShape, status int, err error) {
-	message := boundCatalogMessage(err.Error(), h.limits.ErrorMessageBytes)
-	errorType, errorCode := "invalid_request_error", "bad_request"
-	if status >= http.StatusInternalServerError {
-		errorType, errorCode = "api_error", "internal_server_error"
-	}
+	message := BoundErrorMessage(err.Error(), h.limits.ErrorMessageBytes)
+	errorType, errorCode := TypeForStatus(status), CodeForStatus(status)
 	var body []byte
 	switch shape {
 	case CatalogShapeAnthropic:
@@ -386,12 +385,6 @@ func (h *CatalogHandler) writeErrorBody(w http.ResponseWriter, shape CatalogShap
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(status)
 	_, _ = w.Write(body)
-}
-
-// boundCatalogMessage truncates an error message at the configured bound with
-// the shared ellipsis discipline.
-func boundCatalogMessage(message string, max int) string {
-	return BoundErrorMessage(message, max)
 }
 
 func (h *CatalogHandler) serveSingleModel(w http.ResponseWriter, r *http.Request, modelID string) {
@@ -464,7 +457,7 @@ func (h *CatalogHandler) validateSingleModelQuery(shape CatalogShape, query map[
 }
 
 func (h *CatalogHandler) writeModelNotFoundError(w http.ResponseWriter, shape CatalogShape, modelID string) {
-	message := boundCatalogMessage(
+	message := BoundErrorMessage(
 		fmt.Sprintf("model: %s not found", modelID),
 		h.limits.ErrorMessageBytes,
 	)

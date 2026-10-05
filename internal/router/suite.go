@@ -366,7 +366,7 @@ func (h *CatalogSuiteHandler) defaultCatalogShape() transcode.CatalogShape {
 }
 
 func (h *CatalogSuiteHandler) writeDialectError(w http.ResponseWriter, shape transcode.CatalogShape, status int, message string) {
-	message = boundSuiteMessage(message, h.limits.ErrorMessageBytes)
+	message = transcode.BoundErrorMessage(message, h.limits.ErrorMessageBytes)
 	var body []byte
 	switch shape {
 	case transcode.CatalogShapeAnthropic:
@@ -460,12 +460,8 @@ func fallbackSuiteErrorBody(shape transcode.CatalogShape, status int) []byte {
 	return body
 }
 
-func boundSuiteMessage(message string, max int) string {
-	return transcode.BoundErrorMessage(message, max)
-}
-
 func (h *CatalogSuiteHandler) writeModelNotFoundError(w http.ResponseWriter, shape transcode.CatalogShape, modelID string) {
-	modelID = boundSuiteMessage(modelID, h.limits.ErrorMessageBytes)
+	modelID = transcode.BoundErrorMessage(modelID, h.limits.ErrorMessageBytes)
 	var body []byte
 	switch shape {
 	case transcode.CatalogShapeAnthropic:
@@ -516,32 +512,16 @@ func (h *CatalogSuiteHandler) writeModelNotFoundError(w http.ResponseWriter, sha
 	_, _ = w.Write(body)
 }
 
+// errTypeForStatus and errCodeForStatus map a status to the suite's generic
+// error type/code. They delegate to the transcode package's shared mapping so
+// the catalog-suite errors render the same type/code as every other
+// client-facing error surface. The model-lookup 404s keep their deliberate
+// model-specific rendering (not_found_error / model_not_found, pinned by
+// tests) at their own call sites instead of in this generic table.
 func errTypeForStatus(status int) string {
-	switch status {
-	case http.StatusNotFound:
-		return "invalid_request_error"
-	case http.StatusBadRequest:
-		return "invalid_request_error"
-	case http.StatusServiceUnavailable:
-		return "api_error"
-	case http.StatusRequestEntityTooLarge:
-		return "request_too_large"
-	default:
-		return "api_error"
-	}
+	return transcode.TypeForStatus(status)
 }
 
 func errCodeForStatus(status int) string {
-	switch status {
-	case http.StatusNotFound:
-		return "model_not_found"
-	case http.StatusBadRequest:
-		return "bad_request"
-	case http.StatusServiceUnavailable:
-		return "service_unavailable"
-	case http.StatusRequestEntityTooLarge:
-		return "request_too_large"
-	default:
-		return "api_error"
-	}
+	return transcode.CodeForStatus(status)
 }

@@ -147,6 +147,13 @@ func normalizeCanonicalError(e CanonicalAPIError) CanonicalAPIError {
 	return e
 }
 
+// TypeForStatus maps a status to an OpenAI-style error type. It is the
+// single mapping shared by every client-facing error renderer, so one status
+// renders one type on every surface.
+func TypeForStatus(status int) string {
+	return typeForStatus(status)
+}
+
 // typeForStatus maps a status to an OpenAI-style error type.
 func typeForStatus(status int) string {
 	switch status {
@@ -166,6 +173,13 @@ func typeForStatus(status int) string {
 		}
 		return "invalid_request_error"
 	}
+}
+
+// CodeForStatus maps a status to a stable error code. It is the single
+// mapping shared by every client-facing error renderer, so one status
+// renders one code on every surface.
+func CodeForStatus(status int) string {
+	return codeForStatus(status)
 }
 
 // codeForStatus maps a status to a stable error code.

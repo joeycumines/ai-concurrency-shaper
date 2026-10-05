@@ -66,7 +66,7 @@ func TestProxyNativeStructuralErrorIsBounded(t *testing.T) {
 // TestProxyNativeWrongDialectErrorIsBounded covers the fourth and last local
 // rejection that can carry client text: a known model sent to the wrong
 // native dialect, whose 404 quotes the model identifier. It is a separate
-// boundNativeMessage call from the unmapped-model one, so it needs its own
+// BoundErrorMessage call from the unmapped-model one, so it needs its own
 // proof.
 func TestProxyNativeWrongDialectErrorIsBounded(t *testing.T) {
 	up := &nativeUpstream{response: `{}`}

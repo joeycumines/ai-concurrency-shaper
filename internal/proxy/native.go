@@ -207,7 +207,7 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		// Bounded for the same reason as the decode failure below: the text
 		// originates in the transport and need not be free of request bytes.
 		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
-			boundNativeMessage("read request body: "+err.Error(), limits.ErrorMessageBytes))
+			transcode.BoundErrorMessage("read request body: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
 	if int64(len(body)) > limits.AcceptedRequestBytes {
@@ -241,7 +241,7 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		// ("duplicate JSON key %q"), so it is client-controlled text and is
 		// bounded like every other client string this path reflects.
 		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
-			boundNativeMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
+			transcode.BoundErrorMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
 	rawModel, ok := doc["model"]
@@ -258,7 +258,7 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	mapping, err := nr.ModelMap.Resolve(clientModel)
 	if err != nil {
 		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
-			boundNativeMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
+			transcode.BoundErrorMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
 	if mapping.Via == "" {
@@ -280,7 +280,7 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 			return restoreOriginal(), nativeMiss
 		}
 		writeNativeDialectError(w, nr.Protocol, http.StatusNotFound,
-			boundNativeMessage(
+			transcode.BoundErrorMessage(
 				fmt.Sprintf("model %q is natively served as %s, not on %s", clientModel, mapping.Via, nr.RouteKey.Path),
 				limits.ErrorMessageBytes))
 		return r, nativeError
@@ -498,20 +498,6 @@ func isNativeUpgrade(r *http.Request) bool {
 		return false
 	}
 	return transcode.IsUpgradeRequest(r)
-}
-
-// boundNativeMessage truncates an error message to max bytes. The dialect
-// writer marshals the message with HTML escaping, so a message carrying a
-// client's model identifier is amplified about six fold on the wire; a model
-// identifier is client-controlled and the accepted request body is tens of
-// megabytes, so without this bound a client could make the proxy emit a
-// hundredfold larger error document than the request it sent. The sibling
-// paths bound the same input the same way.
-// A non-positive max means "no configured bound" and returns the message
-// whole, matching boundSuiteMessage and boundCatalogMessage. It is unreachable
-// from the native path, which always reads its limit through WithDefaults.
-func boundNativeMessage(message string, max int) string {
-	return transcode.BoundErrorMessage(message, max)
 }
 
 // writeNativeDialectError renders a local error in the route's client

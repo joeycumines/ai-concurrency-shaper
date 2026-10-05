@@ -2588,3 +2588,57 @@ func TestHandlerLegacyModelMapMissKeepsMessage(t *testing.T) {
 		t.Fatalf("legacy miss message = %q, want %q", errEnvelope.Error.Message, want)
 	}
 }
+
+// TestHandlerConvertErrorMessageIsBounded pins the unbounded-client-message
+// fix: a strict-decode error quoting a very long offending key must reach the
+// client truncated at the ErrorMessageBytes bound, not echoed whole (the
+// dialect writer HTML-escapes the message, amplifying it further on the wire).
+func TestHandlerConvertErrorMessageIsBounded(t *testing.T) {
+	mapping := responsesMapping(t)
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		t.Fatal("round trip must not be called on conversion error")
+		return nil, nil
+	})
+
+	longKey := strings.Repeat("k", 64<<10)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		strings.NewReader(`{"model":"m","input":"x","`+longKey+`":1}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(envelope.Error.Message, longKey) {
+		t.Fatalf("client error echoes the full %d-byte key unbounded", len(longKey))
+	}
+	if len(envelope.Error.Message) > DefaultErrorMessageBytes {
+		t.Fatalf("client error message is %d bytes, over the %d bound",
+			len(envelope.Error.Message), DefaultErrorMessageBytes)
+	}
+}
+
+// TestHandlerBuildUpstreamLogIsSingleLine pins the log-forging fix: a
+// percent-decoded path carrying a newline must be neutralized in the operator
+// log, and a client-fault build error must reach the client bounded.
+func TestHandlerBuildUpstreamLogIsSingleLine(t *testing.T) {
+	if got := logSafeText("/v1/responses\ntranscode: forged line"); got != `/v1/responses\ntranscode: forged line` {
+		t.Fatalf("logSafeText = %q, want the newline escaped", got)
+	}
+	if got := BoundErrorMessage(strings.Repeat("x", 64<<10), DefaultErrorMessageBytes); len(got) > DefaultErrorMessageBytes {
+		t.Fatalf("BoundErrorMessage returned %d bytes, over the %d bound", len(got), DefaultErrorMessageBytes)
+	}
+	if got := BoundErrorMessage("hello", 0); got != "hello" {
+		t.Fatalf("BoundErrorMessage with non-positive max = %q, want the message whole", got)
+	}
+	if got := BoundErrorMessage("hello world", -1); got != "hello world" {
+		t.Fatalf("BoundErrorMessage with negative max = %q, want the message whole", got)
+	}
+}
