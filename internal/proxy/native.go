@@ -145,19 +145,6 @@ func nativeAliasFromContext(ctx context.Context) (nativeAlias, bool) {
 	return alias, ok
 }
 
-// lookupNativeRoute returns the native route for the request method+path,
-// or nil when the route is not natively served.
-func (p *Proxy) lookupNativeRoute(r *http.Request) *NativeRoute {
-	if len(p.nativeRoutes) == 0 {
-		return nil
-	}
-	key, err := transcode.NewRouteKey(r.Method, r.URL.Path)
-	if err != nil {
-		return nil
-	}
-	return p.lookupNativeRouteKey(key)
-}
-
 // lookupNativeRouteKey returns the native route for an already-built key.
 // The key is built once per request and shared with the transcode lookup so
 // the hot path pays route-key construction (method normalization plus full
