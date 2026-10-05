@@ -948,6 +948,12 @@ func TestCatalogSuiteGenericErrorVerdicts(t *testing.T) {
 		t.Errorf("malformed completion = %d %q/%q, want 400 invalid_request_error/bad_request",
 			code, errType, errCode)
 	}
+	// Explicit null model: illegal null, generic 400 envelope.
+	if code, errType, errCode := serve(newSuite(), `{"model":null}`); code != http.StatusBadRequest ||
+		errType != "invalid_request_error" || errCode != "bad_request" {
+		t.Errorf("null-model completion = %d %q/%q, want 400 invalid_request_error/bad_request",
+			code, errType, errCode)
+	}
 	// Empty catalog: 503 service_unavailable envelope.
 	empty := router.NewCatalogSuiteHandler(router.SuiteConfig{
 		Name:         "suite-verdicts-empty",

@@ -818,7 +818,8 @@ func TestTopLevelModelPolicy(t *testing.T) {
 		{"duplicate keys", `{"model":"a","model":"b"}`, "", true},
 		{"number model", `{"model":42}`, "", true},
 		{"object model", `{"model":{"x":1}}`, "", true},
-		{"null model decodes as empty", `{"model":null}`, "", false},
+		{"null model is an illegal null", `{"model":null}`, "", true},
+		{"null model with whitespace", "{\"model\": \tnull\n}", "", true},
 		{"malformed", `{"model":`, "", true},
 		{"trailing", `{"model":"m"} garbage`, "", true},
 	}

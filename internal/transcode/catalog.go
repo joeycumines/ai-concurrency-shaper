@@ -16,6 +16,7 @@
 package transcode
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -612,14 +613,18 @@ func validCatalogSurrogate(s string) bool {
 // TopLevelModel extracts the top-level "model" field from a request document
 // under one documented policy shared by the suite router, the native route,
 // and the byte-surgical rewriter: structural problems (duplicate keys at any
-// depth, trailing values, malformed syntax) are errors; a present model must
-// be a JSON string or null (numbers, objects, and nested-only documents do
-// not count — null decodes as "" per encoding/json, joining the empty
-// verdict below); absence is reported as ("", nil) so the caller decides between miss
-// and refuse. An empty string is returned as-is, also with nil error — the
-// caller owns the empty verdict (the suite reports missing-or-empty, the
-// native path reports must-be-non-empty-string). Probes confirm suite, native,
-// and rewrite verdicts agree on every shape in this policy.
+// depth, trailing values, malformed syntax, an explicit null model) are
+// errors; a present model must be a JSON string (numbers, objects, and
+// nested-only documents do not count); absence is reported as ("", nil) so
+// the caller decides between miss and refuse. An empty string is returned
+// as-is, also with nil error — the caller owns the empty verdict (the suite
+// reports missing-or-empty, the native path reports
+// must-be-non-empty-string). A null model is an illegal null, not absence:
+// encoding/json decodes null into a string as a silent no-op, and the map
+// decode above cannot see it (RawMessage is null-capable), so the arm is
+// checked explicitly and refused with the wire layer's illegal-null verdict.
+// Probes confirm suite, native, and rewrite verdicts agree on every shape in
+// this policy.
 func TopLevelModel(body []byte) (string, error) {
 	var doc map[string]json.RawMessage
 	if err := wire.DecodeTolerant(body, &doc); err != nil {
@@ -628,6 +633,13 @@ func TopLevelModel(body []byte) (string, error) {
 	raw, ok := doc["model"]
 	if !ok {
 		return "", nil
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", &wire.DecodeError{
+			Kind:    wire.DecodeIllegalNull,
+			Path:    "model",
+			Message: "null is not allowed for model",
+		}
 	}
 	var model string
 	if err := json.Unmarshal(raw, &model); err != nil {

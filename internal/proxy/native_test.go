@@ -571,6 +571,7 @@ func TestProxyNativeRejectsStructuralCorruption(t *testing.T) {
 		{"trailing value", `{"model":"msg-model","max_tokens":5,"messages":[]}{}`},
 		{"malformed", `{"model":`},
 		{"non-object", `[1,2,3]`},
+		{"null model", `{"model":null,"max_tokens":5,"messages":[]}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
