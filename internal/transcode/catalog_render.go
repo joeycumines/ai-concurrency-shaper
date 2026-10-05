@@ -432,7 +432,7 @@ type openAICatalogEntry struct {
 	// InputModalities is the semi-standard extension this gateway uses to
 	// advertise modality support in the OpenAI dialect (DeepSeek documents
 	// the same flat top-level array; OpenAI's own shape has no modality
-	// field — see scratch/modality-research.md). Always present, never
+	// field). Always present, never
 	// omitted: an undeclared modality list defaults to ["text"] via
 	// catalogModalities, matching the Codex dialect's default.
 	InputModalities []string `json:"input_modalities"`

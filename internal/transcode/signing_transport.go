@@ -226,6 +226,12 @@ func (t *SigningTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 			return io.NopCloser(bytes.NewReader(substitutedBytes)), nil
 		}
 		clone.ContentLength = int64(len(substitutedBytes))
+		// clone.Header is always non-nil for requests built by http.NewRequest
+		// or received by a server; guard anyway so a hand-built request with
+		// a nil Header map can never panic this transport.
+		if clone.Header == nil {
+			clone.Header = make(http.Header)
+		}
 		clone.Header.Set("Content-Length", strconv.Itoa(len(substitutedBytes)))
 	}
 	if req.GetBody != nil && substituted == nil {
