@@ -635,3 +635,43 @@ func TestProxyNativeForwardsQueryAndHeaders(t *testing.T) {
 		t.Fatalf("upstream beta=%q version=%q, want true/2023-06-01", gotBeta, gotVersion)
 	}
 }
+
+// TestNativeUpgradeParityWithTranscode pins the five header shapes probed
+// during review: the native classifier must agree with the transcode one on
+// every shape, so an upgrade refused on a transcoded route is refused on a
+// native route too and never silently forwarded upstream.
+func TestNativeUpgradeParityWithTranscode(t *testing.T) {
+	makeReq := func(setHeaders func(h http.Header)) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+			bytes.NewBufferString(`{"model":"msg-model","max_tokens":5}`))
+		setHeaders(req.Header)
+		return req
+	}
+	cases := []struct {
+		name       string
+		setHeaders func(h http.Header)
+		want       bool
+	}{
+		{"no headers", func(h http.Header) {}, false},
+		{"single connection upgrade", func(h http.Header) {
+			h.Set("Connection", "upgrade")
+		}, true},
+		{"upgrade h2c plus connection upgrade", func(h http.Header) {
+			h.Set("Upgrade", "h2c")
+			h.Set("Connection", "upgrade")
+		}, true},
+		{"present-but-empty upgrade value", func(h http.Header) {
+			h["Upgrade"] = []string{""}
+		}, true},
+		{"split connection keep-alive and upgrade", func(h http.Header) {
+			h["Connection"] = []string{"keep-alive", "upgrade"}
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isNativeUpgrade(makeReq(tc.setHeaders)); got != tc.want {
+				t.Errorf("isNativeUpgrade = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

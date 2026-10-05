@@ -488,25 +488,16 @@ func (b *nativePrefixBody) Close() error {
 }
 
 // isNativeUpgrade reports whether the request asks for a protocol upgrade,
-// which natively served routes reject like transcoded routes do. The
-// detection mirrors the transcode handler's isUpgradeRequest: either a
-// present Upgrade header or a Connection token naming upgrade marks an
-// upgrade-shaped request, so both boundaries classify identically — an
-// upgrade rejected on a transcoded route is rejected on a native route too,
-// never silently forwarded where one path refuses it.
+// which natively served routes reject like transcoded routes do. It delegates
+// to the transcode handler's classifier so both boundaries classify
+// identically by construction — an upgrade rejected on a transcoded route is
+// rejected on a native route too, never silently forwarded where one path
+// refuses it.
 func isNativeUpgrade(r *http.Request) bool {
 	if r == nil || r.Header == nil {
 		return false
 	}
-	if r.Header.Get("Upgrade") != "" {
-		return true
-	}
-	for token := range strings.SplitSeq(r.Header.Get("Connection"), ",") {
-		if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
-			return true
-		}
-	}
-	return false
+	return transcode.IsUpgradeRequest(r)
 }
 
 // boundNativeMessage truncates an error message to max bytes. The dialect

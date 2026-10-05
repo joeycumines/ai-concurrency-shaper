@@ -1880,6 +1880,13 @@ func isJSON(resp *http.Response) bool {
 	return strings.HasSuffix(mediaType, "+json")
 }
 
+// IsUpgradeRequest reports whether the request carries an Upgrade token.
+// It is the single upgrade classifier shared by the transcode handler and
+// the natively served routes, so both boundaries classify identically.
+func IsUpgradeRequest(r *http.Request) bool {
+	return isUpgradeRequest(r)
+}
+
 // isUpgradeRequest reports whether the request carries an Upgrade token.
 func isUpgradeRequest(r *http.Request) bool {
 	if len(r.Header.Values("Upgrade")) > 0 {
