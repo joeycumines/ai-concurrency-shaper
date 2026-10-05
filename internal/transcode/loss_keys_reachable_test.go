@@ -37,6 +37,16 @@ func TestParseLossFeaturesRejectsLegacyNames(t *testing.T) {
 // reachable: a concrete conversion records it under a permissive policy, and
 // the same conversion is rejected under the strict policy. The scenario
 // builders return the report that must carry the key.
+// chatAudioOutputBody is a chat completion whose assistant message
+// carries audio output (transcript plus base64 data): the shared body for
+// the provider_audio_transcript Note scenario and the provider_audio_data
+// loss scenario.
+var chatAudioOutputBody = []byte(`{"id":"c1","object":"chat.completion","created":1,"model":"m",` +
+	`"choices":[{"index":0,"finish_reason":"stop",` +
+	`"message":{"role":"assistant","content":"hi",` +
+	`"audio":{"id":"a1","data":"AAAA","expires_at":2,"transcript":"spoken hi"}}}],` +
+	`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+
 func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 	type scenario struct {
 		key  Feature
@@ -613,6 +623,28 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 				)
 				_, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: new("think")}, nil))
 				return state.report, err
+			},
+		},
+		{
+			// Upstream chat audio output: the transcript Note records
+			// without any policy decision, so the perm list holds only
+			// the sibling data loss the exchange separately needs.
+			key:  FeatureProviderAudioTranscript,
+			perm: []Feature{FeatureProviderAudioData},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				_, report, err := DecodeChatResponseWithPolicy(chatAudioOutputBody, ChatCapabilities{}, policy)
+				return report, err
+			},
+		},
+		{
+			// The base64 audio data has no target field: an approved
+			// loss under its own permission, a rejection under strict.
+			key:  FeatureProviderAudioData,
+			perm: []Feature{FeatureProviderAudioData},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				_, report, err := DecodeChatResponseWithPolicy(chatAudioOutputBody, ChatCapabilities{}, policy)
+				return report, err
 			},
 		},
 		{

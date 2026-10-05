@@ -306,6 +306,17 @@ const (
 	// are not registered at all (usage_total_merged, profile_routing,
 	// multi_agent_priming) have no operator-facing name by design.
 	FeatureMissingEventName Feature = "missing_event_name"
+	// ProviderAudioTranscript covers upstream chat audio output whose
+	// transcript is mapped to ordinary text: the client dialects have no
+	// audio output field, so the transcript is the only honest text
+	// rendering. Recorded as a Note (sanctioned encoding, never a policy
+	// decision), mirroring FeatureProviderReasoningText.
+	FeatureProviderAudioTranscript Feature = "provider_audio_transcript"
+	// ProviderAudioData covers the base64 audio data of an upstream chat
+	// audio output: no client dialect can reproduce it, so it is an
+	// approved loss or a rejection under the strict policy — never
+	// silently dropped.
+	FeatureProviderAudioData Feature = "provider_audio_data"
 )
 
 // lossEntry pairs a loss key with the description used by the per-request log
@@ -333,6 +344,8 @@ var lossRegistry = []lossEntry{
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
 	{FeatureMissingStreamSentinel, "the upstream chat stream ended after a finishing chunk without the [DONE] sentinel; the completion was released on EOF and the provider quirk recorded"},
 	{FeatureMissingEventName, "the upstream Responses stream omitted the SSE event: name; the event was routed by its JSON type and the provider quirk recorded"},
+	{FeatureProviderAudioTranscript, "upstream chat audio output transcript mapped to ordinary text (provider_audio_transcript encoding)"},
+	{FeatureProviderAudioData, "upstream chat audio output data cannot be reproduced in the target"},
 	{FeatureUsageUnknown, "the source provided no token usage; the required target usage cannot be reproduced"},
 	{FeatureUsageTotalMismatch, "the source usage totals are arithmetically inconsistent (total_tokens != input + output); the emitted values are relayed with the mismatch recorded (the note names the emitted counts and, where a clamp corrected a component, the source numbers)"},
 	{FeatureUsageTotalDerived, "the source usage omitted exactly one total; it was derived from the two present values (never defaulted to zero) and the derivation recorded"},

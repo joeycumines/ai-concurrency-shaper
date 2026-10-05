@@ -299,10 +299,10 @@ func TestParseModelTableEntry_EffortsVocabulary(t *testing.T) {
 		`invalid -model-table "s@p=w;efforts=ultra": unknown effort "ultra" (want minimal, low, medium, high, xhigh, max)`)
 	assertModelTableParseError(t, "s@p=w;efforts=Low",
 		`invalid -model-table "s@p=w;efforts=Low": unknown effort "Low" (want minimal, low, medium, high, xhigh, max)`)
-	assertModelTableParseError(t, "s@p=w;modalities=video",
-		`invalid -model-table "s@p=w;modalities=video": unknown modality "video" (want text, image)`)
-	assertModelTableParseError(t, "s@p=w;modalities=audio",
-		`invalid -model-table "s@p=w;modalities=audio": unknown modality "audio" (want text, image)`)
+	assertModelTableParseError(t, "s@p=w;modalities=hologram",
+		`invalid -model-table "s@p=w;modalities=hologram": unknown modality "hologram" (want text, image, audio, video)`)
+	assertModelTableParseError(t, "s@p=w;modalities=Audio",
+		`invalid -model-table "s@p=w;modalities=Audio": unknown modality "Audio" (want text, image, audio, video)`)
 }
 
 // TestParseModelTableEntry_BareFlagWithValue rejects a value attached to a

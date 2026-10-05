@@ -325,7 +325,7 @@ func TestCatalogMalformedEntrySkipped(t *testing.T) {
 		{"bad context", CatalogModel{Surrogate: "bad", Context: &badContext}},
 		{"bad max_output", CatalogModel{Surrogate: "bad", MaxOutput: &badOut}},
 		{"bad effort", CatalogModel{Surrogate: "bad", Efforts: []string{"bogus"}}},
-		{"bad modality", CatalogModel{Surrogate: "bad", Modalities: []string{"video"}}},
+		{"bad modality", CatalogModel{Surrogate: "bad", Modalities: []string{"hologram"}}},
 		{"nan cost_input", CatalogModel{Surrogate: "bad", CostInput: &nanCost}},
 		{"inf cost_output", CatalogModel{Surrogate: "bad", CostOutput: &infCost}},
 		{"negative cost_input", CatalogModel{Surrogate: "bad", CostInput: &negCost}},
@@ -858,5 +858,93 @@ func TestCatalogIdentGrammarIsSingleSourced(t *testing.T) {
 	}
 	if ValidCatalogIdent(long) {
 		t.Errorf("%d-char ident must be invalid (cap %d)", len(long), MaxCatalogIdentLen)
+	}
+}
+
+// TestCatalogAudioVideoVocabulary pins the expanded modality vocabulary:
+// audio and video validate, unknown values still reject, and the Codex and
+// OpenAI dialects carry the new values verbatim.
+func TestCatalogAudioVideoVocabulary(t *testing.T) {
+	for _, ok := range []string{"text", "image", "audio", "video"} {
+		if !ValidModelModality(ok) {
+			t.Errorf("ValidModelModality(%q) = false, want true", ok)
+		}
+	}
+	if ValidModelModality("hologram") {
+		t.Error("ValidModelModality(hologram) = true, want false")
+	}
+	handler, err := NewCatalogHandler(CatalogConfig{
+		ProviderName: "TestProv",
+		Models: []CatalogModel{
+			{Surrogate: "av-model", Modalities: []string{"text", "audio", "video"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"/v1/models?format=openai", "/v1/models?format=codex"} {
+		rec := catalogGet(t, handler, target, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d: %s", target, rec.Code, rec.Body.String())
+		}
+		var document struct {
+			Data   []map[string]any `json:"data"`
+			Models []map[string]any `json:"models"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &document); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := catalogGet(t, handler, "/v1/models?format=openai", nil)
+	var openai struct {
+		Data []struct {
+			ID              string   `json:"id"`
+			InputModalities []string `json:"input_modalities"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &openai); err != nil {
+		t.Fatal(err)
+	}
+	if len(openai.Data) != 1 || !slices.Equal(openai.Data[0].InputModalities, []string{"text", "audio", "video"}) {
+		t.Fatalf("openai modalities = %+v, want [text audio video]", openai.Data)
+	}
+	rec = catalogGet(t, handler, "/v1/models?format=anthropic", nil)
+	var anthropic struct {
+		Data []struct {
+			ID           string `json:"id"`
+			Capabilities *struct {
+				ImageInput struct {
+					Supported bool `json:"supported"`
+				} `json:"image_input"`
+				AudioInput struct {
+					Supported bool `json:"supported"`
+				} `json:"audio_input"`
+			} `json:"capabilities"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &anthropic); err != nil {
+		t.Fatal(err)
+	}
+	if len(anthropic.Data) != 1 || anthropic.Data[0].Capabilities == nil {
+		t.Fatalf("anthropic entry = %+v, want capabilities present", anthropic.Data)
+	}
+	caps := anthropic.Data[0].Capabilities
+	if caps.ImageInput.Supported {
+		t.Error("image_input supported = true, want false (undeclared)")
+	}
+	if !caps.AudioInput.Supported {
+		t.Error("audio_input supported = false, want true (declared)")
+	}
+	// No video flag exists: video is vocabulary-only until a wire shape does.
+	var raw struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for k := range raw.Data[0]["capabilities"].(map[string]any) {
+		if k == "video_input" {
+			t.Error("capabilities carries video_input, want no video flag (no wire shape)")
+		}
 	}
 }

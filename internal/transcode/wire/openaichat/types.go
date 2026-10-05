@@ -40,6 +40,11 @@ type ContentBlockType string
 const (
 	ContentBlockTypeText  ContentBlockType = "text"
 	ContentBlockTypeImage ContentBlockType = "image_url"
+	// ContentBlockTypeAudio is the documented input_audio part
+	// ({input_audio:{data,format}}, format wav|mp3): the only audio/video
+	// input encoding any of the three dialects documents. There is no video
+	// input part in any dialect.
+	ContentBlockTypeAudio ContentBlockType = "input_audio"
 )
 
 // InputImage is the image_url payload of an image content block.
@@ -48,11 +53,19 @@ type InputImage struct {
 	Detail *string `json:"detail,omitempty"`
 }
 
+// InputAudio is the input_audio payload of an audio content block: base64
+// audio with its container format.
+type InputAudio struct {
+	Data   string `json:"data"`
+	Format string `json:"format"`
+}
+
 // ContentBlock is one element of a content block array.
 type ContentBlock struct {
 	Type     ContentBlockType `json:"type"`
 	Text     *string          `json:"text,omitempty"`
 	ImageURL *InputImage      `json:"image_url,omitempty"`
+	Audio    *InputAudio      `json:"input_audio,omitempty"`
 }
 
 // UnmarshalJSON decodes the tagged union per-arm: a text block admits only
@@ -92,6 +105,17 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 		block.Type = shadow.Type
 		block.ImageURL = shadow.ImageURL
 
+	case ContentBlockTypeAudio:
+		var shadow struct {
+			Type  ContentBlockType `json:"type"`
+			Audio *InputAudio      `json:"input_audio"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("audio block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.Audio = shadow.Audio
+
 	default:
 		return fmt.Errorf("unknown chat content block type %q", probe.Type)
 	}
@@ -110,6 +134,15 @@ func (b ContentBlock) Validate() error {
 	case ContentBlockTypeImage:
 		if b.ImageURL == nil || b.ImageURL.URL == "" {
 			return errors.New("image content block has no image_url")
+		}
+	case ContentBlockTypeAudio:
+		if b.Audio == nil || b.Audio.Data == "" {
+			return errors.New("audio content block has no input_audio data")
+		}
+		switch b.Audio.Format {
+		case "wav", "mp3":
+		default:
+			return fmt.Errorf("audio content block has unsupported format %q (want wav or mp3)", b.Audio.Format)
 		}
 	default:
 		return fmt.Errorf("unknown chat content block type %q", b.Type)
@@ -332,6 +365,11 @@ type ToolCallDelta struct {
 type ChatAssistantMessage struct {
 	Refusal   *string           `json:"refusal,omitempty"`
 	ToolCalls []MessageToolCall `json:"tool_calls,omitempty"`
+	// Audio is the documented chat audio output (choices[].message.audio):
+	// an id, base64 data, expiry, and transcript. Decoded so strict wire
+	// decoding never fails on an audio-capable upstream; the converters
+	// decide its fate per direction (transcript note vs observable loss).
+	Audio *AssistantAudio `json:"audio,omitempty"`
 	// Reasoning is a provider extension: an explicitly configured plaintext
 	// reasoning response field. It is only read when
 	// ChatCapabilities.ProviderReasoningText is enabled and may map only to
@@ -354,6 +392,26 @@ type ChatAssistantMessage struct {
 	RoutedExperts any     `json:"routed_experts,omitempty"`
 	StopReason    *string `json:"stop_reason,omitempty"`
 	MatchedStop   any     `json:"matched_stop,omitempty"`
+}
+
+// AssistantAudio is the documented chat audio output object
+// (choices[].message.audio): an id, base64 data, expiry, and transcript.
+type AssistantAudio struct {
+	ID         string `json:"id"`
+	Data       string `json:"data"`
+	ExpiresAt  int64  `json:"expires_at"`
+	Transcript string `json:"transcript"`
+}
+
+// Validate checks the audio output shape.
+func (a AssistantAudio) Validate() error {
+	if a.ID == "" {
+		return errors.New("chat message audio has no id")
+	}
+	if a.Data == "" {
+		return errors.New("chat message audio has no data")
+	}
+	return nil
 }
 
 // Message is a message in a chat conversation. Assistant messages flatten
@@ -408,6 +466,11 @@ func (m Message) Validate() error {
 			}
 			if call.Type != "function" {
 				return fmt.Errorf("tool call %d type = %q, want function", i, call.Type)
+			}
+		}
+		if m.Audio != nil {
+			if err := m.Audio.Validate(); err != nil {
+				return err
 			}
 		}
 	}

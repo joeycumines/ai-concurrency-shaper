@@ -549,9 +549,13 @@ func validCatalogModel(model CatalogModel) bool {
 // both consume this single definition, so they cannot contradict each other.
 var ModelEfforts = []string{"minimal", "low", "medium", "high", "xhigh", "max"}
 
-// ModelModalities is the closed input-modality vocabulary the supported
-// Responses/Codex request surface can actually carry.
-var ModelModalities = []string{"text", "image"}
+// ModelModalities is the closed input-modality vocabulary the gateway
+// advertises. Text and image ride a wire encoding in every dialect; audio is
+// receivable on the chat upstream surface (input_audio arm) and advertised
+// accordingly; video has no wire encoding in any dialect today and is
+// vocabulary-only (advertisable, never receivable — see
+// scratch/modality-av-research.md).
+var ModelModalities = []string{"text", "image", "audio", "video"}
 
 var (
 	modelEffortSet   = buildVocabularySet(ModelEfforts)

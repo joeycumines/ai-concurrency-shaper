@@ -220,6 +220,7 @@ type anthropicCapabilities struct {
 	ContextManagement anthropicSupport  `json:"context_management"`
 	Effort            anthropicEffort   `json:"effort"`
 	ImageInput        anthropicSupport  `json:"image_input"`
+	AudioInput        anthropicSupport  `json:"audio_input"`
 	PDFInput          anthropicSupport  `json:"pdf_input"`
 	StructuredOutputs anthropicSupport  `json:"structured_outputs"`
 	Thinking          anthropicThinking `json:"thinking"`
@@ -374,6 +375,11 @@ func (h *CatalogHandler) anthropicEntry(model CatalogModel) anthropicCatalogEntr
 			ContextManagement: anthropicSupport{},
 			Effort:            anthropicEffort{Supported: len(model.Efforts) > 0},
 			ImageInput:        anthropicSupport{Supported: slices.Contains(model.Modalities, "image")},
+			// Audio is advertised when the table declares it; video has no
+			// wire encoding in any dialect, so no video flag is emitted —
+			// advertising receipt the gateway cannot perform would be
+			// dishonest (see scratch/modality-av-research.md).
+			AudioInput:        anthropicSupport{Supported: slices.Contains(model.Modalities, "audio")},
 			PDFInput:          anthropicSupport{},
 			StructuredOutputs: anthropicSupport{Supported: h.structuredOutputs},
 		}

@@ -573,6 +573,16 @@ func chatMessageToCanonicalParts(
 						Path:     "choices[].message.content[].type",
 						Feature:  "image_url",
 					}
+				case ChatContentBlockTypeAudio:
+					// Upstream chat audio input follows the image_url
+					// precedent in this direction: the canonical IR has no
+					// audio part, so it is a typed unsupported feature
+					// (local conversion result), never corrupt wire.
+					return nil, nil, &UnsupportedFeatureError{
+						Protocol: "chat",
+						Path:     "choices[].message.content[].type",
+						Feature:  "input_audio",
+					}
 				default:
 					// An unknown content block type is outside the modeled
 					// surface: corrupt wire (an upstream failure). Known
@@ -692,6 +702,49 @@ func chatMessageToCanonicalParts(
 				Name:      name,
 				Arguments: ParseToolArguments(call.Function.Arguments),
 			})
+		}
+
+		if message.Audio != nil {
+			// Upstream chat audio output: the transcript maps to ordinary
+			// text (the provider_audio_transcript sanctioned encoding,
+			// recorded as a Note — the client dialects have no audio output
+			// field, so the transcript is the only honest text rendering).
+			// The base64 audio data itself has no target field: it is an
+			// approved loss or a rejection under the strict policy, never
+			// silently dropped. Guarded by the enclosing
+			// ChatAssistantMessage non-nil check: Audio is an
+			// assistant-only field reached through the embedded struct.
+			// A present-but-empty audio object is malformed model output
+			// (the shadow Validate rejects it where Validate runs; the
+			// response path defends inline like the tool-call-id check
+			// above), never a silent no-op.
+			if message.Audio.Data == "" && message.Audio.Transcript == "" {
+				return nil, nil, upstreamWireError(
+					UpstreamChatCompletions,
+					0,
+					errors.New("chat message audio has neither data nor transcript"),
+				)
+			}
+			if message.Audio.Transcript != "" {
+				parts = append(parts, CanonicalText{Text: message.Audio.Transcript})
+				if err := report.Note(
+					FeatureProviderAudioTranscript,
+					"choices[].message.audio",
+					"upstream chat audio output transcript mapped to ordinary text (provider_audio_transcript encoding)",
+				); err != nil {
+					return nil, nil, err
+				}
+			}
+			if message.Audio.Data != "" {
+				if err := report.Lose(
+					policy,
+					FeatureProviderAudioData,
+					"choices[].message.audio",
+					"upstream chat audio output data cannot be reproduced in the target",
+				); err != nil {
+					return nil, nil, err
+				}
+			}
 		}
 	}
 
