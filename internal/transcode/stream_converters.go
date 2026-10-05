@@ -567,6 +567,14 @@ func (s *chatResponsesStreamState) absorbPhase2Accounting(chunk ChatStreamRespon
 	// real total silently overwrites the client's token counts and the exchange
 	// is still reported as a clean success. Recorded once per stream, and only
 	// when the values actually differ, so a benign exact repeat stays quiet.
+	//
+	// DECISION (last-wins, deliberate): the later frame is the upstream's
+	// latest word on the exchange's totals — the official protocol itself
+	// sends the authoritative usage tail AFTER the finish chunk, so
+	// first-wins would freeze the accounting at the earliest (often empty)
+	// reading and report stale billing counts as current. The divergent-
+	// redelivery note is the protection against an adversarial shrink: the
+	// replacement is observable in the per-request log, never silent.
 	if s.usage != nil && !s.usageMergeNoted && !sameUsageAccounting(*s.usage, *converted) {
 		if err := s.report.Note(
 			FeatureUsageTotalMerged,

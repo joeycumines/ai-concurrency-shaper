@@ -155,6 +155,14 @@ func (c *responsesToAnthropicConverter) Convert(
 	// ungated note. A PRESENT name that disagrees with the JSON type is
 	// still a wire error.
 	//
+	// DECISION (tolerated upstream surface, deliberate): real gateways emit
+	// data-only frames, and refusing them would turn a working upstream into
+	// a 502 — the availability failure the contract-role rules exist to
+	// prevent. No count/threshold gate: any threshold would invent a policy
+	// the contract does not state. The line is principled, not weak —
+	// absence is tolerated, but a present name that CONTRADICTS the JSON
+	// type is still refused, so corruption that disagrees is never routed.
+	//
 	// No synthesized name is stored on the frame: routing below uses the
 	// decoded event's own Type, not this frame's Event field, and nothing
 	// reads frame.Event on this branch. Writing it implied the synthesized

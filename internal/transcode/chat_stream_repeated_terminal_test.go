@@ -491,3 +491,33 @@ func TestStreamRepeatedTerminalIdenticalRepeatStaysQuiet(t *testing.T) {
 		t.Fatalf("an identical redelivery recorded %d merges, want 0", got)
 	}
 }
+
+// TestStreamRepeatedTerminalDivergentTotalsLastWins pins the decided
+// last-wins policy on billing-visible counts: a redelivery carrying SMALLER
+// totals than first recorded still replaces them (the upstream's latest word
+// governs), the replacement is observable via exactly one
+// usage_total_merged note, and the exchange stays a clean success with no
+// error events.
+func TestStreamRepeatedTerminalDivergentTotalsLastWins(t *testing.T) {
+	state := finishedChatStreamState(t)
+	if _, err := state.Convert(repeatedTerminalWithUsage("stop", 100, 50, 150, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if state.usage == nil || state.usage.InputTokens != 100 || state.usage.OutputTokens != 50 || state.usage.TotalTokens != 150 {
+		t.Fatalf("first accounting = %+v, want 100/50/150", state.usage)
+	}
+	// Adversarial-shaped shrink: the redelivery carries smaller totals.
+	events, err := state.Convert(repeatedTerminalWithUsage("stop", 10, 5, 15, nil))
+	if err != nil {
+		t.Fatalf("divergent redelivery rejected: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("redelivery emitted %d events, want none (accounting never renders)", len(events))
+	}
+	if state.usage == nil || state.usage.InputTokens != 10 || state.usage.OutputTokens != 5 || state.usage.TotalTokens != 15 {
+		t.Fatalf("usage = %+v, want the redelivered 10/5/15 (last-wins)", state.usage)
+	}
+	if got := countFeature(state.report, FeatureUsageTotalMerged); got != 1 {
+		t.Fatalf("usage_total_merged recorded %d times, want exactly 1 (the shrink is observable, never silent)", got)
+	}
+}
