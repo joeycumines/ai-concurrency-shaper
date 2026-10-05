@@ -26,7 +26,6 @@ import (
 	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
-	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
 
 // NativeRoute declares one natively served client route: the request
@@ -235,8 +234,11 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	// optional controls (service_tier, cache_control, tools without an
 	// explicit strict, ...) reach the upstream that owns them. The
 	// dialect's own error is authoritative for anything semantic.
-	var doc map[string]json.RawMessage
-	if err := wire.DecodeTolerant(body, &doc); err != nil {
+	// Extraction uses the shared TopLevelModel policy so the suite router,
+	// this path, and the rewriter below agree on what counts as a readable
+	// model field (duplicate keys, non-string values, nested objects).
+	clientModel, err := transcode.TopLevelModel(body)
+	if err != nil {
 		// The decode error can quote a key name straight out of the request
 		// ("duplicate JSON key %q"), so it is client-controlled text and is
 		// bounded like every other client string this path reflects.
@@ -244,13 +246,11 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 			transcode.BoundErrorMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
-	rawModel, ok := doc["model"]
-	if !ok {
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: missing model field")
-		return r, nativeError
-	}
-	var clientModel string
-	if err := json.Unmarshal(rawModel, &clientModel); err != nil || clientModel == "" {
+	if clientModel == "" {
+		// Absent and empty share one verdict here: without a model name there
+		// is nothing to resolve, and an empty string resolves to nothing.
+		// (TopLevelModel reports a non-string model as an error above, so
+		// reaching here with "" means absent-or-empty, never type-corrupt.)
 		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: model field must be a non-empty string")
 		return r, nativeError
 	}
@@ -320,6 +320,12 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 // false when the document is not a JSON object, has no single top-level model
 // member, or has more than one — a duplicate is left untouched because which
 // value a client reads is its parser's decision, not ours.
+// It is the writer half of the model-field policy: callers run it only after
+// TopLevelModel already validated the document, so its false paths are
+// unreachable defence in depth, not a third verdict. It must stay
+// byte-surgical (never decode-and-re-encode: that would reorder keys,
+// collapse duplicates, and re-escape output), which is why extraction lives
+// in TopLevelModel and only the replacement lives here.
 func rewriteTopLevelModel(body []byte, wireModel string) ([]byte, bool) {
 	quoted, err := json.Marshal(wireModel)
 	if err != nil {

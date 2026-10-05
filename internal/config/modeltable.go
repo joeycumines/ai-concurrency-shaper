@@ -54,7 +54,6 @@ import (
 // catalog, and no resolution or rendering path reads them.
 
 const (
-	modelTableMaxSurrogateLen   = 128
 	modelTableMaxProviderLen    = 128
 	modelTableMaxWireLen        = 256
 	modelTableMaxDescriptionLen = 1024
@@ -349,8 +348,14 @@ func hasControlByte(s string) bool {
 }
 
 func validModelTableSurrogate(s string) bool {
-	return s != "." && s != ".." && validModelTableIdent(s, modelTableMaxSurrogateLen)
+	return transcode.ValidCatalogIdent(s)
 }
+
+// validModelTableIdent validates a length-parameterized identifier (provider,
+// tag) under the same rune set as transcode.ValidCatalogIdent, which owns the
+// fixed-cap surrogate grammar. The rune set is deliberately duplicated here
+// rather than parameterized there so the shared grammar keeps exactly one
+// spelling of its cap.
 
 func validModelTableIdent(s string, max int) bool {
 	if s == "" || len(s) > max {

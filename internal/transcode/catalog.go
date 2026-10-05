@@ -25,6 +25,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
 
 // The gateway-hosted model catalog answers a mount's discovery request from the
@@ -564,10 +566,17 @@ func buildVocabularySet(values []string) map[string]struct{} {
 	return set
 }
 
-// validCatalogSurrogate enforces the identifier grammar that also makes a
-// single-model path addressable as exactly one segment.
-func validCatalogSurrogate(s string) bool {
-	if s == "" || s == "." || s == ".." || len(s) > 128 {
+// MaxCatalogIdentLen caps a catalog identifier: the same cap the -model-table
+// grammar enforces, so a table-accepted surrogate is never refused at render.
+const MaxCatalogIdentLen = 128
+
+// ValidCatalogIdent reports whether s is a valid catalog identifier: 1-128
+// chars of [A-Za-z0-9._-], excluding the dot segments. It is the single
+// identifier grammar shared by the -model-table parser, the catalog-suite
+// names, and the catalog render-time backstop — one definition, so a grammar
+// change propagates everywhere by construction.
+func ValidCatalogIdent(s string) bool {
+	if s == "" || s == "." || s == ".." || len(s) > MaxCatalogIdentLen {
 		return false
 	}
 	for _, r := range s {
@@ -581,6 +590,39 @@ func validCatalogSurrogate(s string) bool {
 		}
 	}
 	return true
+}
+
+// validCatalogSurrogate enforces the identifier grammar that also makes a
+// single-model path addressable as exactly one segment.
+func validCatalogSurrogate(s string) bool {
+	return ValidCatalogIdent(s)
+}
+
+// TopLevelModel extracts the top-level "model" field from a request document
+// under one documented policy shared by the suite router, the native route,
+// and the byte-surgical rewriter: structural problems (duplicate keys at any
+// depth, trailing values, malformed syntax) are errors; a present model must
+// be a JSON string or null (numbers, objects, and nested-only documents do
+// not count — null decodes as "" per encoding/json, joining the empty
+// verdict below); absence is reported as ("", nil) so the caller decides between miss
+// and refuse. An empty string is returned as-is, also with nil error — the
+// caller owns the empty verdict (the suite reports missing-or-empty, the
+// native path reports must-be-non-empty-string). Probes confirm suite, native,
+// and rewrite verdicts agree on every shape in this policy.
+func TopLevelModel(body []byte) (string, error) {
+	var doc map[string]json.RawMessage
+	if err := wire.DecodeTolerant(body, &doc); err != nil {
+		return "", err
+	}
+	raw, ok := doc["model"]
+	if !ok {
+		return "", nil
+	}
+	var model string
+	if err := json.Unmarshal(raw, &model); err != nil {
+		return "", err
+	}
+	return model, nil
 }
 
 // ValidModelEffort reports whether s is in the closed effort vocabulary.

@@ -773,3 +773,63 @@ func TestCatalogSubresourceNotMatched(t *testing.T) {
 		t.Fatalf("expected 404 for subresource, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestTopLevelModelPolicy pins the shared model-field extraction verdicts:
+// structural corruption errors, non-string models error, absence is ("", nil),
+// and empty is returned as-is for the caller to judge.
+func TestTopLevelModelPolicy(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		want    string
+		wantErr bool
+	}{
+		{"ok", `{"model":"m"}`, "m", false},
+		{"missing", `{"input":"x"}`, "", false},
+		{"empty", `{"model":""}`, "", false},
+		{"nested only", `{"outer":{"model":"x"}}`, "", false},
+		{"duplicate keys", `{"model":"a","model":"b"}`, "", true},
+		{"number model", `{"model":42}`, "", true},
+		{"object model", `{"model":{"x":1}}`, "", true},
+		{"null model decodes as empty", `{"model":null}`, "", false},
+		{"malformed", `{"model":`, "", true},
+		{"trailing", `{"model":"m"} garbage`, "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := TopLevelModel([]byte(tc.body))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("TopLevelModel(%s) err = %v, wantErr %v", tc.body, err, tc.wantErr)
+			}
+			if err == nil && got != tc.want {
+				t.Fatalf("TopLevelModel(%s) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCatalogIdentGrammarIsSingleSourced pins that the shared identifier
+// grammar accepts exactly the -model-table surrogate shape, including the
+// dot-segment exclusions and the 128 cap.
+func TestCatalogIdentGrammarIsSingleSourced(t *testing.T) {
+	for _, ok := range []string{"m1", "a.b_c-d", "A0.-_"} {
+		if !ValidCatalogIdent(ok) {
+			t.Errorf("ValidCatalogIdent(%q) = false, want true", ok)
+		}
+	}
+	for _, bad := range []string{"", ".", "..", "has space", "semi;colon", "slash/a"} {
+		if ValidCatalogIdent(bad) {
+			t.Errorf("ValidCatalogIdent(%q) = true, want false", bad)
+		}
+	}
+	if ValidCatalogIdent(string(make([]byte, 0))) {
+		t.Error("empty slice must be invalid")
+	}
+	long := string(make([]byte, 0))
+	for i := 0; i < MaxCatalogIdentLen+1; i++ {
+		long += "a"
+	}
+	if ValidCatalogIdent(long) {
+		t.Errorf("%d-char ident must be invalid (cap %d)", len(long), MaxCatalogIdentLen)
+	}
+}

@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
-	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
 
 const catalogSuiteMinErrorBytes = 128
@@ -302,13 +301,7 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 }
 
 func peekModelField(body []byte) (string, error) {
-	var probe struct {
-		Model string `json:"model"`
-	}
-	if err := wire.DecodeTolerant(body, &probe); err != nil {
-		return "", err
-	}
-	return probe.Model, nil
+	return transcode.TopLevelModel(body)
 }
 
 func (h *CatalogSuiteHandler) shapeForCompletion(r *http.Request) transcode.CatalogShape {

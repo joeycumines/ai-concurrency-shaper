@@ -149,7 +149,7 @@ func parseCatalogSuite(raw string) (CatalogSuiteConfig, error) {
 }
 
 func validCatalogSuiteName(name string) bool {
-	return name != "." && name != ".." && validModelTableIdent(name, modelTableMaxSurrogateLen)
+	return transcode.ValidCatalogIdent(name)
 }
 
 func cleanCatalogPrefix(prefix string) (string, error) {
