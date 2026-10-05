@@ -429,6 +429,13 @@ type openAICatalogEntry struct {
 	Pricing         *openAIPricing `json:"pricing,omitempty"`
 	ContextWindow   *int           `json:"context_window,omitempty"`
 	MaxOutputTokens *int           `json:"max_output_tokens,omitempty"`
+	// InputModalities is the semi-standard extension this gateway uses to
+	// advertise modality support in the OpenAI dialect (DeepSeek documents
+	// the same flat top-level array; OpenAI's own shape has no modality
+	// field — see scratch/modality-research.md). Always present, never
+	// omitted: an undeclared modality list defaults to ["text"] via
+	// catalogModalities, matching the Codex dialect's default.
+	InputModalities []string `json:"input_modalities"`
 }
 
 func (h *CatalogHandler) openAIDocument() openAICatalogDocument {
@@ -457,6 +464,7 @@ func (h *CatalogHandler) openAIEntry(model CatalogModel) openAICatalogEntry {
 		Tags:            slices.Clone(model.Tags),
 		ContextWindow:   model.Context,
 		MaxOutputTokens: model.MaxOutput,
+		InputModalities: catalogModalities(model.Modalities),
 	}
 	if model.CostInput != nil || model.CostOutput != nil {
 		entry.Pricing = &openAIPricing{

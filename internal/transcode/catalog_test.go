@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -251,10 +252,11 @@ func TestCatalogOpenAIEntryGolden(t *testing.T) {
 	var document struct {
 		Object string `json:"object"`
 		Data   []struct {
-			ID      string `json:"id"`
-			Object  string `json:"object"`
-			Created int64  `json:"created"`
-			OwnedBy string `json:"owned_by"`
+			ID              string   `json:"id"`
+			Object          string   `json:"object"`
+			Created         int64    `json:"created"`
+			OwnedBy         string   `json:"owned_by"`
+			InputModalities []string `json:"input_modalities"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &document); err != nil {
@@ -270,6 +272,31 @@ func TestCatalogOpenAIEntryGolden(t *testing.T) {
 		entry := document.Data[i]
 		if entry.ID != want || entry.Object != "model" || entry.Created != 0 || entry.OwnedBy != "TestProv" {
 			t.Errorf("data[%d] = %+v, want %q owned_by TestProv", i, entry, want)
+		}
+	}
+	// The OpenAI dialect carries the semi-standard input_modalities extension
+	// on every entry: declared modalities verbatim, undeclared defaulting to
+	// ["text"] like the Codex dialect. The field must be present even for the
+	// bare model (no omitempty), so check the raw JSON too.
+	wantModalities := map[string][]string{
+		"kimi-k3":    {"text", "image"},
+		"glm-5.2":    {"text"},
+		"bare-model": {"text"},
+	}
+	for _, entry := range document.Data {
+		if !slices.Equal(entry.InputModalities, wantModalities[entry.ID]) {
+			t.Errorf("%s input_modalities = %v, want %v", entry.ID, entry.InputModalities, wantModalities[entry.ID])
+		}
+	}
+	var raw struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range raw.Data {
+		if _, ok := entry["input_modalities"]; !ok {
+			t.Errorf("entry %v omits input_modalities", entry["id"])
 		}
 	}
 	if strings.Contains(rec.Body.String(), "shutdown_date") {
