@@ -239,7 +239,13 @@ func (h *CatalogSuiteHandler) serveCompletion(w http.ResponseWriter, r *http.Req
 		timer.Stop()
 		_ = originalBody.Close()
 		clearDeadline()
-		if timedOut.Load() || errors.Is(err, os.ErrDeadlineExceeded) {
+		// The timeout verdict comes from the read itself: a body that arrived
+		// whole (err == nil) is served even if the timer fired in the gap
+		// between ReadAll returning and Stop taking effect — rejecting it
+		// would spuriously 408 a valid request whose delivery landed exactly
+		// at the inspection deadline. The AfterFunc close still unblocks a
+		// hung read; its flag is only meaningful when the read failed.
+		if err != nil && (timedOut.Load() || errors.Is(err, os.ErrDeadlineExceeded)) {
 			h.writeDialectError(w, shape, http.StatusRequestTimeout, "timed out reading request body")
 			return
 		}

@@ -1549,11 +1549,38 @@ func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, ha
 // method-scoped: OPTIONS/GET/HEAD/DELETE on a mapped path pass through
 // transparently.
 func (p *Proxy) lookupTranscodeHandler(r *http.Request) http.Handler {
+	if len(p.transcodeHandlerMap) == 0 {
+		return nil
+	}
 	key, err := transcode.NewRouteKey(r.Method, r.URL.Path)
 	if err != nil {
 		return nil
 	}
+	return p.lookupTranscodeHandlerKey(key)
+}
+
+// lookupTranscodeHandlerKey returns the transcode handler for an
+// already-built key. The key is built once per request and shared with the
+// native lookup so the hot path pays route-key construction at most once.
+func (p *Proxy) lookupTranscodeHandlerKey(key transcode.RouteKey) http.Handler {
+	if len(p.transcodeHandlerMap) == 0 {
+		return nil
+	}
 	return p.transcodeHandlerMap[key]
+}
+
+// lookupRouteTargets resolves the request's method+path to its native route
+// and transcode handler with a single route-key construction, so the paired
+// lookups on the serve path never pay key construction twice.
+func (p *Proxy) lookupRouteTargets(r *http.Request) (*NativeRoute, http.Handler) {
+	if len(p.nativeRoutes) == 0 && len(p.transcodeHandlerMap) == 0 {
+		return nil, nil
+	}
+	key, err := transcode.NewRouteKey(r.Method, r.URL.Path)
+	if err != nil {
+		return nil, nil
+	}
+	return p.lookupNativeRouteKey(key), p.lookupTranscodeHandlerKey(key)
 }
 
 // dispatchAfterNativeRoute answers one request whose method+path sits on a
@@ -1774,9 +1801,10 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 				localPanic = true
 			}
 		}()
-		if nr := p.lookupNativeRoute(r); nr != nil {
+		nr, handler := p.lookupRouteTargets(r)
+		if nr != nil {
 			p.dispatchAfterNativeRoute(w, r, nr)
-		} else if handler := p.lookupTranscodeHandler(r); handler != nil {
+		} else if handler != nil {
 			p.serveTranscodeHandler(w, r, handler)
 		} else {
 			p.inner.ServeHTTP(w, r)
@@ -2225,9 +2253,10 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 				localPanic = true
 			}
 		}()
-		if nr := p.lookupNativeRoute(r); nr != nil {
+		nr, handler := p.lookupRouteTargets(r)
+		if nr != nil {
 			p.dispatchAfterNativeRoute(w, r, nr)
-		} else if handler := p.lookupTranscodeHandler(r); handler != nil {
+		} else if handler != nil {
 			p.serveTranscodeHandler(w, r, handler)
 		} else {
 			p.inner.ServeHTTP(w, r)
