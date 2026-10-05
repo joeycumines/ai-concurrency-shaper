@@ -512,15 +512,39 @@ func (h *CatalogSuiteHandler) writeModelNotFoundError(w http.ResponseWriter, sha
 }
 
 // errTypeForStatus and errCodeForStatus map a status to the suite's generic
-// error type/code. They delegate to the transcode package's shared mapping so
-// the catalog-suite errors render the same type/code as every other
-// client-facing error surface. The model-lookup 404s keep their deliberate
-// model-specific rendering (not_found_error / model_not_found, pinned by
-// tests) at their own call sites instead of in this generic table.
+// error type/code. The table is the suite's own, kept verbatim from before
+// the client-error unification: the completion-path 404s this table serves
+// are generic writeDialectError envelopes (unknown model, unmatched route),
+// whose wire verdicts predate the shared mapping and are pinned by tests.
+// The model-lookup 404s keep their deliberate model-specific rendering
+// (not_found_error / model_not_found, pinned by tests) at their own call
+// sites instead of in this generic table.
 func errTypeForStatus(status int) string {
-	return transcode.TypeForStatus(status)
+	switch status {
+	case http.StatusNotFound:
+		return "invalid_request_error"
+	case http.StatusBadRequest:
+		return "invalid_request_error"
+	case http.StatusServiceUnavailable:
+		return "api_error"
+	case http.StatusRequestEntityTooLarge:
+		return "request_too_large"
+	default:
+		return "api_error"
+	}
 }
 
 func errCodeForStatus(status int) string {
-	return transcode.CodeForStatus(status)
+	switch status {
+	case http.StatusNotFound:
+		return "model_not_found"
+	case http.StatusBadRequest:
+		return "bad_request"
+	case http.StatusServiceUnavailable:
+		return "service_unavailable"
+	case http.StatusRequestEntityTooLarge:
+		return "request_too_large"
+	default:
+		return "api_error"
+	}
 }

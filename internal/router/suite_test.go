@@ -883,3 +883,121 @@ func TestCatalogSuiteKnownOversizeContentLengthFailsBeforeProvider(t *testing.T)
 		t.Fatal("known oversize request reached provider target")
 	}
 }
+
+// TestCatalogSuiteGenericErrorVerdicts pins the suite's own generic 4xx
+// type/code table: completion-path 404s are generic envelopes (unknown model,
+// unmatched route), whose wire verdicts predate the client-error unification
+// and must not drift with the shared mapping. The single-model 404 pins live
+// in TestCatalogSuite_TrailingSlashAndErrorFormat; the 413-type pin lives in
+// TestCatalogSuiteCompletion413Type below.
+func TestCatalogSuiteGenericErrorVerdicts(t *testing.T) {
+	dummyTarget := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	newSuite := func() *router.CatalogSuiteHandler {
+		return router.NewCatalogSuiteHandler(router.SuiteConfig{
+			Name:         "suite-verdicts",
+			Prefix:       "/verdicts",
+			DefaultShape: transcode.CatalogShapeOpenAI,
+			Strict:       true,
+			ModelRoutes: []router.ModelRoute{
+				{Model: "known-model", Handler: dummyTarget, SupportedRoutes: allSuiteRoutes()},
+			},
+		})
+	}
+	serve := func(suite *router.CatalogSuiteHandler, body string) (int, string, string) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+			bytes.NewBufferString(body))
+		rec := httptest.NewRecorder()
+		suite.ServeHTTP(rec, req)
+		var doc struct {
+			Error struct {
+				Type string `json:"type"`
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("unmarshal error envelope: %v: %s", err, rec.Body.String())
+		}
+		return rec.Code, doc.Error.Type, doc.Error.Code
+	}
+	// Unknown model on a completion route: generic 404 envelope.
+	if code, errType, errCode := serve(newSuite(), `{"model":"unknown-model"}`); code != http.StatusNotFound ||
+		errType != "invalid_request_error" || errCode != "model_not_found" {
+		t.Errorf("unknown-model completion = %d %q/%q, want 404 invalid_request_error/model_not_found",
+			code, errType, errCode)
+	}
+	// Known model on an unsupported route: generic 404 envelope.
+	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:         "suite-verdicts-route",
+		Prefix:       "/verdicts-route",
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		Strict:       true,
+		ModelRoutes: []router.ModelRoute{
+			{Model: "known-model", Handler: dummyTarget, SupportedRoutes: suiteRouteSet("/v1/messages")},
+		},
+	})
+	if code, errType, errCode := serve(suite, `{"model":"known-model"}`); code != http.StatusNotFound ||
+		errType != "invalid_request_error" || errCode != "model_not_found" {
+		t.Errorf("unsupported-route completion = %d %q/%q, want 404 invalid_request_error/model_not_found",
+			code, errType, errCode)
+	}
+	// Malformed body: generic 400 envelope.
+	if code, errType, errCode := serve(newSuite(), `{"model":`); code != http.StatusBadRequest ||
+		errType != "invalid_request_error" || errCode != "bad_request" {
+		t.Errorf("malformed completion = %d %q/%q, want 400 invalid_request_error/bad_request",
+			code, errType, errCode)
+	}
+	// Empty catalog: 503 service_unavailable envelope.
+	empty := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Name:         "suite-verdicts-empty",
+		Prefix:       "/verdicts-empty",
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		Strict:       true,
+	})
+	if code, errType, errCode := serve(empty, `{"model":"any"}`); code != http.StatusServiceUnavailable ||
+		errType != "api_error" || errCode != "service_unavailable" {
+		t.Errorf("empty-suite completion = %d %q/%q, want 503 api_error/service_unavailable",
+			code, errType, errCode)
+	}
+}
+
+// TestCatalogSuiteCompletion413Type pins the suite's generic 413 verdict:
+// an oversize completion body renders request_too_large as both type and
+// code, not the shared mapping's invalid_request_error type.
+func TestCatalogSuiteCompletion413Type(t *testing.T) {
+	target := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
+		Strict:       true,
+		DefaultShape: transcode.CatalogShapeOpenAI,
+		Limits:       transcode.BodyLimits{AcceptedRequestBytes: 1},
+		ModelRoutes: []router.ModelRoute{
+			{Model: "m1", Handler: target, SupportedRoutes: allSuiteRoutes()},
+		},
+	})
+	var buf bytes.Buffer
+	buf.WriteString(`{"model":"m1","pad":"`)
+	buf.Write(bytes.Repeat([]byte("b"), 2<<20))
+	buf.WriteString(`"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", &buf)
+	rec := httptest.NewRecorder()
+	suite.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize status = %d, want 413: %s", rec.Code, rec.Body.String())
+	}
+	var doc struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Error.Type != "request_too_large" || doc.Error.Code != "request_too_large" {
+		t.Errorf("oversize envelope = %q/%q, want request_too_large/request_too_large",
+			doc.Error.Type, doc.Error.Code)
+	}
+}

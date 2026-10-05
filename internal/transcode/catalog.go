@@ -324,11 +324,18 @@ func marshalCatalogDocument(document any, limit int64) ([]byte, error) {
 
 // writeDialectError writes a bounded dialect error envelope. The message bound
 // keeps a hostile servable list from amplifying client-visible text. The
-// type/code come from the shared status mapping so the catalog renders one
-// status as one type/code, like every other client-facing error surface.
+// type/code are the catalog's own, kept verbatim from before the client-error
+// unification: generic client faults render invalid_request_error/bad_request
+// and local failures render api_error/internal_server_error, pinned by tests.
+// The single-model 404 keeps its deliberate model-specific rendering
+// (not_found_error / model_not_found, pinned by tests) at its own call site
+// instead of in this generic table.
 func (h *CatalogHandler) writeDialectError(w http.ResponseWriter, shape CatalogShape, status int, err error) {
 	message := BoundErrorMessage(err.Error(), h.limits.ErrorMessageBytes)
-	errorType, errorCode := TypeForStatus(status), CodeForStatus(status)
+	errorType, errorCode := "invalid_request_error", "bad_request"
+	if status >= http.StatusInternalServerError {
+		errorType, errorCode = "api_error", "internal_server_error"
+	}
 	var body []byte
 	switch shape {
 	case CatalogShapeAnthropic:

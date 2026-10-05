@@ -147,13 +147,6 @@ func normalizeCanonicalError(e CanonicalAPIError) CanonicalAPIError {
 	return e
 }
 
-// TypeForStatus maps a status to an OpenAI-style error type. It is the
-// single mapping shared by every client-facing error renderer, so one status
-// renders one type on every surface.
-func TypeForStatus(status int) string {
-	return typeForStatus(status)
-}
-
 // typeForStatus maps a status to an OpenAI-style error type.
 func typeForStatus(status int) string {
 	switch status {
@@ -175,13 +168,6 @@ func typeForStatus(status int) string {
 	}
 }
 
-// CodeForStatus maps a status to a stable error code. It is the single
-// mapping shared by every client-facing error renderer, so one status
-// renders one code on every surface.
-func CodeForStatus(status int) string {
-	return codeForStatus(status)
-}
-
 // codeForStatus maps a status to a stable error code.
 func codeForStatus(status int) string {
 	switch status {
@@ -192,11 +178,18 @@ func codeForStatus(status int) string {
 	case 529:
 		return "overloaded"
 	default:
-		return strings.ReplaceAll(
+		code := strings.ReplaceAll(
 			strings.ToLower(http.StatusText(status)),
 			" ",
 			"_",
 		)
+		if code == "" {
+			// http.StatusText is empty for unknown statuses; an empty code
+			// would break clients expecting a stable snake_case code, so
+			// fall back to the generic local-failure code.
+			return "api_error"
+		}
+		return code
 	}
 }
 

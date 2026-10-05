@@ -948,3 +948,94 @@ func TestCatalogAudioVideoVocabulary(t *testing.T) {
 		}
 	}
 }
+
+// TestCatalogGenericErrorVerdicts pins the catalog's own generic 4xx/5xx
+// type/code table: client faults render invalid_request_error/bad_request
+// and local failures render api_error/internal_server_error, exactly as
+// before the client-error unification. The single-model 404 pins above
+// (model_not_found / not_found_error) cover the model-specific path.
+func TestCatalogGenericErrorVerdicts(t *testing.T) {
+	handler := catalogFixture(t)
+	serve := func(target string) (int, map[string]any) {
+		t.Helper()
+		rec := catalogGet(t, handler, target, nil)
+		var doc struct {
+			Error map[string]any `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("unmarshal %s envelope: %v: %s", target, err, rec.Body.String())
+		}
+		return rec.Code, doc.Error
+	}
+	// Unknown format: generic 400 envelope.
+	if code, envelope := serve("/v1/models?format=bogus"); code != http.StatusBadRequest ||
+		envelope["type"] != "invalid_request_error" || envelope["code"] != "bad_request" {
+		t.Errorf("unknown-format = %d %v, want 400 invalid_request_error/bad_request", code, envelope)
+	}
+	// Unknown query key in the Anthropic dialect: generic 400 envelope.
+	rec := catalogGet(t, handler, "/v1/models?bogus-key=1", map[string]string{"Anthropic-Version": "2023-06-01"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("anthropic unknown-format status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	var anthDoc struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &anthDoc); err != nil {
+		t.Fatal(err)
+	}
+	if anthDoc.Type != "error" || anthDoc.Error.Type != "invalid_request_error" {
+		t.Errorf("anthropic unknown-format = %+v, want error/invalid_request_error", anthDoc)
+	}
+}
+
+// TestCodeForStatusNeverEmpty pins the shared code fallback: statuses with
+// no StatusText (0, out-of-range) render api_error, never an empty code.
+func TestCodeForStatusNeverEmpty(t *testing.T) {
+	for _, status := range []int{0, 599, 999, -1} {
+		if got := codeForStatus(status); got == "" {
+			t.Errorf("codeForStatus(%d) = empty, want a stable code", status)
+		}
+	}
+	if got := codeForStatus(0); got != "api_error" {
+		t.Errorf("codeForStatus(0) = %q, want api_error", got)
+	}
+}
+
+// TestCatalogGenericServerErrorVerdict pins the catalog's generic 5xx side:
+// a local marshal failure renders api_error/internal_server_error. The
+// marshal path is exercised through marshalCatalogDocument's bound by
+// rendering a document over a tiny GeneratedResponseBytes limit via the
+// handler's ServeHTTP.
+func TestCatalogGenericServerErrorVerdict(t *testing.T) {
+	big := 1 << 20
+	handler, err := NewCatalogHandler(CatalogConfig{
+		ProviderName: "TestProv",
+		Models: []CatalogModel{
+			{Surrogate: "m1", Description: string(make([]byte, big))},
+		},
+		Limits: BodyLimits{GeneratedResponseBytes: 1 << 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := catalogGet(t, handler, "/v1/models?format=openai", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	var doc struct {
+		Error struct {
+			Type string `json:"type"`
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Error.Type != "api_error" || doc.Error.Code != "internal_server_error" {
+		t.Errorf("envelope = %q/%q, want api_error/internal_server_error",
+			doc.Error.Type, doc.Error.Code)
+	}
+}

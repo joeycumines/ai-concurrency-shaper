@@ -17,6 +17,7 @@ package router_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -224,6 +225,23 @@ func TestCatalogSuiteStalledBodyHitsRealReadDeadline(t *testing.T) {
 		defer got.resp.Body.Close()
 		if got.resp.StatusCode != http.StatusRequestTimeout {
 			t.Fatalf("stalled body status = %d, want 408", got.resp.StatusCode)
+		}
+		body, err := io.ReadAll(io.LimitReader(got.resp.Body, 1<<20))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct {
+			Error struct {
+				Type string `json:"type"`
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Fatalf("unmarshal 408 envelope: %v: %s", err, body)
+		}
+		if envelope.Error.Type != "api_error" || envelope.Error.Code != "api_error" {
+			t.Errorf("stalled body envelope = %q/%q, want api_error/api_error",
+				envelope.Error.Type, envelope.Error.Code)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("stalled request body did not hit inspection deadline")
