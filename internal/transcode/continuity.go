@@ -89,24 +89,14 @@ func continuityKey(mappingKey, responseID string) string {
 }
 
 // Record stores the canonical conversation that produced responseID under
-// the emitting mapping. Turns are copied by slice header only: canonical
-// parts are immutable after decode, and the store never mutates them.
-// Recording an empty turn list is a no-op. When storeFalse is set (the
-// client sent store:false) nothing is retained.
+// the emitting mapping. It is a thin wrapper over RecordEvicted discarding
+// the eviction count, so the copy/store/evict sequence lives in exactly one
+// place. Turns are copied by slice header only: canonical parts are immutable
+// after decode, and the store never mutates them. Recording an empty turn
+// list is a no-op. When storeFalse is set (the client sent store:false)
+// nothing is retained.
 func (s *ContinuityStore) Record(mappingKey, responseID string, turns []CanonicalTurn, depth int, storeFalse bool) {
-	if s == nil || responseID == "" || len(turns) == 0 || storeFalse {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := continuityKey(mappingKey, responseID)
-	if _, ok := s.chains[key]; !ok {
-		s.order = append(s.order, key)
-	}
-	copied := make([]CanonicalTurn, len(turns))
-	copy(copied, turns)
-	s.chains[key] = &continuityChain{turns: copied, depth: depth, updated: s.now()}
-	s.evictLocked()
+	_ = s.RecordEvicted(mappingKey, responseID, turns, depth, storeFalse)
 }
 
 // RecordEvicted stores like Record and reports how many chains eviction

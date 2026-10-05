@@ -219,17 +219,32 @@ func (s *chatResponsesStreamState) checkAccumulated(builder *strings.Builder, ad
 	return nil
 }
 
+// chargeStreamIdentity adds n bytes of tool-call identity (call id, function
+// name) to the exchange accumulated total: identity renders into the terminal
+// envelope and the done events, so it is part of the repeated semantic state
+// the release bounds derive from. It is the single accounting rule behind
+// both directions' chargeIdentity methods; direction names the stream for the
+// error text. The caller wraps the error in its own wireError so the exchange
+// classification is unchanged.
+func chargeStreamIdentity(accumulated *int64, n int, direction string) error {
+	*accumulated += int64(n)
+	if *accumulated > maxStreamTotalAccumulatedBytes {
+		return fmt.Errorf(
+			"%s stream accumulated tool-call identity exceeds the exchange total of %d bytes",
+			direction,
+			maxStreamTotalAccumulatedBytes,
+		)
+	}
+	return nil
+}
+
 // chargeIdentity adds n bytes of tool-call identity (call id, function name)
 // to the exchange accumulated total: identity renders into the terminal
 // envelope and the done events, so it is part of the repeated semantic
 // state the release bounds derive from.
 func (s *chatResponsesStreamState) chargeIdentity(n int) error {
-	s.totalAccumulated += int64(n)
-	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
-		return s.wireError(fmt.Errorf(
-			"chat stream accumulated tool-call identity exceeds the exchange total of %d bytes",
-			maxStreamTotalAccumulatedBytes,
-		))
+	if err := chargeStreamIdentity(&s.totalAccumulated, n, "chat"); err != nil {
+		return s.wireError(err)
 	}
 	return nil
 }
@@ -239,12 +254,8 @@ func (s *chatResponsesStreamState) chargeIdentity(n int) error {
 // the identity renders into the generated tool_use block start and the
 // terminal reconciliation.
 func (s *anthropicResponsesStreamState) chargeIdentity(n int) error {
-	s.totalAccumulated += int64(n)
-	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
-		return s.wireError(fmt.Errorf(
-			"responses stream accumulated tool-call identity exceeds the exchange total of %d bytes",
-			maxStreamTotalAccumulatedBytes,
-		))
+	if err := chargeStreamIdentity(&s.totalAccumulated, n, "responses"); err != nil {
+		return s.wireError(err)
 	}
 	return nil
 }
@@ -352,18 +363,22 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 // add, and the saturated bound when the addition cannot be represented: the
 // source's arithmetic is never an exchange failure
 // (internal/transcode/errors.go documents this), and the emitted value is never
-// a silent wrap. This mirrors usage_clamp.go's derivedUsageTotal, which
-// saturates to the maximum for the non-streaming renderer.
+// a silent wrap. It delegates to usage_clamp.go's checkedUsageSum so the
+// overflow rule lives in one place; the int width is the wire's width, and
+// the int64 conversion is lossless on every supported build. At 64-bit
+// extremes the old int-width wrap check could return a wrapped sum as exact;
+// the delegation fails closed (saturate) there instead, which is the
+// documented policy, not a behavior change on any representable count.
 func saturatingUsageSum(a, b int) int {
 	if a < 0 || b < 0 {
 		// A negative source count has no defensible sum; the clamp records
 		// usage_negative_counts naming the component it corrected.
 		return 0
 	}
-	if a > math.MaxInt-b {
-		return math.MaxInt
+	if sum, ok := checkedUsageSum(int64(a), int64(b)); ok {
+		return int(sum)
 	}
-	return a + b
+	return math.MaxInt
 }
 
 // saturatingUsageDifference returns known - other, clamped at zero. The source
@@ -374,12 +389,16 @@ func saturatingUsageSum(a, b int) int {
 // the other. Zero is the only defensible count for the derived component -
 // any other value, including a copy of the sibling operand, would report a
 // number derived from nothing. The sibling usage clamp then records the
-// resulting total mismatch, so the correction stays visible.
+// resulting total mismatch, so the correction stays visible. The subtraction
+// runs in int64 so the clamp rule (negatives to zero, never wrap) matches
+// usage_clamp.go's clampNegative on every width. At 64-bit extremes the old
+// int-width subtraction could return a wrapped negative, violating its own
+// clamped-at-zero contract; the int64 form returns zero there instead.
 func saturatingUsageDifference(known, other int) int {
-	if known < other {
-		return 0
+	if diff := int64(known) - int64(other); diff > 0 {
+		return int(diff)
 	}
-	return known - other
+	return 0
 }
 
 // chatUsageKeyIsNull reports whether the named key inside the `usage` object
@@ -412,23 +431,30 @@ func chatUsageKeyIsNull(chunkData json.RawMessage, key string) bool {
 
 // checkedAdd returns a+b and whether the result fits. Token counts are
 // bounded in practice, but a hostile sum must never wrap into a wrong value.
+// It delegates to usage_clamp.go's checkedUsageSum so the overflow rule lives
+// in one place; the int64 conversion is lossless on every supported build.
 func checkedAdd(a, b int) (int, bool) {
-	sum := a + b
-	if (b > 0 && sum < a) || (b < 0 && sum > a) {
+	sum, ok := checkedUsageSum(int64(a), int64(b))
+	if !ok {
 		return 0, false
 	}
-	return sum, true
+	return int(sum), true
 }
 
 // checkedSub returns a-b and whether the result is non-negative and fits.
+// The non-negativity is the caller's derivation rule (a derived component is
+// never negative). The overflow pre-check cannot itself wrap (b < 0 keeps
+// MaxInt64+b representable), so the int64 subtraction that follows is exact;
+// like checkedUsageSum it fails closed on extremes rather than wrapping.
 func checkedSub(a, b int) (int, bool) {
-	if b > 0 && a < b {
+	if b < 0 && int64(a) > math.MaxInt64+int64(b) {
 		return 0, false
 	}
-	if b < 0 && a > a-b {
+	diff := int64(a) - int64(b)
+	if diff < 0 {
 		return 0, false
 	}
-	return a - b, true
+	return int(diff), true
 }
 
 // noteDerivedUsageTotal records the usage_total_derived note exactly once per
