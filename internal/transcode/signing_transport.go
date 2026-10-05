@@ -9,11 +9,13 @@ package transcode
 // local construction/auth failure (neutral), never an upstream failure.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 )
 
 // signerContextKey carries the request signer through the request context.
@@ -61,13 +63,15 @@ func (e *SigningError) IsNonRetryable() bool { return true }
 // see errSignerConsumedUnrebuildableBody. That refusal watches the body this
 // transport installed, so it holds for a signer that leaves the body it was
 // given in place; a signer that substitutes a body of its own is taken at its
-// word and what it installed is what gets sent, byte for byte, on this and
-// every later attempt that also substituted (the rebuild is skipped so the
-// wire never carries an unsigned document; the body fetched for signing is
-// closed once the send body is decided). When the signer fails without
-// substituting, the plain rebuild is fetched for the send as before, so a
-// consumed body is still repaired; the rebuild still runs whenever the signer
-// leaves the transport-fetched body alone.
+// word and what it installed is what gets sent, byte for byte: the
+// substituted bytes are buffered so the clone carries their Content-Length
+// and a replayable GetBody (a rewind re-sends the signed bytes, never the
+// pre-signing original), and the pre-signing rebuild is skipped so the wire
+// never carries an unsigned document. The body fetched for signing is closed
+// once the send body is decided. When the signer fails without substituting,
+// the plain rebuild is fetched for the send as before, so a consumed body is
+// still repaired; the rebuild still runs whenever the signer leaves the
+// transport-fetched body alone.
 type SigningTransport struct {
 	Inner http.RoundTripper
 }
@@ -199,6 +203,30 @@ func (t *SigningTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 	if rebuilt != nil {
 		_ = rebuilt.Close()
 		rebuilt = nil
+	}
+	// resendableSubstituted buffers the signer-installed body so the clone
+	// carries a correct Content-Length and a replayable GetBody: a rewind (an
+	// HTTP/2 stream reset replaying via GetBody) must re-send the signed
+	// bytes, never the pre-signing original. The bytes are the signer's own
+	// construction, not client-controlled input, so no client-size bound
+	// applies; a read failure here is a local SigningError, never a
+	// truncated send.
+	var substitutedBytes []byte
+	if substituted != nil {
+		buffered, err := io.ReadAll(substituted)
+		if err != nil {
+			_ = substituted.Close()
+			return nil, discardAttempt(nil, fmt.Errorf("read substituted request body: %w", err))
+		}
+		substitutedBytes = buffered
+		_ = substituted.Close()
+		substituted = io.NopCloser(bytes.NewReader(substitutedBytes))
+		clone.Body = substituted
+		clone.GetBody = func() (io.ReadCloser, error) {
+			return io.NopCloser(bytes.NewReader(substitutedBytes)), nil
+		}
+		clone.ContentLength = int64(len(substitutedBytes))
+		clone.Header.Set("Content-Length", strconv.Itoa(len(substitutedBytes)))
 	}
 	if req.GetBody != nil && substituted == nil {
 		body, err := req.GetBody()

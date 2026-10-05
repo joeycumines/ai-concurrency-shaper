@@ -129,8 +129,16 @@ func TestSigningTransportClosesASubstitutedBodyItAbandons(t *testing.T) {
 		}
 	})
 
-	t.Run("replaced by a rebuild", func(t *testing.T) {
-		spy := &closeSpy{Reader: strings.NewReader(body)}
+	t.Run("substituted body is sent with its own length and replay", func(t *testing.T) {
+		// The substituted body must be what the inner transport receives:
+		// same bytes through both paths would prove nothing (the old test's
+		// blind spot), so the substitution differs in length, and identity
+		// plus ContentLength plus GetBody-replay are all asserted.
+		const substituted = `{"model":"m","input":"hello, signed world!"}`
+		if len(substituted) == len(body) {
+			t.Fatal("test setup: substituted payload must differ in length from the original")
+		}
+		spy := &closeSpy{Reader: strings.NewReader(substituted)}
 		inner := &recordingTransport{}
 		transport := &SigningTransport{Inner: inner}
 
@@ -142,12 +150,46 @@ func TestSigningTransportClosesASubstitutedBodyItAbandons(t *testing.T) {
 		}
 		_ = resp.Body.Close()
 		if spy.closes != 1 {
-			t.Fatalf("substituted body closed %d times, want 1: it was replaced on the request, so nobody else will close it", spy.closes)
+			t.Fatalf("substituted body closed %d times, want 1: the transport buffered it, so it owns the original", spy.closes)
 		}
-		if inner.sent != body {
-			t.Fatalf("upstream body = %q, want the rebuilt payload", inner.sent)
+		if inner.sent != substituted {
+			t.Fatalf("upstream body = %q, want the substituted payload %q", inner.sent, substituted)
+		}
+		if inner.gotBody == spy {
+			t.Error("inner transport received the signer's own reader: it must receive the buffered copy so GetBody can replay it")
 		}
 	})
+}
+
+func TestSigningTransportServesSubstitutedBodiesOfAnyLength(t *testing.T) {
+	const body = `{"model":"m","input":"hello"}`
+	for _, tc := range []struct {
+		name string
+		sub  string
+	}{
+		{"same length", strings.Repeat("s", len(body))},
+		{"one byte longer", strings.Repeat("s", len(body)+1)},
+		{"one byte shorter", strings.Repeat("s", len(body)-1)},
+		{"empty", ""},
+		{"4096 bytes longer", strings.Repeat("s", len(body)+4096)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := &recordingTransport{}
+			transport := &SigningTransport{Inner: inner}
+
+			req := signingRequest(body, true)
+			req = req.WithContext(WithRequestSigner(req.Context(),
+				&substitutingSigner{body: io.NopCloser(strings.NewReader(tc.sub))}))
+			resp, err := transport.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("RoundTrip: %v", err)
+			}
+			_ = resp.Body.Close()
+			if inner.sent != tc.sub {
+				t.Fatalf("upstream body = %d bytes, want the %d substituted bytes", len(inner.sent), len(tc.sub))
+			}
+		})
+	}
 }
 
 func signingRequest(body string, withGetBody bool) *http.Request {
