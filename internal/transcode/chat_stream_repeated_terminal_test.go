@@ -521,3 +521,42 @@ func TestStreamRepeatedTerminalDivergentTotalsLastWins(t *testing.T) {
 		t.Fatalf("usage_total_merged recorded %d times, want exactly 1 (the shrink is observable, never silent)", got)
 	}
 }
+
+// TestSameUsageAccountingNilDetailsEqual pins the nil-safe convention: two
+// identical snapshots with absent breakdown carriers are the same
+// accounting, so an exact repeat must not record a merge note. (The stream
+// converter always allocates the carriers today, so this pins the
+// comparison contract directly rather than through a stream fixture.)
+func TestSameUsageAccountingNilDetailsEqual(t *testing.T) {
+	a := ResponsesUsage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}
+	b := ResponsesUsage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}
+	if !sameUsageAccounting(a, b) {
+		t.Fatalf("identical snapshots with absent breakdowns compare divergent: %+v vs %+v", a, b)
+	}
+	// Nil-vs-present is still divergent: a redelivery that drops a recorded
+	// breakdown replaced a client-observable value.
+	c := ResponsesUsage{
+		InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+		InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 3},
+		OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 1},
+	}
+	if sameUsageAccounting(a, c) {
+		t.Fatalf("absent-vs-present breakdowns compare equal: %+v vs %+v", a, c)
+	}
+	if sameUsageAccounting(c, a) {
+		t.Fatalf("present-vs-absent breakdowns compare equal: %+v vs %+v", c, a)
+	}
+	// Present-vs-present compares by value.
+	d := ResponsesUsage{
+		InputTokens: 10, OutputTokens: 5, TotalTokens: 15,
+		InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 3},
+		OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 1},
+	}
+	if !sameUsageAccounting(c, d) {
+		t.Fatalf("identical breakdown values compare divergent: %+v vs %+v", c, d)
+	}
+	d.InputTokensDetails.CachedTokens = 0
+	if sameUsageAccounting(c, d) {
+		t.Fatalf("differing cached counts compare equal: %+v vs %+v", c, d)
+	}
+}

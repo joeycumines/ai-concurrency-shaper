@@ -602,10 +602,35 @@ func sameUsageAccounting(a, b ResponsesUsage) bool {
 		a.OutputTokens == b.OutputTokens &&
 		a.TotalTokens == b.TotalTokens &&
 		sameCreatedCacheTokens(a.CreatedCacheTokens, b.CreatedCacheTokens) &&
-		a.InputTokensDetails != nil && b.InputTokensDetails != nil &&
-		a.InputTokensDetails.CachedTokens == b.InputTokensDetails.CachedTokens &&
-		a.OutputTokensDetails != nil && b.OutputTokensDetails != nil &&
-		a.OutputTokensDetails.ReasoningTokens == b.OutputTokensDetails.ReasoningTokens
+		sameCachedTokens(a.InputTokensDetails, b.InputTokensDetails) &&
+		sameReasoningTokens(a.OutputTokensDetails, b.OutputTokensDetails)
+}
+
+// sameCachedTokens compares two optional input breakdowns by value, treating
+// two absent carriers as equal — the same nil-safe convention as
+// sameCreatedCacheTokens below.
+func sameCachedTokens(a, b *UsageInputTokensDetails) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return a.CachedTokens == b.CachedTokens
+	}
+}
+
+// sameReasoningTokens compares two optional output breakdowns by value,
+// treating two absent carriers as equal.
+func sameReasoningTokens(a, b *UsageOutputTokensDetails) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return a.ReasoningTokens == b.ReasoningTokens
+	}
 }
 
 // sameCreatedCacheTokens compares two optional counts by value, treating two
