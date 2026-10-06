@@ -19,6 +19,7 @@ internal/transcode/testcorpus/*
 *unreachable func: ToolChoice.MarshalJSON*
 *unreachable func: ToolChoice.UnmarshalJSON*
 *unreachable func: Message.Validate*
+*unreachable func: AssistantAudio.Validate*
 *unreachable func: Stop.Validate*
 *unreachable func: Stop.MarshalJSON*
 *unreachable func: Stop.UnmarshalJSON*

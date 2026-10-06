@@ -1,6 +1,6 @@
 package transcode
 
-// J5 regression tests: the Chat stream lifecycle —
+// Regression tests: the Chat stream lifecycle —
 // header-derived stream intent is written back into the rendered request,
 // include_usage is requested, chunk identity and creation time are pinned
 // before the first client event, the usage-only tail chunk is consumed into
@@ -441,7 +441,7 @@ func TestChatStreamComposedAnthropicUsageTail(t *testing.T) {
 	)
 	anthropic := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
@@ -557,11 +557,11 @@ func TestChatStreamChoiceIndexAndIdentityEnforced(t *testing.T) {
 	}
 }
 
-// j6PermissivePolicy returns a policy approving the response-side losses the
+// permissiveLossPolicy returns a policy approving the response-side losses the
 // Responses->Messages path triggers (reasoning and usage timing) plus the
 // tool strictness loss a messages->responses mapping requires to serve tool
 // traffic.
-func j6PermissivePolicy() LossPolicy {
+func permissiveLossPolicy() LossPolicy {
 	return LossPolicy{Allowed: map[Feature]struct{}{
 		FeatureToolSchemaStrictness:   {},
 		FeatureReasoningSummary:       {},
@@ -594,7 +594,7 @@ func TestChatStreamComposedCreatedCacheTokens(t *testing.T) {
 		)
 		anthropic := newAnthropicResponsesStreamState(
 			testStreamContext(),
-			j6PermissivePolicy(),
+			permissiveLossPolicy(),
 			ChatCapabilities{},
 			"msg_1",
 			"claude-x",

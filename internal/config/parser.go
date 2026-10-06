@@ -91,7 +91,24 @@ func Parse(args []string) (*Config, error) {
 		if err := fs.Parse(serverSec.lex); err != nil {
 			return nil, err
 		}
-		cfg.Providers = []*Provider{p0}
+		// A suite-only legacy invocation has no implicit provider. If any
+		// provider option was supplied, keep the implicit provider so normal
+		// semantic validation still reports -upstream is required instead of
+		// silently discarding that option.
+		providerOptions := false
+		for i := 0; i < len(serverSec.lex); i++ {
+			meta, ok := flagMetadata()[flagTokenName(serverSec.lex[i])]
+			if !ok || meta.scope != scopeProvider {
+				continue
+			}
+			providerOptions = true
+			if !strings.Contains(serverSec.lex[i], "=") && !meta.isBool {
+				i++
+			}
+		}
+		if p0.Upstream != "" || len(cfg.Server.CatalogSuites) == 0 || providerOptions {
+			cfg.Providers = []*Provider{p0}
+		}
 		return cfg, nil
 	}
 
@@ -116,6 +133,25 @@ func Parse(args []string) (*Config, error) {
 		case scopeAccount:
 			return nil, errors.New("account sections are not yet supported")
 		case scopeProvider:
+			// Mirror of the server-scope check above: a server-scoped flag
+			// inside a provider section is a command-line shape error, not the
+			// provider FlagSet's generic unknown-flag failure. Help is legal at
+			// every scope and is exempt. The walk mirrors tokenize: a
+			// value-taking flag consumes the lexeme that follows it, so a value
+			// that happens to spell a flag name is never misread as one.
+			for i := 0; i < len(s.lex); i++ {
+				tok := s.lex[i]
+				m, ok := flagMetadata()[flagTokenName(tok)]
+				if !ok {
+					continue
+				}
+				if m.scope == scopeServer && !m.isHelp {
+					return nil, fmt.Errorf("%w: server options are not allowed in provider sections: %q", ErrUsage, "-"+flagTokenName(tok))
+				}
+				if !strings.Contains(tok, "=") && !m.isBool {
+					i++
+				}
+			}
 			p := &Provider{}
 			ps := newFlagSet(fmt.Sprintf("provider section %d", len(cfg.Providers)+1))
 			registerProviderFlags(&registrar{fs: ps, meta: map[string]flagMeta{}}, p)

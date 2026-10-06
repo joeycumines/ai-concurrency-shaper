@@ -156,10 +156,13 @@ func Decode(data []byte, dst any) error {
 // but WITHOUT the unknown-field rejection: an unknown field is skipped,
 // never a failure. It is the decode posture for the UPSTREAM provider
 // response envelope — a "subject to change" contract the transcoder does not
-// control. It is never used for the CLIENT contract (whose unknown fields
-// must be rejected to preserve the lossless-transcoding invariant) nor for
-// the content-block unions (whose per-arm strictness is structural contract
-// validation).
+// control — and for a NATIVE passthrough request, where nothing is converted
+// so field coverage belongs to the upstream and only the always-reject
+// structural set protects this proxy's own parsing. It is never used for a
+// CLIENT request that will be converted (whose unknown fields must be
+// rejected to preserve the lossless-transcoding invariant), and the
+// content-block and tool unions keep their per-arm strictness where the
+// decoder into a typed destination still runs them.
 func DecodeTolerant(data []byte, dst any) error {
 	return decode(data, dst, false)
 }

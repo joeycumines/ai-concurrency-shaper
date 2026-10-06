@@ -178,11 +178,18 @@ func codeForStatus(status int) string {
 	case 529:
 		return "overloaded"
 	default:
-		return strings.ReplaceAll(
+		code := strings.ReplaceAll(
 			strings.ToLower(http.StatusText(status)),
 			" ",
 			"_",
 		)
+		if code == "" {
+			// http.StatusText is empty for unknown statuses; an empty code
+			// would break clients expecting a stable snake_case code, so
+			// fall back to the generic local-failure code.
+			return "api_error"
+		}
+		return code
 	}
 }
 

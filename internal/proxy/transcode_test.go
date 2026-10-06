@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -850,7 +852,7 @@ func (w *returnGuardWriter) lateOps() int64 {
 	return w.late.Load()
 }
 
-// TestProxyTranscodeBreakerOutcomeWithRetries verifies gate 20 under the
+// TestProxyTranscodeBreakerOutcomeWithRetries verifies the behaviour under the
 // default CLI-like configuration: a retry-aware transport owns breaker
 // reporting (retryHandlesBreaker), yet a cancelled transcode stream must
 // still be classified from the explicit transcode outcome — never recorded
@@ -1018,7 +1020,7 @@ func TestProxyTranscodeBreakerFailureCountedOnce(t *testing.T) {
 }
 
 // TestProxyTranscodeRateLimitClassification verifies the response-aware
-// failure classification parity with the native path (round-4 fix): a 403
+// failure classification parity with the native path: a 403
 // carrying x-ratelimit-* headers is an upstream failure, and Retry-After: 0
 // is not.
 func TestProxyTranscodeRateLimitClassification(t *testing.T) {
@@ -1142,6 +1144,47 @@ func TestProxyTranscodeMessagesToChatStreaming(t *testing.T) {
 	}
 	if strings.Contains(body, `"type":"error"`) {
 		t.Fatalf("unexpected error event: %q", body)
+	}
+}
+
+// A configured flow log directory is validated at construction: a missing
+// path or a non-directory is a startup error, never a per-request surprise.
+func TestProxyTranscodeFlowLogDirValidated(t *testing.T) {
+	upstreamURL, err := url.Parse("https://upstream.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := func(dir string) error {
+		tm := transcodeMapping(testMessagesResponsesMapping(t))
+		tm.FlowLogDir = dir
+		_, err := New(
+			WithUpstream(upstreamURL),
+			WithMatcher(route.NewMatcher(nil)),
+			WithLimiter(queue.NewLimiterWithCooldown(2, 0)),
+			WithMetrics(metrics.NewCollector()),
+			WithTranscodeMapping(tm),
+		)
+		return err
+	}
+
+	if err := build(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("missing flow log directory accepted at construction")
+	} else if !strings.Contains(err.Error(), "flow log directory") {
+		t.Fatalf("missing directory error = %v", err)
+	}
+
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := build(file); err == nil {
+		t.Fatal("regular file accepted as a flow log directory")
+	} else if !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("non-directory error = %v", err)
+	}
+
+	if err := build(t.TempDir()); err != nil {
+		t.Fatalf("existing directory rejected: %v", err)
 	}
 }
 

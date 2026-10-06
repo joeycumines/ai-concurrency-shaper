@@ -144,7 +144,7 @@ func TestLogRing_ConcurrentWrite(t *testing.T) {
 	}
 }
 
-// ─── TUI-08: visibleLogLines / renderLogs ───
+// ─── visibleLogLines / renderLogs ───
 
 func TestLogBuffer_ReadNew_Sequential(t *testing.T) {
 	b := NewLogBuffer(8)
@@ -419,7 +419,7 @@ func TestLogBuffer_CompleteLineLongerThanCapPublishedWhole(t *testing.T) {
 	}
 }
 
-// TestLogBuffer_RedirectToStreamsThrough pins review-10 #4 / review-11 #2:
+// TestLogBuffer_RedirectToStreamsThrough pins the redirect behaviour:
 // RedirectTo flips the buffer into live passthrough — the torn fragment held at
 // flip time is flushed to the target first, subsequent Writes bypass the ring
 // entirely, and nothing new lands in the polled buffer.
@@ -460,7 +460,7 @@ func TestLogBuffer_RedirectToNilRestoresBuffering(t *testing.T) {
 	}
 }
 
-// TestLogBuffer_RedirectToForwardsUnpolledRingLines pins review-14 #1: lines
+// TestLogBuffer_RedirectToForwardsUnpolledRingLines pins the behaviour: lines
 // published to the ring but never read by a poller are stranded when the TUI
 // dies — RedirectTo must hand every retained-but-unpolled line, plus any
 // pending fragment, to the target writer before flipping passthrough. Lines a
@@ -494,7 +494,7 @@ func TestLogBuffer_RedirectToForwardsUnpolledRingLines(t *testing.T) {
 }
 
 // TestLogBuffer_RedirectToRepeatedHandoffExactlyOnce is the sequential mirror
-// of TestLogBuffer_RedirectToConcurrentExactlyOneSink (review-14 #1): repeated
+// of TestLogBuffer_RedirectToConcurrentExactlyOneSink: repeated
 // redirects with buffering restored in between must forward each undelivered
 // line exactly once — already-polled lines are never re-emitted, and content
 // forwarded by an earlier redirect never leaks into a later one.

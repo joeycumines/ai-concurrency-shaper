@@ -1060,13 +1060,59 @@ func TestResolveAndValidate_AuthSourceNone(t *testing.T) {
 func TestResolveAndValidate_AuthHeaderSpellings(t *testing.T) {
 	t.Run("flag spelling", func(t *testing.T) {
 		p := &Provider{Name: "a", Upstream: "https://gemini.example.com", Concurrency: 4,
-			AuthSource: "env:G_KEY", AuthMode: "header", AuthHeader: "X-Goog-Api-Key"}
+			AuthSource: "env:G_KEY", AuthMode: "header", AuthHeader: "X-Gemini-Key"}
 		t.Setenv("G_KEY", "g")
 		if err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate(); err != nil {
 			t.Fatalf("ResolveAndValidate: %v", err)
 		}
-		if got := p.AuthPolicy().CustomHeader; got != "X-Goog-Api-Key" {
+		if got := p.AuthPolicy().CustomHeader; got != "X-Gemini-Key" {
 			t.Errorf("CustomHeader = %q", got)
+		}
+	})
+
+	// The opencode preset's foreign-client-SDK strip makes x-app and the
+	// x-stainless-* prefix managed names, which is how a credential in one
+	// of them was found being deleted. The rule is preset-scoped in both
+	// directions: with -opencode they cannot carry a credential, without it
+	// they are ordinary headers and remain legal.
+	t.Run("preset-managed header refused only with -opencode", func(t *testing.T) {
+		for _, name := range []string{
+			"X-App", "X-Stainless-Token", "User-Agent", "X-Opencode-Client",
+			"X-Opencode-Session", "X-Session-Affinity", "X-Session-Id",
+			"X-Opencode-Request", "X-Opencode-Project", "X-Parent-Session-Id",
+		} {
+			on := &Provider{Name: "a", Upstream: "https://x.example", Concurrency: 4,
+				AuthSource: "env:G_KEY", AuthMode: "header", AuthHeader: name, Opencode: true}
+			t.Setenv("G_KEY", "g")
+			if err := (&Config{Providers: []*Provider{on}}).ResolveAndValidate(); err == nil {
+				t.Fatalf("%s with -opencode: accepted, want a reserved-name refusal", name)
+			}
+			off := &Provider{Name: "a", Upstream: "https://x.example", Concurrency: 4,
+				AuthSource: "env:G_KEY", AuthMode: "header", AuthHeader: name}
+			if err := (&Config{Providers: []*Provider{off}}).ResolveAndValidate(); err != nil {
+				t.Fatalf("%s without -opencode: %v, want accepted", name, err)
+			}
+		}
+	})
+
+	// A pipeline-managed name cannot carry a credential on ANY mount, not
+	// just a transcode mapping: the pipeline would strip, clobber, or
+	// rewrite it, so the secret would be lost silently.
+	t.Run("pipeline-managed header refused", func(t *testing.T) {
+		for _, name := range []string{
+			"X-Goog-Api-Key", // cloud auth prefix
+			"Content-Type",
+		} {
+			p := &Provider{Name: "a", Upstream: "https://x.example", Concurrency: 4,
+				AuthSource: "env:G_KEY", AuthMode: "header", AuthHeader: name}
+			t.Setenv("G_KEY", "g")
+			err := (&Config{Providers: []*Provider{p}}).ResolveAndValidate()
+			if err == nil {
+				t.Fatalf("%s: accepted, want a reserved-name refusal", name)
+			}
+			if !strings.Contains(err.Error(), "reserved") {
+				t.Fatalf("%s: err = %v, want a reserved-name refusal", name, err)
+			}
 		}
 	})
 

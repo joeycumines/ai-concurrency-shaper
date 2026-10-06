@@ -45,6 +45,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/retry"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
 func setup(t *testing.T, concurrency int, timeout time.Duration, patterns ...string) (*Proxy, *httptest.Server) {
@@ -1605,7 +1606,7 @@ func TestProxy_CircuitBreakerRejectIncrementsCircuitRejected(t *testing.T) {
 	}
 }
 
-// --- R21: phantom-penalty fixes ---
+// --- phantom-penalty fixes ---
 
 func TestProxy_PhantomPenaltyDoesNotBlockHandler(t *testing.T) {
 	// Verify that the phantom concurrency penalty is released asynchronously:
@@ -2301,7 +2302,7 @@ func TestProxy_StandaloneBreakerIgnoresClientCancel(t *testing.T) {
 	// (context.Canceled), the standalone breaker path does NOT call
 	// RecordFailure. An attacker could otherwise trip the breaker by
 	// initiating and immediately dropping connections. This mirrors the
-	// isClientCancel guard in the retry transport (R22-07).
+	// isClientCancel guard in the retry transport.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Simulate slow upstream — the client will cancel before we respond.
 		<-r.Context().Done()
@@ -2492,7 +2493,7 @@ func TestProxy_PhantomPenaltyIgnoresClientCancel(t *testing.T) {
 }
 
 func TestProxy_PhantomPenaltyAppliesOnUpstream5xxDespiteClientCancel(t *testing.T) {
-	// R33-01 regression test: Verify that the phantom concurrency penalty IS
+	// Regression test: Verify that the phantom concurrency penalty IS
 	// applied when the upstream returns a definitive failure status (e.g., 500)
 	// and the client then disconnects. Before the fix, the defer used
 	// !isClientCancel which suppressed the penalty for ALL client cancellations
@@ -2585,7 +2586,7 @@ func TestProxy_PhantomPenaltyAppliesOnUpstream5xxDespiteClientCancel(t *testing.
 }
 
 func TestProxy_PassthroughPhantomPenaltyAppliesOnUpstream5xxDespiteClientCancel(t *testing.T) {
-	// R33-01 regression test (passthrough variant): Same scenario as
+	// Regression test (passthrough variant): Same scenario as
 	// TestProxy_PhantomPenaltyAppliesOnUpstream5xxDespiteClientCancel but
 	// through the passthrough path with a global limiter. Verify that the
 	// passthrough slot-release defer also applies the phantom penalty when
@@ -2721,7 +2722,7 @@ func TestProxy_PassthroughMetricExcludesCircuitRejection(t *testing.T) {
 }
 
 func TestProxy_PassthroughQueueTimeoutRespected(t *testing.T) {
-	// R26-02 regression test: Verify that a passthrough request waiting in the
+	// Regression test: Verify that a passthrough request waiting in the
 	// global limiter respects QueueTimeout. Before the fix, passthrough requests
 	// blocked indefinitely when the global limiter was saturated.
 	//
@@ -2785,7 +2786,7 @@ func TestProxy_PassthroughQueueTimeoutRespected(t *testing.T) {
 }
 
 func TestProxy_Upstream5xxReportedDespiteClientCancel(t *testing.T) {
-	// R26-04 regression test: Verify that when the upstream returns a real 5xx
+	// Regression test: Verify that when the upstream returns a real 5xx
 	// status code and the client disconnects mid-response, the breaker STILL
 	// records the failure. Before the fix, the isClientCancel guard was too broad
 	// and suppressed ALL failures when the client cancelled — even genuine
@@ -2840,7 +2841,7 @@ func TestProxy_Upstream5xxReportedDespiteClientCancel(t *testing.T) {
 }
 
 func TestProxy_TransportErrorIgnoredOnClientCancel(t *testing.T) {
-	// R26-04 preservation test: Verify that transport errors (status 0, meaning
+	// Preservation test: Verify that transport errors (status 0, meaning
 	// no response received) with client-initiated cancellation are still ignored
 	// by the breaker. This is the EXISTING correct behavior that must not be
 	// broken by the isClientCancel refinement. Only real upstream 5xx should be
@@ -3145,7 +3146,7 @@ func TestProxy_CancelCooldownZeroReleasesImmediately(t *testing.T) {
 }
 
 func TestProxy_CancelCooldownFiresOnSlowUpstreamClientCancel(t *testing.T) {
-	// R34-01 regression test: Verify that the cancelCooldown fires when the
+	// Regression test: Verify that the cancelCooldown fires when the
 	// client cancels while the upstream is still processing (rec.status == 0,
 	// WriteHeader never called). This is the cooldown case — the
 	// upstream is still working on the abandoned request, so releasing the slot
@@ -4257,7 +4258,7 @@ func TestProxy_PassthroughCancelCooldownWithGlobalLimiter(t *testing.T) {
 }
 
 func TestProxy_PassthroughCancelCooldownFiresOnSlowUpstreamClientCancel(t *testing.T) {
-	// R34-02 regression test: Verify that the cancelCooldown fires in
+	// Regression test: Verify that the cancelCooldown fires in
 	// servePassthrough when the client cancels while the upstream is still
 	// processing (rec.status == 0). This mirrors
 	// TestProxy_CancelCooldownFiresOnSlowUpstreamClientCancel for the
@@ -11756,4 +11757,18 @@ func TestProxy_ConfigFrozenConcurrent(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+}
+
+func TestProxy_HandlerForRouteKey(t *testing.T) {
+	p, _ := setup(t, 1, 0)
+	key, err := transcode.NewRouteKey(http.MethodPost, "/v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := p.HandlerForRouteKey(key); h != nil {
+		t.Errorf("got %v, want nil for unconfigured key", h)
+	}
+	if cat := p.Catalog(); cat != nil {
+		t.Errorf("got %v, want nil for unconfigured catalog", cat)
+	}
 }

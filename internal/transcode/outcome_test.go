@@ -1,6 +1,6 @@
 package transcode
 
-// J2 regression tests for the extended Outcome dimensions: a failed downstream write changes the recorded provenance instead of
+// Regression tests for the extended Outcome dimensions: a failed downstream write changes the recorded provenance instead of
 // being logged and ignored, and writeUpstreamHTTPError records RetryAfter
 // from the ORIGINAL upstream response so rate-signalled 403s keep their hold
 // signal.

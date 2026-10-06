@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +37,25 @@ type HandlerConfig struct {
 
 	// BodyLimits are the independent request/response body limits.
 	BodyLimits BodyLimits
+
+	// FlowLogDir, when non-empty, is an existing directory that receives one
+	// JSON record per transcoded exchange capturing the full flow (client
+	// request, converted upstream request, upstream response, downstream
+	// response, conversion reports, outcome). The directory is validated by
+	// the constructing caller (the proxy), never created here, and the
+	// records are unredacted: treat the directory as secret-bearing.
+	FlowLogDir string
+
+	// Continuity, when non-nil, is the opt-in bounded per-conversation
+	// store behind the statefulness decision (OFF by default: nil means no
+	// retention, and previous_response_id keeps its existing observable
+	// loss). When set, the handler records the canonical conversation that
+	// produced each emitted Responses id and resolves a later request's
+	// previous_response_id against it; a miss degrades to the existing
+	// loss, never a failure. ContinuityKey scopes retained ids to the
+	// provider mapping that emitted them.
+	Continuity    *ContinuityStore
+	ContinuityKey string
 }
 
 // RoundTrip executes an outbound HTTP request through the proxy engine.
@@ -135,8 +155,8 @@ func NewTranscodeHandler(
 	}
 	// The body limits contract (limits.go): zero values select the package
 	// defaults, computed ONCE here so zero never reaches handler logic — in
-	// particular, a zero DecodedRequestBytes is never treated as unlimited
-	//. The handler-side per-use fallbacks remain as
+	// particular, a zero DecodedRequestBytes is never treated as unlimited.
+	// The handler-side per-use fallbacks remain as
 	// defense-in-depth for any future construction path that bypasses this
 	// normalization.
 	cfg.BodyLimits = cfg.BodyLimits.WithDefaults()
@@ -157,7 +177,7 @@ func NewTranscodeHandler(
 	}
 	upstream := *cfg.Upstream
 	cfg.Upstream = &upstream
-	// Startup observability (GAP-011, operator choice: aggregate + startup
+	// Startup observability (operator choice: aggregate + startup
 	// summary): log the route's approved-loss profile once at construction,
 	// so the operator sees what this route will observably lose. The
 	// per-request approved-loss line (logConversionReport) is the
@@ -191,6 +211,18 @@ func NewTranscodeHandler(
 			cfg.Mapping.ClientRoute.Method,
 			cfg.Mapping.ClientRoute.Path,
 			b.String(),
+		)
+	}
+	if cfg.FlowLogDir != "" {
+		info, err := os.Stat(cfg.FlowLogDir)
+		if err != nil || !info.IsDir() {
+			panic(fmt.Sprintf("transcode: invalid flow log directory %q: not an existing directory", cfg.FlowLogDir))
+		}
+		log.Printf(
+			"transcode: %s %s: flow recorder enabled: writing unredacted full exchange records to %q",
+			cfg.Mapping.ClientRoute.Method,
+			cfg.Mapping.ClientRoute.Path,
+			cfg.FlowLogDir,
 		)
 	}
 	return &TranscodeHandler{
@@ -258,19 +290,30 @@ func (h *TranscodeHandler) ClientPath() string {
 // path recorded one, so the proxy's synchronous sink read can never observe a
 // missing outcome.
 func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Diagnostic full-flow tap (-transcode-flowlog-dir): captures the
+	// complete contents of every transcoded exchange to one JSON file each.
+	// Nil when disabled; every hook below is a nil-guarded no-op then.
+	fl := newFlowCapture(h.cfg.FlowLogDir)
+	if fl != nil {
+		fl.setClientRequest(r)
+		fl.setCommitted(CommittedStreamFromContext(r.Context()))
+		r = r.WithContext(withFlowCapture(r.Context(), fl))
+		w = fl.wrapWriter(w)
+		defer fl.seal()
+	}
 	defer func() {
 		if sink := OutcomeSinkFromContext(r.Context()); sink != nil {
 			if _, recorded := sink.Load(); !recorded {
-				sink.Record(LocalFailureOutcome())
-				if h.outcomeFn != nil {
-					h.outcomeFn(LocalFailureOutcome())
-				}
+				// recordOutcome records to the same sink (once-only) and
+				// carries the outcome to the diagnostic tap.
+				h.recordOutcome(r, LocalFailureOutcome())
 			}
 		}
 	}()
 	// Reject Upgrade requests on transcoded routes: a 101 Switching
 	// Protocols response cannot be meaningfully schema-transcoded.
 	if isUpgradeRequest(r) {
+		h.logRequestError(r, fmt.Errorf("[%s] upgrade requests are not supported on transcoded routes", ProvenanceLocalRequestConversionError))
 		h.writeLocalError(r, w,
 			http.StatusBadRequest, "upgrade requests are not supported on transcoded routes",
 			ProvenanceLocalRequestConversionError)
@@ -288,6 +331,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Code:    "unsupported_content_encoding",
 			Message: "content-encoding is not supported on transcoded routes",
 		}
+		h.logRequestError(r, fmt.Errorf("[%s] content-encoding is not supported on transcoded routes", ProvenanceLocalRequestConversionError))
 		h.writeDialectHTTPError(r, w, apiErr, ProvenanceLocalRequestConversionError)
 		return
 	}
@@ -303,16 +347,19 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, errRequestBodyTooLarge) {
+			h.logRequestError(r, fmt.Errorf("[%s] request body too large", ProvenanceLocalRequestConversionError))
 			h.writeLocalError(r, w,
 				http.StatusRequestEntityTooLarge, "request body too large",
 				ProvenanceLocalRequestConversionError)
 			return
 		}
+		h.logRequestError(r, fmt.Errorf("[%s] read request body: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
-			http.StatusBadRequest, "read request body: "+err.Error(),
+			http.StatusBadRequest, "read request body: "+h.boundErrorMessage(err.Error()),
 			ProvenanceLocalRequestConversionError)
 		return
 	}
+	fl.setClientBody(body)
 
 	// Decode the source request into the canonical IR and render the target
 	// request, resolving the model through the map.
@@ -333,13 +380,16 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errDecodedRequestTooLarge) || errors.Is(err, errEchoTooLarge) {
 			status = http.StatusRequestEntityTooLarge
 		}
+		h.logRequestError(r, fmt.Errorf("[%s] convert request: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
-			status, "convert request: "+err.Error(),
+			status, "convert request: "+h.boundErrorMessage(err.Error()),
 			ProvenanceLocalRequestConversionError)
 		return
 	}
+	fl.setUpstreamRequest(upstreamBody, context.StreamIntent)
 
 	if CommittedStreamFromContext(r.Context()) && !context.StreamIntent {
+		h.logRequestError(r, fmt.Errorf("[%s] stream:false is incompatible with committed event-stream representation", ProvenanceLocalRequestConversionError))
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadRequest,
 			Type:    "invalid_request_error",
@@ -357,23 +407,38 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// resolution, signing) never leak details such as file paths into
 		// the client message; the detail is logged.
 		status := http.StatusInternalServerError
-		message := "build upstream request: " + err.Error()
+		message := "build upstream request: internal error"
 		if errors.Is(err, errClientQueryParameter) ||
 			errors.Is(err, errAuthInboundCredential) {
 			status = http.StatusBadRequest
+			h.logRequestError(r, fmt.Errorf("[%s] build upstream request: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
+			message = "build upstream request: " + h.boundErrorMessage(err.Error())
 		} else {
-			log.Printf(
-				"transcode: %s %s: build upstream request: %v",
-				r.Method,
-				r.URL.Path,
-				err,
-			)
-			message = "build upstream request: internal error"
+			h.logRequestError(r, fmt.Errorf("[%s] build upstream request: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		}
 		h.writeLocalError(r, w,
 			status, message,
 			ProvenanceLocalRequestConversionError)
 		return
+	}
+	fl.setUpstreamTarget(outReq)
+
+	if preset := h.cfg.Mapping.Opencode; preset.Enabled {
+		// First-party headers go on after authentication (applied
+		// inside buildUpstreamRequest): the mock never clobbers
+		// credentials. The conversation key derives from the client
+		// model so the same conversation keeps one key whether it is
+		// served natively or converted; without user text it degrades to
+		// the client-derived key.
+		keyModel := context.RequestedClientModel
+		if keyModel == "" {
+			keyModel = context.UpstreamModel
+		}
+		key := DeriveClientKey(preset.Provider, r.RemoteAddr)
+		if firstText := FirstUserText(clientProtocolToNative(h.cfg.Mapping.ClientProtocol), body); firstText != "" {
+			key = DeriveConversationKey(preset.Provider, keyModel, firstText)
+		}
+		preset.ApplyHeaders(outReq.Header, r.Header, preset.ResolveSession(r.Header, key))
 	}
 
 	resp, err := h.roundTrip(outReq)
@@ -424,9 +489,8 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// http.Client-based transport produces *url.Error with the complete
 		// request URL, including a credential-bearing upstream base query).
 		// The detail is logged server-side with sensitive URL query values
-		// redacted; the client message is neutral (the native passthrough
-		// path likewise sends a fixed body;
-		// ).
+		// redacted; the client message is neutral, exactly as the native
+		// passthrough path sends a fixed body.
 		h.logRequestError(r, sanitizeUpstreamTransportError(err))
 		h.writeDialectHTTPError(r, w, CanonicalAPIError{
 			Status:  http.StatusBadGateway,
@@ -437,6 +501,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	resp.Body = fl.wrapUpstreamBody(resp.Body, resp)
 
 	// A 101 Switching Protocols response on a transcoded JSON/SSE create
 	// route is an upstream protocol error; it cannot be schema-transcoded.
@@ -474,15 +539,14 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The response media type must agree with the client's stream intent
-	// (merge gate 17): a streaming request cannot be answered with JSON and
+	// A streaming request cannot be answered with JSON and
 	// a non-streaming request cannot be answered with an SSE stream.
 	switch {
 	case isEventStream(resp):
 		if !context.StreamIntent {
 			// The upstream returned the wrong representation for the
 			// negotiated mode: corrupt upstream wire, an upstream failure
-			// that fails a half-open probe and applies the failure hold
-			//.
+			// that fails a half-open probe and applies the failure hold.
 			h.writeLocalError(r, w,
 				http.StatusBadGateway,
 				"upstream returned a stream for a non-streaming request",
@@ -550,25 +614,55 @@ func (h *TranscodeHandler) convertRequest(
 		IDs:          NewExchangeIDs(),
 		LossPolicy:   policy,
 		Capabilities: mapping.ChatCapabilities,
-		// Stream intent precedence (v1 blocker 1): the request body's
+		// Stream intent precedence: the request body's
 		// stream field, when explicitly present, is authoritative; only when
 		// absent does the client Accept header select the representation
 		// (parsed below with full media-range and q-value semantics — q=0
 		// excludes, malformed ranges are ignored). The response media type
-		// must agree with the resolved intent (merge gate 17).
+		// must agree with the resolved intent.
 		StreamIntent: AcceptIsEventStream(r.Header.Get("Accept")),
 	}
 
 	// Resolve the client model through the mapping once the decoded request
 	// reveals it. The client-facing alias is returned in the response; the
-	// upstream model is used on the outbound request.
-	resolveModel := func(clientModel string) error {
+	// upstream model is used on the outbound request. Profile-aware
+	// resolution: if the client model matches a profile name, use the
+	// profile's model and tier; otherwise fall through to ModelMap.Resolve.
+	resolveModel := func(clientModel string, report *ConversionReport) error {
+		// Try profile resolution first.
+		if profileModel, profileTier, ok := h.cfg.Mapping.ProfileMap.ResolveProfile(clientModel); ok {
+			// Profile found. Resolve the profile's target model through ModelMap.
+			mappingModel, err := h.cfg.Mapping.ModelMap.Resolve(profileModel)
+			if err != nil {
+				return fmt.Errorf("profile %q targets unmapped model %q: %w", clientModel, profileModel, err)
+			}
+			// Profile model is mapped. Record Note if tier collapsed.
+			if profileTier != "" && mappingModel.ReasoningTier != "" && profileTier != mappingModel.ReasoningTier {
+				if err := report.Note(
+					FeatureProfileRouting,
+					"model",
+					fmt.Sprintf("profile %q requested tier %q but model mapping pins tier %q", clientModel, profileTier, mappingModel.ReasoningTier),
+				); err != nil {
+					return err
+				}
+				context.ResolvedReasoningTier = mappingModel.ReasoningTier
+			} else if profileTier != "" {
+				context.ResolvedReasoningTier = profileTier
+			} else {
+				context.ResolvedReasoningTier = mappingModel.ReasoningTier
+			}
+			context.RequestedClientModel = clientModel
+			context.UpstreamModel = mappingModel.UpstreamModel
+			return nil
+		}
+		// No profile match. Fall through to ModelMap.Resolve.
 		mappingModel, err := h.cfg.Mapping.ModelMap.Resolve(clientModel)
 		if err != nil {
 			return err
 		}
 		context.RequestedClientModel = mappingModel.ClientResponseModel
 		context.UpstreamModel = mappingModel.UpstreamModel
+		context.ResolvedReasoningTier = mappingModel.ReasoningTier
 		return nil
 	}
 
@@ -589,11 +683,42 @@ func (h *TranscodeHandler) convertRequest(
 		// mode: an Accept-only stream request must not
 		// ask the upstream for JSON while the handler expects SSE.
 		result.Request.Stream = context.StreamIntent
-		if err := resolveModel(result.Request.ClientModel); err != nil {
+		if err := resolveModel(result.Request.ClientModel, &result.Report); err != nil {
 			return nil, nil, err
 		}
 		context.OriginalResponsesRequest = echo
+		context.ToolNames = result.ToolNames
 		result.Request.ClientModel = context.UpstreamModel
+
+		// Opt-in continuity (statefulness decision: OFF by default — a nil
+		// store skips this entirely and previous_response_id keeps its
+		// existing observable loss at render). When the store is set and
+		// the request carries a previous_response_id, resolve the retained
+		// conversation and prepend it ahead of the request's own turns; a
+		// miss (unknown, expired, or foreign id) falls through to the
+		// existing loss, never a failure.
+		if h.cfg.Continuity != nil && echo.PreviousResponseID != nil &&
+			*echo.PreviousResponseID != "" {
+			if prior, depth, ok := resolveContinuityChain(
+				h.cfg.Continuity, h.cfg.ContinuityKey, *echo.PreviousResponseID,
+			); ok {
+				merged := make([]CanonicalTurn, 0, len(prior)+len(result.Request.Turns))
+				merged = append(merged, prior...)
+				merged = append(merged, result.Request.Turns...)
+				result.Request.Turns = merged
+				// Record how much of the prefix is proxy-reconstructed so the
+				// render's request-side gates judge only the turns this
+				// request actually authored.
+				result.Request.RetainedTurns = len(prior)
+				context.RequestDepth = depth
+				if err := continuityNote(&result.Report, depth, *echo.PreviousResponseID); err != nil {
+					return nil, nil, err
+				}
+			}
+		}
+		// The retained chain must include the reconstructed history, so the
+		// record call in convertResponse stores the post-merge turns.
+		context.RequestTurns = result.Request.Turns
 
 		var rendered []byte
 		var report ConversionReport
@@ -638,7 +763,7 @@ func (h *TranscodeHandler) convertRequest(
 		// mode: an Accept-only stream request must not
 		// ask the upstream for JSON while the handler expects SSE.
 		result.Request.Stream = context.StreamIntent
-		if err := resolveModel(result.Request.ClientModel); err != nil {
+		if err := resolveModel(result.Request.ClientModel, &result.Report); err != nil {
 			return nil, nil, err
 		}
 		context.OriginalMessagesRequest = &MessagesRequestContext{
@@ -875,7 +1000,7 @@ func (h *TranscodeHandler) jsonResponse(
 }
 
 // checkDecodedRequestSize rejects decoded requests that amplify beyond the
-// decoded-request body limit (merge gate 19: the decoded limit is separate
+// decoded-request body limit (the decoded limit is separate
 // from the accepted raw-body limit). The typed error renders as 413 in the
 // client dialect, never the generic conversion 400.
 func (h *TranscodeHandler) checkDecodedRequestSize(rendered []byte) error {
@@ -924,6 +1049,14 @@ func (h *TranscodeHandler) convertResponse(
 			if err != nil {
 				return nil, conversionProvenance(err), err
 			}
+			// Opt-in continuity: retain the canonical conversation that
+			// produced the emitted id, so a follow-up carrying it as
+			// previous_response_id can be reconstructed. The envelope id
+			// is minted inside the render (context.IDs), so it is read
+			// back from the converted bytes — response.ID is the upstream
+			// chat id, never the client-visible id. Nothing is retained
+			// when the store is nil (default) or the client sent store:false.
+			h.recordContinuityFromEnvelope(r, context, response, converted)
 			// The decode's provider reasoning drop is part of the same
 			// exchange log as the render's losses (request-side merge
 			// precedent).
@@ -1000,6 +1133,7 @@ func (h *TranscodeHandler) streamResponse(
 	if err != nil {
 		// writeLocalError -> writeDialectHTTPError records the outcome
 		// exactly once.
+		h.logRequestError(r, fmt.Errorf("[%s] build stream converter: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
 		h.writeLocalError(r, w,
 			http.StatusInternalServerError, "build stream converter: "+err.Error(),
 			ProvenanceLocalRequestConversionError)
@@ -1037,8 +1171,7 @@ func (h *TranscodeHandler) streamResponse(
 	// not be recorded as a clean completion. The streaming path needs no
 	// short-write check of its own: every downstream frame is written
 	// through sealedSSEWriter.writeAll, which treats a partial write as
-	// io.ErrShortWrite, and the writer's first error surfaces as WriterErr
-	//.
+	// io.ErrShortWrite, and the writer's first error surfaces as WriterErr.
 	downstreamComplete := observation.WriterErr == nil && observation.SealErr == nil
 
 	// Classify the outcome from explicit provenance. The classification is
@@ -1079,6 +1212,7 @@ func (h *TranscodeHandler) streamResponse(
 		outcome.Provenance = ProvenanceLocalResponseConversionError
 		outcome.LocalFailure = true
 		outcome.DownstreamComplete = downstreamComplete
+		h.logStreamConversionError(r, observation.ReaderErr)
 	case streamOutcomeDownstreamFailure:
 		outcome.Provenance = ProvenanceDownstreamWriteError
 	default:
@@ -1088,9 +1222,39 @@ func (h *TranscodeHandler) streamResponse(
 		outcome.DownstreamComplete = downstreamComplete
 	}
 	h.recordOutcome(r, outcome)
+	// The streamed classification ran: the diagnostic record may now report
+	// StreamOutcome (its zero value is a success, so an exchange that never
+	// reached this point must not claim one).
+	flowFromContext(r.Context()).setStreamClassified()
 	// Response-side approved losses are logged with the same fidelity as
 	// request-side losses.
 	h.logConversionReport(*converter.ConversionReport(), r, "response")
+	// Opt-in continuity for streams: on a successful Responses->Chat stream,
+	// retain the conversation that produced the emitted id (request turns +
+	// terminal assistant turns) so a follow-up works exactly like the
+	// non-streaming path. Only the Responses-client/Chat-upstream converter
+	// carries a chatResponsesStreamState; every other direction is a no-op.
+	if classification == streamOutcomeSuccess && h.cfg.Continuity != nil &&
+		h.cfg.Mapping.ClientProtocol == ClientResponses &&
+		h.cfg.Mapping.UpstreamProtocol == UpstreamChatCompletions {
+		if chat, ok := converter.(*chatToResponsesConverter); ok && chat != nil && chat.state != nil {
+			if id, turns, depth, omitted, ok := chat.state.continuityTurns(context.RequestTurns, context.RequestDepth); ok {
+				if omitted > 0 {
+					h.logRequestError(r, fmt.Errorf(
+						"[%s] continuity retained history omitted %d tool call(s) whose arguments are not a JSON object; a follow-up previous_response_id replays without them",
+						ProvenanceLocalResponseConversionError, omitted,
+					))
+				}
+				storeFalse := false
+				if echo := context.OriginalResponsesRequest; echo != nil && echo.Store != nil {
+					storeFalse = !*echo.Store
+				}
+				if dropped := h.cfg.Continuity.RecordEvicted(h.cfg.ContinuityKey, id, turns, depth, storeFalse); dropped > 0 {
+					h.logRequestError(r, fmt.Errorf("[local_response_conversion_error] continuity store evicted %d chain(s) at capacity/TTL bound", dropped))
+				}
+			}
+		}
+	}
 }
 
 // newFrameConverter builds the direction-specific stream converter.
@@ -1482,6 +1646,10 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 // outcome sink is present on the request context, to the proxy's per-request
 // provenance reader.
 func (h *TranscodeHandler) recordOutcome(r *http.Request, outcome Outcome) {
+	// Diagnostic tap: stash the outcome on the per-exchange flow capture.
+	if r != nil {
+		flowFromContext(r.Context()).setOutcome(outcome)
+	}
 	// The synchronous per-request sink records exactly once: there is no non-blocking path that can silently lose
 	// provenance.
 	if r != nil {
@@ -1707,6 +1875,18 @@ func isJSON(resp *http.Response) bool {
 	return strings.HasSuffix(mediaType, "+json")
 }
 
+// IsUpgradeRequest reports whether the request carries an Upgrade token.
+// It is the single upgrade classifier shared by the transcode handler and
+// the natively served routes, so both boundaries classify identically. A nil
+// request (or one with a nil Header, as a hand-built request may carry)
+// carries no upgrade token, matching the pre-unification native helper.
+func IsUpgradeRequest(r *http.Request) bool {
+	if r == nil || r.Header == nil {
+		return false
+	}
+	return isUpgradeRequest(r)
+}
+
 // isUpgradeRequest reports whether the request carries an Upgrade token.
 func isUpgradeRequest(r *http.Request) bool {
 	if len(r.Header.Values("Upgrade")) > 0 {
@@ -1757,6 +1937,7 @@ func derefInt(v *int) int {
 // loss(es)` when every entry is an approved loss, else `loss(es)/note(s)`.
 // Duplicate feature@path entries are deduped preserving first-seen order.
 func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.Request, stage string) {
+	flowFromContext(r.Context()).addReport(stage, report)
 	if len(report.Losses) == 0 {
 		return
 	}
@@ -1785,7 +1966,7 @@ func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.
 	}
 	if report.Dropped > 0 {
 		entries = append(entries, fmt.Sprintf(
-			"note: report_overflow: %d further entries dropped after the bound (CC-REPORT-BOUND)",
+			"note: report_overflow: %d further entries dropped after the bound (the report-overflow bound)",
 			report.Dropped,
 		))
 	}
@@ -1804,22 +1985,47 @@ func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.
 }
 
 // boundErrorMessage truncates a client-visible error message to the
-// configured ErrorMessageBytes bound. Every error
-// writing path goes through it, so no upstream error body can amplify
-// client-visible text beyond the bound.
+// configured ErrorMessageBytes bound. It delegates to the shared
+// BoundErrorMessage so the bound policy has exactly one home.
 func (h *TranscodeHandler) boundErrorMessage(message string) string {
-	max := h.cfg.BodyLimits.ErrorMessageBytes
-	if max <= 0 {
-		return message
+	return BoundErrorMessage(message, h.cfg.BodyLimits.ErrorMessageBytes)
+}
+
+// logSafeText makes text safe to place in ONE operator log line. Every byte
+// a client can influence must be neutralized: error text routinely embeds raw
+// client JSON (encoding/json puts the offending KEY into UnmarshalTypeError,
+// and a decoded key may contain a newline), and the request target is bounded
+// only by net/http's header limit. Without this, a single request could
+// inject a newline and forge a fully-formed "transcode: ..." operator line -
+// which the TUI log ring would then render as its own entry. Control
+// characters are escaped rather than dropped so the evidence survives, and the
+// result is length-bounded so one request cannot flood the log.
+func logSafeText(s string) string {
+	const maxLoggedField = 512
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case r < 0x20 || r == 0x7f:
+			b.WriteString(`\x`)
+			const hex = "0123456789abcdef"
+			b.WriteByte(hex[(r>>4)&0xf])
+			b.WriteByte(hex[r&0xf])
+		default:
+			b.WriteRune(r)
+		}
+		if b.Len() >= maxLoggedField {
+			b.WriteString("…")
+			return b.String()
+		}
 	}
-	if len(message) <= max {
-		return message
-	}
-	// The ellipsis must not push the message past the configured bound.
-	if max > 3 {
-		return message[:max-3] + "…"
-	}
-	return message[:max]
+	return b.String()
 }
 
 // logRequestError logs a local failure with its detail (never the client
@@ -1827,7 +2033,20 @@ func (h *TranscodeHandler) boundErrorMessage(message string) string {
 // sanitized, and reported neutrally (the conversion-failure path stays
 // observable to the operator).
 func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
-	log.Printf("transcode: %s %s: %v", r.Method, r.URL.Path, err)
+	log.Printf("transcode: %s %s: %v",
+		logSafeText(r.Method), logSafeText(r.URL.Path), logSafeText(err.Error()))
+}
+
+// logStreamConversionError records the operator-visible reason a live
+// translated stream failed locally: the client gets the dialect error event,
+// but without this line the log shows nothing. A stream that ran out without
+// a terminal has no converter error, only that fact.
+func (h *TranscodeHandler) logStreamConversionError(r *http.Request, cause error) {
+	detail := "the upstream stream ended before a terminal event and no local error event was written"
+	if cause != nil && !errors.Is(cause, io.EOF) {
+		detail = h.boundErrorMessage(cause.Error())
+	}
+	h.logRequestError(r, fmt.Errorf("[%s] convert stream response: %s", ProvenanceLocalResponseConversionError, detail))
 }
 
 // sanitizeUpstreamTransportError redacts credential-bearing URL query values

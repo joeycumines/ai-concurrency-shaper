@@ -20,6 +20,8 @@ import (
 	"io"
 	"strings"
 	"time"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
 // flagMeta records where a flag is legal and whether it is a boolean, for the
@@ -129,6 +131,8 @@ func registerServerFlags(r *registrar, s *Server) {
 	r.boolVar(&s.TUI, "tui", false, "enable terminal dashboard")
 	r.boolVar(&s.Version, "version", false, "print version and exit")
 	r.stringVar(&s.MetricsBind, "metrics-bind", "", "dedicated listen address for the Prometheus /metrics endpoint (empty = disabled; server scope)")
+	r.stringListVar(&s.ModelTable, "model-table", "global model table entry: surrogate@provider=wire[;facts] (repeatable; server scope)")
+	r.stringListVar(&s.CatalogSuites, "catalog-suite", "repeatable catalog suite mount: [name@]prefix[=models][;options] (repeatable; server scope)")
 	registerHelp(r, &s.Help)
 }
 
@@ -202,13 +206,22 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.boolVar(&p.TranscodeResponsesChat, "transcode-responses-chat", false, "preset: map POST /v1/responses to upstream /v1/chat/completions")
 	r.boolVar(&p.TranscodeMessagesChat, "transcode-messages-chat", false, "preset: map POST /v1/messages to upstream /v1/chat/completions")
 	r.boolVar(&p.TranscodeMessagesResponses, "transcode-messages-responses", false, "preset: map POST /v1/messages to upstream /v1/responses")
+	r.stringListVar(&p.NativeRouteFlags, "native-route", "repeatable natively served route: protocol@path with protocol responses|messages|chat (model identifier rewritten, body otherwise forwarded verbatim)")
+	r.boolVar(&p.Opencode, "opencode", false, "emit the first-party opencode request shape upstream (User-Agent, session affinity, client attribution)")
+	r.stringVar(&p.OpencodeUserAgent, "opencode-user-agent", transcode.DefaultOpencodeUserAgent, "User-Agent the -opencode preset asserts upstream (the impersonation value)")
+	r.stringVar(&p.OpencodeClient, "opencode-client", transcode.DefaultOpencodeClient, "x-opencode-client the -opencode preset asserts upstream")
 	r.boolVar(&p.TranscodeStrictDefaults, "transcode-strict-defaults", false, "disable default loss approvals, capabilities, and query forwarding")
 	r.stringListVar(&p.TranscodeAllowLosses, "transcode-allow-loss", "approved non-portable feature or !name to deny (repeatable)")
 	r.stringListVar(&p.TranscodeChatCapabilities, "transcode-chat-capability", "enable chat upstream capability or !name to deny (repeatable)")
 	r.stringListVar(&p.TranscodeAllowClientQuery, "transcode-allow-client-query", "forward client query parameter or !name to deny (repeatable)")
 	r.stringListVar(&p.TranscodeModelMap, "transcode-model", "map client model to upstream model: client=upstream (repeatable)")
+	r.stringListVar(&p.TranscodeProfiles, "transcode-profile", "map profile name to upstream model and reasoning tier: name=model:tier (repeatable; tier optional, omit for model-only mapping)")
 	r.int64Var(&p.TranscodeMaxRequestMB, "transcode-max-request-mb", defaultTranscodeMaxRequestMB, "max request body size retained for transcoding, in MiB")
 	r.int64Var(&p.TranscodeMaxResponseMB, "transcode-max-response-mb", defaultTranscodeMaxResponseMB, "max response body size retained for transcoding, in MiB")
+	r.stringVar(&p.TranscodeFlowLogDir, "transcode-flowlog-dir", "", "existing directory that receives one JSON record per transcoded exchange, capturing the full flow (client request, converted upstream request, upstream response, downstream response) unredacted; empty disables the recorder")
+	r.boolVar(&p.TranscodeContinuity, "transcode-continuity", false, "opt-in per-conversation continuity store: retain the canonical conversation behind each emitted Responses id so a follow-up previous_response_id reconstructs against a stateless chat upstream (off by default; a miss degrades to the existing observable loss)")
+	r.intVar(&p.TranscodeContinuityCap, "transcode-continuity-capacity", 0, "max retained conversation chains for the continuity store (0 = default 1024; negative rejected)")
+	r.durationVar(&p.TranscodeContinuityTTL, "transcode-continuity-ttl", 0, "max age of a retained conversation chain (0 = default 30m; negative rejected)")
 	r.stringVar(&p.TranscodeAuth, "transcode-auth", "", "upstream auth mode for transcode: auto | none | bearer | x-api-key | api-key | header (unset inherits the provider auth policy)")
 	r.stringVar(&p.TranscodeAuthSource, "transcode-auth-source", "", "upstream auth secret source for transcode: inbound | env:VAR | file:PATH | provider")
 	r.stringVar(&p.TranscodeAuthHeader, "transcode-auth-header", "", "custom upstream auth header name for transcode")

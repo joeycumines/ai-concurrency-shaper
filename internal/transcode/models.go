@@ -2,6 +2,8 @@ package transcode
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // ModelMapping maps a client model identifier to the upstream model identifier
@@ -16,6 +18,15 @@ type ModelMapping struct {
 	// ClientResponseModel is the stable client-facing alias returned in the
 	// converted response. It should normally equal ClientModel.
 	ClientResponseModel string
+
+	// Via names the model's native upstream dialect when known, so a
+	// natively served route can select model-rewrite forwarding instead of
+	// conversion. Empty means unknown: legacy behavior, never native.
+	Via NativeProtocol
+
+	// ReasoningTier pins the reasoning effort tier for this model ("low",
+	// "medium", "high", or "" when unset). Empty means no tier override.
+	ReasoningTier string
 }
 
 // ModelMap resolves client model identifiers to upstream model identifiers.
@@ -25,10 +36,50 @@ type ModelMap struct {
 	RequireExplicitMap bool
 }
 
+// ProfileMapping maps a profile name to a model and reasoning tier. Profiles
+// are used by MultiAgent V2 to dispatch child agents with distinct
+// capabilities.
+type ProfileMapping struct {
+	Model         string
+	ReasoningTier string // "low", "medium", "high", or "" (unset)
+}
+
+// ProfileMap resolves profile names to model+tier pairs. When a profile is
+// resolved, its target model is resolved through the route's ModelMap.
+type ProfileMap struct {
+	Profiles map[string]ProfileMapping
+}
+
+// ResolveProfile returns the mapping for the profile name. If the profile
+// is not in the map, ok is false and the caller should fall through to
+// ModelMap.Resolve. The profile's model is returned as the client model to
+// resolve; the tier is returned separately so the caller can apply it to
+// the rendered request.
+func (p ProfileMap) ResolveProfile(profileName string) (clientModel string, tier string, ok bool) {
+	if p.Profiles == nil {
+		return "", "", false
+	}
+	mapping, found := p.Profiles[profileName]
+	if !found {
+		return "", "", false
+	}
+	return mapping.Model, mapping.ReasoningTier, true
+}
+
 // Resolve returns the mapping for the client model. With identity fallback,
 // an unmapped model is passed through unchanged; otherwise it is an error.
-// The actual upstream model is never leaked into the client response: the
-// client-facing alias is returned instead.
+// It does not itself decide what the client sees: on a CONVERTED response the
+// upstream model is never leaked, because the client-facing alias is rendered
+// instead. A natively served response is a different surface — it is forwarded
+// byte-identically apart from the model value, so the alias restore is a
+// surgical rewrite that leaves the body alone unless it is application/json,
+// unencoded, within the inspection bound, readable without error, naming the
+// wire model, and unambiguous about which key that is. The cases a caller will
+// actually meet are a stream, where byte-identity wins outright; a body over
+// the inspection bound, where the proxy refuses to buffer without limit; and a
+// document with two top-level model keys, where the rewrite is refused rather
+// than applied to a key the client's parser may not read. On all three the
+// upstream model does reach the client, deliberately.
 func (m ModelMap) Resolve(clientModel string) (ModelMapping, error) {
 	if mapping, ok := m.Exact[clientModel]; ok {
 		if mapping.ClientResponseModel == "" {
@@ -42,6 +93,27 @@ func (m ModelMap) Resolve(clientModel string) (ModelMapping, error) {
 			UpstreamModel:       clientModel,
 			ClientResponseModel: clientModel,
 		}, nil
+	}
+	if m.RequireExplicitMap {
+		names := make([]string, 0, len(m.Exact))
+		for name := range m.Exact {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		const maxServableModels = 20
+		shown := min(len(names), maxServableModels)
+		servable := strings.Join(names[:shown], ", ")
+		if shown < len(names) {
+			servable += fmt.Sprintf(" ... (+%d more)", len(names)-shown)
+		}
+		if servable == "" {
+			servable = "none"
+		}
+		return ModelMapping{}, fmt.Errorf(
+			"no upstream model mapping for client model %q; servable on this mount: %s",
+			clientModel,
+			servable,
+		)
 	}
 	return ModelMapping{}, fmt.Errorf(
 		"no upstream model mapping for client model %q",

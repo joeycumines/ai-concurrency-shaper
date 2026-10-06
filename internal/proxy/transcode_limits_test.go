@@ -30,7 +30,7 @@ import (
 
 // TestProxy_Transcode_PropagatedRetryMaxBodyMB_Success verifies that a proxy
 // with retries enabled and multiple transcoded routes having matching
-// RetryReplayBytes initializes cleanly and proxies successfully (H2).
+// RetryReplayBytes initializes cleanly and proxies successfully.
 func TestProxy_Transcode_PropagatedRetryMaxBodyMB_Success(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -127,7 +127,7 @@ func TestProxy_Transcode_PropagatedRetryMaxBodyMB_Success(t *testing.T) {
 
 // TestProxy_Transcode_RetryReplayBytes_MismatchRejected verifies that an explicit
 // per-route RetryReplayBytes that disagrees with the provider's maxBodyBytes fails
-// closed at startup naming the mismatch (H2).
+// closed at startup naming the mismatch.
 func TestProxy_Transcode_RetryReplayBytes_MismatchRejected(t *testing.T) {
 	upstreamURL, _ := url.Parse("http://127.0.0.1:8080")
 	rKey, _ := transcode.NewRouteKey(http.MethodPost, "/v1/responses")

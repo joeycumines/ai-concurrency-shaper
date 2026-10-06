@@ -1,12 +1,12 @@
 package transcode
 
-// Usage arithmetic acceptance tests. History:
-// exact total == input + output and failed the exchange on mismatch.
-// CC-USAGE-ARITHMETIC (operator-observed 2026-09-08: a real glm gateway
-// emitted total 293640 vs sum 293581, 502-ing Claude Code 8 retries on a
-// 293K-token session) re-adjudicated the disposition: a mismatched total is
-// an OBSERVABILITY fact — the source values are relayed as-is and the
-// mismatch is recorded as a usage_total_mismatch note. The
+// Usage arithmetic acceptance tests. The decoder once required the exact
+// total to equal input + output and failed the exchange on mismatch.
+// Re-adjudicated after an observed gateway emitted a total a few dozen tokens
+// above the sum of its parts, failing a Claude Code exchange that then
+// retried: a mismatched total is an OBSERVABILITY fact — the source values
+// are relayed as-is and the mismatch is recorded as a usage_total_mismatch
+// note. The
 // architecture-independent int64-to-int width checks and the
 // absent-vs-zero usage fidelity pins are unchanged.
 
@@ -63,7 +63,7 @@ func TestChatUsageMismatchStreamingRelayed(t *testing.T) {
 		TotalTokens:      20, // not 15
 	}
 	state := newChatResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"resp_1", "gpt-4.1", 1710000000, nil,
 	)
 	if _, err := state.Convert(chunk); err != nil {
@@ -85,7 +85,7 @@ func TestResponsesUsageMismatchStreamingRelayed(t *testing.T) {
 		TotalTokens:  20, // not 15
 	}
 	state := newAnthropicResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{ProviderReasoningThinking: true},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{ProviderReasoningThinking: true},
 		"msg_1", "claude-x", 1710000000,
 	)
 	if err := state.finalizeMessage(CanonicalStopEndTurn, usage); err != nil {
@@ -98,7 +98,7 @@ func TestResponsesUsageMismatchStreamingRelayed(t *testing.T) {
 }
 
 // TestResponsesUsageMismatchNonStreamingRelayed proves the non-streaming
-// responses decode relays a contract-violating total (CC-USAGE-ARITHMETIC).
+// responses decode relays a contract-violating total (usage arithmetic).
 func TestResponsesUsageMismatchNonStreamingRelayed(t *testing.T) {
 	body := []byte(`{"object":"response","id":"resp_1","created_at":1.0,"model":"m","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":20,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}`)
 	response, err := DecodeResponsesResponse(body)
@@ -127,7 +127,7 @@ func TestChatUsageMismatchNonStreamingRelayed(t *testing.T) {
 		t.Fatalf("decode recorded the mismatch before the counts were emitted: %+v", report)
 	}
 	context := testExchangeContext()
-	context.LossPolicy = j6PermissivePolicy()
+	context.LossPolicy = permissiveLossPolicy()
 	context.RequestedClientModel = "m"
 	_, renderReport, err := RenderResponsesResponse(response, context)
 	if err != nil {
@@ -214,13 +214,13 @@ func TestUsageAbsentVsZeroPreserved(t *testing.T) {
 }
 
 // TestStreamResponsesUsageMismatchRelayedAtTerminal pins the stream-path
-// disposition (CC-USAGE-ARITHMETIC): a mismatched total on the terminal
+// disposition (usage arithmetic): a mismatched total on the terminal
 // envelope is recorded as a usage_total_mismatch note and the stream
 // completes with the source's own usage — never a 502.
 func TestStreamResponsesUsageMismatchRelayedAtTerminal(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
@@ -271,11 +271,11 @@ func TestStreamResponsesUsageMismatchRelayedAtTerminal(t *testing.T) {
 
 // TestStreamResponsesUsageMismatchRelayedAtCreated pins the messageStart
 // call site: a mismatched total on response.created is recorded and the
-// stream continues (CC-USAGE-ARITHMETIC).
+// stream continues (usage arithmetic).
 func TestStreamResponsesUsageMismatchRelayedAtCreated(t *testing.T) {
 	state := newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",
@@ -307,12 +307,12 @@ func TestChatResponsesRenderDerivedTotalSaturates(t *testing.T) {
 	body := []byte(`{"object":"chat.completion","created":1,"model":"m",` +
 		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],` +
 		`"usage":{"prompt_tokens":9223372036854775807,"completion_tokens":1}}`)
-	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, j6PermissivePolicy())
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy())
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	context := testExchangeContext()
-	context.LossPolicy = j6PermissivePolicy()
+	context.LossPolicy = permissiveLossPolicy()
 	context.RequestedClientModel = "m"
 	rendered, report, err := RenderResponsesResponse(response, context)
 	if err != nil {
@@ -348,12 +348,12 @@ func TestChatResponsesRenderPostClampMismatchNoted(t *testing.T) {
 		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],` +
 		`"usage":{"prompt_tokens":-2,"completion_tokens":5,"total_tokens":3,` +
 		`"prompt_tokens_details":{"cached_tokens":1}}}`)
-	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, j6PermissivePolicy())
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy())
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	context := testExchangeContext()
-	context.LossPolicy = j6PermissivePolicy()
+	context.LossPolicy = permissiveLossPolicy()
 	context.RequestedClientModel = "m"
 	rendered, report, err := RenderResponsesResponse(response, context)
 	if err != nil {
@@ -391,7 +391,7 @@ func TestChatResponsesStreamPostClampMismatchNoted(t *testing.T) {
 		},
 	}
 	state := newChatResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"resp_1", "gpt-4.1", 1710000000, nil,
 	)
 	if _, err := state.Convert(chunk); err != nil {
@@ -499,7 +499,7 @@ func TestStreamUsageClampNotesGateOncePerKey(t *testing.T) {
 		},
 	}
 	state := newChatResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"resp_1", "gpt-4.1", 1710000000, nil,
 	)
 	for i := range 3 {
@@ -610,12 +610,12 @@ func TestUsageClampDetailFidelity(t *testing.T) {
 			`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],` +
 			`"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,` +
 			`"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":0}}}`)
-		response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, j6PermissivePolicy())
+		response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy())
 		if err != nil {
 			t.Fatalf("decode: %v", err)
 		}
 		context := testExchangeContext()
-		context.LossPolicy = j6PermissivePolicy()
+		context.LossPolicy = permissiveLossPolicy()
 		context.RequestedClientModel = "m"
 		rendered, report, err := RenderResponsesResponse(response, context)
 		if err != nil {
@@ -727,11 +727,11 @@ func TestUsageClampBoundsArePinned(t *testing.T) {
 // presenting the clamp-corrected values as source values.
 func TestComposedClampNoteRecordedOnce(t *testing.T) {
 	chat := newChatResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"resp_1", "gpt-4.1", 1710000000, nil,
 	)
 	anthropic := newAnthropicResponsesStreamState(
-		testStreamContext(), j6PermissivePolicy(), ChatCapabilities{},
+		testStreamContext(), permissiveLossPolicy(), ChatCapabilities{},
 		"msg_1", "gpt-4.1", 1710000000,
 	)
 	converter := newChatToAnthropicConverter(chat, anthropic)

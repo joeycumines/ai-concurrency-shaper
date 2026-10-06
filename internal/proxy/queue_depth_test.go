@@ -173,8 +173,8 @@ func TestProxy_QueueDepthZeroIsUnbounded(t *testing.T) {
 	}
 }
 
-// TestProxy_QueueDepth429ReleasesBreakerProbe pins the finding
-// (ses_f82433a3affeYcnpN3ETKBmQxz, 2026-09-08): the bounded-queue 429
+// TestProxy_QueueDepth429ReleasesBreakerProbe pins a live defect: the
+// bounded-queue 429
 // happens after breaker.Allow(), so in HALF_OPEN the request carries the
 // single recovery probe — if it returns on the queue-rejection path without
 // CancelProbe, the probe stays occupied until the open timeout and every

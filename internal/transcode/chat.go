@@ -1,7 +1,7 @@
 package transcode
 
 // The OpenAI Chat Completions wire definitions live in the pinned wire
-// package wire/openaichat (see contracts.lock.json); this file re-exports
+// package wire/openaichat; this file re-exports
 // them under the package's historical names so consumers compile unchanged.
 // New code should prefer the wire package names.
 //
@@ -28,10 +28,14 @@ type ChatContentBlockType = openaichat.ContentBlockType
 const (
 	ChatContentBlockTypeText  = openaichat.ContentBlockTypeText
 	ChatContentBlockTypeImage = openaichat.ContentBlockTypeImage
+	ChatContentBlockTypeAudio = openaichat.ContentBlockTypeAudio
 )
 
 // ChatInputImage is the image_url payload of an image content block.
 type ChatInputImage = openaichat.InputImage
+
+// ChatInputAudio is the input_audio payload of an audio content block.
+type ChatInputAudio = openaichat.InputAudio
 
 // ChatContentBlock is one element of a content block array.
 type ChatContentBlock = openaichat.ContentBlock
@@ -80,6 +84,9 @@ type ChatToolCallDelta = openaichat.ToolCallDelta
 
 // ChatAssistantMessage carries the assistant-only fields of a chat message.
 type ChatAssistantMessage = openaichat.ChatAssistantMessage
+
+// ChatAssistantAudio is the documented chat audio output object.
+type ChatAssistantAudio = openaichat.AssistantAudio
 
 // ChatMessage is a message in a chat conversation.
 type ChatMessage = openaichat.Message

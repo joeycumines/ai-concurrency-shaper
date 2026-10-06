@@ -1,6 +1,6 @@
 package transcode
 
-// J6 regression tests: unknown usage breakdowns
+// Regression tests: unknown usage breakdowns
 // are never emitted as factual zeros — the Responses and Messages renderers
 // loss-gate every wire-required component the source did not provide and
 // emit the required zeros only after the loss is approved, streaming behaves
@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// usageCounterexample is the -6 fixture: all three totals
+// usageCounterexample is the fixture: all three totals
 // present, no breakdown detail objects.
 const usageCounterexample = `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}`
 
@@ -182,7 +182,7 @@ func TestUsageStreamingDetailObjectsPresence(t *testing.T) {
 		PromptTokens:     10,
 		CompletionTokens: 2,
 		TotalTokens:      12,
-	})
+	}, "")
 	if usage.InputTokensDetails == nil || usage.OutputTokensDetails == nil {
 		t.Fatalf("required detail objects missing: %+v", usage)
 	}
@@ -199,7 +199,7 @@ func TestUsageStreamingDetailObjectsPresence(t *testing.T) {
 		CompletionTokensDetails: &ChatCompletionTokensDetails{
 			ReasoningTokens: 4,
 		},
-	})
+	}, "")
 	if usage.InputTokensDetails == nil || usage.InputTokensDetails.CachedTokens != 3 {
 		t.Fatalf("cached = %+v", usage.InputTokensDetails)
 	}

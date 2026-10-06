@@ -179,7 +179,7 @@ func TestOpenAIChatResponseProviderExtensions(t *testing.T) {
 // TestAnthropicCacheControlNoted pins that cache_control — the Anthropic
 // prompt-cache performance hint real clients attach to text blocks, tools,
 // and the system prompt — is never silently dropped: the decode records an
-// observable anthropic_controls note, deduped per exchange (analysis G3).
+// observable anthropic_controls note, deduped per exchange.
 func TestAnthropicCacheControlNoted(t *testing.T) {
 	body := []byte(`{
 		"model":"m",
@@ -354,7 +354,7 @@ func requireTurnSequence(t *testing.T, turns []CanonicalTurn, want ...CanonicalR
 // TestMessagesSystemCoexistence pins how the two Anthropic system surfaces
 // combine: the top-level envelope.system field becomes a system turn FIRST
 // (appended before the messages loop), then inline system-role messages map
-// to system turns in wire order (analysis G7/G11). Under strict policy the
+// to system turns in wire order. Under strict policy the
 // Responses render rejects the two system turns (multiple_system_turns);
 // under the permission both coexist observably.
 func TestMessagesSystemCoexistence(t *testing.T) {

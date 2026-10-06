@@ -253,13 +253,22 @@ func canonicalToolChoiceToChat(
 }
 
 // canonicalTextTurnToChatMessage renders a system or developer turn into a
-// Chat message with the given role. Only text content is portable to a Chat
-// system/developer message.
+// Chat message with the given role. Text is portable; a non-text part (an
+// image or document) follows the same loss/reject decision the Responses
+// target applies under system_non_text_content — it is either dropped
+// observably (the part cannot be expressed as a system message and the
+// upstream was told to accept the loss) or rejected with a stable,
+// client-dialect feature name (never a leaked Go type). A drop never
+// silently empties the turn: an all-non-text system turn becomes an empty
+// text block so the message shape stays valid.
 func canonicalTextTurnToChatMessage(
 	turn CanonicalTurn,
 	role ChatMessageRole,
+	policy LossPolicy,
+	report *ConversionReport,
 ) (ChatMessage, error) {
 	var blocks []ChatContentBlock
+	dropped := 0
 	for _, part := range turn.Parts {
 		switch value := part.(type) {
 		case CanonicalText:
@@ -268,7 +277,23 @@ func canonicalTextTurnToChatMessage(
 				Type: ChatContentBlockTypeText,
 				Text: &text,
 			})
+		case CanonicalImage, CanonicalDocument:
+			if err := report.Lose(
+				policy,
+				FeatureSystemNonTextContent,
+				"messages[].content",
+				"non-text system content cannot be carried by a chat system message",
+			); err != nil {
+				return ChatMessage{}, err
+			}
+			dropped++
 		default:
+			// Defensive: no request path reaches this arm today, because
+			// ValidateCanonicalRequest pre-empts refusal/call/result in a
+			// system turn and CanonicalThinkingPart is built only on a
+			// response path. It names the offending part type and the turn
+			// role so that IF it is ever reached the operator can diagnose
+			// it - a message that merely repeated the path would not.
 			return ChatMessage{}, &UnsupportedFeatureError{
 				Protocol: "chat",
 				Path:     "messages[].content",
@@ -279,7 +304,23 @@ func canonicalTextTurnToChatMessage(
 	// A system/developer turn is text-only; omit content when there are no
 	// parts rather than emitting an invalid empty union.
 	if len(blocks) == 0 {
-		return ChatMessage{}, errors.New("empty system or developer turn")
+		if dropped > 0 {
+			// Every part was dropped under an approved loss. Emit an empty
+			// text block so the system message stays a valid content union -
+			// but ONLY when this turn is not the whole conversation. A request
+			// whose entire conversation is a dropped system turn has no
+			// representable content at all, and admitting it here would
+			// disagree with the Responses target, which rejects exactly this
+			// shape precisely to match. Callers reject a degenerate rendered
+			// set; see the guard in RenderChatRequest.
+			empty := ""
+			blocks = append(blocks, ChatContentBlock{
+				Type: ChatContentBlockTypeText,
+				Text: &empty,
+			})
+		} else {
+			return ChatMessage{}, errors.New("empty system or developer turn")
+		}
 	}
 	return ChatMessage{Role: role, Content: &ChatMessageContent{ContentBlocks: blocks}}, nil
 }
@@ -340,7 +381,7 @@ func canonicalUserTurnToChatMessages(
 			}
 			// Tool messages use the dedicated tool-result renderer — never
 			// the user-message renderer.
-			toolMessage, err := renderChatToolResult(value, policy, report)
+			toolMessage, err := renderChatToolResult(value, capabilities, policy, report)
 			if err != nil {
 				return nil, err
 			}
@@ -363,6 +404,57 @@ func canonicalUserTurnToChatMessages(
 		messages = append(messages, message)
 	}
 	return messages, nil
+}
+
+// chatImageDetail maps a canonical image detail to the Chat vocabulary
+// (auto|low|high). Any other unexpected value is rejected rather than
+// forwarded unvalidated. An empty value is the source dialect having no detail
+// field (an Anthropic image block), and the documented "auto" default is
+// chosen with the invention recorded as a note: that is PROXY-invented
+// content, not a client request, so it takes no policy decision.
+//
+// The Responses-only "original" is different: the CLIENT asked for it, and
+// mapping it to "high" downgrades a fidelity-only knob. AGENTS.md requires
+// such a mapping to be an observable POLICY-GATED loss so an operator can
+// refuse the downgrade, so it goes through Lose with the policy rather than
+// Note (which never consults the policy and would leave the operator no say).
+// The key is in defaultTranscodeLosses, so a default deployment keeps working
+// while an operator can still reject it.
+func chatImageDetail(
+	detail string,
+	path string,
+	policy LossPolicy,
+	report *ConversionReport,
+) (string, error) {
+	switch detail {
+	case "":
+		if err := report.Note(
+			FeatureImageDetailInvented,
+			path,
+			"the source carried no image detail; the documented 'auto' default was chosen (the source dialect may have no detail field, or the client omitted the optional one)",
+		); err != nil {
+			return "", err
+		}
+		return "auto", nil
+	case "auto", "low", "high":
+		return detail, nil
+	case "original":
+		if err := report.Lose(
+			policy,
+			FeatureImageDetailOriginal,
+			path,
+			"the Responses-only image detail 'original' has no Chat equivalent; it was mapped to 'high' (the closest truthful semantic, but a downgrade the operator can refuse)",
+		); err != nil {
+			return "", err
+		}
+		return "high", nil
+	default:
+		return "", &UnsupportedFeatureError{
+			Protocol: "chat",
+			Path:     path,
+			Feature:  "image detail " + detail,
+		}
+	}
 }
 
 // canonicalContentPartsToChatUserMessage renders text and image parts into a
@@ -404,11 +496,9 @@ func canonicalContentPartsToChatUserMessage(
 					return ChatMessage{}, fmt.Errorf("content part %d: %w", i, err)
 				}
 			}
-			detail := value.Detail
-			if detail == "" {
-				// The official Chat image detail defaults to auto; an empty
-				// value is not part of the wire enum.
-				detail = "auto"
+			detail, err := chatImageDetail(value.Detail, "messages[].content", policy, report)
+			if err != nil {
+				return ChatMessage{}, err
 			}
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeImage,
@@ -549,21 +639,25 @@ type toolResultEnvelope struct {
 // tool-role message — the dedicated tool-result renderer, never the
 // user-message renderer. Exact text results stay exact
 // text. Image, document, or mixed results are rejected under strict policy
-// (UnrepresentableError — local, never corrupt wire) and, under the
-// tool_result_multimodal_content and tool_result_json_envelope permissions,
-// encoded as ONE deterministic JSON text envelope (transcode_version 1) that
-// is recorded in the conversion report. Invalid wire (image_url blocks
-// inside a tool-role message) is never emitted.
+// (UnrepresentableError — local, never corrupt wire) unless the
+// ToolResultImages capability is enabled, in which case they render as
+// multipart content blocks (text and image_url parts, order preserved) so a
+// vision model can see the image. Without that capability they fall back to
+// the observable encoding: the deterministic JSON text envelope
+// (transcode_version 1), gated by the tool_result_multimodal_content and
+// tool_result_json_envelope permissions and recorded in the conversion
+// report. Invalid wire (image_url blocks inside a tool-role message for a
+// target that cannot carry them) is never emitted.
 func renderChatToolResult(
 	result CanonicalFunctionResult,
+	capabilities ChatCapabilities,
 	policy LossPolicy,
 	report *ConversionReport,
 ) (ChatMessage, error) {
 	parts := result.Parts
 	if result.IsError {
 		// The error status cannot be carried by a Chat tool message; the
-		// permissive encoding is the visible error_status_prefix text
-		//.
+		// permissive encoding is the visible error_status_prefix text.
 		if err := report.Lose(
 			policy,
 			FeatureToolResultErrorStatus,
@@ -616,6 +710,21 @@ func renderChatToolResult(
 		}, nil
 	}
 
+	// The upstream accepts image parts inside a tool message: render the
+	// multimodal content as multipart blocks (text and image_url, order
+	// preserved). This is a truthful lossless encoding of the client's
+	// content, so it is preferred whenever the capability is on; only the
+	// image parts require the ImageInput rendering vocabulary.
+	if capabilities.ToolResultImages {
+		toolMessage, ok, err := renderChatToolResultMultipart(result, parts, capabilities, policy, report)
+		if err != nil {
+			return ChatMessage{}, err
+		}
+		if ok {
+			return toolMessage, nil
+		}
+	}
+
 	// Multimodal content: the content-shape loss and the sanctioned
 	// encoding loss gate the deterministic JSON text envelope.
 	if err := report.Lose(
@@ -652,6 +761,83 @@ func renderChatToolResult(
 		Content:         &ChatMessageContent{ContentStr: &envelopeText},
 		ChatToolMessage: &ChatToolMessage{ToolCallID: &callID},
 	}, nil
+}
+
+// renderChatToolResultMultipart renders multimodal tool-result content as
+// multipart Chat tool-message content blocks: text parts as text blocks and
+// image parts as image_url blocks (data URLs), order preserved. It reports
+// ok=false when a part cannot be carried as multipart content (a document,
+// or an image whose media type is outside the Chat vocabulary), leaving the
+// caller to take its loss/reject decision. Image parts require the
+// ImageInput rendering vocabulary in addition to ToolResultImages.
+func renderChatToolResultMultipart(
+	result CanonicalFunctionResult,
+	parts []CanonicalPart,
+	capabilities ChatCapabilities,
+	policy LossPolicy,
+	report *ConversionReport,
+) (ChatMessage, bool, error) {
+	if !capabilities.ImageInput {
+		return ChatMessage{}, false, nil
+	}
+	// The attempt is TRANSACTIONAL. This renderer may decline (a document
+	// part, or an image media type the encoder rejects) and the caller then
+	// falls back to the envelope, which carries no detail field and never
+	// renders a part. Recording into the caller's report as we go would
+	// therefore leave notes and policy-gated losses describing content that
+	// never reached the wire - and, for a client-sent image_detail_original,
+	// could turn a request the envelope converts fine into a rejection. So
+	// collect into a scratch report and commit it only on success.
+	scratch := &ConversionReport{}
+	var blocks []ChatContentBlock
+	for _, part := range parts {
+		switch value := part.(type) {
+		case CanonicalText:
+			text := value.Text
+			blocks = append(blocks, ChatContentBlock{
+				Type: ChatContentBlockTypeText,
+				Text: &text,
+			})
+
+		case CanonicalImage:
+			url := value.URL
+			if url == "" {
+				var err error
+				url, err = imageDataURL(value.MediaType, value.Base64)
+				if err != nil {
+					return ChatMessage{}, false, nil
+				}
+			}
+			detail, err := chatImageDetail(value.Detail, "messages[].tool_result.content", policy, scratch)
+			if err != nil {
+				return ChatMessage{}, false, err
+			}
+			blocks = append(blocks, ChatContentBlock{
+				Type: ChatContentBlockTypeImage,
+				ImageURL: &ChatInputImage{
+					URL:    url,
+					Detail: &detail,
+				},
+			})
+
+		default:
+			// A document (or any other part) is not carried by the
+			// multipart tool-message form: fall back to the JSON envelope,
+			// which can represent every part shape.
+			return ChatMessage{}, false, nil
+		}
+	}
+	if len(blocks) == 0 {
+		return ChatMessage{}, false, nil
+	}
+	report.Losses = append(report.Losses, scratch.Losses...)
+	report.Dropped += scratch.Dropped
+	callID := result.CallID
+	return ChatMessage{
+		Role:            ChatMessageRoleTool,
+		Content:         &ChatMessageContent{ContentBlocks: blocks},
+		ChatToolMessage: &ChatToolMessage{ToolCallID: &callID},
+	}, true, nil
 }
 
 // allTextParts reports whether every part is ordinary text.

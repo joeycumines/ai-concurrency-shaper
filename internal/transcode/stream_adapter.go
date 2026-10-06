@@ -70,7 +70,10 @@ func (c *chatToResponsesConverter) Convert(
 
 // FinalizeEOF reports a truncation error unless the stream terminated
 // correctly. The held terminal (which may be an empty batch for a
-// zero-output finish) is released ONLY by the [DONE] sentinel.
+// zero-output finish) is released by the [DONE] sentinel, or by EOF when
+// a finish_reason was already received — the missing sentinel is recorded
+// as an ungated note. A stream that ends without any finish_reason is
+// still a typed truncation error.
 func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
@@ -109,6 +112,10 @@ func marshalResponsesEvents(
 // Responses events, converted, and marshaled into Anthropic frames.
 type responsesToAnthropicConverter struct {
 	state *anthropicResponsesStreamState
+
+	// missingEventNameNoted gates the missing-event-name note to once per
+	// stream (a data-only gateway omits the name on every frame).
+	missingEventNameNoted bool
 }
 
 func newResponsesToAnthropicConverter(
@@ -141,18 +148,37 @@ func (c *responsesToAnthropicConverter) Convert(
 	if err != nil {
 		return convertedBatch{}, err
 	}
-	// Validate the SSE event name equals the JSON type. Responses streams
-	// require event: to be present and equal the JSON type tag (the
-	// package's own rule): an empty event name is
-	// a wire error, not a silent pass.
+	// The SSE event name must equal the JSON type tag when present. The SSE
+	// event field is optional and the Responses JSON type is the
+	// authoritative discriminator, so a data-only frame is routed by its
+	// decoded type and the provider quirk is recorded once per stream as an
+	// ungated note. A PRESENT name that disagrees with the JSON type is
+	// still a wire error.
+	//
+	// DECISION (tolerated upstream surface, deliberate): real gateways emit
+	// data-only frames, and refusing them would turn a working upstream into
+	// a 502 — the availability failure the contract-role rules exist to
+	// prevent. No count/threshold gate: any threshold would invent a policy
+	// the contract does not state. The line is principled, not weak —
+	// absence is tolerated, but a present name that CONTRADICTS the JSON
+	// type is still refused, so corruption that disagrees is never routed.
+	//
+	// No synthesized name is stored on the frame: routing below uses the
+	// decoded event's own Type, not this frame's Event field, and nothing
+	// reads frame.Event on this branch. Writing it implied the synthesized
+	// name was consumed downstream, which it is not.
 	if frame.Event == "" {
-		return convertedBatch{}, upstreamWireError(
-			UpstreamResponses,
-			http.StatusOK,
-			errors.New("responses stream event has no event name"),
-		)
-	}
-	if err := validateEventNameMatchesJSONType(frame); err != nil {
+		if !c.missingEventNameNoted {
+			c.missingEventNameNoted = true
+			if err := c.state.report.Note(
+				FeatureMissingEventName,
+				"responses[].stream",
+				"the upstream stream omitted the SSE event: name; the event was routed by its JSON type",
+			); err != nil {
+				return convertedBatch{}, err
+			}
+		}
+	} else if err := validateEventNameMatchesJSONType(frame); err != nil {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamResponses,
 			http.StatusOK,
@@ -241,8 +267,7 @@ func (c *chatToAnthropicConverter) Convert(
 		// classifies as an upstream body failure and the reader stops
 		// immediately — never an empty non-terminal batch that would wait
 		// on an upstream keeping the connection open after [DONE]. The sawFinish guard is required because a zero-output
-		// finish holds an EMPTY batch that releaseTerminals still releases
-		//.
+		// finish holds an EMPTY batch that releaseTerminals still releases.
 		if !c.chat.sawFinish {
 			return convertedBatch{}, errChatDoneBeforeTerminal()
 		}
@@ -303,15 +328,22 @@ func (c *chatToAnthropicConverter) releaseTerminals() (convertedBatch, error) {
 	return batch, nil
 }
 
-// FinalizeEOF reports a truncation error unless the stream terminated
-// correctly. The Chat held terminal (which may be an empty batch for a
-// zero-output finish) is released ONLY by the [DONE] sentinel: EOF after finish_reason without [DONE] is a typed upstream
-// truncation, never a released terminal.
+// FinalizeEOF releases the Chat held terminal (which may be an empty batch
+// for a zero-output finish) when the upstream ended after a finishing chunk
+// without the [DONE] sentinel, recording the quirk as an ungated note. A
+// stream that ends WITHOUT any finish_reason is a typed upstream truncation,
+// never a released terminal.
 func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 	if c.chat.sawFinish && !c.chat.terminalReleased {
-		return convertedBatch{}, c.chat.wireError(errors.New(
-			"chat stream ended after finish_reason without the [DONE] sentinel",
-		))
+		if err := c.chat.noteMissingSentinel(); err != nil {
+			return convertedBatch{}, err
+		}
+		batch, err := c.releaseTerminals()
+		if err != nil {
+			return convertedBatch{}, err
+		}
+		batch.Terminal = true
+		return batch, nil
 	}
 	if c.chat.sawFinish || c.anthropic.sawTerminal {
 		return convertedBatch{Terminal: true}, nil
@@ -471,15 +503,27 @@ func boundedErrorMessage(err error) string {
 // upstream payload (e.g. an invalid tool-argument buffer), which must not
 // amplify the downstream frame without bound.
 func boundedErrorMessageLimit(err error, max int) string {
-	message := err.Error()
-	if len(message) <= max {
+	return BoundErrorMessage(err.Error(), max)
+}
+
+// BoundErrorMessage truncates message to max bytes with the shared ellipsis
+// discipline (three-byte ellipsis carved out of the bound; a non-positive
+// max returns the message whole, meaning "no configured bound"). The cut
+// lands on a rune boundary, so a multibyte rune straddling the bound is
+// dropped whole rather than emitted as half a rune (U+FFFD mojibake
+// downstream). It is the
+// one truncation helper for client-controlled text a dialect error reflects
+// back — catalog, suite, native, and handler paths all delegate here, so the
+// bound policy cannot drift between paths that render the same input.
+func BoundErrorMessage(message string, max int) string {
+	if max <= 0 || len(message) <= max {
 		return message
 	}
 	// The ellipsis must not push the text past the configured bound.
 	if max > 3 {
-		return message[:max-3] + "…"
+		return truncateUTF8(message, max-3) + "…"
 	}
-	return message[:max]
+	return truncateUTF8(message, max)
 }
 
 // responsesErrorFrame marshals a Responses error event.

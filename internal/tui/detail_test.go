@@ -164,7 +164,7 @@ func TestLogDetail_EnterOpensAndEscCloses(t *testing.T) {
 	}
 }
 
-// ─── T04: identity-pinned Logs detail view ───
+// ─── Identity-pinned Logs detail view ───
 
 func TestLogDetailPin_NewArrivalsDoNotChangeDisplay(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
@@ -262,7 +262,7 @@ func TestLogDetailPin_StillPresentAppendKeepsMessage(t *testing.T) {
 	}
 }
 
-// ─── T04: identity-pinned Logs detail view (direct logRing writes) ───
+// ─── Identity-pinned Logs detail view (direct logRing writes) ───
 
 func TestLogDetailPin_RingAppendKeepsOriginal(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
@@ -466,7 +466,7 @@ func TestLogDetailPin_FilterChangeClosesOverlay(t *testing.T) {
 	}
 }
 
-// ─── T05: Network detail identity pinning ───
+// ─── Network detail identity pinning ───
 
 func TestNetworkDetailPin_NewEntriesDoNotChangeDisplay(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
@@ -544,4 +544,4 @@ func TestNetworkDetailPin_EvictionClosesOverlay(t *testing.T) {
 	}
 }
 
-// ─── T06: Help/footer text for new affordances ───
+// ─── Help/footer text for new affordances ───

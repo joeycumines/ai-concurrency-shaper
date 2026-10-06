@@ -1,6 +1,6 @@
 package transcode
 
-// Review-08 blocker 10 regression tests: transcoded routes use explicit
+// Regression tests: transcoded routes use explicit
 // request and response header allowlists — nothing the client sent reaches
 // the target provider unless it is on the list, and nothing the upstream
 // sent reaches the client-facing origin unless it is documented

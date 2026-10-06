@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"sort"
@@ -208,6 +209,84 @@ func provisionalStrictnessLoss(m transcode.Mapping) transcode.Mapping {
 	return m
 }
 
+// parseNativeRoute parses one -native-route value of the form
+// protocol@path, where protocol is responses, messages, or chat. Unlike
+// -transcode-route, chat is legal here: native routes forward the document
+// with only the model identifier rewritten, never transcoded.
+func parseNativeRoute(value string) (proxy.NativeRoute, error) {
+	at := strings.Index(value, "@")
+	if at <= 0 || at == len(value)-1 {
+		return proxy.NativeRoute{}, fmt.Errorf(
+			"invalid native route %q: want protocol@path",
+			value,
+		)
+	}
+	protocol, err := transcode.ParseNativeProtocol(value[:at])
+	if err != nil {
+		return proxy.NativeRoute{}, fmt.Errorf("invalid native route %q: %w", value, err)
+	}
+	path := value[at+1:]
+	if !strings.HasPrefix(path, "/") {
+		return proxy.NativeRoute{}, fmt.Errorf("invalid native route %q: path %q must be absolute", value, path)
+	}
+	routeKey, err := transcode.NewRouteKey(httpMethodPost, path)
+	if err != nil {
+		return proxy.NativeRoute{}, fmt.Errorf("invalid native route %q: %w", value, err)
+	}
+	return proxy.NativeRoute{
+		RouteKey: routeKey,
+		Protocol: protocol,
+	}, nil
+}
+
+// parseTranscodeProfiles builds the ProfileMap from repeated -transcode-profile
+// values. Each value is "name=model:tier" or "name=model" (tier optional).
+// The tier, when present, must be in the closed effort vocabulary; an unknown
+// tier is rejected at parse time so a typo surfaces at startup rather than
+// silently falling through to the provider default.
+func parseTranscodeProfiles(values []string) (transcode.ProfileMap, error) {
+	profiles := make(map[string]transcode.ProfileMapping)
+	for _, value := range values {
+		name, rest, ok := strings.Cut(value, "=")
+		if !ok || name == "" || rest == "" {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: want name=model:tier or name=model",
+				value,
+			)
+		}
+		if _, dup := profiles[name]; dup {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"duplicate -transcode-profile name %q",
+				name,
+			)
+		}
+		model, tier, hasTier := strings.Cut(rest, ":")
+		if model == "" {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: model is empty",
+				value,
+			)
+		}
+		if hasTier && tier == "" {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: tier is empty after ':'",
+				value,
+			)
+		}
+		if hasTier && !transcode.ValidModelEffort(tier) {
+			return transcode.ProfileMap{}, fmt.Errorf(
+				"invalid -transcode-profile %q: unknown tier %q (want one of %s)",
+				value, tier, strings.Join(transcode.ModelEfforts, ", "),
+			)
+		}
+		profiles[name] = transcode.ProfileMapping{
+			Model:         model,
+			ReasoningTier: tier,
+		}
+	}
+	return transcode.ProfileMap{Profiles: profiles}, nil
+}
+
 // parseTranscodeModelMap builds the ModelMap from repeated -transcode-model
 // values. With no mappings, identity fallback is used.
 func parseTranscodeModelMap(values []string) (transcode.ModelMap, error) {
@@ -264,7 +343,7 @@ func parseTranscodeAuth(
 		// mode requires a secret source or inbound credentials") instead of
 		// silently forwarding the CLIENT credential upstream — the visible
 		// startup failure is preferable to an implicit credential export
-		// (GAP-005 adjudication principle).
+		// (fail-closed principle).
 	default:
 		secret, err := secretSource(source)
 		if err != nil {
@@ -284,6 +363,7 @@ var chatCapabilityNames = []struct {
 }{
 	{"developer_role", func(c *transcode.ChatCapabilities) *bool { return &c.DeveloperRole }},
 	{"image_input", func(c *transcode.ChatCapabilities) *bool { return &c.ImageInput }},
+	{"tool_result_images", func(c *transcode.ChatCapabilities) *bool { return &c.ToolResultImages }},
 	{"structured_outputs", func(c *transcode.ChatCapabilities) *bool { return &c.StructuredOutputs }},
 	{"parallel_tool_calls", func(c *transcode.ChatCapabilities) *bool { return &c.ParallelToolCalls }},
 	{"stop_sequences", func(c *transcode.ChatCapabilities) *bool { return &c.StopSequences }},
@@ -291,6 +371,7 @@ var chatCapabilityNames = []struct {
 	{"provider_reasoning_text", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningText }},
 	{"provider_reasoning_thinking", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningThinking }},
 	{"system_anywhere", func(c *transcode.ChatCapabilities) *bool { return &c.SystemAnywhere }},
+	{"multi_agent_priming", func(c *transcode.ChatCapabilities) *bool { return &c.MultiAgentPriming }},
 }
 
 func splitFlagNegations(
@@ -414,10 +495,12 @@ func parseClientQuery(
 
 var defaultTranscodeChatCapabilities = transcode.ChatCapabilities{
 	DeveloperRole:             false,
+	ImageInput:                true,
 	ParallelToolCalls:         true,
 	ReasoningEffort:           false,
 	ProviderReasoningText:     false,
 	ProviderReasoningThinking: true,
+	StopSequences:             true,
 	StructuredOutputs:         true,
 }
 
@@ -426,20 +509,25 @@ var defaultTranscodeAllowedQuery = map[string]struct{}{
 }
 
 var defaultTranscodeLosses = map[transcode.Feature]struct{}{
-	transcode.FeatureReasoningSummary:       {},
-	transcode.FeatureAuthenticatedThinking:  {},
-	transcode.FeatureMidConversationSystem:  {},
-	transcode.FeatureResponsesControls:      {},
-	transcode.FeatureAnthropicControls:      {},
-	transcode.FeatureRequestCitations:       {},
-	transcode.FeatureBuiltinTools:           {},
-	transcode.FeatureUsageUnknown:           {},
-	transcode.FeatureUsageCacheReadUnknown:  {},
-	transcode.FeatureUsageCacheWriteUnknown: {},
-	transcode.FeatureUsageReasoningUnknown:  {},
-	transcode.FeatureRequestReasoning:       {},
-	transcode.FeatureToolResultErrorStatus:  {},
-	transcode.FeatureDeveloperRole:          {},
+	transcode.FeatureReasoningSummary:            {},
+	transcode.FeatureAuthenticatedThinking:       {},
+	transcode.FeatureMidConversationSystem:       {},
+	transcode.FeatureResponsesControls:           {},
+	transcode.FeatureAnthropicControls:           {},
+	transcode.FeatureRequestCitations:            {},
+	transcode.FeatureBuiltinTools:                {},
+	transcode.FeatureUsageUnknown:                {},
+	transcode.FeatureUsageCacheReadUnknown:       {},
+	transcode.FeatureUsageCacheWriteUnknown:      {},
+	transcode.FeatureUsageReasoningUnknown:       {},
+	transcode.FeatureRequestReasoning:            {},
+	transcode.FeatureToolResultErrorStatus:       {},
+	transcode.FeatureToolResultMultimodalContent: {},
+	transcode.FeatureToolResultJSONEnvelope:      {},
+	transcode.FeatureDeveloperRole:               {},
+	transcode.FeatureImageDetailOriginal:         {},
+	transcode.FeatureResponseServiceTier:         {},
+	transcode.FeatureOutputPhase:                 {},
 }
 
 func mergedLossPolicy(
@@ -479,6 +567,7 @@ func mergedChatCapabilities(
 	fields := map[string]*bool{
 		"developer_role":              &out.DeveloperRole,
 		"image_input":                 &out.ImageInput,
+		"tool_result_images":          &out.ToolResultImages,
 		"structured_outputs":          &out.StructuredOutputs,
 		"parallel_tool_calls":         &out.ParallelToolCalls,
 		"stop_sequences":              &out.StopSequences,
@@ -486,10 +575,12 @@ func mergedChatCapabilities(
 		"provider_reasoning_text":     &out.ProviderReasoningText,
 		"provider_reasoning_thinking": &out.ProviderReasoningThinking,
 		"system_anywhere":             &out.SystemAnywhere,
+		"multi_agent_priming":         &out.MultiAgentPriming,
 	}
 	cli := map[string]bool{
 		"developer_role":              capabilities.DeveloperRole,
 		"image_input":                 capabilities.ImageInput,
+		"tool_result_images":          capabilities.ToolResultImages,
 		"structured_outputs":          capabilities.StructuredOutputs,
 		"parallel_tool_calls":         capabilities.ParallelToolCalls,
 		"stop_sequences":              capabilities.StopSequences,
@@ -497,6 +588,7 @@ func mergedChatCapabilities(
 		"provider_reasoning_text":     capabilities.ProviderReasoningText,
 		"provider_reasoning_thinking": capabilities.ProviderReasoningThinking,
 		"system_anywhere":             capabilities.SystemAnywhere,
+		"multi_agent_priming":         capabilities.MultiAgentPriming,
 	}
 	for name, field := range fields {
 		_, deny := negated[name]
@@ -626,12 +718,21 @@ func validateMBFlag(name string, value int64, shift uint) error {
 }
 
 // resolveTranscode resolves and validates all transcode configuration for a Provider.
-func (p *Provider) resolveTranscode() error {
+// modelTable is this provider's frozen subset of the global -model-table: nil or
+// empty means the table is not configured and the provider-scope -transcode-model
+// values are the only model-mapping source.
+func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	if err := validateMBFlag("-transcode-max-request-mb", p.TranscodeMaxRequestMB, 20); err != nil {
 		return err
 	}
 	if err := validateMBFlag("-transcode-max-response-mb", p.TranscodeMaxResponseMB, 20); err != nil {
 		return err
+	}
+	if p.TranscodeContinuityCap < 0 {
+		return fmt.Errorf("-transcode-continuity-capacity must be nonnegative, got %d", p.TranscodeContinuityCap)
+	}
+	if p.TranscodeContinuityTTL < 0 {
+		return fmt.Errorf("-transcode-continuity-ttl must be nonnegative, got %s", p.TranscodeContinuityTTL)
 	}
 
 	var parsedRoutes []proxy.TranscodeMapping
@@ -687,6 +788,30 @@ func (p *Provider) resolveTranscode() error {
 	if err != nil {
 		return err
 	}
+	tableProjected := len(modelTable) > 0
+	if tableProjected {
+		modelMap = modelMapFromTable(modelTable)
+	}
+
+	profileMap, err := parseTranscodeProfiles(p.TranscodeProfiles)
+	if err != nil {
+		return err
+	}
+	if len(profileMap.Profiles) > 0 && (tableProjected || len(modelMap.Exact) > 0 || !modelMap.AllowIdentity || modelMap.RequireExplicitMap) {
+		for name, prof := range profileMap.Profiles {
+			// A profile is resolved BEFORE the model map, so a profile whose
+			// name is also a mapped model would silently shadow that mapping
+			// and the client would be told the mapped name while being served
+			// the profile's target. That is a false identity, not a routing
+			// choice, so it is rejected at startup where it is still cheap.
+			if _, clash := modelMap.Exact[name]; clash {
+				return fmt.Errorf("invalid -transcode-profile %q: profile name collides with a mapped model; rename the profile or the model", name)
+			}
+			if _, err := modelMap.Resolve(prof.Model); err != nil {
+				return fmt.Errorf("invalid -transcode-profile %q: target model %q cannot be resolved: %w", name, prof.Model, err)
+			}
+		}
+	}
 
 	allowedLosses, negatedLosses, err := parseNegatedLosses(p.TranscodeAllowLosses...)
 	if err != nil {
@@ -726,7 +851,19 @@ func (p *Provider) resolveTranscode() error {
 
 	// Apply model map, auth, body limits, and check duplicate client routes within this provider.
 	seen := make(map[transcode.RouteKey]struct{})
+	// The preset is built and stamped before the mappings are validated:
+	// the mapping's reserved-name rule consults Mapping.Opencode, so
+	// validating first left that predicate dead and deferred the refusal to
+	// proxy.New, where the operator saw a "proxy config:" prefix instead of
+	// the config error.
+	p.opencodePreset = transcode.OpencodePreset{
+		Enabled:   p.Opencode,
+		UserAgent: p.OpencodeUserAgent,
+		Client:    p.OpencodeClient,
+		Provider:  effectiveName(p),
+	}
 	for i := range mappings {
+		mappings[i].Mapping.Opencode = p.opencodePreset
 		if _, dup := seen[mappings[i].ClientRoute]; dup {
 			return fmt.Errorf(
 				"duplicate transcode mapping for client route %s %s",
@@ -736,8 +873,16 @@ func (p *Provider) resolveTranscode() error {
 		}
 		seen[mappings[i].ClientRoute] = struct{}{}
 
-		if len(modelMap.Exact) > 0 || !modelMap.AllowIdentity {
+		if tableProjected {
+			// The global table owns model resolution for every transcode-enabled
+			// provider: the projected map is stamped unconditionally, identity
+			// fallback is off, and unlisted surrogates fail as local client errors.
 			mappings[i].Mapping.ModelMap = modelMap
+		} else if len(modelMap.Exact) > 0 || !modelMap.AllowIdentity {
+			mappings[i].Mapping.ModelMap = modelMap
+		}
+		if len(profileMap.Profiles) > 0 {
+			mappings[i].Mapping.ProfileMap = profileMap
 		}
 		if hasExplicitTranscodeAuth || p.authPolicy != nil {
 			mappings[i].Mapping.Auth = authPolicy
@@ -753,12 +898,83 @@ func (p *Provider) resolveTranscode() error {
 		if p.TranscodeMaxResponseMB > 0 {
 			mappings[i].BodyLimits.SuccessfulResponseBytes = p.TranscodeMaxResponseMB << 20
 		}
+		mappings[i].FlowLogDir = p.TranscodeFlowLogDir
+
+		if p.TranscodeContinuity {
+			if p.continuityStore == nil {
+				p.continuityStore = transcode.NewContinuityStore(transcode.ContinuityConfig{
+					Capacity: p.TranscodeContinuityCap,
+					TTL:      p.TranscodeContinuityTTL,
+				})
+				log.Printf(
+					"transcode: continuity store enabled (capacity %d, ttl %s); previous_response_id resolves against retained chains, a miss degrades to the existing observable loss",
+					p.continuityStore.Capacity(),
+					p.continuityStore.TTL(),
+				)
+			}
+			mappings[i].Continuity = p.continuityStore
+			mappings[i].ContinuityKey = p.Name
+		}
 
 		if err := mappings[i].Mapping.Validate(); err != nil {
 			return fmt.Errorf("transcode mapping %s %s: %w", mappings[i].ClientRoute.Method, mappings[i].ClientRoute.Path, err)
 		}
 	}
 
+	var nativeRoutes []proxy.NativeRoute
+	nativeSeen := make(map[transcode.RouteKey]struct{})
+	for _, raw := range p.NativeRouteFlags {
+		nr, err := parseNativeRoute(raw)
+		if err != nil {
+			return err
+		}
+		// A native route MAY share its client route with a transcode
+		// mapping: dispatch tries native first and falls through to the
+		// mapping when the model's dialect differs, so one path can serve
+		// both natively and by conversion.
+		if _, dup := nativeSeen[nr.RouteKey]; dup {
+			return fmt.Errorf(
+				"duplicate native route for client route %s %s",
+				nr.RouteKey.Method,
+				nr.RouteKey.Path,
+			)
+		}
+		nativeSeen[nr.RouteKey] = struct{}{}
+		nativeRoutes = append(nativeRoutes, nr)
+	}
+	for i := range nativeRoutes {
+		// Native routes share the provider's model resolution: the
+		// projected table (with Via dialects) or the explicit map. With
+		// neither, identity fallback applies and Via stays unknown, so
+		// every request declines native and falls through.
+		if tableProjected {
+			nativeRoutes[i].ModelMap = modelMap
+		} else if len(modelMap.Exact) > 0 || !modelMap.AllowIdentity {
+			nativeRoutes[i].ModelMap = modelMap
+		} else {
+			nativeRoutes[i].ModelMap = transcode.ModelMap{AllowIdentity: true}
+		}
+		if p.TranscodeMaxRequestMB > 0 {
+			// The native path reads the whole body to rewrite the model
+			// identifier, so both its read cap and its rewritten-body cap
+			// follow the provider's declared request bound.
+			b := p.TranscodeMaxRequestMB << 20
+			nativeRoutes[i].BodyLimits.DecodedRequestBytes = b
+			nativeRoutes[i].BodyLimits.AcceptedRequestBytes = b
+		}
+		if p.TranscodeMaxResponseMB > 0 {
+			nativeRoutes[i].BodyLimits.SuccessfulResponseBytes = p.TranscodeMaxResponseMB << 20
+		}
+		if err := nativeRoutes[i].Validate(); err != nil {
+			return fmt.Errorf("native route %s %s: %w",
+				nativeRoutes[i].RouteKey.Method, nativeRoutes[i].RouteKey.Path, err)
+		}
+	}
+
 	p.transcodeMappings = mappings
+	p.nativeRoutes = nativeRoutes
+	for i := range p.nativeRoutes {
+		p.nativeRoutes[i].Provider = effectiveName(p)
+	}
 	return nil
 }

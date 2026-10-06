@@ -35,6 +35,8 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-upstream` | provider | _(required)_ | Upstream base URL |
 | `-bind` | server | `:8080` | Listen address |
 | `-metrics-bind` | server | _(unset)_ | Dedicated listen address for the Prometheus `/metrics` endpoint (see [Metrics Export](#metrics-export)); empty disables it |
+| `-model-table` | server | _(repeatable)_ | Global model identity entry `surrogate@provider=wire[;facts]` (see [Model identities](#model-identities-and-the-global-model-table)). Server scope, so with `--provider` sections every entry goes before the first marker |
+| `-catalog-suite` | server | _(repeatable)_ | Mount a virtual catalog suite: `[name@]prefix[=models][;options]` (see [Catalog suites](#catalog-suites-unified-endpoints-and-model-routing)). Server scope |
 | `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints). A `:unlimited` suffix (`POST /messages/count_tokens:unlimited`) exempts the route from limiting entirely, including under `-limit-all` |
 | `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
 | `-concurrency` | provider | `4` | Max concurrent limited requests |
@@ -200,12 +202,12 @@ A multi-provider configuration with no auth on some providers prints one startup
 
 #### Scope & Limitations
 
-Routing is **path-prefix only**: there is no model-ID translation or request-body inspection today. Clients choose a provider by targeting its mount (`/anthropic/...`, `/openai/...`); a single base URL with body-aware model routing is future work.
+Standard provider mounts route by **path prefix** (`/anthropic/...`, `/openai/...`). For a single unified endpoint with body-aware model routing across providers, use [Catalog suites](#catalog-suites-unified-endpoints-and-model-routing).
 
 Other explicit scope boundaries and deferred capabilities:
-- **No Downstream Client Authentication (M4)**: There is no downstream client authentication (anything that can reach the port can use every mounted provider). Transcoding's inbound credential mode is per-route forwarding/transcoding, not virtual-key admission.
-- **Stateless Inference without Session Stickiness (G6)**: Stateless LLM inference does not require session affinity or stickiness. Per-tool session affinity, if ever needed in the future, would be based on tool HTTP headers, cookies, or hashes.
-- **Provider Resource Isolation vs Client Identity Rotation (G7)**: The proxy intentionally does not implement LocalAddr pooling, User-Agent rotation, TLS fingerprint spoofing, or keypool rotation on 429. Per the Maxim AI caveat, having $N$ API keys in the same organization does not yield $N\times$ quota under modern upstream mitigation policies (providers enforce limits per organization, project, or billing account). The correct and supported architectural pattern is defining distinct organizations, accounts, or regions as distinct `--provider` resources with isolated queue limiters and circuit breakers, rather than per-request identity rotation.
+- **No Downstream Client Authentication**: There is no downstream client authentication (anything that can reach the port can use every mounted provider). Transcoding's inbound credential mode is per-route forwarding/transcoding, not virtual-key admission.
+- **Stateless Inference without Session Stickiness**: Stateless LLM inference does not require session affinity or stickiness. Per-tool session affinity, if ever needed in the future, would be based on tool HTTP headers, cookies, or hashes.
+- **Provider Resource Isolation vs Client Identity Rotation**: The proxy intentionally does not implement LocalAddr pooling, User-Agent rotation, TLS fingerprint spoofing, or keypool rotation on 429. Per the Maxim AI caveat, having $N$ API keys in the same organization does not yield $N\times$ quota under modern upstream mitigation policies (providers enforce limits per organization, project, or billing account). The correct and supported architectural pattern is defining distinct organizations, accounts, or regions as distinct `--provider` resources with isolated queue limiters and circuit breakers, rather than per-request identity rotation.
 - **Readiness and Configuration**: Readiness is TCP-connect only, and configuration changes require a restart.
 
 ### Examples
@@ -325,13 +327,22 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-allow-client-query` | provider | _(repeatable)_ | Forward client query parameter (`name` or withdraw `!name`) |
 | `-transcode-allow-loss` | provider | _(repeatable)_ | Approve non-portable semantic loss by granular key (or withdraw `!key`) |
 | `-transcode-strict-defaults` | provider | `false` | Strip all out-of-the-box chat capabilities, query parameters, and loss approvals |
-| `-transcode-model` | provider | _(repeatable)_ | Map client model name to upstream model name (`client=upstream`), identity fallback when omitted |
+| `-transcode-model` | provider | _(repeatable)_ | Map client model name to upstream model name (`client=upstream`), identity fallback when omitted. Cannot be combined with `-model-table` — see [Migrating from -transcode-model](#migrating-from--transcode-model) |
+| `-transcode-profile` | provider | _(repeatable)_ | Map profile name to upstream model and optional reasoning tier: `name=model[:tier]` (see [Agent profiles](#agent-profiles--transcode-profile)) |
+| `-transcode-continuity` | provider | `false` | Opt-in per-conversation continuity store for `previous_response_id` against stateless chat upstreams (see [Conversation continuity store](#conversation-continuity-store--transcode-continuity)) |
+| `-transcode-continuity-capacity` | provider | `1024` | Max retained conversation chains for the continuity store (0 = default 1024) |
+| `-transcode-continuity-ttl` | provider | `30m` | Max age of a retained conversation chain (0 = default 30m) |
 | `-transcode-auth` | provider | _(unset — inherits provider auth, else none)_ | Per-route target auth mode override (`auto`, `none`, `bearer`, `x-api-key`, `api-key`, `header`) |
 | `-transcode-auth-source` | provider | _(unset — inherits provider auth, else none)_ | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`, `provider`) |
 | `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header` |
 | `-transcode-anthropic-version` | provider | `2023-06-01` | Anthropic-Version header value when target auth mode resolves to `x-api-key` |
 | `-transcode-max-request-mb` | provider | `10` | Max unmarshaled request body size (MB) for transcoding |
 | `-transcode-max-response-mb` | provider | `10` | Max unmarshaled non-streaming response body size (MB) for transcoding |
+| `-transcode-flowlog-dir` | provider | `` (disabled) | Existing directory that receives one unredacted JSON record per transcoded exchange, capturing the full flow (client request, converted upstream request, upstream response, downstream response); empty disables the recorder |
+| `-native-route` | provider | _(repeatable)_ | Natively served route: `protocol@path` with protocol `responses`, `messages`, or `chat`. A request whose model's `via` dialect matches is forwarded with only the model identifier rewritten; a mismatch falls through to any transcode mapping on the same path (see [Native passthrough](#native-passthrough)) |
+| `-opencode` | provider | `false` | Emit the opencode first-party request shape upstream: `User-Agent`, `x-opencode-client`, session affinity and identity headers (see [opencode Zen and Go](#opencode-zen-and-go)) |
+| `-opencode-user-agent` | provider | `opencode/1.18.33` | `User-Agent` the `-opencode` preset asserts upstream |
+| `-opencode-client` | provider | `cli` | `x-opencode-client` the `-opencode` preset asserts upstream |
 
 ### Route examples
 
@@ -357,6 +368,181 @@ error. A Messages-to-Responses mapping without an approved
 `tool_schema_strictness` loss is also a startup error (Messages tools cannot
 preserve the strictness the Responses contract requires).
 
+### Model identities and the global model table
+
+`-model-table` (server scope, repeatable) declares the gateway's client-visible
+model identities once, globally:
+
+```
+surrogate@provider=wire[;facts]
+```
+
+- `surrogate` is the name clients send and the name responses echo back
+  (letters, digits, `.`, `_`, `-`; 1–128 characters). It is the only model
+  identifier a client ever sees.
+- `provider` is the effective provider name — `-name` when set, the
+  `--provider=` marker, or the host-derived name (`api.anthropic.com` →
+  `anthropic`) — matched case-sensitively.
+- `wire` is the upstream model id, opaque to the shaper (letters, digits, and
+  `._-/:@=+`, so ids like `openai/gpt-4o` and `glm-5.3-flash:dev` pass through
+  verbatim; 1–256 characters), forwarded upstream and never leaked into a
+  client response.
+- Optional `;`-separated facts — `context=<positive int>`,
+  `max_output=<positive int>`,
+  `efforts=minimal+low+medium+high+xhigh+max`,
+  `modalities=text+image`, `default`, `deprecated`,
+  `cost_input=<non-negative decimal>`, `cost_output=<non-negative decimal>`,
+  `tags=tag+...`, `description=<text>`, `created=<non-negative int>` — are
+  validated at startup and served by the [model catalog](#model-catalog-get-v1models).
+  They are presentation-only: no fact affects conversion, resolution, or
+  admission.
+
+Surrogates form one global namespace: a duplicate surrogate, an entry naming
+an unknown provider, a provider with transcode routes that no entry names, a
+provider with entries but no transcode route, and two `default`s on one provider
+are all startup errors. A table-backed alias is rejected on a passthrough-only
+provider because that mount has no model-resolution path on which the advertised
+surrogate could reach its wire id. Because the table is server scope, every
+entry goes before the first `--provider` marker.
+
+Each transcoded mount serves exactly the entries naming it, projected onto
+that mount's model map at startup: a request naming an unlisted model is a
+local 400 that names the mount's servable surrogates, never a silent identity
+fallback. With no entries at all the behavior is unchanged — identity fallback
+applies unless `-transcode-model` supplies explicit mappings.
+
+Startup logs one summary line (sorted by surrogate; facts in parentheses):
+
+```
+model table: 2 surrogates across 2 providers: gpt4o@openai->gpt-4o(context=128000,default,max_output=16384), opus@anthropic->claude-opus-4-1(context=200000,default)
+```
+
+### Model catalog (GET /v1/models)
+
+When at least one `-model-table` entry names a mount, `GET /v1/models` on that
+mount is answered locally from the frozen table — the upstream is never
+contacted and the request never queues behind in-flight completions. The
+document lists exactly that mount's surrogates, and every listed identifier
+resolves on the mount that served it.
+
+The dialect is selected by the strongest available signal: `?format=`
+(`codex`, `anthropic`, or `openai`; `responses` and `messages` are accepted as
+aliases for the first two, `chat`/`chat-completions` for the last), then the
+Codex `?client_version=` probe (native `{"models":[...]}` document), then an
+`Anthropic-Version`/`Anthropic-Beta` header (messages-list document with
+`after_id`/`before_id`/`limit` pagination), then the mount's default —
+Responses mounts are Codex native, Messages mounts are Anthropic native, and
+everything else gets the lean OpenAI list. The accepted query parameters are
+`format`, `client_version`, and `beta` on every shape, plus the pagination trio
+on the Anthropic shape. Every supplied key must have exactly one non-empty
+value; malformed escapes, semicolon separators, repeated selectors/cursors, and
+unknown keys are local 400s, never forwarded upstream.
+
+Wire ids never appear in any served document. Optional facts are omitted (or
+`null` where the client contract requires the key). Anthropic `capabilities` is
+derived from what the table entry actually declares: effort support and its
+per-tier leaves from `efforts`, `image_input` from `modalities`, and
+`structured_outputs` from the mount's resolved chat capability, with everything
+the table does not declare reported as an honest negative rather than a
+fabricated yes. A model entry carrying no facts at all renders `capabilities:
+null` rather than an all-negative document.
+Codex-required fields are always present: `truncation_policy` uses the declared
+context or a conservative 32K-token fallback, `input_modalities` uses the
+declared list or `["text"]`, and `use_responses_lite` plus `support_verbosity`
+are `false` rather than optimistic claims. One malformed entry is skipped
+rather than failing the listing. A mount with no entries keeps
+`GET /v1/models` a transparent passthrough.
+
+### Catalog suites (unified endpoints and model routing)
+
+`-catalog-suite` (server scope, repeatable) mounts a virtual catalog suite that combines local model discovery with body-aware completion routing:
+
+```
+[name@]prefix[=models][;options]
+```
+
+- `prefix`: mount path (e.g. `/suite` or `/v1`).
+- `name`: optional display label (defaults to a sanitized prefix or `catalog`).
+- `models`: optional `+`-delimited list of model surrogates from `-model-table` to expose (defaults to all models in the global table).
+- Semicolon-delimited options (`key=value`):
+  - `format=codex|anthropic|openai|auto`: default catalog response dialect for discovery queries.
+  - `provider=name`: filter suite models to a single named provider.
+  - `strict=true|false`: when `false` and only one provider is configured, requests for unmapped models fall back to that provider; when `true` (or multiple providers exist), unmapped models return a client-dialect 404/400 error.
+
+Discovery endpoint `GET <prefix>/v1/models` is answered locally from the catalog without upstream calls or queueing. Completion endpoints `POST <prefix>/v1/messages` and `POST <prefix>/v1/responses` inspect the `model` field in the request body and dispatch only to a provider that has the matching transcoding route.
+
+Example:
+```sh
+ai-concurrency-shaper \
+  -model-table 'sonnet@anthropic=claude-3-5-sonnet-20241022' \
+  -model-table 'gpt4o@openai=gpt-4o' \
+  -catalog-suite '/suite=sonnet+gpt4o;format=auto' \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -transcode-messages-chat \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -transcode-responses-chat
+```
+
+### Migrating from -transcode-model
+
+Per-provider `-transcode-model client=upstream` entries migrate mechanically:
+move each entry to the global table with its provider's name added. Where the
+same client string previously meant different things on different mounts, the
+global namespace forces an explicit choice — rename one surrogate or collapse
+the pair onto one target — and the startup duplicate check enforces it.
+
+```sh
+# Before: per-provider mappings, one owner per mount
+ai-concurrency-shaper \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -transcode-messages-chat \
+    -transcode-model opus=claude-opus-4-1 \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -transcode-responses-chat \
+    -transcode-model gpt4o=gpt-4o
+
+# After: one global table, each entry naming its provider
+ai-concurrency-shaper \
+  -model-table 'opus@anthropic=claude-opus-4-1' \
+  -model-table 'gpt4o@openai=gpt-4o' \
+  --provider=anthropic \
+    -upstream https://api.anthropic.com \
+    -prefix /anthropic \
+    -transcode-messages-chat \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -prefix /openai \
+    -transcode-responses-chat
+```
+
+The client-visible behavior is unchanged: clients send the surrogate, the
+upstream sees the wire id, and responses echo the surrogate. Rollback is
+deleting the entries and restoring `-transcode-model`; a configuration
+carrying both fails startup naming the provider, so the migration is never
+half-applied silently.
+
+### Agent profiles (-transcode-profile)
+
+`-transcode-profile` (provider scope, repeatable) maps abstract agent profile names to concrete models and optional reasoning tiers:
+
+```
+name=model[:tier]
+```
+
+- `name`: profile identifier passed in the request `model` field (e.g. `scanner`, `analyst`).
+- `model`: target model identifier (a surrogate when `-model-table` is configured, or wire ID otherwise).
+- `tier`: optional reasoning effort tier (`low`, `medium`, `high`). Omit to keep the model's default reasoning configuration.
+
+When a client specifies a profile name in place of a model, the proxy resolves it to the target model and applies the reasoning tier before rendering the upstream request.
+
 ### Sensible defaults
 
 Every CLI mapping (`-transcode-route` and the presets) starts from a
@@ -366,43 +552,22 @@ the flags below extend the defaults, never replace them:
 
 | Layer | Default | Meaning |
 | --- | --- | --- |
-| Chat capabilities | `parallel_tool_calls`, `provider_reasoning_thinking` | a maximally compatible out-of-the-box core, enabled via `-transcode-chat-capability` (granular names: `developer_role`, `image_input`, `structured_outputs`, `parallel_tool_calls`, `stop_sequences`, `reasoning_effort`, `provider_reasoning_text`, `provider_reasoning_thinking`, `system_anywhere`). The fidelity-only knobs — `reasoning_effort` (a parameter several open-source servers reject) and `developer_role` (a role Qwen/Llama/DeepSeek chat templates do not know) — are deliberately opt-in: add them for upstreams that accept the modern surface |
+| Chat capabilities | `image_input`, `parallel_tool_calls`, `provider_reasoning_thinking`, `stop_sequences`, `structured_outputs` | A compatible out-of-the-box core, enabled via `-transcode-chat-capability` (available names: `developer_role`, `image_input`, `multi_agent_priming`, `parallel_tool_calls`, `provider_reasoning_text`, `provider_reasoning_thinking`, `reasoning_effort`, `stop_sequences`, `structured_outputs`, `system_anywhere`, `tool_result_images`). `image_input` and `stop_sequences` are required for common client traffic (such as Claude Code image attachments and stop sequence fields), so rejecting either locally would fail requests before querying upstream; withdraw them with `!image_input` or `!stop_sequences` for upstreams that reject those fields. `tool_result_images` (opt-in) renders multimodal tool-result content as multipart chat tool messages (text and image_url parts) for upstreams accepting tool message images; without it, content falls back to the observable `tool_result_json_envelope` text encoding. `structured_outputs` maps client `text.format` JSON schema definitions directly to chat `response_format`. For upstreams that reject structured outputs, withdraw the capability to fail locally with a typed error or approve the loss to proceed unconstrained with logged notification. |
 | Allowed client query | `beta` | Anthropic clients (Claude Code) gate every request with `?beta=true`; harmless on chat endpoints. Add more via `-transcode-allow-client-query` |
-| Loss policy | `reasoning_summary`, `authenticated_thinking`, `mid_conversation_system`, `responses_controls`, `anthropic_controls`, `builtin_tools`, `usage_unknown`, `usage_cache_read_unknown`, `usage_cache_write_unknown`, `usage_reasoning_unknown`, `request_reasoning`, `developer_role`, `tool_result_error_status` | the non-portable features real Responses/Messages client traffic triggers (reasoning summaries, Anthropic thinking blocks, system turns that cannot keep their position in a chat request, Responses and Anthropic envelope controls, built-in tools, usage breakdowns the chat upstreams do not always report, the effort/role knobs behind the opt-in capabilities, and the error status of a failed tool result); approved via `-transcode-allow-loss` on top of the defaults. Note: approving `responses_controls` tolerates `include`/`client_metadata`/`prompt_cache_key` and upstream-echoed controls — the conversation-state request controls (`background`, `max_tool_calls`, `prompt`, `safety_identifier`, `status`) are errors under every policy. The `tool_result_error_status` default is deliberate: Claude Code marks every failed tool call with `is_error: true`, so rejecting it makes the proxy unusable with the flagship client — the permissive encoding renders the visible `[tool_result_error]` prefix before the result content (the model still sees that the tool failed) and the decision is logged per exchange; withdraw it with `-transcode-allow-loss '!tool_result_error_status'` if you want strict rejection. A multi-part all-text tool result is joined into one string for a chat tool message as a sanctioned encoding (recorded as a note on every exchange; every content byte is preserved) |
+| Loss policy | the approvals a real client's traffic needs | the non-portable features real Responses/Messages client traffic triggers (reasoning summaries, Anthropic thinking blocks, system turns that cannot keep their position in a chat request, Responses and Anthropic envelope controls, the tier/phase controls a native Responses upstream echoes on its responses (`response_service_tier`, `output_phase`), built-in tools, usage breakdowns the chat upstreams do not always report, the effort/role knobs behind the opt-in capabilities, and the error status of a failed tool result); approved via `-transcode-allow-loss` on top of the defaults. Note: approving `responses_controls` tolerates `include`/`client_metadata`/`prompt_cache_key` and upstream-echoed controls — the conversation-state request controls (`background`, `max_tool_calls`, `prompt`, `safety_identifier`, `status`) are errors under every policy. The `tool_result_error_status` default is deliberate: Claude Code marks every failed tool call with `is_error: true`, so rejecting it makes the proxy unusable with the flagship client — the permissive encoding renders the visible `[tool_result_error]` prefix before the result content (the model still sees that the tool failed) and the decision is logged per exchange; withdraw it with `-transcode-allow-loss '!tool_result_error_status'` if you want strict rejection. A multi-part all-text tool result is joined into one string for a chat tool message as a sanctioned encoding (recorded as a note on every exchange; every content byte is preserved) |
 
-Capabilities are exercised only when the client actually uses the feature:
-`provider_reasoning_thinking` (the default) maps the chat provider
-reasoning response extension — spelled `reasoning` (OpenRouter style) or
-`reasoning_content` (the DeepSeek/Qwen convention open-weights gateways
-stream) — to NATIVE Anthropic thinking blocks so Claude Code renders it
-with its native thinking UI (live-verified against Claude Code 2.1.260:
-thinking blocks stream in the exact Anthropic lifecycle and replayed
-synthetic blocks are scrubbed before the upstream sees them);
-`provider_reasoning_text` maps the same field to client
-text; `provider_reasoning_thinking` maps the same field to NATIVE Anthropic
-thinking blocks so Claude Code renders it with its native thinking UI —
-each synthesized block carries the proxy's marker signature
-(`shaper-synth-thinking-1`), and the request path scrubs
-marker-signature thinking blocks out of replayed history before any
-upstream rendering, so the synthetic signature never reaches an upstream;
-`parallel_tool_calls` forwards the parallel-tool-calls setting. When both
-reasoning capabilities are enabled, `provider_reasoning_thinking` takes
-precedence. Without either, provider reasoning follows the
-`provider_reasoning_text` loss decision. To restore the old ordinary-text
-rendering, withdraw thinking and add text:
-`-transcode-chat-capability '!provider_reasoning_thinking' -transcode-chat-capability provider_reasoning_text`.
+Capabilities take effect when the client uses the corresponding feature:
+- `provider_reasoning_thinking` (the default) maps chat provider reasoning response extensions (`reasoning` or `reasoning_content`) to native Anthropic thinking blocks so Claude Code renders them with its native thinking UI. Each synthesized block carries the marker signature `shaper-synth-thinking-1`, and the request path scrubs marker-signature thinking blocks from replayed history before upstream rendering, preventing synthetic markers from leaking upstream.
+- `provider_reasoning_text` maps the same field to client text instead. When both reasoning capabilities are enabled, `provider_reasoning_thinking` takes precedence. Without either, provider reasoning follows the `provider_reasoning_text` loss decision. To map reasoning to ordinary text instead of thinking blocks:
+  `-transcode-chat-capability '!provider_reasoning_thinking' -transcode-chat-capability provider_reasoning_text`.
+- `parallel_tool_calls` forwards the parallel-tool-calls configuration.
+- `multi_agent_priming` injects a bounded sub-agent orchestration protocol reminder into the leading system or developer turn for chat targets, recorded as a per-exchange note (`multi_agent_priming`).
 
-Two
-capabilities are opt-in because generic upstreams reject what they render:
-`reasoning_effort` forwards the Responses `reasoning.effort` (and an
-Anthropic `thinking` budget, see below) as the chat `reasoning_effort`
-parameter — without it the knob drops observably under the default
-`request_reasoning` loss; `developer_role` preserves Responses
-developer-role messages — without it developer turns render as ordinary
-system messages and the distinction drop is observable under the default
-`developer_role` loss; `system_anywhere` renders system/developer turns
-positionally for upstreams that accept system messages anywhere (e.g.
-genuine OpenAI).
+Several capabilities remain opt-in because generic and open-weights upstreams reject what they render:
+- `reasoning_effort` forwards Responses `reasoning.effort` (and Anthropic `thinking` budgets) as the chat `reasoning_effort` parameter; without it, the parameter drops observably under the default `request_reasoning` loss.
+- `developer_role` preserves Responses developer-role messages; without it, developer turns render as standard system messages, recorded under the default `developer_role` loss.
+- `system_anywhere` renders system/developer turns positionally for upstreams that accept system messages anywhere in conversation history.
+- `tool_result_images` renders tool-result images as multipart content in chat tool messages.
 
 ### System message placement
 
@@ -469,6 +634,84 @@ different failure mode; withdraw those defaults per mapping as shown under
 "Removing defaults". (`reasoning_effort` and developer roles are already
 opt-in for exactly this reason: the compatible core never renders them.)
 
+### Namespace tools (Codex subagents and MCP groups)
+
+Modern Codex clients group related tools into Responses **namespace**
+tools: `spawn_agent` and its siblings arrive under `multi_agent_v1`, each
+MCP server arrives under its own `mcp__<server>` group, and the model is
+expected to call a child by its bare name plus the group qualifier. The
+transcoder flattens every namespace child into an ordinary chat function
+tool (the grouping is client-side structure a chat request cannot express,
+recorded as a per-request note), and a model call to a flattened child is
+returned to the client as a `function_call` carrying the bare child name
+together with its separate `namespace` field — never a concatenated name.
+A child whose bare name collides with a plain tool or another namespace's
+child is qualified deterministically (`namespace__child`), and the
+per-request map — not a name separator — is what maps the call back.
+Replayed history keeps the same flat names, so the upstream is not taught
+the bare form for any namespace this request declares. If replayed history
+names a namespace the request no longer declares for that name, the
+qualifier cannot be mapped: that is the `namespace_replay_undeclared` loss.
+It is NOT in the default approved set, so a strict default rejects the
+exchange until the operator approves it with
+`-transcode-allow-loss namespace_replay_undeclared`. When the bare name is
+already owned by a surviving tool the exchange is refused outright instead -
+no policy can approve re-pointing a client-sent call at a different tool. `tool_choice` has no namespaced
+selector (Codex sends `"auto"`), and a named choice addresses the flattened
+name: a bare child name is ambiguous when it collides with another tool, so
+the qualified `namespace__child` form is the one that stays addressable. Namespace tools
+are modeled as a deliberate extension beyond the
+pinned OpenAI SDK revision; the wire shadow's modeled-extension comments record
+the exact shapes.
+
+- `multi_agent_priming` injects a bounded sub-agent orchestration protocol reminder into the
+  leading system (or developer) turn, appended after the client's own instructions so the
+  client's bytes and order are unchanged. It is injected only when the request actually
+  declares one of the sub-agent tools it names (checked by the flat names the upstream
+  will see, so a flattened namespace child still counts), and each injection is recorded
+  as a per-exchange note (`multi_agent_priming`) subject to the same report-entry bound
+  as any other finding. Chat upstreams only; on a Responses
+  upstream the capability is accepted and has no effect, as with the other chat-only
+  capabilities.
+- `tool_result_images` renders multimodal tool-result content as multipart
+  content blocks in a chat tool message, order preserved, for upstreams that
+  accept image parts there. Granting it is independent of `image_input` (an
+  upstream can accept user images while rejecting tool-message image parts),
+  but the multipart form itself needs the `image_url` vocabulary, so a mount
+  that withdraws `image_input` falls back to the envelope even with this on.
+
+### Anthropic server-side tools (web_search, code execution, MCP)
+
+Claude Code sends server-executed tool definitions in `tools[]` — a
+type-discriminated entry such as `web_search_20250305` or
+`code_execution_20250825` — and server-executed or server-referencing content
+blocks (`server_tool_use`, `web_search_tool_result`, `code_execution`,
+`code_execution_tool_result`, `container_upload`). A chat upstream executes
+no server tools, so these are dropped observably rather than forwarded, and a
+`server_tool_use` is never fabricated into a tool call: a call with no
+executor would dangle and corrupt tool pairing.
+
+The `anthropic_server_tools` key is a policy-gated loss and is **strict by
+default**: a Claude Code web-search session against a chat upstream fails
+with a named error until you approve it with
+`-transcode-allow-loss anthropic_server_tools`. The wire shapes are modeled
+beyond the pinned Anthropic Messages revision (recorded at the top of the wire shadow)
+records them and the capture they came from.
+
+`mcp_tool_use` and `mcp_tool_result` are different: they are client-side
+tools that map 1:1 onto `tool_use` and `tool_result` and carry no loss. A
+real `mcp_tool_use` carries `server_name` (the MCP server that owns the
+tool), which is decoded.
+
+A `tools[]` entry is classified by its `type` discriminant. The
+client-function spellings — absent, or the explicit `"type":"function"` —
+are carried through as ordinary client function tools, and they decode
+strictly, so an unmodelled property on a client tool is still a loud error.
+**Any** other `type` takes the `anthropic_server_tools` loss decision, so a
+new Anthropic server tool becomes usable by approving the flag, with no
+proxy rebuild. It is never forwarded silently and never hard-rejected with
+an error the flag cannot clear.
+
 ### Removing defaults
 
 The sensible defaults above exist so a minimal invocation works out of the
@@ -482,12 +725,11 @@ knobs for an upstream that accepts them, or withdraw any default with a
 
 ```sh
 # Restore the modern-surface knobs for an upstream that accepts them
-# (reasoning_effort parameter and developer-role messages), keep every
-# default, and also add image_input:
+# (reasoning_effort parameter and developer-role messages), keeping every
+# default:
 ai-concurrency-shaper -upstream https://api.example.com -transcode-responses-chat \
   -transcode-chat-capability reasoning_effort \
-  -transcode-chat-capability developer_role \
-  -transcode-chat-capability image_input
+  -transcode-chat-capability developer_role
 
 # Withdraw a default loss approval (builtin_tools) so built-in tool requests
 # are rejected instead of dropped, or drop the default beta query forwarding:
@@ -523,9 +765,9 @@ ai-concurrency-shaper -upstream https://api.example.com -transcode-responses-cha
 ### Loss policy
 
 Every non-portable feature is gated by exactly one granular, direction-
-specific loss key (the complete registry is `internal/transcode/LOSS_MATRIX.md`,
-generated from the same registry the program uses). CLI mappings start from
-the sensible default approvals listed above; the programmatic API (zero
+specific loss key. CLI mappings start from
+the sensible default approvals (the startup summary names the set in effect);
+the programmatic API (zero
 `LossPolicy`) is **strict** and rejects every non-portable feature with a
 client-dialect error — nothing is silently dropped, defaulted, merged, or
 reinterpreted. The `-transcode-allow-loss` flag (repeatable, comma/space
@@ -599,6 +841,16 @@ smaller than the minimum legal terminal or error frame are rejected at
 startup — a stream that could never emit its terminal is a configuration
 error, not a runtime surprise.
 
+### Conversation continuity store (-transcode-continuity)
+
+By default, request transcoding is stateless: each exchange is converted and forwarded independently. If a Responses client sends a follow-up request referencing `previous_response_id` against a stateless chat upstream (`/v1/chat/completions`), the chat API cannot resolve the historical conversation chain, resulting in an observable `previous_response_id` loss.
+
+`-transcode-continuity` (provider scope) enables an in-memory conversation continuity store for the provider's transcoded routes:
+- When enabled, the proxy stores canonical conversation turns indexed by emitted Responses IDs (`response.id`).
+- When a subsequent client request supplies `previous_response_id`, the store reconstructs the previous conversation chain and prepends it to the upstream chat request.
+- Store bounds are configured via `-transcode-continuity-capacity` (default 1024 chains) and `-transcode-continuity-ttl` (default 30m).
+- If a referenced ID has expired, was evicted, or is unknown, the request does not fail; it degrades to the standard observable loss.
+
 ### `count_tokens` against a chat-only upstream
 
 `POST /v1/messages/count_tokens` has no chat-completions equivalent, so it
@@ -613,6 +865,104 @@ slot, and is exactly the workaround real gateways (Bifrost) rejected. The
 operational pain with this route is not the 404 but queueing — fix it with
 the limiter-class workaround in [Client-visible queue
 semantics](#client-visible-queue-semantics).
+
+### Native passthrough
+
+Some upstreams serve different models on different dialects — a provider may
+answer `claude-*` on `/v1/messages`, `gpt-*` on `/v1/responses`, and
+`deepseek-*` on `/v1/chat/completions`. Forcing every model through one
+conversion loses the model's native shape and can make the upstream reject the
+exchange.
+
+`-native-route protocol@path` (provider scope, repeatable) declares a route
+that a model can be served on **without conversion**, and the `via` fact on a
+`-model-table` entry names the dialect each model is native to:
+
+```sh
+ai-concurrency-shaper -upstream https://opencode.ai/zen/go -name zen-go \
+  -model-table 'qwen3.7-max@zen-go=qwen3.7-max;context=500000;via=messages' \
+  -model-table 'deepseek-v4-flash@zen-go=deepseek-v4-flash;context=1000000;via=chat' \
+  -native-route messages@/v1/messages \
+  -native-route chat@/v1/chat/completions
+```
+
+A request is forwarded with only the model identifier rewritten when its
+model's `via` dialect matches the route protocol; non-streaming responses get
+the client-facing name restored, and streaming responses pass through
+byte-identically. Validation is structural only (duplicate keys, trailing
+values, malformed syntax, and a usable `model` field) — the upstream owns its
+own dialect's field coverage, so its dialect-correct error is authoritative.
+
+A native route may **share its path** with a transcode mapping. Dispatch tries
+native first and falls through to the mapping when the model's dialect
+differs, so one path can serve some models natively and convert the rest:
+
+```sh
+# qwen3.7-max is served natively on /v1/messages;
+# deepseek-v4-flash is converted from Messages to Chat on the same path.
+ai-concurrency-shaper -upstream https://opencode.ai/zen/go -name zen-go \
+  -model-table 'qwen3.7-max@zen-go=qwen3.7-max;via=messages' \
+  -model-table 'deepseek-v4-flash@zen-go=deepseek-v4-flash;via=chat' \
+  -native-route messages@/v1/messages -transcode-messages-chat
+```
+
+A known model sent to a path with no route or mapping for its dialect fails
+closed with a dialect-shaped 404 naming its native dialect, rather than
+forwarding a surrogate the upstream does not know.
+
+### opencode Zen and Go
+
+OpenCode routes requests to different backend providers per conversation and
+requires a stable session value to pin them (`x-opencode-session`); a request
+without one fails upstream. `-opencode` (provider scope) reproduces the
+first-party request shape on every outbound path — transparent, native, and
+transcoded. The impersonation markers are preset-authoritative: the upstream
+sees the first-party `User-Agent` and `x-opencode-client` rather than whatever
+the client sent, so a client cannot identify itself through them. The session
+value is the client's own when it sent one, else derived. A different client
+SDK's fingerprint headers (`x-stainless-*`, `x-app`) are removed, since a real
+opencode client sends none of them and they would reveal the actual client.
+The preset itself leaves the dialect's protocol headers alone. Note that on a
+mount with an upstream credential configured, `anthropic-version` and
+`anthropic-beta` are removed by credential stripping before the preset runs, on
+the transparent path as well as the native one; a transcoded mapping restores
+`anthropic-version` from its auth policy, a native route does not. If you point a
+native Messages route at an endpoint that requires the header, set it upstream-side
+or use a transcoded mapping. The client's own
+identity/project/parent headers forward when present and are never fabricated.
+Because the preset applies after authentication, a name it writes or removes
+cannot also carry the upstream credential: `-auth-mode header:<name>` is
+refused at startup for every name the preset manages (`user-agent`,
+`x-opencode-client`, the session trio, the request/project/parent headers, and
+the foreign fingerprints) while `-opencode` is on, and for the pipeline-managed
+names generally regardless of it. The rule is preset-scoped — those names remain
+legal credential targets with `-opencode` off — and a custom name such as
+`header:X-Api-Token` works with the preset on.
+Session precedence is the client's `x-opencode-session`, then
+`x-session-affinity`, then `X-Session-Id`, then a stable value derived from the
+conversation's own first user turn. Header values are never logged. Mounts
+without `-opencode` forward byte-identically.
+
+```sh
+export SHAPER_PROVIDER_OPENCODE_API_KEY=...
+ai-concurrency-shaper -bind=127.0.0.1:11239 \
+  --provider=opencode-go -upstream=https://opencode.ai/zen/go -prefix=/opencode-go \
+    -auth-source=env:SHAPER_PROVIDER_OPENCODE_API_KEY -auth-mode=auto \
+    -opencode \
+    -model-table 'qwen3.7-max@opencode-go=qwen3.7-max;via=messages' \
+    -model-table 'deepseek-v4-flash@opencode-go=deepseek-v4-flash;via=chat' \
+    -native-route messages@/v1/messages \
+    -native-route chat@/v1/chat/completions \
+    -transcode-messages-chat -transcode-responses-chat
+```
+
+A mount whose upstream host is not `opencode.ai` logs a startup note when the
+preset is enabled, so the impersonation never happens silently. The pinned
+`User-Agent` follows the released-stable client shape and is overridable with
+`-opencode-user-agent`; re-pin it by reading the installed client's own
+`User-Agent`. The observed upstream contract (model families, native paths,
+session enforcement, keyless behavior) is recorded in
+[`docs/opencode-zen-contract.md`](docs/opencode-zen-contract.md).
 
 ### Failure taxonomy
 
@@ -656,7 +1006,7 @@ emit their own opaque extensions — `prompt_token_ids`, `prompt_text`,
 LiteLLM gateways), the top-level usage extensions (`reasoning_tokens`,
 `cached_tokens`, `prompt_cache_hit_tokens`, `prompt_cache_miss_tokens`),
 and `prompt_tokens_details.created_cache_tokens`; the table of modeled
-spellings lives in `internal/transcode/pins.md`.
+spellings are listed in the wire shadow's modeled-extension comments.
 
 The transcoder applies strictness by CONTRACT ROLE (see the "Transcoding
 invariants" section): the CLIENT request (OpenAI Responses / Anthropic
@@ -669,7 +1019,7 @@ and never forwarded, and it never fails the request. This is why a field like
 `function_call` spelling is a known official field rather than an extension:
 the single invocation maps to one tool call with the id synthesized from the
 response id and recorded as the `legacy_function_call` note. Known provider-extension
-spellings are documented in `internal/transcode/pins.md`; a newly observed
+spellings are documented in the wire shadows; a newly observed
 spelling can be pinned there (and in the field-capture corpus) for
 observability.
 
@@ -701,6 +1051,45 @@ curl on stdin, so it is never persisted: the environment value is never expanded
 Refresh the fixtures from the captured bytes, add the extension to
 the wire shadows alongside its siblings, and extend the corpus
 test — the regression harness then holds the shape permanently.
+
+### Flow recording (diagnostic)
+
+`-transcode-flowlog-dir PATH` (provider scope) makes each transcoded exchange
+write one JSON file into the existing directory `PATH`, capturing the FULL
+contents of the flow: the client request (method, path, query, headers,
+body), the converted upstream request (method, URL, headers, body), the
+upstream response (status, headers, body), the downstream response (status,
+headers, body), the request/response conversion reports (the approved losses
+and Notes, plus the dropped count when a report saturated), the recorded
+outcome, and the exchange duration. A record whose write fails is logged (a
+failure after creation can leave a partial file); records are created with
+mode 0600, and concurrent processes sharing one directory cannot overwrite
+each other (the filename carries the pid, and a taken name gains a numeric
+suffix rather than replacing the existing file). This is the tool to reach
+for when a live exchange misbehaves and the aggregated `transcode:` log lines
+are not enough.
+
+```sh
+mkdir -p /tmp/shaper-flows
+./ai-concurrency-shaper -bind=127.0.0.1:11243 --provider=… -transcode-messages-chat -transcode-flowlog-dir /tmp/shaper-flows
+```
+
+Bodies are stored verbatim (base64 with an explicit flag when not valid
+UTF-8); each streamed body is capped at 64 MiB and flags `truncated` at the
+cap (the cap is per body, so the recorded size of concurrent streams is not
+bounded as a whole). A capture can also end early without the flag — a client
+abort stops the tap with the stream. The record covers the transcoded
+exchange itself: proxy-level artifacts (queue comments, admission timing)
+stay in the journal. The directory must already exist; startup fails with a
+clear error when a transcoded route is configured with a missing (or
+non-directory) path. The record is written synchronously after the exchange
+completes and before its concurrency slot is released, so a very large
+capture (the request bodies plus up to two 64 MiB streamed bodies re-encoded
+as JSON) briefly delays that slot's release — keep the recorder pointed at a
+fast local directory. Nothing is redacted — headers and bodies include
+credentials — so treat the directory as secret-bearing and delete it when
+done. The recorder is off (nil-guarded no-ops with no capture state) when the
+flag is unset.
 
 ## How Concurrency Protection Works
 

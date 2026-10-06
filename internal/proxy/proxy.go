@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -95,7 +96,10 @@ type proxyConfig struct {
 	adaptiveHeadroomWindow time.Duration
 	limitAll               bool
 	transcodeMappings      []TranscodeMapping
+	nativeRoutes           []NativeRoute
 	authPolicy             *auth.AuthPolicy
+	modelCatalog           *transcode.CatalogConfig
+	opencode               transcode.OpencodePreset
 }
 
 // TranscodeMapping configures one transcoded route. The embedded
@@ -106,6 +110,22 @@ type TranscodeMapping struct {
 	// BodyLimits bounds request/response bodies on this route. Zero values
 	// fall back to the proxy defaults.
 	BodyLimits transcode.BodyLimits
+
+	// FlowLogDir, when non-empty, receives one JSON record per transcoded
+	// exchange capturing the full flow. The directory must already exist;
+	// New validates it before any handler is constructed. Records are
+	// unredacted (they include headers and bodies), so the directory is
+	// secret-bearing.
+	FlowLogDir string
+
+	// Continuity, when non-nil, is the opt-in bounded per-conversation
+	// store (OFF by default: nil keeps the existing observable
+	// previous_response_id loss). It is shared by every transcoded route
+	// of one provider; ContinuityKey scopes retained ids to the provider
+	// mapping that emitted them. The store pointer is shared, never
+	// cloned: chains accumulate across exchanges by design.
+	Continuity    *transcode.ContinuityStore
+	ContinuityKey string
 }
 
 // TranscodeOption configures transcoding route mappings.
@@ -131,6 +151,25 @@ func (o *TranscodeOption) applyProxyOption(cfg *proxyConfig) error {
 }
 
 var _ Option = (*TranscodeOption)(nil)
+
+// OpencodePresetOption enables first-party opencode header emission on
+// the transparent engine. The zero preset is disabled and changes nothing.
+type OpencodePresetOption struct {
+	preset transcode.OpencodePreset
+}
+
+// WithOpencodePreset returns an option that enables first-party header
+// emission with the given preset.
+func WithOpencodePreset(preset transcode.OpencodePreset) *OpencodePresetOption {
+	return &OpencodePresetOption{preset: preset}
+}
+
+func (o *OpencodePresetOption) applyProxyOption(cfg *proxyConfig) error {
+	cfg.opencode = o.preset
+	return nil
+}
+
+var _ Option = (*OpencodePresetOption)(nil)
 
 // --- Concrete Options ---
 
@@ -679,9 +718,27 @@ type Proxy struct {
 	// transcodeHandlers serves transcoded routes, one per mapping.
 	transcodeHandlers []*transcode.TranscodeHandler
 
+	// nativeRoutes owns the natively served route declarations; the map
+	// below points into this slice.
+	nativeRoutes []NativeRoute
+
 	// transcodeHandlerMap provides O(1) lookup of transcode handlers by
 	// method+path route key, built once at construction.
 	transcodeHandlerMap map[transcode.RouteKey]http.Handler
+
+	// nativeRouteMap provides O(1) lookup of natively served routes by
+	// method+path route key, built once at construction. A native miss
+	// falls through to the transcode lookup.
+	nativeRouteMap map[transcode.RouteKey]*NativeRoute
+
+	// opencode, when enabled, emits the first-party header set on the
+	// transparent engine's outbound requests (after authentication).
+	opencode transcode.OpencodePreset
+
+	// catalog, when non-nil, answers this mount's GET /v1/models discovery
+	// request locally from the frozen model-table snapshot. Catalog behavior
+	// lives in catalog.go; only the central Proxy lifecycle hook remains here.
+	catalog *transcode.CatalogHandler
 
 	// authPolicy, when non-nil, strips client credential/protocol headers
 	// and attaches the upstream credential inside the Rewrite hook. nil
@@ -884,6 +941,7 @@ func New(opts ...Option) (*Proxy, error) {
 		adaptiveHeadroomWindow: cfg.adaptiveHeadroomWindow,
 		limitAll:               cfg.limitAll,
 		authPolicy:             cfg.authPolicy,
+		opencode:               cfg.opencode,
 	}
 
 	// Build one transcode handler per mapping, each forwarding through the
@@ -909,9 +967,12 @@ func New(opts ...Option) (*Proxy, error) {
 		}
 		h := transcode.NewTranscodeHandler(
 			transcode.HandlerConfig{
-				Mapping:    mapping,
-				Upstream:   cfg.upstream,
-				BodyLimits: m.BodyLimits,
+				Mapping:       mapping,
+				Upstream:      cfg.upstream,
+				BodyLimits:    m.BodyLimits,
+				FlowLogDir:    m.FlowLogDir,
+				Continuity:    m.Continuity,
+				ContinuityKey: m.ContinuityKey,
 			},
 			p.RoundTrip,
 			nil,
@@ -921,6 +982,36 @@ func New(opts ...Option) (*Proxy, error) {
 		if _, exists := p.transcodeHandlerMap[m.ClientRoute]; !exists {
 			p.transcodeHandlerMap[m.ClientRoute] = h
 		}
+	}
+
+	// Native routes share the transparent engine with model-identifier
+	// rewriting. Dispatch tries native first; a model whose dialect differs
+	// falls through to the transcode mapping on the same route when one
+	// exists (that is how one path serves both natively and by
+	// conversion). Duplicate native keys are rejected.
+	p.nativeRouteMap = make(map[transcode.RouteKey]*NativeRoute, len(cfg.nativeRoutes))
+	for i := range cfg.nativeRoutes {
+		// Copy into proxy-owned storage so caller mutation after New
+		// cannot change live routing or race with requests.
+		p.nativeRoutes = append(p.nativeRoutes, cfg.nativeRoutes[i])
+		nr := &p.nativeRoutes[len(p.nativeRoutes)-1]
+		nr.ModelMap = cloneModelMap(nr.ModelMap)
+		if _, dup := p.nativeRouteMap[nr.RouteKey]; dup {
+			return nil, fmt.Errorf("proxy: duplicate native route %s %s",
+				nr.RouteKey.Method, nr.RouteKey.Path)
+		}
+		p.nativeRouteMap[nr.RouteKey] = nr
+	}
+
+	// The catalog is a local answer, not an upstream route: build its handler
+	// once here so an invalid snapshot is a startup error, never a
+	// first-request surprise.
+	if cfg.modelCatalog != nil {
+		catalogHandler, err := transcode.NewCatalogHandler(*cfg.modelCatalog)
+		if err != nil {
+			return nil, fmt.Errorf("proxy: model catalog: %w", err)
+		}
+		p.catalog = catalogHandler
 	}
 
 	rp := &httputil.ReverseProxy{
@@ -949,10 +1040,28 @@ func New(opts ...Option) (*Proxy, error) {
 					auth.StripCredentials(pr.Out.Header)
 				}
 			}
+			if cfg.opencode.Enabled {
+				// First-party headers go on after authentication: the mock
+				// never clobbers credentials. The conversation key stashed
+				// by the native path wins; otherwise the key derives from
+				// the client address (this path never inspects the body).
+				fallback := transcode.DeriveClientKey(cfg.opencode.Provider, pr.In.RemoteAddr)
+				if alias, ok := nativeAliasFromContext(pr.In.Context()); ok && alias.convKey != "" {
+					fallback = alias.convKey
+				}
+				session := cfg.opencode.ResolveSession(pr.In.Header, fallback)
+				cfg.opencode.ApplyHeaders(pr.Out.Header, pr.In.Header, session)
+			}
 		},
 		Transport: p,
 		ModifyResponse: func(res *http.Response) error {
-			return validateSwitchingProtocolsResponse(res)
+			if err := validateSwitchingProtocolsResponse(res); err != nil {
+				return err
+			}
+			// Natively served exchanges restore the client-facing model
+			// alias on non-streaming JSON responses; everything else
+			// passes through untouched.
+			return rewriteNativeResponseAlias(res)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if rec, ok := w.(*statusRecorder); ok {
@@ -1174,14 +1283,27 @@ func (p *Proxy) Journal() *journal.Journal {
 	return p.journal
 }
 
+// HandlerForRouteKey returns the transcode handler mapped to key, or nil.
+func (p *Proxy) HandlerForRouteKey(key transcode.RouteKey) http.Handler {
+	return p.transcodeHandlerMap[key]
+}
+
+// Catalog returns the mount's catalog handler, or nil when no catalog was configured.
+func (p *Proxy) Catalog() *transcode.CatalogHandler {
+	return p.catalog
+}
+
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The unlimited admission class exempts a request whose FIRST matching
 	// pattern declares :unlimited — including under -limit-all. The same
 	// first-match lookup drives limiter selection (acquireSlot/FindMatch),
-	// so classification and admission can never disagree.
+	// so classification and admission can never disagree. The catalog is a
+	// local answer with its own unlimited class: it is never limited, never
+	// queued, and never gated by the circuit breaker.
+	catalog := p.catalogServes(r)
 	limited := (p.limitAll || p.matcher.IsLimited(r.Method, r.URL.Path)) &&
-		!p.matcher.IsUnlimited(r.Method, r.URL.Path)
+		!p.matcher.IsUnlimited(r.Method, r.URL.Path) && !catalog
 
 	flightID := p.m.RegisterInFlight(r.Method, r.URL.Path, limited)
 	defer p.m.DeregisterInFlight(flightID)
@@ -1355,12 +1477,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Dispatch to the admission paths. Transcoded routes are dispatched
-	// inside serveLimited/servePassthrough (via lookupTranscodeHandler) so they
+	// inside serveLimited/servePassthrough (via lookupRouteTargets) so they
 	// are bounded exactly like ordinary requests: limited routes acquire the
 	// per-route and global limiter slots, and passthrough routes honor the
 	// global limiter.
 	if limited {
 		p.serveLimited(rec, r, flightID)
+	} else if catalog {
+		p.serveCatalog(rec, r)
 	} else {
 		p.servePassthrough(rec, r, flightID)
 	}
@@ -1420,16 +1544,53 @@ func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, ha
 	}
 }
 
-// lookupTranscodeHandler returns the transcode handler mapped to the request
-// method and path, or nil when the route is not transcoded. Dispatch is
-// method-scoped: OPTIONS/GET/HEAD/DELETE on a mapped path pass through
-// transparently.
-func (p *Proxy) lookupTranscodeHandler(r *http.Request) http.Handler {
-	key, err := transcode.NewRouteKey(r.Method, r.URL.Path)
-	if err != nil {
+// lookupTranscodeHandlerKey returns the transcode handler for an
+// already-built key. The key is built once per request and shared with the
+// native lookup so the hot path pays route-key construction at most once.
+func (p *Proxy) lookupTranscodeHandlerKey(key transcode.RouteKey) http.Handler {
+	if len(p.transcodeHandlerMap) == 0 {
 		return nil
 	}
 	return p.transcodeHandlerMap[key]
+}
+
+// lookupRouteTargets resolves the request's method+path to its native route
+// and transcode handler with a single route-key construction, so the paired
+// lookups on the serve path never pay key construction twice. Dispatch is
+// method-scoped: mappings are POST-only, so a non-POST method on a mapped
+// path matches no key and passes through transparently.
+func (p *Proxy) lookupRouteTargets(r *http.Request) (*NativeRoute, http.Handler) {
+	if len(p.nativeRoutes) == 0 && len(p.transcodeHandlerMap) == 0 {
+		return nil, nil
+	}
+	key, err := transcode.NewRouteKey(r.Method, r.URL.Path)
+	if err != nil {
+		return nil, nil
+	}
+	return p.lookupNativeRouteKey(key), p.lookupTranscodeHandlerKey(key)
+}
+
+// dispatchAfterNativeRoute answers one request whose method+path sits on a
+// natively served route. Native-first: a model served on its own dialect is
+// rewritten and forwarded through the transparent engine; a model whose
+// dialect differs falls through to the transcode mapping on the same route
+// when one exists, and otherwise rides the transparent engine verbatim.
+// fallback is the transcode handler already resolved for this method+path by
+// lookupRouteTargets at the serve site, so the miss path reuses it instead
+// of rebuilding the route key for a second lookup. nativeError requests
+// were already answered by the native path, so this does nothing for them.
+func (p *Proxy) dispatchAfterNativeRoute(w http.ResponseWriter, r *http.Request, nr *NativeRoute, fallback http.Handler) {
+	out, action := p.nativeRouteAction(w, r, nr)
+	switch action {
+	case nativeServe:
+		p.inner.ServeHTTP(w, out)
+	case nativeMiss:
+		if fallback != nil {
+			p.serveTranscodeHandler(w, out, fallback)
+		} else {
+			p.inner.ServeHTTP(w, out)
+		}
+	}
 }
 
 func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightID uint64) {
@@ -1629,7 +1790,10 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 				localPanic = true
 			}
 		}()
-		if handler := p.lookupTranscodeHandler(r); handler != nil {
+		nr, handler := p.lookupRouteTargets(r)
+		if nr != nil {
+			p.dispatchAfterNativeRoute(w, r, nr, handler)
+		} else if handler != nil {
 			p.serveTranscodeHandler(w, r, handler)
 		} else {
 			p.inner.ServeHTTP(w, r)
@@ -2078,7 +2242,10 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 				localPanic = true
 			}
 		}()
-		if handler := p.lookupTranscodeHandler(r); handler != nil {
+		nr, handler := p.lookupRouteTargets(r)
+		if nr != nil {
+			p.dispatchAfterNativeRoute(w, r, nr, handler)
+		} else if handler != nil {
 			p.serveTranscodeHandler(w, r, handler)
 		} else {
 			p.inner.ServeHTTP(w, r)
@@ -2119,7 +2286,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	// Feed failure/success signals to the circuit breaker from the
 	// immutable exchange result. Without retries, the proxy reports the
 	// whole exchange. With retry-enabled breaker reporting, the retry
-	// transport records failures immediately (attempt.FailureRecorded) but
+	// transport reports failures immediately (attempt.FailureRecorded) but
 	// defers 2xx success via the request context; the proxy records that
 	// success only after ReverseProxy has copied the response body without
 	// an abort. A transcoded exchange contributes explicit outcome
@@ -2256,6 +2423,14 @@ func writeQueueRejected(w http.ResponseWriter, depthLimit int, waiters int64) {
 }
 
 func isUpstreamFailureStatus(rec *statusRecorder, now time.Time, ctxErr error) bool {
+	// A proxy-generated error WITHOUT a real transport error behind it never
+	// saw the upstream: it is a local defect, not an upstream health signal
+	// (panic 502, queue rejection, the native path's local 5xx). A 502 that
+	// wraps a genuine transport error (rec.transportErr) still classifies as
+	// upstream — hasRealProxyTransportError names exactly that shape.
+	if rec != nil && rec.proxyGeneratedError && !rec.hasRealProxyTransportError(ctxErr) {
+		return false
+	}
 	if rec != nil && (rec.localUpgradeFailure || rec.retryCircuitOpen()) {
 		return false
 	}
@@ -2442,7 +2617,11 @@ func classifyNativeExchange(
 	result.upstreamSuccess = !result.upstreamFailure && !result.clientAborted &&
 		isBreakerSuccessStatus(rec, now, epoch, ctxErr)
 	result.retryAfter = parseRetryAfterFromRecorder(rec, now)
-	result.localFailure = rec.status == http.StatusBadGateway && rec.proxyGeneratedError
+	// proxyGeneratedError marks an error this proxy produced without seeing
+	// the upstream — the 502 panic handler, queue rejection, and the native
+	// path's own 5xx local errors. Those are local failures, never upstream
+	// health signals: a purely local defect must not open the breaker.
+	result.localFailure = rec.proxyGeneratedError
 	result.suppressibleAbort = rec.suppressibleClientAbort(ctxErr)
 	return result
 }
@@ -3512,6 +3691,15 @@ func (m TranscodeMapping) Validate() error {
 	}
 	if err := m.BodyLimits.Validate(); err != nil {
 		return fmt.Errorf("body limits: %w", err)
+	}
+	if m.FlowLogDir != "" {
+		info, err := os.Stat(m.FlowLogDir)
+		if err != nil {
+			return fmt.Errorf("flow log directory: %w", err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("flow log directory %q is not a directory", m.FlowLogDir)
+		}
 	}
 	for key := range m.AllowedClientQuery {
 		if !validQueryName(key) {

@@ -413,3 +413,70 @@ func TestChatReasoningBothDetailShared(t *testing.T) {
 	_, err = state.Convert(chunk)
 	assertChatReasoningBothDetail(t, err)
 }
+
+// TestChatAudioOutputRouting pins the directional routing for upstream chat
+// audio output: the transcript maps to ordinary text with a Note, while the
+// base64 data is an approved loss (or a rejection under the strict policy).
+func TestChatAudioOutputRouting(t *testing.T) {
+	body := []byte(`{"id":"c1","object":"chat.completion","created":1,"model":"m",` +
+		`"choices":[{"index":0,"finish_reason":"stop",` +
+		`"message":{"role":"assistant","content":"hi",` +
+		`"audio":{"id":"a1","data":"AAAA","expires_at":2,"transcript":"spoken hi"}}}],` +
+		`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+
+	// Audio data unapproved (strict, no loss): rejection.
+	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	var unsupported *UnsupportedFeatureError
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
+	}
+
+	// Audio data approved: transcript text flows with a Note, data is lost
+	// observably.
+	policy := StrictLossPolicy()
+	policy.Allowed[FeatureProviderAudioData] = struct{}{}
+	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, policy)
+	if err != nil {
+		t.Fatalf("decode with approved loss: %v", err)
+	}
+	message, ok := response.Items[0].(*CanonicalMessageItem)
+	if !ok {
+		t.Fatalf("item = %T", response.Items[0])
+	}
+	found := false
+	for _, part := range message.Parts {
+		if text, ok := part.(CanonicalText); ok && text.Text == "spoken hi" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("audio transcript missing from parts: %+v", message.Parts)
+	}
+	sawNote, sawLoss := false, false
+	for _, l := range report.Losses {
+		if l.Feature == FeatureProviderAudioTranscript && l.Kind == NoteRecord {
+			sawNote = true
+		}
+		if l.Feature == FeatureProviderAudioData && l.Kind == LossRecord {
+			sawLoss = true
+		}
+	}
+	if !sawNote {
+		t.Error("provider_audio_transcript Note missing")
+	}
+	if !sawLoss {
+		t.Error("provider_audio_data approved loss missing")
+	}
+
+	// A present-but-empty audio object is malformed upstream wire, never a
+	// silent no-op.
+	emptyBody := []byte(`{"id":"c1","object":"chat.completion","created":1,"model":"m",` +
+		`"choices":[{"index":0,"finish_reason":"stop",` +
+		`"message":{"role":"assistant","content":"hi","audio":{"id":"","data":"","expires_at":0,"transcript":""}}}],` +
+		`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	_, _, err = DecodeChatResponseWithPolicy(emptyBody, ChatCapabilities{}, permissiveLossPolicy())
+	var wireErr *UpstreamWireError
+	if !errors.As(err, &wireErr) {
+		t.Fatalf("empty audio object err = %T %v, want *UpstreamWireError", err, err)
+	}
+}

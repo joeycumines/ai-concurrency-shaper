@@ -75,7 +75,7 @@ type chatMessageShadow struct {
 	Reasoning  *string              `json:"reasoning,omitempty"`
 
 	// FunctionCall is the legacy non-tool_calls tool-call spelling (a KNOWN
-	// official field, pinned in pins.md). It is modeled so a message carrying
+	// official field of the pinned revision). It is modeled so a message carrying
 	// it is structurally REJECTED — never silently dropped (a silent drop
 	// would leave the client with a tool_use stop reason and no tool call).
 	FunctionCall json.RawMessage `json:"function_call,omitempty"`
@@ -213,7 +213,7 @@ func DecodeChatResponseWithPolicy(
 	// only message, not delta. This is a KNOWN field, not a provider
 	// extension, so rejecting it does not weaken the envelope's
 	// unknown-field tolerance, and it prevents the delta content from being
-	// silently dropped (GAP-012 parity).
+	// silently dropped (structural-rejection parity).
 	if shadowChoice.Delta != nil {
 		return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 			UpstreamChatCompletions,
@@ -243,7 +243,7 @@ func DecodeChatResponseWithPolicy(
 		)
 	}
 	// The legacy non-tool_calls function_call spelling is a KNOWN official
-	// field (pinned in pins.md): the single invocation maps to one
+	// field of the pinned revision: the single invocation maps to one
 	// canonical tool call with a synthesized id, never a silent drop (which
 	// would leave the client with a tool_use stop reason and no tool call).
 	// A message carrying both spellings at once is a contradictory union.
@@ -365,8 +365,8 @@ func DecodeChatResponseWithPolicy(
 	// Usage. The Known flags reflect the shadow's explicit presence: the
 	// Chat usage totals are modeled omitempty (defensively — the pinned
 	// contract marks them required, so a conforming upstream always sends
-	// them, but presence is distinguishable only through the probe;
-	// ). Cache-write tokens come from the
+	// them, but presence is distinguishable only through the probe).
+	// Cache-write tokens come from the
 	// created_cache_tokens provider extension: a provider that reports it
 	// makes the Messages cache-creation component known; one that does not
 	// leaves the loss-gated unknown decision.
@@ -573,6 +573,16 @@ func chatMessageToCanonicalParts(
 						Path:     "choices[].message.content[].type",
 						Feature:  "image_url",
 					}
+				case ChatContentBlockTypeAudio:
+					// Upstream chat audio input follows the image_url
+					// precedent in this direction: the canonical IR has no
+					// audio part, so it is a typed unsupported feature
+					// (local conversion result), never corrupt wire.
+					return nil, nil, &UnsupportedFeatureError{
+						Protocol: "chat",
+						Path:     "choices[].message.content[].type",
+						Feature:  "input_audio",
+					}
 				default:
 					// An unknown content block type is outside the modeled
 					// surface: corrupt wire (an upstream failure). Known
@@ -693,6 +703,49 @@ func chatMessageToCanonicalParts(
 				Arguments: ParseToolArguments(call.Function.Arguments),
 			})
 		}
+
+		if message.Audio != nil {
+			// Upstream chat audio output: the transcript maps to ordinary
+			// text (the provider_audio_transcript sanctioned encoding,
+			// recorded as a Note — the client dialects have no audio output
+			// field, so the transcript is the only honest text rendering).
+			// The base64 audio data itself has no target field: it is an
+			// approved loss or a rejection under the strict policy, never
+			// silently dropped. Guarded by the enclosing
+			// ChatAssistantMessage non-nil check: Audio is an
+			// assistant-only field reached through the embedded struct.
+			// A present-but-empty audio object is malformed model output
+			// (the shadow Validate rejects it where Validate runs; the
+			// response path defends inline like the tool-call-id check
+			// above), never a silent no-op.
+			if message.Audio.Data == "" && message.Audio.Transcript == "" {
+				return nil, nil, upstreamWireError(
+					UpstreamChatCompletions,
+					0,
+					errors.New("chat message audio has neither data nor transcript"),
+				)
+			}
+			if message.Audio.Transcript != "" {
+				parts = append(parts, CanonicalText{Text: message.Audio.Transcript})
+				if err := report.Note(
+					FeatureProviderAudioTranscript,
+					"choices[].message.audio",
+					"upstream chat audio output transcript mapped to ordinary text (provider_audio_transcript encoding)",
+				); err != nil {
+					return nil, nil, err
+				}
+			}
+			if message.Audio.Data != "" {
+				if err := report.Lose(
+					policy,
+					FeatureProviderAudioData,
+					"choices[].message.audio",
+					"upstream chat audio output data cannot be reproduced in the target",
+				); err != nil {
+					return nil, nil, err
+				}
+			}
+		}
 	}
 
 	return parts, calls, nil
@@ -770,8 +823,8 @@ func DecodeResponsesResponse(
 		{"background", envelope.Background != nil},
 		{"max_tool_calls", envelope.MaxToolCalls != nil},
 		{"prompt", envelope.Prompt != nil},
-		{"prompt_cache_key", envelope.PromptCacheKey != ""},
-		{"safety_identifier", envelope.SafetyIdentifier != ""},
+		{"prompt_cache_key", envelope.PromptCacheKey != nil},
+		{"safety_identifier", envelope.SafetyIdentifier != nil},
 	} {
 		if control.present {
 			response.Source.ResponsesControls = append(response.Source.ResponsesControls, control.name)
@@ -857,6 +910,11 @@ func DecodeResponsesResponse(
 			})
 
 		case *ResponsesReasoningOutputItem:
+			// The provider routing marker (ReasoningOutputItem.Format) is
+			// routing metadata, never model output: strip it before the
+			// item enters the canonical bytes so it cannot cross into any
+			// client dialect.
+			value.Format = nil
 			raw, err := json.Marshal(value)
 			if err != nil {
 				return CanonicalResponse{}, fmt.Errorf("output item %d: %w", i, err)
@@ -997,15 +1055,16 @@ func RenderResponsesResponse(
 
 		case *CanonicalFunctionCallItem:
 			// The Responses function_call arguments field is a string:
-			// the model-generated raw text is preserved byte-exact
-			//.
+			// the model-generated raw text is preserved byte-exact.
+			callName, callNamespace := context.ToolNames.clientCallName(value.Name)
 			envelope.Output = append(envelope.Output, &ResponsesFunctionCallOutputItem{
 				ID:        context.IDs.New("fc_"),
 				Type:      "function_call",
 				Status:    ResponsesItemCompleted,
 				CallID:    value.CallID,
-				Name:      value.Name,
+				Name:      callName,
 				Arguments: value.Arguments.Raw,
+				Namespace: callNamespace,
 			})
 
 		case *CanonicalFunctionResultItem:
@@ -1020,6 +1079,13 @@ func RenderResponsesResponse(
 			if err := json.Unmarshal(value.Raw, &reasoning); err != nil {
 				return nil, report, fmt.Errorf("response reasoning item: %w", err)
 			}
+			// No clear is needed here. The canonical item's raw bytes never
+			// carry the provider routing marker: the decode path strips it
+			// before the canonical bytes are cut, and that is the only live
+			// cut point. A defensive clear on this line was DEAD - verified by
+			// removing it and observing the rendered output unchanged, with
+			// and without the marker present in the raw bytes - so it is
+			// deleted rather than kept as unreachable "defence in depth".
 			envelope.Output = append(envelope.Output, &reasoning)
 
 		default:
@@ -1185,7 +1251,7 @@ func RenderMessagesResponse(
 		return nil, report, err
 	}
 	// A failed exchange must never be reported as a successful Messages
-	// completion (merge gate 10). The upstream failure surfaces as a
+	// completion. The upstream failure surfaces as a
 	// client-dialect error, never as a message with a success stop reason.
 	if response.Status == CanonicalResponseFailed {
 		// A 2xx envelope reporting status "failed" is an upstream semantic
@@ -1391,8 +1457,8 @@ func RenderMessagesResponse(
 
 	// Anthropic usage semantics: input_tokens + cache_creation_input_tokens
 	// + cache_read_input_tokens = total. The uncached input is the total
-	// minus the cached breakdown, with checked nonnegative arithmetic
-	//. Unknown usage is never fabricated as zero facts:
+	// minus the cached breakdown, with checked nonnegative arithmetic.
+	// Unknown usage is never fabricated as zero facts:
 	// it is an explicit loss/reject decision.
 	if response.Usage.Unknown() {
 		if err := report.Lose(

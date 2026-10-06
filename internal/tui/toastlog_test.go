@@ -391,41 +391,81 @@ func TestToastAnimSingleOwner_SettledDoesNotStack(t *testing.T) {
 
 // TestToastAnimSingleOwner_AnimatingArmsOnce pins that a fast burst of updates
 // during a toast's slide-in arms a single 30ms animation ticker instead of one
-// per update. At most one natural re-arm is tolerated in case the armed
-// interval elapses mid-burst on a very slow machine.
+// per update.
+//
+// The upper bound is derived from how long the burst actually took rather than
+// being a fixed count, because this ticker re-arms whenever the armed interval
+// has elapsed — a property of the design, not a defect. On a fast machine a 50
+// update burst spans well under one interval and the bound is exactly 1, as
+// intended; on a saturated machine it can honestly span several intervals, and
+// a fixed "at most 2" then fails a correct implementation. The defect this
+// test exists to catch is a re-arm per update, which arms once per Update call
+// and blows past this bound at any burst duration.
 func TestToastAnimSingleOwner_AnimatingArmsOnce(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 	m.width = 80
 	m.height = 24
 	m.AddToast(&toast.Toast{Message: "alert", Duration: 5 * time.Second})
-	m.toasts[0].CreatedAt = time.Now().Add(-10 * time.Millisecond)
+	// CreatedAt is pinned per iteration below rather than once here, so the
+	// toast is provably mid-slide-in at every arm this burst observes.
 
+	const updates = 50
 	cmds := 0
 	cur := m
-	for range 50 {
+	// Anchored before the burst; elapsed is read after it, so the derived
+	// budget errs generous rather than tight.
+	burstStart := time.Now()
+	for range updates {
+		// Re-establish the premise this test is about — a toast mid-slide-in —
+		// before every update. A burst can outlast the 250ms slide-in window on
+		// a loaded machine, and once it does the CORRECT arm is the far-future
+		// slide-out rather than a 30ms animation tick, so a burst that simply
+		// runs long would fail a correct implementation.
+		cur.toasts[0].CreatedAt = time.Now()
 		next, cmd := cur.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 		cur = next.(Model)
 		if cmd != nil {
 			cmds++
-			if got := time.Until(cur.animTickDeadline); got <= 0 || got > toastAnimInterval {
-				t.Fatalf("armed deadline %v is not within one animation interval (%v)", cur.animTickDeadline, toastAnimInterval)
+			// Which timer was armed, decided WITHOUT reading a clock. There are
+			// exactly two candidates — the animation tick and the toast's
+			// slide-out — and the latter is a pure function of the toast, so
+			// comparing against it separates them exactly. A clock read here
+			// cannot be trusted: under load the gap between this test's
+			// time.Now() and the one inside Update reaches 30-40ms, so any
+			// "deadline is within one interval" bound is measuring scheduler
+			// delay rather than the timer (measured 60-72ms of apparent arm
+			// length for a 30ms tick).
+			if d := cur.animTickDeadline; d.Equal(cur.toasts[0].SlideOutStart()) {
+				t.Fatalf("armed the slide-out timer at %v instead of a %v animation tick", d, toastAnimInterval)
 			}
 		}
 	}
-	if cmds == 0 || cmds > 2 {
-		t.Fatalf("burst of 50 updates while animating armed %d ticks, want 1 (at most 2 with one natural re-arm)", cmds)
+	burst := time.Since(burstStart)
+
+	// Consecutive arms are at least toastAnimInterval apart, so a burst of
+	// length d can arm at most 1+floor(d/interval) times. One extra is allowed
+	// for boundary and measurement slop.
+	if maxArms := 1 + int(burst/toastAnimInterval) + 1; cmds > maxArms {
+		t.Fatalf("burst of %d updates over %v armed %d ticks, want at most %d (1 per elapsed %v interval, not 1 per update)",
+			updates, burst, cmds, maxArms, toastAnimInterval)
+	}
+	if cmds == 0 {
+		t.Fatal("burst while animating must arm the animation ticker at least once")
 	}
 
 	// Simulate the armed tick firing mid-burst: once the deadline has passed,
-	// the next update must re-arm exactly one fresh animation tick.
+	// the next update must re-arm exactly one fresh animation tick. Which
+	// timer it re-armed is decided against the model, not a clock, for the
+	// same reason as inside the burst.
+	cur.toasts[0].CreatedAt = time.Now()
 	cur.animTickDeadline = time.Now().Add(-time.Millisecond)
 	next, cmd := cur.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	cur = next.(Model)
 	if cmd == nil {
 		t.Fatal("after the armed tick fires, the next update must re-arm the animation ticker")
 	}
-	if got := time.Until(cur.animTickDeadline); got <= 0 || got > toastAnimInterval {
-		t.Fatalf("re-armed deadline %v is not within one animation interval (%v)", cur.animTickDeadline, toastAnimInterval)
+	if d := cur.animTickDeadline; d.Equal(cur.toasts[0].SlideOutStart()) {
+		t.Fatalf("re-armed the slide-out timer at %v instead of a %v animation tick", d, toastAnimInterval)
 	}
 }
 
@@ -637,7 +677,7 @@ func TestHandleLogLines_EmptyMsgStillToasts(t *testing.T) {
 	}
 }
 
-// TestHandleLogLines_DistinctAttributesToastSeparately exercises the T20 fix end
+// TestHandleLogLines_DistinctAttributesToastSeparately exercises the fix end
 // to end through the toast path.
 func TestHandleLogLines_DistinctAttributesToastSeparately(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})

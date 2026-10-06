@@ -1,0 +1,1 @@
+{"max_tokens":8,"messages":[{"content":"Perform a web search for the query: current time in Tokyo Japan now","role":"user"}],"model":"deepseek-v4-flash-0731","tool_choice":{"type":"auto"},"tools":[{"max_uses":8,"name":"web_search","type":"web_search_20250305"}]}

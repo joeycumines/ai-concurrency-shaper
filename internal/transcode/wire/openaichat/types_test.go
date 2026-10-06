@@ -201,3 +201,42 @@ func TestMessageValidateBranches(t *testing.T) {
 		t.Fatal("non-function tool call accepted")
 	}
 }
+
+func TestContentBlockAudioArm(t *testing.T) {
+	// Valid audio arm decodes with data and format.
+	var block ContentBlock
+	if err := json.Unmarshal([]byte(`{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}`), &block); err != nil {
+		t.Fatalf("valid audio block rejected: %v", err)
+	}
+	if block.Type != ContentBlockTypeAudio || block.Audio == nil || block.Audio.Format != "wav" {
+		t.Fatalf("audio block = %+v", block)
+	}
+	// Unsupported format rejects.
+	var bad ContentBlock
+	if err := json.Unmarshal([]byte(`{"type":"input_audio","input_audio":{"data":"AAAA","format":"ogg"}}`), &bad); err == nil {
+		t.Fatal("ogg audio format accepted")
+	}
+	// Missing data rejects.
+	var empty ContentBlock
+	if err := json.Unmarshal([]byte(`{"type":"input_audio","input_audio":{"data":"","format":"wav"}}`), &empty); err == nil {
+		t.Fatal("data-less audio block accepted")
+	}
+}
+
+func TestAssistantAudioValidate(t *testing.T) {
+	msg := Message{
+		Role:                 MessageRoleAssistant,
+		ChatAssistantMessage: &ChatAssistantMessage{Audio: &AssistantAudio{ID: "a1", Data: "AAAA", Transcript: "hi"}},
+	}
+	if err := msg.Validate(); err != nil {
+		t.Fatalf("valid audio output rejected: %v", err)
+	}
+	msg.ChatAssistantMessage.Audio = &AssistantAudio{Data: "AAAA"}
+	if err := msg.Validate(); err == nil {
+		t.Fatal("id-less audio output accepted")
+	}
+	msg.ChatAssistantMessage.Audio = &AssistantAudio{ID: "a1"}
+	if err := msg.Validate(); err == nil {
+		t.Fatal("data-less audio output accepted")
+	}
+}

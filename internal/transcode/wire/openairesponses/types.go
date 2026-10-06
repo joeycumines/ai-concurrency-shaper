@@ -1,5 +1,5 @@
 // Package openairesponses implements the pinned OpenAI Responses wire
-// contract (source: openai-go v1.12.0, see contracts.lock.json): distinct
+// contract (source: openai-go v1.12.0): distinct
 // strict types for the create request, the response object, and each SSE
 // event, with presence-aware decoding and required-field emission.
 //

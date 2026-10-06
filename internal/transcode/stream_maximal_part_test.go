@@ -54,8 +54,8 @@ func TestChatStreamMaximalPartCompletesRelease(t *testing.T) {
 	}
 }
 
-// TestChatStreamMaximalExchangeCompletesRelease pins the round-2/3 M1
-// derivation: the terminal envelope aggregates EVERY accepted accumulator
+// TestChatStreamMaximalExchangeCompletesRelease pins the release derivation:
+// the terminal envelope aggregates EVERY accepted accumulator
 // (output items, tool arguments) plus the request echo, so the
 // generated-frame/batch/generated-total bounds derive from the EXCHANGE
 // total (maxStreamTotalAccumulatedBytes), not one accumulator — and the

@@ -1,6 +1,6 @@
 package transcode
 
-// Review-08 blockers 3+4+5 regression tests: the Responses-to-Anthropic
+// Regression tests: the Responses-to-Anthropic
 // stream enforces an explicit lifecycle (created first and exactly once,
 // strictly increasing sequence numbers, stable response identity, item/part
 // ownership and uniqueness, matching output indexes, every block closed
@@ -32,7 +32,7 @@ func anthropicLifecycleState(t *testing.T) *anthropicResponsesStreamState {
 	t.Helper()
 	return newAnthropicResponsesStreamState(
 		testStreamContext(),
-		j6PermissivePolicy(),
+		permissiveLossPolicy(),
 		ChatCapabilities{},
 		"msg_1",
 		"claude-x",

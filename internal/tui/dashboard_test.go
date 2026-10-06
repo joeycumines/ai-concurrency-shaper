@@ -221,7 +221,7 @@ func TestDashboard_SummaryFitsViewport(t *testing.T) {
 }
 
 // TestDashboard_InFlightSummaryFitsViewport reproduces the In-Flight
-// summary overflow (review-09): "  N in-flight: L limited, P
+// summary overflow: "  N in-flight: L limited, P
 // passthrough" spans exactly 39 cells for single-digit values — the
 // entire 40-column viewport — and exceeds it the moment any value
 // reaches two digits, so renderContentWithScrollbar silently truncates

@@ -121,7 +121,7 @@ func TestDecodeMessagesRequestThinkingRejections(t *testing.T) {
 
 // TestMessagesThinkingDisabledNoted pins that `thinking: disabled` — an
 // explicit client-asserted behavior, not an omission — is observably reported
-// at render, exactly like adaptive (analysis doc 05 §4 / G8).
+// at render, exactly like adaptive.
 func TestMessagesThinkingDisabledNoted(t *testing.T) {
 	_, report, err := decodeThinking(t, `{"type":"disabled"}`, ChatCapabilities{ReasoningEffort: true})
 	if err != nil {
@@ -245,8 +245,8 @@ func TestMessagesThinkingRejectedOnResponsesTarget(t *testing.T) {
 	}
 }
 
-// TestMessagesThinkingBudgetMapsToResponsesEffort is the reproduction
-// for the high finding request_reasoning-default-native-path: an explicit
+// TestMessagesThinkingBudgetMapsToResponsesEffort is the reproduction:
+// an explicit
 // Anthropic thinking budget must map to Responses reasoning.effort when the
 // exchange grants the ReasoningEffort capability, instead of being consumed as
 // an approved request_reasoning loss that never appears on the upstream
