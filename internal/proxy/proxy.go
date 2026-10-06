@@ -1477,7 +1477,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Dispatch to the admission paths. Transcoded routes are dispatched
-	// inside serveLimited/servePassthrough (via lookupTranscodeHandler) so they
+	// inside serveLimited/servePassthrough (via lookupRouteTargets) so they
 	// are bounded exactly like ordinary requests: limited routes acquire the
 	// per-route and global limiter slots, and passthrough routes honor the
 	// global limiter.
@@ -1544,21 +1544,6 @@ func (p *Proxy) serveTranscodeHandler(w http.ResponseWriter, r *http.Request, ha
 	}
 }
 
-// lookupTranscodeHandler returns the transcode handler mapped to the request
-// method and path, or nil when the route is not transcoded. Dispatch is
-// method-scoped: OPTIONS/GET/HEAD/DELETE on a mapped path pass through
-// transparently.
-func (p *Proxy) lookupTranscodeHandler(r *http.Request) http.Handler {
-	if len(p.transcodeHandlerMap) == 0 {
-		return nil
-	}
-	key, err := transcode.NewRouteKey(r.Method, r.URL.Path)
-	if err != nil {
-		return nil
-	}
-	return p.lookupTranscodeHandlerKey(key)
-}
-
 // lookupTranscodeHandlerKey returns the transcode handler for an
 // already-built key. The key is built once per request and shared with the
 // native lookup so the hot path pays route-key construction at most once.
@@ -1588,16 +1573,18 @@ func (p *Proxy) lookupRouteTargets(r *http.Request) (*NativeRoute, http.Handler)
 // rewritten and forwarded through the transparent engine; a model whose
 // dialect differs falls through to the transcode mapping on the same route
 // when one exists, and otherwise rides the transparent engine verbatim.
-// nativeError requests were already answered by the native path, so this
-// does nothing for them.
-func (p *Proxy) dispatchAfterNativeRoute(w http.ResponseWriter, r *http.Request, nr *NativeRoute) {
+// fallback is the transcode handler already resolved for this method+path by
+// lookupRouteTargets at the serve site, so the miss path reuses it instead
+// of rebuilding the route key for a second lookup. nativeError requests
+// were already answered by the native path, so this does nothing for them.
+func (p *Proxy) dispatchAfterNativeRoute(w http.ResponseWriter, r *http.Request, nr *NativeRoute, fallback http.Handler) {
 	out, action := p.nativeRouteAction(w, r, nr)
 	switch action {
 	case nativeServe:
 		p.inner.ServeHTTP(w, out)
 	case nativeMiss:
-		if handler := p.lookupTranscodeHandler(out); handler != nil {
-			p.serveTranscodeHandler(w, out, handler)
+		if fallback != nil {
+			p.serveTranscodeHandler(w, out, fallback)
 		} else {
 			p.inner.ServeHTTP(w, out)
 		}
@@ -1803,7 +1790,7 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 		}()
 		nr, handler := p.lookupRouteTargets(r)
 		if nr != nil {
-			p.dispatchAfterNativeRoute(w, r, nr)
+			p.dispatchAfterNativeRoute(w, r, nr, handler)
 		} else if handler != nil {
 			p.serveTranscodeHandler(w, r, handler)
 		} else {
@@ -2255,7 +2242,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		}()
 		nr, handler := p.lookupRouteTargets(r)
 		if nr != nil {
-			p.dispatchAfterNativeRoute(w, r, nr)
+			p.dispatchAfterNativeRoute(w, r, nr, handler)
 		} else if handler != nil {
 			p.serveTranscodeHandler(w, r, handler)
 		} else {
