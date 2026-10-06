@@ -1040,3 +1040,30 @@ func TestCatalogGenericServerErrorVerdict(t *testing.T) {
 			doc.Error.Type, doc.Error.Code)
 	}
 }
+
+// TestTopLevelModelPresentPinsPresence pins the presence arm: absence is
+// ("", false, nil), present-but-empty is ("", true, nil), and corrupt or
+// null arms keep their errors with presence true.
+func TestTopLevelModelPresentPinsPresence(t *testing.T) {
+	model, present, err := TopLevelModelPresent([]byte(`{"input":"x"}`))
+	if err != nil || present || model != "" {
+		t.Fatalf("absent = (%q, %v, %v), want (\"\", false, nil)", model, present, err)
+	}
+	model, present, err = TopLevelModelPresent([]byte(`{"model":""}`))
+	if err != nil || !present || model != "" {
+		t.Fatalf("empty = (%q, %v, %v), want (\"\", true, nil)", model, present, err)
+	}
+	model, present, err = TopLevelModelPresent([]byte(`{"model":"m"}`))
+	if err != nil || !present || model != "m" {
+		t.Fatalf("ok = (%q, %v, %v), want (\"m\", true, nil)", model, present, err)
+	}
+	if _, present, err := TopLevelModelPresent([]byte(`{"model":null}`)); err == nil || !present {
+		t.Fatalf("null = (present %v, err %v), want (true, illegal-null error)", present, err)
+	}
+	if _, present, err := TopLevelModelPresent([]byte(`{"model":42}`)); err == nil || !present {
+		t.Fatalf("number = (present %v, err %v), want (true, error)", present, err)
+	}
+	if _, present, err := TopLevelModelPresent([]byte(`{"model":"a","model":"b"}`)); err == nil || present {
+		t.Fatalf("duplicate = (present %v, err %v), want (false, error: the document fails before any arm is identified)", present, err)
+	}
+}

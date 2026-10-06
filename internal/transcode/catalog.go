@@ -626,16 +626,26 @@ func validCatalogSurrogate(s string) bool {
 // Probes confirm suite, native, and rewrite verdicts agree on every shape in
 // this policy.
 func TopLevelModel(body []byte) (string, error) {
+	model, _, err := TopLevelModelPresent(body)
+	return model, err
+}
+
+// TopLevelModelPresent extracts like TopLevelModel and additionally reports
+// whether the top-level "model" member is present at all, so callers that
+// distinguish omission from an empty value (the native path) need no second
+// decode. Absence is ("", false, nil); a present-but-empty string is
+// ("", true, nil).
+func TopLevelModelPresent(body []byte) (string, bool, error) {
 	var doc map[string]json.RawMessage
 	if err := wire.DecodeTolerant(body, &doc); err != nil {
-		return "", err
+		return "", false, err
 	}
 	raw, ok := doc["model"]
 	if !ok {
-		return "", nil
+		return "", false, nil
 	}
 	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return "", &wire.DecodeError{
+		return "", true, &wire.DecodeError{
 			Kind:    wire.DecodeIllegalNull,
 			Path:    "model",
 			Message: "null is not allowed for model",
@@ -643,9 +653,9 @@ func TopLevelModel(body []byte) (string, error) {
 	}
 	var model string
 	if err := json.Unmarshal(raw, &model); err != nil {
-		return "", err
+		return "", true, err
 	}
-	return model, nil
+	return model, true, nil
 }
 
 // ValidModelEffort reports whether s is in the closed effort vocabulary.

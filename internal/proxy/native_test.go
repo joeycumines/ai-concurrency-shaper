@@ -676,3 +676,33 @@ func TestNativeUpgradeParityWithTranscode(t *testing.T) {
 		})
 	}
 }
+
+// TestProxyNativeAbsentVsEmptyModel pins the distinct omission verdicts: a
+// request with no model member names the missing field, while a
+// present-but-empty model names the empty value, so operators can tell the
+// two apart.
+func TestProxyNativeAbsentVsEmptyModel(t *testing.T) {
+	up := &nativeUpstream{response: `{"type":"message","model":"wire-msg"}`}
+	p, _ := newNativeProxy(t, up, nativeRoute(t, transcode.NativeMessages, "/v1/messages"))
+
+	rec := postNative(t, p, "/v1/messages",
+		`{"max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("absent-model status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "missing model field") {
+		t.Errorf("absent-model message = %s, want it to name the missing field", body)
+	}
+
+	rec = postNative(t, p, "/v1/messages",
+		`{"model":"","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty-model status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "must be a non-empty string") {
+		t.Errorf("empty-model message = %s, want it to name the empty value", body)
+	}
+	if path, _, _ := up.got(); path != "" {
+		t.Fatalf("upstream reached at %q, want no contact on either verdict", path)
+	}
+}

@@ -238,7 +238,7 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	// Extraction uses the shared TopLevelModel policy so the suite router,
 	// this path, and the rewriter below agree on what counts as a readable
 	// model field (duplicate keys, non-string values, nested objects).
-	clientModel, err := transcode.TopLevelModel(body)
+	clientModel, present, err := transcode.TopLevelModelPresent(body)
 	if err != nil {
 		// The decode error can quote a key name straight out of the request
 		// ("duplicate JSON key %q"), so it is client-controlled text and is
@@ -247,11 +247,17 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 			transcode.BoundErrorMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
+	if !present {
+		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: missing model field")
+		return r, nativeError
+	}
 	if clientModel == "" {
-		// Absent and empty share one verdict here: without a model name there
-		// is nothing to resolve, and an empty string resolves to nothing.
-		// (TopLevelModel reports a non-string model as an error above, so
-		// reaching here with "" means absent-or-empty, never type-corrupt.)
+		// A present-but-empty model resolves to nothing, like absence — but
+		// the message names the empty value so operators can tell omission
+		// from an empty string.
+		// (TopLevelModelPresent reports a non-string model as an error above,
+		// so reaching here with "" means present-but-empty, never
+		// type-corrupt.)
 		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: model field must be a non-empty string")
 		return r, nativeError
 	}
