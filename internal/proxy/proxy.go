@@ -1556,7 +1556,9 @@ func (p *Proxy) lookupTranscodeHandlerKey(key transcode.RouteKey) http.Handler {
 
 // lookupRouteTargets resolves the request's method+path to its native route
 // and transcode handler with a single route-key construction, so the paired
-// lookups on the serve path never pay key construction twice.
+// lookups on the serve path never pay key construction twice. Dispatch is
+// method-scoped: mappings are POST-only, so a non-POST method on a mapped
+// path matches no key and passes through transparently.
 func (p *Proxy) lookupRouteTargets(r *http.Request) (*NativeRoute, http.Handler) {
 	if len(p.nativeRoutes) == 0 && len(p.transcodeHandlerMap) == 0 {
 		return nil, nil

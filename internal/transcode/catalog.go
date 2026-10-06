@@ -615,10 +615,11 @@ func validCatalogSurrogate(s string) bool {
 // and the byte-surgical rewriter: structural problems (duplicate keys at any
 // depth, trailing values, malformed syntax, an explicit null model) are
 // errors; a present model must be a JSON string (numbers, objects, and
-// nested-only documents do not count); absence is reported as ("", nil) so
-// the caller decides between miss and refuse. An empty string is returned
-// as-is, also with nil error — the caller owns the empty verdict (the suite
-// reports missing-or-empty, the native path reports
+// nested-only documents do not count); absence is a nil error with an empty
+// model — the presence bit lives on TopLevelModelPresent below, which shares
+// this policy through one decode. An empty string is returned as-is, also
+// with nil error — the caller owns the empty verdict (the suite reports
+// missing-or-empty, the native path reports
 // must-be-non-empty-string). A null model is an illegal null, not absence:
 // encoding/json decodes null into a string as a silent no-op, and the map
 // decode above cannot see it (RawMessage is null-capable), so the arm is
