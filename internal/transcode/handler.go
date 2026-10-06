@@ -1877,8 +1877,13 @@ func isJSON(resp *http.Response) bool {
 
 // IsUpgradeRequest reports whether the request carries an Upgrade token.
 // It is the single upgrade classifier shared by the transcode handler and
-// the natively served routes, so both boundaries classify identically.
+// the natively served routes, so both boundaries classify identically. A nil
+// request (or one with a nil Header, as a hand-built request may carry)
+// carries no upgrade token, matching the pre-unification native helper.
 func IsUpgradeRequest(r *http.Request) bool {
+	if r == nil || r.Header == nil {
+		return false
+	}
 	return isUpgradeRequest(r)
 }
 

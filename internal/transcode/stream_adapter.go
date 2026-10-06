@@ -508,7 +508,10 @@ func boundedErrorMessageLimit(err error, max int) string {
 
 // BoundErrorMessage truncates message to max bytes with the shared ellipsis
 // discipline (three-byte ellipsis carved out of the bound; a non-positive
-// max returns the message whole, meaning "no configured bound"). It is the
+// max returns the message whole, meaning "no configured bound"). The cut
+// lands on a rune boundary, so a multibyte rune straddling the bound is
+// dropped whole rather than emitted as half a rune (U+FFFD mojibake
+// downstream). It is the
 // one truncation helper for client-controlled text a dialect error reflects
 // back — catalog, suite, native, and handler paths all delegate here, so the
 // bound policy cannot drift between paths that render the same input.
@@ -518,9 +521,9 @@ func BoundErrorMessage(message string, max int) string {
 	}
 	// The ellipsis must not push the text past the configured bound.
 	if max > 3 {
-		return message[:max-3] + "…"
+		return truncateUTF8(message, max-3) + "…"
 	}
-	return message[:max]
+	return truncateUTF8(message, max)
 }
 
 // responsesErrorFrame marshals a Responses error event.

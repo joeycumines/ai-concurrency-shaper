@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/testcorpus"
 )
@@ -2640,5 +2641,60 @@ func TestHandlerBuildUpstreamLogIsSingleLine(t *testing.T) {
 	}
 	if got := BoundErrorMessage("hello world", -1); got != "hello world" {
 		t.Fatalf("BoundErrorMessage with negative max = %q, want the message whole", got)
+	}
+}
+
+// TestIsUpgradeRequestNilSafe pins the nil contract: a nil request or a
+// request with a nil Header carries no upgrade token, matching the
+// pre-unification native helper.
+func TestIsUpgradeRequestNilSafe(t *testing.T) {
+	if IsUpgradeRequest(nil) {
+		t.Error("IsUpgradeRequest(nil) = true, want false")
+	}
+	req := &http.Request{Header: nil}
+	if IsUpgradeRequest(req) {
+		t.Error("IsUpgradeRequest with nil Header = true, want false")
+	}
+	empty := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	empty.Header["Upgrade"] = []string{""}
+	if !IsUpgradeRequest(empty) {
+		t.Error("IsUpgradeRequest with present-but-empty Upgrade = false, want true")
+	}
+}
+
+// TestBoundErrorMessageRuneSafe pins rune-boundary truncation: a multibyte
+// rune straddling the bound is dropped whole, never emitted as half a rune,
+// and the result stays within the byte bound.
+func TestBoundErrorMessageRuneSafe(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+		max     int
+	}{
+		{"ascii ellipsis arm", "hello world, this is long", 10},
+		{"cjk straddling ellipsis cut", "ab日木本語nd", 8},
+		{"cjk straddling short cut", "日木本語", 4},
+		{"cjk short bound no ellipsis", "日木本語", 3},
+		{"emoji tail", "ok ✓✓✓ done and more", 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BoundErrorMessage(tc.message, tc.max)
+			if len(got) > tc.max {
+				t.Errorf("BoundErrorMessage(%q, %d) = %d bytes, over the bound", tc.message, tc.max, len(got))
+			}
+			for i := 0; i < len(got); {
+				_, size := utf8.DecodeRuneInString(got[i:])
+				if size <= 1 {
+					b := got[i]
+					if b >= 0x80 {
+						t.Fatalf("byte %d of %q is a rune fragment", i, got)
+					}
+				}
+				i += size
+			}
+		})
+	}
+	if got := BoundErrorMessage("日本語テスト", 4096); got != "日本語テスト" {
+		t.Errorf("short multibyte message altered: %q", got)
 	}
 }
