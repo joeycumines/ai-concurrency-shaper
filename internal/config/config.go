@@ -40,6 +40,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/rcclient"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
@@ -106,6 +107,25 @@ type Server struct {
 	// Help is set by -h/-help at server scope (or legacy top level): the
 	// caller prints usage and exits 0 instead of running the proxy.
 	Help bool
+
+	// ---- Embedded RC server (server scope) ----
+
+	// RCBind is the listen address for the embedded RemoteControl.NetConn
+	// gRPC server (-rc-server-bind). Empty disables the embedded server.
+	RCBind string
+	// RCTLS enables TLS on the embedded RC server listener.
+	RCTLS bool
+	// RCCA is the CA for client certificate verification on the embedded RC
+	// server (file:|base64:). When set, mTLS is enforced.
+	RCCA string
+	// RCCert is the server certificate for the embedded RC server (file:|base64:).
+	RCCert string
+	// RCKey is the server private key for the embedded RC server (file:|base64:).
+	RCKey string
+
+	// rcServerConfig is the resolved embedded RC server configuration,
+	// populated by ResolveAndValidate. Nil when -rc-server-bind is empty.
+	rcServerConfig *rcclient.ServerConfig
 }
 
 // Provider is one upstream LLM system plus its access mount and upstream-behavior
@@ -213,6 +233,61 @@ type Provider struct {
 	CBPenalty     time.Duration
 	CBMaxPenalty  time.Duration
 
+	// ---- RemoteControl.NetConn dial target (provider scope) ----
+
+	// RCServer is the RC server address (host:port) for this provider's
+	// upstream dialing (-rc-server). Empty disables RC dialing.
+	RCServer string
+	// RCChannelTLS enables TLS on the gRPC channel to the RC server.
+	RCChannelTLS bool
+	// RCChannelCert/RCChannelKey are the client certificate and key for
+	// mTLS on the gRPC channel (file:|base64:).
+	RCChannelCert string
+	RCChannelKey  string
+	// RCChannelCA is the CA for verifying the RC server's certificate (file:|base64:).
+	RCChannelCA string
+	// RCChannelServerName overrides the TLS SNI for the gRPC channel.
+	RCChannelServerName string
+	// RCChannelInsecure disables TLS certificate verification on the gRPC channel.
+	RCChannelInsecure bool
+	// RCDialTimeout bounds the remote dial operation.
+	RCDialTimeout time.Duration
+	// RCTerminateTLS requests TLS termination at the RC server. The
+	// RCTarget* fields below configure that handshake and are rejected
+	// unless RCTerminateTLS is set.
+	RCTerminateTLS bool
+	// RCTargetServerName is the SNI for the remote TLS handshake.
+	RCTargetServerName string
+	// RCTargetALPN is the ALPN protocol list for the remote TLS handshake.
+	RCTargetALPN []string
+	// RCTargetMinVersion/RCTargetMaxVersion constrain the remote TLS version.
+	RCTargetMinVersion string
+	RCTargetMaxVersion string
+	// RCTargetFingerprint names a client fingerprint preset; the server
+	// fails closed when it cannot satisfy a preset other than the runtime
+	// default (no uTLS provider in the embedded server).
+	RCTargetFingerprint string
+	// RCTargetCiphers is the cipher suite list for the remote TLS handshake
+	// (hex or decimal uint16 values).
+	RCTargetCiphers []string
+	// RCTargetInsecure disables certificate verification on the remote TLS handshake.
+	RCTargetInsecure bool
+	// RCTargetCA/RCTargetCert/RCTargetKey are the CA and client credentials
+	// for the remote TLS handshake (file:|base64:).
+	RCTargetCA   string
+	RCTargetCert string
+	RCTargetKey  string
+	// RCProxyHop is the repeatable proxy hop specification for egress
+	// chaining ahead of the target dial: TYPE@ADDRESS[;user=U][;pass=P][;header=H].
+	RCProxyHop []string
+	// RCFlowControl advertises flow-control support on the stream.
+	RCFlowControl bool
+	// RCOpportunisticTLS advertises opportunistic TLS upgrade support.
+	RCOpportunisticTLS bool
+	// RCWindowSize is the flow-control window size (0 = server default).
+	// Requires RCFlowControl.
+	RCWindowSize int
+
 	// -- resolved state (populated by ResolveAndValidate) --
 
 	upstream          *url.URL
@@ -227,6 +302,9 @@ type Provider struct {
 	transcodeMappings []proxy.TranscodeMapping
 	nativeRoutes      []proxy.NativeRoute
 	opencodePreset    transcode.OpencodePreset
+	// rcDialer is the resolved RC dialer for this provider, or nil when RC
+	// dialing is not configured.
+	rcDialer *rcclient.Dialer
 	// modelCatalog is this provider's frozen catalog snapshot, built from its
 	// model-table subset and resolved mappings. Nil when no table names it.
 	modelCatalog *transcode.CatalogConfig
@@ -334,6 +412,15 @@ func (p *Provider) MaxIdleConnsPerHost() int { return p.maxIdlePerHost }
 // are forwarded verbatim with no stripping or injection.
 func (p *Provider) AuthPolicy() *auth.AuthPolicy { return p.authPolicy }
 
+// RCDialer returns the provider's resolved RemoteControl.NetConn dialer, or
+// nil when -rc-server was not configured: nil means upstream connections
+// dial directly through the default transport.
+func (p *Provider) RCDialer() *rcclient.Dialer { return p.rcDialer }
+
+// RCServerConfig returns the resolved embedded RC server configuration, or
+// nil when -rc-server-bind was not configured.
+func (s *Server) RCServerConfig() *rcclient.ServerConfig { return s.rcServerConfig }
+
 // Account is reserved for the future multi-account layer: per-account keys and
 // limits cooperating under a provider-scoped shared ceiling. Declared as a type
 // now so the concept is materialized, but stage 1 never populates it and the
@@ -388,6 +475,10 @@ func (c *Config) ResolveAndValidate() error {
 	}
 
 	if err := c.resolveCatalogSuites(); err != nil {
+		return err
+	}
+
+	if err := c.Server.resolveRC(); err != nil {
 		return err
 	}
 
@@ -624,9 +715,98 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
 
+	if err := p.resolveRC(); err != nil {
+		return fmt.Errorf("%s%w", ctx(), err)
+	}
+
 	p.resolveModelCatalog(modelTable)
 
 	p.maxIdlePerHost = proxy.MaxIdleConnsPerHost(p.GlobalConcurrency, p.Concurrency, patterns, p.routeLimiters, p.LimitAll)
+	return nil
+}
+
+// resolveRC builds the provider's RemoteControl.NetConn dialer when
+// -rc-server is configured. Validation is fail-closed: any RC dial option
+// without -rc-server, or an invalid combination, is rejected here at
+// startup. The underlying gRPC channel is lazy, so an unreachable RC server
+// does not fail startup; dial errors surface at request time, matching the
+// transport's existing semantics.
+func (p *Provider) resolveRC() error {
+	if p.RCServer == "" {
+		if p.rcFlagSet() {
+			return errors.New("rc dial options require -rc-server")
+		}
+		return nil
+	}
+	channel := rcclient.ChannelConfig{
+		Server:     p.RCServer,
+		TLS:        p.RCChannelTLS,
+		Cert:       p.RCChannelCert,
+		Key:        p.RCChannelKey,
+		CA:         p.RCChannelCA,
+		ServerName: p.RCChannelServerName,
+		Insecure:   p.RCChannelInsecure,
+	}
+	dial := rcclient.DialConfig{
+		Timeout:          p.RCDialTimeout,
+		TerminateTLS:     p.RCTerminateTLS,
+		TargetServerName: p.RCTargetServerName,
+		ALPN:             p.RCTargetALPN,
+		MinVersion:       p.RCTargetMinVersion,
+		MaxVersion:       p.RCTargetMaxVersion,
+		Fingerprint:      p.RCTargetFingerprint,
+		CipherSuites:     p.RCTargetCiphers,
+		TargetInsecure:   p.RCTargetInsecure,
+		TargetCA:         p.RCTargetCA,
+		TargetCert:       p.RCTargetCert,
+		TargetKey:        p.RCTargetKey,
+		ProxyHops:        p.RCProxyHop,
+		FlowControl:      p.RCFlowControl,
+		OpportunisticTLS: p.RCOpportunisticTLS,
+		WindowSize:       p.RCWindowSize,
+	}
+	dialer, err := rcclient.NewDialer(channel, dial)
+	if err != nil {
+		return err
+	}
+	p.rcDialer = dialer
+	return nil
+}
+
+// rcFlagSet reports whether any RC dial option other than -rc-server itself
+// was configured, so a stray option without -rc-server is rejected rather
+// than silently ignored.
+func (p *Provider) rcFlagSet() bool {
+	return p.RCChannelTLS || p.RCChannelCert != "" || p.RCChannelKey != "" ||
+		p.RCChannelCA != "" || p.RCChannelServerName != "" || p.RCChannelInsecure ||
+		p.RCDialTimeout != 0 || p.RCTerminateTLS || p.RCTargetServerName != "" ||
+		len(p.RCTargetALPN) != 0 || p.RCTargetMinVersion != "" || p.RCTargetMaxVersion != "" ||
+		p.RCTargetFingerprint != "" || len(p.RCTargetCiphers) != 0 || p.RCTargetInsecure ||
+		p.RCTargetCA != "" || p.RCTargetCert != "" || p.RCTargetKey != "" ||
+		len(p.RCProxyHop) != 0 || p.RCFlowControl || p.RCOpportunisticTLS || p.RCWindowSize != 0
+}
+
+// resolveRC validates the embedded RC server configuration when
+// -rc-server-bind is set. Without it, stray server options are rejected
+// rather than ignored. No socket is bound here; run() owns the listener.
+func (s *Server) resolveRC() error {
+	if s.RCBind == "" {
+		if s.RCTLS || s.RCCA != "" || s.RCCert != "" || s.RCKey != "" {
+			return errors.New("rc-server TLS options require -rc-server-bind")
+		}
+		return nil
+	}
+	cfg := rcclient.ServerConfig{
+		Bind: s.RCBind,
+		TLS:  s.RCTLS,
+		CA:   s.RCCA,
+		Cert: s.RCCert,
+		Key:  s.RCKey,
+	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	s.rcServerConfig = &cfg
 	return nil
 }
 

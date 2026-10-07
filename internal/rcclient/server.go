@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/joeycumines/sesame/rc"
 	"github.com/joeycumines/sesame/rc/netconn"
@@ -142,3 +143,19 @@ func (s *Server) Addr() net.Addr { return s.listener.Addr() }
 
 // Stop gracefully stops the server.
 func (s *Server) Stop() { s.grpcServer.GracefulStop() }
+
+// StopAfter attempts a graceful stop and force-stops the server when active
+// RPCs do not complete within the timeout. It never blocks past the timeout,
+// so shutdown cannot hang on a client that holds a stream open.
+func (s *Server) StopAfter(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		s.grpcServer.GracefulStop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		s.grpcServer.Stop()
+	}
+}

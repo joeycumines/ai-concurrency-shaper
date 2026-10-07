@@ -39,6 +39,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/rcclient"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/router"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
@@ -91,6 +92,16 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 		MaxIdleConnsPerHost: p.MaxIdleConnsPerHost(),
 		IdleConnTimeout:     120 * time.Second,
 		DisableKeepAlives:   p.DisableKeepAlives,
+	}
+	if d := p.RCDialer(); d != nil {
+		// Dial upstream connections through the RemoteControl.NetConn stream.
+		transport.DialContext = d.DialContext
+		if d.RemoteTerminate() {
+			// TLS is terminated at the RC server: the returned connection
+			// already carries the decrypted stream, so the transport must not
+			// perform its own TLS handshake over it.
+			transport.DialTLSContext = d.DialContext
+		}
 	}
 
 	opts := []proxy.Option{
@@ -198,6 +209,11 @@ func logProviderConfig(pr *config.Provider) {
 			source = "none"
 		}
 		log.Printf("upstream auth: auth-mode=%s auth-source=%s", policy.Mode, source)
+	}
+	if d := pr.RCDialer(); d != nil {
+		// Hyphen-bound tokens, references only (no secret values), matching the
+		// failure-hold/auth discipline above.
+		log.Printf("rc-dial: rc-server=%s terminate-tls=%v", pr.RCServer, d.RemoteTerminate())
 	}
 	if mappings := pr.TranscodeMappings(); len(mappings) > 0 {
 		var parts []string
@@ -314,6 +330,28 @@ func run() error {
 
 	if err := cfg.ResolveAndValidate(); err != nil {
 		return err
+	}
+
+	// Embedded RC server and RC dialer lifecycle: close the dialers and stop
+	// the server after the HTTP servers shut down (runServerLifecycle below).
+	var rcSrv *rcclient.Server
+	defer func() {
+		for _, pr := range cfg.Providers {
+			if d := pr.RCDialer(); d != nil {
+				_ = d.Close()
+			}
+		}
+		if rcSrv != nil {
+			rcSrv.StopAfter(5 * time.Second)
+		}
+	}()
+
+	if rcCfg := cfg.Server.RCServerConfig(); rcCfg != nil {
+		rcSrv, err = rcclient.NewServer(*rcCfg)
+		if err != nil {
+			return err
+		}
+		log.Printf("rc-server: listening on %s (tls=%v)", rcSrv.Addr(), rcCfg.TLS)
 	}
 
 	if summary := cfg.ModelTableSummary(); summary != "" {
