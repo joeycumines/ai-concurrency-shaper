@@ -141,6 +141,43 @@ func TestParseProxyHop(t *testing.T) {
 	}
 }
 
+// TestParseProxyHopDoesNotLeakCredentials pins the secret-hygiene contract:
+// a hop spec legitimately carries a proxy password or Proxy-Authorization
+// header, so no parse error may echo the spec back — a typo in a
+// credential-bearing hop must not leak the credential into the startup
+// error and the journal. One malformed spec per error site, each carrying
+// credentials beside the defect.
+func TestParseProxyHopDoesNotLeakCredentials(t *testing.T) {
+	const (
+		pass   = "hunter2-s3cret"
+		header = "Basic c3VwZXItc2VjcmV0LWhlYWRlcg=="
+	)
+	for _, spec := range []string{
+		"header=" + header,                          // no TYPE@ADDRESS
+		"ftp@host:21;pass=" + pass,                  // unknown type
+		"socks5@;pass=" + pass,                      // empty address
+		"socks5@host:1080;pass=" + pass + ";badopt", // option without '='
+		"socks5@host:1080;pass=" + pass + ";nope=x", // unknown option
+	} {
+		_, err := ParseProxyHop(spec)
+		if err == nil {
+			t.Fatal("malformed hop: want error, got nil")
+		}
+		if strings.Contains(err.Error(), pass) || strings.Contains(err.Error(), header) {
+			t.Errorf("hop error leaks credentials: %v", err)
+		}
+	}
+
+	// The same contract through the startup validation path.
+	verr := (&DialConfig{ProxyHops: []string{"socks5@host:1080;pass=" + pass + ";badopt"}}).Validate()
+	if verr == nil {
+		t.Fatal("Validate with malformed hop: want error, got nil")
+	}
+	if strings.Contains(verr.Error(), pass) {
+		t.Errorf("Validate error leaks credentials: %v", verr)
+	}
+}
+
 func TestDialConfigValidate(t *testing.T) {
 	// Valid: full remote-TLS config.
 	good := DialConfig{

@@ -251,10 +251,14 @@ func ParseFingerprint(s string) (sesametls.FingerprintPreset, error) {
 // TYPE is http-connect or socks5 (case-insensitive). ADDRESS is
 // host:port. The optional key=value pairs set credentials or a custom
 // Proxy-Authorization header.
+//
+// Errors never echo the raw spec: it may carry a proxy password or an
+// auth header, and a parse failure must not leak credentials into the
+// startup error and the journal. They name only the offending token.
 func ParseProxyHop(s string) (*sesameproxy.ProxyHop, error) {
 	rest, after, ok := strings.Cut(s, "@")
 	if !ok {
-		return nil, fmt.Errorf("proxy hop %q: want TYPE@ADDRESS", s)
+		return nil, errors.New("proxy hop: want TYPE@ADDRESS")
 	}
 
 	var hopType sesameproxy.ProxyHop_Type
@@ -264,13 +268,13 @@ func ParseProxyHop(s string) (*sesameproxy.ProxyHop, error) {
 	case "socks5":
 		hopType = sesameproxy.ProxyHop_SOCKS5
 	default:
-		return nil, fmt.Errorf("proxy hop %q: unknown type %q (want http-connect or socks5)", s, rest)
+		return nil, fmt.Errorf("proxy hop: unknown type %q (want http-connect or socks5)", strings.TrimSpace(rest))
 	}
 
 	parts := strings.Split(after, ";")
 	addr := strings.TrimSpace(parts[0])
 	if addr == "" {
-		return nil, fmt.Errorf("proxy hop %q: empty address", s)
+		return nil, errors.New("proxy hop: empty address")
 	}
 
 	hop := &sesameproxy.ProxyHop{
@@ -284,7 +288,8 @@ func ParseProxyHop(s string) (*sesameproxy.ProxyHop, error) {
 	for _, kv := range parts[1:] {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
-			return nil, fmt.Errorf("proxy hop %q: option %q: want key=value", s, kv)
+			// kv carries no '=' and therefore no value; naming it is safe.
+			return nil, fmt.Errorf("proxy hop: option %q: want key=value", kv)
 		}
 		switch strings.ToLower(strings.TrimSpace(k)) {
 		case "user", "username":
@@ -294,7 +299,7 @@ func ParseProxyHop(s string) (*sesameproxy.ProxyHop, error) {
 		case "header", "auth-header":
 			hop.AuthHeader = v
 		default:
-			return nil, fmt.Errorf("proxy hop %q: unknown option %q", s, k)
+			return nil, fmt.Errorf("proxy hop: unknown option %q", k)
 		}
 	}
 
