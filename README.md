@@ -16,6 +16,8 @@ Run with `-tui` for a terminal dashboard with live metrics and request inspectio
 go install github.com/joeycumines/ai-concurrency-shaper@latest
 ```
 
+The repository currently carries a local `go.mod` replace against `../sesame` (the RemoteControl.NetConn feature depends on an unpublished sesame branch), so the `@latest` install above will not build until that branch is released. See [RemoteControl.NetConn Dialing](#remotecontrolnetconn-dialing) for building from source.
+
 ## Usage
 
 ```sh
@@ -209,6 +211,89 @@ Other explicit scope boundaries and deferred capabilities:
 - **Stateless Inference without Session Stickiness**: Stateless LLM inference does not require session affinity or stickiness. Per-tool session affinity, if ever needed in the future, would be based on tool HTTP headers, cookies, or hashes.
 - **Provider Resource Isolation vs Client Identity Rotation**: The proxy intentionally does not implement LocalAddr pooling, User-Agent rotation, TLS fingerprint spoofing, or keypool rotation on 429. Per the Maxim AI caveat, having $N$ API keys in the same organization does not yield $N\times$ quota under modern upstream mitigation policies (providers enforce limits per organization, project, or billing account). The correct and supported architectural pattern is defining distinct organizations, accounts, or regions as distinct `--provider` resources with isolated queue limiters and circuit breakers, rather than per-request identity rotation.
 - **Readiness and Configuration**: Readiness is TCP-connect only, and configuration changes require a restart.
+
+### RemoteControl.NetConn Dialing
+
+A provider's upstream connections can be dialed through a [sesame RemoteControl.NetConn](https://github.com/joeycumines/sesame) target: a gRPC service that dials connections on the client's behalf and streams them back, optionally terminating upstream TLS and traversing egress proxies ahead of the dial. The shaper supports both roles: **client flags** (`-rc-*`, provider scope) configure how a provider dials through an RC server, and **server flags** (`-rc-server-*`, server scope) let the binary itself act as an RC target.
+
+**Install note:** this feature depends on the sesame `dial-options-in-stream-control` branch, which no published sesame release contains. The repository carries a local `go.mod` replace pointing at `../sesame`, so `go install github.com/joeycumines/ai-concurrency-shaper@latest` will not build until the branch is merged and tagged; clone this repository next to a `sesame` checkout and build from source.
+
+#### Provider flags (`-rc-*`, per-provider)
+
+| Flag | Description |
+|------|-------------|
+| `-rc-server` | RC server address (`host:port`). Empty = direct dialing; all other `-rc-*` flags require this. |
+| `-rc-dial-timeout` | Timeout for the remote dial through the RC server (0 = no timeout). |
+| `-rc-channel-tls` | Enable TLS on the gRPC channel to the RC server. |
+| `-rc-channel-ca` | CA for verifying the RC server certificate (`file:PATH` or `base64:DATA`; requires `-rc-channel-tls`). |
+| `-rc-channel-cert` | Client certificate for mTLS on the gRPC channel (`file:PATH` or `base64:DATA`; requires `-rc-channel-tls` and `-rc-channel-key`). |
+| `-rc-channel-key` | Client private key for mTLS on the gRPC channel (`file:PATH` or `base64:DATA`; requires `-rc-channel-tls` and `-rc-channel-cert`). |
+| `-rc-channel-server-name` | TLS SNI override for the gRPC channel (requires `-rc-channel-tls`). |
+| `-rc-channel-insecure` | Skip TLS verification on the gRPC channel (requires `-rc-channel-tls`). |
+| `-rc-terminate-tls` | Terminate upstream TLS **at the RC server** instead of inside the proxy. Enables the `-rc-target-*` flags below; without it the tunnel is plain TCP and the proxy performs TLS normally. |
+| `-rc-target-server-name` | Upstream TLS SNI for the handshake terminated at the RC server (requires `-rc-terminate-tls`). |
+| `-rc-target-ca` | CA for verifying the upstream certificate (`file:PATH` or `base64:DATA`; requires `-rc-terminate-tls`). |
+| `-rc-target-cert` | Client certificate for upstream mTLS (`file:PATH` or `base64:DATA`; requires `-rc-terminate-tls` and `-rc-target-key`). |
+| `-rc-target-key` | Client private key for upstream mTLS (`file:PATH` or `base64:DATA`; requires `-rc-terminate-tls` and `-rc-target-cert`). |
+| `-rc-target-min-version` | Minimum upstream TLS version: `1.0`, `1.1`, `1.2`, or `1.3` (requires `-rc-terminate-tls`). |
+| `-rc-target-max-version` | Maximum upstream TLS version (same values; requires `-rc-terminate-tls`). |
+| `-rc-target-cipher` | Cipher suite for the upstream handshake, hex or decimal uint16 (repeatable; requires `-rc-terminate-tls`). |
+| `-rc-target-fingerprint` | Client TLS fingerprint preset for the upstream handshake (requires `-rc-terminate-tls`). The embedded RC server satisfies only `runtime-default` and fails closed for any other preset. |
+| `-rc-target-alpn` | ALPN protocol offered during the upstream handshake (repeatable; requires `-rc-terminate-tls`). |
+| `-rc-target-insecure` | Skip upstream TLS certificate verification (requires `-rc-terminate-tls`). |
+| `-rc-flow-control` | Advertise flow-control support on the RC stream (switches to the in-stream control path). |
+| `-rc-window-size` | Flow-control window size in bytes (0 = server default; requires `-rc-flow-control`). Values above uint32 max are rejected at startup. |
+| `-rc-opportunistic-tls` | Advertise opportunistic TLS upgrade support on the RC stream. |
+| `-rc-proxy-hop` | Egress proxy hop ahead of the upstream dial: `http-connect|socks5@host:port[;user=U][;pass=P][;header=H]` (repeatable). |
+
+Certificate and key material uses explicit prefixes: `file:/path/to/pem` reads from disk, `base64:DATA` decodes inline PEM. Unprefixed values are rejected without echoing the content back into the error.
+
+Validation is fail-closed: `-rc-channel-cert` requires `-rc-channel-key` (and vice versa), `-rc-target-*` options require `-rc-terminate-tls`, `-rc-window-size` requires `-rc-flow-control`, and any `-rc-*` flag without `-rc-server` is a startup error. The gRPC channel is lazy (`grpc.NewClient`): an unreachable RC server does not fail startup — dial errors surface at request time as transport failures.
+
+#### Server flags (`-rc-server-*`, server scope)
+
+| Flag | Description |
+|------|-------------|
+| `-rc-server-bind` | Listen address for the embedded RC gRPC server (empty = disabled). |
+| `-rc-server-tls` | Enable TLS on the embedded RC server listener. |
+| `-rc-server-ca` | CA for client certificate verification, enforcing mTLS (`file:PATH` or `base64:DATA`). |
+| `-rc-server-cert` | Server certificate (`file:PATH` or `base64:DATA`; requires `-rc-server-tls` and `-rc-server-key`). |
+| `-rc-server-key` | Server private key (`file:PATH` or `base64:DATA`; requires `-rc-server-tls` and `-rc-server-cert`). |
+
+The embedded server registers sesame's `netconn.Server` with default settings: upstream dials go through `DefaultDialer`, a plain `net.Dialer` honoring the request's dial timeout. Fingerprint presets other than `runtime-default` fail closed — a limitation of sesame's server-side handshake support, not of the embedded mode — and there is no session-ticket flag because sesame's `BuildTLSConfig` does not use the field.
+
+#### Worked example: proxy → RC target → upstream with mTLS
+
+The embedded RC server runs inside a proxy process alongside at least one provider. To separate the roles across machines, run a standalone sesame RC server on the remote host; the shaper's embedded mode is intended for testing and single-binary deployments.
+
+```sh
+# Proxy with embedded RC server (mTLS) and a passthrough provider
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8080 \
+  -rc-server-bind 127.0.0.1:9443 \
+  -rc-server-tls \
+  -rc-server-ca    file:ca.pem \
+  -rc-server-cert  file:server.pem \
+  -rc-server-key   file:server-key.pem \
+  --provider=local \
+    -upstream http://127.0.0.1:8081
+
+# Second proxy dialing through the first proxy's RC server
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8082 \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -rc-server 127.0.0.1:9443 \
+    -rc-channel-tls \
+    -rc-channel-ca    file:ca.pem \
+    -rc-channel-cert  file:client.pem \
+    -rc-channel-key   file:client-key.pem \
+    -rc-terminate-tls \
+    -rc-target-server-name api.openai.com \
+    -rc-target-ca file:ca.pem
+```
+
+The second proxy's upstream requests traverse the RC stream: the first proxy's embedded RC server dials `api.openai.com`, terminates TLS, and streams the connection back; the second proxy performs no upstream TLS handshake itself. Generate all certificates from one CA: the server leaf needs `127.0.0.1` in its subject alternative names because the channel verifies the server certificate against the `-rc-server` address, and the client leaf must chain to the CA the server uses for client verification.
 
 ### Examples
 
