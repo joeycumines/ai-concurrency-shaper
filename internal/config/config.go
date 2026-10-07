@@ -738,6 +738,9 @@ func (p *Provider) resolveRC() error {
 		}
 		return nil
 	}
+	if p.RCDialTimeout < 0 {
+		return errors.New("rc dial timeout must be >= 0")
+	}
 	channel := rcclient.ChannelConfig{
 		Server:     p.RCServer,
 		TLS:        p.RCChannelTLS,
@@ -768,6 +771,11 @@ func (p *Provider) resolveRC() error {
 	dialer, err := rcclient.NewDialer(channel, dial)
 	if err != nil {
 		return err
+	}
+	// Close the dialer from any prior resolution so a repeated
+	// ResolveAndValidate never orphans its gRPC channel.
+	if p.rcDialer != nil {
+		_ = p.rcDialer.Close()
 	}
 	p.rcDialer = dialer
 	return nil
