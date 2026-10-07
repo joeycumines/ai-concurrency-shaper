@@ -351,7 +351,12 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		log.Printf("rc-server: listening on %s (tls=%v)", rcSrv.Addr(), rcCfg.TLS)
+		// Deliberately NOT "listening on <addr>": the e2e helper
+		// parseListeningAddr splits on that exact phrase to find the proxy's
+		// own bind address, and an embedded RC server that logged the same
+		// shape would alias it. The hyphen-bound bind=/tls= form is
+		// unambiguous for both the operator and the test parsers.
+		log.Printf("rc-server: bind=%s tls=%v", rcSrv.Addr(), rcCfg.TLS)
 	}
 
 	if summary := cfg.ModelTableSummary(); summary != "" {
