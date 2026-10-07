@@ -49,5 +49,8 @@ func DecodeMaterial(value string) ([]byte, error) {
 		}
 		return b, nil
 	}
-	return nil, fmt.Errorf("rcclient: key material must use a file: or base64: prefix, got %q", value)
+	// Never echo the material back: an operator who pastes a raw private key
+	// without the file:/base64: prefix would otherwise leak it into the error
+	// (and thus the journal/log). Report the size only.
+	return nil, fmt.Errorf("rcclient: key material must use a file: or base64: prefix (got %d bytes)", len(value))
 }

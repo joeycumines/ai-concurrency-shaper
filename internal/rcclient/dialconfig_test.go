@@ -16,6 +16,8 @@
 package rcclient
 
 import (
+	"math"
+	"strings"
 	"testing"
 
 	sesameproxy "github.com/joeycumines/sesame/rc/proxy"
@@ -200,6 +202,19 @@ func TestDialConfigValidate(t *testing.T) {
 	badHop := DialConfig{ProxyHops: []string{"ftp@host:21"}}
 	if err := badHop.Validate(); err == nil {
 		t.Error("bad proxy hop: want error, got nil")
+	}
+}
+
+// TestDialConfigValidateWindowUint32Range pins the fail-closed upper bound:
+// Capabilities renders WindowSize as uint32, so an int above that range must
+// be rejected here rather than truncated silently on the wire.
+func TestDialConfigValidateWindowUint32Range(t *testing.T) {
+	if err := (&DialConfig{FlowControl: true, WindowSize: math.MaxUint32}).Validate(); err != nil {
+		t.Fatalf("window at uint32 max: err = %v, want nil", err)
+	}
+	err := (&DialConfig{FlowControl: true, WindowSize: math.MaxUint32 + 1}).Validate()
+	if err == nil || !strings.Contains(err.Error(), "window size exceeds uint32 range") {
+		t.Fatalf("window above uint32 max: err = %v, want 'window size exceeds uint32 range'", err)
 	}
 }
 

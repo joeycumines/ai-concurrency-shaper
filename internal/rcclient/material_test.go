@@ -18,6 +18,7 @@ package rcclient
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -80,5 +81,23 @@ func TestDecodeMaterialBase64Invalid(t *testing.T) {
 func TestDecodeMaterialNoPrefix(t *testing.T) {
 	if _, err := DecodeMaterial("raw-material-without-prefix"); err == nil {
 		t.Fatal("no prefix: want error, got nil")
+	}
+}
+
+// TestDecodeMaterialNoPrefixDoesNotLeak pins the secret-hygiene contract:
+// the error for unprefixed material must never echo the value back (an
+// operator who pastes a raw private key without a prefix would otherwise
+// leak it into the journal/log). Only the size may be reported.
+func TestDecodeMaterialNoPrefixDoesNotLeak(t *testing.T) {
+	secret := "-----BEGIN PRIVATE KEY-----\nSECRETKEYMATERIAL\n-----END PRIVATE KEY-----"
+	_, err := DecodeMaterial(secret)
+	if err == nil {
+		t.Fatal("no prefix: want error, got nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error leaks the raw material: %v", err)
+	}
+	if !strings.Contains(err.Error(), "file: or base64: prefix") {
+		t.Fatalf("error = %v, want it to name the required prefixes", err)
 	}
 }

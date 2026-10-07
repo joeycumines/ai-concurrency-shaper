@@ -79,6 +79,11 @@ func (c *DialConfig) Validate() error {
 	if c.WindowSize < 0 {
 		return errors.New("rcclient: window size must not be negative")
 	}
+	if c.WindowSize > math.MaxUint32 {
+		// Capabilities renders WindowSize as uint32; a larger int would
+		// truncate silently on the wire, so reject it fail-closed here.
+		return errors.New("rcclient: window size exceeds uint32 range")
+	}
 	if c.WindowSize != 0 && !c.FlowControl {
 		return errors.New("rcclient: window size requires flow control")
 	}
