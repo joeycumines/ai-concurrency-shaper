@@ -289,11 +289,10 @@ ai-concurrency-shaper \
     -rc-channel-cert  file:client.pem \
     -rc-channel-key   file:client-key.pem \
     -rc-terminate-tls \
-    -rc-target-server-name api.openai.com \
-    -rc-target-ca file:ca.pem
+    -rc-target-server-name api.openai.com
 ```
 
-The second proxy's upstream requests traverse the RC stream: the first proxy's embedded RC server dials `api.openai.com`, terminates TLS, and streams the connection back; the second proxy performs no upstream TLS handshake itself. Generate all certificates from one CA: the server leaf needs `127.0.0.1` in its subject alternative names because the channel verifies the server certificate against the `-rc-server` address, and the client leaf must chain to the CA the server uses for client verification.
+The second proxy's upstream requests traverse the RC stream: the first proxy's embedded RC server dials `api.openai.com`, terminates TLS, and streams the connection back; the second proxy performs no upstream TLS handshake itself. The channel certificates all come from one CA: the server leaf needs `127.0.0.1` in its subject alternative names because the channel verifies the server certificate against the `-rc-server` address, and the client leaf must chain to the CA the server uses for client verification. The example sets no `-rc-target-ca`, so the upstream handshake verifies `api.openai.com` against the system roots; set `-rc-target-ca` only when the upstream presents a certificate from a private CA.
 
 ### Examples
 
