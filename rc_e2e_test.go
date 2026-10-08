@@ -244,6 +244,22 @@ func waitForRCBind(t *testing.T, out *lockedBuffer) string {
 	return ""
 }
 
+// waitForSubstring polls the subprocess output until substr appears or the
+// timeout elapses. The proxy logs transport failures before writing the
+// error response, but stderr reaches the test's buffer through a copy
+// goroutine, so the marker can lag the client's receipt of the response; a
+// one-shot read could race it.
+func waitForSubstring(out *lockedBuffer, substr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if strings.Contains(out.String(), substr) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return strings.Contains(out.String(), substr)
+}
+
 // ---- End-to-end tests ----
 
 // TestRC_PlainTunnel_E2E: a subprocess proxy with -rc-server routes its
@@ -376,7 +392,7 @@ func TestRC_TunnelTLS_E2E(t *testing.T) {
 	if got := dialCount.Load(); got < 1 {
 		t.Errorf("RC server dial count = %d, want >= 1 (TCP must traverse the NetConn stream)", got)
 	}
-	if !strings.Contains(out.String(), "x509") {
+	if !waitForSubstring(out, "x509", 10*time.Second) {
 		t.Errorf("proxy log lacks an x509 certificate verification failure; the transport must do its own TLS handshake over the tunnel\nproxy output:\n%s", out.String())
 	}
 
