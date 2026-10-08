@@ -94,8 +94,11 @@ func TestDecodeMaterialNoPrefixDoesNotLeak(t *testing.T) {
 	if err == nil {
 		t.Fatal("no prefix: want error, got nil")
 	}
-	if strings.Contains(err.Error(), secret) {
-		t.Fatalf("error leaks the raw material: %v", err)
+	// Per-line: no line of the pasted material may appear in the error.
+	for line := range strings.SplitSeq(secret, "\n") {
+		if strings.Contains(err.Error(), line) {
+			t.Fatalf("error leaks a line of the raw material (%q): %v", line, err)
+		}
 	}
 	if !strings.Contains(err.Error(), "file: or base64: prefix") {
 		t.Fatalf("error = %v, want it to name the required prefixes", err)

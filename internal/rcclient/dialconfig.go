@@ -254,7 +254,10 @@ func ParseFingerprint(s string) (sesametls.FingerprintPreset, error) {
 //
 // Errors never echo the raw spec: it may carry a proxy password or an
 // auth header, and a parse failure must not leak credentials into the
-// startup error and the journal. They name only the offending token.
+// startup error and the journal. They name only the offending token, and
+// not even that where a token can hold credential bytes: URL-style misuse
+// (socks5://user:pass@host) puts credentials ahead of the first '@', so
+// the unknown-type error reports a byte count instead, DecodeMaterial-style.
 func ParseProxyHop(s string) (*sesameproxy.ProxyHop, error) {
 	rest, after, ok := strings.Cut(s, "@")
 	if !ok {
@@ -268,7 +271,7 @@ func ParseProxyHop(s string) (*sesameproxy.ProxyHop, error) {
 	case "socks5":
 		hopType = sesameproxy.ProxyHop_SOCKS5
 	default:
-		return nil, fmt.Errorf("proxy hop: unknown type %q (want http-connect or socks5)", strings.TrimSpace(rest))
+		return nil, fmt.Errorf("proxy hop: unknown type (%d bytes before '@'; want http-connect or socks5)", len(strings.TrimSpace(rest)))
 	}
 
 	parts := strings.Split(after, ";")

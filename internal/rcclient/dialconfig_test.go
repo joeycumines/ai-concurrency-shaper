@@ -158,6 +158,7 @@ func TestParseProxyHopDoesNotLeakCredentials(t *testing.T) {
 		"socks5@;pass=" + pass,                      // empty address
 		"socks5@host:1080;pass=" + pass + ";badopt", // option without '='
 		"socks5@host:1080;pass=" + pass + ";nope=x", // unknown option
+		"socks5://user:" + pass + "@proxy:1080",     // URL-style: creds ahead of '@'
 	} {
 		_, err := ParseProxyHop(spec)
 		if err == nil {
@@ -165,6 +166,9 @@ func TestParseProxyHopDoesNotLeakCredentials(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), pass) || strings.Contains(err.Error(), header) {
 			t.Errorf("hop error leaks credentials: %v", err)
+		}
+		if strings.Contains(err.Error(), spec) {
+			t.Errorf("hop error echoes the raw spec: %v", err)
 		}
 	}
 

@@ -217,18 +217,26 @@ func rcE2EPost(t *testing.T, proxyAddr string) (status int, elapsed time.Duratio
 }
 
 // waitForRCBind polls subprocess output for the embedded RC server's bind
-// address, which run() logs as "rc-server: bind=<addr> tls=<bool>".
+// address, which run() logs as "rc-server: bind=<addr> tls=<bool>". Only
+// complete lines are scanned: a partial line at the buffer edge could be
+// cut mid-address, so text past the last newline stays unparsed until it
+// is complete.
 func waitForRCBind(t *testing.T, out *lockedBuffer) string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
+	scanned := 0
 	for time.Now().Before(deadline) {
-		for line := range strings.SplitSeq(out.String(), "\n") {
-			if _, after, ok := strings.Cut(line, "rc-server: bind="); ok {
-				addr, _, _ := strings.Cut(after, " tls=")
-				if addr != "" {
-					return addr
+		s := out.String()
+		if end := strings.LastIndex(s, "\n"); end >= scanned {
+			for line := range strings.SplitSeq(s[scanned:end], "\n") {
+				if _, after, ok := strings.Cut(line, "rc-server: bind="); ok {
+					addr, _, _ := strings.Cut(after, " tls=")
+					if addr != "" {
+						return addr
+					}
 				}
 			}
+			scanned = end + 1
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -323,6 +331,83 @@ func TestRC_RemoteTLSTermination_E2E(t *testing.T) {
 	}
 }
 
+// TestRC_TunnelTLS_E2E: without -rc-terminate-tls the tunnel carries plain
+// TCP and the proxy performs its own TLS handshake over the stream. The
+// proxy has no upstream trust hook, so against the in-test PKI the local
+// handshake must fail closed on certificate verification — proving the
+// handshake happens locally and over the tunnel (the TCP connection is
+// counted on the RC server, no HTTP reaches the upstream) — and the same
+// topology with -rc-terminate-tls succeeds, proving the handshake location
+// is the only difference between the two modes.
+func TestRC_TunnelTLS_E2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	pki := generateTestPKI(t)
+	caPath, _, _, _, _ := pki.writeFiles(t)
+
+	var tlsSeen atomic.Bool
+	handler, upstreamCount := newCountingHandler(&tlsSeen)
+	upstreamAddr := startTLSUpstream(t, handler, pki.serverCertPEM, pki.serverKeyPEM)
+
+	// Tunnel mode: plain TCP through the RC stream; the transport handshakes
+	// locally and must fail on the test CA certificate.
+	rcAddr, dialCount := startCountingRCServer(t)
+	sub, out := startProxyCmd(t,
+		"-upstream", "https://"+upstreamAddr,
+		"-rc-server", rcAddr,
+		"-bind", "127.0.0.1:0",
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	proxyAddr := sub.waitForListeningAddr(t, out)
+
+	status, elapsed, err := rcE2EPost(t, proxyAddr)
+	if elapsed > 15*time.Second {
+		t.Fatalf("request took %s; a failed local handshake must fail promptly", elapsed)
+	}
+	if err == nil && status == http.StatusOK {
+		t.Fatalf("tunnel-mode request succeeded against an untrusted upstream certificate")
+	}
+	if got := upstreamCount.Load(); got != 0 {
+		t.Errorf("upstream request count = %d, want 0 (handshake must fail before HTTP)", got)
+	}
+	if got := dialCount.Load(); got < 1 {
+		t.Errorf("RC server dial count = %d, want >= 1 (TCP must traverse the NetConn stream)", got)
+	}
+	if !strings.Contains(out.String(), "x509") {
+		t.Errorf("proxy log lacks an x509 certificate verification failure; the transport must do its own TLS handshake over the tunnel\nproxy output:\n%s", out.String())
+	}
+
+	// Control: identical topology, remote termination. Now the RC server
+	// verifies the certificate against -rc-target-ca and the request succeeds.
+	sub2, out2 := startProxyCmd(t,
+		"-upstream", "https://"+upstreamAddr,
+		"-rc-server", rcAddr,
+		"-rc-terminate-tls",
+		"-rc-target-ca", "file:"+caPath,
+		"-bind", "127.0.0.1:0",
+		"-retry", "0",
+		"-circuit-breaker=false",
+	)
+	proxyAddr2 := sub2.waitForListeningAddr(t, out2)
+
+	status2, _, err2 := rcE2EPost(t, proxyAddr2)
+	if err2 != nil {
+		t.Fatalf("remote-termination control POST: %v\nproxy output:\n%s", err2, out2.String())
+	}
+	if status2 != http.StatusOK {
+		t.Fatalf("remote-termination control status = %d, want 200\nproxy output:\n%s", status2, out2.String())
+	}
+	if got := upstreamCount.Load(); got != 1 {
+		t.Errorf("upstream request count = %d, want 1 (the control request must arrive)", got)
+	}
+	if !tlsSeen.Load() {
+		t.Error("upstream did not observe a TLS connection in the control run")
+	}
+}
+
 // TestRC_ChannelMTLS_E2E: the gRPC channel between proxy and RC server runs
 // mutual TLS end to end, both of them subprocesses. A client presenting the
 // CA-signed client certificate succeeds; one without a certificate is
@@ -395,6 +480,43 @@ func TestRC_ChannelMTLS_E2E(t *testing.T) {
 	if got := upstreamCount.Load(); got != 1 {
 		t.Errorf("upstream request count after rejected client = %d, want 1 (rejected request must not reach upstream)", got)
 	}
+
+	// Prove the rejection cause directly: the listener demands a client
+	// certificate. In TLS 1.3 the client side of the handshake completes
+	// before the server enforces the requirement, so a cert-less dial alone
+	// does not fail — surface the server's rejection on the first read,
+	// which carries the TLS alert. With the CA-signed client cert the
+	// handshake is accepted.
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(pki.caPEM) {
+		t.Fatal("test CA PEM failed to parse")
+	}
+	certLessErr := func() error {
+		conn, err := tls.Dial("tcp", rcAddr, &tls.Config{RootCAs: caPool})
+		if err != nil {
+			return err // rejected during the handshake itself
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Read(make([]byte, 1)); err != nil {
+			return err // server alert after the client-side handshake (TLS 1.3)
+		}
+		return nil
+	}()
+	if certLessErr == nil {
+		t.Fatalf("cert-less TLS connection against the mTLS listener was usable; want certificate rejection\nrc output:\n%s", rcOut.String())
+	} else if !strings.Contains(certLessErr.Error(), "certificate") && !strings.Contains(certLessErr.Error(), "x509") {
+		t.Errorf("cert-less TLS error = %v, want a certificate-rejection error", certLessErr)
+	}
+	clientTLSCert, err := tls.X509KeyPair(pki.clientCertPEM, pki.clientKeyPEM)
+	if err != nil {
+		t.Fatalf("client key pair: %v", err)
+	}
+	conn, err := tls.Dial("tcp", rcAddr, &tls.Config{RootCAs: caPool, Certificates: []tls.Certificate{clientTLSCert}})
+	if err != nil {
+		t.Fatalf("authenticated raw TLS handshake failed: %v", err)
+	}
+	_ = conn.Close()
 }
 
 // TestRC_FailureModes_E2E: a down RC server and a wrong target CA both fail
