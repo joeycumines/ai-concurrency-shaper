@@ -605,3 +605,105 @@ func TestRC_FailureModes_E2E(t *testing.T) {
 		}
 	})
 }
+
+// TestRC_ClientHelloSpec_E2E: the configured ClientHelloSpec flows through
+// flag -> config -> dial -> server and is applied to the upstream TLS
+// handshake. The positive arm uses a Go-honourable spec (max_version pinned
+// to TLS1.2 plus a membership-filtered cipher_suites subset) and succeeds
+// with a verified TLS connection; the negative arm uses an unhonourable spec
+// (signature_algorithms, which crypto/tls cannot control) and fails closed
+// before any upstream traffic.
+func TestRC_ClientHelloSpec_E2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	// Go-honourable spec: cipher_suites restricted to a subset that filters
+	// identically under both the AES and no-AES crypto/tls preference
+	// tables, with max_version pinned to TLS1.2 so custom cipher_suites are
+	// honourable (Go appends TLS1.3 suites otherwise). session_id_length 32
+	// is the only explicit value Go can emit.
+	const honourableSpec = `{"cipherSuites":[49195,49199],"sessionIdLength":32}`
+
+	// Unhonourable spec: signature_algorithms has no public crypto/tls
+	// control, so ApplyGoClientHelloSpec must reject it fail-closed.
+	const unhonourableSpec = `{"signatureAlgorithms":[1027],"sessionIdLength":32}`
+
+	t.Run("Honourable", func(t *testing.T) {
+		pki := generateTestPKI(t)
+		caPath, _, _, _, _ := pki.writeFiles(t)
+
+		var tlsSeen atomic.Bool
+		handler, upstreamCount := newCountingHandler(&tlsSeen)
+		upstreamAddr := startTLSUpstream(t, handler, pki.serverCertPEM, pki.serverKeyPEM)
+
+		rcAddr, dialCount := startCountingRCServer(t)
+
+		sub, out := startProxyCmd(t,
+			"-upstream", "https://"+upstreamAddr,
+			"-rc-server", rcAddr,
+			"-rc-terminate-tls",
+			"-rc-target-ca", "file:"+caPath,
+			"-rc-target-max-version", "1.2",
+			"-rc-target-client-hello", honourableSpec,
+			"-bind", "127.0.0.1:0",
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+		proxyAddr := sub.waitForListeningAddr(t, out)
+
+		status, _, err := rcE2EPost(t, proxyAddr)
+		if err != nil {
+			t.Fatalf("POST through proxy: %v\nproxy output:\n%s", err, out.String())
+		}
+		if status != http.StatusOK {
+			t.Fatalf("status = %d, want 200\nproxy output:\n%s", status, out.String())
+		}
+		if got := upstreamCount.Load(); got != 1 {
+			t.Errorf("upstream request count = %d, want 1", got)
+		}
+		if !tlsSeen.Load() {
+			t.Error("upstream did not observe a TLS connection: the client-hello spec must not break remote termination")
+		}
+		if got := dialCount.Load(); got < 1 {
+			t.Errorf("RC server dial count = %d, want >= 1", got)
+		}
+	})
+
+	t.Run("Unhonourable", func(t *testing.T) {
+		pki := generateTestPKI(t)
+		caPath, _, _, _, _ := pki.writeFiles(t)
+
+		handler, upstreamCount := newCountingHandler(nil)
+		upstreamAddr := startTLSUpstream(t, handler, pki.serverCertPEM, pki.serverKeyPEM)
+
+		rcAddr, dialCount := startCountingRCServer(t)
+
+		sub, out := startProxyCmd(t,
+			"-upstream", "https://"+upstreamAddr,
+			"-rc-server", rcAddr,
+			"-rc-terminate-tls",
+			"-rc-target-ca", "file:"+caPath,
+			"-rc-target-max-version", "1.2",
+			"-rc-target-client-hello", unhonourableSpec,
+			"-bind", "127.0.0.1:0",
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+		proxyAddr := sub.waitForListeningAddr(t, out)
+
+		status, elapsed, err := rcE2EPost(t, proxyAddr)
+		if elapsed > 15*time.Second {
+			t.Fatalf("request took %s; an unhonourable spec must fail promptly, not hang", elapsed)
+		}
+		if err == nil && status == http.StatusOK {
+			t.Fatalf("request succeeded with an unhonourable client-hello spec; the engine must fail closed")
+		}
+		if got := upstreamCount.Load(); got != 0 {
+			t.Errorf("upstream request count = %d, want 0 (unhonourable spec must fail before HTTP)", got)
+		}
+		if got := dialCount.Load(); got < 1 {
+			t.Errorf("RC server dial count = %d, want >= 1 (the dial must be attempted before the handshake is rejected)", got)
+		}
+	})
+}
