@@ -242,6 +242,17 @@ func logProviderConfig(pr *config.Provider) {
 		} else {
 			log.Printf("opencode preset: provider %q emits the first-party request shape", pr.EffectiveName())
 		}
+		// When the same mount also terminates upstream TLS at the RC server,
+		// the first-party shape spans the handshake too — or it stays the
+		// engine default, stated honestly when no client-hello spec is set.
+		if d := pr.RCDialer(); d != nil && d.RemoteTerminate() {
+			if pr.RCTargetClientHello != "" {
+				log.Printf("opencode preset: provider %q pairs first-party headers with the rc-dial client-hello fingerprint", pr.EffectiveName())
+			} else {
+				log.Printf("note: opencode preset for provider %q keeps the engine-default tls fingerprint (no -rc-target-client-hello; full-fidelity opencode fingerprinting needs a sesame-endpoint custom tls provider)",
+					pr.EffectiveName())
+			}
+		}
 	}
 }
 
