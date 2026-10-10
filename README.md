@@ -237,12 +237,11 @@ A provider's upstream connections can be dialed through a [sesame RemoteControl.
 | `-rc-target-key` | Client private key for upstream mTLS (`file:PATH` or `base64:DATA`; requires `-rc-terminate-tls` and `-rc-target-cert`). |
 | `-rc-target-min-version` | Minimum upstream TLS version: `1.0`, `1.1`, `1.2`, or `1.3` (requires `-rc-terminate-tls`). |
 | `-rc-target-max-version` | Maximum upstream TLS version (same values; requires `-rc-terminate-tls`). |
-| `-rc-target-cipher` | Cipher suite for the upstream handshake, hex or decimal uint16 (repeatable; requires `-rc-terminate-tls`). |
-| `-rc-target-fingerprint` | Client TLS fingerprint preset for the upstream handshake (requires `-rc-terminate-tls`). The embedded RC server satisfies only `runtime-default` and fails closed for any other preset. |
+| `-rc-target-client-hello` | Decomposed wire-level ClientHelloSpec for the upstream handshake as protojson (`file:PATH`, `base64:DATA`, or inline JSON; requires `-rc-terminate-tls`; empty = engine default; the server fails closed on any dimension it cannot honour exactly). See [Upstream TLS fingerprinting](#upstream-tls-fingerprinting-clienthellospec). |
 | `-rc-target-alpn` | ALPN protocol offered during the upstream handshake (repeatable; requires `-rc-terminate-tls`). |
 | `-rc-target-insecure` | Skip upstream TLS certificate verification (requires `-rc-terminate-tls`). |
 | `-rc-flow-control` | Advertise flow-control support on the RC stream (switches to the in-stream control path). |
-| `-rc-window-size` | Flow-control window size in bytes (0 = server default; requires `-rc-flow-control`). Values above uint32 max are rejected at startup. |
+| `-rc-window-size` | Flow-control window size in bytes (0 = server default; requires `-rc-flow-control`). Values above int32 max are rejected at startup. |
 | `-rc-opportunistic-tls` | Advertise opportunistic TLS upgrade support on the RC stream. |
 | `-rc-proxy-hop` | Egress proxy hop ahead of the upstream dial: `http-connect|socks5@host:port[;user=U][;pass=P][;header=H]` (repeatable). |
 
@@ -260,7 +259,62 @@ Validation is fail-closed: `-rc-channel-cert` requires `-rc-channel-key` (and vi
 | `-rc-server-cert` | Server certificate (`file:PATH` or `base64:DATA`; requires `-rc-server-tls` and `-rc-server-key`). |
 | `-rc-server-key` | Server private key (`file:PATH` or `base64:DATA`; requires `-rc-server-tls` and `-rc-server-cert`). |
 
-The embedded server registers sesame's `netconn.Server` with default settings: upstream dials go through `DefaultDialer`, a plain `net.Dialer` honoring the request's dial timeout. Fingerprint presets other than `runtime-default` fail closed — a limitation of sesame's server-side handshake support, not of the embedded mode — and there is no session-ticket flag because sesame's `BuildTLSConfig` does not use the field.
+The embedded server registers sesame's `netconn.Server` with default settings: upstream dials go through `DefaultDialer`, a plain `net.Dialer` honoring the request's dial timeout. A `-rc-target-client-hello` spec is authoritative for its handshakes: the server honours every dimension it can honour exactly and fails closed on the rest (see the engine ceilings below), and there is no session-ticket flag because sesame's `BuildTLSConfig` does not use the field.
+
+#### Upstream TLS fingerprinting (ClientHelloSpec)
+
+`-rc-target-client-hello` carries a decomposed, wire-level `ClientHelloSpec`
+(protojson) for the upstream handshake terminated at the RC server. The value
+is read from disk with `file:PATH`, decoded with `base64:DATA`, or passed
+inline as JSON starting with `{`; decoding is strict — unknown fields are
+rejected, out-of-range values fail at startup — and an empty value leaves the
+engine default. The spec is authoritative: the server honours every requested
+dimension exactly or fails closed before the handshake, and the client
+additionally verifies the server's applied-spec echo, aborting on mismatch.
+
+**Engine ceilings (honest limits).** The shaper's embedded RC server is
+sesame's Go `netconn.Server`, backed by Go `crypto/tls`, which exposes no
+knob for several ClientHello dimensions. The engine therefore honours only
+exact-match specs and rejects anything it cannot emit byte-for-byte:
+
+- `cipherSuites` — honoured only when the effective max version is TLS 1.2
+  (`-rc-target-max-version 1.2`); Go appends its TLS 1.3 suites in a fixed
+  order whenever TLS 1.3 remains reachable. The requested list must also
+  equal Go's fixed preference order filtered by membership — user-specified
+  order is never emitted.
+- `supportedGroups` — exact-match over Go's fixed curve preference order
+  (same membership-filter rule), including its removal of TLS-1.3-only key
+  exchanges below TLS 1.3.
+- `sessionIdLength` — Go always sends 32 bytes; only `0` (engine default)
+  and `32` are compatible.
+- `signatureAlgorithms`, `extensions`, `legacyVersion`, `padToSize` — no Go
+  engine control; any non-default value fails closed. `compressionMethods`
+  accepts only `[0]` (null), Go's sole emission.
+
+The sesame-endpoint builtin (node:tls) likewise rejects all non-default
+specs. Full-fidelity opencode/Bun TLS impersonation — the Bun-derived
+ClientHello layout — is therefore not a shaper feature: it is provided by
+plugging a custom `TLSProvider` into sesame-endpoint's
+`createRemoteControlService`, a sesame-repo integration.
+
+Worked example (boot-tested: the subprocess e2e suite drives this exact spec
+through the built binary — `TestRC_ClientHelloSpec_E2E` — and proves both the
+honoured handshake and the fail-closed rejection of an unhonourable spec):
+
+```sh
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8082 \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -rc-server 127.0.0.1:9443 \
+    -rc-terminate-tls \
+    -rc-target-max-version 1.2 \
+    -rc-target-client-hello '{"cipherSuites":[49195,49199],"sessionIdLength":32}'
+```
+
+The spec pins two AES-GCM ECDHE suites — a membership-filter-stable subset of
+Go's preference table — and the 32-byte session id: the combination the Go
+engine can honour exactly at TLS 1.2.
 
 #### Worked example: proxy → RC target → upstream with mTLS
 
@@ -1026,6 +1080,13 @@ Session precedence is the client's `x-opencode-session`, then
 `x-session-affinity`, then `X-Session-Id`, then a stable value derived from the
 conversation's own first user turn. Header values are never logged. Mounts
 without `-opencode` forward byte-identically.
+
+Transport-layer impersonation is a separate axis: when the same mount dials
+through an RC server with remote TLS termination, the first-party shape pairs
+with the rc-dial client-hello fingerprint when `-rc-target-client-hello` is
+also set — startup logs report the pairing, and without a spec they honestly
+report the engine-default fingerprint (see
+[Upstream TLS fingerprinting](#upstream-tls-fingerprinting-clienthellospec)).
 
 ```sh
 export SHAPER_PROVIDER_OPENCODE_API_KEY=...
