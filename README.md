@@ -1105,15 +1105,16 @@ A mount whose upstream host is not `opencode.ai` logs a startup note when the
 preset is enabled, so the impersonation never happens silently. The pinned
 `User-Agent` follows the released-stable client shape and is overridable with
 `-opencode-user-agent`; re-pin it by reading the installed client's own
-`User-Agent`. Inference requires a valid upstream credential either way:
-unauthenticated requests are refused on both Zen surfaces (`401 AuthError:
-"Missing API key."`, observed 2026-09-28), and the `*-free` tier is
-account-gated rather than anonymous — a request with no credential reaches a
-tier check (`403 FreeTierError`) instead of an auth check, the `-opencode`
-preset does not change that refusal (it is not a missing-header condition),
-and a syntactically valid but wrong key returns the ordinary `Invalid API
-key`. The preset's job is session pinning and first-party client-shape
-fidelity on the authenticated mounts, not access.
+`User-Agent`. Model access on the Zen surfaces is heterogeneous.
+`space-bunny-free` on `opencode.ai/zen` is ungated: it serves inference with
+zero credentials and zero custom headers (observed 2026-10-10), on both
+`/v1/chat/completions` and `/v1/messages`, streaming and non-streaming. Most
+other `*-free` models on the same surface are gated (`403 FreeTierError` even
+with the full first-party header set from Bun's own runtime — the gate
+mechanism is unknown). `opencode.ai/zen/go` requires a valid API key for all
+models (`401 AuthError`). The `-opencode` preset remains useful for session
+pinning and first-party client-shape fidelity on authenticated mounts; it is
+neither necessary nor sufficient for the gated free models.
 
 ### Failure taxonomy
 
