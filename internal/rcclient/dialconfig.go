@@ -19,11 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
 	"github.com/joeycumines/sesame/rc"
+	"github.com/joeycumines/sesame/rc/netconn"
 	sesameproxy "github.com/joeycumines/sesame/rc/proxy"
 	sesametls "github.com/joeycumines/sesame/rc/tls"
 	"github.com/joeycumines/sesame/type/netaddr"
@@ -31,9 +33,9 @@ import (
 
 // DialConfig models the NetConnRequest.dial surface of a RemoteControl.NetConn
 // client as flag-friendly values. All material fields use the file:/base64:
-// convention of DecodeMaterial, versions and cipher suites are parsed by
-// ParseTLSVersion and ParseCipherSuite, and each ProxyHops entry is parsed by
-// ParseProxyHop.
+// convention of DecodeMaterial, versions are parsed by ParseTLSVersion, the
+// upstream TLS fingerprint is a wire-level ClientHelloSpec parsed by
+// ParseClientHello, and each ProxyHops entry is parsed by ParseProxyHop.
 type DialConfig struct {
 	// Timeout bounds the remote dial (the dial message's timeout). Zero
 	// leaves it unset.
@@ -47,10 +49,9 @@ type DialConfig struct {
 	ALPN             []string
 	MinVersion       string
 	MaxVersion       string
-	// Fingerprint names a client fingerprint preset; the server fails closed
-	// when it cannot satisfy a preset other than the runtime default.
-	Fingerprint    string
-	CipherSuites   []string
+	// ClientHello is the decomposed, wire-level ClientHello specification
+	// for the upstream TLS handshake. Nil means the engine default.
+	ClientHello    *sesametls.ClientHelloSpec
 	TargetInsecure bool
 	TargetCA       string
 	TargetCert     string
@@ -79,10 +80,10 @@ func (c *DialConfig) Validate() error {
 	if c.WindowSize < 0 {
 		return errors.New("rcclient: window size must not be negative")
 	}
-	if c.WindowSize > math.MaxUint32 {
-		// Capabilities renders WindowSize as uint32; a larger int would
-		// truncate silently on the wire, so reject it fail-closed here.
-		return errors.New("rcclient: window size exceeds uint32 range")
+	if c.WindowSize > math.MaxInt32 {
+		// Capabilities renders WindowSize as int32; a larger int would
+		// overflow on the wire, so reject it fail-closed here.
+		return errors.New("rcclient: window size exceeds int32 range")
 	}
 	if c.WindowSize != 0 && !c.FlowControl {
 		return errors.New("rcclient: window size requires flow control")
@@ -95,7 +96,7 @@ func (c *DialConfig) Validate() error {
 func (c *DialConfig) tlsOptions() (*sesametls.TLSOptions, error) {
 	if !c.TerminateTLS {
 		if c.TargetServerName != "" || len(c.ALPN) != 0 || c.MinVersion != "" ||
-			c.MaxVersion != "" || c.Fingerprint != "" || len(c.CipherSuites) != 0 ||
+			c.MaxVersion != "" || c.ClientHello != nil ||
 			c.TargetInsecure || c.TargetCA != "" || c.TargetCert != "" || c.TargetKey != "" {
 			return nil, errors.New("rcclient: target TLS options require remote TLS termination (-rc-terminate-tls)")
 		}
@@ -123,20 +124,11 @@ func (c *DialConfig) tlsOptions() (*sesametls.TLSOptions, error) {
 		opts.MaxVersion = v
 	}
 
-	if c.Fingerprint != "" {
-		p, err := ParseFingerprint(c.Fingerprint)
-		if err != nil {
-			return nil, fmt.Errorf("rcclient: fingerprint: %w", err)
+	if c.ClientHello != nil {
+		if err := netconn.ValidateClientHelloSpec(c.ClientHello); err != nil {
+			return nil, fmt.Errorf("rcclient: client hello spec: %w", err)
 		}
-		opts.FingerprintPreset = p
-	}
-
-	for _, cs := range c.CipherSuites {
-		n, err := ParseCipherSuite(cs)
-		if err != nil {
-			return nil, fmt.Errorf("rcclient: cipher suite: %w", err)
-		}
-		opts.CipherSuites = append(opts.CipherSuites, n)
+		opts.ClientHello = c.ClientHello
 	}
 
 	ca, err := DecodeMaterial(c.TargetCA)
@@ -188,7 +180,7 @@ func (c *DialConfig) Capabilities() *rc.NetConnRequest_Capabilities {
 	return &rc.NetConnRequest_Capabilities{
 		SupportsFlowControl:      c.FlowControl,
 		SupportsOpportunisticTls: c.OpportunisticTLS,
-		InitialWindowSize:        uint32(c.WindowSize),
+		InitialWindowSize:        int32(c.WindowSize),
 	}
 }
 
@@ -211,37 +203,31 @@ func ParseTLSVersion(s string) (sesametls.TLSVersion, error) {
 	return 0, fmt.Errorf("unknown TLS version %q (want 1.0, 1.1, 1.2, or 1.3)", s)
 }
 
-// ParseCipherSuite parses a single cipher suite identifier. Decimal and
-// 0x-prefixed hex forms are accepted; values that do not fit uint16 are
-// rejected.
-func ParseCipherSuite(s string) (uint32, error) {
-	n, err := strconv.ParseUint(strings.TrimSpace(s), 0, 32)
-	if err != nil {
-		return 0, fmt.Errorf("invalid cipher suite %q: %w", s, err)
+// ParseClientHello parses a wire-level ClientHelloSpec from a flag value.
+// Accepted forms: file:PATH (reads the file), base64:DATA (decodes), or
+// inline protojson (starts with '{'). The spec is decoded strictly: unknown
+// fields are rejected. An empty value returns nil (engine default).
+func ParseClientHello(value string) (*sesametls.ClientHelloSpec, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil, nil
 	}
-	if n > math.MaxUint16 {
-		return 0, fmt.Errorf("cipher suite %q exceeds uint16 range", s)
+	var data []byte
+	if strings.HasPrefix(trimmed, "{") {
+		// Inline protojson.
+		data = []byte(trimmed)
+	} else {
+		var err error
+		data, err = DecodeMaterial(value)
+		if err != nil {
+			return nil, fmt.Errorf("rcclient: client hello spec: %w", err)
+		}
 	}
-	return uint32(n), nil
-}
-
-// ParseFingerprint maps a preset name (case-insensitive, hyphens and
-// underscores interchangeable) to the wire enum. The generated enum map
-// keys are SCREAMING_SNAKE, so the input is uppercased and hyphens are
-// normalized before lookup.
-func ParseFingerprint(s string) (sesametls.FingerprintPreset, error) {
-	key := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(s), "-", "_"))
-	if key == "" || key == "UNSPECIFIED" || key == "FINGERPRINT_PRESET_UNSPECIFIED" {
-		return sesametls.FingerprintPreset_FINGERPRINT_PRESET_UNSPECIFIED, nil
+	spec := &sesametls.ClientHelloSpec{}
+	if err := protojson.Unmarshal(data, spec); err != nil {
+		return nil, fmt.Errorf("rcclient: client hello spec: %w", err)
 	}
-	if v, ok := sesametls.FingerprintPreset_value[key]; ok {
-		return sesametls.FingerprintPreset(v), nil
-	}
-	// Accept the FINGERPRINT_PRESET_ prefix as well.
-	if v, ok := sesametls.FingerprintPreset_value["FINGERPRINT_PRESET_"+key]; ok {
-		return sesametls.FingerprintPreset(v), nil
-	}
-	return 0, fmt.Errorf("unknown fingerprint preset %q", s)
+	return spec, nil
 }
 
 // ParseProxyHop parses one proxy hop specification:

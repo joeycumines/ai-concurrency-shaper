@@ -16,7 +16,10 @@
 package rcclient
 
 import (
+	"encoding/base64"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -53,52 +56,55 @@ func TestParseTLSVersion(t *testing.T) {
 	}
 }
 
-func TestParseCipherSuite(t *testing.T) {
-	// 0x1301 == TLS_AES_128_GCM_SHA256 == 4865 decimal.
-	if got, err := ParseCipherSuite("0x1301"); err != nil || got != 0x1301 {
-		t.Errorf("ParseCipherSuite(0x1301): got %d, %v; want %d, nil", got, err, 0x1301)
+func TestParseClientHello(t *testing.T) {
+	// Inline protojson.
+	spec, err := ParseClientHello(`{"cipherSuites":[4865],"sessionIdLength":32}`)
+	if err != nil {
+		t.Fatalf("inline protojson: unexpected error: %v", err)
 	}
-	if got, err := ParseCipherSuite("4865"); err != nil || got != 4865 {
-		t.Errorf("ParseCipherSuite(4865): got %d, %v; want 4865, nil", got, err)
+	if len(spec.GetCipherSuites()) != 1 || spec.GetCipherSuites()[0] != 4865 {
+		t.Errorf("cipher suites = %v, want [4865]", spec.GetCipherSuites())
 	}
-	for _, bad := range []string{"0x10000", "65536", "not-a-number", ""} {
-		if _, err := ParseCipherSuite(bad); err == nil {
-			t.Errorf("ParseCipherSuite(%q): want error, got nil", bad)
-		}
-	}
-}
-
-func TestParseFingerprint(t *testing.T) {
-	for _, tc := range []struct {
-		in   string
-		want sesametls.FingerprintPreset
-	}{
-		{"chrome-auto", sesametls.FingerprintPreset_CHROME_AUTO},
-		{"CHROME_AUTO", sesametls.FingerprintPreset_CHROME_AUTO},
-		{"chrome_120", sesametls.FingerprintPreset_CHROME_120},
-		{"firefox-120", sesametls.FingerprintPreset_FIREFOX_120},
-		{"runtime-default", sesametls.FingerprintPreset_RUNTIME_DEFAULT},
-		{"RUNTIME_DEFAULT", sesametls.FingerprintPreset_RUNTIME_DEFAULT},
-		{"safari-17", sesametls.FingerprintPreset_SAFARI_17},
-	} {
-		got, err := ParseFingerprint(tc.in)
-		if err != nil {
-			t.Errorf("ParseFingerprint(%q): unexpected error: %v", tc.in, err)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("ParseFingerprint(%q): got %v want %v", tc.in, got, tc.want)
-		}
+	if spec.GetSessionIdLength() != 32 {
+		t.Errorf("session_id_length = %d, want 32", spec.GetSessionIdLength())
 	}
 
-	if got, err := ParseFingerprint(""); err != nil || got != sesametls.FingerprintPreset_FINGERPRINT_PRESET_UNSPECIFIED {
-		t.Errorf("ParseFingerprint(\"\"): got %v, %v; want UNSPECIFIED, nil", got, err)
+	// base64:DATA form.
+	enc := base64.StdEncoding.EncodeToString([]byte(`{"padToSize":512}`))
+	spec, err = ParseClientHello("base64:" + enc)
+	if err != nil {
+		t.Fatalf("base64 form: unexpected error: %v", err)
+	}
+	if spec.GetPadToSize() != 512 {
+		t.Errorf("pad_to_size = %d, want 512", spec.GetPadToSize())
 	}
 
-	for _, bad := range []string{"bogus-preset", "chrome-99999"} {
-		if _, err := ParseFingerprint(bad); err == nil {
-			t.Errorf("ParseFingerprint(%q): want error, got nil", bad)
-		}
+	// file:PATH form.
+	path := filepath.Join(t.TempDir(), "spec.json")
+	if err := os.WriteFile(path, []byte(`{"session_id_length":0}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec, err = ParseClientHello("file:" + path)
+	if err != nil {
+		t.Fatalf("file form: unexpected error: %v", err)
+	}
+	if spec.GetSessionIdLength() != 0 {
+		t.Errorf("session_id_length = %d, want 0", spec.GetSessionIdLength())
+	}
+
+	// Unknown fields are rejected (strict decode).
+	if _, err := ParseClientHello(`{"bogusField":true}`); err == nil {
+		t.Error("unknown field: want error, got nil")
+	}
+
+	// Malformed JSON.
+	if _, err := ParseClientHello(`{not-json`); err == nil {
+		t.Error("malformed json: want error, got nil")
+	}
+
+	// Unsupported prefix.
+	if _, err := ParseClientHello("http://example.com/spec"); err == nil {
+		t.Error("unsupported prefix: want error, got nil")
 	}
 }
 
@@ -190,8 +196,7 @@ func TestDialConfigValidate(t *testing.T) {
 		ALPN:             []string{"h2", "http/1.1"},
 		MinVersion:       "1.2",
 		MaxVersion:       "1.3",
-		Fingerprint:      "runtime-default",
-		CipherSuites:     []string{"0x1301"},
+		ClientHello:      &sesametls.ClientHelloSpec{SessionIdLength: 32},
 		FlowControl:      true,
 		WindowSize:       65536,
 	}
@@ -232,11 +237,11 @@ func TestDialConfigValidate(t *testing.T) {
 		t.Error("bad version: want error, got nil")
 	}
 
-	// Bad cipher suite.
-	badCS := good
-	badCS.CipherSuites = []string{"0x10000"}
-	if err := badCS.Validate(); err == nil {
-		t.Error("bad cipher suite: want error, got nil")
+	// Out-of-range ClientHelloSpec value.
+	badSpec := good
+	badSpec.ClientHello = &sesametls.ClientHelloSpec{CipherSuites: []int32{70000}}
+	if err := badSpec.Validate(); err == nil {
+		t.Error("out-of-range client hello spec: want error, got nil")
 	}
 
 	// Bad proxy hop.
@@ -246,16 +251,16 @@ func TestDialConfigValidate(t *testing.T) {
 	}
 }
 
-// TestDialConfigValidateWindowUint32Range pins the fail-closed upper bound:
-// Capabilities renders WindowSize as uint32, so an int above that range must
-// be rejected here rather than truncated silently on the wire.
-func TestDialConfigValidateWindowUint32Range(t *testing.T) {
-	if err := (&DialConfig{FlowControl: true, WindowSize: math.MaxUint32}).Validate(); err != nil {
-		t.Fatalf("window at uint32 max: err = %v, want nil", err)
+// TestDialConfigValidateWindowInt32Range pins the fail-closed upper bound:
+// Capabilities renders WindowSize as int32, so an int above that range must
+// be rejected here rather than overflowed on the wire.
+func TestDialConfigValidateWindowInt32Range(t *testing.T) {
+	if err := (&DialConfig{FlowControl: true, WindowSize: math.MaxInt32}).Validate(); err != nil {
+		t.Fatalf("window at int32 max: err = %v, want nil", err)
 	}
-	err := (&DialConfig{FlowControl: true, WindowSize: math.MaxUint32 + 1}).Validate()
-	if err == nil || !strings.Contains(err.Error(), "window size exceeds uint32 range") {
-		t.Fatalf("window above uint32 max: err = %v, want 'window size exceeds uint32 range'", err)
+	err := (&DialConfig{FlowControl: true, WindowSize: math.MaxInt32 + 1}).Validate()
+	if err == nil || !strings.Contains(err.Error(), "window size exceeds int32 range") {
+		t.Fatalf("window above int32 max: err = %v, want 'window size exceeds int32 range'", err)
 	}
 }
 

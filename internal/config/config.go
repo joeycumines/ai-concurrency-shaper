@@ -263,13 +263,11 @@ type Provider struct {
 	// RCTargetMinVersion/RCTargetMaxVersion constrain the remote TLS version.
 	RCTargetMinVersion string
 	RCTargetMaxVersion string
-	// RCTargetFingerprint names a client fingerprint preset; the server
-	// fails closed when it cannot satisfy a preset other than the runtime
-	// default (no uTLS provider in the embedded server).
-	RCTargetFingerprint string
-	// RCTargetCiphers is the cipher suite list for the remote TLS handshake
-	// (hex or decimal uint16 values).
-	RCTargetCiphers []string
+	// RCTargetClientHello is the decomposed wire-level ClientHelloSpec for
+	// the upstream handshake, as protojson (file:PATH, base64:DATA, or
+	// inline JSON). Empty leaves the engine default; the server fails
+	// closed on any dimension it cannot honour exactly.
+	RCTargetClientHello string
 	// RCTargetInsecure disables certificate verification on the remote TLS handshake.
 	RCTargetInsecure bool
 	// RCTargetCA/RCTargetCert/RCTargetKey are the CA and client credentials
@@ -750,6 +748,10 @@ func (p *Provider) resolveRC() error {
 		ServerName: p.RCChannelServerName,
 		Insecure:   p.RCChannelInsecure,
 	}
+	clientHello, err := rcclient.ParseClientHello(p.RCTargetClientHello)
+	if err != nil {
+		return err
+	}
 	dial := rcclient.DialConfig{
 		Timeout:          p.RCDialTimeout,
 		TerminateTLS:     p.RCTerminateTLS,
@@ -757,8 +759,7 @@ func (p *Provider) resolveRC() error {
 		ALPN:             p.RCTargetALPN,
 		MinVersion:       p.RCTargetMinVersion,
 		MaxVersion:       p.RCTargetMaxVersion,
-		Fingerprint:      p.RCTargetFingerprint,
-		CipherSuites:     p.RCTargetCiphers,
+		ClientHello:      clientHello,
 		TargetInsecure:   p.RCTargetInsecure,
 		TargetCA:         p.RCTargetCA,
 		TargetCert:       p.RCTargetCert,
@@ -789,7 +790,7 @@ func (p *Provider) rcFlagSet() bool {
 		p.RCChannelCA != "" || p.RCChannelServerName != "" || p.RCChannelInsecure ||
 		p.RCDialTimeout != 0 || p.RCTerminateTLS || p.RCTargetServerName != "" ||
 		len(p.RCTargetALPN) != 0 || p.RCTargetMinVersion != "" || p.RCTargetMaxVersion != "" ||
-		p.RCTargetFingerprint != "" || len(p.RCTargetCiphers) != 0 || p.RCTargetInsecure ||
+		p.RCTargetClientHello != "" || p.RCTargetInsecure ||
 		p.RCTargetCA != "" || p.RCTargetCert != "" || p.RCTargetKey != "" ||
 		len(p.RCProxyHop) != 0 || p.RCFlowControl || p.RCOpportunisticTLS || p.RCWindowSize != 0
 }

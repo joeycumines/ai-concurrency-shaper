@@ -39,8 +39,7 @@ func TestParse_RCFlags_LegacyMode(t *testing.T) {
 		"-rc-target-alpn", "h2",
 		"-rc-target-min-version", "1.2",
 		"-rc-target-max-version", "1.3",
-		"-rc-target-cipher", "0x1301",
-		"-rc-target-cipher", "4865",
+		"-rc-target-client-hello", `{"sessionIdLength":32}`,
 		"-rc-target-insecure",
 		"-rc-proxy-hop", "http-connect@proxy.local:8080;user=u;pass=p",
 		"-rc-proxy-hop", "socks5@10.0.0.1:1080",
@@ -83,9 +82,8 @@ func TestParse_RCFlags_LegacyMode(t *testing.T) {
 	if p.RCTargetMaxVersion != "1.3" {
 		t.Errorf("RCTargetMaxVersion = %q, want 1.3", p.RCTargetMaxVersion)
 	}
-	wantCiphers := []string{"0x1301", "4865"}
-	if !reflect.DeepEqual(p.RCTargetCiphers, wantCiphers) {
-		t.Errorf("RCTargetCiphers = %q, want %q", p.RCTargetCiphers, wantCiphers)
+	if p.RCTargetClientHello != `{"sessionIdLength":32}` {
+		t.Errorf("RCTargetClientHello = %q, want `{\"sessionIdLength\":32}`", p.RCTargetClientHello)
 	}
 	if !p.RCTargetInsecure {
 		t.Error("RCTargetInsecure = false, want true")
