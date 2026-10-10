@@ -16,9 +16,11 @@
 package rcclient
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"strings"
 	"time"
 
@@ -213,15 +215,30 @@ func ParseClientHello(value string) (*sesametls.ClientHelloSpec, error) {
 		return nil, nil
 	}
 	var data []byte
-	if strings.HasPrefix(trimmed, "{") {
+	switch {
+	case strings.HasPrefix(trimmed, "{"):
 		// Inline protojson.
 		data = []byte(trimmed)
-	} else {
-		var err error
-		data, err = DecodeMaterial(value)
+	case strings.HasPrefix(value, "file:"):
+		path := strings.TrimPrefix(value, "file:")
+		if path == "" {
+			return nil, errors.New("rcclient: client hello spec: empty path in file: value")
+		}
+		b, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("rcclient: client hello spec: %w", err)
 		}
+		data = b
+	case strings.HasPrefix(value, "base64:"):
+		b, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, "base64:"))
+		if err != nil {
+			return nil, fmt.Errorf("rcclient: client hello spec: decoding base64: %w", err)
+		}
+		data = b
+	default:
+		// Report the size only, never the value, matching the DecodeMaterial
+		// and hop-parse no-echo discipline.
+		return nil, fmt.Errorf("rcclient: client hello spec must be file:PATH, base64:DATA, or inline protojson (got %d bytes)", len(value))
 	}
 	spec := &sesametls.ClientHelloSpec{}
 	if err := protojson.Unmarshal(data, spec); err != nil {

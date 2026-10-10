@@ -102,9 +102,19 @@ func TestParseClientHello(t *testing.T) {
 		t.Error("malformed json: want error, got nil")
 	}
 
-	// Unsupported prefix.
-	if _, err := ParseClientHello("http://example.com/spec"); err == nil {
-		t.Error("unsupported prefix: want error, got nil")
+	// Unsupported prefix names the accepted forms instead of echoing the
+	// value back.
+	_, err = ParseClientHello("http://example.com/spec")
+	if err == nil {
+		t.Fatal("unsupported prefix: want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "file:PATH") {
+		t.Errorf("unsupported prefix error = %q, want the accepted forms named", err)
+	}
+
+	// Empty file: path.
+	if _, err := ParseClientHello("file:"); err == nil {
+		t.Error("empty file path: want error, got nil")
 	}
 }
 

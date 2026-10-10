@@ -260,6 +260,49 @@ func TestResolveAndValidate_RCChannelTLS(t *testing.T) {
 	t.Cleanup(func() { _ = d.Close() })
 }
 
+// TestResolveAndValidate_RCClientHello pins the resolve-time acceptance of the
+// client-hello flag: a valid spec resolves into the dialer, and an
+// out-of-range spec fails closed at config time.
+func TestResolveAndValidate_RCClientHello(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://x",
+		"-rc-server", "127.0.0.1:9090",
+		"-rc-terminate-tls",
+		"-rc-target-client-hello", `{"sessionIdLength":32}`,
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	d := cfg.Providers[0].RCDialer()
+	if d == nil {
+		t.Fatal("RCDialer() = nil, want non-nil")
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	if !d.RemoteTerminate() {
+		t.Error("RemoteTerminate() = false, want true")
+	}
+
+	bad, err := Parse([]string{
+		"-upstream", "https://x",
+		"-rc-server", "127.0.0.1:9090",
+		"-rc-terminate-tls",
+		"-rc-target-client-hello", `{"sessionIdLength":99}`,
+	})
+	if err != nil {
+		t.Fatalf("Parse out-of-range: %v", err)
+	}
+	err = bad.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("ResolveAndValidate with out-of-range spec: nil error, want rejection")
+	}
+	if !strings.Contains(err.Error(), "client hello spec") {
+		t.Errorf("error = %q, want 'client hello spec'", err)
+	}
+}
+
 // TestResolveAndValidate_RCDisabled confirms the zero configuration leaves RC
 // dialing off (nil dialer).
 func TestResolveAndValidate_RCDisabled(t *testing.T) {
