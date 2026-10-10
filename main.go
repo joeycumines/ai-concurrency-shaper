@@ -246,7 +246,9 @@ func logProviderConfig(pr *config.Provider) {
 		// the first-party shape spans the handshake too — or it stays the
 		// engine default, stated honestly when no client-hello spec is set.
 		if d := pr.RCDialer(); d != nil && d.RemoteTerminate() {
-			if pr.RCTargetClientHello != "" {
+			// Trim to match ParseClientHello semantics: a whitespace-only value
+			// parses to nil (engine default), so it must not report the pairing.
+			if strings.TrimSpace(pr.RCTargetClientHello) != "" {
 				log.Printf("opencode preset: provider %q pairs first-party headers with the rc-dial client-hello fingerprint", pr.EffectiveName())
 			} else {
 				log.Printf("note: opencode preset for provider %q keeps the engine-default tls fingerprint (no -rc-target-client-hello; full-fidelity opencode fingerprinting needs a sesame-endpoint custom tls provider)",

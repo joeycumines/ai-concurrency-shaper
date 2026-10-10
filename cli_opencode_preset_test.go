@@ -96,3 +96,30 @@ func TestCLIOpencodePresetEngineDefaultFingerprint(t *testing.T) {
 		t.Fatalf("output missing engine-default fingerprint note: %s", out)
 	}
 }
+
+// TestCLIOpencodePresetWhitespaceOnlyClientHello pins the pairing-line
+// discriminator to the parsed spec, not the raw flag text: a
+// whitespace-only -rc-target-client-hello parses to nil (engine default),
+// so startup must report the engine-default fingerprint, not the pairing.
+func TestCLIOpencodePresetWhitespaceOnlyClientHello(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping CLI acceptance test in short mode")
+	}
+	out, _ := runCLIStartup(t,
+		"-bind", "127.0.0.1:1",
+		"-upstream", "https://opencode.ai/zen",
+		"-name", "zen",
+		"-model-table", "m@zen=wire;via=messages",
+		"-native-route", "messages@/v1/messages",
+		"-opencode",
+		"-rc-server", "127.0.0.1:9090",
+		"-rc-terminate-tls",
+		"-rc-target-client-hello", "   ",
+	)
+	if strings.Contains(out, "pairs first-party headers with the rc-dial client-hello fingerprint") {
+		t.Fatalf("whitespace-only client-hello must not report the pairing: %s", out)
+	}
+	if !strings.Contains(out, "keeps the engine-default tls fingerprint") {
+		t.Fatalf("output missing engine-default fingerprint note: %s", out)
+	}
+}
