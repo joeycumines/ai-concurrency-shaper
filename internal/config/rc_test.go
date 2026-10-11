@@ -600,3 +600,25 @@ func TestUpstreamTLSConfig_InsecureAndServerName(t *testing.T) {
 		t.Error("RootCAs != nil, want nil without -upstream-ca")
 	}
 }
+
+// TestResolveAndValidate_RCWhitespaceOnlyClientHelloIgnored confirms a
+// whitespace-only -rc-target-client-hello is the engine default everywhere:
+// ParseClientHello trims it to nil, the pairing log trims it to the
+// engine-default note, and rcFlagSet trims it too, so without -rc-server it
+// is not a stray option.
+func TestResolveAndValidate_RCWhitespaceOnlyClientHelloIgnored(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://x",
+		"-rc-target-client-hello", "   ",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v (whitespace-only hello must absorb as engine default)", err)
+	}
+	if d := cfg.Providers[0].RCDialer(); d != nil {
+		t.Errorf("RCDialer() = %v, want nil", d)
+		_ = d.Close()
+	}
+}

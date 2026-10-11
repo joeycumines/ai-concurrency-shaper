@@ -843,13 +843,16 @@ func (p *Provider) resolveRC() error {
 
 // rcFlagSet reports whether any RC dial option other than -rc-server itself
 // was configured, so a stray option without -rc-server is rejected rather
-// than silently ignored.
+// than silently ignored. The client-hello check trims whitespace to match
+// ParseClientHello, for which a whitespace-only value is the engine default
+// (nil): without the trim a whitespace-only value would error here yet
+// absorb silently when -rc-server is set.
 func (p *Provider) rcFlagSet() bool {
 	return p.RCChannelTLS || p.RCChannelCert != "" || p.RCChannelKey != "" ||
 		p.RCChannelCA != "" || p.RCChannelServerName != "" || p.RCChannelInsecure ||
 		p.RCDialTimeout != 0 || p.RCTerminateTLS || p.RCTargetServerName != "" ||
 		len(p.RCTargetALPN) != 0 || p.RCTargetMinVersion != "" || p.RCTargetMaxVersion != "" ||
-		p.RCTargetClientHello != "" || p.RCTargetInsecure ||
+		strings.TrimSpace(p.RCTargetClientHello) != "" || p.RCTargetInsecure ||
 		p.RCTargetCA != "" || p.RCTargetCert != "" || p.RCTargetKey != "" ||
 		len(p.RCProxyHop) != 0 || p.RCFlowControl || p.RCOpportunisticTLS || p.RCWindowSize != 0
 }
