@@ -437,3 +437,166 @@ func TestResolveAndValidate_RCServerCAWithoutTLS(t *testing.T) {
 		t.Errorf("error = %q, want 'server TLS options require -rc-server-tls'", err)
 	}
 }
+
+// TestParse_UpstreamTrustFlags_LegacyMode binds the upstream trust flags at
+// top level alongside the other provider-scope flags.
+func TestParse_UpstreamTrustFlags_LegacyMode(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://x",
+		"-upstream-ca", "file:/tmp/ca.pem",
+		"-upstream-insecure",
+		"-upstream-server-name", "upstream.local",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("len(Providers) = %d, want 1", len(cfg.Providers))
+	}
+	p := cfg.Providers[0]
+	if p.UpstreamCA != "file:/tmp/ca.pem" {
+		t.Errorf("UpstreamCA = %q, want file:/tmp/ca.pem", p.UpstreamCA)
+	}
+	if !p.UpstreamInsecure {
+		t.Error("UpstreamInsecure = false, want true")
+	}
+	if p.UpstreamServerName != "upstream.local" {
+		t.Errorf("UpstreamServerName = %q, want upstream.local", p.UpstreamServerName)
+	}
+}
+
+// TestParse_UpstreamTrustFlags_SectionedMode checks the trust flags stay with
+// their own provider section and do not leak across sections.
+func TestParse_UpstreamTrustFlags_SectionedMode(t *testing.T) {
+	cfg, err := Parse([]string{
+		"--provider=acme",
+		"-upstream", "https://acme.example.com",
+		"-prefix", "/acme",
+		"-upstream-ca", "file:/tmp/acme-ca.pem",
+		"-upstream-insecure",
+		"-upstream-server-name", "acme.local",
+		"--provider=beta",
+		"-upstream", "https://beta.example.com",
+		"-prefix", "/beta",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Providers) != 2 {
+		t.Fatalf("len(Providers) = %d, want 2", len(cfg.Providers))
+	}
+	if cfg.Providers[0].UpstreamCA != "file:/tmp/acme-ca.pem" {
+		t.Errorf("acme UpstreamCA = %q, want file:/tmp/acme-ca.pem", cfg.Providers[0].UpstreamCA)
+	}
+	if !cfg.Providers[0].UpstreamInsecure {
+		t.Error("acme UpstreamInsecure = false, want true")
+	}
+	if cfg.Providers[0].UpstreamServerName != "acme.local" {
+		t.Errorf("acme UpstreamServerName = %q, want acme.local", cfg.Providers[0].UpstreamServerName)
+	}
+	if cfg.Providers[1].UpstreamCA != "" {
+		t.Errorf("beta UpstreamCA = %q, want empty (flags must not leak between sections)", cfg.Providers[1].UpstreamCA)
+	}
+	if cfg.Providers[1].UpstreamInsecure {
+		t.Error("beta UpstreamInsecure = true, want false (flags must not leak between sections)")
+	}
+	if cfg.Providers[1].UpstreamServerName != "" {
+		t.Errorf("beta UpstreamServerName = %q, want empty (flags must not leak between sections)", cfg.Providers[1].UpstreamServerName)
+	}
+}
+
+// TestResolveAndValidate_UpstreamTrustWithTerminate rejects the local
+// handshake trust flags when the handshake runs at the RC server, where they
+// would be silently ignored. The -rc-target-* options are the replacement.
+func TestResolveAndValidate_UpstreamTrustWithTerminate(t *testing.T) {
+	for _, args := range [][]string{
+		{"-upstream-ca", "file:/tmp/ca.pem"},
+		{"-upstream-insecure"},
+		{"-upstream-server-name", "upstream.local"},
+	} {
+		cfg, err := Parse(append([]string{
+			"-upstream", "https://x",
+			"-rc-server", "127.0.0.1:9090",
+			"-rc-terminate-tls",
+		}, args...))
+		if err != nil {
+			t.Fatalf("Parse %q: %v", args, err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Fatalf("ResolveAndValidate %q: nil error, want upstream trust rejection", args)
+		}
+		if !strings.Contains(err.Error(), "upstream TLS trust options") {
+			t.Errorf("ResolveAndValidate %q error = %q, want 'upstream TLS trust options'", args, err)
+		}
+	}
+}
+
+// TestResolveAndValidate_UpstreamTrustBadCA rejects an undecodable CA at
+// startup instead of failing every request later. base64:aGVsbG8= decodes
+// to "hello", which is not PEM.
+func TestResolveAndValidate_UpstreamTrustBadCA(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://x",
+		"-upstream-ca", "base64:aGVsbG8=",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err == nil {
+		t.Fatal("ResolveAndValidate: nil error, want invalid upstream CA PEM")
+	} else if !strings.Contains(err.Error(), "upstream CA") {
+		t.Errorf("error = %q, want 'upstream CA'", err)
+	}
+}
+
+// TestUpstreamTLSConfig_DefaultNil confirms no trust flag means a nil config:
+// the transport verifies against the system roots exactly as before.
+func TestUpstreamTLSConfig_DefaultNil(t *testing.T) {
+	cfg, err := Parse([]string{"-upstream", "https://x"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	got, err := cfg.Providers[0].UpstreamTLSConfig()
+	if err != nil {
+		t.Fatalf("UpstreamTLSConfig: %v", err)
+	}
+	if got != nil {
+		t.Errorf("UpstreamTLSConfig() = %v, want nil", got)
+	}
+}
+
+// TestUpstreamTLSConfig_InsecureAndServerName confirms the non-CA knobs land
+// on the config without needing any material.
+func TestUpstreamTLSConfig_InsecureAndServerName(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://x",
+		"-upstream-insecure",
+		"-upstream-server-name", "upstream.local",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	got, err := cfg.Providers[0].UpstreamTLSConfig()
+	if err != nil {
+		t.Fatalf("UpstreamTLSConfig: %v", err)
+	}
+	if got == nil {
+		t.Fatal("UpstreamTLSConfig() = nil, want non-nil")
+	}
+	if !got.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify = false, want true")
+	}
+	if got.ServerName != "upstream.local" {
+		t.Errorf("ServerName = %q, want upstream.local", got.ServerName)
+	}
+	if got.RootCAs != nil {
+		t.Error("RootCAs != nil, want nil without -upstream-ca")
+	}
+}

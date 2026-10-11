@@ -87,11 +87,16 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 	j := journal.New(journalCap, maxBody)
 
 	met := metrics.NewCollector()
+	tlsCfg, err := p.UpstreamTLSConfig()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("proxy config: %w", err)
+	}
 	transport := &http.Transport{
 		MaxIdleConns:        200,
 		MaxIdleConnsPerHost: p.MaxIdleConnsPerHost(),
 		IdleConnTimeout:     120 * time.Second,
 		DisableKeepAlives:   p.DisableKeepAlives,
+		TLSClientConfig:     tlsCfg,
 	}
 	if d := p.RCDialer(); d != nil {
 		// Dial upstream connections through the RemoteControl.NetConn stream.
@@ -214,6 +219,17 @@ func logProviderConfig(pr *config.Provider) {
 		// Hyphen-bound tokens, references only (no secret values), matching the
 		// failure-hold/auth discipline above.
 		log.Printf("rc-dial: rc-server=%s terminate-tls=%v", pr.RCServer, d.RemoteTerminate())
+	}
+	if pr.UpstreamCA != "" || pr.UpstreamInsecure || pr.UpstreamServerName != "" {
+		// References only: whether a trust hook is configured, never the
+		// material. -upstream-insecure is a deliberate operator choice, so the
+		// line states it plainly rather than warning.
+		trust := "system-roots"
+		if pr.UpstreamCA != "" {
+			trust = "custom-ca"
+		}
+		log.Printf("upstream-tls: trust=%s insecure=%v server-name=%s",
+			trust, pr.UpstreamInsecure, pr.UpstreamServerName)
 	}
 	if mappings := pr.TranscodeMappings(); len(mappings) > 0 {
 		var parts []string

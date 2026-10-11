@@ -719,3 +719,248 @@ func TestRC_ClientHelloSpec_E2E(t *testing.T) {
 		}
 	})
 }
+
+// TestRC_UpstreamTrust_E2E: the proxy's own TLS handshake (direct dialing, or
+// the RC tunnel where the RC server only moves bytes) verifies against the
+// system roots unless -upstream-ca names the upstream's CA. Each arm uses the
+// in-test PKI: without the flag the handshake fails closed before any HTTP
+// reaches the upstream; with the flag the request succeeds.
+func TestRC_UpstreamTrust_E2E(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	t.Run("Direct", func(t *testing.T) {
+		pki := generateTestPKI(t)
+		caPath, _, _, _, _ := pki.writeFiles(t)
+
+		var tlsSeen atomic.Bool
+		handler, upstreamCount := newCountingHandler(&tlsSeen)
+		upstreamAddr := startTLSUpstream(t, handler, pki.serverCertPEM, pki.serverKeyPEM)
+
+		// Without the flag: the private CA is untrusted, so the local
+		// handshake fails and no HTTP reaches the upstream.
+		sub, out := startProxyCmd(t,
+			"-upstream", "https://"+upstreamAddr,
+			"-bind", "127.0.0.1:0",
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+		proxyAddr := sub.waitForListeningAddr(t, out)
+
+		status, elapsed, err := rcE2EPost(t, proxyAddr)
+		if elapsed > 15*time.Second {
+			t.Fatalf("request took %s; a failed local handshake must fail promptly", elapsed)
+		}
+		if err == nil && status == http.StatusOK {
+			t.Fatalf("direct request succeeded against an untrusted upstream certificate")
+		}
+		if got := upstreamCount.Load(); got != 0 {
+			t.Errorf("upstream request count = %d, want 0 (handshake must fail before HTTP)", got)
+		}
+
+		// With the flag: the same topology succeeds over a verified TLS
+		// connection.
+		sub2, out2 := startProxyCmd(t,
+			"-upstream", "https://"+upstreamAddr,
+			"-upstream-ca", "file:"+caPath,
+			"-bind", "127.0.0.1:0",
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+		proxyAddr2 := sub2.waitForListeningAddr(t, out2)
+
+		status2, _, err2 := rcE2EPost(t, proxyAddr2)
+		if err2 != nil {
+			t.Fatalf("trusted direct POST: %v\nproxy output:\n%s", err2, out2.String())
+		}
+		if status2 != http.StatusOK {
+			t.Fatalf("trusted direct status = %d, want 200\nproxy output:\n%s", status2, out2.String())
+		}
+		if got := upstreamCount.Load(); got != 1 {
+			t.Errorf("upstream request count = %d, want 1 (the trusted request must arrive)", got)
+		}
+		if !tlsSeen.Load() {
+			t.Error("upstream did not observe a TLS connection in the trusted run")
+		}
+		if !waitForSubstring(out2, "upstream-tls: trust=custom-ca", 10*time.Second) {
+			t.Errorf("proxy log lacks the upstream-tls trust line\nproxy output:\n%s", out2.String())
+		}
+	})
+
+	t.Run("Tunnel", func(t *testing.T) {
+		pki := generateTestPKI(t)
+		caPath, _, _, _, _ := pki.writeFiles(t)
+
+		var tlsSeen atomic.Bool
+		handler, upstreamCount := newCountingHandler(&tlsSeen)
+		upstreamAddr := startTLSUpstream(t, handler, pki.serverCertPEM, pki.serverKeyPEM)
+
+		rcAddr, dialCount, _ := startCountingRCServer(t)
+
+		// With the flag: the tunnel carries plain TCP and the proxy's own
+		// handshake verifies against the named CA.
+		sub, out := startProxyCmd(t,
+			"-upstream", "https://"+upstreamAddr,
+			"-rc-server", rcAddr,
+			"-upstream-ca", "file:"+caPath,
+			"-bind", "127.0.0.1:0",
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+		proxyAddr := sub.waitForListeningAddr(t, out)
+
+		status, _, err := rcE2EPost(t, proxyAddr)
+		if err != nil {
+			t.Fatalf("trusted tunnel POST: %v\nproxy output:\n%s", err, out.String())
+		}
+		if status != http.StatusOK {
+			t.Fatalf("trusted tunnel status = %d, want 200\nproxy output:\n%s", status, out.String())
+		}
+		if got := upstreamCount.Load(); got != 1 {
+			t.Errorf("upstream request count = %d, want 1", got)
+		}
+		if !tlsSeen.Load() {
+			t.Error("upstream did not observe a TLS connection: the tunnel handshake must happen locally")
+		}
+		if got := dialCount.Load(); got < 1 {
+			t.Errorf("RC server dial count = %d, want >= 1 (TCP must traverse the NetConn stream)", got)
+		}
+
+		// A wrong CA still fails closed over the same tunnel.
+		badPKI := generateTestPKI(t)
+		badCAPath, _, _, _, _ := badPKI.writeFiles(t)
+		sub2, out2 := startProxyCmd(t,
+			"-upstream", "https://"+upstreamAddr,
+			"-rc-server", rcAddr,
+			"-upstream-ca", "file:"+badCAPath,
+			"-bind", "127.0.0.1:0",
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+		proxyAddr2 := sub2.waitForListeningAddr(t, out2)
+
+		status2, elapsed2, err2 := rcE2EPost(t, proxyAddr2)
+		if elapsed2 > 15*time.Second {
+			t.Fatalf("request took %s; a failed tunnel handshake must fail promptly", elapsed2)
+		}
+		if err2 == nil && status2 == http.StatusOK {
+			t.Fatalf("tunnel request succeeded despite a wrong upstream CA")
+		}
+		if got := upstreamCount.Load(); got != 1 {
+			t.Errorf("upstream request count = %d, want 1 (the wrong-CA request must not arrive)", got)
+		}
+	})
+
+	t.Run("IndependentPerProvider", func(t *testing.T) {
+		// Two providers in one sectioned process hold different trust, each
+		// serving its own private-CA HTTPS upstream: provider A verifies
+		// against CA A, provider B against CA B. Both succeed — and the
+		// cross-check below proves neither provider's trust leaks onto the
+		// other, which a private-vs-plain pairing could not show (a CA leak
+		// onto a plaintext upstream is handshake-invisible).
+		pkiA := generateTestPKI(t)
+		caPathA, _, _, _, _ := pkiA.writeFiles(t)
+		pkiB := generateTestPKI(t)
+		caPathB, _, _, _, _ := pkiB.writeFiles(t)
+
+		var tlsSeenA, tlsSeenB atomic.Bool
+		handlerA, countA := newCountingHandler(&tlsSeenA)
+		addrA := startTLSUpstream(t, handlerA, pkiA.serverCertPEM, pkiA.serverKeyPEM)
+		handlerB, countB := newCountingHandler(&tlsSeenB)
+		addrB := startTLSUpstream(t, handlerB, pkiB.serverCertPEM, pkiB.serverKeyPEM)
+
+		sub, out := startProxyCmd(t,
+			"-bind", "127.0.0.1:0",
+			"--provider=alpha",
+			"-upstream", "https://"+addrA,
+			"-prefix", "/alpha",
+			"-upstream-ca", "file:"+caPathA,
+			"-retry", "0",
+			"-circuit-breaker=false",
+			"--provider=beta",
+			"-upstream", "https://"+addrB,
+			"-prefix", "/beta",
+			"-upstream-ca", "file:"+caPathB,
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+		proxyAddr := sub.waitForListeningAddr(t, out)
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		post := func(path string) (int, error) {
+			resp, err := client.Post("http://"+proxyAddr+path, "application/json", strings.NewReader(`{"model":"test"}`))
+			if err != nil {
+				return 0, err
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return resp.StatusCode, nil
+		}
+
+		if status, err := post("/alpha/v1/messages"); err != nil {
+			t.Fatalf("alpha provider POST: %v\nproxy output:\n%s", err, out.String())
+		} else if status != http.StatusOK {
+			t.Fatalf("alpha provider status = %d, want 200\nproxy output:\n%s", status, out.String())
+		}
+		if status, err := post("/beta/v1/messages"); err != nil {
+			t.Fatalf("beta provider POST: %v\nproxy output:\n%s", err, out.String())
+		} else if status != http.StatusOK {
+			t.Fatalf("beta provider status = %d, want 200\nproxy output:\n%s", status, out.String())
+		}
+		if got := countA.Load(); got != 1 {
+			t.Errorf("alpha upstream count = %d, want 1", got)
+		}
+		if got := countB.Load(); got != 1 {
+			t.Errorf("beta upstream count = %d, want 1", got)
+		}
+		if !tlsSeenA.Load() {
+			t.Error("alpha upstream did not observe a TLS connection")
+		}
+		if !tlsSeenB.Load() {
+			t.Error("beta upstream did not observe a TLS connection")
+		}
+
+		// Cross-check: swapping the CAs must fail on both mounts. A trust
+		// leak (A trusting B's CA) would let one of these succeed.
+		sub2, out2 := startProxyCmd(t,
+			"-bind", "127.0.0.1:0",
+			"--provider=alpha",
+			"-upstream", "https://"+addrA,
+			"-prefix", "/alpha",
+			"-upstream-ca", "file:"+caPathB,
+			"-retry", "0",
+			"-circuit-breaker=false",
+			"--provider=beta",
+			"-upstream", "https://"+addrB,
+			"-prefix", "/beta",
+			"-upstream-ca", "file:"+caPathA,
+			"-retry", "0",
+			"-circuit-breaker=false",
+		)
+		proxyAddr2 := sub2.waitForListeningAddr(t, out2)
+
+		client2 := &http.Client{Timeout: 30 * time.Second}
+		post2 := func(path string) (int, error) {
+			resp, err := client2.Post("http://"+proxyAddr2+path, "application/json", strings.NewReader(`{"model":"test"}`))
+			if err != nil {
+				return 0, err
+			}
+			defer resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			return resp.StatusCode, nil
+		}
+		if status, err := post2("/alpha/v1/messages"); err == nil && status == http.StatusOK {
+			t.Fatalf("alpha with beta's CA succeeded; trust must not leak across providers")
+		}
+		if status, err := post2("/beta/v1/messages"); err == nil && status == http.StatusOK {
+			t.Fatalf("beta with alpha's CA succeeded; trust must not leak across providers")
+		}
+		if got := countA.Load(); got != 1 {
+			t.Errorf("alpha upstream count = %d, want 1 (swapped-CA requests must not arrive)", got)
+		}
+		if got := countB.Load(); got != 1 {
+			t.Errorf("beta upstream count = %d, want 1 (swapped-CA requests must not arrive)", got)
+		}
+	})
+}

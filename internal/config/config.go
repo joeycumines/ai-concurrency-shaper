@@ -28,6 +28,8 @@
 package config
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -233,6 +235,21 @@ type Provider struct {
 	CBPenalty     time.Duration
 	CBMaxPenalty  time.Duration
 
+	// ---- Upstream connection TLS trust (provider scope) ----
+	//
+	// These configure the TLS handshake the PROXY performs itself over the
+	// connection it opens: direct dialing, and the RC tunnel when the RC
+	// server only moves bytes (-rc-server without -rc-terminate-tls). They
+	// are rejected under -rc-terminate-tls, where the handshake happens at
+	// the RC server and only the -rc-target-* options apply.
+	//
+	// UpstreamCA is a CA for verifying the upstream certificate
+	// (file:|base64:). UpstreamInsecure skips verification. UpstreamServerName
+	// overrides the expected server name.
+	UpstreamCA         string
+	UpstreamInsecure   bool
+	UpstreamServerName string
+
 	// ---- RemoteControl.NetConn dial target (provider scope) ----
 
 	// RCServer is the RC server address (host:port) for this provider's
@@ -414,6 +431,35 @@ func (p *Provider) AuthPolicy() *auth.AuthPolicy { return p.authPolicy }
 // nil when -rc-server was not configured: nil means upstream connections
 // dial directly through the default transport.
 func (p *Provider) RCDialer() *rcclient.Dialer { return p.rcDialer }
+
+// UpstreamTLSConfig builds the TLS configuration for the proxy's own
+// upstream handshake (direct dialing, or the RC tunnel where the RC server
+// only moves bytes). It returns nil when no trust flag is set, keeping the
+// previous behavior of verifying against the system roots. The CA reference
+// is decoded at startup — once discarded during resolve validation, once
+// rebuilt when the transport is constructed — so a CA that fails to parse
+// as PEM is a startup error, never a per-request surprise.
+func (p *Provider) UpstreamTLSConfig() (*tls.Config, error) {
+	if p.UpstreamCA == "" && !p.UpstreamInsecure && p.UpstreamServerName == "" {
+		return nil, nil
+	}
+	cfg := &tls.Config{
+		ServerName:         p.UpstreamServerName,
+		InsecureSkipVerify: p.UpstreamInsecure,
+	}
+	ca, err := rcclient.DecodeMaterial(p.UpstreamCA)
+	if err != nil {
+		return nil, fmt.Errorf("upstream CA: %w", err)
+	}
+	if len(ca) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(ca) {
+			return nil, errors.New("upstream CA: invalid PEM")
+		}
+		cfg.RootCAs = pool
+	}
+	return cfg, nil
+}
 
 // RCServerConfig returns the resolved embedded RC server configuration, or
 // nil when -rc-server-bind was not configured.
@@ -607,6 +653,15 @@ func (p *Provider) validateBasic(index int, multi bool) error {
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
 
+	// The local-handshake trust flags configure the handshake the proxy
+	// performs itself. Under remote termination the proxy never handshakes,
+	// so accepting them would silently ignore the operator's CA — refuse
+	// here in validation, before any material is decoded, so the error names
+	// the meaningless combination rather than a missing file.
+	if p.RCTerminateTLS && (p.UpstreamCA != "" || p.UpstreamInsecure || p.UpstreamServerName != "") {
+		return fmt.Errorf("%supstream TLS trust options (-upstream-ca, -upstream-insecure, -upstream-server-name) do not apply with -rc-terminate-tls; use the -rc-target-* options", ctx())
+	}
+
 	for _, s := range p.Limits {
 		if _, err := route.Parse(s); err != nil {
 			return fmt.Errorf("%sinvalid -limit %q: %w", ctx(), s, err)
@@ -706,6 +761,10 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 	}
 
 	if err := p.buildAuthPolicy(); err != nil {
+		return fmt.Errorf("%s%w", ctx(), err)
+	}
+
+	if _, err := p.UpstreamTLSConfig(); err != nil {
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
 
