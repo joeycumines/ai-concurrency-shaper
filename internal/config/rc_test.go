@@ -622,3 +622,25 @@ func TestResolveAndValidate_RCWhitespaceOnlyClientHelloIgnored(t *testing.T) {
 		_ = d.Close()
 	}
 }
+
+// TestResolveAndValidate_UpstreamTrustPlaintext rejects the trust flags on a
+// plaintext upstream, where the transport would never consult them.
+func TestResolveAndValidate_UpstreamTrustPlaintext(t *testing.T) {
+	for _, args := range [][]string{
+		{"-upstream-ca", "file:/tmp/ca.pem"},
+		{"-upstream-insecure"},
+		{"-upstream-server-name", "upstream.local"},
+	} {
+		cfg, err := Parse(append([]string{"-upstream", "http://x"}, args...))
+		if err != nil {
+			t.Fatalf("Parse %q: %v", args, err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Fatalf("ResolveAndValidate %q: nil error, want plaintext rejection", args)
+		}
+		if !strings.Contains(err.Error(), "do not apply to a plaintext http upstream") {
+			t.Errorf("ResolveAndValidate %q error = %q, want plaintext rejection", args, err)
+		}
+	}
+}

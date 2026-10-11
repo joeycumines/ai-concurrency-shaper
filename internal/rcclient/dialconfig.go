@@ -174,7 +174,10 @@ func (c *DialConfig) proxyOptions() (*sesameproxy.ProxyOptions, error) {
 }
 
 // Capabilities renders the capability flags into the wire Capabilities, or nil
-// when no capability is enabled.
+// when no capability is enabled. The caller must have validated first:
+// Validate rejects a negative or int32-overflowing WindowSize, and the cast
+// below is exact only for validated input. Every in-binary path goes through
+// NewDialer, which validates before Capabilities is ever called.
 func (c *DialConfig) Capabilities() *rc.NetConnRequest_Capabilities {
 	if !c.FlowControl && !c.OpportunisticTLS {
 		return nil

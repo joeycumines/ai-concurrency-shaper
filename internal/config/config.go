@@ -662,6 +662,13 @@ func (p *Provider) validateBasic(index int, multi bool) error {
 		return fmt.Errorf("%supstream TLS trust options (-upstream-ca, -upstream-insecure, -upstream-server-name) do not apply with -rc-terminate-tls; use the -rc-target-* options", ctx())
 	}
 
+	// On a plaintext upstream the transport never consults TLSClientConfig,
+	// so the same trio would be accepted but inert there too. The upstream
+	// URL is parsed and schemed by this point, so reject on http directly.
+	if p.upstream.Scheme == "http" && (p.UpstreamCA != "" || p.UpstreamInsecure || p.UpstreamServerName != "") {
+		return fmt.Errorf("%supstream TLS trust options (-upstream-ca, -upstream-insecure, -upstream-server-name) do not apply to a plaintext http upstream", ctx())
+	}
+
 	for _, s := range p.Limits {
 		if _, err := route.Parse(s); err != nil {
 			return fmt.Errorf("%sinvalid -limit %q: %w", ctx(), s, err)
