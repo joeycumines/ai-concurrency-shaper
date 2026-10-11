@@ -205,10 +205,11 @@ func registerProviderFlags(r *registrar, p *Provider) {
 
 	// Upstream TLS trust: the handshake the proxy performs itself (direct
 	// dialing, or the RC tunnel without -rc-terminate-tls). Rejected under
-	// -rc-terminate-tls, where only the -rc-target-* options apply.
-	r.stringVar(&p.UpstreamCA, "upstream-ca", "", "CA for verifying the upstream certificate on the proxy's own TLS handshake (file:PATH or base64:DATA; rejected with -rc-terminate-tls)")
-	r.boolVar(&p.UpstreamInsecure, "upstream-insecure", false, "skip upstream TLS certificate verification on the proxy's own handshake (rejected with -rc-terminate-tls)")
-	r.stringVar(&p.UpstreamServerName, "upstream-server-name", "", "TLS SNI override for the proxy's own upstream handshake (rejected with -rc-terminate-tls)")
+	// -rc-terminate-tls, where only the -rc-target-* options apply, and on
+	// plaintext http upstreams, where the transport never handshakes.
+	r.stringVar(&p.UpstreamCA, "upstream-ca", "", "CA for verifying the upstream certificate on the proxy's own TLS handshake (file:PATH or base64:DATA; rejected with -rc-terminate-tls and on plaintext http upstreams)")
+	r.boolVar(&p.UpstreamInsecure, "upstream-insecure", false, "skip upstream TLS certificate verification on the proxy's own handshake (rejected with -rc-terminate-tls and on plaintext http upstreams)")
+	r.stringVar(&p.UpstreamServerName, "upstream-server-name", "", "TLS SNI override for the proxy's own upstream handshake (rejected with -rc-terminate-tls and on plaintext http upstreams)")
 
 	// Upstream authentication.
 	r.stringVar(&p.AuthMode, "auth-mode", "", "upstream auth mode: auto | none | bearer | x-api-key | api-key | header:NAME (default: auto-derived from the upstream host when -auth-source is set)")
