@@ -36,9 +36,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/joeycumines/sesame/rc"
 	"github.com/joeycumines/sesame/rc/netconn"
-	sesametls "github.com/joeycumines/sesame/rc/tls"
+	"github.com/joeycumines/sesame/sesamepb"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -153,17 +152,17 @@ func (p *testPKI) writeFiles(t *testing.T) (ca, serverCert, serverKey, clientCer
 // RemoteControl.NetConn, whose dial factory counts every dial it serves and
 // captures the ClientHelloSpec each dial request carries, proving the
 // configured spec reaches the server on the wire.
-func startCountingRCServer(t *testing.T) (addr string, dialCount *atomic.Int64, clientHello *atomic.Pointer[sesametls.ClientHelloSpec]) {
+func startCountingRCServer(t *testing.T) (addr string, dialCount *atomic.Int64, clientHello *atomic.Pointer[sesamepb.ClientHelloSpec]) {
 	t.Helper()
 	var count atomic.Int64
-	var hello atomic.Pointer[sesametls.ClientHelloSpec]
+	var hello atomic.Pointer[sesamepb.ClientHelloSpec]
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	srv := grpc.NewServer()
-	rc.RegisterRemoteControlServer(srv, &netconn.Server{
-		Dialer: func(req *rc.NetConnRequest_Dial) (netconn.Dialer, error) {
+	sesamepb.RegisterRemoteControlServer(srv, &netconn.Server{
+		Dialer: func(req *sesamepb.NetConnRequest_Dial) (netconn.Dialer, error) {
 			count.Add(1)
 			if spec := req.GetTls().GetClientHello(); spec != nil {
 				hello.Store(spec)
@@ -676,7 +675,7 @@ func TestRC_ClientHelloSpec_E2E(t *testing.T) {
 		if got := dialCount.Load(); got < 1 {
 			t.Errorf("RC server dial count = %d, want >= 1", got)
 		}
-		wantSpec := &sesametls.ClientHelloSpec{CipherSuites: []int32{49195, 49199}, SessionIdLength: 32}
+		wantSpec := &sesamepb.ClientHelloSpec{CipherSuites: []int32{49195, 49199}, SessionIdLength: 32}
 		if got := capturedHello.Load(); got == nil || !proto.Equal(got, wantSpec) {
 			t.Errorf("RC server received ClientHelloSpec %v, want the configured spec %v", got, wantSpec)
 		}

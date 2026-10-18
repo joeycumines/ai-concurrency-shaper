@@ -23,8 +23,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/joeycumines/sesame/rc"
 	"github.com/joeycumines/sesame/rc/netconn"
+	"github.com/joeycumines/sesame/sesamepb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -128,7 +128,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	}
 
 	grpcServer := grpc.NewServer(serverOpts...)
-	rc.RegisterRemoteControlServer(grpcServer, &netconn.Server{})
+	sesamepb.RegisterRemoteControlServer(grpcServer, &netconn.Server{})
 
 	go func() { _ = grpcServer.Serve(ln) }()
 

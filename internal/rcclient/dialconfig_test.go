@@ -23,21 +23,20 @@ import (
 	"strings"
 	"testing"
 
-	sesameproxy "github.com/joeycumines/sesame/rc/proxy"
-	sesametls "github.com/joeycumines/sesame/rc/tls"
+	"github.com/joeycumines/sesame/sesamepb"
 )
 
 func TestParseTLSVersion(t *testing.T) {
 	for _, tc := range []struct {
 		in   string
-		want sesametls.TLSVersion
+		want sesamepb.TlsVersion
 	}{
-		{"1.0", sesametls.TLSVersion_TLS_1_0},
-		{"1.1", sesametls.TLSVersion_TLS_1_1},
-		{"1.2", sesametls.TLSVersion_TLS_1_2},
-		{"1.3", sesametls.TLSVersion_TLS_1_3},
-		{"tls1.2", sesametls.TLSVersion_TLS_1_2},
-		{"TLS1.3", sesametls.TLSVersion_TLS_1_3},
+		{"1.0", sesamepb.TlsVersion_TLS_VERSION_TLS_1_0},
+		{"1.1", sesamepb.TlsVersion_TLS_VERSION_TLS_1_1},
+		{"1.2", sesamepb.TlsVersion_TLS_VERSION_TLS_1_2},
+		{"1.3", sesamepb.TlsVersion_TLS_VERSION_TLS_1_3},
+		{"tls1.2", sesamepb.TlsVersion_TLS_VERSION_TLS_1_2},
+		{"TLS1.3", sesamepb.TlsVersion_TLS_VERSION_TLS_1_3},
 	} {
 		got, err := ParseTLSVersion(tc.in)
 		if err != nil {
@@ -70,13 +69,13 @@ func TestParseClientHello(t *testing.T) {
 	}
 
 	// base64:DATA form.
-	enc := base64.StdEncoding.EncodeToString([]byte(`{"padToSize":512}`))
+	enc := base64.StdEncoding.EncodeToString([]byte(`{"targetSize":512}`))
 	spec, err = ParseClientHello("base64:" + enc)
 	if err != nil {
 		t.Fatalf("base64 form: unexpected error: %v", err)
 	}
-	if spec.GetPadToSize() != 512 {
-		t.Errorf("pad_to_size = %d, want 512", spec.GetPadToSize())
+	if spec.GetTargetSize() != 512 {
+		t.Errorf("target_size = %d, want 512", spec.GetTargetSize())
 	}
 
 	// file:PATH form.
@@ -123,7 +122,7 @@ func TestParseProxyHop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("socks5 hop: unexpected error: %v", err)
 	}
-	if hop.Type != sesameproxy.ProxyHop_SOCKS5 {
+	if hop.Type != sesamepb.ProxyHop_TYPE_SOCKS5 {
 		t.Errorf("socks5 hop: type got %v want SOCKS5", hop.Type)
 	}
 	if hop.Address.GetNetwork() != "tcp" || hop.Address.GetAddress() != "127.0.0.1:1080" {
@@ -137,7 +136,7 @@ func TestParseProxyHop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("http-connect hop: unexpected error: %v", err)
 	}
-	if hop.Type != sesameproxy.ProxyHop_HTTP_CONNECT {
+	if hop.Type != sesamepb.ProxyHop_TYPE_HTTP_CONNECT {
 		t.Errorf("http-connect hop: type got %v want HTTP_CONNECT", hop.Type)
 	}
 	if hop.AuthHeader != "Basic dXNlcjpwYXNz" {
@@ -206,7 +205,7 @@ func TestDialConfigValidate(t *testing.T) {
 		ALPN:             []string{"h2", "http/1.1"},
 		MinVersion:       "1.2",
 		MaxVersion:       "1.3",
-		ClientHello:      &sesametls.ClientHelloSpec{SessionIdLength: 32},
+		ClientHello:      &sesamepb.ClientHelloSpec{SessionIdLength: 32},
 		FlowControl:      true,
 		WindowSize:       65536,
 	}
@@ -249,7 +248,7 @@ func TestDialConfigValidate(t *testing.T) {
 
 	// Out-of-range ClientHelloSpec value.
 	badSpec := good
-	badSpec.ClientHello = &sesametls.ClientHelloSpec{CipherSuites: []int32{70000}}
+	badSpec.ClientHello = &sesamepb.ClientHelloSpec{CipherSuites: []int32{70000}}
 	if err := badSpec.Validate(); err == nil {
 		t.Error("out-of-range client hello spec: want error, got nil")
 	}

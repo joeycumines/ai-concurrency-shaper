@@ -16,8 +16,6 @@ Run with `-tui` for a terminal dashboard with live metrics and request inspectio
 go install github.com/joeycumines/ai-concurrency-shaper@latest
 ```
 
-The repository currently carries a local `go.mod` replace against `../sesame` (the RemoteControl.NetConn feature depends on an unpublished sesame branch), so the `@latest` install above will not build until that branch is released. See [RemoteControl.NetConn Dialing](#remotecontrolnetconn-dialing) for building from source.
-
 ## Usage
 
 ```sh
@@ -219,8 +217,6 @@ Other explicit scope boundaries and deferred capabilities:
 
 A provider's upstream connections can be dialed through a [sesame RemoteControl.NetConn](https://github.com/joeycumines/sesame) target: a gRPC service that dials connections on the client's behalf and streams them back, optionally terminating upstream TLS and traversing egress proxies ahead of the dial. The shaper supports both roles: **client flags** (`-rc-*`, provider scope) configure how a provider dials through an RC server, and **server flags** (`-rc-server-*`, server scope) let the binary itself act as an RC target.
 
-**Install note:** this feature depends on the sesame `dial-options-in-stream-control` branch, which no published sesame release contains. The repository carries a local `go.mod` replace pointing at `../sesame`, so `go install github.com/joeycumines/ai-concurrency-shaper@latest` will not build until the branch is merged and tagged; clone this repository next to a `sesame` checkout and build from source.
-
 #### Provider flags (`-rc-*`, per-provider)
 
 | Flag | Description |
@@ -290,7 +286,7 @@ exact-match specs and rejects anything it cannot emit byte-for-byte:
   exchanges below TLS 1.3.
 - `sessionIdLength` — Go always sends 32 bytes; only `0` (engine default)
   and `32` are compatible.
-- `signatureAlgorithms`, `extensions`, `legacyVersion`, `padToSize` — no Go
+- `signatureAlgorithms`, `extensions`, `legacyVersion`, `targetSize` — no Go
   engine control; any non-default value fails closed. `compressionMethods`
   accepts only `[0]` (null), Go's sole emission.
 

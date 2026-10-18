@@ -24,8 +24,8 @@ import (
 	"net"
 	"sync"
 
-	"github.com/joeycumines/sesame/rc"
 	"github.com/joeycumines/sesame/rc/netconn"
+	"github.com/joeycumines/sesame/sesamepb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -160,7 +160,7 @@ func NewDialer(channel ChannelConfig, dial DialConfig) (*Dialer, error) {
 	}
 
 	client := &netconn.Client{
-		API:          rc.NewRemoteControlClient(conn),
+		API:          sesamepb.NewRemoteControlClient(conn),
 		Timeout:      dial.Timeout,
 		TLS:          opts,
 		Proxy:        proxyOpts,

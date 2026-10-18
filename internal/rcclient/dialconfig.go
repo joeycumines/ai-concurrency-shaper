@@ -26,11 +26,9 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/joeycumines/sesame/rc"
 	"github.com/joeycumines/sesame/rc/netconn"
-	sesameproxy "github.com/joeycumines/sesame/rc/proxy"
-	sesametls "github.com/joeycumines/sesame/rc/tls"
-	"github.com/joeycumines/sesame/type/netaddr"
+	"github.com/joeycumines/sesame/sesamepb"
+	"github.com/joeycumines/sesame/typepb"
 )
 
 // DialConfig models the NetConnRequest.dial surface of a RemoteControl.NetConn
@@ -53,7 +51,7 @@ type DialConfig struct {
 	MaxVersion       string
 	// ClientHello is the decomposed, wire-level ClientHello specification
 	// for the upstream TLS handshake. Nil means the engine default.
-	ClientHello    *sesametls.ClientHelloSpec
+	ClientHello    *sesamepb.ClientHelloSpec
 	TargetInsecure bool
 	TargetCA       string
 	TargetCert     string
@@ -93,9 +91,9 @@ func (c *DialConfig) Validate() error {
 	return nil
 }
 
-// tlsOptions renders the flag values into the wire TLSOptions for remote
+// tlsOptions renders the flag values into the wire TlsOptions for remote
 // termination, or nil when termination is not requested.
-func (c *DialConfig) tlsOptions() (*sesametls.TLSOptions, error) {
+func (c *DialConfig) tlsOptions() (*sesamepb.TlsOptions, error) {
 	if !c.TerminateTLS {
 		if c.TargetServerName != "" || len(c.ALPN) != 0 || c.MinVersion != "" ||
 			c.MaxVersion != "" || c.ClientHello != nil ||
@@ -105,8 +103,8 @@ func (c *DialConfig) tlsOptions() (*sesametls.TLSOptions, error) {
 		return nil, nil
 	}
 
-	opts := &sesametls.TLSOptions{
-		ServerName:         c.TargetServerName,
+	opts := &sesamepb.TlsOptions{
+		Sni:                c.TargetServerName,
 		AlpnProtocols:      c.ALPN,
 		InsecureSkipVerify: c.TargetInsecure,
 	}
@@ -158,11 +156,11 @@ func (c *DialConfig) tlsOptions() (*sesametls.TLSOptions, error) {
 
 // proxyOptions renders ProxyHops into the wire ProxyOptions, or nil when no
 // hops are configured.
-func (c *DialConfig) proxyOptions() (*sesameproxy.ProxyOptions, error) {
+func (c *DialConfig) proxyOptions() (*sesamepb.ProxyOptions, error) {
 	if len(c.ProxyHops) == 0 {
 		return nil, nil
 	}
-	var hops []*sesameproxy.ProxyHop
+	var hops []*sesamepb.ProxyHop
 	for i, raw := range c.ProxyHops {
 		hop, err := ParseProxyHop(raw)
 		if err != nil {
@@ -170,7 +168,7 @@ func (c *DialConfig) proxyOptions() (*sesameproxy.ProxyOptions, error) {
 		}
 		hops = append(hops, hop)
 	}
-	return &sesameproxy.ProxyOptions{Hops: hops}, nil
+	return &sesamepb.ProxyOptions{Hops: hops}, nil
 }
 
 // Capabilities renders the capability flags into the wire Capabilities, or nil
@@ -178,11 +176,11 @@ func (c *DialConfig) proxyOptions() (*sesameproxy.ProxyOptions, error) {
 // Validate rejects a negative or int32-overflowing WindowSize, and the cast
 // below is exact only for validated input. Every in-binary path goes through
 // NewDialer, which validates before Capabilities is ever called.
-func (c *DialConfig) Capabilities() *rc.NetConnRequest_Capabilities {
+func (c *DialConfig) Capabilities() *sesamepb.NetConnRequest_Capabilities {
 	if !c.FlowControl && !c.OpportunisticTLS {
 		return nil
 	}
-	return &rc.NetConnRequest_Capabilities{
+	return &sesamepb.NetConnRequest_Capabilities{
 		SupportsFlowControl:      c.FlowControl,
 		SupportsOpportunisticTls: c.OpportunisticTLS,
 		InitialWindowSize:        int32(c.WindowSize),
@@ -192,18 +190,18 @@ func (c *DialConfig) Capabilities() *rc.NetConnRequest_Capabilities {
 // ParseTLSVersion maps a version name to the wire enum.
 // Accepted forms: "1.0", "1.1", "1.2", "1.3", and the "tls"-prefixed
 // variants ("tls1.2", "TLS1.3").
-func ParseTLSVersion(s string) (sesametls.TLSVersion, error) {
+func ParseTLSVersion(s string) (sesamepb.TlsVersion, error) {
 	lower := strings.ToLower(s)
 	lower = strings.TrimPrefix(lower, "tls")
 	switch lower {
 	case "1.0":
-		return sesametls.TLSVersion_TLS_1_0, nil
+		return sesamepb.TlsVersion_TLS_VERSION_TLS_1_0, nil
 	case "1.1":
-		return sesametls.TLSVersion_TLS_1_1, nil
+		return sesamepb.TlsVersion_TLS_VERSION_TLS_1_1, nil
 	case "1.2":
-		return sesametls.TLSVersion_TLS_1_2, nil
+		return sesamepb.TlsVersion_TLS_VERSION_TLS_1_2, nil
 	case "1.3":
-		return sesametls.TLSVersion_TLS_1_3, nil
+		return sesamepb.TlsVersion_TLS_VERSION_TLS_1_3, nil
 	}
 	return 0, fmt.Errorf("unknown TLS version %q (want 1.0, 1.1, 1.2, or 1.3)", s)
 }
@@ -212,7 +210,7 @@ func ParseTLSVersion(s string) (sesametls.TLSVersion, error) {
 // Accepted forms: file:PATH (reads the file), base64:DATA (decodes), or
 // inline protojson (starts with '{'). The spec is decoded strictly: unknown
 // fields are rejected. An empty value returns nil (engine default).
-func ParseClientHello(value string) (*sesametls.ClientHelloSpec, error) {
+func ParseClientHello(value string) (*sesamepb.ClientHelloSpec, error) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
 		return nil, nil
@@ -243,7 +241,7 @@ func ParseClientHello(value string) (*sesametls.ClientHelloSpec, error) {
 		// and hop-parse no-echo discipline.
 		return nil, fmt.Errorf("rcclient: client hello spec must be file:PATH, base64:DATA, or inline protojson (got %d bytes)", len(value))
 	}
-	spec := &sesametls.ClientHelloSpec{}
+	spec := &sesamepb.ClientHelloSpec{}
 	if err := protojson.Unmarshal(data, spec); err != nil {
 		return nil, fmt.Errorf("rcclient: client hello spec: %w", err)
 	}
@@ -264,18 +262,18 @@ func ParseClientHello(value string) (*sesametls.ClientHelloSpec, error) {
 // not even that where a token can hold credential bytes: URL-style misuse
 // (socks5://user:pass@host) puts credentials ahead of the first '@', so
 // the unknown-type error reports a byte count instead, DecodeMaterial-style.
-func ParseProxyHop(s string) (*sesameproxy.ProxyHop, error) {
+func ParseProxyHop(s string) (*sesamepb.ProxyHop, error) {
 	rest, after, ok := strings.Cut(s, "@")
 	if !ok {
 		return nil, errors.New("proxy hop: want TYPE@ADDRESS")
 	}
 
-	var hopType sesameproxy.ProxyHop_Type
+	var hopType sesamepb.ProxyHop_Type
 	switch strings.ToLower(strings.TrimSpace(rest)) {
 	case "http-connect", "http_connect", "connect":
-		hopType = sesameproxy.ProxyHop_HTTP_CONNECT
+		hopType = sesamepb.ProxyHop_TYPE_HTTP_CONNECT
 	case "socks5":
-		hopType = sesameproxy.ProxyHop_SOCKS5
+		hopType = sesamepb.ProxyHop_TYPE_SOCKS5
 	default:
 		return nil, fmt.Errorf("proxy hop: unknown type (%d bytes before '@'; want http-connect or socks5)", len(strings.TrimSpace(rest)))
 	}
@@ -286,9 +284,9 @@ func ParseProxyHop(s string) (*sesameproxy.ProxyHop, error) {
 		return nil, errors.New("proxy hop: empty address")
 	}
 
-	hop := &sesameproxy.ProxyHop{
+	hop := &sesamepb.ProxyHop{
 		Type: hopType,
-		Address: &netaddr.NetAddr{
+		Address: &typepb.NetAddr{
 			Network: "tcp",
 			Address: addr,
 		},
