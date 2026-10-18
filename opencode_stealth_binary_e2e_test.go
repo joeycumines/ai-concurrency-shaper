@@ -74,7 +74,7 @@ func (u *opencodeUpstream) handler(w http.ResponseWriter, r *http.Request) {
 	case "/v1/chat/completions":
 		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1710000000,"model":"wire-chat","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
 	case "/v1/responses":
-		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","model":"wire-resp","status":"completed","output":[]}`))
+		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","model":"wire-resp","status":"completed","output":[{"id":"item_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hi"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`))
 	default:
 		_, _ = w.Write([]byte(`{}`))
 	}
@@ -133,6 +133,8 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 		"-native-route", "chat@/v1/chat/completions",
 		"-native-route", "responses@/v1/responses",
 		"-transcode-messages-chat",
+		"-transcode-messages-responses",
+		"-transcode-allow-loss", "tool_schema_strictness,request_reasoning,multiple_system_turns",
 		"--provider=zen",
 		"-upstream", srv.URL,
 		"-prefix", "/zen",
@@ -251,6 +253,17 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 		t.Fatalf("converted upstream path=%q model=%q, want /v1/chat/completions wire-chat", path, model)
 	}
 
+	// A Messages client naming a responses-native model converts to /v1/responses
+	// on the same path the native route occupies.
+	code, body = post("/suite/v1/messages",
+		`{"model":"gpt-alias","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`, claudeHeaders)
+	if code != 200 {
+		t.Fatalf("messages->responses converted status = %d: %s", code, body)
+	}
+	if path, model, _, _, _ = up.got(); path != "/v1/responses" || model != "wire-resp" {
+		t.Fatalf("converted upstream path=%q model=%q, want /v1/responses wire-resp", path, model)
+	}
+
 	// Responses-native model on its own dialect.
 	code, body = post("/suite/v1/responses", `{"model":"gpt-alias","input":"hi"}`,
 		map[string]string{"Content-Type": "application/json"})
@@ -262,8 +275,9 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 	}
 
 	// The client credential must not reach the upstream: the configured
-	// bearer is applied instead, and the client's own value is never
-	// forwarded.
+	// credential is applied instead, and the client's own value is never
+	// forwarded. On native messages routes, the provider's configured bearer
+	// adapts to X-Api-Key + Anthropic-Version so opencode /v1/messages is satisfied.
 	code, body = post("/suite/v1/messages",
 		`{"model":"claude-alias","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`,
 		map[string]string{
@@ -275,10 +289,18 @@ func TestE2E_OpencodeStealth_RealBinary(t *testing.T) {
 		t.Fatalf("auth status = %d: %s", code, body)
 	}
 	up.mu.Lock()
+	gotApiKey := up.hdrs.Get("X-Api-Key")
+	gotAnthropicVer := up.hdrs.Get("Anthropic-Version")
 	gotAuth := up.auth
 	up.mu.Unlock()
-	if gotAuth != "Bearer test-opencode-key" {
-		t.Fatalf("upstream Authorization = %q, want the configured bearer (never the client's)", gotAuth)
+	if gotApiKey != "test-opencode-key" {
+		t.Fatalf("upstream X-Api-Key = %q, want the configured secret", gotApiKey)
+	}
+	if gotAnthropicVer != "2023-06-01" {
+		t.Fatalf("upstream Anthropic-Version = %q, want 2023-06-01", gotAnthropicVer)
+	}
+	if gotAuth != "" {
+		t.Fatalf("upstream Authorization = %q, want empty (client's bearer must not cross and native messages requires x-api-key)", gotAuth)
 	}
 
 	// A different client SDK's fingerprint headers must not reach the

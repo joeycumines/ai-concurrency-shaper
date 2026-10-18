@@ -123,6 +123,7 @@ var _ Option = (*NativeOption)(nil)
 type nativeAlias struct {
 	surrogate string
 	wire      string
+	protocol  transcode.NativeProtocol
 	// respCap bounds the response body inspected for the alias restore.
 	respCap int64
 	// convKey is the stable conversation key the rewrite hook should prefer:
@@ -143,6 +144,22 @@ func withNativeAlias(ctx context.Context, alias nativeAlias) context.Context {
 func nativeAliasFromContext(ctx context.Context) (nativeAlias, bool) {
 	alias, ok := ctx.Value(nativeAliasKey{}).(nativeAlias)
 	return alias, ok
+}
+
+type nativeMissInfo struct {
+	clientModel string
+	via         transcode.NativeProtocol
+}
+
+type nativeMissKey struct{}
+
+func withNativeMiss(ctx context.Context, info nativeMissInfo) context.Context {
+	return context.WithValue(ctx, nativeMissKey{}, info)
+}
+
+func nativeMissFromContext(ctx context.Context) (nativeMissInfo, bool) {
+	info, ok := ctx.Value(nativeMissKey{}).(nativeMissInfo)
+	return info, ok
 }
 
 // lookupNativeRouteKey returns the native route for an already-built key.
@@ -284,7 +301,11 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	// the upstream does not know.
 	if mapping.Via != nr.Protocol {
 		if _, fallback := p.transcodeHandlerMap[nr.RouteKey]; fallback {
-			return restoreOriginal(), nativeMiss
+			restored := restoreOriginal()
+			return restored.WithContext(withNativeMiss(restored.Context(), nativeMissInfo{
+				clientModel: clientModel,
+				via:         mapping.Via,
+			})), nativeMiss
 		}
 		writeNativeDialectError(w, nr.Protocol, http.StatusNotFound,
 			transcode.BoundErrorMessage(
@@ -317,6 +338,7 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	return rewritten.WithContext(withNativeAlias(rewritten.Context(), nativeAlias{
 		surrogate: mapping.ClientResponseModel,
 		wire:      mapping.UpstreamModel,
+		protocol:  nr.Protocol,
 		respCap:   limits.SuccessfulResponseBytes,
 		convKey:   convKey,
 	})), nativeServe

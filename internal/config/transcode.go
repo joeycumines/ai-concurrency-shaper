@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"math"
 	"os"
 	"sort"
@@ -634,18 +635,19 @@ func buildTranscodeMappings(
 	responsesChat, messagesChat, messagesResponses bool,
 	opts transcodeCLIOptions,
 ) ([]proxy.TranscodeMapping, error) {
-	if messagesChat && messagesResponses {
-		return nil, fmt.Errorf(
-			"-transcode-messages-chat and -transcode-messages-responses both map /v1/messages; enable only one",
-		)
-	}
-
 	lossPolicy := mergedLossPolicy(opts.lossPolicy, opts.negatedLosses, opts.strictDefaults)
 	capabilities := mergedChatCapabilities(opts.capabilities, opts.negatedCapabilities, opts.strictDefaults)
 	allowedQuery := mergedAllowedQuery(opts.clientQuery, opts.negatedQuery, opts.strictDefaults)
 
 	lossMapping := func(m transcode.Mapping) proxy.TranscodeMapping {
-		m.LossPolicy = lossPolicy
+		lp := transcode.LossPolicy{Allowed: make(map[transcode.Feature]struct{}, len(lossPolicy.Allowed)+1)}
+		maps.Copy(lp.Allowed, lossPolicy.Allowed)
+		if !opts.strictDefaults && m.ClientProtocol == transcode.ClientMessages && m.UpstreamProtocol == transcode.UpstreamResponses {
+			if _, negated := opts.negatedLosses[transcode.FeatureToolSchemaStrictness]; !negated {
+				lp.Allowed[transcode.FeatureToolSchemaStrictness] = struct{}{}
+			}
+		}
+		m.LossPolicy = lp
 		m.ChatCapabilities = capabilities
 		m.AllowedClientQuery = allowedQuery
 		return proxy.TranscodeMapping{Mapping: m}
@@ -850,7 +852,11 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	}
 
 	// Apply model map, auth, body limits, and check duplicate client routes within this provider.
-	seen := make(map[transcode.RouteKey]struct{})
+	type transcodeTargetKey struct {
+		routeKey transcode.RouteKey
+		upstream transcode.UpstreamProtocol
+	}
+	seen := make(map[transcodeTargetKey]struct{})
 	// The preset is built and stamped before the mappings are validated:
 	// the mapping's reserved-name rule consults Mapping.Opencode, so
 	// validating first left that predicate dead and deferred the refusal to
@@ -864,14 +870,18 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	}
 	for i := range mappings {
 		mappings[i].Mapping.Opencode = p.opencodePreset
-		if _, dup := seen[mappings[i].ClientRoute]; dup {
+		targetKey := transcodeTargetKey{
+			routeKey: mappings[i].ClientRoute,
+			upstream: mappings[i].UpstreamProtocol,
+		}
+		if _, dup := seen[targetKey]; dup {
 			return fmt.Errorf(
 				"duplicate transcode mapping for client route %s %s",
 				mappings[i].ClientRoute.Method,
 				mappings[i].ClientRoute.Path,
 			)
 		}
-		seen[mappings[i].ClientRoute] = struct{}{}
+		seen[targetKey] = struct{}{}
 
 		if tableProjected {
 			// The global table owns model resolution for every transcode-enabled

@@ -243,6 +243,15 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.stringVar(&p.TranscodeAuthHeader, "transcode-auth-header", "", "custom upstream auth header name for transcode")
 	r.stringVar(&p.TranscodeAnthropicVersion, "transcode-anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value for transcode x-api-key")
 
+	// Upstream transport and Sesame endpoint options.
+	r.stringVar(&p.Transport, "transport", "", "upstream transport mode: direct | sesame (default: direct)")
+	r.stringVar(&p.SesameEndpoint, "sesame-endpoint", "", "sesame endpoint URL (e.g. https://host:port) to dial through via RemoteControl")
+	r.stringVar(&p.SesameTokenEnv, "sesame-token-env", "", "environment variable name providing the sesame endpoint token")
+	r.stringVar(&p.SesameCACert, "sesame-ca-cert", "", "CA certificate for sesame endpoint mTLS verification (file:PATH or base64:DATA)")
+	r.stringVar(&p.SesameClientCert, "sesame-client-cert", "", "client certificate for sesame endpoint mTLS (file:PATH or base64:DATA)")
+	r.stringVar(&p.SesameClientKey, "sesame-client-key", "", "client private key for sesame endpoint mTLS (file:PATH or base64:DATA)")
+	r.stringVar(&p.SesameServerName, "sesame-server-name", "", "TLS SNI override for sesame endpoint channel")
+
 	// RemoteControl.NetConn dial target.
 	r.stringVar(&p.RCServer, "rc-server", "", "RemoteControl.NetConn gRPC server address (host:port) this provider's upstream connections dial through (empty = direct dialing)")
 	r.boolVar(&p.RCChannelTLS, "rc-channel-tls", false, "enable TLS on the gRPC channel to the RC server")

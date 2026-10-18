@@ -583,15 +583,21 @@ func TestParseClientQuery(t *testing.T) {
 	}
 }
 
-// TestBuildTranscodeMappingsConflict verifies enabling both Messages presets
-// fails before proxy.New runs.
-func TestBuildTranscodeMappingsConflict(t *testing.T) {
-	_, err := buildTranscodeMappings(nil, false, true, true, transcodeCLIOptions{lossPolicy: transcode.StrictLossPolicy()})
-	if err == nil {
-		t.Fatal("expected both-messages-preset conflict")
+// TestBuildTranscodeMappings_BothMessagesPresetsAllowed verifies enabling both Messages presets
+// produces both UpstreamChatCompletions and UpstreamResponses mappings for POST /v1/messages.
+func TestBuildTranscodeMappings_BothMessagesPresetsAllowed(t *testing.T) {
+	mappings, err := buildTranscodeMappings(nil, false, true, true, transcodeCLIOptions{lossPolicy: transcode.StrictLossPolicy()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "both map /v1/messages") {
-		t.Fatalf("error = %v", err)
+	if len(mappings) != 2 {
+		t.Fatalf("mappings count = %d, want 2", len(mappings))
+	}
+	if mappings[0].Mapping.UpstreamProtocol != transcode.UpstreamChatCompletions {
+		t.Errorf("mappings[0].UpstreamProtocol = %v, want %v", mappings[0].Mapping.UpstreamProtocol, transcode.UpstreamChatCompletions)
+	}
+	if mappings[1].Mapping.UpstreamProtocol != transcode.UpstreamResponses {
+		t.Errorf("mappings[1].UpstreamProtocol = %v, want %v", mappings[1].Mapping.UpstreamProtocol, transcode.UpstreamResponses)
 	}
 }
 
@@ -1693,5 +1699,39 @@ func TestParseTranscodeProfilesAllTiers(t *testing.T) {
 		if profiles.Profiles["p"].ReasoningTier != tier {
 			t.Errorf("tier %q not preserved", tier)
 		}
+	}
+}
+
+// TestResolveAndValidate_SingleMountMultiDialect verifies that a single provider mount
+// can simultaneously configure native routes for chat, messages, and responses alongside
+// transcodes for responses-chat, messages-chat, and messages-responses without conflict.
+func TestResolveAndValidate_SingleMountMultiDialect(t *testing.T) {
+	t.Setenv("TEST_OPENCODE_TOKEN", "test-secret")
+	args := []string{
+		"--provider=opencode-go",
+		"-upstream", "https://opencode.ai/zen/go",
+		"--native-route=chat@/v1/chat/completions",
+		"--native-route=messages@/v1/messages",
+		"--native-route=responses@/v1/responses",
+		"-transcode-responses-chat",
+		"-transcode-messages-chat",
+		"-transcode-messages-responses",
+		"-transcode-model", "claude-opus=wire-opus",
+		"-auth-mode", "bearer",
+		"-auth-source", "env:TEST_OPENCODE_TOKEN",
+	}
+	cfg, err := Parse(args)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	p := cfg.Providers[0]
+	if len(p.NativeRoutes()) != 3 {
+		t.Fatalf("native routes = %d, want 3", len(p.NativeRoutes()))
+	}
+	if len(p.TranscodeMappings()) != 3 {
+		t.Fatalf("transcode mappings = %d, want 3", len(p.TranscodeMappings()))
 	}
 }

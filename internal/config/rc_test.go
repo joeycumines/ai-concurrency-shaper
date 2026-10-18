@@ -16,7 +16,16 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"math/big"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -642,5 +651,123 @@ func TestResolveAndValidate_UpstreamTrustPlaintext(t *testing.T) {
 		if !strings.Contains(err.Error(), "do not apply to a plaintext http upstream") {
 			t.Errorf("ResolveAndValidate %q error = %q, want plaintext rejection", args, err)
 		}
+	}
+}
+
+func generateTestCerts(t *testing.T) (caPEM, clientCertPEM, clientKeyPEM []byte) {
+	t.Helper()
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create CA cert: %v", err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatalf("parse CA cert: %v", err)
+	}
+	caPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})
+
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate client key: %v", err)
+	}
+	clientTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "test-client"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	clientDER, err := x509.CreateCertificate(rand.Reader, clientTmpl, caCert, &clientKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create client cert: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(clientKey)
+	if err != nil {
+		t.Fatalf("marshal client key: %v", err)
+	}
+	clientCertPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER})
+	clientKeyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return caPEM, clientCertPEM, clientKeyPEM
+}
+
+// TestResolveAndValidate_SesameEndpointAndTransport tests parsing and resolution
+// of -transport and -sesame-* flags onto the underlying RC channel.
+func TestResolveAndValidate_SesameEndpointAndTransport(t *testing.T) {
+	caPEM, clientCertPEM, clientKeyPEM := generateTestCerts(t)
+	certFile := filepath.Join(t.TempDir(), "client.crt")
+	keyFile := filepath.Join(t.TempDir(), "client.key")
+	caFile := filepath.Join(t.TempDir(), "ca.crt")
+	if err := os.WriteFile(certFile, clientCertPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, clientKeyPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(caFile, caPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Parse([]string{
+		"-upstream=https://api.example.com",
+		"-transport=sesame",
+		"-sesame-endpoint=https://127.0.0.1:50051",
+		"-sesame-ca-cert=" + caFile,
+		"-sesame-client-cert=" + certFile,
+		"-sesame-client-key=" + keyFile,
+		"-sesame-server-name=localhost",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	p := cfg.Providers[0]
+	if p.RCServer != "127.0.0.1:50051" {
+		t.Errorf("RCServer = %q, want 127.0.0.1:50051", p.RCServer)
+	}
+	if !p.RCChannelTLS {
+		t.Error("RCChannelTLS = false, want true")
+	}
+	if p.RCChannelServerName != "localhost" {
+		t.Errorf("RCChannelServerName = %q, want localhost", p.RCChannelServerName)
+	}
+	if p.RCChannelCA != "file:"+caFile {
+		t.Errorf("RCChannelCA = %q, want file:%s", p.RCChannelCA, caFile)
+	}
+	if p.RCDialer() == nil {
+		t.Fatal("RCDialer() = nil, want non-nil dialer")
+	}
+
+	// Invalid transport
+	cfgBad, err := Parse([]string{"-upstream=https://api.example.com", "-transport=invalid"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfgBad.ResolveAndValidate(); err == nil || !strings.Contains(err.Error(), "invalid -transport") {
+		t.Errorf("ResolveAndValidate want invalid -transport error, got %v", err)
+	}
+
+	// Transport sesame without endpoint
+	cfgNoEp, err := Parse([]string{"-upstream=https://api.example.com", "-transport=sesame"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfgNoEp.ResolveAndValidate(); err == nil || !strings.Contains(err.Error(), "transport sesame requires") {
+		t.Errorf("ResolveAndValidate want transport sesame requires error, got %v", err)
 	}
 }

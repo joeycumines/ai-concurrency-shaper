@@ -808,13 +808,21 @@ func New(opts ...Option) (*Proxy, error) {
 	// RetryReplayBytes bound must equal the proxy's retry transport body cap
 	// with retries enabled: the declared bound is
 	// otherwise a silent lie about the actual replay cap.
-	seenTranscodeRoutes := make(map[transcode.RouteKey]struct{}, len(cfg.transcodeMappings))
+	type transcodeTargetKey struct {
+		routeKey transcode.RouteKey
+		upstream transcode.UpstreamProtocol
+	}
+	seenTranscodeRoutes := make(map[transcodeTargetKey]struct{}, len(cfg.transcodeMappings))
 	for i := range cfg.transcodeMappings {
 		routeKey := cfg.transcodeMappings[i].Mapping.ClientRoute
-		if _, dup := seenTranscodeRoutes[routeKey]; dup {
+		targetKey := transcodeTargetKey{
+			routeKey: routeKey,
+			upstream: cfg.transcodeMappings[i].Mapping.UpstreamProtocol,
+		}
+		if _, dup := seenTranscodeRoutes[targetKey]; dup {
 			return nil, fmt.Errorf("proxy: duplicate transcode client route %s %s", routeKey.Method, routeKey.Path)
 		}
-		seenTranscodeRoutes[routeKey] = struct{}{}
+		seenTranscodeRoutes[targetKey] = struct{}{}
 
 		// An external signer signs EVERY actual attempt AFTER the retry
 		// layer rebuilt the body. With retries enabled,
@@ -948,7 +956,7 @@ func New(opts ...Option) (*Proxy, error) {
 	// proxy engine (the retry/breaker-aware transport). The mutable parts of
 	// the configuration are deep-copied so caller mutation after New cannot
 	// change live behavior or race with requests.
-	p.transcodeHandlerMap = make(map[transcode.RouteKey]http.Handler, len(cfg.transcodeMappings))
+	handlersByRoute := make(map[transcode.RouteKey][]targetTranscodeHandler)
 	for i := range cfg.transcodeMappings {
 		m := &cfg.transcodeMappings[i]
 		mapping := m.Mapping
@@ -978,10 +986,18 @@ func New(opts ...Option) (*Proxy, error) {
 			nil,
 		)
 		p.transcodeHandlers = append(p.transcodeHandlers, h)
-		// First-match wins for duplicate route keys.
-		if _, exists := p.transcodeHandlerMap[m.ClientRoute]; !exists {
-			p.transcodeHandlerMap[m.ClientRoute] = h
+		handlersByRoute[m.ClientRoute] = append(handlersByRoute[m.ClientRoute], targetTranscodeHandler{
+			mapping: m,
+			handler: h,
+		})
+	}
+	p.transcodeHandlerMap = make(map[transcode.RouteKey]http.Handler, len(handlersByRoute))
+	for routeKey, targets := range handlersByRoute {
+		if len(targets) == 1 {
+			p.transcodeHandlerMap[routeKey] = targets[0].handler
+			continue
 		}
+		p.transcodeHandlerMap[routeKey] = newMultiTranscodeDispatcher(routeKey, targets)
 	}
 
 	// Native routes share the transparent engine with model-identifier
@@ -1029,13 +1045,32 @@ func New(opts ...Option) (*Proxy, error) {
 			pr.SetURL(cfg.upstream)
 			pr.Out.Host = cfg.upstream.Host
 			if cfg.authPolicy != nil {
+				effectiveAuth := cfg.authPolicy
+				if alias, ok := nativeAliasFromContext(pr.In.Context()); ok {
+					if alias.protocol == transcode.NativeMessages && cfg.authPolicy.Mode == auth.AuthBearer {
+						anthropicVer := cfg.authPolicy.AnthropicVersion
+						if strings.TrimSpace(anthropicVer) == "" {
+							anthropicVer = auth.DefaultAnthropicVersion
+						}
+						effectiveAuth = &auth.AuthPolicy{
+							Mode:             auth.AuthXAPIKey,
+							Secret:           cfg.authPolicy.Secret,
+							AnthropicVersion: anthropicVer,
+						}
+					} else if (alias.protocol == transcode.NativeChat || alias.protocol == transcode.NativeResponses) && cfg.authPolicy.Mode == auth.AuthXAPIKey {
+						effectiveAuth = &auth.AuthPolicy{
+							Mode:   auth.AuthBearer,
+							Secret: cfg.authPolicy.Secret,
+						}
+					}
+				}
 				// Effectively unreachable for config-built policies: their
 				// sources reject blank credentials at construction time, and
 				// Validate ran at startup. Kept defensive for direct callers
 				// and future SecretSource implementations. On failure, fall
 				// back to strip-only rather than forwarding an
 				// unauthenticated or client-credentialed request.
-				if err := auth.ApplyUpstreamAuthentication(pr.Out.Context(), pr.Out, cfg.authPolicy); err != nil {
+				if err := auth.ApplyUpstreamAuthentication(pr.Out.Context(), pr.Out, effectiveAuth); err != nil {
 					slog.Error("upstream auth failed; forwarding stripped-only", "error", err)
 					auth.StripCredentials(pr.Out.Header)
 				}

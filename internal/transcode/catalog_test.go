@@ -854,7 +854,7 @@ func TestCatalogIdentGrammarIsSingleSourced(t *testing.T) {
 		t.Error("empty slice must be invalid")
 	}
 	long := string(make([]byte, 0))
-	for i := 0; i < MaxCatalogIdentLen+1; i++ {
+	for range MaxCatalogIdentLen + 1 {
 		long += "a"
 	}
 	if ValidCatalogIdent(long) {

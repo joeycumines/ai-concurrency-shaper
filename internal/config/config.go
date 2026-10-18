@@ -250,6 +250,20 @@ type Provider struct {
 	UpstreamInsecure   bool
 	UpstreamServerName string
 
+	// ---- Upstream transport and Sesame endpoint options (provider scope) ----
+
+	// Transport is the upstream transport mode: direct | sesame.
+	Transport string
+	// SesameEndpoint is the sesame endpoint URL (e.g. https://host:port).
+	SesameEndpoint string
+	// SesameTokenEnv is the environment variable name providing the sesame token.
+	SesameTokenEnv string
+	// SesameCACert/ClientCert/ClientKey/ServerName configure mTLS to the sesame endpoint.
+	SesameCACert     string
+	SesameClientCert string
+	SesameClientKey  string
+	SesameServerName string
+
 	// ---- RemoteControl.NetConn dial target (provider scope) ----
 
 	// RCServer is the RC server address (host:port) for this provider's
@@ -795,7 +809,46 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 // startup. The underlying gRPC channel is lazy, so an unreachable RC server
 // does not fail startup; dial errors surface at request time, matching the
 // transport's existing semantics.
+func normalizeMaterial(v string) string {
+	if v == "" || strings.HasPrefix(v, "file:") || strings.HasPrefix(v, "base64:") {
+		return v
+	}
+	return "file:" + v
+}
+
 func (p *Provider) resolveRC() error {
+	if p.Transport != "" && p.Transport != "sesame" && p.Transport != "direct" {
+		return fmt.Errorf("invalid -transport: %q (must be direct or sesame)", p.Transport)
+	}
+	if p.SesameEndpoint != "" {
+		endpoint := p.SesameEndpoint
+		p.RCChannelTLS = true
+		if after, ok := strings.CutPrefix(endpoint, "https://"); ok {
+			endpoint = after
+		} else if after, ok := strings.CutPrefix(endpoint, "http://"); ok {
+			endpoint = after
+			p.RCChannelTLS = false
+		}
+		if p.RCServer == "" {
+			p.RCServer = endpoint
+		}
+		if p.SesameCACert != "" && p.RCChannelCA == "" {
+			p.RCChannelCA = normalizeMaterial(p.SesameCACert)
+		}
+		if p.SesameClientCert != "" && p.RCChannelCert == "" {
+			p.RCChannelCert = normalizeMaterial(p.SesameClientCert)
+		}
+		if p.SesameClientKey != "" && p.RCChannelKey == "" {
+			p.RCChannelKey = normalizeMaterial(p.SesameClientKey)
+		}
+		if p.SesameServerName != "" && p.RCChannelServerName == "" {
+			p.RCChannelServerName = p.SesameServerName
+		}
+	}
+	if p.Transport == "sesame" && p.RCServer == "" {
+		return errors.New("transport sesame requires -rc-server or -sesame-endpoint")
+	}
+
 	if p.RCServer == "" {
 		if p.rcFlagSet() {
 			return errors.New("rc dial options require -rc-server")
@@ -861,7 +914,10 @@ func (p *Provider) rcFlagSet() bool {
 		len(p.RCTargetALPN) != 0 || p.RCTargetMinVersion != "" || p.RCTargetMaxVersion != "" ||
 		strings.TrimSpace(p.RCTargetClientHello) != "" || p.RCTargetInsecure ||
 		p.RCTargetCA != "" || p.RCTargetCert != "" || p.RCTargetKey != "" ||
-		len(p.RCProxyHop) != 0 || p.RCFlowControl || p.RCOpportunisticTLS || p.RCWindowSize != 0
+		len(p.RCProxyHop) != 0 || p.RCFlowControl || p.RCOpportunisticTLS || p.RCWindowSize != 0 ||
+		p.SesameEndpoint != "" || p.SesameCACert != "" || p.SesameClientCert != "" ||
+		p.SesameClientKey != "" || p.SesameServerName != "" || p.SesameTokenEnv != "" ||
+		p.Transport == "sesame"
 }
 
 // resolveRC validates the embedded RC server configuration when
