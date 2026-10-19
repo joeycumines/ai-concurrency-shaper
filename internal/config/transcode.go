@@ -18,12 +18,9 @@ package config
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"maps"
 	"math"
-	"os"
-	"sort"
 	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
@@ -32,603 +29,6 @@ import (
 )
 
 const httpMethodPost = "POST"
-
-// maxSecretFileBytes bounds a secret file read at 64 KiB with one-byte
-// overflow detection: an oversized file is a construction error, never an
-// unbounded read.
-const maxSecretFileBytes = 64 << 10
-
-// envSecretSource reads a secret from an environment variable.
-type envSecretSource string
-
-func (s envSecretSource) Secret(context.Context) (string, error) {
-	value, ok := os.LookupEnv(string(s))
-	if !ok {
-		return "", fmt.Errorf("environment variable %s is not set", string(s))
-	}
-	if strings.TrimSpace(value) == "" {
-		return "", fmt.Errorf("environment variable %s is empty", string(s))
-	}
-	return strings.TrimSpace(value), nil
-}
-
-// fileSecretSource reads a secret from a file path. The file's trailing
-// newline is trimmed.
-type fileSecretSource string
-
-func (s fileSecretSource) Secret(_ context.Context) (string, error) {
-	if string(s) == "" {
-		return "", fmt.Errorf("file secret source has no path")
-	}
-	file, err := os.Open(string(s))
-	if err != nil {
-		return "", fmt.Errorf("read secret file: %w", err)
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxSecretFileBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("read secret file: %w", err)
-	}
-	if len(data) > maxSecretFileBytes {
-		return "", fmt.Errorf(
-			"secret file %q exceeds the %d byte bound",
-			string(s),
-			maxSecretFileBytes,
-		)
-	}
-	val := strings.TrimSpace(string(data))
-	if val == "" {
-		return "", fmt.Errorf("secret file %s is empty", string(s))
-	}
-	return val, nil
-}
-
-// secretSource resolves an env:NAME or file:PATH source.
-func secretSource(source string) (transcode.SecretSource, error) {
-	kind, name, ok := strings.Cut(source, ":")
-	if !ok {
-		return nil, fmt.Errorf(
-			"invalid -transcode-auth-source %q: want inbound, env:NAME, or file:PATH",
-			source,
-		)
-	}
-	switch kind {
-	case "env":
-		if name == "" {
-			return nil, fmt.Errorf("invalid -transcode-auth-source %q: env name is empty", source)
-		}
-		return envSecretSource(name), nil
-	case "file":
-		if name == "" {
-			return nil, fmt.Errorf("invalid -transcode-auth-source %q: file path is empty", source)
-		}
-		return fileSecretSource(name), nil
-	default:
-		return nil, fmt.Errorf(
-			"invalid -transcode-auth-source %q: want inbound, env:NAME, or file:PATH",
-			source,
-		)
-	}
-}
-
-// parseTranscodeEndpoint splits "protocol@path" and validates the protocol
-// name. The path may itself contain '@' (e.g. /v1/models@predict), so the
-// first '@' separates the protocol.
-func parseTranscodeEndpoint(
-	value string,
-	upstream bool,
-) (clientProtocol transcode.ClientProtocol, upstreamProtocol transcode.UpstreamProtocol, path string, err error) {
-	at := strings.Index(value, "@")
-	if at <= 0 || at == len(value)-1 {
-		return "", "", "", fmt.Errorf(
-			"want protocol@path, got %q",
-			value,
-		)
-	}
-	protocolName := value[:at]
-	path = value[at+1:]
-	if !strings.HasPrefix(path, "/") {
-		return "", "", "", fmt.Errorf("path %q must be absolute", path)
-	}
-
-	if upstream {
-		switch transcode.UpstreamProtocol(protocolName) {
-		case transcode.UpstreamResponses,
-			transcode.UpstreamChatCompletions:
-			return "", transcode.UpstreamProtocol(protocolName), path, nil
-		}
-		return "", "", "", fmt.Errorf(
-			"unknown upstream protocol %q (want responses or chat-completions)",
-			protocolName,
-		)
-	}
-
-	switch transcode.ClientProtocol(protocolName) {
-	case transcode.ClientResponses, transcode.ClientMessages:
-		return transcode.ClientProtocol(protocolName), "", path, nil
-	case transcode.ClientProtocol(transcode.UpstreamChatCompletions):
-		return "", "", "", fmt.Errorf(
-			"chat-completions is not a valid client protocol; it is upstream-only",
-		)
-	}
-	return "", "", "", fmt.Errorf(
-		"unknown client protocol %q (want responses or messages)",
-		protocolName,
-	)
-}
-
-// parseTranscodeRoute parses one -transcode-route value. Chat Completions is
-// rejected as a client protocol at parse time (chat is upstream-only).
-func parseTranscodeRoute(value string) (proxy.TranscodeMapping, error) {
-	parts := strings.SplitN(value, "=", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return proxy.TranscodeMapping{}, fmt.Errorf(
-			"invalid transcode route %q: want clientProtocol@clientPath=upstreamProtocol@upstreamPath",
-			value,
-		)
-	}
-
-	clientProtocol, _, clientPath, err := parseTranscodeEndpoint(parts[0], false)
-	if err != nil {
-		return proxy.TranscodeMapping{}, fmt.Errorf("invalid transcode route %q: %w", value, err)
-	}
-	_, upstreamProtocol, upstreamPath, err := parseTranscodeEndpoint(parts[1], true)
-	if err != nil {
-		return proxy.TranscodeMapping{}, fmt.Errorf("invalid transcode route %q: %w", value, err)
-	}
-
-	routeKey, err := transcode.NewRouteKey(httpMethodPost, clientPath)
-	if err != nil {
-		return proxy.TranscodeMapping{}, fmt.Errorf("invalid transcode route %q: %w", value, err)
-	}
-
-	mapping := transcode.Mapping{
-		ClientRoute:      routeKey,
-		ClientProtocol:   clientProtocol,
-		UpstreamProtocol: upstreamProtocol,
-		UpstreamPath:     upstreamPath,
-		ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
-	}
-	if err := provisionalStrictnessLoss(mapping).Validate(); err != nil {
-		return proxy.TranscodeMapping{}, fmt.Errorf("invalid transcode route %q: %w", value, err)
-	}
-	return proxy.TranscodeMapping{Mapping: mapping}, nil
-}
-
-// provisionalStrictnessLoss is applied to a route mapping during PARSING
-// only: the CLI's real loss policy is applied later by
-// buildTranscodeMappings, which re-runs the strictness rejection against
-// the final policy.
-func provisionalStrictnessLoss(m transcode.Mapping) transcode.Mapping {
-	if m.ClientProtocol == transcode.ClientMessages &&
-		m.UpstreamProtocol == transcode.UpstreamResponses {
-		m.LossPolicy = transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
-			transcode.FeatureToolSchemaStrictness: {},
-		}}
-	}
-	return m
-}
-
-// parseNativeRoute parses one -native-route value of the form
-// protocol@path, where protocol is responses, messages, or chat. Unlike
-// -transcode-route, chat is legal here: native routes forward the document
-// with only the model identifier rewritten, never transcoded.
-func parseNativeRoute(value string) (proxy.NativeRoute, error) {
-	at := strings.Index(value, "@")
-	if at <= 0 || at == len(value)-1 {
-		return proxy.NativeRoute{}, fmt.Errorf(
-			"invalid native route %q: want protocol@path",
-			value,
-		)
-	}
-	protocol, err := transcode.ParseNativeProtocol(value[:at])
-	if err != nil {
-		return proxy.NativeRoute{}, fmt.Errorf("invalid native route %q: %w", value, err)
-	}
-	path := value[at+1:]
-	if !strings.HasPrefix(path, "/") {
-		return proxy.NativeRoute{}, fmt.Errorf("invalid native route %q: path %q must be absolute", value, path)
-	}
-	routeKey, err := transcode.NewRouteKey(httpMethodPost, path)
-	if err != nil {
-		return proxy.NativeRoute{}, fmt.Errorf("invalid native route %q: %w", value, err)
-	}
-	return proxy.NativeRoute{
-		RouteKey: routeKey,
-		Protocol: protocol,
-	}, nil
-}
-
-// parseTranscodeProfiles builds the ProfileMap from repeated -transcode-profile
-// values. Each value is "name=model:tier" or "name=model" (tier optional).
-// The tier, when present, must be in the closed effort vocabulary; an unknown
-// tier is rejected at parse time so a typo surfaces at startup rather than
-// silently falling through to the provider default.
-func parseTranscodeProfiles(values []string) (transcode.ProfileMap, error) {
-	profiles := make(map[string]transcode.ProfileMapping)
-	for _, value := range values {
-		name, rest, ok := strings.Cut(value, "=")
-		if !ok || name == "" || rest == "" {
-			return transcode.ProfileMap{}, fmt.Errorf(
-				"invalid -transcode-profile %q: want name=model:tier or name=model",
-				value,
-			)
-		}
-		if _, dup := profiles[name]; dup {
-			return transcode.ProfileMap{}, fmt.Errorf(
-				"duplicate -transcode-profile name %q",
-				name,
-			)
-		}
-		model, tier, hasTier := strings.Cut(rest, ":")
-		if model == "" {
-			return transcode.ProfileMap{}, fmt.Errorf(
-				"invalid -transcode-profile %q: model is empty",
-				value,
-			)
-		}
-		if hasTier && tier == "" {
-			return transcode.ProfileMap{}, fmt.Errorf(
-				"invalid -transcode-profile %q: tier is empty after ':'",
-				value,
-			)
-		}
-		if hasTier && !transcode.ValidModelEffort(tier) {
-			return transcode.ProfileMap{}, fmt.Errorf(
-				"invalid -transcode-profile %q: unknown tier %q (want one of %s)",
-				value, tier, strings.Join(transcode.ModelEfforts, ", "),
-			)
-		}
-		profiles[name] = transcode.ProfileMapping{
-			Model:         model,
-			ReasoningTier: tier,
-		}
-	}
-	return transcode.ProfileMap{Profiles: profiles}, nil
-}
-
-// parseTranscodeModelMap builds the ModelMap from repeated -transcode-model
-// values. With no mappings, identity fallback is used.
-func parseTranscodeModelMap(values []string) (transcode.ModelMap, error) {
-	exact := make(map[string]transcode.ModelMapping)
-	for _, value := range values {
-		client, upstream, ok := strings.Cut(value, "=")
-		if !ok || client == "" || upstream == "" {
-			return transcode.ModelMap{}, fmt.Errorf(
-				"invalid -transcode-model %q: want client-model=upstream-model",
-				value,
-			)
-		}
-		if _, dup := exact[client]; dup {
-			return transcode.ModelMap{}, fmt.Errorf(
-				"duplicate -transcode-model client model %q",
-				client,
-			)
-		}
-		exact[client] = transcode.ModelMapping{
-			ClientModel:         client,
-			UpstreamModel:       upstream,
-			ClientResponseModel: client,
-		}
-	}
-	return transcode.ModelMap{
-		Exact:         exact,
-		AllowIdentity: len(exact) == 0,
-	}, nil
-}
-
-// parseTranscodeAuth builds the AuthPolicy from the CLI contract.
-func parseTranscodeAuth(
-	mode, source, customHeader, anthropicVersion string,
-) (transcode.AuthPolicy, error) {
-	policy := transcode.AuthPolicy{
-		Mode:             transcode.AuthMode(mode),
-		CustomHeader:     customHeader,
-		AnthropicVersion: anthropicVersion,
-	}
-
-	if policy.Mode == transcode.AuthNone {
-		return transcode.AuthPolicy{Mode: transcode.AuthNone}, nil
-	}
-
-	switch source {
-	case "inbound":
-		// Explicit opt-in: the single client credential is forwarded to the
-		// transcode target.
-		policy.Inbound = true
-	case "":
-		// FAIL CLOSED: no source declared and no
-		// inbound opt-in leaves Inbound=false and Secret=nil, so the
-		// mapping's auth validation rejects the policy at startup ("auth
-		// mode requires a secret source or inbound credentials") instead of
-		// silently forwarding the CLIENT credential upstream — the visible
-		// startup failure is preferable to an implicit credential export
-		// (fail-closed principle).
-	default:
-		secret, err := secretSource(source)
-		if err != nil {
-			return transcode.AuthPolicy{}, err
-		}
-		policy.Secret = secret
-	}
-
-	return policy, nil
-}
-
-// chatCapabilityNames is the canonical CLI vocabulary for
-// -transcode-chat-capability.
-var chatCapabilityNames = []struct {
-	name  string
-	field func(*transcode.ChatCapabilities) *bool
-}{
-	{"developer_role", func(c *transcode.ChatCapabilities) *bool { return &c.DeveloperRole }},
-	{"image_input", func(c *transcode.ChatCapabilities) *bool { return &c.ImageInput }},
-	{"tool_result_images", func(c *transcode.ChatCapabilities) *bool { return &c.ToolResultImages }},
-	{"structured_outputs", func(c *transcode.ChatCapabilities) *bool { return &c.StructuredOutputs }},
-	{"parallel_tool_calls", func(c *transcode.ChatCapabilities) *bool { return &c.ParallelToolCalls }},
-	{"stop_sequences", func(c *transcode.ChatCapabilities) *bool { return &c.StopSequences }},
-	{"reasoning_effort", func(c *transcode.ChatCapabilities) *bool { return &c.ReasoningEffort }},
-	{"provider_reasoning_text", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningText }},
-	{"provider_reasoning_thinking", func(c *transcode.ChatCapabilities) *bool { return &c.ProviderReasoningThinking }},
-	{"system_anywhere", func(c *transcode.ChatCapabilities) *bool { return &c.SystemAnywhere }},
-	{"multi_agent_priming", func(c *transcode.ChatCapabilities) *bool { return &c.MultiAgentPriming }},
-}
-
-func splitFlagNegations(
-	values []string,
-	validate func(name string) error,
-) (positives []string, negated map[string]struct{}, err error) {
-	positiveSet := make(map[string]struct{})
-	negated = make(map[string]struct{})
-	for _, value := range values {
-		for _, part := range strings.FieldsFunc(value, func(r rune) bool {
-			return r == ',' || r == ' '
-		}) {
-			name, negative := strings.CutPrefix(part, "!")
-			if name == "" {
-				return nil, nil, fmt.Errorf("empty name in %q", part)
-			}
-			if err := validate(name); err != nil {
-				return nil, nil, err
-			}
-			if negative {
-				negated[name] = struct{}{}
-			} else {
-				positiveSet[name] = struct{}{}
-			}
-		}
-	}
-	for name := range negated {
-		if _, ok := positiveSet[name]; ok {
-			return nil, nil, fmt.Errorf(
-				"conflicting values for %q: given both positively and negated (!%s)",
-				name, name,
-			)
-		}
-	}
-	positives = make([]string, 0, len(positiveSet))
-	for name := range positiveSet {
-		positives = append(positives, name)
-	}
-	sort.Strings(positives)
-	return positives, negated, nil
-}
-
-func parseChatCapabilities(
-	values []string,
-) (transcode.ChatCapabilities, map[string]struct{}, error) {
-	validate := func(name string) error {
-		for _, entry := range chatCapabilityNames {
-			if entry.name == name {
-				return nil
-			}
-		}
-		return fmt.Errorf("unknown chat capability %q", name)
-	}
-	positives, negated, err := splitFlagNegations(values, validate)
-	if err != nil {
-		return transcode.ChatCapabilities{}, nil, err
-	}
-	var out transcode.ChatCapabilities
-	for _, name := range positives {
-		for _, entry := range chatCapabilityNames {
-			if entry.name == name {
-				*entry.field(&out) = true
-				break
-			}
-		}
-	}
-	return out, negated, nil
-}
-
-func parseNegatedLosses(
-	values ...string,
-) (map[transcode.Feature]struct{}, map[transcode.Feature]struct{}, error) {
-	validate := func(name string) error {
-		_, err := transcode.ParseLossFeatures(name)
-		return err
-	}
-	positives, negatedNames, err := splitFlagNegations(values, validate)
-	if err != nil {
-		return nil, nil, err
-	}
-	allowed, err := transcode.ParseLossFeatures(positives...)
-	if err != nil {
-		return nil, nil, err
-	}
-	negated := make(map[transcode.Feature]struct{}, len(negatedNames))
-	for name := range negatedNames {
-		negated[transcode.Feature(name)] = struct{}{}
-	}
-	return allowed, negated, nil
-}
-
-func validClientQueryName(name string) error {
-	if name == "" {
-		return fmt.Errorf("empty client query parameter name")
-	}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if c < 0x21 || c == 0x7f || strings.ContainsRune("=%&#?", rune(c)) {
-			return fmt.Errorf(
-				"invalid client query parameter name %q",
-				name,
-			)
-		}
-	}
-	return nil
-}
-
-func parseClientQuery(
-	values []string,
-) (map[string]struct{}, map[string]struct{}, error) {
-	positives, negated, err := splitFlagNegations(values, validClientQueryName)
-	if err != nil {
-		return nil, nil, err
-	}
-	out := make(map[string]struct{}, len(positives))
-	for _, name := range positives {
-		out[name] = struct{}{}
-	}
-	return out, negated, nil
-}
-
-var defaultTranscodeChatCapabilities = transcode.ChatCapabilities{
-	DeveloperRole:             false,
-	ImageInput:                true,
-	ParallelToolCalls:         true,
-	ReasoningEffort:           false,
-	ProviderReasoningText:     false,
-	ProviderReasoningThinking: true,
-	StopSequences:             true,
-	StructuredOutputs:         true,
-}
-
-var defaultTranscodeAllowedQuery = map[string]struct{}{
-	"beta": {},
-}
-
-var defaultTranscodeLosses = map[transcode.Feature]struct{}{
-	transcode.FeatureReasoningSummary:            {},
-	transcode.FeatureAuthenticatedThinking:       {},
-	transcode.FeatureMidConversationSystem:       {},
-	transcode.FeatureResponsesControls:           {},
-	transcode.FeatureAnthropicControls:           {},
-	transcode.FeatureRequestCitations:            {},
-	transcode.FeatureBuiltinTools:                {},
-	transcode.FeatureUsageUnknown:                {},
-	transcode.FeatureUsageCacheReadUnknown:       {},
-	transcode.FeatureUsageCacheWriteUnknown:      {},
-	transcode.FeatureUsageReasoningUnknown:       {},
-	transcode.FeatureRequestReasoning:            {},
-	transcode.FeatureToolResultErrorStatus:       {},
-	transcode.FeatureToolResultMultimodalContent: {},
-	transcode.FeatureToolResultJSONEnvelope:      {},
-	transcode.FeatureDeveloperRole:               {},
-	transcode.FeatureImageDetailOriginal:         {},
-	transcode.FeatureResponseServiceTier:         {},
-	transcode.FeatureOutputPhase:                 {},
-}
-
-func mergedLossPolicy(
-	lossPolicy transcode.LossPolicy,
-	negated map[transcode.Feature]struct{},
-	strictDefaults bool,
-) transcode.LossPolicy {
-	allowed := make(
-		map[transcode.Feature]struct{},
-		len(defaultTranscodeLosses)+len(lossPolicy.Allowed),
-	)
-	if !strictDefaults {
-		for feature := range defaultTranscodeLosses {
-			allowed[feature] = struct{}{}
-		}
-	}
-	for feature := range lossPolicy.Allowed {
-		allowed[feature] = struct{}{}
-	}
-	for feature := range negated {
-		if _, positive := lossPolicy.Allowed[feature]; !positive {
-			delete(allowed, feature)
-		}
-	}
-	return transcode.LossPolicy{Allowed: allowed}
-}
-
-func mergedChatCapabilities(
-	capabilities transcode.ChatCapabilities,
-	negated map[string]struct{},
-	strictDefaults bool,
-) transcode.ChatCapabilities {
-	out := transcode.ChatCapabilities{}
-	if !strictDefaults {
-		out = defaultTranscodeChatCapabilities
-	}
-	fields := map[string]*bool{
-		"developer_role":              &out.DeveloperRole,
-		"image_input":                 &out.ImageInput,
-		"tool_result_images":          &out.ToolResultImages,
-		"structured_outputs":          &out.StructuredOutputs,
-		"parallel_tool_calls":         &out.ParallelToolCalls,
-		"stop_sequences":              &out.StopSequences,
-		"reasoning_effort":            &out.ReasoningEffort,
-		"provider_reasoning_text":     &out.ProviderReasoningText,
-		"provider_reasoning_thinking": &out.ProviderReasoningThinking,
-		"system_anywhere":             &out.SystemAnywhere,
-		"multi_agent_priming":         &out.MultiAgentPriming,
-	}
-	cli := map[string]bool{
-		"developer_role":              capabilities.DeveloperRole,
-		"image_input":                 capabilities.ImageInput,
-		"tool_result_images":          capabilities.ToolResultImages,
-		"structured_outputs":          capabilities.StructuredOutputs,
-		"parallel_tool_calls":         capabilities.ParallelToolCalls,
-		"stop_sequences":              capabilities.StopSequences,
-		"reasoning_effort":            capabilities.ReasoningEffort,
-		"provider_reasoning_text":     capabilities.ProviderReasoningText,
-		"provider_reasoning_thinking": capabilities.ProviderReasoningThinking,
-		"system_anywhere":             capabilities.SystemAnywhere,
-		"multi_agent_priming":         capabilities.MultiAgentPriming,
-	}
-	for name, field := range fields {
-		_, deny := negated[name]
-		*field = (*field || cli[name]) && !(deny && !cli[name])
-	}
-	return out
-}
-
-func mergedAllowedQuery(
-	clientQuery map[string]struct{},
-	negated map[string]struct{},
-	strictDefaults bool,
-) map[string]struct{} {
-	out := make(map[string]struct{}, len(defaultTranscodeAllowedQuery)+len(clientQuery))
-	if !strictDefaults {
-		for name := range defaultTranscodeAllowedQuery {
-			out[name] = struct{}{}
-		}
-	}
-	for name := range clientQuery {
-		out[name] = struct{}{}
-	}
-	for name := range negated {
-		if _, positive := clientQuery[name]; !positive {
-			delete(out, name)
-		}
-	}
-	return out
-}
-
-type transcodeCLIOptions struct {
-	lossPolicy          transcode.LossPolicy
-	negatedLosses       map[transcode.Feature]struct{}
-	capabilities        transcode.ChatCapabilities
-	negatedCapabilities map[string]struct{}
-	clientQuery         map[string]struct{}
-	negatedQuery        map[string]struct{}
-	strictDefaults      bool
-}
 
 func buildTranscodeMappings(
 	routes []proxy.TranscodeMapping,
@@ -639,7 +39,15 @@ func buildTranscodeMappings(
 	capabilities := mergedChatCapabilities(opts.capabilities, opts.negatedCapabilities, opts.strictDefaults)
 	allowedQuery := mergedAllowedQuery(opts.clientQuery, opts.negatedQuery, opts.strictDefaults)
 
-	lossMapping := func(m transcode.Mapping) proxy.TranscodeMapping {
+	// mappingLossPolicy derives one mapping's effective loss policy from the
+	// merged CLI policy: a fresh copy plus the directional
+	// Messages->Responses tool-strictness injection, unless defaults are
+	// strict or the operator negated the feature. The injection is what
+	// makes enabling the direction work out of the box — Messages tools
+	// carry no strictness semantic and the Responses function-tool contract
+	// demands explicit strict — and it applies to EVERY spelling of the
+	// direction, preset and explicit route alike, so the two cannot drift.
+	mappingLossPolicy := func(m transcode.Mapping) transcode.LossPolicy {
 		lp := transcode.LossPolicy{Allowed: make(map[transcode.Feature]struct{}, len(lossPolicy.Allowed)+1)}
 		maps.Copy(lp.Allowed, lossPolicy.Allowed)
 		if !opts.strictDefaults && m.ClientProtocol == transcode.ClientMessages && m.UpstreamProtocol == transcode.UpstreamResponses {
@@ -647,7 +55,11 @@ func buildTranscodeMappings(
 				lp.Allowed[transcode.FeatureToolSchemaStrictness] = struct{}{}
 			}
 		}
-		m.LossPolicy = lp
+		return lp
+	}
+
+	lossMapping := func(m transcode.Mapping) proxy.TranscodeMapping {
+		m.LossPolicy = mappingLossPolicy(m)
 		m.ChatCapabilities = capabilities
 		m.AllowedClientQuery = allowedQuery
 		return proxy.TranscodeMapping{Mapping: m}
@@ -655,7 +67,7 @@ func buildTranscodeMappings(
 
 	var mappings []proxy.TranscodeMapping
 	for _, route := range routes {
-		route.Mapping.LossPolicy = lossPolicy
+		route.Mapping.LossPolicy = mappingLossPolicy(route.Mapping)
 		route.Mapping.ChatCapabilities = capabilities
 		route.Mapping.AllowedClientQuery = allowedQuery
 		if err := route.Mapping.Validate(); err != nil {
@@ -857,6 +269,11 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		upstream transcode.UpstreamProtocol
 	}
 	seen := make(map[transcodeTargetKey]struct{})
+	// routeClientProtocol tracks the client dialect already claimed by each
+	// client route: one route is one client dialect, and a second mapping in
+	// a different dialect would parse requests and render errors in the
+	// wrong shape behind one dispatcher.
+	routeClientProtocol := make(map[transcode.RouteKey]transcode.ClientProtocol)
 	// The preset is built and stamped before the mappings are validated:
 	// the mapping's reserved-name rule consults Mapping.Opencode, so
 	// validating first left that predicate dead and deferred the refusal to
@@ -876,12 +293,23 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		}
 		if _, dup := seen[targetKey]; dup {
 			return fmt.Errorf(
-				"duplicate transcode mapping for client route %s %s",
+				"duplicate transcode mapping for client route %s %s (upstream %s)",
 				mappings[i].ClientRoute.Method,
 				mappings[i].ClientRoute.Path,
+				mappings[i].UpstreamProtocol,
 			)
 		}
 		seen[targetKey] = struct{}{}
+		if claimed, ok := routeClientProtocol[mappings[i].ClientRoute]; ok && claimed != mappings[i].ClientProtocol {
+			return fmt.Errorf(
+				"transcode mappings for client route %s %s declare conflicting client protocols (%s vs %s)",
+				mappings[i].ClientRoute.Method,
+				mappings[i].ClientRoute.Path,
+				claimed,
+				mappings[i].ClientProtocol,
+			)
+		}
+		routeClientProtocol[mappings[i].ClientRoute] = mappings[i].ClientProtocol
 
 		if tableProjected {
 			// The global table owns model resolution for every transcode-enabled

@@ -288,8 +288,15 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	if mapping.Via == "" {
 		// Unknown native dialect (identity resolution): not native, and
 		// there is nothing to say about it — fall through with the body
-		// intact, preserving legacy transparent behavior.
-		return restoreOriginal(), nativeMiss
+		// intact, preserving legacy transparent behavior. The miss is
+		// stamped so a multi-target dispatcher on the same route trusts
+		// this resolution (including its emptiness) instead of re-reading
+		// and re-parsing the body to re-derive it.
+		restored := restoreOriginal()
+		return restored.WithContext(withNativeMiss(restored.Context(), nativeMissInfo{
+			clientModel: clientModel,
+			via:         mapping.Via,
+		})), nativeMiss
 	}
 	// Known model, wrong dialect for this route. When a transcode mapping
 	// covers the same client route, fall through so the exchange is served

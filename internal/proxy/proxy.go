@@ -820,7 +820,11 @@ func New(opts ...Option) (*Proxy, error) {
 			upstream: cfg.transcodeMappings[i].Mapping.UpstreamProtocol,
 		}
 		if _, dup := seenTranscodeRoutes[targetKey]; dup {
-			return nil, fmt.Errorf("proxy: duplicate transcode client route %s %s", routeKey.Method, routeKey.Path)
+			return nil, fmt.Errorf(
+				"proxy: duplicate transcode client route %s %s (upstream %s)",
+				routeKey.Method, routeKey.Path,
+				cfg.transcodeMappings[i].Mapping.UpstreamProtocol,
+			)
 		}
 		seenTranscodeRoutes[targetKey] = struct{}{}
 
@@ -997,7 +1001,11 @@ func New(opts ...Option) (*Proxy, error) {
 			p.transcodeHandlerMap[routeKey] = targets[0].handler
 			continue
 		}
-		p.transcodeHandlerMap[routeKey] = newMultiTranscodeDispatcher(routeKey, targets)
+		dispatcher, err := newMultiTranscodeDispatcher(routeKey, targets)
+		if err != nil {
+			return nil, err
+		}
+		p.transcodeHandlerMap[routeKey] = dispatcher
 	}
 
 	// Native routes share the transparent engine with model-identifier
@@ -1319,6 +1327,10 @@ func (p *Proxy) Journal() *journal.Journal {
 }
 
 // HandlerForRouteKey returns the transcode handler mapped to key, or nil.
+// A route with multiple mappings returns a dispatcher that selects the
+// target by the request's model dialect (Via); callers invoking it directly
+// on a raw request pay one bounded body pre-read and get dispatcher
+// semantics, including the native-miss context contract.
 func (p *Proxy) HandlerForRouteKey(key transcode.RouteKey) http.Handler {
 	return p.transcodeHandlerMap[key]
 }

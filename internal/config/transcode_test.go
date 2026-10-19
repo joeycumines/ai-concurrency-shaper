@@ -1735,3 +1735,120 @@ func TestResolveAndValidate_SingleMountMultiDialect(t *testing.T) {
 		t.Fatalf("transcode mappings = %d, want 3", len(p.TranscodeMappings()))
 	}
 }
+
+// TestResolveAndValidate_ExplicitMessagesResponsesRouteParity verifies the
+// loss-policy parity between the preset and the explicit route spelling:
+// both Messages->Responses forms validate out of the box with the same
+// effective policy (the tool_schema_strictness injection is directional, not
+// preset-specific), and both keep their operator escapes.
+func TestResolveAndValidate_ExplicitMessagesResponsesRouteParity(t *testing.T) {
+	base := []string{
+		"--provider=opencode-go",
+		"-upstream", "https://opencode.ai/zen/go",
+		"-transcode-route", "messages@/v1/messages=responses@/v1/responses",
+	}
+
+	// Explicit route validates without extra flags, exactly like the preset.
+	cfg, err := Parse(base)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate explicit messages-responses route: %v", err)
+	}
+	mappings := cfg.Providers[0].TranscodeMappings()
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	if !mappings[0].LossPolicy.Allows(transcode.FeatureToolSchemaStrictness) {
+		t.Error("explicit messages-responses route: effective policy does not allow tool_schema_strictness, want parity with the preset")
+	}
+
+	// The preset's effective policy allows it too.
+	presetCfg, err := Parse([]string{
+		"--provider=opencode-go",
+		"-upstream", "https://opencode.ai/zen/go",
+		"-transcode-messages-responses",
+	})
+	if err != nil {
+		t.Fatalf("Parse preset: %v", err)
+	}
+	if err := presetCfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate preset: %v", err)
+	}
+	preset := presetCfg.Providers[0].TranscodeMappings()
+	if len(preset) != 1 {
+		t.Fatalf("preset mappings = %d, want 1", len(preset))
+	}
+	if !preset[0].LossPolicy.Allows(transcode.FeatureToolSchemaStrictness) {
+		t.Error("preset messages-responses: effective policy does not allow tool_schema_strictness")
+	}
+
+	// Negation still rejects for both spellings.
+	negatedArgs := append(append([]string{}, base...),
+		"-transcode-allow-loss", "!tool_schema_strictness")
+	negated, err := Parse(negatedArgs)
+	if err != nil {
+		t.Fatalf("Parse negated: %v", err)
+	}
+	if err := negated.ResolveAndValidate(); err == nil ||
+		!strings.Contains(err.Error(), "tool_schema_strictness") {
+		t.Errorf("negated explicit route: error = %v, want tool_schema_strictness rejection", err)
+	}
+
+	// Strict defaults still reject for both spellings.
+	strict, err := Parse(append(append([]string{}, base...), "-transcode-strict-defaults"))
+	if err != nil {
+		t.Fatalf("Parse strict: %v", err)
+	}
+	if err := strict.ResolveAndValidate(); err == nil ||
+		!strings.Contains(err.Error(), "tool_schema_strictness") {
+		t.Errorf("strict explicit route: error = %v, want tool_schema_strictness rejection", err)
+	}
+}
+
+// TestResolveAndValidate_SameRouteConflictingClientProtocols verifies that
+// two mappings sharing one client route must agree on the client protocol:
+// one route is one client dialect, and mixing two would parse requests and
+// render errors in the wrong shape.
+func TestResolveAndValidate_SameRouteConflictingClientProtocols(t *testing.T) {
+	cfg, err := Parse([]string{
+		"--provider=opencode-go",
+		"-upstream", "https://opencode.ai/zen/go",
+		"-transcode-route", "messages@/v1/messages=responses@/v1/responses",
+		"-transcode-route", "responses@/v1/messages=chat-completions@/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("ResolveAndValidate: nil error, want conflicting client protocol rejection")
+	}
+	if !strings.Contains(err.Error(), "conflicting client protocols") {
+		t.Errorf("error = %v, want conflicting client protocols", err)
+	}
+}
+
+// TestResolveAndValidate_DuplicateErrorNamesUpstream verifies the duplicate
+// (route, upstream) rejection identifies the exact collision by naming the
+// upstream protocol, now that one client route may legitimately carry
+// multiple mappings.
+func TestResolveAndValidate_DuplicateErrorNamesUpstream(t *testing.T) {
+	cfg, err := Parse([]string{
+		"--provider=opencode-go",
+		"-upstream", "https://opencode.ai/zen/go",
+		"-transcode-route", "messages@/v1/messages=chat-completions@/v1/chat/completions",
+		"-transcode-messages-chat",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("ResolveAndValidate: nil error, want duplicate rejection")
+	}
+	if !strings.Contains(err.Error(), "chat-completions") {
+		t.Errorf("error = %v, want it to name the duplicated upstream protocol", err)
+	}
+}
