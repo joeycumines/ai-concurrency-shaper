@@ -473,6 +473,105 @@ func TestNativeMissStampsContextForEmptyVia(t *testing.T) {
 	}
 }
 
+// TestNew_RejectsConflictingClientProtocolsOnRoute verifies the library
+// surface rejects a route whose mappings disagree on the client dialect:
+// one client route is one client dialect, and construction fails instead
+// of building a dispatcher that would parse requests and render errors in
+// the wrong shape. The two mappings use different upstream protocols so
+// the duplicate check passes and the conflict is the only rejection left.
+func TestNew_RejectsConflictingClientProtocolsOnRoute(t *testing.T) {
+	upstream := &multiDialectUpstream{}
+	srv := httptest.NewServer(http.HandlerFunc(upstream.handler))
+	t.Cleanup(srv.Close)
+	upstreamURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	lossPolicy := transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+		transcode.FeatureToolSchemaStrictness:   {},
+		transcode.FeatureUsageUnknown:           {},
+		transcode.FeatureUsageCacheReadUnknown:  {},
+		transcode.FeatureUsageCacheWriteUnknown: {},
+		transcode.FeatureUsageReasoningUnknown:  {},
+	}}
+	messagesRoute := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	messagesToResponses := TranscodeMapping{Mapping: transcode.Mapping{
+		ClientRoute:      messagesRoute,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamResponses,
+		UpstreamPath:     "/v1/responses",
+		ModelMap:         transcode.ModelMap{AllowIdentity: true},
+		LossPolicy:       lossPolicy,
+	}}
+	responsesToChat := TranscodeMapping{Mapping: transcode.Mapping{
+		ClientRoute:      messagesRoute,
+		ClientProtocol:   transcode.ClientResponses,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         transcode.ModelMap{AllowIdentity: true},
+		LossPolicy:       lossPolicy,
+	}}
+
+	_, err = New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(messagesToResponses, responsesToChat),
+	)
+	if err == nil {
+		t.Fatal("New: nil error, want conflicting client protocol rejection")
+	}
+	if !strings.Contains(err.Error(), "conflicting client protocols") {
+		t.Errorf("error = %v, want it to name the conflicting client protocols", err)
+	}
+}
+
+// TestNew_DuplicateRouteNamesUpstreamProtocol verifies the duplicate
+// (client route, upstream protocol) rejection at the library surface
+// identifies the exact collision, now that one client route may
+// legitimately carry mappings to several different upstreams.
+func TestNew_DuplicateRouteNamesUpstreamProtocol(t *testing.T) {
+	upstream := &multiDialectUpstream{}
+	srv := httptest.NewServer(http.HandlerFunc(upstream.handler))
+	t.Cleanup(srv.Close)
+	upstreamURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	lossPolicy := transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+		transcode.FeatureToolSchemaStrictness:   {},
+		transcode.FeatureUsageUnknown:           {},
+		transcode.FeatureUsageCacheReadUnknown:  {},
+		transcode.FeatureUsageCacheWriteUnknown: {},
+		transcode.FeatureUsageReasoningUnknown:  {},
+	}}
+	messagesRoute := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	messagesToChat := TranscodeMapping{Mapping: transcode.Mapping{
+		ClientRoute:      messagesRoute,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         transcode.ModelMap{AllowIdentity: true},
+		LossPolicy:       lossPolicy,
+	}}
+	duplicate := messagesToChat
+
+	_, err = New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(messagesToChat, duplicate),
+	)
+	if err == nil {
+		t.Fatal("New: nil error, want duplicate rejection")
+	}
+	if !strings.Contains(err.Error(), "chat-completions") {
+		t.Errorf("error = %v, want it to name the duplicated upstream protocol", err)
+	}
+}
+
 // countingBody counts reads against its underlying reader.
 type countingBody struct {
 	reads int
