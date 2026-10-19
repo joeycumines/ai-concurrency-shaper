@@ -17,6 +17,7 @@ package config
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"strings"
 )
@@ -91,6 +92,7 @@ func Parse(args []string) (*Config, error) {
 		if err := fs.Parse(serverSec.lex); err != nil {
 			return nil, err
 		}
+		recordExplicitFlags(fs, p0)
 		// A suite-only legacy invocation has no implicit provider. If any
 		// provider option was supplied, keep the implicit provider so normal
 		// semantic validation still reports -upstream is required instead of
@@ -158,6 +160,7 @@ func Parse(args []string) (*Config, error) {
 			if err := ps.Parse(s.lex); err != nil {
 				return nil, fmt.Errorf("provider section %d: %w", len(cfg.Providers)+1, err)
 			}
+			recordExplicitFlags(ps, p)
 			if p.Name == "" {
 				p.Name = s.name
 			}
@@ -168,6 +171,23 @@ func Parse(args []string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// recordExplicitFlags stores the provider-scoped flags the operator actually
+// set in this section (flag.FlagSet.Visit reports exactly the set ones, with
+// their parsed values) onto the provider, so resolution can distinguish an
+// explicit choice from an untouched default. Server-scoped flags bound into
+// the same legacy FlagSet are filtered out by scope.
+func recordExplicitFlags(fs *flag.FlagSet, p *Provider) {
+	fs.Visit(func(f *flag.Flag) {
+		if flagMetadata()[f.Name].scope != scopeProvider {
+			return
+		}
+		if p.explicitFlags == nil {
+			p.explicitFlags = make(map[string]string)
+		}
+		p.explicitFlags[f.Name] = f.Value.String()
+	})
 }
 
 // serverHelpRequested reports whether any raw lexeme in any section requests

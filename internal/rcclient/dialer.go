@@ -43,6 +43,12 @@ type ChannelConfig struct {
 	CA         string // server CA (file:|base64:)
 	ServerName string // TLS SNI override for the channel
 	Insecure   bool   // InsecureSkipVerify on the channel TLS
+	// Token, when non-empty, is attached to every RPC on the channel as
+	// "authorization: Bearer <token>" per-RPC metadata. The credentials
+	// require transport security, so a Token on a plaintext channel fails
+	// the RPC instead of silently sending the secret in the clear. The
+	// value is never logged.
+	Token string
 }
 
 // Validate checks the channel configuration without connecting.
@@ -112,6 +118,22 @@ func (c *ChannelConfig) tlsConfig() (*tls.Config, error) {
 	return cfg, nil
 }
 
+// bearerTokenCredentials attaches a static bearer token to every RPC as
+// "authorization" metadata. RequireTransportSecurity is permanently true: a
+// token configured for a plaintext channel fails the RPC at the gRPC layer
+// rather than being sent in the clear.
+type bearerTokenCredentials struct {
+	token string
+}
+
+// GetRequestMetadata satisfies credentials.PerRPCCredentials.
+func (c bearerTokenCredentials) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + c.token}, nil
+}
+
+// RequireTransportSecurity satisfies credentials.PerRPCCredentials.
+func (bearerTokenCredentials) RequireTransportSecurity() bool { return true }
+
 // Dialer dials upstream connections through a RemoteControl.NetConn stream.
 // It implements the DialContext signature that http.Transport.DialContext
 // expects.
@@ -152,6 +174,9 @@ func NewDialer(channel ChannelConfig, dial DialConfig) (*Dialer, error) {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
 	} else {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	if channel.Token != "" {
+		dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(bearerTokenCredentials{token: channel.Token}))
 	}
 
 	conn, err := grpc.NewClient(channel.Server, dialOpts...)

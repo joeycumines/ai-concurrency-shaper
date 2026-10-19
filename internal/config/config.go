@@ -32,10 +32,8 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log"
 	"maps"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
@@ -334,6 +332,16 @@ type Provider struct {
 	// rcDialer is the resolved RC dialer for this provider, or nil when RC
 	// dialing is not configured.
 	rcDialer *rcclient.Dialer
+	// rcToken is the sesame channel credential resolved once from
+	// -sesame-token-env during resolveRC, or empty. Held for the RC
+	// channel's per-RPC credentials; never logged or journaled.
+	rcToken string
+	// explicitFlags maps the provider-scoped flag names the operator
+	// actually set on the command line (as opposed to defaults) to their
+	// parsed value strings, recorded by Parse via FlagSet.Visit. It lets
+	// resolution distinguish an explicit -rc-channel-tls choice from an
+	// untouched default when reconciling it with -sesame-endpoint.
+	explicitFlags map[string]string
 	// modelCatalog is this provider's frozen catalog snapshot, built from its
 	// model-table subset and resolved mappings. Nil when no table names it.
 	modelCatalog *transcode.CatalogConfig
@@ -667,6 +675,15 @@ func (p *Provider) validateBasic(index int, multi bool) error {
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
 
+	// Grammar-only (no side effects): the variable is read during resolve,
+	// after every provider's grammar has been checked, mirroring validateAuth.
+	if p.SesameTokenEnv != "" && !validEnvVarName(p.SesameTokenEnv) {
+		return fmt.Errorf(
+			"%s-sesame-token-env %q: environment variable name must match [A-Za-z_][A-Za-z0-9_]*",
+			ctx(), p.SesameTokenEnv,
+		)
+	}
+
 	// The local-handshake trust flags configure the handshake the proxy
 	// performs itself. Under remote termination the proxy never handshakes,
 	// so accepting them would silently ignore the operator's CA — refuse
@@ -803,123 +820,6 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 	return nil
 }
 
-// resolveRC builds the provider's RemoteControl.NetConn dialer when
-// -rc-server is configured. Validation is fail-closed: any RC dial option
-// without -rc-server, or an invalid combination, is rejected here at
-// startup. The underlying gRPC channel is lazy, so an unreachable RC server
-// does not fail startup; dial errors surface at request time, matching the
-// transport's existing semantics.
-func normalizeMaterial(v string) string {
-	if v == "" || strings.HasPrefix(v, "file:") || strings.HasPrefix(v, "base64:") {
-		return v
-	}
-	return "file:" + v
-}
-
-func (p *Provider) resolveRC() error {
-	if p.Transport != "" && p.Transport != "sesame" && p.Transport != "direct" {
-		return fmt.Errorf("invalid -transport: %q (must be direct or sesame)", p.Transport)
-	}
-	if p.SesameEndpoint != "" {
-		endpoint := p.SesameEndpoint
-		p.RCChannelTLS = true
-		if after, ok := strings.CutPrefix(endpoint, "https://"); ok {
-			endpoint = after
-		} else if after, ok := strings.CutPrefix(endpoint, "http://"); ok {
-			endpoint = after
-			p.RCChannelTLS = false
-		}
-		if p.RCServer == "" {
-			p.RCServer = endpoint
-		}
-		if p.SesameCACert != "" && p.RCChannelCA == "" {
-			p.RCChannelCA = normalizeMaterial(p.SesameCACert)
-		}
-		if p.SesameClientCert != "" && p.RCChannelCert == "" {
-			p.RCChannelCert = normalizeMaterial(p.SesameClientCert)
-		}
-		if p.SesameClientKey != "" && p.RCChannelKey == "" {
-			p.RCChannelKey = normalizeMaterial(p.SesameClientKey)
-		}
-		if p.SesameServerName != "" && p.RCChannelServerName == "" {
-			p.RCChannelServerName = p.SesameServerName
-		}
-	}
-	if p.Transport == "sesame" && p.RCServer == "" {
-		return errors.New("transport sesame requires -rc-server or -sesame-endpoint")
-	}
-
-	if p.RCServer == "" {
-		if p.rcFlagSet() {
-			return errors.New("rc dial options require -rc-server")
-		}
-		return nil
-	}
-	if p.RCDialTimeout < 0 {
-		return errors.New("rc dial timeout must be >= 0")
-	}
-	channel := rcclient.ChannelConfig{
-		Server:     p.RCServer,
-		TLS:        p.RCChannelTLS,
-		Cert:       p.RCChannelCert,
-		Key:        p.RCChannelKey,
-		CA:         p.RCChannelCA,
-		ServerName: p.RCChannelServerName,
-		Insecure:   p.RCChannelInsecure,
-	}
-	clientHello, err := rcclient.ParseClientHello(p.RCTargetClientHello)
-	if err != nil {
-		return err
-	}
-	dial := rcclient.DialConfig{
-		Timeout:          p.RCDialTimeout,
-		TerminateTLS:     p.RCTerminateTLS,
-		TargetServerName: p.RCTargetServerName,
-		ALPN:             p.RCTargetALPN,
-		MinVersion:       p.RCTargetMinVersion,
-		MaxVersion:       p.RCTargetMaxVersion,
-		ClientHello:      clientHello,
-		TargetInsecure:   p.RCTargetInsecure,
-		TargetCA:         p.RCTargetCA,
-		TargetCert:       p.RCTargetCert,
-		TargetKey:        p.RCTargetKey,
-		ProxyHops:        p.RCProxyHop,
-		FlowControl:      p.RCFlowControl,
-		OpportunisticTLS: p.RCOpportunisticTLS,
-		WindowSize:       p.RCWindowSize,
-	}
-	dialer, err := rcclient.NewDialer(channel, dial)
-	if err != nil {
-		return err
-	}
-	// Close the dialer from any prior resolution so a repeated
-	// ResolveAndValidate never orphans its gRPC channel.
-	if p.rcDialer != nil {
-		_ = p.rcDialer.Close()
-	}
-	p.rcDialer = dialer
-	return nil
-}
-
-// rcFlagSet reports whether any RC dial option other than -rc-server itself
-// was configured, so a stray option without -rc-server is rejected rather
-// than silently ignored. The client-hello check trims whitespace to match
-// ParseClientHello, for which a whitespace-only value is the engine default
-// (nil): without the trim a whitespace-only value would error here yet
-// absorb silently when -rc-server is set.
-func (p *Provider) rcFlagSet() bool {
-	return p.RCChannelTLS || p.RCChannelCert != "" || p.RCChannelKey != "" ||
-		p.RCChannelCA != "" || p.RCChannelServerName != "" || p.RCChannelInsecure ||
-		p.RCDialTimeout != 0 || p.RCTerminateTLS || p.RCTargetServerName != "" ||
-		len(p.RCTargetALPN) != 0 || p.RCTargetMinVersion != "" || p.RCTargetMaxVersion != "" ||
-		strings.TrimSpace(p.RCTargetClientHello) != "" || p.RCTargetInsecure ||
-		p.RCTargetCA != "" || p.RCTargetCert != "" || p.RCTargetKey != "" ||
-		len(p.RCProxyHop) != 0 || p.RCFlowControl || p.RCOpportunisticTLS || p.RCWindowSize != 0 ||
-		p.SesameEndpoint != "" || p.SesameCACert != "" || p.SesameClientCert != "" ||
-		p.SesameClientKey != "" || p.SesameServerName != "" || p.SesameTokenEnv != "" ||
-		p.Transport == "sesame"
-}
-
 // resolveRC validates the embedded RC server configuration when
 // -rc-server-bind is set. Without it, stray server options are rejected
 // rather than ignored. No socket is bound here; run() owns the listener.
@@ -942,134 +842,4 @@ func (s *Server) resolveRC() error {
 	}
 	s.rcServerConfig = &cfg
 	return nil
-}
-
-// parsePatterns parses -limit patterns, falling back to the built-in defaults
-// when none were configured.
-func (p *Provider) parsePatterns() ([]route.Pattern, error) {
-	if len(p.Limits) == 0 {
-		return route.DefaultPatterns(), nil
-	}
-	out := make([]route.Pattern, 0, len(p.Limits))
-	for _, s := range p.Limits {
-		pattern, err := route.Parse(s)
-		if err != nil {
-			return nil, fmt.Errorf("invalid -limit %q: %w", s, err)
-		}
-		out = append(out, pattern)
-	}
-	return out, nil
-}
-
-// routeLimiters builds the per-route/per-group limiters exactly as the legacy
-// wiring in main.go does: one limiter per distinct -limit pattern (or group),
-// keyed by the pattern's group name when present and by its raw string otherwise.
-// Patterns with Limit == 0 fall through to the default pool and get no limiter.
-//
-// validateBasic already parsed every entry of limitSpecs, so route.Parse cannot
-// fail here. A group-conflict warning mirrors the legacy behavior (the first
-// limiter wins).
-func routeLimiters(limitSpecs []string, releaseCooldown time.Duration) map[string]*queue.Limiter {
-	limiters := make(map[string]*queue.Limiter)
-
-	for _, s := range limitSpecs {
-		pattern, _ := route.Parse(s) // validated by validateBasic
-		if pattern.Unlimited {
-			continue // exempt class: no limiter, never acquires a slot
-		}
-		if pattern.Limit == 0 {
-			continue // falls through to the default pool
-		}
-		key := pattern.Raw
-		if pattern.Group != "" {
-			key = pattern.Group
-		}
-		if existing, ok := limiters[key]; ok {
-			// Group conflict warning: legacy behavior keeps the first limiter.
-			if existing.Limit() != pattern.Limit {
-				log.Printf("WARNING: route %q specifies group %q with limit %d, but group already has limit %d. Using %d.\n", s, pattern.Group, pattern.Limit, existing.Limit(), existing.Limit())
-			}
-			continue
-		}
-		limiters[key] = queue.NewLimiterWithCooldown(pattern.Limit, releaseCooldown)
-	}
-	return limiters
-}
-
-// normalizePrefix normalizes a mount prefix: "/" becomes "", a trailing slash is
-// removed, and the leading slash requirement is enforced.
-func normalizePrefix(p *Provider) error {
-	if p.Prefix == "" || p.Prefix == "/" {
-		p.Prefix = ""
-		return nil
-	}
-	if !strings.HasPrefix(p.Prefix, "/") {
-		return fmt.Errorf("-prefix must start with /, got %q", p.Prefix)
-	}
-	// Keep internal slashes; drop at most one trailing slash.
-	p.Prefix = strings.TrimSuffix(p.Prefix, "/")
-	return nil
-}
-
-// prefixSegments splits a normalized prefix into traversal-resolved segments for
-// overlap comparison: empty and "." segments are dropped, and ".." pops the
-// previous segment. This deliberately matches the router's literal (colon-free)
-// mount segmentation — the prefix is a literal mount prefix, not a route pattern.
-func prefixSegments(prefix string) []string {
-	var segs []string
-	for s := range strings.SplitSeq(prefix, "/") {
-		if s == "" || s == "." {
-			continue
-		}
-		if s == ".." {
-			if len(segs) > 0 {
-				segs = segs[:len(segs)-1]
-			}
-			continue
-		}
-		segs = append(segs, s)
-	}
-	return segs
-}
-
-// segmentsOverlap reports whether the two normalized prefixes have a segment-wise
-// prefix relationship (either is a prefix of the other), meaning they would route
-// the same request.
-func segmentsOverlap(a, b string) bool {
-	as := prefixSegments(a)
-	bs := prefixSegments(b)
-	if len(as) > len(bs) {
-		as, bs = bs, as
-	}
-	for i := range as {
-		if as[i] != bs[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// deriveName derives a provider display name from its upstream host:
-// strip the port, strip a leading "api."/"api-", and take the first
-// dot-segment. api.anthropic.com → anthropic. The host is the port-free,
-// bracket-free form from url.URL.Hostname() — IPv6 literals such as
-// "[::1]:9000" derive as "::1", without brackets or port.
-func deriveName(host string) string {
-	h := host
-	h = strings.TrimPrefix(h, "api.")
-	h = strings.TrimPrefix(h, "api-")
-	if i := strings.IndexByte(h, '.'); i >= 0 {
-		h = h[:i]
-	}
-	return h
-}
-
-func nameLabel(p *Provider) string {
-	if p.Name != "" {
-		return p.Name
-	}
-	if p.upstream != nil {
-		return p.upstream.Host
-	}
-	return "(unnamed)"
 }
