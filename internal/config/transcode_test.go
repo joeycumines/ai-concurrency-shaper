@@ -1852,3 +1852,136 @@ func TestResolveAndValidate_DuplicateErrorNamesUpstream(t *testing.T) {
 		t.Errorf("error = %v, want it to name the duplicated upstream protocol", err)
 	}
 }
+
+// TestResolveAndValidate_TranscodeAuthDialectAdaptation pins the dialect
+// adaptation of INHERITED transcode auth: provider-policy inheritance —
+// implicit or via -transcode-auth-source provider — adapts the mount's
+// bearer/x-api-key spelling to each mapping's upstream dialect (an x-api-key
+// mount transcoding to the OpenAI upstreams authenticates with Bearer, a
+// bearer mount transcoding to Messages authenticates with X-Api-Key plus the
+// default Anthropic version), while an explicit -transcode-auth-mode is
+// applied verbatim and never second-guessed.
+func TestResolveAndValidate_TranscodeAuthDialectAdaptation(t *testing.T) {
+	t.Setenv("PROVIDER_SECRET", "provider-val")
+	t.Setenv("ROUTE_SECRET", "route-val")
+
+	// 1. Implicit inheritance from an x-api-key mount adapts per mapping:
+	// messages->chat resolves with Bearer, not the mount's X-Api-Key.
+	{
+		cfg, err := Parse([]string{
+			"--provider=opencode-go",
+			"-upstream", "https://opencode.ai/zen/go",
+			"-auth-mode", "x-api-key",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-messages-chat",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		if len(mappings) != 1 {
+			t.Fatalf("mappings = %d, want 1", len(mappings))
+		}
+		authP := mappings[0].Mapping.Auth
+		if authP.Mode != transcode.AuthBearer {
+			t.Errorf("auth mode = %q, want bearer (mount is x-api-key, upstream dialect is chat)", authP.Mode)
+		}
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "provider-val" {
+			t.Errorf("secret = %q, err = %v, want provider-val", sec, err)
+		}
+	}
+
+	// 2. Implicit inheritance from a bearer mount transcoding to an OpenAI
+	// upstream stays bearer: the upstream dialect decides, and the Responses
+	// upstream speaks bearer. (The bearer->x-api-key arm exists for an
+	// UpstreamMessages target, which no transcode mapping can carry — it
+	// is the native Messages path's adaptation — so from config the
+	// adaptation only ever runs x-api-key -> bearer.)
+	{
+		cfg, err := Parse([]string{
+			"--provider=opencode-go",
+			"-upstream", "https://opencode.ai/zen/go",
+			"-auth-mode", "bearer",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-messages-responses",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		if len(mappings) != 1 {
+			t.Fatalf("mappings = %d, want 1", len(mappings))
+		}
+		authP := mappings[0].Mapping.Auth
+		if authP.Mode != transcode.AuthBearer {
+			t.Errorf("auth mode = %q, want bearer (upstream dialect is responses; no spurious adaptation)", authP.Mode)
+		}
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "provider-val" {
+			t.Errorf("secret = %q, err = %v, want provider-val", sec, err)
+		}
+	}
+
+	// 3. Explicit -transcode-auth-mode x-api-key stays verbatim: the
+	// operator's explicit spelling is authoritative, never adapted.
+	{
+		cfg, err := Parse([]string{
+			"--provider=opencode-go",
+			"-upstream", "https://opencode.ai/zen/go",
+			"-auth-mode", "x-api-key",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-messages-chat",
+			"-transcode-auth", "x-api-key",
+			"-transcode-auth-source", "env:ROUTE_SECRET",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		authP := mappings[0].Mapping.Auth
+		if authP.Mode != transcode.AuthXAPIKey {
+			t.Errorf("auth mode = %q, want x-api-key (explicit mode is never adapted)", authP.Mode)
+		}
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "route-val" {
+			t.Errorf("secret = %q, err = %v, want route-val", sec, err)
+		}
+	}
+
+	// 4. -transcode-auth-source provider inherits the adaptation.
+	{
+		cfg, err := Parse([]string{
+			"--provider=opencode-go",
+			"-upstream", "https://opencode.ai/zen/go",
+			"-auth-mode", "x-api-key",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-messages-chat",
+			"-transcode-auth-source", "provider",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		authP := mappings[0].Mapping.Auth
+		if authP.Mode != transcode.AuthBearer {
+			t.Errorf("auth mode = %q, want bearer (provider-source inheritance adapts like implicit)", authP.Mode)
+		}
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "provider-val" {
+			t.Errorf("secret = %q, err = %v, want provider-val", sec, err)
+		}
+	}
+}

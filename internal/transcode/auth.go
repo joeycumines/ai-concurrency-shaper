@@ -186,6 +186,34 @@ func FromProviderAuth(policy *auth.AuthPolicy) AuthPolicy {
 	}
 }
 
+// FromProviderAuthForUpstream converts an internal/auth.AuthPolicy into a
+// transcode.AuthPolicy adapted to the target dialect, applying the same rule
+// ApplyTargetAuthentication uses to resolve auto at request time: a bearer
+// mount serving the Messages upstream authenticates with X-Api-Key (plus the
+// default Anthropic version when the policy carries none), an x-api-key mount
+// serving the OpenAI upstreams authenticates with Bearer. Every other mode —
+// and every other field — passes through verbatim: the mount's mode provides
+// the secret's spelling, the upstream's dialect decides the header, so one
+// mount authenticates a model identically whether served natively or
+// transcoded.
+func FromProviderAuthForUpstream(policy *auth.AuthPolicy, target UpstreamProtocol) AuthPolicy {
+	out := FromProviderAuth(policy)
+	switch out.Mode {
+	case AuthBearer:
+		if target == UpstreamMessages {
+			out.Mode = AuthXAPIKey
+			if strings.TrimSpace(out.AnthropicVersion) == "" {
+				out.AnthropicVersion = auth.DefaultAnthropicVersion
+			}
+		}
+	case AuthXAPIKey:
+		if target == UpstreamResponses || target == UpstreamChatCompletions {
+			out.Mode = AuthBearer
+		}
+	}
+	return out
+}
+
 // Validate checks the policy against the target protocol.
 func (p AuthPolicy) Validate(target UpstreamProtocol) error {
 	switch p.Mode {

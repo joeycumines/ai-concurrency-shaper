@@ -548,3 +548,103 @@ func TestMultiDialect_AuthXAPIKey_AdaptsToBearer(t *testing.T) {
 		t.Errorf("X-Api-Key = %q, want empty", last.XAPIKeyHeader)
 	}
 }
+
+// TestMultiDialect_AuthXAPIKey_AdaptsToBearerOnTranscode extends the
+// adaptation contract to the transcode path: on one x-api-key mount, a
+// via=chat model authenticates with Authorization: Bearer whether it is
+// served natively on POST /v1/chat/completions or transcoded from
+// POST /v1/messages to the same upstream — the dialect decides the header,
+// the mount mode provides the secret, and the two paths cannot disagree.
+func TestMultiDialect_AuthXAPIKey_AdaptsToBearerOnTranscode(t *testing.T) {
+	upstream := &multiDialectUpstream{}
+	srv := httptest.NewServer(http.HandlerFunc(upstream.handler))
+	t.Cleanup(srv.Close)
+
+	upstreamURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+
+	modelMap := testMultiDialectModelMap()
+
+	nativeChat := NativeRoute{
+		RouteKey: transcode.RouteKey{Method: http.MethodPost, Path: "/v1/chat/completions"},
+		Protocol: transcode.NativeChat,
+		Provider: "test-anthropic-mount",
+		ModelMap: modelMap,
+	}
+
+	messagesChat := TranscodeMapping{
+		Mapping: transcode.Mapping{
+			ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			UpstreamPath:     "/v1/chat/completions",
+			ModelMap:         modelMap,
+			LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+				transcode.FeatureToolSchemaStrictness:   {},
+				transcode.FeatureUsageUnknown:           {},
+				transcode.FeatureUsageCacheReadUnknown:  {},
+				transcode.FeatureUsageCacheWriteUnknown: {},
+				transcode.FeatureUsageReasoningUnknown:  {},
+			}},
+		},
+	}
+
+	authPolicy := &auth.AuthPolicy{
+		Mode:             auth.AuthXAPIKey,
+		Secret:           auth.NewStaticSecretSource("sk-ant-secret"),
+		AnthropicVersion: "2023-06-01",
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithAuthPolicy(authPolicy),
+		WithNativeRoutes(nativeChat),
+		WithTranscodeMapping(messagesChat),
+	)
+	if err != nil {
+		t.Fatalf("New proxy: %v", err)
+	}
+
+	// Native path: POST /v1/chat/completions for the via=chat model.
+	nativeReq := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"deepseek-v3","messages":[{"role":"user","content":"hi"}]}`))
+	nativeReq.Header.Set("Content-Type", "application/json")
+	nativeRec := httptest.NewRecorder()
+	p.ServeHTTP(nativeRec, nativeReq)
+	if nativeRec.Code != http.StatusOK {
+		t.Fatalf("native status = %d, want 200; body: %s", nativeRec.Code, nativeRec.Body.String())
+	}
+	last := upstream.lastRequest()
+	if last.AuthHeader != "Bearer sk-ant-secret" {
+		t.Errorf("native Authorization = %q, want Bearer sk-ant-secret", last.AuthHeader)
+	}
+	if last.XAPIKeyHeader != "" {
+		t.Errorf("native X-Api-Key = %q, want empty", last.XAPIKeyHeader)
+	}
+
+	// Transcode path: POST /v1/messages for the same via=chat model,
+	// converted to the same /v1/chat/completions upstream.
+	transcodeReq := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		bytes.NewBufferString(`{"model":"deepseek-v3","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`))
+	transcodeReq.Header.Set("Content-Type", "application/json")
+	transcodeRec := httptest.NewRecorder()
+	p.ServeHTTP(transcodeRec, transcodeReq)
+	if transcodeRec.Code != http.StatusOK {
+		t.Fatalf("transcode status = %d, want 200; body: %s", transcodeRec.Code, transcodeRec.Body.String())
+	}
+	last = upstream.lastRequest()
+	if last.Path != "/v1/chat/completions" {
+		t.Errorf("transcode upstream path = %q, want /v1/chat/completions", last.Path)
+	}
+	if last.AuthHeader != "Bearer sk-ant-secret" {
+		t.Errorf("transcode Authorization = %q, want Bearer sk-ant-secret", last.AuthHeader)
+	}
+	if last.XAPIKeyHeader != "" {
+		t.Errorf("transcode X-Api-Key = %q, want empty", last.XAPIKeyHeader)
+	}
+}

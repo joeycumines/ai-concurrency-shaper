@@ -969,7 +969,10 @@ func New(opts ...Option) (*Proxy, error) {
 		mapping.AllowedClientQuery = cloneStringSet(m.AllowedClientQuery)
 		if mapping.Auth.IsZero() {
 			if cfg.authPolicy != nil {
-				mapping.Auth = transcode.FromProviderAuth(cfg.authPolicy)
+				// Inherited provider auth adapts to the mapping's upstream
+				// dialect (bearer<->x-api-key) so a model authenticates
+				// identically whether served natively or transcoded.
+				mapping.Auth = transcode.FromProviderAuthForUpstream(cfg.authPolicy, mapping.UpstreamProtocol)
 			} else {
 				mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthNone}
 			}
@@ -1038,6 +1041,10 @@ func New(opts ...Option) (*Proxy, error) {
 		p.catalog = catalogHandler
 	}
 
+	// The native auth variants are precomputed once so the Rewrite hot
+	// path only selects a ready pointer by the natively served dialect.
+	nativeAuth := newNativeAuthVariants(cfg.authPolicy)
+
 	rp := &httputil.ReverseProxy{
 		// Rewrite (not the deprecated Director) is load-bearing for auth
 		// safety: stdlib strips hop-by-hop headers from the outbound clone
@@ -1052,25 +1059,10 @@ func New(opts ...Option) (*Proxy, error) {
 			// query by raw concatenation — the transparent-proxy contract.
 			pr.SetURL(cfg.upstream)
 			pr.Out.Host = cfg.upstream.Host
-			if cfg.authPolicy != nil {
-				effectiveAuth := cfg.authPolicy
+			if nativeAuth.provider != nil {
+				effectiveAuth := nativeAuth.provider
 				if alias, ok := nativeAliasFromContext(pr.In.Context()); ok {
-					if alias.protocol == transcode.NativeMessages && cfg.authPolicy.Mode == auth.AuthBearer {
-						anthropicVer := cfg.authPolicy.AnthropicVersion
-						if strings.TrimSpace(anthropicVer) == "" {
-							anthropicVer = auth.DefaultAnthropicVersion
-						}
-						effectiveAuth = &auth.AuthPolicy{
-							Mode:             auth.AuthXAPIKey,
-							Secret:           cfg.authPolicy.Secret,
-							AnthropicVersion: anthropicVer,
-						}
-					} else if (alias.protocol == transcode.NativeChat || alias.protocol == transcode.NativeResponses) && cfg.authPolicy.Mode == auth.AuthXAPIKey {
-						effectiveAuth = &auth.AuthPolicy{
-							Mode:   auth.AuthBearer,
-							Secret: cfg.authPolicy.Secret,
-						}
-					}
+					effectiveAuth = nativeAuth.forProtocol(alias.protocol)
 				}
 				// Effectively unreachable for config-built policies: their
 				// sources reject blank credentials at construction time, and

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
@@ -118,7 +119,7 @@ const (
 	defaultCBMaxOpen              = 120 * time.Second
 	defaultCBPenalty              = 2 * time.Second
 	defaultCBMaxPenalty           = 60 * time.Second
-	defaultAnthropicVersionValue  = "2023-06-01"
+	defaultAnthropicVersionValue  = auth.DefaultAnthropicVersion
 	defaultTranscodeMaxRequestMB  = 10
 	defaultTranscodeMaxResponseMB = 10
 )

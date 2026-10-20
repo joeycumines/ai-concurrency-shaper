@@ -160,6 +160,7 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 
 	var authPolicy transcode.AuthPolicy
 	var hasExplicitTranscodeAuth bool
+	var authFromProvider bool
 	if p.TranscodeAuth != "" || p.TranscodeAuthSource != "" || p.TranscodeAuthHeader != "" {
 		if p.TranscodeAuthSource == "provider" {
 			// Explicit opt-in to provider-auth inheritance, distinct from
@@ -171,7 +172,7 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 			if p.authPolicy == nil {
 				return fmt.Errorf("-transcode-auth-source provider requires a configured -auth-source on the provider")
 			}
-			authPolicy = transcode.FromProviderAuth(p.authPolicy)
+			authFromProvider = true
 		} else {
 			var err error
 			authPolicy, err = parseTranscodeAuth(
@@ -193,7 +194,7 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		}
 		hasExplicitTranscodeAuth = true
 	} else if p.authPolicy != nil {
-		authPolicy = transcode.FromProviderAuth(p.authPolicy)
+		authFromProvider = true
 	} else {
 		authPolicy = transcode.AuthPolicy{Mode: transcode.AuthNone}
 	}
@@ -322,9 +323,17 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		if len(profileMap.Profiles) > 0 {
 			mappings[i].Mapping.ProfileMap = profileMap
 		}
-		if hasExplicitTranscodeAuth || p.authPolicy != nil {
+		switch {
+		case authFromProvider:
+			// Inherited provider auth — implicit or -transcode-auth-source
+			// provider — adapts to each mapping's upstream dialect, so a
+			// model authenticates identically whether served natively or
+			// transcoded. Explicit transcode auth (env:/file:/inbound) is
+			// applied verbatim below: the operator's spelling wins.
+			mappings[i].Mapping.Auth = transcode.FromProviderAuthForUpstream(p.authPolicy, mappings[i].UpstreamProtocol)
+		case hasExplicitTranscodeAuth:
 			mappings[i].Mapping.Auth = authPolicy
-		} else if mappings[i].Mapping.Auth.IsZero() {
+		case mappings[i].Mapping.Auth.IsZero():
 			mappings[i].Mapping.Auth = authPolicy
 		}
 		if p.RetryMax != 0 && p.RetryMaxBodyMB > 0 && mappings[i].BodyLimits.RetryReplayBytes == 0 {
