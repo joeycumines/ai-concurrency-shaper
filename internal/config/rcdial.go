@@ -42,6 +42,10 @@ func (p *Provider) resolveRC() error {
 	if p.Transport != "" && p.Transport != "sesame" && p.Transport != "direct" {
 		return fmt.Errorf("invalid -transport: %q (must be direct or sesame)", p.Transport)
 	}
+	// Repeated resolution starts from the operator's current inputs. Values
+	// derived by an earlier resolve must be removed first, or a later direct
+	// resolve would be rejected by the state of a former sesame endpoint.
+	p.resetDerivedSesameState()
 	// direct is an enforced mode, not a synonym for the default: any dial
 	// configuration alongside it is a contradiction, and honoring it
 	// silently would route upstream connections through RemoteControl
@@ -60,6 +64,13 @@ func (p *Provider) resolveRC() error {
 	if p.RCServer == "" {
 		if p.rcFlagSet() {
 			return errors.New("rc dial options require -rc-server")
+		}
+		// A successful earlier resolve may have installed a dialer for an RC
+		// target that was since removed. Close it so the config does not
+		// retain a live channel after RC dialing is disabled.
+		if p.rcDialer != nil {
+			_ = p.rcDialer.Close()
+			p.rcDialer = nil
 		}
 		return nil
 	}
@@ -142,7 +153,9 @@ func (p *Provider) resolveSesameEndpoint() error {
 	if p.SesameEndpoint == "" {
 		return nil
 	}
-	if p.RCServer != "" {
+	// The direct guard has already established that -rc-server is not
+	// present. Here a non-explicit RCServer cannot be operator input.
+	if p.explicitProviderFlag("rc-server") {
 		return errors.New("-rc-server and -sesame-endpoint both configure the sesame channel dial target; configure only one")
 	}
 	tlsOn := true
@@ -211,25 +224,58 @@ func (p *Provider) rcFlagSet() bool {
 		p.SesameClientKey != "" || p.SesameServerName != "" || p.SesameTokenEnv != ""
 }
 
-// sesameMaterialPropagation copies the -sesame-* mTLS material into the
-// -rc-channel-* fields it feeds, deferring to any explicitly configured
-// channel option, and applies regardless of whether the dial target came
-// from -sesame-endpoint or a plain -rc-server: both address the same sesame
-// endpoint channel, so gating on the endpoint flag silently dropped the
-// material for -rc-server targets.
+// resetDerivedSesameState clears provider fields derived by an earlier
+// resolve whenever their corresponding operator flag was not explicit. It
+// leaves explicit -rc-server and -rc-channel-* values untouched so they
+// remain authoritative across repeated resolution.
+func (p *Provider) resetDerivedSesameState() {
+	if !p.explicitProviderFlag("rc-server") {
+		p.RCServer = ""
+	}
+	if !p.explicitProviderFlag("rc-channel-tls") {
+		p.RCChannelTLS = false
+	}
+	if !p.explicitProviderFlag("rc-channel-ca") {
+		p.RCChannelCA = ""
+	}
+	if !p.explicitProviderFlag("rc-channel-cert") {
+		p.RCChannelCert = ""
+	}
+	if !p.explicitProviderFlag("rc-channel-key") {
+		p.RCChannelKey = ""
+	}
+	if !p.explicitProviderFlag("rc-channel-server-name") {
+		p.RCChannelServerName = ""
+	}
+}
+
+// sesameMaterialPropagation derives the -rc-channel-* mTLS fields from the
+// current -sesame-* material, deferring to every explicitly configured
+// channel option. It applies regardless of whether the dial target came from
+// -sesame-endpoint or a plain -rc-server: both address the same sesame
+// endpoint channel. Repeated resolution is re-entrant: fields derived by an
+// earlier resolve are recomputed, so changed or removed sesame material is
+// reflected instead of being frozen by its first derived value.
 func (p *Provider) sesameMaterialPropagation() {
-	if p.SesameCACert != "" && p.RCChannelCA == "" {
+	if !p.explicitProviderFlag("rc-channel-ca") {
 		p.RCChannelCA = normalizeMaterial(p.SesameCACert)
 	}
-	if p.SesameClientCert != "" && p.RCChannelCert == "" {
+	if !p.explicitProviderFlag("rc-channel-cert") {
 		p.RCChannelCert = normalizeMaterial(p.SesameClientCert)
 	}
-	if p.SesameClientKey != "" && p.RCChannelKey == "" {
+	if !p.explicitProviderFlag("rc-channel-key") {
 		p.RCChannelKey = normalizeMaterial(p.SesameClientKey)
 	}
-	if p.SesameServerName != "" && p.RCChannelServerName == "" {
+	if !p.explicitProviderFlag("rc-channel-server-name") {
 		p.RCChannelServerName = p.SesameServerName
 	}
+}
+
+// explicitProviderFlag reports whether the operator set the named
+// provider-scoped flag, independently of that flag's current value.
+func (p *Provider) explicitProviderFlag(name string) bool {
+	_, ok := p.explicitProviderFlags[name]
+	return ok
 }
 
 // normalizeMaterial accepts a -sesame-* material value as either an explicit

@@ -336,12 +336,14 @@ type Provider struct {
 	// -sesame-token-env during resolveRC, or empty. Held for the RC
 	// channel's per-RPC credentials; never logged or journaled.
 	rcToken string
-	// explicitFlags maps the provider-scoped flag names the operator
-	// actually set on the command line (as opposed to defaults) to their
-	// parsed value strings, recorded by Parse via FlagSet.Visit. It lets
-	// resolution distinguish an explicit -rc-channel-tls choice from an
-	// untouched default when reconciling it with -sesame-endpoint.
+	// explicitFlags maps the provider-scoped flag names the operator set
+	// (as opposed to defaults) to their parsed value strings, recorded by
+	// Parse via FlagSet.Visit. Resolution uses it only where a value is
+	// semantically required; explicitness is explicitProviderFlags.
 	explicitFlags map[string]string
+	// explicitProviderFlags records only which provider-scoped flags were
+	// set, keeping provenance separate from recorded values.
+	explicitProviderFlags map[string]struct{}
 	// modelCatalog is this provider's frozen catalog snapshot, built from its
 	// model-table subset and resolved mappings. Nil when no table names it.
 	modelCatalog *transcode.CatalogConfig

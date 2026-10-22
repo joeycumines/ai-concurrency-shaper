@@ -185,8 +185,10 @@ func recordExplicitFlags(fs *flag.FlagSet, p *Provider) {
 		}
 		if p.explicitFlags == nil {
 			p.explicitFlags = make(map[string]string)
+			p.explicitProviderFlags = make(map[string]struct{})
 		}
 		p.explicitFlags[f.Name] = f.Value.String()
+		p.explicitProviderFlags[f.Name] = struct{}{}
 	})
 }
 
