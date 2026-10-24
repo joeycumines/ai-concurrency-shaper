@@ -28,18 +28,19 @@
 package config
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
-	"log"
 	"maps"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/rcclient"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
@@ -106,6 +107,25 @@ type Server struct {
 	// Help is set by -h/-help at server scope (or legacy top level): the
 	// caller prints usage and exits 0 instead of running the proxy.
 	Help bool
+
+	// ---- Embedded RC server (server scope) ----
+
+	// RCBind is the listen address for the embedded RemoteControl.NetConn
+	// gRPC server (-rc-server-bind). Empty disables the embedded server.
+	RCBind string
+	// RCTLS enables TLS on the embedded RC server listener.
+	RCTLS bool
+	// RCCA is the CA for client certificate verification on the embedded RC
+	// server (file:|base64:). When set, mTLS is enforced.
+	RCCA string
+	// RCCert is the server certificate for the embedded RC server (file:|base64:).
+	RCCert string
+	// RCKey is the server private key for the embedded RC server (file:|base64:).
+	RCKey string
+
+	// rcServerConfig is the resolved embedded RC server configuration,
+	// populated by ResolveAndValidate. Nil when -rc-server-bind is empty.
+	rcServerConfig *rcclient.ServerConfig
 }
 
 // Provider is one upstream LLM system plus its access mount and upstream-behavior
@@ -213,6 +233,88 @@ type Provider struct {
 	CBPenalty     time.Duration
 	CBMaxPenalty  time.Duration
 
+	// ---- Upstream connection TLS trust (provider scope) ----
+	//
+	// These configure the TLS handshake the PROXY performs itself over the
+	// connection it opens: direct dialing, and the RC tunnel when the RC
+	// server only moves bytes (-rc-server without -rc-terminate-tls). They
+	// are rejected under -rc-terminate-tls, where the handshake happens at
+	// the RC server and only the -rc-target-* options apply.
+	//
+	// UpstreamCA is a CA for verifying the upstream certificate
+	// (file:|base64:). UpstreamInsecure skips verification. UpstreamServerName
+	// overrides the expected server name.
+	UpstreamCA         string
+	UpstreamInsecure   bool
+	UpstreamServerName string
+
+	// ---- Upstream transport and Sesame endpoint options (provider scope) ----
+
+	// Transport is the upstream transport mode: direct | sesame.
+	Transport string
+	// SesameEndpoint is the sesame endpoint URL (e.g. https://host:port).
+	SesameEndpoint string
+	// SesameTokenEnv is the environment variable name providing the sesame token.
+	SesameTokenEnv string
+	// SesameCACert/ClientCert/ClientKey/ServerName configure mTLS to the sesame endpoint.
+	SesameCACert     string
+	SesameClientCert string
+	SesameClientKey  string
+	SesameServerName string
+
+	// ---- RemoteControl.NetConn dial target (provider scope) ----
+
+	// RCServer is the RC server address (host:port) for this provider's
+	// upstream dialing (-rc-server). Empty disables RC dialing.
+	RCServer string
+	// RCChannelTLS enables TLS on the gRPC channel to the RC server.
+	RCChannelTLS bool
+	// RCChannelCert/RCChannelKey are the client certificate and key for
+	// mTLS on the gRPC channel (file:|base64:).
+	RCChannelCert string
+	RCChannelKey  string
+	// RCChannelCA is the CA for verifying the RC server's certificate (file:|base64:).
+	RCChannelCA string
+	// RCChannelServerName overrides the TLS SNI for the gRPC channel.
+	RCChannelServerName string
+	// RCChannelInsecure disables TLS certificate verification on the gRPC channel.
+	RCChannelInsecure bool
+	// RCDialTimeout bounds the remote dial operation.
+	RCDialTimeout time.Duration
+	// RCTerminateTLS requests TLS termination at the RC server. The
+	// RCTarget* fields below configure that handshake and are rejected
+	// unless RCTerminateTLS is set.
+	RCTerminateTLS bool
+	// RCTargetServerName is the SNI for the remote TLS handshake.
+	RCTargetServerName string
+	// RCTargetALPN is the ALPN protocol list for the remote TLS handshake.
+	RCTargetALPN []string
+	// RCTargetMinVersion/RCTargetMaxVersion constrain the remote TLS version.
+	RCTargetMinVersion string
+	RCTargetMaxVersion string
+	// RCTargetClientHello is the decomposed wire-level ClientHelloSpec for
+	// the upstream handshake, as protojson (file:PATH, base64:DATA, or
+	// inline JSON). Empty leaves the engine default; the server fails
+	// closed on any dimension it cannot honour exactly.
+	RCTargetClientHello string
+	// RCTargetInsecure disables certificate verification on the remote TLS handshake.
+	RCTargetInsecure bool
+	// RCTargetCA/RCTargetCert/RCTargetKey are the CA and client credentials
+	// for the remote TLS handshake (file:|base64:).
+	RCTargetCA   string
+	RCTargetCert string
+	RCTargetKey  string
+	// RCProxyHop is the repeatable proxy hop specification for egress
+	// chaining ahead of the target dial: TYPE@ADDRESS[;user=U][;pass=P][;header=H].
+	RCProxyHop []string
+	// RCFlowControl advertises flow-control support on the stream.
+	RCFlowControl bool
+	// RCOpportunisticTLS advertises opportunistic TLS upgrade support.
+	RCOpportunisticTLS bool
+	// RCWindowSize is the flow-control window size (0 = server default).
+	// Requires RCFlowControl.
+	RCWindowSize int
+
 	// -- resolved state (populated by ResolveAndValidate) --
 
 	upstream          *url.URL
@@ -227,6 +329,21 @@ type Provider struct {
 	transcodeMappings []proxy.TranscodeMapping
 	nativeRoutes      []proxy.NativeRoute
 	opencodePreset    transcode.OpencodePreset
+	// rcDialer is the resolved RC dialer for this provider, or nil when RC
+	// dialing is not configured.
+	rcDialer *rcclient.Dialer
+	// rcToken is the sesame channel credential resolved once from
+	// -sesame-token-env during resolveRC, or empty. Held for the RC
+	// channel's per-RPC credentials; never logged or journaled.
+	rcToken string
+	// explicitFlags maps the provider-scoped flag names the operator set
+	// (as opposed to defaults) to their parsed value strings, recorded by
+	// Parse via FlagSet.Visit. Resolution uses it only where a value is
+	// semantically required; explicitness is explicitProviderFlags.
+	explicitFlags map[string]string
+	// explicitProviderFlags records only which provider-scoped flags were
+	// set, keeping provenance separate from recorded values.
+	explicitProviderFlags map[string]struct{}
 	// modelCatalog is this provider's frozen catalog snapshot, built from its
 	// model-table subset and resolved mappings. Nil when no table names it.
 	modelCatalog *transcode.CatalogConfig
@@ -334,6 +451,44 @@ func (p *Provider) MaxIdleConnsPerHost() int { return p.maxIdlePerHost }
 // are forwarded verbatim with no stripping or injection.
 func (p *Provider) AuthPolicy() *auth.AuthPolicy { return p.authPolicy }
 
+// RCDialer returns the provider's resolved RemoteControl.NetConn dialer, or
+// nil when -rc-server was not configured: nil means upstream connections
+// dial directly through the default transport.
+func (p *Provider) RCDialer() *rcclient.Dialer { return p.rcDialer }
+
+// UpstreamTLSConfig builds the TLS configuration for the proxy's own
+// upstream handshake (direct dialing, or the RC tunnel where the RC server
+// only moves bytes). It returns nil when no trust flag is set, keeping the
+// previous behavior of verifying against the system roots. The CA reference
+// is decoded at startup — once discarded during resolve validation, once
+// rebuilt when the transport is constructed — so a CA that fails to parse
+// as PEM is a startup error, never a per-request surprise.
+func (p *Provider) UpstreamTLSConfig() (*tls.Config, error) {
+	if p.UpstreamCA == "" && !p.UpstreamInsecure && p.UpstreamServerName == "" {
+		return nil, nil
+	}
+	cfg := &tls.Config{
+		ServerName:         p.UpstreamServerName,
+		InsecureSkipVerify: p.UpstreamInsecure,
+	}
+	ca, err := rcclient.DecodeMaterial(p.UpstreamCA)
+	if err != nil {
+		return nil, fmt.Errorf("upstream CA: %w", err)
+	}
+	if len(ca) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(ca) {
+			return nil, errors.New("upstream CA: invalid PEM")
+		}
+		cfg.RootCAs = pool
+	}
+	return cfg, nil
+}
+
+// RCServerConfig returns the resolved embedded RC server configuration, or
+// nil when -rc-server-bind was not configured.
+func (s *Server) RCServerConfig() *rcclient.ServerConfig { return s.rcServerConfig }
+
 // Account is reserved for the future multi-account layer: per-account keys and
 // limits cooperating under a provider-scoped shared ceiling. Declared as a type
 // now so the concept is materialized, but stage 1 never populates it and the
@@ -388,6 +543,10 @@ func (c *Config) ResolveAndValidate() error {
 	}
 
 	if err := c.resolveCatalogSuites(); err != nil {
+		return err
+	}
+
+	if err := c.Server.resolveRC(); err != nil {
 		return err
 	}
 
@@ -518,6 +677,31 @@ func (p *Provider) validateBasic(index int, multi bool) error {
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
 
+	// Grammar-only (no side effects): the variable is read during resolve,
+	// after every provider's grammar has been checked, mirroring validateAuth.
+	if p.SesameTokenEnv != "" && !validEnvVarName(p.SesameTokenEnv) {
+		return fmt.Errorf(
+			"%s-sesame-token-env %q: environment variable name must match [A-Za-z_][A-Za-z0-9_]*",
+			ctx(), p.SesameTokenEnv,
+		)
+	}
+
+	// The local-handshake trust flags configure the handshake the proxy
+	// performs itself. Under remote termination the proxy never handshakes,
+	// so accepting them would silently ignore the operator's CA — refuse
+	// here in validation, before any material is decoded, so the error names
+	// the meaningless combination rather than a missing file.
+	if p.RCTerminateTLS && (p.UpstreamCA != "" || p.UpstreamInsecure || p.UpstreamServerName != "") {
+		return fmt.Errorf("%supstream TLS trust options (-upstream-ca, -upstream-insecure, -upstream-server-name) do not apply with -rc-terminate-tls; use the -rc-target-* options", ctx())
+	}
+
+	// On a plaintext upstream the transport never consults TLSClientConfig,
+	// so the same trio would be accepted but inert there too. The upstream
+	// URL is parsed and schemed by this point, so reject on http directly.
+	if p.upstream.Scheme == "http" && (p.UpstreamCA != "" || p.UpstreamInsecure || p.UpstreamServerName != "") {
+		return fmt.Errorf("%supstream TLS trust options (-upstream-ca, -upstream-insecure, -upstream-server-name) do not apply to a plaintext http upstream", ctx())
+	}
+
 	for _, s := range p.Limits {
 		if _, err := route.Parse(s); err != nil {
 			return fmt.Errorf("%sinvalid -limit %q: %w", ctx(), s, err)
@@ -620,7 +804,15 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
 
+	if _, err := p.UpstreamTLSConfig(); err != nil {
+		return fmt.Errorf("%s%w", ctx(), err)
+	}
+
 	if err := p.resolveTranscode(modelTable); err != nil {
+		return fmt.Errorf("%s%w", ctx(), err)
+	}
+
+	if err := p.resolveRC(); err != nil {
 		return fmt.Errorf("%s%w", ctx(), err)
 	}
 
@@ -630,132 +822,26 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 	return nil
 }
 
-// parsePatterns parses -limit patterns, falling back to the built-in defaults
-// when none were configured.
-func (p *Provider) parsePatterns() ([]route.Pattern, error) {
-	if len(p.Limits) == 0 {
-		return route.DefaultPatterns(), nil
-	}
-	out := make([]route.Pattern, 0, len(p.Limits))
-	for _, s := range p.Limits {
-		pattern, err := route.Parse(s)
-		if err != nil {
-			return nil, fmt.Errorf("invalid -limit %q: %w", s, err)
+// resolveRC validates the embedded RC server configuration when
+// -rc-server-bind is set. Without it, stray server options are rejected
+// rather than ignored. No socket is bound here; run() owns the listener.
+func (s *Server) resolveRC() error {
+	if s.RCBind == "" {
+		if s.RCTLS || s.RCCA != "" || s.RCCert != "" || s.RCKey != "" {
+			return errors.New("rc-server TLS options require -rc-server-bind")
 		}
-		out = append(out, pattern)
-	}
-	return out, nil
-}
-
-// routeLimiters builds the per-route/per-group limiters exactly as the legacy
-// wiring in main.go does: one limiter per distinct -limit pattern (or group),
-// keyed by the pattern's group name when present and by its raw string otherwise.
-// Patterns with Limit == 0 fall through to the default pool and get no limiter.
-//
-// validateBasic already parsed every entry of limitSpecs, so route.Parse cannot
-// fail here. A group-conflict warning mirrors the legacy behavior (the first
-// limiter wins).
-func routeLimiters(limitSpecs []string, releaseCooldown time.Duration) map[string]*queue.Limiter {
-	limiters := make(map[string]*queue.Limiter)
-
-	for _, s := range limitSpecs {
-		pattern, _ := route.Parse(s) // validated by validateBasic
-		if pattern.Unlimited {
-			continue // exempt class: no limiter, never acquires a slot
-		}
-		if pattern.Limit == 0 {
-			continue // falls through to the default pool
-		}
-		key := pattern.Raw
-		if pattern.Group != "" {
-			key = pattern.Group
-		}
-		if existing, ok := limiters[key]; ok {
-			// Group conflict warning: legacy behavior keeps the first limiter.
-			if existing.Limit() != pattern.Limit {
-				log.Printf("WARNING: route %q specifies group %q with limit %d, but group already has limit %d. Using %d.\n", s, pattern.Group, pattern.Limit, existing.Limit(), existing.Limit())
-			}
-			continue
-		}
-		limiters[key] = queue.NewLimiterWithCooldown(pattern.Limit, releaseCooldown)
-	}
-	return limiters
-}
-
-// normalizePrefix normalizes a mount prefix: "/" becomes "", a trailing slash is
-// removed, and the leading slash requirement is enforced.
-func normalizePrefix(p *Provider) error {
-	if p.Prefix == "" || p.Prefix == "/" {
-		p.Prefix = ""
 		return nil
 	}
-	if !strings.HasPrefix(p.Prefix, "/") {
-		return fmt.Errorf("-prefix must start with /, got %q", p.Prefix)
+	cfg := rcclient.ServerConfig{
+		Bind: s.RCBind,
+		TLS:  s.RCTLS,
+		CA:   s.RCCA,
+		Cert: s.RCCert,
+		Key:  s.RCKey,
 	}
-	// Keep internal slashes; drop at most one trailing slash.
-	p.Prefix = strings.TrimSuffix(p.Prefix, "/")
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	s.rcServerConfig = &cfg
 	return nil
-}
-
-// prefixSegments splits a normalized prefix into traversal-resolved segments for
-// overlap comparison: empty and "." segments are dropped, and ".." pops the
-// previous segment. This deliberately matches the router's literal (colon-free)
-// mount segmentation — the prefix is a literal mount prefix, not a route pattern.
-func prefixSegments(prefix string) []string {
-	var segs []string
-	for s := range strings.SplitSeq(prefix, "/") {
-		if s == "" || s == "." {
-			continue
-		}
-		if s == ".." {
-			if len(segs) > 0 {
-				segs = segs[:len(segs)-1]
-			}
-			continue
-		}
-		segs = append(segs, s)
-	}
-	return segs
-}
-
-// segmentsOverlap reports whether the two normalized prefixes have a segment-wise
-// prefix relationship (either is a prefix of the other), meaning they would route
-// the same request.
-func segmentsOverlap(a, b string) bool {
-	as := prefixSegments(a)
-	bs := prefixSegments(b)
-	if len(as) > len(bs) {
-		as, bs = bs, as
-	}
-	for i := range as {
-		if as[i] != bs[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// deriveName derives a provider display name from its upstream host:
-// strip the port, strip a leading "api."/"api-", and take the first
-// dot-segment. api.anthropic.com → anthropic. The host is the port-free,
-// bracket-free form from url.URL.Hostname() — IPv6 literals such as
-// "[::1]:9000" derive as "::1", without brackets or port.
-func deriveName(host string) string {
-	h := host
-	h = strings.TrimPrefix(h, "api.")
-	h = strings.TrimPrefix(h, "api-")
-	if i := strings.IndexByte(h, '.'); i >= 0 {
-		h = h[:i]
-	}
-	return h
-}
-
-func nameLabel(p *Provider) string {
-	if p.Name != "" {
-		return p.Name
-	}
-	if p.upstream != nil {
-		return p.upstream.Host
-	}
-	return "(unnamed)"
 }

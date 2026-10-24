@@ -426,8 +426,7 @@ func TestChatAudioOutputRouting(t *testing.T) {
 
 	// Audio data unapproved (strict, no loss): rejection.
 	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
-	var unsupported *UnsupportedFeatureError
-	if !errors.As(err, &unsupported) {
+	if _, ok := errors.AsType[*UnsupportedFeatureError](err); !ok {
 		t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 	}
 
@@ -475,8 +474,7 @@ func TestChatAudioOutputRouting(t *testing.T) {
 		`"message":{"role":"assistant","content":"hi","audio":{"id":"","data":"","expires_at":0,"transcript":""}}}],` +
 		`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 	_, _, err = DecodeChatResponseWithPolicy(emptyBody, ChatCapabilities{}, permissiveLossPolicy())
-	var wireErr *UpstreamWireError
-	if !errors.As(err, &wireErr) {
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("empty audio object err = %T %v, want *UpstreamWireError", err, err)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 )
 
 func TestExtractInboundCredential(t *testing.T) {
@@ -322,5 +324,191 @@ func TestApplyTargetAuthenticationConfiguredSecret(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected missing inbound credential error")
+	}
+}
+
+// TestFromProviderAuthForUpstream pins the dialect-adaptation contract of
+// inherited provider auth: a bearer mount serving the Messages upstream
+// authenticates with X-Api-Key (plus the default Anthropic version unless the
+// policy carries one), an x-api-key mount serving the OpenAI upstreams
+// authenticates with Bearer, and every other mode passes through verbatim —
+// mirroring the auto rule ApplyTargetAuthentication applies at request time,
+// so one mount authenticates a model identically whether served natively or
+// transcoded.
+func TestFromProviderAuthForUpstream(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy *auth.AuthPolicy
+		target UpstreamProtocol
+		want   AuthPolicy
+	}{
+		{
+			name:   "nil policy",
+			policy: nil,
+			target: UpstreamChatCompletions,
+			want:   AuthPolicy{Mode: AuthNone},
+		},
+		{
+			name:   "none policy",
+			policy: &auth.AuthPolicy{Mode: auth.AuthNone},
+			target: UpstreamMessages,
+			want:   AuthPolicy{Mode: AuthNone},
+		},
+		{
+			name: "bearer to messages adapts with default version",
+			policy: &auth.AuthPolicy{
+				Mode:   auth.AuthBearer,
+				Secret: auth.NewStaticSecretSource("tok"),
+			},
+			target: UpstreamMessages,
+			want: AuthPolicy{
+				Mode:             AuthXAPIKey,
+				Secret:           auth.NewStaticSecretSource("tok"),
+				AnthropicVersion: auth.DefaultAnthropicVersion,
+			},
+		},
+		{
+			name: "bearer to messages keeps explicit version",
+			policy: &auth.AuthPolicy{
+				Mode:             auth.AuthBearer,
+				Secret:           auth.NewStaticSecretSource("tok"),
+				AnthropicVersion: "2024-01-01",
+			},
+			target: UpstreamMessages,
+			want: AuthPolicy{
+				Mode:             AuthXAPIKey,
+				Secret:           auth.NewStaticSecretSource("tok"),
+				AnthropicVersion: "2024-01-01",
+			},
+		},
+		{
+			name: "bearer to responses verbatim",
+			policy: &auth.AuthPolicy{
+				Mode:   auth.AuthBearer,
+				Secret: auth.NewStaticSecretSource("tok"),
+			},
+			target: UpstreamResponses,
+			want: AuthPolicy{
+				Mode:   AuthBearer,
+				Secret: auth.NewStaticSecretSource("tok"),
+			},
+		},
+		{
+			name: "bearer to chat completions verbatim",
+			policy: &auth.AuthPolicy{
+				Mode:   auth.AuthBearer,
+				Secret: auth.NewStaticSecretSource("tok"),
+			},
+			target: UpstreamChatCompletions,
+			want: AuthPolicy{
+				Mode:   AuthBearer,
+				Secret: auth.NewStaticSecretSource("tok"),
+			},
+		},
+		{
+			name: "x-api-key to responses adapts to bearer",
+			policy: &auth.AuthPolicy{
+				Mode:             auth.AuthXAPIKey,
+				Secret:           auth.NewStaticSecretSource("tok"),
+				AnthropicVersion: "2023-06-01",
+			},
+			target: UpstreamResponses,
+			want: AuthPolicy{
+				Mode:   AuthBearer,
+				Secret: auth.NewStaticSecretSource("tok"),
+				// The version rides along faithfully: it is inert on the
+				// OpenAI upstreams (the header is stripped there) and
+				// survives a round trip back to a Messages target.
+				AnthropicVersion: "2023-06-01",
+			},
+		},
+		{
+			name: "x-api-key to chat completions adapts to bearer",
+			policy: &auth.AuthPolicy{
+				Mode:             auth.AuthXAPIKey,
+				Secret:           auth.NewStaticSecretSource("tok"),
+				AnthropicVersion: "2023-06-01",
+			},
+			target: UpstreamChatCompletions,
+			want: AuthPolicy{
+				Mode:             AuthBearer,
+				Secret:           auth.NewStaticSecretSource("tok"),
+				AnthropicVersion: "2023-06-01",
+			},
+		},
+		{
+			name: "x-api-key to messages verbatim",
+			policy: &auth.AuthPolicy{
+				Mode:             auth.AuthXAPIKey,
+				Secret:           auth.NewStaticSecretSource("tok"),
+				AnthropicVersion: "2023-06-01",
+			},
+			target: UpstreamMessages,
+			want: AuthPolicy{
+				Mode:             AuthXAPIKey,
+				Secret:           auth.NewStaticSecretSource("tok"),
+				AnthropicVersion: "2023-06-01",
+			},
+		},
+		{
+			name: "api-key verbatim for every target",
+			policy: &auth.AuthPolicy{
+				Mode:   auth.AuthAPIKey,
+				Secret: auth.NewStaticSecretSource("tok"),
+			},
+			target: UpstreamMessages,
+			want: AuthPolicy{
+				Mode:   AuthAPIKey,
+				Secret: auth.NewStaticSecretSource("tok"),
+			},
+		},
+		{
+			name: "header verbatim for every target",
+			policy: &auth.AuthPolicy{
+				Mode:         auth.AuthCustomHeader,
+				Secret:       auth.NewStaticSecretSource("tok"),
+				CustomHeader: "X-Custom-Key",
+			},
+			target: UpstreamMessages,
+			want: AuthPolicy{
+				Mode:         AuthCustomHeader,
+				Secret:       auth.NewStaticSecretSource("tok"),
+				CustomHeader: "X-Custom-Key",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FromProviderAuthForUpstream(tt.policy, tt.target)
+			if got.Mode != tt.want.Mode {
+				t.Errorf("mode = %q, want %q", got.Mode, tt.want.Mode)
+			}
+			if got.AnthropicVersion != tt.want.AnthropicVersion {
+				t.Errorf("anthropic version = %q, want %q", got.AnthropicVersion, tt.want.AnthropicVersion)
+			}
+			if got.CustomHeader != tt.want.CustomHeader {
+				t.Errorf("custom header = %q, want %q", got.CustomHeader, tt.want.CustomHeader)
+			}
+			if tt.want.Secret == nil {
+				if got.Secret != nil {
+					t.Fatal("secret = non-nil, want nil")
+				}
+				return
+			}
+			if got.Secret == nil {
+				t.Fatal("secret = nil, want non-nil")
+			}
+			gotValue, err := got.Secret.Secret(context.Background())
+			if err != nil {
+				t.Fatalf("resolve secret: %v", err)
+			}
+			wantValue, err := tt.want.Secret.Secret(context.Background())
+			if err != nil {
+				t.Fatalf("resolve want secret: %v", err)
+			}
+			if gotValue != wantValue {
+				t.Errorf("secret = %q, want %q", gotValue, wantValue)
+			}
+		})
 	}
 }

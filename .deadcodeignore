@@ -44,3 +44,9 @@ internal/transcode/testcorpus/*
 # unreachable even though they are load-bearing test surface.
 *unreachable func: Model.renderProviderSwitcher*
 *unreachable func: Model.budgetedChips*
+
+# rcclient embedded RC server: Stop (unbounded graceful stop) is public API
+# for programmatic consumers and tests. main.go deliberately calls the bounded
+# StopAfter so shutdown cannot hang on a client that holds a stream open,
+# which leaves the plain Stop unreachable from the binary entry.
+*unreachable func: Server.Stop*

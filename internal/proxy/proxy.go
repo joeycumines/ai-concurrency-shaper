@@ -808,13 +808,25 @@ func New(opts ...Option) (*Proxy, error) {
 	// RetryReplayBytes bound must equal the proxy's retry transport body cap
 	// with retries enabled: the declared bound is
 	// otherwise a silent lie about the actual replay cap.
-	seenTranscodeRoutes := make(map[transcode.RouteKey]struct{}, len(cfg.transcodeMappings))
+	type transcodeTargetKey struct {
+		routeKey transcode.RouteKey
+		upstream transcode.UpstreamProtocol
+	}
+	seenTranscodeRoutes := make(map[transcodeTargetKey]struct{}, len(cfg.transcodeMappings))
 	for i := range cfg.transcodeMappings {
 		routeKey := cfg.transcodeMappings[i].Mapping.ClientRoute
-		if _, dup := seenTranscodeRoutes[routeKey]; dup {
-			return nil, fmt.Errorf("proxy: duplicate transcode client route %s %s", routeKey.Method, routeKey.Path)
+		targetKey := transcodeTargetKey{
+			routeKey: routeKey,
+			upstream: cfg.transcodeMappings[i].Mapping.UpstreamProtocol,
 		}
-		seenTranscodeRoutes[routeKey] = struct{}{}
+		if _, dup := seenTranscodeRoutes[targetKey]; dup {
+			return nil, fmt.Errorf(
+				"proxy: duplicate transcode client route %s %s (upstream %s)",
+				routeKey.Method, routeKey.Path,
+				cfg.transcodeMappings[i].Mapping.UpstreamProtocol,
+			)
+		}
+		seenTranscodeRoutes[targetKey] = struct{}{}
 
 		// An external signer signs EVERY actual attempt AFTER the retry
 		// layer rebuilt the body. With retries enabled,
@@ -948,7 +960,7 @@ func New(opts ...Option) (*Proxy, error) {
 	// proxy engine (the retry/breaker-aware transport). The mutable parts of
 	// the configuration are deep-copied so caller mutation after New cannot
 	// change live behavior or race with requests.
-	p.transcodeHandlerMap = make(map[transcode.RouteKey]http.Handler, len(cfg.transcodeMappings))
+	handlersByRoute := make(map[transcode.RouteKey][]targetTranscodeHandler)
 	for i := range cfg.transcodeMappings {
 		m := &cfg.transcodeMappings[i]
 		mapping := m.Mapping
@@ -957,7 +969,10 @@ func New(opts ...Option) (*Proxy, error) {
 		mapping.AllowedClientQuery = cloneStringSet(m.AllowedClientQuery)
 		if mapping.Auth.IsZero() {
 			if cfg.authPolicy != nil {
-				mapping.Auth = transcode.FromProviderAuth(cfg.authPolicy)
+				// Inherited provider auth adapts to the mapping's upstream
+				// dialect (bearer<->x-api-key) so a model authenticates
+				// identically whether served natively or transcoded.
+				mapping.Auth = transcode.FromProviderAuthForUpstream(cfg.authPolicy, mapping.UpstreamProtocol)
 			} else {
 				mapping.Auth = transcode.AuthPolicy{Mode: transcode.AuthNone}
 			}
@@ -978,10 +993,22 @@ func New(opts ...Option) (*Proxy, error) {
 			nil,
 		)
 		p.transcodeHandlers = append(p.transcodeHandlers, h)
-		// First-match wins for duplicate route keys.
-		if _, exists := p.transcodeHandlerMap[m.ClientRoute]; !exists {
-			p.transcodeHandlerMap[m.ClientRoute] = h
+		handlersByRoute[m.ClientRoute] = append(handlersByRoute[m.ClientRoute], targetTranscodeHandler{
+			mapping: m,
+			handler: h,
+		})
+	}
+	p.transcodeHandlerMap = make(map[transcode.RouteKey]http.Handler, len(handlersByRoute))
+	for routeKey, targets := range handlersByRoute {
+		if len(targets) == 1 {
+			p.transcodeHandlerMap[routeKey] = targets[0].handler
+			continue
 		}
+		dispatcher, err := newMultiTranscodeDispatcher(routeKey, targets)
+		if err != nil {
+			return nil, err
+		}
+		p.transcodeHandlerMap[routeKey] = dispatcher
 	}
 
 	// Native routes share the transparent engine with model-identifier
@@ -1014,6 +1041,10 @@ func New(opts ...Option) (*Proxy, error) {
 		p.catalog = catalogHandler
 	}
 
+	// The native auth variants are precomputed once so the Rewrite hot
+	// path only selects a ready pointer by the natively served dialect.
+	nativeAuth := newNativeAuthVariants(cfg.authPolicy)
+
 	rp := &httputil.ReverseProxy{
 		// Rewrite (not the deprecated Director) is load-bearing for auth
 		// safety: stdlib strips hop-by-hop headers from the outbound clone
@@ -1028,14 +1059,18 @@ func New(opts ...Option) (*Proxy, error) {
 			// query by raw concatenation — the transparent-proxy contract.
 			pr.SetURL(cfg.upstream)
 			pr.Out.Host = cfg.upstream.Host
-			if cfg.authPolicy != nil {
+			if nativeAuth.provider != nil {
+				effectiveAuth := nativeAuth.provider
+				if alias, ok := nativeAliasFromContext(pr.In.Context()); ok {
+					effectiveAuth = nativeAuth.forProtocol(alias.protocol)
+				}
 				// Effectively unreachable for config-built policies: their
 				// sources reject blank credentials at construction time, and
 				// Validate ran at startup. Kept defensive for direct callers
 				// and future SecretSource implementations. On failure, fall
 				// back to strip-only rather than forwarding an
 				// unauthenticated or client-credentialed request.
-				if err := auth.ApplyUpstreamAuthentication(pr.Out.Context(), pr.Out, cfg.authPolicy); err != nil {
+				if err := auth.ApplyUpstreamAuthentication(pr.Out.Context(), pr.Out, effectiveAuth); err != nil {
 					slog.Error("upstream auth failed; forwarding stripped-only", "error", err)
 					auth.StripCredentials(pr.Out.Header)
 				}
@@ -1284,6 +1319,10 @@ func (p *Proxy) Journal() *journal.Journal {
 }
 
 // HandlerForRouteKey returns the transcode handler mapped to key, or nil.
+// A route with multiple mappings returns a dispatcher that selects the
+// target by the request's model dialect (Via); callers invoking it directly
+// on a raw request pay one bounded body pre-read and get dispatcher
+// semantics, including the native-miss context contract.
 func (p *Proxy) HandlerForRouteKey(key transcode.RouteKey) http.Handler {
 	return p.transcodeHandlerMap[key]
 }

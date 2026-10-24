@@ -583,15 +583,21 @@ func TestParseClientQuery(t *testing.T) {
 	}
 }
 
-// TestBuildTranscodeMappingsConflict verifies enabling both Messages presets
-// fails before proxy.New runs.
-func TestBuildTranscodeMappingsConflict(t *testing.T) {
-	_, err := buildTranscodeMappings(nil, false, true, true, transcodeCLIOptions{lossPolicy: transcode.StrictLossPolicy()})
-	if err == nil {
-		t.Fatal("expected both-messages-preset conflict")
+// TestBuildTranscodeMappings_BothMessagesPresetsAllowed verifies enabling both Messages presets
+// produces both UpstreamChatCompletions and UpstreamResponses mappings for POST /v1/messages.
+func TestBuildTranscodeMappings_BothMessagesPresetsAllowed(t *testing.T) {
+	mappings, err := buildTranscodeMappings(nil, false, true, true, transcodeCLIOptions{lossPolicy: transcode.StrictLossPolicy()})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "both map /v1/messages") {
-		t.Fatalf("error = %v", err)
+	if len(mappings) != 2 {
+		t.Fatalf("mappings count = %d, want 2", len(mappings))
+	}
+	if mappings[0].Mapping.UpstreamProtocol != transcode.UpstreamChatCompletions {
+		t.Errorf("mappings[0].UpstreamProtocol = %v, want %v", mappings[0].Mapping.UpstreamProtocol, transcode.UpstreamChatCompletions)
+	}
+	if mappings[1].Mapping.UpstreamProtocol != transcode.UpstreamResponses {
+		t.Errorf("mappings[1].UpstreamProtocol = %v, want %v", mappings[1].Mapping.UpstreamProtocol, transcode.UpstreamResponses)
 	}
 }
 
@@ -1692,6 +1698,290 @@ func TestParseTranscodeProfilesAllTiers(t *testing.T) {
 		}
 		if profiles.Profiles["p"].ReasoningTier != tier {
 			t.Errorf("tier %q not preserved", tier)
+		}
+	}
+}
+
+// TestResolveAndValidate_SingleMountMultiDialect verifies that a single provider mount
+// can simultaneously configure native routes for chat, messages, and responses alongside
+// transcodes for responses-chat, messages-chat, and messages-responses without conflict.
+func TestResolveAndValidate_SingleMountMultiDialect(t *testing.T) {
+	t.Setenv("TEST_OPENCODE_TOKEN", "test-secret")
+	args := []string{
+		"--provider=opencode-go",
+		"-upstream", "https://opencode.ai/zen/go",
+		"--native-route=chat@/v1/chat/completions",
+		"--native-route=messages@/v1/messages",
+		"--native-route=responses@/v1/responses",
+		"-transcode-responses-chat",
+		"-transcode-messages-chat",
+		"-transcode-messages-responses",
+		"-transcode-model", "claude-opus=wire-opus",
+		"-auth-mode", "bearer",
+		"-auth-source", "env:TEST_OPENCODE_TOKEN",
+	}
+	cfg, err := Parse(args)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	p := cfg.Providers[0]
+	if len(p.NativeRoutes()) != 3 {
+		t.Fatalf("native routes = %d, want 3", len(p.NativeRoutes()))
+	}
+	if len(p.TranscodeMappings()) != 3 {
+		t.Fatalf("transcode mappings = %d, want 3", len(p.TranscodeMappings()))
+	}
+}
+
+// TestResolveAndValidate_ExplicitMessagesResponsesRouteParity verifies the
+// loss-policy parity between the preset and the explicit route spelling:
+// both Messages->Responses forms validate out of the box with the same
+// effective policy (the tool_schema_strictness injection is directional, not
+// preset-specific), and both keep their operator escapes.
+func TestResolveAndValidate_ExplicitMessagesResponsesRouteParity(t *testing.T) {
+	base := []string{
+		"--provider=opencode-go",
+		"-upstream", "https://opencode.ai/zen/go",
+		"-transcode-route", "messages@/v1/messages=responses@/v1/responses",
+	}
+
+	// Explicit route validates without extra flags, exactly like the preset.
+	cfg, err := Parse(base)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate explicit messages-responses route: %v", err)
+	}
+	mappings := cfg.Providers[0].TranscodeMappings()
+	if len(mappings) != 1 {
+		t.Fatalf("mappings = %d, want 1", len(mappings))
+	}
+	if !mappings[0].LossPolicy.Allows(transcode.FeatureToolSchemaStrictness) {
+		t.Error("explicit messages-responses route: effective policy does not allow tool_schema_strictness, want parity with the preset")
+	}
+
+	// The preset's effective policy allows it too.
+	presetCfg, err := Parse([]string{
+		"--provider=opencode-go",
+		"-upstream", "https://opencode.ai/zen/go",
+		"-transcode-messages-responses",
+	})
+	if err != nil {
+		t.Fatalf("Parse preset: %v", err)
+	}
+	if err := presetCfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate preset: %v", err)
+	}
+	preset := presetCfg.Providers[0].TranscodeMappings()
+	if len(preset) != 1 {
+		t.Fatalf("preset mappings = %d, want 1", len(preset))
+	}
+	if !preset[0].LossPolicy.Allows(transcode.FeatureToolSchemaStrictness) {
+		t.Error("preset messages-responses: effective policy does not allow tool_schema_strictness")
+	}
+
+	// Negation still rejects for both spellings.
+	negatedArgs := append(append([]string{}, base...),
+		"-transcode-allow-loss", "!tool_schema_strictness")
+	negated, err := Parse(negatedArgs)
+	if err != nil {
+		t.Fatalf("Parse negated: %v", err)
+	}
+	if err := negated.ResolveAndValidate(); err == nil ||
+		!strings.Contains(err.Error(), "tool_schema_strictness") {
+		t.Errorf("negated explicit route: error = %v, want tool_schema_strictness rejection", err)
+	}
+
+	// Strict defaults still reject for both spellings.
+	strict, err := Parse(append(append([]string{}, base...), "-transcode-strict-defaults"))
+	if err != nil {
+		t.Fatalf("Parse strict: %v", err)
+	}
+	if err := strict.ResolveAndValidate(); err == nil ||
+		!strings.Contains(err.Error(), "tool_schema_strictness") {
+		t.Errorf("strict explicit route: error = %v, want tool_schema_strictness rejection", err)
+	}
+}
+
+// TestResolveAndValidate_SameRouteConflictingClientProtocols verifies that
+// two mappings sharing one client route must agree on the client protocol:
+// one route is one client dialect, and mixing two would parse requests and
+// render errors in the wrong shape.
+func TestResolveAndValidate_SameRouteConflictingClientProtocols(t *testing.T) {
+	cfg, err := Parse([]string{
+		"--provider=opencode-go",
+		"-upstream", "https://opencode.ai/zen/go",
+		"-transcode-route", "messages@/v1/messages=responses@/v1/responses",
+		"-transcode-route", "responses@/v1/messages=chat-completions@/v1/chat/completions",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("ResolveAndValidate: nil error, want conflicting client protocol rejection")
+	}
+	if !strings.Contains(err.Error(), "conflicting client protocols") {
+		t.Errorf("error = %v, want conflicting client protocols", err)
+	}
+}
+
+// TestResolveAndValidate_DuplicateErrorNamesUpstream verifies the duplicate
+// (route, upstream) rejection identifies the exact collision by naming the
+// upstream protocol, now that one client route may legitimately carry
+// multiple mappings.
+func TestResolveAndValidate_DuplicateErrorNamesUpstream(t *testing.T) {
+	cfg, err := Parse([]string{
+		"--provider=opencode-go",
+		"-upstream", "https://opencode.ai/zen/go",
+		"-transcode-route", "messages@/v1/messages=chat-completions@/v1/chat/completions",
+		"-transcode-messages-chat",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("ResolveAndValidate: nil error, want duplicate rejection")
+	}
+	if !strings.Contains(err.Error(), "chat-completions") {
+		t.Errorf("error = %v, want it to name the duplicated upstream protocol", err)
+	}
+}
+
+// TestResolveAndValidate_TranscodeAuthDialectAdaptation pins the dialect
+// adaptation of INHERITED transcode auth: provider-policy inheritance —
+// implicit or via -transcode-auth-source provider — adapts the mount's
+// bearer/x-api-key spelling to each mapping's upstream dialect (an x-api-key
+// mount transcoding to the OpenAI upstreams authenticates with Bearer, a
+// bearer mount transcoding to Messages authenticates with X-Api-Key plus the
+// default Anthropic version), while an explicit -transcode-auth-mode is
+// applied verbatim and never second-guessed.
+func TestResolveAndValidate_TranscodeAuthDialectAdaptation(t *testing.T) {
+	t.Setenv("PROVIDER_SECRET", "provider-val")
+	t.Setenv("ROUTE_SECRET", "route-val")
+
+	// 1. Implicit inheritance from an x-api-key mount adapts per mapping:
+	// messages->chat resolves with Bearer, not the mount's X-Api-Key.
+	{
+		cfg, err := Parse([]string{
+			"--provider=opencode-go",
+			"-upstream", "https://opencode.ai/zen/go",
+			"-auth-mode", "x-api-key",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-messages-chat",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		if len(mappings) != 1 {
+			t.Fatalf("mappings = %d, want 1", len(mappings))
+		}
+		authP := mappings[0].Mapping.Auth
+		if authP.Mode != transcode.AuthBearer {
+			t.Errorf("auth mode = %q, want bearer (mount is x-api-key, upstream dialect is chat)", authP.Mode)
+		}
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "provider-val" {
+			t.Errorf("secret = %q, err = %v, want provider-val", sec, err)
+		}
+	}
+
+	// 2. Implicit inheritance from a bearer mount transcoding to an OpenAI
+	// upstream stays bearer: the upstream dialect decides, and the Responses
+	// upstream speaks bearer. (The bearer->x-api-key arm exists for an
+	// UpstreamMessages target, which no transcode mapping can carry — it
+	// is the native Messages path's adaptation — so from config the
+	// adaptation only ever runs x-api-key -> bearer.)
+	{
+		cfg, err := Parse([]string{
+			"--provider=opencode-go",
+			"-upstream", "https://opencode.ai/zen/go",
+			"-auth-mode", "bearer",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-messages-responses",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		if len(mappings) != 1 {
+			t.Fatalf("mappings = %d, want 1", len(mappings))
+		}
+		authP := mappings[0].Mapping.Auth
+		if authP.Mode != transcode.AuthBearer {
+			t.Errorf("auth mode = %q, want bearer (upstream dialect is responses; no spurious adaptation)", authP.Mode)
+		}
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "provider-val" {
+			t.Errorf("secret = %q, err = %v, want provider-val", sec, err)
+		}
+	}
+
+	// 3. Explicit -transcode-auth-mode x-api-key stays verbatim: the
+	// operator's explicit spelling is authoritative, never adapted.
+	{
+		cfg, err := Parse([]string{
+			"--provider=opencode-go",
+			"-upstream", "https://opencode.ai/zen/go",
+			"-auth-mode", "x-api-key",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-messages-chat",
+			"-transcode-auth", "x-api-key",
+			"-transcode-auth-source", "env:ROUTE_SECRET",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		authP := mappings[0].Mapping.Auth
+		if authP.Mode != transcode.AuthXAPIKey {
+			t.Errorf("auth mode = %q, want x-api-key (explicit mode is never adapted)", authP.Mode)
+		}
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "route-val" {
+			t.Errorf("secret = %q, err = %v, want route-val", sec, err)
+		}
+	}
+
+	// 4. -transcode-auth-source provider inherits the adaptation.
+	{
+		cfg, err := Parse([]string{
+			"--provider=opencode-go",
+			"-upstream", "https://opencode.ai/zen/go",
+			"-auth-mode", "x-api-key",
+			"-auth-source", "env:PROVIDER_SECRET",
+			"-transcode-messages-chat",
+			"-transcode-auth-source", "provider",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if err := cfg.ResolveAndValidate(); err != nil {
+			t.Fatalf("ResolveAndValidate: %v", err)
+		}
+		mappings := cfg.Providers[0].TranscodeMappings()
+		authP := mappings[0].Mapping.Auth
+		if authP.Mode != transcode.AuthBearer {
+			t.Errorf("auth mode = %q, want bearer (provider-source inheritance adapts like implicit)", authP.Mode)
+		}
+		sec, err := authP.Secret.Secret(context.Background())
+		if err != nil || sec != "provider-val" {
+			t.Errorf("secret = %q, err = %v, want provider-val", sec, err)
 		}
 	}
 }

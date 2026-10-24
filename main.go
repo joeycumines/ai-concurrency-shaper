@@ -39,6 +39,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/rcclient"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/router"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
@@ -86,11 +87,26 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 	j := journal.New(journalCap, maxBody)
 
 	met := metrics.NewCollector()
+	tlsCfg, err := p.UpstreamTLSConfig()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("proxy config: %w", err)
+	}
 	transport := &http.Transport{
 		MaxIdleConns:        200,
 		MaxIdleConnsPerHost: p.MaxIdleConnsPerHost(),
 		IdleConnTimeout:     120 * time.Second,
 		DisableKeepAlives:   p.DisableKeepAlives,
+		TLSClientConfig:     tlsCfg,
+	}
+	if d := p.RCDialer(); d != nil {
+		// Dial upstream connections through the RemoteControl.NetConn stream.
+		transport.DialContext = d.DialContext
+		if d.RemoteTerminate() {
+			// TLS is terminated at the RC server: the returned connection
+			// already carries the decrypted stream, so the transport must not
+			// perform its own TLS handshake over it.
+			transport.DialTLSContext = d.DialContext
+		}
 	}
 
 	opts := []proxy.Option{
@@ -199,6 +215,22 @@ func logProviderConfig(pr *config.Provider) {
 		}
 		log.Printf("upstream auth: auth-mode=%s auth-source=%s", policy.Mode, source)
 	}
+	if d := pr.RCDialer(); d != nil {
+		// Hyphen-bound tokens, references only (no secret values), matching the
+		// failure-hold/auth discipline above.
+		log.Printf("rc-dial: rc-server=%s terminate-tls=%v", pr.RCServer, d.RemoteTerminate())
+	}
+	if pr.UpstreamCA != "" || pr.UpstreamInsecure || pr.UpstreamServerName != "" {
+		// References only: whether a trust hook is configured, never the
+		// material. -upstream-insecure is a deliberate operator choice, so the
+		// line states it plainly rather than warning.
+		trust := "system-roots"
+		if pr.UpstreamCA != "" {
+			trust = "custom-ca"
+		}
+		log.Printf("upstream-tls: trust=%s insecure=%v server-name=%s",
+			trust, pr.UpstreamInsecure, pr.UpstreamServerName)
+	}
 	if mappings := pr.TranscodeMappings(); len(mappings) > 0 {
 		var parts []string
 		for _, m := range mappings {
@@ -225,6 +257,19 @@ func logProviderConfig(pr *config.Provider) {
 				pr.EffectiveName(), host)
 		} else {
 			log.Printf("opencode preset: provider %q emits the first-party request shape", pr.EffectiveName())
+		}
+		// When the same mount also terminates upstream TLS at the RC server,
+		// the first-party shape spans the handshake too — or it stays the
+		// engine default, stated honestly when no client-hello spec is set.
+		if d := pr.RCDialer(); d != nil && d.RemoteTerminate() {
+			// Trim to match ParseClientHello semantics: a whitespace-only value
+			// parses to nil (engine default), so it must not report the pairing.
+			if strings.TrimSpace(pr.RCTargetClientHello) != "" {
+				log.Printf("opencode preset: provider %q pairs first-party headers with the rc-dial client-hello fingerprint", pr.EffectiveName())
+			} else {
+				log.Printf("note: opencode preset for provider %q keeps the engine-default tls fingerprint (no -rc-target-client-hello; full-fidelity opencode fingerprinting needs a sesame-endpoint custom tls provider)",
+					pr.EffectiveName())
+			}
 		}
 	}
 }
@@ -314,6 +359,33 @@ func run() error {
 
 	if err := cfg.ResolveAndValidate(); err != nil {
 		return err
+	}
+
+	// Embedded RC server and RC dialer lifecycle: close the dialers and stop
+	// the server after the HTTP servers shut down (runServerLifecycle below).
+	var rcSrv *rcclient.Server
+	defer func() {
+		for _, pr := range cfg.Providers {
+			if d := pr.RCDialer(); d != nil {
+				_ = d.Close()
+			}
+		}
+		if rcSrv != nil {
+			rcSrv.StopAfter(5 * time.Second)
+		}
+	}()
+
+	if rcCfg := cfg.Server.RCServerConfig(); rcCfg != nil {
+		rcSrv, err = rcclient.NewServer(*rcCfg)
+		if err != nil {
+			return err
+		}
+		// Deliberately NOT "listening on <addr>": the e2e helper
+		// parseListeningAddr splits on that exact phrase to find the proxy's
+		// own bind address, and an embedded RC server that logged the same
+		// shape would alias it. The hyphen-bound bind=/tls= form is
+		// unambiguous for both the operator and the test parsers.
+		log.Printf("rc-server: bind=%s tls=%v", rcSrv.Addr(), rcCfg.TLS)
 	}
 
 	if summary := cfg.ModelTableSummary(); summary != "" {

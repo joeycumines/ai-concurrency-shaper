@@ -45,6 +45,9 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-queue-depth` | provider | `0` | Max requests waiting for a slot at once (0 = unbounded, the documented blocking semantics). When the bound is reached, arriving requests fail fast with `429 Too Many Requests` + `Retry-After` — the protocol signal AI clients and the official SDKs already act on — instead of queueing silently and amplifying into client-side retries |
 | `-queue-comments` | provider | `0` | SSE queue-comment interval for streaming requests (0 = disabled). When set (e.g. `15s`) and the request's `Accept` header selects `text/event-stream`, the proxy commits `200` + SSE headers **before** admission and emits `: queue-wait elapsed=N` comments while queued — the connection stays visibly alive instead of silently blocking. Opt-in with a documented trade-off: once committed, the exchange is locked to the streaming representation; later failures surface as stream failures/aborts, never as HTTP error statuses. Body-carrying requests require a full-duplex-capable connection (standard for net/http servers); a writer that cannot enable it falls back to the silent-queuing semantics rather than corrupt the request body |
 | `-upstream-disable-keep-alives` | provider | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
+| `-upstream-ca` | provider | _(unset)_ | CA for verifying the upstream certificate on the proxy's own TLS handshake (`file:PATH` or `base64:DATA`). Unset verifies against the system roots. Rejected with `-rc-terminate-tls` (use `-rc-target-ca` there) and on plaintext `http://` upstreams (nothing to verify against). |
+| `-upstream-insecure` | provider | `false` | Skip upstream TLS certificate verification on the proxy's own handshake. Rejected with `-rc-terminate-tls` and on plaintext `http://` upstreams. A configured `-upstream-ca` is inert alongside it (nothing left to verify against). |
+| `-upstream-server-name` | provider | _(unset)_ | TLS SNI override for the proxy's own upstream handshake. Rejected with `-rc-terminate-tls` and on plaintext `http://` upstreams. |
 | `-retry` | provider | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
 | `-retry-max-body-mb` | provider | `5` | Max request body size (MB) eligible for retry |
 | `-auth-source` | provider | _(unset)_ | Upstream credential source: `env:VAR`, `file:PATH`, or `none` (strip-only). Unset disables upstream auth entirely — requests are forwarded verbatim |
@@ -210,6 +213,140 @@ Other explicit scope boundaries and deferred capabilities:
 - **Provider Resource Isolation vs Client Identity Rotation**: The proxy intentionally does not implement LocalAddr pooling, User-Agent rotation, TLS fingerprint spoofing, or keypool rotation on 429. Per the Maxim AI caveat, having $N$ API keys in the same organization does not yield $N\times$ quota under modern upstream mitigation policies (providers enforce limits per organization, project, or billing account). The correct and supported architectural pattern is defining distinct organizations, accounts, or regions as distinct `--provider` resources with isolated queue limiters and circuit breakers, rather than per-request identity rotation.
 - **Readiness and Configuration**: Readiness is TCP-connect only, and configuration changes require a restart.
 
+### RemoteControl.NetConn Dialing
+
+A provider's upstream connections can be dialed through a [sesame RemoteControl.NetConn](https://github.com/joeycumines/sesame) target: a gRPC service that dials connections on the client's behalf and streams them back, optionally terminating upstream TLS and traversing egress proxies ahead of the dial. The shaper supports both roles: **client flags** (`-rc-*`, provider scope) configure how a provider dials through an RC server, and **server flags** (`-rc-server-*`, server scope) let the binary itself act as an RC target.
+
+#### Provider flags (`-rc-*`, per-provider)
+
+| Flag | Description |
+|------|-------------|
+| `-rc-server` | RC server address (`host:port`). Empty = direct dialing; all other `-rc-*` flags require this. |
+| `-rc-dial-timeout` | Timeout for the remote dial through the RC server (0 = no timeout). |
+| `-rc-channel-tls` | Enable TLS on the gRPC channel to the RC server. |
+| `-rc-channel-ca` | CA for verifying the RC server certificate (`file:PATH` or `base64:DATA`; requires `-rc-channel-tls`). |
+| `-rc-channel-cert` | Client certificate for mTLS on the gRPC channel (`file:PATH` or `base64:DATA`; requires `-rc-channel-tls` and `-rc-channel-key`). |
+| `-rc-channel-key` | Client private key for mTLS on the gRPC channel (`file:PATH` or `base64:DATA`; requires `-rc-channel-tls` and `-rc-channel-cert`). |
+| `-rc-channel-server-name` | TLS SNI override for the gRPC channel (requires `-rc-channel-tls`). |
+| `-rc-channel-insecure` | Skip TLS verification on the gRPC channel (requires `-rc-channel-tls`). |
+| `-rc-terminate-tls` | Terminate upstream TLS **at the RC server** instead of inside the proxy. Enables the `-rc-target-*` flags below; without it the tunnel is plain TCP and the proxy performs TLS normally. |
+| `-rc-target-server-name` | Upstream TLS SNI for the handshake terminated at the RC server (requires `-rc-terminate-tls`). |
+| `-rc-target-ca` | CA for verifying the upstream certificate (`file:PATH` or `base64:DATA`; requires `-rc-terminate-tls`). |
+| `-rc-target-cert` | Client certificate for upstream mTLS (`file:PATH` or `base64:DATA`; requires `-rc-terminate-tls` and `-rc-target-key`). |
+| `-rc-target-key` | Client private key for upstream mTLS (`file:PATH` or `base64:DATA`; requires `-rc-terminate-tls` and `-rc-target-cert`). |
+| `-rc-target-min-version` | Minimum upstream TLS version: `1.0`, `1.1`, `1.2`, or `1.3` (requires `-rc-terminate-tls`). |
+| `-rc-target-max-version` | Maximum upstream TLS version (same values; requires `-rc-terminate-tls`). |
+| `-rc-target-client-hello` | Decomposed wire-level ClientHelloSpec for the upstream handshake as protojson (`file:PATH`, `base64:DATA`, or inline JSON; requires `-rc-terminate-tls`; empty = engine default; the server fails closed on any dimension it cannot honour exactly). See [Upstream TLS fingerprinting](#upstream-tls-fingerprinting-clienthellospec). |
+| `-rc-target-alpn` | ALPN protocol offered during the upstream handshake (repeatable; requires `-rc-terminate-tls`). |
+| `-rc-target-insecure` | Skip upstream TLS certificate verification (requires `-rc-terminate-tls`). |
+| `-rc-flow-control` | Advertise flow-control support on the RC stream (switches to the in-stream control path). |
+| `-rc-window-size` | Flow-control window size in bytes (0 = server default; requires `-rc-flow-control`). Values above int32 max are rejected at startup. |
+| `-rc-opportunistic-tls` | Advertise opportunistic TLS upgrade support on the RC stream. |
+| `-rc-proxy-hop` | Egress proxy hop ahead of the upstream dial: `http-connect|socks5@host:port[;user=U][;pass=P][;header=H]` (repeatable). |
+
+Certificate and key material uses explicit prefixes: `file:/path/to/pem` reads from disk, `base64:DATA` decodes inline PEM. Unprefixed values are rejected without echoing the content back into the error.
+
+Validation is fail-closed: `-rc-channel-cert` requires `-rc-channel-key` (and vice versa), `-rc-target-*` options require `-rc-terminate-tls`, `-rc-window-size` requires `-rc-flow-control`, and any `-rc-*` flag without `-rc-server` is a startup error. The `-upstream-ca`, `-upstream-insecure`, and `-upstream-server-name` flags configure the handshake the proxy performs itself (direct dialing, or the RC tunnel without `-rc-terminate-tls`); under `-rc-terminate-tls` they are rejected at startup because the proxy never handshakes there and would otherwise ignore them silently — the `-rc-target-*` options are the replacement. The gRPC channel is lazy (`grpc.NewClient`): an unreachable RC server does not fail startup — dial errors surface at request time as transport failures. A refused RC server fails fast; a blackholed one (packets dropped, not refused) holds the first request's dial until the client gives up unless `-rc-dial-timeout` bounds it — the default is 0 (no timeout), matching the proxy's blocking-slot semantics, so set `-rc-dial-timeout` when the RC server is across an unreliable network. There is no per-attempt HTTP timeout on any path (direct or RC): once admitted, a stalled upstream holds its limiter slot until the client cancels. That blast radius is per provider — one stalled mount starves its own limiters, not the others'.
+
+#### Server flags (`-rc-server-*`, server scope)
+
+| Flag | Description |
+|------|-------------|
+| `-rc-server-bind` | Listen address for the embedded RC gRPC server (empty = disabled). |
+| `-rc-server-tls` | Enable TLS on the embedded RC server listener. |
+| `-rc-server-ca` | CA for client certificate verification, enforcing mTLS (`file:PATH` or `base64:DATA`). |
+| `-rc-server-cert` | Server certificate (`file:PATH` or `base64:DATA`; requires `-rc-server-tls` and `-rc-server-key`). |
+| `-rc-server-key` | Server private key (`file:PATH` or `base64:DATA`; requires `-rc-server-tls` and `-rc-server-cert`). |
+
+The embedded server registers sesame's `netconn.Server` with default settings: upstream dials go through `DefaultDialer`, a plain `net.Dialer` honoring the request's dial timeout. A `-rc-target-client-hello` spec is authoritative for its handshakes: the server honours every dimension it can honour exactly and fails closed on the rest (see the engine ceilings below), and there is no session-ticket flag because sesame's `BuildTLSConfig` does not use the field.
+
+#### Upstream TLS fingerprinting (ClientHelloSpec)
+
+`-rc-target-client-hello` carries a decomposed, wire-level `ClientHelloSpec`
+(protojson) for the upstream handshake terminated at the RC server. The value
+is read from disk with `file:PATH`, decoded with `base64:DATA`, or passed
+inline as JSON starting with `{`; decoding is strict — unknown fields are
+rejected, out-of-range values fail at startup — and an empty value leaves the
+engine default. The spec is authoritative: the server honours every requested
+dimension exactly or fails closed before the handshake, and the client
+additionally verifies the server's applied-spec echo, aborting on mismatch.
+
+**Engine ceilings (honest limits).** The shaper's embedded RC server is
+sesame's Go `netconn.Server`, backed by Go `crypto/tls`, which exposes no
+knob for several ClientHello dimensions. The engine therefore honours only
+exact-match specs and rejects anything it cannot emit byte-for-byte:
+
+- `cipherSuites` — honoured only when the effective max version is TLS 1.2
+  (`-rc-target-max-version 1.2`); Go appends its TLS 1.3 suites in a fixed
+  order whenever TLS 1.3 remains reachable. The requested list must also
+  equal Go's fixed preference order filtered by membership — user-specified
+  order is never emitted.
+- `supportedGroups` — exact-match over Go's fixed curve preference order
+  (same membership-filter rule), including its removal of TLS-1.3-only key
+  exchanges below TLS 1.3.
+- `sessionIdLength` — Go always sends 32 bytes; only `0` (engine default)
+  and `32` are compatible.
+- `signatureAlgorithms`, `extensions`, `legacyVersion`, `targetSize` — no Go
+  engine control; any non-default value fails closed. `compressionMethods`
+  accepts only `[0]` (null), Go's sole emission.
+
+The sesame-endpoint builtin (node:tls) likewise rejects all non-default
+specs. Full-fidelity opencode/Bun TLS impersonation — the Bun-derived
+ClientHello layout — is therefore not a shaper feature: it is provided by
+plugging a custom `TLSProvider` into sesame-endpoint's
+`createRemoteControlService`, a sesame-repo integration.
+
+Worked example (boot-tested: the subprocess e2e suite drives this exact spec
+through the built binary — `TestRC_ClientHelloSpec_E2E` — and proves both the
+honoured handshake and the fail-closed rejection of an unhonourable spec):
+
+```sh
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8082 \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -rc-server 127.0.0.1:9443 \
+    -rc-terminate-tls \
+    -rc-target-max-version 1.2 \
+    -rc-target-client-hello '{"cipherSuites":[49195,49199],"sessionIdLength":32}'
+```
+
+The spec pins two AES-GCM ECDHE suites — a membership-filter-stable subset of
+Go's preference table — and the 32-byte session id: the combination the Go
+engine can honour exactly at TLS 1.2.
+
+#### Worked example: proxy → RC target → upstream with mTLS
+
+The embedded RC server runs inside a proxy process alongside at least one provider. To separate the roles across machines, run a standalone sesame RC server on the remote host; the shaper's embedded mode is intended for testing and single-binary deployments.
+
+```sh
+# Proxy with embedded RC server (mTLS) and a passthrough provider
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8080 \
+  -rc-server-bind 127.0.0.1:9443 \
+  -rc-server-tls \
+  -rc-server-ca    file:ca.pem \
+  -rc-server-cert  file:server.pem \
+  -rc-server-key   file:server-key.pem \
+  --provider=local \
+    -upstream http://127.0.0.1:8081
+
+# Second proxy dialing through the first proxy's RC server
+ai-concurrency-shaper \
+  -bind 127.0.0.1:8082 \
+  --provider=openai \
+    -upstream https://api.openai.com \
+    -rc-server 127.0.0.1:9443 \
+    -rc-channel-tls \
+    -rc-channel-ca    file:ca.pem \
+    -rc-channel-cert  file:client.pem \
+    -rc-channel-key   file:client-key.pem \
+    -rc-terminate-tls \
+    -rc-target-server-name api.openai.com
+```
+
+The second proxy's upstream requests traverse the RC stream: the first proxy's embedded RC server dials `api.openai.com`, terminates TLS, and streams the connection back; the second proxy performs no upstream TLS handshake itself. The channel certificates all come from one CA: the server leaf needs `127.0.0.1` in its subject alternative names because the channel verifies the server certificate against the `-rc-server` address, and the client leaf must chain to the CA the server uses for client verification. The example sets no `-rc-target-ca`, so the upstream handshake verifies `api.openai.com` against the system roots; set `-rc-target-ca` only when the upstream presents a certificate from a private CA.
+
 ### Examples
 
 Proxy with default limits and TUI:
@@ -341,7 +478,7 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-flowlog-dir` | provider | `` (disabled) | Existing directory that receives one unredacted JSON record per transcoded exchange, capturing the full flow (client request, converted upstream request, upstream response, downstream response); empty disables the recorder |
 | `-native-route` | provider | _(repeatable)_ | Natively served route: `protocol@path` with protocol `responses`, `messages`, or `chat`. A request whose model's `via` dialect matches is forwarded with only the model identifier rewritten; a mismatch falls through to any transcode mapping on the same path (see [Native passthrough](#native-passthrough)) |
 | `-opencode` | provider | `false` | Emit the opencode first-party request shape upstream: `User-Agent`, `x-opencode-client`, session affinity and identity headers (see [opencode Zen and Go](#opencode-zen-and-go)) |
-| `-opencode-user-agent` | provider | `opencode/1.18.33` | `User-Agent` the `-opencode` preset asserts upstream |
+| `-opencode-user-agent` | provider | `opencode/1.18.35` | `User-Agent` the `-opencode` preset asserts upstream |
 | `-opencode-client` | provider | `cli` | `x-opencode-client` the `-opencode` preset asserts upstream |
 
 ### Route examples
@@ -943,6 +1080,13 @@ Session precedence is the client's `x-opencode-session`, then
 conversation's own first user turn. Header values are never logged. Mounts
 without `-opencode` forward byte-identically.
 
+Transport-layer impersonation is a separate axis: when the same mount dials
+through an RC server with remote TLS termination, the first-party shape pairs
+with the rc-dial client-hello fingerprint when `-rc-target-client-hello` is
+also set — startup logs report the pairing, and without a spec they honestly
+report the engine-default fingerprint (see
+[Upstream TLS fingerprinting](#upstream-tls-fingerprinting-clienthellospec)).
+
 ```sh
 export SHAPER_PROVIDER_OPENCODE_API_KEY=...
 ai-concurrency-shaper -bind=127.0.0.1:11239 \
@@ -960,9 +1104,16 @@ A mount whose upstream host is not `opencode.ai` logs a startup note when the
 preset is enabled, so the impersonation never happens silently. The pinned
 `User-Agent` follows the released-stable client shape and is overridable with
 `-opencode-user-agent`; re-pin it by reading the installed client's own
-`User-Agent`. The observed upstream contract (model families, native paths,
-session enforcement, keyless behavior) is recorded in
-[`docs/opencode-zen-contract.md`](docs/opencode-zen-contract.md).
+`User-Agent`. Model access on the Zen surfaces is heterogeneous.
+`space-bunny-free` on `opencode.ai/zen` is ungated: it serves inference with
+zero credentials and zero custom headers (observed 2026-10-10), on both
+`/v1/chat/completions` and `/v1/messages`, streaming and non-streaming. Most
+other `*-free` models on the same surface are gated (`403 FreeTierError` even
+with the full first-party header set from Bun's own runtime — the gate
+mechanism is unknown). `opencode.ai/zen/go` requires a valid API key for all
+models (`401 AuthError`). The `-opencode` preset remains useful for session
+pinning and first-party client-shape fidelity on authenticated mounts; it is
+neither necessary nor sufficient for the gated free models.
 
 ### Failure taxonomy
 

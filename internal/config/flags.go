@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
@@ -118,7 +119,7 @@ const (
 	defaultCBMaxOpen              = 120 * time.Second
 	defaultCBPenalty              = 2 * time.Second
 	defaultCBMaxPenalty           = 60 * time.Second
-	defaultAnthropicVersionValue  = "2023-06-01"
+	defaultAnthropicVersionValue  = auth.DefaultAnthropicVersion
 	defaultTranscodeMaxRequestMB  = 10
 	defaultTranscodeMaxResponseMB = 10
 )
@@ -133,6 +134,14 @@ func registerServerFlags(r *registrar, s *Server) {
 	r.stringVar(&s.MetricsBind, "metrics-bind", "", "dedicated listen address for the Prometheus /metrics endpoint (empty = disabled; server scope)")
 	r.stringListVar(&s.ModelTable, "model-table", "global model table entry: surrogate@provider=wire[;facts] (repeatable; server scope)")
 	r.stringListVar(&s.CatalogSuites, "catalog-suite", "repeatable catalog suite mount: [name@]prefix[=models][;options] (repeatable; server scope)")
+
+	// Embedded RC server (server scope).
+	r.stringVar(&s.RCBind, "rc-server-bind", "", "listen address for the embedded RemoteControl.NetConn gRPC server (empty = disabled)")
+	r.boolVar(&s.RCTLS, "rc-server-tls", false, "enable TLS on the embedded RC server listener")
+	r.stringVar(&s.RCCA, "rc-server-ca", "", "CA for client certificate verification on the embedded RC server, enforcing mTLS (file:PATH or base64:DATA)")
+	r.stringVar(&s.RCCert, "rc-server-cert", "", "server certificate for the embedded RC server (file:PATH or base64:DATA; requires -rc-server-tls and -rc-server-key)")
+	r.stringVar(&s.RCKey, "rc-server-key", "", "server private key for the embedded RC server (file:PATH or base64:DATA; requires -rc-server-tls and -rc-server-cert)")
+
 	registerHelp(r, &s.Help)
 }
 
@@ -195,6 +204,14 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	// Transport tuning.
 	r.boolVar(&p.DisableKeepAlives, "upstream-disable-keep-alives", defaultDisableKeepAlives, "disable HTTP keep-alives to upstream")
 
+	// Upstream TLS trust: the handshake the proxy performs itself (direct
+	// dialing, or the RC tunnel without -rc-terminate-tls). Rejected under
+	// -rc-terminate-tls, where only the -rc-target-* options apply, and on
+	// plaintext http upstreams, where the transport never handshakes.
+	r.stringVar(&p.UpstreamCA, "upstream-ca", "", "CA for verifying the upstream certificate on the proxy's own TLS handshake (file:PATH or base64:DATA; rejected with -rc-terminate-tls and on plaintext http upstreams)")
+	r.boolVar(&p.UpstreamInsecure, "upstream-insecure", false, "skip upstream TLS certificate verification on the proxy's own handshake (rejected with -rc-terminate-tls and on plaintext http upstreams)")
+	r.stringVar(&p.UpstreamServerName, "upstream-server-name", "", "TLS SNI override for the proxy's own upstream handshake (rejected with -rc-terminate-tls and on plaintext http upstreams)")
+
 	// Upstream authentication.
 	r.stringVar(&p.AuthMode, "auth-mode", "", "upstream auth mode: auto | none | bearer | x-api-key | api-key | header:NAME (default: auto-derived from the upstream host when -auth-source is set)")
 	r.stringVar(&p.AuthSource, "auth-source", "", "upstream credential source: env:VAR | file:PATH | none (empty disables upstream auth entirely; requests are forwarded verbatim)")
@@ -226,6 +243,39 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.stringVar(&p.TranscodeAuthSource, "transcode-auth-source", "", "upstream auth secret source for transcode: inbound | env:VAR | file:PATH | provider")
 	r.stringVar(&p.TranscodeAuthHeader, "transcode-auth-header", "", "custom upstream auth header name for transcode")
 	r.stringVar(&p.TranscodeAnthropicVersion, "transcode-anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value for transcode x-api-key")
+
+	// Upstream transport and Sesame endpoint options.
+	r.stringVar(&p.Transport, "transport", "", "upstream transport mode: direct | sesame (default: direct)")
+	r.stringVar(&p.SesameEndpoint, "sesame-endpoint", "", "sesame endpoint to dial through via RemoteControl (host:port or http(s)://host:port)")
+	r.stringVar(&p.SesameTokenEnv, "sesame-token-env", "", "environment variable name providing the sesame endpoint bearer token (requires a TLS sesame channel)")
+	r.stringVar(&p.SesameCACert, "sesame-ca-cert", "", "CA certificate for sesame endpoint mTLS verification (file:PATH, base64:DATA, or a bare path)")
+	r.stringVar(&p.SesameClientCert, "sesame-client-cert", "", "client certificate for sesame endpoint mTLS (file:PATH, base64:DATA, or a bare path)")
+	r.stringVar(&p.SesameClientKey, "sesame-client-key", "", "client private key for sesame endpoint mTLS (file:PATH, base64:DATA, or a bare path)")
+	r.stringVar(&p.SesameServerName, "sesame-server-name", "", "TLS SNI override for sesame endpoint channel")
+
+	// RemoteControl.NetConn dial target.
+	r.stringVar(&p.RCServer, "rc-server", "", "RemoteControl.NetConn gRPC server address (host:port) this provider's upstream connections dial through (empty = direct dialing)")
+	r.boolVar(&p.RCChannelTLS, "rc-channel-tls", false, "enable TLS on the gRPC channel to the RC server")
+	r.stringVar(&p.RCChannelCert, "rc-channel-cert", "", "client certificate for mTLS on the gRPC channel to the RC server (file:PATH or base64:DATA; requires -rc-channel-tls and -rc-channel-key)")
+	r.stringVar(&p.RCChannelKey, "rc-channel-key", "", "client private key for mTLS on the gRPC channel to the RC server (file:PATH or base64:DATA; requires -rc-channel-tls and -rc-channel-cert)")
+	r.stringVar(&p.RCChannelCA, "rc-channel-ca", "", "CA for verifying the RC server certificate on the gRPC channel (file:PATH or base64:DATA; requires -rc-channel-tls)")
+	r.stringVar(&p.RCChannelServerName, "rc-channel-server-name", "", "TLS SNI override for the gRPC channel to the RC server (requires -rc-channel-tls)")
+	r.boolVar(&p.RCChannelInsecure, "rc-channel-insecure", false, "skip TLS certificate verification on the gRPC channel to the RC server (requires -rc-channel-tls)")
+	r.durationVar(&p.RCDialTimeout, "rc-dial-timeout", 0, "timeout for the remote dial through the RC server (0 = no timeout)")
+	r.boolVar(&p.RCTerminateTLS, "rc-terminate-tls", false, "terminate upstream TLS at the RC server instead of inside the proxy (enables the -rc-target-* options)")
+	r.stringVar(&p.RCTargetServerName, "rc-target-server-name", "", "TLS SNI for the upstream handshake terminated at the RC server (requires -rc-terminate-tls)")
+	r.stringListVar(&p.RCTargetALPN, "rc-target-alpn", "ALPN protocol offered during the upstream TLS handshake terminated at the RC server (repeatable; requires -rc-terminate-tls)")
+	r.stringVar(&p.RCTargetMinVersion, "rc-target-min-version", "", "minimum upstream TLS version: 1.0, 1.1, 1.2, or 1.3 (requires -rc-terminate-tls)")
+	r.stringVar(&p.RCTargetMaxVersion, "rc-target-max-version", "", "maximum upstream TLS version: 1.0, 1.1, 1.2, or 1.3 (requires -rc-terminate-tls)")
+	r.stringVar(&p.RCTargetClientHello, "rc-target-client-hello", "", "decomposed wire-level ClientHelloSpec for the upstream handshake as protojson (file:PATH, base64:DATA, or inline JSON; requires -rc-terminate-tls; empty = engine default; the server fails closed on any dimension it cannot honour exactly)")
+	r.boolVar(&p.RCTargetInsecure, "rc-target-insecure", false, "skip upstream TLS certificate verification for the handshake terminated at the RC server (requires -rc-terminate-tls)")
+	r.stringVar(&p.RCTargetCA, "rc-target-ca", "", "CA for verifying the upstream certificate during the handshake terminated at the RC server (file:PATH or base64:DATA; requires -rc-terminate-tls)")
+	r.stringVar(&p.RCTargetCert, "rc-target-cert", "", "client certificate for upstream mTLS terminated at the RC server (file:PATH or base64:DATA; requires -rc-terminate-tls and -rc-target-key)")
+	r.stringVar(&p.RCTargetKey, "rc-target-key", "", "client private key for upstream mTLS terminated at the RC server (file:PATH or base64:DATA; requires -rc-terminate-tls and -rc-target-cert)")
+	r.stringListVar(&p.RCProxyHop, "rc-proxy-hop", "egress proxy hop ahead of the upstream dial: http-connect|socks5@host:port[;user=U][;pass=P][;header=H] (repeatable)")
+	r.boolVar(&p.RCFlowControl, "rc-flow-control", false, "advertise flow-control support on the RC stream (switches to the in-stream control path)")
+	r.boolVar(&p.RCOpportunisticTLS, "rc-opportunistic-tls", false, "advertise opportunistic TLS upgrade support on the RC stream")
+	r.intVar(&p.RCWindowSize, "rc-window-size", 0, "flow-control window size for the RC stream (0 = server default; requires -rc-flow-control)")
 
 	// Circuit breaker.
 	r.boolVar(&p.CBEnabled, "circuit-breaker", defaultCBEnabled, "enable the circuit breaker")

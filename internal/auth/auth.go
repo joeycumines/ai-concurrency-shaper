@@ -48,6 +48,10 @@ const (
 	AuthCustomHeader AuthMode = "header"
 )
 
+// DefaultAnthropicVersion is the default Anthropic API version header applied
+// when authenticating upstream Anthropic Messages requests.
+const DefaultAnthropicVersion = "2023-06-01"
+
 // AuthPolicy describes how an upstream request is authenticated. The zero
 // value is not a valid policy; construct one with a concrete resolved Mode,
 // and for every mode except none a non-nil Secret.
