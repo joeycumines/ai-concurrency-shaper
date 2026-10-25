@@ -463,6 +463,38 @@ func TestDialConfigRejectsH2Offer(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "must not offer h2") {
 		t.Errorf("client-hello h2: err = %v, want the h2 rejection", err)
 	}
+	// A multi-entry list whose second name is h2 is caught.
+	multiSpec := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
+		{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{
+			// list length 12: "\x02h2" then "\x08http/1.1"
+			Raw: []byte{0x00, 0x0c, 0x02, 'h', '2', 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1'},
+		}},
+	}}
+	if err := (&DialConfig{TerminateTLS: true, ClientHello: multiSpec}).Validate(); err == nil || !strings.Contains(err.Error(), "must not offer h2") {
+		t.Errorf("multi-entry client-hello: err = %v, want the h2 rejection", err)
+	}
+	// The scan reads the name list to the end of the body rather than trusting
+	// the declared list length, so a body that under-declares its length still
+	// exposes the offer it contains: refusing it is the fail-closed answer.
+	truncated := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
+		{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{Raw: []byte{0x00, 0x20, 0x02, 'h', '2'}}},
+	}}
+	if err := (&DialConfig{TerminateTLS: true, ClientHello: truncated}).Validate(); err == nil || !strings.Contains(err.Error(), "must not offer h2") {
+		t.Errorf("under-declared list length: err = %v, want the h2 rejection", err)
+	}
+	// Bodies that carry no readable name must not panic and must be accepted.
+	for name, raw := range map[string][]byte{
+		"zero-length name": {0x00, 0x01, 0x00},
+		"short body":       {0x00},
+		"empty body":       {},
+	} {
+		spec := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
+			{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{Raw: raw}},
+		}}
+		if err := (&DialConfig{TerminateTLS: true, ClientHello: spec}).Validate(); err != nil {
+			t.Errorf("%s: unexpected error: %v", name, err)
+		}
+	}
 	// A spec offering only http/1.1 is accepted.
 	http11Spec := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
 		{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{Raw: []byte{0x00, 0x08, 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1'}}},
