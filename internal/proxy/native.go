@@ -578,7 +578,12 @@ func writeNativeDialectError(w http.ResponseWriter, r *http.Request, protocol tr
 		target = transcode.ClientMessages
 	}
 	if status >= 500 {
-		if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
+		// Set regardless of an earlier write: under the SSE queue comments the
+		// 200 commit already marked the exchange terminal, and the fact is a
+		// classification input, not a WriteHeader guard. Without it a local
+		// 5xx would be classified from the status override as an upstream
+		// failure and could open the breaker against a healthy upstream.
+		if rec, ok := w.(*statusRecorder); ok {
 			rec.proxyGeneratedError = true
 		}
 	}

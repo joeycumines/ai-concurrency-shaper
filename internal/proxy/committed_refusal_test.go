@@ -254,3 +254,32 @@ func TestNativeCommittedStreamLocalRefusalIsSSEErrorTerminal(t *testing.T) {
 		t.Fatalf("counters = aborted %d / proxied %d, want 1 / 0", snap.TotalAborted, snap.TotalProxied)
 	}
 }
+
+// TestNativeLocal5xxMarksProxyGeneratedAfterCommit pins the classification
+// input of a local 5xx on the native path: the queue-comment commit already
+// wrote a terminal 200 through the recorder, so a terminalWritten-guarded
+// marker would be skipped and the exchange's status override would be
+// classified as an upstream failure — a purely local defect opening the
+// breaker against a healthy upstream.
+func TestNativeLocal5xxMarksProxyGeneratedAfterCommit(t *testing.T) {
+	rec := httptest.NewRecorder()
+	// The queue-comment commit: startQueueComments sets the flag and writes
+	// the 200 (the recorder's commentsCommitted branch silences the dup, so
+	// recordImplicitOK is what marks the exchange terminal).
+	statusRec := &statusRecorder{ResponseWriter: rec, commentsCommitted: true}
+	statusRec.recordImplicitOK(nil)
+	if !statusRec.terminalWritten {
+		t.Fatal("terminalWritten = false after the queue-comment commit, want true")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req = req.WithContext(transcode.WithCommittedStreamContext(req.Context()))
+	writeNativeDialectError(statusRec, req, transcode.NativeMessages, http.StatusInternalServerError, "internal error")
+
+	if !statusRec.proxyGeneratedError {
+		t.Fatal("proxyGeneratedError = false after a local 5xx, want true (never an upstream health signal)")
+	}
+	if !strings.Contains(rec.Body.String(), "event: error\n") {
+		t.Fatalf("body = %q, want the SSE error terminal", rec.Body.String())
+	}
+}
