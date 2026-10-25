@@ -256,15 +256,12 @@ func TestDispatcher_UnresolvableModelKeepsHandlerError(t *testing.T) {
 	}
 }
 
-// TestDispatcher_NativeMissIsAuthoritative verifies that when the native
-// route already resolved the model (a native miss with an empty Via), the
-// dispatcher trusts that resolution instead of re-reading and re-resolving
-// the body: the recorded miss decides the target, and the body is never
-// probed a second time.
-func TestDispatcher_NativeMissIsAuthoritative(t *testing.T) {
-	// The transcode mappings resolve "m" to a responses-native model, but
-	// the native route's authoritative resolution said Via is empty — the
-	// miss must win and the request goes to the chat handler.
+// TestDispatcher_NativeMissResolvesEmptyViaAgainstTargets verifies that a
+// native miss which resolved no dialect (an identity fallback) does not stop
+// the dispatcher: the route's mappings still resolve the model, and a model
+// they name as responses-native reaches the Responses upstream even though
+// the native route's own map knows nothing about its dialect.
+func TestDispatcher_NativeMissResolvesAgainstTargets(t *testing.T) {
 	nativeMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
 		"m": {ClientModel: "m", UpstreamModel: "wire-m", ClientResponseModel: "m"},
 	}}
@@ -325,8 +322,11 @@ func TestDispatcher_NativeMissIsAuthoritative(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
 	last := upstream.lastRequest()
-	if last.Path != "/v1/chat/completions" {
-		t.Errorf("upstream path = %q, want /v1/chat/completions (the native miss's empty Via is authoritative)", last.Path)
+	if last.Path != "/v1/responses" {
+		t.Errorf("upstream path = %q, want /v1/responses (the mappings' resolution decides an identity-fallback miss)", last.Path)
+	}
+	if last.Model != "wire-m" {
+		t.Errorf("upstream model = %q, want wire-m", last.Model)
 	}
 }
 

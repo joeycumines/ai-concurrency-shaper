@@ -202,20 +202,20 @@ const (
 // mean transparency is not unconditional for those three shapes.
 func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *NativeRoute) (*http.Request, nativeAction) {
 	if isNativeUpgrade(r) {
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest,
 			"upgrade requests are not supported on natively served routes")
 		return r, nativeError
 	}
 	if enc := r.Header.Get("Content-Encoding"); enc != "" &&
 		!strings.EqualFold(strings.TrimSpace(enc), "identity") {
-		writeNativeDialectError(w, nr.Protocol, http.StatusUnsupportedMediaType,
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusUnsupportedMediaType,
 			"content-encoding is not supported on natively served routes")
 		return r, nativeError
 	}
 
 	limits := nr.BodyLimits.WithDefaults()
 	if r.Body == nil {
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "missing request body")
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest, "missing request body")
 		return r, nativeError
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, limits.AcceptedRequestBytes+1))
@@ -223,12 +223,12 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	if err != nil {
 		// Bounded for the same reason as the decode failure below: the text
 		// originates in the transport and need not be free of request bytes.
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest,
 			transcode.BoundErrorMessage("read request body: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
 	if int64(len(body)) > limits.AcceptedRequestBytes {
-		writeNativeDialectError(w, nr.Protocol, http.StatusRequestEntityTooLarge, "request body too large")
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusRequestEntityTooLarge, "request body too large")
 		return r, nativeError
 	}
 	// restoreOriginal puts the consumed bytes back so a native miss falls
@@ -260,12 +260,12 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		// The decode error can quote a key name straight out of the request
 		// ("duplicate JSON key %q"), so it is client-controlled text and is
 		// bounded like every other client string this path reflects.
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest,
 			transcode.BoundErrorMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
 	if !present {
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: missing model field")
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest, "natively served request: missing model field")
 		return r, nativeError
 	}
 	if clientModel == "" {
@@ -275,13 +275,25 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		// (TopLevelModelPresent reports a non-string model as an error above,
 		// so reaching here with "" means present-but-empty, never
 		// type-corrupt.)
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest, "natively served request: model field must be a non-empty string")
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest, "natively served request: model field must be a non-empty string")
 		return r, nativeError
 	}
 
 	mapping, err := nr.ModelMap.Resolve(clientModel)
 	if err != nil {
-		writeNativeDialectError(w, nr.Protocol, http.StatusBadRequest,
+		// A client model the native route cannot resolve may still be a
+		// profile (or a model mapped only by the transcode mapping on this
+		// same route). Native serving converts nothing, so the mapping — not
+		// the native route — owns that name; failing closed here would make
+		// the documented native-plus-transcode composition unusable for
+		// exactly the names the mapping exists to serve.
+		if fallback := p.lookupTranscodeHandlerKey(nr.RouteKey); fallback != nil {
+			restored := restoreOriginal()
+			return restored.WithContext(withNativeMiss(restored.Context(), nativeMissInfo{
+				clientModel: clientModel,
+			})), nativeMiss
+		}
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest,
 			transcode.BoundErrorMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
 		return r, nativeError
 	}
@@ -314,20 +326,21 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 				via:         mapping.Via,
 			})), nativeMiss
 		}
-		writeNativeDialectError(w, nr.Protocol, http.StatusNotFound,
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusNotFound,
 			transcode.BoundErrorMessage(
-				fmt.Sprintf("model %q is natively served as %s, not on %s", clientModel, mapping.Via, nr.RouteKey.Path),
+				fmt.Sprintf("model %q is served natively as %s; this route serves %s natively and no transcode mapping covers the model (add -native-route %s@%s to serve it here)",
+					clientModel, mapping.Via, nr.Protocol, mapping.Via, nr.RouteKey.Path),
 				limits.ErrorMessageBytes))
 		return r, nativeError
 	}
 
 	out, ok := rewriteTopLevelModel(body, mapping.UpstreamModel)
 	if !ok {
-		writeNativeDialectError(w, nr.Protocol, http.StatusInternalServerError, "natively served request: internal error")
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusInternalServerError, "natively served request: internal error")
 		return r, nativeError
 	}
 	if int64(len(out)) > limits.DecodedRequestBytes {
-		writeNativeDialectError(w, nr.Protocol, http.StatusRequestEntityTooLarge, "request body too large")
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusRequestEntityTooLarge, "request body too large")
 		return r, nativeError
 	}
 
@@ -552,7 +565,14 @@ func isNativeUpgrade(r *http.Request) bool {
 // a purely local bug must not open the circuit breaker against a healthy
 // upstream. Client-fault statuses (4xx) leave no marker; they are not
 // upstream health signals either way.
-func writeNativeDialectError(w http.ResponseWriter, protocol transcode.NativeProtocol, status int, message string) {
+//
+// When the streaming representation was already committed before admission
+// (SSE queue comments), the status is fixed and the request is locked to the
+// stream, so the refusal is delivered as the dialect's SSE error terminal —
+// never as a JSON body spliced into a committed stream, and never as the
+// upstream-blame ": queue-wait failed: upstream" close comment, which would
+// misattribute a purely local refusal.
+func writeNativeDialectError(w http.ResponseWriter, r *http.Request, protocol transcode.NativeProtocol, status int, message string) {
 	target := transcode.ClientResponses
 	if protocol == transcode.NativeMessages {
 		target = transcode.ClientMessages
@@ -562,8 +582,13 @@ func writeNativeDialectError(w http.ResponseWriter, protocol transcode.NativePro
 			rec.proxyGeneratedError = true
 		}
 	}
-	_ = transcode.WriteDialectHTTPError(w, target, transcode.CanonicalAPIError{
+	apiErr := transcode.CanonicalAPIError{
 		Status:  status,
 		Message: message,
-	})
+	}
+	if r != nil && transcode.CommittedStreamFromContext(r.Context()) {
+		_ = transcode.WriteCommittedStreamError(w, target, apiErr)
+		return
+	}
+	_ = transcode.WriteDialectHTTPError(w, target, apiErr)
 }

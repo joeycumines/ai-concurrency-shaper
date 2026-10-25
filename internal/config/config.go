@@ -336,6 +336,12 @@ type Provider struct {
 	// -sesame-token-env during resolveRC, or empty. Held for the RC
 	// channel's per-RPC credentials; never logged or journaled.
 	rcToken string
+	// derivedSesame records which sesame/RCServer fields the LAST resolve
+	// computed rather than read from operator input. A repeated resolve
+	// clears exactly those, so a value the caller set directly (a Provider
+	// built programmatically, without Parse) survives, while a value derived
+	// from a since-removed flag does not linger.
+	derivedSesame derivedSesameFields
 	// explicitFlags maps the provider-scoped flag names the operator set
 	// (as opposed to defaults) to their parsed value strings, recorded by
 	// Parse via FlagSet.Visit. Resolution uses it only where a value is
@@ -520,6 +526,30 @@ type Account struct {
 //     normalize to trailing-slash-free paths and must not overlap; unnamed
 //     providers get derived names that must be unique.
 func (c *Config) ResolveAndValidate() error {
+	if err := c.resolveAndValidate(); err != nil {
+		// A failed resolution must not leave live resources behind: each
+		// provider's RC dialer holds an open gRPC channel, and main.go
+		// registers its close defer only after a SUCCESSFUL resolve. Closing
+		// here is idempotent, so a caller that keeps a partially resolved
+		// Config for inspection still owns nothing that leaks.
+		c.Close()
+		return err
+	}
+	return nil
+}
+
+// Close releases every resource the resolved configuration owns. It is
+// idempotent and safe to call on a partially resolved Config.
+func (c *Config) Close() {
+	for _, p := range c.Providers {
+		if p.rcDialer != nil {
+			_ = p.rcDialer.Close()
+			p.rcDialer = nil
+		}
+	}
+}
+
+func (c *Config) resolveAndValidate() error {
 	if len(c.Providers) == 0 && len(c.Server.CatalogSuites) == 0 {
 		return errors.New("no providers configured")
 	}
@@ -701,6 +731,14 @@ func (p *Provider) validateBasic(index int, multi bool) error {
 	if p.upstream.Scheme == "http" && (p.UpstreamCA != "" || p.UpstreamInsecure || p.UpstreamServerName != "") {
 		return fmt.Errorf("%supstream TLS trust options (-upstream-ca, -upstream-insecure, -upstream-server-name) do not apply to a plaintext http upstream", ctx())
 	}
+	// Remote TLS termination hands the proxy a decrypted byte stream for an
+	// https upstream. On an http upstream there is no handshake to terminate,
+	// so the flag would be accepted and then silently ignored — the operator
+	// would believe the upstream handshake runs at the RC server while the
+	// proxy forwards plaintext.
+	if p.upstream.Scheme == "http" && p.RCTerminateTLS {
+		return fmt.Errorf("%s-rc-terminate-tls does not apply to a plaintext http upstream: there is no upstream TLS handshake to terminate", ctx())
+	}
 
 	for _, s := range p.Limits {
 		if _, err := route.Parse(s); err != nil {
@@ -830,6 +868,10 @@ func (s *Server) resolveRC() error {
 		if s.RCTLS || s.RCCA != "" || s.RCCert != "" || s.RCKey != "" {
 			return errors.New("rc-server TLS options require -rc-server-bind")
 		}
+		// A previous resolve may have installed a server config whose bind
+		// has since been removed: leaving it would make main.go start an RC
+		// server the current inputs do not ask for.
+		s.rcServerConfig = nil
 		return nil
 	}
 	cfg := rcclient.ServerConfig{

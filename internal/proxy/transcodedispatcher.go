@@ -43,22 +43,32 @@ type dispatcherTarget struct {
 
 // resolveVia answers the request model's native dialect from this target's
 // frozen resolution state, mirroring the handler's own resolution order: a
-// profile name resolves to its target model first, then the model map. A
-// profile whose target model this target cannot map answers false so the
-// next target gets the chance; an unmapped model likewise answers false.
-func (t dispatcherTarget) resolveVia(model string) (transcode.NativeProtocol, bool) {
+// profile name resolves to its target model first, then the model map, and a
+// profile is authoritative once this target claims it.
+//
+// explicit reports whether the answer is a resolved dialect rather than an
+// identity fallback. Only an explicit answer may end the target search: an
+// identity fallback (no Via known) says nothing about which upstream serves
+// the model, while a later target's map may name it.
+//
+// A profile this target claims whose target model the target cannot map
+// answers explicit=true with an empty Via and an error: the handler the
+// request reaches renders that as its own "profile %q targets unmapped
+// model %q" refusal, so the search must stop here rather than hand the
+// request to a different target that would serve a different dialect.
+func (t dispatcherTarget) resolveVia(model string) (via transcode.NativeProtocol, explicit bool, err error) {
 	if profileModel, _, ok := t.profileMap.ResolveProfile(model); ok {
-		resolved, err := t.modelMap.Resolve(profileModel)
-		if err != nil {
-			return "", false
+		resolved, rerr := t.modelMap.Resolve(profileModel)
+		if rerr != nil {
+			return "", true, rerr
 		}
-		return resolved.Via, true
+		return resolved.Via, true, nil
 	}
 	resolved, err := t.modelMap.Resolve(model)
 	if err != nil {
-		return "", false
+		return "", false, nil
 	}
-	return resolved.Via, true
+	return resolved.Via, resolved.Via != "", nil
 }
 
 // multiTranscodeDispatcher dispatches a single client route (such as POST
@@ -185,10 +195,16 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		resolved    bool
 	)
 	if miss, ok := nativeMissFromContext(r.Context()); ok {
-		// The native route already resolved the model authoritatively.
-		targetVia, clientModel, resolved = miss.via, miss.clientModel, true
+		// The native route's model resolution answers for the models its own
+		// map knows. A Via it resolved decides the dialect; an identity
+		// fallback resolved nothing, so the model still has to be resolved
+		// here against the mappings on the route.
+		clientModel = miss.clientModel
+		if miss.via != "" {
+			targetVia, resolved = miss.via, true
+		}
 	}
-	if !resolved && r.Body != nil {
+	if !resolved && clientModel == "" && r.Body != nil {
 		body, err := io.ReadAll(io.LimitReader(r.Body, d.acceptedBytes+1))
 		// Close the consumed original exactly like the native path does:
 		// the journal's request-body capture has seen every byte read
@@ -207,17 +223,22 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		if err == nil && int64(len(body)) <= d.acceptedBytes {
 			if model, present, perr := transcode.TopLevelModelPresent(body); perr == nil && present && model != "" {
 				clientModel = model
-				for _, target := range d.targets {
-					if via, ok := target.resolveVia(model); ok {
-						targetVia = via
-						break
-					}
-				}
 			}
 		}
 	}
+	var claiming http.Handler
+	if !resolved && clientModel != "" {
+		targetVia, claiming = d.selectTarget(clientModel)
+	}
 
 	switch {
+	case targetVia == "" && claiming != nil:
+		// A target claimed the model without naming a dialect (a profile
+		// whose target model that target cannot map). The claiming handler
+		// owns the refusal and renders it in the mapping's dialect, so the
+		// request never reaches a different upstream under a name the
+		// operator mapped to this one.
+		claiming.ServeHTTP(w, r)
 	case targetVia == transcode.NativeResponses && d.responsesHandler != nil:
 		d.responsesHandler.ServeHTTP(w, r)
 	case targetVia == transcode.NativeChat && d.chatHandler != nil:
@@ -227,8 +248,8 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		// messages-native model cannot be served by any configured
 		// transcode target on this route.
 		d.writeRouteError(w, r, http.StatusNotFound, fmt.Sprintf(
-			"model %q is natively served as %s, not on %s",
-			clientModel, transcode.NativeMessages, d.routeKey.Path,
+			"model %q is served natively as %s; this route transcodes to the chat-completions and responses upstreams only, so no transcode mapping on %s can serve it — serve it natively with -native-route %s@%s",
+			clientModel, transcode.NativeMessages, d.routeKey.Path, transcode.NativeMessages, d.routeKey.Path,
 		))
 	case d.chatHandler != nil:
 		d.chatHandler.ServeHTTP(w, r)
@@ -240,23 +261,59 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+// selectTarget walks the targets in registration order and returns the first
+// explicit answer: its dialect, plus the handler that owns the answer. An
+// identity fallback answers nothing — a later target's map may name the model.
+//
+// A target that claims the model as a profile whose target model it cannot map
+// is an explicit answer with no dialect: the handler that claims the profile
+// owns the refusal, and returning it here is what keeps the request from being
+// served by a different upstream under a name the operator mapped to this one.
+func (d *multiTranscodeDispatcher) selectTarget(clientModel string) (transcode.NativeProtocol, http.Handler) {
+	for _, target := range d.targets {
+		if via, explicit, _ := target.resolveVia(clientModel); explicit {
+			return via, target.handler
+		}
+	}
+	return "", nil
+}
+
 // writeRouteError renders a dispatcher-level refusal in the route's client
 // dialect and records the local outcome so the proxy's exactly-one-outcome
 // invariant holds even though no handler ran. The message is bounded because
 // it quotes the client-controlled model name; 5xx marks the exchange as a
 // proxy-generated error (never an upstream health signal), mirroring the
 // native path's error writer.
+//
+// When the streaming representation was already committed before admission
+// (SSE queue comments), the status is fixed and the exchange is locked to the
+// stream: the refusal becomes the dialect's SSE error terminal, exactly as a
+// handler's own post-commit error path renders it. A refusal is never a clean
+// completion, so its outcome never claims DownstreamComplete.
 func (d *multiTranscodeDispatcher) writeRouteError(w http.ResponseWriter, r *http.Request, status int, message string) {
 	if status >= 500 {
-		if rec, ok := w.(*statusRecorder); ok && !rec.terminalWritten {
+		// A 5xx refusal is a proxy-local defect (no upstream was seen), so
+		// the recorder's proxyGeneratedError fact keeps the exchange out of
+		// upstream-health classification. The queue-comment commit already
+		// wrote a 200 through the recorder, which marks it terminal; the fact
+		// is a classification input, not a WriteHeader guard, so it is set
+		// regardless of that earlier write.
+		if rec, ok := w.(*statusRecorder); ok {
 			rec.proxyGeneratedError = true
 		}
 	}
 	message = transcode.BoundErrorMessage(message, int(d.errorMessageBytes))
-	writeErr := transcode.WriteDialectHTTPError(w, d.client, transcode.CanonicalAPIError{
+	apiErr := transcode.CanonicalAPIError{
 		Status:  status,
 		Message: message,
-	})
+	}
+	committed := transcode.CommittedStreamFromContext(r.Context())
+	var writeErr error
+	if committed {
+		writeErr = transcode.WriteCommittedStreamError(w, d.client, apiErr)
+	} else {
+		writeErr = transcode.WriteDialectHTTPError(w, d.client, apiErr)
+	}
 	outcome := transcode.Outcome{
 		UpstreamAttempted: false,
 		UpstreamStatus:    transcode.Optional[int]{Value: status, Set: true},
@@ -273,8 +330,6 @@ func (d *multiTranscodeDispatcher) writeRouteError(w http.ResponseWriter, r *htt
 		} else {
 			outcome.Provenance = transcode.ProvenanceDownstreamWriteError
 		}
-	} else {
-		outcome.DownstreamComplete = true
 	}
 	if sink := transcode.OutcomeSinkFromContext(r.Context()); sink != nil {
 		sink.Record(outcome)

@@ -1708,6 +1708,12 @@ func TestParseTranscodeProfilesAllTiers(t *testing.T) {
 func TestResolveAndValidate_SingleMountMultiDialect(t *testing.T) {
 	t.Setenv("TEST_OPENCODE_TOKEN", "test-secret")
 	args := []string{
+		// The messages route carries two mappings, so dispatch needs each
+		// model's upstream dialect; the global table is the only source of the
+		// via= fact.
+		"-model-table", "claude-opus@opencode-go=wire-opus;via=messages",
+		"-model-table", "gpt-nano@opencode-go=wire-nano;via=responses",
+		"-model-table", "deepseek-v3@opencode-go=wire-deepseek;via=chat",
 		"--provider=opencode-go",
 		"-upstream", "https://opencode.ai/zen/go",
 		"--native-route=chat@/v1/chat/completions",
@@ -1716,7 +1722,6 @@ func TestResolveAndValidate_SingleMountMultiDialect(t *testing.T) {
 		"-transcode-responses-chat",
 		"-transcode-messages-chat",
 		"-transcode-messages-responses",
-		"-transcode-model", "claude-opus=wire-opus",
 		"-auth-mode", "bearer",
 		"-auth-source", "env:TEST_OPENCODE_TOKEN",
 	}
@@ -1983,5 +1988,61 @@ func TestResolveAndValidate_TranscodeAuthDialectAdaptation(t *testing.T) {
 		if err != nil || sec != "provider-val" {
 			t.Errorf("secret = %q, err = %v, want provider-val", sec, err)
 		}
+	}
+}
+
+// TestResolveAndValidate_MultiTargetRouteRequiresVia proves the dead
+// configuration is refused at startup: a client route carrying two transcode
+// mappings is dispatched by the request model's declared upstream dialect, and
+// without any via= fact every target answers the same identity fallback, so
+// the responses target can never be reached. The refusal names the flag that
+// makes the route work.
+func TestResolveAndValidate_MultiTargetRouteRequiresVia(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.example.com",
+		"-transcode-messages-chat",
+		"-transcode-messages-responses",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("ResolveAndValidate: nil error, want the unreachable-target rejection")
+	}
+	for _, want := range []string{"POST /v1/messages", "responses target is unreachable", "-model-table"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+
+	// The same route with a via-bearing table entry resolves.
+	ok, err := Parse([]string{
+		"-model-table", "s@example=wire;via=responses",
+		"-upstream", "https://api.example.com",
+		"-transcode-messages-chat",
+		"-transcode-messages-responses",
+	})
+	if err != nil {
+		t.Fatalf("Parse with table: %v", err)
+	}
+	if err := ok.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate with a via-bearing table: %v", err)
+	}
+	if n := len(ok.Providers[0].TranscodeMappings()); n != 2 {
+		t.Fatalf("mappings = %d, want 2", n)
+	}
+
+	// A single mapping on the route is the operator's blanket serving choice
+	// and needs no dialect fact.
+	single, err := Parse([]string{
+		"-upstream", "https://api.example.com",
+		"-transcode-messages-chat",
+	})
+	if err != nil {
+		t.Fatalf("Parse single: %v", err)
+	}
+	if err := single.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate single mapping: %v", err)
 	}
 }

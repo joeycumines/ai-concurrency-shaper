@@ -245,7 +245,7 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.stringVar(&p.TranscodeAnthropicVersion, "transcode-anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value for transcode x-api-key")
 
 	// Upstream transport and Sesame endpoint options.
-	r.stringVar(&p.Transport, "transport", "", "upstream transport mode: direct | sesame (default: direct)")
+	r.stringVar(&p.Transport, "transport", "", "upstream transport mode: direct | sesame (default: direct unless an RC dial target, -rc-server or -sesame-endpoint, is configured)")
 	r.stringVar(&p.SesameEndpoint, "sesame-endpoint", "", "sesame endpoint to dial through via RemoteControl (host:port or http(s)://host:port)")
 	r.stringVar(&p.SesameTokenEnv, "sesame-token-env", "", "environment variable name providing the sesame endpoint bearer token (requires a TLS sesame channel)")
 	r.stringVar(&p.SesameCACert, "sesame-ca-cert", "", "CA certificate for sesame endpoint mTLS verification (file:PATH, base64:DATA, or a bare path)")

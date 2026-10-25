@@ -368,6 +368,33 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		}
 	}
 
+	// A client route carrying several transcode mappings is dispatched by the
+	// request model's native dialect, and the only source of that dialect is a
+	// -model-table entry's via= fact. Without one, every target answers the
+	// same identity fallback, the responses target is unreachable, and the
+	// operator has configured a route that cannot do what its flags say. The
+	// reachability of the responses branch is a property of the table, so the
+	// refusal names the flag that would make it work.
+	multiTargetRoutes := make(map[transcode.RouteKey]int, len(mappings))
+	routeHasVia := make(map[transcode.RouteKey]bool, len(mappings))
+	for _, m := range mappings {
+		multiTargetRoutes[m.ClientRoute]++
+		for _, mapping := range m.Mapping.ModelMap.Exact {
+			if mapping.Via != "" {
+				routeHasVia[m.ClientRoute] = true
+			}
+		}
+	}
+	for routeKey, count := range multiTargetRoutes {
+		if count < 2 || routeHasVia[routeKey] {
+			continue
+		}
+		return fmt.Errorf(
+			"transcode route %s %s carries %d mappings but no model declares its upstream dialect: the responses target is unreachable; declare the dialect with -model-table entries (surrogate@provider=wire;via=responses) or configure a single mapping for the route",
+			routeKey.Method, routeKey.Path, count,
+		)
+	}
+
 	var nativeRoutes []proxy.NativeRoute
 	nativeSeen := make(map[transcode.RouteKey]struct{})
 	for _, raw := range p.NativeRouteFlags {

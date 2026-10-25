@@ -173,7 +173,11 @@ func TestParseProxyHopDoesNotLeakCredentials(t *testing.T) {
 		"socks5@;pass=" + pass,                      // empty address
 		"socks5@host:1080;pass=" + pass + ";badopt", // option without '='
 		"socks5@host:1080;pass=" + pass + ";nope=x", // unknown option
-		"socks5://user:" + pass + "@proxy:1080",     // URL-style: creds ahead of '@'
+		// The credential IS the offending token: a password pasted as its own
+		// segment, and a password pasted as the key of a stray pair.
+		"socks5@host:1080;" + pass,
+		"socks5@host:1080;" + pass + "=x",
+		"socks5://user:" + pass + "@proxy:1080", // URL-style: creds ahead of '@'
 	} {
 		_, err := ParseProxyHop(spec)
 		if err == nil {
@@ -202,7 +206,7 @@ func TestDialConfigValidate(t *testing.T) {
 	good := DialConfig{
 		TerminateTLS:     true,
 		TargetServerName: "example.com",
-		ALPN:             []string{"h2", "http/1.1"},
+		ALPN:             []string{"http/1.1"},
 		MinVersion:       "1.2",
 		MaxVersion:       "1.3",
 		ClientHello:      &sesamepb.ClientHelloSpec{SessionIdLength: 32},
@@ -294,5 +298,185 @@ func TestChannelConfigValidate(t *testing.T) {
 	// Valid plaintext.
 	if err := (&ChannelConfig{Server: "127.0.0.1:1"}).Validate(); err != nil {
 		t.Errorf("valid plaintext channel: unexpected error: %v", err)
+	}
+}
+
+// TestDialConfigValidateMaterialAndVersions pins the startup validation of
+// every remote-termination TLS value: malformed PEM, an empty configured value,
+// and an impossible version range all fail Validate, before any socket exists.
+func TestDialConfigValidateMaterialAndVersions(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.pem")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	garbage := filepath.Join(dir, "garbage.pem")
+	if err := os.WriteFile(garbage, []byte("not pem at all"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		cfg     DialConfig
+		wantErr string
+	}{
+		"garbage target CA": {
+			cfg:     DialConfig{TerminateTLS: true, TargetCA: "file:" + garbage},
+			wantErr: "invalid target CA PEM",
+		},
+		"garbage target cert and key": {
+			cfg:     DialConfig{TerminateTLS: true, TargetCert: "file:" + garbage, TargetKey: "file:" + garbage},
+			wantErr: "target client cert/key",
+		},
+		"empty target CA": {
+			cfg:     DialConfig{TerminateTLS: true, TargetCA: "file:" + empty},
+			wantErr: "key material is empty",
+		},
+		"empty target cert with valid key": {
+			cfg:     DialConfig{TerminateTLS: true, TargetCert: "base64:", TargetKey: "base64:aGVsbG8="},
+			wantErr: "key material is empty",
+		},
+		"min above max": {
+			cfg:     DialConfig{TerminateTLS: true, MinVersion: "1.3", MaxVersion: "1.2"},
+			wantErr: "above -rc-target-max-version",
+		},
+	}
+	for name, tc := range cases {
+		err := tc.cfg.Validate()
+		if err == nil {
+			t.Errorf("%s: Validate = nil, want %q", name, tc.wantErr)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: error = %v, want it to contain %q", name, err, tc.wantErr)
+		}
+	}
+	// The equal-version pair is legal.
+	if err := (&DialConfig{TerminateTLS: true, MinVersion: "1.2", MaxVersion: "1.2"}).Validate(); err != nil {
+		t.Errorf("equal version range: unexpected error: %v", err)
+	}
+}
+
+// TestChannelConfigValidateMaterial pins the same discipline for the channel:
+// a malformed or empty configured CA/cert/key is a validation error, and the
+// !TLS contradiction is reported before any file is read.
+func TestChannelConfigValidateMaterial(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.pem")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	garbage := filepath.Join(dir, "garbage.pem")
+	if err := os.WriteFile(garbage, []byte("not pem at all"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		cfg     ChannelConfig
+		wantErr string
+	}{
+		"empty CA": {
+			cfg:     ChannelConfig{Server: "127.0.0.1:1", TLS: true, CA: "file:" + empty},
+			wantErr: "key material is empty",
+		},
+		"garbage CA": {
+			cfg:     ChannelConfig{Server: "127.0.0.1:1", TLS: true, CA: "file:" + garbage},
+			wantErr: "invalid channel CA PEM",
+		},
+		"garbage cert and key": {
+			cfg:     ChannelConfig{Server: "127.0.0.1:1", TLS: true, Cert: "file:" + garbage, Key: "file:" + garbage},
+			wantErr: "channel client cert/key",
+		},
+		"empty cert with valid key": {
+			cfg:     ChannelConfig{Server: "127.0.0.1:1", TLS: true, Cert: "base64:", Key: "base64:aGVsbG8="},
+			wantErr: "key material is empty",
+		},
+		"TLS options without TLS wins over material": {
+			// The file does not exist: the contradiction must be reported, not
+			// the missing file.
+			cfg:     ChannelConfig{Server: "127.0.0.1:1", CA: "file:/nonexistent/rcclient-channel-test.pem"},
+			wantErr: "require -rc-channel-tls",
+		},
+	}
+	for name, tc := range cases {
+		err := tc.cfg.Validate()
+		if err == nil {
+			t.Errorf("%s: Validate = nil, want %q", name, tc.wantErr)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: error = %v, want it to contain %q", name, err, tc.wantErr)
+		}
+	}
+}
+
+// TestServerConfigValidateMaterial pins startup validation of the embedded RC
+// server's material: malformed PEM never waits for the listener to be bound.
+func TestServerConfigValidateMaterial(t *testing.T) {
+	dir := t.TempDir()
+	garbage := filepath.Join(dir, "garbage.pem")
+	if err := os.WriteFile(garbage, []byte("not pem at all"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		cfg     ServerConfig
+		wantErr string
+	}{
+		"garbage cert and key": {
+			cfg:     ServerConfig{Bind: "127.0.0.1:0", TLS: true, Cert: "file:" + garbage, Key: "file:" + garbage},
+			wantErr: "rc-server cert/key",
+		},
+		"garbage CA": {
+			cfg:     ServerConfig{Bind: "127.0.0.1:0", TLS: true, CA: "file:" + garbage, Cert: "file:" + garbage, Key: "file:" + garbage},
+			wantErr: "invalid server CA PEM",
+		},
+	}
+	for name, tc := range cases {
+		err := tc.cfg.Validate()
+		if err == nil {
+			t.Errorf("%s: Validate = nil, want %q", name, tc.wantErr)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: error = %v, want it to contain %q", name, err, tc.wantErr)
+		}
+	}
+}
+
+// TestDialConfigRejectsH2Offer pins the HTTP/1.1-only constraint of a
+// remote-terminated connection: the proxy dials through
+// http.Transport.DialTLSContext, whose returned connection is not a *tls.Conn,
+// so net/http never learns the negotiated protocol and never sends an HTTP/2
+// preface. An h2 offer — in the ALPN list or in a wire-level client-hello
+// extension — would let the upstream select a protocol this client cannot use.
+func TestDialConfigRejectsH2Offer(t *testing.T) {
+	// The ALPN list.
+	for _, protocol := range []string{"h2", "H2", " h2 "} {
+		err := (&DialConfig{TerminateTLS: true, ALPN: []string{"http/1.1", protocol}}).Validate()
+		if err == nil || !strings.Contains(err.Error(), "must not offer h2") {
+			t.Errorf("ALPN %q: err = %v, want the h2 rejection", protocol, err)
+		}
+	}
+	// A client-hello spec whose raw ALPN extension offers h2.
+	// Body: 2-byte list length (5) then 1-byte length + name: "\x02h2".
+	h2Spec := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
+		{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{Raw: []byte{0x00, 0x03, 0x02, 'h', '2'}}},
+	}}
+	err := (&DialConfig{TerminateTLS: true, ClientHello: h2Spec}).Validate()
+	if err == nil || !strings.Contains(err.Error(), "must not offer h2") {
+		t.Errorf("client-hello h2: err = %v, want the h2 rejection", err)
+	}
+	// A spec offering only http/1.1 is accepted.
+	http11Spec := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
+		{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{Raw: []byte{0x00, 0x08, 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1'}}},
+	}}
+	if err := (&DialConfig{TerminateTLS: true, ClientHello: http11Spec}).Validate(); err != nil {
+		t.Errorf("client-hello http/1.1: unexpected error: %v", err)
+	}
+	// An empty ALPN list stays empty: the sesame server then sends no ALPN
+	// extension at all, so nothing can negotiate h2.
+	opts, err := (&DialConfig{TerminateTLS: true}).tlsOptions()
+	if err != nil {
+		t.Fatalf("tlsOptions: %v", err)
+	}
+	if len(opts.GetAlpnProtocols()) != 0 {
+		t.Fatalf("AlpnProtocols = %q, want empty (no ALPN extension is sent)", opts.GetAlpnProtocols())
 	}
 }

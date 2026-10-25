@@ -16,6 +16,8 @@
 package rcclient
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -69,7 +71,11 @@ type DialConfig struct {
 	WindowSize       int
 }
 
-// Validate checks the configuration without connecting anywhere.
+// Validate checks the configuration without connecting anywhere. The
+// remote-termination TLS options are rendered here, so every PEM value is
+// parsed and every version pair checked before any socket exists: a malformed
+// target CA, certificate, or key is a configuration error, never a per-request
+// surprise at the RC server.
 func (c *DialConfig) Validate() error {
 	if _, err := c.tlsOptions(); err != nil {
 		return err
@@ -93,6 +99,15 @@ func (c *DialConfig) Validate() error {
 
 // tlsOptions renders the flag values into the wire TlsOptions for remote
 // termination, or nil when termination is not requested.
+//
+// The ALPN offer is constrained to http/1.1. Under remote termination the
+// proxy dials the upstream through http.Transport.DialTLSContext, whose
+// returned connection is not a *tls.Conn, so net/http never learns the
+// negotiated protocol and can only speak HTTP/1.1 — it never sends an HTTP/2
+// preface. An offer of "h2" would therefore let an upstream select a protocol
+// this client cannot use, failing the exchange with a preface mismatch. With
+// no offer at all the sesame server sends no ALPN extension (its documented
+// contract), which is why an empty list is left empty rather than defaulted.
 func (c *DialConfig) tlsOptions() (*sesamepb.TlsOptions, error) {
 	if !c.TerminateTLS {
 		if c.TargetServerName != "" || len(c.ALPN) != 0 || c.MinVersion != "" ||
@@ -101,6 +116,11 @@ func (c *DialConfig) tlsOptions() (*sesamepb.TlsOptions, error) {
 			return nil, errors.New("rcclient: target TLS options require remote TLS termination (-rc-terminate-tls)")
 		}
 		return nil, nil
+	}
+	for _, protocol := range c.ALPN {
+		if strings.EqualFold(strings.TrimSpace(protocol), "h2") {
+			return nil, errors.New("rcclient: -rc-target-alpn must not offer h2: the remote-terminated connection carries HTTP/1.1 only, so an h2 selection would fail every request with a protocol mismatch")
+		}
 	}
 
 	opts := &sesamepb.TlsOptions{
@@ -123,10 +143,22 @@ func (c *DialConfig) tlsOptions() (*sesamepb.TlsOptions, error) {
 		}
 		opts.MaxVersion = v
 	}
+	// A floor above its ceiling can never negotiate; the remote server would
+	// reject it, so refuse it here where the operator sees which flags
+	// disagree.
+	if c.MinVersion != "" && c.MaxVersion != "" && opts.MinVersion > opts.MaxVersion {
+		return nil, fmt.Errorf(
+			"rcclient: -rc-target-min-version %s is above -rc-target-max-version %s",
+			c.MinVersion, c.MaxVersion,
+		)
+	}
 
 	if c.ClientHello != nil {
 		if err := netconn.ValidateClientHelloSpec(c.ClientHello); err != nil {
 			return nil, fmt.Errorf("rcclient: client hello spec: %w", err)
+		}
+		if clientHelloOffersH2(c.ClientHello) {
+			return nil, errors.New("rcclient: -rc-target-client-hello must not offer h2: the remote-terminated connection carries HTTP/1.1 only, so an h2 selection would fail every request with a protocol mismatch")
 		}
 		opts.ClientHello = c.ClientHello
 	}
@@ -134,6 +166,12 @@ func (c *DialConfig) tlsOptions() (*sesamepb.TlsOptions, error) {
 	ca, err := DecodeMaterial(c.TargetCA)
 	if err != nil {
 		return nil, fmt.Errorf("rcclient: target CA: %w", err)
+	}
+	if len(ca) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(ca) {
+			return nil, errors.New("rcclient: invalid target CA PEM")
+		}
 	}
 	opts.CaCertificates = ca
 
@@ -147,6 +185,11 @@ func (c *DialConfig) tlsOptions() (*sesamepb.TlsOptions, error) {
 	}
 	if (cert != nil) != (key != nil) {
 		return nil, errors.New("rcclient: target client cert and key must both be set or both unset")
+	}
+	if cert != nil {
+		if _, err := tls.X509KeyPair(cert, key); err != nil {
+			return nil, fmt.Errorf("rcclient: target client cert/key: %w", err)
+		}
 	}
 	opts.ClientCertificate = cert
 	opts.ClientPrivateKey = key
@@ -258,10 +301,11 @@ func ParseClientHello(value string) (*sesamepb.ClientHelloSpec, error) {
 //
 // Errors never echo the raw spec: it may carry a proxy password or an
 // auth header, and a parse failure must not leak credentials into the
-// startup error and the journal. They name only the offending token, and
-// not even that where a token can hold credential bytes: URL-style misuse
-// (socks5://user:pass@host) puts credentials ahead of the first '@', so
-// the unknown-type error reports a byte count instead, DecodeMaterial-style.
+// startup error and the journal. No error names a token that can hold
+// credential bytes: URL-style misuse (socks5://user:pass@host) puts
+// credentials ahead of the first '@', and a credential containing '=' splits
+// into key/value, so every such error reports the option's position and byte
+// length instead, DecodeMaterial-style.
 func ParseProxyHop(s string) (*sesamepb.ProxyHop, error) {
 	rest, after, ok := strings.Cut(s, "@")
 	if !ok {
@@ -292,11 +336,13 @@ func ParseProxyHop(s string) (*sesamepb.ProxyHop, error) {
 		},
 	}
 
-	for _, kv := range parts[1:] {
+	for i, kv := range parts[1:] {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
-			// kv carries no '=' and therefore no value; naming it is safe.
-			return nil, fmt.Errorf("proxy hop: option %q: want key=value", kv)
+			// The segment has no '=' and no value, but it can still be a
+			// mistyped credential ("pass;secret") — report its position and
+			// size only, never its bytes.
+			return nil, fmt.Errorf("proxy hop: option %d (%d bytes): want key=value", i+1, len(kv))
 		}
 		switch strings.ToLower(strings.TrimSpace(k)) {
 		case "user", "username":
@@ -306,9 +352,46 @@ func ParseProxyHop(s string) (*sesamepb.ProxyHop, error) {
 		case "header", "auth-header":
 			hop.AuthHeader = v
 		default:
-			return nil, fmt.Errorf("proxy hop: unknown option %q", k)
+			// The key is operator text that may itself be a pasted secret
+			// (a password containing '=' splits into key/value), so the
+			// error reports its position and size instead of the key.
+			return nil, fmt.Errorf("proxy hop: unknown option %d (%d bytes before '='): want user, pass, or header", i+1, len(k))
 		}
 	}
 
 	return hop, nil
+}
+
+// alpnExtensionType is the IANA TLS extension type of application_layer_protocol_negotiation.
+const alpnExtensionType = 16
+
+// clientHelloOffersH2 reports whether a wire-level ClientHelloSpec would offer
+// "h2" in its ALPN extension. Only a raw extension body can carry an offer —
+// the engine-derived (auto) form takes its ALPN list from TlsOptions, which
+// tlsOptions constrains — so a malformed body is treated as offering nothing
+// and left to the server's own validation.
+func clientHelloOffersH2(spec *sesamepb.ClientHelloSpec) bool {
+	for _, ext := range spec.GetExtensions() {
+		if ext.GetType() != alpnExtensionType {
+			continue
+		}
+		body := ext.GetRaw()
+		// The ALPN body is a 2-byte list length followed by 1-byte-length
+		// prefixed protocol names.
+		if len(body) < 2 {
+			continue
+		}
+		list := body[2:]
+		for len(list) > 0 {
+			n := int(list[0])
+			if n == 0 || 1+n > len(list) {
+				break
+			}
+			if strings.EqualFold(string(list[1:1+n]), "h2") {
+				return true
+			}
+			list = list[1+n:]
+		}
+	}
+	return false
 }

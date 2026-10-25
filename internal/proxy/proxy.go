@@ -965,6 +965,7 @@ func New(opts ...Option) (*Proxy, error) {
 		m := &cfg.transcodeMappings[i]
 		mapping := m.Mapping
 		mapping.ModelMap = cloneModelMap(m.ModelMap)
+		mapping.ProfileMap = cloneProfileMap(m.ProfileMap)
 		mapping.LossPolicy = cloneLossPolicy(m.LossPolicy)
 		mapping.AllowedClientQuery = cloneStringSet(m.AllowedClientQuery)
 		if mapping.Auth.IsZero() {
@@ -3414,7 +3415,13 @@ type statusRecorder struct {
 	commentsCommitted      bool
 	upstreamStatusOverride int
 	transcodeStream        bool
-	localUpgradeFailure    bool
+	// dialectErrorFramed marks a committed stream whose failure is being
+	// delivered as a client-dialect error terminal by its owner. The
+	// recorder must then not append its own ": queue-wait failed: upstream"
+	// close comment: the failure is local (or already framed), and blaming
+	// the upstream would misreport what happened.
+	dialectErrorFramed  bool
+	localUpgradeFailure bool
 
 	switchingProtocolsProbeResolved      atomic.Bool
 	onSwitchingProtocolsHandshakeSuccess func()
@@ -3439,6 +3446,12 @@ func (r *statusRecorder) FlushError() error {
 	}
 	return err
 }
+
+// SuppressFailedCloseComment marks the committed stream as framed by its
+// owner: a dialect error terminal follows, so the recorder must not add its
+// own failed-close comment. It is called by the dialect error writer just
+// before the terminal, while the exchange is still running.
+func (r *statusRecorder) SuppressFailedCloseComment() { r.dialectErrorFramed = true }
 
 func (r *statusRecorder) downstreamWriteFailed() bool {
 	return r != nil && r.writeFailed
@@ -3495,7 +3508,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 				r.entry.Timing.ResponseHeaders = now
 				r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
 			}
-			if !r.transcodeStream {
+			if !r.transcodeStream && !r.dialectErrorFramed {
 				fmt.Fprintf(r.ResponseWriter, ": queue-wait failed: upstream\n\n")
 				_ = r.FlushError()
 			}
@@ -3535,7 +3548,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 }
 
 func (r *statusRecorder) Write(b []byte) (int, error) {
-	if r.commentsCommitted && r.upstreamStatusOverride > 0 && !r.transcodeStream {
+	if r.commentsCommitted && r.upstreamStatusOverride > 0 && !r.transcodeStream && !r.dialectErrorFramed {
 		if r.entry != nil && !r.captureDone && len(b) > 0 {
 			remaining := r.captureMax - int64(len(r.capturedBody))
 			if remaining > 0 {

@@ -264,8 +264,11 @@ func TestProxyNativeKnownViaMismatchIsLocal404(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "natively served as chat") {
+	if !strings.Contains(rec.Body.String(), "served natively as chat") {
 		t.Fatalf("body = %s, want it to name the chat native dialect as the model's own", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "-native-route") {
+		t.Fatalf("body = %s, want it to name the flag that serves the model", rec.Body.String())
 	}
 	if path, _, _ := up.got(); path != "" {
 		t.Fatalf("upstream reached at %q, want no upstream contact", path)

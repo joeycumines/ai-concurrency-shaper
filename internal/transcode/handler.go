@@ -236,6 +236,13 @@ func NewTranscodeHandler(
 func cloneMapping(m Mapping) Mapping {
 	m.LossPolicy = LossPolicy{Allowed: cloneLossSet(m.LossPolicy.Allowed)}
 	m.ModelMap = cloneModelMapValues(m.ModelMap)
+	if m.ProfileMap.Profiles != nil {
+		profiles := make(map[string]ProfileMapping, len(m.ProfileMap.Profiles))
+		for name, profile := range m.ProfileMap.Profiles {
+			profiles[name] = profile
+		}
+		m.ProfileMap.Profiles = profiles
+	}
 	m.AllowedClientQuery = cloneQuerySet(m.AllowedClientQuery)
 	return m
 }
@@ -1340,18 +1347,39 @@ func (h *TranscodeHandler) writeLocalError(
 	h.writeDialectHTTPError(r, w, apiErr, provenance)
 }
 
-// writeCommittedStreamError failed-closes an already-committed SSE stream
+// WriteCommittedStreamError failed-closes an already-committed SSE stream
 // with a client-dialect error event. The re-declared WriteHeader never
 // reaches the wire (the proxy's committed-stream guard silences it and
 // marks the exchange aborted); the SSE error frame is the observable
 // failure. A failed downstream write is returned so the outcome records
 // the delivery fact exactly like the JSON error writers.
-func writeCommittedStreamError(
+//
+// It is exported so a route-selection refusal that happens before any
+// handler runs (the multi-target dispatcher) emits exactly the frame the
+// handler's own post-commit error path emits, instead of a second spelling
+// of the same wire event.
+func WriteCommittedStreamError(
 	w http.ResponseWriter,
 	client ClientProtocol,
 	apiErr CanonicalAPIError,
 ) error {
 	apiErr = normalizeCanonicalError(apiErr)
+	// A writer that owns a failed-close comment (the proxy's committed-stream
+	// recorder) must not add its own upstream-blame close once this terminal
+	// is framed: the failure is local, or already stated by the dialect
+	// event, and a second close comment would misreport the cause. The
+	// recorder sits behind diagnostic wrappers, so the chain is walked.
+	for cur := w; cur != nil; {
+		if suppressor, ok := cur.(interface{ SuppressFailedCloseComment() }); ok {
+			suppressor.SuppressFailedCloseComment()
+			break
+		}
+		unwrapper, ok := cur.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		cur = unwrapper.Unwrap()
+	}
 	w.WriteHeader(apiErr.Status)
 	var payload []byte
 	var err error
@@ -1398,7 +1426,7 @@ func (h *TranscodeHandler) writeDialectOrCommittedStreamError(
 	apiErr CanonicalAPIError,
 ) error {
 	if CommittedStreamFromContext(r.Context()) {
-		return writeCommittedStreamError(w, client, apiErr)
+		return WriteCommittedStreamError(w, client, apiErr)
 	}
 	return WriteDialectHTTPError(w, client, apiErr)
 }

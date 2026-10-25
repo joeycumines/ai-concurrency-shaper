@@ -24,6 +24,8 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -700,4 +702,94 @@ func generateTestCerts(t *testing.T) (caPEM, clientCertPEM, clientKeyPEM []byte)
 	clientCertPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER})
 	clientKeyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	return caPEM, clientCertPEM, clientKeyPEM
+}
+
+// TestResolveAndValidate_RCMaterialFailsClosed pins the startup rejection of
+// every unusable piece of RC material, before any socket is bound or dialled.
+// Each case names the flag through the error text so the operator can fix the
+// configuration without guessing.
+func TestResolveAndValidate_RCMaterialFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.pem")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	garbage := filepath.Join(dir, "garbage.pem")
+	if err := os.WriteFile(garbage, []byte("not pem at all"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		args    []string
+		wantErr string
+	}{
+		"empty upstream CA": {
+			args:    []string{"-upstream-ca", "base64:"},
+			wantErr: "key material is empty",
+		},
+		"empty channel CA": {
+			args:    []string{"-rc-server", "127.0.0.1:9090", "-rc-channel-tls", "-rc-channel-ca", "file:" + empty},
+			wantErr: "key material is empty",
+		},
+		"empty channel cert with valid key": {
+			args: []string{"-rc-server", "127.0.0.1:9090", "-rc-channel-tls",
+				"-rc-channel-cert", "base64:", "-rc-channel-key", "base64:aGVsbG8="},
+			wantErr: "key material is empty",
+		},
+		"garbage server cert": {
+			args: []string{"-rc-server-bind", "127.0.0.1:0", "-rc-server-tls",
+				"-rc-server-cert", "file:" + garbage, "-rc-server-key", "file:" + garbage},
+			wantErr: "rc-server cert/key",
+		},
+		"garbage target CA": {
+			args:    []string{"-rc-server", "127.0.0.1:9090", "-rc-terminate-tls", "-rc-target-ca", "file:" + garbage},
+			wantErr: "invalid target CA PEM",
+		},
+		"min version above max": {
+			args: []string{"-rc-server", "127.0.0.1:9090", "-rc-terminate-tls",
+				"-rc-target-min-version", "1.3", "-rc-target-max-version", "1.2"},
+			wantErr: "above -rc-target-max-version",
+		},
+		"client hello without termination": {
+			args:    []string{"-rc-server", "127.0.0.1:9090", "-rc-target-client-hello", "file:/nonexistent/spec.json"},
+			wantErr: "requires -rc-terminate-tls",
+		},
+	}
+	for name, tc := range cases {
+		cfg, err := Parse(append([]string{"-upstream", "https://x"}, tc.args...))
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", name, err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Errorf("%s: ResolveAndValidate = nil, want %q", name, tc.wantErr)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: error = %v, want it to contain %q", name, err, tc.wantErr)
+		}
+	}
+}
+
+// TestResolveAndValidate_TerminateTLSPlaintextUpstream rejects remote TLS
+// termination on a plaintext upstream: there is no upstream handshake to run
+// at the RC server, so accepting the flag would silently forward plaintext
+// while the operator believes the handshake moved.
+func TestResolveAndValidate_TerminateTLSPlaintextUpstream(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream", "http://127.0.0.1:8080",
+		"-rc-server", "127.0.0.1:9090",
+		"-rc-terminate-tls",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("ResolveAndValidate = nil, want the plaintext-termination rejection")
+	}
+	for _, want := range []string{"-rc-terminate-tls", "plaintext http upstream"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to contain %q", err, want)
+		}
+	}
 }

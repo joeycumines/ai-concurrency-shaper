@@ -283,7 +283,8 @@ func TestResolveAndValidate_SesameMaterialExplicitChannelWins(t *testing.T) {
 
 // TestResolveAndValidate_SesameEndpointMalformedAfterResolve verifies that a
 // failed endpoint revalidation clears the target derived by the previous
-// successful resolve instead of leaving stale state on the failed Config.
+// successful resolve and releases the channel it opened, instead of leaving
+// stale state or a live dialer on the failed Config.
 func TestResolveAndValidate_SesameEndpointMalformedAfterResolve(t *testing.T) {
 	cfg, err := Parse([]string{
 		"-upstream=https://api.example.com",
@@ -309,8 +310,12 @@ func TestResolveAndValidate_SesameEndpointMalformedAfterResolve(t *testing.T) {
 	if cfg.Providers[0].RCServer != "" {
 		t.Fatalf("RCServer after failed revalidation = %q, want empty", cfg.Providers[0].RCServer)
 	}
-	if cfg.Providers[0].RCDialer() != first {
-		t.Fatal("failed revalidation replaced the dialer, want the prior dialer retained")
+	// A failed resolve owns nothing: the channel installed by the earlier
+	// success is released, so no caller can inherit a live gRPC channel
+	// alongside an error (main.go registers its close defer only after a
+	// successful resolve).
+	if got := cfg.Providers[0].RCDialer(); got != nil {
+		t.Fatalf("RCDialer() after failed revalidation = %v, want nil (no open channel)", got)
 	}
 }
 
@@ -763,5 +768,191 @@ func TestResolveAndValidate_SesameTokenEnv(t *testing.T) {
 	}
 	if err := cfgStray.ResolveAndValidate(); err == nil || !strings.Contains(err.Error(), "rc dial options require -rc-server") {
 		t.Errorf("ResolveAndValidate want rc dial options error, got %v", err)
+	}
+}
+
+// TestResolveAndValidate_SesameEndpointRejectsMalformedHostsAndNeverEchoes
+// pins two contracts for the bare (scheme-less) endpoint form: a userinfo,
+// empty host, missing port, or scheme-typo value is refused at startup, and no
+// endpoint error ever contains a byte of the value — the endpoint is logged
+// verbatim at startup, so an error that echoed it would publish userinfo into
+// the journal.
+func TestResolveAndValidate_SesameEndpointRejectsMalformedHostsAndNeverEchoes(t *testing.T) {
+	const secret = "s3cret-userinfo-value"
+	for name, tc := range map[string]struct {
+		endpoint string
+		wantErr  string
+	}{
+		"userinfo in bare form": {endpoint: secret + "@127.0.0.1:50051", wantErr: "without userinfo"},
+		"userinfo in url form":  {endpoint: "https://" + secret + "@127.0.0.1:50051", wantErr: "must not contain userinfo"},
+		"empty host":            {endpoint: ":8443", wantErr: "missing host"},
+		"scheme typo":           {endpoint: "http:host:8080", wantErr: "malformed host:port"},
+		"whitespace only":       {endpoint: "   ", wantErr: "missing host"},
+	} {
+		cfg, err := Parse([]string{
+			"-upstream=https://api.example.com",
+			"-sesame-endpoint=" + tc.endpoint,
+		})
+		if err != nil {
+			t.Fatalf("%s: Parse: %v", name, err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Errorf("%s: ResolveAndValidate = nil, want %q", name, tc.wantErr)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: error = %v, want it to contain %q", name, err, tc.wantErr)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("%s: error leaks the endpoint userinfo: %v", name, err)
+		}
+	}
+
+	// Surrounding whitespace is trimmed rather than producing a target that
+	// main.go would log with the spaces.
+	cfg, err := Parse([]string{
+		"-upstream=https://api.example.com",
+		"-sesame-endpoint= 127.0.0.1:50051 ",
+	})
+	if err != nil {
+		t.Fatalf("Parse padded endpoint: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate padded endpoint: %v", err)
+	}
+	if got := cfg.Providers[0].RCServer; got != "127.0.0.1:50051" {
+		t.Fatalf("RCServer = %q, want the trimmed 127.0.0.1:50051", got)
+	}
+}
+
+// TestResolveAndValidate_TokenDoesNotSurviveRemoval pins the credential
+// hygiene of repeated resolution: a token resolved from -sesame-token-env must
+// not survive a later resolve whose inputs no longer select that variable.
+// Before the fix the stale token stayed on the provider and was attached to
+// the next channel (or failed every RPC once that channel was plaintext).
+func TestResolveAndValidate_TokenDoesNotSurviveRemoval(t *testing.T) {
+	const envVar = "SHAPER_TEST_SESAME_TOKEN_REMOVAL"
+	t.Setenv(envVar, "first-token")
+	cfg, err := Parse([]string{
+		"-upstream=https://api.example.com",
+		"-transport=sesame",
+		"-sesame-endpoint=https://127.0.0.1:50051",
+		"-sesame-token-env=" + envVar,
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("first ResolveAndValidate: %v", err)
+	}
+	p := cfg.Providers[0]
+	if p.rcToken != "first-token" {
+		t.Fatalf("rcToken = %q, want first-token", p.rcToken)
+	}
+
+	// The operator drops the token flag but keeps the (now plaintext) channel.
+	p.SesameTokenEnv = ""
+	p.SesameEndpoint = "http://127.0.0.1:50051"
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("second ResolveAndValidate: %v", err)
+	}
+	if p.rcToken != "" {
+		t.Fatalf("rcToken after removal = %q, want empty (a stale secret must not be attached)", p.rcToken)
+	}
+}
+
+// TestResolveAndValidate_ServerConfigClearedOnBindRemoval pins that removing
+// -rc-server-bind clears the resolved server configuration: main.go starts the
+// embedded RC server from RCServerConfig, so a stale value would start a
+// listener the current inputs do not ask for.
+func TestResolveAndValidate_ServerConfigClearedOnBindRemoval(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-upstream=https://x",
+		"-rc-server-bind", "127.0.0.1:0",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("first ResolveAndValidate: %v", err)
+	}
+	if cfg.Server.RCServerConfig() == nil {
+		t.Fatal("RCServerConfig() = nil after a resolve with -rc-server-bind, want the config")
+	}
+	cfg.Server.RCBind = ""
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("second ResolveAndValidate: %v", err)
+	}
+	if got := cfg.Server.RCServerConfig(); got != nil {
+		t.Fatalf("RCServerConfig() = %+v after bind removal, want nil", got)
+	}
+}
+
+// TestResolveAndValidate_ProgrammaticProviderKeepsDialFields pins the
+// programmatic-construction contract: a Provider that was never built by Parse
+// carries no explicit-flag record, and the values its caller set directly must
+// survive ResolveAndValidate instead of being wiped as if they had been derived
+// from a flag that is no longer present.
+func TestResolveAndValidate_ProgrammaticProviderKeepsDialFields(t *testing.T) {
+	cfg, err := Parse([]string{"-upstream", "https://x"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	p := cfg.Providers[0]
+	p.RCServer = "127.0.0.1:9090"
+	p.RCChannelTLS = true
+	p.RCChannelServerName = "rc.local"
+
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v", err)
+	}
+	if p.RCServer != "127.0.0.1:9090" {
+		t.Errorf("RCServer = %q, want the caller's 127.0.0.1:9090", p.RCServer)
+	}
+	if !p.RCChannelTLS {
+		t.Error("RCChannelTLS = false, want the caller's true")
+	}
+	if p.RCChannelServerName != "rc.local" {
+		t.Errorf("RCChannelServerName = %q, want the caller's rc.local", p.RCChannelServerName)
+	}
+	if p.RCDialer() == nil {
+		t.Error("RCDialer() = nil, want a dialer for the caller's target")
+	} else {
+		_ = p.RCDialer().Close()
+	}
+}
+
+// TestResolveAndValidate_FailureReleasesDialers pins that a resolve which
+// fails after some providers succeeded leaves no open gRPC channel behind:
+// main.go registers its close defer only after a successful resolve, so a
+// failed resolve would otherwise leak every channel it had opened.
+func TestResolveAndValidate_FailureReleasesDialers(t *testing.T) {
+	cfg, err := Parse([]string{
+		"--provider=acme",
+		"-upstream", "https://api.anthropic.com",
+		"-prefix", "/acme",
+		"-rc-server", "127.0.0.1:9090",
+		"--provider=beta",
+		"-upstream", "https://api.openai.com",
+		"-prefix", "/beta",
+		"-rc-server", "127.0.0.1:9091",
+		// An impossible version range fails the second provider's resolve,
+		// after the first provider's channel is already open.
+		"-rc-terminate-tls",
+		"-rc-target-min-version", "1.3",
+		"-rc-target-max-version", "1.2",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err == nil {
+		t.Fatal("ResolveAndValidate = nil, want the version-range failure")
+	}
+	for i, p := range cfg.Providers {
+		if d := p.RCDialer(); d != nil {
+			t.Errorf("provider %d RCDialer() = %v after a failed resolve, want nil", i+1, d)
+			_ = d.Close()
+		}
 	}
 }
