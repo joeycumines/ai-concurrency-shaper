@@ -283,3 +283,39 @@ func TestNativeLocal5xxMarksProxyGeneratedAfterCommit(t *testing.T) {
 		t.Fatalf("body = %q, want the SSE error terminal", rec.Body.String())
 	}
 }
+
+// TestDispatcherRefusalCountsAsDelivered pins the counting parity between a
+// refusal the dispatcher renders and the identical refusal a handler renders:
+// DownstreamComplete means "the response was delivered", so a delivered 4xx is
+// a local failure that completed downstream — not an aborted exchange. Without
+// the parity the same client-visible outcome counted as aborted on a
+// multi-mapping route and as a clean request on a single-mapping one.
+func TestDispatcherRefusalCountsAsDelivered(t *testing.T) {
+	p, upstream, met := committedRefusalMount(t)
+
+	// native-only is mapped as messages-native, which no target on the route
+	// can serve: the dispatcher renders the 404 (no queue comments here).
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"native-only","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+	}
+	if len(upstream.requests) != 0 {
+		t.Fatalf("upstream received %d requests, want 0", len(upstream.requests))
+	}
+	snap := met.Snapshot()
+	if snap.TotalAborted != 0 {
+		t.Fatalf("TotalAborted = %d, want 0 (the refusal was delivered, so the exchange completed downstream)", snap.TotalAborted)
+	}
+	// A refusal never reaches an upstream attempt, so it never increments the
+	// clean-completion counter either — that is the pre-existing shape for a
+	// handler-rendered refusal too. The property under test is that the
+	// dispatcher matches it rather than adding an abort.
+	if snap.TotalProxied != 0 {
+		t.Fatalf("TotalProxied = %d, want 0 (a refusal is not an upstream completion)", snap.TotalProxied)
+	}
+}

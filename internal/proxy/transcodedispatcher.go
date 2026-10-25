@@ -288,8 +288,13 @@ func (d *multiTranscodeDispatcher) selectTarget(clientModel string) (transcode.N
 // When the streaming representation was already committed before admission
 // (SSE queue comments), the status is fixed and the exchange is locked to the
 // stream: the refusal becomes the dialect's SSE error terminal, exactly as a
-// handler's own post-commit error path renders it. A refusal is never a clean
-// completion, so its outcome never claims DownstreamComplete.
+// handler's own post-commit error path renders it.
+//
+// DownstreamComplete means the response was delivered, not that the exchange
+// succeeded — the same meaning every handler error writer gives it. A
+// delivered refusal therefore completes downstream while remaining a local
+// failure (Provenance + LocalFailure), which is exactly how the identical
+// refusal is counted when a handler renders it.
 func (d *multiTranscodeDispatcher) writeRouteError(w http.ResponseWriter, r *http.Request, status int, message string) {
 	if status >= 500 {
 		// A 5xx refusal is a proxy-local defect (no upstream was seen), so
@@ -330,6 +335,8 @@ func (d *multiTranscodeDispatcher) writeRouteError(w http.ResponseWriter, r *htt
 		} else {
 			outcome.Provenance = transcode.ProvenanceDownstreamWriteError
 		}
+	} else {
+		outcome.DownstreamComplete = true
 	}
 	if sink := transcode.OutcomeSinkFromContext(r.Context()); sink != nil {
 		sink.Record(outcome)
