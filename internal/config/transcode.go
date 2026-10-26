@@ -21,7 +21,6 @@ import (
 	"log"
 	"maps"
 	"math"
-	"slices"
 	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
@@ -370,60 +369,68 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	}
 
 	// A client route carrying several transcode mappings is dispatched by the
-	// request model's native dialect, and the only source of that dialect is a
-	// -model-table entry's via= fact. Without one, every target answers the
-	// same identity fallback, the responses target is unreachable, and the
-	// operator has configured a route that cannot do what its flags say. The
-	// reachability of the responses branch is a property of the table, so the
-	// refusal names the flag that would make it work.
-	multiTargetRoutes := make(map[transcode.RouteKey]int, len(mappings))
-	routeVias := make(map[transcode.RouteKey]map[transcode.NativeProtocol]bool, len(mappings))
+	// request model's native dialect, so a target no model can select is dead
+	// configuration: the operator's flags promise a route that cannot happen.
+	// The responses target is selected only by a model declaring
+	// via=responses (a -model-table fact; -transcode-model cannot carry one).
+	// The chat target is also the dispatcher's fallback, so any model that
+	// resolves with no declared dialect reaches it: a via-less map entry or
+	// identity resolution counts, not only via=chat. Routes are checked in
+	// configuration order, so the refusal is deterministic.
+	type routeReach struct {
+		mappings  int
+		chat      bool
+		responses bool
+		hasChat   bool
+		hasResp   bool
+	}
+	reach := make(map[transcode.RouteKey]*routeReach, len(mappings))
+	var routeOrder []transcode.RouteKey
 	for _, m := range mappings {
-		multiTargetRoutes[m.ClientRoute]++
-		for _, mapping := range m.Mapping.ModelMap.Exact {
-			if mapping.Via == "" {
-				continue
+		r := reach[m.ClientRoute]
+		if r == nil {
+			r = &routeReach{}
+			reach[m.ClientRoute] = r
+			routeOrder = append(routeOrder, m.ClientRoute)
+		}
+		r.mappings++
+		switch m.UpstreamProtocol {
+		case transcode.UpstreamChatCompletions:
+			r.hasChat = true
+		case transcode.UpstreamResponses:
+			r.hasResp = true
+		}
+		modelMap := m.Mapping.ModelMap
+		if modelMap.AllowIdentity && !modelMap.RequireExplicitMap {
+			r.chat = true
+		}
+		for _, mapping := range modelMap.Exact {
+			switch mapping.Via {
+			case "", transcode.NativeChat:
+				r.chat = true
+			case transcode.NativeResponses:
+				r.responses = true
 			}
-			if routeVias[m.ClientRoute] == nil {
-				routeVias[m.ClientRoute] = make(map[transcode.NativeProtocol]bool, 2)
-			}
-			routeVias[m.ClientRoute][mapping.Via] = true
 		}
 	}
-	for routeKey, count := range multiTargetRoutes {
-		if count < 2 {
+	for _, routeKey := range routeOrder {
+		r := reach[routeKey]
+		if r.mappings < 2 {
 			continue
 		}
-		// Both upstream protocols on the route need at least one model that
-		// selects them, or that target can never be reached: dispatch is
-		// entirely by the model's declared dialect, so a route whose only
-		// via= entries name one protocol has a dead target.
 		var missing []string
-		for _, m := range mappings {
-			if m.ClientRoute != routeKey {
-				continue
-			}
-			var via transcode.NativeProtocol
-			switch m.UpstreamProtocol {
-			case transcode.UpstreamResponses:
-				via = transcode.NativeResponses
-			case transcode.UpstreamChatCompletions:
-				via = transcode.NativeChat
-			default:
-				continue
-			}
-			if routeVias[routeKey][via] {
-				continue
-			}
-			missing = append(missing, string(via))
+		if r.hasChat && !r.chat {
+			missing = append(missing, string(transcode.NativeChat))
+		}
+		if r.hasResp && !r.responses {
+			missing = append(missing, string(transcode.NativeResponses))
 		}
 		if len(missing) == 0 {
 			continue
 		}
-		slices.Sort(missing)
 		return fmt.Errorf(
-			"transcode route %s %s carries %d mappings but no model declares the %s dialect, so that target is unreachable; declare it with -model-table (surrogate@provider=wire;via=%s) or configure a single mapping for the route",
-			routeKey.Method, routeKey.Path, count, strings.Join(missing, " or "), missing[0],
+			"transcode route %s %s carries %d mappings but no model can select the %s dialect, so that target is unreachable; declare it with -model-table (surrogate@provider=wire;via=%s) or configure a single mapping for the route",
+			routeKey.Method, routeKey.Path, r.mappings, strings.Join(missing, " or "), missing[0],
 		)
 	}
 

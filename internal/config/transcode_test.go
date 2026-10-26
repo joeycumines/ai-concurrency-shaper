@@ -1998,7 +1998,8 @@ func TestResolveAndValidate_TranscodeAuthDialectAdaptation(t *testing.T) {
 // the responses target can never be reached. The refusal names the flag that
 // makes the route work.
 func TestResolveAndValidate_MultiTargetRouteRequiresVia(t *testing.T) {
-	// No via= fact at all: neither target can be selected.
+	// No via= fact at all: identity resolution reaches the chat fallback, but
+	// no model can select the responses target.
 	cfg, err := Parse([]string{
 		"-upstream", "https://api.example.com",
 		"-transcode-messages-chat",
@@ -2073,5 +2074,54 @@ func TestResolveAndValidate_MultiTargetRouteRequiresVia(t *testing.T) {
 	}
 	if err := single.ResolveAndValidate(); err != nil {
 		t.Fatalf("ResolveAndValidate single mapping: %v", err)
+	}
+}
+
+// TestResolveAndValidate_MultiTargetChatFallbackIsReachable pins that the
+// reachability check counts the dispatcher's chat-first fallback: a model with
+// no declared dialect is served by the chat mapping, so "responses for the
+// via=responses models, chat for the rest" is a working layout and must not be
+// refused for lacking a via=chat entry.
+func TestResolveAndValidate_MultiTargetChatFallbackIsReachable(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-model-table", "r@example=resp-wire;via=responses",
+		"-model-table", "c@example=chat-wire",
+		"-upstream", "https://api.example.com",
+		"-transcode-messages-chat",
+		"-transcode-messages-responses",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v (a via-less model reaches the chat fallback)", err)
+	}
+	if n := len(cfg.Providers[0].TranscodeMappings()); n != 2 {
+		t.Fatalf("mappings = %d, want 2", n)
+	}
+}
+
+// TestResolveAndValidate_MultiTargetRejectionIsDeterministic pins that when
+// several routes leave a target unreachable, the refusal always names the
+// first configured route, not whichever a map iteration happened to visit.
+func TestResolveAndValidate_MultiTargetRejectionIsDeterministic(t *testing.T) {
+	for i := range 32 {
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.example.com",
+			"-transcode-route", "messages@/a=chat-completions@/v1/chat/completions",
+			"-transcode-route", "messages@/a=responses@/v1/responses",
+			"-transcode-route", "messages@/b=chat-completions@/v1/chat/completions",
+			"-transcode-route", "messages@/b=responses@/v1/responses",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Fatal("ResolveAndValidate: nil error, want the unreachable responses target refused")
+		}
+		if !strings.Contains(err.Error(), "POST /a ") {
+			t.Fatalf("run %d: error = %q, want the first configured route POST /a", i, err)
+		}
 	}
 }
