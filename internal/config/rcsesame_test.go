@@ -956,3 +956,27 @@ func TestResolveAndValidate_FailureReleasesDialers(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveAndValidate_SesameEndpointSchemeSlotNeverEchoed pins the last
+// echo site: an unsupported scheme is operator text, and a password pasted
+// ahead of "://" lands in that slot, so the error reports only its length.
+func TestResolveAndValidate_SesameEndpointSchemeSlotNeverEchoed(t *testing.T) {
+	const secret = "myp4ssw0rd"
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.example.com",
+		"-sesame-endpoint", secret + "://host:1",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("ResolveAndValidate = nil, want the unsupported-scheme rejection")
+	}
+	if !strings.Contains(err.Error(), "unsupported scheme") {
+		t.Fatalf("error = %v, want it to name the defect", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error echoes the scheme slot: %v", err)
+	}
+}

@@ -192,9 +192,11 @@ func (p *Provider) resolveSesameEndpoint() error {
 		case "http":
 			tlsOn = false
 		default:
+			// The scheme slot is operator text: a password pasted ahead of
+			// "://" lands there. Report its length, never its bytes.
 			return fmt.Errorf(
-				"invalid -sesame-endpoint: unsupported scheme %q (want http or https)",
-				u.Scheme,
+				"invalid -sesame-endpoint: unsupported scheme (%d bytes; want http or https)",
+				len(u.Scheme),
 			)
 		}
 		if u.User != nil {
