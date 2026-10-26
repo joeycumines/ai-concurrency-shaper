@@ -19,8 +19,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/rcclient"
@@ -49,7 +51,10 @@ func (p *Provider) resolveRC() error {
 	// The channel credential is one of those derived values: it survives an
 	// -sesame-token-env removal otherwise, attaching a stale secret to the
 	// next channel (or failing every RPC when the new channel is plaintext).
+	// So is the previous resolve's dialer: it belongs to inputs that may have
+	// changed, and a failure below must not leave it installed.
 	p.rcToken = ""
+	p.closeRCDialer()
 	p.resetDerivedSesameState()
 	// direct is an enforced mode, not a synonym for the default: any dial
 	// configuration alongside it is a contradiction, and honoring it
@@ -70,10 +75,6 @@ func (p *Provider) resolveRC() error {
 		if p.rcFlagSet() {
 			return errors.New("rc dial options require -rc-server")
 		}
-		// A successful earlier resolve may have installed a dialer for an RC
-		// target that was since removed. Close it so the config does not
-		// retain a live channel after RC dialing is disabled.
-		p.closeRCDialer()
 		return nil
 	}
 	if p.SesameTokenEnv != "" {
@@ -141,16 +142,14 @@ func (p *Provider) resolveRC() error {
 	if err != nil {
 		return err
 	}
-	// Close the dialer from any prior resolution so a repeated
-	// ResolveAndValidate never orphans its gRPC channel.
-	p.closeRCDialer()
 	p.rcDialer = dialer
 	return nil
 }
 
 // closeRCDialer releases the dialer a previous resolve installed, leaving the
-// provider with no live channel. A failed resolve calls it so a stale dialer
-// is never retained alongside an error.
+// provider with no live channel. resolveRC calls it first, so a resolve that
+// fails never retains a dialer built from earlier inputs, and Config.Close
+// calls it to release every channel.
 func (p *Provider) closeRCDialer() {
 	if p.rcDialer != nil {
 		_ = p.rcDialer.Close()
@@ -165,14 +164,15 @@ func (p *Provider) closeRCDialer() {
 // host[:port] values (TLS on, matching the sesame endpoint's TLS-by-default
 // posture). An explicitly set -rc-channel-tls conflicts with the endpoint's
 // scheme instead of being silently clobbered, and -rc-server alongside the
-// endpoint is rejected: both name the same dial target.
+// endpoint is rejected: both name the same dial target. The conflicts read the
+// live fields, which after the derived-state reset hold only operator flags or
+// a programmatic caller's direct assignments: both are input, and neither may
+// be silently overwritten.
 func (p *Provider) resolveSesameEndpoint() error {
 	if p.SesameEndpoint == "" {
 		return nil
 	}
-	// The direct guard has already established that -rc-server is not
-	// present. Here a non-explicit RCServer cannot be operator input.
-	if p.explicitProviderFlag("rc-server") {
+	if p.RCServer != "" {
 		return errors.New("-rc-server and -sesame-endpoint both configure the sesame channel dial target; configure only one")
 	}
 	// The value is validated as a dial target, and its bytes never reach an
@@ -202,8 +202,8 @@ func (p *Provider) resolveSesameEndpoint() error {
 		if u.User != nil {
 			return errors.New("invalid -sesame-endpoint: a dial target must not contain userinfo")
 		}
-		if u.Hostname() == "" {
-			return errors.New("invalid -sesame-endpoint: missing host")
+		if err := validateSesameHostPort(u.Host); err != nil {
+			return err
 		}
 		if u.Path != "" && u.Path != "/" {
 			return errors.New("invalid -sesame-endpoint: a dial target must not contain a path")
@@ -212,7 +212,7 @@ func (p *Provider) resolveSesameEndpoint() error {
 			return errors.New("invalid -sesame-endpoint: a dial target must not contain a query or fragment")
 		}
 		p.RCServer = u.Host
-		p.derivedSesame.server = true
+		p.derivedSesame.server = u.Host
 	} else {
 		if endpoint == "" {
 			return errors.New("invalid -sesame-endpoint: missing host")
@@ -220,38 +220,72 @@ func (p *Provider) resolveSesameEndpoint() error {
 		if strings.ContainsAny(endpoint, "/?#@") {
 			return errors.New("invalid -sesame-endpoint: must be host[:port] or http(s)://host[:port], without userinfo, a path, a query, or a fragment")
 		}
-		host, port, err := net.SplitHostPort(endpoint)
-		switch {
-		case err == nil:
-			if host == "" {
-				return errors.New("invalid -sesame-endpoint: missing host")
-			}
-			if port == "" {
-				return errors.New("invalid -sesame-endpoint: missing port")
-			}
-		case strings.Contains(endpoint, ":"):
-			// A colon that SplitHostPort rejects is a malformed host:port
-			// (a scheme typo such as "http:host:8080" lands here too, since
-			// it carries no "://").
-			return errors.New("invalid -sesame-endpoint: malformed host:port")
+		if err := validateSesameHostPort(endpoint); err != nil {
+			return err
 		}
 		p.RCServer = endpoint
-		p.derivedSesame.server = true
+		p.derivedSesame.server = endpoint
 	}
-	if value, explicit := p.explicitFlags["rc-channel-tls"]; explicit && isTrueBool(value) != tlsOn {
-		if tlsOn {
-			return errors.New("-sesame-endpoint conflicts with -rc-channel-tls=false: the endpoint requires a TLS channel")
-		}
+	// A true RCChannelTLS is input (the flag, or a direct assignment); a false
+	// one is indistinguishable from unset unless the flag recorded it.
+	if p.RCChannelTLS && !tlsOn {
 		return errors.New("-sesame-endpoint conflicts with -rc-channel-tls=true: the endpoint selects a plaintext channel")
 	}
-	p.RCChannelTLS = tlsOn
-	// Only a value this call DERIVED may be cleared by the next resolve: an
-	// explicit -rc-channel-tls stays the operator's choice across repeated
-	// resolution even after the endpoint that agreed with it is removed.
-	if !p.explicitProviderFlag("rc-channel-tls") {
+	if value, explicit := p.explicitFlags["rc-channel-tls"]; explicit && !isTrueBool(value) && tlsOn {
+		return errors.New("-sesame-endpoint conflicts with -rc-channel-tls=false: the endpoint requires a TLS channel")
+	}
+	if tlsOn && !p.RCChannelTLS {
+		p.RCChannelTLS = true
 		p.derivedSesame.channelTLS = true
 	}
 	return nil
+}
+
+// validateSesameHostPort checks a -sesame-endpoint dial target, shared by the
+// URL form (its host component) and the bare form so both accept exactly the
+// same shapes: host or host:port, where a present port is a number in
+// 1..65535 and an IPv6 host is bracketed, with or without a port. The value is
+// never echoed.
+func validateSesameHostPort(hostport string) error {
+	host := hostport
+	if h, port, err := net.SplitHostPort(hostport); err == nil {
+		host = h
+		if port == "" {
+			return errors.New("invalid -sesame-endpoint: missing port")
+		}
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return errors.New("invalid -sesame-endpoint: port must be a number in 1..65535")
+		}
+		if strings.Contains(host, ":") && !isIPv6Literal(host) {
+			return errors.New("invalid -sesame-endpoint: bracketed host must be an IPv6 address")
+		}
+	} else if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
+		host = hostport[1 : len(hostport)-1]
+		if !isIPv6Literal(host) {
+			return errors.New("invalid -sesame-endpoint: bracketed host must be an IPv6 address")
+		}
+	} else if strings.ContainsAny(hostport, ":[]") {
+		// A colon that SplitHostPort rejects is a malformed host:port (a
+		// scheme typo such as "http:host:8080" lands here too, since it
+		// carries no "://"), as is an unbalanced bracket.
+		return errors.New("invalid -sesame-endpoint: malformed host:port")
+	}
+	if host == "" {
+		return errors.New("invalid -sesame-endpoint: missing host")
+	}
+	for _, c := range host {
+		if c <= ' ' || c == 0x7f {
+			return errors.New("invalid -sesame-endpoint: host must not contain whitespace or control characters")
+		}
+	}
+	return nil
+}
+
+// isIPv6Literal reports whether host is an unzoned IPv6 literal, 4-in-6
+// included. A zone is refused because the gRPC dial target cannot carry one.
+func isIPv6Literal(host string) bool {
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Is6() && a.Zone() == ""
 }
 
 // rcFlagSet reports whether any RC dial option other than -rc-server itself
@@ -272,40 +306,43 @@ func (p *Provider) rcFlagSet() bool {
 		p.SesameClientKey != "" || p.SesameServerName != "" || p.SesameTokenEnv != ""
 }
 
-// derivedSesameFields marks the sesame/RCServer fields a resolve computed from
-// other inputs (as opposed to reading them from operator flags or a caller's
-// direct assignment). Only marked fields are cleared by the next resolve.
+// derivedSesameFields records the sesame/RCServer field values a resolve
+// computed from other inputs (as opposed to reading them from operator flags
+// or a caller's direct assignment). An empty string (or false) means the field
+// was not derived.
 type derivedSesameFields struct {
-	server            bool
+	server            string
 	channelTLS        bool
-	channelCA         bool
-	channelCert       bool
-	channelKey        bool
-	channelServerName bool
+	channelCA         string
+	channelCert       string
+	channelKey        string
+	channelServerName string
 }
 
-// resetDerivedSesameState clears exactly the provider fields the previous
-// resolve derived. A value read from an operator flag is never derived, and a
-// value a programmatic caller assigned directly is never derived either, so
-// both survive repeated resolution; only state that came from a since-changed
-// input (a removed -sesame-endpoint, changed -sesame-* material) is removed.
+// resetDerivedSesameState clears the provider fields the previous resolve
+// derived, but only while they still hold the derived value: a value the
+// caller assigned since is input and survives, as does any value read from an
+// operator flag (never derived). Reassigning exactly the derived value is
+// indistinguishable from leaving it, so it is cleared like derived state —
+// most visibly for RCChannelTLS, whose only derived value is true.
 func (p *Provider) resetDerivedSesameState() {
-	if p.derivedSesame.server {
+	d := p.derivedSesame
+	if d.server != "" && p.RCServer == d.server {
 		p.RCServer = ""
 	}
-	if p.derivedSesame.channelTLS {
+	if d.channelTLS && p.RCChannelTLS {
 		p.RCChannelTLS = false
 	}
-	if p.derivedSesame.channelCA {
+	if d.channelCA != "" && p.RCChannelCA == d.channelCA {
 		p.RCChannelCA = ""
 	}
-	if p.derivedSesame.channelCert {
+	if d.channelCert != "" && p.RCChannelCert == d.channelCert {
 		p.RCChannelCert = ""
 	}
-	if p.derivedSesame.channelKey {
+	if d.channelKey != "" && p.RCChannelKey == d.channelKey {
 		p.RCChannelKey = ""
 	}
-	if p.derivedSesame.channelServerName {
+	if d.channelServerName != "" && p.RCChannelServerName == d.channelServerName {
 		p.RCChannelServerName = ""
 	}
 	p.derivedSesame = derivedSesameFields{}
@@ -326,19 +363,19 @@ func (p *Provider) sesameMaterialPropagation() {
 	// has already removed whatever a previous resolve derived.
 	if !p.explicitProviderFlag("rc-channel-ca") && p.SesameCACert != "" && p.RCChannelCA == "" {
 		p.RCChannelCA = normalizeMaterial(p.SesameCACert)
-		p.derivedSesame.channelCA = true
+		p.derivedSesame.channelCA = p.RCChannelCA
 	}
 	if !p.explicitProviderFlag("rc-channel-cert") && p.SesameClientCert != "" && p.RCChannelCert == "" {
 		p.RCChannelCert = normalizeMaterial(p.SesameClientCert)
-		p.derivedSesame.channelCert = true
+		p.derivedSesame.channelCert = p.RCChannelCert
 	}
 	if !p.explicitProviderFlag("rc-channel-key") && p.SesameClientKey != "" && p.RCChannelKey == "" {
 		p.RCChannelKey = normalizeMaterial(p.SesameClientKey)
-		p.derivedSesame.channelKey = true
+		p.derivedSesame.channelKey = p.RCChannelKey
 	}
 	if !p.explicitProviderFlag("rc-channel-server-name") && p.SesameServerName != "" && p.RCChannelServerName == "" {
 		p.RCChannelServerName = p.SesameServerName
-		p.derivedSesame.channelServerName = true
+		p.derivedSesame.channelServerName = p.RCChannelServerName
 	}
 }
 

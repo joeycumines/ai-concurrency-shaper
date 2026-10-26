@@ -148,6 +148,10 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	if p.TranscodeContinuityTTL < 0 {
 		return fmt.Errorf("-transcode-continuity-ttl must be nonnegative, got %s", p.TranscodeContinuityTTL)
 	}
+	// The continuity store is shared by this resolve's mappings only: one an
+	// earlier resolve built reflects its capacity and TTL, not the current
+	// ones.
+	p.continuityStore = nil
 
 	var parsedRoutes []proxy.TranscodeMapping
 	for _, r := range p.TranscodeRoutes {

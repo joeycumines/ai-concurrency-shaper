@@ -542,10 +542,7 @@ func (c *Config) ResolveAndValidate() error {
 // idempotent and safe to call on a partially resolved Config.
 func (c *Config) Close() {
 	for _, p := range c.Providers {
-		if p.rcDialer != nil {
-			_ = p.rcDialer.Close()
-			p.rcDialer = nil
-		}
+		p.closeRCDialer()
 	}
 }
 
@@ -818,6 +815,11 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 
 	p.defaultLimiter = queue.NewLimiterWithCooldown(p.Concurrency, p.ReleaseCooldown)
 
+	// Optional runtime objects are rebuilt from the current inputs: one an
+	// earlier resolve built must not survive its flag being turned off.
+	p.globalLimiter = nil
+	p.breaker = nil
+
 	p.routeLimiters = routeLimiters(p.Limits, p.ReleaseCooldown)
 
 	if p.GlobalConcurrency > 0 {
@@ -864,14 +866,14 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 // -rc-server-bind is set. Without it, stray server options are rejected
 // rather than ignored. No socket is bound here; run() owns the listener.
 func (s *Server) resolveRC() error {
+	// A previous resolve may have installed a server config the current
+	// inputs no longer ask for (or that fails to validate below): leaving it
+	// would make main.go start an RC server they do not describe.
+	s.rcServerConfig = nil
 	if s.RCBind == "" {
 		if s.RCTLS || s.RCCA != "" || s.RCCert != "" || s.RCKey != "" {
 			return errors.New("rc-server TLS options require -rc-server-bind")
 		}
-		// A previous resolve may have installed a server config whose bind
-		// has since been removed: leaving it would make main.go start an RC
-		// server the current inputs do not ask for.
-		s.rcServerConfig = nil
 		return nil
 	}
 	cfg := rcclient.ServerConfig{
