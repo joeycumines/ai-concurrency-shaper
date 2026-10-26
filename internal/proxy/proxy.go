@@ -1456,11 +1456,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// Any recovered panic is an aborted exchange: the exchange never
 				// completed cleanly, the clean-completion counters are skipped,
 				// and the journal records Aborted with ResponseComplete unset.
-				recPtr.aborted = true
-				if !recPtr.terminalWritten {
-					recPtr.proxyGeneratedError = true
-					http.Error(recPtr, "internal error", http.StatusBadGateway)
-				}
+				recPtr.recoverLocalPanic()
 				finalize(true)
 			} else {
 				// No statusRecorder — write directly to the raw ResponseWriter.
