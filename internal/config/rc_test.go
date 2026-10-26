@@ -34,7 +34,8 @@ import (
 
 // TestParse_RCFlags_LegacyMode binds every provider-scope RC dial flag at top
 // level (the single implicit provider), exactly like every other
-// provider-scope flag.
+// provider-scope flag. It checks binding only: the values are not resolved, so
+// they need not be ones a resolve would accept.
 func TestParse_RCFlags_LegacyMode(t *testing.T) {
 	cfg, err := Parse([]string{
 		"-upstream", "https://x",
