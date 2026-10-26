@@ -250,7 +250,7 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		// messages-native model cannot be served by any configured
 		// transcode target on this route.
 		d.writeRouteError(w, r, http.StatusNotFound, fmt.Sprintf(
-			"model %q is served natively as %s; this route transcodes to the chat-completions and responses upstreams only, so no transcode mapping on %s can serve it — serve it natively with -native-route %s@%s",
+			"model %q is served natively as %s; this route transcodes to the chat-completions and responses upstreams only, so no transcode mapping on %s can serve it — request it on its own native path, or add a -native-route %s@%s for it",
 			clientModel, transcode.NativeMessages, d.routeKey.Path, transcode.NativeMessages, d.routeKey.Path,
 		))
 	case d.chatHandler != nil:

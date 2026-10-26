@@ -319,3 +319,40 @@ func TestDispatcherRefusalCountsAsDelivered(t *testing.T) {
 		t.Fatalf("TotalProxied = %d, want 0 (a refusal is not an upstream completion)", snap.TotalProxied)
 	}
 }
+
+// TestPanicClassificationAfterCommit pins the panic-recovery classification
+// input under the queue comments. The 200 commit already marked the exchange
+// terminal, so the recovered-panic branch must set proxyGeneratedError
+// unconditionally: with the old terminalWritten guard it was skipped, and the
+// local 502 was then read from the status override as an upstream failure.
+//
+// The assertion is on the classifier rather than the breaker because
+// localPanic independently suppresses breaker reporting; the classification
+// input (and the journal's proxy-generated fact) is what regresses.
+func TestPanicClassificationAfterCommit(t *testing.T) {
+	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder(), commentsCommitted: true}
+	rec.recordImplicitOK(nil)
+	if !rec.terminalWritten {
+		t.Fatal("terminalWritten = false after the queue-comment commit, want true")
+	}
+	// Recovered panic: the branch marks the exchange aborted and
+	// proxy-generated, and cannot rewrite the status.
+	rec.aborted = true
+	rec.proxyGeneratedError = true
+
+	if isUpstreamFailureStatus(rec, time.Now(), nil) {
+		t.Fatal("a proxy-generated 502 after the commit must not classify as an upstream failure")
+	}
+
+	// Contrast: the same recorder WITHOUT the fact is the defect being fixed —
+	// the override 502 reads as an upstream failure.
+	defective := &statusRecorder{
+		ResponseWriter:         httptest.NewRecorder(),
+		commentsCommitted:      true,
+		terminalWritten:        true,
+		upstreamStatusOverride: http.StatusBadGateway,
+	}
+	if !isUpstreamFailureStatus(defective, time.Now(), nil) {
+		t.Fatal("precondition: an unmarked 502 override classifies as an upstream failure")
+	}
+}

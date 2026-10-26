@@ -326,10 +326,15 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 				via:         mapping.Via,
 			})), nativeMiss
 		}
+		// The remedy cannot be "add a native route for this path": a client
+		// route carries at most one native route, and this one already
+		// exists. Name the dialect and the reason instead, so the operator
+		// knows the model must be requested on its own path (or served here
+		// by a transcode mapping).
 		writeNativeDialectError(w, r, nr.Protocol, http.StatusNotFound,
 			transcode.BoundErrorMessage(
-				fmt.Sprintf("model %q is served natively as %s; this route serves %s natively and no transcode mapping covers the model (add -native-route %s@%s to serve it here)",
-					clientModel, mapping.Via, nr.Protocol, mapping.Via, nr.RouteKey.Path),
+				fmt.Sprintf("model %q is served natively as %s, not as %s, and no transcode mapping on %s covers the model",
+					clientModel, mapping.Via, nr.Protocol, nr.RouteKey.Path),
 				limits.ErrorMessageBytes))
 		return r, nativeError
 	}

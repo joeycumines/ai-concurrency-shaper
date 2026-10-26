@@ -1998,6 +1998,7 @@ func TestResolveAndValidate_TranscodeAuthDialectAdaptation(t *testing.T) {
 // the responses target can never be reached. The refusal names the flag that
 // makes the route work.
 func TestResolveAndValidate_MultiTargetRouteRequiresVia(t *testing.T) {
+	// No via= fact at all: neither target can be selected.
 	cfg, err := Parse([]string{
 		"-upstream", "https://api.example.com",
 		"-transcode-messages-chat",
@@ -2010,24 +2011,52 @@ func TestResolveAndValidate_MultiTargetRouteRequiresVia(t *testing.T) {
 	if err == nil {
 		t.Fatal("ResolveAndValidate: nil error, want the unreachable-target rejection")
 	}
-	for _, want := range []string{"POST /v1/messages", "responses target is unreachable", "-model-table"} {
+	for _, want := range []string{"POST /v1/messages", "unreachable", "-model-table"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %q, want it to contain %q", err, want)
 		}
 	}
 
-	// The same route with a via-bearing table entry resolves.
+	// A via= entry for only ONE of the two protocols leaves the other target
+	// unreachable: the check must name the missing dialect, not merely see
+	// that some via exists.
+	for _, tc := range []struct{ via, missing string }{
+		{"chat", "responses"},
+		{"responses", "chat"},
+		{"messages", "chat or responses"},
+	} {
+		bad, err := Parse([]string{
+			"-model-table", "s@example=wire;via=" + tc.via,
+			"-upstream", "https://api.example.com",
+			"-transcode-messages-chat",
+			"-transcode-messages-responses",
+		})
+		if err != nil {
+			t.Fatalf("via=%s: Parse: %v", tc.via, err)
+		}
+		err = bad.ResolveAndValidate()
+		if err == nil {
+			t.Errorf("via=%s: ResolveAndValidate = nil, want the %s target rejected as unreachable", tc.via, tc.missing)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.missing) {
+			t.Errorf("via=%s: error = %q, want it to name %q", tc.via, err, tc.missing)
+		}
+	}
+
+	// A model selecting each protocol resolves.
 	ok, err := Parse([]string{
-		"-model-table", "s@example=wire;via=responses",
+		"-model-table", "c@example=chat-wire;via=chat",
+		"-model-table", "r@example=resp-wire;via=responses",
 		"-upstream", "https://api.example.com",
 		"-transcode-messages-chat",
 		"-transcode-messages-responses",
 	})
 	if err != nil {
-		t.Fatalf("Parse with table: %v", err)
+		t.Fatalf("Parse with both vias: %v", err)
 	}
 	if err := ok.ResolveAndValidate(); err != nil {
-		t.Fatalf("ResolveAndValidate with a via-bearing table: %v", err)
+		t.Fatalf("ResolveAndValidate with both dialects: %v", err)
 	}
 	if n := len(ok.Providers[0].TranscodeMappings()); n != 2 {
 		t.Fatalf("mappings = %d, want 2", n)

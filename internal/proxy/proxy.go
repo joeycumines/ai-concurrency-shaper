@@ -1822,8 +1822,13 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 					// reaches the completion counters or a clean journal
 					// finalization.
 					rec.aborted = true
+					// The proxy-generated fact is a classification input, not a
+					// WriteHeader guard: under the SSE queue comments the 200
+					// commit already marked the exchange terminal, and without
+					// the fact the 502 written below (or the status override)
+					// would classify a local panic as an upstream failure.
+					rec.proxyGeneratedError = true
 					if !rec.terminalWritten {
-						rec.proxyGeneratedError = true
 						http.Error(rec, "internal error", http.StatusBadGateway)
 					}
 				}
@@ -2274,8 +2279,13 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 					// reaches the completion counters or a clean journal
 					// finalization.
 					rec.aborted = true
+					// The proxy-generated fact is a classification input, not a
+					// WriteHeader guard: under the SSE queue comments the 200
+					// commit already marked the exchange terminal, and without
+					// the fact the 502 written below (or the status override)
+					// would classify a local panic as an upstream failure.
+					rec.proxyGeneratedError = true
 					if !rec.terminalWritten {
-						rec.proxyGeneratedError = true
 						http.Error(rec, "internal error", http.StatusBadGateway)
 					}
 				}
