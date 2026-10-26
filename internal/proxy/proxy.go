@@ -1165,9 +1165,14 @@ func New(opts ...Option) (*Proxy, error) {
 			slog.Error("proxy transport error", "error", sanitizeTransportError(err))
 			if rec, ok := w.(*statusRecorder); ok {
 				if rec.commentsCommitted {
-					rec.aborted = true
+					// The same 502 the uncommitted branch writes, recorded
+					// behind the committed 200: without it classification
+					// reads the commit's 200 and a dead upstream never
+					// reaches the breaker.
 					fmt.Fprintf(rec, ": queue-wait failed: upstream\n\n")
 					_ = rec.FlushError()
+					rec.proxyGeneratedError = true
+					rec.recordCommittedFailure(http.StatusBadGateway)
 				} else if !rec.terminalWritten {
 					rec.proxyGeneratedError = true
 					http.Error(rec, "bad gateway", http.StatusBadGateway)
@@ -1818,19 +1823,7 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 				}
 				slog.Error("proxy panic in servePassthrough", "panic", rv)
 				if rec, ok := w.(*statusRecorder); ok {
-					// Any recovered panic is an aborted exchange: it never
-					// reaches the completion counters or a clean journal
-					// finalization.
-					rec.aborted = true
-					// The proxy-generated fact is a classification input, not a
-					// WriteHeader guard: under the SSE queue comments the 200
-					// commit already marked the exchange terminal, and without
-					// the fact the 502 written below (or the status override)
-					// would classify a local panic as an upstream failure.
-					rec.proxyGeneratedError = true
-					if !rec.terminalWritten {
-						http.Error(rec, "internal error", http.StatusBadGateway)
-					}
+					rec.recoverLocalPanic()
 				}
 				localPanic = true
 			}
@@ -2275,19 +2268,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 				}
 				slog.Error("proxy panic in serveLimited", "panic", rv)
 				if rec, ok := w.(*statusRecorder); ok {
-					// Any recovered panic is an aborted exchange: it never
-					// reaches the completion counters or a clean journal
-					// finalization.
-					rec.aborted = true
-					// The proxy-generated fact is a classification input, not a
-					// WriteHeader guard: under the SSE queue comments the 200
-					// commit already marked the exchange terminal, and without
-					// the fact the 502 written below (or the status override)
-					// would classify a local panic as an upstream failure.
-					rec.proxyGeneratedError = true
-					if !rec.terminalWritten {
-						http.Error(rec, "internal error", http.StatusBadGateway)
-					}
+					rec.recoverLocalPanic()
 				}
 				localPanic = true
 			}
@@ -3424,7 +3405,12 @@ type statusRecorder struct {
 	// error frames, never as HTTP error statuses.
 	commentsCommitted      bool
 	upstreamStatusOverride int
-	transcodeStream        bool
+	// committedOKObserved records a 200 written after the queue-comment
+	// commit (the upstream's, or a transcode handler re-committing its
+	// successful stream). The commit silences it, so neither status nor the
+	// override can show that an upstream status was observed.
+	committedOKObserved bool
+	transcodeStream     bool
 	// dialectErrorFramed marks a committed stream whose failure is being
 	// delivered as a client-dialect error terminal by its owner. The
 	// recorder must then not append its own ": queue-wait failed: upstream"
@@ -3462,6 +3448,49 @@ func (r *statusRecorder) FlushError() error {
 // own failed-close comment. It is called by the dialect error writer just
 // before the terminal, while the exchange is still running.
 func (r *statusRecorder) SuppressFailedCloseComment() { r.dialectErrorFramed = true }
+
+// recoverLocalPanic records a recovered local panic. Any panic aborts the
+// exchange: it never reaches the completion counters or a clean journal
+// finalization. The failure is proxy-generated only when no upstream status
+// was observed — a panic after a delivered upstream status (including a 200
+// the commit silenced) leaves that status's classification alone. Before any status the client gets a 502.
+// After the SSE queue-comment commit the status is fixed, so the stream is
+// closed with a local failed-close comment (unless its owner already framed
+// a dialect error) and the 502 is recorded the way a committed upstream
+// failure status is: without it the client saw the queue comments and then a
+// silent clean EOF, and the journal kept the commit's 200.
+func (r *statusRecorder) recoverLocalPanic() {
+	r.aborted = true
+	switch {
+	case !r.terminalWritten:
+		r.proxyGeneratedError = true
+		http.Error(r, "internal error", http.StatusBadGateway)
+	case r.commentsCommitted && r.upstreamStatusOverride == 0 && !r.committedOKObserved:
+		r.proxyGeneratedError = true
+		if !r.dialectErrorFramed {
+			fmt.Fprintf(r, ": queue-wait failed: internal\n\n")
+			_ = r.FlushError()
+		}
+		r.recordCommittedFailure(http.StatusBadGateway)
+	}
+}
+
+// recordCommittedFailure records the failure status of a stream whose 200 the
+// queue comments already committed: the client cannot see it, but
+// classification and the journal entry read it, exactly as they read a
+// committed upstream failure status from WriteHeader. Callers write any
+// failed-close comment first, since Write swallows bytes once an override is
+// recorded.
+func (r *statusRecorder) recordCommittedFailure(code int) {
+	r.aborted = true
+	r.upstreamStatusOverride = code
+	now := time.Now()
+	r.responseAt = now
+	if r.entry != nil {
+		r.entry.StatusCode = code
+		r.entry.Timing.ResponseHeaders = now
+	}
+}
 
 func (r *statusRecorder) downstreamWriteFailed() bool {
 	return r != nil && r.writeFailed
@@ -3507,6 +3536,11 @@ func (r *statusRecorder) WriteHeader(code int) {
 	// representation-mismatch 502) marks the exchange aborted — the client
 	// sees the comments then a failed close, never a misleading new status.
 	if r.commentsCommitted {
+		if code == http.StatusOK && r.terminalWritten {
+			// terminalWritten is first set by the commit's own comment
+			// write, so this 200 is not the commit's.
+			r.committedOKObserved = true
+		}
 		if code >= 200 && code != http.StatusOK {
 			r.aborted = true
 			r.upstreamStatusOverride = code
