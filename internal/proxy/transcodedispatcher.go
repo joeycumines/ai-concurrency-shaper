@@ -39,38 +39,44 @@ type dispatcherTarget struct {
 	profileMap transcode.ProfileMap
 	modelMap   transcode.ModelMap
 	handler    http.Handler
+	// chat marks the chat-completions target, the dispatcher's fallback
+	// handler: a claim it makes is preferred when no dialect decides.
+	chat bool
 }
 
-// resolveVia answers the request model's native dialect from this target's
-// frozen resolution state, mirroring the handler's own resolution order: a
-// profile name resolves to its target model first, then the model map, and a
-// profile is authoritative once this target claims it.
-//
-// explicit reports whether the answer is a resolved dialect rather than an
-// identity fallback. Only an explicit answer may end the target search: an
-// identity fallback (no Via known) says nothing about which upstream serves
-// the model, while a later target's map may name it.
-//
-// A profile this target claims whose target model the target cannot map
-// answers explicit=true with an empty Via and an error: the handler the
-// request reaches renders that as its own "profile %q targets unmapped
-// model %q" refusal, so the search must stop here rather than hand the
-// request to a different target that would serve a different dialect.
-func (t dispatcherTarget) resolveVia(model string) (via transcode.NativeProtocol, explicit bool, err error) {
+// targetAnswer is one target's view of the request model, mirroring the
+// handler's own resolution order: a profile name resolves to its target model
+// first, then the model map.
+type targetAnswer struct {
+	// via is the target model's declared dialect; explicit reports that one
+	// is known. Only an explicit answer decides the route: an identity
+	// fallback (no Via) says nothing about which upstream serves the model,
+	// and a later target's map may name it.
+	via      transcode.NativeProtocol
+	explicit bool
+	// claimed reports that the name is one of this target's profiles: a
+	// claiming handler is the only kind that knows the name (any other would
+	// treat the profile as a model name). unmapped reports a claim whose
+	// target model this target cannot map.
+	claimed  bool
+	unmapped bool
+}
+
+func (t dispatcherTarget) resolve(model string) targetAnswer {
 	if profileModel, _, ok := t.profileMap.ResolveProfile(model); ok {
-		resolved, rerr := t.modelMap.Resolve(profileModel)
-		if rerr != nil {
-			return "", true, rerr
+		resolved, err := t.modelMap.Resolve(profileModel)
+		if err != nil {
+			return targetAnswer{claimed: true, unmapped: true}
 		}
-		return resolved.Via, true, nil
+		return targetAnswer{via: resolved.Via, explicit: resolved.Via != "", claimed: true}
 	}
-	resolved, resolveErr := t.modelMap.Resolve(model)
-	if resolveErr != nil {
-		// An unmapped model is not this target's answer to claim: a later
+	resolved, err := t.modelMap.Resolve(model)
+	if err != nil {
+		// An unmapped model is not this target's answer to give: a later
 		// target's map may know it.
-		return "", false, nil
+		return targetAnswer{}
 	}
-	return resolved.Via, resolved.Via != "", nil
+	return targetAnswer{via: resolved.Via, explicit: resolved.Via != ""}
 }
 
 // multiTranscodeDispatcher dispatches a single client route (such as POST
@@ -79,15 +85,20 @@ func (t dispatcherTarget) resolveVia(model string) (via transcode.NativeProtocol
 // serving choice (pre-existing fallthrough semantics); multiple mappings
 // switch this dispatcher to via-directed selection:
 //
-//   - A model the native route already resolved (a native miss on the same
-//     path) is authoritative: the dispatcher never re-reads or re-resolves
-//     the body, even when the recorded Via is empty.
+//   - A native miss on the same path supplies the model name, so the body is
+//     never re-read. A Via the native route resolved decides the dialect; an
+//     empty Via (identity fallback) resolved nothing, so the name is still
+//     resolved against the targets below.
 //   - Otherwise the body is probed once — bounded by the largest
-//     accepted-request bound across the targets — and resolved against each
-//     target in registration order, so the first target whose resolution
-//     state answers the model decides the dialect. Conflicting maps across
-//     targets therefore resolve deterministically by registration order,
-//     never "last mapping wins".
+//     accepted-request bound across the targets — and the model is resolved
+//     against each target in registration order: the first explicit dialect
+//     decides. Conflicting maps across targets therefore resolve
+//     deterministically by registration order, never "last mapping wins".
+//   - A profile follows its target model's dialect. A target that claims a
+//     profile whose target model it cannot map decides the route: its handler
+//     renders the profile refusal. A claim with no dialect is served by a
+//     claiming handler (the chat target first, matching the fallback below),
+//     because only a claiming handler knows the name.
 //   - via=responses and via=chat select their matching handler.
 //   - via=messages fails closed with a 404 naming the model: no transcode
 //     direction serves a messages-native model faithfully, and converting
@@ -148,6 +159,7 @@ func newMultiTranscodeDispatcher(routeKey transcode.RouteKey, targets []targetTr
 			profileMap: cloneProfileMap(t.mapping.ProfileMap),
 			modelMap:   cloneModelMap(t.mapping.ModelMap),
 			handler:    t.handler,
+			chat:       t.mapping.Mapping.UpstreamProtocol == transcode.UpstreamChatCompletions,
 		})
 	}
 	if d.acceptedBytes <= 0 || d.errorMessageBytes <= 0 {
@@ -196,7 +208,8 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		clientModel string
 		resolved    bool
 	)
-	if miss, ok := nativeMissFromContext(r.Context()); ok {
+	miss, missed := nativeMissFromContext(r.Context())
+	if missed {
 		// The native route's model resolution answers for the models its own
 		// map knows. A Via it resolved decides the dialect; an identity
 		// fallback resolved nothing, so the model still has to be resolved
@@ -235,11 +248,12 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 
 	switch {
 	case targetVia == "" && claiming != nil:
-		// A target claimed the model without naming a dialect (a profile
-		// whose target model that target cannot map). The claiming handler
-		// owns the refusal and renders it in the mapping's dialect, so the
-		// request never reaches a different upstream under a name the
-		// operator mapped to this one.
+		// A target claimed the name as a profile and no target named a
+		// dialect: the profile's target model resolves by identity there
+		// (the claimant serves it), or cannot be mapped (the claimant renders
+		// its own profile refusal in the mapping's dialect). Either way the
+		// request reaches a handler that knows the name, never one that would
+		// forward the profile name as a model.
 		claiming.ServeHTTP(w, r)
 	case targetVia == transcode.NativeResponses && d.responsesHandler != nil:
 		d.responsesHandler.ServeHTTP(w, r)
@@ -249,10 +263,7 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		// Faithful to the native route's own refusal vocabulary: a
 		// messages-native model cannot be served by any configured
 		// transcode target on this route.
-		d.writeRouteError(w, r, http.StatusNotFound, fmt.Sprintf(
-			"model %q is served natively as %s; this route transcodes to the chat-completions and responses upstreams only, so no transcode mapping on %s can serve it — request it on its own native path, or add a -native-route %s@%s for it",
-			clientModel, transcode.NativeMessages, d.routeKey.Path, transcode.NativeMessages, d.routeKey.Path,
-		))
+		d.writeRouteError(w, r, http.StatusNotFound, d.messagesNativeRefusal(clientModel, miss, missed))
 	case d.chatHandler != nil:
 		d.chatHandler.ServeHTTP(w, r)
 	case d.responsesHandler != nil:
@@ -263,21 +274,97 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	}
 }
 
-// selectTarget walks the targets in registration order and returns the first
-// explicit answer: its dialect, plus the handler that owns the answer. An
-// identity fallback answers nothing — a later target's map may name the model.
+// selectTarget walks the targets in registration order and stops at the first
+// decisive answer: an explicit dialect (returned with the handler that answered
+// it), or a profile claim whose target model the claiming target cannot map
+// (returned with no dialect, so that handler renders its own "profile %q
+// targets unmapped model %q" refusal instead of the request reaching another
+// upstream under a name the operator mapped to this one).
 //
-// A target that claims the model as a profile whose target model it cannot map
-// is an explicit answer with no dialect: the handler that claims the profile
-// owns the refusal, and returning it here is what keeps the request from being
-// served by a different upstream under a name the operator mapped to this one.
+// A profile claim that resolves with no dialect decides nothing: the search
+// continues, and if no target names a dialect the claimant is returned with no
+// dialect — the chat target if it claims, else the first claimant — so the
+// profile lands where its target model would when requested by name, on a
+// handler that knows the profile. No claim and no dialect: ("", nil), and the
+// dispatcher's fallback decides.
 func (d *multiTranscodeDispatcher) selectTarget(clientModel string) (transcode.NativeProtocol, http.Handler) {
-	for _, target := range d.targets {
-		if via, explicit, _ := target.resolveVia(clientModel); explicit {
-			return via, target.handler
+	var claimant *dispatcherTarget
+	for i := range d.targets {
+		target := &d.targets[i]
+		answer := target.resolve(clientModel)
+		if answer.explicit {
+			return answer.via, target.handler
+		}
+		if answer.unmapped {
+			return "", target.handler
+		}
+		if answer.claimed && (claimant == nil || (target.chat && !claimant.chat)) {
+			claimant = target
 		}
 	}
+	if claimant != nil {
+		return "", claimant.handler
+	}
 	return "", nil
+}
+
+// messagesNativeRefusal words the 404 for a messages-native model so its
+// remedy is one the operator can apply. A path carries at most one native
+// route, and a native miss proves this one has it: adding another would be a
+// duplicate-route startup error. Native serving resolves model names only,
+// never -transcode-profile names, so a profile is pointed at its target model.
+func (d *multiTranscodeDispatcher) messagesNativeRefusal(clientModel string, miss nativeMissInfo, missed bool) string {
+	for _, target := range d.targets {
+		profileModel, _, ok := target.profileMap.ResolveProfile(clientModel)
+		if !ok {
+			continue
+		}
+		where := " on a path whose -native-route serves " + string(transcode.NativeMessages)
+		switch {
+		case !missed:
+			where += fmt.Sprintf(" (or add a -native-route %s@%s)", transcode.NativeMessages, d.routeKey.Path)
+		case miss.nativeProtocol == transcode.NativeMessages:
+			where = ""
+		}
+		return fmt.Sprintf(
+			"%q is a -transcode-profile whose target model %q is served natively as %s; native serving resolves model names only, and the transcode mappings on %s reach the chat-completions and responses upstreams only — request %q by name%s",
+			clientModel, profileModel, transcode.NativeMessages, d.routeKey.Path, profileModel, where,
+		)
+	}
+	switch {
+	case !missed:
+		return fmt.Sprintf(
+			"model %q is served natively as %s; this route transcodes to the chat-completions and responses upstreams only, so no transcode mapping on %s can serve it — request it on its own native path, or add a -native-route %s@%s for it",
+			clientModel, transcode.NativeMessages, d.routeKey.Path, transcode.NativeMessages, d.routeKey.Path,
+		)
+	case miss.nativeProtocol == transcode.NativeMessages:
+		return fmt.Sprintf(
+			"model %q is served natively as %s by the transcode mappings' model map, but this path's %s native route does not map it, and the transcode mappings reach the chat-completions and responses upstreams only",
+			clientModel, transcode.NativeMessages, transcode.NativeMessages,
+		)
+	default:
+		return fmt.Sprintf(
+			"model %q is served natively as %s; %s already carries a %s native route and its transcode mappings reach the chat-completions and responses upstreams only — request it on a path whose -native-route serves %s",
+			clientModel, transcode.NativeMessages, d.routeKey.Path, miss.nativeProtocol, transcode.NativeMessages,
+		)
+	}
+}
+
+// recorderFrom finds the proxy's statusRecorder behind any Unwrap-capable
+// diagnostic wrappers, the same traversal transcode.WriteCommittedStreamError
+// performs, so classification facts land on the recorder whatever wraps it.
+func recorderFrom(w http.ResponseWriter) *statusRecorder {
+	for cur := w; cur != nil; {
+		if rec, ok := cur.(*statusRecorder); ok {
+			return rec
+		}
+		unwrapper, ok := cur.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return nil
+		}
+		cur = unwrapper.Unwrap()
+	}
+	return nil
 }
 
 // writeRouteError renders a dispatcher-level refusal in the route's client
@@ -305,7 +392,7 @@ func (d *multiTranscodeDispatcher) writeRouteError(w http.ResponseWriter, r *htt
 		// wrote a 200 through the recorder, which marks it terminal; the fact
 		// is a classification input, not a WriteHeader guard, so it is set
 		// regardless of that earlier write.
-		if rec, ok := w.(*statusRecorder); ok {
+		if rec := recorderFrom(w); rec != nil {
 			rec.proxyGeneratedError = true
 		}
 	}

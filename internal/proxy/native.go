@@ -149,6 +149,10 @@ func nativeAliasFromContext(ctx context.Context) (nativeAlias, bool) {
 type nativeMissInfo struct {
 	clientModel string
 	via         transcode.NativeProtocol
+	// nativeProtocol is the dialect of the native route that missed: a miss
+	// proves the path already carries its one native route, which decides
+	// what remedy a later refusal can truthfully advise.
+	nativeProtocol transcode.NativeProtocol
 }
 
 type nativeMissKey struct{}
@@ -290,7 +294,8 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		if fallback := p.lookupTranscodeHandlerKey(nr.RouteKey); fallback != nil {
 			restored := restoreOriginal()
 			return restored.WithContext(withNativeMiss(restored.Context(), nativeMissInfo{
-				clientModel: clientModel,
+				clientModel:    clientModel,
+				nativeProtocol: nr.Protocol,
 			})), nativeMiss
 		}
 		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest,
@@ -301,13 +306,14 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 		// Unknown native dialect (identity resolution): not native, and
 		// there is nothing to say about it — fall through with the body
 		// intact, preserving legacy transparent behavior. The miss is
-		// stamped so a multi-target dispatcher on the same route trusts
-		// this resolution (including its emptiness) instead of re-reading
-		// and re-parsing the body to re-derive it.
+		// stamped with the model name so a multi-target dispatcher on the
+		// same route resolves it against its mappings without re-reading
+		// and re-parsing the body; the empty Via decides nothing.
 		restored := restoreOriginal()
 		return restored.WithContext(withNativeMiss(restored.Context(), nativeMissInfo{
-			clientModel: clientModel,
-			via:         mapping.Via,
+			clientModel:    clientModel,
+			via:            mapping.Via,
+			nativeProtocol: nr.Protocol,
 		})), nativeMiss
 	}
 	// Known model, wrong dialect for this route. When a transcode mapping
@@ -319,11 +325,12 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	// native dialect, because forwarding verbatim would send a surrogate
 	// the upstream does not know.
 	if mapping.Via != nr.Protocol {
-		if _, fallback := p.transcodeHandlerMap[nr.RouteKey]; fallback {
+		if fallback := p.lookupTranscodeHandlerKey(nr.RouteKey); fallback != nil {
 			restored := restoreOriginal()
 			return restored.WithContext(withNativeMiss(restored.Context(), nativeMissInfo{
-				clientModel: clientModel,
-				via:         mapping.Via,
+				clientModel:    clientModel,
+				via:            mapping.Via,
+				nativeProtocol: nr.Protocol,
 			})), nativeMiss
 		}
 		// The remedy cannot be "add a native route for this path": a client
@@ -588,7 +595,7 @@ func writeNativeDialectError(w http.ResponseWriter, r *http.Request, protocol tr
 		// classification input, not a WriteHeader guard. Without it a local
 		// 5xx would be classified from the status override as an upstream
 		// failure and could open the breaker against a healthy upstream.
-		if rec, ok := w.(*statusRecorder); ok {
+		if rec := recorderFrom(w); rec != nil {
 			rec.proxyGeneratedError = true
 		}
 	}

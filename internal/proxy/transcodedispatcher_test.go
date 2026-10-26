@@ -587,9 +587,8 @@ func (c *countingBody) Close() error { return nil }
 
 // TestDispatcher_MissSkipsBodyProbe verifies the dispatcher's probe-skip
 // directly: a request carrying native miss info is never read or replaced by
-// the dispatcher, even when the recorded Via is empty (the native path
-// already resolved the model). The selected handler receives the original
-// body untouched.
+// the dispatcher (the native path already extracted the model name). The
+// selected handler receives the original body untouched.
 func TestDispatcher_MissSkipsBodyProbe(t *testing.T) {
 	var stubbed []*http.Request
 	stub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
