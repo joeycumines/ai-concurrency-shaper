@@ -64,8 +64,10 @@ func (t dispatcherTarget) resolveVia(model string) (via transcode.NativeProtocol
 		}
 		return resolved.Via, true, nil
 	}
-	resolved, err := t.modelMap.Resolve(model)
-	if err != nil {
+	resolved, resolveErr := t.modelMap.Resolve(model)
+	if resolveErr != nil {
+		// An unmapped model is not this target's answer to claim: a later
+		// target's map may know it.
 		return "", false, nil
 	}
 	return resolved.Via, resolved.Via != "", nil
