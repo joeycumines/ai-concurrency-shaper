@@ -440,66 +440,54 @@ func TestServerConfigValidateMaterial(t *testing.T) {
 	}
 }
 
-// TestDialConfigRejectsH2Offer pins the HTTP/1.1-only constraint of a
+// TestDialConfigOffersOnlyHTTP11 pins the HTTP/1.1-only constraint of a
 // remote-terminated connection: the proxy dials through
 // http.Transport.DialTLSContext, whose returned connection is not a *tls.Conn,
-// so net/http never learns the negotiated protocol and never sends an HTTP/2
-// preface. An h2 offer — in the ALPN list or in a wire-level client-hello
-// extension — would let the upstream select a protocol this client cannot use.
-func TestDialConfigRejectsH2Offer(t *testing.T) {
-	// The ALPN list.
-	for _, protocol := range []string{"h2", "H2", " h2 "} {
+// so net/http never learns the negotiated protocol and speaks HTTP/1.1 only.
+// Any other offer — h2, h3, or a name nothing here can speak — in the ALPN
+// list or in a wire-level client-hello extension would let the upstream select
+// a protocol this client cannot use, and a client-hello ALPN body that cannot
+// be read as a list of names cannot be shown to offer only http/1.1.
+func TestDialConfigOffersOnlyHTTP11(t *testing.T) {
+	const want = "http/1.1"
+	for _, protocol := range []string{"h2", "H2", " h2 ", "h3", "foo", "HTTP/1.1", "", "http/1.0"} {
 		err := (&DialConfig{TerminateTLS: true, ALPN: []string{"http/1.1", protocol}}).Validate()
-		if err == nil || !strings.Contains(err.Error(), "must not offer h2") {
-			t.Errorf("ALPN %q: err = %v, want the h2 rejection", protocol, err)
+		if err == nil || !strings.Contains(err.Error(), "-rc-target-alpn") || !strings.Contains(err.Error(), want) {
+			t.Errorf("ALPN %q: err = %v, want a -rc-target-alpn rejection naming %s", protocol, err, want)
 		}
 	}
-	// A client-hello spec whose raw ALPN extension offers h2.
-	// Body: 2-byte list length (5) then 1-byte length + name: "\x02h2".
-	h2Spec := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
-		{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{Raw: []byte{0x00, 0x03, 0x02, 'h', '2'}}},
-	}}
-	err := (&DialConfig{TerminateTLS: true, ClientHello: h2Spec}).Validate()
-	if err == nil || !strings.Contains(err.Error(), "must not offer h2") {
-		t.Errorf("client-hello h2: err = %v, want the h2 rejection", err)
+	if err := (&DialConfig{TerminateTLS: true, ALPN: []string{"http/1.1", "http/1.1"}}).Validate(); err != nil {
+		t.Errorf("ALPN http/1.1 twice: unexpected error: %v", err)
 	}
-	// A multi-entry list whose second name is h2 is caught.
-	multiSpec := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
-		{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{
-			// list length 12: "\x02h2" then "\x08http/1.1"
-			Raw: []byte{0x00, 0x0c, 0x02, 'h', '2', 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1'},
-		}},
-	}}
-	if err := (&DialConfig{TerminateTLS: true, ClientHello: multiSpec}).Validate(); err == nil || !strings.Contains(err.Error(), "must not offer h2") {
-		t.Errorf("multi-entry client-hello: err = %v, want the h2 rejection", err)
-	}
-	// The scan reads the name list to the end of the body rather than trusting
-	// the declared list length, so a body that under-declares its length still
-	// exposes the offer it contains: refusing it is the fail-closed answer.
-	truncated := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
-		{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{Raw: []byte{0x00, 0x20, 0x02, 'h', '2'}}},
-	}}
-	if err := (&DialConfig{TerminateTLS: true, ClientHello: truncated}).Validate(); err == nil || !strings.Contains(err.Error(), "must not offer h2") {
-		t.Errorf("under-declared list length: err = %v, want the h2 rejection", err)
-	}
-	// Bodies that carry no readable name must not panic and must be accepted.
-	for name, raw := range map[string][]byte{
-		"zero-length name": {0x00, 0x01, 0x00},
-		"short body":       {0x00},
-		"empty body":       {},
-	} {
-		spec := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
+
+	alpn := func(raw []byte) *sesamepb.ClientHelloSpec {
+		return &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
 			{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{Raw: raw}},
 		}}
-		if err := (&DialConfig{TerminateTLS: true, ClientHello: spec}).Validate(); err != nil {
-			t.Errorf("%s: unexpected error: %v", name, err)
+	}
+	for name, raw := range map[string][]byte{
+		"h2":                         {0x00, 0x03, 0x02, 'h', '2'},
+		"h3":                         {0x00, 0x03, 0x02, 'h', '3'},
+		"h2 after http/1.1":          {0x00, 0x0c, 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1', 0x02, 'h', '2'},
+		"http/1.1 then foo":          {0x00, 0x0d, 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1', 0x03, 'f', 'o', 'o'},
+		"under-declared list length": {0x00, 0x20, 0x02, 'h', '2'},
+		"over-declared list length":  {0x00, 0x01, 0x02, 'h', '2'},
+		"trailing bytes":             {0x00, 0x03, 0x02, 'h', '2', 0x00},
+		"zero-length name":           {0x00, 0x01, 0x00},
+		"empty list":                 {0x00, 0x00},
+		"name overruns the list":     {0x00, 0x03, 0x09, 'h', '2'},
+		"short body":                 {0x00},
+		"empty body":                 {},
+	} {
+		err := (&DialConfig{TerminateTLS: true, ClientHello: alpn(raw)}).Validate()
+		if err == nil || !strings.Contains(err.Error(), "-rc-target-client-hello") || !strings.Contains(err.Error(), want) {
+			t.Errorf("client-hello %s: err = %v, want a -rc-target-client-hello rejection naming %s", name, err, want)
 		}
 	}
-	// A spec offering only http/1.1 is accepted.
-	http11Spec := &sesamepb.ClientHelloSpec{Extensions: []*sesamepb.ClientHelloExtension{
-		{Type: 16, Body: &sesamepb.ClientHelloExtension_Raw{Raw: []byte{0x00, 0x08, 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1'}}},
-	}}
-	if err := (&DialConfig{TerminateTLS: true, ClientHello: http11Spec}).Validate(); err != nil {
+
+	// A client-hello offering only http/1.1 is accepted.
+	only := alpn([]byte{0x00, 0x09, 0x08, 'h', 't', 't', 'p', '/', '1', '.', '1'})
+	if err := (&DialConfig{TerminateTLS: true, ClientHello: only}).Validate(); err != nil {
 		t.Errorf("client-hello http/1.1: unexpected error: %v", err)
 	}
 	// An empty ALPN list stays empty: the sesame server then sends no ALPN

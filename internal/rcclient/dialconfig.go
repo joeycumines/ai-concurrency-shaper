@@ -100,12 +100,12 @@ func (c *DialConfig) Validate() error {
 // tlsOptions renders the flag values into the wire TlsOptions for remote
 // termination, or nil when termination is not requested.
 //
-// The ALPN offer is constrained to http/1.1. Under remote termination the
+// The ALPN offer is constrained to exactly http/1.1. Under remote termination the
 // proxy dials the upstream through http.Transport.DialTLSContext, whose
 // returned connection is not a *tls.Conn, so net/http never learns the
 // negotiated protocol and can only speak HTTP/1.1 — it never sends an HTTP/2
-// preface. An offer of "h2" would therefore let an upstream select a protocol
-// this client cannot use, failing the exchange with a preface mismatch. With
+// preface. An offer of any other protocol would therefore let an upstream
+// select one this client cannot use, failing the exchange. With
 // no offer at all the sesame server sends no ALPN extension (its documented
 // contract), which is why an empty list is left empty rather than defaulted.
 func (c *DialConfig) tlsOptions() (*sesamepb.TlsOptions, error) {
@@ -118,8 +118,8 @@ func (c *DialConfig) tlsOptions() (*sesamepb.TlsOptions, error) {
 		return nil, nil
 	}
 	for _, protocol := range c.ALPN {
-		if strings.EqualFold(strings.TrimSpace(protocol), "h2") {
-			return nil, errors.New("rcclient: -rc-target-alpn must not offer h2: the remote-terminated connection carries HTTP/1.1 only, so an h2 selection would fail every request with a protocol mismatch")
+		if protocol != alpnHTTP11 {
+			return nil, errors.New("rcclient: -rc-target-alpn may offer only " + alpnHTTP11 + ": the remote-terminated connection carries HTTP/1.1 only, so the selection of any other protocol would fail every request")
 		}
 	}
 
@@ -157,8 +157,8 @@ func (c *DialConfig) tlsOptions() (*sesamepb.TlsOptions, error) {
 		if err := netconn.ValidateClientHelloSpec(c.ClientHello); err != nil {
 			return nil, fmt.Errorf("rcclient: client hello spec: %w", err)
 		}
-		if clientHelloOffersH2(c.ClientHello) {
-			return nil, errors.New("rcclient: -rc-target-client-hello must not offer h2: the remote-terminated connection carries HTTP/1.1 only, so an h2 selection would fail every request with a protocol mismatch")
+		if !clientHelloOffersOnlyHTTP11(c.ClientHello) {
+			return nil, errors.New("rcclient: -rc-target-client-hello ALPN extension must be a well-formed list offering only " + alpnHTTP11 + ": the remote-terminated connection carries HTTP/1.1 only, so the selection of any other protocol would fail every request")
 		}
 		opts.ClientHello = c.ClientHello
 	}
@@ -365,33 +365,37 @@ func ParseProxyHop(s string) (*sesamepb.ProxyHop, error) {
 // alpnExtensionType is the IANA TLS extension type of application_layer_protocol_negotiation.
 const alpnExtensionType = 16
 
-// clientHelloOffersH2 reports whether a wire-level ClientHelloSpec would offer
-// "h2" in its ALPN extension. Only a raw extension body can carry an offer —
-// the engine-derived (auto) form takes its ALPN list from TlsOptions, which
-// tlsOptions constrains — so a malformed body is treated as offering nothing
-// and left to the server's own validation.
-func clientHelloOffersH2(spec *sesamepb.ClientHelloSpec) bool {
+// alpnHTTP11 is the only application protocol a remote-terminated connection
+// can carry.
+const alpnHTTP11 = "http/1.1"
+
+// clientHelloOffersOnlyHTTP11 reports whether every ALPN extension of a
+// wire-level ClientHelloSpec is a well-formed offer of http/1.1 alone. The
+// extension body is sent verbatim, so it is parsed strictly: a 2-byte list
+// length that matches the remaining bytes, a non-empty list, and entries that
+// each carry a 1-byte length within bounds. A body that cannot be read that way
+// cannot be shown to offer only http/1.1 and is refused. The engine-derived
+// (auto) form carries no body; its ALPN list comes from TlsOptions, which
+// tlsOptions constrains.
+func clientHelloOffersOnlyHTTP11(spec *sesamepb.ClientHelloSpec) bool {
 	for _, ext := range spec.GetExtensions() {
 		if ext.GetType() != alpnExtensionType {
 			continue
 		}
-		body := ext.GetRaw()
-		// The ALPN body is a 2-byte list length followed by 1-byte-length
-		// prefixed protocol names.
-		if len(body) < 2 {
+		if _, raw := ext.GetBody().(*sesamepb.ClientHelloExtension_Raw); !raw {
 			continue
 		}
-		list := body[2:]
-		for len(list) > 0 {
+		body := ext.GetRaw()
+		if len(body) < 2 || int(body[0])<<8|int(body[1]) != len(body)-2 || len(body) == 2 {
+			return false
+		}
+		for list := body[2:]; len(list) > 0; {
 			n := int(list[0])
-			if n == 0 || 1+n > len(list) {
-				break
-			}
-			if strings.EqualFold(string(list[1:1+n]), "h2") {
-				return true
+			if n == 0 || 1+n > len(list) || string(list[1:1+n]) != alpnHTTP11 {
+				return false
 			}
 			list = list[1+n:]
 		}
 	}
-	return false
+	return true
 }
