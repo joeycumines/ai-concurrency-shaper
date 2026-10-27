@@ -274,11 +274,22 @@ type Breaker struct {
 	// Tracks the last observed Retry-After for penalty calculation.
 	lastRetryAfter time.Duration
 
-	// HALF_OPEN probe tracking: allows exactly one request through.
-	probeInFlight  bool
-	probeStartedAt time.Time // when the current probe was dispatched
-	probeEpoch     uint64    // incremented each time a probe is dispatched; used to discard stale probe results
-	halfOpenEpoch  uint64    // earliest probe epoch issued in the current continuous HALF_OPEN period
+	// HALF_OPEN probe tracking. probes holds the probes issued in the current
+	// HALF_OPEN window that have neither resolved nor been cancelled, oldest
+	// first. The newest is the probe the breaker waits on. Older entries are
+	// probes superseded after going stale: they may still be running upstream,
+	// so their success still closes the breaker. An entry is added only when
+	// the newest probe is stale, so the list grows at most once per open
+	// timeout while the window lasts. issuedEpoch is the last epoch handed
+	// out; it only grows, so an epoch is never reused.
+	probes      []probeTicket
+	issuedEpoch uint64
+}
+
+// probeTicket is one HALF_OPEN probe admitted by Allow.
+type probeTicket struct {
+	epoch     uint64
+	startedAt time.Time
 }
 
 // New creates a Breaker with the given options. Zero-valued fields receive
@@ -319,6 +330,7 @@ func (b *Breaker) Allow() (uint64, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	now := time.Now()
 	switch b.state {
 	case Closed:
 		return 0, nil
@@ -326,39 +338,65 @@ func (b *Breaker) Allow() (uint64, error) {
 		// Check if enough time has passed to transition to HALF_OPEN.
 		if time.Since(b.openSince) >= b.openTimeout() {
 			b.setState(HalfOpen)
-			b.probeInFlight = true
-			b.probeStartedAt = time.Now()
-			b.probeEpoch++
-			b.halfOpenEpoch = b.probeEpoch
-			return b.probeEpoch, nil
+			return b.issueProbe(now), nil
 		}
 		return 0, ErrCircuitOpen
 	case HalfOpen:
-		// Allow exactly one probe request.
-		if !b.probeInFlight {
-			b.probeInFlight = true
-			b.probeStartedAt = time.Now()
-			b.probeEpoch++
-			if b.halfOpenEpoch == 0 {
-				b.halfOpenEpoch = b.probeEpoch
-			}
-			return b.probeEpoch, nil
-		}
-		// If the probe has been in flight longer than the open timeout,
-		// it is likely stuck (e.g., the client disconnected without
-		// triggering RecordFailure or RecordSuccess, or the probe got
-		// a status that neither path reports). Allow a new probe to
-		// prevent permanent HALF_OPEN deadlock. The epoch is incremented
-		// so stale results from the old probe are discarded.
-		if time.Since(b.probeStartedAt) > b.openTimeout() {
-			b.probeStartedAt = time.Now()
-			b.probeEpoch++
-			return b.probeEpoch, nil
+		// Allow exactly one probe in flight. A newest probe that has been in
+		// flight longer than the open timeout is likely stuck (the client
+		// disconnected without a RecordFailure or RecordSuccess, or the probe
+		// got a status that neither path reports), so a new probe is admitted
+		// to prevent a permanent HALF_OPEN deadlock. The stale probe stays
+		// live: if it still completes, its success still closes the breaker.
+		newest, inFlight := b.newestProbe()
+		if !inFlight || time.Since(newest.startedAt) > b.openTimeout() {
+			return b.issueProbe(now), nil
 		}
 		return 0, ErrCircuitOpen
 	default:
 		return 0, ErrCircuitOpen
 	}
+}
+
+// issueProbe admits a new HALF_OPEN probe at now and returns its epoch.
+// Callers hold b.mu.
+func (b *Breaker) issueProbe(now time.Time) uint64 {
+	b.issuedEpoch++
+	b.probes = append(b.probes, probeTicket{epoch: b.issuedEpoch, startedAt: now})
+	return b.issuedEpoch
+}
+
+// newestProbe returns the probe the breaker is waiting on, if any. Callers
+// hold b.mu.
+func (b *Breaker) newestProbe() (probeTicket, bool) {
+	if len(b.probes) == 0 {
+		return probeTicket{}, false
+	}
+	return b.probes[len(b.probes)-1], true
+}
+
+// isNewestProbe reports whether epoch names the probe the breaker is waiting
+// on. Callers hold b.mu.
+func (b *Breaker) isNewestProbe(epoch uint64) bool {
+	newest, ok := b.newestProbe()
+	return ok && newest.epoch == epoch
+}
+
+// isLiveProbe reports whether epoch names a probe that is still unresolved in
+// the current HALF_OPEN window. Callers hold b.mu.
+func (b *Breaker) isLiveProbe(epoch uint64) bool {
+	for _, p := range b.probes {
+		if p.epoch == epoch {
+			return true
+		}
+	}
+	return false
+}
+
+// endProbeWindow discards every probe when the breaker leaves HALF_OPEN (or
+// closes): a probe that outlives its window is stale. Callers hold b.mu.
+func (b *Breaker) endProbeWindow() {
+	b.probes = nil
 }
 
 // WouldAllow reports whether Allow would admit a request right now, without
@@ -376,7 +414,8 @@ func (b *Breaker) WouldAllow() bool {
 	case Open:
 		return time.Since(b.openSince) >= b.openTimeout()
 	case HalfOpen:
-		return !b.probeInFlight || time.Since(b.probeStartedAt) > b.openTimeout()
+		newest, inFlight := b.newestProbe()
+		return !inFlight || time.Since(newest.startedAt) > b.openTimeout()
 	default:
 		return false
 	}
@@ -388,19 +427,23 @@ func (b *Breaker) WouldAllow() bool {
 // local upgrade capability failure, and suppressed client aborts after response
 // headers. It is intentionally a no-op for CLOSED requests (epoch 0), stale
 // epochs, and probes that have already resolved through RecordSuccess or
-// RecordFailure. A matching cancellation also advances the epoch so any late
-// result carrying the canceled epoch is treated as stale by
-// RecordSuccess/RecordFailure.
+// RecordFailure. The cancelled probe leaves the live set, so its late result
+// is stale. Older probes it superseded keep their standing: when the cancelled
+// probe was the newest, the newest remaining probe is again the one in flight.
 func (b *Breaker) CancelProbe(epoch uint64) {
 	if epoch == 0 {
 		return
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.state == HalfOpen && b.probeInFlight && b.probeEpoch == epoch {
-		b.probeInFlight = false
-		b.probeEpoch++
-		b.halfOpenEpoch = 0
+	if b.state != HalfOpen {
+		return
+	}
+	for i, p := range b.probes {
+		if p.epoch == epoch {
+			b.probes = append(b.probes[:i], b.probes[i+1:]...)
+			return
+		}
 	}
 }
 
@@ -412,8 +455,8 @@ func (b *Breaker) CancelProbe(epoch uint64) {
 // OPEN period's start (openSince), the failure is ignored in the HALF_OPEN
 // state transition — it is a stale result from a request that started before
 // the circuit opened, not the probe. Pass a zero time.Time to disable filtering.
-// epoch is the probe epoch returned by Allow; if non-zero and different from the
-// current probeEpoch, the result is from a stale probe and is discarded.
+// epoch is the probe epoch returned by Allow; if non-zero and not the newest
+// live probe, the result is from a stale probe and is discarded.
 // Pass 0 to disable epoch filtering (e.g., for non-probe requests in CLOSED state).
 func (b *Breaker) RecordFailure(statusCode int, retryAfter time.Duration, startedAt time.Time, epoch uint64) {
 	b.mu.Lock()
@@ -421,7 +464,7 @@ func (b *Breaker) RecordFailure(statusCode int, retryAfter time.Duration, starte
 
 	// Discard results from stale probes. Only the latest probe epoch in HALF_OPEN
 	// can record a probe failure; older superseded probes do not re-trip the circuit.
-	if epoch != 0 && epoch != b.probeEpoch {
+	if epoch != 0 && !b.isNewestProbe(epoch) {
 		return
 	}
 
@@ -455,17 +498,14 @@ func (b *Breaker) RecordFailure(statusCode int, retryAfter time.Duration, starte
 		if len(b.failures) >= b.cfg.failureThreshold {
 			b.setState(Open)
 			b.openSince = now
-			b.probeEpoch++
-			b.halfOpenEpoch = 0
+			b.endProbeWindow()
 		}
 	case HalfOpen:
 		// Probe failed — back to OPEN with increased backoff.
 		b.backoffMultiple++
 		b.setState(Open)
 		b.openSince = now
-		b.probeInFlight = false
-		b.probeEpoch++
-		b.halfOpenEpoch = 0
+		b.endProbeWindow()
 	}
 }
 
@@ -475,22 +515,17 @@ func (b *Breaker) RecordFailure(statusCode int, retryAfter time.Duration, starte
 // OPEN period's start (openSince), the success is ignored in the HALF_OPEN
 // state transition — it is a stale result from a request that started before
 // the circuit opened, not the probe. Pass a zero time.Time to disable filtering.
-// epoch is the probe epoch returned by Allow; if non-zero and different from the
-// current probeEpoch, the result is from a stale probe and is discarded.
+// epoch is the probe epoch returned by Allow; if non-zero and not a live
+// probe of the current HALF_OPEN window, the result is stale and is discarded.
 // Pass 0 to disable epoch filtering.
 func (b *Breaker) RecordSuccess(startedAt time.Time, epoch uint64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Discard results from stale probes (same logic as RecordFailure).
-	if epoch != 0 {
-		if b.state == HalfOpen {
-			if b.halfOpenEpoch == 0 || epoch < b.halfOpenEpoch || epoch > b.probeEpoch {
-				return
-			}
-		} else if epoch != b.probeEpoch {
-			return
-		}
+	// A probe result counts only while its probe is live in this window. A
+	// cancelled or resolved probe, or one from an earlier window, is stale.
+	if epoch != 0 && !b.isLiveProbe(epoch) {
+		return
 	}
 
 	b.totalSuccesses++
@@ -513,9 +548,7 @@ func (b *Breaker) RecordSuccess(startedAt time.Time, epoch uint64) {
 		b.lastRetryAfter = 0
 		b.failures = b.failures[:0] // Clear accumulated failures on recovery.
 		b.setState(Closed)
-		b.probeInFlight = false
-		b.probeEpoch++
-		b.halfOpenEpoch = 0
+		b.endProbeWindow()
 	case Closed:
 		// Normal success — reset consecutive and penalty state.
 		b.consecutive = 0
