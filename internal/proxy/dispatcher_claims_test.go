@@ -18,6 +18,8 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -673,6 +675,7 @@ func TestDispatcher_ProfileDialectRefusal_NoMappingForDialect(t *testing.T) {
 			},
 		},
 	}
+
 	profiles := transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 		"p": {Model: "resp-m"},
 	}}
@@ -724,5 +727,260 @@ func TestDispatcher_ProfileDialectRefusal_NoMappingForDialect(t *testing.T) {
 		if !strings.Contains(env.Error.Message, want) {
 			t.Errorf("message = %q, want to contain %q", env.Error.Message, want)
 		}
+	}
+}
+
+func TestDispatcher_ProfileSearchContinuesPastUnmappedClaim(t *testing.T) {
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	profiles := transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
+		"fast": {Model: "gpt-4o-mini"},
+	}}
+	var responsesCalled, chatCalled bool
+	responses := targetTranscodeHandler{
+		mapping: &TranscodeMapping{
+			ClientRoute: routeKey, ClientProtocol: transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamResponses, ProfileMap: profiles,
+		},
+		handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			responsesCalled = true
+			w.WriteHeader(http.StatusInternalServerError)
+		}),
+	}
+	chat := targetTranscodeHandler{
+		mapping: &TranscodeMapping{
+			ClientRoute: routeKey, ClientProtocol: transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			ModelMap: transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+				"gpt-4o-mini": {
+					ClientModel: "gpt-4o-mini", UpstreamModel: "gpt-4o-mini",
+					ClientResponseModel: "gpt-4o-mini", Via: transcode.NativeChat,
+				},
+			}},
+			ProfileMap: profiles,
+		},
+		handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			chatCalled = true
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	d, err := newMultiTranscodeDispatcher(routeKey, []targetTranscodeHandler{responses, chat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, routeKey.Path,
+		strings.NewReader(`{"model":"fast","max_tokens":16,"messages":[]}`))
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || !chatCalled || responsesCalled {
+		t.Fatalf("status=%d responses=%v chat=%v; want chat handler to serve the mapped profile",
+			rec.Code, responsesCalled, chatCalled)
+	}
+}
+
+func TestDispatcher_ProfileRefusalNamesTargetModelDialectMismatch(t *testing.T) {
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	profiles := transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
+		"fast": {Model: "gpt-4o-mini"},
+	}}
+	profileTarget := func(up transcode.UpstreamProtocol, via transcode.NativeProtocol) targetTranscodeHandler {
+		return targetTranscodeHandler{
+			mapping: &TranscodeMapping{
+				ClientRoute: routeKey, ClientProtocol: transcode.ClientMessages,
+				UpstreamProtocol: up,
+				ModelMap: transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+					"gpt-4o-mini": {
+						ClientModel: "gpt-4o-mini", UpstreamModel: "gpt-4o-mini",
+						ClientResponseModel: "gpt-4o-mini", Via: via,
+					},
+				}},
+				ProfileMap: profiles,
+			},
+			handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				t.Error("profile dialect mismatch must be refused before handler dispatch")
+				w.WriteHeader(http.StatusOK)
+			}),
+		}
+	}
+	d, err := newMultiTranscodeDispatcher(routeKey, []targetTranscodeHandler{
+		profileTarget(transcode.UpstreamChatCompletions, transcode.NativeResponses),
+		profileTarget(transcode.UpstreamResponses, transcode.NativeChat),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, routeKey.Path,
+		strings.NewReader(`{"model":"fast","max_tokens":16,"messages":[]}`))
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, req)
+	var env struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode refusal %q: %v", rec.Body.String(), err)
+	}
+	if rec.Code != http.StatusInternalServerError ||
+		!strings.Contains(env.Error.Message, `does not map target model "gpt-4o-mini" to responses`) ||
+		strings.Contains(env.Error.Message, "does not define the profile") {
+		t.Fatalf("status=%d message=%q; want accurate target-model dialect refusal",
+			rec.Code, env.Error.Message)
+	}
+}
+
+func TestDispatcher_GetBodyReplaysReadError(t *testing.T) {
+	wantErr := errors.New("request body read failed")
+	body := `{"model":"fast","max_tokens":16,"messages":[]}`
+	var bodyErr, replayErr error
+	var replayed, replayedGetBody []byte
+	d := &multiTranscodeDispatcher{
+		acceptedBytes: 1 << 10,
+		chatHandler: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			replayed, bodyErr = io.ReadAll(r.Body)
+			copy, err := r.GetBody()
+			if err != nil {
+				replayErr = err
+				return
+			}
+			defer copy.Close()
+			replayedGetBody, replayErr = io.ReadAll(copy)
+		}),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.Body = &readErrorAfterChunkBody{chunk: []byte(body), err: wantErr}
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, req)
+
+	if string(replayed) != body || !errors.Is(bodyErr, wantErr) {
+		t.Fatalf("Body replay = %q, err=%v; want full prefix and original read error", replayed, bodyErr)
+	}
+	if string(replayedGetBody) != body || !errors.Is(replayErr, wantErr) {
+		t.Fatalf("GetBody replay = %q, err=%v; want the same prefix and original read error", replayedGetBody, replayErr)
+	}
+}
+
+// profileDispatchTarget builds a dispatcher target with a stub handler that
+// records being chosen.
+func profileDispatchTarget(
+	up transcode.UpstreamProtocol,
+	modelMap transcode.ModelMap,
+	profiles map[string]transcode.ProfileMapping,
+	called *string,
+) targetTranscodeHandler {
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	return targetTranscodeHandler{
+		mapping: &TranscodeMapping{
+			ClientRoute: routeKey, ClientProtocol: transcode.ClientMessages,
+			UpstreamProtocol: up, ModelMap: modelMap,
+			ProfileMap: transcode.ProfileMap{Profiles: profiles},
+		},
+		handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			*called = string(up)
+			w.WriteHeader(http.StatusTeapot)
+		}),
+	}
+}
+
+func dispatchProfile(t *testing.T, targets ...targetTranscodeHandler) *httptest.ResponseRecorder {
+	t.Helper()
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	d, err := newMultiTranscodeDispatcher(routeKey, targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, routeKey.Path,
+		strings.NewReader(`{"model":"fast","max_tokens":16,"messages":[]}`))
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestDispatcher_ProfileSelectionIgnoresRegistrationOrder pins that the
+// handler chosen for a profile does not depend on the order the mappings were
+// registered in. The chat mapping claims the profile but cannot map its
+// target model, which the responses mapping (also claiming it) maps
+// explicitly with Via=responses; the mapped responses claimant is selected
+// in every registration order.
+func TestDispatcher_ProfileSelectionIgnoresRegistrationOrder(t *testing.T) {
+	profiles := map[string]transcode.ProfileMapping{"fast": {Model: "o3-mini"}}
+	responsesMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+		"o3-mini": {ClientModel: "o3-mini", UpstreamModel: "o3-mini", ClientResponseModel: "o3-mini", Via: transcode.NativeResponses},
+	}}
+	chatMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+		"other": {ClientModel: "other", UpstreamModel: "other", ClientResponseModel: "other", Via: transcode.NativeChat},
+	}}
+	for _, chatFirst := range []bool{true, false} {
+		var called string
+		chat := profileDispatchTarget(transcode.UpstreamChatCompletions, chatMap, profiles, &called)
+		responses := profileDispatchTarget(transcode.UpstreamResponses, responsesMap, profiles, &called)
+		targets := []targetTranscodeHandler{responses, chat}
+		if chatFirst {
+			targets = []targetTranscodeHandler{chat, responses}
+		}
+		dispatchProfile(t, targets...)
+		if called != string(transcode.UpstreamResponses) {
+			t.Errorf("chatFirst=%v: handler = %q, want the responses claimant in every order", chatFirst, called)
+		}
+	}
+}
+
+// TestDispatcher_ExplicitClaimantsIgnoreRegistrationOrder pins that when
+// both mappings claim a profile and the target model is mapped with an
+// explicit dialect, the handler for that explicit dialect is selected
+// in every registration order.
+func TestDispatcher_ExplicitClaimantsIgnoreRegistrationOrder(t *testing.T) {
+	profiles := map[string]transcode.ProfileMapping{"fast": {Model: "shared-model"}}
+	chatMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+		"shared-model": {ClientModel: "shared-model", UpstreamModel: "shared-model", ClientResponseModel: "shared-model", Via: transcode.NativeChat},
+	}}
+	responsesMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+		"shared-model": {ClientModel: "shared-model", UpstreamModel: "shared-model", ClientResponseModel: "shared-model", Via: transcode.NativeChat},
+	}}
+	for _, chatFirst := range []bool{true, false} {
+		var called string
+		chat := profileDispatchTarget(transcode.UpstreamChatCompletions, chatMap, profiles, &called)
+		responses := profileDispatchTarget(transcode.UpstreamResponses, responsesMap, profiles, &called)
+		targets := []targetTranscodeHandler{responses, chat}
+		if chatFirst {
+			targets = []targetTranscodeHandler{chat, responses}
+		}
+		dispatchProfile(t, targets...)
+		if called != string(transcode.UpstreamChatCompletions) {
+			t.Errorf("chatFirst=%v: handler = %q, want the chat claimant in every order", chatFirst, called)
+		}
+	}
+}
+
+// TestDispatcher_ProfileRefusalNamesUnmappedTargetModel pins the wording when
+// the dialect's mapping defines the profile identically but cannot map its
+// target model: the refusal says so, rather than claiming the profile is
+// undefined there.
+func TestDispatcher_ProfileRefusalNamesUnmappedTargetModel(t *testing.T) {
+	profiles := map[string]transcode.ProfileMapping{"fast": {Model: "o3-mini"}}
+	chatMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+		"o3-mini": {ClientModel: "o3-mini", UpstreamModel: "o3-mini", ClientResponseModel: "o3-mini", Via: transcode.NativeResponses},
+	}}
+	var called string
+	rec := dispatchProfile(t,
+		profileDispatchTarget(transcode.UpstreamChatCompletions, chatMap, profiles, &called),
+		profileDispatchTarget(transcode.UpstreamResponses, transcode.ModelMap{}, profiles, &called),
+	)
+	if called != "" {
+		t.Fatalf("handler %q served a profile its dialect mapping cannot map", called)
+	}
+	var env struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decode refusal %q: %v", rec.Body.String(), err)
+	}
+	if rec.Code != http.StatusInternalServerError ||
+		!strings.Contains(env.Error.Message, `does not map target model "o3-mini"`) ||
+		strings.Contains(env.Error.Message, "does not define the profile") {
+		t.Fatalf("status=%d message=%q; want the unmapped-target-model refusal", rec.Code, env.Error.Message)
 	}
 }

@@ -11,6 +11,8 @@ Providing structural information here makes agents lazy, as they stop exploring 
 
 **The proxy's scope is not limited to what an analysis finds convenient:** anything a client needs in order to work — including stateful harness behaviour such as agent/thread lifecycles, mailboxes, and profile routing — can only live here, so never rule work out as "out of scope".
 
+**Tests verify correctness; they do not define the solution:** Tests exist to prove that implementation obeys product requirements, specifications, and architectural invariants — tests are never the specification itself. Never contort business logic, introduce artificial asymmetries, or reward-hack production code to keep a test green when that test asserts an accidental ordering artifact, an implementation bug, or behavior that contradicts project invariants. If an existing test contradicts documented contracts or design principles, treat the test as a hypothesis that failed verification: inform the operator or correct the test to verify the true invariant honestly.
+
 This is a **stealth reverse proxy** with bounded concurrency and a TUI dashboard.
 
 Ensure these characteristics:
@@ -22,6 +24,19 @@ Ensure these characteristics:
 - Blocking (synchronous) request semantics mean the client call blocks until the proxy can admit it — this avoids the client needing its own backoff/retry logic.
 - The TUI (charm/bubbletea v2) visualizes concurrency, queue state, and live metrics.
 - The binary is `go install`-able from `github.com/joeycumines/ai-concurrency-shaper`.
+
+### Admission and breaker invariants
+
+The product exists so an upstream never *observes* more concurrency than configured: providers detect excess concurrency on their side, with their own accounting lag, and respond with 429s or temporary bans. This admission core was hard to get right; every change to it must preserve:
+
+- A limited request holds its route slot (and the global slot, when configured) from before anything reaches the upstream until the exchange ends. Both slots are released together, after any hold.
+- Holds cover the provider's accounting lag: the release cooldown on every release, the cancel cooldown when a client leaves after an upstream attempt started, and after an upstream failure the breaker's phantom penalty (or `-failure-hold` with the breaker off). A failure the upstream already reported keeps its hold even if the client disconnects; only an ambiguous outcome (no upstream status, or a proxy-generated error) after a client abort is suppressed.
+- Breaker state changes only through a request's single `Allow` and the resolution of that admission (`RecordSuccess`, `RecordFailure`, `CancelProbe`). Any earlier check is read-only (`WouldAllow`), so rejecting a request before admission (open circuit, queue depth, expired queue timeout) never changes breaker state or probe epochs. Every admitted `HALF_OPEN` probe is resolved or cancelled on every path.
+- Only definitive upstream outcomes feed the breaker. Local failures (conversion errors, proxy-generated responses, local panics, signer failures, downstream write failures) and client aborts are neither success nor failure.
+- With `-queue-comments`, the `200` SSE commit happens only after breaker admission. After it, every failure is a failed close (a comment, or a dialect error event), and classification reads the status the exchange actually observed after the commit, never the commit's own `200`.
+- Blocking is the contract: a waiting request is turned away only by an explicit bound (`-queue-depth`, `-queue-timeout`) or an open breaker.
+
+### Transcoding
 
 The proxy supports optional HTTP request/response transcoding between the OpenAI Responses API (`/v1/responses`), the OpenAI Chat Completions API (`/v1/chat/completions`), and the Anthropic Messages API (`/v1/messages`).
 
@@ -44,7 +59,6 @@ Transcoding invariants:
 - Decode source wire type → canonical IR → render target wire type. Never chain JSON conversions through another dialect.
 - The supported surface is a strict subset. Every unsupported field or variant must produce a client-dialect error; never silently drop, default, merge, or reinterpret it.
 - Preserve turn boundaries, content order, tool-call identity, tool-result identity, and stream lifecycle ordering.
-
 - Thinking-block synthesis is adjudicated SAFE under the marker+scrubbing contract (operator ruling, 2026-09-07): the proxy may synthesize Anthropic `thinking` blocks ONLY under the `provider_reasoning_thinking` capability, ONLY with the marker signature (`SyntheticThinkingSignature`), and the request path MUST scrub marker-signature thinking blocks out of replayed history before any upstream rendering — a synthetic signature must never reach an upstream. `redacted_thinking` is never synthesized (no source data exists). Non-marker thinking blocks are source-authenticated artifacts: preserve them byte-for-byte or reject/explicitly lose them.
 - Use event-specific SSE types. Emit every required field, keep `event:` equal to JSON `type`, and emit exactly one success terminal or one error terminal.
 - A failed, malformed, truncated, or cancelled exchange must never be reported as a successful model completion.
@@ -52,6 +66,8 @@ Transcoding invariants:
 - `stream.Proxy` is mandatory for streaming copy/cancellation. The handler must still seal downstream writes, close the upstream body, and classify the final outcome before returning.
 - Keep accepted-request, retry-replay, decoded-request, successful-response, and error-body limits separate.
 - Official SDKs may be used only in temporary manual conformance checks, not as committed dependencies.
+- Multi-mapping dispatch on a client route (e.g. `POST /v1/messages` targeting both chat completions and responses) is strictly registration-order independent. Peer upstream targets (`chat` and `responses`) are evaluated symmetrically; while `chat` acts as the fallback dialect when no dialect is declared, it never preempts or blocks explicitly mapped models or profiles on peer targets.
+- A `-transcode-profile` follows its target model's dialect: if any mapping on the route resolves the profile's target model to an explicit upstream dialect, that dialect serves the profile regardless of mapping registration order. Profile claims are authoritative against raw model matches: a non-claiming target's raw model match on a profile name must never steal a profile dispatch or forward a profile name upstream.
 
 ### Contract-role strictness and the directional loss model
 
@@ -65,7 +81,7 @@ The transcoder touches wire contracts of two different **roles**, and each role 
 
 **A native passthrough is not a conversion.** When a model is served on its own dialect (`-native-route` plus the `-model-table` `via` fact), the proxy rewrites only the model identifier and forwards the document otherwise byte-identically. There is no target dialect to render, so the whole dialect contract — which fields are known, which unions are valid — belongs to the upstream: the request is validated structurally only (the ALWAYS-reject set above still holds: duplicate JSON keys, trailing values, malformed syntax), and everything the conversion path would have to model or reject is forwarded instead. Non-POST methods on a natively served path pass through transparently, exactly like the transcoded-route rule below. The owning upstream returns its dialect-correct error for anything it cannot serve.
 
-**The directional loss model.** Loss is **directional** and **per-feature**; the canonical IR is the pivot. The granular loss registry (`internal/transcode/losses.go`) is direction-scoped: request-side keys (`request_reasoning`, `multiple_system_turns`, `anthropic_controls`, `previous_response_id`) and response-side keys (`provider_reasoning_text`, `usage_unknown`, `response_service_tier`). The **same field can be inert in one direction and a rejection in the other** — e.g. `reasoning_content` is a response-side provider extension in Chat→Messages (capability-gated text or an approved loss) while a request-side reasoning control is the separate `request_reasoning` key. For each direction every feature is routed to exactly one of three outcomes:
+**The directional loss model.** Loss is **directional** and **per-feature**; the canonical IR is the pivot. The granular loss registry is direction-scoped: request-side keys (`request_reasoning`, `multiple_system_turns`, `anthropic_controls`, `previous_response_id`) and response-side keys (`provider_reasoning_text`, `usage_unknown`, `response_service_tier`). The **same field can be inert in one direction and a rejection in the other** — e.g. `reasoning_content` is a response-side provider extension in Chat→Messages (capability-gated text or an approved loss) while a request-side reasoning control is the separate `request_reasoning` key. For each direction every feature is routed to exactly one of three outcomes:
 
 1. **Lossless** — the feature maps 1:1 to the target dialect and is forwarded.
 2. **Observable loss** — the feature is non-portable and approved for loss; it is dropped and the loss is **logged** (see "Loss observability" below).
@@ -73,11 +89,9 @@ The transcoder touches wire contracts of two different **roles**, and each role 
 
 This three-way split is what preserves lossless transcoding: nothing is ever silently dropped, defaulted, merged, or reinterpreted. The tolerance on the upstream response does not relax it, because the invariant governs the client contract, and the union-arm strictness still guards client-visible content.
 
-**Approved losses vs Notes.** The `ConversionReport.Losses` slice holds BOTH approved losses (`Lose`, gated by the policy) and **Notes** (`Note`, losses.go) — a Note is a *sanctioned encoding* recorded WITHOUT a policy decision (a capability-gated or loss-sanctioned mapping that invents or reinterprets content, e.g. `provider_reasoning_text` mapped to ordinary text). A Note is **not** a loss. Logging and the startup summary must distinguish them.
+**Approved losses vs Notes.** The `ConversionReport.Losses` slice holds BOTH approved losses (`Lose`, gated by the policy) and **Notes** (`Note`) — a Note is a *sanctioned encoding* recorded WITHOUT a policy decision (a capability-gated or loss-sanctioned mapping that invents or reinterprets content, e.g. `provider_reasoning_text` mapped to ordinary text). A Note is **not** a loss. Logging and the startup summary must distinguish them.
 
 **Loss observability.** At **startup**, each transcode route logs one summary of its **loss profile**: the policy's `Allowed` set (with `LossKeyDescription`), or `none (strict)` for a strict route. Per **request**, each conversion stage logs ONE aggregated line: `request`-side (after request conversion) and `response`-side (after response conversion) — at most two per exchange. The line lists `feature at path` for approved losses, and `note: feature at path: <detail>` for Notes (so a Note's rationale is inline, since the startup summary covers only the Allowed set). Duplicate `feature at path` entries are deduped. The two-stage split is deliberate: request-side losses are logged before the upstream round-trip, so they remain observable even when the upstream/response fails.
-
-**The lossless-transcoding invariant governs the CLIENT contract.** What the client sends is honored losslessly, or observably lost under a named key, or rejected — never silently dropped, defaulted, merged, or reinterpreted. This is enforced by the strict client-request decode, the union-arm strictness, and the directional loss model; the upstream-response tolerance never touches it.
 
 
 Authoritative contracts:
@@ -96,7 +110,7 @@ The handler translates SSE incrementally: it parses upstream `data:` frames, con
 
 `stream.Proxy` aborts and returns as soon as the passed context is cancelled; it does not itself close the remote side in that case. The handler therefore cancels the upstream request context on `r.Context().Done()`, which releases the upstream connection.
 
-Strict constraints:
+### Secrets in output
 
 - TUI output is not captured anywhere and is visible only to the local operator during an interactive session. Do not redact secrets from TUI display — the journal and TUI may show raw credential headers and URLs.
-- Logging must be explicit about what is logged - for example, do not log arbitrary HTTP headers, as they may contain secrets. While the TUI does show the log, log output is also available in non-interactive sessions, so logging must be safe for that context.
+- Logging must be explicit about what is logged: never log arbitrary HTTP headers, which may contain secrets. The TUI shows the log, but log output is also captured in non-interactive sessions, so every log line must be safe there.

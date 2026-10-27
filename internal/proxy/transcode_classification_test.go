@@ -1735,3 +1735,28 @@ func TestClassifyTranscodeExchangeAttemptFact(t *testing.T) {
 		t.Fatal("abort without marker reads as upstream-attempted")
 	}
 }
+
+// TestClassifyTranscodeExchangeDownstreamWriteFailureIsNotUpstreamSuccess
+// pins that a transcoded stream whose downstream write failed is never
+// upstream success, even though the outcome carries the upstream's 2xx: the
+// client never received the complete response, so crediting the breaker
+// could reset a real failure streak. The classification must hold on its
+// own, without relying on the recorder's separate aborted flag.
+func TestClassifyTranscodeExchangeDownstreamWriteFailureIsNotUpstreamSuccess(t *testing.T) {
+	outcome := transcode.Outcome{
+		UpstreamAttempted: true,
+		UpstreamStatus:    transcode.Optional[int]{Value: http.StatusOK, Set: true},
+		Provenance:        transcode.ProvenanceDownstreamWriteError,
+	}
+	rec := &statusRecorder{ResponseWriter: httptest.NewRecorder(), transcodeOutcome: &outcome}
+	result := classifyTranscodeExchange(rec, true)
+	if !result.localFailure {
+		t.Fatal("downstream write failure is not a local failure")
+	}
+	if result.upstreamSuccess {
+		t.Fatal("downstream write failure classified as upstream success")
+	}
+	if result.upstreamStatus != http.StatusOK || !result.upstreamAttempted {
+		t.Fatalf("result = %+v, want the observed upstream status and attempt retained", result)
+	}
+}

@@ -1729,23 +1729,15 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		defer cancel()
 	}
 
-	// Reject immediately if the circuit breaker is OPEN.
-	var breakerEpoch uint64
-	if p.breaker != nil {
-		var err error
-		breakerEpoch, err = p.breaker.Allow()
-		if err != nil {
-			p.m.IncCircuitRejected()
-			http.Error(w, "circuit open", http.StatusServiceUnavailable)
-			return
-		}
-		// Inject the breaker epoch into the request context so breaker reporting
-		// uses the same stale-probe guard for the first retry-transport attempt.
-		ctx := context.WithValue(r.Context(), retry.BreakerEpochKey, breakerEpoch)
-		ctx = p.withRetryAttemptContext(ctx, &retryAttempt)
-		r = r.WithContext(ctx)
-	} else if p.retryTracksAttempts {
-		r = r.WithContext(p.withRetryAttemptContext(r.Context(), &retryAttempt))
+	// Reject a request the breaker would refuse before reading its body. The
+	// peek changes no breaker state: admission itself (and a HALF_OPEN probe
+	// epoch) is taken by the single Allow below, after the body inspection,
+	// so neither a slow upload nor a queue-depth rejection can claim,
+	// supersede, or cancel a recovery probe.
+	if p.breaker != nil && !p.breaker.WouldAllow() {
+		p.m.IncCircuitRejected()
+		http.Error(w, "circuit open", http.StatusServiceUnavailable)
+		return
 	}
 
 	// Bounded-queue admission: when a depth limit is configured,
@@ -1772,25 +1764,19 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		if effective == nil {
 			effective = p.limiter
 		}
-		if effective != nil && effective.Stats().Waiters >= int64(p.queueDepthLimit) {
-			// The request carries a HALF_OPEN recovery probe (Allow()
-			// already admitted it); returning on the queue-rejection path
-			// without cancelling would strand the probe until the open
-			// timeout and block breaker recovery exactly under load.
-			if p.breaker != nil {
-				p.breaker.CancelProbe(breakerEpoch)
+		if effective != nil {
+			if waiters := effective.Stats().Waiters; waiters >= int64(p.queueDepthLimit) {
+				p.m.IncQueueRejected()
+				writeQueueRejected(w, p.queueDepthLimit, waiters)
+				return
 			}
-			p.m.IncQueueRejected()
-			writeQueueRejected(w, p.queueDepthLimit, effective.Stats().Waiters)
-			return
 		}
-		if p.globalLimiter != nil && p.globalLimiter.Stats().Waiters >= int64(p.queueDepthLimit) {
-			if p.breaker != nil {
-				p.breaker.CancelProbe(breakerEpoch)
+		if p.globalLimiter != nil {
+			if waiters := p.globalLimiter.Stats().Waiters; waiters >= int64(p.queueDepthLimit) {
+				p.m.IncQueueRejected()
+				writeQueueRejected(w, p.queueDepthLimit, waiters)
+				return
 			}
-			p.m.IncQueueRejected()
-			writeQueueRejected(w, p.queueDepthLimit, p.globalLimiter.Stats().Waiters)
-			return
 		}
 	}
 
@@ -1812,20 +1798,54 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	// body-carrying request therefore requires a full-duplex writer; one
 	// that cannot (recorders, exotic embedders) falls back to the
 	// documented silent-queuing semantics instead of corrupting the body.
+	//
+	// Only the eligibility is decided here; the commit itself happens after
+	// the breaker admits the request, so a breaker rejection is always a
+	// plain 503 and never a committed stream with a failed close.
 	rec, recIsRecorder := w.(*statusRecorder)
 	var stopComments func()
+	commitComments := false
 	if p.queueComments > 0 {
-		if recIsRecorder && transcode.AcceptIsEventStream(r.Header.Get("Accept")) && !isExplicitNonStreamingRequest(r) {
+		if recIsRecorder && transcode.AcceptIsEventStream(r.Header.Get("Accept")) {
 			if canCommitCommentsWithUnreadBody(r) || http.NewResponseController(rec).EnableFullDuplex() == nil {
-				stopComments = p.startQueueComments(rec)
-				// Tell a downstream transcode handler the streaming
-				// representation is committed: its error writers then
-				// failed-close with dialect-legal SSE error events
-				// instead of raw JSON bodies the committed stream
-				// cannot carry.
-				r = r.WithContext(transcode.WithCommittedStreamContext(r.Context()))
+				commitComments = !bodyBlocksStreamCommit(w, r, ctx)
 			}
 		}
+	}
+	if ctx.Err() != nil {
+		// The admission deadline (or the client) ended the request during
+		// the body inspection: answer exactly as an expired queue wait,
+		// without consulting the breaker.
+		p.writeAdmissionFailure(w, ctx, nil, rec)
+		return
+	}
+
+	var breakerEpoch uint64
+	if p.breaker != nil {
+		var err error
+		breakerEpoch, err = p.breaker.Allow()
+		if err != nil {
+			p.m.IncCircuitRejected()
+			http.Error(w, "circuit open", http.StatusServiceUnavailable)
+			return
+		}
+		// Inject the breaker epoch into the request context so breaker reporting
+		// uses the same stale-probe guard for the first retry-transport attempt.
+		ctx := context.WithValue(r.Context(), retry.BreakerEpochKey, breakerEpoch)
+		ctx = p.withRetryAttemptContext(ctx, &retryAttempt)
+		r = r.WithContext(ctx)
+	} else if p.retryTracksAttempts {
+		r = r.WithContext(p.withRetryAttemptContext(r.Context(), &retryAttempt))
+	}
+
+	if commitComments {
+		stopComments = p.startQueueComments(rec)
+		// Tell a downstream transcode handler the streaming
+		// representation is committed: its error writers then
+		// failed-close with dialect-legal SSE error events
+		// instead of raw JSON bodies the committed stream
+		// cannot carry.
+		r = r.WithContext(transcode.WithCommittedStreamContext(r.Context()))
 	}
 
 	p.m.IncQueued()
@@ -1848,31 +1868,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		if p.breaker != nil {
 			p.breaker.CancelProbe(breakerEpoch)
 		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			p.m.IncTimeout()
-			if stopComments != nil {
-				// The streaming representation was already committed: the
-				// failure surfaces as a failed close (error comment +
-				// aborted exchange), never as a misleading new HTTP status
-				// or a non-SSE body inside the committed stream.
-				stopComments()
-				rec.aborted = true
-				fmt.Fprintf(w, ": queue-wait failed: timeout\n\n")
-				_ = rec.FlushError()
-			} else {
-				http.Error(w, "queue timeout", http.StatusGatewayTimeout)
-			}
-		} else {
-			p.m.IncCancelled()
-			if stopComments != nil {
-				stopComments()
-				rec.aborted = true
-				fmt.Fprintf(w, ": queue-wait failed: canceled\n\n")
-				_ = rec.FlushError()
-			} else {
-				http.Error(w, "request canceled", http.StatusServiceUnavailable)
-			}
-		}
+		p.writeAdmissionFailure(w, ctx, stopComments, rec)
 		return
 	}
 	// The comments keep flowing through the GLOBAL limiter wait below —
@@ -1915,6 +1911,13 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	var reachedUpstream bool
 	attemptState := &upstreamAttemptState{}
 	var localPanic bool // set by inner recovery when a local panic (not upstream failure) occurs
+	var globalRelease func()
+	releaseSlots := func() {
+		if globalRelease != nil {
+			globalRelease()
+		}
+		release()
+	}
 	defer func() {
 		// A local panic (e.g., nil pointer in proxy code) is NOT an upstream
 		// failure — do NOT apply phantom penalty, failure hold, or cancel
@@ -1922,7 +1925,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		// bug, not a downstream error, so holding the slot would penalize
 		// legitimate traffic for a proxy-internal problem.
 		if localPanic {
-			release()
+			releaseSlots()
 			return
 		}
 		rec, recOK := w.(*statusRecorder)
@@ -1953,7 +1956,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		if p.breaker != nil && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 			penalty := p.breaker.PenaltyDuration()
 			if penalty > 0 {
-				time.AfterFunc(penalty, release)
+				time.AfterFunc(penalty, releaseSlots)
 				return
 			}
 			// Penalty is zero — fall through to check failureHold below.
@@ -1965,7 +1968,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			// guard as the phantom penalty branch — client cancels with ambiguous
 			// status codes are suppressed; definitive upstream/proxy transport
 			// failures are not.
-			time.AfterFunc(p.failureHold, release)
+			time.AfterFunc(p.failureHold, releaseSlots)
 			return
 		}
 		if isClientCancel && result.upstreamAttempted && p.cancelCooldown > 0 {
@@ -1982,14 +1985,15 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			// isTransportOrProxyError guard IS correct for phantom penalty and
 			// failure hold (which punish upstream failures, not accounting lag),
 			// but the cooldown exists specifically to cover the lag case.
-			time.AfterFunc(p.cancelCooldown, release)
+			time.AfterFunc(p.cancelCooldown, releaseSlots)
 			return
 		}
-		release()
+		releaseSlots()
 	}()
 
 	if p.globalLimiter != nil {
-		globalRelease, err := p.globalLimiter.Acquire(ctx)
+		var err error
+		globalRelease, err = p.globalLimiter.Acquire(ctx)
 		if err != nil {
 			p.m.DecQueued()
 			// Record the moment the global limiter wait ended so that
@@ -2000,30 +2004,9 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			if p.breaker != nil {
 				p.breaker.CancelProbe(breakerEpoch)
 			}
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				p.m.IncTimeout()
-				if stopComments != nil {
-					stopComments()
-					rec.aborted = true
-					fmt.Fprintf(w, ": queue-wait failed: timeout\n\n")
-					_ = rec.FlushError()
-				} else {
-					http.Error(w, "queue timeout", http.StatusGatewayTimeout)
-				}
-			} else {
-				p.m.IncCancelled()
-				if stopComments != nil {
-					stopComments()
-					rec.aborted = true
-					fmt.Fprintf(w, ": queue-wait failed: canceled\n\n")
-					_ = rec.FlushError()
-				} else {
-					http.Error(w, "request canceled", http.StatusServiceUnavailable)
-				}
-			}
+			p.writeAdmissionFailure(w, ctx, stopComments, rec)
 			return
 		}
-		defer globalRelease()
 	}
 
 	// All admission complete (per-route + global limiter): stop the queue
@@ -2184,35 +2167,87 @@ type bodyReadCloser struct {
 	io.Closer
 }
 
-// isExplicitNonStreamingRequest inspects whether a POST request carries a JSON body
-// with an explicit "stream": false field. Stream intent precedence dictates that an
-// explicit body stream field takes precedence over the client's Accept header; when
-// stream: false is explicitly requested, the early SSE queue comments must not lock
-// the exchange into the streaming representation.
-func isExplicitNonStreamingRequest(r *http.Request) bool {
+// writeAdmissionFailure answers a request whose admission context ended
+// before it was admitted: the queue timeout (504) or a client cancellation
+// (503). Once the queue comments committed the streaming representation
+// (stopComments != nil), the failure surfaces as a failed close (error
+// comment + aborted exchange), never as a misleading new HTTP status or a
+// non-SSE body inside the committed stream.
+func (p *Proxy) writeAdmissionFailure(w http.ResponseWriter, ctx context.Context, stopComments func(), rec *statusRecorder) {
+	reason, status, text := "canceled", http.StatusServiceUnavailable, "request canceled"
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		reason, status, text = "timeout", http.StatusGatewayTimeout, "queue timeout"
+		p.m.IncTimeout()
+	} else {
+		p.m.IncCancelled()
+	}
+	if stopComments == nil {
+		http.Error(w, text, status)
+		return
+	}
+	stopComments()
+	rec.aborted = true
+	fmt.Fprintf(w, ": queue-wait failed: %s\n\n", reason)
+	_ = rec.FlushError()
+}
+
+// bodyBlocksStreamCommit reports whether a request body forbids the early
+// queue-comment SSE commit. An explicit body "stream": false takes precedence
+// over the client's Accept header, so it must not be locked into the streaming
+// representation; neither may a body whose intent cannot be determined (too
+// large to inspect, of unknown length, unreadable, or not JSON).
+//
+// The inspection is bounded and ends with probeContext. The consumed bytes are
+// always replayed to the handler, followed by the original read error if the
+// read failed, so the handler observes the body exactly as sent.
+//
+// Cancellation must interrupt a read blocked on a stalled upload. Closing an
+// HTTP/1.1 server body cannot: (*http.body).Read holds the body mutex across
+// the socket read and Close waits for the same mutex. The read deadline of
+// the underlying connection can, so it is moved to now; Close is the fallback
+// for writers without deadline support.
+func bodyBlocksStreamCommit(w http.ResponseWriter, r *http.Request, probeContext context.Context) bool {
 	if r == nil || r.Method != http.MethodPost || r.Body == nil || r.ContentLength == 0 {
 		return false
 	}
-	limit := int64(10 << 20)
-	if r.ContentLength > 0 && r.ContentLength < limit {
-		limit = r.ContentLength
-	}
-	buf, err := io.ReadAll(io.LimitReader(r.Body, limit))
-	if err != nil {
-		return false
+	const limit = int64(10 << 20)
+	if r.ContentLength < 0 || r.ContentLength > limit {
+		return true
 	}
 	origBody := r.Body
+	stopInterrupt := context.AfterFunc(probeContext, func() {
+		if http.NewResponseController(w).SetReadDeadline(time.Now()) != nil {
+			_ = origBody.Close()
+		}
+	})
+	buf, err := io.ReadAll(io.LimitReader(origBody, limit+1))
+	if !stopInterrupt() && err == nil {
+		// The interrupt fired after the read finished: the request is
+		// over, and origBody may be closed concurrently, so it must not be
+		// read again.
+		err = probeContext.Err()
+	}
+	if err != nil {
+		r.Body = &bodyReadCloser{
+			Reader: &errorBodyReader{rest: bytes.NewReader(buf), err: err},
+			Closer: origBody,
+		}
+		return true
+	}
 	r.Body = &bodyReadCloser{
 		Reader: io.MultiReader(bytes.NewReader(buf), origBody),
 		Closer: origBody,
 	}
+	if int64(len(buf)) > limit {
+		return true
+	}
 	var probe struct {
 		Stream *bool `json:"stream"`
 	}
-	if err := json.Unmarshal(buf, &probe); err == nil && probe.Stream != nil && !*probe.Stream {
+	if err := json.Unmarshal(buf, &probe); err != nil {
 		return true
 	}
-	return false
+	return probe.Stream != nil && !*probe.Stream
 }
 
 // writeQueueRejected emits the bounded-queue 429: a Retry-After header plus
@@ -2229,10 +2264,10 @@ func isExplicitNonStreamingRequest(r *http.Request) bool {
 // the representation: later WriteHeader calls cannot change the status the
 // client already received.
 func (p *Proxy) startQueueComments(rec *statusRecorder) func() {
-	rec.commentsCommitted = true
 	rec.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	rec.Header().Set("Cache-Control", "no-cache")
 	rec.WriteHeader(http.StatusOK)
+	rec.commentsCommitted = true
 	start := time.Now()
 	fmt.Fprintf(rec, ": queue-wait elapsed=0\n\n")
 	_ = rec.FlushError()
@@ -2374,11 +2409,10 @@ func classifyTranscodeExchange(
 	upstreamAttempted bool,
 ) exchangeResult {
 	outcome := rec.transcodeOutcome
-	// The attempt marker fires when the signing+dispatch chain starts, which
-	// precedes the signer: a local request conversion or signing error never
-	// dispatches, so its outcome fact overrides the marker. The marker still
-	// ORs in for exchanges aborted mid-flight where the handler recorded no
-	// attempt fact.
+	// The attempt marker is inside SigningTransport, so it only fires after
+	// signing succeeds and the configured round trip is about to begin. The
+	// outcome fact still covers exchanges whose handler recorded an attempt
+	// but whose transport never returned a response.
 	attempted := outcome.UpstreamAttempted ||
 		(upstreamAttempted && outcome.Provenance != transcode.ProvenanceLocalRequestConversionError)
 	result := exchangeResult{
@@ -2402,8 +2436,11 @@ func classifyTranscodeExchange(
 	// partial stream could reset a real failure streak. This mirrors the
 	// native path's !clientAborted guard so classification is self-contained
 	// and does not depend on the recorder's independent rec.aborted coupling
-	// in serveTranscodeHandler.
+	// in serveTranscodeHandler. A local failure (including a downstream write
+	// that failed mid-stream) is excluded for the same reason: the upstream's
+	// 2xx is retained as an observed fact, but the exchange did not succeed.
 	result.upstreamSuccess = !result.upstreamFailure &&
+		!result.localFailure &&
 		!result.clientAborted &&
 		outcome.UpstreamStatus.Set &&
 		outcome.UpstreamStatus.Value >= http.StatusOK &&
@@ -2491,6 +2528,13 @@ func (p *Proxy) resolveAbortedExchange(
 	}
 	if result.upstreamFailure && !result.suppressibleAbort {
 		p.recordFailureOnce(result, attempt, startedAt, epoch)
+		return
+	}
+	attemptStart, attemptEpoch := retryAttemptOrDefault(attempt, startedAt, epoch)
+	if attemptEpoch != 0 && !result.clientAborted && result.upstreamStatus > 0 &&
+		!result.upstreamFailure && !result.localFailure && !result.suppressibleAbort &&
+		!result.switchingProtocolsResolved {
+		p.breaker.RecordSuccess(attemptStart, attemptEpoch)
 		return
 	}
 	p.cancelSuppressedAbortProbe(attempt, startedAt, epoch)
@@ -2614,78 +2658,12 @@ func isContextCancellation(err error) bool {
 
 var errLocalSwitchingProtocolsFailure = errors.New("proxy: local switching protocols failure")
 
-// sanitizedTransportError preserves the rendered message of an error chain
-// whose embedded URLs have been scrubbed, while Unwrap keeps the REDACTED
-// clone reachable: logs see the full original context (including any outer %w
-// wrapping prefixes) with no secret substrings, and errors.Is/errors.As
-// traverse to a *url.Error whose URL field is itself clean.
-type sanitizedTransportError struct {
-	msg      string
-	redacted error
-}
-
-func (e *sanitizedTransportError) Error() string { return e.msg }
-
-func (e *sanitizedTransportError) Unwrap() error { return e.redacted }
-
-// sanitizeTransportError rewrites transport errors so no embedded target URL
-// echoes credential query parameters into logs: http.Transport wraps failures
-// in url.Error with the full outbound URL, and its Error() text would
-// otherwise leak ?key=... secrets verbatim.
-//
-// Fidelity contract:
-//   - A bare *url.Error input yields a redacted *url.Error clone (same shape
-//     as before sanitization existed).
-//   - A wrapped chain yields a sanitizedTransportError whose Error() is the
-//     ORIGINAL message with every collected *url.Error URL replaced by its
-//     RedactSensitiveURL counterpart (raw and %q-quoted spellings both
-//     covered), so outer wrapping context survives into log lines.
-//   - Directly nested url.Error subtrees (net/http redirect chains) are
-//     cloned recursively with each level's URL scrubbed; errors.Is and
-//     errors.As keep working through Unwrap.
-//
-// Non-url.Error values carry no URL and pass through unchanged. When the
-// outermost URL cannot be parsed there is nothing safe to rewrite and the
-// original error is returned unchanged (historical fallback).
+// sanitizeTransportError rewrites a transport error before it is logged so no
+// embedded target URL echoes credential query parameters: http.Transport
+// wraps failures in url.Error with the full outbound URL. See
+// auth.SanitizeURLError for the guarantees.
 func sanitizeTransportError(err error) error {
-	var outer *url.Error
-	if !errors.As(err, &outer) {
-		return err
-	}
-	parsed, perr := url.Parse(outer.URL)
-	if perr != nil {
-		return err
-	}
-	var replacements []string
-	clone := redactURLError(outer, parsed, &replacements)
-	if _, direct := err.(*url.Error); direct {
-		return clone
-	}
-	return &sanitizedTransportError{
-		msg:      strings.NewReplacer(replacements...).Replace(err.Error()),
-		redacted: clone,
-	}
-}
-
-// redactURLError clones e with its URL replaced by the redacted form of
-// parsed and its Err subtree recursively scrubbed when it nests another
-// *url.Error directly (as http.Client redirect chains do). Every URL seen is
-// appended to replacements as %q-quoted and raw old/new pairs - quoted first,
-// because a quoted rendering must be rewritten atomically to stay correctly
-// escaped.
-func redactURLError(e *url.Error, parsed *url.URL, replacements *[]string) *url.Error {
-	redacted := auth.RedactSensitiveURL(parsed).String()
-	if e.URL != "" && e.URL != redacted {
-		*replacements = append(*replacements, strconv.Quote(e.URL), strconv.Quote(redacted), e.URL, redacted)
-	}
-	clone := *e
-	clone.URL = redacted
-	if inner, ok := e.Err.(*url.Error); ok {
-		if innerParsed, perr := url.Parse(inner.URL); perr == nil {
-			clone.Err = redactURLError(inner, innerParsed, replacements)
-		}
-	}
-	return &clone
+	return auth.SanitizeURLError(err)
 }
 
 func localSwitchingProtocolsFailure(msg string) error {
@@ -3214,12 +3192,12 @@ type statusRecorder struct {
 	// error frames, never as HTTP error statuses.
 	commentsCommitted      bool
 	upstreamStatusOverride int
-	// committedOKObserved records a 200 written after the queue-comment
-	// commit (the upstream's, or a transcode handler re-committing its
-	// successful stream). The commit silences it, so neither status nor the
-	// override can show that an upstream status was observed.
-	committedOKObserved bool
-	transcodeStream     bool
+	// committedOKObserved records a 2xx written after the queue-comment
+	// commit. committedResponseStatus retains the actual upstream status
+	// while the client-visible status remains the already-committed 200.
+	committedOKObserved     bool
+	committedResponseStatus int
+	transcodeStream         bool
 	// dialectErrorFramed marks a committed stream whose failure is being
 	// delivered as a client-dialect error terminal by its owner. The
 	// recorder must then not append its own ": queue-wait failed: upstream"
@@ -3325,6 +3303,9 @@ func (r *statusRecorder) observedStatus() int {
 	case r.upstreamStatusOverride > 0:
 		return r.upstreamStatusOverride
 	case r.committedOKObserved:
+		if r.committedResponseStatus > 0 {
+			return r.committedResponseStatus
+		}
 		return http.StatusOK
 	default:
 		return 0
@@ -3370,12 +3351,24 @@ func (r *statusRecorder) WriteHeader(code int) {
 	// representation-mismatch 502) marks the exchange aborted — the client
 	// sees the comments then a failed close, never a misleading new status.
 	if r.commentsCommitted {
-		if code == http.StatusOK && r.terminalWritten {
-			// terminalWritten is first set by the commit's own comment
-			// write, so this 200 is not the commit's.
+		if code >= 200 && code < 300 && r.terminalWritten &&
+			!r.committedOKObserved && r.upstreamStatusOverride == 0 {
+			// terminalWritten is first set by the commit's own WriteHeader,
+			// so the first status after it is the upstream/handler
+			// response; a later one is superfluous, exactly as net/http
+			// ignores a second WriteHeader on an uncommitted exchange.
 			r.committedOKObserved = true
+			r.committedResponseStatus = code
+			now := time.Now()
+			r.responseAt = now
+			if r.entry != nil {
+				r.entry.StatusCode = code
+				r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
+				r.entry.Timing.ResponseHeaders = now
+				r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
+			}
 		}
-		if code >= 200 && code != http.StatusOK {
+		if code >= 300 {
 			r.aborted = true
 			r.upstreamStatusOverride = code
 			now := time.Now()

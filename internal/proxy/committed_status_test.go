@@ -249,50 +249,17 @@ func TestStatusRecorder_ProxyTransportOrGeneratedError(t *testing.T) {
 			rec      *statusRecorder
 			wantBool bool
 		}{
-			{
-				name:     "nil recorder",
-				rec:      nil,
-				wantBool: false,
-			},
-			{
-				name:     "status 0",
-				rec:      &statusRecorder{status: 0},
-				wantBool: true,
-			},
-			{
-				name:     "status 502 proxy-generated",
-				rec:      &statusRecorder{status: 502, proxyGeneratedError: true},
-				wantBool: true,
-			},
-			{
-				name:     "status 500 proxy-generated",
-				rec:      &statusRecorder{status: 500, proxyGeneratedError: true},
-				wantBool: true,
-			},
-			{
-				name:     "status 503 proxy-generated",
-				rec:      &statusRecorder{status: 503, proxyGeneratedError: true},
-				wantBool: true,
-			},
-			{
-				name:     "status 429 proxy-generated",
-				rec:      &statusRecorder{status: 429, proxyGeneratedError: true},
-				wantBool: true,
-			},
-			{
-				name:     "status 200 normal upstream",
-				rec:      &statusRecorder{status: 200, proxyGeneratedError: false},
-				wantBool: false,
-			},
-			{
-				name:     "status 500 normal upstream",
-				rec:      &statusRecorder{status: 500, proxyGeneratedError: false},
-				wantBool: false,
-			},
+			{name: "nil recorder", rec: nil, wantBool: false},
+			{name: "status 0", rec: &statusRecorder{status: 0}, wantBool: true},
+			{name: "status 502 proxy-generated", rec: &statusRecorder{status: 502, proxyGeneratedError: true}, wantBool: true},
+			{name: "status 500 proxy-generated", rec: &statusRecorder{status: 500, proxyGeneratedError: true}, wantBool: true},
+			{name: "status 503 proxy-generated", rec: &statusRecorder{status: 503, proxyGeneratedError: true}, wantBool: true},
+			{name: "status 429 proxy-generated", rec: &statusRecorder{status: 429, proxyGeneratedError: true}, wantBool: true},
+			{name: "status 200 normal upstream", rec: &statusRecorder{status: 200}, wantBool: false},
+			{name: "status 500 normal upstream", rec: &statusRecorder{status: 500}, wantBool: false},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				got := tc.rec.proxyTransportOrGeneratedError()
-				if got != tc.wantBool {
+				if got := tc.rec.proxyTransportOrGeneratedError(); got != tc.wantBool {
 					t.Fatalf("proxyTransportOrGeneratedError() = %v, want %v", got, tc.wantBool)
 				}
 			})
@@ -301,7 +268,7 @@ func TestStatusRecorder_ProxyTransportOrGeneratedError(t *testing.T) {
 
 	t.Run("isBreakerSuccessStatus rejects proxy-generated non-502 errors during probe", func(t *testing.T) {
 		now := time.Now()
-		epoch := uint64(42) // HALF_OPEN probe epoch
+		epoch := uint64(42)
 		for _, status := range []int{500, 503, 429} {
 			rec := &statusRecorder{
 				ResponseWriter:      httptest.NewRecorder(),
@@ -313,4 +280,66 @@ func TestStatusRecorder_ProxyTransportOrGeneratedError(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestProxy_QueueCommentsHalfOpenProbeSucceedsOnUpstreamClientError(t *testing.T) {
+	upstreamURL, _ := url.Parse("http://upstream.invalid")
+	pat, _ := route.Parse("POST /v1/messages")
+	b := mustBreaker(t,
+		circuitbreaker.WithFailureThreshold(2),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(20*time.Millisecond),
+		circuitbreaker.WithMaxOpenTimeout(20*time.Millisecond),
+	)
+	waitForHalfOpenProbeWindow(t, b)
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithBreaker(b),
+		WithMaxRetries(0),
+		WithQueueComments(time.Hour),
+		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Status:     "404 Not Found",
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("not found")),
+				Request:    req,
+			}, nil
+		})),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ServeHTTP(httptest.NewRecorder(), committedOrPlainRequest(context.Background(), true))
+
+	if state := b.State(); state != circuitbreaker.Closed {
+		t.Fatalf("breaker state = %s, want CLOSED after definitive non-failure upstream response", state)
+	}
+	if stats := b.Stats(); stats.TotalSuccesses != 1 || stats.TotalFailures != 2 {
+		t.Fatalf("breaker successes=%d failures=%d, want one probe success and no new failures",
+			stats.TotalSuccesses, stats.TotalFailures)
+	}
+}
+
+func TestStatusRecorderQueueCommentsTreatsAll2xxAsSuccessfulResponses(t *testing.T) {
+	rec := &statusRecorder{
+		ResponseWriter:    httptest.NewRecorder(),
+		commentsCommitted: true,
+		terminalWritten:   true,
+	}
+	rec.WriteHeader(http.StatusCreated)
+
+	if rec.aborted {
+		t.Fatal("2xx upstream response marked aborted")
+	}
+	if !rec.committedOKObserved {
+		t.Fatal("2xx upstream response was not recorded")
+	}
+	if got := rec.observedStatus(); got != http.StatusCreated {
+		t.Fatalf("observed status = %d, want %d", got, http.StatusCreated)
+	}
 }

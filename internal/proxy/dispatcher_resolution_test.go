@@ -16,6 +16,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -119,7 +120,9 @@ func TestDispatcher_ProfileClaimedByTargetWins(t *testing.T) {
 		transcode.FeatureUsageReasoningUnknown:  {},
 	}}
 	// The chat target claims the profile but cannot map its target model; the
-	// responses target could serve the same profile's model.
+	// responses target has a raw model match under the same name. The profile
+	// claim is authoritative: the owning handler renders its profile error
+	// rather than falling through to the raw model match.
 	chat := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
@@ -141,13 +144,10 @@ func TestDispatcher_ProfileClaimedByTargetWins(t *testing.T) {
 		UpstreamProtocol: transcode.UpstreamResponses,
 		UpstreamPath:     "/v1/responses",
 		ModelMap: transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
-			"unmapped-target": {
-				ClientModel: "unmapped-target", UpstreamModel: "wire-target",
-				ClientResponseModel: "unmapped-target", Via: transcode.NativeResponses,
+			"worker": {
+				ClientModel: "worker", UpstreamModel: "wire-target",
+				ClientResponseModel: "worker", Via: transcode.NativeResponses,
 			},
-		}},
-		ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
-			"worker": {Model: "unmapped-target"},
 		}},
 		LossPolicy: lossPolicy}
 	p, err := New(
@@ -243,19 +243,12 @@ func TestDispatcher_NativeRouteProfileFallsThroughToMapping(t *testing.T) {
 	}
 }
 
-// TestDispatcher_ProfileClaimBeatsLaterMapping pins that when several targets
-// claim a profile, the first claiming target owns it: its own refusal is the
-// answer, and the route never silently serves the model through a different
-// upstream protocol than the one that claimed it. A later target that happens
-// to map the profile's target model must not be consulted.
-func TestDispatcher_ProfileClaimBeatsLaterMapping(t *testing.T) {
-	upstream := &multiDialectUpstream{}
-	srv := httptest.NewServer(http.HandlerFunc(upstream.handler))
-	t.Cleanup(srv.Close)
-	upstreamURL, err := url.Parse(srv.URL)
-	if err != nil {
-		t.Fatalf("parse upstream URL: %v", err)
-	}
+// TestDispatcher_ProfileFollowsExplicitTargetModelDialectAcrossClaimants pins
+// that when multiple targets claim a profile, an explicit dialect declared for
+// the target model decides the route regardless of mapping registration order.
+// An unmapped claimant on another dialect does not veto or preempt the target
+// that can explicitly serve the model.
+func TestDispatcher_ProfileFollowsExplicitTargetModelDialectAcrossClaimants(t *testing.T) {
 	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
 	lossPolicy := transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
 		transcode.FeatureToolSchemaStrictness:   {},
@@ -264,9 +257,8 @@ func TestDispatcher_ProfileClaimBeatsLaterMapping(t *testing.T) {
 		transcode.FeatureUsageCacheWriteUnknown: {},
 		transcode.FeatureUsageReasoningUnknown:  {},
 	}}
-	// Both targets claim the profile; the first (chat) cannot map its target
-	// model, the second (responses) can. The chat target's claim is
-	// authoritative, so its profile refusal is the answer.
+	// Both targets claim the profile; chat cannot map its target model,
+	// while responses maps it explicitly with Via=responses.
 	chat := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
@@ -297,26 +289,39 @@ func TestDispatcher_ProfileClaimBeatsLaterMapping(t *testing.T) {
 			"worker": {Model: "resp-only"},
 		}},
 		LossPolicy: lossPolicy}
-	p, err := New(
-		WithUpstream(upstreamURL),
-		WithMatcher(route.NewMatcher(nil)),
-		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
-		WithMetrics(metrics.NewCollector()),
-		WithTranscodeMapping(chat, responses),
-	)
-	if err != nil {
-		t.Fatalf("New proxy: %v", err)
-	}
 
-	rec := dispatcherPost(t, p, `{"model":"worker","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (the first claiming target renders the profile error); body: %s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "worker") || !strings.Contains(rec.Body.String(), "resp-only") {
-		t.Fatalf("error body = %q, want it to name the profile and its unmapped target model", rec.Body.String())
-	}
-	if len(upstream.requests) != 0 {
-		t.Fatalf("upstream received %d requests, want 0", len(upstream.requests))
+	for _, chatFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("chatFirst=%v", chatFirst), func(t *testing.T) {
+			upstream := &multiDialectUpstream{}
+			srv := httptest.NewServer(http.HandlerFunc(upstream.handler))
+			defer srv.Close()
+			upstreamURL, err := url.Parse(srv.URL)
+			if err != nil {
+				t.Fatalf("parse upstream URL: %v", err)
+			}
+			mappings := []TranscodeMapping{chat, responses}
+			if !chatFirst {
+				mappings = []TranscodeMapping{responses, chat}
+			}
+			p, err := New(
+				WithUpstream(upstreamURL),
+				WithMatcher(route.NewMatcher(nil)),
+				WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+				WithMetrics(metrics.NewCollector()),
+				WithTranscodeMapping(mappings...),
+			)
+			if err != nil {
+				t.Fatalf("New proxy: %v", err)
+			}
+
+			rec := dispatcherPost(t, p, `{"model":"worker","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (responses serves the mapped profile); body: %s", rec.Code, rec.Body.String())
+			}
+			if last := upstream.lastRequest(); last.Path != "/v1/responses" || last.Model != "wire-resp" {
+				t.Fatalf("upstream = %s %s, want /v1/responses wire-resp", last.Path, last.Model)
+			}
+		})
 	}
 }
 

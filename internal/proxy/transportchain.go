@@ -27,7 +27,7 @@ import (
 
 // buildUpstreamTransport assembles the engine's upstream round-trip chain,
 // outermost first: the retry transport (when retries are enabled), the
-// reauthentication layer, attempt marking, request signing, and finally the
+// reauthentication layer, request signing, attempt marking, and finally the
 // configured (or default) transport.
 func buildUpstreamTransport(cfg *proxyConfig) http.RoundTripper {
 	var transport http.RoundTripper = cfg.transport
@@ -66,12 +66,12 @@ func buildUpstreamTransport(cfg *proxyConfig) http.RoundTripper {
 		// signer in their context pass through untouched.
 		// The reauthentication layer sits inside the retry chain too, so its
 		// one re-send after a rejected rotating credential replays the body the
-		// retry layer buffered, and outside attempt marking so the re-send
-		// counts as an attempt.
+		// retry layer buffered. Attempt marking is inside signing, so local
+		// signing failures are not counted as upstream attempts.
 		transport = &retry.Transport{
-			Inner: &reauthTransport{inner: withAttemptMarkingTransport(&transcode.SigningTransport{
-				Inner: transport,
-			})},
+			Inner: &reauthTransport{inner: &transcode.SigningTransport{
+				Inner: withAttemptMarkingTransport(transport),
+			}},
 			MaxRetries:    cfg.maxRetries,
 			MaxBodyBytes:  cfg.maxBodyBytes,
 			WaitMin:       cfg.retryWaitMin,
@@ -81,9 +81,9 @@ func buildUpstreamTransport(cfg *proxyConfig) http.RoundTripper {
 			CheckRetry:    checkRetry,
 		}
 	} else {
-		transport = &reauthTransport{inner: withAttemptMarkingTransport(&transcode.SigningTransport{
-			Inner: transport,
-		})}
+		transport = &reauthTransport{inner: &transcode.SigningTransport{
+			Inner: withAttemptMarkingTransport(transport),
+		}}
 	}
 	return transport
 }

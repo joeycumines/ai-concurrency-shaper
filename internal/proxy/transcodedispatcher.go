@@ -61,12 +61,13 @@ type dispatcherTarget struct {
 //     deterministically by registration order, never "last mapping wins".
 //   - A profile follows its target model's dialect, and is only ever served
 //     by a handler whose mapping defines it: any other handler would forward
-//     the profile name upstream as a model name. When the dialect's handler
-//     does not define the profile (programmatic mappings may carry different
-//     profile maps), the request is refused. A target that claims a profile
-//     whose target model it cannot map decides the route: its handler
-//     renders the profile refusal. A claim with no dialect is served by a
-//     claiming handler (the chat target first, matching the fallback below).
+//     the profile name upstream as a model name. An explicit dialect declared
+//     for the target model decides the route symmetrically, regardless of
+//     mapping registration order. When the dialect's handler does not define
+//     the profile identically (programmatic mappings may carry different
+//     profile maps; the CLI stamps one map per provider), the request is
+//     refused. A profile unmapped across the route is refused by the claiming
+//     handler (chat preferred as fallback).
 //   - via=responses and via=chat select their matching handler.
 //   - via=messages fails closed with a 404 naming the model: no transcode
 //     direction serves a messages-native model faithfully, and converting
@@ -211,6 +212,9 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 			out.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		out.GetBody = func() (io.ReadCloser, error) {
+			if err != nil {
+				return &errorBodyReader{rest: bytes.NewReader(body), err: err}, nil
+			}
 			return io.NopCloser(bytes.NewReader(body)), nil
 		}
 		r = &out
@@ -273,81 +277,80 @@ type targetSelection struct {
 	target       *dispatcherTarget
 }
 
-// selectTarget walks the targets in registration order and stops at the first
-// decisive answer: an explicit dialect (returned with the target that answered
-// it), or a profile claim whose target model the claiming target cannot map
-// (returned with no dialect, so that handler renders its own "profile %q
-// targets unmapped model %q" refusal instead of the request reaching another
-// upstream under a name the operator mapped to this one).
+// selectTarget decides which handler serves clientModel.
 //
-// When clientModel is claimed as a profile by any target:
-//   - If a claiming target cannot map the target model, it decides the route
-//     (renders the unmapped refusal).
-//   - If any claiming target has an explicit dialect for the target model,
-//     that explicit dialect decides.
-//   - If no claiming target has an explicit dialect, but another target's
-//     model map assigns the target model an explicit dialect, that dialect
-//     decides (and profileDialectRefusal enforces that the serving handler
-//     defines the profile).
-//   - Otherwise, the profile claim is served by a claiming handler (the chat
-//     target first, matching the fallback).
+// When clientModel is claimed as a profile:
+//   - Any claiming target whose model map assigns the target model an explicit
+//     dialect decides the route.
+//   - If no claiming target has an explicit dialect, but another target on the
+//     route assigns the target model an explicit dialect, that dialect decides
+//     (and profileDialectRefusal enforces that the serving handler defines the
+//     profile).
+//   - If no explicit dialect is declared anywhere on the route, a claiming
+//     target that resolves the target model via identity serves it (chat
+//     claimant preferred as fallback, matching single-target fallback rules).
+//   - If no target can map the target model at all, the profile is unmapped
+//     across the entire route; the fallback claimant (chat preferred, else the
+//     first claimant) renders its profile refusal.
 //
-// A non-claiming target's raw model match on the literal profile name is never
+// In every case, profile dispatch is registration-order independent, and a
+// non-claiming target's raw model match on the literal profile name is never
 // allowed to steal the dispatch or forward the profile name upstream.
 //
-// When clientModel is not claimed as a profile:
-//   - The targets' model maps are searched in registration order for an
-//     explicit dialect.
-//   - If none is found, the zero selection is returned and the fallback decides.
+// When clientModel is not claimed as a profile, the targets' model maps are
+// searched in registration order for an explicit dialect; if none is found,
+// the zero selection is returned and the fallback decides.
 func (d *multiTranscodeDispatcher) selectTarget(clientModel string) targetSelection {
-	var claimant *dispatcherTarget
-	var claimantModel string
-
-	// Step 1: Check if any target claims clientModel as a profile.
+	type claim struct {
+		target   *dispatcherTarget
+		model    string
+		resolved transcode.ModelMapping
+		err      error
+	}
+	var claims []claim
 	for i := range d.targets {
 		target := &d.targets[i]
-		if pModel, _, ok := target.profileMap.ResolveProfile(clientModel); ok {
-			resolved, err := target.modelMap.Resolve(pModel)
-			if err != nil {
-				// A target that claims a profile whose target model it cannot map
-				// decides the route: its handler renders the profile refusal.
-				return targetSelection{handler: target.handler, profileModel: pModel, target: target}
-			}
-			if resolved.Via != "" {
-				// An explicit dialect on a claiming target decides.
-				return targetSelection{via: resolved.Via, handler: target.handler, profileModel: pModel, target: target}
-			}
-			if claimant == nil || (target.chat && !claimant.chat) {
-				claimant = target
-				claimantModel = pModel
-			}
+		pModel, _, ok := target.profileMap.ResolveProfile(clientModel)
+		if !ok {
+			continue
 		}
+		resolved, err := target.modelMap.Resolve(pModel)
+		claims = append(claims, claim{target: target, model: pModel, resolved: resolved, err: err})
 	}
 
-	// Step 2: If a profile was claimed, find whether any target's model map
-	// assigns its target model an explicit dialect.
-	if claimant != nil {
-		for i := range d.targets {
-			target := &d.targets[i]
-			if resolved, err := target.modelMap.Resolve(claimantModel); err == nil && resolved.Via != "" {
-				return targetSelection{
-					via:          resolved.Via,
-					handler:      claimant.handler,
-					profileModel: claimantModel,
-					target:       claimant,
+	if len(claims) > 0 {
+		for _, c := range claims {
+			if c.err == nil && c.resolved.Via != "" {
+				return targetSelection{via: c.resolved.Via, handler: c.target.handler, profileModel: c.model, target: c.target}
+			}
+		}
+		for _, c := range claims {
+			for i := range d.targets {
+				target := &d.targets[i]
+				if resolved, err := target.modelMap.Resolve(c.model); err == nil && resolved.Via != "" {
+					return targetSelection{via: resolved.Via, handler: c.target.handler, profileModel: c.model, target: c.target}
 				}
 			}
 		}
-		// A claim with no dialect is served by the claiming handler (the chat
-		// target first, matching the fallback).
-		return targetSelection{
-			handler:      claimant.handler,
-			profileModel: claimantModel,
-			target:       claimant,
+		for _, c := range claims {
+			if c.err == nil && c.target.chat {
+				return targetSelection{handler: c.target.handler, profileModel: c.model, target: c.target}
+			}
 		}
+		for _, c := range claims {
+			if c.err == nil {
+				return targetSelection{handler: c.target.handler, profileModel: c.model, target: c.target}
+			}
+		}
+		for _, c := range claims {
+			if c.target.chat {
+				return targetSelection{handler: c.target.handler, profileModel: c.model, target: c.target}
+			}
+		}
+		first := claims[0]
+		return targetSelection{handler: first.target.handler, profileModel: first.model, target: first.target}
 	}
 
-	// Step 3: Not a profile. Resolve clientModel across targets' model maps.
 	for i := range d.targets {
 		target := &d.targets[i]
 		if resolved, err := target.modelMap.Resolve(clientModel); err == nil && resolved.Via != "" {
@@ -379,9 +382,6 @@ func (d *multiTranscodeDispatcher) profileDialectRefusal(clientModel string, sel
 		), false
 	}
 	served := &d.targets[idx]
-	if served == sel.target {
-		return "", true
-	}
 	pm, _, ok := served.profileMap.ResolveProfile(clientModel)
 	if !ok || pm != sel.profileModel {
 		return fmt.Sprintf(
@@ -390,10 +390,16 @@ func (d *multiTranscodeDispatcher) profileDialectRefusal(clientModel string, sel
 		), false
 	}
 	res, err := served.modelMap.Resolve(sel.profileModel)
-	if err != nil || (res.Via != "" && res.Via != sel.via) {
+	if err != nil {
 		return fmt.Sprintf(
-			"%q is a -transcode-profile whose target model %q is served as %s, but the %s mapping on %s does not define the profile, so no transcode mapping on this route can serve it",
-			clientModel, sel.profileModel, sel.via, sel.via, d.routeKey.Path,
+			"%q is a -transcode-profile whose target model %q is served as %s, but the %s mapping on %s does not map target model %q, so no transcode mapping on this route can serve it",
+			clientModel, sel.profileModel, sel.via, sel.via, d.routeKey.Path, sel.profileModel,
+		), false
+	}
+	if res.Via != "" && res.Via != sel.via {
+		return fmt.Sprintf(
+			"%q is a -transcode-profile whose target model %q is served as %s, but the %s mapping on %s does not map target model %q to %s",
+			clientModel, sel.profileModel, sel.via, sel.via, d.routeKey.Path, sel.profileModel, sel.via,
 		), false
 	}
 	return "", true

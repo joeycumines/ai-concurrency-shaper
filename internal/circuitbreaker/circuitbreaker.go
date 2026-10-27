@@ -361,6 +361,27 @@ func (b *Breaker) Allow() (uint64, error) {
 	}
 }
 
+// WouldAllow reports whether Allow would admit a request right now, without
+// changing any breaker state: an elapsed OPEN period is not moved to
+// HALF_OPEN, and no probe is claimed or superseded. It lets a caller reject a
+// request early (for example before reading its body) while deferring the
+// real admission decision, and its probe epoch, to a later Allow. The answer
+// is advisory: concurrent requests may change the state before that Allow.
+func (b *Breaker) WouldAllow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	switch b.state {
+	case Closed:
+		return true
+	case Open:
+		return time.Since(b.openSince) >= b.openTimeout()
+	case HalfOpen:
+		return !b.probeInFlight || time.Since(b.probeStartedAt) > b.openTimeout()
+	default:
+		return false
+	}
+}
+
 // CancelProbe releases a HALF_OPEN probe admitted by Allow when the caller
 // discovers that the probe was inconclusive rather than a breaker success or
 // failure. Examples include no upstream attempt, downstream write/flush failure,
