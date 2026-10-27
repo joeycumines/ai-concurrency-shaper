@@ -4,7 +4,7 @@ Reverse proxy with bounded concurrency for AI/LLM API endpoints.
 
 Sits in front of an upstream HTTP API (e.g. Anthropic, OpenAI) and limits concurrent requests to configured routes. Requests that exceed the limit block until a slot opens, so clients need no backoff of their own. Non-matching requests pass through unmodified.
 
-The point is to never let the upstream *observe* more concurrency than you configured. Providers detect excess concurrency on their side, with their own accounting lag, and answer with 429s or temporary bans. So the proxy does more than count in-flight requests: it holds slots across the provider's accounting window after releases, cancellations, and failures, and a circuit breaker stops a failing upstream from being hammered.
+The goal is that the upstream never *observes* more concurrency than you configured. Providers detect excess concurrency on their side, with their own accounting lag, and answer with 429s or temporary bans. So the proxy does more than count in-flight requests: it holds slots across the provider's accounting window after releases, cancellations, and failures, and a circuit breaker stops a failing upstream from being hammered.
 
 Optionally, it also transcodes between the OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages APIs (see [Transcoding](#transcoding)). Run with `-tui` for a terminal dashboard with live metrics and request inspection.
 
@@ -521,7 +521,7 @@ ai-concurrency-shaper -upstream https://api.example.com \
 ```
 
 Both Messages presets map `/v1/messages`; enabled together they form one
-two-target route dispatched by model dialect (see above). That dispatch needs each served model's dialect declared with a `via` fact in `-model-table`; a two-target route whose models carry no `via` fact is a startup error. A
+two-target route dispatched by model dialect (see above). A
 Messages-to-Responses mapping without an approved `tool_schema_strictness`
 loss is a startup error (Messages tools cannot preserve the strictness the
 Responses contract requires).
@@ -700,6 +700,8 @@ name=model[:tier]
 - `tier`: optional reasoning effort (`minimal`, `low`, `medium`, `high`, `xhigh`, or `max`). Omit to keep the model's default reasoning configuration.
 
 When a client specifies a profile name in place of a model, the proxy resolves it to the target model and applies the reasoning tier before rendering the upstream request.
+
+On a route with two mappings, a profile follows its target model's dialect. Two mappings that define the same profile name must route it to one dialect and one target model, and the mappings that decide it must agree on its reasoning tier. Otherwise the request is refused with a `500` that names the disagreement, identically whatever order the mappings were configured in, and no upstream receives it.
 
 ### Sensible defaults
 
@@ -1252,7 +1254,7 @@ flag is unset.
 
 ## How Concurrency Protection Works
 
-Each limiter is a counting semaphore (a buffered channel of slots). A limited request acquires a slot before anything is sent upstream and returns it when the exchange ends, possibly after a hold (below). That bounds the proxy's own concurrency; the upstream may still observe more because of its accounting lag, which is what the holds exist for.
+Each limiter is a counting semaphore (a buffered channel of slots). A limited request acquires a slot before anything is sent upstream and returns it when the exchange ends, possibly after a hold (below). The slot bounds the proxy's own concurrency. Providers count with an accounting lag, so an upstream can still observe a request after its slot has been released; the holds exist to cover that lag.
 
 Admission order for a limited request: a breaker that would refuse it answers `503 circuit open` before the body is read, and a full `-queue-depth` bound answers `429`; neither changes breaker state. A streaming request under `-queue-comments` then reads its body (bounded by `-queue-timeout`) to decide whether the stream can be committed. The request then takes its breaker admission (a `HALF_OPEN` breaker admits exactly one probe at a time) and waits for its route slot and then the global slot, failing with `504 queue timeout` after `-queue-timeout`. A request that times out after admission cancels its own probe; its epoch advances and no other request's probe is affected.
 
