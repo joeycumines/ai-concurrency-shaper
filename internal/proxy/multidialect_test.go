@@ -491,6 +491,7 @@ func TestMultiDialect_SingleMount_RoutingAndAuth(t *testing.T) {
 		}
 	})
 }
+
 // TestMultiDialect_AuthXAPIKey_AdaptsToBearer verifies that if the mount's default auth
 // mode is x-api-key, native requests on chat or responses adapt to Authorization: Bearer.
 func TestMultiDialect_AuthXAPIKey_AdaptsToBearer(t *testing.T) {
