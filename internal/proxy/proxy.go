@@ -1573,14 +1573,9 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 			upstreamFailure := result.upstreamFailure || retryRecordedFailure
 			// Phantom penalty: hold the global-limiter slot after an upstream failure
 			// when the circuit breaker is enabled and the penalty is non-zero. If the
-			// penalty is zero, fall through to check failureHold.
 			if p.breaker != nil && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
-				penalty := p.breaker.PenaltyDuration()
-				if penalty > 0 {
-					time.AfterFunc(penalty, release)
-					return
-				}
-				// Penalty is zero — fall through to check failureHold below.
+				time.AfterFunc(p.breaker.PenaltyDuration(), release)
+				return
 			}
 			if p.failureHold > 0 && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 				// Standalone failure hold: holds the global-limiter slot after an
@@ -1959,12 +1954,8 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		// failure fact.
 		upstreamFailure := result.upstreamFailure || retryRecordedFailure
 		if p.breaker != nil && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
-			penalty := p.breaker.PenaltyDuration()
-			if penalty > 0 {
-				time.AfterFunc(penalty, releaseSlots)
-				return
-			}
-			// Penalty is zero — fall through to check failureHold below.
+			time.AfterFunc(p.breaker.PenaltyDuration(), releaseSlots)
+			return
 		}
 		if p.failureHold > 0 && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 			// Standalone failure hold: holds the slot after an upstream failure.

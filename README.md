@@ -521,7 +521,7 @@ ai-concurrency-shaper -upstream https://api.example.com \
 ```
 
 Both Messages presets map `/v1/messages`; enabled together they form one
-two-target route dispatched by model dialect (see above). A
+two-target route dispatched by model dialect (see above). That dispatch needs each served model's dialect declared with a `via` fact in `-model-table`; a two-target route whose models carry no `via` fact is a startup error. A
 Messages-to-Responses mapping without an approved `tool_schema_strictness`
 loss is a startup error (Messages tools cannot preserve the strictness the
 Responses contract requires).
