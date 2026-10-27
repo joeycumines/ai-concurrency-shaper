@@ -61,28 +61,24 @@ func dispatcherMount(
 	}
 
 	messagesChat := TranscodeMapping{
-		Mapping: transcode.Mapping{
-			ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
-			ClientProtocol:   transcode.ClientMessages,
-			UpstreamProtocol: transcode.UpstreamChatCompletions,
-			UpstreamPath:     "/v1/chat/completions",
-			ModelMap:         modelMap,
-			ProfileMap:       profileMap,
-			LossPolicy:       lossPolicy,
-		},
-		BodyLimits: chatLimits,
+		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         modelMap,
+		ProfileMap:       profileMap,
+		LossPolicy:       lossPolicy,
+		BodyLimits:       chatLimits,
 	}
 	messagesResponses := TranscodeMapping{
-		Mapping: transcode.Mapping{
-			ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
-			ClientProtocol:   transcode.ClientMessages,
-			UpstreamProtocol: transcode.UpstreamResponses,
-			UpstreamPath:     "/v1/responses",
-			ModelMap:         modelMap,
-			ProfileMap:       profileMap,
-			LossPolicy:       lossPolicy,
-		},
-		BodyLimits: responsesLimits,
+		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamResponses,
+		UpstreamPath:     "/v1/responses",
+		ModelMap:         modelMap,
+		ProfileMap:       profileMap,
+		LossPolicy:       lossPolicy,
+		BodyLimits:       responsesLimits,
 	}
 
 	p, err := New(
@@ -290,20 +286,18 @@ func TestDispatcher_NativeMissResolvesAgainstTargets(t *testing.T) {
 		Provider: "dispatcher-test",
 		ModelMap: nativeMap,
 	}
-	messagesChat := TranscodeMapping{Mapping: transcode.Mapping{
+	messagesChat := TranscodeMapping{
 		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
-		ModelMap:         dualMap, LossPolicy: lossPolicy,
-	}}
-	messagesResponses := TranscodeMapping{Mapping: transcode.Mapping{
+		ModelMap:         dualMap, LossPolicy: lossPolicy}
+	messagesResponses := TranscodeMapping{
 		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
 		UpstreamPath:     "/v1/responses",
-		ModelMap:         dualMap, LossPolicy: lossPolicy,
-	}}
+		ModelMap:         dualMap, LossPolicy: lossPolicy}
 
 	p, err := New(
 		WithUpstream(upstreamURL),
@@ -379,20 +373,18 @@ func TestDispatcher_FirstTargetResolvesConflictingMaps(t *testing.T) {
 		transcode.FeatureUsageCacheWriteUnknown: {},
 		transcode.FeatureUsageReasoningUnknown:  {},
 	}}
-	messagesChat := TranscodeMapping{Mapping: transcode.Mapping{
+	messagesChat := TranscodeMapping{
 		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
-		ModelMap:         chatMap, LossPolicy: lossPolicy,
-	}}
-	messagesResponses := TranscodeMapping{Mapping: transcode.Mapping{
+		ModelMap:         chatMap, LossPolicy: lossPolicy}
+	messagesResponses := TranscodeMapping{
 		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
 		UpstreamPath:     "/v1/responses",
-		ModelMap:         responsesMap, LossPolicy: lossPolicy,
-	}}
+		ModelMap:         responsesMap, LossPolicy: lossPolicy}
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher(nil)),
@@ -495,22 +487,20 @@ func TestNew_RejectsConflictingClientProtocolsOnRoute(t *testing.T) {
 		transcode.FeatureUsageReasoningUnknown:  {},
 	}}
 	messagesRoute := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
-	messagesToResponses := TranscodeMapping{Mapping: transcode.Mapping{
+	messagesToResponses := TranscodeMapping{
 		ClientRoute:      messagesRoute,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
 		UpstreamPath:     "/v1/responses",
 		ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		LossPolicy:       lossPolicy,
-	}}
-	responsesToChat := TranscodeMapping{Mapping: transcode.Mapping{
+		LossPolicy:       lossPolicy}
+	responsesToChat := TranscodeMapping{
 		ClientRoute:      messagesRoute,
 		ClientProtocol:   transcode.ClientResponses,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		LossPolicy:       lossPolicy,
-	}}
+		LossPolicy:       lossPolicy}
 
 	_, err = New(
 		WithUpstream(upstreamURL),
@@ -547,14 +537,13 @@ func TestNew_DuplicateRouteNamesUpstreamProtocol(t *testing.T) {
 		transcode.FeatureUsageReasoningUnknown:  {},
 	}}
 	messagesRoute := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
-	messagesToChat := TranscodeMapping{Mapping: transcode.Mapping{
+	messagesToChat := TranscodeMapping{
 		ClientRoute:      messagesRoute,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		LossPolicy:       lossPolicy,
-	}}
+		LossPolicy:       lossPolicy}
 	duplicate := messagesToChat
 
 	_, err = New(
@@ -596,13 +585,11 @@ func TestDispatcher_MissSkipsBodyProbe(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mapping := &TranscodeMapping{
-		Mapping: transcode.Mapping{
-			ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
-			ClientProtocol:   transcode.ClientMessages,
-			UpstreamProtocol: transcode.UpstreamChatCompletions,
-			UpstreamPath:     "/v1/chat/completions",
-			ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		},
+		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         transcode.ModelMap{AllowIdentity: true},
 	}
 	dispatcher, err := newMultiTranscodeDispatcher(mapping.ClientRoute, []targetTranscodeHandler{
 		{mapping: mapping, handler: stub},

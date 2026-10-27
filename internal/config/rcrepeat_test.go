@@ -447,3 +447,49 @@ func TestResolveAndValidate_DerivedProviderNameFollowsUpstream(t *testing.T) {
 		t.Errorf("derived name = %q, want openai for the new upstream", got)
 	}
 }
+
+// TestResolveAndValidate_FailedReResolveClearsDerivedSesameState pins that
+// when repeated resolution fails anywhere before resolveRC (for example, in
+// basic validation or server configuration), all derived sesame fields are
+// reset rather than lingering from the earlier successful resolve.
+func TestResolveAndValidate_FailedReResolveClearsDerivedSesameState(t *testing.T) {
+	caPEM, clientCertPEM, clientKeyPEM := generateTestCerts(t)
+	paths := materialPaths(t, t.TempDir(), caPEM, clientCertPEM, clientKeyPEM)
+
+	for _, tc := range []struct {
+		name   string
+		break_ func(cfg *Config)
+	}{
+		{"validation failure before resolveRC (missing upstream)", func(cfg *Config) { cfg.Providers[0].Upstream = "" }},
+		{"server rejection before resolveRC", func(cfg *Config) { cfg.Server.RCTLS = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]string{
+				"-upstream=https://api.example.com",
+				"-sesame-endpoint=https://127.0.0.1:50051",
+				"-sesame-ca-cert=" + paths.ca,
+				"-sesame-client-cert=" + paths.cert,
+				"-sesame-client-key=" + paths.key,
+			})
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if err := cfg.ResolveAndValidate(); err != nil {
+				t.Fatalf("first ResolveAndValidate: %v", err)
+			}
+			p := cfg.Providers[0]
+			if p.RCServer == "" || !p.RCChannelTLS || p.RCChannelCA == "" {
+				t.Fatalf("precondition: derived sesame fields not set: %+v", p.derivedSesame)
+			}
+			closeDialer(t, p)
+			tc.break_(cfg)
+			if err := cfg.ResolveAndValidate(); err == nil {
+				t.Fatal("second ResolveAndValidate = nil, want error")
+			}
+			if p.RCServer != "" || p.RCChannelTLS || p.RCChannelCA != "" || p.RCChannelCert != "" || p.RCChannelKey != "" {
+				t.Errorf("derived sesame state survived failed resolve: server=%q tls=%v ca=%q cert=%q key=%q",
+					p.RCServer, p.RCChannelTLS, p.RCChannelCA, p.RCChannelCert, p.RCChannelKey)
+			}
+		})
+	}
+}

@@ -73,24 +73,22 @@ func TestDispatcher_ViaLessProfileFollowsItsTargetModel(t *testing.T) {
 	profiles := transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 		"fast": {Model: "gpt-4o"},
 	}}
-	responses := TranscodeMapping{Mapping: transcode.Mapping{
+	responses := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
 		UpstreamPath:     "/v1/responses",
 		ModelMap:         identityMap(),
 		ProfileMap:       profiles,
-		LossPolicy:       claimsLossPolicy(),
-	}}
-	chat := TranscodeMapping{Mapping: transcode.Mapping{
+		LossPolicy:       claimsLossPolicy()}
+	chat := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		ModelMap:         identityMap(),
 		ProfileMap:       profiles,
-		LossPolicy:       claimsLossPolicy(),
-	}}
+		LossPolicy:       claimsLossPolicy()}
 	p, upstream := claimsProxy(t, responses, chat)
 
 	for _, model := range []string{"gpt-4o", "fast"} {
@@ -126,13 +124,12 @@ func messagesOnlyDispatcher(t *testing.T) *multiTranscodeDispatcher {
 	var targets []targetTranscodeHandler
 	for _, up := range []transcode.UpstreamProtocol{transcode.UpstreamChatCompletions, transcode.UpstreamResponses} {
 		targets = append(targets, targetTranscodeHandler{
-			mapping: &TranscodeMapping{Mapping: transcode.Mapping{
+			mapping: &TranscodeMapping{
 				ClientRoute:      routeKey,
 				ClientProtocol:   transcode.ClientMessages,
 				UpstreamProtocol: up,
 				ModelMap:         modelMap,
-				ProfileMap:       profiles,
-			}},
+				ProfileMap:       profiles},
 			handler: stub,
 		})
 	}
@@ -277,23 +274,21 @@ func TestDispatcher_ProfileAnswerNeedsAClaimingHandler(t *testing.T) {
 	profiles := transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 		"p": {Model: "chat-m"},
 	}}
-	responses := TranscodeMapping{Mapping: transcode.Mapping{
+	responses := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
 		UpstreamPath:     "/v1/responses",
 		ModelMap:         chatModel,
 		ProfileMap:       profiles,
-		LossPolicy:       claimsLossPolicy(),
-	}}
-	chat := TranscodeMapping{Mapping: transcode.Mapping{
+		LossPolicy:       claimsLossPolicy()}
+	chat := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		ModelMap:         chatModel,
-		LossPolicy:       claimsLossPolicy(),
-	}}
+		LossPolicy:       claimsLossPolicy()}
 	body := `{"model":"p","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
 
 	t.Run("dialect handler lacks the profile", func(t *testing.T) {
@@ -345,19 +340,18 @@ func TestDispatcher_MessagesNativeRefusalNamesTheDecidingSource(t *testing.T) {
 		w.WriteHeader(http.StatusTeapot)
 	})
 	chatTarget := targetTranscodeHandler{
-		mapping: &TranscodeMapping{Mapping: transcode.Mapping{
+		mapping: &TranscodeMapping{
 			ClientRoute:      routeKey,
 			ClientProtocol:   transcode.ClientMessages,
 			UpstreamProtocol: transcode.UpstreamChatCompletions,
 			ModelMap:         identityMap(),
 			ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 				"p": {Model: "model-a"},
-			}},
-		}},
+			}}},
 		handler: stub,
 	}
 	responsesTarget := targetTranscodeHandler{
-		mapping: &TranscodeMapping{Mapping: transcode.Mapping{
+		mapping: &TranscodeMapping{
 			ClientRoute:      routeKey,
 			ClientProtocol:   transcode.ClientMessages,
 			UpstreamProtocol: transcode.UpstreamResponses,
@@ -369,8 +363,7 @@ func TestDispatcher_MessagesNativeRefusalNamesTheDecidingSource(t *testing.T) {
 			}},
 			ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 				"p": {Model: "claude"},
-			}},
-		}},
+			}}},
 		handler: stub,
 	}
 	d, err := newMultiTranscodeDispatcher(routeKey, []targetTranscodeHandler{chatTarget, responsesTarget})
@@ -404,4 +397,332 @@ func TestDispatcher_MessagesNativeRefusalNamesTheDecidingSource(t *testing.T) {
 			t.Fatalf("body = %s, want model wording for a name the native route resolved", body)
 		}
 	})
+}
+
+// TestDispatcher_ProfileTargetModelExplicitViaOnOtherTarget pins that a profile
+// follows its target model's dialect even when that dialect is declared by
+// another mapping's model map. When the dialect's mapping does not define the
+// profile, the request must be refused, not erroneously served by a claiming
+// target whose own model map had no explicit dialect.
+func TestDispatcher_ProfileTargetModelExplicitViaOnOtherTarget(t *testing.T) {
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	profiles := transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
+		"fast": {Model: "o3-mini"},
+	}}
+	responsesMap := transcode.ModelMap{
+		AllowIdentity: true,
+		Exact: map[string]transcode.ModelMapping{
+			"o3-mini": {
+				ClientModel: "o3-mini", UpstreamModel: "o3-mini",
+				ClientResponseModel: "o3-mini", Via: transcode.NativeResponses,
+			},
+		},
+	}
+	chatMap := transcode.ModelMap{
+		AllowIdentity: true,
+		Exact: map[string]transcode.ModelMapping{
+			"o3-mini": {
+				ClientModel: "o3-mini", UpstreamModel: "o3-mini",
+				ClientResponseModel: "o3-mini", Via: transcode.NativeChat,
+			},
+		},
+	}
+	messagesMap := transcode.ModelMap{
+		AllowIdentity: true,
+		Exact: map[string]transcode.ModelMapping{
+			"o3-mini": {
+				ClientModel: "o3-mini", UpstreamModel: "o3-mini",
+				ClientResponseModel: "o3-mini", Via: transcode.NativeMessages,
+			},
+		},
+	}
+	body := `{"model":"fast","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+
+	t.Run("target model via responses triggers profile refusal when responses target lacks profile", func(t *testing.T) {
+		chat := TranscodeMapping{
+			ClientRoute:      routeKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			UpstreamPath:     "/v1/chat/completions",
+			ModelMap:         identityMap(),
+			ProfileMap:       profiles,
+			LossPolicy:       claimsLossPolicy()}
+		responses := TranscodeMapping{
+			ClientRoute:      routeKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamResponses,
+			UpstreamPath:     "/v1/responses",
+			ModelMap:         responsesMap,
+			LossPolicy:       claimsLossPolicy()}
+		p, upstream := claimsProxy(t, chat, responses)
+		rec := dispatcherPost(t, p, body)
+		if last := upstream.lastRequest(); last.Path != "" {
+			t.Fatalf("upstream received %s model %q, want no upstream request", last.Path, last.Model)
+		}
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500; body: %s", rec.Code, rec.Body.String())
+		}
+		var env struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+		for _, want := range []string{`"fast"`, `"o3-mini"`, "served as responses", "responses mapping on /v1/messages does not define the profile"} {
+			if !strings.Contains(env.Error.Message, want) {
+				t.Errorf("error message = %q, want it to contain %q", env.Error.Message, want)
+			}
+		}
+	})
+
+	t.Run("symmetric: profile on responses target, target model via chat on chat target", func(t *testing.T) {
+		chat := TranscodeMapping{
+			ClientRoute:      routeKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			UpstreamPath:     "/v1/chat/completions",
+			ModelMap:         chatMap,
+			LossPolicy:       claimsLossPolicy()}
+		responses := TranscodeMapping{
+			ClientRoute:      routeKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamResponses,
+			UpstreamPath:     "/v1/responses",
+			ModelMap:         identityMap(),
+			ProfileMap:       profiles,
+			LossPolicy:       claimsLossPolicy()}
+		p, upstream := claimsProxy(t, chat, responses)
+		rec := dispatcherPost(t, p, body)
+		if last := upstream.lastRequest(); last.Path != "" {
+			t.Fatalf("upstream received %s model %q, want no upstream request", last.Path, last.Model)
+		}
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500; body: %s", rec.Code, rec.Body.String())
+		}
+		var env struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+		for _, want := range []string{`"fast"`, `"o3-mini"`, "served as chat", "chat mapping on /v1/messages does not define the profile"} {
+			if !strings.Contains(env.Error.Message, want) {
+				t.Errorf("error message = %q, want it to contain %q", env.Error.Message, want)
+			}
+		}
+	})
+
+	t.Run("target model via messages triggers messagesNativeRefusal", func(t *testing.T) {
+		chat := TranscodeMapping{
+			ClientRoute:      routeKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			UpstreamPath:     "/v1/chat/completions",
+			ModelMap:         identityMap(),
+			ProfileMap:       profiles,
+			LossPolicy:       claimsLossPolicy()}
+		responses := TranscodeMapping{
+			ClientRoute:      routeKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamResponses,
+			UpstreamPath:     "/v1/responses",
+			ModelMap:         messagesMap,
+			LossPolicy:       claimsLossPolicy()}
+		p, upstream := claimsProxy(t, chat, responses)
+		rec := dispatcherPost(t, p, body)
+		if last := upstream.lastRequest(); last.Path != "" {
+			t.Fatalf("upstream received %s model %q, want no upstream request", last.Path, last.Model)
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+		}
+		var env struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+		for _, want := range []string{`"fast" is a -transcode-profile`, `target model "o3-mini" is served natively as messages`} {
+			if !strings.Contains(env.Error.Message, want) {
+				t.Errorf("error message = %q, want it to contain %q", env.Error.Message, want)
+			}
+		}
+	})
+}
+
+// TestDispatcher_ProfileCannotBeStolenByRawModelMatch pins that a raw model
+// match on a non-claiming target cannot steal a request whose model name is
+// claimed as a profile by another target. The non-claiming handler would forward
+// the profile name upstream as a model name.
+func TestDispatcher_ProfileCannotBeStolenByRawModelMatch(t *testing.T) {
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	responses := TranscodeMapping{
+		ClientRoute:      routeKey,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamResponses,
+		UpstreamPath:     "/v1/responses",
+		ModelMap:         identityMap(),
+		ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
+			"fast": {Model: "o3-mini"},
+		}},
+		LossPolicy: claimsLossPolicy()}
+	chat := TranscodeMapping{
+		ClientRoute:      routeKey,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap: transcode.ModelMap{
+			AllowIdentity: true,
+			Exact: map[string]transcode.ModelMapping{
+				"fast": {
+					ClientModel: "fast", UpstreamModel: "wire-fast",
+					ClientResponseModel: "fast", Via: transcode.NativeChat,
+				},
+			},
+		},
+		LossPolicy: claimsLossPolicy()}
+	p, upstream := claimsProxy(t, responses, chat)
+	body := `{"model":"fast","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	rec := dispatcherPost(t, p, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	last := upstream.lastRequest()
+	if last.Path != "/v1/responses" || last.Model != "o3-mini" {
+		t.Fatalf("upstream = %s %q, want /v1/responses o3-mini (claimed profile must not be stolen by raw model map)", last.Path, last.Model)
+	}
+}
+
+// TestDispatcher_ProfileDialectRefusal_TargetModelMismatch pins that a dialect
+// handler cannot serve a profile if its own profile definition maps that name
+// to a different target model.
+func TestDispatcher_ProfileDialectRefusal_TargetModelMismatch(t *testing.T) {
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	chatModel := transcode.ModelMap{
+		AllowIdentity: true,
+		Exact: map[string]transcode.ModelMapping{
+			"chat-m": {
+				ClientModel: "chat-m", UpstreamModel: "chat-m",
+				ClientResponseModel: "chat-m", Via: transcode.NativeChat,
+			},
+		},
+	}
+	responses := TranscodeMapping{
+		ClientRoute:      routeKey,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamResponses,
+		UpstreamPath:     "/v1/responses",
+		ModelMap:         chatModel,
+		ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
+			"p": {Model: "chat-m"},
+		}},
+		LossPolicy: claimsLossPolicy()}
+	chat := TranscodeMapping{
+		ClientRoute:      routeKey,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         chatModel,
+		ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
+			"p": {Model: "other-m"},
+		}},
+		LossPolicy: claimsLossPolicy()}
+	p, upstream := claimsProxy(t, responses, chat)
+	body := `{"model":"p","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	rec := dispatcherPost(t, p, body)
+	if last := upstream.lastRequest(); last.Path != "" {
+		t.Fatalf("upstream received %s model %q, want refusal", last.Path, last.Model)
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body: %s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	for _, want := range []string{`"p"`, `"chat-m"`, "served as chat"} {
+		if !strings.Contains(env.Error.Message, want) {
+			t.Errorf("message = %q, want to contain %q", env.Error.Message, want)
+		}
+	}
+}
+
+// TestDispatcher_ProfileDialectRefusal_NoMappingForDialect pins that when a
+// profile's target model declares a dialect that has no handler on the route
+// (e.g. via=responses on a route with only chat mappings), the dispatcher
+// renders a 500 refusal rather than falling through to the wrong dialect's
+// handler.
+func TestDispatcher_ProfileDialectRefusal_NoMappingForDialect(t *testing.T) {
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	respModel := transcode.ModelMap{
+		AllowIdentity: true,
+		Exact: map[string]transcode.ModelMapping{
+			"resp-m": {
+				ClientModel: "resp-m", UpstreamModel: "resp-m",
+				ClientResponseModel: "resp-m", Via: transcode.NativeResponses,
+			},
+		},
+	}
+	profiles := transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
+		"p": {Model: "resp-m"},
+	}}
+	// A multi-mapping route where all targets are chat completions (no responses target).
+	chat1 := targetTranscodeHandler{
+		mapping: &TranscodeMapping{
+			ClientRoute:      routeKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			ModelMap:         respModel,
+			ProfileMap:       profiles},
+		handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("chat handler must not receive request for a profile whose target model is responses")
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	chat2 := targetTranscodeHandler{
+		mapping: &TranscodeMapping{
+			ClientRoute:      routeKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			ModelMap:         respModel,
+			ProfileMap:       profiles},
+		handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.Error("chat handler must not receive request for a profile whose target model is responses")
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	d, err := newMultiTranscodeDispatcher(routeKey, []targetTranscodeHandler{chat1, chat2})
+	if err != nil {
+		t.Fatalf("newMultiTranscodeDispatcher: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		bytes.NewBufferString(`{"model":"p","max_tokens":16,"messages":[]}`))
+	rec := httptest.NewRecorder()
+	d.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body: %s", rec.Code, rec.Body.String())
+	}
+	var env struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+	for _, want := range []string{`"p"`, `"resp-m"`, "served as responses", "has no responses mapping"} {
+		if !strings.Contains(env.Error.Message, want) {
+			t.Errorf("message = %q, want to contain %q", env.Error.Message, want)
+		}
+	}
 }

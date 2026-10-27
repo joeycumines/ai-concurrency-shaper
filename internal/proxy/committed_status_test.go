@@ -237,3 +237,80 @@ func TestProxy_QueueCommentsCircuitOpenRecords503(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusRecorder_ProxyTransportOrGeneratedError pins that any
+// proxy-generated error status (500, 502, 503, 429) or unobserved status (0)
+// is recognized by proxyTransportOrGeneratedError, and that a proxy-generated
+// non-502 status is never counted as a breaker success during a HALF_OPEN probe.
+func TestStatusRecorder_ProxyTransportOrGeneratedError(t *testing.T) {
+	t.Run("predicate unit cases", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			rec      *statusRecorder
+			wantBool bool
+		}{
+			{
+				name:     "nil recorder",
+				rec:      nil,
+				wantBool: false,
+			},
+			{
+				name:     "status 0",
+				rec:      &statusRecorder{status: 0},
+				wantBool: true,
+			},
+			{
+				name:     "status 502 proxy-generated",
+				rec:      &statusRecorder{status: 502, proxyGeneratedError: true},
+				wantBool: true,
+			},
+			{
+				name:     "status 500 proxy-generated",
+				rec:      &statusRecorder{status: 500, proxyGeneratedError: true},
+				wantBool: true,
+			},
+			{
+				name:     "status 503 proxy-generated",
+				rec:      &statusRecorder{status: 503, proxyGeneratedError: true},
+				wantBool: true,
+			},
+			{
+				name:     "status 429 proxy-generated",
+				rec:      &statusRecorder{status: 429, proxyGeneratedError: true},
+				wantBool: true,
+			},
+			{
+				name:     "status 200 normal upstream",
+				rec:      &statusRecorder{status: 200, proxyGeneratedError: false},
+				wantBool: false,
+			},
+			{
+				name:     "status 500 normal upstream",
+				rec:      &statusRecorder{status: 500, proxyGeneratedError: false},
+				wantBool: false,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				got := tc.rec.proxyTransportOrGeneratedError()
+				if got != tc.wantBool {
+					t.Fatalf("proxyTransportOrGeneratedError() = %v, want %v", got, tc.wantBool)
+				}
+			})
+		}
+	})
+
+	t.Run("isBreakerSuccessStatus rejects proxy-generated non-502 errors during probe", func(t *testing.T) {
+		now := time.Now()
+		epoch := uint64(42) // HALF_OPEN probe epoch
+		for _, status := range []int{500, 503, 429} {
+			rec := &statusRecorder{
+				ResponseWriter:      httptest.NewRecorder(),
+				status:              status,
+				proxyGeneratedError: true,
+			}
+			if isBreakerSuccessStatus(rec, now, epoch, nil) {
+				t.Fatalf("status %d proxy-generated error: isBreakerSuccessStatus() = true, want false", status)
+			}
+		}
+	})
+}

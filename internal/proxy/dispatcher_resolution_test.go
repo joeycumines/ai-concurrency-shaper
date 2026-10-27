@@ -58,15 +58,14 @@ func TestDispatcher_IdentityFallbackDoesNotStopSearch(t *testing.T) {
 	}}
 	// Registered chat-first, but only the second (responses) target declares
 	// the model's dialect.
-	chat := TranscodeMapping{Mapping: transcode.Mapping{
+	chat := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		ModelMap:         identityMap(),
-		LossPolicy:       lossPolicy,
-	}}
-	responses := TranscodeMapping{Mapping: transcode.Mapping{
+		LossPolicy:       lossPolicy}
+	responses := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
@@ -77,8 +76,7 @@ func TestDispatcher_IdentityFallbackDoesNotStopSearch(t *testing.T) {
 				ClientResponseModel: "gpt-nano", Via: transcode.NativeResponses,
 			},
 		}},
-		LossPolicy: lossPolicy,
-	}}
+		LossPolicy: lossPolicy}
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher(nil)),
@@ -122,7 +120,7 @@ func TestDispatcher_ProfileClaimedByTargetWins(t *testing.T) {
 	}}
 	// The chat target claims the profile but cannot map its target model; the
 	// responses target could serve the same profile's model.
-	chat := TranscodeMapping{Mapping: transcode.Mapping{
+	chat := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
@@ -136,9 +134,8 @@ func TestDispatcher_ProfileClaimedByTargetWins(t *testing.T) {
 		ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 			"worker": {Model: "unmapped-target"},
 		}},
-		LossPolicy: lossPolicy,
-	}}
-	responses := TranscodeMapping{Mapping: transcode.Mapping{
+		LossPolicy: lossPolicy}
+	responses := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
@@ -152,8 +149,7 @@ func TestDispatcher_ProfileClaimedByTargetWins(t *testing.T) {
 		ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 			"worker": {Model: "unmapped-target"},
 		}},
-		LossPolicy: lossPolicy,
-	}}
+		LossPolicy: lossPolicy}
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher(nil)),
@@ -211,7 +207,7 @@ func TestDispatcher_NativeRouteProfileFallsThroughToMapping(t *testing.T) {
 			},
 		}},
 	}
-	chat := TranscodeMapping{Mapping: transcode.Mapping{
+	chat := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
@@ -225,8 +221,7 @@ func TestDispatcher_NativeRouteProfileFallsThroughToMapping(t *testing.T) {
 		ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 			"scanner": {Model: "profile-target"},
 		}},
-		LossPolicy: lossPolicy,
-	}}
+		LossPolicy: lossPolicy}
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher(nil)),
@@ -272,7 +267,7 @@ func TestDispatcher_ProfileClaimBeatsLaterMapping(t *testing.T) {
 	// Both targets claim the profile; the first (chat) cannot map its target
 	// model, the second (responses) can. The chat target's claim is
 	// authoritative, so its profile refusal is the answer.
-	chat := TranscodeMapping{Mapping: transcode.Mapping{
+	chat := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
@@ -286,9 +281,8 @@ func TestDispatcher_ProfileClaimBeatsLaterMapping(t *testing.T) {
 		ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 			"worker": {Model: "resp-only"},
 		}},
-		LossPolicy: lossPolicy,
-	}}
-	responses := TranscodeMapping{Mapping: transcode.Mapping{
+		LossPolicy: lossPolicy}
+	responses := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
@@ -302,8 +296,7 @@ func TestDispatcher_ProfileClaimBeatsLaterMapping(t *testing.T) {
 		ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 			"worker": {Model: "resp-only"},
 		}},
-		LossPolicy: lossPolicy,
-	}}
+		LossPolicy: lossPolicy}
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher(nil)),
@@ -352,7 +345,7 @@ func TestDispatcher_DialectlessClaimReachesResponsesHandler(t *testing.T) {
 	}}
 	// Chat is registered first but does NOT claim the profile; responses
 	// claims it with an unmappable target.
-	chat := TranscodeMapping{Mapping: transcode.Mapping{
+	chat := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
@@ -363,9 +356,8 @@ func TestDispatcher_DialectlessClaimReachesResponsesHandler(t *testing.T) {
 				ClientResponseModel: "chat-only", Via: transcode.NativeChat,
 			},
 		}},
-		LossPolicy: lossPolicy,
-	}}
-	responses := TranscodeMapping{Mapping: transcode.Mapping{
+		LossPolicy: lossPolicy}
+	responses := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
@@ -379,8 +371,7 @@ func TestDispatcher_DialectlessClaimReachesResponsesHandler(t *testing.T) {
 		ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
 			"worker": {Model: "not-mapped-here"},
 		}},
-		LossPolicy: lossPolicy,
-	}}
+		LossPolicy: lossPolicy}
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher(nil)),
@@ -424,7 +415,7 @@ func TestNew_ProfileMapFrozenAfterNew(t *testing.T) {
 		transcode.FeatureUsageReasoningUnknown:  {},
 	}}
 	profiles := map[string]transcode.ProfileMapping{"worker": {Model: "worker-model"}}
-	mapping := TranscodeMapping{Mapping: transcode.Mapping{
+	mapping := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
@@ -436,8 +427,7 @@ func TestNew_ProfileMapFrozenAfterNew(t *testing.T) {
 			},
 		}},
 		ProfileMap: transcode.ProfileMap{Profiles: profiles},
-		LossPolicy: lossPolicy,
-	}}
+		LossPolicy: lossPolicy}
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher(nil)),

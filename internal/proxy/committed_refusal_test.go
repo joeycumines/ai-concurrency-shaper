@@ -64,22 +64,20 @@ func committedRefusalMount(t *testing.T) (*Proxy, *multiDialectUpstream, *metric
 		},
 		AllowIdentity: true,
 	}
-	messagesChat := TranscodeMapping{Mapping: transcode.Mapping{
+	messagesChat := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		ModelMap:         modelMap,
-		LossPolicy:       lossPolicy,
-	}}
-	messagesResponses := TranscodeMapping{Mapping: transcode.Mapping{
+		LossPolicy:       lossPolicy}
+	messagesResponses := TranscodeMapping{
 		ClientRoute:      routeKey,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
 		UpstreamPath:     "/v1/responses",
 		ModelMap:         modelMap,
-		LossPolicy:       lossPolicy,
-	}}
+		LossPolicy:       lossPolicy}
 
 	met := metrics.NewCollector()
 	pat, err := route.Parse("POST /messages:1")

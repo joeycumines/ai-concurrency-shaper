@@ -238,9 +238,7 @@ func cloneMapping(m Mapping) Mapping {
 	m.ModelMap = cloneModelMapValues(m.ModelMap)
 	if m.ProfileMap.Profiles != nil {
 		profiles := make(map[string]ProfileMapping, len(m.ProfileMap.Profiles))
-		for name, profile := range m.ProfileMap.Profiles {
-			profiles[name] = profile
-		}
+		maps.Copy(profiles, m.ProfileMap.Profiles)
 		m.ProfileMap.Profiles = profiles
 	}
 	m.AllowedClientQuery = cloneQuerySet(m.AllowedClientQuery)

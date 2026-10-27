@@ -549,8 +549,11 @@ func (c *Config) Close() {
 		p.closeRCDialer()
 		// The channel credential belongs to the dialer: a failed resolve
 		// may not have reached this provider's reset, and must not leave the
-		// earlier secret attached to it.
+		// earlier secret attached to it. So do values derived from a former
+		// sesame endpoint: a failed resolve that never reached resolveRC
+		// must not leave them behind on the provider.
 		p.rcToken = ""
+		p.resetDerivedSesameState()
 	}
 }
 
@@ -564,11 +567,14 @@ func (c *Config) resolveAndValidate() error {
 	// A name an earlier resolve derived from the upstream host is derived
 	// state, not input: it is recomputed from the current upstream. A name
 	// the caller assigned since (anything but the derived value) survives.
+	// Values derived from -sesame-endpoint are likewise reset before any
+	// check can fail.
 	for _, p := range c.Providers {
 		if p.derivedName != "" && p.Name == p.derivedName {
 			p.Name = ""
 		}
 		p.derivedName = ""
+		p.resetDerivedSesameState()
 	}
 
 	for i, p := range c.Providers {

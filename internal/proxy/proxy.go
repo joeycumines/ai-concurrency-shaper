@@ -3514,8 +3514,7 @@ func (r *statusRecorder) proxyTransportOrGeneratedError() bool {
 	if r == nil {
 		return false
 	}
-	status := r.observedStatus()
-	return status == 0 || (status == http.StatusBadGateway && r.proxyGeneratedError)
+	return r.observedStatus() == 0 || r.proxyGeneratedError
 }
 
 func (r *statusRecorder) hasRealProxyTransportError(ctxErr error) bool {

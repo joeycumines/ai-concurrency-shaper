@@ -575,20 +575,18 @@ func TestMultiDialect_AuthXAPIKey_AdaptsToBearerOnTranscode(t *testing.T) {
 	}
 
 	messagesChat := TranscodeMapping{
-		Mapping: transcode.Mapping{
-			ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
-			ClientProtocol:   transcode.ClientMessages,
-			UpstreamProtocol: transcode.UpstreamChatCompletions,
-			UpstreamPath:     "/v1/chat/completions",
-			ModelMap:         modelMap,
-			LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
-				transcode.FeatureToolSchemaStrictness:   {},
-				transcode.FeatureUsageUnknown:           {},
-				transcode.FeatureUsageCacheReadUnknown:  {},
-				transcode.FeatureUsageCacheWriteUnknown: {},
-				transcode.FeatureUsageReasoningUnknown:  {},
-			}},
-		},
+		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         modelMap,
+		LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+			transcode.FeatureToolSchemaStrictness:   {},
+			transcode.FeatureUsageUnknown:           {},
+			transcode.FeatureUsageCacheReadUnknown:  {},
+			transcode.FeatureUsageCacheWriteUnknown: {},
+			transcode.FeatureUsageReasoningUnknown:  {},
+		}},
 	}
 
 	authPolicy := &auth.AuthPolicy{

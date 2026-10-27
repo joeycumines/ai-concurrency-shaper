@@ -187,7 +187,7 @@ func (p *Provider) resolveSesameEndpoint() error {
 	// "://" makes the value a URL only as its scheme separator: one that
 	// follows a delimiter sits in a path, query, fragment, or userinfo of a
 	// value that is no URL, and the bare-form check below reports it.
-	if sep := strings.Index(endpoint, "://"); sep >= 0 && !strings.ContainsAny(endpoint[:sep], "/?#@") {
+	if before, _, ok := strings.Cut(endpoint, "://"); ok && !strings.ContainsAny(before, "/?#@") {
 		u, err := url.Parse(endpoint)
 		if err != nil {
 			return errors.New("invalid -sesame-endpoint: not a parseable URL")
