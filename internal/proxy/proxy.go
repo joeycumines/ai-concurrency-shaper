@@ -1222,8 +1222,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if recPtr != nil && !recPtr.hijacked && !aborted {
 				entry.Timing.ResponseComplete = time.Now()
 			}
-			// For passthrough requests, there is no queue phase — set QueueEnd
-			// equal to QueueStart so QueueDuration returns 0.
+			// An exchange with no queue wait (passthrough, or a request ended
+			// before admission began) gets QueueEnd equal to QueueStart, so
+			// QueueDuration returns 0.
 			if entry.Timing.QueueEnd.IsZero() {
 				entry.Timing.QueueEnd = entry.Timing.QueueStart
 			}
@@ -1815,7 +1816,11 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	if ctx.Err() != nil {
 		// The admission deadline (or the client) ended the request during
 		// the body inspection: answer exactly as an expired queue wait,
-		// without consulting the breaker.
+		// without consulting the breaker. Admission ended here, so the
+		// journal's queue wait ends here too.
+		if recIsRecorder && rec.entry != nil {
+			rec.entry.Timing.QueueEnd = time.Now()
+		}
 		p.writeAdmissionFailure(w, ctx, nil, rec)
 		return
 	}
