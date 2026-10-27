@@ -177,6 +177,11 @@ func TestResolveAndValidate_SesameEndpointFormsAgree(t *testing.T) {
 		{hostport: secret + ":65536", wantErr: "port"},
 		{hostport: secret + ":0", wantErr: "port"},
 		{hostport: "[" + secret + "]", wantErr: "invalid -sesame-endpoint"},
+		// url.Parse refuses these itself, so only the shared prefix is
+		// common to both forms; the property is that both reject.
+		{hostport: "[" + secret + "]:8080", wantErr: "invalid -sesame-endpoint"},
+		{hostport: "[127.0.0.1]:8080", wantErr: "invalid -sesame-endpoint"},
+		{hostport: secret + ":+443", wantErr: "invalid -sesame-endpoint"},
 	} {
 		for _, form := range []string{"bare", "url"} {
 			endpoint := tc.hostport
@@ -312,5 +317,133 @@ func TestResolveAndValidate_FailedReResolveHoldsNoEarlierState(t *testing.T) {
 	}
 	if got := cfg.Server.RCServerConfig(); got != nil {
 		t.Fatalf("RCServerConfig() = %+v after a failed resolve, want nil", got)
+	}
+}
+
+// TestResolveAndValidate_SesameEndpointURLDelimiters pins that the URL form
+// rejects an empty fragment exactly like the bare form rejects '#', and that
+// a bare value is only parsed as a URL when "://" is its scheme separator:
+// "://" after a path delimiter is a malformed bare value, reported as one
+// rather than as an empty URL scheme.
+func TestResolveAndValidate_SesameEndpointURLDelimiters(t *testing.T) {
+	for _, tc := range []struct{ endpoint, wantErr, notErr string }{
+		{endpoint: "https://example.com#", wantErr: "fragment"},
+		{endpoint: "https://example.com:443#", wantErr: "fragment"},
+		{endpoint: "example.com#", wantErr: "fragment"},
+		{endpoint: "example.com/http://x", wantErr: "must be host[:port]", notErr: "scheme"},
+	} {
+		cfg, err := Parse([]string{"-upstream=https://api.example.com", "-sesame-endpoint=" + tc.endpoint})
+		if err != nil {
+			t.Fatalf("%q: Parse: %v", tc.endpoint, err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			closeDialer(t, cfg.Providers[0])
+			t.Errorf("%q: ResolveAndValidate = nil, want %q", tc.endpoint, tc.wantErr)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) || (tc.notErr != "" && strings.Contains(err.Error(), tc.notErr)) {
+			t.Errorf("%q: error = %v, want it to contain %q", tc.endpoint, err, tc.wantErr)
+		}
+	}
+}
+
+// TestResolveAndValidate_FailedReResolveDropsChannelCredential pins that a
+// repeated resolve which fails keeps neither the earlier channel credential
+// nor the dial target derived from the earlier endpoint, whether it fails on
+// the provider's own -transport check or before the provider is reached.
+// Before the fix the -transport check returned ahead of the reset.
+func TestResolveAndValidate_FailedReResolveDropsChannelCredential(t *testing.T) {
+	t.Setenv("ACS_TEST_SESAME_TOKEN", "tok3n")
+	for _, tc := range []struct {
+		name   string
+		break_ func(cfg *Config)
+	}{
+		{"invalid transport", func(cfg *Config) { cfg.Providers[0].Transport = "bogus" }},
+		{"server rejection before the provider", func(cfg *Config) { cfg.Server.RCTLS = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]string{
+				"-upstream=https://api.example.com",
+				"-sesame-endpoint=https://127.0.0.1:50051",
+				"-sesame-token-env=ACS_TEST_SESAME_TOKEN",
+			})
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if err := cfg.ResolveAndValidate(); err != nil {
+				t.Fatalf("first ResolveAndValidate: %v", err)
+			}
+			p := cfg.Providers[0]
+			if p.rcToken != "tok3n" || p.RCServer != "127.0.0.1:50051" {
+				t.Fatalf("precondition: token %q server %q", p.rcToken, p.RCServer)
+			}
+			tc.break_(cfg)
+			if err := cfg.ResolveAndValidate(); err == nil {
+				closeDialer(t, p)
+				t.Fatal("second ResolveAndValidate = nil, want a rejection")
+			}
+			if p.rcToken != "" {
+				t.Error("the channel credential survived a failed resolve")
+			}
+			if p.RCDialer() != nil {
+				t.Error("a dialer survived a failed resolve")
+			}
+		})
+	}
+
+	cfg, err := Parse([]string{
+		"-upstream=https://api.example.com",
+		"-sesame-endpoint=https://127.0.0.1:50051",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("first ResolveAndValidate: %v", err)
+	}
+	p := cfg.Providers[0]
+	closeDialer(t, p)
+	p.Transport = "bogus"
+	if err := cfg.ResolveAndValidate(); err == nil {
+		t.Fatal("second ResolveAndValidate = nil, want the -transport rejection")
+	}
+	if p.RCServer != "" || p.RCChannelTLS {
+		t.Errorf("RCServer %q RCChannelTLS %v survived a failed resolve, want the derived values cleared", p.RCServer, p.RCChannelTLS)
+	}
+}
+
+// TestResolveAndValidate_DerivedProviderNameFollowsUpstream pins that a
+// provider name derived from the upstream host is recomputed when the
+// upstream changes, while a configured name survives. Before the fix the
+// first derived name was written into Name and frozen there.
+func TestResolveAndValidate_DerivedProviderNameFollowsUpstream(t *testing.T) {
+	cfg, err := Parse([]string{
+		"--provider=acme",
+		"-upstream", "https://acme.example.com",
+		"-prefix", "/acme",
+		"--provider",
+		"-upstream", "https://api.anthropic.com",
+		"-prefix", "/claude",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("first ResolveAndValidate: %v", err)
+	}
+	if got := cfg.Providers[1].Name; got != "anthropic" {
+		t.Fatalf("precondition: derived name = %q, want anthropic", got)
+	}
+	cfg.Providers[0].Upstream = "https://other.example.org"
+	cfg.Providers[1].Upstream = "https://api.openai.com"
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("second ResolveAndValidate: %v", err)
+	}
+	if got := cfg.Providers[0].Name; got != "acme" {
+		t.Errorf("configured name = %q, want acme to survive", got)
+	}
+	if got := cfg.Providers[1].Name; got != "openai" {
+		t.Errorf("derived name = %q, want openai for the new upstream", got)
 	}
 }

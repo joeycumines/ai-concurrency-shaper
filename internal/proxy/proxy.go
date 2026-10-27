@@ -1152,9 +1152,14 @@ func New(opts ...Option) (*Proxy, error) {
 						// terminalWritten guard below cannot be relied
 						// on for this path — recordImplicitOK satisfied
 						// it on the comment write).
-						rec.aborted = true
+						// The same proxy-generated 503 the uncommitted
+						// branch writes is recorded behind the committed
+						// 200, after the comment (Write swallows bytes once
+						// an override is set).
 						fmt.Fprintf(rec, ": queue-wait failed: circuit open\n\n")
 						_ = rec.FlushError()
+						rec.proxyGeneratedError = true
+						rec.recordCommittedFailure(http.StatusServiceUnavailable)
 					} else if !rec.terminalWritten {
 						rec.proxyGeneratedError = true
 						http.Error(rec, "circuit open", http.StatusServiceUnavailable)
@@ -2461,13 +2466,7 @@ func isUpstreamFailureStatus(rec *statusRecorder, now time.Time, ctxErr error) b
 	if rec != nil && (rec.localUpgradeFailure || rec.retryCircuitOpen()) {
 		return false
 	}
-	status := 0
-	if rec != nil {
-		status = rec.status
-		if rec.commentsCommitted && rec.upstreamStatusOverride > 0 {
-			status = rec.upstreamStatusOverride
-		}
-	}
+	status := rec.observedStatus()
 	// When the client cancelled the context and the upstream returned a
 	// clean 2xx response, this is a suppressible client abort — the
 	// upstream succeeded and the client just disconnected. Classifying
@@ -2630,11 +2629,7 @@ func classifyNativeExchange(
 	if retryAttempt != nil && retryAttempt.Epoch != 0 {
 		epoch = retryAttempt.Epoch
 	}
-	effectiveStatus := rec.status
-	if rec.commentsCommitted && rec.upstreamStatusOverride > 0 {
-		effectiveStatus = rec.upstreamStatusOverride
-	}
-	result.upstreamStatus = effectiveStatus
+	result.upstreamStatus = rec.observedStatus()
 	result.upstreamFailure = isUpstreamFailureStatus(rec, now, ctxErr) || upstreamAbortFailure
 	result.switchingProtocolsResolved = rec.status == http.StatusSwitchingProtocols &&
 		rec.switchingProtocolsProbeResolved.Load()
@@ -2754,10 +2749,7 @@ func isBreakerSuccessStatus(rec *statusRecorder, now time.Time, epoch uint64, ct
 	if rec.status == http.StatusSwitchingProtocols && rec.switchingProtocolsProbeResolved.Load() {
 		return false
 	}
-	status := rec.status
-	if rec.commentsCommitted && rec.upstreamStatusOverride > 0 {
-		status = rec.upstreamStatusOverride
-	}
+	status := rec.observedStatus()
 	if status >= 200 && status < 300 {
 		return true
 	}
@@ -3203,7 +3195,7 @@ func retryHistoricalFailureCanDriveSlot(rec *statusRecorder, finalUnclean bool) 
 	if rec.localUpgradeFailure {
 		return false
 	}
-	if rec.status > 0 && !rec.proxyTransportOrGeneratedError() {
+	if rec.observedStatus() > 0 && !rec.proxyTransportOrGeneratedError() {
 		return false
 	}
 	return true
@@ -3304,7 +3296,7 @@ func (p *Proxy) recordAbortFailure(w http.ResponseWriter, attempt *retry.Breaker
 		return
 	}
 	if rec != nil && !rec.proxyTransportOrGeneratedError() && isUpstreamFailureStatus(rec, now, ctxErr) {
-		status = rec.status
+		status = rec.observedStatus()
 		retryAfter = parseRetryAfterFromRecorder(rec, now)
 	}
 
@@ -3496,8 +3488,34 @@ func (r *statusRecorder) resolveSwitchingProtocolsProbe() bool {
 	return r != nil && r.switchingProtocolsProbeResolved.CompareAndSwap(false, true)
 }
 
+// observedStatus is the response status the exchange actually observed, the
+// one every classification reads. Without the queue-comment commit it is the
+// recorded status. After the commit, status is fixed at the commit's own 200,
+// which says nothing about the upstream: the observed status is then a
+// recorded failure status (the upstream's, or a proxy-generated one), else
+// the upstream's silenced 200, else 0 — no status observed, exactly the state
+// an uncommitted exchange reports before WriteHeader.
+func (r *statusRecorder) observedStatus() int {
+	switch {
+	case r == nil:
+		return 0
+	case !r.commentsCommitted:
+		return r.status
+	case r.upstreamStatusOverride > 0:
+		return r.upstreamStatusOverride
+	case r.committedOKObserved:
+		return http.StatusOK
+	default:
+		return 0
+	}
+}
+
 func (r *statusRecorder) proxyTransportOrGeneratedError() bool {
-	return r != nil && (r.status == 0 || (r.status == http.StatusBadGateway && r.proxyGeneratedError))
+	if r == nil {
+		return false
+	}
+	status := r.observedStatus()
+	return status == 0 || (status == http.StatusBadGateway && r.proxyGeneratedError)
 }
 
 func (r *statusRecorder) hasRealProxyTransportError(ctxErr error) bool {

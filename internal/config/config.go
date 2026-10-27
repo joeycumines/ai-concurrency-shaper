@@ -342,6 +342,10 @@ type Provider struct {
 	// built programmatically, without Parse) survives, while a value derived
 	// from a since-removed flag does not linger.
 	derivedSesame derivedSesameFields
+	// derivedName is the Name the last resolve derived from the upstream
+	// host (multi-provider mode), or empty. The next resolve clears Name
+	// while it still holds that value, so the name follows the upstream.
+	derivedName string
 	// explicitFlags maps the provider-scoped flag names the operator set
 	// (as opposed to defaults) to their parsed value strings, recorded by
 	// Parse via FlagSet.Visit. Resolution uses it only where a value is
@@ -543,6 +547,10 @@ func (c *Config) ResolveAndValidate() error {
 func (c *Config) Close() {
 	for _, p := range c.Providers {
 		p.closeRCDialer()
+		// The channel credential belongs to the dialer: a failed resolve
+		// may not have reached this provider's reset, and must not leave the
+		// earlier secret attached to it.
+		p.rcToken = ""
 	}
 }
 
@@ -552,6 +560,16 @@ func (c *Config) resolveAndValidate() error {
 	}
 
 	multi := len(c.Providers) > 1
+
+	// A name an earlier resolve derived from the upstream host is derived
+	// state, not input: it is recomputed from the current upstream. A name
+	// the caller assigned since (anything but the derived value) survives.
+	for _, p := range c.Providers {
+		if p.derivedName != "" && p.Name == p.derivedName {
+			p.Name = ""
+		}
+		p.derivedName = ""
+	}
 
 	for i, p := range c.Providers {
 		if err := p.validateBasic(i, multi); err != nil {
@@ -769,6 +787,7 @@ func validateMulti(providers []*Provider) error {
 	for i, p := range providers {
 		if p.Name == "" {
 			p.Name = deriveName(p.upstream.Hostname())
+			p.derivedName = p.Name
 		}
 		if p.Name == "" {
 			return fmt.Errorf("provider section %d: unable to derive a name from upstream %q", i+1, p.upstream.Host)

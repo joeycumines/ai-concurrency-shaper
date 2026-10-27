@@ -256,3 +256,152 @@ func TestRouteErrorMarksRecorderBehindWrapper(t *testing.T) {
 		})
 	}
 }
+
+// TestDispatcher_ProfileAnswerNeedsAClaimingHandler pins that a profile whose
+// target model names a dialect is served only by a handler that defines the
+// profile. Programmatic mappings may carry different profile maps; before the
+// fix the dispatcher sent the request to the dialect's handler regardless, and
+// that handler, not knowing the profile, forwarded the profile name upstream
+// as a model name.
+func TestDispatcher_ProfileAnswerNeedsAClaimingHandler(t *testing.T) {
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	chatModel := transcode.ModelMap{
+		AllowIdentity: true,
+		Exact: map[string]transcode.ModelMapping{
+			"chat-m": {
+				ClientModel: "chat-m", UpstreamModel: "chat-m",
+				ClientResponseModel: "chat-m", Via: transcode.NativeChat,
+			},
+		},
+	}
+	profiles := transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
+		"p": {Model: "chat-m"},
+	}}
+	responses := TranscodeMapping{Mapping: transcode.Mapping{
+		ClientRoute:      routeKey,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamResponses,
+		UpstreamPath:     "/v1/responses",
+		ModelMap:         chatModel,
+		ProfileMap:       profiles,
+		LossPolicy:       claimsLossPolicy(),
+	}}
+	chat := TranscodeMapping{Mapping: transcode.Mapping{
+		ClientRoute:      routeKey,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         chatModel,
+		LossPolicy:       claimsLossPolicy(),
+	}}
+	body := `{"model":"p","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+
+	t.Run("dialect handler lacks the profile", func(t *testing.T) {
+		p, upstream := claimsProxy(t, responses, chat)
+		rec := dispatcherPost(t, p, body)
+		if last := upstream.lastRequest(); last.Path != "" {
+			t.Fatalf("upstream received %s model %q, want no upstream request for an unservable profile", last.Path, last.Model)
+		}
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500; body: %s", rec.Code, rec.Body.String())
+		}
+		var envelope struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode error body %q: %v", rec.Body.String(), err)
+		}
+		for _, want := range []string{`"p"`, `"chat-m"`, "served as chat"} {
+			if !strings.Contains(envelope.Error.Message, want) {
+				t.Errorf("message = %q, want it to name %s", envelope.Error.Message, want)
+			}
+		}
+	})
+	t.Run("dialect handler defines the profile", func(t *testing.T) {
+		withProfile := chat
+		withProfile.ProfileMap = profiles
+		p, upstream := claimsProxy(t, responses, withProfile)
+		rec := dispatcherPost(t, p, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+		if last := upstream.lastRequest(); last.Path != "/v1/chat/completions" || last.Model != "chat-m" {
+			t.Fatalf("upstream = %s %q, want /v1/chat/completions chat-m", last.Path, last.Model)
+		}
+	})
+}
+
+// TestDispatcher_MessagesNativeRefusalNamesTheDecidingSource pins that the
+// messages-native refusal is worded from whatever actually decided the route.
+// Before the fix it reported the first target whose profile map knew the
+// name, even when that target's answer decided nothing, and used profile
+// wording for a model the native route itself resolved.
+func TestDispatcher_MessagesNativeRefusalNamesTheDecidingSource(t *testing.T) {
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	stub := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("a messages-native model must not reach a transcode handler")
+		w.WriteHeader(http.StatusTeapot)
+	})
+	chatTarget := targetTranscodeHandler{
+		mapping: &TranscodeMapping{Mapping: transcode.Mapping{
+			ClientRoute:      routeKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			ModelMap:         identityMap(),
+			ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
+				"p": {Model: "model-a"},
+			}},
+		}},
+		handler: stub,
+	}
+	responsesTarget := targetTranscodeHandler{
+		mapping: &TranscodeMapping{Mapping: transcode.Mapping{
+			ClientRoute:      routeKey,
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamResponses,
+			ModelMap: transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+				"claude": {
+					ClientModel: "claude", UpstreamModel: "claude",
+					ClientResponseModel: "claude", Via: transcode.NativeMessages,
+				},
+			}},
+			ProfileMap: transcode.ProfileMap{Profiles: map[string]transcode.ProfileMapping{
+				"p": {Model: "claude"},
+			}},
+		}},
+		handler: stub,
+	}
+	d, err := newMultiTranscodeDispatcher(routeKey, []targetTranscodeHandler{chatTarget, responsesTarget})
+	if err != nil {
+		t.Fatalf("newMultiTranscodeDispatcher: %v", err)
+	}
+	refusal := func(t *testing.T, miss *nativeMissInfo) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+			bytes.NewBufferString(`{"model":"p","max_tokens":16,"messages":[]}`))
+		if miss != nil {
+			req = req.WithContext(withNativeMiss(req.Context(), *miss))
+		}
+		rec := httptest.NewRecorder()
+		d.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404; body: %s", rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	t.Run("profile decided by a later target", func(t *testing.T) {
+		body := refusal(t, nil)
+		if !strings.Contains(body, `target model \"claude\"`) || strings.Contains(body, "model-a") {
+			t.Fatalf("body = %s, want the deciding target's model claude, never model-a", body)
+		}
+	})
+	t.Run("model decided by the native route", func(t *testing.T) {
+		body := refusal(t, &nativeMissInfo{clientModel: "p", via: transcode.NativeMessages, nativeProtocol: transcode.NativeResponses})
+		if strings.Contains(body, "-transcode-profile") || !strings.Contains(body, `model \"p\" is served natively as messages`) {
+			t.Fatalf("body = %s, want model wording for a name the native route resolved", body)
+		}
+	})
+}

@@ -42,9 +42,6 @@ import (
 // startup; dial errors surface at request time, matching the transport's
 // existing semantics.
 func (p *Provider) resolveRC() error {
-	if p.Transport != "" && p.Transport != "sesame" && p.Transport != "direct" {
-		return fmt.Errorf("invalid -transport: %q (must be direct or sesame)", p.Transport)
-	}
 	// Repeated resolution starts from the operator's current inputs. Values
 	// derived by an earlier resolve must be removed first, or a later direct
 	// resolve would be rejected by the state of a former sesame endpoint.
@@ -53,9 +50,14 @@ func (p *Provider) resolveRC() error {
 	// next channel (or failing every RPC when the new channel is plaintext).
 	// So is the previous resolve's dialer: it belongs to inputs that may have
 	// changed, and a failure below must not leave it installed.
+	// The reset runs before any check that can fail, so no rejection leaves
+	// an earlier resolve's credential or derived target behind.
 	p.rcToken = ""
 	p.closeRCDialer()
 	p.resetDerivedSesameState()
+	if p.Transport != "" && p.Transport != "sesame" && p.Transport != "direct" {
+		return fmt.Errorf("invalid -transport: %q (must be direct or sesame)", p.Transport)
+	}
 	// direct is an enforced mode, not a synonym for the default: any dial
 	// configuration alongside it is a contradiction, and honoring it
 	// silently would route upstream connections through RemoteControl
@@ -182,7 +184,10 @@ func (p *Provider) resolveSesameEndpoint() error {
 	// defect instead.
 	tlsOn := true
 	endpoint := strings.TrimSpace(p.SesameEndpoint)
-	if strings.Contains(endpoint, "://") {
+	// "://" makes the value a URL only as its scheme separator: one that
+	// follows a delimiter sits in a path, query, fragment, or userinfo of a
+	// value that is no URL, and the bare-form check below reports it.
+	if sep := strings.Index(endpoint, "://"); sep >= 0 && !strings.ContainsAny(endpoint[:sep], "/?#@") {
 		u, err := url.Parse(endpoint)
 		if err != nil {
 			return errors.New("invalid -sesame-endpoint: not a parseable URL")
@@ -208,7 +213,9 @@ func (p *Provider) resolveSesameEndpoint() error {
 		if u.Path != "" && u.Path != "/" {
 			return errors.New("invalid -sesame-endpoint: a dial target must not contain a path")
 		}
-		if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		// url.Parse drops an empty fragment ("host#"), so the delimiter is
+		// checked on the raw value, as the bare form does.
+		if u.RawQuery != "" || u.ForceQuery || strings.Contains(endpoint, "#") {
 			return errors.New("invalid -sesame-endpoint: a dial target must not contain a query or fragment")
 		}
 		p.RCServer = u.Host
@@ -253,10 +260,14 @@ func validateSesameHostPort(hostport string) error {
 		if port == "" {
 			return errors.New("invalid -sesame-endpoint: missing port")
 		}
-		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		// ParseUint, unlike Atoi, refuses a sign, matching url.Parse's
+		// digits-only port in the URL form.
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n < 1 {
 			return errors.New("invalid -sesame-endpoint: port must be a number in 1..65535")
 		}
-		if strings.Contains(host, ":") && !isIPv6Literal(host) {
+		// SplitHostPort strips the brackets, so the bracket itself (not a
+		// colon in the host) marks a host that must be an IPv6 literal.
+		if strings.HasPrefix(hostport, "[") && !isIPv6Literal(host) {
 			return errors.New("invalid -sesame-endpoint: bracketed host must be an IPv6 address")
 		}
 	} else if strings.HasPrefix(hostport, "[") && strings.HasSuffix(hostport, "]") {
