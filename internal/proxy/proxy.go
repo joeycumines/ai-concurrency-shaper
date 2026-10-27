@@ -2439,9 +2439,14 @@ func classifyTranscodeExchange(
 	// in serveTranscodeHandler. A local failure (including a downstream write
 	// that failed mid-stream) is excluded for the same reason: the upstream's
 	// 2xx is retained as an observed fact, but the exchange did not succeed.
+	// Success also needs the whole response delivered: a delivery the recorder
+	// saw fail, or one not completed, leaves the upstream's status observed but
+	// does not make the exchange a success.
 	result.upstreamSuccess = !result.upstreamFailure &&
 		!result.localFailure &&
 		!result.clientAborted &&
+		!rec.downstreamWriteFailed() &&
+		outcome.DownstreamComplete &&
 		outcome.UpstreamStatus.Set &&
 		outcome.UpstreamStatus.Value >= http.StatusOK &&
 		outcome.UpstreamStatus.Value < http.StatusMultipleChoices
@@ -2531,7 +2536,10 @@ func (p *Proxy) resolveAbortedExchange(
 		return
 	}
 	attemptStart, attemptEpoch := retryAttemptOrDefault(attempt, startedAt, epoch)
-	if attemptEpoch != 0 && !result.clientAborted && result.upstreamStatus > 0 &&
+	// An aborted exchange resolves a probe only from a definitive non-2xx status:
+	// an aborted 2xx transfer was not delivered in full, so it is neither
+	// success nor failure.
+	if attemptEpoch != 0 && !result.clientAborted && result.upstreamStatus >= http.StatusMultipleChoices &&
 		!result.upstreamFailure && !result.localFailure && !result.suppressibleAbort &&
 		!result.switchingProtocolsResolved {
 		p.breaker.RecordSuccess(attemptStart, attemptEpoch)
