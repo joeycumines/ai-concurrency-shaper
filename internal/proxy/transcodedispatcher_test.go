@@ -351,7 +351,7 @@ func TestDispatcher_ConfigFrozenAfterNew(t *testing.T) {
 // mappings on one route carry different model maps, resolution tries each
 // target's maps in registration order and the first target that resolves
 // the model decides the dialect — deterministic, never "last mapping wins".
-func TestDispatcher_FirstTargetResolvesConflictingMaps(t *testing.T) {
+func TestDispatcher_ConflictingRawMapsRefusedInEveryOrder(t *testing.T) {
 	chatMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
 		"m": {ClientModel: "m", UpstreamModel: "wire-chat-m", ClientResponseModel: "m", Via: transcode.NativeChat},
 	}}
@@ -397,15 +397,26 @@ func TestDispatcher_FirstTargetResolvesConflictingMaps(t *testing.T) {
 	}
 
 	rec := dispatcherPost(t, p, `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want the 500 conflict refusal; body: %s", rec.Code, rec.Body.String())
 	}
-	last := upstream.lastRequest()
-	if last.Path != "/v1/chat/completions" {
-		t.Errorf("upstream path = %q, want /v1/chat/completions (first target's map resolves first)", last.Path)
+	if last := upstream.lastRequest(); last.Path != "" {
+		t.Fatalf("upstream received %s, want no dispatch for an undecidable model", last.Path)
 	}
-	if last.Model != "wire-chat-m" {
-		t.Errorf("upstream model = %q, want wire-chat-m (the chat target's own map renders it)", last.Model)
+	// Registration order must not change the refusal.
+	reversed, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(messagesResponses, messagesChat),
+	)
+	if err != nil {
+		t.Fatalf("New proxy: %v", err)
+	}
+	reversedRec := dispatcherPost(t, reversed, `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	if reversedRec.Code != rec.Code || refusalText(t, reversedRec) != refusalText(t, rec) {
+		t.Fatalf("refusal differs by registration order: %q vs %q", refusalText(t, rec), refusalText(t, reversedRec))
 	}
 }
 

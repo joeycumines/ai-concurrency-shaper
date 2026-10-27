@@ -21,6 +21,8 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
@@ -56,18 +58,22 @@ type dispatcherTarget struct {
 //     resolved against the targets below.
 //   - Otherwise the body is probed once — bounded by the largest
 //     accepted-request bound across the targets — and the model is resolved
-//     against each target in registration order: the first explicit dialect
-//     decides. Conflicting maps across targets therefore resolve
-//     deterministically by registration order, never "last mapping wins".
+//     against each target: the explicit dialect decides. Conflicting explicit
+//     dialects for one model, and conflicting definitions of one profile name,
+//     are refused rather than resolved by registration order.
 //   - A profile follows its target model's dialect, and is only ever served
 //     by a handler whose mapping defines it: any other handler would forward
 //     the profile name upstream as a model name. An explicit dialect declared
 //     for the target model decides the route symmetrically, regardless of
-//     mapping registration order. When the dialect's handler does not define
-//     the profile identically (programmatic mappings may carry different
-//     profile maps; the CLI stamps one map per provider), the request is
-//     refused. A profile unmapped across the route is refused by the claiming
-//     handler (chat preferred as fallback).
+//     mapping registration order. Claimants of one profile name must decide one
+//     dialect and one target model between them, and the claimants that decide
+//     it must agree on the reasoning tier; the CLI stamps one profile map per
+//     provider, so divergent definitions are real configurations. When the
+//     decided dialect's handler does not define the profile as the claimants
+//     do, the request is refused. Any other disagreement is refused as well,
+//     with a message that names the sorted disagreement. A profile unmapped
+//     across the route is refused by the claiming handler (chat preferred as
+//     fallback).
 //   - via=responses and via=chat select their matching handler.
 //   - via=messages fails closed with a 404 naming the model: no transcode
 //     direction serves a messages-native model faithfully, and converting
@@ -226,6 +232,10 @@ func (d *multiTranscodeDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	}
 	var sel targetSelection
 	if !resolved && clientModel != "" {
+		if refusal, ok := d.routeConflict(clientModel); !ok {
+			d.writeRouteError(w, r, http.StatusInternalServerError, refusal)
+			return
+		}
 		sel = d.selectTarget(clientModel)
 		targetVia = sel.via
 	}
@@ -362,6 +372,115 @@ func (d *multiTranscodeDispatcher) selectTarget(clientModel string) targetSelect
 		}
 	}
 	return targetSelection{}
+}
+
+// routeConflict reports whether the route can decide clientModel's dialect
+// without a registration order choosing it.
+//
+// For a profile name, each claimant reaches a dialect through the explicit
+// dialects its target model carries. A target model with conflicting explicit
+// dialects is undecidable by itself. Across the claimants, the decisions must
+// name one dialect and one target model, and the claimants that decide them
+// must agree on the reasoning tier. Claimants that carry no explicit dialect
+// fall back to identity resolution and never conflict with a decision. A raw
+// model name is undecidable when its explicit dialects conflict. Every refusal
+// names the sorted disagreement, so it is identical in every registration
+// order.
+func (d *multiTranscodeDispatcher) routeConflict(clientModel string) (string, bool) {
+	type decision struct {
+		dialect transcode.NativeProtocol
+		model   string
+		tier    string
+	}
+	var decisions []decision
+	claimed := false
+	for i := range d.targets {
+		model, tier, ok := d.targets[i].profileMap.ResolveProfile(clientModel)
+		if !ok {
+			continue
+		}
+		claimed = true
+		dialects := d.explicitDialects(model)
+		if len(dialects) > 1 {
+			return fmt.Sprintf(
+				"%q is a -transcode-profile whose target model %q is mapped to conflicting dialects (%s) by the mappings on %s, so no transcode mapping on this route can serve it",
+				clientModel, model, joinDialects(dialects), d.routeKey.Path,
+			), false
+		}
+		for _, dialect := range dialects {
+			decisions = append(decisions, decision{dialect: dialect, model: model, tier: tier})
+		}
+	}
+	if !claimed {
+		if dialects := d.explicitDialects(clientModel); len(dialects) > 1 {
+			return fmt.Sprintf(
+				"model %q is mapped to conflicting dialects (%s) by the mappings on %s, so no transcode mapping on this route can serve it",
+				clientModel, joinDialects(dialects), d.routeKey.Path,
+			), false
+		}
+		return "", true
+	}
+	if len(decisions) == 0 {
+		return "", true
+	}
+	slices.SortFunc(decisions, func(a, b decision) int {
+		if c := strings.Compare(string(a.dialect), string(b.dialect)); c != 0 {
+			return c
+		}
+		return strings.Compare(a.model, b.model)
+	})
+	var pairs []string
+	var tiers []string
+	for i, dec := range decisions {
+		if i == 0 || dec.dialect != decisions[i-1].dialect || dec.model != decisions[i-1].model {
+			pairs = append(pairs, fmt.Sprintf("%s via %s", dec.model, dec.dialect))
+		}
+		if !slices.Contains(tiers, dec.tier) {
+			tiers = append(tiers, dec.tier)
+		}
+	}
+	if len(pairs) > 1 {
+		return fmt.Sprintf(
+			"%q is a -transcode-profile that the mappings on %s decide differently (%s), so no transcode mapping on this route can serve it",
+			clientModel, d.routeKey.Path, strings.Join(pairs, " and "),
+		), false
+	}
+	if len(tiers) > 1 {
+		slices.Sort(tiers)
+		for i, tier := range tiers {
+			if tier == "" {
+				tiers[i] = "none"
+			}
+		}
+		return fmt.Sprintf(
+			"%q is a -transcode-profile whose target model %q is defined with conflicting reasoning tiers (%s) by the mappings on %s, so no transcode mapping on this route can serve it",
+			clientModel, decisions[0].model, strings.Join(tiers, " and "), d.routeKey.Path,
+		), false
+	}
+	return "", true
+}
+
+// explicitDialects returns the distinct explicit dialects that route targets
+// declare for model, sorted. Identity resolution declares none.
+func (d *multiTranscodeDispatcher) explicitDialects(model string) []transcode.NativeProtocol {
+	var dialects []transcode.NativeProtocol
+	for i := range d.targets {
+		resolved, err := d.targets[i].modelMap.Resolve(model)
+		if err == nil && resolved.Via != "" && !slices.Contains(dialects, resolved.Via) {
+			dialects = append(dialects, resolved.Via)
+		}
+	}
+	slices.Sort(dialects)
+	return dialects
+}
+
+// joinDialects renders explicit dialects for an error message.
+func joinDialects(dialects []transcode.NativeProtocol) string {
+	parts := make([]string, 0, len(dialects))
+	for _, dialect := range dialects {
+		parts = append(parts, string(dialect))
+	}
+	return strings.Join(parts, " and ")
 }
 
 // profileDialectRefusal checks that a profile answer naming a dialect can be

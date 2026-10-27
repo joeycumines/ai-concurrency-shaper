@@ -822,10 +822,23 @@ func TestDispatcher_ProfileRefusalNamesTargetModelDialectMismatch(t *testing.T) 
 		t.Fatalf("decode refusal %q: %v", rec.Body.String(), err)
 	}
 	if rec.Code != http.StatusInternalServerError ||
-		!strings.Contains(env.Error.Message, `does not map target model "gpt-4o-mini" to responses`) ||
-		strings.Contains(env.Error.Message, "does not define the profile") {
-		t.Fatalf("status=%d message=%q; want accurate target-model dialect refusal",
+		!strings.Contains(env.Error.Message, `target model "gpt-4o-mini" is mapped to conflicting dialects (chat and responses)`) {
+		t.Fatalf("status=%d message=%q; want the conflicting-dialect refusal",
 			rec.Code, env.Error.Message)
+	}
+	// Registration order must not change the refusal.
+	reversed, err := newMultiTranscodeDispatcher(routeKey, []targetTranscodeHandler{
+		profileTarget(transcode.UpstreamResponses, transcode.NativeChat),
+		profileTarget(transcode.UpstreamChatCompletions, transcode.NativeResponses),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reversedRec := httptest.NewRecorder()
+	reversed.ServeHTTP(reversedRec, httptest.NewRequest(http.MethodPost, routeKey.Path,
+		strings.NewReader(`{"model":"fast","max_tokens":16,"messages":[]}`)))
+	if got := refusalText(t, reversedRec); got != env.Error.Message {
+		t.Fatalf("refusal differs by registration order:\n chat first: %q\n responses first: %q", env.Error.Message, got)
 	}
 }
 
