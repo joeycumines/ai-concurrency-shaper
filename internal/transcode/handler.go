@@ -166,14 +166,15 @@ func NewTranscodeHandler(
 	// static source (when not the inbound-forwarding mode): a mutable
 	// custom SecretSource can no longer change live behavior or fail
 	// mid-exchange — the same freeze contract the provider auth policy
-	// satisfies through auth.FreezeAuthPolicy.
+	// satisfies through auth.FreezeAuthPolicy, including its one exception:
+	// a rotating auth.DynamicSecretSource is resolved but kept live.
 	cfg.Mapping = cloneMapping(cfg.Mapping)
 	if !cfg.Mapping.Auth.Inbound && cfg.Mapping.Auth.Secret != nil {
-		secret, err := cfg.Mapping.Auth.Secret.Secret(context.Background())
+		frozen, err := freezeSecretSource(context.Background(), cfg.Mapping.Auth.Secret)
 		if err != nil {
 			panic(fmt.Sprintf("transcode: resolve mapping auth secret: %v", err))
 		}
-		cfg.Mapping.Auth.Secret = staticSecretSource(strings.TrimSpace(secret))
+		cfg.Mapping.Auth.Secret = frozen
 	}
 	upstream := *cfg.Upstream
 	cfg.Upstream = &upstream

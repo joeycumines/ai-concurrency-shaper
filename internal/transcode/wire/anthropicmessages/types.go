@@ -781,6 +781,12 @@ type Tool struct {
 	// accepted on the wire and not forwarded — the decode path reports the
 	// drop observably (one deduped anthropic_controls note per exchange).
 	CacheControl any `json:"cache_control,omitempty"`
+
+	// DeferLoading is the Anthropic tool-search hint (Claude Code sets it on
+	// MCP tools it would load on demand). Deferral needs the Anthropic
+	// server-side tool search, which no transcoded target has, so the tool is
+	// rendered eagerly and the decode path records one deduped note.
+	DeferLoading *bool `json:"defer_loading,omitempty"`
 }
 
 // UnmarshalJSON admits function tools strictly and server-side tools with
@@ -812,6 +818,7 @@ func (t *Tool) UnmarshalJSON(data []byte) error {
 			Description  *string          `json:"description,omitempty"`
 			InputSchema  json.RawMessage  `json:"input_schema,omitempty"`
 			CacheControl any              `json:"cache_control,omitempty"`
+			DeferLoading *bool            `json:"defer_loading,omitempty"`
 		}
 		if err := wire.Decode(data, &function); err != nil {
 			return err
@@ -822,6 +829,7 @@ func (t *Tool) UnmarshalJSON(data []byte) error {
 			Description:  function.Description,
 			InputSchema:  function.InputSchema,
 			CacheControl: function.CacheControl,
+			DeferLoading: function.DeferLoading,
 		}
 		return t.Validate()
 	}

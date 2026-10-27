@@ -174,13 +174,22 @@ type Provider struct {
 	// ---- Upstream authentication (provider scope) ----
 
 	// AuthSource names where the upstream credential comes from:
-	// "env:VAR", "file:PATH", or the literal "none" (strip-only hygiene).
-	// Credentials from "file:PATH" are resolved once at startup and wrapped
-	// as static secrets across both passthrough and transcoded routes; file
-	// rotation requires a restart today.
+	// "env:VAR", "file:PATH", "exec:<JSON argv>", or the literal "none"
+	// (strip-only hygiene). Credentials from "env:VAR" and "file:PATH" are
+	// resolved once at startup and wrapped as static secrets across both
+	// passthrough and transcoded routes; rotating them requires a restart.
+	// "exec:" is the rotation exception: the command's output is cached
+	// for AuthSourceTTL and re-acquired while the process runs.
 	// Empty disables upstream authentication entirely: requests are
 	// forwarded verbatim, exactly as they always have been.
 	AuthSource string
+	// AuthSourceTTL is how long an exec: credential is used before it is
+	// re-acquired. Required (> 0) with exec:, rejected with any other
+	// source.
+	AuthSourceTTL time.Duration
+	// AuthSourceTimeout bounds one run of the exec: command. Must be > 0;
+	// setting it with any other source is rejected.
+	AuthSourceTimeout time.Duration
 	// AuthMode selects how the credential is attached upstream:
 	// "auto" (default when a source is set), "none", "bearer", "x-api-key",
 	// "api-key", or "header:<NAME>". Auto derives from the upstream host.

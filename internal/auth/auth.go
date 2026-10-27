@@ -56,8 +56,9 @@ const DefaultAnthropicVersion = "2023-06-01"
 // value is not a valid policy; construct one with a concrete resolved Mode,
 // and for every mode except none a non-nil Secret.
 //
-// A policy carries no mutable state after construction and is safe for
-// concurrent use by multiple requests.
+// A policy carries no mutable state of its own after construction and is
+// safe for concurrent use by multiple requests; a DynamicSecretSource keeps
+// its refresh state internally synchronized.
 type AuthPolicy struct {
 	// Mode is the resolved authentication mode. It must never hold AuthAuto:
 	// resolve once at configuration time via ResolveMode.
@@ -65,7 +66,8 @@ type AuthPolicy struct {
 
 	// Secret supplies the upstream credential. It is consulted on every
 	// authenticated request; configurations that resolve their source once
-	// at startup wrap the resolved value in a staticSecretSource.
+	// at startup wrap the resolved value in a staticSecretSource, while a
+	// DynamicSecretSource (exec:) is kept live.
 	Secret SecretSource
 
 	// CustomHeader names the injection target when Mode is header.
@@ -163,7 +165,10 @@ func validHeaderName(name string) bool {
 //
 // Apply never returns an error for validated policies whose Secret was
 // resolved at startup: stripping is unconditional and injection only fails if
-// the secret source itself fails at call time.
+// the secret source itself fails at call time. A credential drawn from a
+// DynamicSecretSource additionally marks the request (see
+// AttachReauthentication) so the sending transport can recover from an
+// upstream rejection of a rotated credential.
 func ApplyUpstreamAuthentication(ctx context.Context, req *http.Request, policy *AuthPolicy) error {
 	if err := policy.Validate(); err != nil {
 		return err
@@ -180,20 +185,23 @@ func ApplyUpstreamAuthentication(ctx context.Context, req *http.Request, policy 
 		return err
 	}
 
+	var header, scheme string
 	switch policy.Mode {
 	case AuthBearer:
-		req.Header.Set("Authorization", "Bearer "+secret)
+		header, scheme = "Authorization", "Bearer "
 	case AuthXAPIKey:
-		req.Header.Set("X-Api-Key", secret)
+		header = "X-Api-Key"
 		req.Header.Set("Anthropic-Version", policy.AnthropicVersion)
 	case AuthAPIKey:
-		req.Header.Set("Api-Key", secret)
+		header = "Api-Key"
 	case AuthCustomHeader:
-		req.Header.Set(policy.CustomHeader, secret)
+		header = policy.CustomHeader
 	default:
 		// Unreachable: Validate rejects unknown modes above.
 		return fmt.Errorf("unsupported auth mode %q", policy.Mode)
 	}
+	req.Header.Set(header, scheme+secret)
+	AttachReauthentication(req, policy.Secret, secret, header, scheme)
 	return nil
 }
 
@@ -221,7 +229,10 @@ func resolveSecret(ctx context.Context, source SecretSource) (string, error) {
 // no secret and keeps Secret nil; every authenticated mode resolves the
 // secret eagerly through resolveSecret and wraps it in a static source, so a
 // missing or failing credential surfaces here, at construction time, instead
-// of on the first request. A nil policy returns nil.
+// of on the first request. A DynamicSecretSource is the one exception: it is
+// resolved eagerly for the same fail-fast check but retained, because its
+// value is meant to change (short-lived credentials). A nil policy returns
+// nil.
 func FreezeAuthPolicy(ctx context.Context, policy *AuthPolicy) (*AuthPolicy, error) {
 	if policy == nil {
 		return nil, nil
@@ -234,6 +245,9 @@ func FreezeAuthPolicy(ctx context.Context, policy *AuthPolicy) (*AuthPolicy, err
 	secret, err := resolveSecret(ctx, frozen.Secret)
 	if err != nil {
 		return nil, err
+	}
+	if _, dynamic := frozen.Secret.(DynamicSecretSource); dynamic {
+		return &frozen, nil
 	}
 	frozen.Secret = NewStaticSecretSource(secret)
 	return &frozen, nil

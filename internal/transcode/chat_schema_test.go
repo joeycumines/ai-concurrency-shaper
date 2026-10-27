@@ -210,7 +210,9 @@ func TestNonStreamToolCallNoIndexOnWire(t *testing.T) {
 	})
 
 	context := testExchangeContext()
-	rendered, _, err := RenderChatRequest(result.Request, context, ChatCapabilities{ParallelToolCalls: true})
+	caps := defaultChatCapabilities()
+	caps.ParallelToolCalls = true
+	rendered, _, err := RenderChatRequest(result.Request, context, caps)
 	if err != nil {
 		t.Fatal(err)
 	}

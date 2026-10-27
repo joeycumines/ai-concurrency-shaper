@@ -120,6 +120,7 @@ const (
 	defaultCBPenalty              = 2 * time.Second
 	defaultCBMaxPenalty           = 60 * time.Second
 	defaultAnthropicVersionValue  = auth.DefaultAnthropicVersion
+	defaultAuthSourceTimeout      = 60 * time.Second
 	defaultTranscodeMaxRequestMB  = 10
 	defaultTranscodeMaxResponseMB = 10
 )
@@ -214,7 +215,9 @@ func registerProviderFlags(r *registrar, p *Provider) {
 
 	// Upstream authentication.
 	r.stringVar(&p.AuthMode, "auth-mode", "", "upstream auth mode: auto | none | bearer | x-api-key | api-key | header:NAME (default: auto-derived from the upstream host when -auth-source is set)")
-	r.stringVar(&p.AuthSource, "auth-source", "", "upstream credential source: env:VAR | file:PATH | none (empty disables upstream auth entirely; requests are forwarded verbatim)")
+	r.stringVar(&p.AuthSource, "auth-source", "", `upstream credential source: env:VAR | file:PATH | exec:["/abs/cmd","arg",...] | none (empty disables upstream auth entirely; requests are forwarded verbatim)`)
+	r.durationVar(&p.AuthSourceTTL, "auth-source-ttl", 0, "how long an exec: credential is used before the command is run again (required with exec:; e.g. 50m)")
+	r.durationVar(&p.AuthSourceTimeout, "auth-source-timeout", defaultAuthSourceTimeout, "max run time of the exec: credential command before it is killed (exec: only)")
 	r.stringVar(&p.AuthHeader, "auth-header", "", "custom upstream auth header name (required by -auth-mode header:<NAME>)")
 	r.stringVar(&p.AnthropicVersion, "anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value applied when the auth mode resolves to x-api-key")
 

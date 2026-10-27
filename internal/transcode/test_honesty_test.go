@@ -118,6 +118,7 @@ func TestTranscodeMessagesToChatStripsClientCredentials(t *testing.T) {
 		UpstreamProtocol: UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		Auth:             AuthPolicy{Mode: AuthNone},
+		ChatCapabilities: defaultChatCapabilities(),
 		ModelMap:         ModelMap{AllowIdentity: true},
 		LossPolicy: LossPolicy{Allowed: map[Feature]struct{}{
 			FeatureTopK:                   {},

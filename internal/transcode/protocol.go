@@ -140,6 +140,22 @@ const SyntheticThinkingSignature = "shaper-synth-thinking-1"
 // A capability must be enabled from configuration or a maintained provider
 // profile; conversion code must never infer it from a successful response.
 type ChatCapabilities struct {
+	// Metadata forwards the client request's metadata map as Chat Completions
+	// metadata. On by default. Some chat providers validate metadata values
+	// against their own grammar (Amazon Bedrock rejects quotes and braces,
+	// which Claude Code's structured user_id carries), so an operator can
+	// withdraw it; the client's metadata is then an observable, policy-gated
+	// loss under the metadata feature, never a silent drop.
+	Metadata bool
+
+	// Float64Bounds forwards tool schemas byte-exact even when they carry a
+	// numeric bound at ±math.MaxFloat64 (zod-generated MCP schemas put one on
+	// every plain number). On by default. Withdrawing it removes exactly those
+	// vacuous bounds, which admit every finite number, so the schema accepts
+	// the same values; the rewrite is recorded as a note. Amazon Bedrock's
+	// OpenAI-compatible endpoint rejects any request carrying such a bound.
+	Float64Bounds bool
+
 	DeveloperRole     bool
 	ImageInput        bool
 	StructuredOutputs bool
