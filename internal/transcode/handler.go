@@ -956,7 +956,7 @@ func (h *TranscodeHandler) jsonResponse(
 			Type:    "api_error",
 			Code:    "response_conversion_error",
 			Message: "generated response exceeds the configured limit",
-		}, ProvenanceUpstreamBodyError)
+		}, ProvenanceLocalResponseConversionError)
 		return
 	}
 	h.copyResponseHeaders(w.Header(), resp.Header)
