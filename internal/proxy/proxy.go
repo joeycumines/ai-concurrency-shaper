@@ -3369,19 +3369,25 @@ func (r *statusRecorder) WriteHeader(code int) {
 			}
 		}
 		if code >= 300 {
+			// The first post-commit status is the one the exchange observed. A
+			// later failure is superfluous, as net/http ignores a second
+			// WriteHeader: it still marks the exchange aborted, but it neither
+			// replaces the recorded status and timing nor writes a second close.
 			r.aborted = true
-			r.upstreamStatusOverride = code
-			now := time.Now()
-			r.responseAt = now
-			if r.entry != nil {
-				r.entry.StatusCode = code
-				r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
-				r.entry.Timing.ResponseHeaders = now
-				r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
-			}
-			if !r.transcodeStream && !r.dialectErrorFramed {
-				fmt.Fprintf(r.ResponseWriter, ": queue-wait failed: upstream\n\n")
-				_ = r.FlushError()
+			if r.upstreamStatusOverride == 0 && !r.committedOKObserved {
+				r.upstreamStatusOverride = code
+				now := time.Now()
+				r.responseAt = now
+				if r.entry != nil {
+					r.entry.StatusCode = code
+					r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
+					r.entry.Timing.ResponseHeaders = now
+					r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
+				}
+				if !r.transcodeStream && !r.dialectErrorFramed {
+					fmt.Fprintf(r.ResponseWriter, ": queue-wait failed: upstream\n\n")
+					_ = r.FlushError()
+				}
 			}
 		}
 		return
