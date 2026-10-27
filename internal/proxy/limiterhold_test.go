@@ -36,6 +36,7 @@ func TestProxy_LimitedFailureHoldAlsoHoldsGlobalLimiter(t *testing.T) {
 		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
 		WithGlobalLimiter(queue.NewLimiterWithCooldown(1, 0)),
 		WithMetrics(metrics.NewCollector()),
+		WithMaxRetries(0),
 		WithFailureHold(200*time.Millisecond),
 	)
 	if err != nil {
