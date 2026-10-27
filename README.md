@@ -45,7 +45,7 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-global-concurrency` | provider | `0` | Global concurrency limit (0 = disabled) |
 | `-queue-timeout` | provider | `30s` | Max wait for a concurrency slot |
 | `-queue-depth` | provider | `0` | Max requests waiting for a slot at once (0 = unbounded, the documented blocking semantics). When the bound is reached, arriving requests fail fast with `429 Too Many Requests` + `Retry-After` — the protocol signal AI clients and the official SDKs already act on — instead of queueing silently and amplifying into client-side retries |
-| `-queue-comments` | provider | `0` | SSE keep-alive comment interval while a streaming request is queued (0 = disabled). Commits `200` + SSE headers before admission; see [Queue comments](#queue-comments--queue-comments) for the trade-off |
+| `-queue-comments` | provider | `0` | SSE keep-alive comment interval while a streaming request is queued (0 = disabled). Commits `200` + SSE headers after breaker admission and before the slot wait; see [Queue comments](#queue-comments--queue-comments) for the trade-off |
 | `-upstream-disable-keep-alives` | provider | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
 | `-upstream-ca` | provider | _(unset)_ | CA for verifying the upstream certificate on the proxy's own TLS handshake (`file:PATH` or `base64:DATA`). Unset verifies against the system roots. Rejected with `-rc-terminate-tls` (use `-rc-target-ca` there) and on plaintext `http://` upstreams (nothing to verify against). |
 | `-upstream-insecure` | provider | `false` | Skip upstream TLS certificate verification on the proxy's own handshake. Rejected with `-rc-terminate-tls` and on plaintext `http://` upstreams. A configured `-upstream-ca` is inert alongside it (nothing left to verify against). |
@@ -1254,7 +1254,7 @@ flag is unset.
 
 Each limiter is a counting semaphore (a buffered channel of slots). A limited request acquires a slot before anything is sent upstream and returns it when the exchange ends, possibly after a hold (below). That bounds the proxy's own concurrency; the upstream may still observe more because of its accounting lag, which is what the holds exist for.
 
-Admission order for a limited request: a breaker that would refuse it answers `503 circuit open` before the body is read; a full `-queue-depth` bound answers `429`; then the request takes its breaker admission (a `HALF_OPEN` breaker admits exactly one probe) and waits for its route slot and then the global slot, failing with `504 queue timeout` after `-queue-timeout`. None of the rejections before admission change breaker state.
+Admission order for a limited request: a breaker that would refuse it answers `503 circuit open` before the body is read, and a full `-queue-depth` bound answers `429`; neither changes breaker state. A streaming request under `-queue-comments` then reads its body (bounded by `-queue-timeout`) to decide whether the stream can be committed. The request then takes its breaker admission (a `HALF_OPEN` breaker admits exactly one probe at a time) and waits for its route slot and then the global slot, failing with `504 queue timeout` after `-queue-timeout`. A request that times out after admission cancels its own probe; its epoch advances and no other request's probe is affected.
 
 ### Client-visible queue semantics
 
