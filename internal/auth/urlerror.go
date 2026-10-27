@@ -28,28 +28,36 @@ import (
 // substitutes for a credential value.
 const redactedQueryPlaceholder = "%5BREDACTED%5D"
 
-// SanitizeURLError rewrites a transport error so that no *url.Error URL
-// anywhere in its chain can echo a credential query value into a log line.
-// net/http wraps transport failures in *url.Error carrying the full outbound
-// URL, and redirect handling nests further *url.Error values, sometimes
-// behind ordinary %w wrappers and sometimes rendered into wrapper text.
+// SanitizeURLError rewrites a transport error so that no URL carried by a
+// *url.Error reachable through its chain can echo a credential query value
+// into a log line. net/http wraps transport failures in *url.Error values
+// carrying the full outbound URL, and redirect handling nests further
+// *url.Error values, sometimes behind ordinary %w wrappers and sometimes
+// rendered into wrapper text.
 //
 // Guarantees:
 //   - Error() is the original message with every URL found in the chain
 //     replaced by its redacted form, raw and %q-quoted spellings alike. The
-//     longest URL is replaced first, so a URL that is a prefix of another
-//     can never leave the longer one's tail behind.
-//   - Every *url.Error reachable through Unwrap/errors.As is a clone whose
-//     URL is redacted and whose Err is itself sanitized, so no raw URL is
-//     reachable programmatically either. A bare *url.Error input yields a
-//     *url.Error.
+//     longest URL is replaced first, so a URL that is a prefix of another can
+//     never leave the longer one's tail behind.
+//   - The chain keeps its shape: every member reachable through Unwrap() error
+//     or Unwrap() []error stays reachable, so errors.Is keeps matching
+//     sentinels such as context errors and joined siblings stay reachable. A
+//     branch that carries no URL is returned as it was.
+//   - Every *url.Error reachable through Unwrap or errors.As is a clone whose
+//     URL is redacted and whose Err is itself sanitized. A bare *url.Error
+//     input yields a *url.Error.
 //   - A URL that cannot be parsed is still redacted: its whole query and
 //     fragment are replaced, since its credential parameters cannot be told
 //     apart.
 //
+// Scope: a URL exposed only through a custom As method cannot be enumerated,
+// so it is not covered. Wrappers on the path to a URL are rebuilt as generic
+// sanitized wrappers, so their concrete types are not preserved.
+//
 // Errors carrying no *url.Error are returned unchanged.
 func SanitizeURLError(err error) error {
-	if _, ok := errors.AsType[*url.Error](err); !ok {
+	if !hasURLError(err) {
 		return err
 	}
 	pairs := map[string]string{}
@@ -73,31 +81,44 @@ func SanitizeURLError(err error) error {
 	return sanitizeWith(err, strings.NewReplacer(args...))
 }
 
-// sanitizeWith rebuilds err with r applied to every rendering and every
-// reachable *url.Error cloned.
+// hasURLError reports whether a *url.Error is reachable from err.
+func hasURLError(err error) bool {
+	_, ok := errors.AsType[*url.Error](err)
+	return ok
+}
+
+// sanitizeWith rebuilds err with r applied to every rendering. A *url.Error
+// becomes a clone. A subtree that holds no *url.Error and whose rendering r
+// leaves unchanged is returned as it is, so sentinels keep their identity and
+// URL-free branches keep their types. Every other node is rebuilt with each of
+// its children sanitized, so no member of the chain is dropped.
 func sanitizeWith(err error, r *strings.Replacer) error {
 	if err == nil {
 		return nil
 	}
-	msg := r.Replace(err.Error())
 	if direct, ok := err.(*url.Error); ok {
-		clone := cloneURLError(direct, r)
-		if clone.Error() == msg {
-			return clone
-		}
-		return &sanitizedURLError{msg: msg, redacted: clone}
+		return cloneURLError(direct, r)
 	}
-	if outer, ok := errors.AsType[*url.Error](err); ok {
-		return &sanitizedURLError{msg: msg, redacted: cloneURLError(outer, r)}
-	}
-	if msg == err.Error() {
-		// No URL below and nothing to scrub: keep the original value, so
-		// errors.Is keeps matching sentinels such as context errors.
+	msg := r.Replace(err.Error())
+	if msg == err.Error() && !hasURLError(err) {
 		return err
 	}
-	return &sanitizedURLError{msg: msg}
+	switch w := err.(type) {
+	case interface{ Unwrap() []error }:
+		children := w.Unwrap()
+		sanitized := make([]error, len(children))
+		for i, child := range children {
+			sanitized[i] = sanitizeWith(child, r)
+		}
+		return &sanitizedJoinError{msg: msg, children: sanitized}
+	case interface{ Unwrap() error }:
+		return &sanitizedError{msg: msg, child: sanitizeWith(w.Unwrap(), r)}
+	}
+	return &sanitizedError{msg: msg}
 }
 
+// cloneURLError returns a copy of e with its URL redacted and its Err
+// sanitized, so the clone is safe to render and to unwrap.
 func cloneURLError(e *url.Error, r *strings.Replacer) *url.Error {
 	clone := *e
 	clone.URL = redactRawURL(e.URL)
@@ -138,14 +159,21 @@ func redactRawURL(raw string) string {
 	return raw
 }
 
-// sanitizedURLError carries a scrubbed rendering of a wrapped error chain.
-// Unwrap exposes only the sanitized clone of the chain's first *url.Error
-// (nil when the scrubbed value held none), never the original.
-type sanitizedURLError struct {
-	msg      string
-	redacted error
+// sanitizedError carries a scrubbed rendering of a wrapper with one child.
+type sanitizedError struct {
+	msg   string
+	child error
 }
 
-func (e *sanitizedURLError) Error() string { return e.msg }
+func (e *sanitizedError) Error() string { return e.msg }
+func (e *sanitizedError) Unwrap() error { return e.child }
 
-func (e *sanitizedURLError) Unwrap() error { return e.redacted }
+// sanitizedJoinError carries a scrubbed rendering of a wrapper with several
+// children, as errors.Join produces.
+type sanitizedJoinError struct {
+	msg      string
+	children []error
+}
+
+func (e *sanitizedJoinError) Error() string   { return e.msg }
+func (e *sanitizedJoinError) Unwrap() []error { return e.children }
