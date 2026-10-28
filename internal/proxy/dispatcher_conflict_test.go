@@ -109,6 +109,49 @@ func TestDispatcher_DivergentProfileTargetsRefusedInEveryOrder(t *testing.T) {
 	)
 }
 
+// Two claimants define the same profile name with different target models,
+// and BOTH target models carry conflicting explicit dialects across the
+// route's mappings: the refusal must be byte-identical in every registration
+// order and name every conflicted target model, so no order can decide which
+// single model the message blames.
+func TestDispatcher_DualConflictedProfileTargetsRefusedIdenticallyInEveryOrder(t *testing.T) {
+	chatMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+		"model-chat": {ClientModel: "model-chat", UpstreamModel: "model-chat", ClientResponseModel: "model-chat", Via: transcode.NativeChat},
+	}}
+	respMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
+		"model-chat": {ClientModel: "model-chat", UpstreamModel: "model-chat", ClientResponseModel: "model-chat", Via: transcode.NativeResponses},
+	}}
+	// Both targets also map the OTHER claimant's target model, to the
+	// opposite dialect, so both target models are doubly mapped.
+	shared := func(base transcode.ModelMap, extraName string, extra transcode.ModelMapping) transcode.ModelMap {
+		out := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{}}
+		for k, v := range base.Exact {
+			out.Exact[k] = v
+		}
+		out.Exact[extraName] = extra
+		return out
+	}
+	chatFull := shared(chatMap, "model-resp", transcode.ModelMapping{
+		ClientModel: "model-resp", UpstreamModel: "model-resp", ClientResponseModel: "model-resp", Via: transcode.NativeResponses,
+	})
+	respFull := shared(respMap, "model-resp", transcode.ModelMapping{
+		ClientModel: "model-resp", UpstreamModel: "model-resp", ClientResponseModel: "model-resp", Via: transcode.NativeChat,
+	})
+	text := requireSymmetricRefusal(t, "fast",
+		func(called *string) targetTranscodeHandler {
+			return profileDispatchTarget(transcode.UpstreamChatCompletions, chatFull,
+				map[string]transcode.ProfileMapping{"fast": {Model: "model-chat"}}, called)
+		},
+		func(called *string) targetTranscodeHandler {
+			return profileDispatchTarget(transcode.UpstreamResponses, respFull,
+				map[string]transcode.ProfileMapping{"fast": {Model: "model-resp"}}, called)
+		},
+	)
+	if !strings.Contains(text, "model-chat") || !strings.Contains(text, "model-resp") {
+		t.Fatalf("refusal %q does not name both conflicted target models", text)
+	}
+}
+
 // The same target model with different reasoning tiers is a different profile.
 func TestDispatcher_ProfileTierDivergenceRefusedInEveryOrder(t *testing.T) {
 	respMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{

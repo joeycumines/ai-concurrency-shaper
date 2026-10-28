@@ -383,16 +383,23 @@ func (d *multiTranscodeDispatcher) selectTarget(clientModel string) targetSelect
 // name one dialect and one target model, and the claimants that decide them
 // must agree on the reasoning tier. Claimants that carry no explicit dialect
 // fall back to identity resolution and never conflict with a decision. A raw
-// model name is undecidable when its explicit dialects conflict. Every refusal
-// names the sorted disagreement, so it is identical in every registration
-// order.
+// model name is undecidable when its explicit dialects conflict. Every
+// undecidable target model found across the claimants is collected before the
+// refusal is rendered, and the message names them all in sorted order, so it
+// is identical in every registration order.
 func (d *multiTranscodeDispatcher) routeConflict(clientModel string) (string, bool) {
 	type decision struct {
 		dialect transcode.NativeProtocol
 		model   string
 		tier    string
 	}
-	var decisions []decision
+	var (
+		decisions []decision
+		// doublyMapped holds each profile target model whose explicit
+		// dialects conflict, in first-seen order; the refusal renders them
+		// sorted, so collection order cannot leak.
+		doublyMapped []string
+	)
 	claimed := false
 	for i := range d.targets {
 		model, tier, ok := d.targets[i].profileMap.ResolveProfile(clientModel)
@@ -402,14 +409,32 @@ func (d *multiTranscodeDispatcher) routeConflict(clientModel string) (string, bo
 		claimed = true
 		dialects := d.explicitDialects(model)
 		if len(dialects) > 1 {
-			return fmt.Sprintf(
-				"%q is a -transcode-profile whose target model %q is mapped to conflicting dialects (%s) by the mappings on %s, so no transcode mapping on this route can serve it",
-				clientModel, model, joinDialects(dialects), d.routeKey.Path,
-			), false
+			if !slices.Contains(doublyMapped, model) {
+				doublyMapped = append(doublyMapped, model)
+			}
+			continue
 		}
 		for _, dialect := range dialects {
 			decisions = append(decisions, decision{dialect: dialect, model: model, tier: tier})
 		}
+	}
+	if claimed && len(doublyMapped) > 0 {
+		slices.Sort(doublyMapped)
+		if len(doublyMapped) == 1 {
+			model := doublyMapped[0]
+			return fmt.Sprintf(
+				"%q is a -transcode-profile whose target model %q is mapped to conflicting dialects (%s) by the mappings on %s, so no transcode mapping on this route can serve it",
+				clientModel, model, joinDialects(d.explicitDialects(model)), d.routeKey.Path,
+			), false
+		}
+		named := make([]string, 0, len(doublyMapped))
+		for _, model := range doublyMapped {
+			named = append(named, fmt.Sprintf("%q (%s)", model, joinDialects(d.explicitDialects(model))))
+		}
+		return fmt.Sprintf(
+			"%q is a -transcode-profile whose target models %s are mapped to conflicting dialects by the mappings on %s, so no transcode mapping on this route can serve it",
+			clientModel, strings.Join(named, " and "), d.routeKey.Path,
+		), false
 	}
 	if !claimed {
 		if dialects := d.explicitDialects(clientModel); len(dialects) > 1 {
