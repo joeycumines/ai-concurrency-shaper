@@ -17,7 +17,6 @@ package auth
 
 import (
 	"cmp"
-	"errors"
 	"net/url"
 	"slices"
 	"strconv"
@@ -44,16 +43,21 @@ const redactedQueryPlaceholder = "%5BREDACTED%5D"
 //     or Unwrap() []error stays reachable, so errors.Is keeps matching
 //     sentinels such as context errors and joined siblings stay reachable. A
 //     branch that carries no URL is returned as it was.
-//   - Every *url.Error reachable through Unwrap or errors.As is a clone whose
-//     URL is redacted and whose Err is itself sanitized. A bare *url.Error
-//     input yields a *url.Error.
+//   - Every *url.Error reachable through Unwrap is a clone whose URL is
+//     redacted and whose Err is itself sanitized. A bare *url.Error input
+//     yields a *url.Error. A leaf whose own message carries a URL is
+//     replaced by a sanitized leaf: leaving the original reachable would
+//     re-expose the URL through Unwrap().Error(), so its concrete type is
+//     deliberately not preserved.
 //   - A URL that cannot be parsed is still redacted: its whole query and
 //     fragment are replaced, since its credential parameters cannot be told
 //     apart.
 //
-// Scope: a URL exposed only through a custom As method cannot be enumerated,
-// so it is not covered. Wrappers on the path to a URL are rebuilt as generic
-// sanitized wrappers, so their concrete types are not preserved.
+// Scope: the walk is Unwrap only, shared by detection, collection, and
+// rewriting. A URL exposed only through a custom As method cannot be
+// enumerated, so it is not covered and the error is returned unchanged.
+// Wrappers on the path to a URL are rebuilt as generic sanitized wrappers,
+// so their concrete types are not preserved.
 //
 // Errors carrying no *url.Error are returned unchanged.
 func SanitizeURLError(err error) error {
@@ -81,10 +85,24 @@ func SanitizeURLError(err error) error {
 	return sanitizeWith(err, strings.NewReplacer(args...))
 }
 
-// hasURLError reports whether a *url.Error is reachable from err.
+// hasURLError reports whether a *url.Error is reachable from err through
+// the same traversal collectURLs and sanitizeWith walk: direct type
+// assertion, then Unwrap() []error, then Unwrap() error. A URL exposed
+// only through a custom As method is out of scope by construction, so
+// detection and rewriting can never disagree about whether the chain
+// carries something to redact.
 func hasURLError(err error) bool {
-	_, ok := errors.AsType[*url.Error](err)
-	return ok
+	switch w := err.(type) {
+	case *url.Error:
+		return w != nil
+	case interface{ Unwrap() []error }:
+		if slices.ContainsFunc(w.Unwrap(), hasURLError) {
+			return true
+		}
+	case interface{ Unwrap() error }:
+		return hasURLError(w.Unwrap())
+	}
+	return false
 }
 
 // sanitizeWith rebuilds err with r applied to every rendering. A *url.Error
@@ -96,7 +114,7 @@ func sanitizeWith(err error, r *strings.Replacer) error {
 	if err == nil {
 		return nil
 	}
-	if direct, ok := err.(*url.Error); ok {
+	if direct, ok := err.(*url.Error); ok && direct != nil {
 		return cloneURLError(direct, r)
 	}
 	msg := r.Replace(err.Error())
@@ -132,7 +150,7 @@ func collectURLs(err error, pairs map[string]string) {
 	if err == nil {
 		return
 	}
-	if u, ok := err.(*url.Error); ok && u.URL != "" {
+	if u, ok := err.(*url.Error); ok && u != nil && u.URL != "" {
 		if redacted := redactRawURL(u.URL); redacted != u.URL {
 			pairs[u.URL] = redacted
 			pairs[strconv.Quote(u.URL)] = strconv.Quote(redacted)

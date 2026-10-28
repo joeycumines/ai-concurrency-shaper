@@ -108,3 +108,48 @@ func TestSanitizeURLErrorBareInputStaysURLError(t *testing.T) {
 		t.Fatalf("errors.Is(context.Canceled) = false for %v", got)
 	}
 }
+
+// asOnlyWrapper exposes a *url.Error through a custom As method with no
+// Unwrap: it is outside the sanitizer's documented scope (only Unwrap-
+// reachable URLs are scrubbed). The sanitizer must leave such an error
+// completely alone - no rebuild, concrete type intact - because there is
+// nothing on the walkable chain to redact.
+type asOnlyWrapper struct{ inner *url.Error }
+
+func (w *asOnlyWrapper) Error() string { return "as-only: " + w.inner.Error() }
+func (w *asOnlyWrapper) As(target any) bool {
+	if t, ok := target.(**url.Error); ok {
+		*t = w.inner
+		return true
+	}
+	return false
+}
+
+func TestSanitizeURLErrorAsOnlyWrapperReturnedUnchanged(t *testing.T) {
+	w := &asOnlyWrapper{inner: chainURLError()}
+	got := SanitizeURLError(w)
+	if got != error(w) {
+		t.Fatalf("SanitizeURLError returned %T, want the original error unchanged: an As-only URL is out of scope and there is nothing to redact on the Unwrap chain", got)
+	}
+}
+
+// typedNilWrapper exposes a typed-nil *url.Error through Unwrap without
+// rendering it, the way a real wrapper would carry a zero value it never
+// formatted. The walker must tolerate it: no panic, wrapper preserved.
+type typedNilWrapper struct{ inner error }
+
+func (w *typedNilWrapper) Error() string { return "typed-nil carrier" }
+func (w *typedNilWrapper) Unwrap() error { return w.inner }
+
+func TestSanitizeURLErrorTypedNilURLErrorDoesNotPanic(t *testing.T) {
+	w := &typedNilWrapper{inner: (*url.Error)(nil)}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("SanitizeURLError panicked on a typed-nil *url.Error: %v", r)
+		}
+	}()
+	got := SanitizeURLError(w)
+	if !strings.Contains(got.Error(), "typed-nil carrier") {
+		t.Fatalf("sanitized error %q lost the wrapper's text", got.Error())
+	}
+}

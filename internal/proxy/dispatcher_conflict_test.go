@@ -17,6 +17,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -125,9 +126,7 @@ func TestDispatcher_DualConflictedProfileTargetsRefusedIdenticallyInEveryOrder(t
 	// opposite dialect, so both target models are doubly mapped.
 	shared := func(base transcode.ModelMap, extraName string, extra transcode.ModelMapping) transcode.ModelMap {
 		out := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{}}
-		for k, v := range base.Exact {
-			out.Exact[k] = v
-		}
+		maps.Copy(out.Exact, base.Exact)
 		out.Exact[extraName] = extra
 		return out
 	}

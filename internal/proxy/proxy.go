@@ -1572,7 +1572,9 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 			// retry-recorded failure fact.
 			upstreamFailure := result.upstreamFailure || retryRecordedFailure
 			// Phantom penalty: hold the global-limiter slot after an upstream failure
-			// when the circuit breaker is enabled and the penalty is non-zero. If the
+			// when the circuit breaker is enabled. PenaltyDuration is always
+			// positive under the validated options, so no penalty-zero
+			// fall-through exists here.
 			if p.breaker != nil && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 				time.AfterFunc(p.breaker.PenaltyDuration(), release)
 				return
