@@ -2185,6 +2185,11 @@ func (p *Proxy) writeAdmissionFailure(w http.ResponseWriter, ctx context.Context
 	rec.aborted = true
 	fmt.Fprintf(w, ": queue-wait failed: %s\n\n", reason)
 	_ = rec.FlushError()
+	// Record the admission failure in the journal the way a committed
+	// upstream failure status is recorded: the client saw the committed 200
+	// and the failed close, but the journal must carry the reason (504
+	// timeout, 503 cancel) rather than a status no exchange ever observed.
+	rec.recordCommittedFailure(status)
 }
 
 // bodyBlocksStreamCommit reports whether a request body forbids the early
@@ -2262,7 +2267,16 @@ func bodyBlocksStreamCommit(w http.ResponseWriter, r *http.Request, probeContext
 func (p *Proxy) startQueueComments(rec *statusRecorder) func() {
 	rec.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	rec.Header().Set("Cache-Control", "no-cache")
+	// The commit's own 200 is the streaming representation, not an observed
+	// upstream status: it is written while the request is still waiting for
+	// admission, before the queue phase even begins. commitSSE marks it so
+	// WriteHeader skips the journal stamp (see its commentsCommitted branch),
+	// and an exchange that ends without a later real status - an expired
+	// queue wait, or a client abort before the handler wrote anything -
+	// never journals headers that precede QueueStart.
+	rec.commitSSE = true
 	rec.WriteHeader(http.StatusOK)
+	rec.commitSSE = false
 	rec.commentsCommitted = true
 	start := time.Now()
 	fmt.Fprintf(rec, ": queue-wait elapsed=0\n\n")
@@ -3196,6 +3210,14 @@ type statusRecorder struct {
 	// error frames, never as HTTP error statuses.
 	commentsCommitted      bool
 	upstreamStatusOverride int
+	// commitSSE marks the WriteHeader call that IS the queue-comment commit
+	// (the representation's own 200, written before admission and before the
+	// queue phase begins). WriteHeader skips the journal stamp for it: it is
+	// not an observed upstream status, and stamping it would journal headers
+	// that precede QueueStart on exchanges that end without a later real
+	// status. The commit still sets terminalWritten, so the client-visible
+	// committed-200 semantics are unchanged.
+	commitSSE bool
 	// committedOKObserved records a 2xx written after the queue-comment
 	// commit. committedResponseStatus retains the actual upstream status
 	// while the client-visible status remains the already-committed 200.
@@ -3403,11 +3425,31 @@ func (r *statusRecorder) WriteHeader(code int) {
 	// mutate the journal entry — the client already received the first
 	// status code. Informational 1xx responses are still allowed to
 	// update the state until a terminal status locks it.
+	// Ignore duplicate terminal statuses in the journal, matching net/http
+	// behavior. Once a terminal status (>=200) is locked, subsequent
+	// terminal WriteHeader calls are forwarded to the underlying writer
+	// (to trigger the stdlib's dup-WriteHeader warning) but must not
+	// mutate the journal entry — the client already received the first
+	// status code. Informational 1xx responses are still allowed to
+	// update the state until a terminal status locks it.
 	if code >= 200 && r.terminalWritten {
 		r.ResponseWriter.WriteHeader(code)
 		return
 	}
-
+	if r.commitSSE {
+		// The queue-comment commit's own 200: written before admission,
+		// before the queue phase begins. It sets terminalWritten so the
+		// committed-stream guards hold, but stamps nothing: it is the
+		// streaming representation, not an observed upstream status, and
+		// stamping it would journal ResponseHeaders before QueueStart on
+		// exchanges that end without a later real status (an expired queue
+		// wait, or a client abort before the handler wrote anything).
+		r.ResponseWriter.WriteHeader(code)
+		if code >= 200 {
+			r.terminalWritten = true
+		}
+		return
+	}
 	r.status = code
 	now := time.Now()
 	r.responseAt = now
