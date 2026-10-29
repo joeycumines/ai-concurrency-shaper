@@ -49,6 +49,11 @@ const redactedQueryPlaceholder = "%5BREDACTED%5D"
 //     replaced by a sanitized leaf: leaving the original reachable would
 //     re-expose the URL through Unwrap().Error(), so its concrete type is
 //     deliberately not preserved.
+//   - A typed-nil *url.Error anywhere in the chain is a leaf with nothing
+//     to redact; it is kept as it is and never rendered or unwrapped. An
+//     error whose own rendering panics (for example errors.Join over a
+//     typed-nil *url.Error) panics when logged anyway, and stays out of
+//     scope.
 //   - A URL that cannot be parsed is still redacted: its whole query and
 //     fragment are replaced, since its credential parameters cannot be told
 //     apart.
@@ -114,7 +119,11 @@ func sanitizeWith(err error, r *strings.Replacer) error {
 	if err == nil {
 		return nil
 	}
-	if direct, ok := err.(*url.Error); ok && direct != nil {
+	if direct, ok := err.(*url.Error); ok {
+		if direct == nil {
+			// A typed-nil carries no URL, and rendering it would panic.
+			return err
+		}
 		return cloneURLError(direct, r)
 	}
 	msg := r.Replace(err.Error())
@@ -150,10 +159,16 @@ func collectURLs(err error, pairs map[string]string) {
 	if err == nil {
 		return
 	}
-	if u, ok := err.(*url.Error); ok && u != nil && u.URL != "" {
-		if redacted := redactRawURL(u.URL); redacted != u.URL {
-			pairs[u.URL] = redacted
-			pairs[strconv.Quote(u.URL)] = strconv.Quote(redacted)
+	if u, ok := err.(*url.Error); ok {
+		if u == nil {
+			// A typed-nil is a leaf: its Unwrap would dereference it.
+			return
+		}
+		if u.URL != "" {
+			if redacted := redactRawURL(u.URL); redacted != u.URL {
+				pairs[u.URL] = redacted
+				pairs[strconv.Quote(u.URL)] = strconv.Quote(redacted)
+			}
 		}
 	}
 	switch w := err.(type) {

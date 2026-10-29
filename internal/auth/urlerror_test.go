@@ -153,3 +153,50 @@ func TestSanitizeURLErrorTypedNilURLErrorDoesNotPanic(t *testing.T) {
 		t.Fatalf("sanitized error %q lost the wrapper's text", got.Error())
 	}
 }
+
+// selectiveJoin joins children but renders only the first, so a typed-nil
+// child beside it never reaches its own (panicking) Error method.
+type selectiveJoin struct{ children []error }
+
+func (j *selectiveJoin) Error() string   { return j.children[0].Error() }
+func (j *selectiveJoin) Unwrap() []error { return j.children }
+
+// A typed-nil *url.Error beside or below a real one must not panic any
+// walker once the real URL makes the chain eligible for rewriting: the
+// typed-nil is a leaf with nothing to redact, and every real URL is still
+// redacted. Each chain renders without panicking before sanitization.
+func TestSanitizeURLErrorTypedNilBesideRealURLError(t *testing.T) {
+	for name, build := range map[string]func() error{
+		"joined sibling behind a wrapper": func() error {
+			return errors.Join(chainURLError(), &typedNilWrapper{inner: (*url.Error)(nil)})
+		},
+		"Err of a real url.Error behind a wrapper": func() error {
+			u := chainURLError()
+			u.Err = &typedNilWrapper{inner: (*url.Error)(nil)}
+			return u
+		},
+		"direct child of a selective join": func() error {
+			return &selectiveJoin{children: []error{chainURLError(), (*url.Error)(nil)}}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			in := build()
+			_ = in.Error() // the original renders safely
+			var got error
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("SanitizeURLError panicked: %v", r)
+					}
+				}()
+				got = SanitizeURLError(in)
+			}()
+			requireChainRedacted(t, got)
+			if strings.Contains(name, "wrapper") {
+				if _, ok := errors.AsType[*typedNilWrapper](got); !ok {
+					t.Fatalf("the typed-nil carrier is no longer reachable: %v", got)
+				}
+			}
+		})
+	}
+}
