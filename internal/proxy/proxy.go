@@ -3293,9 +3293,9 @@ func (r *statusRecorder) recoverLocalPanic() {
 // recordCommittedFailure records the failure status of a stream whose 200 the
 // queue comments already committed: the client cannot see it, but
 // classification and the journal entry read it, exactly as they read a
-// committed upstream failure status from WriteHeader. Callers write any
-// failed-close comment first, since Write swallows bytes once an override is
-// recorded.
+// committed upstream failure status from WriteHeader, including the
+// committed headers the client received. Callers write any failed-close
+// comment first, since Write swallows bytes once an override is recorded.
 func (r *statusRecorder) recordCommittedFailure(code int) {
 	r.aborted = true
 	r.upstreamStatusOverride = code
@@ -3303,7 +3303,9 @@ func (r *statusRecorder) recordCommittedFailure(code int) {
 	r.responseAt = now
 	if r.entry != nil {
 		r.entry.StatusCode = code
+		r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
 		r.entry.Timing.ResponseHeaders = now
+		r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
 	}
 }
 
@@ -3427,13 +3429,6 @@ func (r *statusRecorder) WriteHeader(code int) {
 	// mutate the journal entry — the client already received the first
 	// status code. Informational 1xx responses are still allowed to
 	// update the state until a terminal status locks it.
-	// Ignore duplicate terminal statuses in the journal, matching net/http
-	// behavior. Once a terminal status (>=200) is locked, subsequent
-	// terminal WriteHeader calls are forwarded to the underlying writer
-	// (to trigger the stdlib's dup-WriteHeader warning) but must not
-	// mutate the journal entry — the client already received the first
-	// status code. Informational 1xx responses are still allowed to
-	// update the state until a terminal status locks it.
 	if code >= 200 && r.terminalWritten {
 		r.ResponseWriter.WriteHeader(code)
 		return
@@ -3445,7 +3440,11 @@ func (r *statusRecorder) WriteHeader(code int) {
 		// streaming representation, not an observed upstream status, and
 		// stamping it would journal ResponseHeaders before QueueStart on
 		// exchanges that end without a later real status (an expired queue
-		// wait, or a client abort before the handler wrote anything).
+		// wait, or a client abort before the handler wrote anything). It
+		// is still the status the client received, so status keeps it:
+		// the status buckets and request log count the client-visible
+		// status, while classification reads observedStatus.
+		r.status = code
 		r.ResponseWriter.WriteHeader(code)
 		if code >= 200 {
 			r.terminalWritten = true

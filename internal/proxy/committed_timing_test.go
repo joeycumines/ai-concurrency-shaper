@@ -16,6 +16,7 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -109,18 +110,50 @@ func (f *committedStreamFixture) holdSlot(t *testing.T, met *metrics.Collector) 
 	})
 }
 
-// waitJournalEntry polls the journal until it holds at least want entries.
-func waitJournalEntry(t *testing.T, j *journal.Journal) *journal.Entry {
+// queuedStreamEntry polls the journal for the entry of the queued streaming
+// request (the only request sent with Accept: text/event-stream), so the
+// selection never depends on which request journalled first.
+func queuedStreamEntry(t *testing.T, j *journal.Journal) *journal.Entry {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if entries := j.Entries(); len(entries) > 0 {
-			return entries[0]
+		for _, e := range j.Entries() {
+			if e.RequestHeaders.Get("Accept") == "text/event-stream" {
+				return e
+			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("no journal entry")
+			t.Fatal("no journal entry for the queued streaming request")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// requireCommittedJournalHeaders asserts the entry carries the committed SSE
+// representation's headers: the client received them, so the journal must too.
+func requireCommittedJournalHeaders(t *testing.T, entry *journal.Entry) {
+	t.Helper()
+	if got := entry.ResponseHeaders.Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Fatalf("journal ResponseHeaders Content-Type = %q, want the committed text/event-stream", got)
+	}
+	if !strings.HasPrefix(entry.ContentType, "text/event-stream") {
+		t.Fatalf("journal ContentType = %q, want the committed text/event-stream", entry.ContentType)
+	}
+}
+
+// requireCommittedStatusCounted asserts the exchange was counted under the
+// status the client received, the committed 200: status buckets and the
+// request log count the client-visible status, never 0.
+func requireCommittedStatusCounted(t *testing.T, met *metrics.Collector) {
+	t.Helper()
+	snap := met.Snapshot()
+	for _, e := range snap.LogEntries {
+		if e.Status == 0 {
+			t.Fatalf("request log holds status 0 (%+v): a committed exchange must log the client-visible 200", e)
+		}
+	}
+	if snap.StatusCounts[2] == 0 {
+		t.Fatalf("2xx bucket = 0 (buckets %v): the committed 200 was not counted", snap.StatusCounts)
 	}
 }
 
@@ -142,17 +175,9 @@ func TestProxy_CommittedStreamQueueTimeoutJournalsQueuePhase(t *testing.T) {
 		t.Fatalf("body = %q, want the failed-close comment", body)
 	}
 
-	entry := waitJournalEntry(t, f.journal)
-	// The slot-holding first request journals first; select the queued
-	// request's entry by ID.
-	entries := f.journal.Entries()
-	for _, e := range entries {
-		if e.ID > entry.ID {
-			entry = e
-		}
-	}
+	entry := queuedStreamEntry(t, f.journal)
 	if entry.StatusCode != http.StatusGatewayTimeout {
-		t.Fatalf("queued request StatusCode = %d, want the 504 the failed close recorded (entries: %d)", entry.StatusCode, len(entries))
+		t.Fatalf("queued request StatusCode = %d, want the 504 the failed close recorded", entry.StatusCode)
 	}
 	if entry.Timing.QueueStart.IsZero() {
 		t.Fatal("QueueStart unset")
@@ -167,9 +192,47 @@ func TestProxy_CommittedStreamQueueTimeoutJournalsQueuePhase(t *testing.T) {
 		t.Fatalf("ResponseHeaders %v precedes QueueStart %v: the commit's headers were journalled before the queue phase began",
 			entry.Timing.ResponseHeaders, entry.Timing.QueueStart)
 	}
-	if entry.StatusCode != http.StatusGatewayTimeout {
-		t.Fatalf("StatusCode = %d, want the 504 the failed close recorded", entry.StatusCode)
+	requireCommittedJournalHeaders(t, entry)
+	requireCommittedStatusCounted(t, f.p.Metrics())
+}
+
+// A committed stream whose client leaves during the queue wait journals the
+// cancel's own 503 with queue-phase timing and the committed headers, and is
+// still counted under the client-visible 200.
+func TestProxy_CommittedStreamQueueCancelJournalsQueuePhase(t *testing.T) {
+	f := newCommittedStreamFixture(t, 10*time.Second)
+	f.holdSlot(t, f.p.Metrics())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	rec := httptest.NewRecorder()
+	go func() {
+		defer close(done)
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/messages", nil)
+		req.Header.Set("Accept", "text/event-stream")
+		f.p.ServeHTTP(rec, req)
+	}()
+	waitSnapshot(t, f.p.Metrics(), func(s metrics.Snapshot) bool { return s.Queued == 1 })
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+
+	if body := rec.Body.String(); !strings.Contains(body, "queue-wait failed: canceled") {
+		t.Fatalf("body = %q, want the failed-close comment", body)
 	}
+	entry := queuedStreamEntry(t, f.journal)
+	if entry.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("StatusCode = %d, want the 503 the cancel recorded", entry.StatusCode)
+	}
+	if entry.Timing.QueueEnd.IsZero() || entry.Timing.QueueDuration() <= 0 {
+		t.Fatalf("queue phase not journalled: QueueStart %v QueueEnd %v", entry.Timing.QueueStart, entry.Timing.QueueEnd)
+	}
+	if entry.Timing.ResponseHeaders.Before(entry.Timing.QueueStart) {
+		t.Fatalf("ResponseHeaders %v precedes QueueStart %v", entry.Timing.ResponseHeaders, entry.Timing.QueueStart)
+	}
+	requireCommittedJournalHeaders(t, entry)
+	requireCommittedStatusCounted(t, f.p.Metrics())
 }
 
 // A committed stream whose exchange completes normally keeps today's journal
@@ -194,24 +257,7 @@ func TestProxy_CommittedStreamNormalExchangeJournalsUpstreamStatus(t *testing.T)
 		t.Fatalf("status = %d, want 200 (body %q)", code, rec.Body.String())
 	}
 
-	entries := f.journal.Entries()
-	deadline := time.Now().Add(2 * time.Second)
-	for len(entries) < 2 {
-		if time.Now().After(deadline) {
-			t.Fatalf("expected two journal entries, got %d", len(entries))
-		}
-		time.Sleep(5 * time.Millisecond)
-		entries = f.journal.Entries()
-	}
-	entry := entries[len(entries)-1]
-	if entries[0].ID > entry.ID {
-		entry = entries[0]
-	}
-	for _, e := range entries {
-		if e.ID > entry.ID {
-			entry = e
-		}
-	}
+	entry := queuedStreamEntry(t, f.journal)
 	if entry.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want the upstream 200", entry.StatusCode)
 	}
@@ -221,4 +267,5 @@ func TestProxy_CommittedStreamNormalExchangeJournalsUpstreamStatus(t *testing.T)
 	if !entry.Timing.QueueEnd.IsZero() && entry.Timing.ResponseHeaders.Before(entry.Timing.QueueEnd) {
 		t.Fatalf("ResponseHeaders %v precedes QueueEnd %v", entry.Timing.ResponseHeaders, entry.Timing.QueueEnd)
 	}
+	requireCommittedStatusCounted(t, f.p.Metrics())
 }
