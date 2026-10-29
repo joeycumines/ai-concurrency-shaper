@@ -369,6 +369,29 @@ func TestBodyBlocksStreamCommitPreservesReadError(t *testing.T) {
 	}
 }
 
+func TestBodyBlocksStreamCommitInspectsBodyOfUnknownLength(t *testing.T) {
+	for _, tc := range []struct {
+		body  string
+		block bool
+	}{
+		{`{"model":"m","stream":true}`, false},
+		{`{"model":"m"}`, false},
+		{`{"model":"m","stream":false}`, true},
+		{`{"model":`, true},
+		{`{"padding":"` + strings.Repeat("x", 10<<20) + `","stream":true}`, true},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		req.ContentLength = -1
+		req.Body = io.NopCloser(strings.NewReader(tc.body))
+		if got := bodyBlocksStreamCommit(httptest.NewRecorder(), req, req.Context()); got != tc.block {
+			t.Errorf("bodyBlocksStreamCommit(%.40q) = %v, want %v", tc.body, got, tc.block)
+		}
+		if replayed, err := io.ReadAll(req.Body); err != nil || string(replayed) != tc.body {
+			t.Errorf("replayed body of %d bytes (err %v), want the original %d bytes", len(replayed), err, len(tc.body))
+		}
+	}
+}
+
 func TestProxy_QueueCommentsDoNotCommitForLargeExplicitNonStreamingBody(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

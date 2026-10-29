@@ -2198,7 +2198,9 @@ func (p *Proxy) writeAdmissionFailure(w http.ResponseWriter, ctx context.Context
 // queue-comment SSE commit. An explicit body "stream": false takes precedence
 // over the client's Accept header, so it must not be locked into the streaming
 // representation; neither may a body whose intent cannot be determined (too
-// large to inspect, of unknown length, unreadable, or not JSON).
+// large to inspect, unreadable, or not JSON). A body of unknown length
+// (chunked, or HTTP/2 without Content-Length) is inspected like any other:
+// the bounded read decides whether it fits.
 //
 // The inspection is bounded and ends with probeContext. The consumed bytes are
 // always replayed to the handler, followed by the original read error if the
@@ -2214,7 +2216,7 @@ func bodyBlocksStreamCommit(w http.ResponseWriter, r *http.Request, probeContext
 		return false
 	}
 	const limit = int64(10 << 20)
-	if r.ContentLength < 0 || r.ContentLength > limit {
+	if r.ContentLength > limit {
 		return true
 	}
 	origBody := r.Body
@@ -3299,6 +3301,13 @@ func (r *statusRecorder) recoverLocalPanic() {
 func (r *statusRecorder) recordCommittedFailure(code int) {
 	r.aborted = true
 	r.upstreamStatusOverride = code
+	r.stampCommittedStatus(code)
+}
+
+// stampCommittedStatus records code, observed after the queue-comment commit,
+// as the exchange's response in the journal entry, with the committed
+// headers the client received and the time it was observed.
+func (r *statusRecorder) stampCommittedStatus(code int) {
 	now := time.Now()
 	r.responseAt = now
 	if r.entry != nil {
@@ -3389,14 +3398,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 			// ignores a second WriteHeader on an uncommitted exchange.
 			r.committedOKObserved = true
 			r.committedResponseStatus = code
-			now := time.Now()
-			r.responseAt = now
-			if r.entry != nil {
-				r.entry.StatusCode = code
-				r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
-				r.entry.Timing.ResponseHeaders = now
-				r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
-			}
+			r.stampCommittedStatus(code)
 		}
 		if code >= 300 {
 			// The first post-commit status is the one the exchange observed. A
@@ -3406,14 +3408,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 			r.aborted = true
 			if r.upstreamStatusOverride == 0 && !r.committedOKObserved {
 				r.upstreamStatusOverride = code
-				now := time.Now()
-				r.responseAt = now
-				if r.entry != nil {
-					r.entry.StatusCode = code
-					r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
-					r.entry.Timing.ResponseHeaders = now
-					r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
-				}
+				r.stampCommittedStatus(code)
 				if !r.transcodeStream && !r.dialectErrorFramed {
 					fmt.Fprintf(r.ResponseWriter, ": queue-wait failed: upstream\n\n")
 					_ = r.FlushError()

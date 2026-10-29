@@ -85,7 +85,20 @@ func copyWithoutVacuousBounds(decoder *json.Decoder, out *bytes.Buffer, changed 
 					first = false
 					writeJSONString(out, key)
 					out.WriteByte(':')
-					out.Write(bytes.TrimSpace(member))
+					member = bytes.TrimSpace(member)
+					if len(member) > 0 && (member[0] == '{' || member[0] == '[') {
+						// Not a bound: a container under a bound keyword's
+						// name is a sub-schema (a property or definition
+						// named "maximum", say), so its own bounds are
+						// rewritten too.
+						nested := json.NewDecoder(bytes.NewReader(member))
+						nested.UseNumber()
+						if err := copyWithoutVacuousBounds(nested, out, changed); err != nil {
+							return err
+						}
+						continue
+					}
+					out.Write(member)
 					continue
 				}
 				if !first {
@@ -138,10 +151,17 @@ func copyWithoutVacuousBounds(decoder *json.Decoder, out *bytes.Buffer, changed 
 // isVacuousBound reports whether a bound keyword's raw value is a number at or
 // beyond ±math.MaxFloat64.
 func isVacuousBound(member json.RawMessage) bool {
-	var number json.Number
+	// Read one token rather than decoding into json.Number: that decode also
+	// accepts a quoted numeric string ("1e400"), which is not a bound and
+	// must be kept.
 	decoder := json.NewDecoder(bytes.NewReader(member))
 	decoder.UseNumber()
-	if err := decoder.Decode(&number); err != nil {
+	token, err := decoder.Token()
+	if err != nil {
+		return false
+	}
+	number, ok := token.(json.Number)
+	if !ok {
 		return false
 	}
 	parsed, err := strconv.ParseFloat(number.String(), 64)

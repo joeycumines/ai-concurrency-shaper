@@ -36,10 +36,18 @@ type DynamicSecretSource interface {
 
 	// Invalidate reports that rejected, a value previously returned by
 	// Secret, was refused by the upstream. When rejected is still the
-	// current value the next Secret call re-acquires the credential,
-	// subject to the source's own rate limit; a stale rejection (the value
-	// has already been replaced) is ignored.
+	// current value a refresh starts, subject to the source's own rate
+	// limit; a stale rejection (the value has already been replaced) is
+	// ignored. It never blocks. Whether other callers of Secret wait for
+	// that refresh is the source's policy.
 	Invalidate(rejected string)
+
+	// Reacquire returns the credential to retry a request refused with
+	// rejected. While rejected is still the current value and a refresh is
+	// in flight, it waits for that refresh; otherwise it returns the
+	// current value immediately, which equals rejected when no replacement
+	// is available (rate-limited or failed refresh).
+	Reacquire(ctx context.Context, rejected string) (string, error)
 }
 
 const (
@@ -56,7 +64,13 @@ const (
 	execBackoffMax = time.Minute
 	// execInvalidateInterval is the minimum spacing between forced
 	// refreshes, so a burst of upstream 401s cannot fork a process each.
-	execInvalidateInterval = 5 * time.Second
+	// While every replacement a forced refresh produces is refused in turn
+	// (the upstream is refusing for a reason other than the credential,
+	// such as a 403 for a model the account is not entitled to), the
+	// spacing doubles per refusal up to execInvalidateIntervalMax, and
+	// returns to the minimum after the next scheduled refresh.
+	execInvalidateInterval    = 5 * time.Second
+	execInvalidateIntervalMax = 5 * time.Minute
 	// execWaitDelay bounds how long the output pipe may stay open after the
 	// command exits or is killed (a backgrounded grandchild holding stdout).
 	execWaitDelay = time.Second
@@ -73,10 +87,18 @@ const (
 // Refreshes are request-driven: inside the refresh-ahead window a caller
 // triggers a background refresh and is served the still-valid value, so a
 // steadily used source never blocks on the command. A caller only waits when
-// the value has expired or was invalidated. No timer runs while the proxy is
-// idle, so the command is never executed unless a request needs it. All
-// callers share one in-flight run, and a failed refresh keeps serving the
-// previous value while retrying with bounded exponential backoff.
+// the value has expired, or after an upstream rejection until a refresh
+// replaces the refused value: it is presumed revoked, so every caller waits
+// for its replacement, and a refresh that fails or is held back by the
+// failure backoff is retried by the next caller once the backoff allows.
+// When the replacement a forced refresh produced is refused too, the
+// upstream is evidently refusing for a reason other than the credential:
+// further forced refreshes back off and run in the background, with only
+// the refused request waiting (see Reacquire), until the next scheduled
+// refresh. No timer runs while the proxy is idle, so the command is never
+// executed unless a request needs it. All callers share one in-flight run,
+// and a failed refresh keeps serving the previous value while retrying with
+// bounded exponential backoff.
 type ExecSecretSource struct {
 	argv    []string
 	ttl     time.Duration
@@ -91,10 +113,17 @@ type ExecSecretSource struct {
 	// refreshAt is when a background refresh starts.
 	expires   time.Time
 	refreshAt time.Time
-	// forced marks value as rejected upstream: the next caller waits for a
-	// refresh. lastForced rate-limits how often that can happen.
-	forced     bool
-	lastForced time.Time
+	// lastForced and forcedSpacing rate-limit forced refreshes;
+	// forcedValue is the value the last forced refresh produced ("" once a
+	// scheduled refresh has replaced it), so a refusal of that value backs
+	// the spacing off.
+	lastForced    time.Time
+	forcedSpacing time.Duration
+	forcedValue   string
+	// refused is a value the upstream refused that no successful refresh
+	// has replaced yet; while it is the current value, Secret callers wait
+	// for (or start) a forced refresh instead of being served it.
+	refused string
 	// retryAt gates new runs after a failure; failures sizes the backoff.
 	retryAt  time.Time
 	failures int
@@ -103,7 +132,11 @@ type ExecSecretSource struct {
 }
 
 // execRun is one in-flight command execution shared by every waiter.
-type execRun struct{ done chan struct{} }
+type execRun struct {
+	done chan struct{}
+	// forced marks a run started or joined because of an upstream refusal.
+	forced bool
+}
 
 // NewExecSecretSource validates the command and durations and returns a
 // source that has not run yet: the first Secret call executes the command.
@@ -140,18 +173,20 @@ func NewExecSecretSource(argv []string, ttl, timeout time.Duration) (*ExecSecret
 func (s *ExecSecretSource) Secret(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	now := s.now()
-	if s.value != "" && !s.forced && now.Before(s.expires) {
+	refused := s.value != "" && s.value == s.refused
+	if s.value != "" && now.Before(s.expires) && !refused {
 		if !now.Before(s.refreshAt) {
-			s.startLocked(now)
+			s.startLocked(now, false)
 		}
 		value := s.value
 		s.mu.Unlock()
 		return value, nil
 	}
-	run := s.startLocked(now)
+	run := s.startLocked(now, refused)
 	if run == nil {
 		// Backing off after a failure: serve the previous value when there
-		// is one (a stale credential surfaces as an upstream 401).
+		// is one (a stale or refused credential surfaces as an upstream
+		// 401, and the next caller after the backoff retries).
 		value, err := s.value, s.lastErr
 		s.mu.Unlock()
 		if value != "" {
@@ -179,29 +214,78 @@ func (s *ExecSecretSource) Secret(ctx context.Context) (string, error) {
 func (s *ExecSecretSource) Invalidate(rejected string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if rejected == "" || rejected != s.value || s.forced {
+	if rejected == "" || rejected != s.value || rejected == s.refused {
 		return
+	}
+	// A refused replacement from a forced refresh means the upstream is
+	// refusing for a reason other than the credential.
+	repeat := rejected == s.forcedValue
+	spacing := execInvalidateInterval
+	if repeat {
+		spacing = min(2*max(s.forcedSpacing, execInvalidateInterval), execInvalidateIntervalMax)
 	}
 	now := s.now()
-	if !s.lastForced.IsZero() && now.Sub(s.lastForced) < execInvalidateInterval {
+	if !s.lastForced.IsZero() && now.Sub(s.lastForced) < spacing {
 		return
 	}
-	s.forced = true
-	s.lastForced = now
+	if !repeat {
+		// Presumed revoked: Secret withholds it until it is replaced, even
+		// if the run below is held back by the failure backoff or fails.
+		s.refused = rejected
+		s.lastForced = now
+		s.forcedSpacing = spacing
+	}
+	// A refresh already running (refresh-ahead) is joined and counted as
+	// forced, so a refusal of its result continues the backoff chain.
+	if s.startLocked(now, true) != nil && repeat {
+		s.lastForced = now
+		s.forcedSpacing = spacing
+	}
+}
+
+// Reacquire implements DynamicSecretSource.
+func (s *ExecSecretSource) Reacquire(ctx context.Context, rejected string) (string, error) {
+	s.mu.Lock()
+	run := s.inflight
+	if run == nil || rejected != s.value {
+		value, err := s.value, s.lastErr
+		s.mu.Unlock()
+		if value == "" {
+			return "", err
+		}
+		return value, nil
+	}
+	s.mu.Unlock()
+
+	select {
+	case <-run.done:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.value != "" {
+		return s.value, nil
+	}
+	return "", s.lastErr
 }
 
 // startLocked joins the in-flight run or starts one, returning nil while a
 // failure backoff is in effect. The run uses its own timeout, never a
 // caller's context: one caller giving up must not abort a refresh others
 // are waiting on.
-func (s *ExecSecretSource) startLocked(now time.Time) *execRun {
+func (s *ExecSecretSource) startLocked(now time.Time, forced bool) *execRun {
 	if s.inflight != nil {
+		if forced {
+			s.inflight.forced = true
+		}
 		return s.inflight
 	}
 	if now.Before(s.retryAt) {
 		return nil
 	}
-	run := &execRun{done: make(chan struct{})}
+	run := &execRun{done: make(chan struct{}), forced: forced}
 	s.inflight = run
 	go s.refresh(run)
 	return run
@@ -213,7 +297,6 @@ func (s *ExecSecretSource) refresh(run *execRun) {
 
 	s.mu.Lock()
 	s.inflight = nil
-	s.forced = false
 	if err != nil {
 		s.failures++
 		s.lastErr = err
@@ -224,6 +307,16 @@ func (s *ExecSecretSource) refresh(run *execRun) {
 	} else {
 		ahead := min(s.ttl/5, execRefreshAheadCap)
 		s.value = value
+		// Any successful run ends the refusal, even one that returned the
+		// same value: a refusal of it again is then a repeat, which backs
+		// off, rather than a standing refusal that would rerun the command
+		// for every caller.
+		s.refused = ""
+		if run.forced {
+			s.forcedValue = value
+		} else {
+			s.forcedValue = ""
+		}
 		s.expires = started.Add(s.ttl)
 		s.refreshAt = s.expires.Add(-ahead)
 		s.failures = 0

@@ -69,7 +69,9 @@ func (t *reauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if !replayable {
 		return resp, nil
 	}
-	fresh, serr := reauth.Source.Secret(req.Context())
+	// Only this refused request waits for the replacement; whether other
+	// callers wait as well is the source's policy.
+	fresh, serr := reauth.Source.Reacquire(req.Context(), used)
 	fresh = strings.TrimSpace(fresh)
 	if serr != nil || fresh == "" || fresh == used {
 		// No different credential to try (the refresh is rate-limited,

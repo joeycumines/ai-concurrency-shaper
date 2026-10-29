@@ -557,18 +557,26 @@ func (c *Config) Close() {
 	c.Server.rcServerConfig = nil
 	for _, p := range c.Providers {
 		p.closeRCDialer()
-		if p.derivedName != "" && p.Name == p.derivedName {
-			p.Name = ""
-		}
-		p.derivedName = ""
 		// The channel credential belongs to the dialer: a failed resolve
 		// may not have reached this provider's reset, and must not leave the
-		// earlier secret attached to it. So do values derived from a former
-		// sesame endpoint: a failed resolve that never reached resolveRC
-		// must not leave them behind on the provider.
+		// earlier secret attached to it. So do the derived name and values
+		// derived from a former sesame endpoint: a failed resolve that never
+		// reached resolveRC must not leave them behind on the provider.
 		p.rcToken = ""
-		p.resetDerivedSesameState()
+		p.resetDerivedResolveState()
 	}
+}
+
+// resetDerivedResolveState clears the provider state a previous resolve
+// derived rather than read from input: a name derived from the upstream host
+// (unless the caller has since assigned a different one) and the values
+// derived from -sesame-endpoint.
+func (p *Provider) resetDerivedResolveState() {
+	if p.derivedName != "" && p.Name == p.derivedName {
+		p.Name = ""
+	}
+	p.derivedName = ""
+	p.resetDerivedSesameState()
 }
 
 func (c *Config) resolveAndValidate() error {
@@ -584,11 +592,7 @@ func (c *Config) resolveAndValidate() error {
 	// Values derived from -sesame-endpoint are likewise reset before any
 	// check can fail.
 	for _, p := range c.Providers {
-		if p.derivedName != "" && p.Name == p.derivedName {
-			p.Name = ""
-		}
-		p.derivedName = ""
-		p.resetDerivedSesameState()
+		p.resetDerivedResolveState()
 	}
 
 	for i, p := range c.Providers {
