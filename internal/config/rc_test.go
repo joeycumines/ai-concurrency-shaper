@@ -794,3 +794,38 @@ func TestResolveAndValidate_TerminateTLSPlaintextUpstream(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveAndValidate_RCTargetOffersOnlyHTTP11 pins that a target ALPN
+// offer other than http/1.1, in the list or in a client-hello extension, is
+// refused at resolve time with an error naming the flag.
+func TestResolveAndValidate_RCTargetOffersOnlyHTTP11(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		flag string
+	}{
+		{"alpn h3", []string{"-rc-target-alpn", "h3"}, "-rc-target-alpn"},
+		{"alpn foo", []string{"-rc-target-alpn", "foo"}, "-rc-target-alpn"},
+		{"client-hello h2", []string{"-rc-target-client-hello", `{"extensions":[{"type":16,"raw":"AAMCaDI="}]}`}, "-rc-target-client-hello"},
+		{"client-hello malformed", []string{"-rc-target-client-hello", `{"extensions":[{"type":16,"raw":"AAE="}]}`}, "-rc-target-client-hello"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse(append([]string{
+				"-upstream=https://api.example.com",
+				"-rc-server", "127.0.0.1:9090",
+				"-rc-terminate-tls",
+			}, tc.args...))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			err = cfg.ResolveAndValidate()
+			if err == nil {
+				closeDialer(t, cfg.Providers[0])
+				t.Fatal("ResolveAndValidate = nil, want a rejection")
+			}
+			if !strings.Contains(err.Error(), tc.flag) || !strings.Contains(err.Error(), "http/1.1") {
+				t.Fatalf("error = %v, want it to name %s and http/1.1", err, tc.flag)
+			}
+		})
+	}
+}

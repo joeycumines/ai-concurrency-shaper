@@ -17,7 +17,6 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -124,20 +123,6 @@ func dispatcherPost(t *testing.T, p *Proxy, body string) *httptest.ResponseRecor
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 	return rec
-}
-
-// refusalText returns the error message of a dialect-shaped refusal body.
-func refusalText(t *testing.T, rec *httptest.ResponseRecorder) string {
-	t.Helper()
-	var env struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
-		t.Fatalf("decode refusal %q: %v", rec.Body.String(), err)
-	}
-	return env.Error.Message
 }
 
 // failingBodyReader serves its bytes and then reports err instead of EOF,
