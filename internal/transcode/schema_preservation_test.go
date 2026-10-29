@@ -342,7 +342,9 @@ func TestSchemaOfficialFixturesStillDecode(t *testing.T) {
 	if len(result2.Request.Tools) != 1 || len(result2.Request.Tools[0].JSONSchema) == 0 {
 		t.Fatalf("responses fixture tools = %+v", result2.Request.Tools)
 	}
-	if _, _, err := RenderChatRequest(result2.Request, testExchangeContext(), ChatCapabilities{ParallelToolCalls: true}); err != nil {
+	caps := defaultChatCapabilities()
+	caps.ParallelToolCalls = true
+	if _, _, err := RenderChatRequest(result2.Request, testExchangeContext(), caps); err != nil {
 		t.Fatal(err)
 	}
 }

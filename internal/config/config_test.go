@@ -868,7 +868,7 @@ func TestResolveAndValidate_AuthGrammar(t *testing.T) {
 		want    string
 	}{
 		{name: "bad source form", authSrc: "secret-in-argv",
-			want: `-auth-source "secret-in-argv" must be env:VAR, file:PATH, or none`},
+			want: `-auth-source "secret-in-argv" must be env:VAR, file:PATH, exec:[JSON argv], or none`},
 		{name: "empty env var name", authSrc: "env:",
 			want: "environment variable name must match"},
 		{name: "bad env var name", authSrc: "env:MY KEY",

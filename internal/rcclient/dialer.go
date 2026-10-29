@@ -51,10 +51,18 @@ type ChannelConfig struct {
 	Token string
 }
 
-// Validate checks the channel configuration without connecting.
+// Validate checks the channel configuration without connecting. Every PEM
+// value is parsed here, not at dial time, so a malformed certificate, key, or
+// CA fails configuration resolution — before any socket exists — instead of
+// surfacing on the first request. The !TLS-with-TLS-options contradiction is
+// checked before any file is read, so the operator sees the meaningless
+// combination rather than a missing-file error.
 func (c *ChannelConfig) Validate() error {
 	if c.Server == "" {
 		return errors.New("rcclient: channel server address is required")
+	}
+	if !c.TLS && (c.Cert != "" || c.Key != "" || c.CA != "" || c.ServerName != "" || c.Insecure) {
+		return errors.New("rcclient: channel TLS options require -rc-channel-tls")
 	}
 	cert, err := DecodeMaterial(c.Cert)
 	if err != nil {
@@ -67,11 +75,20 @@ func (c *ChannelConfig) Validate() error {
 	if (cert != nil) != (key != nil) {
 		return errors.New("rcclient: channel client cert and key must both be set or both unset")
 	}
-	if _, err := DecodeMaterial(c.CA); err != nil {
+	if cert != nil {
+		if _, err := tls.X509KeyPair(cert, key); err != nil {
+			return fmt.Errorf("rcclient: channel client cert/key: %w", err)
+		}
+	}
+	ca, err := DecodeMaterial(c.CA)
+	if err != nil {
 		return fmt.Errorf("rcclient: channel CA: %w", err)
 	}
-	if !c.TLS && (cert != nil || key != nil || c.CA != "" || c.ServerName != "" || c.Insecure) {
-		return errors.New("rcclient: channel TLS options require -rc-channel-tls")
+	if len(ca) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(ca) {
+			return errors.New("rcclient: invalid channel CA PEM")
+		}
 	}
 	return nil
 }

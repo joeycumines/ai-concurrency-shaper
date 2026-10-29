@@ -264,8 +264,16 @@ func TestProxyNativeKnownViaMismatchIsLocal404(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "natively served as chat") {
+	if !strings.Contains(rec.Body.String(), "served natively as chat") {
 		t.Fatalf("body = %s, want it to name the chat native dialect as the model's own", rec.Body.String())
+	}
+	// The remedy must be actionable: a client route carries at most one
+	// native route, so "add -native-route here" would be a startup error.
+	if strings.Contains(rec.Body.String(), "add -native-route") {
+		t.Fatalf("body = %s, must not advise a duplicate native route for this path", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no transcode mapping") {
+		t.Fatalf("body = %s, want it to name the reason the model is refused here", rec.Body.String())
 	}
 	if path, _, _ := up.got(); path != "" {
 		t.Fatalf("upstream reached at %q, want no upstream contact", path)
@@ -704,5 +712,28 @@ func TestProxyNativeAbsentVsEmptyModel(t *testing.T) {
 	}
 	if path, _, _ := up.got(); path != "" {
 		t.Fatalf("upstream reached at %q, want no contact on either verdict", path)
+	}
+}
+
+// TestProxyNativeMismatch404RemedyIsActionable pins that the native mismatch
+// refusal never advises a configuration that cannot start: a client route
+// carries at most one native route, so "add -native-route <dialect>@<path>"
+// for the SAME path is a duplicate-route startup error. The message names the
+// dialect and the reason instead.
+func TestProxyNativeMismatch404RemedyIsActionable(t *testing.T) {
+	up := &nativeUpstream{response: `{}`}
+	p, _ := newNativeProxy(t, up, nativeRoute(t, transcode.NativeMessages, "/v1/messages"))
+
+	rec := postNative(t, p, "/v1/messages",
+		`{"model":"chat-model","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "chat") || !strings.Contains(body, "not as messages") {
+		t.Fatalf("body = %s, want it to name the model's dialect and this route's dialect", body)
+	}
+	if strings.Contains(body, "add -native-route") {
+		t.Fatalf("body = %s, must not advise a duplicate native route for the same path", body)
 	}
 }

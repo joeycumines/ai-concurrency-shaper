@@ -148,6 +148,10 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	if p.TranscodeContinuityTTL < 0 {
 		return fmt.Errorf("-transcode-continuity-ttl must be nonnegative, got %s", p.TranscodeContinuityTTL)
 	}
+	// The continuity store is shared by this resolve's mappings only: one an
+	// earlier resolve built reflects its capacity and TTL, not the current
+	// ones.
+	p.continuityStore = nil
 
 	var parsedRoutes []proxy.TranscodeMapping
 	for _, r := range p.TranscodeRoutes {
@@ -366,6 +370,72 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		if err := mappings[i].Mapping.Validate(); err != nil {
 			return fmt.Errorf("transcode mapping %s %s: %w", mappings[i].ClientRoute.Method, mappings[i].ClientRoute.Path, err)
 		}
+	}
+
+	// A client route carrying several transcode mappings is dispatched by the
+	// request model's native dialect, so a target no model can select is dead
+	// configuration: the operator's flags promise a route that cannot happen.
+	// The responses target is selected only by a model declaring
+	// via=responses (a -model-table fact; -transcode-model cannot carry one).
+	// The chat target is also the dispatcher's fallback, so any model that
+	// resolves with no declared dialect reaches it: a via-less map entry or
+	// identity resolution counts, not only via=chat. Routes are checked in
+	// configuration order, so the refusal is deterministic.
+	type routeReach struct {
+		mappings  int
+		chat      bool
+		responses bool
+		hasChat   bool
+		hasResp   bool
+	}
+	reach := make(map[transcode.RouteKey]*routeReach, len(mappings))
+	var routeOrder []transcode.RouteKey
+	for _, m := range mappings {
+		r := reach[m.ClientRoute]
+		if r == nil {
+			r = &routeReach{}
+			reach[m.ClientRoute] = r
+			routeOrder = append(routeOrder, m.ClientRoute)
+		}
+		r.mappings++
+		switch m.UpstreamProtocol {
+		case transcode.UpstreamChatCompletions:
+			r.hasChat = true
+		case transcode.UpstreamResponses:
+			r.hasResp = true
+		}
+		modelMap := m.Mapping.ModelMap
+		if modelMap.AllowIdentity && !modelMap.RequireExplicitMap {
+			r.chat = true
+		}
+		for _, mapping := range modelMap.Exact {
+			switch mapping.Via {
+			case "", transcode.NativeChat:
+				r.chat = true
+			case transcode.NativeResponses:
+				r.responses = true
+			}
+		}
+	}
+	for _, routeKey := range routeOrder {
+		r := reach[routeKey]
+		if r.mappings < 2 {
+			continue
+		}
+		var missing []string
+		if r.hasChat && !r.chat {
+			missing = append(missing, string(transcode.NativeChat))
+		}
+		if r.hasResp && !r.responses {
+			missing = append(missing, string(transcode.NativeResponses))
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		return fmt.Errorf(
+			"transcode route %s %s carries %d mappings but no model can select the %s dialect, so that target is unreachable; declare it with -model-table (surrogate@provider=wire;via=%s) or configure a single mapping for the route",
+			routeKey.Method, routeKey.Path, r.mappings, strings.Join(missing, " or "), missing[0],
+		)
 	}
 
 	var nativeRoutes []proxy.NativeRoute

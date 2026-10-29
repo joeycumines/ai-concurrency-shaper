@@ -55,14 +55,26 @@ func (c *ServerConfig) Validate() error {
 	if c.Cert == "" || c.Key == "" {
 		return errors.New("rcclient: server TLS requires both cert and key")
 	}
-	if _, err := DecodeMaterial(c.CA); err != nil {
+	caPEM, err := DecodeMaterial(c.CA)
+	if err != nil {
 		return fmt.Errorf("rcclient: server CA: %w", err)
 	}
-	if _, err := DecodeMaterial(c.Cert); err != nil {
+	if len(caPEM) > 0 {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return errors.New("rcclient: invalid server CA PEM")
+		}
+	}
+	certPEM, err := DecodeMaterial(c.Cert)
+	if err != nil {
 		return fmt.Errorf("rcclient: server cert: %w", err)
 	}
-	if _, err := DecodeMaterial(c.Key); err != nil {
+	keyPEM, err := DecodeMaterial(c.Key)
+	if err != nil {
 		return fmt.Errorf("rcclient: server key: %w", err)
+	}
+	if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+		return fmt.Errorf("rcclient: rc-server cert/key: %w", err)
 	}
 	return nil
 }

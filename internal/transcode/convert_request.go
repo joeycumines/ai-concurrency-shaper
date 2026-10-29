@@ -1076,9 +1076,20 @@ func DecodeMessagesRequest(
 			}
 		}
 	}
+	deferNoted := false
 	for _, tool := range envelope.Tools {
 		if tool.CacheControl != nil {
 			if err := noteCacheControl(); err != nil {
+				return DecodeResult{}, err
+			}
+		}
+		if tool.DeferLoading != nil && *tool.DeferLoading && !deferNoted {
+			deferNoted = true
+			if err := result.Report.Note(
+				FeatureAnthropicControls,
+				"tools[].defer_loading",
+				"deferred tool loading needs Anthropic server-side tool search; deferred tools are sent eagerly",
+			); err != nil {
 				return DecodeResult{}, err
 			}
 		}
@@ -2033,8 +2044,21 @@ func RenderChatRequest(
 		TopP:                request.TopP,
 		MaxCompletionTokens: request.MaxOutputTokens,
 		Stream:              new(request.Stream),
-		Metadata:            anyMap(request.Metadata),
 		N:                   new(1),
+	}
+	if len(request.Metadata) > 0 {
+		if !capabilities.Metadata {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureMetadata,
+				"metadata",
+				"request metadata is not forwarded to the configured chat provider",
+			); err != nil {
+				return nil, report, err
+			}
+		} else {
+			out.Metadata = anyMap(request.Metadata)
+		}
 	}
 	// The official stream protocol sends a final usage-only chunk before
 	// [DONE] when include_usage is requested; the state machine consumes it
@@ -2346,14 +2370,35 @@ func RenderChatRequest(
 	// validated as exactly one JSON object at decode, so no
 	// decode-and-remarshal round trip can corrupt its numbers. An absent schema is omitted, matching the source's
 	// presence.
+	boundsNoted := false
 	for _, tool := range request.Tools {
 		description := tool.Description
+		parameters := tool.JSONSchema
+		if !capabilities.Float64Bounds {
+			rewritten, changed, err := dropVacuousNumericBounds(parameters)
+			if err != nil {
+				return nil, report, fmt.Errorf("tool %q schema: %w", tool.Name, err)
+			}
+			if changed {
+				parameters = rewritten
+				if !boundsNoted {
+					boundsNoted = true
+					if err := report.Note(
+						FeatureVacuousSchemaBounds,
+						"tools[].function.parameters",
+						"numeric bounds at ±float64 max (which admit every finite number) are removed from tool schemas",
+					); err != nil {
+						return nil, report, err
+					}
+				}
+			}
+		}
 		out.Tools = append(out.Tools, ChatTool{
 			Type: ChatToolTypeFunction,
 			Function: &ChatToolFunction{
 				Name:        tool.Name,
 				Description: &description,
-				Parameters:  tool.JSONSchema,
+				Parameters:  parameters,
 				Strict:      tool.Strict,
 			},
 		})

@@ -104,3 +104,32 @@ func TestDecodeMaterialNoPrefixDoesNotLeak(t *testing.T) {
 		t.Fatalf("error = %v, want it to name the required prefixes", err)
 	}
 }
+
+// TestDecodeMaterialEmptyDecodeFailsClosed pins the fail-closed contract: a
+// CONFIGURED value that decodes to zero bytes is an error, never an empty
+// slice. Callers tell "unset" from "set" by nil, so an empty result would make
+// every len>0 guard downstream silently skip material the operator configured.
+func TestDecodeMaterialEmptyDecodeFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.pem")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"base64 empty payload": "base64:",
+		"base64 newline only":  "base64:\n",
+		"empty file":           "file:" + empty,
+	} {
+		b, err := DecodeMaterial(value)
+		if err == nil {
+			t.Errorf("%s: err = nil (got %q), want the empty-material rejection", name, b)
+			continue
+		}
+		if !strings.Contains(err.Error(), "key material is empty") {
+			t.Errorf("%s: err = %v, want 'key material is empty'", name, err)
+		}
+		if b != nil {
+			t.Errorf("%s: bytes = %q, want nil on error", name, b)
+		}
+	}
+}

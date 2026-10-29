@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
@@ -575,20 +576,18 @@ func TestMultiDialect_AuthXAPIKey_AdaptsToBearerOnTranscode(t *testing.T) {
 	}
 
 	messagesChat := TranscodeMapping{
-		Mapping: transcode.Mapping{
-			ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
-			ClientProtocol:   transcode.ClientMessages,
-			UpstreamProtocol: transcode.UpstreamChatCompletions,
-			UpstreamPath:     "/v1/chat/completions",
-			ModelMap:         modelMap,
-			LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
-				transcode.FeatureToolSchemaStrictness:   {},
-				transcode.FeatureUsageUnknown:           {},
-				transcode.FeatureUsageCacheReadUnknown:  {},
-				transcode.FeatureUsageCacheWriteUnknown: {},
-				transcode.FeatureUsageReasoningUnknown:  {},
-			}},
-		},
+		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         modelMap,
+		LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
+			transcode.FeatureToolSchemaStrictness:   {},
+			transcode.FeatureUsageUnknown:           {},
+			transcode.FeatureUsageCacheReadUnknown:  {},
+			transcode.FeatureUsageCacheWriteUnknown: {},
+			transcode.FeatureUsageReasoningUnknown:  {},
+		}},
 	}
 
 	authPolicy := &auth.AuthPolicy{
@@ -647,4 +646,166 @@ func TestMultiDialect_AuthXAPIKey_AdaptsToBearerOnTranscode(t *testing.T) {
 	if last.XAPIKeyHeader != "" {
 		t.Errorf("transcode X-Api-Key = %q, want empty", last.XAPIKeyHeader)
 	}
+}
+
+// TestMultiDialect_Profiles_NativeFallthroughAndDialectSelection verifies that on a client route
+// with both a native route and multiple transcode mappings, profiles that miss the native route
+// fall through cleanly to multi-target transcode dispatch, follow their target model's dialect
+// symmetrically to Chat or Responses upstreams, and restore the profile name on client responses.
+func TestMultiDialect_Profiles_NativeFallthroughAndDialectSelection(t *testing.T) {
+	upstream := &multiDialectUpstream{}
+	srv := httptest.NewServer(http.HandlerFunc(upstream.handler))
+	t.Cleanup(srv.Close)
+
+	upstreamURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+
+	modelMap := testMultiDialectModelMap()
+	profiles := transcode.ProfileMap{
+		Profiles: map[string]transcode.ProfileMapping{
+			"profile-chat":      {Model: "deepseek-v3"},
+			"profile-responses": {Model: "gpt-nano"},
+			"profile-unmapped":  {Model: "unknown-target"},
+		},
+	}
+
+	routeKey := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
+	nativeMessages := NativeRoute{
+		RouteKey: routeKey,
+		Protocol: transcode.NativeMessages,
+		Provider: "opencode-go",
+		ModelMap: modelMap,
+	}
+
+	lossPolicy := transcode.LossPolicy{
+		Allowed: map[transcode.Feature]struct{}{
+			transcode.FeatureToolSchemaStrictness:   {},
+			transcode.FeatureUsageUnknown:           {},
+			transcode.FeatureUsageCacheReadUnknown:  {},
+			transcode.FeatureUsageCacheWriteUnknown: {},
+			transcode.FeatureUsageReasoningUnknown:  {},
+		},
+	}
+
+	chatMapping := TranscodeMapping{
+		ClientRoute:      routeKey,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         modelMap,
+		ProfileMap:       profiles,
+		LossPolicy:       lossPolicy,
+	}
+
+	responsesMapping := TranscodeMapping{
+		ClientRoute:      routeKey,
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamResponses,
+		UpstreamPath:     "/v1/responses",
+		ModelMap:         modelMap,
+		ProfileMap:       profiles,
+		LossPolicy:       lossPolicy,
+	}
+
+	authPolicy := &auth.AuthPolicy{
+		Mode:             auth.AuthBearer,
+		Secret:           auth.NewStaticSecretSource("test-token"),
+		AnthropicVersion: "2023-06-01",
+	}
+
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithAuthPolicy(authPolicy),
+		WithNativeRoutes(nativeMessages),
+		WithTranscodeMapping(chatMapping, responsesMapping),
+	)
+	if err != nil {
+		t.Fatalf("New proxy: %v", err)
+	}
+
+	// 1. Direct native route request for claude-opus (via=messages)
+	t.Run("native_serving", func(t *testing.T) {
+		reqBody := `{"model":"claude-opus","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+		last := upstream.lastRequest()
+		if last.Path != "/v1/messages" || last.Model != "wire-opus" {
+			t.Errorf("upstream = %s %s, want /v1/messages wire-opus", last.Path, last.Model)
+		}
+	})
+
+	// 2. Profile pointing to chat model (deepseek-v3) -> falls through native to transcode chat
+	t.Run("profile_to_chat", func(t *testing.T) {
+		reqBody := `{"model":"profile-chat","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+		last := upstream.lastRequest()
+		if last.Path != "/v1/chat/completions" || last.Model != "wire-deepseek" {
+			t.Errorf("upstream = %s %s, want /v1/chat/completions wire-deepseek", last.Path, last.Model)
+		}
+		var resMsg struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resMsg)
+		if resMsg.Model != "profile-chat" {
+			t.Errorf("client model = %q, want profile-chat", resMsg.Model)
+		}
+	})
+
+	// 3. Profile pointing to responses model (gpt-nano) -> falls through native to transcode responses
+	t.Run("profile_to_responses", func(t *testing.T) {
+		reqBody := `{"model":"profile-responses","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+		last := upstream.lastRequest()
+		if last.Path != "/v1/responses" || last.Model != "wire-nano" {
+			t.Errorf("upstream = %s %s, want /v1/responses wire-nano", last.Path, last.Model)
+		}
+		var resMsg struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &resMsg)
+		if resMsg.Model != "profile-responses" {
+			t.Errorf("client model = %q, want profile-responses", resMsg.Model)
+		}
+	})
+
+	// 4. Profile pointing to unknown target model -> returns 400 Bad Request
+	t.Run("unmapped_profile_refusal", func(t *testing.T) {
+		reqBody := `{"model":"profile-unmapped","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body: %s", rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "profile-unmapped") || !strings.Contains(rec.Body.String(), "unknown-target") {
+			t.Errorf("refusal body = %s, want to name profile-unmapped and unknown-target", rec.Body.String())
+		}
+	})
 }

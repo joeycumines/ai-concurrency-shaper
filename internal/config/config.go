@@ -174,13 +174,22 @@ type Provider struct {
 	// ---- Upstream authentication (provider scope) ----
 
 	// AuthSource names where the upstream credential comes from:
-	// "env:VAR", "file:PATH", or the literal "none" (strip-only hygiene).
-	// Credentials from "file:PATH" are resolved once at startup and wrapped
-	// as static secrets across both passthrough and transcoded routes; file
-	// rotation requires a restart today.
+	// "env:VAR", "file:PATH", "exec:<JSON argv>", or the literal "none"
+	// (strip-only hygiene). Credentials from "env:VAR" and "file:PATH" are
+	// resolved once at startup and wrapped as static secrets across both
+	// passthrough and transcoded routes; rotating them requires a restart.
+	// "exec:" is the rotation exception: the command's output is cached
+	// for AuthSourceTTL and re-acquired while the process runs.
 	// Empty disables upstream authentication entirely: requests are
 	// forwarded verbatim, exactly as they always have been.
 	AuthSource string
+	// AuthSourceTTL is how long an exec: credential is used before it is
+	// re-acquired. Required (> 0) with exec:, rejected with any other
+	// source.
+	AuthSourceTTL time.Duration
+	// AuthSourceTimeout bounds one run of the exec: command. Must be > 0;
+	// setting it with any other source is rejected.
+	AuthSourceTimeout time.Duration
 	// AuthMode selects how the credential is attached upstream:
 	// "auto" (default when a source is set), "none", "bearer", "x-api-key",
 	// "api-key", or "header:<NAME>". Auto derives from the upstream host.
@@ -336,6 +345,16 @@ type Provider struct {
 	// -sesame-token-env during resolveRC, or empty. Held for the RC
 	// channel's per-RPC credentials; never logged or journaled.
 	rcToken string
+	// derivedSesame records which sesame/RCServer fields the LAST resolve
+	// computed rather than read from operator input. A repeated resolve
+	// clears exactly those, so a value the caller set directly (a Provider
+	// built programmatically, without Parse) survives, while a value derived
+	// from a since-removed flag does not linger.
+	derivedSesame derivedSesameFields
+	// derivedName is the Name the last resolve derived from the upstream
+	// host (multi-provider mode), or empty. The next resolve clears Name
+	// while it still holds that value, so the name follows the upstream.
+	derivedName string
 	// explicitFlags maps the provider-scoped flag names the operator set
 	// (as opposed to defaults) to their parsed value strings, recorded by
 	// Parse via FlagSet.Visit. Resolution uses it only where a value is
@@ -520,11 +539,57 @@ type Account struct {
 //     normalize to trailing-slash-free paths and must not overlap; unnamed
 //     providers get derived names that must be unique.
 func (c *Config) ResolveAndValidate() error {
+	if err := c.resolveAndValidate(); err != nil {
+		// A failed resolution must not leave live resources behind: each
+		// provider's RC dialer holds an open gRPC channel, and main.go
+		// registers its close defer only after a SUCCESSFUL resolve. Closing
+		// here is idempotent, so a caller that keeps a partially resolved
+		// Config for inspection still owns nothing that leaks.
+		c.Close()
+		return err
+	}
+	return nil
+}
+
+// Close releases every resource the resolved configuration owns. It is
+// idempotent and safe to call on a partially resolved Config.
+func (c *Config) Close() {
+	c.Server.rcServerConfig = nil
+	for _, p := range c.Providers {
+		p.closeRCDialer()
+		if p.derivedName != "" && p.Name == p.derivedName {
+			p.Name = ""
+		}
+		p.derivedName = ""
+		// The channel credential belongs to the dialer: a failed resolve
+		// may not have reached this provider's reset, and must not leave the
+		// earlier secret attached to it. So do values derived from a former
+		// sesame endpoint: a failed resolve that never reached resolveRC
+		// must not leave them behind on the provider.
+		p.rcToken = ""
+		p.resetDerivedSesameState()
+	}
+}
+
+func (c *Config) resolveAndValidate() error {
 	if len(c.Providers) == 0 && len(c.Server.CatalogSuites) == 0 {
 		return errors.New("no providers configured")
 	}
 
 	multi := len(c.Providers) > 1
+
+	// A name an earlier resolve derived from the upstream host is derived
+	// state, not input: it is recomputed from the current upstream. A name
+	// the caller assigned since (anything but the derived value) survives.
+	// Values derived from -sesame-endpoint are likewise reset before any
+	// check can fail.
+	for _, p := range c.Providers {
+		if p.derivedName != "" && p.Name == p.derivedName {
+			p.Name = ""
+		}
+		p.derivedName = ""
+		p.resetDerivedSesameState()
+	}
 
 	for i, p := range c.Providers {
 		if err := p.validateBasic(i, multi); err != nil {
@@ -575,145 +640,6 @@ func effectiveName(p *Provider) string {
 	return p.EffectiveName()
 }
 
-// validateBasic validates a single provider's identity/connection values and
-// normalizes its prefix. It does not construct runtime objects. When multi is
-// false (the single legacy provider) errors are not prefixed with a section
-// label, keeping the error text byte-identical to the legacy binary.
-func (p *Provider) validateBasic(index int, multi bool) error {
-	// When multi is false (the single legacy provider) the context prefix is
-	// empty so error text stays byte-identical to the legacy binary.
-	ctx := func() string {
-		if !multi {
-			return ""
-		}
-		return fmt.Sprintf("provider section %d: ", index+1)
-	}
-
-	if p.Upstream == "" {
-		return fmt.Errorf("%s-upstream is required", ctx())
-	}
-	u, err := url.Parse(p.Upstream)
-	if err != nil {
-		return fmt.Errorf("%sinvalid -upstream URL: %w", ctx(), err)
-	}
-	if u.Scheme == "" {
-		return fmt.Errorf("%s-upstream URL must include scheme (http or https)", ctx())
-	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("%s-upstream URL scheme must be http or https, got %q", ctx(), u.Scheme)
-	}
-	p.upstream = u
-
-	if p.Concurrency < 1 {
-		return fmt.Errorf("%s-concurrency must be >= 1, got %d", ctx(), p.Concurrency)
-	}
-	if p.GlobalConcurrency < 0 {
-		return fmt.Errorf("%s-global-concurrency must be >= 0, got %d", ctx(), p.GlobalConcurrency)
-	}
-	if p.ReleaseCooldown < 0 {
-		return fmt.Errorf("%s-release-cooldown must be >= 0, got %v", ctx(), p.ReleaseCooldown)
-	}
-
-	// Fail-closed backstops for every remaining value flag, in flag-definition
-	// order (see registerProviderFlags). queue.NewLimiterWithCooldown panics on
-	// invalid input and stdlib flag accepts negative durations, so each value is
-	// rejected here before resolve() can reach any panicking constructor. The
-	// messages mirror the downstream proxy/circuitbreaker validation that this
-	// replaces as the first line of defense.
-	if p.QueueTimeout < 0 {
-		return fmt.Errorf("%s-queue-timeout must be >= 0, got %v", ctx(), p.QueueTimeout)
-	}
-	if p.QueueDepth < 0 {
-		return fmt.Errorf("%s-queue-depth must be >= 0, got %d", ctx(), p.QueueDepth)
-	}
-	if p.QueueComments < 0 {
-		return fmt.Errorf("%s-queue-comments must be >= 0, got %v", ctx(), p.QueueComments)
-	}
-	if p.RetryMaxBodyMB < 0 {
-		return fmt.Errorf("%s-retry-max-body-mb must be >= 0, got %d", ctx(), p.RetryMaxBodyMB)
-	}
-	if p.RetryWaitMin < 0 {
-		return fmt.Errorf("%s-retry-wait-min must be >= 0, got %v", ctx(), p.RetryWaitMin)
-	}
-	if p.RetryWaitMax < 0 {
-		return fmt.Errorf("%s-retry-wait-max must be >= 0, got %v", ctx(), p.RetryWaitMax)
-	}
-	if p.RetryMinDelay < 0 {
-		return fmt.Errorf("%s-retry-min-delay must be >= 0, got %v", ctx(), p.RetryMinDelay)
-	}
-	if p.CancelCooldown < 0 {
-		return fmt.Errorf("%s-cancel-cooldown must be >= 0, got %v", ctx(), p.CancelCooldown)
-	}
-	if p.FailureHold < 0 {
-		return fmt.Errorf("%s-failure-hold must be >= 0, got %v", ctx(), p.FailureHold)
-	}
-	if p.AdaptiveHeadroomWindow < 0 {
-		return fmt.Errorf("%s-adaptive-headroom-window must be >= 0, got %v", ctx(), p.AdaptiveHeadroomWindow)
-	}
-	if p.CBEnabled {
-		// The breaker rejects zero/negative values, but only when enabled —
-		// the disabled-breaker zero state is legal.
-		if p.CBThreshold < 1 {
-			return fmt.Errorf("%s-cb-threshold must be > 0, got %d", ctx(), p.CBThreshold)
-		}
-		if p.CBWindow <= 0 {
-			return fmt.Errorf("%s-cb-window must be > 0, got %v", ctx(), p.CBWindow)
-		}
-		if p.CBOpenTimeout <= 0 {
-			return fmt.Errorf("%s-cb-open-timeout must be > 0, got %v", ctx(), p.CBOpenTimeout)
-		}
-		if p.CBMaxOpen <= 0 {
-			return fmt.Errorf("%s-cb-max-open-timeout must be > 0, got %v", ctx(), p.CBMaxOpen)
-		}
-		if p.CBPenalty <= 0 {
-			return fmt.Errorf("%s-cb-penalty must be > 0, got %v", ctx(), p.CBPenalty)
-		}
-		if p.CBMaxPenalty <= 0 {
-			return fmt.Errorf("%s-cb-max-penalty must be > 0, got %v", ctx(), p.CBMaxPenalty)
-		}
-	}
-
-	if err := p.validateAuth(); err != nil {
-		return fmt.Errorf("%s%w", ctx(), err)
-	}
-
-	// Grammar-only (no side effects): the variable is read during resolve,
-	// after every provider's grammar has been checked, mirroring validateAuth.
-	if p.SesameTokenEnv != "" && !validEnvVarName(p.SesameTokenEnv) {
-		return fmt.Errorf(
-			"%s-sesame-token-env %q: environment variable name must match [A-Za-z_][A-Za-z0-9_]*",
-			ctx(), p.SesameTokenEnv,
-		)
-	}
-
-	// The local-handshake trust flags configure the handshake the proxy
-	// performs itself. Under remote termination the proxy never handshakes,
-	// so accepting them would silently ignore the operator's CA — refuse
-	// here in validation, before any material is decoded, so the error names
-	// the meaningless combination rather than a missing file.
-	if p.RCTerminateTLS && (p.UpstreamCA != "" || p.UpstreamInsecure || p.UpstreamServerName != "") {
-		return fmt.Errorf("%supstream TLS trust options (-upstream-ca, -upstream-insecure, -upstream-server-name) do not apply with -rc-terminate-tls; use the -rc-target-* options", ctx())
-	}
-
-	// On a plaintext upstream the transport never consults TLSClientConfig,
-	// so the same trio would be accepted but inert there too. The upstream
-	// URL is parsed and schemed by this point, so reject on http directly.
-	if p.upstream.Scheme == "http" && (p.UpstreamCA != "" || p.UpstreamInsecure || p.UpstreamServerName != "") {
-		return fmt.Errorf("%supstream TLS trust options (-upstream-ca, -upstream-insecure, -upstream-server-name) do not apply to a plaintext http upstream", ctx())
-	}
-
-	for _, s := range p.Limits {
-		if _, err := route.Parse(s); err != nil {
-			return fmt.Errorf("%sinvalid -limit %q: %w", ctx(), s, err)
-		}
-	}
-
-	if err := normalizePrefix(p); err != nil {
-		return fmt.Errorf("%s%w", ctx(), err)
-	}
-	return nil
-}
-
 // validateMulti enforces the multi-provider access rules: distinct non-empty,
 // non-overlapping prefixes, and unique derived names.
 func validateMulti(providers []*Provider) error {
@@ -734,6 +660,7 @@ func validateMulti(providers []*Provider) error {
 	for i, p := range providers {
 		if p.Name == "" {
 			p.Name = deriveName(p.upstream.Hostname())
+			p.derivedName = p.Name
 		}
 		if p.Name == "" {
 			return fmt.Errorf("provider section %d: unable to derive a name from upstream %q", i+1, p.upstream.Host)
@@ -779,6 +706,11 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 	p.matcher = route.NewMatcher(patterns)
 
 	p.defaultLimiter = queue.NewLimiterWithCooldown(p.Concurrency, p.ReleaseCooldown)
+
+	// Optional runtime objects are rebuilt from the current inputs: one an
+	// earlier resolve built must not survive its flag being turned off.
+	p.globalLimiter = nil
+	p.breaker = nil
 
 	p.routeLimiters = routeLimiters(p.Limits, p.ReleaseCooldown)
 
@@ -826,6 +758,10 @@ func (p *Provider) resolve(index int, multi bool, modelTable []modelTableEntry) 
 // -rc-server-bind is set. Without it, stray server options are rejected
 // rather than ignored. No socket is bound here; run() owns the listener.
 func (s *Server) resolveRC() error {
+	// A previous resolve may have installed a server config the current
+	// inputs no longer ask for (or that fails to validate below): leaving it
+	// would make main.go start an RC server they do not describe.
+	s.rcServerConfig = nil
 	if s.RCBind == "" {
 		if s.RCTLS || s.RCCA != "" || s.RCCert != "" || s.RCKey != "" {
 			return errors.New("rc-server TLS options require -rc-server-bind")

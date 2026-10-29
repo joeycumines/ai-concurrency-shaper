@@ -9,6 +9,7 @@ package proxy
 // failures, never as HTTP error statuses.
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
@@ -27,15 +29,17 @@ import (
 // blocks the FIRST request on the gate (holding the slot) and serves
 // subsequent requests immediately, so a second request queues.
 type queueCommentsFixture struct {
-	p     *Proxy
-	met   *metrics.Collector
-	gate  chan struct{}
-	gateC sync.Once
+	p       *Proxy
+	met     *metrics.Collector
+	journal *journal.Journal
+	gate    chan struct{}
+	gateC   sync.Once
 }
 
 func newQueueCommentsFixture(t *testing.T, comments time.Duration, timeout time.Duration) *queueCommentsFixture {
 	t.Helper()
 	f := &queueCommentsFixture{gate: make(chan struct{})}
+	f.journal = journal.New(8, 1<<20)
 	var mu sync.Mutex
 	first := true
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +47,7 @@ func newQueueCommentsFixture(t *testing.T, comments time.Duration, timeout time.
 		isFirst := first
 		first = false
 		mu.Unlock()
+		w.Header().Set("X-Upstream-Request", "observed")
 		if isFirst {
 			<-f.gate
 			w.WriteHeader(http.StatusOK)
@@ -67,6 +72,7 @@ func newQueueCommentsFixture(t *testing.T, comments time.Duration, timeout time.
 		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
 		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
 		WithMetrics(f.met),
+		WithJournal(f.journal),
 		WithQueueComments(comments),
 		WithQueueTimeout(timeout),
 	)
@@ -345,6 +351,105 @@ func TestProxy_QueueCommentsPreserveRequestBody(t *testing.T) {
 	defer mu.Unlock()
 	if *got != reqBody {
 		t.Fatalf("upstream received body %q, want %q", *got, reqBody)
+	}
+}
+
+func TestBodyBlocksStreamCommitPreservesReadError(t *testing.T) {
+	wantErr := errors.New("request body read failed")
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	req.ContentLength = 10
+	req.Body = &readErrorAfterChunkBody{chunk: []byte("prefix"), err: wantErr}
+
+	if !bodyBlocksStreamCommit(httptest.NewRecorder(), req, req.Context()) {
+		t.Fatal("bodyBlocksStreamCommit = false, want indeterminate intent")
+	}
+	got, err := io.ReadAll(req.Body)
+	if !errors.Is(err, wantErr) || string(got) != "prefix" {
+		t.Fatalf("replayed body = %q, err = %v; want prefix and %v", got, err, wantErr)
+	}
+}
+
+func TestProxy_QueueCommentsDoNotCommitForLargeExplicitNonStreamingBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pat, _ := route.Parse("POST /messages:1")
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueComments(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	const padding = 11 << 20
+	body := `{"padding":"` + strings.Repeat("x", padding) + `","stream":false}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("response body: %v", err)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q; body %q, want transparent JSON response", got, responseBody)
+	}
+	if strings.Contains(string(responseBody), ": queue-wait") {
+		t.Fatalf("large stream:false request was locked into SSE: %q", responseBody)
+	}
+}
+
+func TestProxy_QueueCommentsJournalUsesUpstreamHeadersAndQueueRelativeTTFB(t *testing.T) {
+	f := newQueueCommentsFixture(t, 10*time.Millisecond, 10*time.Second)
+	firstDone := make(chan struct{})
+	go func() {
+		f.p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+		close(firstDone)
+	}()
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool { return s.Active == 1 })
+
+	secondDone := make(chan struct{})
+	go func() {
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		req.Header.Set("Accept", "text/event-stream")
+		f.p.ServeHTTP(httptest.NewRecorder(), req)
+		close(secondDone)
+	}()
+	waitSnapshot(t, f.met, func(s metrics.Snapshot) bool { return s.Queued == 1 })
+	f.gateC.Do(func() { close(f.gate) })
+	<-firstDone
+	<-secondDone
+
+	entries := f.journal.Entries()
+	if len(entries) != 2 {
+		t.Fatalf("journal entries = %d, want 2", len(entries))
+	}
+	entry := entries[1]
+	if got := entry.ResponseHeaders.Get("X-Upstream-Request"); got != "observed" {
+		t.Fatalf("journal response header X-Upstream-Request = %q, want upstream header", got)
+	}
+	if entry.Timing.ResponseHeaders.Before(entry.Timing.QueueEnd) {
+		t.Fatalf("journal response headers precede QueueEnd: response=%v queue_end=%v (TTFB %v)",
+			entry.Timing.ResponseHeaders, entry.Timing.QueueEnd, entry.Timing.TTFB())
 	}
 }
 

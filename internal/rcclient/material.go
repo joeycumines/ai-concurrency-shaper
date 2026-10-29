@@ -28,6 +28,13 @@ import (
 // standard base64. Any other form is an error — the explicit prefix states
 // the source instead of guessing it from content. An empty value yields nil,
 // nil (material unset).
+//
+// A configured value that decodes to zero bytes is an error, never an empty
+// slice: callers distinguish "unset" from "set" by nil, and a silently empty
+// CA or certificate makes every len>0 guard downstream skip the material it
+// was configured with — the handshake would then trust the system roots or
+// omit a configured client certificate while the operator's flags say
+// otherwise.
 func DecodeMaterial(value string) ([]byte, error) {
 	if value == "" {
 		return nil, nil
@@ -40,12 +47,18 @@ func DecodeMaterial(value string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("rcclient: reading key material: %w", err)
 		}
+		if len(b) == 0 {
+			return nil, errors.New("rcclient: key material is empty")
+		}
 		return b, nil
 	}
 	if data, ok := strings.CutPrefix(value, "base64:"); ok {
 		b, err := base64.StdEncoding.DecodeString(data)
 		if err != nil {
 			return nil, fmt.Errorf("rcclient: decoding base64 key material: %w", err)
+		}
+		if len(b) == 0 {
+			return nil, errors.New("rcclient: key material is empty")
 		}
 		return b, nil
 	}

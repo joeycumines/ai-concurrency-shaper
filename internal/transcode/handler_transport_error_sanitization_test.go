@@ -71,6 +71,7 @@ func TestTransportErrorLogRedactsNestedChainURLs(t *testing.T) {
 		URL: "https://upstream.example/v1/chat/completions?key=AIzaSyINNERSECRET",
 		Err: errors.New("connection reset by peer"),
 	}
+
 	outer := &url.Error{
 		Op:  "Post",
 		URL: "https://upstream.example/v1/chat/completions",
@@ -94,5 +95,72 @@ func TestTransportErrorLogRedactsNestedChainURLs(t *testing.T) {
 	plain := errors.New("dial tcp: no such host")
 	if got := sanitizeUpstreamTransportError(plain); got.Error() != plain.Error() {
 		t.Fatalf("plain error mutated: %v", got)
+	}
+}
+
+func TestTransportErrorLogRedactsWrappedNestedURLsAndQuotedURLText(t *testing.T) {
+	inner := &url.Error{
+		Op:  "Post",
+		URL: "https://upstream.example/v1/chat/completions?key=inner-secret",
+		Err: errors.New("connection reset"),
+	}
+	middle := fmt.Errorf("redirect wrapper: %w", inner)
+	outerURL := "https://upstream.example/v1/responses?token=outer-secret"
+	outer := &url.Error{
+		Op:  "Post",
+		URL: outerURL,
+		Err: middle,
+	}
+	wrapped := fmt.Errorf("failed URL %q: %w", outerURL, outer)
+
+	for _, input := range []error{outer, wrapped} {
+		got := sanitizeUpstreamTransportError(input)
+		for _, secret := range []string{"inner-secret", "outer-secret"} {
+			if strings.Contains(got.Error(), secret) {
+				t.Fatalf("sanitized error leaks %q: %v", secret, got)
+			}
+		}
+	}
+}
+
+// TestTransportErrorLogRedactsEveryURLInTheChain pins the transcode
+// sanitizer to the same guarantee as the native one: no secret query value
+// survives in the message or behind Unwrap, including an outer URL that
+// prefixes an unquoted inner URL and an outer URL that cannot be parsed.
+func TestTransportErrorLogRedactsEveryURLInTheChain(t *testing.T) {
+	const outerURL = "https://upstream.example/v1?key=outer-secret"
+	prefixInner := &url.Error{Op: "Get", URL: outerURL + "&token=inner-secret", Err: errors.New("connection refused")}
+	for name, input := range map[string]error{
+		"outer prefixes inner": &url.Error{
+			Op:  "Post",
+			URL: outerURL,
+			Err: fmt.Errorf("redirect to %s: %w", prefixInner.URL, prefixInner),
+		},
+		"wrapped nested chain": fmt.Errorf("round trip: %w", &url.Error{
+			Op:  "Post",
+			URL: outerURL,
+			Err: fmt.Errorf("redirect detail: %w", &url.Error{
+				Op: "Get", URL: "https://upstream.example/v2?token=inner-secret", Err: errors.New("refused"),
+			}),
+		}),
+		"unparseable outer": &url.Error{
+			Op:  "Post",
+			URL: "https://upstream.example/v1\x7f?key=outer-secret",
+			Err: &url.Error{Op: "Get", URL: "https://upstream.example/v2?token=inner-secret", Err: errors.New("refused")},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := sanitizeUpstreamTransportError(input)
+			for e := error(got); e != nil; e = errors.Unwrap(e) {
+				for _, secret := range []string{"outer-secret", "inner-secret"} {
+					if strings.Contains(e.Error(), secret) {
+						t.Errorf("sanitized chain leaks %q at %T: %s", secret, e, e)
+					}
+				}
+			}
+			if _, ok := errors.AsType[*url.Error](got); !ok {
+				t.Fatalf("errors.As(%T) found no *url.Error", got)
+			}
+		})
 	}
 }

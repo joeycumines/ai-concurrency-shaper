@@ -203,6 +203,12 @@ const (
 	// StructuredOutput covers a structured-output format that the target
 	// cannot reproduce.
 	FeatureStructuredOutput Feature = "structured_output"
+	// VacuousSchemaBounds records the removal of ±math.MaxFloat64 numeric
+	// bounds from tool schemas (a lossless rewrite; a note, never a loss).
+	FeatureVacuousSchemaBounds Feature = "vacuous_schema_bounds"
+	// Metadata covers request metadata that the configured chat provider
+	// does not accept (the metadata capability is withdrawn).
+	FeatureMetadata Feature = "metadata"
 	// ParallelToolCalls covers the parallel-tool-calls setting that the
 	// target cannot reproduce.
 	FeatureParallelToolCalls Feature = "parallel_tool_calls"
@@ -363,6 +369,8 @@ var lossRegistry = []lossEntry{
 	{FeatureToolResultJSONEnvelope, "multimodal tool results are encoded as the deterministic transcode JSON text envelope (transcode_version 1) inside a Chat tool message"},
 	{FeatureDeveloperRole, "the developer-role distinction cannot be reproduced in the target"},
 	{FeatureStructuredOutput, "the structured-output format cannot be reproduced in the target"},
+	{FeatureVacuousSchemaBounds, "tool schema numeric bounds at ±float64 max admit every finite number and are removed for a chat provider that rejects them"},
+	{FeatureMetadata, "request metadata is not forwarded because the configured chat provider does not accept it"},
 	{FeatureParallelToolCalls, "the parallel-tool-calls setting cannot be reproduced in the target"},
 	{FeatureStopSequences, "stop sequences cannot be reproduced in the target"},
 	{FeatureImageInput, "image input cannot be reproduced in the target"},

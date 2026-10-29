@@ -17,6 +17,7 @@ package config
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -45,9 +46,11 @@ func (c *Config) UnprotectedProviderCount() int {
 //
 // Grammar:
 //
-//	-auth-source: "" (disabled) | none | env:VAR | file:PATH
+//	-auth-source: "" (disabled) | none | env:VAR | file:PATH |
+//	              exec:<JSON array of strings>
 //	-auth-mode:   "" (auto when a source is set) | auto | none | bearer |
 //	              x-api-key | api-key | header:<NAME>
+//	-auth-source-ttl, -auth-source-timeout: exec: only (ttl required)
 //
 // Empty source and empty mode together mean authentication is disabled: the
 // provider forwards requests verbatim with no stripping or injection.
@@ -65,7 +68,7 @@ func (p *Provider) validateAuth() error {
 	switch modeName {
 	case "", "auto":
 	case "none":
-		if sourceKind == "env" || sourceKind == "file" {
+		if sourceKind == "env" || sourceKind == "file" || sourceKind == "exec" {
 			return fmt.Errorf("-auth-mode none does not use -auth-source")
 		}
 	case "bearer", "x-api-key", "api-key":
@@ -96,15 +99,55 @@ func (p *Provider) validateAuth() error {
 		}
 	case "file":
 		// Non-empty path guaranteed by parseAuthSource.
+	case "exec":
+		if _, err := p.newExecSecretSource(sourceArg); err != nil {
+			return err
+		}
+	}
+
+	if sourceKind != "exec" {
+		if p.AuthSourceTTL != 0 || p.explicitProviderFlag("auth-source-ttl") {
+			return fmt.Errorf("-auth-source-ttl requires an exec: -auth-source")
+		}
+		if p.explicitProviderFlag("auth-source-timeout") {
+			return fmt.Errorf("-auth-source-timeout requires an exec: -auth-source")
+		}
 	}
 
 	return nil
 }
 
+// newExecSecretSource builds the exec: source from its JSON argv and the
+// -auth-source-ttl/-auth-source-timeout values. Construction has no side
+// effects (nothing runs until the first Secret call), so validateAuth uses
+// it for the grammar check too.
+func (p *Provider) newExecSecretSource(rawArgv string) (*auth.ExecSecretSource, error) {
+	var argv []string
+	if err := json.Unmarshal([]byte(rawArgv), &argv); err != nil {
+		return nil, fmt.Errorf("-auth-source exec: command must be a JSON array of strings: %w", err)
+	}
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("-auth-source exec: command must be a non-empty JSON array of strings")
+	}
+	if p.AuthSourceTTL <= 0 {
+		return nil, fmt.Errorf("-auth-source exec: requires -auth-source-ttl > 0, got %v", p.AuthSourceTTL)
+	}
+	if p.AuthSourceTimeout <= 0 {
+		return nil, fmt.Errorf("-auth-source-timeout must be > 0, got %v", p.AuthSourceTimeout)
+	}
+	source, err := auth.NewExecSecretSource(argv, p.AuthSourceTTL, p.AuthSourceTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("-auth-source: %w", err)
+	}
+	return source, nil
+}
+
 // buildAuthPolicy constructs the provider's runtime auth policy. It resolves
 // the credential ONCE so a missing or empty secret fails here — before any
-// socket binds — instead of failing every request later. The resolved value
-// is wrapped in a static source; nothing about it is ever logged.
+// socket binds — instead of failing every request later. An env:/file: value
+// is wrapped in a static source; an exec: source has run its command once
+// and is kept live so it can rotate the credential. Nothing about the value
+// is ever logged.
 //
 // Callers prefix returned errors with the section context.
 func (p *Provider) buildAuthPolicy() error {
@@ -168,6 +211,12 @@ func (p *Provider) buildAuthPolicy() error {
 		source = auth.NewEnvSecretSource(sourceArg)
 	case "file":
 		source = auth.NewFileSecretSource(sourceArg)
+	case "exec":
+		execSource, err := p.newExecSecretSource(sourceArg)
+		if err != nil {
+			return err
+		}
+		source = execSource
 	default:
 		return fmt.Errorf("-auth-mode %q requires -auth-source", p.AuthMode)
 	}
@@ -176,10 +225,13 @@ func (p *Provider) buildAuthPolicy() error {
 	if err != nil {
 		return fmt.Errorf("-auth-source %s: %w", p.AuthSource, err)
 	}
+	if _, dynamic := source.(auth.DynamicSecretSource); !dynamic {
+		source = auth.NewStaticSecretSource(strings.TrimSpace(value))
+	}
 
 	policy := &auth.AuthPolicy{
 		Mode:             resolved,
-		Secret:           auth.NewStaticSecretSource(strings.TrimSpace(value)),
+		Secret:           source,
 		CustomHeader:     headerName,
 		AnthropicVersion: p.AnthropicVersion,
 	}
@@ -207,7 +259,8 @@ func resolveAuthHeader(rawMode, modeArg, flagValue string) (string, error) {
 }
 
 // parseAuthSource splits the raw -auth-source value into its kind and
-// argument: "" (disabled), "none", "env:VAR", or "file:PATH".
+// argument: "" (disabled), "none", "env:VAR", "file:PATH", or
+// "exec:<JSON argv>" (the argument is the unparsed JSON).
 func parseAuthSource(raw string) (kind, arg string, err error) {
 	switch {
 	case raw == "":
@@ -232,7 +285,15 @@ func parseAuthSource(raw string) (kind, arg string, err error) {
 		return "file", rest, nil
 	}
 
-	return "", "", fmt.Errorf("-auth-source %q must be env:VAR, file:PATH, or none", raw)
+	rest, ok = strings.CutPrefix(raw, "exec:")
+	if ok {
+		if rest == "" {
+			return "", "", fmt.Errorf("-auth-source exec: command must be a non-empty JSON array of strings")
+		}
+		return "exec", rest, nil
+	}
+
+	return "", "", fmt.Errorf("-auth-source %q must be env:VAR, file:PATH, exec:[JSON argv], or none", raw)
 }
 
 // splitAuthMode splits the raw -auth-mode value into its name and argument

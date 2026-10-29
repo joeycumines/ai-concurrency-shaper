@@ -669,7 +669,9 @@ func TestRenderChatRequestFromResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{ParallelToolCalls: true})
+	caps := defaultChatCapabilities()
+	caps.ParallelToolCalls = true
+	rendered, _, err := RenderChatRequest(result.Request, testExchangeContext(), caps)
 	if err != nil {
 		t.Fatal(err)
 	}

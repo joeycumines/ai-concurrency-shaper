@@ -1708,6 +1708,12 @@ func TestParseTranscodeProfilesAllTiers(t *testing.T) {
 func TestResolveAndValidate_SingleMountMultiDialect(t *testing.T) {
 	t.Setenv("TEST_OPENCODE_TOKEN", "test-secret")
 	args := []string{
+		// The messages route carries two mappings, so dispatch needs each
+		// model's upstream dialect; the global table is the only source of the
+		// via= fact.
+		"-model-table", "claude-opus@opencode-go=wire-opus;via=messages",
+		"-model-table", "gpt-nano@opencode-go=wire-nano;via=responses",
+		"-model-table", "deepseek-v3@opencode-go=wire-deepseek;via=chat",
 		"--provider=opencode-go",
 		"-upstream", "https://opencode.ai/zen/go",
 		"--native-route=chat@/v1/chat/completions",
@@ -1716,7 +1722,6 @@ func TestResolveAndValidate_SingleMountMultiDialect(t *testing.T) {
 		"-transcode-responses-chat",
 		"-transcode-messages-chat",
 		"-transcode-messages-responses",
-		"-transcode-model", "claude-opus=wire-opus",
 		"-auth-mode", "bearer",
 		"-auth-source", "env:TEST_OPENCODE_TOKEN",
 	}
@@ -1982,6 +1987,141 @@ func TestResolveAndValidate_TranscodeAuthDialectAdaptation(t *testing.T) {
 		sec, err := authP.Secret.Secret(context.Background())
 		if err != nil || sec != "provider-val" {
 			t.Errorf("secret = %q, err = %v, want provider-val", sec, err)
+		}
+	}
+}
+
+// TestResolveAndValidate_MultiTargetRouteRequiresVia proves the dead
+// configuration is refused at startup: a client route carrying two transcode
+// mappings is dispatched by the request model's declared upstream dialect, and
+// without any via= fact every target answers the same identity fallback, so
+// the responses target can never be reached. The refusal names the flag that
+// makes the route work.
+func TestResolveAndValidate_MultiTargetRouteRequiresVia(t *testing.T) {
+	// No via= fact at all: identity resolution reaches the chat fallback, but
+	// no model can select the responses target.
+	cfg, err := Parse([]string{
+		"-upstream", "https://api.example.com",
+		"-transcode-messages-chat",
+		"-transcode-messages-responses",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = cfg.ResolveAndValidate()
+	if err == nil {
+		t.Fatal("ResolveAndValidate: nil error, want the unreachable-target rejection")
+	}
+	for _, want := range []string{"POST /v1/messages", "unreachable", "-model-table"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err, want)
+		}
+	}
+
+	// A via= entry for only ONE of the two protocols leaves the other target
+	// unreachable: the check must name the missing dialect, not merely see
+	// that some via exists.
+	for _, tc := range []struct{ via, missing string }{
+		{"chat", "responses"},
+		{"responses", "chat"},
+		{"messages", "chat or responses"},
+	} {
+		bad, err := Parse([]string{
+			"-model-table", "s@example=wire;via=" + tc.via,
+			"-upstream", "https://api.example.com",
+			"-transcode-messages-chat",
+			"-transcode-messages-responses",
+		})
+		if err != nil {
+			t.Fatalf("via=%s: Parse: %v", tc.via, err)
+		}
+		err = bad.ResolveAndValidate()
+		if err == nil {
+			t.Errorf("via=%s: ResolveAndValidate = nil, want the %s target rejected as unreachable", tc.via, tc.missing)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.missing) {
+			t.Errorf("via=%s: error = %q, want it to name %q", tc.via, err, tc.missing)
+		}
+	}
+
+	// A model selecting each protocol resolves.
+	ok, err := Parse([]string{
+		"-model-table", "c@example=chat-wire;via=chat",
+		"-model-table", "r@example=resp-wire;via=responses",
+		"-upstream", "https://api.example.com",
+		"-transcode-messages-chat",
+		"-transcode-messages-responses",
+	})
+	if err != nil {
+		t.Fatalf("Parse with both vias: %v", err)
+	}
+	if err := ok.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate with both dialects: %v", err)
+	}
+	if n := len(ok.Providers[0].TranscodeMappings()); n != 2 {
+		t.Fatalf("mappings = %d, want 2", n)
+	}
+
+	// A single mapping on the route is the operator's blanket serving choice
+	// and needs no dialect fact.
+	single, err := Parse([]string{
+		"-upstream", "https://api.example.com",
+		"-transcode-messages-chat",
+	})
+	if err != nil {
+		t.Fatalf("Parse single: %v", err)
+	}
+	if err := single.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate single mapping: %v", err)
+	}
+}
+
+// TestResolveAndValidate_MultiTargetChatFallbackIsReachable pins that the
+// reachability check counts the dispatcher's chat-first fallback: a model with
+// no declared dialect is served by the chat mapping, so "responses for the
+// via=responses models, chat for the rest" is a working layout and must not be
+// refused for lacking a via=chat entry.
+func TestResolveAndValidate_MultiTargetChatFallbackIsReachable(t *testing.T) {
+	cfg, err := Parse([]string{
+		"-model-table", "r@example=resp-wire;via=responses",
+		"-model-table", "c@example=chat-wire",
+		"-upstream", "https://api.example.com",
+		"-transcode-messages-chat",
+		"-transcode-messages-responses",
+	})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := cfg.ResolveAndValidate(); err != nil {
+		t.Fatalf("ResolveAndValidate: %v (a via-less model reaches the chat fallback)", err)
+	}
+	if n := len(cfg.Providers[0].TranscodeMappings()); n != 2 {
+		t.Fatalf("mappings = %d, want 2", n)
+	}
+}
+
+// TestResolveAndValidate_MultiTargetRejectionIsDeterministic pins that when
+// several routes leave a target unreachable, the refusal always names the
+// first configured route, not whichever a map iteration happened to visit.
+func TestResolveAndValidate_MultiTargetRejectionIsDeterministic(t *testing.T) {
+	for i := range 32 {
+		cfg, err := Parse([]string{
+			"-upstream", "https://api.example.com",
+			"-transcode-route", "messages@/a=chat-completions@/v1/chat/completions",
+			"-transcode-route", "messages@/a=responses@/v1/responses",
+			"-transcode-route", "messages@/b=chat-completions@/v1/chat/completions",
+			"-transcode-route", "messages@/b=responses@/v1/responses",
+		})
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		err = cfg.ResolveAndValidate()
+		if err == nil {
+			t.Fatal("ResolveAndValidate: nil error, want the unreachable responses target refused")
+		}
+		if !strings.Contains(err.Error(), "POST /a ") {
+			t.Fatalf("run %d: error = %q, want the first configured route POST /a", i, err)
 		}
 	}
 }

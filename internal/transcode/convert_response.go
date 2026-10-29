@@ -27,7 +27,7 @@ type chatResponseShadow struct {
 	Created           int64              `json:"created"`
 	Model             *string            `json:"model"`
 	ServiceTier       *string            `json:"service_tier,omitempty"`
-	SystemFingerprint string             `json:"system_fingerprint,omitempty"`
+	SystemFingerprint *string            `json:"system_fingerprint,omitempty"`
 	Choices           []chatChoiceShadow `json:"choices"`
 	Usage             *chatUsageShadow   `json:"usage,omitempty"`
 

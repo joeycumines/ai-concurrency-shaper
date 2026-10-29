@@ -130,6 +130,21 @@ func (s staticSecretSource) Secret(context.Context) (string, error) {
 	return string(s), nil
 }
 
+// freezeSecretSource resolves source once. The trimmed value is pinned in a
+// static source, except for an auth.DynamicSecretSource: that one is
+// validated by the same eager resolution but retained, because its
+// credential is meant to rotate.
+func freezeSecretSource(ctx context.Context, source SecretSource) (SecretSource, error) {
+	secret, err := source.Secret(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, dynamic := source.(auth.DynamicSecretSource); dynamic {
+		return source, nil
+	}
+	return staticSecretSource(strings.TrimSpace(secret)), nil
+}
+
 // RequestSigner signs a final request. Sign runs last, after the final URL,
 // query, body, Host, and representation headers are set.
 type RequestSigner interface {
@@ -299,21 +314,29 @@ func ApplyTargetAuthentication(
 		}
 	}
 
+	var header, scheme string
 	switch mode {
 	case AuthBearer:
-		req.Header.Set("Authorization", "Bearer "+secret)
+		header, scheme = "Authorization", "Bearer "
 
 	case AuthXAPIKey:
-		req.Header.Set("X-Api-Key", secret)
+		header = "X-Api-Key"
 
 	case AuthAPIKey:
-		req.Header.Set("Api-Key", secret)
+		header = "Api-Key"
 
 	case AuthCustomHeader:
-		req.Header.Set(policy.CustomHeader, secret)
+		header = policy.CustomHeader
 
 	default:
 		return fmt.Errorf("unsupported resolved auth mode %q", mode)
+	}
+	req.Header.Set(header, scheme+secret)
+	if !policy.Inbound {
+		// A rotating provider credential (exec:) marks the request so the
+		// proxy transport can invalidate it and re-send once on an upstream
+		// 401/403; every other source attaches nothing.
+		auth.AttachReauthentication(req, policy.Secret, secret, header, scheme)
 	}
 
 	if target == UpstreamMessages {

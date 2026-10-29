@@ -166,14 +166,15 @@ func NewTranscodeHandler(
 	// static source (when not the inbound-forwarding mode): a mutable
 	// custom SecretSource can no longer change live behavior or fail
 	// mid-exchange — the same freeze contract the provider auth policy
-	// satisfies through auth.FreezeAuthPolicy.
+	// satisfies through auth.FreezeAuthPolicy, including its one exception:
+	// a rotating auth.DynamicSecretSource is resolved but kept live.
 	cfg.Mapping = cloneMapping(cfg.Mapping)
 	if !cfg.Mapping.Auth.Inbound && cfg.Mapping.Auth.Secret != nil {
-		secret, err := cfg.Mapping.Auth.Secret.Secret(context.Background())
+		frozen, err := freezeSecretSource(context.Background(), cfg.Mapping.Auth.Secret)
 		if err != nil {
 			panic(fmt.Sprintf("transcode: resolve mapping auth secret: %v", err))
 		}
-		cfg.Mapping.Auth.Secret = staticSecretSource(strings.TrimSpace(secret))
+		cfg.Mapping.Auth.Secret = frozen
 	}
 	upstream := *cfg.Upstream
 	cfg.Upstream = &upstream
@@ -236,6 +237,11 @@ func NewTranscodeHandler(
 func cloneMapping(m Mapping) Mapping {
 	m.LossPolicy = LossPolicy{Allowed: cloneLossSet(m.LossPolicy.Allowed)}
 	m.ModelMap = cloneModelMapValues(m.ModelMap)
+	if m.ProfileMap.Profiles != nil {
+		profiles := make(map[string]ProfileMapping, len(m.ProfileMap.Profiles))
+		maps.Copy(profiles, m.ProfileMap.Profiles)
+		m.ProfileMap.Profiles = profiles
+	}
 	m.AllowedClientQuery = cloneQuerySet(m.AllowedClientQuery)
 	return m
 }
@@ -950,7 +956,7 @@ func (h *TranscodeHandler) jsonResponse(
 			Type:    "api_error",
 			Code:    "response_conversion_error",
 			Message: "generated response exceeds the configured limit",
-		}, ProvenanceUpstreamBodyError)
+		}, ProvenanceLocalResponseConversionError)
 		return
 	}
 	h.copyResponseHeaders(w.Header(), resp.Header)
@@ -1188,6 +1194,8 @@ func (h *TranscodeHandler) streamResponse(
 		outcome.Provenance = ProvenanceUpstreamHTTP
 		outcome.DownstreamComplete = downstreamComplete
 	case streamOutcomeClientAbort:
+		outcome.UpstreamAttempted = true
+		outcome.UpstreamStatus = Optional[int]{Value: resp.StatusCode, Set: true}
 		outcome.Provenance = ProvenanceClientAbort
 		outcome.ClientAborted = true
 	case streamOutcomeUpstreamFailure:
@@ -1214,6 +1222,8 @@ func (h *TranscodeHandler) streamResponse(
 		outcome.DownstreamComplete = downstreamComplete
 		h.logStreamConversionError(r, observation.ReaderErr)
 	case streamOutcomeDownstreamFailure:
+		outcome.UpstreamAttempted = true
+		outcome.UpstreamStatus = Optional[int]{Value: resp.StatusCode, Set: true}
 		outcome.Provenance = ProvenanceDownstreamWriteError
 	default:
 		outcome.UpstreamAttempted = true
@@ -1340,18 +1350,39 @@ func (h *TranscodeHandler) writeLocalError(
 	h.writeDialectHTTPError(r, w, apiErr, provenance)
 }
 
-// writeCommittedStreamError failed-closes an already-committed SSE stream
+// WriteCommittedStreamError failed-closes an already-committed SSE stream
 // with a client-dialect error event. The re-declared WriteHeader never
 // reaches the wire (the proxy's committed-stream guard silences it and
 // marks the exchange aborted); the SSE error frame is the observable
 // failure. A failed downstream write is returned so the outcome records
 // the delivery fact exactly like the JSON error writers.
-func writeCommittedStreamError(
+//
+// It is exported so a route-selection refusal that happens before any
+// handler runs (the multi-target dispatcher) emits exactly the frame the
+// handler's own post-commit error path emits, instead of a second spelling
+// of the same wire event.
+func WriteCommittedStreamError(
 	w http.ResponseWriter,
 	client ClientProtocol,
 	apiErr CanonicalAPIError,
 ) error {
 	apiErr = normalizeCanonicalError(apiErr)
+	// A writer that owns a failed-close comment (the proxy's committed-stream
+	// recorder) must not add its own upstream-blame close once this terminal
+	// is framed: the failure is local, or already stated by the dialect
+	// event, and a second close comment would misreport the cause. The
+	// recorder sits behind diagnostic wrappers, so the chain is walked.
+	for cur := w; cur != nil; {
+		if suppressor, ok := cur.(interface{ SuppressFailedCloseComment() }); ok {
+			suppressor.SuppressFailedCloseComment()
+			break
+		}
+		unwrapper, ok := cur.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		cur = unwrapper.Unwrap()
+	}
 	w.WriteHeader(apiErr.Status)
 	var payload []byte
 	var err error
@@ -1398,7 +1429,7 @@ func (h *TranscodeHandler) writeDialectOrCommittedStreamError(
 	apiErr CanonicalAPIError,
 ) error {
 	if CommittedStreamFromContext(r.Context()) {
-		return writeCommittedStreamError(w, client, apiErr)
+		return WriteCommittedStreamError(w, client, apiErr)
 	}
 	return WriteDialectHTTPError(w, client, apiErr)
 }
@@ -2050,52 +2081,8 @@ func (h *TranscodeHandler) logStreamConversionError(r *http.Request, cause error
 }
 
 // sanitizeUpstreamTransportError redacts credential-bearing URL query values
-// from a RoundTrip transport error before it reaches any log sink. A custom
-// http.Client-based transport produces *url.Error values carrying the full
-// outbound request URL (including the upstream base query preserved by the
-// route mapping), so the error string is scrubbed with the same sensitive
-// parameter redaction the native passthrough path applies to its log line,
-// recursing through nested url.Error chains the way the native sanitizer
-// does.
+// from an upstream transport error before it is logged, with the same
+// guarantees as the native path (auth.SanitizeURLError).
 func sanitizeUpstreamTransportError(err error) error {
-	var outer *url.Error
-	if !errors.As(err, &outer) {
-		return err
-	}
-	parsed, perr := url.Parse(outer.URL)
-	if perr != nil {
-		return err
-	}
-	var replacements []string
-	redacted := redactURLErrorChain(outer, parsed, &replacements)
-	if _, direct := err.(*url.Error); !direct {
-		// Preserve the original error's own formatting for non-url.Error
-		// wrappers: replace every raw/redacted URL pair in the rendered
-		// string so nested chains are scrubbed too.
-		msg := err.Error()
-		for i := 0; i+1 < len(replacements); i += 2 {
-			msg = strings.ReplaceAll(msg, replacements[i], replacements[i+1])
-		}
-		return errors.New(msg)
-	}
-	return redacted
-}
-
-// redactURLErrorChain clones e with its URL redacted and recurses into
-// directly nested url.Error subtrees (http.Client redirect chains), so every
-// URL in the chain is scrubbed. Each raw/redacted pair is appended to
-// replacements for callers that must scrub a rendered wrapper string.
-func redactURLErrorChain(e *url.Error, parsed *url.URL, replacements *[]string) *url.Error {
-	clone := *e
-	redactedURL := auth.RedactSensitiveURL(parsed).String()
-	if e.URL != "" && e.URL != redactedURL {
-		*replacements = append(*replacements, e.URL, redactedURL)
-	}
-	clone.URL = redactedURL
-	if inner, ok := e.Err.(*url.Error); ok {
-		if innerParsed, perr := url.Parse(inner.URL); perr == nil {
-			clone.Err = redactURLErrorChain(inner, innerParsed, replacements)
-		}
-	}
-	return &clone
+	return auth.SanitizeURLError(err)
 }

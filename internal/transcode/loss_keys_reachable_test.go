@@ -1166,6 +1166,47 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 				return report, err
 			},
 		},
+		{
+			key:  FeatureVacuousSchemaBounds,
+			perm: []Feature{},
+			note: true,
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				request := CanonicalRequest{
+					ClientModel: "m",
+					Turns: []CanonicalTurn{{
+						Role:  CanonicalUser,
+						Parts: []CanonicalPart{CanonicalText{Text: "hi"}},
+					}},
+					Tools: []CanonicalTool{{
+						Name:        "t",
+						Description: "d",
+						JSONSchema:  json.RawMessage(`{"type":"object","properties":{"n":{"type":"number","maximum":1.7976931348623157e+308}}}`),
+					}},
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				_, report, err := RenderChatRequest(request, context, ChatCapabilities{Float64Bounds: false, Metadata: true})
+				return report, err
+			},
+		},
+		{
+			key:  FeatureMetadata,
+			perm: []Feature{FeatureMetadata},
+			run: func(policy LossPolicy) (ConversionReport, error) {
+				request := CanonicalRequest{
+					ClientModel: "m",
+					Turns: []CanonicalTurn{{
+						Role:  CanonicalUser,
+						Parts: []CanonicalPart{CanonicalText{Text: "hi"}},
+					}},
+					Metadata: map[string]string{"session_id": "s1"},
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				_, report, err := RenderChatRequest(request, context, ChatCapabilities{Metadata: false, Float64Bounds: true})
+				return report, err
+			},
+		},
 	}
 
 	// The scenario matrix must cover every registered key exactly once.

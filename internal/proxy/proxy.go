@@ -548,11 +548,11 @@ type FailureHoldOption struct {
 }
 
 // WithFailureHold returns an option that sets the slot hold duration after
-// an upstream failure (5xx, 429). This hold applies when the circuit breaker
-// is disabled or when the breaker's phantom penalty is zero. When the breaker
-// is enabled with a non-zero penalty, the phantom penalty handles failure-path
-// holds instead. The hold is released asynchronously so the HTTP handler
-// returns immediately. Zero means no hold (disabled).
+// an upstream failure (5xx, 429). This hold applies only when the circuit
+// breaker is disabled: an enabled breaker's phantom penalty, which is always
+// at least its positive base penalty, is the failure-path hold instead. The
+// hold is released asynchronously so the HTTP handler returns immediately.
+// Zero means no hold (disabled).
 func WithFailureHold(d time.Duration) *FailureHoldOption {
 	return &FailureHoldOption{value: d}
 }
@@ -863,58 +863,7 @@ func New(opts ...Option) (*Proxy, error) {
 		}
 	}
 
-	// Build retry transport when retries are enabled.
-	var transport http.RoundTripper = cfg.transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	if cfg.maxRetries != 0 {
-		var checkRetry retry.CheckRetry
-		if cfg.retrySkipOn429 {
-			checkRetry = func(resp *http.Response, err error) bool {
-				if err != nil {
-					// Local non-retryable defects (e.g. signing failures)
-					// are never retried.
-					return !retry.IsNonRetryable(err)
-				}
-				if resp == nil {
-					return false
-				}
-				// Skip 429 — retrying rate-limited responses amplifies
-				// the concurrency issue that caused the 429.
-				return resp.StatusCode >= 500
-			}
-		}
-		// Disposition (grounded moot): a deterministic
-		// transcode decode failure (a 200 body outside the supported wire
-		// subset) can NEVER be retried here, because this policy sees only
-		// RoundTrip errors and HTTP status — the body fails AFTER the
-		// response returns, inside the TranscodeHandler. The proxy therefore
-		// re-sends a poisonous body zero times; the field-observed repeat
-		// 502s were client-driven retries. Pinned by
-		// TestProxyTranscodePoisonUsage200IsNeverRetried
-		// (transcode_classification_test.go).
-		// The signing transport sits inside the retry chain so EVERY
-		// attempt is signed after the retry layer rebuilt the body and
-		// finalized Content-Length. Requests without a
-		// signer in their context pass through untouched.
-		transport = &retry.Transport{
-			Inner: withAttemptMarkingTransport(&transcode.SigningTransport{
-				Inner: transport,
-			}),
-			MaxRetries:    cfg.maxRetries,
-			MaxBodyBytes:  cfg.maxBodyBytes,
-			WaitMin:       cfg.retryWaitMin,
-			WaitMax:       cfg.retryWaitMax,
-			MinRetryDelay: cfg.retryMinDelay,
-			Breaker:       cfg.breaker,
-			CheckRetry:    checkRetry,
-		}
-	} else {
-		transport = withAttemptMarkingTransport(&transcode.SigningTransport{
-			Inner: transport,
-		})
-	}
+	transport := buildUpstreamTransport(&cfg)
 
 	// Track whether the retry transport handles breaker reporting. Detect direct
 	// retry transports and transparent wrappers that expose retry ownership, so
@@ -965,6 +914,7 @@ func New(opts ...Option) (*Proxy, error) {
 		m := &cfg.transcodeMappings[i]
 		mapping := m.Mapping
 		mapping.ModelMap = cloneModelMap(m.ModelMap)
+		mapping.ProfileMap = cloneProfileMap(m.ProfileMap)
 		mapping.LossPolicy = cloneLossPolicy(m.LossPolicy)
 		mapping.AllowedClientQuery = cloneStringSet(m.AllowedClientQuery)
 		if mapping.Auth.IsZero() {
@@ -1151,9 +1101,14 @@ func New(opts ...Option) (*Proxy, error) {
 						// terminalWritten guard below cannot be relied
 						// on for this path — recordImplicitOK satisfied
 						// it on the comment write).
-						rec.aborted = true
+						// The same proxy-generated 503 the uncommitted
+						// branch writes is recorded behind the committed
+						// 200, after the comment (Write swallows bytes once
+						// an override is set).
 						fmt.Fprintf(rec, ": queue-wait failed: circuit open\n\n")
 						_ = rec.FlushError()
+						rec.proxyGeneratedError = true
+						rec.recordCommittedFailure(http.StatusServiceUnavailable)
 					} else if !rec.terminalWritten {
 						rec.proxyGeneratedError = true
 						http.Error(rec, "circuit open", http.StatusServiceUnavailable)
@@ -1164,9 +1119,14 @@ func New(opts ...Option) (*Proxy, error) {
 			slog.Error("proxy transport error", "error", sanitizeTransportError(err))
 			if rec, ok := w.(*statusRecorder); ok {
 				if rec.commentsCommitted {
-					rec.aborted = true
+					// The same 502 the uncommitted branch writes, recorded
+					// behind the committed 200: without it classification
+					// reads the commit's 200 and a dead upstream never
+					// reaches the breaker.
 					fmt.Fprintf(rec, ": queue-wait failed: upstream\n\n")
 					_ = rec.FlushError()
+					rec.proxyGeneratedError = true
+					rec.recordCommittedFailure(http.StatusBadGateway)
 				} else if !rec.terminalWritten {
 					rec.proxyGeneratedError = true
 					http.Error(rec, "bad gateway", http.StatusBadGateway)
@@ -1178,134 +1138,6 @@ func New(opts ...Option) (*Proxy, error) {
 	p.inner = rp
 	p.transport = transport
 	return p, nil
-}
-
-type retryBreakerTransport interface {
-	RetryBreaker() *circuitbreaker.Breaker
-}
-
-type retryInFlightTransport interface {
-	SetInFlightRetries(*atomic.Int64)
-}
-
-type roundTripperUnwrapper interface {
-	Unwrap() http.RoundTripper
-}
-
-type retryTransportDetection struct {
-	found              bool
-	breaker            *circuitbreaker.Breaker
-	conflictingBreaker bool
-	setInFlightRetries func(*atomic.Int64)
-}
-
-type attemptMarkingTransport struct {
-	inner http.RoundTripper
-}
-
-func (t *attemptMarkingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if state := upstreamAttemptStateFromContext(req.Context()); state != nil {
-		state.started.Store(true)
-	}
-	inner := t.inner
-	if inner == nil {
-		inner = http.DefaultTransport
-	}
-	return inner.RoundTrip(req)
-}
-
-func (t *attemptMarkingTransport) Unwrap() http.RoundTripper {
-	if t == nil {
-		return nil
-	}
-	return t.inner
-}
-
-func withAttemptMarkingTransport(transport http.RoundTripper) http.RoundTripper {
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	if withAttemptMarkingRetryTransport(transport, 0) {
-		return transport
-	}
-	return &attemptMarkingTransport{inner: transport}
-}
-
-func withAttemptMarkingRetryTransport(transport http.RoundTripper, depth int) bool {
-	if transport == nil || depth > 16 {
-		return false
-	}
-	if _, ok := transport.(*attemptMarkingTransport); ok {
-		return true
-	}
-	if rt, ok := transport.(*retry.Transport); ok {
-		rt.Inner = withAttemptMarkingTransport(rt.Inner)
-		return true
-	}
-	if uw, ok := transport.(roundTripperUnwrapper); ok {
-		return withAttemptMarkingRetryTransport(uw.Unwrap(), depth+1)
-	}
-	return false
-}
-
-func detectRetryTransport(transport http.RoundTripper) retryTransportDetection {
-	return detectRetryTransportDepth(transport, 0)
-}
-
-func detectRetryTransportDepth(transport http.RoundTripper, depth int) retryTransportDetection {
-	if transport == nil || depth > 16 {
-		return retryTransportDetection{}
-	}
-
-	var out retryTransportDetection
-	if rt, ok := transport.(retryBreakerTransport); ok {
-		out.found = true
-		out.breaker = rt.RetryBreaker()
-	}
-	if rt, ok := transport.(retryInFlightTransport); ok {
-		out.found = true
-		out.setInFlightRetries = rt.SetInFlightRetries
-	}
-
-	if uw, ok := transport.(roundTripperUnwrapper); ok {
-		inner := detectRetryTransportDepth(uw.Unwrap(), depth+1)
-		if !out.found {
-			return inner
-		}
-		if out.breaker == nil {
-			out.breaker = inner.breaker
-		} else if inner.breaker != nil && inner.breaker != out.breaker {
-			out.conflictingBreaker = true
-		}
-		out.conflictingBreaker = out.conflictingBreaker || inner.conflictingBreaker
-		if out.setInFlightRetries == nil {
-			out.setInFlightRetries = inner.setInFlightRetries
-		}
-	}
-	return out
-}
-
-func validateRetryTransportBreaker(transport http.RoundTripper, breaker *circuitbreaker.Breaker, maxRetries int) error {
-	retryInfo := detectRetryTransport(transport)
-	if !retryInfo.found || retryInfo.breaker == nil {
-		if retryInfo.conflictingBreaker {
-			return errors.New("proxy: supplied retry transport wrappers expose conflicting breakers")
-		}
-		return nil
-	}
-	if retryInfo.conflictingBreaker {
-		return errors.New("proxy: supplied retry transport wrappers expose conflicting breakers")
-	}
-	if breaker == nil {
-		return errors.New("proxy: supplied retry transport has a breaker but WithBreaker is nil; WithBreaker owns proxy breaker integration")
-	}
-	if retryInfo.breaker != breaker {
-		return errors.New("proxy: supplied retry transport breaker must match WithBreaker breaker")
-	}
-	if maxRetries != 0 {
-		return errors.New("proxy: supplied retry transport with a breaker cannot be wrapped by WithMaxRetries; set the transport breaker to nil or disable proxy retries")
-	}
-	return nil
 }
 
 // Metrics returns the shared metrics collector.
@@ -1390,8 +1222,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if recPtr != nil && !recPtr.hijacked && !aborted {
 				entry.Timing.ResponseComplete = time.Now()
 			}
-			// For passthrough requests, there is no queue phase — set QueueEnd
-			// equal to QueueStart so QueueDuration returns 0.
+			// An exchange with no queue wait (passthrough, or a request ended
+			// before admission began) gets QueueEnd equal to QueueStart, so
+			// QueueDuration returns 0.
 			if entry.Timing.QueueEnd.IsZero() {
 				entry.Timing.QueueEnd = entry.Timing.QueueStart
 			}
@@ -1450,11 +1283,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// Any recovered panic is an aborted exchange: the exchange never
 				// completed cleanly, the clean-completion counters are skipped,
 				// and the journal records Aborted with ResponseComplete unset.
-				recPtr.aborted = true
-				if !recPtr.terminalWritten {
-					recPtr.proxyGeneratedError = true
-					http.Error(recPtr, "internal error", http.StatusBadGateway)
-				}
+				recPtr.recoverLocalPanic()
 				finalize(true)
 			} else {
 				// No statusRecorder — write directly to the raw ResponseWriter.
@@ -1743,20 +1572,17 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 			// retry-recorded failure fact.
 			upstreamFailure := result.upstreamFailure || retryRecordedFailure
 			// Phantom penalty: hold the global-limiter slot after an upstream failure
-			// when the circuit breaker is enabled and the penalty is non-zero. If the
-			// penalty is zero, fall through to check failureHold.
+			// when the circuit breaker is enabled. PenaltyDuration is always
+			// positive under the validated options, so no penalty-zero
+			// fall-through exists here.
 			if p.breaker != nil && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
-				penalty := p.breaker.PenaltyDuration()
-				if penalty > 0 {
-					time.AfterFunc(penalty, release)
-					return
-				}
-				// Penalty is zero — fall through to check failureHold below.
+				time.AfterFunc(p.breaker.PenaltyDuration(), release)
+				return
 			}
 			if p.failureHold > 0 && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 				// Standalone failure hold: holds the global-limiter slot after an
-				// upstream failure. This applies when the circuit breaker is disabled
-				// or when the breaker penalty is zero. Mirrors serveLimited.
+				// upstream failure. This applies only when the circuit breaker is
+				// disabled. Mirrors serveLimited.
 				time.AfterFunc(p.failureHold, release)
 				return
 			}
@@ -1817,14 +1643,7 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 				}
 				slog.Error("proxy panic in servePassthrough", "panic", rv)
 				if rec, ok := w.(*statusRecorder); ok {
-					// Any recovered panic is an aborted exchange: it never
-					// reaches the completion counters or a clean journal
-					// finalization.
-					rec.aborted = true
-					if !rec.terminalWritten {
-						rec.proxyGeneratedError = true
-						http.Error(rec, "internal error", http.StatusBadGateway)
-					}
+					rec.recoverLocalPanic()
 				}
 				localPanic = true
 			}
@@ -1908,23 +1727,15 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		defer cancel()
 	}
 
-	// Reject immediately if the circuit breaker is OPEN.
-	var breakerEpoch uint64
-	if p.breaker != nil {
-		var err error
-		breakerEpoch, err = p.breaker.Allow()
-		if err != nil {
-			p.m.IncCircuitRejected()
-			http.Error(w, "circuit open", http.StatusServiceUnavailable)
-			return
-		}
-		// Inject the breaker epoch into the request context so breaker reporting
-		// uses the same stale-probe guard for the first retry-transport attempt.
-		ctx := context.WithValue(r.Context(), retry.BreakerEpochKey, breakerEpoch)
-		ctx = p.withRetryAttemptContext(ctx, &retryAttempt)
-		r = r.WithContext(ctx)
-	} else if p.retryTracksAttempts {
-		r = r.WithContext(p.withRetryAttemptContext(r.Context(), &retryAttempt))
+	// Reject a request the breaker would refuse before reading its body. The
+	// peek changes no breaker state: admission itself (and a HALF_OPEN probe
+	// epoch) is taken by the single Allow below, after the body inspection,
+	// so neither a slow upload nor a queue-depth rejection can claim,
+	// supersede, or cancel a recovery probe.
+	if p.breaker != nil && !p.breaker.WouldAllow() {
+		p.m.IncCircuitRejected()
+		http.Error(w, "circuit open", http.StatusServiceUnavailable)
+		return
 	}
 
 	// Bounded-queue admission: when a depth limit is configured,
@@ -1951,25 +1762,19 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		if effective == nil {
 			effective = p.limiter
 		}
-		if effective != nil && effective.Stats().Waiters >= int64(p.queueDepthLimit) {
-			// The request carries a HALF_OPEN recovery probe (Allow()
-			// already admitted it); returning on the queue-rejection path
-			// without cancelling would strand the probe until the open
-			// timeout and block breaker recovery exactly under load.
-			if p.breaker != nil {
-				p.breaker.CancelProbe(breakerEpoch)
+		if effective != nil {
+			if waiters := effective.Stats().Waiters; waiters >= int64(p.queueDepthLimit) {
+				p.m.IncQueueRejected()
+				writeQueueRejected(w, p.queueDepthLimit, waiters)
+				return
 			}
-			p.m.IncQueueRejected()
-			writeQueueRejected(w, p.queueDepthLimit, effective.Stats().Waiters)
-			return
 		}
-		if p.globalLimiter != nil && p.globalLimiter.Stats().Waiters >= int64(p.queueDepthLimit) {
-			if p.breaker != nil {
-				p.breaker.CancelProbe(breakerEpoch)
+		if p.globalLimiter != nil {
+			if waiters := p.globalLimiter.Stats().Waiters; waiters >= int64(p.queueDepthLimit) {
+				p.m.IncQueueRejected()
+				writeQueueRejected(w, p.queueDepthLimit, waiters)
+				return
 			}
-			p.m.IncQueueRejected()
-			writeQueueRejected(w, p.queueDepthLimit, p.globalLimiter.Stats().Waiters)
-			return
 		}
 	}
 
@@ -1991,20 +1796,58 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	// body-carrying request therefore requires a full-duplex writer; one
 	// that cannot (recorders, exotic embedders) falls back to the
 	// documented silent-queuing semantics instead of corrupting the body.
+	//
+	// Only the eligibility is decided here; the commit itself happens after
+	// the breaker admits the request, so a breaker rejection is always a
+	// plain 503 and never a committed stream with a failed close.
 	rec, recIsRecorder := w.(*statusRecorder)
 	var stopComments func()
+	commitComments := false
 	if p.queueComments > 0 {
-		if recIsRecorder && transcode.AcceptIsEventStream(r.Header.Get("Accept")) && !isExplicitNonStreamingRequest(r) {
+		if recIsRecorder && transcode.AcceptIsEventStream(r.Header.Get("Accept")) {
 			if canCommitCommentsWithUnreadBody(r) || http.NewResponseController(rec).EnableFullDuplex() == nil {
-				stopComments = p.startQueueComments(rec)
-				// Tell a downstream transcode handler the streaming
-				// representation is committed: its error writers then
-				// failed-close with dialect-legal SSE error events
-				// instead of raw JSON bodies the committed stream
-				// cannot carry.
-				r = r.WithContext(transcode.WithCommittedStreamContext(r.Context()))
+				commitComments = !bodyBlocksStreamCommit(w, r, ctx)
 			}
 		}
+	}
+	if ctx.Err() != nil {
+		// The admission deadline (or the client) ended the request during
+		// the body inspection: answer exactly as an expired queue wait,
+		// without consulting the breaker. Admission ended here, so the
+		// journal's queue wait ends here too.
+		if recIsRecorder && rec.entry != nil {
+			rec.entry.Timing.QueueEnd = time.Now()
+		}
+		p.writeAdmissionFailure(w, ctx, nil, rec)
+		return
+	}
+
+	var breakerEpoch uint64
+	if p.breaker != nil {
+		var err error
+		breakerEpoch, err = p.breaker.Allow()
+		if err != nil {
+			p.m.IncCircuitRejected()
+			http.Error(w, "circuit open", http.StatusServiceUnavailable)
+			return
+		}
+		// Inject the breaker epoch into the request context so breaker reporting
+		// uses the same stale-probe guard for the first retry-transport attempt.
+		ctx := context.WithValue(r.Context(), retry.BreakerEpochKey, breakerEpoch)
+		ctx = p.withRetryAttemptContext(ctx, &retryAttempt)
+		r = r.WithContext(ctx)
+	} else if p.retryTracksAttempts {
+		r = r.WithContext(p.withRetryAttemptContext(r.Context(), &retryAttempt))
+	}
+
+	if commitComments {
+		stopComments = p.startQueueComments(rec)
+		// Tell a downstream transcode handler the streaming
+		// representation is committed: its error writers then
+		// failed-close with dialect-legal SSE error events
+		// instead of raw JSON bodies the committed stream
+		// cannot carry.
+		r = r.WithContext(transcode.WithCommittedStreamContext(r.Context()))
 	}
 
 	p.m.IncQueued()
@@ -2027,31 +1870,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		if p.breaker != nil {
 			p.breaker.CancelProbe(breakerEpoch)
 		}
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			p.m.IncTimeout()
-			if stopComments != nil {
-				// The streaming representation was already committed: the
-				// failure surfaces as a failed close (error comment +
-				// aborted exchange), never as a misleading new HTTP status
-				// or a non-SSE body inside the committed stream.
-				stopComments()
-				rec.aborted = true
-				fmt.Fprintf(w, ": queue-wait failed: timeout\n\n")
-				_ = rec.FlushError()
-			} else {
-				http.Error(w, "queue timeout", http.StatusGatewayTimeout)
-			}
-		} else {
-			p.m.IncCancelled()
-			if stopComments != nil {
-				stopComments()
-				rec.aborted = true
-				fmt.Fprintf(w, ": queue-wait failed: canceled\n\n")
-				_ = rec.FlushError()
-			} else {
-				http.Error(w, "request canceled", http.StatusServiceUnavailable)
-			}
-		}
+		p.writeAdmissionFailure(w, ctx, stopComments, rec)
 		return
 	}
 	// The comments keep flowing through the GLOBAL limiter wait below —
@@ -2094,6 +1913,13 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	var reachedUpstream bool
 	attemptState := &upstreamAttemptState{}
 	var localPanic bool // set by inner recovery when a local panic (not upstream failure) occurs
+	var globalRelease func()
+	releaseSlots := func() {
+		if globalRelease != nil {
+			globalRelease()
+		}
+		release()
+	}
 	defer func() {
 		// A local panic (e.g., nil pointer in proxy code) is NOT an upstream
 		// failure — do NOT apply phantom penalty, failure hold, or cancel
@@ -2101,7 +1927,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		// bug, not a downstream error, so holding the slot would penalize
 		// legitimate traffic for a proxy-internal problem.
 		if localPanic {
-			release()
+			releaseSlots()
 			return
 		}
 		rec, recOK := w.(*statusRecorder)
@@ -2130,21 +1956,17 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		// failure fact.
 		upstreamFailure := result.upstreamFailure || retryRecordedFailure
 		if p.breaker != nil && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
-			penalty := p.breaker.PenaltyDuration()
-			if penalty > 0 {
-				time.AfterFunc(penalty, release)
-				return
-			}
-			// Penalty is zero — fall through to check failureHold below.
+			time.AfterFunc(p.breaker.PenaltyDuration(), releaseSlots)
+			return
 		}
 		if p.failureHold > 0 && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 			// Standalone failure hold: holds the slot after an upstream failure.
-			// This applies when the circuit breaker is disabled or when the
-			// breaker penalty is zero. Uses the same suppressible-client-abort
-			// guard as the phantom penalty branch — client cancels with ambiguous
-			// status codes are suppressed; definitive upstream/proxy transport
-			// failures are not.
-			time.AfterFunc(p.failureHold, release)
+			// This applies only when the circuit breaker is disabled (the
+			// phantom penalty branch above returns first). Uses the same
+			// suppressible-client-abort guard as the phantom penalty branch:
+			// client cancels with ambiguous status codes are suppressed;
+			// definitive upstream/proxy transport failures are not.
+			time.AfterFunc(p.failureHold, releaseSlots)
 			return
 		}
 		if isClientCancel && result.upstreamAttempted && p.cancelCooldown > 0 {
@@ -2161,14 +1983,15 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			// isTransportOrProxyError guard IS correct for phantom penalty and
 			// failure hold (which punish upstream failures, not accounting lag),
 			// but the cooldown exists specifically to cover the lag case.
-			time.AfterFunc(p.cancelCooldown, release)
+			time.AfterFunc(p.cancelCooldown, releaseSlots)
 			return
 		}
-		release()
+		releaseSlots()
 	}()
 
 	if p.globalLimiter != nil {
-		globalRelease, err := p.globalLimiter.Acquire(ctx)
+		var err error
+		globalRelease, err = p.globalLimiter.Acquire(ctx)
 		if err != nil {
 			p.m.DecQueued()
 			// Record the moment the global limiter wait ended so that
@@ -2179,30 +2002,9 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			if p.breaker != nil {
 				p.breaker.CancelProbe(breakerEpoch)
 			}
-			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				p.m.IncTimeout()
-				if stopComments != nil {
-					stopComments()
-					rec.aborted = true
-					fmt.Fprintf(w, ": queue-wait failed: timeout\n\n")
-					_ = rec.FlushError()
-				} else {
-					http.Error(w, "queue timeout", http.StatusGatewayTimeout)
-				}
-			} else {
-				p.m.IncCancelled()
-				if stopComments != nil {
-					stopComments()
-					rec.aborted = true
-					fmt.Fprintf(w, ": queue-wait failed: canceled\n\n")
-					_ = rec.FlushError()
-				} else {
-					http.Error(w, "request canceled", http.StatusServiceUnavailable)
-				}
-			}
+			p.writeAdmissionFailure(w, ctx, stopComments, rec)
 			return
 		}
-		defer globalRelease()
 	}
 
 	// All admission complete (per-route + global limiter): stop the queue
@@ -2269,14 +2071,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 				}
 				slog.Error("proxy panic in serveLimited", "panic", rv)
 				if rec, ok := w.(*statusRecorder); ok {
-					// Any recovered panic is an aborted exchange: it never
-					// reaches the completion counters or a clean journal
-					// finalization.
-					rec.aborted = true
-					if !rec.terminalWritten {
-						rec.proxyGeneratedError = true
-						http.Error(rec, "internal error", http.StatusBadGateway)
-					}
+					rec.recoverLocalPanic()
 				}
 				localPanic = true
 			}
@@ -2370,35 +2165,92 @@ type bodyReadCloser struct {
 	io.Closer
 }
 
-// isExplicitNonStreamingRequest inspects whether a POST request carries a JSON body
-// with an explicit "stream": false field. Stream intent precedence dictates that an
-// explicit body stream field takes precedence over the client's Accept header; when
-// stream: false is explicitly requested, the early SSE queue comments must not lock
-// the exchange into the streaming representation.
-func isExplicitNonStreamingRequest(r *http.Request) bool {
+// writeAdmissionFailure answers a request whose admission context ended
+// before it was admitted: the queue timeout (504) or a client cancellation
+// (503). Once the queue comments committed the streaming representation
+// (stopComments != nil), the failure surfaces as a failed close (error
+// comment + aborted exchange), never as a misleading new HTTP status or a
+// non-SSE body inside the committed stream.
+func (p *Proxy) writeAdmissionFailure(w http.ResponseWriter, ctx context.Context, stopComments func(), rec *statusRecorder) {
+	reason, status, text := "canceled", http.StatusServiceUnavailable, "request canceled"
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		reason, status, text = "timeout", http.StatusGatewayTimeout, "queue timeout"
+		p.m.IncTimeout()
+	} else {
+		p.m.IncCancelled()
+	}
+	if stopComments == nil {
+		http.Error(w, text, status)
+		return
+	}
+	stopComments()
+	rec.aborted = true
+	fmt.Fprintf(w, ": queue-wait failed: %s\n\n", reason)
+	_ = rec.FlushError()
+	// Record the admission failure in the journal the way a committed
+	// upstream failure status is recorded: the client saw the committed 200
+	// and the failed close, but the journal must carry the reason (504
+	// timeout, 503 cancel) rather than a status no exchange ever observed.
+	rec.recordCommittedFailure(status)
+}
+
+// bodyBlocksStreamCommit reports whether a request body forbids the early
+// queue-comment SSE commit. An explicit body "stream": false takes precedence
+// over the client's Accept header, so it must not be locked into the streaming
+// representation; neither may a body whose intent cannot be determined (too
+// large to inspect, of unknown length, unreadable, or not JSON).
+//
+// The inspection is bounded and ends with probeContext. The consumed bytes are
+// always replayed to the handler, followed by the original read error if the
+// read failed, so the handler observes the body exactly as sent.
+//
+// Cancellation must interrupt a read blocked on a stalled upload. Closing an
+// HTTP/1.1 server body cannot: (*http.body).Read holds the body mutex across
+// the socket read and Close waits for the same mutex. The read deadline of
+// the underlying connection can, so it is moved to now; Close is the fallback
+// for writers without deadline support.
+func bodyBlocksStreamCommit(w http.ResponseWriter, r *http.Request, probeContext context.Context) bool {
 	if r == nil || r.Method != http.MethodPost || r.Body == nil || r.ContentLength == 0 {
 		return false
 	}
-	limit := int64(10 << 20)
-	if r.ContentLength > 0 && r.ContentLength < limit {
-		limit = r.ContentLength
-	}
-	buf, err := io.ReadAll(io.LimitReader(r.Body, limit))
-	if err != nil {
-		return false
+	const limit = int64(10 << 20)
+	if r.ContentLength < 0 || r.ContentLength > limit {
+		return true
 	}
 	origBody := r.Body
+	stopInterrupt := context.AfterFunc(probeContext, func() {
+		if http.NewResponseController(w).SetReadDeadline(time.Now()) != nil {
+			_ = origBody.Close()
+		}
+	})
+	buf, err := io.ReadAll(io.LimitReader(origBody, limit+1))
+	if !stopInterrupt() && err == nil {
+		// The interrupt fired after the read finished: the request is
+		// over, and origBody may be closed concurrently, so it must not be
+		// read again.
+		err = probeContext.Err()
+	}
+	if err != nil {
+		r.Body = &bodyReadCloser{
+			Reader: &errorBodyReader{rest: bytes.NewReader(buf), err: err},
+			Closer: origBody,
+		}
+		return true
+	}
 	r.Body = &bodyReadCloser{
 		Reader: io.MultiReader(bytes.NewReader(buf), origBody),
 		Closer: origBody,
 	}
+	if int64(len(buf)) > limit {
+		return true
+	}
 	var probe struct {
 		Stream *bool `json:"stream"`
 	}
-	if err := json.Unmarshal(buf, &probe); err == nil && probe.Stream != nil && !*probe.Stream {
+	if err := json.Unmarshal(buf, &probe); err != nil {
 		return true
 	}
-	return false
+	return probe.Stream != nil && !*probe.Stream
 }
 
 // writeQueueRejected emits the bounded-queue 429: a Retry-After header plus
@@ -2415,10 +2267,19 @@ func isExplicitNonStreamingRequest(r *http.Request) bool {
 // the representation: later WriteHeader calls cannot change the status the
 // client already received.
 func (p *Proxy) startQueueComments(rec *statusRecorder) func() {
-	rec.commentsCommitted = true
 	rec.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	rec.Header().Set("Cache-Control", "no-cache")
+	// The commit's own 200 is the streaming representation, not an observed
+	// upstream status: it is written while the request is still waiting for
+	// admission, before the queue phase even begins. commitSSE marks it so
+	// WriteHeader skips the journal stamp (see its commentsCommitted branch),
+	// and an exchange that ends without a later real status - an expired
+	// queue wait, or a client abort before the handler wrote anything -
+	// never journals headers that precede QueueStart.
+	rec.commitSSE = true
 	rec.WriteHeader(http.StatusOK)
+	rec.commitSSE = false
+	rec.commentsCommitted = true
 	start := time.Now()
 	fmt.Fprintf(rec, ": queue-wait elapsed=0\n\n")
 	_ = rec.FlushError()
@@ -2473,13 +2334,7 @@ func isUpstreamFailureStatus(rec *statusRecorder, now time.Time, ctxErr error) b
 	if rec != nil && (rec.localUpgradeFailure || rec.retryCircuitOpen()) {
 		return false
 	}
-	status := 0
-	if rec != nil {
-		status = rec.status
-		if rec.commentsCommitted && rec.upstreamStatusOverride > 0 {
-			status = rec.upstreamStatusOverride
-		}
-	}
+	status := rec.observedStatus()
 	// When the client cancelled the context and the upstream returned a
 	// clean 2xx response, this is a suppressible client abort — the
 	// upstream succeeded and the client just disconnected. Classifying
@@ -2566,11 +2421,10 @@ func classifyTranscodeExchange(
 	upstreamAttempted bool,
 ) exchangeResult {
 	outcome := rec.transcodeOutcome
-	// The attempt marker fires when the signing+dispatch chain starts, which
-	// precedes the signer: a local request conversion or signing error never
-	// dispatches, so its outcome fact overrides the marker. The marker still
-	// ORs in for exchanges aborted mid-flight where the handler recorded no
-	// attempt fact.
+	// The attempt marker is inside SigningTransport, so it only fires after
+	// signing succeeds and the configured round trip is about to begin. The
+	// outcome fact still covers exchanges whose handler recorded an attempt
+	// but whose transport never returned a response.
 	attempted := outcome.UpstreamAttempted ||
 		(upstreamAttempted && outcome.Provenance != transcode.ProvenanceLocalRequestConversionError)
 	result := exchangeResult{
@@ -2594,9 +2448,17 @@ func classifyTranscodeExchange(
 	// partial stream could reset a real failure streak. This mirrors the
 	// native path's !clientAborted guard so classification is self-contained
 	// and does not depend on the recorder's independent rec.aborted coupling
-	// in serveTranscodeHandler.
+	// in serveTranscodeHandler. A local failure (including a downstream write
+	// that failed mid-stream) is excluded for the same reason: the upstream's
+	// 2xx is retained as an observed fact, but the exchange did not succeed.
+	// Success also needs the whole response delivered: a delivery the recorder
+	// saw fail, or one not completed, leaves the upstream's status observed but
+	// does not make the exchange a success.
 	result.upstreamSuccess = !result.upstreamFailure &&
+		!result.localFailure &&
 		!result.clientAborted &&
+		!rec.downstreamWriteFailed() &&
+		outcome.DownstreamComplete &&
 		outcome.UpstreamStatus.Set &&
 		outcome.UpstreamStatus.Value >= http.StatusOK &&
 		outcome.UpstreamStatus.Value < http.StatusMultipleChoices
@@ -2642,11 +2504,7 @@ func classifyNativeExchange(
 	if retryAttempt != nil && retryAttempt.Epoch != 0 {
 		epoch = retryAttempt.Epoch
 	}
-	effectiveStatus := rec.status
-	if rec.commentsCommitted && rec.upstreamStatusOverride > 0 {
-		effectiveStatus = rec.upstreamStatusOverride
-	}
-	result.upstreamStatus = effectiveStatus
+	result.upstreamStatus = rec.observedStatus()
 	result.upstreamFailure = isUpstreamFailureStatus(rec, now, ctxErr) || upstreamAbortFailure
 	result.switchingProtocolsResolved = rec.status == http.StatusSwitchingProtocols &&
 		rec.switchingProtocolsProbeResolved.Load()
@@ -2687,6 +2545,16 @@ func (p *Proxy) resolveAbortedExchange(
 	}
 	if result.upstreamFailure && !result.suppressibleAbort {
 		p.recordFailureOnce(result, attempt, startedAt, epoch)
+		return
+	}
+	attemptStart, attemptEpoch := retryAttemptOrDefault(attempt, startedAt, epoch)
+	// An aborted exchange resolves a probe only from a definitive non-2xx status:
+	// an aborted 2xx transfer was not delivered in full, so it is neither
+	// success nor failure.
+	if attemptEpoch != 0 && !result.clientAborted && result.upstreamStatus >= http.StatusMultipleChoices &&
+		!result.upstreamFailure && !result.localFailure && !result.suppressibleAbort &&
+		!result.switchingProtocolsResolved {
+		p.breaker.RecordSuccess(attemptStart, attemptEpoch)
 		return
 	}
 	p.cancelSuppressedAbortProbe(attempt, startedAt, epoch)
@@ -2766,10 +2634,7 @@ func isBreakerSuccessStatus(rec *statusRecorder, now time.Time, epoch uint64, ct
 	if rec.status == http.StatusSwitchingProtocols && rec.switchingProtocolsProbeResolved.Load() {
 		return false
 	}
-	status := rec.status
-	if rec.commentsCommitted && rec.upstreamStatusOverride > 0 {
-		status = rec.upstreamStatusOverride
-	}
+	status := rec.observedStatus()
 	if status >= 200 && status < 300 {
 		return true
 	}
@@ -2813,78 +2678,12 @@ func isContextCancellation(err error) bool {
 
 var errLocalSwitchingProtocolsFailure = errors.New("proxy: local switching protocols failure")
 
-// sanitizedTransportError preserves the rendered message of an error chain
-// whose embedded URLs have been scrubbed, while Unwrap keeps the REDACTED
-// clone reachable: logs see the full original context (including any outer %w
-// wrapping prefixes) with no secret substrings, and errors.Is/errors.As
-// traverse to a *url.Error whose URL field is itself clean.
-type sanitizedTransportError struct {
-	msg      string
-	redacted error
-}
-
-func (e *sanitizedTransportError) Error() string { return e.msg }
-
-func (e *sanitizedTransportError) Unwrap() error { return e.redacted }
-
-// sanitizeTransportError rewrites transport errors so no embedded target URL
-// echoes credential query parameters into logs: http.Transport wraps failures
-// in url.Error with the full outbound URL, and its Error() text would
-// otherwise leak ?key=... secrets verbatim.
-//
-// Fidelity contract:
-//   - A bare *url.Error input yields a redacted *url.Error clone (same shape
-//     as before sanitization existed).
-//   - A wrapped chain yields a sanitizedTransportError whose Error() is the
-//     ORIGINAL message with every collected *url.Error URL replaced by its
-//     RedactSensitiveURL counterpart (raw and %q-quoted spellings both
-//     covered), so outer wrapping context survives into log lines.
-//   - Directly nested url.Error subtrees (net/http redirect chains) are
-//     cloned recursively with each level's URL scrubbed; errors.Is and
-//     errors.As keep working through Unwrap.
-//
-// Non-url.Error values carry no URL and pass through unchanged. When the
-// outermost URL cannot be parsed there is nothing safe to rewrite and the
-// original error is returned unchanged (historical fallback).
+// sanitizeTransportError rewrites a transport error before it is logged so no
+// embedded target URL echoes credential query parameters: http.Transport
+// wraps failures in url.Error with the full outbound URL. See
+// auth.SanitizeURLError for the guarantees.
 func sanitizeTransportError(err error) error {
-	var outer *url.Error
-	if !errors.As(err, &outer) {
-		return err
-	}
-	parsed, perr := url.Parse(outer.URL)
-	if perr != nil {
-		return err
-	}
-	var replacements []string
-	clone := redactURLError(outer, parsed, &replacements)
-	if _, direct := err.(*url.Error); direct {
-		return clone
-	}
-	return &sanitizedTransportError{
-		msg:      strings.NewReplacer(replacements...).Replace(err.Error()),
-		redacted: clone,
-	}
-}
-
-// redactURLError clones e with its URL replaced by the redacted form of
-// parsed and its Err subtree recursively scrubbed when it nests another
-// *url.Error directly (as http.Client redirect chains do). Every URL seen is
-// appended to replacements as %q-quoted and raw old/new pairs - quoted first,
-// because a quoted rendering must be rewritten atomically to stay correctly
-// escaped.
-func redactURLError(e *url.Error, parsed *url.URL, replacements *[]string) *url.Error {
-	redacted := auth.RedactSensitiveURL(parsed).String()
-	if e.URL != "" && e.URL != redacted {
-		*replacements = append(*replacements, strconv.Quote(e.URL), strconv.Quote(redacted), e.URL, redacted)
-	}
-	clone := *e
-	clone.URL = redacted
-	if inner, ok := e.Err.(*url.Error); ok {
-		if innerParsed, perr := url.Parse(inner.URL); perr == nil {
-			clone.Err = redactURLError(inner, innerParsed, replacements)
-		}
-	}
-	return &clone
+	return auth.SanitizeURLError(err)
 }
 
 func localSwitchingProtocolsFailure(msg string) error {
@@ -3215,7 +3014,7 @@ func retryHistoricalFailureCanDriveSlot(rec *statusRecorder, finalUnclean bool) 
 	if rec.localUpgradeFailure {
 		return false
 	}
-	if rec.status > 0 && !rec.proxyTransportOrGeneratedError() {
+	if rec.observedStatus() > 0 && !rec.proxyTransportOrGeneratedError() {
 		return false
 	}
 	return true
@@ -3316,7 +3115,7 @@ func (p *Proxy) recordAbortFailure(w http.ResponseWriter, attempt *retry.Breaker
 		return
 	}
 	if rec != nil && !rec.proxyTransportOrGeneratedError() && isUpstreamFailureStatus(rec, now, ctxErr) {
-		status = rec.status
+		status = rec.observedStatus()
 		retryAfter = parseRetryAfterFromRecorder(rec, now)
 	}
 
@@ -3413,8 +3212,27 @@ type statusRecorder struct {
 	// error frames, never as HTTP error statuses.
 	commentsCommitted      bool
 	upstreamStatusOverride int
-	transcodeStream        bool
-	localUpgradeFailure    bool
+	// commitSSE marks the WriteHeader call that IS the queue-comment commit
+	// (the representation's own 200, written before admission and before the
+	// queue phase begins). WriteHeader skips the journal stamp for it: it is
+	// not an observed upstream status, and stamping it would journal headers
+	// that precede QueueStart on exchanges that end without a later real
+	// status. The commit still sets terminalWritten, so the client-visible
+	// committed-200 semantics are unchanged.
+	commitSSE bool
+	// committedOKObserved records a 2xx written after the queue-comment
+	// commit. committedResponseStatus retains the actual upstream status
+	// while the client-visible status remains the already-committed 200.
+	committedOKObserved     bool
+	committedResponseStatus int
+	transcodeStream         bool
+	// dialectErrorFramed marks a committed stream whose failure is being
+	// delivered as a client-dialect error terminal by its owner. The
+	// recorder must then not append its own ": queue-wait failed: upstream"
+	// close comment: the failure is local (or already framed), and blaming
+	// the upstream would misreport what happened.
+	dialectErrorFramed  bool
+	localUpgradeFailure bool
 
 	switchingProtocolsProbeResolved      atomic.Bool
 	onSwitchingProtocolsHandshakeSuccess func()
@@ -3440,6 +3258,57 @@ func (r *statusRecorder) FlushError() error {
 	return err
 }
 
+// SuppressFailedCloseComment marks the committed stream as framed by its
+// owner: a dialect error terminal follows, so the recorder must not add its
+// own failed-close comment. It is called by the dialect error writer just
+// before the terminal, while the exchange is still running.
+func (r *statusRecorder) SuppressFailedCloseComment() { r.dialectErrorFramed = true }
+
+// recoverLocalPanic records a recovered local panic. Any panic aborts the
+// exchange: it never reaches the completion counters or a clean journal
+// finalization. The failure is proxy-generated only when no upstream status
+// was observed — a panic after a delivered upstream status (including a 200
+// the commit silenced) leaves that status's classification alone. Before any status the client gets a 502.
+// After the SSE queue-comment commit the status is fixed, so the stream is
+// closed with a local failed-close comment (unless its owner already framed
+// a dialect error) and the 502 is recorded the way a committed upstream
+// failure status is: without it the client saw the queue comments and then a
+// silent clean EOF, and the journal kept the commit's 200.
+func (r *statusRecorder) recoverLocalPanic() {
+	r.aborted = true
+	switch {
+	case !r.terminalWritten:
+		r.proxyGeneratedError = true
+		http.Error(r, "internal error", http.StatusBadGateway)
+	case r.commentsCommitted && r.upstreamStatusOverride == 0 && !r.committedOKObserved:
+		r.proxyGeneratedError = true
+		if !r.dialectErrorFramed {
+			fmt.Fprintf(r, ": queue-wait failed: internal\n\n")
+			_ = r.FlushError()
+		}
+		r.recordCommittedFailure(http.StatusBadGateway)
+	}
+}
+
+// recordCommittedFailure records the failure status of a stream whose 200 the
+// queue comments already committed: the client cannot see it, but
+// classification and the journal entry read it, exactly as they read a
+// committed upstream failure status from WriteHeader, including the
+// committed headers the client received. Callers write any failed-close
+// comment first, since Write swallows bytes once an override is recorded.
+func (r *statusRecorder) recordCommittedFailure(code int) {
+	r.aborted = true
+	r.upstreamStatusOverride = code
+	now := time.Now()
+	r.responseAt = now
+	if r.entry != nil {
+		r.entry.StatusCode = code
+		r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
+		r.entry.Timing.ResponseHeaders = now
+		r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
+	}
+}
+
 func (r *statusRecorder) downstreamWriteFailed() bool {
 	return r != nil && r.writeFailed
 }
@@ -3448,8 +3317,36 @@ func (r *statusRecorder) resolveSwitchingProtocolsProbe() bool {
 	return r != nil && r.switchingProtocolsProbeResolved.CompareAndSwap(false, true)
 }
 
+// observedStatus is the response status the exchange actually observed, the
+// one every classification reads. Without the queue-comment commit it is the
+// recorded status. After the commit, status is fixed at the commit's own 200,
+// which says nothing about the upstream: the observed status is then a
+// recorded failure status (the upstream's, or a proxy-generated one), else
+// the upstream's silenced 200, else 0 — no status observed, exactly the state
+// an uncommitted exchange reports before WriteHeader.
+func (r *statusRecorder) observedStatus() int {
+	switch {
+	case r == nil:
+		return 0
+	case !r.commentsCommitted:
+		return r.status
+	case r.upstreamStatusOverride > 0:
+		return r.upstreamStatusOverride
+	case r.committedOKObserved:
+		if r.committedResponseStatus > 0 {
+			return r.committedResponseStatus
+		}
+		return http.StatusOK
+	default:
+		return 0
+	}
+}
+
 func (r *statusRecorder) proxyTransportOrGeneratedError() bool {
-	return r != nil && (r.status == 0 || (r.status == http.StatusBadGateway && r.proxyGeneratedError))
+	if r == nil {
+		return false
+	}
+	return r.observedStatus() == 0 || r.proxyGeneratedError
 }
 
 func (r *statusRecorder) hasRealProxyTransportError(ctxErr error) bool {
@@ -3484,9 +3381,14 @@ func (r *statusRecorder) WriteHeader(code int) {
 	// representation-mismatch 502) marks the exchange aborted — the client
 	// sees the comments then a failed close, never a misleading new status.
 	if r.commentsCommitted {
-		if code >= 200 && code != http.StatusOK {
-			r.aborted = true
-			r.upstreamStatusOverride = code
+		if code >= 200 && code < 300 && r.terminalWritten &&
+			!r.committedOKObserved && r.upstreamStatusOverride == 0 {
+			// terminalWritten is first set by the commit's own WriteHeader,
+			// so the first status after it is the upstream/handler
+			// response; a later one is superfluous, exactly as net/http
+			// ignores a second WriteHeader on an uncommitted exchange.
+			r.committedOKObserved = true
+			r.committedResponseStatus = code
 			now := time.Now()
 			r.responseAt = now
 			if r.entry != nil {
@@ -3495,9 +3397,27 @@ func (r *statusRecorder) WriteHeader(code int) {
 				r.entry.Timing.ResponseHeaders = now
 				r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
 			}
-			if !r.transcodeStream {
-				fmt.Fprintf(r.ResponseWriter, ": queue-wait failed: upstream\n\n")
-				_ = r.FlushError()
+		}
+		if code >= 300 {
+			// The first post-commit status is the one the exchange observed. A
+			// later failure is superfluous, as net/http ignores a second
+			// WriteHeader: it still marks the exchange aborted, but it neither
+			// replaces the recorded status and timing nor writes a second close.
+			r.aborted = true
+			if r.upstreamStatusOverride == 0 && !r.committedOKObserved {
+				r.upstreamStatusOverride = code
+				now := time.Now()
+				r.responseAt = now
+				if r.entry != nil {
+					r.entry.StatusCode = code
+					r.entry.ResponseHeaders = r.ResponseWriter.Header().Clone()
+					r.entry.Timing.ResponseHeaders = now
+					r.entry.ContentType = r.ResponseWriter.Header().Get("Content-Type")
+				}
+				if !r.transcodeStream && !r.dialectErrorFramed {
+					fmt.Fprintf(r.ResponseWriter, ": queue-wait failed: upstream\n\n")
+					_ = r.FlushError()
+				}
 			}
 		}
 		return
@@ -3513,7 +3433,24 @@ func (r *statusRecorder) WriteHeader(code int) {
 		r.ResponseWriter.WriteHeader(code)
 		return
 	}
-
+	if r.commitSSE {
+		// The queue-comment commit's own 200: written before admission,
+		// before the queue phase begins. It sets terminalWritten so the
+		// committed-stream guards hold, but stamps nothing: it is the
+		// streaming representation, not an observed upstream status, and
+		// stamping it would journal ResponseHeaders before QueueStart on
+		// exchanges that end without a later real status (an expired queue
+		// wait, or a client abort before the handler wrote anything). It
+		// is still the status the client received, so status keeps it:
+		// the status buckets and request log count the client-visible
+		// status, while classification reads observedStatus.
+		r.status = code
+		r.ResponseWriter.WriteHeader(code)
+		if code >= 200 {
+			r.terminalWritten = true
+		}
+		return
+	}
 	r.status = code
 	now := time.Now()
 	r.responseAt = now
@@ -3535,7 +3472,7 @@ func (r *statusRecorder) WriteHeader(code int) {
 }
 
 func (r *statusRecorder) Write(b []byte) (int, error) {
-	if r.commentsCommitted && r.upstreamStatusOverride > 0 && !r.transcodeStream {
+	if r.commentsCommitted && r.upstreamStatusOverride > 0 && !r.transcodeStream && !r.dialectErrorFramed {
 		if r.entry != nil && !r.captureDone && len(b) > 0 {
 			remaining := r.captureMax - int64(len(r.capturedBody))
 			if remaining > 0 {

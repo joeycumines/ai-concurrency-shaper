@@ -720,7 +720,7 @@ type Response struct {
 	Created           int64     `json:"created"`
 	Model             string    `json:"model"`
 	ServiceTier       *string   `json:"service_tier,omitempty"`
-	SystemFingerprint string    `json:"system_fingerprint,omitempty"`
+	SystemFingerprint *string   `json:"system_fingerprint,omitempty"`
 	Choices           []Choice  `json:"choices"`
 	Usage             *LLMUsage `json:"usage,omitempty"`
 
@@ -748,7 +748,7 @@ type StreamChunk struct {
 	Created           int64     `json:"created"`
 	Model             string    `json:"model"`
 	ServiceTier       *string   `json:"service_tier,omitempty"`
-	SystemFingerprint string    `json:"system_fingerprint,omitempty"`
+	SystemFingerprint *string   `json:"system_fingerprint,omitempty"`
 	Choices           []Choice  `json:"choices"`
 	Usage             *LLMUsage `json:"usage,omitempty"`
 
