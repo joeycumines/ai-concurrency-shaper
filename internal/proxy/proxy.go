@@ -548,11 +548,11 @@ type FailureHoldOption struct {
 }
 
 // WithFailureHold returns an option that sets the slot hold duration after
-// an upstream failure (5xx, 429). This hold applies when the circuit breaker
-// is disabled or when the breaker's phantom penalty is zero. When the breaker
-// is enabled with a non-zero penalty, the phantom penalty handles failure-path
-// holds instead. The hold is released asynchronously so the HTTP handler
-// returns immediately. Zero means no hold (disabled).
+// an upstream failure (5xx, 429). This hold applies only when the circuit
+// breaker is disabled: an enabled breaker's phantom penalty, which is always
+// at least its positive base penalty, is the failure-path hold instead. The
+// hold is released asynchronously so the HTTP handler returns immediately.
+// Zero means no hold (disabled).
 func WithFailureHold(d time.Duration) *FailureHoldOption {
 	return &FailureHoldOption{value: d}
 }
@@ -1581,8 +1581,8 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 			}
 			if p.failureHold > 0 && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 				// Standalone failure hold: holds the global-limiter slot after an
-				// upstream failure. This applies when the circuit breaker is disabled
-				// or when the breaker penalty is zero. Mirrors serveLimited.
+				// upstream failure. This applies only when the circuit breaker is
+				// disabled. Mirrors serveLimited.
 				time.AfterFunc(p.failureHold, release)
 				return
 			}
@@ -1961,11 +1961,11 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 		}
 		if p.failureHold > 0 && result.upstreamAttempted && !suppressFailureForClientAbort && upstreamFailure {
 			// Standalone failure hold: holds the slot after an upstream failure.
-			// This applies when the circuit breaker is disabled or when the
-			// breaker penalty is zero. Uses the same suppressible-client-abort
-			// guard as the phantom penalty branch — client cancels with ambiguous
-			// status codes are suppressed; definitive upstream/proxy transport
-			// failures are not.
+			// This applies only when the circuit breaker is disabled (the
+			// phantom penalty branch above returns first). Uses the same
+			// suppressible-client-abort guard as the phantom penalty branch:
+			// client cancels with ambiguous status codes are suppressed;
+			// definitive upstream/proxy transport failures are not.
 			time.AfterFunc(p.failureHold, releaseSlots)
 			return
 		}
