@@ -455,6 +455,71 @@ func TestExecSecretSourceFirstRefusalDuringRefreshAheadBlocksCallers(t *testing.
 	if got := mustSecret(t, s); got != "tok-2" || runs() != 2 {
 		t.Fatalf("Secret = %q after %d runs, want tok-2 from the one background run", got, runs())
 	}
+
+	// The joined run counts as a forced refresh: refusing its tok-2 at once
+	// is rate-limited, and once allowed it is a repeat refusal that does not
+	// stall other callers.
+	s.Invalidate("tok-2")
+	if got, _ := s.Reacquire(context.Background(), "tok-2"); got != "tok-2" || runs() != 2 {
+		t.Fatalf("immediate refusal of tok-2: %q after %d runs; want tok-2 after 2 (rate-limited)", got, runs())
+	}
+	clock.Advance(2 * execInvalidateInterval)
+	s.Invalidate("tok-2")
+	quickCtx, quickCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer quickCancel()
+	if got, err := s.Secret(quickCtx); err != nil || got != "tok-2" {
+		t.Fatalf("Secret during the repeat refresh = %q, %v; want tok-2 without waiting", got, err)
+	}
+	if got, err := s.Reacquire(context.Background(), "tok-2"); err != nil || got != "tok-3" {
+		t.Fatalf("Reacquire = %q, %v; want tok-3", got, err)
+	}
+}
+
+func TestExecSecretSourceRepeatRefusalJoiningRefreshAheadDoesNotStall(t *testing.T) {
+	path, dir, runs := credentialScript(t, `if [ -f "$DIR/slow" ]; then sleep 2; fi; echo "tok-$N"`)
+	s, clock := newScriptSource(t, path, time.Hour, 10*time.Second)
+	quick := func() (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		return s.Secret(ctx)
+	}
+	mustSecret(t, s) // tok-1
+	s.Invalidate("tok-1")
+	if got := mustSecret(t, s); got != "tok-2" {
+		t.Fatalf("Secret after the first refusal = %q, want tok-2", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "slow"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// tok-2 came from a forced refresh, so refusing it while a scheduled
+	// refresh-ahead runs is a repeat: other callers are not stalled.
+	clock.Advance(56 * time.Minute)
+	mustSecret(t, s) // starts the refresh-ahead, serves tok-2
+	s.Invalidate("tok-2")
+	if got, err := quick(); err != nil || got != "tok-2" {
+		t.Fatalf("Secret during a joined repeat refresh = %q, %v; want tok-2 without waiting", got, err)
+	}
+	if got, err := s.Reacquire(context.Background(), "tok-2"); err != nil || got != "tok-3" {
+		t.Fatalf("Reacquire = %q, %v; want tok-3", got, err)
+	}
+
+	// The joined run counted as forced, so refusing its tok-3 continues
+	// the chain: backed off (the spacing doubled again to 20s, so 10s is
+	// not enough), and still without stalling other callers.
+	clock.Advance(2 * execInvalidateInterval)
+	s.Invalidate("tok-3")
+	if got, _ := s.Reacquire(context.Background(), "tok-3"); got != "tok-3" || runs() != 3 {
+		t.Fatalf("Reacquire inside the doubled spacing = %q after %d runs; want tok-3 after 3", got, runs())
+	}
+	clock.Advance(2 * execInvalidateInterval)
+	s.Invalidate("tok-3")
+	if got, err := quick(); err != nil || got != "tok-3" {
+		t.Fatalf("Secret during the next repeat refresh = %q, %v; want tok-3 without waiting", got, err)
+	}
+	if got, err := s.Reacquire(context.Background(), "tok-3"); err != nil || got != "tok-4" || runs() != 4 {
+		t.Fatalf("Reacquire = %q, %v after %d runs; want tok-4 after 4", got, err, runs())
+	}
 }
 
 func TestExecSecretSourceRefusalDuringFailureBackoffIsRetried(t *testing.T) {
@@ -483,9 +548,54 @@ func TestExecSecretSourceRefusalDuringFailureBackoffIsRetried(t *testing.T) {
 	if err := os.Remove(fail); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(execBackoffMin)
+	clock.Advance(15 * time.Second)
+
+	// Once the backoff allows, a refusal of the still-withheld value starts
+	// the forced refresh itself, so the refused request gets the
+	// replacement rather than its own refused credential back.
+	s.Invalidate("tok-1")
+	if got, err := s.Reacquire(context.Background(), "tok-1"); err != nil || got != "tok-3" {
+		t.Fatalf("Reacquire after the backoff = %q, %v; want tok-3 from a forced refresh", got, err)
+	}
 	if got := mustSecret(t, s); got != "tok-3" {
-		t.Fatalf("Secret after the backoff = %q, want tok-3 from a forced refresh", got)
+		t.Fatalf("Secret after the forced refresh = %q, want tok-3", got)
+	}
+
+	// Spacing runs from when that forced refresh started, not from the
+	// first refusal 15s earlier: refusing tok-3 at once is rate-limited.
+	s.Invalidate("tok-3")
+	if got, _ := s.Reacquire(context.Background(), "tok-3"); got != "tok-3" || runs() != 3 {
+		t.Fatalf("immediate refusal of tok-3: %q after %d runs; want tok-3 after 3 (rate-limited)", got, runs())
+	}
+}
+
+func TestExecSecretSourceRefusalsDuringRepeatRefreshDoNotAdvanceBackoff(t *testing.T) {
+	path, dir, runs := credentialScript(t, `if [ -f "$DIR/slow" ]; then sleep 2; fi; echo "tok-$N"`)
+	s, clock := newScriptSource(t, path, time.Hour, 10*time.Second)
+	mustSecret(t, s) // tok-1
+	s.Invalidate("tok-1")
+	if got := mustSecret(t, s); got != "tok-2" {
+		t.Fatalf("Secret after the first refusal = %q, want tok-2", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "slow"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A repeat refresh (10s spacing) outlasts the spacing while refusals of
+	// the same tok-2 keep arriving; they must not double the spacing again.
+	clock.Advance(2 * execInvalidateInterval)
+	s.Invalidate("tok-2")
+	clock.Advance(4 * execInvalidateInterval)
+	s.Invalidate("tok-2")
+	if got, err := s.Reacquire(context.Background(), "tok-2"); err != nil || got != "tok-3" || runs() != 3 {
+		t.Fatalf("Reacquire = %q, %v after %d runs; want tok-3 after 3", got, err, runs())
+	}
+
+	// The spacing doubled once, to 20s from the run's start 20s ago, so a
+	// refusal of tok-3 is allowed now (re-doubled to 40s, it would not be).
+	s.Invalidate("tok-3")
+	if got, err := s.Reacquire(context.Background(), "tok-3"); err != nil || got != "tok-4" {
+		t.Fatalf("Reacquire after the singly doubled spacing = %q, %v; want tok-4", got, err)
 	}
 }
 

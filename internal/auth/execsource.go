@@ -114,9 +114,10 @@ type ExecSecretSource struct {
 	expires   time.Time
 	refreshAt time.Time
 	// lastForced and forcedSpacing rate-limit forced refreshes;
-	// forcedValue is the value the last forced refresh produced ("" once a
-	// scheduled refresh has replaced it), so a refusal of that value backs
-	// the spacing off.
+	// forcedValue is the value the last forced refresh produced, including
+	// a scheduled run a refusal joined ("" once an unjoined scheduled
+	// refresh has replaced it), so a refusal of that value backs the
+	// spacing off.
 	lastForced    time.Time
 	forcedSpacing time.Duration
 	forcedValue   string
@@ -214,7 +215,20 @@ func (s *ExecSecretSource) Secret(ctx context.Context) (string, error) {
 func (s *ExecSecretSource) Invalidate(rejected string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if rejected == "" || rejected != s.value || rejected == s.refused {
+	if rejected == "" || rejected != s.value {
+		return
+	}
+	now := s.now()
+	if rejected == s.refused {
+		// Already withheld, but no refresh replaced it (it failed or was
+		// held back by the failure backoff): retry as soon as the backoff
+		// allows, so the refused request can wait for the replacement.
+		s.startLocked(now, true)
+		return
+	}
+	if s.inflight != nil && s.inflight.forced {
+		// A forced refresh is already replacing this value; refusals
+		// arriving while it runs must not advance the backoff again.
 		return
 	}
 	// A refused replacement from a forced refresh means the upstream is
@@ -224,7 +238,6 @@ func (s *ExecSecretSource) Invalidate(rejected string) {
 	if repeat {
 		spacing = min(2*max(s.forcedSpacing, execInvalidateInterval), execInvalidateIntervalMax)
 	}
-	now := s.now()
 	if !s.lastForced.IsZero() && now.Sub(s.lastForced) < spacing {
 		return
 	}
@@ -232,13 +245,11 @@ func (s *ExecSecretSource) Invalidate(rejected string) {
 		// Presumed revoked: Secret withholds it until it is replaced, even
 		// if the run below is held back by the failure backoff or fails.
 		s.refused = rejected
-		s.lastForced = now
 		s.forcedSpacing = spacing
 	}
 	// A refresh already running (refresh-ahead) is joined and counted as
 	// forced, so a refusal of its result continues the backoff chain.
 	if s.startLocked(now, true) != nil && repeat {
-		s.lastForced = now
 		s.forcedSpacing = spacing
 	}
 }
@@ -274,16 +285,22 @@ func (s *ExecSecretSource) Reacquire(ctx context.Context, rejected string) (stri
 // startLocked joins the in-flight run or starts one, returning nil while a
 // failure backoff is in effect. The run uses its own timeout, never a
 // caller's context: one caller giving up must not abort a refresh others
-// are waiting on.
+// are waiting on. Forced-refresh spacing is measured from when a forced run
+// actually starts (or a running one becomes forced), not from the refusal,
+// which the failure backoff may have held back.
 func (s *ExecSecretSource) startLocked(now time.Time, forced bool) *execRun {
 	if s.inflight != nil {
-		if forced {
+		if forced && !s.inflight.forced {
 			s.inflight.forced = true
+			s.lastForced = now
 		}
 		return s.inflight
 	}
 	if now.Before(s.retryAt) {
 		return nil
+	}
+	if forced {
+		s.lastForced = now
 	}
 	run := &execRun{done: make(chan struct{}), forced: forced}
 	s.inflight = run
