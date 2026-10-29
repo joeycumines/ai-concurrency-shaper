@@ -655,3 +655,55 @@ func TestAnthropicRequestCitationsReplay(t *testing.T) {
 		t.Fatalf("assistant message text not found in responses input items: %s", string(respReq))
 	}
 }
+
+// TestOpenAIChatNullSystemFingerprint pins that a null system_fingerprint — the
+// OpenAI SDK types it Optional[str], and Amazon Bedrock's OpenAI-compatible
+// bedrock-runtime surface sends it null on every completion and chunk — is
+// accepted on both the non-streaming and the streaming decode.
+func TestOpenAIChatNullSystemFingerprint(t *testing.T) {
+	response := []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"global.zai.glm-5.3","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"message":{"role":"assistant","content":"Hi","refusal":null},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
+	decoded, _, err := DecodeChatResponseWithPolicy(response, ChatCapabilities{}, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("DecodeChatResponse with null system_fingerprint: %v", err)
+	}
+	if decoded.ID != "chatcmpl-1" {
+		t.Fatalf("decoded id = %q", decoded.ID)
+	}
+
+	chunk := []byte(`{"choices":[{"delta":{"content":"Hi","role":"assistant","refusal":null},"finish_reason":null,"index":0}],"created":1,"id":"chatcmpl-1","model":"global.zai.glm-5.3","object":"chat.completion.chunk","service_tier":"default","system_fingerprint":null,"usage":null,"obfuscation":"abc"}`)
+	if _, err := chatStreamChunkFromSSE(SSEEvent{Data: chunk}); err != nil {
+		t.Fatalf("stream chunk with null system_fingerprint: %v", err)
+	}
+}
+
+// TestAnthropicDeferLoadingNoted pins that defer_loading — the tool-search hint
+// Claude Code sets on MCP tools — decodes, keeps the tool, and is recorded as
+// one observable note rather than rejected as an unknown field.
+func TestAnthropicDeferLoadingNoted(t *testing.T) {
+	body := []byte(`{
+		"model":"m",
+		"max_tokens":100,
+		"tools":[
+			{"name":"mcp__a__one","input_schema":{"type":"object"},"defer_loading":true},
+			{"name":"mcp__a__two","input_schema":{"type":"object"},"defer_loading":true},
+			{"name":"Bash","input_schema":{"type":"object"}}
+		],
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	result, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("defer_loading must decode under every policy (it is a loading hint): %v", err)
+	}
+	if got := len(result.Request.Tools); got != 3 {
+		t.Fatalf("tools = %d, want 3 (deferred tools are sent eagerly)", got)
+	}
+	notes := 0
+	for _, loss := range result.Report.Losses {
+		if loss.Path == "tools[].defer_loading" {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("defer_loading notes = %d, want exactly 1 (deduped)", notes)
+	}
+}

@@ -21,6 +21,15 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/testcorpus"
 )
 
+// defaultChatCapabilities returns baseline capabilities for tests where
+// features that are on by default (Metadata, Float64Bounds) are enabled.
+func defaultChatCapabilities() ChatCapabilities {
+	return ChatCapabilities{
+		Metadata:      true,
+		Float64Bounds: true,
+	}
+}
+
 // testHandler builds a TranscodeHandler with a scripted round trip.
 func testHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) *TranscodeHandler {
 	t.Helper()
@@ -33,7 +42,10 @@ func testHandler(t *testing.T, mapping Mapping, roundTrip RoundTrip) *TranscodeH
 		mapping.LossPolicy = StrictLossPolicy()
 	}
 	mapping.Auth = AuthPolicy{Mode: AuthNone}
-	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	caps := defaultChatCapabilities()
+	caps.ParallelToolCalls = true
+	caps.ReasoningEffort = true
+	mapping.ChatCapabilities = caps
 	mapping.AllowedClientQuery = map[string]struct{}{}
 	return NewTranscodeHandler(
 		HandlerConfig{
@@ -145,6 +157,7 @@ func responsesMapping(t *testing.T) Mapping {
 		UpstreamProtocol: UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		Auth:             AuthPolicy{Mode: AuthNone},
+		ChatCapabilities: defaultChatCapabilities(),
 	}
 }
 
@@ -160,6 +173,7 @@ func messagesMapping(t *testing.T, upstream UpstreamProtocol) Mapping {
 		UpstreamProtocol: upstream,
 		UpstreamPath:     "/v1/" + string(upstream),
 		Auth:             AuthPolicy{Mode: AuthNone},
+		ChatCapabilities: defaultChatCapabilities(),
 	}
 	if upstream == UpstreamResponses {
 		// Messages tools carry no strictness; a messages->responses mapping
@@ -328,7 +342,10 @@ func TestHandlerRetryReplayLimitSeparateFromInbound(t *testing.T) {
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
 	mapping.LossPolicy = StrictLossPolicy()
 	mapping.Auth = AuthPolicy{Mode: AuthNone}
-	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	caps := defaultChatCapabilities()
+	caps.ParallelToolCalls = true
+	caps.ReasoningEffort = true
+	mapping.ChatCapabilities = caps
 	mapping.AllowedClientQuery = map[string]struct{}{}
 
 	const (
@@ -433,7 +450,10 @@ func TestHandlerDecodedRequestAmplification413(t *testing.T) {
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
 	mapping.LossPolicy = StrictLossPolicy()
 	mapping.Auth = AuthPolicy{Mode: AuthNone}
-	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	caps := defaultChatCapabilities()
+	caps.ParallelToolCalls = true
+	caps.ReasoningEffort = true
+	mapping.ChatCapabilities = caps
 	mapping.AllowedClientQuery = map[string]struct{}{}
 
 	handler := NewTranscodeHandler(
@@ -1241,7 +1261,10 @@ func TestHandlerStreamingMessagesToResponses(t *testing.T) {
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
 	mapping.LossPolicy = permissiveLossPolicy()
 	mapping.Auth = AuthPolicy{Mode: AuthNone}
-	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	caps := defaultChatCapabilities()
+	caps.ParallelToolCalls = true
+	caps.ReasoningEffort = true
+	mapping.ChatCapabilities = caps
 	mapping.AllowedClientQuery = map[string]struct{}{}
 
 	// The fixture carries a reasoning item and no early usage; the
@@ -1722,7 +1745,10 @@ func TestHandlerClientAbortReturns(t *testing.T) {
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
 	mapping.LossPolicy = StrictLossPolicy()
 	mapping.Auth = AuthPolicy{Mode: AuthNone}
-	mapping.ChatCapabilities = ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true}
+	caps := defaultChatCapabilities()
+	caps.ParallelToolCalls = true
+	caps.ReasoningEffort = true
+	mapping.ChatCapabilities = caps
 	mapping.AllowedClientQuery = map[string]struct{}{}
 
 	var (

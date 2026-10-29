@@ -2,9 +2,11 @@
 
 Reverse proxy with bounded concurrency for AI/LLM API endpoints.
 
-Sits in front of an upstream HTTP API (e.g. Anthropic, OpenAI) and limits concurrent requests to configured routes. Requests that exceed the limit block until a slot opens. No client-side backoff needed. Non-matching requests pass through unmodified.
+Sits in front of an upstream HTTP API (e.g. Anthropic, OpenAI) and limits concurrent requests to configured routes. Requests that exceed the limit block until a slot opens, so clients need no backoff of their own. Non-matching requests pass through unmodified.
 
-Run with `-tui` for a terminal dashboard with live metrics and request inspection.
+The goal is that the upstream never *observes* more concurrency than you configured. Providers detect excess concurrency on their side, with their own accounting lag, and answer with 429s or temporary bans. So the proxy does more than count in-flight requests: it holds slots across the provider's accounting window after releases, cancellations, and failures, and a circuit breaker stops a failing upstream from being hammered.
+
+Optionally, it also transcodes between the OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages APIs (see [Transcoding](#transcoding)). Run with `-tui` for a terminal dashboard with live metrics and request inspection.
 
 <p align="center">
   <img src="docs/assets/tui.webp" alt="TUI dashboard showing live request metrics" width="800">
@@ -22,11 +24,11 @@ go install github.com/joeycumines/ai-concurrency-shaper@latest
 ai-concurrency-shaper -upstream https://api.anthropic.com
 ```
 
-That's the whole surface for a single upstream: every tuning flag below applies to it, top-level. To front several upstreams through one port instead, see [Multiple Providers](#multiple-providers) — the same flags apply per `--provider` section.
+Every tuning flag below applies to that single upstream. To front several upstreams through one port, see [Multiple Providers](#multiple-providers); the same flags then apply per `--provider` section.
 
 ### Flags
 
-Every flag lives in one of two scopes. **Server-scope** flags configure the listener itself; **provider-scope** flags configure one upstream's behavior (limiting, retry, breaker, cooldowns). In the single-upstream invocation above the two scopes are flattened onto one command line — that form keeps working exactly as before. With `--provider` sections, each flag must appear in the section it configures.
+Every flag lives in one of two scopes. **Server-scope** flags configure the process (listener, TUI, model table, catalog suites, embedded RC server); **provider-scope** flags configure one upstream (limiting, retry, breaker, cooldowns, auth, transcoding). With a single upstream both scopes share one command line. With `--provider` sections, server-scope flags go before the first marker and each provider-scope flag goes in the section it configures.
 
 Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider=acme -h`) for the complete flag reference. Usage errors — unknown flags, malformed sections — exit 2 with a hint pointing at `-h`; semantic failures (bad values, missing upstream) exit 1.
 
@@ -43,14 +45,16 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-global-concurrency` | provider | `0` | Global concurrency limit (0 = disabled) |
 | `-queue-timeout` | provider | `30s` | Max wait for a concurrency slot |
 | `-queue-depth` | provider | `0` | Max requests waiting for a slot at once (0 = unbounded, the documented blocking semantics). When the bound is reached, arriving requests fail fast with `429 Too Many Requests` + `Retry-After` — the protocol signal AI clients and the official SDKs already act on — instead of queueing silently and amplifying into client-side retries |
-| `-queue-comments` | provider | `0` | SSE queue-comment interval for streaming requests (0 = disabled). When set (e.g. `15s`) and the request's `Accept` header selects `text/event-stream`, the proxy commits `200` + SSE headers **before** admission and emits `: queue-wait elapsed=N` comments while queued — the connection stays visibly alive instead of silently blocking. Opt-in with a documented trade-off: once committed, the exchange is locked to the streaming representation; later failures surface as stream failures/aborts, never as HTTP error statuses. Body-carrying requests require a full-duplex-capable connection (standard for net/http servers); a writer that cannot enable it falls back to the silent-queuing semantics rather than corrupt the request body |
+| `-queue-comments` | provider | `0` | SSE keep-alive comment interval while a streaming request is queued (0 = disabled). Commits `200` + SSE headers after breaker admission and before the slot wait; see [Queue comments](#queue-comments--queue-comments) for the trade-off |
 | `-upstream-disable-keep-alives` | provider | `false` | Disable HTTP keep-alives to upstream; each request uses a fresh TCP connection. Use when the upstream counts idle connections as concurrent. |
 | `-upstream-ca` | provider | _(unset)_ | CA for verifying the upstream certificate on the proxy's own TLS handshake (`file:PATH` or `base64:DATA`). Unset verifies against the system roots. Rejected with `-rc-terminate-tls` (use `-rc-target-ca` there) and on plaintext `http://` upstreams (nothing to verify against). |
 | `-upstream-insecure` | provider | `false` | Skip upstream TLS certificate verification on the proxy's own handshake. Rejected with `-rc-terminate-tls` and on plaintext `http://` upstreams. A configured `-upstream-ca` is inert alongside it (nothing left to verify against). |
 | `-upstream-server-name` | provider | _(unset)_ | TLS SNI override for the proxy's own upstream handshake. Rejected with `-rc-terminate-tls` and on plaintext `http://` upstreams. |
 | `-retry` | provider | `-1` | Max retry attempts (-1 = unlimited, 0 = disabled) |
 | `-retry-max-body-mb` | provider | `5` | Max request body size (MB) eligible for retry |
-| `-auth-source` | provider | _(unset)_ | Upstream credential source: `env:VAR`, `file:PATH`, or `none` (strip-only). Unset disables upstream auth entirely — requests are forwarded verbatim |
+| `-auth-source` | provider | _(unset)_ | Upstream credential source: `env:VAR`, `file:PATH`, `exec:<JSON argv>` (a short-lived credential from a command, refreshed while running), or `none` (strip-only). Unset disables upstream auth entirely — requests are forwarded verbatim |
+| `-auth-source-ttl` | provider | _(unset; required with `exec:`)_ | How long an `exec:` credential is used before the command runs again, measured from the start of the run that produced it (e.g. `50m` for a 1h key). Rejected with any other source |
+| `-auth-source-timeout` | provider | `60s` | Max run time of the `exec:` command; it is killed (with its process group) after this. Must be > 0; rejected with any other source |
 | `-auth-mode` | provider | `auto` | How the credential is attached: `auto` (derived from the upstream host), `bearer`, `x-api-key`, `api-key`, or `header:NAME`. `none` strips client credentials without injecting anything |
 | `-auth-header` | provider | _(required by `header:` mode)_ | Custom upstream auth header name (e.g. `X-Goog-Api-Key`) |
 | `-anthropic-version` | provider | `2023-06-01` | `Anthropic-Version` header value applied when the resolved mode is `x-api-key` |
@@ -61,15 +65,15 @@ The tables in [Concurrency Protection](#concurrency-protection), [Circuit Breake
 
 #### Concurrency Protection
 
-The proxy's internal semaphore limits how many tokens are held concurrently. What the downstream actually observes depends on its own accounting: providers differ in how they measure concurrency (active connections, in-flight requests, token usage windows, etc.), and most have some lag between completing a response and decrementing their counter. These flags insert delays after slot release to reduce the risk that the downstream observes N+1 or higher concurrency, at the cost of throughput. They are configurable because the right tradeoff depends on the upstream's accounting behavior. Defaults are conservative.
+The limiters bound the proxy's own concurrency. What the upstream observes depends on its accounting: providers measure concurrency differently (active connections, in-flight requests, token windows), and most lag between finishing a response and decrementing their counter. These flags hold a slot after its exchange ends so the upstream does not observe N+1, at the cost of throughput. The right values depend on the upstream; the defaults are conservative. [How Concurrency Protection Works](#how-concurrency-protection-works) explains how they combine.
 
 | Flag | Scope | Default | Description |
 |------|-------|---------|-------------|
-| `-release-cooldown` | provider | `200ms` | Delay after releasing a slot before re-admission; caps maximum throughput at `limit / cooldown` req/s. Reduces the chance the next request arrives while the downstream is still cleaning up. |
-| `-cancel-cooldown` | provider | `200ms` | Hold the slot after a client disconnects once an upstream attempt has started. Mitigates N+1 from rapid connect/disconnect cycles. |
-| `-failure-hold` | provider | `2s` | Hold the slot after an upstream failure (5xx, 429, or rate-limit-signaled 403) when the circuit breaker is disabled or its penalty is zero. When the breaker is enabled with a non-zero penalty, the phantom penalty takes precedence instead. |
-| `-retry-min-delay` | provider | `1s` | Minimum delay before retrying. Reduces the chance the retry arrives before the downstream has finished accounting. |
-| `-retry-skip-429` | provider | `true` | Do not retry 429 responses. Avoids the feedback loop where retries amplify concurrency at the downstream. |
+| `-release-cooldown` | provider | `200ms` | Hold every slot this long after its exchange ends. Caps throughput at `limit / cooldown` req/s (5 req/s at limit 1). |
+| `-cancel-cooldown` | provider | `200ms` | Hold the slot after a client disconnects once an upstream attempt has started, so rapid connect/disconnect cycles cannot produce N+1. |
+| `-failure-hold` | provider | `2s` | Hold the slot after an upstream failure (5xx, 429, transport error, or rate-limit-signaled 403) when the circuit breaker is disabled. With the breaker enabled, its phantom penalty (`-cb-penalty`) is the hold instead. |
+| `-retry-min-delay` | provider | `1s` | Minimum delay before a retry, so it does not arrive before the upstream has finished accounting for the failed attempt. |
+| `-retry-skip-429` | provider | `true` | Do not retry 429 responses: retrying them adds concurrency at the upstream that is already refusing it. |
 | `-adaptive-headroom` | provider | `false` | Reduce effective concurrency by one slot after a 429, restoring after a quiet window. Use when the provider can see N+1 concurrent requests due to connection teardown or CDN accounting lag. |
 | `-adaptive-headroom-window` | provider | `30s` | How long the one-slot 429 headroom is held. Each new 429 resets this window. |
 
@@ -117,7 +121,7 @@ For `101 Switching Protocols`, local inability to complete the requested upgrade
 
 ### Multiple Providers
 
-Front several upstreams through one port with `--provider` sections. A `--provider[=name]` marker starts a new section; every provider-scope flag after it — until the next marker — configures that upstream only. Server-scope flags (`-bind`, `-tui`, `-version`) belong before the first marker.
+Front several upstreams through one port with `--provider` sections. A `--provider[=name]` marker starts a new section; every provider-scope flag after it, until the next marker, configures that upstream only. Server-scope flags belong before the first marker.
 
 ```sh
 ai-concurrency-shaper \
@@ -146,7 +150,7 @@ Two provider-only flags join the surface in sectioned mode:
 Mount semantics:
 
 - The prefix is a true mount: `/anthropic/v1/messages` is forwarded upstream as `/v1/messages`. A request equal to the mount (`/anthropic`) forwards as `/`.
-- With more than one provider, requests matching no prefix get `404 Not Found` — nothing leaks to a default upstream. A single bare provider (no `--provider` markers, no prefix) still serves every path from the root, exactly as before.
+- With more than one provider, requests matching no prefix get `404 Not Found` — nothing leaks to a default upstream. A single bare provider (no `--provider` markers, no prefix) serves every path from the root.
 - Prefixes must not overlap: `/anthropic` and `/anthropic/v1` cannot coexist. Overlapping configurations are rejected at startup, before the listener binds.
 - Providers are matched on whole path segments, so `/anthropic2` never matches the `/anthropic` prefix.
 
@@ -174,7 +178,7 @@ ai-concurrency-shaper \
 
 With auth enabled, every proxied request has all client HTTP credential headers (`Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key`, `X-Goog-Api-Key`) plus protocol headers (`Anthropic-Version`, `Anthropic-Beta`) and cloud signature families (`x-amz-*`, `x-goog-*`) stripped first — then exactly one upstream credential is attached. A client that sends OpenAI's token to the Anthropic mount cannot leak it to Anthropic, and vice versa: leakage of these credential headers is structurally impossible, not merely discouraged. The injection happens inside Go's `Rewrite` hook, where hop-by-hop headers have already been removed, so a malicious `Connection` header list cannot strip the injected credential.
 
-One deliberate exception: **`Cookie` headers are forwarded verbatim** to whichever mount receives the request, even with auth enabled — stripping them unconditionally would break cookie-authenticated upstreams. Per the TUI Redaction Constraint (see AGENTS.md), the journal and TUI display raw headers and URLs — including `Cookie` — because TUI output is not captured anywhere and is visible only to the local operator during an interactive session. If your clients send cookies you do not want forwarded, strip them before they reach the gateway.
+One deliberate exception: **`Cookie` headers are forwarded verbatim** to whichever mount receives the request, even with auth enabled, because stripping them would break cookie-authenticated upstreams. The journal and TUI display raw headers and URLs, `Cookie` included: TUI output is not captured anywhere and is visible only to the local operator. If your clients send cookies you do not want forwarded, strip them before they reach the gateway.
 
 The gateway never sends `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, or `Forwarded` upstream — client-supplied forwarding headers are removed and no client IP is injected (the gateway is a stealth hop). This is also true when auth is disabled.
 
@@ -194,12 +198,21 @@ Sources:
 |----------------|----------|
 | `env:VAR` | Read `VAR` from the environment once at startup. Unset or blank → startup fails naming the variable |
 | `file:PATH` | Read the secret from `PATH` once at startup. Unreadable or blank → startup fails naming the path |
+| `exec:<JSON argv>` | Run a command for a short-lived credential, e.g. `exec:["/usr/local/bin/osm","ai-credential","--","bedrock-openai-shaper"]`, and keep it fresh for the life of the process (see below). Requires `-auth-source-ttl`. The command runs once at startup; failure fails startup |
 | `none` | Strip-only hygiene: client credentials are removed, nothing is injected |
-| _(unset)_ | Auth disabled entirely — requests are forwarded verbatim, exactly as before this feature existed |
+| _(unset)_ | Auth disabled entirely: requests are forwarded verbatim |
 
-Where secrets can and cannot appear: a referenced variable's *value* is never logged, printed, or written anywhere by the proxy — startup logs name only the *reference* (`env:SHAPER_PROVIDER_ACME_API_KEY`). Per AGENTS.md TUI Redaction Constraint, the journal and TUI may show raw credential headers and URLs (including upstream `Set-Cookie` and `?key=` query strings) — TUI output is not captured and is visible only to the local operator during an interactive session. Requests are still forwarded byte-for-byte unchanged, and transport-error log lines are scrubbed via `sanitizeTransportError` (any `*url.Error` query is redacted) as defense-in-depth for captured logs. Passing secrets as literal argv values would expose them in `ps`/`/proc`; use env references instead.
+Where secrets can and cannot appear: a referenced variable's *value* is never logged, printed, or written anywhere by the proxy; startup logs name only the *reference* (`env:SHAPER_PROVIDER_ACME_API_KEY`). The journal and TUI may show raw credential headers and URLs (including upstream `Set-Cookie` and `?key=` query strings), since that output is visible only to the local operator. Log lines are different, because logs are captured: transport-error logs have every credential query parameter of every URL carried by a `*url.Error` reachable through the error chain's `Unwrap` links redacted (raw and quoted spellings; a URL a wrapper exposes only through a custom `As` method is not enumerable and stays out of scope). Passing secrets as literal argv values would expose them in `ps`/`/proc`; use env references instead.
 
 Other credential channels outside the header allowlist are your responsibility: credentials embedded in path segments are forwarded by design and appear in route labels and request listings; request bodies captured for the TUI preview may contain whatever the client sent; custom secret headers not in the strip list above are forwarded verbatim and shown unredacted. If clients send secrets through these channels that you do not want stored or displayed locally, strip them before they reach the gateway.
+
+`env:` and `file:` credentials are pinned at startup: rotating them requires a restart. `exec:` is the rotation exception, built for short-lived bearer credentials such as Amazon Bedrock short-term API keys:
+
+- **Execution.** The argv is a JSON array of non-empty strings run directly, without a shell; `argv[0]` is an absolute path or a bare name resolved through `PATH`. Stdin is the null device, the proxy's environment is inherited, stderr is discarded, and the credential is the first line of stdout, trimmed (at most 64 KiB of output is read). A run that exits non-zero, exceeds `-auth-source-timeout`, or prints no credential is an error reported by class only (`exec secret source: command exited with status 1`, `... timed out after 1m0s`, `... produced no output`) — command output never appears in errors or logs.
+- **Caching and refresh.** A credential is used for `-auth-source-ttl` from the start of the run that produced it. Once it is within `min(ttl/5, 5m)` of expiry, the next request starts a background refresh and is served the still-valid value, so steady traffic never waits on the command; a request arriving after expiry waits for the refresh. Refreshes are request-driven, so an idle proxy never runs the command. Concurrent requests share a single in-flight run.
+- **Resilience.** If a refresh fails while a previous credential exists, the previous one keeps being served (an expired one surfaces as the upstream's own 401) and the refresh is retried with exponential backoff from 1s to 1m. Requests fail only when no credential has ever been obtained.
+- **Rejection recovery.** When the upstream answers a request authenticated by an `exec:` credential with `401`, or with a `403` that carries no rate-limit signal (`Retry-After` / `x-ratelimit-*` 403s are temporary bans, not credential failures), the credential is invalidated and the request is re-sent exactly once with a fresh one — on passthrough, native, and transcoded routes alike. The re-send needs a replayable body: transcoded requests always are, passthrough requests are when retries are enabled and the body fits `-retry-max-body-mb`. Otherwise the rejection is returned as-is and the next request uses the fresh credential. Forced refreshes are rate-limited to one per 5s, and a rejection of a credential that has already been replaced does not trigger another, so a burst of 401s cannot run the command repeatedly. Until a refresh replaces a refused credential, every request waits for that refresh instead of being sent with the refused value; while the command keeps failing, the previous value is served between backoff retries. If the replacement is refused too, the upstream is refusing for a reason other than the credential (for example a 403 for a model the account is not entitled to). From then on, forced refreshes run in the background with only the refused request waiting, and the spacing doubles per repeat (up to 5m) until the next scheduled refresh. `env:`/`file:` credentials are never re-sent on 401/403.
+- **Custody.** The proxy keeps the credential in memory and never logs it; the startup log names the `exec:` argv (the reference), never the value. As with every source, the opt-in `-transcode-flowlog-dir` recorder writes upstream request headers unredacted, so the credential is written there when it is enabled.
 
 A multi-provider configuration with no auth on some providers prints one startup note (`N of M providers configured without upstream auth`) so an open relay is never silent.
 
@@ -207,11 +220,10 @@ A multi-provider configuration with no auth on some providers prints one startup
 
 Standard provider mounts route by **path prefix** (`/anthropic/...`, `/openai/...`). For a single unified endpoint with body-aware model routing across providers, use [Catalog suites](#catalog-suites-unified-endpoints-and-model-routing).
 
-Other explicit scope boundaries and deferred capabilities:
-- **No Downstream Client Authentication**: There is no downstream client authentication (anything that can reach the port can use every mounted provider). Transcoding's inbound credential mode is per-route forwarding/transcoding, not virtual-key admission.
-- **Stateless Inference without Session Stickiness**: Stateless LLM inference does not require session affinity or stickiness. Per-tool session affinity, if ever needed in the future, would be based on tool HTTP headers, cookies, or hashes.
-- **Provider Resource Isolation vs Client Identity Rotation**: The proxy intentionally does not implement LocalAddr pooling, User-Agent rotation, TLS fingerprint spoofing, or keypool rotation on 429. Per the Maxim AI caveat, having $N$ API keys in the same organization does not yield $N\times$ quota under modern upstream mitigation policies (providers enforce limits per organization, project, or billing account). The correct and supported architectural pattern is defining distinct organizations, accounts, or regions as distinct `--provider` resources with isolated queue limiters and circuit breakers, rather than per-request identity rotation.
-- **Readiness and Configuration**: Readiness is TCP-connect only, and configuration changes require a restart.
+Other deliberate boundaries:
+- **No downstream client authentication.** Anything that can reach the port can use every mounted provider. Transcoding's `inbound` credential mode forwards the client's credential; it is not virtual-key admission.
+- **No identity rotation.** The proxy does not rotate local addresses, User-Agents, or API keys on 429. Providers enforce limits per organization, project, or billing account, so N keys in one organization do not buy N times the quota. Model separate accounts or regions as separate `--provider` sections, each with its own limiters and breaker.
+- **Static configuration.** Readiness is TCP-connect only, and configuration changes require a restart.
 
 ### RemoteControl.NetConn Dialing
 
@@ -229,24 +241,30 @@ A provider's upstream connections can be dialed through a [sesame RemoteControl.
 | `-rc-channel-key` | Client private key for mTLS on the gRPC channel (`file:PATH` or `base64:DATA`; requires `-rc-channel-tls` and `-rc-channel-cert`). |
 | `-rc-channel-server-name` | TLS SNI override for the gRPC channel (requires `-rc-channel-tls`). |
 | `-rc-channel-insecure` | Skip TLS verification on the gRPC channel (requires `-rc-channel-tls`). |
-| `-rc-terminate-tls` | Terminate upstream TLS **at the RC server** instead of inside the proxy. Enables the `-rc-target-*` flags below; without it the tunnel is plain TCP and the proxy performs TLS normally. |
+| `-rc-terminate-tls` | Terminate upstream TLS **at the RC server** instead of inside the proxy. Enables the `-rc-target-*` flags below; without it the tunnel is plain TCP and the proxy performs TLS normally. Rejected on a plaintext `http://` upstream, which has no handshake to terminate. |
 | `-rc-target-server-name` | Upstream TLS SNI for the handshake terminated at the RC server (requires `-rc-terminate-tls`). |
 | `-rc-target-ca` | CA for verifying the upstream certificate (`file:PATH` or `base64:DATA`; requires `-rc-terminate-tls`). |
 | `-rc-target-cert` | Client certificate for upstream mTLS (`file:PATH` or `base64:DATA`; requires `-rc-terminate-tls` and `-rc-target-key`). |
 | `-rc-target-key` | Client private key for upstream mTLS (`file:PATH` or `base64:DATA`; requires `-rc-terminate-tls` and `-rc-target-cert`). |
-| `-rc-target-min-version` | Minimum upstream TLS version: `1.0`, `1.1`, `1.2`, or `1.3` (requires `-rc-terminate-tls`). |
+| `-rc-target-min-version` | Minimum upstream TLS version: `1.0`, `1.1`, `1.2`, or `1.3` (requires `-rc-terminate-tls`; a floor above `-rc-target-max-version` is rejected). |
 | `-rc-target-max-version` | Maximum upstream TLS version (same values; requires `-rc-terminate-tls`). |
 | `-rc-target-client-hello` | Decomposed wire-level ClientHelloSpec for the upstream handshake as protojson (`file:PATH`, `base64:DATA`, or inline JSON; requires `-rc-terminate-tls`; empty = engine default; the server fails closed on any dimension it cannot honour exactly). See [Upstream TLS fingerprinting](#upstream-tls-fingerprinting-clienthellospec). |
-| `-rc-target-alpn` | ALPN protocol offered during the upstream handshake (repeatable; requires `-rc-terminate-tls`). |
+| `-rc-target-alpn` | ALPN protocol offered during the upstream handshake (repeatable; requires `-rc-terminate-tls`). Only `http/1.1` is accepted: a remote-terminated connection carries HTTP/1.1 only (see the validation note below). |
 | `-rc-target-insecure` | Skip upstream TLS certificate verification (requires `-rc-terminate-tls`). |
 | `-rc-flow-control` | Advertise flow-control support on the RC stream (switches to the in-stream control path). |
 | `-rc-window-size` | Flow-control window size in bytes (0 = server default; requires `-rc-flow-control`). Values above int32 max are rejected at startup. |
 | `-rc-opportunistic-tls` | Advertise opportunistic TLS upgrade support on the RC stream. |
 | `-rc-proxy-hop` | Egress proxy hop ahead of the upstream dial: `http-connect|socks5@host:port[;user=U][;pass=P][;header=H]` (repeatable). |
 
-Certificate and key material uses explicit prefixes: `file:/path/to/pem` reads from disk, `base64:DATA` decodes inline PEM. Unprefixed values are rejected without echoing the content back into the error.
+Certificate and key material uses explicit prefixes: `file:/path/to/pem` reads from disk, `base64:DATA` decodes inline PEM. Unprefixed values are rejected without echoing the content back into the error, and the same no-echo rule covers `-rc-proxy-hop` parse errors (option position and size only) and `-sesame-endpoint` validation (a URL-form userinfo is never printed).
 
-Validation is fail-closed: `-rc-channel-cert` requires `-rc-channel-key` (and vice versa), `-rc-target-*` options require `-rc-terminate-tls`, `-rc-window-size` requires `-rc-flow-control`, and any `-rc-*` flag without `-rc-server` is a startup error. The `-upstream-ca`, `-upstream-insecure`, and `-upstream-server-name` flags configure the handshake the proxy performs itself (direct dialing, or the RC tunnel without `-rc-terminate-tls`); under `-rc-terminate-tls` they are rejected at startup because the proxy never handshakes there and would otherwise ignore them silently — the `-rc-target-*` options are the replacement. The gRPC channel is lazy (`grpc.NewClient`): an unreachable RC server does not fail startup — dial errors surface at request time as transport failures. A refused RC server fails fast; a blackholed one (packets dropped, not refused) holds the first request's dial until the client gives up unless `-rc-dial-timeout` bounds it — the default is 0 (no timeout), matching the proxy's blocking-slot semantics, so set `-rc-dial-timeout` when the RC server is across an unreliable network. There is no per-attempt HTTP timeout on any path (direct or RC): once admitted, a stalled upstream holds its limiter slot until the client cancels. That blast radius is per provider — one stalled mount starves its own limiters, not the others'.
+Validation is fail-closed, and every check runs during configuration resolution — before any socket is bound or dialled. `-rc-channel-cert` requires `-rc-channel-key` (and vice versa), `-rc-target-*` options require `-rc-terminate-tls`, `-rc-window-size` requires `-rc-flow-control`, and any `-rc-*` flag without `-rc-server` is a startup error. All configured PEM (`-rc-channel-*`, `-rc-target-*`, `-rc-server-*`) is parsed at startup, and a configured value that decodes to zero bytes is an error rather than "unset": an empty CA or certificate would otherwise silently fall back to the system roots or omit the certificate while the flags said otherwise.
+
+The upstream ALPN offer is constrained to HTTP/1.1. Under `-rc-terminate-tls` the proxy dials through `http.Transport.DialTLSContext`, whose returned connection is not a `*tls.Conn`, so net/http never learns the negotiated protocol and never sends an HTTP/2 preface. Any other offer, in `-rc-target-alpn` or in a `-rc-target-client-hello` ALPN extension (which must also be a well-formed protocol list), would let the upstream select a protocol the exchange cannot use, so it is refused at startup. An empty offer is safe: the sesame server then sends no ALPN extension at all.
+
+The `-upstream-ca`, `-upstream-insecure`, and `-upstream-server-name` flags configure the handshake the proxy performs itself (direct dialing, or the RC tunnel without `-rc-terminate-tls`). Under `-rc-terminate-tls` the proxy never handshakes, so they are rejected at startup rather than silently ignored; the `-rc-target-*` options replace them.
+
+The gRPC channel is lazy (`grpc.NewClient`): an unreachable RC server does not fail startup, and dial errors surface at request time as transport failures. A refused RC server fails fast; a blackholed one holds the first request's dial until the client gives up, unless `-rc-dial-timeout` bounds it. The default is 0 (no timeout), matching the proxy's blocking-slot semantics, so set it when the RC server is across an unreliable network. There is no per-attempt HTTP timeout on any path (direct or RC): once admitted, a stalled upstream holds its limiter slot until the client cancels. The blast radius is per provider: one stalled mount starves its own limiters, not the others'.
 
 #### Server flags (`-rc-server-*`, server scope)
 
@@ -429,15 +447,15 @@ ai-concurrency-shaper \
   -adaptive-headroom-window 30s
 ```
 
-- **`-concurrency 4`** matches the upstream's per-key limit. The proxy holds at most 4 tokens concurrently.
+- **`-concurrency 4`** matches the upstream's per-key limit. At most 4 requests are in flight.
 - **`-queue-timeout 30m`** LLM streaming requests can take minutes. A 30s timeout would kill legitimate long-running requests.
 - **`-retry 2`** bounded retries. More than 2 risks amplifying load during an outage; unlimited (`-1`) is only safe when the upstream recovers quickly.
-- **`-retry-min-delay 5s`** the upstream has slow accounting. Without this floor, the default backoff (starting at 500ms) could send a retry before the upstream finishes cleaning up from the failed attempt.
+- **`-retry-min-delay 5s`** the upstream has slow accounting. Without this floor, the default backoff (starting at 500ms) could send a retry before the upstream has accounted for the failed attempt.
 - **`-retry-skip-429=true`** a 429 means the upstream is overloaded. Retrying adds concurrent requests and makes the problem worse.
 - **`-release-cooldown 500ms`** the default 200ms is too aggressive for this upstream; accounting lag is closer to 500ms.
 - **`-cancel-cooldown 500ms`** mitigates N+1 from rapid disconnect/reconnect cycles.
 - **`-cb-threshold 2` / `-cb-window 10s`** trip after 2 failures in 10s. Aggressive, but appropriate when the upstream is generally reliable and any 5xx indicates a real problem. Bare 403 auth errors do not count unless the response carries rate-limit signals.
-- **`-cb-penalty 5s` / `-cb-max-penalty 60s`** phantom concurrency penalty (exponential backoff). The proxy holds the slot as if a request is still in flight, reducing the rate of new requests reaching the struggling upstream. Stacks with `release-cooldown` (5s penalty, then release, then 500ms cooldown = 5.5s total).
+- **`-cb-penalty 5s` / `-cb-max-penalty 60s`** phantom penalty: after a failure the slot is held as if the request were still in flight, so fewer requests reach the struggling upstream. The penalty grows with consecutive failures (the first failure holds two base units, 10s here) and is followed by the release cooldown.
 - **`-upstream-disable-keep-alives`** the provider counts *open* connections, not just in-flight requests. Without this, idle keep-alive connections can push the observed concurrency above the `-concurrency 4` limit and trigger 429s.
 - **`-adaptive-headroom` / `-adaptive-headroom-window 30s`** some providers (or their CDNs) can still observe a momentary N+1 concurrent requests because connection teardown is asynchronous. When a 429 arrives, these flags temporarily reduce the effective limit by one slot, creating headroom. The slot is restored after 30s with no new 429s.
 
@@ -476,10 +494,12 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-max-request-mb` | provider | `10` | Max unmarshaled request body size (MB) for transcoding |
 | `-transcode-max-response-mb` | provider | `10` | Max unmarshaled non-streaming response body size (MB) for transcoding |
 | `-transcode-flowlog-dir` | provider | `` (disabled) | Existing directory that receives one unredacted JSON record per transcoded exchange, capturing the full flow (client request, converted upstream request, upstream response, downstream response); empty disables the recorder |
-| `-native-route` | provider | _(repeatable)_ | Natively served route: `protocol@path` with protocol `responses`, `messages`, or `chat`. A request whose model's `via` dialect matches is forwarded with only the model identifier rewritten; a mismatch falls through to any transcode mapping on the same path (see [Native passthrough](#native-passthrough)) |
+| `-native-route` | provider | _(repeatable)_ | Natively served route: `protocol@path` with protocol `responses`, `messages`, or `chat`. A request whose model's `via` dialect matches is forwarded with only the model identifier rewritten; a mismatch — or a model the native map cannot resolve at all, such as a `-transcode-profile` name — falls through to any transcode mapping on the same path (see [Native passthrough](#native-passthrough)) |
 | `-opencode` | provider | `false` | Emit the opencode first-party request shape upstream: `User-Agent`, `x-opencode-client`, session affinity and identity headers (see [opencode Zen and Go](#opencode-zen-and-go)) |
 | `-opencode-user-agent` | provider | `opencode/1.18.35` | `User-Agent` the `-opencode` preset asserts upstream |
 | `-opencode-client` | provider | `cli` | `x-opencode-client` the `-opencode` preset asserts upstream |
+
+A client route carrying **two** transcode mappings (for example `-transcode-messages-chat` together with `-transcode-messages-responses`) is dispatched by the request model's declared upstream dialect: each `-model-table` entry's `via=` fact decides whether that model is served by the chat or the responses upstream. A model with no `via=` fact falls back to the chat target, so the responses target is reachable only through a `via=responses` entry; without one, startup refuses the configuration, naming `-model-table`. A `-transcode-profile` follows its target model's dialect. A single mapping on a route is the operator's blanket serving choice and needs no dialect fact.
 
 ### Route examples
 
@@ -488,8 +508,7 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 ai-concurrency-shaper -upstream https://api.openai.com -transcode-responses-chat
 
 # Messages client -> Responses upstream
-ai-concurrency-shaper -upstream https://api.openai.com -transcode-messages-responses \
-  -transcode-allow-loss tool_schema_strictness
+ai-concurrency-shaper -upstream https://api.openai.com -transcode-messages-responses
 
 # Messages client -> Chat upstream
 ai-concurrency-shaper -upstream https://api.anthropic.com -transcode-messages-chat \
@@ -500,10 +519,13 @@ ai-concurrency-shaper -upstream https://api.example.com \
   -transcode-route "responses@/v1/responses=chat-completions@/v1/chat/completions"
 ```
 
-Both Messages presets map `/v1/messages`, so enabling both is a startup
-error. A Messages-to-Responses mapping without an approved
-`tool_schema_strictness` loss is also a startup error (Messages tools cannot
-preserve the strictness the Responses contract requires).
+Both Messages presets map `/v1/messages`; enabled together they form one
+two-target route dispatched by model dialect (see above). Messages tools
+carry no strictness setting while Responses function tools require one, so
+every Messages-to-Responses mapping, preset or explicit route, approves the
+`tool_schema_strictness` loss by default. Under `-transcode-strict-defaults`,
+or with `-transcode-allow-loss '!tool_schema_strictness'`, the mapping is a
+startup error unless the loss is approved explicitly.
 
 ### Model identities and the global model table
 
@@ -606,7 +628,7 @@ rather than failing the listing. A mount with no entries keeps
   - `provider=name`: filter suite models to a single named provider.
   - `strict=true|false`: when `false` and only one provider is configured, requests for unmapped models fall back to that provider; when `true` (or multiple providers exist), unmapped models return a client-dialect 404/400 error.
 
-Discovery endpoint `GET <prefix>/v1/models` is answered locally from the catalog without upstream calls or queueing. Completion endpoints `POST <prefix>/v1/messages` and `POST <prefix>/v1/responses` inspect the `model` field in the request body and dispatch only to a provider that has the matching transcoding route.
+Discovery (`GET <prefix>/v1/models`) is answered locally from the catalog, without upstream calls or queueing. The completion routes `POST <prefix>/v1/messages`, `/v1/responses`, and `/v1/chat/completions` read the request's `model` and dispatch only to a provider that serves that model on that route. `POST <prefix>/v1/messages/count_tokens` is routed the same way, so a token-count probe gets an Anthropic-dialect answer rather than a bare 404 page. Any other path answers a dialect-shaped 404 unless a non-strict suite forwards it to its single provider.
 
 Example:
 ```sh
@@ -676,9 +698,11 @@ name=model[:tier]
 
 - `name`: profile identifier passed in the request `model` field (e.g. `scanner`, `analyst`).
 - `model`: target model identifier (a surrogate when `-model-table` is configured, or wire ID otherwise).
-- `tier`: optional reasoning effort tier (`low`, `medium`, `high`). Omit to keep the model's default reasoning configuration.
+- `tier`: optional reasoning effort (`minimal`, `low`, `medium`, `high`, `xhigh`, or `max`). Omit to keep the model's default reasoning configuration.
 
 When a client specifies a profile name in place of a model, the proxy resolves it to the target model and applies the reasoning tier before rendering the upstream request.
+
+On a route with two mappings, a profile follows its target model's dialect. A mapping whose profile target model carries an explicit dialect (a `via=` fact) decides the profile; the deciding mappings must agree on one dialect, one target model, and one reasoning tier, and a target model given two different explicit dialects is undecidable. A mapping whose target model carries no explicit dialect is an identity fallback: it yields to a deciding mapping, and among fallbacks the chat target serves. A conflict is refused with a `500` that names the disagreement, identical whatever order the mappings were configured in, and no upstream receives it.
 
 ### Sensible defaults
 
@@ -689,7 +713,7 @@ the flags below extend the defaults, never replace them:
 
 | Layer | Default | Meaning |
 | --- | --- | --- |
-| Chat capabilities | `image_input`, `parallel_tool_calls`, `provider_reasoning_thinking`, `stop_sequences`, `structured_outputs` | A compatible out-of-the-box core, enabled via `-transcode-chat-capability` (available names: `developer_role`, `image_input`, `multi_agent_priming`, `parallel_tool_calls`, `provider_reasoning_text`, `provider_reasoning_thinking`, `reasoning_effort`, `stop_sequences`, `structured_outputs`, `system_anywhere`, `tool_result_images`). `image_input` and `stop_sequences` are required for common client traffic (such as Claude Code image attachments and stop sequence fields), so rejecting either locally would fail requests before querying upstream; withdraw them with `!image_input` or `!stop_sequences` for upstreams that reject those fields. `tool_result_images` (opt-in) renders multimodal tool-result content as multipart chat tool messages (text and image_url parts) for upstreams accepting tool message images; without it, content falls back to the observable `tool_result_json_envelope` text encoding. `structured_outputs` maps client `text.format` JSON schema definitions directly to chat `response_format`. For upstreams that reject structured outputs, withdraw the capability to fail locally with a typed error or approve the loss to proceed unconstrained with logged notification. |
+| Chat capabilities | `float64_bounds`, `image_input`, `metadata`, `parallel_tool_calls`, `provider_reasoning_thinking`, `stop_sequences`, `structured_outputs` | A compatible out-of-the-box core, enabled via `-transcode-chat-capability` (available names: `developer_role`, `float64_bounds`, `image_input`, `metadata`, `multi_agent_priming`, `parallel_tool_calls`, `provider_reasoning_text`, `provider_reasoning_thinking`, `reasoning_effort`, `stop_sequences`, `structured_outputs`, `system_anywhere`, `tool_result_images`). `image_input` and `stop_sequences` are required for common client traffic (such as Claude Code image attachments and stop sequence fields), so rejecting either locally would fail requests before querying upstream; withdraw them with `!image_input` or `!stop_sequences` for upstreams that reject those fields. `tool_result_images` (opt-in) renders multimodal tool-result content as multipart chat tool messages (text and image_url parts) for upstreams accepting tool message images; without it, content falls back to the observable `tool_result_json_envelope` text encoding. `structured_outputs` maps client `text.format` JSON schema definitions directly to chat `response_format`. For upstreams that reject structured outputs, withdraw the capability to fail locally with a typed error or approve the loss to proceed unconstrained with logged notification. |
 | Allowed client query | `beta` | Anthropic clients (Claude Code) gate every request with `?beta=true`; harmless on chat endpoints. Add more via `-transcode-allow-client-query` |
 | Loss policy | the approvals a real client's traffic needs | the non-portable features real Responses/Messages client traffic triggers (reasoning summaries, Anthropic thinking blocks, system turns that cannot keep their position in a chat request, Responses and Anthropic envelope controls, the tier/phase controls a native Responses upstream echoes on its responses (`response_service_tier`, `output_phase`), built-in tools, usage breakdowns the chat upstreams do not always report, the effort/role knobs behind the opt-in capabilities, and the error status of a failed tool result); approved via `-transcode-allow-loss` on top of the defaults. Note: approving `responses_controls` tolerates `include`/`client_metadata`/`prompt_cache_key` and upstream-echoed controls — the conversation-state request controls (`background`, `max_tool_calls`, `prompt`, `safety_identifier`, `status`) are errors under every policy. The `tool_result_error_status` default is deliberate: Claude Code marks every failed tool call with `is_error: true`, so rejecting it makes the proxy unusable with the flagship client — the permissive encoding renders the visible `[tool_result_error]` prefix before the result content (the model still sees that the tool failed) and the decision is logged per exchange; withdraw it with `-transcode-allow-loss '!tool_result_error_status'` if you want strict rejection. A multi-part all-text tool result is joined into one string for a chat tool message as a sanctioned encoding (recorded as a note on every exchange; every content byte is preserved) |
 
@@ -697,14 +721,16 @@ Capabilities take effect when the client uses the corresponding feature:
 - `provider_reasoning_thinking` (the default) maps chat provider reasoning response extensions (`reasoning` or `reasoning_content`) to native Anthropic thinking blocks so Claude Code renders them with its native thinking UI. Each synthesized block carries the marker signature `shaper-synth-thinking-1`, and the request path scrubs marker-signature thinking blocks from replayed history before upstream rendering, preventing synthetic markers from leaking upstream.
 - `provider_reasoning_text` maps the same field to client text instead. When both reasoning capabilities are enabled, `provider_reasoning_thinking` takes precedence. Without either, provider reasoning follows the `provider_reasoning_text` loss decision. To map reasoning to ordinary text instead of thinking blocks:
   `-transcode-chat-capability '!provider_reasoning_thinking' -transcode-chat-capability provider_reasoning_text`.
+- `float64_bounds` forwards tool schemas byte-exact even when they carry a numeric bound at ±float64 max, which zod-generated MCP tool schemas put on every plain number. On by default, including under strict defaults. Withdraw it with `!float64_bounds` for an upstream that rejects such bounds (Amazon Bedrock's OpenAI-compatible endpoint refuses the whole request): exactly those vacuous bounds are removed, keeping every other byte's key order and number spelling, and the rewrite is recorded as a `vacuous_schema_bounds` note.
+- `metadata` forwards the client request's metadata as Chat Completions `metadata`. On by default, including under strict defaults. Withdraw it with `!metadata` for an upstream that validates metadata values against its own grammar (Amazon Bedrock's OpenAI-compatible endpoint rejects the quotes and braces in Claude Code's `user_id`); the metadata is then an observable loss under the `metadata` loss key, so also pass `-transcode-allow-loss metadata`.
 - `parallel_tool_calls` forwards the parallel-tool-calls configuration.
-- `multi_agent_priming` injects a bounded sub-agent orchestration protocol reminder into the leading system or developer turn for chat targets, recorded as a per-exchange note (`multi_agent_priming`).
+- `multi_agent_priming` appends a bounded sub-agent orchestration reminder to the leading system (or developer) turn, after the client's own instructions, so the client's bytes and order are unchanged. It is injected only when the request declares one of the sub-agent tools it names (by the flat names the upstream will see, so a flattened namespace child counts), and each injection is recorded as a per-exchange `multi_agent_priming` note. Chat upstreams only; on a Responses upstream the capability is accepted and has no effect.
 
 Several capabilities remain opt-in because generic and open-weights upstreams reject what they render:
 - `reasoning_effort` forwards Responses `reasoning.effort` (and Anthropic `thinking` budgets) as the chat `reasoning_effort` parameter; without it, the parameter drops observably under the default `request_reasoning` loss.
 - `developer_role` preserves Responses developer-role messages; without it, developer turns render as standard system messages, recorded under the default `developer_role` loss.
 - `system_anywhere` renders system/developer turns positionally for upstreams that accept system messages anywhere in conversation history.
-- `tool_result_images` renders tool-result images as multipart content in chat tool messages.
+- `tool_result_images` renders multimodal tool-result content as multipart content in a chat tool message, order preserved. It is independent of `image_input` (an upstream can accept user images while rejecting tool-message image parts), but the multipart form needs the `image_url` vocabulary, so a mount that withdraws `image_input` falls back to the envelope even with this on.
 
 ### System message placement
 
@@ -722,6 +748,8 @@ the same key. The strict programmatic policy rejects the position loss;
 pass `-transcode-chat-capability system_anywhere` to restore positional
 rendering for upstreams that accept it.
 
+### Thinking budgets and reasoning effort
+
 Anthropic `thinking` on a Messages client maps to chat `reasoning_effort`
 as follows — when the opt-in `reasoning_effort` capability is enabled
 (without it, an enabled budget drops observably under the default
@@ -738,20 +766,12 @@ The thinking members are validated per type (`enabled` carries
 a cross-type member is a malformed request, not a silently ignored field.
 Request-side reasoning controls — an enabled `thinking` budget or a
 Responses `reasoning.effort` — are gated by their own `request_reasoning`
-loss key, deliberately distinct from the response-side
-`provider_reasoning_text` (chat reasoning content): an operator never has
-to approve losing response reasoning text just to strip a request knob,
-or vice versa. Without the `reasoning_effort` capability an enabled budget
-is a loss/reject decision, never a silent drop — and on a non-Chat target
-(e.g. Messages→Responses) an enabled budget is likewise a loss/reject
-decision, never silently dropped.
-
-One scope caveat on "out of the box": the sensible defaults make a minimal
-invocation work for the Chat directions (`-transcode-responses-chat`,
-`-transcode-messages-chat`). The Messages→Responses direction is not
-zero-flag: it requires `-transcode-allow-loss tool_schema_strictness`
-(shown in the route examples above), and a mapping without that approval
-fails at startup rather than serving tool traffic loosely.
+loss key, distinct from the response-side `provider_reasoning_text` (chat
+reasoning content), so an operator never has to approve losing response
+reasoning text just to strip a request knob, or the reverse. Without the
+`reasoning_effort` capability, and on a non-Chat target such as
+Messages→Responses, an enabled budget is a loss or a rejection, never a
+silent drop.
 
 ### Large tool surfaces vs small upstream contexts
 
@@ -792,30 +812,14 @@ qualifier cannot be mapped: that is the `namespace_replay_undeclared` loss.
 It is NOT in the default approved set, so a strict default rejects the
 exchange until the operator approves it with
 `-transcode-allow-loss namespace_replay_undeclared`. When the bare name is
-already owned by a surviving tool the exchange is refused outright instead -
-no policy can approve re-pointing a client-sent call at a different tool. `tool_choice` has no namespaced
-selector (Codex sends `"auto"`), and a named choice addresses the flattened
-name: a bare child name is ambiguous when it collides with another tool, so
-the qualified `namespace__child` form is the one that stays addressable. Namespace tools
-are modeled as a deliberate extension beyond the
-pinned OpenAI SDK revision; the wire shadow's modeled-extension comments record
-the exact shapes.
-
-- `multi_agent_priming` injects a bounded sub-agent orchestration protocol reminder into the
-  leading system (or developer) turn, appended after the client's own instructions so the
-  client's bytes and order are unchanged. It is injected only when the request actually
-  declares one of the sub-agent tools it names (checked by the flat names the upstream
-  will see, so a flattened namespace child still counts), and each injection is recorded
-  as a per-exchange note (`multi_agent_priming`) subject to the same report-entry bound
-  as any other finding. Chat upstreams only; on a Responses
-  upstream the capability is accepted and has no effect, as with the other chat-only
-  capabilities.
-- `tool_result_images` renders multimodal tool-result content as multipart
-  content blocks in a chat tool message, order preserved, for upstreams that
-  accept image parts there. Granting it is independent of `image_input` (an
-  upstream can accept user images while rejecting tool-message image parts),
-  but the multipart form itself needs the `image_url` vocabulary, so a mount
-  that withdraws `image_input` falls back to the envelope even with this on.
+already owned by a surviving tool the exchange is refused outright: no
+policy can approve re-pointing a client-sent call at a different tool.
+`tool_choice` has no namespaced selector (Codex sends `"auto"`), and a named
+choice addresses the flattened name: a bare child name is ambiguous when it
+collides with another tool, so the qualified `namespace__child` form is the
+one that stays addressable. Namespace tools are modeled as a deliberate
+extension beyond the pinned OpenAI SDK revision; the wire shadow's
+modeled-extension comments record the exact shapes.
 
 ### Anthropic server-side tools (web_search, code execution, MCP)
 
@@ -831,9 +835,9 @@ executor would dangle and corrupt tool pairing.
 The `anthropic_server_tools` key is a policy-gated loss and is **strict by
 default**: a Claude Code web-search session against a chat upstream fails
 with a named error until you approve it with
-`-transcode-allow-loss anthropic_server_tools`. The wire shapes are modeled
-beyond the pinned Anthropic Messages revision (recorded at the top of the wire shadow)
-records them and the capture they came from.
+`-transcode-allow-loss anthropic_server_tools`. These wire shapes are modeled
+beyond the pinned Anthropic Messages revision; the wire shadow records them and
+the capture they came from.
 
 `mcp_tool_use` and `mcp_tool_result` are different: they are client-side
 tools that map 1:1 onto `tool_use` and `tool_result` and carry no loss. A
@@ -851,14 +855,10 @@ an error the flag cannot clear.
 
 ### Removing defaults
 
-The sensible defaults above exist so a minimal invocation works out of the
-box against essentially any OpenAI-compatible chat upstream — the
-compatible core never renders parameters or roles that generic and
-open-weights servers reject. An operator can still adjust every layer from
-the command line alone, without the programmatic API: restore the modern
-knobs for an upstream that accepts them, or withdraw any default with a
-`!` prefix. Three layers are negatable the same way: a value prefixed with
-`!` withdraws a default.
+Every default layer can be adjusted from the command line: add the opt-in
+knobs for an upstream that accepts them, or withdraw a default by
+prefixing its name with `!` (capabilities, client query parameters, and
+loss approvals alike).
 
 ```sh
 # Restore the modern-surface knobs for an upstream that accepts them
@@ -901,15 +901,15 @@ ai-concurrency-shaper -upstream https://api.example.com -transcode-responses-cha
 
 ### Loss policy
 
-Every non-portable feature is gated by exactly one granular, direction-
-specific loss key. CLI mappings start from
-the sensible default approvals (the startup summary names the set in effect);
-the programmatic API (zero
-`LossPolicy`) is **strict** and rejects every non-portable feature with a
-client-dialect error — nothing is silently dropped, defaulted, merged, or
-reinterpreted. The `-transcode-allow-loss` flag (repeatable, comma/space
-separated) approves additional keys on top of the defaults; only the
-granular names exist, there are no aliases:
+Every non-portable feature is gated by exactly one granular,
+direction-specific loss key. Each feature is either carried losslessly,
+dropped as an approved loss that is logged per request, or rejected with a
+client-dialect error; nothing is silently dropped, defaulted, merged, or
+reinterpreted. CLI mappings start from the default approvals (the startup
+log names the set in effect); the programmatic API's zero `LossPolicy` is
+strict and approves nothing. `-transcode-allow-loss` (repeatable, comma or
+space separated) approves further keys; only the granular names exist,
+with no aliases:
 
 ```sh
 # Approve two further losses on top of the CLI defaults: image input and
@@ -938,6 +938,9 @@ failure, never a silent fallback. The client's stream intent (the
   credential from the client request; `env:NAME` and `file:PATH` supply
   the secret from the environment or a bounded file read (64 KiB cap;
   resolved once at startup, credential rotation requires restart).
+  An inherited provider `exec:` source stays live on transcoded routes:
+  the mapping uses the rotating credential and recovers from a 401/403
+  exactly as passthrough routes do.
   `-transcode-auth-source provider` is the explicit spelling of the
   implicit inheritance and requires the provider to have a configured
   auth source; it cannot be combined with `-transcode-auth` or
@@ -996,12 +999,11 @@ upstream answers 404. That is deliberate. Claude Code does not hang on the
 404 — it degrades through its own fallbacks (documented by operators as
 silent `max_tokens: 1` probe requests that read back the input usage). The
 proxy deliberately does not shim, estimate, or synthesize a count: a
-constant-zero stub suppresses client context-management (compaction) and
-turning the count into a completion is billable, consumes a concurrency
-slot, and is exactly the workaround real gateways (Bifrost) rejected. The
-operational pain with this route is not the 404 but queueing — fix it with
-the limiter-class workaround in [Client-visible queue
-semantics](#client-visible-queue-semantics).
+constant-zero stub suppresses client context management (compaction), and
+turning the count into a completion is billable and consumes a concurrency
+slot. The operational pain with this route is not the 404 but queueing — fix it with
+an admission class from [Cheap endpoints and the completion
+pool](#cheap-endpoints-and-the-completion-pool).
 
 ### Native passthrough
 
@@ -1137,8 +1139,9 @@ which is the correct signal (the upstream, not the proxy, is emitting
 bodies no client can consume). Streams classify identically: a corrupt
 frame inside a stream is corrupt upstream wire — an upstream failure,
 breaker-counted whether or not the exchange streams — while only locally
-generated conversion errors on a live stream stay local. The proxy never re-sends a poisonous body
-itself: its retry transport decides before the body is read, so a
+generated conversion errors on a live stream stay local. The proxy never
+re-sends a poisonous body itself: its retry transport decides before the
+body is read, so a
 decode-failure 502 costs exactly one upstream hit; the repeat 502s you may
 see in the field are client-driven retries. Fix dialect coverage (teach the
 transcoder the provider's shape) rather than widening breaker tolerance,
@@ -1156,23 +1159,21 @@ emit their own opaque extensions — `prompt_token_ids`, `prompt_text`,
 `token_ids`, the billing fields `cache_cost`/`completion_cost` (the Verboo /
 LiteLLM gateways), the top-level usage extensions (`reasoning_tokens`,
 `cached_tokens`, `prompt_cache_hit_tokens`, `prompt_cache_miss_tokens`),
-and `prompt_tokens_details.created_cache_tokens`; the table of modeled
-spellings are listed in the wire shadow's modeled-extension comments.
+and `prompt_tokens_details.created_cache_tokens`. The modeled spellings are
+listed in the wire shadow's modeled-extension comments.
 
-The transcoder applies strictness by CONTRACT ROLE (see the "Transcoding
-invariants" section): the CLIENT request (OpenAI Responses / Anthropic
-Messages) and the content-block unions are STRICT, so a client-sent unknown
-field, a text block carrying `image_url`, or an unknown content-block type is
-rejected. The UPSTREAM response envelope is a **subject-to-change** provider
-contract, so an unknown field there is TOLERATED — it is skipped (discarded)
-and never forwarded, and it never fails the request. This is why a field like
-`completion_cost` no longer breaks a live session. The deprecated chat
+Strictness follows the contract's role. The client request (OpenAI Responses
+or Anthropic Messages) and the content-block unions are strict, so a
+client-sent unknown field, a text block carrying `image_url`, or an unknown
+content-block type is rejected. The upstream response envelope is a provider
+contract that changes without notice, so an unknown field there is skipped,
+never forwarded, and never fails the request; a field like `completion_cost`
+cannot break a session. The deprecated chat
 `function_call` spelling is a known official field rather than an extension:
 the single invocation maps to one tool call with the id synthesized from the
-response id and recorded as the `legacy_function_call` note. Known provider-extension
-spellings are documented in the wire shadows; a newly observed
-spelling can be pinned there (and in the field-capture corpus) for
-observability.
+response id and recorded as the `legacy_function_call` note. A newly observed spelling is
+not captured automatically: it is modeled in the wire shadows and added to
+the field-capture corpus below.
 
 The defense is a committed corpus of sanitized fixtures reconstructed from
 the field regressions: `internal/transcode/testcorpus/testdata/field/`
@@ -1244,13 +1245,45 @@ flag is unset.
 
 ## How Concurrency Protection Works
 
-The proxy uses a token-bucket channel to enforce the concurrency limit. Each limited request acquires a token; the token is returned when the request completes. This bounds the proxy's internal concurrency, but the downstream may still observe more due to accounting lag (see above).
+Each limiter is a counting semaphore (a buffered channel of slots). A limited request acquires a slot before anything is sent upstream and returns it when the exchange ends, possibly after a [hold](#holds). The slot bounds the proxy's own concurrency. Providers count with an accounting lag, so an upstream can still observe a request after its slot has been released; the holds exist to cover that lag.
+
+Admission order for a limited request:
+
+1. A breaker that would refuse the request answers `503 circuit open` before the body is read, and a full `-queue-depth` bound answers `429`. Neither check changes breaker state.
+2. A streaming request under `-queue-comments` reads its body (bounded by `-queue-timeout`) to decide whether the stream can be committed.
+3. The request takes its single breaker admission. A `HALF_OPEN` breaker admits a probe only when no probe is in flight or the newest one has been in flight longer than the open timeout; the stale probe stays live, so its own success can still close the breaker.
+4. Under `-queue-comments`, a committable stream commits `200` and SSE headers now.
+5. The request waits for its route slot, then the global slot, failing with `504 queue timeout` after `-queue-timeout`. A request that times out or is cancelled after admission cancels its own probe; no other request's probe is affected.
+
+Both slots are released together when the exchange ends, after any hold.
+
+### Holds
+
+A slot is held after its exchange ends, before it returns to the pool (flags in [Concurrency Protection](#concurrency-protection)):
+
+- **Every release** is followed by `-release-cooldown`.
+- **An upstream failure** (5xx, 429, transport error, or rate-limit-signaled 403) is held first. With the breaker enabled the hold is its phantom penalty: it starts at two `-cb-penalty` units on the first failure, grows with consecutive failures, rises to any `Retry-After`, and is capped at `-cb-max-penalty`. With the breaker disabled it is `-failure-hold`. A failure the upstream already reported keeps its hold even if the client disconnects, so a client cannot recycle a slot by hanging up; only an outcome the upstream never reported (no status, or a proxy-generated error) after a client abort skips it.
+- **A client disconnect** after an upstream attempt started is held for `-cancel-cooldown`.
+
+Holds stack additively:
+
+- Failure + release cooldown (breaker disabled): failure-hold (2s), then release, then release-cooldown (200ms). Total: 2.2s.
+- Failure + release cooldown (breaker enabled): phantom penalty (by default 4s on the first failure, growing to the 60s cap), then release, then release-cooldown (200ms). Total: penalty + 200ms. The failure-hold is not used on this path.
+- Client cancel + cancel cooldown: cancel-cooldown (200ms), then release, then release-cooldown (200ms). Total: 400ms.
 
 ### Client-visible queue semantics
 
-A limited request blocks until a slot opens — that is the feature: the client call waits instead of failing, so clients need no retry/backoff logic of their own. While a request waits, its connection stays open with **zero response bytes**: no headers are committed until the request is admitted, converted, and the upstream has responded. An AI client cannot distinguish this wait from a dead connection, and most agents (including Claude Code) enforce their own deadlines — a request blocked past the client's effective timeout is aborted **and retried**, which amplifies load on a bounded queue. Size `-queue-timeout` against the client's effective deadline (well below it): an expired queue wait fails visibly with `504 queue timeout` instead of hanging silently. The TUI shows queue depth and active slots so the operator can see what the client cannot.
+A limited request blocks until a slot opens. That is the feature: the client call waits instead of failing, so clients need no retry or backoff logic of their own. While a request waits, its connection stays open with **zero response bytes** (unless `-queue-comments` is on): no headers are committed until the request is admitted, converted, and the upstream has responded. An AI client cannot distinguish this wait from a dead connection, and most agents (including Claude Code) enforce their own deadlines; a request blocked past the client's effective timeout is aborted **and retried**, which amplifies load on a bounded queue. Size `-queue-timeout` well below the client's effective deadline, so an expired wait fails visibly with `504 queue timeout` instead of hanging silently. The TUI shows queue depth and active slots so the operator can see what the client cannot.
 
-**Cheap endpoints must not share the completion pool.** Under `-limit-all=true`, *every* request is limiter-admitted — including cheap auxiliary routes like `POST /v1/messages/count_tokens`, which does **not** match the end-anchored `/messages` pattern and therefore falls through to the default pool. A token-count probe then queues behind 80–200s streaming completions and the calling agent appears to hang. Two fixes exist.
+#### Queue comments (-queue-comments)
+
+`-queue-comments 15s` keeps a waiting streaming request visibly alive. When the request's `Accept` header selects `text/event-stream`, the proxy commits `200` and SSE headers once the breaker has admitted the request, then emits `: queue-wait elapsed=N` comments while it is queued. The trade-off: once committed, the exchange is locked to the streaming representation, so later failures surface as stream failures (`: queue-wait failed: timeout|canceled|upstream|circuit open` close comments, or the client dialect's SSE `event: error` terminal on a transcoded or native route), never as HTTP error statuses. `: queue-wait failed: upstream` is reserved for failures that involved the upstream; a local refusal on a transcoded route (a model no mapping can serve) is rendered as a dialect error event instead.
+
+Not every streaming request commits. A body with an explicit `"stream": false` must get a JSON answer, so the proxy reads the body first (bounded by 10 MiB and by `-queue-timeout`, including against a client that stalls mid-upload) and skips the commit for an explicit `false` or for a body whose intent it cannot tell (unknown or oversized length, unreadable, not JSON). The consumed bytes are replayed to the upstream unchanged. Body-carrying requests also need a full-duplex-capable connection (standard for net/http servers); without one the request queues silently rather than risk corrupting its body. Breaker rejections are never committed: they are always a plain `503`.
+
+#### Cheap endpoints and the completion pool
+
+Under `-limit-all=true`, *every* request is limiter-admitted — including cheap auxiliary routes like `POST /v1/messages/count_tokens`, which does **not** match the end-anchored `/messages` pattern and therefore falls through to the default pool. A token-count probe then queues behind 80–200s streaming completions and the calling agent appears to hang. Two fixes exist.
 
 The **unlimited admission class** exempts a route from limiting entirely — including under `-limit-all`:
 
@@ -1275,22 +1308,6 @@ ai-concurrency-shaper \
 ```
 
 Two rules make this work: any explicit `-limit` flag **replaces** the automatic default patterns (so `POST /messages` must be listed explicitly), and `/messages` is end-anchored — it never captures `/messages/count_tokens`, so the two routes stay independent. A `-global-concurrency` still couples every class behind one shared limiter; omit it or size it deliberately.
-
-The concurrency protection flags insert dead zones between slot release and re-admission:
-
-- **`-release-cooldown`** (success path): token is held for this duration before re-entering the pool. Imposes a throughput ceiling of `limit / cooldown` req/s (e.g. 5 req/s at limit=1, 200ms; 40 req/s at limit=8, 200ms). Default 200ms covers most provider accounting windows.
-- **`-failure-hold`** (failure path): slot is held after 5xx, 429, or rate-limit-signaled 403 when the circuit breaker is disabled. Default 2s. When the breaker is enabled, the phantom penalty (`-cb-penalty`) handles failure-path holds instead — the two are mutually exclusive (else-if branches).
-- **`-cancel-cooldown`** (client disconnect): slot is held briefly when a client disconnects after an upstream attempt has started. Default 200ms.
-- **`-retry-min-delay`** (retry path): floor on retry delay to reduce the chance of arriving before the downstream finishes cleanup. Default 1s.
-- **`-retry-skip-429`** (429 amplification): retrying a 429 adds concurrent requests at the downstream. Enabled by default.
-
-### Stacking
-
-Protections stack additively:
-
-- Failure + release cooldown (breaker disabled): failure-hold (2s), then release, then release-cooldown (200ms). Total: 2.2s. Failure classification includes 5xx, 429, and rate-limit-signaled 403s; bare auth 403s are passed through.
-- Failure + release cooldown (breaker enabled): phantom penalty (2 to 60s), then release, then release-cooldown (200ms). Total: penalty + 200ms. The failure-hold is not used in this path — the breaker penalty subsumes it.
-- Client cancel + cancel cooldown: cancel-cooldown (200ms), then release, then release-cooldown (200ms). Total: 400ms.
 
 ## Building
 

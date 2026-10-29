@@ -120,6 +120,7 @@ const (
 	defaultCBPenalty              = 2 * time.Second
 	defaultCBMaxPenalty           = 60 * time.Second
 	defaultAnthropicVersionValue  = auth.DefaultAnthropicVersion
+	defaultAuthSourceTimeout      = 60 * time.Second
 	defaultTranscodeMaxRequestMB  = 10
 	defaultTranscodeMaxResponseMB = 10
 )
@@ -195,7 +196,7 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	// Concurrency protection.
 	r.durationVar(&p.ReleaseCooldown, "release-cooldown", defaultReleaseCooldown, "delay after slot release before re-admission; caps throughput at limit/cooldown req/s (0 = immediate)")
 	r.durationVar(&p.CancelCooldown, "cancel-cooldown", defaultCancelCooldown, "hold slot after client cancel once an upstream attempt started (0 = immediate)")
-	r.durationVar(&p.FailureHold, "failure-hold", defaultFailureHold, "hold slot after upstream failure even without circuit breaker (0 = disabled)")
+	r.durationVar(&p.FailureHold, "failure-hold", defaultFailureHold, "hold slot after upstream failure when the circuit breaker is disabled; an enabled breaker holds by its phantom penalty instead (0 = disabled)")
 
 	// Adaptive headroom.
 	r.boolVar(&p.AdaptiveHeadroom, "adaptive-headroom", defaultAdaptiveHeadroom, "reduce effective concurrency by one slot after a 429, restoring after a quiet window")
@@ -214,7 +215,9 @@ func registerProviderFlags(r *registrar, p *Provider) {
 
 	// Upstream authentication.
 	r.stringVar(&p.AuthMode, "auth-mode", "", "upstream auth mode: auto | none | bearer | x-api-key | api-key | header:NAME (default: auto-derived from the upstream host when -auth-source is set)")
-	r.stringVar(&p.AuthSource, "auth-source", "", "upstream credential source: env:VAR | file:PATH | none (empty disables upstream auth entirely; requests are forwarded verbatim)")
+	r.stringVar(&p.AuthSource, "auth-source", "", `upstream credential source: env:VAR | file:PATH | exec:["/abs/cmd","arg",...] | none (empty disables upstream auth entirely; requests are forwarded verbatim)`)
+	r.durationVar(&p.AuthSourceTTL, "auth-source-ttl", 0, "how long an exec: credential is used before the command is run again (required with exec:; e.g. 50m)")
+	r.durationVar(&p.AuthSourceTimeout, "auth-source-timeout", defaultAuthSourceTimeout, "max run time of the exec: credential command before it is killed (exec: only)")
 	r.stringVar(&p.AuthHeader, "auth-header", "", "custom upstream auth header name (required by -auth-mode header:<NAME>)")
 	r.stringVar(&p.AnthropicVersion, "anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value applied when the auth mode resolves to x-api-key")
 
@@ -245,8 +248,8 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.stringVar(&p.TranscodeAnthropicVersion, "transcode-anthropic-version", defaultAnthropicVersionValue, "anthropic-version header value for transcode x-api-key")
 
 	// Upstream transport and Sesame endpoint options.
-	r.stringVar(&p.Transport, "transport", "", "upstream transport mode: direct | sesame (default: direct)")
-	r.stringVar(&p.SesameEndpoint, "sesame-endpoint", "", "sesame endpoint to dial through via RemoteControl (host:port or http(s)://host:port)")
+	r.stringVar(&p.Transport, "transport", "", "upstream transport mode: direct | sesame (default: direct unless an RC dial target, -rc-server or -sesame-endpoint, is configured)")
+	r.stringVar(&p.SesameEndpoint, "sesame-endpoint", "", "sesame endpoint to dial through via RemoteControl (host[:port] or http(s)://host[:port]; a bracketed IPv6 host is accepted)")
 	r.stringVar(&p.SesameTokenEnv, "sesame-token-env", "", "environment variable name providing the sesame endpoint bearer token (requires a TLS sesame channel)")
 	r.stringVar(&p.SesameCACert, "sesame-ca-cert", "", "CA certificate for sesame endpoint mTLS verification (file:PATH, base64:DATA, or a bare path)")
 	r.stringVar(&p.SesameClientCert, "sesame-client-cert", "", "client certificate for sesame endpoint mTLS (file:PATH, base64:DATA, or a bare path)")
@@ -262,12 +265,12 @@ func registerProviderFlags(r *registrar, p *Provider) {
 	r.stringVar(&p.RCChannelServerName, "rc-channel-server-name", "", "TLS SNI override for the gRPC channel to the RC server (requires -rc-channel-tls)")
 	r.boolVar(&p.RCChannelInsecure, "rc-channel-insecure", false, "skip TLS certificate verification on the gRPC channel to the RC server (requires -rc-channel-tls)")
 	r.durationVar(&p.RCDialTimeout, "rc-dial-timeout", 0, "timeout for the remote dial through the RC server (0 = no timeout)")
-	r.boolVar(&p.RCTerminateTLS, "rc-terminate-tls", false, "terminate upstream TLS at the RC server instead of inside the proxy (enables the -rc-target-* options)")
+	r.boolVar(&p.RCTerminateTLS, "rc-terminate-tls", false, "terminate upstream TLS at the RC server instead of inside the proxy (enables the -rc-target-* options; rejected on a plaintext http upstream, which has no handshake to terminate)")
 	r.stringVar(&p.RCTargetServerName, "rc-target-server-name", "", "TLS SNI for the upstream handshake terminated at the RC server (requires -rc-terminate-tls)")
-	r.stringListVar(&p.RCTargetALPN, "rc-target-alpn", "ALPN protocol offered during the upstream TLS handshake terminated at the RC server (repeatable; requires -rc-terminate-tls)")
+	r.stringListVar(&p.RCTargetALPN, "rc-target-alpn", "ALPN protocol offered during the upstream TLS handshake terminated at the RC server (repeatable; requires -rc-terminate-tls; only http/1.1 is accepted because the terminated connection carries HTTP/1.1 only)")
 	r.stringVar(&p.RCTargetMinVersion, "rc-target-min-version", "", "minimum upstream TLS version: 1.0, 1.1, 1.2, or 1.3 (requires -rc-terminate-tls)")
 	r.stringVar(&p.RCTargetMaxVersion, "rc-target-max-version", "", "maximum upstream TLS version: 1.0, 1.1, 1.2, or 1.3 (requires -rc-terminate-tls)")
-	r.stringVar(&p.RCTargetClientHello, "rc-target-client-hello", "", "decomposed wire-level ClientHelloSpec for the upstream handshake as protojson (file:PATH, base64:DATA, or inline JSON; requires -rc-terminate-tls; empty = engine default; the server fails closed on any dimension it cannot honour exactly)")
+	r.stringVar(&p.RCTargetClientHello, "rc-target-client-hello", "", "decomposed wire-level ClientHelloSpec for the upstream handshake as protojson (file:PATH, base64:DATA, or inline JSON; requires -rc-terminate-tls; empty = engine default; an ALPN extension must be a well-formed list offering only http/1.1; the server fails closed on any dimension it cannot honour exactly)")
 	r.boolVar(&p.RCTargetInsecure, "rc-target-insecure", false, "skip upstream TLS certificate verification for the handshake terminated at the RC server (requires -rc-terminate-tls)")
 	r.stringVar(&p.RCTargetCA, "rc-target-ca", "", "CA for verifying the upstream certificate during the handshake terminated at the RC server (file:PATH or base64:DATA; requires -rc-terminate-tls)")
 	r.stringVar(&p.RCTargetCert, "rc-target-cert", "", "client certificate for upstream mTLS terminated at the RC server (file:PATH or base64:DATA; requires -rc-terminate-tls and -rc-target-key)")

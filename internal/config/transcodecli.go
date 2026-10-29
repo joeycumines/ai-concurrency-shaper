@@ -363,6 +363,8 @@ var chatCapabilityNames = []struct {
 	name  string
 	field func(*transcode.ChatCapabilities) *bool
 }{
+	{"metadata", func(c *transcode.ChatCapabilities) *bool { return &c.Metadata }},
+	{"float64_bounds", func(c *transcode.ChatCapabilities) *bool { return &c.Float64Bounds }},
 	{"developer_role", func(c *transcode.ChatCapabilities) *bool { return &c.DeveloperRole }},
 	{"image_input", func(c *transcode.ChatCapabilities) *bool { return &c.ImageInput }},
 	{"tool_result_images", func(c *transcode.ChatCapabilities) *bool { return &c.ToolResultImages }},
@@ -496,6 +498,8 @@ func parseClientQuery(
 }
 
 var defaultTranscodeChatCapabilities = transcode.ChatCapabilities{
+	Metadata:                  true,
+	Float64Bounds:             true,
 	DeveloperRole:             false,
 	ImageInput:                true,
 	ParallelToolCalls:         true,
@@ -566,7 +570,14 @@ func mergedChatCapabilities(
 	if !strictDefaults {
 		out = defaultTranscodeChatCapabilities
 	}
+	// Metadata forwarding and byte-exact tool schemas predate these
+	// capabilities and are not fidelity knobs, so strict defaults keep them:
+	// only an explicit !metadata or !float64_bounds withdraws them.
+	out.Metadata = true
+	out.Float64Bounds = true
 	fields := map[string]*bool{
+		"metadata":                    &out.Metadata,
+		"float64_bounds":              &out.Float64Bounds,
 		"developer_role":              &out.DeveloperRole,
 		"image_input":                 &out.ImageInput,
 		"tool_result_images":          &out.ToolResultImages,
@@ -580,6 +591,8 @@ func mergedChatCapabilities(
 		"multi_agent_priming":         &out.MultiAgentPriming,
 	}
 	cli := map[string]bool{
+		"metadata":                    capabilities.Metadata,
+		"float64_bounds":              capabilities.Float64Bounds,
 		"developer_role":              capabilities.DeveloperRole,
 		"image_input":                 capabilities.ImageInput,
 		"tool_result_images":          capabilities.ToolResultImages,

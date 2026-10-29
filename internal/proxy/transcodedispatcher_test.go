@@ -61,28 +61,24 @@ func dispatcherMount(
 	}
 
 	messagesChat := TranscodeMapping{
-		Mapping: transcode.Mapping{
-			ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
-			ClientProtocol:   transcode.ClientMessages,
-			UpstreamProtocol: transcode.UpstreamChatCompletions,
-			UpstreamPath:     "/v1/chat/completions",
-			ModelMap:         modelMap,
-			ProfileMap:       profileMap,
-			LossPolicy:       lossPolicy,
-		},
-		BodyLimits: chatLimits,
+		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         modelMap,
+		ProfileMap:       profileMap,
+		LossPolicy:       lossPolicy,
+		BodyLimits:       chatLimits,
 	}
 	messagesResponses := TranscodeMapping{
-		Mapping: transcode.Mapping{
-			ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
-			ClientProtocol:   transcode.ClientMessages,
-			UpstreamProtocol: transcode.UpstreamResponses,
-			UpstreamPath:     "/v1/responses",
-			ModelMap:         modelMap,
-			ProfileMap:       profileMap,
-			LossPolicy:       lossPolicy,
-		},
-		BodyLimits: responsesLimits,
+		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamResponses,
+		UpstreamPath:     "/v1/responses",
+		ModelMap:         modelMap,
+		ProfileMap:       profileMap,
+		LossPolicy:       lossPolicy,
+		BodyLimits:       responsesLimits,
 	}
 
 	p, err := New(
@@ -256,15 +252,12 @@ func TestDispatcher_UnresolvableModelKeepsHandlerError(t *testing.T) {
 	}
 }
 
-// TestDispatcher_NativeMissIsAuthoritative verifies that when the native
-// route already resolved the model (a native miss with an empty Via), the
-// dispatcher trusts that resolution instead of re-reading and re-resolving
-// the body: the recorded miss decides the target, and the body is never
-// probed a second time.
-func TestDispatcher_NativeMissIsAuthoritative(t *testing.T) {
-	// The transcode mappings resolve "m" to a responses-native model, but
-	// the native route's authoritative resolution said Via is empty — the
-	// miss must win and the request goes to the chat handler.
+// TestDispatcher_NativeMissResolvesEmptyViaAgainstTargets verifies that a
+// native miss which resolved no dialect (an identity fallback) does not stop
+// the dispatcher: the route's mappings still resolve the model, and a model
+// they name as responses-native reaches the Responses upstream even though
+// the native route's own map knows nothing about its dialect.
+func TestDispatcher_NativeMissResolvesAgainstTargets(t *testing.T) {
 	nativeMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
 		"m": {ClientModel: "m", UpstreamModel: "wire-m", ClientResponseModel: "m"},
 	}}
@@ -293,20 +286,18 @@ func TestDispatcher_NativeMissIsAuthoritative(t *testing.T) {
 		Provider: "dispatcher-test",
 		ModelMap: nativeMap,
 	}
-	messagesChat := TranscodeMapping{Mapping: transcode.Mapping{
+	messagesChat := TranscodeMapping{
 		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
-		ModelMap:         dualMap, LossPolicy: lossPolicy,
-	}}
-	messagesResponses := TranscodeMapping{Mapping: transcode.Mapping{
+		ModelMap:         dualMap, LossPolicy: lossPolicy}
+	messagesResponses := TranscodeMapping{
 		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
 		UpstreamPath:     "/v1/responses",
-		ModelMap:         dualMap, LossPolicy: lossPolicy,
-	}}
+		ModelMap:         dualMap, LossPolicy: lossPolicy}
 
 	p, err := New(
 		WithUpstream(upstreamURL),
@@ -325,8 +316,11 @@ func TestDispatcher_NativeMissIsAuthoritative(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
 	}
 	last := upstream.lastRequest()
-	if last.Path != "/v1/chat/completions" {
-		t.Errorf("upstream path = %q, want /v1/chat/completions (the native miss's empty Via is authoritative)", last.Path)
+	if last.Path != "/v1/responses" {
+		t.Errorf("upstream path = %q, want /v1/responses (the mappings' resolution decides an identity-fallback miss)", last.Path)
+	}
+	if last.Model != "wire-m" {
+		t.Errorf("upstream model = %q, want wire-m", last.Model)
 	}
 }
 
@@ -357,7 +351,7 @@ func TestDispatcher_ConfigFrozenAfterNew(t *testing.T) {
 // mappings on one route carry different model maps, resolution tries each
 // target's maps in registration order and the first target that resolves
 // the model decides the dialect — deterministic, never "last mapping wins".
-func TestDispatcher_FirstTargetResolvesConflictingMaps(t *testing.T) {
+func TestDispatcher_ConflictingRawMapsRefusedInEveryOrder(t *testing.T) {
 	chatMap := transcode.ModelMap{Exact: map[string]transcode.ModelMapping{
 		"m": {ClientModel: "m", UpstreamModel: "wire-chat-m", ClientResponseModel: "m", Via: transcode.NativeChat},
 	}}
@@ -379,20 +373,18 @@ func TestDispatcher_FirstTargetResolvesConflictingMaps(t *testing.T) {
 		transcode.FeatureUsageCacheWriteUnknown: {},
 		transcode.FeatureUsageReasoningUnknown:  {},
 	}}
-	messagesChat := TranscodeMapping{Mapping: transcode.Mapping{
+	messagesChat := TranscodeMapping{
 		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
-		ModelMap:         chatMap, LossPolicy: lossPolicy,
-	}}
-	messagesResponses := TranscodeMapping{Mapping: transcode.Mapping{
+		ModelMap:         chatMap, LossPolicy: lossPolicy}
+	messagesResponses := TranscodeMapping{
 		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
 		UpstreamPath:     "/v1/responses",
-		ModelMap:         responsesMap, LossPolicy: lossPolicy,
-	}}
+		ModelMap:         responsesMap, LossPolicy: lossPolicy}
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher(nil)),
@@ -405,15 +397,26 @@ func TestDispatcher_FirstTargetResolvesConflictingMaps(t *testing.T) {
 	}
 
 	rec := dispatcherPost(t, p, `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want the 500 conflict refusal; body: %s", rec.Code, rec.Body.String())
 	}
-	last := upstream.lastRequest()
-	if last.Path != "/v1/chat/completions" {
-		t.Errorf("upstream path = %q, want /v1/chat/completions (first target's map resolves first)", last.Path)
+	if last := upstream.lastRequest(); last.Path != "" {
+		t.Fatalf("upstream received %s, want no dispatch for an undecidable model", last.Path)
 	}
-	if last.Model != "wire-chat-m" {
-		t.Errorf("upstream model = %q, want wire-chat-m (the chat target's own map renders it)", last.Model)
+	// Registration order must not change the refusal.
+	reversed, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher(nil)),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithTranscodeMapping(messagesResponses, messagesChat),
+	)
+	if err != nil {
+		t.Fatalf("New proxy: %v", err)
+	}
+	reversedRec := dispatcherPost(t, reversed, `{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	if reversedRec.Code != rec.Code || refusalText(t, reversedRec) != refusalText(t, rec) {
+		t.Fatalf("refusal differs by registration order: %q vs %q", refusalText(t, rec), refusalText(t, reversedRec))
 	}
 }
 
@@ -495,22 +498,20 @@ func TestNew_RejectsConflictingClientProtocolsOnRoute(t *testing.T) {
 		transcode.FeatureUsageReasoningUnknown:  {},
 	}}
 	messagesRoute := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
-	messagesToResponses := TranscodeMapping{Mapping: transcode.Mapping{
+	messagesToResponses := TranscodeMapping{
 		ClientRoute:      messagesRoute,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamResponses,
 		UpstreamPath:     "/v1/responses",
 		ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		LossPolicy:       lossPolicy,
-	}}
-	responsesToChat := TranscodeMapping{Mapping: transcode.Mapping{
+		LossPolicy:       lossPolicy}
+	responsesToChat := TranscodeMapping{
 		ClientRoute:      messagesRoute,
 		ClientProtocol:   transcode.ClientResponses,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		LossPolicy:       lossPolicy,
-	}}
+		LossPolicy:       lossPolicy}
 
 	_, err = New(
 		WithUpstream(upstreamURL),
@@ -547,14 +548,13 @@ func TestNew_DuplicateRouteNamesUpstreamProtocol(t *testing.T) {
 		transcode.FeatureUsageReasoningUnknown:  {},
 	}}
 	messagesRoute := transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"}
-	messagesToChat := TranscodeMapping{Mapping: transcode.Mapping{
+	messagesToChat := TranscodeMapping{
 		ClientRoute:      messagesRoute,
 		ClientProtocol:   transcode.ClientMessages,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
 		UpstreamPath:     "/v1/chat/completions",
 		ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		LossPolicy:       lossPolicy,
-	}}
+		LossPolicy:       lossPolicy}
 	duplicate := messagesToChat
 
 	_, err = New(
@@ -587,9 +587,8 @@ func (c *countingBody) Close() error { return nil }
 
 // TestDispatcher_MissSkipsBodyProbe verifies the dispatcher's probe-skip
 // directly: a request carrying native miss info is never read or replaced by
-// the dispatcher, even when the recorded Via is empty (the native path
-// already resolved the model). The selected handler receives the original
-// body untouched.
+// the dispatcher (the native path already extracted the model name). The
+// selected handler receives the original body untouched.
 func TestDispatcher_MissSkipsBodyProbe(t *testing.T) {
 	var stubbed []*http.Request
 	stub := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -597,13 +596,11 @@ func TestDispatcher_MissSkipsBodyProbe(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mapping := &TranscodeMapping{
-		Mapping: transcode.Mapping{
-			ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
-			ClientProtocol:   transcode.ClientMessages,
-			UpstreamProtocol: transcode.UpstreamChatCompletions,
-			UpstreamPath:     "/v1/chat/completions",
-			ModelMap:         transcode.ModelMap{AllowIdentity: true},
-		},
+		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/messages"},
+		ClientProtocol:   transcode.ClientMessages,
+		UpstreamProtocol: transcode.UpstreamChatCompletions,
+		UpstreamPath:     "/v1/chat/completions",
+		ModelMap:         transcode.ModelMap{AllowIdentity: true},
 	}
 	dispatcher, err := newMultiTranscodeDispatcher(mapping.ClientRoute, []targetTranscodeHandler{
 		{mapping: mapping, handler: stub},
