@@ -129,7 +129,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	var stopComments func()
 	commitComments := false
 	if p.queueComments > 0 {
-		if recIsRecorder && transcode.AcceptIsEventStream(r.Header.Get("Accept")) {
+		if recIsRecorder && queueCommentsEligible(r) && transcode.AcceptIsEventStream(r.Header.Get("Accept")) {
 			if canCommitCommentsWithUnreadBody(r) || http.NewResponseController(rec).EnableFullDuplex() == nil {
 				commitComments = !bodyBlocksStreamCommit(w, r, ctx)
 			}
@@ -476,6 +476,20 @@ func (p *Proxy) acquireSlot(ctx context.Context, method, path string) (release f
 	return rel, p.limiter, err
 }
 
+// queueCommentsEligible reports whether the request's response can be
+// replaced by the early SSE commit at all. The commit writes a body, so a
+// HEAD request is excluded: its response must not carry one. A
+// protocol-upgrade request is excluded too: its exchange is a connection
+// handoff (101 and then raw protocol bytes), which a committed 200 stream
+// would preempt, leaving ReverseProxy to write the real handshake into an
+// already-committed message.
+func queueCommentsEligible(r *http.Request) bool {
+	if r == nil || r.Method == http.MethodHead {
+		return false
+	}
+	return switchingProtocolsUpgradeType(r.Header) == ""
+}
+
 // canCommitCommentsWithUnreadBody reports whether the early SSE commit can
 // proceed without enabling full duplex — i.e. whether the request carries
 // no body bytes the post-admission upstream send still needs. ContentLength
@@ -580,11 +594,6 @@ func bodyBlocksStreamCommit(w http.ResponseWriter, r *http.Request, probeContext
 	return probe.Stream != nil && !*probe.Stream
 }
 
-// writeQueueRejected emits the bounded-queue 429: a Retry-After header plus
-// a JSON error body valid under both AI dialects' envelope conventions
-// ({"error":{...}}). The status and Retry-After are the machine signal the
-// official SDKs act on; the body is for human logs. The write goes through
-// the statusRecorder so the journal and status buckets capture the 429.
 // startQueueComments commits the SSE streaming representation (200 +
 // text/event-stream) BEFORE admission and writes ": queue-wait elapsed=N"
 // comment lines every p.queueComments interval, flushing each, until the
@@ -592,7 +601,8 @@ func bodyBlocksStreamCommit(w http.ResponseWriter, r *http.Request, probeContext
 // comment goroutine has finished its last write, so the caller can safely
 // take over the ResponseWriter. The recorder's commentsCommitted flag locks
 // the representation: later WriteHeader calls cannot change the status the
-// client already received.
+// client already received. The caller decides eligibility; see
+// queueCommentsEligible and bodyBlocksStreamCommit.
 func (p *Proxy) startQueueComments(rec *statusRecorder) func() {
 	rec.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	rec.Header().Set("Cache-Control", "no-cache")
@@ -634,6 +644,11 @@ func (p *Proxy) startQueueComments(rec *statusRecorder) func() {
 	}
 }
 
+// writeQueueRejected emits the bounded-queue 429: a Retry-After header plus
+// a JSON error body valid under both AI dialects' envelope conventions
+// ({"error":{...}}). The status and Retry-After are the machine signal the
+// official SDKs act on; the body is for human logs. The write goes through
+// the statusRecorder so the journal and status buckets capture the 429.
 func writeQueueRejected(w http.ResponseWriter, depthLimit int, waiters int64) {
 	if rec, ok := w.(*statusRecorder); ok {
 		if !rec.terminalWritten {
