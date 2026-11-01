@@ -31,14 +31,10 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
-// --- Option Interface ---
-
 // Option configures a Proxy.
 type Option interface {
 	applyProxyOption(cfg *proxyConfig) error
 }
-
-// --- Unexported Config Struct ---
 
 type proxyConfig struct {
 	upstream     *url.URL
@@ -154,8 +150,6 @@ func (o *OpencodePresetOption) applyProxyOption(cfg *proxyConfig) error {
 }
 
 var _ Option = (*OpencodePresetOption)(nil)
-
-// --- Concrete Options ---
 
 // UpstreamOption sets the upstream URL to proxy to.
 type UpstreamOption struct {
@@ -625,14 +619,14 @@ func (o *AuthPolicyOption) applyProxyOption(cfg *proxyConfig) error {
 	return nil
 }
 
-// --- Compile-Time Compliance Checks ---
-
 var (
 	_ Option = (*UpstreamOption)(nil)
 	_ Option = (*MatcherOption)(nil)
 	_ Option = (*LimiterOption)(nil)
 	_ Option = (*MetricsOption)(nil)
 	_ Option = (*QueueTimeoutOption)(nil)
+	_ Option = (*QueueDepthLimitOption)(nil)
+	_ Option = (*QueueCommentsOption)(nil)
 	_ Option = (*GlobalLimiterOption)(nil)
 	_ Option = (*RouteLimitersOption)(nil)
 	_ Option = (*MaxRetriesOption)(nil)
