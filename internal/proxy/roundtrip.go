@@ -24,6 +24,9 @@ import (
 )
 
 func responseHeaders(rec *statusRecorder) http.Header {
+	if rec == nil {
+		return nil
+	}
 	if rec.entry != nil && rec.entry.ResponseHeaders != nil {
 		return rec.entry.ResponseHeaders
 	}
@@ -37,6 +40,9 @@ func responseHeaders(rec *statusRecorder) http.Header {
 // evaluatedAt is the time of evaluation, passed in by the caller together with
 // classification so both decisions share one anchor.
 func parseRetryAfterFromRecorder(rec *statusRecorder, now time.Time) time.Duration {
+	if rec == nil {
+		return 0
+	}
 	return circuitbreaker.ParseRetryAfter(responseHeaders(rec), rec.responseAt, now)
 }
 

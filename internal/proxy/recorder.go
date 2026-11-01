@@ -120,8 +120,9 @@ func (r *statusRecorder) SuppressFailedCloseComment() { r.dialectErrorFramed = t
 // exchange: it never reaches the completion counters or a clean journal
 // finalization. The failure is proxy-generated only when no upstream status
 // was observed — a panic after a delivered upstream status (including a 200
-// the commit silenced) leaves that status's classification alone. Before any status the client gets a 502.
-// After the SSE queue-comment commit the status is fixed, so the stream is
+// the commit silenced) leaves that status's classification alone. Before any
+// status the client gets a 502. After the SSE queue-comment commit the status
+// is fixed, so the stream is
 // closed with a local failed-close comment (unless its owner already framed
 // a dialect error) and the 502 is recorded the way a committed upstream
 // failure status is: without it the client saw the queue comments and then a

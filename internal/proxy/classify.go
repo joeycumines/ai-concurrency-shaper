@@ -26,15 +26,20 @@ import (
 )
 
 func isUpstreamFailureStatus(rec *statusRecorder, now time.Time, ctxErr error) bool {
+	if rec == nil {
+		// Without a recorder there is no upstream observation to classify,
+		// and a local defect must never open the breaker.
+		return false
+	}
 	// A proxy-generated error WITHOUT a real transport error behind it never
 	// saw the upstream: it is a local defect, not an upstream health signal
 	// (panic 502, queue rejection, the native path's local 5xx). A 502 that
 	// wraps a genuine transport error (rec.transportErr) still classifies as
 	// upstream — hasRealProxyTransportError names exactly that shape.
-	if rec != nil && rec.proxyGeneratedError && !rec.hasRealProxyTransportError(ctxErr) {
+	if rec.proxyGeneratedError && !rec.hasRealProxyTransportError(ctxErr) {
 		return false
 	}
-	if rec != nil && (rec.localUpgradeFailure || rec.retryCircuitOpen()) {
+	if rec.localUpgradeFailure || rec.retryCircuitOpen() {
 		return false
 	}
 	status := rec.observedStatus()
@@ -217,11 +222,16 @@ func classifyNativeExchange(
 	result.upstreamSuccess = !result.upstreamFailure && !result.clientAborted &&
 		isBreakerSuccessStatus(rec, now, epoch, ctxErr)
 	result.retryAfter = parseRetryAfterFromRecorder(rec, now)
-	// proxyGeneratedError marks an error this proxy produced without seeing
-	// the upstream — the 502 panic handler, queue rejection, and the native
-	// path's own 5xx local errors. Those are local failures, never upstream
-	// health signals: a purely local defect must not open the breaker.
-	result.localFailure = rec.proxyGeneratedError
+	// proxyGeneratedError marks an error this proxy produced — the 502 panic
+	// handler, queue rejection, and the native path's own 5xx local errors.
+	// When it wraps a genuine transport error the upstream was attempted and
+	// failed, so that exchange is an upstream failure, not a local one: the
+	// proxy merely reported what the transport observed. A local upgrade
+	// handoff failure is the converse — the upstream may have answered, but
+	// the proxy could not deliver the upgrade, so it never speaks to upstream
+	// health and is classified as a local failure.
+	result.localFailure = (rec.proxyGeneratedError && !rec.hasRealProxyTransportError(ctxErr)) ||
+		rec.localUpgradeFailure
 	result.suppressibleAbort = rec.suppressibleClientAbort(ctxErr)
 	return result
 }
@@ -350,6 +360,7 @@ func isBreakerSuccessStatus(rec *statusRecorder, now time.Time, epoch uint64, ct
 	}
 	return false
 }
+
 func retryAttemptOrDefault(attempt *retry.BreakerAttempt, startedAt time.Time, epoch uint64) (time.Time, uint64) {
 	if attempt != nil && !attempt.StartedAt.IsZero() {
 		return attempt.StartedAt, attempt.Epoch
