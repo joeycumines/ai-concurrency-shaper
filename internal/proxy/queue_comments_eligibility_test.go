@@ -38,6 +38,45 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 )
 
+func TestQueueCommentsEligible(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		method string
+		header http.Header
+		want   bool
+	}{
+		{name: "post", method: http.MethodPost, want: true},
+		{name: "get", method: http.MethodGet, want: true},
+		{name: "head", method: http.MethodHead},
+		{
+			name:   "upgrade",
+			method: http.MethodPost,
+			header: http.Header{"Connection": {"Upgrade"}, "Upgrade": {"websocket"}},
+		},
+		{
+			name:   "upgrade token among others",
+			method: http.MethodPost,
+			header: http.Header{"Connection": {"keep-alive, Upgrade"}, "Upgrade": {"h2c"}},
+		},
+		{
+			name:   "upgrade header without the connection token",
+			method: http.MethodPost,
+			header: http.Header{"Upgrade": {"websocket"}},
+			want:   true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/v1/messages", nil)
+			for name, values := range tc.header {
+				req.Header[name] = values
+			}
+			if got := queueCommentsEligible(req); got != tc.want {
+				t.Fatalf("queueCommentsEligible = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProxy_QueueCommentsSkipHead(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
