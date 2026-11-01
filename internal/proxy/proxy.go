@@ -31,8 +31,6 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
-// --- Factory ---
-
 // Proxy is a concurrency-bounded reverse proxy.
 type Proxy struct {
 	inner   *httputil.ReverseProxy

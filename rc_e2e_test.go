@@ -42,8 +42,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// ---- RC e2e test infrastructure ----
-
 // testPKI is a self-contained certificate authority and leaf pair generated
 // in-test (no committed fixtures). The server cert carries an IP SAN for
 // 127.0.0.1 so hostname verification succeeds for loopback connections
@@ -266,8 +264,6 @@ func waitForSubstring(out *lockedBuffer, substr string, timeout time.Duration) b
 	}
 	return strings.Contains(out.String(), substr)
 }
-
-// ---- End-to-end tests ----
 
 // TestRC_PlainTunnel_E2E: a subprocess proxy with -rc-server routes its
 // upstream connections through an in-test RemoteControl.NetConn server; the
