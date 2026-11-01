@@ -25,6 +25,7 @@ package proxy
 import (
 	"bufio"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -67,9 +68,7 @@ func TestQueueCommentsEligible(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "/v1/messages", nil)
-			for name, values := range tc.header {
-				req.Header[name] = values
-			}
+			maps.Copy(req.Header, tc.header)
 			if got := queueCommentsEligible(req); got != tc.want {
 				t.Fatalf("queueCommentsEligible = %v, want %v", got, tc.want)
 			}
