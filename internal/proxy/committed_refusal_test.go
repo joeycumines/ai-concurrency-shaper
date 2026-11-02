@@ -342,15 +342,18 @@ func TestPanicClassificationAfterCommit(t *testing.T) {
 		t.Fatal("a proxy-generated 502 after the commit must not classify as an upstream failure")
 	}
 
-	// Contrast: the same recorder WITHOUT the fact is the defect being fixed —
-	// the override 502 reads as an upstream failure.
+	// Contrast: the same recorder WITHOUT the fact but WITH a recorded
+	// upstream attempt is the defect being fixed — the override 502 reads as
+	// an upstream failure. (Without an attempt, the 502 is local: the
+	// upstream never observed it.)
 	defective := &statusRecorder{
 		ResponseWriter:         httptest.NewRecorder(),
 		commentsCommitted:      true,
 		terminalWritten:        true,
 		upstreamStatusOverride: http.StatusBadGateway,
+		upstreamAttempted:      true,
 	}
 	if !isUpstreamFailureStatus(defective, time.Now(), nil) {
-		t.Fatal("precondition: an unmarked 502 override classifies as an upstream failure")
+		t.Fatal("precondition: an unmarked attempted 502 override classifies as an upstream failure")
 	}
 }

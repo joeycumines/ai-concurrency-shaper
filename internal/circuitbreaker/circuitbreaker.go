@@ -73,14 +73,10 @@ var ErrCircuitOpen = errors.New("circuit breaker open")
 // a Date header is present, RFC 9110 §10.2.3 eliminates the skew.
 const clockSkewTolerance = 1 * time.Second
 
-// --- Option Interface ---
-
 // Option configures a Breaker.
 type Option interface {
 	applyBreakerOption(cfg *breakerConfig) error
 }
-
-// --- Unexported Config Struct ---
 
 type breakerConfig struct {
 	failureThreshold int
@@ -114,8 +110,6 @@ func (c *breakerConfig) applyDefaults() {
 		c.maxPenalty = 60 * time.Second
 	}
 }
-
-// --- Concrete Options ---
 
 const (
 	// DefaultFailureThreshold is the default number of failures within the window to trip the breaker.
@@ -239,8 +233,6 @@ func (o *MaxPenaltyOption) applyBreakerOption(cfg *breakerConfig) error {
 	return nil
 }
 
-// --- Compile-Time Compliance Checks ---
-
 var (
 	_ Option = (*FailureThresholdOption)(nil)
 	_ Option = (*WindowOption)(nil)
@@ -249,8 +241,6 @@ var (
 	_ Option = (*BasePenaltyOption)(nil)
 	_ Option = (*MaxPenaltyOption)(nil)
 )
-
-// --- Factory ---
 
 // Breaker is a conservative circuit breaker with phantom concurrency penalty.
 // All methods are safe for concurrent use.
@@ -794,8 +784,6 @@ func IsTemporaryBanResponse(h http.Header, receivedAt, evaluatedAt time.Time) bo
 
 	return hasRateLimitHeader
 }
-
-// --- internal helpers ---
 
 func (b *Breaker) setState(s State) {
 	b.state = s

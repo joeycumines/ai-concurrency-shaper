@@ -89,6 +89,15 @@ func (t *reauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	reauth.Apply(resend.Header, fresh)
 
+	// The resend is a NEW attempt: whatever attempt marker an earlier attempt
+	// set must not make a local failure of THIS resend (e.g. a signer error
+	// inside the inner chain) look like an upstream transport error. Clear the
+	// marker before the resend enters the chain; attemptMarkingTransport sets
+	// it again only if this attempt actually reaches the base transport.
+	if state := upstreamAttemptStateFromContext(resend.Context()); state != nil {
+		state.started.Store(false)
+	}
+
 	// Closed without draining: reading the rejected body could block on a
 	// slow upstream, and this path is rare enough that losing the
 	// connection for reuse costs nothing.

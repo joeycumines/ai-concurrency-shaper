@@ -53,8 +53,8 @@ Transcoding invariants:
 
 - Default behavior must be highly compatible out of the box — as strict as possible while remaining so: fidelity-only knobs (parameters, roles) are opt-in capabilities whose absence is an observable policy-gated loss, never a hard error and never a silently rendered incompatibility.
 - Compatibility nuance: whether to absorb an upstream defect or refuse the exchange is decided per case, by what the client can still be told truthfully — clamped arithmetic, totals that do not add up, absent or over-large breakdowns and provider-extension fields can be absorbed and noted because the client dialect can carry the corrected value honestly, while a defect that would mislead the client (a missing required field, a type-corrupt modeled field, malformed syntax, a self-contradictory union arm) can justify refusal; every correction is recorded as a note, so the decision is visible in the per-request log.
-- Client-facing protocols are OpenAI Responses and Anthropic Messages only. Chat Completions is an upstream-only fallback.
-- Supported directions are Responses → Chat Completions, Messages → Responses, and Messages → Chat Completions; prefer Responses → Chat Completions for Responses clients, and Messages → Responses when its explicit loss policy is configured.
+- Client-facing protocols are OpenAI Responses, Anthropic Messages, and Gemini GenerateContent (v1beta generateContent and streamGenerateContent). Chat Completions is an upstream-only fallback.
+- Supported directions are Responses → Chat Completions, Messages → Responses, Messages → Chat Completions, Gemini → Chat Completions, Gemini → Responses, Gemini → Messages, Responses → Gemini, and Messages → Gemini; prefer Responses → Chat Completions for Responses clients, and Messages → Responses when its explicit loss policy is configured.
 - Match mappings by HTTP method + path. Create-route mappings are POST-only.
 - Decode source wire type → canonical IR → render target wire type. Never chain JSON conversions through another dialect.
 - The supported surface is a strict subset. Every unsupported field or variant must produce a client-dialect error; never silently drop, default, merge, or reinterpret it.
@@ -98,6 +98,7 @@ https://platform.openai.com/docs/api-reference/responses
 https://platform.openai.com/docs/api-reference/chat
 https://platform.claude.com/docs/en/api/messages
 https://platform.claude.com/docs/en/build-with-claude/streaming
+https://ai.google.dev/api/generate-content
 
 ### Streaming lifecycle
 

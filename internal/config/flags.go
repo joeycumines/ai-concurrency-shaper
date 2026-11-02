@@ -195,7 +195,7 @@ func registerProviderFlags(r *registrar, p *Provider) {
 
 	// Concurrency protection.
 	r.durationVar(&p.ReleaseCooldown, "release-cooldown", defaultReleaseCooldown, "delay after slot release before re-admission; caps throughput at limit/cooldown req/s (0 = immediate)")
-	r.durationVar(&p.CancelCooldown, "cancel-cooldown", defaultCancelCooldown, "hold slot after client cancel once an upstream attempt started (0 = immediate)")
+	r.durationVar(&p.CancelCooldown, "cancel-cooldown", defaultCancelCooldown, "hold slot once an upstream attempt started, after a client cancel or an upstream connection the proxy had to abandon (0 = immediate)")
 	r.durationVar(&p.FailureHold, "failure-hold", defaultFailureHold, "hold slot after upstream failure when the circuit breaker is disabled; an enabled breaker holds by its phantom penalty instead (0 = disabled)")
 
 	// Adaptive headroom.

@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// ---------------------------------------------------------------------------
-// Field[T]
-// ---------------------------------------------------------------------------
-
 func TestFieldUnmarshal(t *testing.T) {
 	var f Field[string]
 	if err := json.Unmarshal([]byte(`"hello"`), &f); err != nil {
@@ -52,10 +48,6 @@ func TestFieldUnmarshal(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Duplicate keys
-// ---------------------------------------------------------------------------
-
 func TestDecodeRejectsDuplicateKeys(t *testing.T) {
 	type nested struct {
 		B int `json:"b"`
@@ -82,10 +74,6 @@ func TestDecodeRejectsDuplicateKeys(t *testing.T) {
 		})
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Unknown fields, trailing values, malformed syntax
-// ---------------------------------------------------------------------------
 
 func TestDecodeRejectsUnknownFields(t *testing.T) {
 	type doc struct {
@@ -124,10 +112,6 @@ func TestDecodeRejectsMalformed(t *testing.T) {
 		}
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Illegal nulls
-// ---------------------------------------------------------------------------
 
 type nullTestOuter struct {
 	ID        string            `json:"id"`
@@ -225,10 +209,6 @@ func TestDecodeNestedCustomUnmarshalerSkipsNulls(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Success paths
-// ---------------------------------------------------------------------------
-
 func TestDecodeSuccess(t *testing.T) {
 	type doc struct {
 		ID    string   `json:"id"`
@@ -245,10 +225,6 @@ func TestDecodeSuccess(t *testing.T) {
 		t.Fatalf("decode = %+v", out)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// JSONObject
-// ---------------------------------------------------------------------------
 
 func TestJSONObject(t *testing.T) {
 	obj, err := JSONObject(`{"a":1,"b":{"c":[1,2]}}`)
@@ -280,10 +256,6 @@ func TestJSONObject(t *testing.T) {
 		t.Fatalf("expected extra val, got %s", string(dupObj["extra"]))
 	}
 }
-
-// ---------------------------------------------------------------------------
-// DecodeTolerant
-// ---------------------------------------------------------------------------
 
 // TestDecodeTolerant proves the tolerant decode used for the UPSTREAM
 // provider response envelope skips unknown fields (a subject-to-change
@@ -346,10 +318,6 @@ func TestDecodeTolerant(t *testing.T) {
 		})
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Error shapes
-// ---------------------------------------------------------------------------
 
 func TestDecodeErrorString(t *testing.T) {
 	e := &DecodeError{Kind: DecodeIllegalNull, Path: ".a", Message: "null is not allowed for string"}

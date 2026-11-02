@@ -1216,8 +1216,6 @@ func TestStatusRecorderSniffedContentTypeInHeaders(t *testing.T) {
 	})
 }
 
-// --- Circuit breaker integration tests ---
-
 func TestProxy_CircuitBreakerRejectsWhenOpen(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -1605,8 +1603,6 @@ func TestProxy_CircuitBreakerRejectIncrementsCircuitRejected(t *testing.T) {
 		t.Errorf("TotalTimeout = %d, want 0 (circuit rejection is NOT a queue timeout)", snap.TotalTimeout)
 	}
 }
-
-// --- phantom-penalty fixes ---
 
 func TestProxy_PhantomPenaltyDoesNotBlockHandler(t *testing.T) {
 	// Verify that the phantom concurrency penalty is released asynchronously:
