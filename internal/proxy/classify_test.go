@@ -105,6 +105,9 @@ func TestClassifyNativeExchangeRetryCircuitOpenIsLocal(t *testing.T) {
 	if result.upstreamFailure {
 		t.Fatal("a breaker rejection is classified as an upstream failure")
 	}
+	if !result.localFailure {
+		t.Fatal("a breaker rejection is not classified as a local failure")
+	}
 }
 
 // TestIsBreakerSuccessStatusRefusesLocalFailures pins the guard at the helper

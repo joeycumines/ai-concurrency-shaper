@@ -228,8 +228,15 @@ func classifyNativeExchange(
 	// localFailure is computed before upstreamSuccess because the two are
 	// mutually exclusive by construction: an exchange the proxy failed on its
 	// own is never an upstream success, so no resolution path may see both.
+	// A breaker rejection produced between retries (retryCircuitOpen) is a
+	// local fact on the same terms as a local upgrade handoff: the exchange
+	// never reached the upstream as an upstream outcome, so no resolution
+	// path may close a HALF_OPEN probe on it — isUpstreamFailureStatus and
+	// isBreakerSuccessStatus already refuse it, and the result field must
+	// agree with them.
 	result.localFailure = (rec.proxyGeneratedError && !rec.hasRealProxyTransportError(ctxErr)) ||
-		rec.localUpgradeFailure
+		rec.localUpgradeFailure ||
+		rec.retryCircuitOpen()
 	// A cancelled 2xx is neither success nor failure: the upstream completed
 	// but the client abandoned the response. Recording it as a success could
 	// reset an existing failure streak.
@@ -307,14 +314,17 @@ func (p *Proxy) resolveBreakerResult(
 		p.recordFailureOnce(result, attempt, startedAt, epoch)
 	case result.upstreamSuccess && !result.suppressibleAbort:
 		p.breaker.RecordSuccess(attemptStart, attemptEpoch)
-	case attemptEpoch != 0 && result.upstreamStatus > 0 &&
+	case attemptEpoch != 0 && !result.clientAborted && result.upstreamStatus > 0 &&
 		!result.upstreamFailure && !result.localFailure && !result.suppressibleAbort &&
 		!result.switchingProtocolsResolved:
 		// A HALF_OPEN probe must be resolved by every definitive upstream
 		// response; non-failure statuses prove the upstream answered even if
 		// they are not ordinary CLOSED-state 2xx successes. A resolved 101
 		// handshake is excluded: the switching-protocols hooks already
-		// recorded its outcome.
+		// recorded its outcome. A client-aborted exchange is excluded for the
+		// same reason as in resolveAbortedExchange: the client is not a health
+		// probe, and crediting an abandoned exchange could reset a real
+		// failure streak — the probe is cancelled instead.
 		p.breaker.RecordSuccess(attemptStart, attemptEpoch)
 	default:
 		if attempt != nil && attempt.FailureRecorded {
