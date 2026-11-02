@@ -216,12 +216,6 @@ func classifyNativeExchange(
 	result.upstreamFailure = isUpstreamFailureStatus(rec, now, ctxErr) || upstreamAbortFailure
 	result.switchingProtocolsResolved = rec.status == http.StatusSwitchingProtocols &&
 		rec.switchingProtocolsProbeResolved.Load()
-	// A cancelled 2xx is neither success nor failure: the upstream completed
-	// but the client abandoned the response. Recording it as a success could
-	// reset an existing failure streak.
-	result.upstreamSuccess = !result.upstreamFailure && !result.clientAborted &&
-		isBreakerSuccessStatus(rec, now, epoch, ctxErr)
-	result.retryAfter = parseRetryAfterFromRecorder(rec, now)
 	// proxyGeneratedError marks an error this proxy produced — the 502 panic
 	// handler, queue rejection, and the native path's own 5xx local errors.
 	// When it wraps a genuine transport error the upstream was attempted and
@@ -230,8 +224,18 @@ func classifyNativeExchange(
 	// handoff failure is the converse — the upstream may have answered, but
 	// the proxy could not deliver the upgrade, so it never speaks to upstream
 	// health and is classified as a local failure.
+	//
+	// localFailure is computed before upstreamSuccess because the two are
+	// mutually exclusive by construction: an exchange the proxy failed on its
+	// own is never an upstream success, so no resolution path may see both.
 	result.localFailure = (rec.proxyGeneratedError && !rec.hasRealProxyTransportError(ctxErr)) ||
 		rec.localUpgradeFailure
+	// A cancelled 2xx is neither success nor failure: the upstream completed
+	// but the client abandoned the response. Recording it as a success could
+	// reset an existing failure streak.
+	result.upstreamSuccess = !result.upstreamFailure && !result.localFailure && !result.clientAborted &&
+		isBreakerSuccessStatus(rec, now, epoch, ctxErr)
+	result.retryAfter = parseRetryAfterFromRecorder(rec, now)
 	result.suppressibleAbort = rec.suppressibleClientAbort(ctxErr)
 	return result
 }
@@ -341,7 +345,11 @@ func (p *Proxy) recordFailureOnce(
 }
 
 func isBreakerSuccessStatus(rec *statusRecorder, now time.Time, epoch uint64, ctxErr error) bool {
-	if rec == nil || rec.proxyTransportOrGeneratedError() {
+	// A local failure is never a breaker success, independently of which
+	// caller or resolution path reached this helper: an upgrade the proxy
+	// could not hand off and a breaker rejection it produced itself both mean
+	// the upstream was not the cause, so neither may close a HALF_OPEN probe.
+	if rec == nil || rec.proxyTransportOrGeneratedError() || rec.localUpgradeFailure || rec.retryCircuitOpen() {
 		return false
 	}
 	if rec.status == http.StatusSwitchingProtocols && rec.switchingProtocolsProbeResolved.Load() {

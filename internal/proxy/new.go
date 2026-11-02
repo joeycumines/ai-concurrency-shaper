@@ -333,6 +333,15 @@ func New(opts ...Option) (*Proxy, error) {
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if rec, ok := w.(*statusRecorder); ok {
 				rec.transportErr = err
+				// Record whether the round trip actually started, so a
+				// proxy-generated error that never reached the upstream (an
+				// unsupported CONNECT, a signer failure) is never classified as
+				// an upstream transport failure. The attempt marker inside the
+				// transport chain is the authority; it is set before the
+				// configured transport is called.
+				if state := upstreamAttemptStateFromContext(r.Context()); state != nil {
+					rec.upstreamAttempted = state.started.Load()
+				}
 				if rec.hijacked && rec.status == http.StatusSwitchingProtocols {
 					// ReverseProxy.handleUpgradeResponse hijacks first, then writes and
 					// flushes the 101 response on the hijacked bufio.Writer. If that

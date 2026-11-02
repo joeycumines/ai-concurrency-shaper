@@ -150,14 +150,14 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 				time.AfterFunc(p.failureHold, release)
 				return
 			}
-			if isClientCancel && result.upstreamAttempted && p.cancelCooldown > 0 {
-				// Client disconnected after an upstream transport attempt started. Hold
-				// the slot briefly to prevent N+1 observed concurrency from
-				// downstream accounting lag. Unlike
-				// phantom penalty and failure hold, the cancelCooldown does NOT
-				// use the isTransportOrProxyError guard — it MUST fire even when
-				// rec.status == 0 (upstream still processing). See
-				// serveLimited's cancel-cooldown comment for the full rationale.
+			// Both shapes of an upstream connection closed underneath the
+			// upstream need the same accounting-lag hold: the client left after
+			// an attempt started, or the upstream produced a response the proxy
+			// could not deliver (upstreamHandoffAbandoned). Correctness must not
+			// depend on -release-cooldown, which an operator may set to 0. See
+			// serveLimited's cancel-cooldown comment for the full rationale.
+			handoffAbandoned := recOK && rec.upstreamHandoffAbandoned()
+			if (isClientCancel || handoffAbandoned) && result.upstreamAttempted && p.cancelCooldown > 0 {
 				time.AfterFunc(p.cancelCooldown, release)
 				return
 			}

@@ -50,7 +50,14 @@ type statusRecorder struct {
 	writeErr            error
 	proxyGeneratedError bool
 	transportErr        error
-	aborted             bool
+	// upstreamAttempted records whether the upstream round trip actually
+	// started before transportErr was observed. It is the fact that separates
+	// a genuine upstream transport failure from a proxy-local defect that also
+	// happens to arrive as a transport error (an unsupported CONNECT, a signer
+	// failure): transportErr alone cannot tell them apart, and "local failure"
+	// means "the upstream was not the cause".
+	upstreamAttempted bool
+	aborted           bool
 	// admissionCompleted is set at the end of the admission path
 	// (serveLimited/servePassthrough): finalize's clean-completion counter
 	// fires only when the exchange actually completed the admission path,
@@ -209,12 +216,40 @@ func (r *statusRecorder) proxyTransportOrGeneratedError() bool {
 	return r.observedStatus() == 0 || r.proxyGeneratedError
 }
 
+// hasRealProxyTransportError reports whether the exchange failed in the
+// upstream transport after the round trip started. Every term is load-bearing:
+// a local upgrade handoff failure and a breaker rejection are local facts, an
+// error that never reached the transport (no attempt started) is a local
+// defect, and a transport error that is only the client's own cancellation is
+// an abandonment rather than an upstream health signal.
 func (r *statusRecorder) hasRealProxyTransportError(ctxErr error) bool {
-	return r != nil && !r.localUpgradeFailure && !r.retryCircuitOpen() && r.proxyGeneratedError && r.transportErr != nil && !(isContextCancellation(r.transportErr) && isContextCancellation(ctxErr))
+	return r != nil &&
+		!r.localUpgradeFailure &&
+		!r.retryCircuitOpen() &&
+		r.upstreamAttempted &&
+		r.proxyGeneratedError &&
+		r.transportErr != nil &&
+		!(isContextCancellation(r.transportErr) && isContextCancellation(ctxErr))
 }
 
 func (r *statusRecorder) retryCircuitOpen() bool {
 	return r != nil && errors.Is(r.transportErr, circuitbreaker.ErrCircuitOpen)
+}
+
+// upstreamHandoffAbandoned reports whether the upstream produced a response
+// the proxy did not deliver and then closed that connection. The upstream has
+// been told to tear a session down and may still be accounting for it, so the
+// slot has to cover that lag exactly as it does for a client that leaves after
+// an upstream attempt started.
+//
+// One concept for both admission paths: serveLimited and servePassthrough both
+// consult this predicate, so a future case extends it here rather than being
+// added to one defer and forgotten in the other.
+func (r *statusRecorder) upstreamHandoffAbandoned() bool {
+	// A local upgrade handoff failure is the only shape today: the upstream
+	// answered 101, the proxy closed that body because it could not deliver the
+	// upgrade downstream, and the client was told to retry.
+	return r != nil && r.localUpgradeFailure
 }
 
 func (r *statusRecorder) suppressibleClientAbort(ctxErr error) bool {

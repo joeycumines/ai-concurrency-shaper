@@ -294,20 +294,23 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 			time.AfterFunc(p.failureHold, releaseSlots)
 			return
 		}
-		if isClientCancel && result.upstreamAttempted && p.cancelCooldown > 0 {
-			// Client disconnected after an upstream transport attempt started. Hold the
-			// slot briefly to prevent N+1 observed concurrency from downstream
-			// accounting lag. Unlike phantom penalty and
-			// failure hold, the cancelCooldown does NOT use the
-			// isTransportOrProxyError guard — it MUST fire even when
-			// rec.status == 0 (upstream still processing, WriteHeader not yet
-			// called). When the upstream hasn't responded yet, the upstream is
-			// still actively computing the abandoned request, so releasing the
-			// slot immediately would allow an attacker to exhaust upstream
-			// concurrency by rapidly opening and dropping connections. The
-			// isTransportOrProxyError guard IS correct for phantom penalty and
-			// failure hold (which punish upstream failures, not accounting lag),
-			// but the cooldown exists specifically to cover the lag case.
+		// The slot must stay held while the upstream finishes accounting for a
+		// connection the proxy closed underneath it. Two shapes qualify: the
+		// client left after an upstream attempt started, or the upstream
+		// produced a response the proxy could not deliver and then tore it down
+		// (upstreamHandoffAbandoned). Unlike phantom penalty and failure hold,
+		// this branch does NOT use the isTransportOrProxyError guard — it MUST
+		// fire even when rec.status == 0 (upstream still processing,
+		// WriteHeader not yet called). When the upstream hasn't responded yet,
+		// it is still actively computing the abandoned request, so releasing
+		// the slot immediately would allow an attacker to exhaust upstream
+		// concurrency by rapidly opening and dropping connections. Correctness
+		// here must not depend on the limiter's post-release cooldown: an
+		// operator may set -release-cooldown 0, and then an immediately
+		// retryable failure would collide with the session the upstream is
+		// still tearing down.
+		handoffAbandoned := recOK && rec.upstreamHandoffAbandoned()
+		if (isClientCancel || handoffAbandoned) && result.upstreamAttempted && p.cancelCooldown > 0 {
 			time.AfterFunc(p.cancelCooldown, releaseSlots)
 			return
 		}
@@ -476,18 +479,38 @@ func (p *Proxy) acquireSlot(ctx context.Context, method, path string) (release f
 	return rel, p.limiter, err
 }
 
-// queueCommentsEligible reports whether the request's response can be
-// replaced by the early SSE commit at all. The commit writes a body, so a
-// HEAD request is excluded: its response must not carry one. A
-// protocol-upgrade request is excluded too: its exchange is a connection
-// handoff (101 and then raw protocol bytes), which a committed 200 stream
-// would preempt, leaving ReverseProxy to write the real handshake into an
-// already-committed message.
+// queueCommentsEligible reports whether the early SSE commit may replace this
+// request's response. The predicate is about the response, not about which
+// methods matter: the commit replaces the upstream's whole response with a
+// 200 event stream, so it is only sane when that response can carry a body
+// and no handler will refuse the request first.
+//
+//   - HEAD: net/http discards HEAD body writes, so the commit does not fail —
+//     it silently turns the exchange into a bodiless 200 event stream and
+//     swallows the real status, headers, and Retry-After the client asked for.
+//   - CONNECT: a 2xx CONNECT response cannot carry a body, and
+//     httputil.ReverseProxy rejects CONNECT locally before any upstream
+//     attempt, so the commit hides a real error behind a synthetic 200.
+//   - Upgrade: the native and transcode handlers refuse every upgrade request
+//     with a dialect 400, and ReverseProxy needs the connection itself for
+//     the 101 handshake. A committed 200 turns the refusal into a 200 error
+//     stream, or preempts the handshake and writes it into a committed
+//     message.
+//
+// The upgrade test is transcode.IsUpgradeRequest, the same classifier both
+// handlers refuse with, so the gate and the handlers cannot disagree. That is
+// deliberately broader than the switching-protocols check used for 101
+// validation (which follows net/http's handshake semantics): a request this
+// gate lets through only loses comment bytes, while one the handlers refuse
+// after a commit costs the client a truthful status.
+//
+// This never decides admission: serveLimited consults it after the breaker and
+// queue-depth checks, purely to choose the response representation.
 func queueCommentsEligible(r *http.Request) bool {
-	if r == nil || r.Method == http.MethodHead {
+	if r == nil || r.Method == http.MethodHead || r.Method == http.MethodConnect {
 		return false
 	}
-	return switchingProtocolsUpgradeType(r.Header) == ""
+	return !transcode.IsUpgradeRequest(r)
 }
 
 // canCommitCommentsWithUnreadBody reports whether the early SSE commit can

@@ -49,6 +49,7 @@ func TestQueueCommentsEligible(t *testing.T) {
 		{name: "post", method: http.MethodPost, want: true},
 		{name: "get", method: http.MethodGet, want: true},
 		{name: "head", method: http.MethodHead},
+		{name: "connect", method: http.MethodConnect},
 		{
 			name:   "upgrade",
 			method: http.MethodPost,
@@ -60,10 +61,23 @@ func TestQueueCommentsEligible(t *testing.T) {
 			header: http.Header{"Connection": {"keep-alive, Upgrade"}, "Upgrade": {"h2c"}},
 		},
 		{
+			// The gate uses the same classifier the native and transcode
+			// handlers refuse with, so a bare Upgrade header is not eligible:
+			// those handlers answer it with a 400, and the commit would turn
+			// that into a 200 error stream.
 			name:   "upgrade header without the connection token",
 			method: http.MethodPost,
 			header: http.Header{"Upgrade": {"websocket"}},
-			want:   true,
+		},
+		{
+			name:   "connection upgrade without the upgrade header",
+			method: http.MethodPost,
+			header: http.Header{"Connection": {"Upgrade"}},
+		},
+		{
+			name:   "head with upgrade headers",
+			method: http.MethodHead,
+			header: http.Header{"Connection": {"Upgrade"}, "Upgrade": {"websocket"}},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
