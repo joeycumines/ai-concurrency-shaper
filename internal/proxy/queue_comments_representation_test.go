@@ -39,8 +39,8 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
-// newLimitAllProxy builds a single-slot, blanket-limited proxy whose upstream
-// answers with the supplied handler.
+// newLimitAllProxy builds a blanket-limited proxy (every route queued) whose
+// upstream answers with the supplied handler.
 func newLimitAllProxy(t *testing.T, upstream http.Handler, opts ...Option) *Proxy {
 	t.Helper()
 	srv := httptest.NewServer(upstream)
@@ -304,6 +304,16 @@ func TestProxyQueueCommentsGateNeverChangesAdmission(t *testing.T) {
 				t.Fatal("holder request never reached the upstream")
 			}
 
+			// Each queued connection must outlive close(release) so its
+			// response can be read after the slot is freed: the conns are
+			// closed at the outer level, after the post-release assertions.
+			var conns []net.Conn
+			defer func() {
+				for _, c := range conns {
+					_ = c.Close()
+				}
+			}()
+
 			for _, tc := range []struct {
 				name    string
 				request string
@@ -318,7 +328,7 @@ func TestProxyQueueCommentsGateNeverChangesAdmission(t *testing.T) {
 					if err != nil {
 						t.Fatalf("dial: %v", err)
 					}
-					defer conn.Close()
+					conns = append(conns, conn)
 					if _, err := io.WriteString(conn, strings.ReplaceAll(tc.request, "{addr}", addr)); err != nil {
 						t.Fatalf("write: %v", err)
 					}
@@ -337,6 +347,21 @@ func TestProxyQueueCommentsGateNeverChangesAdmission(t *testing.T) {
 
 			close(release)
 			<-holderDone
+
+			// With the slot released, every queued request must actually be
+			// admitted and answered — the gate never changed admission, so
+			// none of these reads may time out.
+			for i, tc := range []string{"head", "connect", "upgrade"} {
+				resp, err := http.ReadResponse(bufio.NewReader(conns[i]), nil)
+				if err != nil {
+					t.Fatalf("%s: no response after slot release (10s deadline): %v", tc, err)
+				}
+				_, _ = io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				if resp.StatusCode < 200 || resp.StatusCode >= 600 {
+					t.Fatalf("%s: invalid status %d after release", tc, resp.StatusCode)
+				}
+			}
 		})
 	}
 }
@@ -396,7 +421,8 @@ func TestProxyQueueCommentsGateRespectsQueueDepth(t *testing.T) {
 				time.Sleep(5 * time.Millisecond)
 			}
 
-			// One waiter fills the depth bound.
+			// One waiter fills the depth bound. Poll the limiter's waiter
+			// count instead of sleeping a fixed interval.
 			waiterDone := make(chan struct{})
 			go func() {
 				defer close(waiterDone)
@@ -405,7 +431,13 @@ func TestProxyQueueCommentsGateRespectsQueueDepth(t *testing.T) {
 					resp.Body.Close()
 				}
 			}()
-			time.Sleep(150 * time.Millisecond)
+			deadline = time.Now().Add(5 * time.Second)
+			for p.limiter.Stats().Waiters < 1 && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			if p.limiter.Stats().Waiters < 1 {
+				t.Fatal("waiter never registered with the limiter")
+			}
 
 			req, err := http.NewRequest(http.MethodHead, srv.URL+"/v1/messages", nil)
 			if err != nil {

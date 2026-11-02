@@ -486,9 +486,11 @@ type CancelCooldownOption struct {
 }
 
 // WithCancelCooldown returns an option that sets the client-cancel cooldown.
-// When a client disconnects after an upstream transport attempt has started,
-// the slot is held for this duration before re-admission.
-// Zero means no cooldown (immediate release on client cancel).
+// Once an upstream transport attempt has started, the slot is held for this
+// duration before re-admission in two shapes: a client disconnect after the
+// attempt started, and an upstream connection the proxy had to abandon (for
+// example a failed upgrade handoff). Zero means no cooldown (immediate
+// release).
 func WithCancelCooldown(d time.Duration) *CancelCooldownOption {
 	return &CancelCooldownOption{value: d}
 }
