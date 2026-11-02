@@ -28,6 +28,7 @@ import (
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/retry"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
@@ -220,12 +221,15 @@ func (r *statusRecorder) proxyTransportOrGeneratedError() bool {
 // upstream transport after the round trip started. Every term is load-bearing:
 // a local upgrade handoff failure and a breaker rejection are local facts, an
 // error that never reached the transport (no attempt started) is a local
-// defect, and a transport error that is only the client's own cancellation is
-// an abandonment rather than an upstream health signal.
+// defect, a non-retryable local defect (e.g. a signing failure on a retry
+// resend, whose marker still shows the earlier attempt) is a local defect, and
+// a transport error that is only the client's own cancellation is an
+// abandonment rather than an upstream health signal.
 func (r *statusRecorder) hasRealProxyTransportError(ctxErr error) bool {
 	return r != nil &&
 		!r.localUpgradeFailure &&
 		!r.retryCircuitOpen() &&
+		!retry.IsNonRetryable(r.transportErr) &&
 		r.upstreamAttempted &&
 		r.proxyGeneratedError &&
 		r.transportErr != nil &&

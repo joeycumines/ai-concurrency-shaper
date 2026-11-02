@@ -283,3 +283,140 @@ func TestBuildUpstreamTransportReauthResendClearsAttemptMarker(t *testing.T) {
 		t.Fatal("attempt marker leaked across the reauth resend: started=true after a local resend failure")
 	}
 }
+
+// retryResendSigner fails on the second and later Sign calls, simulating a
+// signer that breaks on a retry resend after the first attempt started.
+type retryResendSigner struct{ calls atomic.Int64 }
+
+func (s *retryResendSigner) Sign(context.Context, *http.Request) error {
+	if s.calls.Add(1) > 1 {
+		return errors.New("signing: attempt-local credential defect")
+	}
+	return nil
+}
+
+// TestClassifyNativeExchangeResendLocalDefectIsLocal pins that a local
+// non-retryable defect (a signer failure) arriving as the terminal transport
+// error of a retry resend is a local failure even when the per-request attempt
+// marker still shows an earlier attempt started — the marker leak must not
+// make it an upstream failure, and under a probe epoch it must cancel the
+// probe rather than close it. The contrast case (a genuine transport error on
+// the resend, marker leaked) stays an upstream failure.
+func TestClassifyNativeExchangeResendLocalDefectIsLocal(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	signerErr := &transcode.SigningError{Cause: errors.New("signing: attempt-local credential defect")}
+
+	rec := &statusRecorder{
+		ResponseWriter:      httptest.NewRecorder(),
+		status:              http.StatusBadGateway, // the ErrorHandler's proxy-generated 502
+		proxyGeneratedError: true,
+		transportErr:        signerErr,
+		upstreamAttempted:   true, // leaked from the earlier attempt of the same request
+	}
+	result := classifyNativeExchange(rec, req, nil, true, false, 1, time.Now())
+	if result.upstreamFailure {
+		t.Fatal("a non-retryable local defect on a resend is classified as an upstream failure")
+	}
+	if !result.localFailure {
+		t.Fatal("a non-retryable local defect on a resend is not classified as a local failure")
+	}
+	if result.upstreamSuccess {
+		t.Fatal("a non-retryable local defect on a resend is classified as an upstream success")
+	}
+
+	b := halfOpenBreaker(t)
+	epoch := takeProbe(t, b)
+	p := newTestProxy(b)
+	p.resolveBreakerResult(result, nil, time.Now(), epoch)
+	if stats := b.Stats(); stats.State == circuitbreaker.Closed || stats.TotalSuccesses != 0 {
+		t.Fatalf("probe resolved as success on a resend local defect: state=%s successes=%d", stats.State, stats.TotalSuccesses)
+	}
+
+	// Contrast: the same leaked marker with a genuine (retryable) transport
+	// error on the resend is still an upstream failure — the marker alone must
+	// not excuse a real transport failure.
+	rec2 := &statusRecorder{
+		ResponseWriter:      httptest.NewRecorder(),
+		status:              http.StatusBadGateway,
+		proxyGeneratedError: true,
+		transportErr:        errors.New("read: connection reset by peer"),
+		upstreamAttempted:   true,
+	}
+	result2 := classifyNativeExchange(rec2, req, nil, true, false, 0, time.Now())
+	if !result2.upstreamFailure {
+		t.Fatal("a genuine transport error on a resend (marker leaked) is not classified as an upstream failure")
+	}
+	if result2.localFailure {
+		t.Fatal("a genuine transport error on a resend is classified as a local failure")
+	}
+}
+
+// TestProxyRetryResendSignerFailureIsLocalNotUpstream drives a full proxy
+// exchange with retries enabled: attempt 1 reaches the (fake) upstream and is
+// answered 503, the retry layer resends, and the signer fails locally on the
+// resend. The resend's local defect must classify as a local failure — the
+// breaker must record the attempt-1 503 but NOT the signer failure, and the
+// slot-release path must not treat the signer failure as an upstream failure.
+// The per-request attempt marker legitimately still shows started (attempt 1
+// did reach the upstream); what must not leak is the *classification* of the
+// resend's local error as upstream.
+func TestProxyRetryResendSignerFailureIsLocalNotUpstream(t *testing.T) {
+	var upstreamHits atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable) // retryable: forces the retry resend
+	}))
+	t.Cleanup(upstream.Close)
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	signer := &retryResendSigner{}
+	b := mustBreaker(t,
+		circuitbreaker.WithFailureThreshold(5),
+		circuitbreaker.WithWindow(10*time.Second),
+		circuitbreaker.WithOpenTimeout(time.Hour),
+		circuitbreaker.WithMaxOpenTimeout(time.Hour),
+	)
+	p, err := New(
+		WithUpstream(upstreamURL),
+		WithMatcher(route.NewMatcher([]route.Pattern{mustRoutePattern(t, "POST /v1/messages")})),
+		WithLimiter(queue.NewLimiterWithCooldown(4, 0)),
+		WithMetrics(metrics.NewCollector()),
+		WithQueueTimeout(10*time.Second),
+		// Retries enabled with a body cap so the retry transport buffers the
+		// body and the resend is replayable.
+		WithMaxRetries(1),
+		WithMaxBodyBytes(1<<20),
+		WithRetryWaitMin(time.Millisecond),
+		WithRetryWaitMax(time.Millisecond),
+		WithRetryMinDelay(0),
+		WithBreaker(b),
+	)
+	if err != nil {
+		t.Fatalf("proxy.New: %v", err)
+	}
+
+	// Attach the signer to the request context the way the transcode path
+	// does (transcode.AuthExternalSigner).
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(transcode.WithRequestSigner(req.Context(), signer))
+
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if got := signer.calls.Load(); got < 2 {
+		t.Fatalf("signer calls = %d, want at least 2 (initial attempt plus the retry resend)", got)
+	}
+	if got := upstreamHits.Load(); got != 1 {
+		t.Fatalf("upstream hits = %d, want 1 (the resend fails locally before reaching upstream)", got)
+	}
+	// The retry transport records the attempt-1 503 itself (FailureRecorded),
+	// so exactly one failure may be on the breaker — never a second one for
+	// the local signer defect on the resend.
+	if stats := b.Stats(); stats.TotalFailures != 1 || stats.State != circuitbreaker.Closed {
+		t.Fatalf("breaker recorded the resend's local signer defect as an upstream failure: state=%s totalFailures=%d", stats.State, stats.TotalFailures)
+	}
+}
