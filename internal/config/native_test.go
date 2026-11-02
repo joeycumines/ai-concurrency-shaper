@@ -112,7 +112,7 @@ func TestResolveTranscode_NativeRoutes(t *testing.T) {
 		"-upstream", "https://api.example.com",
 		"-model-table", "s@example=wire",
 		"-native-route", "bogus@/v1/messages",
-	}, `invalid native route "bogus@/v1/messages": unknown native protocol "bogus" (want responses, messages, or chat)`)
+	}, `invalid native route "bogus@/v1/messages": unknown native protocol "bogus" (want responses, messages, chat, or gemini)`)
 }
 
 // TestResolveTranscode_OpencodePreset proves the -opencode flags resolve

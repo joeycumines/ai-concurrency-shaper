@@ -21,6 +21,9 @@ import (
 // Anthropic Messages:
 // https://platform.claude.com/docs/en/api/messages
 //
+// Google Gemini GenerateContent (v1beta):
+// https://ai.google.dev/api/generate-content
+//
 // Chat is deliberately upstream-only. There must be no ClientChatCompletions
 // value and no client-facing /v1/chat/completions transcoding route.
 type ClientProtocol string
@@ -28,6 +31,7 @@ type ClientProtocol string
 const (
 	ClientResponses ClientProtocol = "responses"
 	ClientMessages  ClientProtocol = "messages"
+	ClientGemini    ClientProtocol = "gemini"
 )
 
 type UpstreamProtocol string
@@ -36,6 +40,7 @@ const (
 	UpstreamResponses       UpstreamProtocol = "responses"
 	UpstreamMessages        UpstreamProtocol = "messages"
 	UpstreamChatCompletions UpstreamProtocol = "chat-completions"
+	UpstreamGemini          UpstreamProtocol = "gemini"
 )
 
 // NativeProtocol names the upstream dialect a model serves without
@@ -49,16 +54,17 @@ const (
 	NativeResponses NativeProtocol = "responses"
 	NativeMessages  NativeProtocol = "messages"
 	NativeChat      NativeProtocol = "chat"
+	NativeGemini    NativeProtocol = "gemini"
 )
 
 // ParseNativeProtocol resolves the -model-table via fact and -native-route
 // protocol vocabulary to a NativeProtocol.
 func ParseNativeProtocol(value string) (NativeProtocol, error) {
 	switch NativeProtocol(value) {
-	case NativeResponses, NativeMessages, NativeChat:
+	case NativeResponses, NativeMessages, NativeChat, NativeGemini:
 		return NativeProtocol(value), nil
 	default:
-		return "", fmt.Errorf("unknown native protocol %q (want responses, messages, or chat)", value)
+		return "", fmt.Errorf("unknown native protocol %q (want responses, messages, chat, or gemini)", value)
 	}
 }
 

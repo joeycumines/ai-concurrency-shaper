@@ -192,7 +192,7 @@ type Provider struct {
 	AuthSourceTimeout time.Duration
 	// AuthMode selects how the credential is attached upstream:
 	// "auto" (default when a source is set), "none", "bearer", "x-api-key",
-	// "api-key", or "header:<NAME>". Auto derives from the upstream host.
+	// "api-key", "goog-api-key", or "header:<NAME>". Auto derives from the upstream host.
 	AuthMode string
 	// AuthHeader names the injection target when AuthMode is header.
 	AuthHeader string

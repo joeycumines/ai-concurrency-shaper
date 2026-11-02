@@ -43,9 +43,12 @@ const (
 	AuthXAPIKey AuthMode = "x-api-key"
 	// AuthAPIKey injects "Api-Key: <secret>" (Azure key-based auth).
 	AuthAPIKey AuthMode = "api-key"
-	// AuthCustomHeader injects the secret under Policy.CustomHeader
-	// (e.g. Gemini's X-Goog-Api-Key).
+	// AuthCustomHeader injects the secret under Policy.CustomHeader, for a
+	// vendor header that the proxy does not reserve. Gemini uses
+	// AuthGoogAPIKey instead.
 	AuthCustomHeader AuthMode = "header"
+	// AuthGoogAPIKey injects "X-Goog-Api-Key: <secret>" (Gemini Developer API).
+	AuthGoogAPIKey AuthMode = "goog-api-key"
 )
 
 // DefaultAnthropicVersion is the default Anthropic API version header applied
@@ -83,7 +86,7 @@ type AuthPolicy struct {
 // fails at startup rather than as a per-request 5xx.
 func (p *AuthPolicy) Validate() error {
 	switch p.Mode {
-	case AuthNone, AuthBearer, AuthXAPIKey, AuthAPIKey:
+	case AuthNone, AuthBearer, AuthXAPIKey, AuthAPIKey, AuthGoogAPIKey:
 	case AuthCustomHeader:
 		if p.CustomHeader == "" {
 			return errors.New("custom auth header is empty")
@@ -111,7 +114,8 @@ func (p *AuthPolicy) Validate() error {
 
 // ResolveMode resolves the configured mode against the upstream host: auto
 // derives from documented host conventions (Anthropic hosts speak x-api-key,
-// everything else defaults to bearer) and any other mode passes through.
+// the Gemini Developer API host speaks goog-api-key, and everything else
+// defaults to bearer) and any other mode passes through.
 func ResolveMode(mode AuthMode, host string) (AuthMode, error) {
 	if mode != AuthAuto {
 		return mode, nil
@@ -123,13 +127,17 @@ func ResolveMode(mode AuthMode, host string) (AuthMode, error) {
 }
 
 // DeriveMode returns the default auth mode for an upstream host:
-// api.anthropic.com and *.anthropic.com speak x-api-key, everything else
+// api.anthropic.com and *.anthropic.com speak x-api-key,
+// generativelanguage.googleapis.com speaks goog-api-key, and everything else
 // defaults to bearer. The rule is deliberately narrow and deterministic;
 // providers outside it configure an explicit mode.
 func DeriveMode(host string) AuthMode {
 	h := strings.ToLower(strings.TrimSpace(host))
 	if h == "api.anthropic.com" || strings.HasSuffix(h, ".anthropic.com") {
 		return AuthXAPIKey
+	}
+	if h == "generativelanguage.googleapis.com" {
+		return AuthGoogAPIKey
 	}
 	return AuthBearer
 }
@@ -194,6 +202,8 @@ func ApplyUpstreamAuthentication(ctx context.Context, req *http.Request, policy 
 		req.Header.Set("Anthropic-Version", policy.AnthropicVersion)
 	case AuthAPIKey:
 		header = "Api-Key"
+	case AuthGoogAPIKey:
+		header = "X-Goog-Api-Key"
 	case AuthCustomHeader:
 		header = policy.CustomHeader
 	default:

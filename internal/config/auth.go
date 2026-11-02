@@ -49,7 +49,7 @@ func (c *Config) UnprotectedProviderCount() int {
 //	-auth-source: "" (disabled) | none | env:VAR | file:PATH |
 //	              exec:<JSON array of strings>
 //	-auth-mode:   "" (auto when a source is set) | auto | none | bearer |
-//	              x-api-key | api-key | header:<NAME>
+//	              x-api-key | api-key | goog-api-key | header:<NAME>
 //	-auth-source-ttl, -auth-source-timeout: exec: only (ttl required)
 //
 // Empty source and empty mode together mean authentication is disabled: the
@@ -71,7 +71,7 @@ func (p *Provider) validateAuth() error {
 		if sourceKind == "env" || sourceKind == "file" || sourceKind == "exec" {
 			return fmt.Errorf("-auth-mode none does not use -auth-source")
 		}
-	case "bearer", "x-api-key", "api-key":
+	case "bearer", "x-api-key", "api-key", "goog-api-key":
 		if sourceKind == "" {
 			return fmt.Errorf("-auth-mode %q requires -auth-source", p.AuthMode)
 		}
@@ -83,7 +83,7 @@ func (p *Provider) validateAuth() error {
 			return err
 		}
 	default:
-		return fmt.Errorf("-auth-mode %q must be auto|none|bearer|x-api-key|api-key|header:NAME", p.AuthMode)
+		return fmt.Errorf("-auth-mode %q must be auto|none|bearer|x-api-key|api-key|goog-api-key|header:NAME", p.AuthMode)
 	}
 
 	switch sourceKind {
@@ -306,10 +306,10 @@ func splitAuthMode(raw string) (name, arg string, err error) {
 		return "header", rest, nil
 	}
 	switch auth.AuthMode(raw) {
-	case auth.AuthAuto, auth.AuthNone, auth.AuthBearer, auth.AuthXAPIKey, auth.AuthAPIKey, auth.AuthCustomHeader:
+	case auth.AuthAuto, auth.AuthNone, auth.AuthBearer, auth.AuthXAPIKey, auth.AuthAPIKey, auth.AuthGoogAPIKey, auth.AuthCustomHeader:
 		return raw, "", nil
 	default:
-		return "", "", fmt.Errorf("-auth-mode %q must be auto|none|bearer|x-api-key|api-key|header:NAME", raw)
+		return "", "", fmt.Errorf("-auth-mode %q must be auto|none|bearer|x-api-key|api-key|goog-api-key|header:NAME", raw)
 	}
 }
 

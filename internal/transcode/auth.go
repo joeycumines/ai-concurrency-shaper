@@ -33,6 +33,7 @@ const (
 	CredentialBearer
 	CredentialXAPIKey
 	CredentialAPIKey
+	CredentialGoogAPIKey
 )
 
 // Credential is one extracted inbound credential.
@@ -84,6 +85,15 @@ func ExtractInboundCredential(h http.Header) (Credential, error) {
 		}
 	}
 
+	for _, value := range h.Values("X-Goog-Api-Key") {
+		if value = strings.TrimSpace(value); value != "" {
+			credentials = append(credentials, Credential{
+				Kind:  CredentialGoogAPIKey,
+				Value: value,
+			})
+		}
+	}
+
 	if len(credentials) == 0 {
 		return Credential{}, nil
 	}
@@ -114,6 +124,7 @@ const (
 	AuthAPIKey         AuthMode = "api-key"
 	AuthCustomHeader   AuthMode = "header"
 	AuthExternalSigner AuthMode = "external-signer"
+	AuthGoogAPIKey     AuthMode = "goog-api-key"
 )
 
 // SecretSource supplies an upstream secret on demand.
@@ -190,6 +201,8 @@ func FromProviderAuth(policy *auth.AuthPolicy) AuthPolicy {
 		mode = AuthAPIKey
 	case auth.AuthCustomHeader:
 		mode = AuthCustomHeader
+	case auth.AuthGoogAPIKey:
+		mode = AuthGoogAPIKey
 	default:
 		mode = AuthMode(policy.Mode)
 	}
@@ -232,7 +245,7 @@ func FromProviderAuthForUpstream(policy *auth.AuthPolicy, target UpstreamProtoco
 // Validate checks the policy against the target protocol.
 func (p AuthPolicy) Validate(target UpstreamProtocol) error {
 	switch p.Mode {
-	case "", AuthAuto, AuthNone, AuthBearer, AuthXAPIKey, AuthAPIKey:
+	case "", AuthAuto, AuthNone, AuthBearer, AuthXAPIKey, AuthAPIKey, AuthGoogAPIKey:
 	case AuthCustomHeader:
 		if strings.TrimSpace(p.CustomHeader) == "" {
 			return errors.New("custom auth header is empty")
@@ -324,6 +337,9 @@ func ApplyTargetAuthentication(
 
 	case AuthAPIKey:
 		header = "Api-Key"
+
+	case AuthGoogAPIKey:
+		header = "X-Goog-Api-Key"
 
 	case AuthCustomHeader:
 		header = policy.CustomHeader
