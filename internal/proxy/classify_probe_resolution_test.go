@@ -84,7 +84,7 @@ func TestResolveBreakerResultCancelledProbeIsNotSuccess(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name   string
+		name    string
 		resolve func(p *Proxy, result exchangeResult, epoch uint64)
 	}{
 		{
@@ -141,7 +141,7 @@ func TestResolveBreakerResultCircuitOpenIsNotProbeSuccess(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name   string
+		name    string
 		resolve func(p *Proxy, result exchangeResult, epoch uint64)
 	}{
 		{

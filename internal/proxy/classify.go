@@ -42,6 +42,13 @@ func isUpstreamFailureStatus(rec *statusRecorder, now time.Time, ctxErr error) b
 	if rec.localUpgradeFailure || rec.retryCircuitOpen() {
 		return false
 	}
+	// No upstream attempt started: whatever error or status the exchange
+	// carries, the upstream never observed it, so it is not an upstream
+	// failure. The attempt fact is the authority; hasRealProxyTransportError
+	// requires the same fact for the transport-error case above.
+	if !rec.upstreamAttempted {
+		return false
+	}
 	status := rec.observedStatus()
 	// When the client cancelled the context and the upstream returned a
 	// clean 2xx response, this is a suppressible client abort — the
@@ -207,6 +214,15 @@ func classifyNativeExchange(
 	if rec == nil {
 		return result
 	}
+	// The admission paths hold the transport-attempt fact in their
+	// upstreamAttemptState; the ReverseProxy ErrorHandler copies it into the
+	// recorder on the error path. Sync it here as well so the classifier — not
+	// just the call-site guard — is authoritative: a caller that passes the
+	// fact without the ErrorHandler (or a recorder built before it) cannot
+	// make classification and the recorder disagree.
+	if !rec.upstreamAttempted {
+		rec.upstreamAttempted = upstreamAttempted
+	}
 	ctxErr := r.Context().Err()
 	epoch := breakerEpoch
 	if retryAttempt != nil && retryAttempt.Epoch != 0 {
@@ -234,9 +250,17 @@ func classifyNativeExchange(
 	// path may close a HALF_OPEN probe on it — isUpstreamFailureStatus and
 	// isBreakerSuccessStatus already refuse it, and the result field must
 	// agree with them.
+	// A proxy-generated error that never reached the upstream is a local
+	// defect. The same holds for ANY local refusal rendered before the round
+	// trip started — including the native path's 4xx dialect errors, which
+	// carry a real status but no upstream observation: with no attempt
+	// started, a positive status is a proxy-local answer, never an upstream
+	// outcome, and under a probe epoch it must cancel the probe rather than
+	// close it.
 	result.localFailure = (rec.proxyGeneratedError && !rec.hasRealProxyTransportError(ctxErr)) ||
 		rec.localUpgradeFailure ||
-		rec.retryCircuitOpen()
+		rec.retryCircuitOpen() ||
+		(!upstreamAttempted && result.upstreamStatus > 0 && !rec.hasRealProxyTransportError(ctxErr))
 	// A cancelled 2xx is neither success nor failure: the upstream completed
 	// but the client abandoned the response. Recording it as a success could
 	// reset an existing failure streak.
@@ -362,6 +386,12 @@ func isBreakerSuccessStatus(rec *statusRecorder, now time.Time, epoch uint64, ct
 	if rec == nil || rec.proxyTransportOrGeneratedError() || rec.localUpgradeFailure || rec.retryCircuitOpen() {
 		return false
 	}
+	// No upstream attempt started: whatever status the proxy wrote locally,
+	// the upstream never answered, so it proves nothing about upstream health
+	// and must not close a HALF_OPEN probe.
+	if !rec.upstreamAttempted {
+		return false
+	}
 	if rec.status == http.StatusSwitchingProtocols && rec.switchingProtocolsProbeResolved.Load() {
 		return false
 	}
@@ -445,7 +475,18 @@ func (p *Proxy) handleAbortHandler(w http.ResponseWriter, r *http.Request, attem
 
 	// Definitive upstream failure statuses are facts independent of how the copy
 	// later aborted. Preserve them even if the client disconnects while the body
-	// is being written.
+	// is being written. The attempt fact comes from the admission path's
+	// upstreamAttemptState (synced onto the recorder by classifyExchange and by
+	// the ReverseProxy ErrorHandler); when the panic path reaches here before
+	// any classification, read it straight from the context so an observed
+	// upstream 5xx is still recorded as a failure.
+	attempted := false
+	if state := upstreamAttemptStateFromContext(r.Context()); state != nil {
+		attempted = state.started.Load()
+	}
+	if rec != nil && !rec.upstreamAttempted {
+		rec.upstreamAttempted = attempted
+	}
 	if rec != nil {
 		if rec.hasRealProxyTransportError(r.Context().Err()) {
 			p.recordAbortFailure(w, attempt, recordStartedAt, recordEpoch, r.Context().Err())

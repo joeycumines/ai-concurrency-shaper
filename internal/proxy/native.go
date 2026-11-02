@@ -571,12 +571,12 @@ func isNativeUpgrade(r *http.Request) bool {
 // dialect. Chat has no client error shape of its own, so it uses the
 // OpenAI (responses) envelope like every other non-messages path.
 //
-// A 5xx from this path is a proxy-local defect (the upstream was never
-// seen), so it sets the recorder's proxyGeneratedError fact: the exchange
-// classification must count it as a local failure, never an upstream one —
-// a purely local bug must not open the circuit breaker against a healthy
-// upstream. Client-fault statuses (4xx) leave no marker; they are not
-// upstream health signals either way.
+// Every refusal from this path is a proxy-local fact: the upstream was never
+// contacted, so the recorder's proxyGeneratedError is set for the rendered
+// status at any code (4xx and 5xx alike) — the exchange classification must
+// count it as a local failure, never an upstream one, and a HALF_OPEN probe
+// must never close on it. A purely local bug must not open the circuit breaker
+// against a healthy upstream.
 //
 // When the streaming representation was already committed before admission
 // (SSE queue comments), the status is fixed and the request is locked to the
@@ -589,12 +589,13 @@ func writeNativeDialectError(w http.ResponseWriter, r *http.Request, protocol tr
 	if protocol == transcode.NativeMessages {
 		target = transcode.ClientMessages
 	}
-	if status >= 500 {
+	{
 		// Set regardless of an earlier write: under the SSE queue comments the
 		// 200 commit already marked the exchange terminal, and the fact is a
 		// classification input, not a WriteHeader guard. Without it a local
-		// 5xx would be classified from the status override as an upstream
-		// failure and could open the breaker against a healthy upstream.
+		// refusal would be classified from the status (or its override) as an
+		// upstream outcome and could open the breaker or close a probe against
+		// a healthy upstream.
 		if rec := recorderFrom(w); rec != nil {
 			rec.proxyGeneratedError = true
 		}
