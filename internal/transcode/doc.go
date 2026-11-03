@@ -1,12 +1,13 @@
 // Package transcode implements HTTP request/response transcoding between the
-// OpenAI Responses API, the OpenAI Chat Completions API, and the Anthropic
-// Messages API.
+// OpenAI Responses API, the OpenAI Chat Completions API, the Anthropic
+// Messages API, and the Gemini GenerateContent API (v1beta generateContent
+// and streamGenerateContent).
 //
 // The transcoder is native-first and strict:
 //
-//   - Client-facing protocols are OpenAI Responses and Anthropic Messages
-//     only. Chat Completions exists only as an upstream compatibility target
-//     for providers that expose no preferable API.
+//   - Client-facing protocols are OpenAI Responses, Anthropic Messages, and
+//     Gemini GenerateContent. Chat Completions exists only as an upstream
+//     compatibility target for providers that expose no preferable API.
 //   - Every source payload decodes exactly once into a small canonical IR and
 //     every target renders directly from that IR. Wire serializers are never
 //     chained through another dialect.
@@ -171,7 +172,8 @@
 // # Stream FSM
 //
 // Every supported stream event (chat chunks, responses events, anthropic
-// events) passes through one lifecycle state machine per direction
+// events, gemini generateContent chunks) passes through one lifecycle state
+// machine per direction
 // (responses_stream_fsm.go, the direction converters in stream_converters.go):
 // duplicate and post-done events are rejected, a terminal requires every child
 // lifecycle closed, output indexes are unique, terminal snapshots reconcile
@@ -197,4 +199,5 @@
 // https://platform.openai.com/docs/api-reference/chat
 // https://platform.claude.com/docs/en/api/messages
 // https://platform.claude.com/docs/en/build-with-claude/streaming
+// https://ai.google.dev/api/generate-content
 package transcode

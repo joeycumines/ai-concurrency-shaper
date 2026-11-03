@@ -98,6 +98,7 @@ var sensitiveQueryParams = map[string]struct{}{
 	"api_key":      {},
 	"apikey":       {},
 	"key":          {},
+	"oauth_token":  {},
 	"sig":          {},
 	"signature":    {},
 	"token":        {},

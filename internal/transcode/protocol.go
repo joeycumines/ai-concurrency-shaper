@@ -21,6 +21,9 @@ import (
 // Anthropic Messages:
 // https://platform.claude.com/docs/en/api/messages
 //
+// Google Gemini GenerateContent (v1beta):
+// https://ai.google.dev/api/generate-content
+//
 // Chat is deliberately upstream-only. There must be no ClientChatCompletions
 // value and no client-facing /v1/chat/completions transcoding route.
 type ClientProtocol string
@@ -28,6 +31,7 @@ type ClientProtocol string
 const (
 	ClientResponses ClientProtocol = "responses"
 	ClientMessages  ClientProtocol = "messages"
+	ClientGemini    ClientProtocol = "gemini"
 )
 
 type UpstreamProtocol string
@@ -36,6 +40,7 @@ const (
 	UpstreamResponses       UpstreamProtocol = "responses"
 	UpstreamMessages        UpstreamProtocol = "messages"
 	UpstreamChatCompletions UpstreamProtocol = "chat-completions"
+	UpstreamGemini          UpstreamProtocol = "gemini"
 )
 
 // NativeProtocol names the upstream dialect a model serves without
@@ -49,16 +54,17 @@ const (
 	NativeResponses NativeProtocol = "responses"
 	NativeMessages  NativeProtocol = "messages"
 	NativeChat      NativeProtocol = "chat"
+	NativeGemini    NativeProtocol = "gemini"
 )
 
 // ParseNativeProtocol resolves the -model-table via fact and -native-route
 // protocol vocabulary to a NativeProtocol.
 func ParseNativeProtocol(value string) (NativeProtocol, error) {
 	switch NativeProtocol(value) {
-	case NativeResponses, NativeMessages, NativeChat:
+	case NativeResponses, NativeMessages, NativeChat, NativeGemini:
 		return NativeProtocol(value), nil
 	default:
-		return "", fmt.Errorf("unknown native protocol %q (want responses, messages, or chat)", value)
+		return "", fmt.Errorf("unknown native protocol %q (want responses, messages, chat, or gemini)", value)
 	}
 }
 
@@ -253,12 +259,21 @@ func (m Mapping) Validate() error {
 	if !strings.HasPrefix(m.UpstreamPath, "/") {
 		return fmt.Errorf("upstream path %q must be absolute", m.UpstreamPath)
 	}
+	if err := m.validateGeminiShape(); err != nil {
+		return err
+	}
 
 	switch {
 	case m.ClientProtocol == ClientResponses &&
 		m.UpstreamProtocol == UpstreamChatCompletions:
 
-	case m.ClientProtocol == ClientMessages &&
+	case m.ClientProtocol == ClientGemini &&
+		m.UpstreamProtocol == UpstreamChatCompletions:
+
+	case m.ClientProtocol == ClientGemini &&
+		m.UpstreamProtocol == UpstreamMessages:
+
+	case (m.ClientProtocol == ClientMessages || m.ClientProtocol == ClientGemini) &&
 		m.UpstreamProtocol == UpstreamResponses:
 		// A Messages-to-Responses mapping cannot preserve tool strictness
 		// unless the tool_schema_strictness loss is explicitly approved:
@@ -269,6 +284,11 @@ func (m Mapping) Validate() error {
 		// serve tool traffic, so it fails at startup instead. The check is
 		// feature-specific rather than "empty policy" so the CLI's sensible
 		// default loss set cannot accidentally silence it.
+		if !m.LossPolicy.Allows(FeatureToolSchemaStrictness) && m.ClientProtocol == ClientGemini {
+			return fmt.Errorf(
+				"gemini-to-responses tool mapping cannot preserve tool strictness; allow the tool_schema_strictness loss (e.g. -transcode-allow-loss tool_schema_strictness)",
+			)
+		}
 		if !m.LossPolicy.Allows(FeatureToolSchemaStrictness) {
 			return fmt.Errorf(
 				"messages-to-responses tool mapping cannot preserve tool strictness; allow the tool_schema_strictness loss (e.g. -transcode-allow-loss tool_schema_strictness)",
@@ -277,6 +297,12 @@ func (m Mapping) Validate() error {
 
 	case m.ClientProtocol == ClientMessages &&
 		m.UpstreamProtocol == UpstreamChatCompletions:
+
+	case m.ClientProtocol == ClientResponses &&
+		m.UpstreamProtocol == UpstreamGemini:
+
+	case m.ClientProtocol == ClientMessages &&
+		m.UpstreamProtocol == UpstreamGemini:
 
 	default:
 		return fmt.Errorf(
