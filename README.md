@@ -6,7 +6,7 @@ Sits in front of an upstream HTTP API (e.g. Anthropic, OpenAI) and limits concur
 
 The goal is that the upstream never *observes* more concurrency than you configured. Providers detect excess concurrency on their side, with their own accounting lag, and answer with 429s or temporary bans. So the proxy does more than count in-flight requests: it holds slots across the provider's accounting window after releases, cancellations, and failures, and a circuit breaker stops a failing upstream from being hammered.
 
-Optionally, it also transcodes between the OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages APIs (see [Transcoding](#transcoding)). Run with `-tui` for a terminal dashboard with live metrics and request inspection.
+Optionally, it also transcodes between the OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Gemini GenerateContent APIs (see [Transcoding](#transcoding)). Run with `-tui` for a terminal dashboard with live metrics and request inspection.
 
 <p align="center">
   <img src="docs/assets/tui.webp" alt="TUI dashboard showing live request metrics" width="800">
@@ -39,7 +39,7 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-metrics-bind` | server | _(unset)_ | Dedicated listen address for the Prometheus `/metrics` endpoint (see [Metrics Export](#metrics-export)); empty disables it |
 | `-model-table` | server | _(repeatable)_ | Global model identity entry `surrogate@provider=wire[;facts]` (see [Model identities](#model-identities-and-the-global-model-table)). Server scope, so with `--provider` sections every entry goes before the first marker |
 | `-catalog-suite` | server | _(repeatable)_ | Mount a virtual catalog suite: `[name@]prefix[=models][;options]` (see [Catalog suites](#catalog-suites-unified-endpoints-and-model-routing)). Server scope |
-| `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints). A `:unlimited` suffix (`POST /messages/count_tokens:unlimited`) exempts the route from limiting entirely, including under `-limit-all` |
+| `-limit` | provider | _(repeatable)_ | Route pattern to limit, matched by trailing segments (defaults to common AI endpoints, including the Gemini `POST /generateContent` / `POST /streamGenerateContent` suffixes). A `:unlimited` suffix (`POST /messages/count_tokens:unlimited`) exempts the route from limiting entirely, including under `-limit-all`. Patterns have no `{model}` wildcard: a template-shaped pattern like `POST /v1beta/models/{model}:generateContent` matches nothing — use the suffix patterns — and any explicit `-limit` replaces the default set entirely |
 | `-limit-all` | provider | `false` | Limit all requests, not just matching routes. Use for "dumb" blanket rate limiting when you don't know the upstream's expensive routes. |
 | `-concurrency` | provider | `4` | Max concurrent limited requests |
 | `-global-concurrency` | provider | `0` | Global concurrency limit (0 = disabled) |
@@ -55,7 +55,7 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-auth-source` | provider | _(unset)_ | Upstream credential source: `env:VAR`, `file:PATH`, `exec:<JSON argv>` (a short-lived credential from a command, refreshed while running), or `none` (strip-only). Unset disables upstream auth entirely — requests are forwarded verbatim |
 | `-auth-source-ttl` | provider | _(unset; required with `exec:`)_ | How long an `exec:` credential is used before the command runs again, measured from the start of the run that produced it (e.g. `50m` for a 1h key). Rejected with any other source |
 | `-auth-source-timeout` | provider | `60s` | Max run time of the `exec:` command; it is killed (with its process group) after this. Must be > 0; rejected with any other source |
-| `-auth-mode` | provider | `auto` | How the credential is attached: `auto` (derived from the upstream host), `bearer`, `x-api-key`, `api-key`, or `header:NAME`. `none` strips client credentials without injecting anything |
+| `-auth-mode` | provider | `auto` | How the credential is attached: `auto` (derived from the upstream host), `bearer`, `x-api-key`, `api-key`, `goog-api-key`, or `header:NAME`. `none` strips client credentials without injecting anything |
 | `-auth-header` | provider | _(required by `header:` mode)_ | Custom upstream auth header name (e.g. `X-Goog-Api-Key`) |
 | `-anthropic-version` | provider | `2023-06-01` | `Anthropic-Version` header value applied when the resolved mode is `x-api-key` |
 | `-tui` | server | `false` | Enable terminal dashboard |
@@ -84,7 +84,13 @@ route patterns configured with `-limit` (or every request with
 flows through the passthrough limiter — bounded by `-global-concurrency`
 when set, otherwise unbounded. If a transcoded route must be bounded but
 its path is not a limited route, either set `-global-concurrency` or add an
-explicit `-limit` pattern for that path.
+explicit `-limit` pattern for that path. Gemini operation paths
+(`/v1beta/models/{model}:generateContent`, `:streamGenerateContent`) are
+bounded by the default suffix patterns `POST /generateContent` and
+`POST /streamGenerateContent`; since patterns are literal suffix segments
+with no `{model}` wildcard, a template-shaped `-limit` matches nothing, and
+any explicit `-limit` replaces the default set — list those two suffixes
+explicitly when overriding.
 
 The upstream HTTP transport sizes `MaxIdleConnsPerHost` to the sum of configured route/global concurrency caps, with a per-host minimum floor of 20 applied after the global cap. This avoids closing a large burst of healthy keep-alive connections when multiple route limiters or groups share the same upstream host. Use `-upstream-disable-keep-alives` only when the upstream counts idle/open connections as concurrent.
 
@@ -104,7 +110,7 @@ The circuit breaker treats 5xx, 429, transport errors, and rate-limit-signaled 4
 
 #### Metrics Export
 
-Pass `-metrics-bind 127.0.0.1:2112` to expose a Prometheus text-format `/metrics` endpoint on a dedicated listener — it never shares the proxy port, so a bare-root provider keeps every path and scraping is never mistaken for proxied traffic. Every series carries a `provider` label (an unnamed single provider exports as `provider="default"`): `shaper_active`, `shaper_queued`, `shaper_oldest_queued_seconds` (age of the oldest limited request waiting on either limiter — per-route or global — `0.000` when no limited request is waiting; passthrough requests blocked in the global limiter count toward `shaper_queued` but carry no queue age), `shaper_retries_in_flight`, `shaper_clean_proxied_total`, `shaper_clean_passthrough_total`, `shaper_aborted_total`, `shaper_circuit_rejected_total`, `shaper_queue_rejected_total` (requests rejected by a `-queue-depth` bound with `429`), `shaper_requests_total{status="1xx"…"5xx"}`, and `shaper_breaker_state` (0 closed / 1 half-open / 2 open; omitted when the provider's breaker is disabled). While requests are waiting in a provider's per-route queues, two further families appear with `method` and `path` labels: `shaper_route_queued` (waiters per route) and `shaper_route_oldest_queued_seconds` (oldest waiter age per route); routes with no waiters export no series, and a route whose `method` or `path` label value is not valid UTF-8 exports no series either — the text parser rejects the whole document on an invalid label value, so the series is skipped (fail-closed), never sanitized, because sanitizing could collide two distinct routes into duplicate series. Series are grouped by metric name — each family forms one contiguous block across all providers — as the exposition format's grouping rule requires. The endpoint is off by default and binds after the proxy listener — a bad `-metrics-bind` address fails at startup after the proxy listener is released, and a proxy bind failure never leaves a metrics listener behind. Bind it to loopback unless you know what you are exposing.
+Pass `-metrics-bind 127.0.0.1:2112` to expose a Prometheus text-format `/metrics` endpoint on a dedicated listener — it never shares the proxy port, so a bare-root provider keeps every path and scraping is never mistaken for proxied traffic. Every series carries a `provider` label (an unnamed single provider exports as `provider="default"`): `shaper_active`, `shaper_queued`, `shaper_oldest_queued_seconds` (age of the oldest limited request waiting on either limiter — per-route or global — `0.000` when no limited request is waiting; passthrough requests blocked in the global limiter count toward `shaper_queued` but carry no queue age), `shaper_retries_in_flight`, `shaper_clean_proxied_total`, `shaper_clean_passthrough_total`, `shaper_aborted_total`, `shaper_circuit_rejected_total`, `shaper_queue_rejected_total` (requests rejected by a `-queue-depth` bound with `429`), `shaper_requests_total{status="1xx"…"5xx"}`, and `shaper_breaker_state` (0 closed / 1 half-open / 2 open; omitted when the provider's breaker is disabled). While requests are waiting in a provider's per-route queues, two further families appear with `method` and `path` labels: `shaper_route_queued` (waiters per route) and `shaper_route_oldest_queued_seconds` (oldest waiter age per route). The `path` label is the **concrete in-flight path** (so a Gemini waiter exports e.g. `path="/v1beta/models/gemini-2.5-flash:generateContent"`), not a template; the TUI route-stats view aggregates by the configured route key instead. Routes with no waiters export no series, and a route whose `method` or `path` label value is not valid UTF-8 exports no series either — the text parser rejects the whole document on an invalid label value, so the series is skipped (fail-closed), never sanitized, because sanitizing could collide two distinct routes into duplicate series. Series are grouped by metric name — each family forms one contiguous block across all providers — as the exposition format's grouping rule requires. The endpoint is off by default and binds after the proxy listener — a bad `-metrics-bind` address fails at startup after the proxy listener is released, and a proxy bind failure never leaves a metrics listener behind. Bind it to loopback unless you know what you are exposing.
 
 #### Observability Semantics
 
@@ -190,6 +196,7 @@ Modes:
 | `bearer` | `Authorization: Bearer <secret>` | OpenAI-compatible |
 | `x-api-key` | `X-Api-Key: <secret>` + configured `-anthropic-version` | Anthropic Messages |
 | `api-key` | `Api-Key: <secret>` | Azure key-based |
+| `goog-api-key` | `x-goog-api-key: <secret>` (a client `key` query parameter is refused on Gemini routes) | Google Gemini API |
 | `header:NAME` | `NAME: <secret>` | Gemini-style custom headers (set `NAME` via `-auth-header NAME` instead if you prefer) |
 
 Sources:
@@ -373,7 +380,7 @@ Proxy with default limits and TUI:
 ai-concurrency-shaper -upstream https://api.anthropic.com -tui
 ```
 
-`-limit` patterns are **end-anchored suffix matches**: only the trailing path segments matter, and the path may have any prefix. This means `-limit "POST /chat/completions"` matches `/v1/chat/completions` and `/api/v2/chat/completions`, but it does **not** match `/v1/chat/completions/123`. A sub-resource needs its own `-limit` pattern or it passes through unlimited.
+`-limit` patterns are **end-anchored suffix matches**: only the trailing path segments matter, and the path may have any prefix. This means `-limit "POST /chat/completions"` matches `/v1/chat/completions` and `/api/v2/chat/completions`, but it does **not** match `/v1/chat/completions/123`. A sub-resource needs its own `-limit` pattern or it passes through unlimited. There is no `{model}` wildcard — a pattern is literal segments — so a Gemini path like `/v1beta/models/gemini-2.5-flash:generateContent` is bounded by the default suffix patterns `POST /generateContent` / `POST /streamGenerateContent` (present in the default set), never by a `/v1beta/models/{model}:generateContent` template, which matches nothing.
 
 ```sh
 # matches /v1/chat/completions and /openai/deployments/x/chat/completions
@@ -463,7 +470,9 @@ ai-concurrency-shaper \
 
 The proxy can transcode requests between the OpenAI Responses API
 (`/v1/responses`), the OpenAI Chat Completions API (`/v1/chat/completions`,
-upstream only), and the Anthropic Messages API (`/v1/messages`). A
+upstream only), the Anthropic Messages API (`/v1/messages`), and the Gemini
+GenerateContent API (`/v1beta/models/{model}:generateContent` and
+`:streamGenerateContent`). A
 transcoded route is **method + path** scoped and intercepts only the
 configured client route; every other route stays a transparent passthrough.
 Transcoding is **off by default** — no mapping, no interception.
@@ -478,6 +487,13 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-responses-chat` | provider | `false` | Preset: Responses client (`POST /v1/responses`) → Chat upstream (`POST /v1/chat/completions`) |
 | `-transcode-messages-chat` | provider | `false` | Preset: Messages client (`POST /v1/messages`) → Chat upstream (`POST /v1/chat/completions`) |
 | `-transcode-messages-responses` | provider | `false` | Preset: Messages client (`POST /v1/messages`) → Responses upstream (`POST /v1/responses`) |
+| `-transcode-gemini-chat` | provider | `false` | Preset: Gemini client (`POST /v1beta/models/{model}:generateContent`, both operations) → Chat upstream (`POST /v1/chat/completions`) |
+| `-transcode-gemini-responses` | provider | `false` | Preset: Gemini client → Responses upstream (`POST /v1/responses`) |
+| `-transcode-gemini-messages` | provider | `false` | Preset: Gemini client → Messages upstream (`POST /v1/messages`) |
+| `-transcode-responses-gemini` | provider | `false` | Preset: Responses client (`POST /v1/responses`) → Gemini upstream (`/v1beta`) |
+| `-transcode-messages-gemini` | provider | `false` | Preset: Messages client (`POST /v1/messages`) → Gemini upstream (`/v1beta`) |
+| `-transcode-gemini-signature-capacity` | provider | `4096` | Max retained Gemini function-call thought signatures (0 = default 4096) |
+| `-transcode-gemini-signature-ttl` | provider | `1h` | Max age of a retained Gemini thought signature (0 = default 1h) |
 | `-transcode-chat-capability` | provider | _(repeatable)_ | Enable or withdraw (`!name`) an optional chat upstream capability |
 | `-transcode-allow-client-query` | provider | _(repeatable)_ | Forward client query parameter (`name` or withdraw `!name`) |
 | `-transcode-allow-loss` | provider | _(repeatable)_ | Approve non-portable semantic loss by granular key (or withdraw `!key`) |
@@ -487,14 +503,14 @@ All transcoding flags are **provider-scope**: in sectioned mode (`--provider`), 
 | `-transcode-continuity` | provider | `false` | Opt-in per-conversation continuity store for `previous_response_id` against stateless chat upstreams (see [Conversation continuity store](#conversation-continuity-store--transcode-continuity)) |
 | `-transcode-continuity-capacity` | provider | `1024` | Max retained conversation chains for the continuity store (0 = default 1024) |
 | `-transcode-continuity-ttl` | provider | `30m` | Max age of a retained conversation chain (0 = default 30m) |
-| `-transcode-auth` | provider | _(unset — inherits provider auth, else none)_ | Per-route target auth mode override (`auto`, `none`, `bearer`, `x-api-key`, `api-key`, `header`) |
+| `-transcode-auth` | provider | _(unset — inherits provider auth, else none)_ | Per-route target auth mode override (`auto`, `none`, `bearer`, `x-api-key`, `api-key`, `goog-api-key`, `header`) |
 | `-transcode-auth-source` | provider | _(unset — inherits provider auth, else none)_ | Per-route credential source override (`inbound`, `env:VAR`, `file:PATH`, `provider`) |
 | `-transcode-auth-header` | provider | _(required for custom header mode)_ | Header name when `-transcode-auth` is custom `header` |
 | `-transcode-anthropic-version` | provider | `2023-06-01` | Anthropic-Version header value when target auth mode resolves to `x-api-key` |
 | `-transcode-max-request-mb` | provider | `10` | Max unmarshaled request body size (MB) for transcoding |
 | `-transcode-max-response-mb` | provider | `10` | Max unmarshaled non-streaming response body size (MB) for transcoding |
 | `-transcode-flowlog-dir` | provider | `` (disabled) | Existing directory that receives one unredacted JSON record per transcoded exchange, capturing the full flow (client request, converted upstream request, upstream response, downstream response); empty disables the recorder |
-| `-native-route` | provider | _(repeatable)_ | Natively served route: `protocol@path` with protocol `responses`, `messages`, or `chat`. A request whose model's `via` dialect matches is forwarded with only the model identifier rewritten; a mismatch — or a model the native map cannot resolve at all, such as a `-transcode-profile` name — falls through to any transcode mapping on the same path (see [Native passthrough](#native-passthrough)) |
+| `-native-route` | provider | _(repeatable)_ | Natively served route: `protocol@path` with protocol `responses`, `messages`, `chat`, or `gemini` (model identifier rewritten, body otherwise forwarded verbatim; a Gemini path takes the form `<prefix>/models/{model}:generateContent`). A request whose model's `via` dialect matches is forwarded with only the model identifier rewritten; a mismatch — or a model the native map cannot resolve at all, such as a `-transcode-profile` name — falls through to any transcode mapping on the same path (see [Native passthrough](#native-passthrough)) |
 | `-opencode` | provider | `false` | Emit the opencode first-party request shape upstream: `User-Agent`, `x-opencode-client`, session affinity and identity headers (see [opencode Zen and Go](#opencode-zen-and-go)) |
 | `-opencode-user-agent` | provider | `opencode/1.18.35` | `User-Agent` the `-opencode` preset asserts upstream |
 | `-opencode-client` | provider | `cli` | `x-opencode-client` the `-opencode` preset asserts upstream |
@@ -517,6 +533,21 @@ ai-concurrency-shaper -upstream https://api.anthropic.com -transcode-messages-ch
 # Explicit route with a custom path
 ai-concurrency-shaper -upstream https://api.example.com \
   -transcode-route "responses@/v1/responses=chat-completions@/v1/chat/completions"
+
+# Gemini client -> Chat upstream (both :generateContent and :streamGenerateContent)
+ai-concurrency-shaper -upstream https://api.openai.com \
+  -auth-mode goog-api-key -auth-source env:GEMINI_API_KEY \
+  -transcode-gemini-chat
+
+# Responses client -> Gemini upstream
+ai-concurrency-shaper -upstream https://generativelanguage.googleapis.com \
+  -transcode-responses-gemini
+
+# Native Gemini passthrough (no conversion at all)
+ai-concurrency-shaper -upstream https://generativelanguage.googleapis.com \
+  -auth-mode goog-api-key -auth-source env:GEMINI_API_KEY \
+  -model-table 'gemini-2.5-flash@default=gemini-2.5-flash;via=gemini' \
+  -native-route 'gemini@/v1beta/models/{model}:generateContent'
 ```
 
 Both Messages presets map `/v1/messages`; enabled together they form one
@@ -526,6 +557,118 @@ every Messages-to-Responses mapping, preset or explicit route, approves the
 `tool_schema_strictness` loss by default. Under `-transcode-strict-defaults`,
 or with `-transcode-allow-loss '!tool_schema_strictness'`, the mapping is a
 startup error unless the loss is approved explicitly.
+
+### Gemini GenerateContent
+
+Gemini clients call `POST /v1beta/models/{model}:generateContent` and
+`POST /v1beta/models/{model}:streamGenerateContent`. The **path model is
+authoritative**: both operations are parsed from the path's last colon-split
+segment (never by the route matcher), and one mapping key serves both. The
+supported directions are Gemini → Chat Completions, Gemini → Responses,
+Gemini → Messages, Responses → Gemini, and Messages → Gemini, plus native
+Gemini passthrough. The presets:
+
+| Preset | Client route | Upstream |
+|--------|--------------|----------|
+| `-transcode-gemini-chat` | `POST /v1beta/models/{model}:generateContent` (+ `:streamGenerateContent`) | `POST /v1/chat/completions` |
+| `-transcode-gemini-responses` | same | `POST /v1/responses` |
+| `-transcode-gemini-messages` | same | `POST /v1/messages` |
+| `-transcode-responses-gemini` | `POST /v1/responses` | `/v1beta` Gemini upstream |
+| `-transcode-messages-gemini` | `POST /v1/messages` | `/v1beta` Gemini upstream |
+
+Native serving uses `-native-route 'gemini@/v1beta/models/{model}:generateContent'`
+with a `-model-table` entry carrying `via=gemini`: the request is forwarded
+with only the model identifier rewritten and every other byte preserved;
+Gemini responses pass through byte-identical (`modelVersion` is never
+rewritten). Authenticate a Gemini upstream with `-auth-mode goog-api-key`
+(header `x-goog-api-key`; a client `?key=` query credential is refused with a
+400 on Gemini routes — API keys belong in the header, never the query string).
+
+Behavior specifics:
+
+- **No SSE queue comments on Gemini paths.** The Python SDK raises on
+  comment lines, so `-queue-comments` never commits a stream on a Gemini
+  operation path.
+- **Client query parameters are never forwarded to a Gemini upstream** (the
+  API rejects unknown parameters); they are dropped observably under the
+  `gemini_client_query` loss. The stream operation requires `alt=sse`
+  upstream — a `:streamGenerateContent` request is rendered as
+  `streamGenerateContent?alt=sse`.
+- **Field names use the camelCase JSON spelling.** A snake_case field
+  (e.g. `system_instruction`) is rejected with an error naming the camelCase
+  spelling (`systemInstruction`).
+- **Thought signatures** (`thoughtSignature` on function-call parts) are
+  retained per provider in a bounded store
+  (`-transcode-gemini-signature-capacity`, default 4096;
+  `-transcode-gemini-signature-ttl`, default 1h) and restored on replay. The
+  documented `skip_thought_signature_validator` placeholder emitted on the
+  current turn's first call when no signature is stored is the approved
+  `gemini_thought_signature_placeholder` loss.
+- **Bounding.** `-limit` patterns have no `{model}` wildcard; the default
+  pattern set already includes the suffixes `POST /generateContent` and
+  `POST /streamGenerateContent`, which bound every Gemini path. Any explicit
+  `-limit` replaces the defaults, so add those two suffixes back if you
+  override.
+
+Default-approved Gemini loss keys (all overridable with
+`-transcode-allow-loss`): `gemini_generation_controls`,
+`gemini_safety_settings`, `gemini_request_controls`, `gemini_thought_signature`,
+`gemini_part_metadata`, `gemini_client_query`,
+`gemini_thought_signature_placeholder`, `gemini_safety_metadata`,
+`gemini_grounding_metadata`, `gemini_usage_breakdown`,
+`gemini_response_thought_signature`, `gemini_model_status`,
+`gemini_tool_strictness`, `gemini_image_detail`. `gemini_provider_tools`
+and `gemini_candidate_collapse` are NOT approved by default.
+
+Out of scope (a client sending any of these gets a client-dialect error or
+an approved loss, never a silent drop): Vertex AI paths and auth, every
+Gemini method except `generateContent`/`streamGenerateContent` (so
+`GET /v1beta/models` discovery passes through untouched), `tunedModels`,
+multiple candidates, non-text modalities, audio/video input, `fileData`,
+and Gemini server-side tools.
+
+#### agy conformance
+
+Measured with `agy` 1.4.12 (2026-11-01, branch `gemini-support`) against a
+local fake Gemini upstream and a fake Chat Completions upstream, gateway
+configured with a `-catalog-suite /suite=fake-gemini+fake-chat` mount plus
+per-provider mounts `/gemini` (native route, `via=gemini`) and `/chat`
+(`-transcode-gemini-chat`). agy was configured in a throwaway home at
+`~/.gemini/antigravity-cli/settings.json` with `"modelProvider": "gemini"`,
+a dummy `GEMINI_API_KEY` in the agy process environment only, and
+`customModelsConfig.customModels` entries whose `modelName` is
+`gemini-api://<gateway-origin>/models/<alias>`; `GOOGLE_GEMINI_BASE_URL`
+pointed at the mount prefix (`http://127.0.0.1:18099/gemini`) or the suite
+prefix (`http://127.0.0.1:18099/suite`).
+
+Observed wire behavior: agy sends
+`POST /v1beta/models/{model}:streamGenerateContent?alt=sse` with header
+`x-goog-api-key` and a camelCase body carrying
+`generationConfig: {maxOutputTokens: 65536, thinkingConfig: {includeThoughts: true, thinkingBudget: -1}}`,
+`systemInstruction`, and `tools[].functionDeclarations`. One 1.4.12 quirk to
+know before publishing an alias: the whole remainder of the `gemini-api://`
+URI lands in the path model, so with base
+`http://127.0.0.1:18099/gemini` and alias `fake-gemini` the fake upstream
+received
+`POST /v1beta/models/http:/127.0.0.1:18099/gemini/models/fake-gemini:streamGenerateContent?alt=sse`.
+Register the surrogate under exactly that string (the model-table wire
+charset allows `/` and `:`), or accept the passthrough fallthrough.
+
+Through the native `/gemini` mount the gateway forwarded the request with
+the provider's `x-goog-api-key` (the client's dummy key was stripped), no
+`Authorization` header, `alt=sse` preserved, and the body byte-identical;
+agy printed the streamed reply. Through the `/chat` mount with
+`-transcode-gemini-chat`, the fake chat upstream received
+`POST /v1/chat/completions` with `Authorization: Bearer <provider secret>`,
+**no** `x-goog-api-key`, and body
+`{"model":"some-chat-model","stream":true,"n":1,"stream_options":...,"messages":[{"role":"user",...}]}`;
+the response came back to agy as Gemini SSE (`data: {"candidates":...}`)
+with the shaper log recording `usage_cache_read_unknown` /
+`usage_reasoning_unknown` losses and the `missing_stream_sentinel` note (a
+property of the fake, not the gateway). The suite mount answered
+`GET /suite/v1/models` with both surrogates; a suite request whose path model
+was not in the catalog got the dialect-shaped 404, which agy surfaces as
+`model "..." is not available for ...`.
 
 ### Model identities and the global model table
 
@@ -928,7 +1071,7 @@ failure, never a silent fallback. The client's stream intent (the
 ### Authentication
 
 - `-transcode-auth` selects the target policy: `auto`, `none`, `bearer`,
-  `x-api-key`, `api-key`, or a custom `header`. Unset, the transcoded
+  `x-api-key`, `api-key`, `goog-api-key`, or a custom `header`. Unset, the transcoded
   route inherits the provider's resolved auth policy (as configured by
   the provider-scope `-auth-source`/`-auth-mode`); a provider with no
   auth configured yields a strip-only `none` policy. The documented
@@ -1048,6 +1191,12 @@ ai-concurrency-shaper -upstream https://opencode.ai/zen/go -name zen-go \
 A known model sent to a path with no route or mapping for its dialect fails
 closed with a dialect-shaped 404 naming its native dialect, rather than
 forwarding a surrogate the upstream does not know.
+
+The `gemini` protocol works the same way: `-native-route 'gemini@/v1beta/models/{model}:generateContent'`
+plus a `via=gemini` table entry serves a Gemini model with only the model
+segment rewritten; `modelVersion` in the response is never rewritten, so
+native Gemini responses pass through byte-identical (see
+[Gemini GenerateContent](#gemini-generatecontent)).
 
 ### opencode Zen and Go
 
