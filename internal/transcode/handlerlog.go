@@ -13,6 +13,11 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 )
 
+// isContextCancellationError reports whether the error is cancellation-derived
+// (context.Canceled or context.DeadlineExceeded, possibly wrapped). Client
+// abort suppression applies only to such errors: an unrelated transport or
+// body failure racing with a client cancellation must win as its true
+// classification.
 func isContextCancellationError(err error) bool {
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
@@ -20,13 +25,11 @@ func isContextCancellationError(err error) bool {
 // nowUnix returns the current unix time in seconds as a float64: the
 // Responses contract's created_at is float64, so the generated stream
 // identity timestamps share the type end-to-end.
-
 func nowUnix() float64 {
 	return float64(time.Now().Unix())
 }
 
 // derefInt returns the value of v, or 0 when v is nil.
-
 func derefInt(v *int) int {
 	if v == nil {
 		return 0
@@ -44,7 +47,6 @@ func derefInt(v *int) int {
 // summary only covers the policy's Allowed set. The header is `approved
 // loss(es)` when every entry is an approved loss, else `loss(es)/note(s)`.
 // Duplicate feature@path entries are deduped preserving first-seen order.
-
 func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.Request, stage string) {
 	flowFromContext(r.Context()).addReport(stage, report)
 	if len(report.Losses) == 0 {
@@ -96,7 +98,6 @@ func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.
 // boundErrorMessage truncates a client-visible error message to the
 // configured ErrorMessageBytes bound. It delegates to the shared
 // BoundErrorMessage so the bound policy has exactly one home.
-
 func (h *TranscodeHandler) boundErrorMessage(message string) string {
 	return BoundErrorMessage(message, h.cfg.BodyLimits.ErrorMessageBytes)
 }
@@ -110,7 +111,6 @@ func (h *TranscodeHandler) boundErrorMessage(message string) string {
 // which the TUI log ring would then render as its own entry. Control
 // characters are escaped rather than dropped so the evidence survives, and the
 // result is length-bounded so one request cannot flood the log.
-
 func logSafeText(s string) string {
 	const maxLoggedField = 512
 	var b strings.Builder
@@ -143,7 +143,6 @@ func logSafeText(s string) string {
 // message): local construction and conversion failures are logged,
 // sanitized, and reported neutrally (the conversion-failure path stays
 // observable to the operator).
-
 func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
 	log.Printf("transcode: %s %s: %v",
 		logSafeText(r.Method), logSafeText(r.URL.Path), logSafeText(err.Error()))
@@ -153,7 +152,6 @@ func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
 // translated stream failed locally: the client gets the dialect error event,
 // but without this line the log shows nothing. A stream that ran out without
 // a terminal has no converter error, only that fact.
-
 func (h *TranscodeHandler) logStreamConversionError(r *http.Request, cause error) {
 	detail := "the upstream stream ended before a terminal event and no local error event was written"
 	if cause != nil && !errors.Is(cause, io.EOF) {
@@ -165,7 +163,6 @@ func (h *TranscodeHandler) logStreamConversionError(r *http.Request, cause error
 // sanitizeUpstreamTransportError redacts credential-bearing URL query values
 // from an upstream transport error before it is logged, with the same
 // guarantees as the native path (auth.SanitizeURLError).
-
 func sanitizeUpstreamTransportError(err error) error {
 	return auth.SanitizeURLError(err)
 }
