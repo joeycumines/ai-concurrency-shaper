@@ -77,3 +77,19 @@ internal/transcode/testcorpus/*
 *unreachable func: convertGeminiSchemaAt
 *unreachable func: geminiSchemaInteger
 *unreachable func: NewGeminiSignatureStore
+
+# Gemini request decode/render direction, staged ahead of its handler wiring
+# (the conversion commits land the production callers in handlerrequest.go):
+# pinned by the committed geminirequest_test.go/geminirender_test.go.
+*unreachable func: DecodeGeminiRequest
+*unreachable func: RenderGeminiRequest
+*unreachable func: geminiDecodeError
+*unreachable func: geminiCamelCase
+*unreachable func: newGeminiDecoder
+*unreachable func: geminiDecoder.*
+*unreachable func: geminiTextOnly
+*unreachable func: geminiRawPayloadPresent
+*unreachable func: geminiInlineData
+*unreachable func: geminiField
+*unreachable func: geminiModalities
+*unreachable func: geminiObjectSchema
