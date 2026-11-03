@@ -449,6 +449,14 @@ func (c *chatToResponsesConverter) ErrorEvent(err error) (frameEvent, bool) {
 	return responsesErrorFrame(err, c.state.builder.NextSequenceNumber())
 }
 
+// continuityTurns implements continuityTurnSource so streamResponse records
+// continuity for any Responses-client converter, not just the chat upstream.
+func (c *chatToResponsesConverter) continuityTurns(
+	requestTurns []CanonicalTurn, depth int,
+) (string, []CanonicalTurn, int, int, bool) {
+	return c.state.continuityTurns(requestTurns, depth)
+}
+
 // ConversionReport returns the accumulated approved losses of the
 // Anthropic state.
 func (c *responsesToAnthropicConverter) ConversionReport() *ConversionReport {

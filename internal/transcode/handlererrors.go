@@ -9,6 +9,9 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 )
 
+// writeLocalError writes a plain-text local error. Dialect-correct rendering
+// is used for API errors; local infrastructure errors are plain text because
+// they are not provider API errors.
 func (h *TranscodeHandler) writeLocalError(
 	r *http.Request,
 	w http.ResponseWriter,
@@ -36,7 +39,6 @@ func (h *TranscodeHandler) writeLocalError(
 // handler runs (the multi-target dispatcher) emits exactly the frame the
 // handler's own post-commit error path emits, instead of a second spelling
 // of the same wire event.
-
 func WriteCommittedStreamError(
 	w http.ResponseWriter,
 	client ClientProtocol,
@@ -83,6 +85,17 @@ func WriteCommittedStreamError(
 			Message:        apiErr.Message,
 			Param:          "",
 		})
+	case ClientGemini:
+		// Gemini's streamGenerateContent carries no SSE event names: the
+		// error envelope is the data payload of an unnamed frame.
+		payload, err = json.Marshal(geminiClientError(apiErr))
+		if err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
+			return err
+		}
+		return http.NewResponseController(w).Flush()
 	default:
 		return fmt.Errorf("unknown client error dialect %q", client)
 	}
@@ -98,7 +111,6 @@ func WriteCommittedStreamError(
 // writeDialectOrCommittedStreamError renders the canonical error as a dialect-legal
 // SSE error event when the streaming representation was already committed, or as a
 // standard dialect HTTP JSON error otherwise.
-
 func (h *TranscodeHandler) writeDialectOrCommittedStreamError(
 	r *http.Request,
 	w http.ResponseWriter,
@@ -150,7 +162,6 @@ func (h *TranscodeHandler) writeCircuitOpenError(r *http.Request, w http.Respons
 // from the ORIGINAL upstream response is recorded on the outcome so a
 // rate-signalled 403 keeps its hold signal even when the rendered client
 // error cannot carry the upstream rate-limit headers.
-
 func (h *TranscodeHandler) writeUpstreamHTTPError(
 	r *http.Request,
 	w http.ResponseWriter,
@@ -210,7 +221,6 @@ func (h *TranscodeHandler) writeUpstreamHTTPError(
 // outcome. The exchange is recorded as an upstream body failure regardless
 // of the status — a truncated 400 is never a healthy non-failure. A failed downstream write changes the provenance exactly like
 // the other error writers while the upstream failure fact is retained.
-
 func (h *TranscodeHandler) writeUpstreamBodyError(
 	r *http.Request,
 	w http.ResponseWriter,
@@ -256,7 +266,6 @@ func (h *TranscodeHandler) writeUpstreamBodyError(
 // UpstreamFailure=true, matching the streamed response.failed classification
 // A failed downstream write changes the provenance
 // exactly like the other error writers.
-
 func (h *TranscodeHandler) writeUpstreamSemanticFailure(
 	r *http.Request,
 	w http.ResponseWriter,
@@ -292,7 +301,6 @@ func (h *TranscodeHandler) writeUpstreamSemanticFailure(
 // downstream write changes the recorded provenance to the downstream failure
 // (or a client abort when the context is cancelled) instead of being logged
 // and ignored.
-
 func (h *TranscodeHandler) writeDialectHTTPError(
 	r *http.Request,
 	w http.ResponseWriter,
@@ -353,7 +361,3 @@ func (h *TranscodeHandler) writeDialectHTTPError(
 	}
 	h.recordOutcome(r, outcome)
 }
-
-// recordOutcome forwards the outcome to the proxy breaker hook and, when an
-// outcome sink is present on the request context, to the proxy's per-request
-// provenance reader.
