@@ -8,12 +8,24 @@ import (
 	"strings"
 )
 
+// isEventStreamMediaType reports whether the media type is exactly
+// text/event-stream, shared by the Accept parsing and the response
+// Content-Type matching.
 func isEventStreamMediaType(mediaType string) bool {
 	return mediaType == "text/event-stream"
 }
 
 // acceptRange is one parsed media range of an Accept header.
+type acceptRange struct {
+	mediaType string  // lowercased
+	q         float64 // 0..1
+	order     int     // position in the header; the first range is 0
+}
 
+// splitAcceptRanges splits an Accept header into its media ranges on commas
+// that are outside quoted strings. RFC 9110 quoted-string parameter values
+// may contain commas (and backslash-escaped characters); splitting naively
+// on every comma would destroy such a range.
 func splitAcceptRanges(accept string) []string {
 	var parts []string
 	start := 0
@@ -39,7 +51,6 @@ func splitAcceptRanges(accept string) []string {
 // that fail to parse, or whose q value is outside 0..1, are skipped: a
 // malformed range expresses no usable preference and is ignored — it never
 // decides and never disturbs the ordering of the ranges around it.
-
 func parseAcceptRanges(accept string) []acceptRange {
 	var ranges []acceptRange
 	for order, part := range splitAcceptRanges(accept) {
@@ -65,7 +76,23 @@ func parseAcceptRanges(accept string) []acceptRange {
 
 // acceptPreference is the client's preference for one representation derived
 // from an Accept header.
+type acceptPreference struct {
+	acceptable  bool    // the representation is not excluded (see below)
+	q           float64 // effective quality of the deciding range
+	specificity int     // specificity of the deciding range
+	order       int     // position of the deciding range
+}
 
+// effectiveAcceptPreference derives the client's preference for mediaType
+// from parsed Accept ranges, matched by the exact type, typeWildcard, or
+// */*. The most specific applicable range determines the representation's
+// quality (RFC 9110 §12.5.1): a q=0 exact exclusion wins over a later */*,
+// and a less specific range never dilutes the most specific decision. Among
+// equally specific ranges the highest q wins, and the earliest such range
+// decides order ties. A representation with no applicable range is
+// acceptable by default (RFC 9110: unmentioned representations are
+// acceptable); it is excluded only when an applicable range exists and the
+// most specific tier's quality is 0.
 func effectiveAcceptPreference(ranges []acceptRange, mediaType, typeWildcard string) acceptPreference {
 	var best acceptPreference
 	best.specificity = -1
@@ -107,7 +134,6 @@ func effectiveAcceptPreference(ranges []acceptRange, mediaType, typeWildcard str
 // (exact type over type/* over */*); (3) order of appearance in the header.
 // A tie that remains (e.g. Accept: */*, or no acceptable representation at
 // all) defaults to application/json, the non-streaming representation.
-
 func AcceptIsEventStream(accept string) bool {
 	ranges := parseAcceptRanges(accept)
 	sse := effectiveAcceptPreference(ranges, "text/event-stream", "text/*")
@@ -133,10 +159,11 @@ func AcceptIsEventStream(accept string) bool {
 	return false
 }
 
-// isEventStream reports whether the response is an SSE stream, matched by
-// media type exactly — text/event-streaming and other lookalikes are not
-// streams.
-
+// IsUpgradeRequest reports whether the request carries an Upgrade token.
+// It is the single upgrade classifier shared by the transcode handler and
+// the natively served routes, so both boundaries classify identically. A nil
+// request (or one with a nil Header, as a hand-built request may carry)
+// carries no upgrade token, matching the pre-unification native helper.
 func IsUpgradeRequest(r *http.Request) bool {
 	if r == nil || r.Header == nil {
 		return false
@@ -145,7 +172,6 @@ func IsUpgradeRequest(r *http.Request) bool {
 }
 
 // isUpgradeRequest reports whether the request carries an Upgrade token.
-
 func isUpgradeRequest(r *http.Request) bool {
 	if len(r.Header.Values("Upgrade")) > 0 {
 		return true
@@ -159,38 +185,3 @@ func isUpgradeRequest(r *http.Request) bool {
 	}
 	return false
 }
-
-// isContextCancellationError reports whether the error is cancellation-derived
-// (context.Canceled or context.DeadlineExceeded, possibly wrapped). Client
-// abort suppression applies only to such errors: an unrelated transport or
-// body failure racing with a client cancellation must win as its true
-// classification.
-
-type acceptRange struct {
-	mediaType string  // lowercased
-	q         float64 // 0..1
-	order     int     // position in the header; the first range is 0
-}
-
-// splitAcceptRanges splits an Accept header into its media ranges on commas
-// that are outside quoted strings. RFC 9110 quoted-string parameter values
-// may contain commas (and backslash-escaped characters); splitting naively
-// on every comma would destroy such a range.
-
-type acceptPreference struct {
-	acceptable  bool    // the representation is not excluded (see below)
-	q           float64 // effective quality of the deciding range
-	specificity int     // specificity of the deciding range
-	order       int     // position of the deciding range
-}
-
-// effectiveAcceptPreference derives the client's preference for mediaType
-// from parsed Accept ranges, matched by the exact type, typeWildcard, or
-// */*. The most specific applicable range determines the representation's
-// quality (RFC 9110 §12.5.1): a q=0 exact exclusion wins over a later */*,
-// and a less specific range never dilutes the most specific decision. Among
-// equally specific ranges the highest q wins, and the earliest such range
-// decides order ties. A representation with no applicable range is
-// acceptable by default (RFC 9110: unmentioned representations are
-// acceptable); it is excluded only when an applicable range exists and the
-// most specific tier's quality is 0.
