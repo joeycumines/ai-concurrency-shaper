@@ -849,7 +849,8 @@ func TestDispatcher_GetBodyReplaysReadError(t *testing.T) {
 	var replayed, replayedGetBody []byte
 	d := &multiTranscodeDispatcher{
 		acceptedBytes: 1 << 10,
-		chatHandler: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		client:        transcode.ClientMessages,
+		handlers: map[transcode.NativeProtocol]http.Handler{transcode.NativeChat: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 			replayed, bodyErr = io.ReadAll(r.Body)
 			copy, err := r.GetBody()
 			if err != nil {
@@ -858,7 +859,7 @@ func TestDispatcher_GetBodyReplaysReadError(t *testing.T) {
 			}
 			defer copy.Close()
 			replayedGetBody, replayErr = io.ReadAll(copy)
-		}),
+		})},
 	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	req.Body = &readErrorAfterChunkBody{chunk: []byte(body), err: wantErr}

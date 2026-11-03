@@ -106,6 +106,16 @@ type TranscodeMapping struct {
 	// cloned: chains accumulate across exchanges by design.
 	Continuity    *transcode.ContinuityStore
 	ContinuityKey string
+
+	// GeminiSignatures, when non-nil, is the bounded per-provider store of
+	// Gemini function-call thought signatures. It is attached to every
+	// mapping whose upstream is Gemini; GeminiSignatureScope scopes the
+	// retained signatures to the provider (the provider name), so ids from
+	// different providers never meet. A nil store behaves as an empty
+	// store: the renderer then sends the documented placeholder on the
+	// first function call of each current-turn model content.
+	GeminiSignatures     *transcode.GeminiSignatureStore
+	GeminiSignatureScope string
 }
 
 // TranscodeOption configures transcoding route mappings.

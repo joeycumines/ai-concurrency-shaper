@@ -2,7 +2,10 @@
 # Patterns to exclude from deadcode analysis
 # See: https://pkg.go.dev/github.com/joeycumines/simple-command-output-filter
 
-# DO NOT ADD IGNORES TO THIS FILE WITH THE INTENT OF "WIRING THEM UP LATER"
+# DO NOT ADD IGNORES FOR CODE THAT IS UNREACHABLE ONLY BECAUSE ITS CALLERS ARE
+# NOT WRITTEN YET — write the caller first. Every ignore below documents a
+# confirmed false positive: test-pinned public API or test-only packages that
+# the binary-entry reachability analysis cannot see.
 
 # Test-only packages + CONFIRMED false positives. Read the deadcode tool's `go doc` for details re: false positives.
 internal/tui/tuitest/helper.go:*
