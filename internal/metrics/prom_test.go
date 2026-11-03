@@ -30,10 +30,10 @@ func TestWritePrometheusFleetGoldenLines(t *testing.T) {
 	c.RecordStatus(200)
 	c.RecordStatus(200)
 	c.RecordStatus(404)
-	c.RecordRequest("POST", "/v1/messages", 200, 0, true)
-	c.RecordRequest("POST", "/v1/messages", 200, 0, true)
-	c.RecordRequest("GET", "/health", 404, 0, false)
-	c.RecordAbortedRequest("POST", "/v1/messages", 0, 0, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, 0, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, 0, true)
+	c.RecordRequest("GET", "/health", "", 404, 0, false)
+	c.RecordAbortedRequest("POST", "/v1/messages", "", 0, 0, true)
 	// Clean-completion counters are driven by the proxy after the exchange
 	// finishes; RecordRequest only feeds routes/throughput/log ring.
 	c.IncProxied()

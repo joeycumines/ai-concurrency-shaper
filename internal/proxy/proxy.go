@@ -87,6 +87,11 @@ type Proxy struct {
 	// method+path route key, built once at construction.
 	transcodeHandlerMap map[transcode.RouteKey]http.Handler
 
+	// geminiRoutes is set when a Gemini GenerateContent mapping is configured.
+	// Gemini requests name their model in the path, so they resolve to a route
+	// template rather than a fixed route key; see lookupRouteTargets.
+	geminiRoutes bool
+
 	// nativeRouteMap provides O(1) lookup of natively served routes by
 	// method+path route key, built once at construction. A native miss
 	// falls through to the transcode lookup.
@@ -224,9 +229,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		p.m.RecordStatus(status)
 		if aborted {
-			p.m.RecordAbortedRequest(r.Method, r.URL.Path, status, time.Since(start), limited)
+			p.m.RecordAbortedRequest(r.Method, r.URL.Path, p.statsRouteKey(r), status, time.Since(start), limited)
 		} else {
-			p.m.RecordRequest(r.Method, r.URL.Path, status, time.Since(start), limited)
+			p.m.RecordRequest(r.Method, r.URL.Path, p.statsRouteKey(r), status, time.Since(start), limited)
 			// The clean-completion counter publishes here — after the journal
 			// entry — instead of at the end of the handler body, so the
 			// counter-then-journal window cannot reopen. The
@@ -258,7 +263,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// below before any work begins), but handle it defensively.
 				http.Error(w, "internal error", http.StatusBadGateway)
 				p.m.RecordStatus(http.StatusBadGateway)
-				p.m.RecordRequest(r.Method, r.URL.Path, http.StatusBadGateway, time.Since(start), limited)
+				p.m.RecordRequest(r.Method, r.URL.Path, p.statsRouteKey(r), http.StatusBadGateway, time.Since(start), limited)
 				if limited {
 					p.m.IncProxied()
 				} else {
@@ -398,11 +403,35 @@ func (p *Proxy) lookupRouteTargets(r *http.Request) (*NativeRoute, http.Handler)
 	if len(p.nativeRoutes) == 0 && len(p.transcodeHandlerMap) == 0 {
 		return nil, nil
 	}
-	key, err := transcode.NewRouteKey(r.Method, r.URL.Path)
-	if err != nil {
-		return nil, nil
+	var nr *NativeRoute
+	var handler http.Handler
+	if key, err := transcode.NewRouteKey(r.Method, r.URL.Path); err == nil {
+		nr, handler = p.lookupNativeRouteKey(key), p.lookupTranscodeHandlerKey(key)
 	}
-	return p.lookupNativeRouteKey(key), p.lookupTranscodeHandlerKey(key)
+	if (nr == nil || handler == nil) && p.geminiRoutes {
+		if match, ok := transcode.MatchGeminiRequestPath(r.Method, r.URL.Path); ok {
+			if nr == nil {
+				nr = p.lookupNativeRouteKey(match.Key)
+			}
+			if handler == nil {
+				handler = p.lookupTranscodeHandlerKey(match.Key)
+			}
+		}
+	}
+	return nr, handler
+}
+
+// statsRouteKey returns the Gemini route template a request matched, which
+// labels per-route metrics so concrete model names never become separate
+// routes. It is empty for every other request.
+func (p *Proxy) statsRouteKey(r *http.Request) string {
+	if !p.geminiRoutes {
+		return ""
+	}
+	if match, ok := transcode.MatchGeminiRequestPath(r.Method, r.URL.Path); ok {
+		return match.TemplatePath
+	}
+	return ""
 }
 
 // dispatchAfterNativeRoute answers one request whose method+path sits on a

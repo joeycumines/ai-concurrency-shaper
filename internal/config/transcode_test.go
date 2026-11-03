@@ -683,18 +683,6 @@ func TestParseTranscodeAuth(t *testing.T) {
 	}
 }
 
-// TestParseTranscodeRouteMessagesUpstreamRejected proves the CLI rejects a
-// messages upstream at parse time.
-func TestParseTranscodeRouteMessagesUpstreamRejected(t *testing.T) {
-	_, err := parseTranscodeRoute("responses@/v1/responses=messages@/v1/messages")
-	if err == nil {
-		t.Fatal("expected messages upstream rejection")
-	}
-	if !strings.Contains(err.Error(), "want responses or chat-completions") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 // TestParseTranscodeAuthExternalSignerRejectedAtStartup proves the CLI
 // cannot configure an external signer.
 func TestParseTranscodeAuthExternalSignerRejectedAtStartup(t *testing.T) {
