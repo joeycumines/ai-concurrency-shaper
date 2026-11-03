@@ -235,8 +235,25 @@ func FromProviderAuthForUpstream(policy *auth.AuthPolicy, target UpstreamProtoco
 			}
 		}
 	case AuthXAPIKey:
-		if target == UpstreamResponses || target == UpstreamChatCompletions {
+		switch target {
+		case UpstreamResponses, UpstreamChatCompletions:
 			out.Mode = AuthBearer
+		case UpstreamGemini:
+			out.Mode = AuthGoogAPIKey
+		}
+	case AuthAPIKey:
+		if target == UpstreamGemini {
+			out.Mode = AuthGoogAPIKey
+		}
+	case AuthGoogAPIKey:
+		switch target {
+		case UpstreamResponses, UpstreamChatCompletions:
+			out.Mode = AuthBearer
+		case UpstreamMessages:
+			out.Mode = AuthXAPIKey
+			if strings.TrimSpace(out.AnthropicVersion) == "" {
+				out.AnthropicVersion = auth.DefaultAnthropicVersion
+			}
 		}
 	}
 	return out
@@ -322,6 +339,8 @@ func ApplyTargetAuthentication(
 			mode = AuthXAPIKey
 		case UpstreamResponses, UpstreamChatCompletions:
 			mode = AuthBearer
+		case UpstreamGemini:
+			mode = AuthGoogAPIKey
 		default:
 			return fmt.Errorf("auto auth has no rule for %q", target)
 		}

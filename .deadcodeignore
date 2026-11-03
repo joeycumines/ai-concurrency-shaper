@@ -50,3 +50,30 @@ internal/transcode/testcorpus/*
 # StopAfter so shutdown cannot hang on a client that holds a stream open,
 # which leaves the plain Stop unreachable from the binary entry.
 *unreachable func: Server.Stop*
+
+# Gemini wire-package API pinned by the committed wire tests
+# (wire/geminigeneratecontent/*_test.go): the deadcode tool analyzes
+# reachability from THIS module's binary entry, so the package's decode and
+# validation entry points read as unreachable until the Gemini conversion
+# directions (which call them) land. They are load-bearing public surface of
+# the pinned contract shadow.
+*unreachable func: DecodeRequest
+*unreachable func: DecodeResponse
+*unreachable func: RawMemberPresent
+*unreachable func: validateJSONObject
+*unreachable func: Part.Validate
+*unreachable func: Part.UnmarshalJSON
+
+# Gemini route/URL/schema/signature foundations are pinned by their committed
+# unit tests (geminiroute_test.go, geminiurl_test.go, geminischema_test.go,
+# geminisignatures_test.go) and by Mapping.Validate for the path parser; the
+# production callers (handler dispatch, upstream URL build, tool-schema
+# conversion, provider signature store) land with the Gemini conversion and
+# gateway commits.
+*unreachable func: MatchGeminiRequestPath
+*unreachable func: IsGeminiOperationPath
+*unreachable func: BuildGeminiURL
+*unreachable func: ConvertGeminiSchema
+*unreachable func: convertGeminiSchemaAt
+*unreachable func: geminiSchemaInteger
+*unreachable func: NewGeminiSignatureStore

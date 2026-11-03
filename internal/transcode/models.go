@@ -27,6 +27,12 @@ type ModelMapping struct {
 	// ReasoningTier pins the reasoning effort tier for this model ("low",
 	// "medium", "high", or "" when unset). Empty means no tier override.
 	ReasoningTier string
+
+	// MaxOutput is the model's output token ceiling when the model table
+	// declares one, nil when it does not. The Anthropic Messages upstream
+	// requires max_tokens, so a Gemini request that omits maxOutputTokens takes
+	// this value. The pointee is read-only once the mapping is built.
+	MaxOutput *int
 }
 
 // ModelMap resolves client model identifiers to upstream model identifiers.

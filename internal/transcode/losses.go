@@ -292,6 +292,63 @@ const (
 	// tool call with a synthesized id derived from the response id, recorded
 	// as an ungated note naming the source.
 	FeatureLegacyFunctionCall Feature = "legacy_function_call"
+	// GeminiGenerationControls covers Gemini generation controls with no
+	// counterpart in the target request: penalties, seed, logprobs, media
+	// resolution, affective dialog, and enhanced civic answers.
+	FeatureGeminiGenerationControls Feature = "gemini_generation_controls"
+	// GeminiSafetySettings covers Gemini request safety settings: the target
+	// applies its own safety policy, so the client's thresholds are dropped.
+	FeatureGeminiSafetySettings Feature = "gemini_safety_settings"
+	// GeminiRequestControls covers Gemini request controls the target cannot
+	// honor: store, labels, and serviceTier.
+	FeatureGeminiRequestControls Feature = "gemini_request_controls"
+	// GeminiThoughtSignature covers Gemini thought material: thought summary
+	// parts and thought signatures cannot be replayed to another provider.
+	FeatureGeminiThoughtSignature Feature = "gemini_thought_signature"
+	// GeminiPartMetadata covers per-part Gemini metadata (mediaResolution,
+	// mediaProcessing, partMetadata) that the target cannot carry.
+	FeatureGeminiPartMetadata Feature = "gemini_part_metadata"
+	// GeminiProviderTools covers Gemini provider-executed tools (code
+	// execution, search, URL context, maps, computer use, MCP servers,
+	// retrieval). Dropping them changes what the model can do, so the loss is
+	// not a default.
+	FeatureGeminiProviderTools Feature = "gemini_provider_tools"
+	// GeminiClientQuery covers a client query parameter on a Gemini-bound
+	// route that the Gemini GenerateContent API does not accept: it is
+	// dropped and the drop is logged.
+	FeatureGeminiClientQuery Feature = "gemini_client_query"
+	// GeminiThoughtSignaturePlaceholder covers the documented
+	// skip_thought_signature_validator placeholder sent on the first
+	// functionCall of a current-turn model content that has no stored
+	// thought signature.
+	FeatureGeminiThoughtSignaturePlaceholder Feature = "gemini_thought_signature_placeholder"
+	// GeminiCandidateCollapse covers a multi-candidate Gemini response, of
+	// which only the lowest-index candidate can be represented.
+	FeatureGeminiCandidateCollapse Feature = "gemini_candidate_collapse"
+	// GeminiSafetyMetadata covers Gemini safety ratings (prompt feedback and
+	// candidate) that the target response cannot reproduce.
+	FeatureGeminiSafetyMetadata Feature = "gemini_safety_metadata"
+	// GeminiGroundingMetadata covers Gemini citation/grounding/url-context
+	// metadata that the target response cannot reproduce.
+	FeatureGeminiGroundingMetadata Feature = "gemini_grounding_metadata"
+	// GeminiUsageBreakdown covers Gemini usage details the target response
+	// cannot reproduce: per-modality token breakdowns and the candidate
+	// token count.
+	FeatureGeminiUsageBreakdown Feature = "gemini_usage_breakdown"
+	// GeminiResponseThoughtSignature covers a thought signature attached to
+	// a non-function-call part of a Gemini response, which the target
+	// response cannot reproduce.
+	FeatureGeminiResponseThoughtSignature Feature = "gemini_response_thought_signature"
+	// GeminiModelStatus covers the Gemini modelStatus lifecycle/retirement
+	// member, which the target response cannot reproduce.
+	FeatureGeminiModelStatus Feature = "gemini_model_status"
+	// GeminiToolStrictness covers a per-tool strict flag: Gemini enforces
+	// schemas only in VALIDATED function-calling mode, which also changes
+	// tool-choice semantics, so per-tool strictness cannot be reproduced.
+	FeatureGeminiToolStrictness Feature = "gemini_tool_strictness"
+	// GeminiImageDetail covers a per-image detail control (e.g. high/low)
+	// that Gemini has no equivalent for.
+	FeatureGeminiImageDetail Feature = "gemini_image_detail"
 	// MissingStreamSentinel covers an upstream chat stream that ended after
 	// a finishing chunk without the [DONE] sentinel: the completion is
 	// released on EOF (the refusal cannot be reported as a truncated
@@ -370,7 +427,7 @@ var lossRegistry = []lossEntry{
 	{FeatureDeveloperRole, "the developer-role distinction cannot be reproduced in the target"},
 	{FeatureStructuredOutput, "the structured-output format cannot be reproduced in the target"},
 	{FeatureVacuousSchemaBounds, "tool schema numeric bounds at ±float64 max admit every finite number and are removed for a chat provider that rejects them"},
-	{FeatureMetadata, "request metadata is not forwarded because the configured chat provider does not accept it"},
+	{FeatureMetadata, "request metadata is not forwarded because the target provider does not accept it"},
 	{FeatureParallelToolCalls, "the parallel-tool-calls setting cannot be reproduced in the target"},
 	{FeatureStopSequences, "stop sequences cannot be reproduced in the target"},
 	{FeatureImageInput, "image input cannot be reproduced in the target"},
@@ -383,8 +440,24 @@ var lossRegistry = []lossEntry{
 	{FeatureRequestCitations, "request citations on text blocks cannot be reproduced in the target request"},
 	{FeatureBuiltinTools, "Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject)"},
 	{FeatureAnthropicServerTools, "Anthropic Messages server-side tools and server-executed content (type-discriminated tools[] definitions, server_tool_use / web_search_tool_result / code_execution blocks, container_upload references) cannot be reproduced in a chat request; an approved loss drops them observably"},
-	{FeatureResponseServiceTier, "the upstream chat service tier actually served cannot be reproduced in the target"},
+	{FeatureResponseServiceTier, "the upstream service tier actually served cannot be reproduced in the target"},
 	{FeatureLegacyFunctionCall, "the upstream chat response uses the legacy non-tool_calls function_call spelling; the single invocation maps to one canonical tool call with a synthesized id derived from the response id (the note names the synthesis)"},
+	{FeatureGeminiGenerationControls, "Gemini generation controls (frequency and presence penalties, seed, logprobs, media resolution, affective dialog, enhanced civic answers) cannot be reproduced in the target request"},
+	{FeatureGeminiSafetySettings, "Gemini request safety settings cannot be reproduced in the target, which applies its own safety policy"},
+	{FeatureGeminiRequestControls, "the Gemini request controls store, labels, and serviceTier cannot be reproduced in the target request"},
+	{FeatureGeminiThoughtSignature, "Gemini thought summaries and thought signatures cannot be replayed to another provider and are dropped"},
+	{FeatureGeminiPartMetadata, "Gemini per-part metadata (mediaResolution, mediaProcessing, partMetadata) cannot be reproduced in the target request"},
+	{FeatureGeminiProviderTools, "Gemini provider-executed tools (code execution, search, URL context, maps, computer use, MCP servers, retrieval) cannot be reproduced and dropping them changes what the model can do"},
+	{FeatureGeminiClientQuery, "a client query parameter on a Gemini-bound route that the Gemini GenerateContent API does not accept is not forwarded"},
+	{FeatureGeminiThoughtSignaturePlaceholder, "no stored thought signature exists for this function call, so the documented skip_thought_signature_validator placeholder is sent to Gemini"},
+	{FeatureGeminiCandidateCollapse, "the Gemini response carried multiple candidates and only the lowest index can be represented in the target response"},
+	{FeatureGeminiSafetyMetadata, "Gemini safety ratings (prompt feedback and per-candidate) cannot be reproduced in the target response"},
+	{FeatureGeminiGroundingMetadata, "Gemini citation/grounding/url-context metadata cannot be reproduced in the target response"},
+	{FeatureGeminiUsageBreakdown, "Gemini usage details the target response cannot reproduce (per-modality token breakdowns, candidate token count)"},
+	{FeatureGeminiResponseThoughtSignature, "a thought signature on a non-function-call Gemini response part cannot be reproduced in the target response"},
+	{FeatureGeminiModelStatus, "the Gemini modelStatus (lifecycle stage/retirement) cannot be reproduced in the target response"},
+	{FeatureGeminiToolStrictness, "a per-tool strict flag cannot be reproduced: Gemini enforces schemas only in VALIDATED function-calling mode, which also changes tool-choice semantics"},
+	{FeatureGeminiImageDetail, "a per-image detail control (e.g. high/low) has no Gemini equivalent"},
 }
 
 // allLossKeys returns the set of every registered loss key.

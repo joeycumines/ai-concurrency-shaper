@@ -13,5 +13,10 @@
     "source": "anthropic-api",
     "version": "2023-06-01",
     "snapshot_sha256": "7904599c41df8745b57614322d73e970c8bf54bb48563829d8ec3a2381920ce5"
+  },
+  "google_gemini_generate_content": {
+    "source": "generativelanguage-discovery",
+    "version": "v1beta-20261028",
+    "snapshot_sha256": "c32b6b66b58f1587ef30c8beff868c5ee6d22cace94b39f86254c18e24ce3901"
   }
 }
