@@ -108,3 +108,7 @@ func TestDecodeMessagesResponseThinkingNeedsApproval(t *testing.T) {
 		}
 	})
 }
+
+// geminiMessagesBody is the Gemini generateContent request used by the
+// Gemini-client-over-Messages handler tests (messagesstreamupstream_test.go).
+const geminiMessagesBody = `{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":64}}`
