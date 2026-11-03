@@ -2,82 +2,18 @@ package transcode
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"maps"
-	"math"
-	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
-)
-
-// HandlerConfig configures one transcoded route.
-// HandlerConfig is the transcode handler configuration. The route-specific
-// values (auth, model map, loss policy, capabilities, allowed client query)
-// live in Mapping — HandlerConfig does not duplicate them. The constructor validates, defaults, and deep-copies the mapping once
-// into a private immutable configuration; runtime always reads the
-// normalized copy.
-type HandlerConfig struct {
-	// Mapping is the validated route mapping.
-	Mapping Mapping
-
-	// Upstream is the upstream base URL.
-	Upstream *url.URL
-
-	// BodyLimits are the independent request/response body limits.
-	BodyLimits BodyLimits
-
-	// FlowLogDir, when non-empty, is an existing directory that receives one
-	// JSON record per transcoded exchange capturing the full flow (client
-	// request, converted upstream request, upstream response, downstream
-	// response, conversion reports, outcome). The directory is validated by
-	// the constructing caller (the proxy), never created here, and the
-	// records are unredacted: treat the directory as secret-bearing.
-	FlowLogDir string
-
-	// Continuity, when non-nil, is the opt-in bounded per-conversation
-	// store behind the statefulness decision (OFF by default: nil means no
-	// retention, and previous_response_id keeps its existing observable
-	// loss). When set, the handler records the canonical conversation that
-	// produced each emitted Responses id and resolves a later request's
-	// previous_response_id against it; a miss degrades to the existing
-	// loss, never a failure. ContinuityKey scopes retained ids to the
-	// provider mapping that emitted them.
-	Continuity    *ContinuityStore
-	ContinuityKey string
-}
-
-// RoundTrip executes an outbound HTTP request through the proxy engine.
-type RoundTrip func(*http.Request) (*http.Response, error)
-
-// ExchangeProvenance is the explicit outcome provenance recorded for breaker
-// accounting. Breaker health is derived from provenance, never from the final
-// status code alone.
-//
-// https://platform.openai.com/docs/guides/error-codes/api-errors
-type ExchangeProvenance uint8
-
-// ExchangeProvenance values.
-const (
-	ProvenanceUpstreamHTTP ExchangeProvenance = iota
-	ProvenanceUpstreamTransportError
-	ProvenanceUpstreamBodyError
-	ProvenanceClientAbort
-	ProvenanceDownstreamWriteError
-	ProvenanceLocalRequestConversionError
-	ProvenanceLocalResponseConversionError
-	ProvenanceLocalStreamValidationError
 )
 
 func (p ExchangeProvenance) String() string {
@@ -110,30 +46,7 @@ func (p ExchangeProvenance) String() string {
 // OutcomeFunc receives the exchange outcome. The proxy wires this to breaker
 // accounting. It must be safe to call at most once per exchange, after the
 // handler has stopped mutating the recorder.
-type OutcomeFunc func(Outcome)
 
-// TranscodeHandler intercepts requests for a transcoded route, converts the
-// payload to the upstream schema, forwards through the proxy engine, and
-// converts the response back to the client schema. Streaming responses are
-// translated incrementally through the state machines.
-//
-// The stream path uses stream.Proxy as the mandated bidirectional copy and
-// cancellation boundary. The converted HTTP request body has already been
-// submitted by RoundTrip; stream.Proxy's local EOF triggers the configured
-// adapter soft-close; the handler owns downstream sealing and body closure;
-// the tests verify translated-stream continuation and cancellation, not a new
-// transport-level request-body half-close mechanism.
-type TranscodeHandler struct {
-	cfg       HandlerConfig
-	roundTrip RoundTrip
-	outcomeFn OutcomeFunc
-}
-
-// NewTranscodeHandler returns a handler for the given configuration. The
-// configuration is validated at construction, never on the first request: a
-// nil round trip would panic at request time, negative body limits would be
-// silently defaulted, and an invalid mapping or upstream would fail
-// mid-exchange.
 func NewTranscodeHandler(
 	cfg HandlerConfig,
 	roundTrip RoundTrip,
@@ -234,6 +147,7 @@ func NewTranscodeHandler(
 }
 
 // cloneMapping deep-copies every mutable value of a Mapping.
+
 func cloneMapping(m Mapping) Mapping {
 	m.LossPolicy = LossPolicy{Allowed: cloneLossSet(m.LossPolicy.Allowed)}
 	m.ModelMap = cloneModelMapValues(m.ModelMap)
@@ -247,6 +161,7 @@ func cloneMapping(m Mapping) Mapping {
 }
 
 // cloneLossSet deep-copies a loss-policy allow set.
+
 func cloneLossSet(allowed map[Feature]struct{}) map[Feature]struct{} {
 	if allowed == nil {
 		return nil
@@ -259,12 +174,14 @@ func cloneLossSet(allowed map[Feature]struct{}) map[Feature]struct{} {
 }
 
 // cloneModelMapValues deep-copies the model-map entries.
+
 func cloneModelMapValues(m ModelMap) ModelMap {
 	m.Exact = cloneModelMappings(m.Exact)
 	return m
 }
 
 // cloneModelMappings deep-copies a model-mapping map.
+
 func cloneModelMappings(m map[string]ModelMapping) map[string]ModelMapping {
 	if m == nil {
 		return nil
@@ -275,6 +192,7 @@ func cloneModelMappings(m map[string]ModelMapping) map[string]ModelMapping {
 }
 
 // cloneQuerySet deep-copies the allowed-client-query set.
+
 func cloneQuerySet(s map[string]struct{}) map[string]struct{} {
 	if s == nil {
 		return nil
@@ -287,6 +205,7 @@ func cloneQuerySet(s map[string]struct{}) map[string]struct{} {
 }
 
 // ClientPath returns the client-facing route path of the handler.
+
 func (h *TranscodeHandler) ClientPath() string {
 	return h.cfg.Mapping.ClientRoute.Path
 }
@@ -295,6 +214,7 @@ func (h *TranscodeHandler) ClientPath() string {
 // outcome: the defer below records an internal local-failure outcome when no
 // path recorded one, so the proxy's synchronous sink read can never observe a
 // missing outcome.
+
 func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Diagnostic full-flow tap (-transcode-flowlog-dir): captures the
 	// complete contents of every transcoded exchange to one JSON file each.
@@ -579,1103 +499,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // readRequestBody reads and bounds the client request body.
-var errRequestBodyTooLarge = errors.New("request body too large")
 
-// errDecodedRequestTooLarge marks a decoded/rendered request that amplified
-// beyond the decoded-request body limit. It renders as 413 RequestEntityTooLarge
-// in the client dialect, not the generic conversion 400.
-var errDecodedRequestTooLarge = errors.New("decoded request exceeds the decoded-request body limit")
-
-// errEchoTooLarge marks a Responses request whose echo exceeds the echo
-// bound (checkEchoSize): the echo renders into every response envelope at up
-// to 6x JSON escaping, so it is bounded as a fail-closed resource limit. It
-// renders as 413 like the decoded-request bound.
-var errEchoTooLarge = errors.New("responses request echo exceeds the echo body limit")
-
-func (h *TranscodeHandler) readRequestBody(r *http.Request) ([]byte, error) {
-	limit := h.cfg.BodyLimits.AcceptedRequestBytes
-	if limit <= 0 {
-		limit = 32 << 20
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(body)) > limit {
-		return nil, errRequestBodyTooLarge
-	}
-	return body, nil
-}
-
-// convertRequest decodes the source request into the canonical IR and renders
-// the target request body, building the exchange context.
-func (h *TranscodeHandler) convertRequest(
-	r *http.Request,
-	body []byte,
-) ([]byte, *ExchangeContext, error) {
-	policy := h.cfg.Mapping.LossPolicy
-	mapping := h.cfg.Mapping
-
-	context := &ExchangeContext{
-		IDs:          NewExchangeIDs(),
-		LossPolicy:   policy,
-		Capabilities: mapping.ChatCapabilities,
-		// Stream intent precedence: the request body's
-		// stream field, when explicitly present, is authoritative; only when
-		// absent does the client Accept header select the representation
-		// (parsed below with full media-range and q-value semantics — q=0
-		// excludes, malformed ranges are ignored). The response media type
-		// must agree with the resolved intent.
-		StreamIntent: AcceptIsEventStream(r.Header.Get("Accept")),
-	}
-
-	// Resolve the client model through the mapping once the decoded request
-	// reveals it. The client-facing alias is returned in the response; the
-	// upstream model is used on the outbound request. Profile-aware
-	// resolution: if the client model matches a profile name, use the
-	// profile's model and tier; otherwise fall through to ModelMap.Resolve.
-	resolveModel := func(clientModel string, report *ConversionReport) error {
-		// Try profile resolution first.
-		if profileModel, profileTier, ok := h.cfg.Mapping.ProfileMap.ResolveProfile(clientModel); ok {
-			// Profile found. Resolve the profile's target model through ModelMap.
-			mappingModel, err := h.cfg.Mapping.ModelMap.Resolve(profileModel)
-			if err != nil {
-				return fmt.Errorf("profile %q targets unmapped model %q: %w", clientModel, profileModel, err)
-			}
-			// Profile model is mapped. Record Note if tier collapsed.
-			if profileTier != "" && mappingModel.ReasoningTier != "" && profileTier != mappingModel.ReasoningTier {
-				if err := report.Note(
-					FeatureProfileRouting,
-					"model",
-					fmt.Sprintf("profile %q requested tier %q but model mapping pins tier %q", clientModel, profileTier, mappingModel.ReasoningTier),
-				); err != nil {
-					return err
-				}
-				context.ResolvedReasoningTier = mappingModel.ReasoningTier
-			} else if profileTier != "" {
-				context.ResolvedReasoningTier = profileTier
-			} else {
-				context.ResolvedReasoningTier = mappingModel.ReasoningTier
-			}
-			context.RequestedClientModel = clientModel
-			context.UpstreamModel = mappingModel.UpstreamModel
-			return nil
-		}
-		// No profile match. Fall through to ModelMap.Resolve.
-		mappingModel, err := h.cfg.Mapping.ModelMap.Resolve(clientModel)
-		if err != nil {
-			return err
-		}
-		context.RequestedClientModel = mappingModel.ClientResponseModel
-		context.UpstreamModel = mappingModel.UpstreamModel
-		context.ResolvedReasoningTier = mappingModel.ReasoningTier
-		return nil
-	}
-
-	switch mapping.ClientProtocol {
-	case ClientResponses:
-		result, echo, err := DecodeResponsesRequest(body, policy)
-		if err != nil {
-			return nil, nil, err
-		}
-		// The request body's stream field, when explicitly present, is
-		// authoritative over the Accept header: an
-		// explicit stream:false is never merged into streaming.
-		if result.StreamSet {
-			context.StreamIntent = result.Request.Stream
-		}
-		// Write the resolved intent back into the canonical request so the
-		// upstream renderer emits the stream value matching the negotiated
-		// mode: an Accept-only stream request must not
-		// ask the upstream for JSON while the handler expects SSE.
-		result.Request.Stream = context.StreamIntent
-		if err := resolveModel(result.Request.ClientModel, &result.Report); err != nil {
-			return nil, nil, err
-		}
-		context.OriginalResponsesRequest = echo
-		context.ToolNames = result.ToolNames
-		result.Request.ClientModel = context.UpstreamModel
-
-		// Opt-in continuity (statefulness decision: OFF by default — a nil
-		// store skips this entirely and previous_response_id keeps its
-		// existing observable loss at render). When the store is set and
-		// the request carries a previous_response_id, resolve the retained
-		// conversation and prepend it ahead of the request's own turns; a
-		// miss (unknown, expired, or foreign id) falls through to the
-		// existing loss, never a failure.
-		if h.cfg.Continuity != nil && echo.PreviousResponseID != nil &&
-			*echo.PreviousResponseID != "" {
-			if prior, depth, ok := resolveContinuityChain(
-				h.cfg.Continuity, h.cfg.ContinuityKey, *echo.PreviousResponseID,
-			); ok {
-				merged := make([]CanonicalTurn, 0, len(prior)+len(result.Request.Turns))
-				merged = append(merged, prior...)
-				merged = append(merged, result.Request.Turns...)
-				result.Request.Turns = merged
-				// Record how much of the prefix is proxy-reconstructed so the
-				// render's request-side gates judge only the turns this
-				// request actually authored.
-				result.Request.RetainedTurns = len(prior)
-				context.RequestDepth = depth
-				if err := continuityNote(&result.Report, depth, *echo.PreviousResponseID); err != nil {
-					return nil, nil, err
-				}
-			}
-		}
-		// The retained chain must include the reconstructed history, so the
-		// record call in convertResponse stores the post-merge turns.
-		context.RequestTurns = result.Request.Turns
-
-		var rendered []byte
-		var report ConversionReport
-		switch mapping.UpstreamProtocol {
-		case UpstreamChatCompletions:
-			rendered, report, err = RenderChatRequest(
-				result.Request,
-				context,
-				h.cfg.Mapping.ChatCapabilities,
-			)
-		case UpstreamResponses:
-			rendered, report, err = RenderResponsesRequest(result.Request, context)
-		default:
-			return nil, nil, fmt.Errorf(
-				"unsupported upstream protocol %q for responses client",
-				mapping.UpstreamProtocol,
-			)
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := h.checkDecodedRequestSize(rendered); err != nil {
-			return nil, nil, err
-		}
-		report.Losses = append(report.Losses, result.Report.Losses...)
-		h.logConversionReport(report, r, "request")
-		return rendered, context, nil
-
-	case ClientMessages:
-		result, err := DecodeMessagesRequest(body, policy)
-		if err != nil {
-			return nil, nil, err
-		}
-		// The request body's stream field, when explicitly present, is
-		// authoritative over the Accept header: an
-		// explicit stream:false is never merged into streaming.
-		if result.StreamSet {
-			context.StreamIntent = result.Request.Stream
-		}
-		// Write the resolved intent back into the canonical request so the
-		// upstream renderer emits the stream value matching the negotiated
-		// mode: an Accept-only stream request must not
-		// ask the upstream for JSON while the handler expects SSE.
-		result.Request.Stream = context.StreamIntent
-		if err := resolveModel(result.Request.ClientModel, &result.Report); err != nil {
-			return nil, nil, err
-		}
-		context.OriginalMessagesRequest = &MessagesRequestContext{
-			MaxTokens: derefInt(result.Request.MaxOutputTokens),
-			Metadata:  result.Request.Metadata,
-		}
-		result.Request.ClientModel = context.UpstreamModel
-
-		var rendered []byte
-		var report ConversionReport
-		switch mapping.UpstreamProtocol {
-		case UpstreamResponses:
-			rendered, report, err = RenderResponsesRequest(result.Request, context)
-		case UpstreamChatCompletions:
-			rendered, report, err = RenderChatRequest(
-				result.Request,
-				context,
-				h.cfg.Mapping.ChatCapabilities,
-			)
-		default:
-			return nil, nil, fmt.Errorf(
-				"unsupported upstream protocol %q for messages client",
-				mapping.UpstreamProtocol,
-			)
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := h.checkDecodedRequestSize(rendered); err != nil {
-			return nil, nil, err
-		}
-		report.Losses = append(report.Losses, result.Report.Losses...)
-		h.logConversionReport(report, r, "request")
-		return rendered, context, nil
-
-	default:
-		return nil, nil, fmt.Errorf("unknown client protocol %q", mapping.ClientProtocol)
-	}
-}
-
-// buildUpstreamRequest builds the outbound request: hop-by-hop sanitization,
-// source auth stripping, target auth application, recomputed Content-Length,
-// the outbound Accept rewritten to the negotiated stream mode, and the client
-// context carried so downstream cancellation aborts upstream.
-func (h *TranscodeHandler) buildUpstreamRequest(
-	r *http.Request,
-	body []byte,
-	streamIntent bool,
-) (*http.Request, error) {
-	targetURL, err := BuildMappedURL(
-		h.cfg.Upstream,
-		h.cfg.Mapping.UpstreamPath,
-		r.URL.Query(),
-		h.cfg.Mapping.AllowedClientQuery,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// The outbound request uses an explicit allowlist: NOTHING the client
-	// sent is forwarded unless it is on the list.
-	// Cookies, forwarding headers, range/conditional controls, idempotency
-	// keys, source-provider controls, and unknown credential or extension
-	// headers never reach the target provider; hop-by-hop and
-	// transformed-representation metadata are structurally absent.
-	headers := http.Header{}
-	// The outbound Accept is rewritten to the representation actually
-	// requested upstream: text/event-stream when the exchange streams,
-	// otherwise application/json. The client's Accept describes its own
-	// preferences, not the mode of the converted request, and must never
-	// reach the target provider unnormalized.
-	if streamIntent {
-		headers.Set("Accept", "text/event-stream")
-	} else {
-		headers.Set("Accept", "application/json")
-	}
-	headers.Set("Content-Type", "application/json")
-
-	outReq, err := BuildConvertedRequest(r.Context(), r.Method, targetURL.String(), body, headers)
-	if err != nil {
-		return nil, err
-	}
-
-	// Extract the inbound credential from the CLIENT's original headers when
-	// the policy requires inbound credentials, then strip and re-apply per policy.
-	var inbound Credential
-	if h.cfg.Mapping.Auth.Inbound && h.cfg.Mapping.Auth.Mode != AuthNone {
-		var err error
-		inbound, err = ExtractInboundCredential(r.Header)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if err := ApplyTargetAuthentication(
-		r.Context(),
-		outReq,
-		h.cfg.Mapping.UpstreamProtocol,
-		h.cfg.Mapping.Auth,
-		inbound,
-	); err != nil {
-		return nil, err
-	}
-
-	return outReq, nil
-}
-
-// jsonResponse converts a non-streaming upstream response back to the client
-// schema and writes it downstream.
-func (h *TranscodeHandler) jsonResponse(
-	w http.ResponseWriter,
-	r *http.Request,
-	resp *http.Response,
-	context *ExchangeContext,
-) {
-	limit := h.cfg.BodyLimits.SuccessfulResponseBytes
-	if limit <= 0 {
-		limit = 32 << 20
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		if r.Context().Err() != nil && isContextCancellationError(err) {
-			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
-			// A cancelled client context means the exchange is already over.
-			// Return normally: the proxy classifies the abort from the
-			// recorded outcome, and the net/http server tolerates a handler
-			// that returns without writing to a dead connection.
-			return
-		}
-		h.writeDialectHTTPError(r, w, CanonicalAPIError{
-			Status:  http.StatusBadGateway,
-			Type:    "api_error",
-			Code:    "upstream_body_error",
-			Message: "read upstream response: " + err.Error(),
-		}, ProvenanceUpstreamBodyError)
-		return
-	}
-	if int64(len(body)) > limit {
-		h.writeDialectHTTPError(r, w, CanonicalAPIError{
-			Status:  http.StatusBadGateway,
-			Type:    "api_error",
-			Code:    "upstream_response_too_large",
-			Message: "upstream response body exceeds the configured limit",
-		}, ProvenanceUpstreamBodyError)
-		return
-	}
-
-	converted, provenance, err := h.convertResponse(r, body, context)
-	if err != nil {
-		apiErr := CanonicalAPIError{
-			Status:  http.StatusBadGateway,
-			Type:    "api_error",
-			Code:    "response_conversion_error",
-			Message: "convert response: " + err.Error(),
-		}
-		// A typed upstream semantic failure (a 2xx envelope whose payload
-		// reports failure) classifies with the UPSTREAM status and
-		// UpstreamFailure=true, matching the streamed classification
-		// — never a local conversion failure.
-		if _, ok := errors.AsType[*UpstreamSemanticFailureError](err); ok {
-			h.writeUpstreamSemanticFailure(r, w, apiErr, resp.StatusCode)
-			return
-		}
-		// The conversion failure is logged server-side (
-		// a parse-failure cascade must be visible to the operator) in
-		// addition to the bounded client message below. Upstream-authored
-		// semantic-failure text is NOT logged: it is already echoed to the
-		// client and must not enter the server log unbounded.
-		h.logRequestError(r, err)
-		h.writeDialectHTTPError(r, w, apiErr, provenance)
-		return
-	}
-
-	// Sound behavior: strip hop-by-hop headers from the upstream response
-	// BEFORE copying (copyResponseHeaders skips the Connection header, so
-	// Connection-nominated tokens can only be resolved from the source),
-	// then recompute Content-Length after conversion.
-	RemoveHopByHopHeaders(resp.Header)
-	// The complete rendered JSON response is bounded AFTER conversion and
-	// BEFORE any header commits: an oversized body fails the exchange
-	// without a partial response escaping.
-	if int64(len(converted)) > h.cfg.BodyLimits.GeneratedResponseBytes {
-		h.writeDialectHTTPError(r, w, CanonicalAPIError{
-			Status:  http.StatusBadGateway,
-			Type:    "api_error",
-			Code:    "response_conversion_error",
-			Message: "generated response exceeds the configured limit",
-		}, ProvenanceLocalResponseConversionError)
-		return
-	}
-	h.copyResponseHeaders(w.Header(), resp.Header)
-	RemoveTransformedRepresentationHeaders(w.Header())
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(converted)))
-	w.WriteHeader(resp.StatusCode)
-	// A failed write after a client abort must not be recorded as a
-	// successful completion (the streaming path classifies the abort the
-	// same way); a write failure without a client cancel is a downstream
-	// error. A short write (n < len) with a nil error violates the
-	// io.Writer contract — the recorder detects it independently, and the
-	// handler must never record it as a clean completion.
-	n, writeErr := w.Write(converted)
-	if writeErr == nil && n != len(converted) {
-		writeErr = io.ErrShortWrite
-	}
-	switch {
-	case writeErr != nil && r.Context().Err() != nil && isContextCancellationError(writeErr):
-		h.recordOutcome(r, Outcome{
-			// The upstream did respond (headers were committed with the
-			// 2xx status); the client abandoned the exchange mid-write. The
-			// completed upstream success is retained so breaker recovery and
-			// monitoring still see it, matching the sibling error writers.
-			UpstreamAttempted: true,
-			UpstreamStatus:    Optional[int]{Value: resp.StatusCode, Set: true},
-			Provenance:        ProvenanceClientAbort,
-			ClientAborted:     true,
-		})
-	case writeErr != nil:
-		h.recordOutcome(r, Outcome{
-			// A downstream write failure (e.g. a short write) after a
-			// successful upstream response retains the upstream success fact;
-			// only the provenance changes, exactly like the error writers.
-			UpstreamAttempted: true,
-			UpstreamStatus:    Optional[int]{Value: resp.StatusCode, Set: true},
-			Provenance:        ProvenanceDownstreamWriteError,
-		})
-	default:
-		h.recordOutcome(r, Outcome{
-			UpstreamAttempted:  true,
-			UpstreamStatus:     Optional[int]{Value: resp.StatusCode, Set: true},
-			Provenance:         ProvenanceUpstreamHTTP,
-			DownstreamComplete: true,
-		})
-	}
-}
-
-// checkDecodedRequestSize rejects decoded requests that amplify beyond the
-// decoded-request body limit (the decoded limit is separate
-// from the accepted raw-body limit). The typed error renders as 413 in the
-// client dialect, never the generic conversion 400.
-func (h *TranscodeHandler) checkDecodedRequestSize(rendered []byte) error {
-	limit := h.cfg.BodyLimits.DecodedRequestBytes
-	if limit <= 0 {
-		return nil
-	}
-	if int64(len(rendered)) > limit {
-		return errDecodedRequestTooLarge
-	}
-	return nil
-}
-
-// conversionProvenance classifies a response-conversion error: corrupt
-// upstream wire data (UpstreamWireError) is an upstream body failure; valid
-// source features the transcoder does not support (UnsupportedFeatureError),
-// loss-policy rejections, and target-render failures stay local.
-func conversionProvenance(err error) ExchangeProvenance {
-	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
-		return ProvenanceUpstreamBodyError
-	}
-	return ProvenanceLocalResponseConversionError
-}
-
-// convertResponse decodes the upstream JSON response into the canonical IR
-// and renders the client response envelope. The output dialect is determined
-// by the CLIENT protocol, never by the upstream protocol.
-func (h *TranscodeHandler) convertResponse(
-	r *http.Request,
-	body []byte,
-	context *ExchangeContext,
-) ([]byte, ExchangeProvenance, error) {
-	switch h.cfg.Mapping.ClientProtocol {
-	case ClientResponses:
-		switch h.cfg.Mapping.UpstreamProtocol {
-		case UpstreamChatCompletions:
-			response, decodeReport, err := DecodeChatResponseWithPolicy(
-				body,
-				h.cfg.Mapping.ChatCapabilities,
-				h.cfg.Mapping.LossPolicy,
-			)
-			if err != nil {
-				return nil, conversionProvenance(err), err
-			}
-			converted, report, err := RenderResponsesResponse(response, context)
-			if err != nil {
-				return nil, conversionProvenance(err), err
-			}
-			// Opt-in continuity: retain the canonical conversation that
-			// produced the emitted id, so a follow-up carrying it as
-			// previous_response_id can be reconstructed. The envelope id
-			// is minted inside the render (context.IDs), so it is read
-			// back from the converted bytes — response.ID is the upstream
-			// chat id, never the client-visible id. Nothing is retained
-			// when the store is nil (default) or the client sent store:false.
-			h.recordContinuityFromEnvelope(r, context, response, converted)
-			// The decode's provider reasoning drop is part of the same
-			// exchange log as the render's losses (request-side merge
-			// precedent).
-			report.Losses = append(report.Losses, decodeReport.Losses...)
-			h.logConversionReport(report, r, "response")
-			return converted, ProvenanceLocalResponseConversionError, nil
-		default:
-			return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
-				"unsupported upstream protocol %q for responses client",
-				h.cfg.Mapping.UpstreamProtocol,
-			)
-		}
-
-	case ClientMessages:
-		switch h.cfg.Mapping.UpstreamProtocol {
-		case UpstreamChatCompletions:
-			response, decodeReport, err := DecodeChatResponseWithPolicy(
-				body,
-				h.cfg.Mapping.ChatCapabilities,
-				h.cfg.Mapping.LossPolicy,
-			)
-			if err != nil {
-				return nil, conversionProvenance(err), err
-			}
-			converted, report, err := RenderMessagesResponse(response, context)
-			if err != nil {
-				return nil, conversionProvenance(err), err
-			}
-			// The decode's provider reasoning drop is part of the same
-			// exchange log as the render's losses (request-side merge
-			// precedent).
-			report.Losses = append(report.Losses, decodeReport.Losses...)
-			h.logConversionReport(report, r, "response")
-			return converted, ProvenanceLocalResponseConversionError, nil
-
-		case UpstreamResponses:
-			response, err := DecodeResponsesResponse(body)
-			if err != nil {
-				return nil, conversionProvenance(err), err
-			}
-			converted, report, err := RenderMessagesResponse(response, context)
-			if err != nil {
-				return nil, conversionProvenance(err), err
-			}
-			h.logConversionReport(report, r, "response")
-			return converted, ProvenanceLocalResponseConversionError, nil
-
-		default:
-			return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
-				"unsupported upstream protocol %q for messages client",
-				h.cfg.Mapping.UpstreamProtocol,
-			)
-		}
-
-	default:
-		return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
-			"unsupported client protocol %q",
-			h.cfg.Mapping.ClientProtocol,
-		)
-	}
-}
-
-// streamResponse translates an upstream SSE stream into client SSE events,
-// delegating copy and cancellation to stream.Proxy and sealing downstream
-// writes before returning.
-func (h *TranscodeHandler) streamResponse(
-	w http.ResponseWriter,
-	r *http.Request,
-	resp *http.Response,
-	context *ExchangeContext,
-	receivedAt time.Time,
-) {
-	converter, err := h.newFrameConverter(context)
-	if err != nil {
-		// writeLocalError -> writeDialectHTTPError records the outcome
-		// exactly once.
-		h.logRequestError(r, fmt.Errorf("[%s] build stream converter: %s", ProvenanceLocalRequestConversionError, h.boundErrorMessage(err.Error())))
-		h.writeLocalError(r, w,
-			http.StatusInternalServerError, "build stream converter: "+err.Error(),
-			ProvenanceLocalRequestConversionError)
-		return
-	}
-
-	// Copy entity headers without Connection (the SSE writer must not
-	// reintroduce a hop-by-hop header, which is invalid for HTTP/2) and
-	// without transformed-representation headers: the translated stream is
-	// a different representation than the upstream body, so Content-Length,
-	// ETag, and Digest from the upstream would be stale and corrupting.
-	// Connection-nominated tokens are resolved from the upstream source
-	// before the copy (the copy itself skips the Connection header).
-	RemoveHopByHopHeaders(resp.Header)
-	h.copyResponseHeaders(w.Header(), resp.Header)
-	RemoveTransformedRepresentationHeaders(w.Header())
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.WriteHeader(resp.StatusCode)
-
-	reader := newConvertingReaderWithLimits(NewSSEReaderWithLimits(
-		resp.Body,
-		h.cfg.BodyLimits.SSELineBytes,
-		h.cfg.BodyLimits.SSEFrameBytes,
-	), converter,
-		h.cfg.BodyLimits.GeneratedSSEFrameBytes,
-		h.cfg.BodyLimits.GeneratedSSEBatchBytes,
-		h.cfg.BodyLimits.ErrorMessageBytes,
-	)
-	observation := runTranslatedStream(r.Context(), w, resp.Body, reader)
-
-	// DownstreamComplete reflects the actual write state, not the
-	// classification bucket: a converted upstream error frame whose
-	// downstream write failed was never delivered, and the exchange must
-	// not be recorded as a clean completion. The streaming path needs no
-	// short-write check of its own: every downstream frame is written
-	// through sealedSSEWriter.writeAll, which treats a partial write as
-	// io.ErrShortWrite, and the writer's first error surfaces as WriterErr.
-	downstreamComplete := observation.WriterErr == nil && observation.SealErr == nil
-
-	// Classify the outcome from explicit provenance. The classification is
-	// recorded on the outcome  so downstream sinks
-	// observe the truthful stream bucket for every exchange, not the zero
-	// value.
-	var outcome Outcome
-	classification := classifyStreamObservation(observation)
-	outcome.StreamOutcome = classification
-	switch classification {
-	case streamOutcomeSuccess:
-		outcome.UpstreamAttempted = true
-		outcome.UpstreamStatus = Optional[int]{Value: resp.StatusCode, Set: true}
-		outcome.Provenance = ProvenanceUpstreamHTTP
-		outcome.DownstreamComplete = downstreamComplete
-	case streamOutcomeClientAbort:
-		outcome.UpstreamAttempted = true
-		outcome.UpstreamStatus = Optional[int]{Value: resp.StatusCode, Set: true}
-		outcome.Provenance = ProvenanceClientAbort
-		outcome.ClientAborted = true
-	case streamOutcomeUpstreamFailure:
-		outcome.UpstreamAttempted = true
-		outcome.UpstreamStatus = Optional[int]{Value: resp.StatusCode, Set: true}
-		outcome.Provenance = ProvenanceUpstreamBodyError
-		outcome.UpstreamFailure = true
-		outcome.DownstreamComplete = downstreamComplete
-		// A hold signaled on the streamed response is a header fact that
-		// survives the failed stream, anchored at the TRUE header-receipt
-		// time captured when the upstream response arrived: the remaining
-		// hold excludes the stream duration, exactly as the JSON error
-		// writers record it. Set=true whenever the upstream signaled, even
-		// when already expired.
-		outcome.RetryAfter = Optional[time.Duration]{
-			Value: circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, time.Now()),
-			Set:   resp.Header.Get("Retry-After") != "",
-		}
-	case streamOutcomeLocalConversionFailure:
-		outcome.UpstreamAttempted = true
-		outcome.UpstreamStatus = Optional[int]{Value: http.StatusBadGateway, Set: true}
-		outcome.Provenance = ProvenanceLocalResponseConversionError
-		outcome.LocalFailure = true
-		outcome.DownstreamComplete = downstreamComplete
-		h.logStreamConversionError(r, observation.ReaderErr)
-	case streamOutcomeDownstreamFailure:
-		outcome.UpstreamAttempted = true
-		outcome.UpstreamStatus = Optional[int]{Value: resp.StatusCode, Set: true}
-		outcome.Provenance = ProvenanceDownstreamWriteError
-	default:
-		outcome.UpstreamAttempted = true
-		outcome.UpstreamStatus = Optional[int]{Value: resp.StatusCode, Set: true}
-		outcome.Provenance = ProvenanceUpstreamHTTP
-		outcome.DownstreamComplete = downstreamComplete
-	}
-	h.recordOutcome(r, outcome)
-	// The streamed classification ran: the diagnostic record may now report
-	// StreamOutcome (its zero value is a success, so an exchange that never
-	// reached this point must not claim one).
-	flowFromContext(r.Context()).setStreamClassified()
-	// Response-side approved losses are logged with the same fidelity as
-	// request-side losses.
-	h.logConversionReport(*converter.ConversionReport(), r, "response")
-	// Opt-in continuity for streams: on a successful Responses->Chat stream,
-	// retain the conversation that produced the emitted id (request turns +
-	// terminal assistant turns) so a follow-up works exactly like the
-	// non-streaming path. Only the Responses-client/Chat-upstream converter
-	// carries a chatResponsesStreamState; every other direction is a no-op.
-	if classification == streamOutcomeSuccess && h.cfg.Continuity != nil &&
-		h.cfg.Mapping.ClientProtocol == ClientResponses &&
-		h.cfg.Mapping.UpstreamProtocol == UpstreamChatCompletions {
-		if chat, ok := converter.(*chatToResponsesConverter); ok && chat != nil && chat.state != nil {
-			if id, turns, depth, omitted, ok := chat.state.continuityTurns(context.RequestTurns, context.RequestDepth); ok {
-				if omitted > 0 {
-					h.logRequestError(r, fmt.Errorf(
-						"[%s] continuity retained history omitted %d tool call(s) whose arguments are not a JSON object; a follow-up previous_response_id replays without them",
-						ProvenanceLocalResponseConversionError, omitted,
-					))
-				}
-				storeFalse := false
-				if echo := context.OriginalResponsesRequest; echo != nil && echo.Store != nil {
-					storeFalse = !*echo.Store
-				}
-				if dropped := h.cfg.Continuity.RecordEvicted(h.cfg.ContinuityKey, id, turns, depth, storeFalse); dropped > 0 {
-					h.logRequestError(r, fmt.Errorf("[local_response_conversion_error] continuity store evicted %d chain(s) at capacity/TTL bound", dropped))
-				}
-			}
-		}
-	}
-}
-
-// newFrameConverter builds the direction-specific stream converter.
-func (h *TranscodeHandler) newFrameConverter(
-	context *ExchangeContext,
-) (frameConverter, error) {
-	client := h.cfg.Mapping.ClientProtocol
-	upstream := h.cfg.Mapping.UpstreamProtocol
-
-	responseID := context.IDs.New("resp_")
-	createdAt := nowUnix()
-	model := context.RequestedClientModel
-
-	switch {
-	case client == ClientResponses && upstream == UpstreamChatCompletions:
-		state := newChatResponsesStreamState(
-			context,
-			h.cfg.Mapping.LossPolicy,
-			h.cfg.Mapping.ChatCapabilities,
-			responseID,
-			model,
-			createdAt,
-			context.OriginalResponsesRequest,
-		)
-		return newChatToResponsesConverter(state), nil
-
-	case client == ClientMessages && upstream == UpstreamResponses:
-		state := newAnthropicResponsesStreamState(
-			context,
-			h.cfg.Mapping.LossPolicy,
-			h.cfg.Mapping.ChatCapabilities,
-			context.IDs.New("msg_"),
-			model,
-			createdAt,
-		)
-		return newResponsesToAnthropicConverter(state), nil
-
-	case client == ClientMessages && upstream == UpstreamChatCompletions:
-		chat := newChatResponsesStreamState(
-			context,
-			h.cfg.Mapping.LossPolicy,
-			h.cfg.Mapping.ChatCapabilities,
-			responseID,
-			model,
-			createdAt,
-			nil, // Responses envelope is internal to the composition
-		)
-		anthropic := newAnthropicResponsesStreamState(
-			context,
-			h.cfg.Mapping.LossPolicy,
-			h.cfg.Mapping.ChatCapabilities,
-			context.IDs.New("msg_"),
-			model,
-			createdAt,
-		)
-		return newChatToAnthropicConverter(chat, anthropic), nil
-
-	default:
-		return nil, fmt.Errorf(
-			"unsupported stream direction %q -> %q",
-			client,
-			upstream,
-		)
-	}
-}
-
-// writeLocalError writes a plain-text local error. Dialect-correct rendering
-// is used for API errors; local infrastructure errors are plain text because
-// they are not provider API errors.
-func (h *TranscodeHandler) writeLocalError(
-	r *http.Request,
-	w http.ResponseWriter,
-	status int,
-	message string,
-	provenance ExchangeProvenance,
-) {
-	apiErr := CanonicalAPIError{
-		Status:  status,
-		Type:    typeForStatus(status),
-		Code:    codeForStatus(status),
-		Message: message,
-	}
-	h.writeDialectHTTPError(r, w, apiErr, provenance)
-}
-
-// WriteCommittedStreamError failed-closes an already-committed SSE stream
-// with a client-dialect error event. The re-declared WriteHeader never
-// reaches the wire (the proxy's committed-stream guard silences it and
-// marks the exchange aborted); the SSE error frame is the observable
-// failure. A failed downstream write is returned so the outcome records
-// the delivery fact exactly like the JSON error writers.
-//
-// It is exported so a route-selection refusal that happens before any
-// handler runs (the multi-target dispatcher) emits exactly the frame the
-// handler's own post-commit error path emits, instead of a second spelling
-// of the same wire event.
-func WriteCommittedStreamError(
-	w http.ResponseWriter,
-	client ClientProtocol,
-	apiErr CanonicalAPIError,
-) error {
-	apiErr = normalizeCanonicalError(apiErr)
-	// A writer that owns a failed-close comment (the proxy's committed-stream
-	// recorder) must not add its own upstream-blame close once this terminal
-	// is framed: the failure is local, or already stated by the dialect
-	// event, and a second close comment would misreport the cause. The
-	// recorder sits behind diagnostic wrappers, so the chain is walked.
-	for cur := w; cur != nil; {
-		if suppressor, ok := cur.(interface{ SuppressFailedCloseComment() }); ok {
-			suppressor.SuppressFailedCloseComment()
-			break
-		}
-		unwrapper, ok := cur.(interface{ Unwrap() http.ResponseWriter })
-		if !ok {
-			break
-		}
-		cur = unwrapper.Unwrap()
-	}
-	w.WriteHeader(apiErr.Status)
-	var payload []byte
-	var err error
-	switch client {
-	case ClientMessages:
-		payload, err = json.Marshal(AnthropicStreamEvent{
-			Type: AnthropicStreamEventTypeError,
-			Error: &AnthropicStreamError{
-				Type:    anthropicErrorType(apiErr),
-				Message: apiErr.Message,
-			},
-		})
-	case ClientResponses:
-		code := apiErr.Code
-		if code == "" {
-			code = "conversion_error"
-		}
-		payload, err = json.Marshal(ResponseErrorEvent{
-			Type:           "error",
-			SequenceNumber: 0,
-			Code:           code,
-			Message:        apiErr.Message,
-			Param:          "",
-		})
-	default:
-		return fmt.Errorf("unknown client error dialect %q", client)
-	}
-	if err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(w, "event: error\ndata: %s\n\n", payload); err != nil {
-		return err
-	}
-	return http.NewResponseController(w).Flush()
-}
-
-// writeDialectOrCommittedStreamError renders the canonical error as a dialect-legal
-// SSE error event when the streaming representation was already committed, or as a
-// standard dialect HTTP JSON error otherwise.
-func (h *TranscodeHandler) writeDialectOrCommittedStreamError(
-	r *http.Request,
-	w http.ResponseWriter,
-	client ClientProtocol,
-	apiErr CanonicalAPIError,
-) error {
-	if CommittedStreamFromContext(r.Context()) {
-		return WriteCommittedStreamError(w, client, apiErr)
-	}
-	return WriteDialectHTTPError(w, client, apiErr)
-}
-
-func (h *TranscodeHandler) writeCircuitOpenError(r *http.Request, w http.ResponseWriter) {
-	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
-	apiErr := CanonicalAPIError{
-		Status:  http.StatusServiceUnavailable,
-		Type:    "api_error",
-		Code:    "circuit_open",
-		Message: "circuit open",
-	}
-	apiErr.Message = h.boundErrorMessage(apiErr.Message)
-	writeErr := h.writeDialectOrCommittedStreamError(r, w, client, apiErr)
-	outcome := Outcome{
-		UpstreamAttempted: false,
-		UpstreamStatus:    Optional[int]{Value: http.StatusServiceUnavailable, Set: true},
-		Provenance:        ProvenanceLocalRequestConversionError,
-		UpstreamFailure:   false,
-		LocalFailure:      true,
-		CircuitRejected:   true,
-	}
-	if writeErr != nil {
-		if r.Context().Err() != nil {
-			outcome.Provenance = ProvenanceClientAbort
-			outcome.ClientAborted = true
-		} else {
-			outcome.Provenance = ProvenanceDownstreamWriteError
-		}
-	} else {
-		outcome.DownstreamComplete = true
-	}
-	h.recordOutcome(r, outcome)
-}
-
-// writeUpstreamHTTPError renders a non-2xx upstream response in the client
-// dialect. The failure classification uses the response-aware breaker
-// semantics (IsFailureStatusWithHeaders) so 429, 5xx, and 403 with
-// rate-limit signals (Retry-After or x-ratelimit-* headers) are upstream
-// failures — matching the native passthrough path exactly. The Retry-After
-// from the ORIGINAL upstream response is recorded on the outcome so a
-// rate-signalled 403 keeps its hold signal even when the rendered client
-// error cannot carry the upstream rate-limit headers.
-func (h *TranscodeHandler) writeUpstreamHTTPError(
-	r *http.Request,
-	w http.ResponseWriter,
-	resp *http.Response,
-	receivedAt time.Time,
-	apiErr CanonicalAPIError,
-) {
-	// Evaluate the failure classification and Retry-After at outcome
-	// construction time, anchored at header receipt: the error body was read
-	// between the two, and the hold must measure from when the headers
-	// arrived.
-	evaluatedAt := time.Now()
-	upstreamFailure := circuitbreaker.IsFailureStatusWithHeaders(
-		apiErr.Status,
-		resp.Header,
-		receivedAt,
-		evaluatedAt,
-	)
-	retryAfter := circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, evaluatedAt)
-	outcome := Outcome{
-		UpstreamAttempted: true,
-		UpstreamStatus:    Optional[int]{Value: apiErr.Status, Set: true},
-		Provenance:        ProvenanceUpstreamHTTP,
-		UpstreamFailure:   upstreamFailure,
-		// Set=true whenever the upstream SIGNALED a hold, even when it has
-		// already expired (a zero remaining hold is present-but-expired);
-		// Set=false when no hold was signaled.
-		RetryAfter: Optional[time.Duration]{
-			Value: retryAfter,
-			Set:   resp.Header.Get("Retry-After") != "",
-		},
-	}
-	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
-	apiErr.Message = h.boundErrorMessage(apiErr.Message)
-	if err := h.writeDialectOrCommittedStreamError(r, w, client, apiErr); err != nil {
-		// A failed downstream write is a fact about the exchange, not a
-		// log line: the translated error was never delivered. The recorded
-		// provenance changes to the downstream failure (or a client abort
-		// when the context is cancelled) while the upstream facts (status,
-		// failure, retry-after) are retained so the breaker still sees a
-		// definitive upstream failure.
-		if r.Context().Err() != nil {
-			outcome.Provenance = ProvenanceClientAbort
-			outcome.ClientAborted = true
-		} else {
-			outcome.Provenance = ProvenanceDownstreamWriteError
-		}
-	} else {
-		outcome.DownstreamComplete = true
-	}
-	h.recordOutcome(r, outcome)
-}
-
-// writeUpstreamBodyError renders a client-dialect error for a failed
-// non-2xx upstream body transfer: the error body could not be read within
-// its bound, so the upstream's own status cannot be trusted as the exchange
-// outcome. The exchange is recorded as an upstream body failure regardless
-// of the status — a truncated 400 is never a healthy non-failure. A failed downstream write changes the provenance exactly like
-// the other error writers while the upstream failure fact is retained.
-func (h *TranscodeHandler) writeUpstreamBodyError(
-	r *http.Request,
-	w http.ResponseWriter,
-	resp *http.Response,
-	receivedAt time.Time,
-	apiErr CanonicalAPIError,
-) {
-	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
-	apiErr.Message = h.boundErrorMessage(apiErr.Message)
-	writeErr := h.writeDialectOrCommittedStreamError(r, w, client, apiErr)
-	retryAfter := circuitbreaker.ParseRetryAfter(resp.Header, receivedAt, time.Now())
-	outcome := Outcome{
-		UpstreamAttempted: true,
-		UpstreamStatus:    Optional[int]{Value: apiErr.Status, Set: true},
-		Provenance:        ProvenanceUpstreamBodyError,
-		UpstreamFailure:   true,
-		// The upstream's Retry-After is a header fact that survives the
-		// failed body transfer: the rate-signalled hold must be recorded
-		// even when the error body could not be read, anchored at header
-		// receipt. Set=true whenever the
-		// upstream signaled a hold, even when it has already expired.
-		RetryAfter: Optional[time.Duration]{
-			Value: retryAfter,
-			Set:   resp.Header.Get("Retry-After") != "",
-		},
-	}
-	if writeErr != nil {
-		if r.Context().Err() != nil {
-			outcome.Provenance = ProvenanceClientAbort
-			outcome.ClientAborted = true
-		} else {
-			outcome.Provenance = ProvenanceDownstreamWriteError
-		}
-	} else {
-		outcome.DownstreamComplete = true
-	}
-	h.recordOutcome(r, outcome)
-}
-
-// writeUpstreamSemanticFailure renders a client-dialect error for a typed
-// upstream semantic failure (a 2xx envelope whose payload reports failure)
-// and records the outcome with the upstream's HTTP status and
-// UpstreamFailure=true, matching the streamed response.failed classification
-// A failed downstream write changes the provenance
-// exactly like the other error writers.
-func (h *TranscodeHandler) writeUpstreamSemanticFailure(
-	r *http.Request,
-	w http.ResponseWriter,
-	apiErr CanonicalAPIError,
-	upstreamStatus int,
-) {
-	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
-	apiErr.Message = h.boundErrorMessage(apiErr.Message)
-	writeErr := h.writeDialectOrCommittedStreamError(r, w, client, apiErr)
-	outcome := Outcome{
-		UpstreamAttempted: true,
-		UpstreamStatus:    Optional[int]{Value: upstreamStatus, Set: true},
-		Provenance:        ProvenanceUpstreamHTTP,
-		UpstreamFailure:   true,
-	}
-	if writeErr != nil {
-		if r.Context().Err() != nil {
-			outcome.Provenance = ProvenanceClientAbort
-			outcome.ClientAborted = true
-		} else {
-			outcome.Provenance = ProvenanceDownstreamWriteError
-		}
-	} else {
-		outcome.DownstreamComplete = true
-	}
-	h.recordOutcome(r, outcome)
-}
-
-// writeDialectHTTPError renders a canonical error in the client dialect and
-// records the outcome. UpstreamFailure is derived from explicit provenance:
-// only definitive upstream outcomes (transport errors and upstream HTTP >=
-// 500) are upstream failures; local conversion errors are not. A failed
-// downstream write changes the recorded provenance to the downstream failure
-// (or a client abort when the context is cancelled) instead of being logged
-// and ignored.
-func (h *TranscodeHandler) writeDialectHTTPError(
-	r *http.Request,
-	w http.ResponseWriter,
-	apiErr CanonicalAPIError,
-	provenance ExchangeProvenance,
-) {
-	client := ClientProtocol(h.cfg.Mapping.ClientProtocol)
-	// Every client-visible error message respects the configured
-	// ErrorMessageBytes bound.
-	apiErr.Message = h.boundErrorMessage(apiErr.Message)
-	writeErr := h.writeDialectOrCommittedStreamError(r, w, client, apiErr)
-	upstreamFailure := false
-	switch provenance {
-	case ProvenanceUpstreamTransportError:
-		upstreamFailure = true
-	case ProvenanceUpstreamHTTP, ProvenanceUpstreamBodyError:
-		// Match the proxy's breaker classification (IsFailureStatus /
-		// IsFailureStatusWithHeaders): 429 and 5xx are failures, and 403 is
-		// a failure only when it carries a rate-limit signal (Retry-After).
-		//
-		// Disposition (no change): the upstream-failure
-		// classification of body errors is pinned — a body
-		// violating the wire contract IS an upstream health signal, and a
-		// consistently-poisonous upstream SHOULD open the breaker
-		// (TestHandlerCorruptUpstreamResponseIsUpstreamFailure). The
-		// field-observed poison sources are eliminated at the decode layer
-		// (the upstream-failure classification), not by widening breaker tolerance here.
-		upstreamFailure = apiErr.Status == http.StatusTooManyRequests ||
-			(apiErr.Status >= 500 && apiErr.Status < 600) ||
-			(apiErr.Status == http.StatusForbidden && apiErr.RetryAfter != "")
-	}
-	outcome := Outcome{
-		// The attempt fact reflects whether an upstream request was
-		// dispatched: local REQUEST conversion and signing errors never
-		// are; upstream HTTP/body/transport outcomes and local RESPONSE
-		// conversion errors are.
-		UpstreamAttempted: provenance != ProvenanceLocalRequestConversionError,
-		UpstreamStatus:    Optional[int]{Value: apiErr.Status, Set: true},
-		Provenance:        provenance,
-		UpstreamFailure:   upstreamFailure,
-		LocalFailure: provenance == ProvenanceLocalRequestConversionError ||
-			provenance == ProvenanceLocalResponseConversionError ||
-			provenance == ProvenanceLocalStreamValidationError,
-	}
-	if writeErr != nil {
-		// The translated error was never delivered: the exchange did not
-		// complete cleanly. Change the provenance to the downstream failure
-		// (or a client abort when the context is cancelled); retained
-		// upstream facts (status, failure) still classify the exchange.
-		if r.Context().Err() != nil {
-			outcome.Provenance = ProvenanceClientAbort
-			outcome.ClientAborted = true
-		} else {
-			outcome.Provenance = ProvenanceDownstreamWriteError
-		}
-	} else {
-		outcome.DownstreamComplete = true
-	}
-	h.recordOutcome(r, outcome)
-}
-
-// recordOutcome forwards the outcome to the proxy breaker hook and, when an
-// outcome sink is present on the request context, to the proxy's per-request
-// provenance reader.
 func (h *TranscodeHandler) recordOutcome(r *http.Request, outcome Outcome) {
 	// Diagnostic tap: stash the outcome on the per-exchange flow capture.
 	if r != nil {
@@ -1699,390 +523,83 @@ func (h *TranscodeHandler) recordOutcome(r *http.Request, outcome Outcome) {
 // entity metadata, and provider extension headers — is stripped: the
 // translated response is a new representation and the client's origin must
 // not receive cross-provider control signals.
-func (h *TranscodeHandler) copyResponseHeaders(dst, src http.Header) {
-	for name, values := range src {
-		if !isAllowedResponseHeader(name) {
-			continue
-		}
-		for _, value := range values {
-			dst.Add(name, value)
-		}
-	}
+
+type HandlerConfig struct {
+	// Mapping is the validated route mapping.
+	Mapping Mapping
+
+	// Upstream is the upstream base URL.
+	Upstream *url.URL
+
+	// BodyLimits are the independent request/response body limits.
+	BodyLimits BodyLimits
+
+	// FlowLogDir, when non-empty, is an existing directory that receives one
+	// JSON record per transcoded exchange capturing the full flow (client
+	// request, converted upstream request, upstream response, downstream
+	// response, conversion reports, outcome). The directory is validated by
+	// the constructing caller (the proxy), never created here, and the
+	// records are unredacted: treat the directory as secret-bearing.
+	FlowLogDir string
+
+	// Continuity, when non-nil, is the opt-in bounded per-conversation
+	// store behind the statefulness decision (OFF by default: nil means no
+	// retention, and previous_response_id keeps its existing observable
+	// loss). When set, the handler records the canonical conversation that
+	// produced each emitted Responses id and resolves a later request's
+	// previous_response_id against it; a miss degrades to the existing
+	// loss, never a failure. ContinuityKey scopes retained ids to the
+	// provider mapping that emitted them.
+	Continuity    *ContinuityStore
+	ContinuityKey string
 }
 
-// isAllowedResponseHeader reports whether an upstream response header may be
-// exposed on a transcoded route. The allowed set is the request-id family and
-// the rate-limit informational headers of the pinned providers (OpenAI
-// x-ratelimit-*, Anthropic anthropic-ratelimit-*), plus Retry-After.
-func isAllowedResponseHeader(name string) bool {
-	lower := strings.ToLower(name)
-	switch lower {
-	case "x-request-id", "request-id", "x-amzn-requestid",
-		"x-amz-request-id", "x-amz-id-2", "retry-after":
-		return true
-	}
-	return strings.HasPrefix(lower, "x-ratelimit-") ||
-		strings.HasPrefix(lower, "anthropic-ratelimit-")
+// RoundTrip executes an outbound HTTP request through the proxy engine.
+
+type RoundTrip func(*http.Request) (*http.Response, error)
+
+// ExchangeProvenance is the explicit outcome provenance recorded for breaker
+// accounting. Breaker health is derived from provenance, never from the final
+// status code alone.
+//
+// https://platform.openai.com/docs/guides/error-codes/api-errors
+
+type ExchangeProvenance uint8
+
+// ExchangeProvenance values.
+const (
+	ProvenanceUpstreamHTTP ExchangeProvenance = iota
+	ProvenanceUpstreamTransportError
+	ProvenanceUpstreamBodyError
+	ProvenanceClientAbort
+	ProvenanceDownstreamWriteError
+	ProvenanceLocalRequestConversionError
+	ProvenanceLocalResponseConversionError
+	ProvenanceLocalStreamValidationError
+)
+
+type OutcomeFunc func(Outcome)
+
+// TranscodeHandler intercepts requests for a transcoded route, converts the
+// payload to the upstream schema, forwards through the proxy engine, and
+// converts the response back to the client schema. Streaming responses are
+// translated incrementally through the state machines.
+//
+// The stream path uses stream.Proxy as the mandated bidirectional copy and
+// cancellation boundary. The converted HTTP request body has already been
+// submitted by RoundTrip; stream.Proxy's local EOF triggers the configured
+// adapter soft-close; the handler owns downstream sealing and body closure;
+// the tests verify translated-stream continuation and cancellation, not a new
+// transport-level request-body half-close mechanism.
+
+type TranscodeHandler struct {
+	cfg       HandlerConfig
+	roundTrip RoundTrip
+	outcomeFn OutcomeFunc
 }
 
-// isEventStreamMediaType reports whether the media type is exactly
-// text/event-stream, shared by the Accept parsing and the response
-// Content-Type matching.
-func isEventStreamMediaType(mediaType string) bool {
-	return mediaType == "text/event-stream"
-}
-
-// acceptRange is one parsed media range of an Accept header.
-type acceptRange struct {
-	mediaType string  // lowercased
-	q         float64 // 0..1
-	order     int     // position in the header; the first range is 0
-}
-
-// splitAcceptRanges splits an Accept header into its media ranges on commas
-// that are outside quoted strings. RFC 9110 quoted-string parameter values
-// may contain commas (and backslash-escaped characters); splitting naively
-// on every comma would destroy such a range.
-func splitAcceptRanges(accept string) []string {
-	var parts []string
-	start := 0
-	inQuotes := false
-	escaped := false
-	for i := 0; i < len(accept); i++ {
-		switch c := accept[i]; {
-		case escaped:
-			escaped = false
-		case inQuotes && c == '\\':
-			escaped = true
-		case c == '"':
-			inQuotes = !inQuotes
-		case c == ',' && !inQuotes:
-			parts = append(parts, accept[start:i])
-			start = i + 1
-		}
-	}
-	return append(parts, accept[start:])
-}
-
-// parseAcceptRanges parses every media range of an Accept header. Ranges
-// that fail to parse, or whose q value is outside 0..1, are skipped: a
-// malformed range expresses no usable preference and is ignored — it never
-// decides and never disturbs the ordering of the ranges around it.
-func parseAcceptRanges(accept string) []acceptRange {
-	var ranges []acceptRange
-	for order, part := range splitAcceptRanges(accept) {
-		mediaType, params, err := mime.ParseMediaType(part)
-		if err != nil {
-			continue
-		}
-		r := acceptRange{mediaType: mediaType, q: 1, order: order}
-		if raw, ok := params["q"]; ok {
-			q, err := strconv.ParseFloat(raw, 64)
-			// math.IsNaN rejects NaN, which passes the numeric bounds check
-			// (NaN compares false against everything) and would otherwise
-			// poison same-specificity selection as an undefeatable exclusion.
-			if err != nil || math.IsNaN(q) || q < 0 || q > 1 {
-				continue
-			}
-			r.q = q
-		}
-		ranges = append(ranges, r)
-	}
-	return ranges
-}
-
-// acceptPreference is the client's preference for one representation derived
-// from an Accept header.
-type acceptPreference struct {
-	acceptable  bool    // the representation is not excluded (see below)
-	q           float64 // effective quality of the deciding range
-	specificity int     // specificity of the deciding range
-	order       int     // position of the deciding range
-}
-
-// effectiveAcceptPreference derives the client's preference for mediaType
-// from parsed Accept ranges, matched by the exact type, typeWildcard, or
-// */*. The most specific applicable range determines the representation's
-// quality (RFC 9110 §12.5.1): a q=0 exact exclusion wins over a later */*,
-// and a less specific range never dilutes the most specific decision. Among
-// equally specific ranges the highest q wins, and the earliest such range
-// decides order ties. A representation with no applicable range is
-// acceptable by default (RFC 9110: unmentioned representations are
-// acceptable); it is excluded only when an applicable range exists and the
-// most specific tier's quality is 0.
-func effectiveAcceptPreference(ranges []acceptRange, mediaType, typeWildcard string) acceptPreference {
-	var best acceptPreference
-	best.specificity = -1
-	for _, r := range ranges {
-		specificity := -1
-		switch r.mediaType {
-		case mediaType:
-			specificity = 2
-		case typeWildcard:
-			specificity = 1
-		case "*/*":
-			specificity = 0
-		}
-		if specificity < 0 {
-			continue
-		}
-		if specificity > best.specificity ||
-			specificity == best.specificity &&
-				(r.q > best.q || r.q == best.q && r.order < best.order) {
-			best = acceptPreference{
-				q:           r.q,
-				specificity: specificity,
-				order:       r.order,
-			}
-		}
-	}
-	best.acceptable = !(best.specificity >= 0 && best.q == 0)
-	return best
-}
-
-// AcceptIsEventStream reports whether the client's Accept header selects
-// text/event-stream as the most-preferred acceptable representation over
-// application/json. Every media range is parsed (media type and q); a q=0
-// range excludes the representation it names (an unmentioned representation
-// remains acceptable by default); malformed ranges are ignored. When exactly
-// one representation is acceptable it is selected; otherwise the documented
-// precedence applies: (1) effective quality, where the most specific
-// applicable range determines a representation's quality; (2) specificity
-// (exact type over type/* over */*); (3) order of appearance in the header.
-// A tie that remains (e.g. Accept: */*, or no acceptable representation at
-// all) defaults to application/json, the non-streaming representation.
-func AcceptIsEventStream(accept string) bool {
-	ranges := parseAcceptRanges(accept)
-	sse := effectiveAcceptPreference(ranges, "text/event-stream", "text/*")
-	jsonPref := effectiveAcceptPreference(ranges, "application/json", "application/*")
-	if !sse.acceptable && !jsonPref.acceptable {
-		return false
-	}
-	if !jsonPref.acceptable {
-		return true
-	}
-	if !sse.acceptable {
-		return false
-	}
-	if sse.q != jsonPref.q {
-		return sse.q > jsonPref.q
-	}
-	if sse.specificity != jsonPref.specificity {
-		return sse.specificity > jsonPref.specificity
-	}
-	if sse.order != jsonPref.order {
-		return sse.order < jsonPref.order
-	}
-	return false
-}
-
-// isEventStream reports whether the response is an SSE stream, matched by
-// media type exactly — text/event-streaming and other lookalikes are not
-// streams.
-func isEventStream(resp *http.Response) bool {
-	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	return err == nil && isEventStreamMediaType(mediaType)
-}
-
-// isJSON reports whether the response is JSON: the application/json media
-// type or a structured-syntax-suffix member of the JSON family
-// (application/*+json). application/notjson and other lookalikes are not
-// JSON. The structured-syntax suffix "+json" matches
-// only within the application tree:
-// text/example+json is NOT JSON, per RFC 6839 — the suffix is only defined
-// for application/*.
-func isJSON(resp *http.Response) bool {
-	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	if err != nil {
-		return false
-	}
-	if mediaType == "application/json" {
-		return true
-	}
-	base, _, ok := strings.Cut(mediaType, "/")
-	if !ok || base != "application" {
-		return false
-	}
-	return strings.HasSuffix(mediaType, "+json")
-}
-
-// IsUpgradeRequest reports whether the request carries an Upgrade token.
-// It is the single upgrade classifier shared by the transcode handler and
-// the natively served routes, so both boundaries classify identically. A nil
-// request (or one with a nil Header, as a hand-built request may carry)
-// carries no upgrade token, matching the pre-unification native helper.
-func IsUpgradeRequest(r *http.Request) bool {
-	if r == nil || r.Header == nil {
-		return false
-	}
-	return isUpgradeRequest(r)
-}
-
-// isUpgradeRequest reports whether the request carries an Upgrade token.
-func isUpgradeRequest(r *http.Request) bool {
-	if len(r.Header.Values("Upgrade")) > 0 {
-		return true
-	}
-	for _, value := range r.Header.Values("Connection") {
-		for token := range strings.SplitSeq(value, ",") {
-			if strings.EqualFold(strings.TrimSpace(token), "upgrade") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// isContextCancellationError reports whether the error is cancellation-derived
-// (context.Canceled or context.DeadlineExceeded, possibly wrapped). Client
-// abort suppression applies only to such errors: an unrelated transport or
-// body failure racing with a client cancellation must win as its true
-// classification.
-func isContextCancellationError(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
-}
-
-// nowUnix returns the current unix time in seconds as a float64: the
-// Responses contract's created_at is float64, so the generated stream
-// identity timestamps share the type end-to-end.
-func nowUnix() float64 {
-	return float64(time.Now().Unix())
-}
-
-// derefInt returns the value of v, or 0 when v is nil.
-func derefInt(v *int) int {
-	if v == nil {
-		return 0
-	}
-	return *v
-}
-
-// logConversionReport logs approved losses and notes for observability. It
-// aggregates ALL entries of one conversion into a SINGLE line for the given
-// stage (request/response), so a route whose defaults approve several losses
-// does not flood the log/TUI with one line per loss. Each entry is classified:
-// an approved loss (the policy allows it) is logged as `feature at path`; a
-// Note (a sanctioned encoding recorded WITHOUT a policy decision, losses.go
-// Note) is logged as `note: feature at path: <detail>`, because the startup
-// summary only covers the policy's Allowed set. The header is `approved
-// loss(es)` when every entry is an approved loss, else `loss(es)/note(s)`.
-// Duplicate feature@path entries are deduped preserving first-seen order.
-func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.Request, stage string) {
-	flowFromContext(r.Context()).addReport(stage, report)
-	if len(report.Losses) == 0 {
-		return
-	}
-	seen := make(map[string]struct{}, len(report.Losses))
-	var entries []string
-	anyNote := false
-	for _, loss := range report.Losses {
-		key := fmt.Sprintf("%s at %s", loss.Feature, loss.Path)
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		if loss.Kind == LossRecord {
-			entries = append(entries, key)
-		} else {
-			anyNote = true
-			if loss.Detail != "" {
-				entries = append(entries, fmt.Sprintf("note: %s: %s", key, loss.Detail))
-			} else {
-				entries = append(entries, fmt.Sprintf("note: %s", key))
-			}
-		}
-	}
-	if len(entries) == 0 {
-		return
-	}
-	if report.Dropped > 0 {
-		entries = append(entries, fmt.Sprintf(
-			"note: report_overflow: %d further entries dropped after the bound (the report-overflow bound)",
-			report.Dropped,
-		))
-	}
-	header := "approved loss(es)"
-	if anyNote {
-		header = "loss(es)/note(s)"
-	}
-	log.Printf(
-		"transcode: %s %s: %s %s: %s",
-		r.Method,
-		r.URL.Path,
-		stage,
-		header,
-		strings.Join(entries, ", "),
-	)
-}
-
-// boundErrorMessage truncates a client-visible error message to the
-// configured ErrorMessageBytes bound. It delegates to the shared
-// BoundErrorMessage so the bound policy has exactly one home.
-func (h *TranscodeHandler) boundErrorMessage(message string) string {
-	return BoundErrorMessage(message, h.cfg.BodyLimits.ErrorMessageBytes)
-}
-
-// logSafeText makes text safe to place in ONE operator log line. Every byte
-// a client can influence must be neutralized: error text routinely embeds raw
-// client JSON (encoding/json puts the offending KEY into UnmarshalTypeError,
-// and a decoded key may contain a newline), and the request target is bounded
-// only by net/http's header limit. Without this, a single request could
-// inject a newline and forge a fully-formed "transcode: ..." operator line -
-// which the TUI log ring would then render as its own entry. Control
-// characters are escaped rather than dropped so the evidence survives, and the
-// result is length-bounded so one request cannot flood the log.
-func logSafeText(s string) string {
-	const maxLoggedField = 512
-	var b strings.Builder
-	b.Grow(len(s))
-	for _, r := range s {
-		switch {
-		case r == '\n':
-			b.WriteString(`\n`)
-		case r == '\r':
-			b.WriteString(`\r`)
-		case r == '\t':
-			b.WriteString(`\t`)
-		case r < 0x20 || r == 0x7f:
-			b.WriteString(`\x`)
-			const hex = "0123456789abcdef"
-			b.WriteByte(hex[(r>>4)&0xf])
-			b.WriteByte(hex[r&0xf])
-		default:
-			b.WriteRune(r)
-		}
-		if b.Len() >= maxLoggedField {
-			b.WriteString("…")
-			return b.String()
-		}
-	}
-	return b.String()
-}
-
-// logRequestError logs a local failure with its detail (never the client
-// message): local construction and conversion failures are logged,
-// sanitized, and reported neutrally (the conversion-failure path stays
-// observable to the operator).
-func (h *TranscodeHandler) logRequestError(r *http.Request, err error) {
-	log.Printf("transcode: %s %s: %v",
-		logSafeText(r.Method), logSafeText(r.URL.Path), logSafeText(err.Error()))
-}
-
-// logStreamConversionError records the operator-visible reason a live
-// translated stream failed locally: the client gets the dialect error event,
-// but without this line the log shows nothing. A stream that ran out without
-// a terminal has no converter error, only that fact.
-func (h *TranscodeHandler) logStreamConversionError(r *http.Request, cause error) {
-	detail := "the upstream stream ended before a terminal event and no local error event was written"
-	if cause != nil && !errors.Is(cause, io.EOF) {
-		detail = h.boundErrorMessage(cause.Error())
-	}
-	h.logRequestError(r, fmt.Errorf("[%s] convert stream response: %s", ProvenanceLocalResponseConversionError, detail))
-}
-
-// sanitizeUpstreamTransportError redacts credential-bearing URL query values
-// from an upstream transport error before it is logged, with the same
-// guarantees as the native path (auth.SanitizeURLError).
-func sanitizeUpstreamTransportError(err error) error {
-	return auth.SanitizeURLError(err)
-}
+// NewTranscodeHandler returns a handler for the given configuration. The
+// configuration is validated at construction, never on the first request: a
+// nil round trip would panic at request time, negative body limits would be
+// silently defaulted, and an invalid mapping or upstream would fail
+// mid-exchange.
