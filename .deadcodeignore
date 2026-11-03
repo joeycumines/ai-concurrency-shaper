@@ -104,3 +104,25 @@ internal/transcode/testcorpus/*
 *unreachable func: geminiOutputPart
 *unreachable func: geminiFinishReason
 *unreachable func: geminiResponseUsage
+
+# Messages render/decode direction (Messages -> Messages render path and
+# upstream response decode), staged ahead of its handler wiring: pinned by
+# the committed messagesrequest_test.go / messagesresponse_test.go.
+*unreachable func: RenderMessagesRequest
+*unreachable func: DecodeMessagesResponse
+*unreachable func: messagesMaxTokens
+*unreachable func: renderMessagesTurns
+*unreachable func: sawDialogAfterSystem
+*unreachable func: messagesSystemBlocks
+*unreachable func: messagesTurn
+*unreachable func: messagesToolResultBlock
+*unreachable func: messagesResultContent
+*unreachable func: messagesMediaBlock
+*unreachable func: messagesSource
+*unreachable func: renderMessagesTools
+*unreachable func: messagesToolChoice
+*unreachable func: renderMessagesMetadata
+*unreachable func: messagesUsage
+*unreachable func: messagesStop
+*unreachable func: messagesItems
+*unreachable func: derefString
