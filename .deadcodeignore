@@ -93,3 +93,14 @@ internal/transcode/testcorpus/*
 *unreachable func: geminiField
 *unreachable func: geminiModalities
 *unreachable func: geminiObjectSchema
+
+# Gemini response decode/render direction, staged ahead of its handler
+# wiring: pinned by the committed geminiresponse_test.go /
+# geminiresponserender_test.go.
+*unreachable func: DecodeGeminiResponse
+*unreachable func: RenderGeminiResponse
+*unreachable func: jsonObjectShaped
+*unreachable func: geminiResponseParts
+*unreachable func: geminiOutputPart
+*unreachable func: geminiFinishReason
+*unreachable func: geminiResponseUsage
