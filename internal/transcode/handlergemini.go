@@ -32,9 +32,10 @@ var errGeminiQueryCredential = errors.New(
 // and logged. The scan runs over the raw query, not parsed url.Values:
 // url.ParseQuery silently drops pairs whose key or value fails QueryUnescape
 // (e.g. key=secret%zz), which would bypass the check, and it drops
-// ';'-delimited segments entirely.
+// ';'-delimited segments entirely. Both '&' and ';' delimit pairs here, so a
+// credential after a ';' (?foo=1;key=SECRET) is still found.
 func HasQueryCredential(rawQuery string) bool {
-	for pair := range strings.SplitSeq(rawQuery, "&") {
+	for _, pair := range rawQueryPairs(rawQuery) {
 		name, _, _ := strings.Cut(pair, "=")
 		if unescaped, err := url.QueryUnescape(name); err == nil {
 			name = unescaped
@@ -51,16 +52,22 @@ func HasQueryCredential(rawQuery string) bool {
 	return false
 }
 
+// rawQueryPairs splits a raw query into its non-empty pairs, treating both
+// '&' and ';' as delimiters: net/http keeps ';' in RawQuery, and a scan that
+// split only on '&' would read "foo=1;key=SECRET" as one pair named foo.
+func rawQueryPairs(rawQuery string) []string {
+	return strings.FieldsFunc(rawQuery, func(r rune) bool {
+		return r == '&' || r == ';'
+	})
+}
+
 // parseQueryTolerant parses a raw query into url.Values, keeping pairs whose
 // value fails to unescape (with the raw value) so alt validation still sees
 // them; only the credential scan must see malformed pairs, and it runs on
 // the raw query before this.
 func parseQueryTolerant(rawQuery string) url.Values {
 	query := make(url.Values)
-	for pair := range strings.SplitSeq(rawQuery, "&") {
-		if pair == "" {
-			continue
-		}
+	for _, pair := range rawQueryPairs(rawQuery) {
 		name, value, _ := strings.Cut(pair, "=")
 		if unescaped, err := url.QueryUnescape(name); err == nil {
 			name = unescaped

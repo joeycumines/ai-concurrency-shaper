@@ -2,6 +2,8 @@ package transcode
 
 import (
 	"encoding/json"
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -302,12 +304,7 @@ func TestGeminiUpstreamStreamThoughtCapability(t *testing.T) {
 }
 
 func contains(list []string, want string) bool {
-	for _, v := range list {
-		if v == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, want)
 }
 
 func TestGeminiUpstreamStreamPromptBlocked(t *testing.T) {
@@ -319,9 +316,40 @@ func TestGeminiUpstreamStreamPromptBlocked(t *testing.T) {
 		t.Fatalf("stream: %v", err)
 	}
 	all := append(append([]ResponsesSSEEvent{}, events...), final...)
-	types := geminiStreamEventTypes(all)
-	if !contains(types, "response.refusal.done") || !contains(types, "response.completed") {
-		t.Fatalf("types = %v, want a refusal and a completed terminal", types)
+	assertGeminiStreamTypes(t, all,
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.content_part.added",
+		"response.refusal.delta",
+		"response.refusal.done",
+		"response.content_part.done",
+		"response.output_item.done",
+		"response.incomplete",
+	)
+	assertGeminiIncompleteReason(t, all[len(all)-1], "content_filter")
+}
+
+// assertGeminiStreamTypes fails unless the events have exactly the given types
+// in order.
+func assertGeminiStreamTypes(t *testing.T, events []ResponsesSSEEvent, want ...string) {
+	t.Helper()
+	got := geminiStreamEventTypes(events)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("event types:\n got  %v\n want %v", got, want)
+	}
+}
+
+// assertGeminiIncompleteReason fails unless the event is response.incomplete
+// with the given incomplete_details.reason.
+func assertGeminiIncompleteReason(t *testing.T, event ResponsesSSEEvent, want string) {
+	t.Helper()
+	incomplete, ok := event.(ResponseIncompleteEvent)
+	if !ok {
+		t.Fatalf("terminal = %T, want response.incomplete", event)
+	}
+	if incomplete.Response.IncompleteDetails == nil || incomplete.Response.IncompleteDetails.Reason != want {
+		t.Fatalf("incomplete_details = %+v, want reason %q", incomplete.Response.IncompleteDetails, want)
 	}
 }
 
@@ -334,13 +362,7 @@ func TestGeminiUpstreamStreamMaxTokensIsIncomplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stream: %v", err)
 	}
-	data, err := MarshalResponsesEvent(final[len(final)-1])
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	if !strings.Contains(string(data), `"response.incomplete"`) || !strings.Contains(string(data), `"max_tokens"`) {
-		t.Fatalf("terminal = %s", data)
-	}
+	assertGeminiIncompleteReason(t, final[len(final)-1], "max_output_tokens")
 }
 
 func TestGeminiUpstreamStreamMultipleCandidatesRejected(t *testing.T) {
@@ -427,5 +449,204 @@ func TestGeminiUpstreamStreamAnthropicComposition(t *testing.T) {
 	}
 	if !sawMessageDelta || !sawMessageStop || !sawTextDelta {
 		t.Fatalf("events = %v / %v, want a text delta, message_delta and message_stop", first.Events, batch.Events)
+	}
+}
+
+func TestGeminiUpstreamStreamTextThenFunctionCallClosesMessage(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	events, final, err := collectResponses(t, s,
+		`{"candidates":[{"content":{"parts":[{"text":"Let me check"}]},"index":0}]}`,
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"x"}}}]},"finishReason":"STOP","index":0}]}`,
+	)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	all := append(append([]ResponsesSSEEvent{}, events...), final...)
+	assertGeminiStreamTypes(t, all,
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.content_part.added",
+		"response.output_text.delta",
+		"response.output_text.done",
+		"response.content_part.done",
+		"response.output_item.done",
+		"response.output_item.added",
+		"response.function_call_arguments.delta",
+		"response.function_call_arguments.done",
+		"response.output_item.done",
+		"response.completed",
+	)
+	completed := all[len(all)-1].(ResponseCompletedEvent)
+	if len(completed.Response.Output) != 2 {
+		t.Fatalf("terminal output = %+v, want message + call", completed.Response.Output)
+	}
+	message, ok := completed.Response.Output[0].(*ResponsesOutputMessage)
+	if !ok || message.Status != ResponsesItemCompleted {
+		t.Fatalf("terminal output[0] = %#v, want a completed message", completed.Response.Output[0])
+	}
+	if text := message.Content[0].(*ResponsesOutputText).Text; text != "Let me check" {
+		t.Fatalf("terminal message text = %q", text)
+	}
+}
+
+func TestGeminiUpstreamStreamThoughtThenTextClosesReasoning(t *testing.T) {
+	ctx := geminiStreamTestContext()
+	s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{ProviderReasoningThinking: true},
+		"resp_test", "gemini-3-pro-preview", 1700000000, nil)
+	events, final, err := collectResponses(t, s,
+		`{"candidates":[{"content":{"parts":[{"text":"hmm","thought":true}]},"index":0}]}`,
+		`{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP","index":0}]}`,
+	)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	all := append(append([]ResponsesSSEEvent{}, events...), final...)
+	assertGeminiStreamTypes(t, all,
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_summary_part.done",
+		"response.output_item.done",
+		"response.output_item.added",
+		"response.content_part.added",
+		"response.output_text.delta",
+		"response.output_text.done",
+		"response.content_part.done",
+		"response.output_item.done",
+		"response.completed",
+	)
+	completed := all[len(all)-1].(ResponseCompletedEvent)
+	reasoning, ok := completed.Response.Output[0].(*ResponsesReasoningOutputItem)
+	if !ok || reasoning.Status != ResponsesItemCompleted || reasoning.Summary[0].Text != "hmm" {
+		t.Fatalf("terminal output[0] = %#v, want the completed reasoning item", completed.Response.Output[0])
+	}
+}
+
+func TestGeminiUpstreamStreamRefusalFinishReason(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	events, final, err := collectResponses(t, s,
+		`{"candidates":[{"content":{"parts":[{"text":"partial"}]},"index":0}]}`,
+		`{"candidates":[{"finishReason":"SAFETY","finishMessage":"blocked by safety","index":0}]}`,
+	)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	all := append(append([]ResponsesSSEEvent{}, events...), final...)
+	assertGeminiStreamTypes(t, all,
+		"response.created",
+		"response.in_progress",
+		"response.output_item.added",
+		"response.content_part.added",
+		"response.output_text.delta",
+		"response.output_text.done",
+		"response.content_part.done",
+		"response.content_part.added",
+		"response.refusal.delta",
+		"response.refusal.done",
+		"response.content_part.done",
+		"response.output_item.done",
+		"response.incomplete",
+	)
+	assertGeminiIncompleteReason(t, all[len(all)-1], "content_filter")
+	message := all[len(all)-1].(ResponseIncompleteEvent).Response.Output[0].(*ResponsesOutputMessage)
+	if refusal, ok := message.Content[1].(*ResponsesOutputRefusal); !ok || refusal.Refusal != "blocked by safety" {
+		t.Fatalf("message content = %#v, want text then the finishMessage refusal", message.Content)
+	}
+	if !reportHasFeature(s.report, FeatureGeminiFinishRefusal) {
+		t.Fatalf("report lacks the finish-refusal note: %+v", s.report.Losses)
+	}
+}
+
+// geminiAnthropicStream runs Gemini chunks through the composed
+// Gemini->Responses->Anthropic converter and returns every Anthropic frame.
+func geminiAnthropicStream(t *testing.T, chunks ...string) []frameEvent {
+	t.Helper()
+	ctx := geminiStreamTestContext()
+	ctx.LossPolicy.Allowed[FeatureUsageUnknown] = struct{}{}
+	gemini := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_a", "m", 1, nil)
+	anthropic := newAnthropicResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "msg_a", "m", 1)
+	c := newGeminiToAnthropicConverter(gemini, anthropic)
+	var frames []frameEvent
+	for _, chunk := range chunks {
+		batch, err := c.Convert(SSEEvent{Data: []byte(chunk)})
+		if err != nil {
+			t.Fatalf("convert %s: %v", chunk, err)
+		}
+		frames = append(frames, batch.Events...)
+	}
+	batch, err := c.FinalizeEOF()
+	if err != nil {
+		t.Fatalf("EOF: %v", err)
+	}
+	if !batch.Terminal {
+		t.Fatal("EOF must release the terminal")
+	}
+	return append(frames, batch.Events...)
+}
+
+// anthropicStopReason returns the stop_reason of the message_delta frame.
+func anthropicStopReason(t *testing.T, frames []frameEvent) string {
+	t.Helper()
+	for _, frame := range frames {
+		if string(frame.Type) != "message_delta" {
+			continue
+		}
+		var delta struct {
+			Delta struct {
+				StopReason string `json:"stop_reason"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal(frame.Data, &delta); err != nil {
+			t.Fatalf("message_delta: %v", err)
+		}
+		return delta.Delta.StopReason
+	}
+	t.Fatalf("no message_delta in %v", frames)
+	return ""
+}
+
+func TestGeminiUpstreamStreamAnthropicCompositionKindChanges(t *testing.T) {
+	frames := geminiAnthropicStream(t,
+		`{"candidates":[{"content":{"parts":[{"text":"Let me check"}]},"index":0}]}`,
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_1","name":"lookup","args":{"q":"x"}}}]},"finishReason":"STOP","index":0}]}`,
+	)
+	if got := anthropicStopReason(t, frames); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use", got)
+	}
+}
+
+func TestGeminiUpstreamStreamAnthropicCompositionRefusals(t *testing.T) {
+	t.Run("finish reason", func(t *testing.T) {
+		frames := geminiAnthropicStream(t,
+			`{"candidates":[{"content":{"parts":[{"text":"partial"}]},"index":0}]}`,
+			`{"candidates":[{"finishReason":"SAFETY","index":0}]}`,
+		)
+		if got := anthropicStopReason(t, frames); got != "refusal" {
+			t.Fatalf("stop_reason = %q, want refusal", got)
+		}
+	})
+	t.Run("blocked prompt", func(t *testing.T) {
+		frames := geminiAnthropicStream(t, `{"promptFeedback":{"blockReason":"SAFETY"}}`)
+		if got := anthropicStopReason(t, frames); got != "refusal" {
+			t.Fatalf("stop_reason = %q, want refusal", got)
+		}
+	})
+}
+
+func TestGeminiUpstreamStreamFunctionCallChargesExchangeTotal(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	s.totalAccumulated = maxStreamTotalAccumulatedBytes - 4
+	_, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call_1","name":"lookup","args":{"q":"x"}}}]},"index":0}]}`,
+	))
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("err = %T %v, want *UpstreamWireError for the exchange total", err, err)
+	}
+	if len(s.items) != 0 {
+		t.Fatalf("items = %d, want the call refused before it was retained", len(s.items))
 	}
 }

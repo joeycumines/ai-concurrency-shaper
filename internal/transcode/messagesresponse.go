@@ -94,7 +94,7 @@ func messagesStop(resp anthropicmessages.Response) (
 	case anthropicmessages.StopReasonToolUse:
 		return CanonicalResponseCompleted, CanonicalStop{Reason: CanonicalStopToolUse}, "", nil
 	case anthropicmessages.StopReasonMaxTokens:
-		return CanonicalResponseIncomplete, CanonicalStop{Reason: CanonicalStopMaxTokens}, "max_tokens", nil
+		return CanonicalResponseIncomplete, CanonicalStop{Reason: CanonicalStopMaxTokens}, "max_output_tokens", nil
 	case anthropicmessages.StopReasonRefusal:
 		return CanonicalResponseCompleted, CanonicalStop{Reason: CanonicalStopRefusal}, "", nil
 	case anthropicmessages.StopReasonPauseTurn:

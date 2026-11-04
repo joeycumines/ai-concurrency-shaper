@@ -30,6 +30,11 @@ type geminiStreamClientState struct {
 	// thoughtLossNoted and refusalNoted keep the once-per-stream records.
 	thoughtLossNoted bool
 	refusalNoted     bool
+	// phaseLossNoted and reasoningLossNoted keep the once-per-stream records
+	// of the output metadata a Gemini stream cannot carry, matching the
+	// non-streaming render.
+	phaseLossNoted     bool
+	reasoningLossNoted bool
 
 	sawTerminal bool
 }
@@ -111,8 +116,13 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 		}
 		return s.textChunk(value.Delta, true)
 	case ResponseOutputItemDoneEvent:
-		if call, ok := value.Item.(*ResponsesFunctionCallOutputItem); ok {
-			return s.functionCallChunk(call)
+		switch item := value.Item.(type) {
+		case *ResponsesFunctionCallOutputItem:
+			return s.functionCallChunk(item)
+		case *ResponsesOutputMessage:
+			return nil, s.losePhase(item)
+		case *ResponsesReasoningOutputItem:
+			return nil, s.loseReasoning(item)
 		}
 		return nil, nil
 	case ResponseCompletedEvent:
@@ -130,6 +140,45 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 		// progress, part and item boundaries) produce no chunk.
 		return nil, nil
 	}
+}
+
+// losePhase records the approved loss of an output message phase, once per
+// stream: a Gemini response has no phase.
+func (s *geminiStreamClientState) losePhase(message *ResponsesOutputMessage) error {
+	if message.Phase == "" || s.phaseLossNoted {
+		return nil
+	}
+	s.phaseLossNoted = true
+	return s.report.Lose(
+		s.policy, FeatureOutputPhase, "output[].phase",
+		"the output message phase cannot be reproduced in a Gemini stream",
+	)
+}
+
+// loseReasoning records the approved loss of reasoning output the stream did
+// not render, once per stream. Summary text arrives as summary deltas, which
+// are rendered as thoughts or recorded as provider reasoning loss on their
+// own; whatever the item carries beyond that (encrypted content, reasoning
+// text content, or an item with no summary text at all) is lost here.
+func (s *geminiStreamClientState) loseReasoning(item *ResponsesReasoningOutputItem) error {
+	if s.reasoningLossNoted {
+		return nil
+	}
+	summarized := false
+	for _, summary := range item.Summary {
+		if summary.Text != "" {
+			summarized = true
+			break
+		}
+	}
+	if summarized && item.EncryptedContent == "" && len(item.Content) == 0 {
+		return nil
+	}
+	s.reasoningLossNoted = true
+	return s.report.Lose(
+		s.policy, FeatureReasoningSummary, "output[].reasoning",
+		"Responses reasoning output cannot be reproduced in a Gemini stream",
+	)
 }
 
 // textChunk renders one text delta. An empty delta carries nothing and is

@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -517,4 +518,64 @@ func TestGeminiStreamResponsesMalformedFrameIsUpstreamFailure(t *testing.T) {
 	reader := geminiResponsesConverterReader(sse)
 	output, readErr := drainReader(t, reader)
 	assertGeminiFailedStream(t, reader, output, readErr)
+}
+
+// geminiClientStateReader converts the SSE body through a Responses->Gemini
+// state with the given policy, returning the reader and the state.
+func geminiClientStateReader(sse string, policy LossPolicy) (*convertingReader, *geminiStreamClientState) {
+	ctx := testStreamContext()
+	ctx.LossPolicy = policy
+	state := newGeminiStreamClientState(ctx, policy, "resp_1", "gemini-x")
+	return newConvertingReaderWithLimits(
+		NewSSEReaderWithLimits(strings.NewReader(sse), 0, 0),
+		newResponsesToGeminiConverter(state), 0, 0, 0,
+	), state
+}
+
+func TestGeminiStreamResponsesUnrenderedOutputMetadataIsGated(t *testing.T) {
+	encryptedReasoning := "" +
+		"event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"in_progress","summary":[]}}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"completed","summary":[],"encrypted_content":"opaque"}}` + "\n\n"
+	phasedMessage := "" +
+		"event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","phase":"final_answer","content":[]}}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","phase":"final_answer","content":[]}}` + "\n\n"
+	tests := []struct {
+		name    string
+		items   string
+		feature Feature
+	}{
+		{name: "encrypted reasoning", items: encryptedReasoning, feature: FeatureReasoningSummary},
+		{name: "message phase", items: phasedMessage, feature: FeatureOutputPhase},
+	}
+	for _, tt := range tests {
+		sse := geminiSSEBody(t, fsmCreated(1)) + tt.items + geminiSSEBody(t, fsmComplete(4))
+		t.Run(tt.name+" approved", func(t *testing.T) {
+			policy := LossPolicy{Allowed: map[Feature]struct{}{
+				tt.feature:                    {},
+				FeatureUsageUnknown:           {},
+				FeatureUsageCacheReadUnknown:  {},
+				FeatureUsageCacheWriteUnknown: {},
+				FeatureUsageReasoningUnknown:  {},
+			}}
+			reader, state := geminiClientStateReader(sse, policy)
+			output, err := drainReader(t, reader)
+			if !errors.Is(err, io.EOF) || !reader.SawTerminal() {
+				t.Fatalf("stream did not complete: err %v; output %q", err, output)
+			}
+			if !reportHasFeature(state.report, tt.feature) {
+				t.Fatalf("report lacks %s: %+v", tt.feature, state.report.Losses)
+			}
+		})
+		t.Run(tt.name+" strict", func(t *testing.T) {
+			reader, _ := geminiClientStateReader(sse, StrictLossPolicy())
+			output, _ := drainReader(t, reader)
+			if reader.SawTerminal() || strings.Contains(output, "finishReason") {
+				t.Fatalf("strict policy reported success: %q", output)
+			}
+		})
+	}
 }
