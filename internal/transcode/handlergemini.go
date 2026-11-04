@@ -11,13 +11,31 @@ import (
 // upstreamClientQuery returns the client query the upstream may see. The
 // Gemini alt selector describes the client's own representation, so it is
 // removed before the allowlist check. The result is a copy: r.URL is never
-// mutated.
-func upstreamClientQuery(r *http.Request, client ClientProtocol) url.Values {
-	query := r.URL.Query()
+// mutated. A malformed query is refused (see parseClientQuery), never
+// partially read.
+func upstreamClientQuery(r *http.Request, client ClientProtocol) (url.Values, error) {
+	query, err := parseClientQuery(r.URL.RawQuery)
+	if err != nil {
+		return nil, err
+	}
 	if client == ClientGemini {
 		query.Del("alt")
 	}
-	return query
+	return query, nil
+}
+
+// parseClientQuery parses the client query for validation and forwarding.
+// url.ParseQuery skips a pair it cannot parse (a ';' separator, an invalid
+// percent escape) and reports it only through its error. Ignoring that error
+// would let a pair escape the allowlist check while still sitting in the
+// journaled URL, so a malformed query is a client fault and is refused
+// whole. The error names only the parse failure, never a value.
+func parseClientQuery(rawQuery string) (url.Values, error) {
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the query string is malformed: %v", errClientQueryParameter, err)
+	}
+	return query, nil
 }
 
 // errGeminiQueryCredential refuses a credential carried in the query string.
@@ -32,17 +50,17 @@ var errGeminiQueryCredential = errors.New(
 // and logged. The scan runs over the raw query, not parsed url.Values:
 // url.ParseQuery silently drops pairs whose key or value fails QueryUnescape
 // (e.g. key=secret%zz), which would bypass the check, and it drops
-// ';'-delimited segments entirely.
+// ';'-delimited segments entirely. Both '&' and ';' delimit pairs here, so a
+// credential after a ';' (?foo=1;key=SECRET) is still found.
 func HasQueryCredential(rawQuery string) bool {
-	for pair := range strings.SplitSeq(rawQuery, "&") {
+	for _, pair := range rawQueryPairs(rawQuery) {
 		name, _, _ := strings.Cut(pair, "=")
 		if unescaped, err := url.QueryUnescape(name); err == nil {
-			name = unescaped
+			// An escaped '=' (raw "key%3DSECRET" or "key%3D%3D=x") still
+			// names the credential parameter, so the unescaped name is cut
+			// at its first '=' as well.
+			name, _, _ = strings.Cut(unescaped, "=")
 		}
-		// A name that unescapes to "key=" (raw "key%3D") still names the
-		// credential parameter, so compare the name with any trailing '='
-		// stripped as well.
-		name = strings.TrimSuffix(name, "=")
 		switch strings.ToLower(name) {
 		case "key", "access_token", "oauth_token":
 			return true
@@ -51,36 +69,29 @@ func HasQueryCredential(rawQuery string) bool {
 	return false
 }
 
-// parseQueryTolerant parses a raw query into url.Values, keeping pairs whose
-// value fails to unescape (with the raw value) so alt validation still sees
-// them; only the credential scan must see malformed pairs, and it runs on
-// the raw query before this.
-func parseQueryTolerant(rawQuery string) url.Values {
-	query := make(url.Values)
-	for pair := range strings.SplitSeq(rawQuery, "&") {
-		if pair == "" {
-			continue
-		}
-		name, value, _ := strings.Cut(pair, "=")
-		if unescaped, err := url.QueryUnescape(name); err == nil {
-			name = unescaped
-		}
-		if unescaped, err := url.QueryUnescape(value); err == nil {
-			value = unescaped
-		}
-		query[name] = append(query[name], value)
-	}
-	return query
+// rawQueryPairs splits a raw query into its non-empty pairs, treating both
+// '&' and ';' as delimiters: net/http keeps ';' in RawQuery, and a scan that
+// split only on '&' would read "foo=1;key=SECRET" as one pair named foo.
+func rawQueryPairs(rawQuery string) []string {
+	return strings.FieldsFunc(rawQuery, func(r rune) bool {
+		return r == '&' || r == ';'
+	})
 }
 
 // geminiClientQuery applies the client query rules of a Gemini operation.
-// Credential parameters are refused outright, alt may be given at most once,
-// and generateContent accepts only alt=json or no alt.
+// Credential parameters are refused outright (the scan runs first, over the
+// raw query, so a credential in a malformed pair still gets the credential
+// refusal), the query must parse, alt may be given at most once, and
+// generateContent accepts only alt=json or no alt. The query is parsed by the
+// same parser as the allowlist check, so both see the same pairs.
 func geminiClientQuery(match GeminiRouteMatch, rawQuery string) error {
 	if HasQueryCredential(rawQuery) {
 		return errGeminiQueryCredential
 	}
-	query := parseQueryTolerant(rawQuery)
+	query, err := parseClientQuery(rawQuery)
+	if err != nil {
+		return err
+	}
 	alt := query["alt"]
 	if len(alt) > 1 {
 		return errors.New("alt must be given at most once")

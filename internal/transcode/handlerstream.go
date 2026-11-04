@@ -183,16 +183,16 @@ func (h *TranscodeHandler) newFrameConverter(
 			createdAt,
 			nil, // Responses envelope is internal to the composition
 		)
-		gemini := newGeminiStreamClientState(context, h.cfg.Mapping.LossPolicy, responseID, model)
+		gemini := newGeminiStreamClientState(context, upstream, h.cfg.Mapping.LossPolicy, responseID, model)
 		return newChatToGeminiConverter(chat, gemini), nil
 
 	case client == ClientGemini && upstream == UpstreamResponses:
-		state := newGeminiStreamClientState(context, h.cfg.Mapping.LossPolicy, responseID, model)
+		state := newGeminiStreamClientState(context, upstream, h.cfg.Mapping.LossPolicy, responseID, model)
 		return newResponsesToGeminiConverter(state), nil
 
 	case client == ClientGemini && upstream == UpstreamMessages:
 		upstreamState := newAnthropicUpstreamResponsesStreamState(responseID, model, h.cfg.Mapping.LossPolicy)
-		gemini := newGeminiStreamClientState(context, h.cfg.Mapping.LossPolicy, responseID, model)
+		gemini := newGeminiStreamClientState(context, upstream, h.cfg.Mapping.LossPolicy, responseID, model)
 		return newMessagesToGeminiConverter(upstreamState, gemini), nil
 
 	case client == ClientMessages && upstream == UpstreamResponses:

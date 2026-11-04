@@ -67,7 +67,7 @@ func (h *TranscodeHandler) convertRequest(
 	// upstream model is used on the outbound request. Profile-aware
 	// resolution: if the client model matches a profile name, use the
 	// profile's model and tier; otherwise fall through to ModelMap.Resolve.
-	resolveModel := func(clientModel string, report *ConversionReport) error {
+	resolveMapped := func(clientModel string, report *ConversionReport) error {
 		// Try profile resolution first.
 		if profileModel, profileTier, ok := h.cfg.Mapping.ProfileMap.ResolveProfile(clientModel); ok {
 			// Profile found. Resolve the profile's target model through ModelMap.
@@ -104,6 +104,24 @@ func (h *TranscodeHandler) convertRequest(
 		context.UpstreamModel = mappingModel.UpstreamModel
 		context.ResolvedReasoningTier = mappingModel.ReasoningTier
 		context.ModelMaxOutputTokens = mappingModel.MaxOutput
+		return nil
+	}
+	// A Gemini upstream carries the model in the URL path, so the resolved
+	// model must be a bare id. Identity mapping passes the client's own
+	// spelling through (the Gemini SDK writes "models/gemini-2.5-pro"), so
+	// the check runs on the resolved model and fails the request as a
+	// conversion error naming the model, never as an opaque URL-build fault.
+	resolveModel := func(clientModel string, report *ConversionReport) error {
+		if err := resolveMapped(clientModel, report); err != nil {
+			return err
+		}
+		if mapping.UpstreamProtocol == UpstreamGemini && !ValidCatalogIdent(context.UpstreamModel) {
+			return fmt.Errorf(
+				"model %q resolves to upstream model %q, which is not a bare Gemini model id (no models/ prefix, no '/' or ':')",
+				clientModel,
+				context.UpstreamModel,
+			)
+		}
 		return nil
 	}
 
@@ -341,7 +359,10 @@ func (h *TranscodeHandler) geminiClientQueryLosses(r *http.Request) (ConversionR
 	if h.cfg.Mapping.UpstreamProtocol != UpstreamGemini {
 		return report, nil
 	}
-	clientQuery := upstreamClientQuery(r, h.cfg.Mapping.ClientProtocol)
+	clientQuery, err := upstreamClientQuery(r, h.cfg.Mapping.ClientProtocol)
+	if err != nil {
+		return report, err
+	}
 	for _, name := range sortedQueryNames(clientQuery) {
 		if _, allowed := h.cfg.Mapping.AllowedClientQuery[name]; allowed {
 			if err := report.Lose(
@@ -385,11 +406,14 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 			return nil, err
 		}
 	} else {
-		var err error
+		clientQuery, err := upstreamClientQuery(r, h.cfg.Mapping.ClientProtocol)
+		if err != nil {
+			return nil, err
+		}
 		targetURL, err = BuildMappedURL(
 			h.cfg.Upstream,
 			h.cfg.Mapping.UpstreamPath,
-			upstreamClientQuery(r, h.cfg.Mapping.ClientProtocol),
+			clientQuery,
 			h.cfg.Mapping.AllowedClientQuery,
 		)
 		if err != nil {

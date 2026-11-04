@@ -70,7 +70,11 @@ func DecodeGeminiResponse(
 		if resp.PromptFeedback.BlockReason != nil &&
 			*resp.PromptFeedback.BlockReason != "" &&
 			*resp.PromptFeedback.BlockReason != "BLOCK_REASON_UNSPECIFIED" {
-			response.Status = CanonicalResponseCompleted
+			// The Responses contract represents a filtered response as
+			// incomplete with reason content_filter; the Anthropic dialect
+			// renders the refusal stop reason. The stream renders the same.
+			response.Status = CanonicalResponseIncomplete
+			response.IncompleteReason = "content_filter"
 			response.Stop = CanonicalStop{Reason: CanonicalStopRefusal}
 			response.Items = append(response.Items, &CanonicalMessageItem{
 				Role: CanonicalAssistant,
@@ -414,9 +418,10 @@ func DecodeGeminiResponse(
 		case reason == "MAX_TOKENS":
 			response.Status = CanonicalResponseIncomplete
 			response.Stop = CanonicalStop{Reason: CanonicalStopMaxTokens}
-			response.IncompleteReason = "max_tokens"
+			response.IncompleteReason = "max_output_tokens"
 		case refusalFinishReasons[reason]:
-			response.Status = CanonicalResponseCompleted
+			response.Status = CanonicalResponseIncomplete
+			response.IncompleteReason = "content_filter"
 			response.Stop = CanonicalStop{Reason: CanonicalStopRefusal}
 			text := fmt.Sprintf("the provider stopped the response (finishReason %s)", reason)
 			if candidate.FinishMessage != nil && *candidate.FinishMessage != "" {
