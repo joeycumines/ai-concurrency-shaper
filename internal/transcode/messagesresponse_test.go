@@ -49,7 +49,8 @@ func TestDecodeMessagesResponseStopReasons(t *testing.T) {
 		incomplete string
 	}{
 		{name: "end_turn completes", stop: `"end_turn"`, status: CanonicalResponseCompleted, reason: CanonicalStopEndTurn},
-		{name: "max_tokens is incomplete", stop: `"max_tokens"`, status: CanonicalResponseIncomplete, reason: CanonicalStopMaxTokens, incomplete: "max_tokens"},
+		{name: "max_tokens is incomplete", stop: `"max_tokens"`, status: CanonicalResponseIncomplete, reason: CanonicalStopMaxTokens, incomplete: "max_output_tokens"},
+		{name: "refusal is incomplete content_filter", stop: `"refusal"`, status: CanonicalResponseIncomplete, reason: CanonicalStopRefusal, incomplete: "content_filter"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

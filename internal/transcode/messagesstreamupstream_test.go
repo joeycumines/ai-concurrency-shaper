@@ -1,10 +1,13 @@
 package transcode
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/anthropicmessages"
 )
 
 // geminiMessagesStreamHandler serves a streamGenerateContent exchange over an
@@ -263,5 +266,55 @@ func TestGeminiStreamMessagesFailuresNeverSucceed(t *testing.T) {
 				t.Fatalf("failed stream did not end in an error frame: %v", frames)
 			}
 		})
+	}
+}
+
+func TestGeminiStreamMessagesToleratesEnvelopeExtensions(t *testing.T) {
+	start := "" +
+		"event: message_start\n" +
+		`data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":null,"stop_sequence":null,"container":null,"usage":{"input_tokens":3,"output_tokens":1,"service_tier":"standard","cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"server_tool_use":{"web_search_requests":0}}}}` + "\n\n"
+	stop := "" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null},"usage":{"output_tokens":2,"server_tool_use":{"web_search_requests":0}}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	rec := serveGeminiStreamBody(t,
+		geminiMessagesStreamHandler(t, start+anthropicTextBlockSSE+stop, nil),
+		geminiMessagesStreamTarget,
+		geminiMessagesBody,
+	)
+	frames := geminiStreamFrames(t, rec.Body.String())
+	assertSingleTerminal(t, frames)
+	if got := geminiFrameText(frames); got != "hello" {
+		t.Fatalf("text %q, want hello; body %s", got, rec.Body.String())
+	}
+	if finish := geminiFrameFinish(frames[len(frames)-1]); finish != "STOP" {
+		t.Fatalf("finish %q, want STOP; body %s", finish, rec.Body.String())
+	}
+}
+
+func TestDecodeAnthropicStreamFrameContentStaysStrict(t *testing.T) {
+	_, err := decodeAnthropicStreamFrame(SSEEvent{
+		Event: "content_block_delta",
+		Data:  []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x","surprise":1}}`),
+	})
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("unknown field on a content delta: err = %T %v, want *UpstreamWireError", err, err)
+	}
+	_, err = decodeAnthropicStreamFrame(SSEEvent{
+		Event: "content_block_start",
+		Data:  []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"","surprise":1}}`),
+	})
+	if err == nil {
+		t.Fatal("unknown field on a content block: nil error, want rejection")
+	}
+}
+
+func TestAnthropicUpstreamStreamBudgetIsUpstreamFault(t *testing.T) {
+	s := newAnthropicUpstreamResponsesStreamState("resp_1", "claude-x", LossPolicy{})
+	s.budget.events = s.budget.eventsBudget
+	_, err := s.Convert(anthropicmessages.StreamEvent{Type: anthropicmessages.StreamEventTypePing})
+	if !isUpstreamConversionError(err) {
+		t.Fatalf("event budget: err = %T %v, want an upstream conversion error", err, err)
 	}
 }

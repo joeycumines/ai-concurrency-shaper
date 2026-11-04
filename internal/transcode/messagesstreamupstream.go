@@ -1,6 +1,7 @@
 package transcode
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -53,6 +54,13 @@ type anthropicStreamBlock struct {
 	closed      bool
 }
 
+// wireError types a stream failure as an upstream wire error, so a budget
+// violation caused by the upstream's stream is classified as an upstream
+// fault rather than a local conversion failure.
+func (s *anthropicUpstreamResponsesStreamState) wireError(err error) error {
+	return upstreamWireError(UpstreamMessages, http.StatusOK, err)
+}
+
 func newAnthropicUpstreamResponsesStreamState(
 	responseID string,
 	model string,
@@ -82,7 +90,7 @@ func (s *anthropicUpstreamResponsesStreamState) Convert(
 		)
 	}
 	if err := s.budget.addEvent(); err != nil {
-		return nil, err
+		return nil, s.wireError(err)
 	}
 	switch event.Type {
 	case anthropicmessages.StreamEventTypeMessageStart:
@@ -167,10 +175,10 @@ func (s *anthropicUpstreamResponsesStreamState) blockStart(
 			}
 		}
 		if err := s.budget.addItem(); err != nil {
-			return nil, err
+			return nil, s.wireError(err)
 		}
 		if err := s.budget.addPart(); err != nil {
-			return nil, err
+			return nil, s.wireError(err)
 		}
 		tracked := &anthropicStreamBlock{
 			kind:        block.Type,
@@ -218,17 +226,23 @@ func (s *anthropicUpstreamResponsesStreamState) blockStart(
 			)
 		}
 		if err := s.budget.addItem(); err != nil {
-			return nil, err
+			return nil, s.wireError(err)
 		}
 		if err := s.budget.addToolCall(); err != nil {
-			return nil, err
+			return nil, s.wireError(err)
+		}
+		callID, name := derefString(block.ID), derefString(block.Name)
+		// The call identity is repeated in the done events and the terminal
+		// envelope, so it is retained semantic state like the arguments.
+		if err := s.budget.addSemanticBytes(int64(len(callID) + len(name))); err != nil {
+			return nil, s.wireError(err)
 		}
 		tracked := &anthropicStreamBlock{
 			kind:        block.Type,
 			outputIndex: s.nextOutput,
 			itemID:      fmt.Sprintf("fc_%d", s.nextOutput),
-			callID:      derefString(block.ID),
-			name:        derefString(block.Name),
+			callID:      callID,
+			name:        name,
 		}
 		s.nextOutput++
 		s.blocks[index] = tracked
@@ -252,6 +266,9 @@ func (s *anthropicUpstreamResponsesStreamState) blockStart(
 		); err != nil {
 			return nil, err
 		}
+		if err := s.budget.addStateEntries(1); err != nil {
+			return nil, s.wireError(err)
+		}
 		s.ignored[index] = true
 		return nil, nil
 
@@ -269,6 +286,9 @@ func (s *anthropicUpstreamResponsesStreamState) blockStart(
 			"server-side tool output cannot be reproduced in a Gemini stream",
 		); err != nil {
 			return nil, err
+		}
+		if err := s.budget.addStateEntries(1); err != nil {
+			return nil, s.wireError(err)
 		}
 		s.ignored[index] = true
 		return nil, nil
@@ -334,7 +354,7 @@ func (s *anthropicUpstreamResponsesStreamState) blockDelta(
 		}
 		partial := derefString(delta.PartialJSON)
 		if err := s.budget.addSemanticBytes(int64(len(partial))); err != nil {
-			return nil, err
+			return nil, s.wireError(err)
 		}
 		tracked.args.WriteString(partial)
 		return []ResponsesSSEEvent{ResponseFunctionCallArgumentsDeltaEvent{
@@ -367,7 +387,7 @@ func (s *anthropicUpstreamResponsesStreamState) textDelta(
 	text string,
 ) (ResponsesSSEEvent, error) {
 	if err := s.budget.addSemanticBytes(int64(len(text))); err != nil {
-		return nil, err
+		return nil, s.wireError(err)
 	}
 	tracked.text.WriteString(text)
 	return ResponseTextDeltaEvent{
@@ -644,12 +664,31 @@ func (c *messagesToGeminiConverter) ConversionReport() *ConversionReport {
 	return mergeConversionReports(&c.upstream.report, &c.gemini.report)
 }
 
-// decodeAnthropicStreamFrame decodes one upstream frame strictly. The SSE event
-// name must match the JSON type when the frame names one.
+// decodeAnthropicStreamFrame decodes one upstream frame. The event envelope
+// (including the message and usage objects) is the provider's
+// subject-to-change surface, so it is decoded tolerantly: an unknown field
+// such as usage.service_tier is skipped. Content stays strict: content blocks
+// decode through their per-arm union decoder, and a content_block_delta's
+// delta is decoded again strictly so an unknown field on content is still
+// rejected. The SSE event name must match the JSON type when the frame names
+// one.
 func decodeAnthropicStreamFrame(frame SSEEvent) (anthropicmessages.StreamEvent, error) {
 	var event anthropicmessages.StreamEvent
-	if err := wire.Decode(trimJSONSpace(frame.Data), &event); err != nil {
+	data := trimJSONSpace(frame.Data)
+	if err := wire.DecodeTolerant(data, &event); err != nil {
 		return event, upstreamWireError(UpstreamMessages, http.StatusOK, err)
+	}
+	if event.Type == anthropicmessages.StreamEventTypeContentBlockDelta && event.Delta != nil {
+		var raw struct {
+			Delta json.RawMessage `json:"delta"`
+		}
+		if err := wire.DecodeTolerant(data, &raw); err != nil {
+			return event, upstreamWireError(UpstreamMessages, http.StatusOK, err)
+		}
+		var delta anthropicmessages.StreamDelta
+		if err := wire.Decode(raw.Delta, &delta); err != nil {
+			return event, upstreamWireError(UpstreamMessages, http.StatusOK, fmt.Errorf("content_block_delta delta: %w", err))
+		}
 	}
 	if frame.Event != "" && frame.Event != string(event.Type) {
 		return event, upstreamWireError(

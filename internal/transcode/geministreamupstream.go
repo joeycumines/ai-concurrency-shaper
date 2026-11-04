@@ -55,7 +55,12 @@ type geminiResponsesStreamState struct {
 	// finishReason is recorded when the finish chunk arrives; the terminal
 	// envelope is built lazily at release so a trailing usage chunk is
 	// reflected.
-	finishReason  string
+	finishReason string
+	// refused is set when the stream ended in a provider refusal (a blocked
+	// prompt or a refusal finishReason); the terminal is then rendered as
+	// incomplete with reason content_filter, the Responses contract's
+	// representation of a filtered response.
+	refused       bool
 	heldTerminal  []ResponsesSSEEvent
 	terminalDone  bool
 	usage         *ResponsesUsage
@@ -70,6 +75,7 @@ type geminiResponsesStreamState struct {
 
 	// Per-stream once-gates for the metadata losses.
 	safetyLossRecorded         bool
+	promptSafetyLossRecorded   bool
 	groundingLossRecorded      bool
 	logprobsLossRecorded       bool
 	tokenCountLossRecorded     bool
@@ -119,16 +125,25 @@ func (s *geminiResponsesStreamState) wireError(err error) error {
 }
 
 // checkAccumulated bounds the per-buffer and exchange-wide accumulated
-// semantic bytes, mirroring the chat state's bound.
+// semantic bytes, mirroring the chat state's bound. It runs BEFORE the added
+// bytes are written, so the per-buffer bound includes them.
 func (s *geminiResponsesStreamState) checkAccumulated(builder *strings.Builder, added int, what string) error {
-	if builder.Len() > maxStreamAccumulatedBytes {
+	if builder.Len()+added > maxStreamAccumulatedBytes {
 		return s.wireError(fmt.Errorf(
 			"gemini stream accumulated %s exceeds %d bytes",
 			what,
 			maxStreamAccumulatedBytes,
 		))
 	}
-	s.totalAccumulated += int64(added)
+	return s.chargeTotal(added, what)
+}
+
+// chargeTotal adds n retained semantic bytes (text, refusal, tool arguments,
+// tool-call identity) to the exchange-wide accumulated total. Everything
+// charged here is repeated in done events and the terminal envelope, so the
+// release bounds derive from this total.
+func (s *geminiResponsesStreamState) chargeTotal(n int, what string) error {
+	s.totalAccumulated += int64(n)
 	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
 		return s.wireError(fmt.Errorf(
 			"gemini stream accumulated %s exceeds the exchange total of %d bytes",
@@ -174,11 +189,21 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 		candidate = &c
 	}
 
-	// Prompt-blocked with no candidates: a completed refusal.
+	blocked := chunk.PromptFeedback != nil && chunk.PromptFeedback.BlockReason != nil &&
+		*chunk.PromptFeedback.BlockReason != "" &&
+		*chunk.PromptFeedback.BlockReason != "BLOCK_REASON_UNSPECIFIED"
+	// The API contract: when blockReason is set "the prompt was blocked and
+	// no candidates are returned". A chunk carrying both contradicts itself,
+	// and neither half can be dropped silently, so it is corrupt wire.
+	if blocked && candidate != nil {
+		return nil, s.wireError(errors.New(
+			"gemini stream chunk carries both promptFeedback.blockReason and a candidate",
+		))
+	}
+
+	// Prompt-blocked with no candidates: a refusal.
 	if candidate == nil {
-		if chunk.PromptFeedback != nil && chunk.PromptFeedback.BlockReason != nil &&
-			*chunk.PromptFeedback.BlockReason != "" &&
-			*chunk.PromptFeedback.BlockReason != "BLOCK_REASON_UNSPECIFIED" {
+		if blocked {
 			if s.sawTerm {
 				return nil, s.wireError(errors.New("gemini stream chunk after the terminal"))
 			}
@@ -191,23 +216,28 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 			); err != nil {
 				return nil, err
 			}
-			events, err := s.openRefusalItem(fmt.Sprintf("the prompt was blocked by the provider (blockReason %s)", reason))
+			events := s.startEvents()
+			refusal, err := s.appendRefusal(fmt.Sprintf("the prompt was blocked by the provider (blockReason %s)", reason))
 			if err != nil {
 				return nil, err
 			}
-			held, err := s.closeAllAndHold("STOP")
-			if err != nil {
+			events = append(events, refusal...)
+			s.refused = true
+			s.heldTerminal = s.closeAllAndHold()
+			// The blocked-prompt chunk is usually the only chunk, so its
+			// usage and metadata are recorded here, not lost with it.
+			if err := s.recordChunkMetadata(chunk); err != nil {
 				return nil, err
 			}
-			return append(events, held...), nil
+			return events, nil
 		}
-		// A chunk with no candidates and no block reason mid-stream carries
-		// nothing (some providers emit empty keep-alives); after the terminal
-		// it is a usage-only chunk and absorbed below.
+		// A chunk with no candidates and no block reason carries no content
+		// (some providers emit empty keep-alives, or a usage-only chunk);
+		// after the terminal it is absorbed as trailing accounting.
 		if s.sawTerm {
 			return s.absorbTrailing(chunk)
 		}
-		return nil, nil
+		return nil, s.recordChunkMetadata(chunk)
 	}
 
 	if s.sawTerm {
@@ -215,15 +245,7 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 		return s.absorbTrailing(chunk)
 	}
 
-	var events []ResponsesSSEEvent
-	if !s.started {
-		s.started = true
-		envelope := s.baseEnvelope("in_progress")
-		events = append(events,
-			s.builder.Created(envelope),
-			s.builder.InProgress(envelope),
-		)
-	}
+	events := s.startEvents()
 
 	// Content parts.
 	if candidate.Content != nil {
@@ -246,23 +268,8 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 	if err := s.recordCandidateMetadata(candidate); err != nil {
 		return nil, err
 	}
-	if chunk.UsageMetadata != nil {
-		if err := s.recordUsage(chunk.UsageMetadata); err != nil {
-			return nil, err
-		}
-	}
-	if chunk.ModelStatus != nil {
-		if !s.modelStatusLossRecorded {
-			s.modelStatusLossRecorded = true
-			if err := s.report.Lose(
-				s.policy,
-				FeatureGeminiModelStatus,
-				"modelStatus",
-				"the model status (lifecycle stage/retirement) cannot be reproduced in the target response",
-			); err != nil {
-				return nil, err
-			}
-		}
+	if err := s.recordChunkMetadata(chunk); err != nil {
+		return nil, err
 	}
 
 	// A chunk carrying finishReason is terminal: hold the item-closing events
@@ -284,19 +291,51 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 		}
 		s.sawTerm = true
 		s.finishReason = reason
-		held, err := s.closeAllAndHold(reason)
-		if err != nil {
-			return nil, err
+		if refusalFinishReasons[reason] {
+			// The same rendering as the non-streaming decode: the stop is a
+			// refusal, carried by a refusal part on the message item.
+			text := fmt.Sprintf("the provider stopped the response (finishReason %s)", reason)
+			if candidate.FinishMessage != nil && *candidate.FinishMessage != "" {
+				text = *candidate.FinishMessage
+			}
+			if err := s.report.Note(
+				FeatureGeminiFinishRefusal,
+				"candidates[].finishReason",
+				fmt.Sprintf("finishReason %s rendered as a refusal (gemini_finish_refusal encoding)", reason),
+			); err != nil {
+				return nil, err
+			}
+			refusal, err := s.appendRefusal(text)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, refusal...)
+			s.refused = true
 		}
-		s.heldTerminal = held
+		s.heldTerminal = s.closeAllAndHold()
 		return events, nil
 	}
 
 	return events, nil
 }
 
-// absorbTrailing handles a chunk after the terminal: only usageMetadata may
-// carry new information (the last one wins); content parts are corrupt wire.
+// startEvents returns response.created and response.in_progress the first
+// time it is called, and nothing afterwards: every path that emits an output
+// item calls it first, so the lifecycle always opens with the response.
+func (s *geminiResponsesStreamState) startEvents() []ResponsesSSEEvent {
+	if s.started {
+		return nil
+	}
+	s.started = true
+	envelope := s.baseEnvelope("in_progress")
+	return []ResponsesSSEEvent{
+		s.builder.Created(envelope),
+		s.builder.InProgress(envelope),
+	}
+}
+
+// absorbTrailing handles a chunk after the terminal: only accounting and
+// metadata may follow (the last usage wins); content parts are corrupt wire.
 func (s *geminiResponsesStreamState) absorbTrailing(chunk geminigeneratecontent.GenerateContentResponse) ([]ResponsesSSEEvent, error) {
 	if len(chunk.Candidates) > 0 && chunk.Candidates[0].Content != nil &&
 		len(chunk.Candidates[0].Content.Parts) > 0 {
@@ -304,12 +343,43 @@ func (s *geminiResponsesStreamState) absorbTrailing(chunk geminigeneratecontent.
 			"gemini stream chunk with content parts after the finish chunk",
 		))
 	}
+	return nil, s.recordChunkMetadata(chunk)
+}
+
+// recordChunkMetadata records the response-level fields of one chunk, on
+// every path a chunk can take: usage (the last one wins), and the approved
+// losses of the prompt safety ratings and the model status, each once per
+// stream. The non-streaming decode gates the same fields.
+func (s *geminiResponsesStreamState) recordChunkMetadata(chunk geminigeneratecontent.GenerateContentResponse) error {
 	if chunk.UsageMetadata != nil {
 		if err := s.recordUsage(chunk.UsageMetadata); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return nil, nil
+	if chunk.PromptFeedback != nil && len(chunk.PromptFeedback.SafetyRatings) > 0 &&
+		!s.promptSafetyLossRecorded {
+		s.promptSafetyLossRecorded = true
+		if err := s.report.Lose(
+			s.policy,
+			FeatureGeminiSafetyMetadata,
+			"promptFeedback.safetyRatings",
+			"prompt safety ratings cannot be reproduced in the target response",
+		); err != nil {
+			return err
+		}
+	}
+	if chunk.ModelStatus != nil && !s.modelStatusLossRecorded {
+		s.modelStatusLossRecorded = true
+		if err := s.report.Lose(
+			s.policy,
+			FeatureGeminiModelStatus,
+			"modelStatus",
+			"the model status (lifecycle stage/retirement) cannot be reproduced in the target response",
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // convertPart converts one Gemini stream part into Responses events.
@@ -436,6 +506,9 @@ func (s *geminiResponsesStreamState) emitTextDelta(delta string) ([]ResponsesSSE
 		contentIndex = item.openPartIndex
 		key = geminiPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
 	} else {
+		if err := s.budget.addPart(); err != nil {
+			return nil, s.wireError(err)
+		}
 		contentIndex = int64(len(message.Content))
 		key = geminiPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
 		s.textBufs[key] = &strings.Builder{}
@@ -485,6 +558,9 @@ func (s *geminiResponsesStreamState) emitThoughtText(delta, path string) ([]Resp
 		buf = &strings.Builder{}
 		s.thoughtBufs[geminiPartKey{outputIndex: item.outputIndex}] = buf
 		if len(reasoning.Summary) == 0 {
+			if err := s.budget.addPart(); err != nil {
+				return nil, s.wireError(err)
+			}
 			reasoning.Summary = []ResponsesReasoningSummary{{Type: "summary_text", Text: ""}}
 			events = append(events, s.builder.ReasoningSummaryPartAdded(
 				reasoning.ID, item.outputIndex, 0, openairesponses.SummaryTextPart{
@@ -506,12 +582,10 @@ func (s *geminiResponsesStreamState) emitThoughtText(delta, path string) ([]Resp
 // ensureMessageOpen opens a new output message item when the last item is not
 // an open message.
 func (s *geminiResponsesStreamState) ensureMessageOpen() ([]ResponsesSSEEvent, error) {
-	if err := s.closeOpenReasoning(); err != nil {
-		return nil, err
-	}
+	events := s.closeOpenReasoning()
 	if n := len(s.items); n > 0 {
 		if item := &s.items[n-1]; item.isMessage() && item.item.(*ResponsesOutputMessage).Status != ResponsesItemCompleted {
-			return nil, nil
+			return events, nil
 		}
 	}
 	if err := s.budget.addItem(); err != nil {
@@ -526,7 +600,12 @@ func (s *geminiResponsesStreamState) ensureMessageOpen() ([]ResponsesSSEEvent, e
 		Content: []ResponsesOutputContentPart{},
 	}
 	s.items = append(s.items, openResponsesItem{outputIndex: outputIndex, item: message, openPartIndex: -1})
-	return []ResponsesSSEEvent{s.builder.OutputItemAdded(outputIndex, message)}, nil
+	// The added event carries a detached snapshot of the item at creation:
+	// the live item gains parts and is completed later, possibly within the
+	// same chunk, before the event is marshaled.
+	snapshot := *message
+	snapshot.Content = ResponsesOutputContentParts{}
+	return append(events, s.builder.OutputItemAdded(outputIndex, &snapshot)), nil
 }
 
 // ensureReasoningOpen opens a reasoning item when none is open.
@@ -537,9 +616,7 @@ func (s *geminiResponsesStreamState) ensureReasoningOpen() ([]ResponsesSSEEvent,
 			return nil, nil
 		}
 	}
-	if err := s.closeOpenMessage(); err != nil {
-		return nil, err
-	}
+	events := s.closeOpenMessage()
 	if err := s.budget.addItem(); err != nil {
 		return nil, s.wireError(err)
 	}
@@ -551,7 +628,10 @@ func (s *geminiResponsesStreamState) ensureReasoningOpen() ([]ResponsesSSEEvent,
 		Summary: []ResponsesReasoningSummary{},
 	}
 	s.items = append(s.items, openResponsesItem{outputIndex: outputIndex, item: reasoning, openPartIndex: -1})
-	return []ResponsesSSEEvent{s.builder.OutputItemAdded(outputIndex, reasoning)}, nil
+	// A detached creation snapshot, as for message items.
+	snapshot := *reasoning
+	snapshot.Summary = []ResponsesReasoningSummary{}
+	return append(events, s.builder.OutputItemAdded(outputIndex, &snapshot)), nil
 }
 
 // convertFunctionCall emits one complete function call: close any open item,
@@ -580,10 +660,14 @@ func (s *geminiResponsesStreamState) convertFunctionCall(
 	if args == "" {
 		args = "{}"
 	}
-	if err := s.closeOpenMessage(); err != nil {
-		return nil, err
+	if len(args) > maxStreamAccumulatedBytes {
+		return nil, s.wireError(fmt.Errorf(
+			"gemini stream functionCall arguments at %s exceed %d bytes",
+			path,
+			maxStreamAccumulatedBytes,
+		))
 	}
-	if err := s.closeOpenReasoning(); err != nil {
+	if err := s.chargeTotal(len(args), "tool arguments"); err != nil {
 		return nil, err
 	}
 	if err := s.budget.addItem(); err != nil {
@@ -610,6 +694,13 @@ func (s *geminiResponsesStreamState) convertFunctionCall(
 			name = clientName
 		}
 	}
+	// The call identity renders into the done events and the terminal
+	// envelope, so it is retained semantic state like the arguments.
+	if err := s.chargeTotal(len(callID)+len(name), "tool-call identity"); err != nil {
+		return nil, err
+	}
+	events := s.closeOpenMessage()
+	events = append(events, s.closeOpenReasoning()...)
 	item := &ResponsesFunctionCallOutputItem{
 		ID:        itemID,
 		Type:      "function_call",
@@ -625,32 +716,95 @@ func (s *geminiResponsesStreamState) convertFunctionCall(
 		s.ctx.GeminiSignatures != nil {
 		s.ctx.GeminiSignatures.Put(s.ctx.GeminiSignatureScope, callID, *part.ThoughtSignature)
 	}
-	return []ResponsesSSEEvent{
-		s.builder.OutputItemAdded(outputIndex, item),
+	// The added event announces the call in progress with empty arguments,
+	// which then arrive through the delta, as on every other stream path.
+	added := *item
+	added.Status = ResponsesItemInProgress
+	added.Arguments = ""
+	return append(events,
+		s.builder.OutputItemAdded(outputIndex, &added),
 		s.builder.FunctionArgumentsDelta(itemID, outputIndex, args),
 		s.builder.FunctionArgumentsDone(itemID, outputIndex, args),
 		s.builder.OutputItemDone(outputIndex, item),
-	}, nil
+	), nil
 }
 
-// openRefusalItem opens a message item carrying a refusal part.
-func (s *geminiResponsesStreamState) openRefusalItem(text string) ([]ResponsesSSEEvent, error) {
+// appendRefusal adds a refusal content part to the open message item, opening
+// one when none is open (the same placement as the non-streaming decode). An
+// open text part is closed first, so at most one part is ever open. The
+// refusal text is streamed as one delta so the done event reconciles with it;
+// the part stays open until closeAllAndHold.
+func (s *geminiResponsesStreamState) appendRefusal(text string) ([]ResponsesSSEEvent, error) {
 	events, err := s.ensureMessageOpen()
 	if err != nil {
 		return nil, err
 	}
+	if err := s.budget.addPart(); err != nil {
+		return nil, s.wireError(err)
+	}
+	// The refusal text comes from the upstream (finishMessage), so it has
+	// the same per-part bound as streamed text.
+	if len(text) > maxStreamAccumulatedBytes {
+		return nil, s.wireError(fmt.Errorf(
+			"gemini stream refusal exceeds %d bytes",
+			maxStreamAccumulatedBytes,
+		))
+	}
+	if err := s.chargeTotal(len(text), "refusal"); err != nil {
+		return nil, err
+	}
 	item := &s.items[len(s.items)-1]
 	message := item.item.(*ResponsesOutputMessage)
+	events = append(events, s.closeOpenPart(item)...)
 	contentIndex := int64(len(message.Content))
 	message.Content = append(message.Content, &ResponsesOutputRefusal{Type: "refusal", Refusal: text})
-	events = append(events, s.builder.ContentPartAdded(message.ID, item.outputIndex, contentIndex,
-		&ResponsesStreamRefusalPart{Type: "refusal", Refusal: text}))
+	item.openPartIndex = contentIndex
+	events = append(events,
+		s.builder.ContentPartAdded(message.ID, item.outputIndex, contentIndex,
+			&ResponsesStreamRefusalPart{Type: "refusal", Refusal: ""}),
+		s.builder.RefusalDelta(message.ID, item.outputIndex, contentIndex, text),
+	)
 	return events, nil
 }
 
-// closeOpenMessage closes the open message item (text done, part done,
-// item done) if one is open.
-func (s *geminiResponsesStreamState) closeOpenMessage() error {
+// closeOpenPart emits the done events of the message item's open content part
+// (text or refusal done, then content_part.done), materializing the streamed
+// text into the part. It does nothing when no part is open.
+func (s *geminiResponsesStreamState) closeOpenPart(item *openResponsesItem) []ResponsesSSEEvent {
+	message, ok := item.item.(*ResponsesOutputMessage)
+	if !ok || item.openPartIndex < 0 || int(item.openPartIndex) >= len(message.Content) {
+		item.openPartIndex = -1
+		return nil
+	}
+	contentIndex := item.openPartIndex
+	item.openPartIndex = -1
+	switch part := message.Content[contentIndex].(type) {
+	case *ResponsesOutputText:
+		if buf := s.textBufs[geminiPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}]; buf != nil {
+			part.Text = buf.String()
+		}
+		return []ResponsesSSEEvent{
+			s.builder.TextDone(message.ID, item.outputIndex, contentIndex, part.Text),
+			s.builder.ContentPartDone(message.ID, item.outputIndex, contentIndex,
+				&ResponsesStreamOutputTextPart{
+					Type:        "output_text",
+					Text:        part.Text,
+					Annotations: []ResponsesAnnotation{},
+				}),
+		}
+	case *ResponsesOutputRefusal:
+		return []ResponsesSSEEvent{
+			s.builder.RefusalDone(message.ID, item.outputIndex, contentIndex, part.Refusal),
+			s.builder.ContentPartDone(message.ID, item.outputIndex, contentIndex,
+				&ResponsesStreamRefusalPart{Type: "refusal", Refusal: part.Refusal}),
+		}
+	}
+	return nil
+}
+
+// closeOpenMessage closes the last item when it is an open message: its open
+// content part's done events, then output_item.done with status completed.
+func (s *geminiResponsesStreamState) closeOpenMessage() []ResponsesSSEEvent {
 	n := len(s.items)
 	if n == 0 {
 		return nil
@@ -660,20 +814,15 @@ func (s *geminiResponsesStreamState) closeOpenMessage() error {
 	if !ok || message.Status == ResponsesItemCompleted {
 		return nil
 	}
-	item.openPartIndex = -1
-	for contentIndex, part := range message.Content {
-		key := geminiPartKey{outputIndex: item.outputIndex, contentIndex: int64(contentIndex)}
-		if textPart, ok := part.(*ResponsesOutputText); ok {
-			if buf := s.textBufs[key]; buf != nil {
-				textPart.Text = buf.String()
-			}
-		}
-	}
-	return nil
+	events := s.closeOpenPart(item)
+	message.Status = ResponsesItemCompleted
+	return append(events, s.builder.OutputItemDone(item.outputIndex, message))
 }
 
-// closeOpenReasoning closes the open reasoning item.
-func (s *geminiResponsesStreamState) closeOpenReasoning() error {
+// closeOpenReasoning closes the last item when it is an open reasoning item:
+// the summary text and part done events, then output_item.done with status
+// completed.
+func (s *geminiResponsesStreamState) closeOpenReasoning() []ResponsesSSEEvent {
 	n := len(s.items)
 	if n == 0 {
 		return nil
@@ -683,74 +832,32 @@ func (s *geminiResponsesStreamState) closeOpenReasoning() error {
 	if !ok || reasoning.Status == ResponsesItemCompleted {
 		return nil
 	}
-	_ = reasoning
-	return nil
+	text := ""
+	if buf := s.thoughtBufs[geminiPartKey{outputIndex: item.outputIndex}]; buf != nil {
+		text = buf.String()
+	}
+	if len(reasoning.Summary) == 0 {
+		reasoning.Summary = []ResponsesReasoningSummary{{Type: "summary_text", Text: text}}
+	} else {
+		reasoning.Summary[0].Text = text
+	}
+	reasoning.Status = ResponsesItemCompleted
+	return []ResponsesSSEEvent{
+		s.builder.ReasoningSummaryTextDone(reasoning.ID, item.outputIndex, 0, text),
+		s.builder.ReasoningSummaryPartDone(reasoning.ID, item.outputIndex, 0, openairesponses.SummaryTextPart{
+			Type: "summary_text", Text: text,
+		}),
+		s.builder.OutputItemDone(item.outputIndex, reasoning),
+	}
 }
 
-// closeAllAndHold closes every open item, records the finish reason, and
-// returns the held terminal events (item-closing events; the terminal
-// envelope is appended at release so the trailing usage is reflected).
-func (s *geminiResponsesStreamState) closeAllAndHold(reason string) ([]ResponsesSSEEvent, error) {
-	var events []ResponsesSSEEvent
-	// Close the open message item with done events.
-	if n := len(s.items); n > 0 {
-		item := &s.items[n-1]
-		switch value := item.item.(type) {
-		case *ResponsesOutputMessage:
-			if value.Status != ResponsesItemCompleted {
-				for contentIndex, part := range value.Content {
-					key := geminiPartKey{outputIndex: item.outputIndex, contentIndex: int64(contentIndex)}
-					switch p := part.(type) {
-					case *ResponsesOutputText:
-						text := p.Text
-						if buf := s.textBufs[key]; buf != nil {
-							text = buf.String()
-						}
-						p.Text = text
-						events = append(events,
-							s.builder.TextDone(value.ID, item.outputIndex, int64(contentIndex), text),
-							s.builder.ContentPartDone(value.ID, item.outputIndex, int64(contentIndex),
-								&ResponsesStreamOutputTextPart{
-									Type:        "output_text",
-									Text:        text,
-									Annotations: []ResponsesAnnotation{},
-								}),
-						)
-					case *ResponsesOutputRefusal:
-						events = append(events,
-							s.builder.RefusalDone(value.ID, item.outputIndex, int64(contentIndex), p.Refusal),
-							s.builder.ContentPartDone(value.ID, item.outputIndex, int64(contentIndex),
-								&ResponsesStreamRefusalPart{Type: "refusal", Refusal: p.Refusal}),
-						)
-					}
-				}
-				value.Status = ResponsesItemCompleted
-				item.openPartIndex = -1
-				events = append(events, s.builder.OutputItemDone(item.outputIndex, value))
-			}
-		case *ResponsesReasoningOutputItem:
-			if value.Status != ResponsesItemCompleted {
-				text := ""
-				if buf := s.thoughtBufs[geminiPartKey{outputIndex: item.outputIndex}]; buf != nil {
-					text = buf.String()
-				}
-				if len(value.Summary) == 0 {
-					value.Summary = []ResponsesReasoningSummary{{Type: "summary_text", Text: text}}
-				} else {
-					value.Summary[0].Text = text
-				}
-				value.Status = ResponsesItemCompleted
-				events = append(events,
-					s.builder.ReasoningSummaryTextDone(value.ID, item.outputIndex, 0, text),
-					s.builder.ReasoningSummaryPartDone(value.ID, item.outputIndex, 0, openairesponses.SummaryTextPart{
-						Type: "summary_text", Text: text,
-					}),
-					s.builder.OutputItemDone(item.outputIndex, value),
-				)
-			}
-		}
-	}
-	return events, nil
+// closeAllAndHold closes the open item and returns its closing events, which
+// the caller holds with the terminal: the terminal envelope is appended at
+// release so a trailing usage chunk is reflected. Function-call items are
+// complete when emitted, and every earlier item was closed when the next one
+// opened, so only the last item can still be open.
+func (s *geminiResponsesStreamState) closeAllAndHold() []ResponsesSSEEvent {
+	return append(s.closeOpenMessage(), s.closeOpenReasoning()...)
 }
 
 // recordCandidateMetadata records the per-chunk candidate metadata losses once
@@ -925,20 +1032,22 @@ func (s *geminiResponsesStreamState) finalOutputItems() []ResponsesOutputItem {
 
 // terminalEnvelope builds the terminal envelope with the final usage.
 func (s *geminiResponsesStreamState) terminalEnvelope() ResponsesSSEEvent {
-	reason := s.finishReason
-	if refusalFinishReasons[reason] {
-		// Refusal finish: completed status, refusal stop is carried by the
-		// refusal item; the Responses envelope stays "completed".
-		envelope := s.baseEnvelope("completed")
-		envelope.Output = s.finalOutputItems()
-		envelope.Usage = s.usage
-		return s.builder.Completed(envelope)
+	// A refusal (blocked prompt or refusal finishReason) is incomplete with
+	// reason content_filter, the Responses contract's filtered-response
+	// representation, which the Anthropic composition renders as the refusal
+	// stop reason. MAX_TOKENS is incomplete with max_output_tokens.
+	incompleteReason := ""
+	switch {
+	case s.refused:
+		incompleteReason = "content_filter"
+	case s.finishReason == "MAX_TOKENS":
+		incompleteReason = "max_output_tokens"
 	}
-	if reason == "MAX_TOKENS" {
+	if incompleteReason != "" {
 		envelope := s.baseEnvelope("incomplete")
 		envelope.Output = s.finalOutputItems()
 		envelope.Usage = s.usage
-		envelope.IncompleteDetails = &ResponsesIncompleteDetails{Reason: "max_tokens"}
+		envelope.IncompleteDetails = &ResponsesIncompleteDetails{Reason: incompleteReason}
 		return s.builder.Incomplete(envelope)
 	}
 	envelope := s.baseEnvelope("completed")
