@@ -747,6 +747,26 @@ func TestGeminiUpstreamStreamAddedEventsAreCreationSnapshots(t *testing.T) {
 	}
 }
 
+func TestGeminiUpstreamStreamEmptySafetyRatingsAreNotALoss(t *testing.T) {
+	// An explicit empty safetyRatings:[] carries no information, so it is not
+	// a loss — matching the prompt-feedback and non-streaming gates.
+	ctx := geminiStreamTestContext()
+	ctx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{}}
+	s := newGeminiStreamState(t, ctx)
+	_, final, err := collectResponses(t, s,
+		`{"candidates":[{"content":{"parts":[{"text":"hi"}]},"safetyRatings":[],"index":0}]}`,
+		`{"candidates":[{"finishReason":"STOP","safetyRatings":[],"index":0}]}`,
+		`{"promptFeedback":{"safetyRatings":[]},"usageMetadata":{"totalTokenCount":1}}`,
+	)
+	if err != nil {
+		t.Fatalf("stream under a fully strict policy: %v", err)
+	}
+	_ = final
+	if reportHasFeature(s.report, FeatureGeminiSafetyMetadata) {
+		t.Fatalf("empty safetyRatings arrays recorded a loss: %+v", s.report.Losses)
+	}
+}
+
 func TestGeminiUpstreamStreamBlockReasonWithCandidateIsCorrupt(t *testing.T) {
 	s := newGeminiStreamState(t, nil)
 	_, err := s.Convert(geminiChunk(t,
@@ -754,5 +774,118 @@ func TestGeminiUpstreamStreamBlockReasonWithCandidateIsCorrupt(t *testing.T) {
 	))
 	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	}
+}
+
+// finishChunk is a terminal STOP chunk; trailing chunks follow it.
+const geminiFinishChunk = `{"candidates":[{"finishReason":"STOP","index":0}]}`
+
+func TestGeminiUpstreamStreamTrailingChunkWithFinishReasonIsCorrupt(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	if _, err := s.Convert(geminiChunk(t, geminiFinishChunk)); err != nil {
+		t.Fatalf("finish chunk: %v", err)
+	}
+	_, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"finishReason":"SAFETY","index":0}]}`,
+	))
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("trailing finishReason: err = %T %v, want *UpstreamWireError", err, err)
+	}
+}
+
+func TestGeminiUpstreamStreamTrailingChunkWithFinishMessageIsCorrupt(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	if _, err := s.Convert(geminiChunk(t, geminiFinishChunk)); err != nil {
+		t.Fatalf("finish chunk: %v", err)
+	}
+	_, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"finishMessage":"late","index":0}]}`,
+	))
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("trailing finishMessage: err = %T %v, want *UpstreamWireError", err, err)
+	}
+}
+
+func TestGeminiUpstreamStreamTrailingChunkWithBadRoleIsCorrupt(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	if _, err := s.Convert(geminiChunk(t, geminiFinishChunk)); err != nil {
+		t.Fatalf("finish chunk: %v", err)
+	}
+	_, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"content":{"role":"user","parts":[]},"index":0}]}`,
+	))
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("trailing bad role: err = %T %v, want *UpstreamWireError", err, err)
+	}
+}
+
+func TestGeminiUpstreamStreamTrailingCandidateMetadataIsNotDropped(t *testing.T) {
+	// A trailing candidate chunk with no content parts must still record its
+	// metadata losses under the policy: safety ratings are lost, and a
+	// continuation token is unrepresentable.
+	trailingSafety := `{"candidates":[{"safetyRatings":[{"category":"HARM_CATEGORY_HARASSMENT","probability":"HIGH"}],"index":0}]}`
+	trailingContinuation := `{"candidates":[{"continuationToken":"tok","index":0}]}`
+
+	// Permissive policy: the safety loss is recorded and the chunk absorbed.
+	s := newGeminiStreamState(t, nil)
+	if _, err := s.Convert(geminiChunk(t, geminiFinishChunk)); err != nil {
+		t.Fatalf("finish chunk: %v", err)
+	}
+	if _, err := s.Convert(geminiChunk(t, trailingSafety)); err != nil {
+		t.Fatalf("trailing safety chunk: %v", err)
+	}
+	if !reportHasFeature(s.report, FeatureGeminiSafetyMetadata) {
+		t.Fatalf("trailing candidate safety ratings were not recorded: %+v", s.report.Losses)
+	}
+
+	// Strict policy: the trailing safety ratings refuse the stream.
+	strictCtx := geminiStreamTestContext()
+	strictCtx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{}}
+	strict := newGeminiStreamState(t, strictCtx)
+	if _, err := strict.Convert(geminiChunk(t, geminiFinishChunk)); err != nil {
+		t.Fatalf("finish chunk: %v", err)
+	}
+	if _, err := strict.Convert(geminiChunk(t, trailingSafety)); err == nil ||
+		!strings.Contains(err.Error(), string(FeatureGeminiSafetyMetadata)) {
+		t.Fatalf("strict trailing safety chunk: err = %v, want a %s refusal", err, FeatureGeminiSafetyMetadata)
+	}
+
+	// A trailing continuation token is unrepresentable on any policy.
+	c := newGeminiStreamState(t, nil)
+	if _, err := c.Convert(geminiChunk(t, geminiFinishChunk)); err != nil {
+		t.Fatalf("finish chunk: %v", err)
+	}
+	_, err := c.Convert(geminiChunk(t, trailingContinuation))
+	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
+		t.Fatalf("trailing continuationToken: err = %T %v, want *UnrepresentableError", err, err)
+	}
+}
+
+func TestGeminiUpstreamStreamTrailingUsageOnlyChunkIsAbsorbed(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	events, final, err := collectResponses(t, s,
+		`{"candidates":[{"content":{"parts":[{"text":"hi"}]},"index":0}]}`,
+		geminiFinishChunk,
+		`{"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":2,"totalTokenCount":7}}`,
+	)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	all := append(append([]ResponsesSSEEvent{}, events...), final...)
+	last := all[len(all)-1]
+	data, err := MarshalResponsesEvent(last)
+	if err != nil {
+		t.Fatalf("marshal terminal: %v", err)
+	}
+	var envelope struct {
+		Response struct {
+			Usage *ResponsesUsage `json:"usage"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("unmarshal terminal: %v", err)
+	}
+	if envelope.Response.Usage == nil || envelope.Response.Usage.TotalTokens != 7 {
+		t.Fatalf("terminal usage = %+v, want the trailing usage chunk (total 7)", envelope.Response.Usage)
 	}
 }

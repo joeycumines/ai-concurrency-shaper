@@ -21,10 +21,15 @@ func TestHasQueryCredential(t *testing.T) {
 		{query: "key%3D=x", want: true},
 		{query: "key%3DSECRET", want: true},
 		{query: "key%3D%3D=x", want: true},
+		{query: "key%3Dsecret%zz", want: true},
+		{query: "key%3D%zz=x", want: true},
+		{query: "KEY%3dsecret%zz", want: true},
 		{query: "foo=1;key=SECRET", want: true},
+		{query: "foo=1;key%3Dsecret%zz", want: true},
 		{query: "x;access_token=T", want: true},
 		{query: "alt=sse;;oauth_token=T&", want: true},
 		{query: "monkey=1;keys=2", want: false},
+		{query: "foo=1;keys=2", want: false},
 	}
 	for _, tt := range tests {
 		if got := HasQueryCredential(tt.query); got != tt.want {
@@ -47,6 +52,31 @@ func TestGeminiClientQueryMalformedIsRefused(t *testing.T) {
 	// still gets the credential refusal.
 	if err := geminiClientQuery(match, "foo=1;key=SECRET"); !errors.Is(err, errGeminiQueryCredential) {
 		t.Fatalf("credential after ';' = %v, want the credential refusal", err)
+	}
+	// The same holds when the credential name is %3D-escaped and the value
+	// carries a malformed escape: the credential refusal wins, not the
+	// malformed-query refusal.
+	for _, query := range []string{"key%3Dsecret%zz", "key%3D%zz=x&alt=sse"} {
+		if err := geminiClientQuery(match, query); !errors.Is(err, errGeminiQueryCredential) {
+			t.Errorf("geminiClientQuery(%q) = %v, want the credential refusal", query, err)
+		}
+	}
+}
+
+func TestParseClientQueryErrorNamesNoValue(t *testing.T) {
+	// url.ParseQuery's error embeds up to 3 raw bytes of the offending escape
+	// (e.g. url.EscapeError("%zz")); the returned error must name only the
+	// parse failure, never a value fragment.
+	for _, query := range []string{"token=my_secret%zz", "key%3Dsecret%zz", "bad=%zz&alt=sse"} {
+		_, err := parseClientQuery(query)
+		if !errors.Is(err, errClientQueryParameter) {
+			t.Fatalf("parseClientQuery(%q) = %v, want the malformed-query refusal", query, err)
+		}
+		for _, fragment := range []string{"%zz", "secret", "my_secret"} {
+			if strings.Contains(err.Error(), fragment) {
+				t.Errorf("parseClientQuery(%q) error %q echoes value fragment %q", query, err, fragment)
+			}
+		}
 	}
 }
 

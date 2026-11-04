@@ -29,11 +29,13 @@ func upstreamClientQuery(r *http.Request, client ClientProtocol) (url.Values, er
 // percent escape) and reports it only through its error. Ignoring that error
 // would let a pair escape the allowlist check while still sitting in the
 // journaled URL, so a malformed query is a client fault and is refused
-// whole. The error names only the parse failure, never a value.
+// whole. The error names only the parse failure, never a value: url's
+// EscapeError embeds raw bytes of the offending escape, so the underlying
+// error is wrapped with %w and never interpolated.
 func parseClientQuery(rawQuery string) (url.Values, error) {
 	query, err := url.ParseQuery(rawQuery)
 	if err != nil {
-		return nil, fmt.Errorf("%w: the query string is malformed: %v", errClientQueryParameter, err)
+		return nil, fmt.Errorf("%w: the query string is malformed", errClientQueryParameter)
 	}
 	return query, nil
 }
@@ -55,6 +57,13 @@ var errGeminiQueryCredential = errors.New(
 func HasQueryCredential(rawQuery string) bool {
 	for _, pair := range rawQueryPairs(rawQuery) {
 		name, _, _ := strings.Cut(pair, "=")
+		// Cut on a raw %3D / %3d before QueryUnescape: unescaping is
+		// all-or-nothing, so a malformed escape later in the pair (e.g.
+		// "key%3Dsecret%zz") would otherwise discard the unescape and hide
+		// the credential name.
+		if idx := strings.Index(strings.ToLower(name), "%3d"); idx >= 0 {
+			name = name[:idx]
+		}
 		if unescaped, err := url.QueryUnescape(name); err == nil {
 			// An escaped '=' (raw "key%3DSECRET" or "key%3D%3D=x") still
 			// names the credential parameter, so the unescaped name is cut

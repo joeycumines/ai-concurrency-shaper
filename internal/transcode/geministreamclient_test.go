@@ -610,6 +610,72 @@ func TestGeminiStreamResponsesUnstreamedSummaryIsLost(t *testing.T) {
 	assertGeminiLossRefused(t, reader, output, err, FeatureReasoningSummary)
 }
 
+// geminiReasoningSummarySSE builds a reasoning item whose summary arrives as
+// deltas (the given text) and whose output_item.done repeats the done text.
+func geminiReasoningSummarySSE(streamed, done string) string {
+	return "" +
+		"event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"in_progress","summary":[]}}` + "\n\n" +
+		"event: response.reasoning_summary_part.added\n" +
+		`data: {"type":"response.reasoning_summary_part.added","sequence_number":3,"item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}` + "\n\n" +
+		"event: response.reasoning_summary_text.delta\n" +
+		`data: {"type":"response.reasoning_summary_text.delta","sequence_number":4,"item_id":"rs_1","output_index":0,"summary_index":0,"delta":` + jsonString(streamed) + `}` + "\n\n" +
+		"event: response.reasoning_summary_text.done\n" +
+		`data: {"type":"response.reasoning_summary_text.done","sequence_number":5,"item_id":"rs_1","output_index":0,"summary_index":0,"text":` + jsonString(streamed) + `}` + "\n\n" +
+		"event: response.reasoning_summary_part.done\n" +
+		`data: {"type":"response.reasoning_summary_part.done","sequence_number":6,"item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":` + jsonString(streamed) + `}}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","sequence_number":7,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":` + jsonString(done) + `}]}}` + "\n\n"
+}
+
+func jsonString(s string) string {
+	data, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
+}
+
+func TestGeminiStreamResponsesSummaryCoverageProvesContentNotBytes(t *testing.T) {
+	// The streamed summary and the final summary are both 3 bytes but differ:
+	// the final text was never rendered, so the loss must be recorded.
+	sameLengthDifferent := geminiSSEBody(t, fsmCreated(1)) +
+		geminiReasoningSummarySSE("aaa", "bbb") +
+		geminiSSEBody(t, fsmComplete(8))
+	reader, _ := geminiClientStateReader(sameLengthDifferent, usageOnlyPolicy(FeatureProviderReasoningText))
+	output, err := drainReader(t, reader)
+	assertGeminiLossRefused(t, reader, output, err, FeatureReasoningSummary)
+
+	// The final summary matches the streamed deltas exactly: no loss.
+	exact := geminiSSEBody(t, fsmCreated(1)) +
+		geminiReasoningSummarySSE("think", "think") +
+		geminiSSEBody(t, fsmComplete(8))
+	reader, state := geminiClientStateReader(exact, usageOnlyPolicy(FeatureProviderReasoningText))
+	output, err = drainReader(t, reader)
+	if !errors.Is(err, io.EOF) || !reader.SawTerminal() {
+		t.Fatalf("exact-match summary stream did not complete: err %v; output %q", err, output)
+	}
+	if reportHasFeature(state.report, FeatureReasoningSummary) {
+		t.Fatalf("exactly streamed summary recorded a loss: %+v", state.report.Losses)
+	}
+
+	// The done event omits the repeated summary after deltas streamed: the
+	// summary is not proven covered, so the loss must be recorded.
+	omitted := geminiSSEBody(t, fsmCreated(1)) +
+		"event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"in_progress","summary":[]}}` + "\n\n" +
+		"event: response.reasoning_summary_part.added\n" +
+		`data: {"type":"response.reasoning_summary_part.added","sequence_number":3,"item_id":"rs_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}` + "\n\n" +
+		"event: response.reasoning_summary_text.delta\n" +
+		`data: {"type":"response.reasoning_summary_text.delta","sequence_number":4,"item_id":"rs_1","output_index":0,"summary_index":0,"delta":"think"}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","sequence_number":5,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"completed","summary":[]}}` + "\n\n" +
+		geminiSSEBody(t, fsmComplete(6))
+	reader, _ = geminiClientStateReader(omitted, usageOnlyPolicy(FeatureProviderReasoningText))
+	output, err = drainReader(t, reader)
+	assertGeminiLossRefused(t, reader, output, err, FeatureReasoningSummary)
+}
+
 func TestGeminiStreamClientBudgetIsUpstreamFault(t *testing.T) {
 	state := newGeminiStreamClientState(testStreamContext(), UpstreamMessages, StrictLossPolicy(), "resp_1", "gemini-x")
 	state.budget.semanticBytes = state.budget.semanticBytesBudget

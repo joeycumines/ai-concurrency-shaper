@@ -26,7 +26,8 @@ import (
 )
 
 // refusalFinishReasons are the Gemini finish reasons that mean the provider
-// declined the answer: the response is a completed refusal, never a failure.
+// declined the answer: the response is incomplete with reason content_filter,
+// never a failure.
 var refusalFinishReasons = map[string]bool{
 	"SAFETY":                   true,
 	"RECITATION":               true,
@@ -64,12 +65,21 @@ func DecodeGeminiResponse(
 	response.ID = resp.ResponseID
 	response.Model = resp.ModelVersion
 
-	// Prompt feedback: a blocked prompt is a completed refusal; its safety
-	// ratings are an observable loss.
+	// Prompt feedback: a blocked prompt is incomplete with reason
+	// content_filter; its safety ratings are an observable loss. The API
+	// contract says a blocked prompt returns no candidates, so a response
+	// carrying both contradicts itself and is corrupt wire (the stream
+	// rejects the same combination).
 	if resp.PromptFeedback != nil {
 		if resp.PromptFeedback.BlockReason != nil &&
 			*resp.PromptFeedback.BlockReason != "" &&
 			*resp.PromptFeedback.BlockReason != "BLOCK_REASON_UNSPECIFIED" {
+			if len(resp.Candidates) > 0 {
+				return CanonicalResponse{}, report, upstreamWireError(
+					UpstreamGemini, 0,
+					errors.New("gemini response carries both promptFeedback.blockReason and candidates"),
+				)
+			}
 			// The Responses contract represents a filtered response as
 			// incomplete with reason content_filter; the Anthropic dialect
 			// renders the refusal stop reason. The stream renders the same.

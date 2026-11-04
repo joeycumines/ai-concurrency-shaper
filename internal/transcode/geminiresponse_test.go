@@ -383,3 +383,21 @@ func TestDecodeGeminiResponseCorruptWire(t *testing.T) {
 		t.Fatalf("err = %v (%T), want *UpstreamWireError", err, err)
 	}
 }
+
+func TestDecodeGeminiResponseBlockReasonWithCandidateIsCorrupt(t *testing.T) {
+	// The stream path rejects a chunk carrying both promptFeedback.blockReason
+	// and a candidate as corrupt wire; the non-streaming decode must too,
+	// otherwise the finish-reason switch overwrites the blocked-prompt
+	// incomplete status while IncompleteReason stays content_filter.
+	for _, finish := range []string{"STOP", "SAFETY", "MAX_TOKENS"} {
+		body := `{
+			"promptFeedback": {"blockReason": "SAFETY"},
+			"candidates": [{"content": {"role": "model", "parts": [{"text": "hi"}]}, "finishReason": "` + finish + `", "index": 0}],
+			"modelVersion": "m"
+		}`
+		_, _, err := decodeGemini(body, permissivePolicy())
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+			t.Fatalf("finishReason %s: err = %v (%T), want *UpstreamWireError", finish, err, err)
+		}
+	}
+}
