@@ -2,10 +2,7 @@
 # Patterns to exclude from deadcode analysis
 # See: https://pkg.go.dev/github.com/joeycumines/simple-command-output-filter
 
-# DO NOT ADD IGNORES FOR CODE THAT IS UNREACHABLE ONLY BECAUSE ITS CALLERS ARE
-# NOT WRITTEN YET — write the caller first. Every ignore below documents a
-# confirmed false positive: test-pinned public API or test-only packages that
-# the binary-entry reachability analysis cannot see.
+# DO NOT ADD IGNORES TO THIS FILE WITH THE INTENT OF "WIRING THEM UP LATER"
 
 # Test-only packages + CONFIRMED false positives. Read the deadcode tool's `go doc` for details re: false positives.
 internal/tui/tuitest/helper.go:*
@@ -53,79 +50,3 @@ internal/transcode/testcorpus/*
 # StopAfter so shutdown cannot hang on a client that holds a stream open,
 # which leaves the plain Stop unreachable from the binary entry.
 *unreachable func: Server.Stop*
-
-# Gemini wire-package API pinned by the committed wire tests
-# (wire/geminigeneratecontent/*_test.go): the deadcode tool analyzes
-# reachability from THIS module's binary entry, so the package's decode and
-# validation entry points read as unreachable until the Gemini conversion
-# directions (which call them) land. They are load-bearing public surface of
-# the pinned contract shadow.
-*unreachable func: DecodeRequest
-*unreachable func: DecodeResponse
-*unreachable func: RawMemberPresent
-*unreachable func: validateJSONObject
-*unreachable func: Part.Validate
-*unreachable func: Part.UnmarshalJSON
-
-# Gemini route/URL/schema/signature foundations are pinned by their committed
-# unit tests (geminiroute_test.go, geminiurl_test.go, geminischema_test.go,
-# geminisignatures_test.go) and by Mapping.Validate for the path parser; the
-# production callers (handler dispatch, upstream URL build, tool-schema
-# conversion, provider signature store) land with the Gemini conversion and
-# gateway commits.
-*unreachable func: MatchGeminiRequestPath
-*unreachable func: IsGeminiOperationPath
-*unreachable func: BuildGeminiURL
-*unreachable func: ConvertGeminiSchema
-*unreachable func: convertGeminiSchemaAt
-*unreachable func: geminiSchemaInteger
-*unreachable func: NewGeminiSignatureStore
-
-# Gemini request decode/render direction, staged ahead of its handler wiring
-# (the conversion commits land the production callers in handlerrequest.go):
-# pinned by the committed geminirequest_test.go/geminirender_test.go.
-*unreachable func: DecodeGeminiRequest
-*unreachable func: RenderGeminiRequest
-*unreachable func: geminiDecodeError
-*unreachable func: geminiCamelCase
-*unreachable func: newGeminiDecoder
-*unreachable func: geminiDecoder.*
-*unreachable func: geminiTextOnly
-*unreachable func: geminiRawPayloadPresent
-*unreachable func: geminiInlineData
-*unreachable func: geminiField
-*unreachable func: geminiModalities
-*unreachable func: geminiObjectSchema
-
-# Gemini response decode/render direction, staged ahead of its handler
-# wiring: pinned by the committed geminiresponse_test.go /
-# geminiresponserender_test.go.
-*unreachable func: DecodeGeminiResponse
-*unreachable func: RenderGeminiResponse
-*unreachable func: jsonObjectShaped
-*unreachable func: geminiResponseParts
-*unreachable func: geminiOutputPart
-*unreachable func: geminiFinishReason
-*unreachable func: geminiResponseUsage
-
-# Messages render/decode direction (Messages -> Messages render path and
-# upstream response decode), staged ahead of its handler wiring: pinned by
-# the committed messagesrequest_test.go / messagesresponse_test.go.
-*unreachable func: RenderMessagesRequest
-*unreachable func: DecodeMessagesResponse
-*unreachable func: messagesMaxTokens
-*unreachable func: renderMessagesTurns
-*unreachable func: sawDialogAfterSystem
-*unreachable func: messagesSystemBlocks
-*unreachable func: messagesTurn
-*unreachable func: messagesToolResultBlock
-*unreachable func: messagesResultContent
-*unreachable func: messagesMediaBlock
-*unreachable func: messagesSource
-*unreachable func: renderMessagesTools
-*unreachable func: messagesToolChoice
-*unreachable func: renderMessagesMetadata
-*unreachable func: messagesUsage
-*unreachable func: messagesStop
-*unreachable func: messagesItems
-*unreachable func: derefString
