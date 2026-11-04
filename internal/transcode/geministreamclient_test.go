@@ -450,7 +450,7 @@ func TestGeminiStreamWithoutAltIsRefusedBeforeUpstream(t *testing.T) {
 // geminiResponsesConverterReader drives Responses SSE through the Gemini
 // client converter, the same way the handler composes it.
 func geminiResponsesConverterReader(sse string) *convertingReader {
-	state := newGeminiStreamClientState(testStreamContext(), StrictLossPolicy(), "resp_1", "gemini-x")
+	state := newGeminiStreamClientState(testStreamContext(), UpstreamResponses, StrictLossPolicy(), "resp_1", "gemini-x")
 	return newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(strings.NewReader(sse), 0, 0),
 		newResponsesToGeminiConverter(state), 0, 0, 0,
@@ -520,12 +520,39 @@ func TestGeminiStreamResponsesMalformedFrameIsUpstreamFailure(t *testing.T) {
 	assertGeminiFailedStream(t, reader, output, readErr)
 }
 
+// usageOnlyPolicy approves only the usage losses a fixture without usage
+// incurs, so a stream it fails is failed by the feature under test.
+func usageOnlyPolicy(extra ...Feature) LossPolicy {
+	policy := LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureUsageUnknown:           {},
+		FeatureUsageCacheReadUnknown:  {},
+		FeatureUsageCacheWriteUnknown: {},
+		FeatureUsageReasoningUnknown:  {},
+	}}
+	for _, feature := range extra {
+		policy.Allowed[feature] = struct{}{}
+	}
+	return policy
+}
+
+// assertGeminiLossRefused fails unless the stream was refused by a loss of
+// the given feature the policy did not approve.
+func assertGeminiLossRefused(t *testing.T, reader *convertingReader, output string, err error, feature Feature) {
+	t.Helper()
+	if reader.SawTerminal() || strings.Contains(output, "finishReason") {
+		t.Fatalf("policy without %s reported success: %q", feature, output)
+	}
+	if err == nil || !strings.Contains(err.Error(), string(feature)) {
+		t.Fatalf("err = %v, want a refusal naming %s", err, feature)
+	}
+}
+
 // geminiClientStateReader converts the SSE body through a Responses->Gemini
 // state with the given policy, returning the reader and the state.
 func geminiClientStateReader(sse string, policy LossPolicy) (*convertingReader, *geminiStreamClientState) {
 	ctx := testStreamContext()
 	ctx.LossPolicy = policy
-	state := newGeminiStreamClientState(ctx, policy, "resp_1", "gemini-x")
+	state := newGeminiStreamClientState(ctx, UpstreamResponses, policy, "resp_1", "gemini-x")
 	return newConvertingReaderWithLimits(
 		NewSSEReaderWithLimits(strings.NewReader(sse), 0, 0),
 		newResponsesToGeminiConverter(state), 0, 0, 0,
@@ -554,14 +581,7 @@ func TestGeminiStreamResponsesUnrenderedOutputMetadataIsGated(t *testing.T) {
 	for _, tt := range tests {
 		sse := geminiSSEBody(t, fsmCreated(1)) + tt.items + geminiSSEBody(t, fsmComplete(4))
 		t.Run(tt.name+" approved", func(t *testing.T) {
-			policy := LossPolicy{Allowed: map[Feature]struct{}{
-				tt.feature:                    {},
-				FeatureUsageUnknown:           {},
-				FeatureUsageCacheReadUnknown:  {},
-				FeatureUsageCacheWriteUnknown: {},
-				FeatureUsageReasoningUnknown:  {},
-			}}
-			reader, state := geminiClientStateReader(sse, policy)
+			reader, state := geminiClientStateReader(sse, usageOnlyPolicy(tt.feature))
 			output, err := drainReader(t, reader)
 			if !errors.Is(err, io.EOF) || !reader.SawTerminal() {
 				t.Fatalf("stream did not complete: err %v; output %q", err, output)
@@ -570,12 +590,49 @@ func TestGeminiStreamResponsesUnrenderedOutputMetadataIsGated(t *testing.T) {
 				t.Fatalf("report lacks %s: %+v", tt.feature, state.report.Losses)
 			}
 		})
-		t.Run(tt.name+" strict", func(t *testing.T) {
-			reader, _ := geminiClientStateReader(sse, StrictLossPolicy())
-			output, _ := drainReader(t, reader)
-			if reader.SawTerminal() || strings.Contains(output, "finishReason") {
-				t.Fatalf("strict policy reported success: %q", output)
-			}
+		t.Run(tt.name+" not approved", func(t *testing.T) {
+			reader, _ := geminiClientStateReader(sse, usageOnlyPolicy())
+			output, err := drainReader(t, reader)
+			assertGeminiLossRefused(t, reader, output, err, tt.feature)
 		})
+	}
+}
+
+func TestGeminiStreamResponsesUnstreamedSummaryIsLost(t *testing.T) {
+	sse := geminiSSEBody(t, fsmCreated(1)) +
+		"event: response.output_item.added\n" +
+		`data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"in_progress","summary":[]}}` + "\n\n" +
+		"event: response.output_item.done\n" +
+		`data: {"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{"id":"rs_1","type":"reasoning","status":"completed","summary":[{"type":"summary_text","text":"never streamed"}]}}` + "\n\n" +
+		geminiSSEBody(t, fsmComplete(4))
+	reader, _ := geminiClientStateReader(sse, usageOnlyPolicy())
+	output, err := drainReader(t, reader)
+	assertGeminiLossRefused(t, reader, output, err, FeatureReasoningSummary)
+}
+
+func TestGeminiStreamClientBudgetIsUpstreamFault(t *testing.T) {
+	state := newGeminiStreamClientState(testStreamContext(), UpstreamMessages, StrictLossPolicy(), "resp_1", "gemini-x")
+	state.budget.semanticBytes = state.budget.semanticBytesBudget
+	_, err := state.textChunk("x", false)
+	if !isUpstreamConversionError(err) {
+		t.Fatalf("semantic budget: err = %T %v, want an upstream conversion error", err, err)
+	}
+}
+
+func TestGeminiStreamChatUpstreamLengthIsMaxTokens(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gemini-x","choices":[{"index":0,"delta":{"role":"assistant","content":"cut"},"finish_reason":null}]}`,
+		``,
+		`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"gemini-x","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	rec := serveGeminiStream(t, geminiStreamHandler(t, UpstreamChatCompletions, sse),
+		"/v1beta/models/gemini-x:streamGenerateContent?alt=sse")
+	frames := geminiStreamFrames(t, rec.Body.String())
+	assertSingleTerminal(t, frames)
+	if finish := geminiFrameFinish(frames[len(frames)-1]); finish != "MAX_TOKENS" {
+		t.Fatalf("finish %q, want MAX_TOKENS; body %s", finish, rec.Body.String())
 	}
 }

@@ -13,7 +13,11 @@ import (
 // after the terminal chunk. The chunks carry no event name and no comment:
 // the Gemini SDK reads data-only frames.
 type geminiStreamClientState struct {
-	ctx        *ExchangeContext
+	ctx *ExchangeContext
+	// upstream is the protocol whose stream produced the events. Every
+	// event derives from upstream bytes, so a bound violation here is an
+	// upstream fault and is typed as that upstream's wire error.
+	upstream   UpstreamProtocol
 	policy     LossPolicy
 	report     ConversionReport
 	responseID string
@@ -35,18 +39,24 @@ type geminiStreamClientState struct {
 	// non-streaming render.
 	phaseLossNoted     bool
 	reasoningLossNoted bool
+	// streamedSummary counts, per reasoning item id, the summary bytes that
+	// arrived as summary deltas: only those were rendered as thoughts or
+	// recorded as provider reasoning loss.
+	streamedSummary map[string]int
 
 	sawTerminal bool
 }
 
 func newGeminiStreamClientState(
 	ctx *ExchangeContext,
+	upstream UpstreamProtocol,
 	policy LossPolicy,
 	responseID string,
 	model string,
 ) *geminiStreamClientState {
 	return &geminiStreamClientState{
 		ctx:          ctx,
+		upstream:     upstream,
 		policy:       policy,
 		responseID:   responseID,
 		model:        model,
@@ -67,22 +77,28 @@ func upstreamStreamFailure(message string) error {
 	}
 }
 
+// wireError types a stream failure as a wire error of the upstream whose
+// stream produced the events.
+func (s *geminiStreamClientState) wireError(err error) error {
+	return upstreamWireError(s.upstream, http.StatusOK, err)
+}
+
 // Convert processes one typed Responses event into zero or more chunks.
 func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResponse, error) {
 	if s.sawTerminal {
-		return nil, errors.New("responses stream event after terminal")
+		return nil, s.wireError(errors.New("responses stream event after terminal"))
 	}
 	if err := s.fsm.Validate(event); err != nil {
 		return nil, err
 	}
 	if err := s.budget.addEvent(); err != nil {
-		return nil, err
+		return nil, s.wireError(err)
 	}
 	if sequence := event.Sequence(); sequence <= s.lastSequence {
-		return nil, fmt.Errorf(
+		return nil, s.wireError(fmt.Errorf(
 			"responses stream sequence number %d is not strictly increasing (last %d)",
 			sequence, s.lastSequence,
-		)
+		))
 	} else {
 		s.lastSequence = sequence
 	}
@@ -102,6 +118,17 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 		}
 		return s.textChunk(value.Delta, false)
 	case ResponseReasoningSummaryTextDeltaEvent:
+		if value.Delta != "" {
+			if s.streamedSummary == nil {
+				s.streamedSummary = make(map[string]int)
+			}
+			if _, seen := s.streamedSummary[value.ItemID]; !seen {
+				if err := s.budget.addStateEntries(1); err != nil {
+					return nil, s.wireError(err)
+				}
+			}
+			s.streamedSummary[value.ItemID] += len(value.Delta)
+		}
 		if !s.ctx.GeminiIncludeThoughts {
 			if !s.thoughtLossNoted {
 				s.thoughtLossNoted = true
@@ -156,21 +183,20 @@ func (s *geminiStreamClientState) losePhase(message *ResponsesOutputMessage) err
 }
 
 // loseReasoning records the approved loss of reasoning output the stream did
-// not render, once per stream. Summary text arrives as summary deltas, which
-// are rendered as thoughts or recorded as provider reasoning loss on their
-// own; whatever the item carries beyond that (encrypted content, reasoning
-// text content, or an item with no summary text at all) is lost here.
+// not render, once per stream. Summary text that arrived as summary deltas
+// was rendered as thoughts or recorded as provider reasoning loss on its own;
+// whatever the item carries beyond that (summary text that never streamed,
+// encrypted content, reasoning text content, or an item with no summary text
+// at all, as the non-streaming render treats it) is lost here.
 func (s *geminiStreamClientState) loseReasoning(item *ResponsesReasoningOutputItem) error {
 	if s.reasoningLossNoted {
 		return nil
 	}
-	summarized := false
+	summaryBytes := 0
 	for _, summary := range item.Summary {
-		if summary.Text != "" {
-			summarized = true
-			break
-		}
+		summaryBytes += len(summary.Text)
 	}
+	summarized := summaryBytes > 0 && s.streamedSummary[item.ID] == summaryBytes
 	if summarized && item.EncryptedContent == "" && len(item.Content) == 0 {
 		return nil
 	}
@@ -188,7 +214,7 @@ func (s *geminiStreamClientState) textChunk(delta string, thought bool) ([]gemin
 		return nil, nil
 	}
 	if err := s.budget.addSemanticBytes(int64(len(delta))); err != nil {
-		return nil, err
+		return nil, s.wireError(err)
 	}
 	text := delta
 	part := geminiPart{Text: &text}
@@ -204,7 +230,7 @@ func (s *geminiStreamClientState) textChunk(delta string, thought bool) ([]gemin
 // be a JSON object, because Gemini functionCall.args is an object.
 func (s *geminiStreamClientState) functionCallChunk(item *ResponsesFunctionCallOutputItem) ([]geminiResponse, error) {
 	if err := s.budget.addToolCall(); err != nil {
-		return nil, err
+		return nil, s.wireError(err)
 	}
 	args := ParseToolArguments(item.Arguments)
 	if !args.IsObject {
@@ -421,7 +447,11 @@ func (c *chatToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
 	if c.chat.sawFinish || c.gemini.sawTerminal {
 		return convertedBatch{Terminal: true}, nil
 	}
-	return convertedBatch{}, errors.New("chat stream ended before a terminal condition")
+	return convertedBatch{}, upstreamWireError(
+		UpstreamChatCompletions,
+		http.StatusOK,
+		errors.New("chat stream ended before a terminal condition"),
+	)
 }
 
 // ErrorEvent renders a stream failure as the Gemini error frame.

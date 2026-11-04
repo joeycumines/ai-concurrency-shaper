@@ -650,3 +650,109 @@ func TestGeminiUpstreamStreamFunctionCallChargesExchangeTotal(t *testing.T) {
 		t.Fatalf("items = %d, want the call refused before it was retained", len(s.items))
 	}
 }
+
+func TestGeminiUpstreamStreamPromptBlockedKeepsUsageAndMetadata(t *testing.T) {
+	const blocked = `{"promptFeedback":{"blockReason":"SAFETY","safetyRatings":[{"category":"HARM_CATEGORY_HARASSMENT","probability":"HIGH"}]},` +
+		`"usageMetadata":{"promptTokenCount":7,"totalTokenCount":7},"modelStatus":{"modelStage":"STABLE"}}`
+	s := newGeminiStreamState(t, nil)
+	_, final, err := collectResponses(t, s, blocked)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	terminal := final[len(final)-1].(ResponseIncompleteEvent)
+	if terminal.Response.Usage == nil || terminal.Response.Usage.InputTokens != 7 || terminal.Response.Usage.TotalTokens != 7 {
+		t.Fatalf("terminal usage = %+v, want the blocked chunk's usage", terminal.Response.Usage)
+	}
+	for _, feature := range []Feature{FeatureGeminiSafetyMetadata, FeatureGeminiModelStatus} {
+		if !reportHasFeature(s.report, feature) {
+			t.Errorf("report lacks %s: %+v", feature, s.report.Losses)
+		}
+	}
+
+	strictCtx := geminiStreamTestContext()
+	strictCtx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureGeminiPromptBlocked: {}}}
+	strict := newGeminiStreamState(t, strictCtx)
+	if _, err := strict.Convert(geminiChunk(t, blocked)); err == nil {
+		t.Fatal("strict policy: nil error, want the prompt safety ratings refused")
+	}
+}
+
+func TestGeminiUpstreamStreamTextBoundIncludesTheDelta(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	big := strings.Repeat("a", maxStreamAccumulatedBytes+1)
+	_, err := s.Convert(geminiChunk(t, `{"candidates":[{"content":{"parts":[{"text":"`+big+`"}]},"index":0}]}`))
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("over-bound delta: err = %T %v, want *UpstreamWireError", err, err)
+	}
+}
+
+func TestGeminiUpstreamStreamRefusalTextIsBounded(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	big := strings.Repeat("a", maxStreamAccumulatedBytes+1)
+	_, err := s.Convert(geminiChunk(t, `{"candidates":[{"finishReason":"SAFETY","finishMessage":"`+big+`","index":0}]}`))
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("over-bound finishMessage: err = %T %v, want *UpstreamWireError", err, err)
+	}
+}
+
+func TestGeminiUpstreamStreamAddedEventsAreCreationSnapshots(t *testing.T) {
+	ctx := geminiStreamTestContext()
+	s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{ProviderReasoningThinking: true},
+		"resp_test", "gemini-3-pro-preview", 1700000000, nil)
+	events, final, err := collectResponses(t, s,
+		`{"candidates":[{"content":{"parts":[{"text":"hmm","thought":true},{"text":"hi"},{"functionCall":{"id":"call_1","name":"lookup","args":{"q":"x"}}}]},"finishReason":"STOP","index":0}]}`,
+	)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	added := 0
+	for _, event := range append(events, final...) {
+		value, ok := event.(ResponseOutputItemAddedEvent)
+		if !ok {
+			continue
+		}
+		added++
+		// Marshal as the converter would, after the whole chunk converted.
+		data, err := MarshalResponsesEvent(value)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var decoded struct {
+			Item map[string]any `json:"item"`
+		}
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		item := decoded.Item
+		if item["status"] != "in_progress" {
+			t.Errorf("%s added with status %v, want in_progress", item["type"], item["status"])
+		}
+		switch item["type"] {
+		case "message":
+			if content, _ := item["content"].([]any); len(content) != 0 {
+				t.Errorf("message added with content %v, want []", content)
+			}
+		case "reasoning":
+			if summary, _ := item["summary"].([]any); len(summary) != 0 {
+				t.Errorf("reasoning added with summary %v, want []", summary)
+			}
+		case "function_call":
+			if item["arguments"] != "" {
+				t.Errorf("function call added with arguments %v, want empty", item["arguments"])
+			}
+		}
+	}
+	if added != 3 {
+		t.Fatalf("added events = %d, want 3", added)
+	}
+}
+
+func TestGeminiUpstreamStreamBlockReasonWithCandidateIsCorrupt(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	_, err := s.Convert(geminiChunk(t,
+		`{"promptFeedback":{"blockReason":"SAFETY"},"candidates":[{"content":{"parts":[{"text":"hi"}]},"index":0}]}`,
+	))
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	}
+}

@@ -359,7 +359,10 @@ func (h *TranscodeHandler) geminiClientQueryLosses(r *http.Request) (ConversionR
 	if h.cfg.Mapping.UpstreamProtocol != UpstreamGemini {
 		return report, nil
 	}
-	clientQuery := upstreamClientQuery(r, h.cfg.Mapping.ClientProtocol)
+	clientQuery, err := upstreamClientQuery(r, h.cfg.Mapping.ClientProtocol)
+	if err != nil {
+		return report, err
+	}
 	for _, name := range sortedQueryNames(clientQuery) {
 		if _, allowed := h.cfg.Mapping.AllowedClientQuery[name]; allowed {
 			if err := report.Lose(
@@ -403,11 +406,14 @@ func (h *TranscodeHandler) buildUpstreamRequest(
 			return nil, err
 		}
 	} else {
-		var err error
+		clientQuery, err := upstreamClientQuery(r, h.cfg.Mapping.ClientProtocol)
+		if err != nil {
+			return nil, err
+		}
 		targetURL, err = BuildMappedURL(
 			h.cfg.Upstream,
 			h.cfg.Mapping.UpstreamPath,
-			upstreamClientQuery(r, h.cfg.Mapping.ClientProtocol),
+			clientQuery,
 			h.cfg.Mapping.AllowedClientQuery,
 		)
 		if err != nil {

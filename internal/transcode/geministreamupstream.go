@@ -75,6 +75,7 @@ type geminiResponsesStreamState struct {
 
 	// Per-stream once-gates for the metadata losses.
 	safetyLossRecorded         bool
+	promptSafetyLossRecorded   bool
 	groundingLossRecorded      bool
 	logprobsLossRecorded       bool
 	tokenCountLossRecorded     bool
@@ -124,9 +125,10 @@ func (s *geminiResponsesStreamState) wireError(err error) error {
 }
 
 // checkAccumulated bounds the per-buffer and exchange-wide accumulated
-// semantic bytes, mirroring the chat state's bound.
+// semantic bytes, mirroring the chat state's bound. It runs BEFORE the added
+// bytes are written, so the per-buffer bound includes them.
 func (s *geminiResponsesStreamState) checkAccumulated(builder *strings.Builder, added int, what string) error {
-	if builder.Len() > maxStreamAccumulatedBytes {
+	if builder.Len()+added > maxStreamAccumulatedBytes {
 		return s.wireError(fmt.Errorf(
 			"gemini stream accumulated %s exceeds %d bytes",
 			what,
@@ -187,11 +189,21 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 		candidate = &c
 	}
 
-	// Prompt-blocked with no candidates: a completed refusal.
+	blocked := chunk.PromptFeedback != nil && chunk.PromptFeedback.BlockReason != nil &&
+		*chunk.PromptFeedback.BlockReason != "" &&
+		*chunk.PromptFeedback.BlockReason != "BLOCK_REASON_UNSPECIFIED"
+	// The API contract: when blockReason is set "the prompt was blocked and
+	// no candidates are returned". A chunk carrying both contradicts itself,
+	// and neither half can be dropped silently, so it is corrupt wire.
+	if blocked && candidate != nil {
+		return nil, s.wireError(errors.New(
+			"gemini stream chunk carries both promptFeedback.blockReason and a candidate",
+		))
+	}
+
+	// Prompt-blocked with no candidates: a refusal.
 	if candidate == nil {
-		if chunk.PromptFeedback != nil && chunk.PromptFeedback.BlockReason != nil &&
-			*chunk.PromptFeedback.BlockReason != "" &&
-			*chunk.PromptFeedback.BlockReason != "BLOCK_REASON_UNSPECIFIED" {
+		if blocked {
 			if s.sawTerm {
 				return nil, s.wireError(errors.New("gemini stream chunk after the terminal"))
 			}
@@ -212,15 +224,20 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 			events = append(events, refusal...)
 			s.refused = true
 			s.heldTerminal = s.closeAllAndHold()
+			// The blocked-prompt chunk is usually the only chunk, so its
+			// usage and metadata are recorded here, not lost with it.
+			if err := s.recordChunkMetadata(chunk); err != nil {
+				return nil, err
+			}
 			return events, nil
 		}
-		// A chunk with no candidates and no block reason mid-stream carries
-		// nothing (some providers emit empty keep-alives); after the terminal
-		// it is a usage-only chunk and absorbed below.
+		// A chunk with no candidates and no block reason carries no content
+		// (some providers emit empty keep-alives, or a usage-only chunk);
+		// after the terminal it is absorbed as trailing accounting.
 		if s.sawTerm {
 			return s.absorbTrailing(chunk)
 		}
-		return nil, nil
+		return nil, s.recordChunkMetadata(chunk)
 	}
 
 	if s.sawTerm {
@@ -251,23 +268,8 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 	if err := s.recordCandidateMetadata(candidate); err != nil {
 		return nil, err
 	}
-	if chunk.UsageMetadata != nil {
-		if err := s.recordUsage(chunk.UsageMetadata); err != nil {
-			return nil, err
-		}
-	}
-	if chunk.ModelStatus != nil {
-		if !s.modelStatusLossRecorded {
-			s.modelStatusLossRecorded = true
-			if err := s.report.Lose(
-				s.policy,
-				FeatureGeminiModelStatus,
-				"modelStatus",
-				"the model status (lifecycle stage/retirement) cannot be reproduced in the target response",
-			); err != nil {
-				return nil, err
-			}
-		}
+	if err := s.recordChunkMetadata(chunk); err != nil {
+		return nil, err
 	}
 
 	// A chunk carrying finishReason is terminal: hold the item-closing events
@@ -332,8 +334,8 @@ func (s *geminiResponsesStreamState) startEvents() []ResponsesSSEEvent {
 	}
 }
 
-// absorbTrailing handles a chunk after the terminal: only usageMetadata may
-// carry new information (the last one wins); content parts are corrupt wire.
+// absorbTrailing handles a chunk after the terminal: only accounting and
+// metadata may follow (the last usage wins); content parts are corrupt wire.
 func (s *geminiResponsesStreamState) absorbTrailing(chunk geminigeneratecontent.GenerateContentResponse) ([]ResponsesSSEEvent, error) {
 	if len(chunk.Candidates) > 0 && chunk.Candidates[0].Content != nil &&
 		len(chunk.Candidates[0].Content.Parts) > 0 {
@@ -341,12 +343,43 @@ func (s *geminiResponsesStreamState) absorbTrailing(chunk geminigeneratecontent.
 			"gemini stream chunk with content parts after the finish chunk",
 		))
 	}
+	return nil, s.recordChunkMetadata(chunk)
+}
+
+// recordChunkMetadata records the response-level fields of one chunk, on
+// every path a chunk can take: usage (the last one wins), and the approved
+// losses of the prompt safety ratings and the model status, each once per
+// stream. The non-streaming decode gates the same fields.
+func (s *geminiResponsesStreamState) recordChunkMetadata(chunk geminigeneratecontent.GenerateContentResponse) error {
 	if chunk.UsageMetadata != nil {
 		if err := s.recordUsage(chunk.UsageMetadata); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return nil, nil
+	if chunk.PromptFeedback != nil && len(chunk.PromptFeedback.SafetyRatings) > 0 &&
+		!s.promptSafetyLossRecorded {
+		s.promptSafetyLossRecorded = true
+		if err := s.report.Lose(
+			s.policy,
+			FeatureGeminiSafetyMetadata,
+			"promptFeedback.safetyRatings",
+			"prompt safety ratings cannot be reproduced in the target response",
+		); err != nil {
+			return err
+		}
+	}
+	if chunk.ModelStatus != nil && !s.modelStatusLossRecorded {
+		s.modelStatusLossRecorded = true
+		if err := s.report.Lose(
+			s.policy,
+			FeatureGeminiModelStatus,
+			"modelStatus",
+			"the model status (lifecycle stage/retirement) cannot be reproduced in the target response",
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // convertPart converts one Gemini stream part into Responses events.
@@ -567,7 +600,12 @@ func (s *geminiResponsesStreamState) ensureMessageOpen() ([]ResponsesSSEEvent, e
 		Content: []ResponsesOutputContentPart{},
 	}
 	s.items = append(s.items, openResponsesItem{outputIndex: outputIndex, item: message, openPartIndex: -1})
-	return append(events, s.builder.OutputItemAdded(outputIndex, message)), nil
+	// The added event carries a detached snapshot of the item at creation:
+	// the live item gains parts and is completed later, possibly within the
+	// same chunk, before the event is marshaled.
+	snapshot := *message
+	snapshot.Content = ResponsesOutputContentParts{}
+	return append(events, s.builder.OutputItemAdded(outputIndex, &snapshot)), nil
 }
 
 // ensureReasoningOpen opens a reasoning item when none is open.
@@ -590,7 +628,10 @@ func (s *geminiResponsesStreamState) ensureReasoningOpen() ([]ResponsesSSEEvent,
 		Summary: []ResponsesReasoningSummary{},
 	}
 	s.items = append(s.items, openResponsesItem{outputIndex: outputIndex, item: reasoning, openPartIndex: -1})
-	return append(events, s.builder.OutputItemAdded(outputIndex, reasoning)), nil
+	// A detached creation snapshot, as for message items.
+	snapshot := *reasoning
+	snapshot.Summary = []ResponsesReasoningSummary{}
+	return append(events, s.builder.OutputItemAdded(outputIndex, &snapshot)), nil
 }
 
 // convertFunctionCall emits one complete function call: close any open item,
@@ -675,8 +716,13 @@ func (s *geminiResponsesStreamState) convertFunctionCall(
 		s.ctx.GeminiSignatures != nil {
 		s.ctx.GeminiSignatures.Put(s.ctx.GeminiSignatureScope, callID, *part.ThoughtSignature)
 	}
+	// The added event announces the call in progress with empty arguments,
+	// which then arrive through the delta, as on every other stream path.
+	added := *item
+	added.Status = ResponsesItemInProgress
+	added.Arguments = ""
 	return append(events,
-		s.builder.OutputItemAdded(outputIndex, item),
+		s.builder.OutputItemAdded(outputIndex, &added),
 		s.builder.FunctionArgumentsDelta(itemID, outputIndex, args),
 		s.builder.FunctionArgumentsDone(itemID, outputIndex, args),
 		s.builder.OutputItemDone(outputIndex, item),
@@ -695,6 +741,14 @@ func (s *geminiResponsesStreamState) appendRefusal(text string) ([]ResponsesSSEE
 	}
 	if err := s.budget.addPart(); err != nil {
 		return nil, s.wireError(err)
+	}
+	// The refusal text comes from the upstream (finishMessage), so it has
+	// the same per-part bound as streamed text.
+	if len(text) > maxStreamAccumulatedBytes {
+		return nil, s.wireError(fmt.Errorf(
+			"gemini stream refusal exceeds %d bytes",
+			maxStreamAccumulatedBytes,
+		))
 	}
 	if err := s.chargeTotal(len(text), "refusal"); err != nil {
 		return nil, err
