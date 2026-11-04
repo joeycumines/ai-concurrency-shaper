@@ -77,3 +77,52 @@ internal/transcode/testcorpus/*
 *unreachable func: convertGeminiSchemaAt
 *unreachable func: geminiSchemaInteger
 *unreachable func: NewGeminiSignatureStore
+
+# Gemini request decode/render direction, staged ahead of its handler wiring
+# (the conversion commits land the production callers in handlerrequest.go):
+# pinned by the committed geminirequest_test.go/geminirender_test.go.
+*unreachable func: DecodeGeminiRequest
+*unreachable func: RenderGeminiRequest
+*unreachable func: geminiDecodeError
+*unreachable func: geminiCamelCase
+*unreachable func: newGeminiDecoder
+*unreachable func: geminiDecoder.*
+*unreachable func: geminiTextOnly
+*unreachable func: geminiRawPayloadPresent
+*unreachable func: geminiInlineData
+*unreachable func: geminiField
+*unreachable func: geminiModalities
+*unreachable func: geminiObjectSchema
+
+# Gemini response decode/render direction, staged ahead of its handler
+# wiring: pinned by the committed geminiresponse_test.go /
+# geminiresponserender_test.go.
+*unreachable func: DecodeGeminiResponse
+*unreachable func: RenderGeminiResponse
+*unreachable func: jsonObjectShaped
+*unreachable func: geminiResponseParts
+*unreachable func: geminiOutputPart
+*unreachable func: geminiFinishReason
+*unreachable func: geminiResponseUsage
+
+# Messages render/decode direction (Messages -> Messages render path and
+# upstream response decode), staged ahead of its handler wiring: pinned by
+# the committed messagesrequest_test.go / messagesresponse_test.go.
+*unreachable func: RenderMessagesRequest
+*unreachable func: DecodeMessagesResponse
+*unreachable func: messagesMaxTokens
+*unreachable func: renderMessagesTurns
+*unreachable func: sawDialogAfterSystem
+*unreachable func: messagesSystemBlocks
+*unreachable func: messagesTurn
+*unreachable func: messagesToolResultBlock
+*unreachable func: messagesResultContent
+*unreachable func: messagesMediaBlock
+*unreachable func: messagesSource
+*unreachable func: renderMessagesTools
+*unreachable func: messagesToolChoice
+*unreachable func: renderMessagesMetadata
+*unreachable func: messagesUsage
+*unreachable func: messagesStop
+*unreachable func: messagesItems
+*unreachable func: derefString
