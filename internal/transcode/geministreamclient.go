@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // geminiStreamClientState converts typed Responses events into Gemini
@@ -39,10 +40,11 @@ type geminiStreamClientState struct {
 	// non-streaming render.
 	phaseLossNoted     bool
 	reasoningLossNoted bool
-	// streamedSummary counts, per reasoning item id, the summary bytes that
-	// arrived as summary deltas: only those were rendered as thoughts or
-	// recorded as provider reasoning loss.
-	streamedSummary map[string]int
+	// streamedSummary accumulates, per reasoning item id, the summary text
+	// that arrived as summary deltas: only that text was rendered as thoughts
+	// or recorded as provider reasoning loss, so only an exact content match
+	// proves the item's final summary covered.
+	streamedSummary map[string]string
 
 	sawTerminal bool
 }
@@ -120,14 +122,14 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 	case ResponseReasoningSummaryTextDeltaEvent:
 		if value.Delta != "" {
 			if s.streamedSummary == nil {
-				s.streamedSummary = make(map[string]int)
+				s.streamedSummary = make(map[string]string)
 			}
 			if _, seen := s.streamedSummary[value.ItemID]; !seen {
 				if err := s.budget.addStateEntries(1); err != nil {
 					return nil, s.wireError(err)
 				}
 			}
-			s.streamedSummary[value.ItemID] += len(value.Delta)
+			s.streamedSummary[value.ItemID] += value.Delta
 		}
 		if !s.ctx.GeminiIncludeThoughts {
 			if !s.thoughtLossNoted {
@@ -185,18 +187,20 @@ func (s *geminiStreamClientState) losePhase(message *ResponsesOutputMessage) err
 // loseReasoning records the approved loss of reasoning output the stream did
 // not render, once per stream. Summary text that arrived as summary deltas
 // was rendered as thoughts or recorded as provider reasoning loss on its own;
-// whatever the item carries beyond that (summary text that never streamed,
+// only a final summary whose text exactly matches the accumulated streamed
+// text is proven covered — a byte-count match is not a content match.
+// Whatever the item carries beyond that (summary text that never streamed,
 // encrypted content, reasoning text content, or an item with no summary text
 // at all, as the non-streaming render treats it) is lost here.
 func (s *geminiStreamClientState) loseReasoning(item *ResponsesReasoningOutputItem) error {
 	if s.reasoningLossNoted {
 		return nil
 	}
-	summaryBytes := 0
+	var summaryText strings.Builder
 	for _, summary := range item.Summary {
-		summaryBytes += len(summary.Text)
+		summaryText.WriteString(summary.Text)
 	}
-	summarized := summaryBytes > 0 && s.streamedSummary[item.ID] == summaryBytes
+	summarized := summaryText.Len() > 0 && s.streamedSummary[item.ID] == summaryText.String()
 	if summarized && item.EncryptedContent == "" && len(item.Content) == 0 {
 		return nil
 	}

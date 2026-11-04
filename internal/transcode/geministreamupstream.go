@@ -335,13 +335,38 @@ func (s *geminiResponsesStreamState) startEvents() []ResponsesSSEEvent {
 }
 
 // absorbTrailing handles a chunk after the terminal: only accounting and
-// metadata may follow (the last usage wins); content parts are corrupt wire.
+// metadata may follow (the last usage wins); content parts are corrupt wire,
+// and so is a candidate that repeats a finish reason, finish message, or a
+// non-model role — the finish chunk already carried the terminal state. The
+// candidate's remaining metadata is still recorded under the loss policy.
 func (s *geminiResponsesStreamState) absorbTrailing(chunk geminigeneratecontent.GenerateContentResponse) ([]ResponsesSSEEvent, error) {
-	if len(chunk.Candidates) > 0 && chunk.Candidates[0].Content != nil &&
-		len(chunk.Candidates[0].Content.Parts) > 0 {
-		return nil, s.wireError(errors.New(
-			"gemini stream chunk with content parts after the finish chunk",
-		))
+	if len(chunk.Candidates) > 0 {
+		candidate := &chunk.Candidates[0]
+		if candidate.Content != nil && len(candidate.Content.Parts) > 0 {
+			return nil, s.wireError(errors.New(
+				"gemini stream chunk with content parts after the finish chunk",
+			))
+		}
+		if candidate.FinishReason != nil && *candidate.FinishReason != "" &&
+			*candidate.FinishReason != "FINISH_REASON_UNSPECIFIED" {
+			return nil, s.wireError(fmt.Errorf(
+				"gemini stream chunk with finishReason %q after the finish chunk", *candidate.FinishReason,
+			))
+		}
+		if candidate.FinishMessage != nil && *candidate.FinishMessage != "" {
+			return nil, s.wireError(errors.New(
+				"gemini stream chunk with finishMessage after the finish chunk",
+			))
+		}
+		if candidate.Content != nil && candidate.Content.Role != "" && candidate.Content.Role != "model" {
+			return nil, s.wireError(fmt.Errorf(
+				"gemini stream candidate content role = %q after the finish chunk, want model or absent",
+				candidate.Content.Role,
+			))
+		}
+		if err := s.recordCandidateMetadata(candidate); err != nil {
+			return nil, err
+		}
 	}
 	return nil, s.recordChunkMetadata(chunk)
 }
@@ -863,7 +888,7 @@ func (s *geminiResponsesStreamState) closeAllAndHold() []ResponsesSSEEvent {
 // recordCandidateMetadata records the per-chunk candidate metadata losses once
 // per stream.
 func (s *geminiResponsesStreamState) recordCandidateMetadata(candidate *geminigeneratecontent.Candidate) error {
-	if candidate.SafetyRatings != nil && !s.safetyLossRecorded {
+	if len(candidate.SafetyRatings) > 0 && !s.safetyLossRecorded {
 		s.safetyLossRecorded = true
 		if err := s.report.Lose(
 			s.policy,
