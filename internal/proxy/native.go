@@ -65,8 +65,21 @@ func (r NativeRoute) Validate() error {
 	}
 	switch r.Protocol {
 	case transcode.NativeResponses, transcode.NativeMessages, transcode.NativeChat:
+		if strings.ContainsAny(r.RouteKey.Path, "{}") {
+			return fmt.Errorf(
+				"native route %s %s: route path %q contains a template placeholder; only gemini routes accept {model}",
+				r.RouteKey.Method, r.RouteKey.Path, r.RouteKey.Path,
+			)
+		}
+	case transcode.NativeGemini:
+		// A Gemini client route is the canonical template of the JSON
+		// operation; the stream operation shares the route key, and the
+		// matcher in transcode/geminiroute.go is the only parser.
+		if _, err := transcode.ParseGeminiClientRoutePath(r.RouteKey.Path); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("unknown native protocol %q (want responses, messages, or chat)", r.Protocol)
+		return fmt.Errorf("unknown native protocol %q (want responses, messages, chat, or gemini)", r.Protocol)
 	}
 	if len(r.ModelMap.Exact) == 0 &&
 		(!r.ModelMap.AllowIdentity || r.ModelMap.RequireExplicitMap) {
@@ -83,11 +96,23 @@ func (r NativeRoute) Validate() error {
 	// depth for a library caller.
 	for clientModel, m := range r.ModelMap.Exact {
 		switch m.Via {
-		case "", transcode.NativeResponses, transcode.NativeMessages, transcode.NativeChat:
+		case "", transcode.NativeResponses, transcode.NativeMessages, transcode.NativeChat, transcode.NativeGemini:
 		default:
 			return fmt.Errorf(
-				"native route %s %s: model %q declares unknown native dialect %q (want responses, messages, or chat)",
+				"native route %s %s: model %q declares unknown native dialect %q (want responses, messages, chat, or gemini)",
 				r.RouteKey.Method, r.RouteKey.Path, clientModel, m.Via,
+			)
+		}
+		// On a Gemini route the wire model becomes a path segment, so it must
+		// be a bare model id: a "/", ":", "?", "#", or "models/" prefix would
+		// corrupt the rewritten action path. The same rule the transcoded
+		// Gemini upstream enforces per request (BuildGeminiURL) is enforced
+		// here at startup.
+		if r.Protocol == transcode.NativeGemini && m.Via == transcode.NativeGemini &&
+			!transcode.ValidCatalogIdent(m.UpstreamModel) {
+			return fmt.Errorf(
+				"native route %s %s: gemini model %q maps to upstream model %q, which is not a bare model id such as gemini-2.5-pro (no models/ prefix, no '/' or ':')",
+				r.RouteKey.Method, r.RouteKey.Path, clientModel, m.UpstreamModel,
 			)
 		}
 	}
@@ -216,7 +241,15 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 			"content-encoding is not supported on natively served routes")
 		return r, nativeError
 	}
-
+	// A credential in the query string is refused before the body is read:
+	// the URL is journaled and logged, so a query credential must never pass.
+	// The scan runs over the raw query (HasQueryCredential case-folds names
+	// and also sees pairs that url.ParseQuery would silently drop).
+	if nr.Protocol == transcode.NativeGemini && transcode.HasQueryCredential(r.URL.RawQuery) {
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest,
+			"API keys must not be sent in the query string; use the X-Goog-Api-Key header")
+		return r, nativeError
+	}
 	limits := nr.BodyLimits.WithDefaults()
 	if r.Body == nil {
 		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest, "missing request body")
@@ -244,6 +277,10 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 			return io.NopCloser(bytes.NewReader(body)), nil
 		}
 		return &out
+	}
+
+	if nr.Protocol == transcode.NativeGemini {
+		return p.nativeGeminiServe(w, r, nr, limits, body, restoreOriginal)
 	}
 
 	// Structural validation only. A native path converts nothing, so the
@@ -376,6 +413,147 @@ func (p *Proxy) nativeRouteAction(w http.ResponseWriter, r *http.Request, nr *Na
 	})), nativeServe
 }
 
+// nativeGeminiServe is the NativeGemini branch of nativeRouteAction. The
+// Gemini GenerateContent API carries the model in the request path, so the
+// rewrite replaces the model segment of the URL — never the body unless the
+// body carries a model member naming the path model — and the document is
+// otherwise forwarded byte-identically through the transparent engine.
+func (p *Proxy) nativeGeminiServe(
+	w http.ResponseWriter,
+	r *http.Request,
+	nr *NativeRoute,
+	limits transcode.BodyLimits,
+	body []byte,
+	restoreOriginal func() *http.Request,
+) (*http.Request, nativeAction) {
+	// The route key already matched the template, so the match cannot fail;
+	// a direct programmatic caller that bypasses the lookup gets a miss so
+	// the request falls through untouched rather than being mis-served.
+	match, ok := transcode.MatchGeminiRequestPath(r.Method, r.URL.Path)
+	if !ok {
+		restored := restoreOriginal()
+		return restored.WithContext(withNativeMiss(restored.Context(), nativeMissInfo{
+			nativeProtocol: nr.Protocol,
+		})), nativeMiss
+	}
+	// Structural validation only, exactly as on the other native dialects:
+	// the always-reject set (duplicate keys, trailing values, malformed
+	// syntax) still guards this proxy's own parsing, and unknown fields are
+	// forwarded because the upstream owns the dialect contract.
+	bodyModel, present, err := transcode.TopLevelModelPresent(body)
+	if err != nil {
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest,
+			transcode.BoundErrorMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
+		return r, nativeError
+	}
+	// A body model naming the path model is accepted; anything else is a
+	// conflict. An empty body model is treated as absent, matching the
+	// transcoded Gemini path (geminiBodyModel), so the same request behaves
+	// identically whether it is served natively or by conversion.
+	if present && bodyModel != "" && bodyModel != match.Model && bodyModel != "models/"+match.Model {
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest,
+			transcode.BoundErrorMessage(
+				fmt.Sprintf("body model %q conflicts with path model %q", bodyModel, match.Model),
+				limits.ErrorMessageBytes))
+		return r, nativeError
+	}
+
+	mapping, err := nr.ModelMap.Resolve(match.Model)
+	if err != nil {
+		if fallback := p.lookupTranscodeHandlerKey(nr.RouteKey); fallback != nil {
+			restored := restoreOriginal()
+			return restored.WithContext(withNativeMiss(restored.Context(), nativeMissInfo{
+				clientModel:    match.Model,
+				nativeProtocol: nr.Protocol,
+			})), nativeMiss
+		}
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusBadRequest,
+			transcode.BoundErrorMessage("natively served request: "+err.Error(), limits.ErrorMessageBytes))
+		return r, nativeError
+	}
+	if mapping.Via == "" {
+		restored := restoreOriginal()
+		return restored.WithContext(withNativeMiss(restored.Context(), nativeMissInfo{
+			clientModel:    match.Model,
+			via:            mapping.Via,
+			nativeProtocol: nr.Protocol,
+		})), nativeMiss
+	}
+	if mapping.Via != nr.Protocol {
+		if fallback := p.lookupTranscodeHandlerKey(nr.RouteKey); fallback != nil {
+			restored := restoreOriginal()
+			return restored.WithContext(withNativeMiss(restored.Context(), nativeMissInfo{
+				clientModel:    match.Model,
+				via:            mapping.Via,
+				nativeProtocol: nr.Protocol,
+			})), nativeMiss
+		}
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusNotFound,
+			transcode.BoundErrorMessage(
+				fmt.Sprintf("model %q is served natively as %s, not as %s, and no transcode mapping on %s covers the model",
+					match.Model, mapping.Via, nr.Protocol, nr.RouteKey.Path),
+				limits.ErrorMessageBytes))
+		return r, nativeError
+	}
+
+	// Rewrite only the model segment of the path, preserving every other
+	// segment and the whole query (alt=sse and friends). The final segment
+	// carries the model as the prefix of "<model>:<action>". The request URL
+	// is copied, never mutated, so the journal and metrics keep the client
+	// path.
+	u := *r.URL
+	slash := strings.LastIndexByte(u.Path, '/')
+	if slash < 0 || !strings.HasPrefix(u.Path[slash+1:], match.Model+":") {
+		// Unreachable after a successful match; defence in depth.
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusInternalServerError, "natively served request: internal error")
+		return r, nativeError
+	}
+	u.Path = u.Path[:slash+1] + mapping.UpstreamModel + u.Path[slash+1+len(match.Model):]
+	u.RawPath = ""
+
+	out := *r
+	out.URL = &u
+	finalBody := body
+	if present && bodyModel != "" {
+		// A body model naming the path model is rewritten to the wire model
+		// in the same spelling form (with or without the models/ prefix).
+		wireModel := mapping.UpstreamModel
+		if strings.HasPrefix(bodyModel, "models/") {
+			wireModel = "models/" + wireModel
+		}
+		rewritten, ok := rewriteTopLevelModel(body, wireModel)
+		if !ok {
+			writeNativeDialectError(w, r, nr.Protocol, http.StatusInternalServerError, "natively served request: internal error")
+			return r, nativeError
+		}
+		finalBody = rewritten
+	}
+	// The decoded-body bound applies to the final forwarded body in both
+	// branches, exactly as the other native dialects enforce it after their
+	// rewrite: the accepted-request read above bounds a different limit.
+	if int64(len(finalBody)) > limits.DecodedRequestBytes {
+		writeNativeDialectError(w, r, nr.Protocol, http.StatusRequestEntityTooLarge, "request body too large")
+		return r, nativeError
+	}
+	out.Body = io.NopCloser(bytes.NewReader(finalBody))
+	out.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(finalBody)), nil
+	}
+	out.ContentLength = int64(len(finalBody))
+	out.TransferEncoding = nil
+	convKey := transcode.DeriveClientKey(nr.Provider, r.RemoteAddr)
+	if firstText := transcode.FirstUserText(nr.Protocol, body); firstText != "" {
+		convKey = transcode.DeriveConversationKey(nr.Provider, match.Model, firstText)
+	}
+	return out.WithContext(withNativeAlias(out.Context(), nativeAlias{
+		surrogate: mapping.ClientResponseModel,
+		wire:      mapping.UpstreamModel,
+		protocol:  nr.Protocol,
+		respCap:   limits.SuccessfulResponseBytes,
+		convKey:   convKey,
+	})), nativeServe
+}
+
 // rewriteTopLevelModel returns body with the top-level "model" value
 // replaced by wireModel, preserving every other byte exactly. It reports
 // false when the document is not a JSON object, has no single top-level model
@@ -470,6 +648,12 @@ func rewriteNativeResponseAlias(res *http.Response) error {
 	}
 	alias, ok := nativeAliasFromContext(res.Request.Context())
 	if !ok {
+		return nil
+	}
+	// A Gemini response carries modelVersion, which reports the real serving
+	// version and is never rewritten, so native Gemini responses pass through
+	// byte-identical — streamed or not.
+	if alias.protocol == transcode.NativeGemini {
 		return nil
 	}
 	ct := res.Header.Get("Content-Type")
@@ -586,8 +770,11 @@ func isNativeUpgrade(r *http.Request) bool {
 // misattribute a purely local refusal.
 func writeNativeDialectError(w http.ResponseWriter, r *http.Request, protocol transcode.NativeProtocol, status int, message string) {
 	target := transcode.ClientResponses
-	if protocol == transcode.NativeMessages {
+	switch protocol {
+	case transcode.NativeMessages:
 		target = transcode.ClientMessages
+	case transcode.NativeGemini:
+		target = transcode.ClientGemini
 	}
 	{
 		// Set regardless of an earlier write: under the SSE queue comments the

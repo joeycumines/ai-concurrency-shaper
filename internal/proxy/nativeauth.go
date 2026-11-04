@@ -36,9 +36,12 @@ type nativeAuthVariants struct {
 	// messages adapts a bearer mount for NativeMessages: X-Api-Key plus
 	// the default Anthropic version when the policy carries none.
 	messages *auth.AuthPolicy
-	// openai adapts an x-api-key mount for NativeChat and
+	// openai adapts an x-api-key or goog-api-key mount for NativeChat and
 	// NativeResponses: Bearer.
 	openai *auth.AuthPolicy
+	// gemini adapts an x-api-key or api-key mount for NativeGemini:
+	// goog-api-key.
+	gemini *auth.AuthPolicy
 }
 
 // newNativeAuthVariants precomputes the adapted variants of a provider
@@ -51,20 +54,41 @@ func newNativeAuthVariants(policy *auth.AuthPolicy) nativeAuthVariants {
 	}
 	switch policy.Mode {
 	case auth.AuthBearer:
-		version := policy.AnthropicVersion
-		if strings.TrimSpace(version) == "" {
-			version = auth.DefaultAnthropicVersion
-		}
-		messages := *policy
-		messages.Mode = auth.AuthXAPIKey
-		messages.AnthropicVersion = version
-		variants.messages = &messages
+		variants.messages = messagesVariant(policy)
 	case auth.AuthXAPIKey:
 		openai := *policy
 		openai.Mode = auth.AuthBearer
 		variants.openai = &openai
+		variants.gemini = geminiVariant(policy)
+	case auth.AuthAPIKey:
+		variants.gemini = geminiVariant(policy)
+	case auth.AuthGoogAPIKey:
+		openai := *policy
+		openai.Mode = auth.AuthBearer
+		variants.openai = &openai
+		variants.messages = messagesVariant(policy)
 	}
 	return variants
+}
+
+// messagesVariant adapts a policy for NativeMessages: X-Api-Key with the
+// policy's Anthropic version, or the default version when the policy has none.
+func messagesVariant(policy *auth.AuthPolicy) *auth.AuthPolicy {
+	version := policy.AnthropicVersion
+	if strings.TrimSpace(version) == "" {
+		version = auth.DefaultAnthropicVersion
+	}
+	messages := *policy
+	messages.Mode = auth.AuthXAPIKey
+	messages.AnthropicVersion = version
+	return &messages
+}
+
+// geminiVariant adapts a policy for NativeGemini: X-Goog-Api-Key.
+func geminiVariant(policy *auth.AuthPolicy) *auth.AuthPolicy {
+	gemini := *policy
+	gemini.Mode = auth.AuthGoogAPIKey
+	return &gemini
 }
 
 // forProtocol selects the precomputed policy for a native dialect: the
@@ -79,6 +103,10 @@ func (v nativeAuthVariants) forProtocol(protocol transcode.NativeProtocol) *auth
 	case transcode.NativeChat, transcode.NativeResponses:
 		if v.openai != nil {
 			return v.openai
+		}
+	case transcode.NativeGemini:
+		if v.gemini != nil {
+			return v.gemini
 		}
 	}
 	return v.provider
