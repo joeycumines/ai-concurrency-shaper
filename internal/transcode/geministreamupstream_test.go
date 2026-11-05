@@ -890,6 +890,9 @@ func TestGeminiUpstreamStreamBlockedMetadataFailureDoesNotReleaseTerminal(t *tes
 	if len(final) != 0 {
 		t.Fatalf("FinalizeEOF released events after a rejected blocked chunk: %v", final)
 	}
+	if n := countReportFeature(s.report, FeatureGeminiPromptBlocked); n != 0 {
+		t.Fatalf("blocked note recorded for a rejected refusal: %+v", s.report.Losses)
+	}
 }
 
 func TestGeminiUpstreamStreamBlockReasonWithCandidateIsCorrupt(t *testing.T) {
@@ -1144,5 +1147,144 @@ func TestGeminiUpstreamStreamTrailingUsageOnlyChunkIsAbsorbed(t *testing.T) {
 	}
 	if envelope.Response.Usage == nil || envelope.Response.Usage.TotalTokens != 7 {
 		t.Fatalf("terminal usage = %+v, want the trailing usage chunk (total 7)", envelope.Response.Usage)
+	}
+}
+
+func TestGeminiUpstreamStreamEmptyThoughtSignatureRecordsNothing(t *testing.T) {
+	// An explicit empty signature carries no signature, so nothing is lost.
+	// The strict policy would refuse the stream if a loss were recorded.
+	ctx := geminiStreamTestContext()
+	ctx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{}}
+	s := newGeminiStreamState(t, ctx)
+	if _, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"content":{"parts":[{"text":"hello","thoughtSignature":""}]},"index":0}]}`,
+	)); err != nil {
+		t.Fatalf("empty thoughtSignature: %v", err)
+	}
+	if n := countReportFeature(s.report, FeatureGeminiResponseThoughtSignature); n != 0 {
+		t.Fatalf("empty thoughtSignature recorded %d losses, want 0: %+v", n, s.report.Losses)
+	}
+}
+
+func TestGeminiUpstreamStreamOversizedDeltaLeavesNoOutput(t *testing.T) {
+	// A delta rejected by the exchange total must not leave the item, part,
+	// or observability note it would have produced.
+	exhaust := func(s *geminiResponsesStreamState) {
+		s.totalAccumulated = maxStreamTotalAccumulatedBytes - 3
+	}
+	t.Run("thought", func(t *testing.T) {
+		ctx := geminiStreamTestContext()
+		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy,
+			ChatCapabilities{ProviderReasoningThinking: true}, "resp_test", "m", 1, nil)
+		exhaust(s)
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"four","thought":true}]},"index":0}]}`,
+		))
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+			t.Fatalf("oversized thought delta: err = %T %v, want *UpstreamWireError", err, err)
+		}
+		if len(s.items) != 0 {
+			t.Fatalf("oversized thought delta left %d items", len(s.items))
+		}
+		if n := countReportFeature(s.report, FeatureProviderReasoningText); n != 0 {
+			t.Fatalf("oversized thought delta recorded %d notes: %+v", n, s.report.Losses)
+		}
+	})
+	t.Run("thought as text", func(t *testing.T) {
+		ctx := geminiStreamTestContext()
+		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy,
+			ChatCapabilities{ProviderReasoningText: true}, "resp_test", "m", 1, nil)
+		exhaust(s)
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"four","thought":true}]},"index":0}]}`,
+		))
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+			t.Fatalf("oversized mapped thought delta: err = %T %v, want *UpstreamWireError", err, err)
+		}
+		if len(s.items) != 0 {
+			t.Fatalf("oversized mapped thought delta left %d items", len(s.items))
+		}
+		if n := countReportFeature(s.report, FeatureProviderReasoningText); n != 0 {
+			t.Fatalf("oversized mapped thought delta recorded %d notes: %+v", n, s.report.Losses)
+		}
+	})
+	t.Run("text", func(t *testing.T) {
+		s := newGeminiStreamState(t, nil)
+		exhaust(s)
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"four"}]},"index":0}]}`,
+		))
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+			t.Fatalf("oversized text delta: err = %T %v, want *UpstreamWireError", err, err)
+		}
+		if len(s.items) != 0 {
+			t.Fatalf("oversized text delta left %d items", len(s.items))
+		}
+	})
+}
+
+func TestGeminiUpstreamStreamOversizedRefusalLeavesNoOutput(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	long := strings.Repeat("x", maxStreamAccumulatedBytes+1)
+	if _, err := s.Convert(geminiChunk(t,
+		`{"promptFeedback":{"blockReason":"`+long+`"}}`,
+	)); err == nil {
+		t.Fatal("oversized refusal: nil error")
+	}
+	if len(s.items) != 0 {
+		t.Fatalf("oversized refusal left %d items", len(s.items))
+	}
+	if n := countReportFeature(s.report, FeatureGeminiPromptBlocked); n != 0 {
+		t.Fatalf("oversized refusal recorded %d notes: %+v", n, s.report.Losses)
+	}
+}
+
+func TestGeminiUpstreamStreamUnrepresentableFinishLeavesNoOutput(t *testing.T) {
+	// The part losses are allowed by policy, so any that were recorded before
+	// the finish reason was validated would be observable pollution.
+	ctx := geminiStreamTestContext()
+	ctx.LossPolicy.Allowed[FeatureGeminiResponseThoughtSignature] = struct{}{}
+	s := newGeminiStreamState(t, ctx)
+	_, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"content":{"parts":[{"text":"hi","partMetadata":{"k":1},"thoughtSignature":"sig"}]},"finishReason":"OTHER","index":0}]}`,
+	))
+	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
+		t.Fatalf("finishReason OTHER: err = %T %v, want *UnrepresentableError", err, err)
+	}
+	if len(s.items) != 0 || s.started {
+		t.Fatalf("unrepresentable finish left %d items (started %v)", len(s.items), s.started)
+	}
+	if len(s.report.Losses) != 0 {
+		t.Fatalf("unrepresentable finish recorded %+v", s.report.Losses)
+	}
+}
+
+func TestGeminiUpstreamStreamSynthesizedCallIDNoteIsOncePerStream(t *testing.T) {
+	s := newGeminiStreamState(t, nil)
+	chunks := []string{
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"a","args":{}}}]},"index":0}]}`,
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"b","args":{}}}]},"index":0}]}`,
+		geminiFinishChunk,
+	}
+	if _, _, err := collectResponses(t, s, chunks...); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if n := countReportFeature(s.report, FeatureGeminiCallIDSynthesized); n != 1 {
+		t.Fatalf("synthesized call id note recorded %d times, want 1: %+v", n, s.report.Losses)
+	}
+}
+
+func TestGeminiUpstreamStreamContinuationTokenRejectedBeforeLosses(t *testing.T) {
+	ctx := geminiStreamTestContext()
+	ctx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{}}
+	s := newGeminiStreamState(t, ctx)
+	_, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"safetyRatings":[{"category":"HARM_CATEGORY_HARASSMENT","probability":"HIGH"}],"continuationToken":"tok","index":0}]}`,
+	))
+	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
+		t.Fatalf("continuationToken with safety ratings: err = %T %v, want *UnrepresentableError", err, err)
+	}
+	if len(s.report.Losses) != 0 {
+		t.Fatalf("continuationToken rejection recorded %+v", s.report.Losses)
 	}
 }
