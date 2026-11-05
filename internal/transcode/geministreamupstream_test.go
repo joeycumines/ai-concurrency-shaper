@@ -767,6 +767,44 @@ func TestGeminiUpstreamStreamEmptySafetyRatingsAreNotALoss(t *testing.T) {
 	}
 }
 
+func TestGeminiUpstreamStreamClampNotesAreOncePerStream(t *testing.T) {
+	// Repeated usage chunks carrying the same arithmetic inconsistency must
+	// record the clamp note once, not saturate the report (the chat state
+	// gates these via usageClampNotes).
+	s := newGeminiStreamState(t, nil)
+	badUsage := `{"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":99}}`
+	if _, err := s.Convert(geminiChunk(t, geminiFinishChunk)); err != nil {
+		t.Fatalf("finish chunk: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := s.Convert(geminiChunk(t, badUsage)); err != nil {
+			t.Fatalf("usage chunk %d: %v", i, err)
+		}
+	}
+	if n := countReportFeature(s.report, FeatureUsageTotalMismatch); n != 1 {
+		t.Fatalf("total-mismatch note recorded %d times, want 1: %+v", n, s.report.Losses)
+	}
+}
+
+func TestGeminiUpstreamStreamErrorFrameFinalizeEOFStaysFailed(t *testing.T) {
+	// An in-stream error frame is an upstream failure: FinalizeEOF after it
+	// must propagate the failure, never release a successful terminal.
+	s := newGeminiStreamState(t, nil)
+	_, err := s.Convert(geminiChunk(t, `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"bad request"}}`))
+	if err == nil || !isUpstreamConversionError(err) {
+		t.Fatalf("error frame: err = %T %v, want an upstream conversion error", err, err)
+	}
+	events, finalErr := s.FinalizeEOF()
+	if finalErr == nil || !isUpstreamConversionError(finalErr) {
+		t.Fatalf("FinalizeEOF after error frame: err = %T %v, want an upstream conversion error", finalErr, finalErr)
+	}
+	for _, e := range events {
+		if e.EventType() == "response.completed" {
+			t.Fatalf("FinalizeEOF released a success terminal for an errored stream: %+v", e)
+		}
+	}
+}
+
 func TestGeminiUpstreamStreamBlockReasonWithCandidateIsCorrupt(t *testing.T) {
 	s := newGeminiStreamState(t, nil)
 	_, err := s.Convert(geminiChunk(t,
@@ -774,6 +812,138 @@ func TestGeminiUpstreamStreamBlockReasonWithCandidateIsCorrupt(t *testing.T) {
 	))
 	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	}
+}
+
+func TestGeminiUpstreamStreamCrossChunkBlockContradictionIsCorrupt(t *testing.T) {
+	// The blockReason+candidates contradiction is corrupt wire even when the
+	// two halves arrive in different chunks, in either order.
+	candidateChunk := `{"candidates":[{"content":{"parts":[{"text":"hi"}]},"index":0}]}`
+	blockedChunk := `{"promptFeedback":{"blockReason":"SAFETY"}}`
+	trailingCandidateChunk := `{"candidates":[{"safetyRatings":[{"category":"HARM_CATEGORY_HARASSMENT","probability":"HIGH"}],"index":0}]}`
+
+	// Candidate first, then a blocked-prompt chunk.
+	s := newGeminiStreamState(t, nil)
+	if _, err := s.Convert(geminiChunk(t, candidateChunk)); err != nil {
+		t.Fatalf("candidate chunk: %v", err)
+	}
+	if _, err := s.Convert(geminiChunk(t, blockedChunk)); err == nil {
+		t.Fatal("blocked chunk after a candidate: err = nil, want *UpstreamWireError")
+	} else if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("blocked after candidate: err = %T %v, want *UpstreamWireError", err, err)
+	}
+
+	// Blocked first, then a trailing candidate chunk (absorbTrailing path).
+	s = newGeminiStreamState(t, nil)
+	if _, err := s.Convert(geminiChunk(t, blockedChunk)); err != nil {
+		t.Fatalf("blocked chunk: %v", err)
+	}
+	if _, err := s.Convert(geminiChunk(t, trailingCandidateChunk)); err == nil {
+		t.Fatal("candidate chunk after a blocked prompt: err = nil, want *UpstreamWireError")
+	} else if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("candidate after blocked: err = %T %v, want *UpstreamWireError", err, err)
+	}
+}
+
+func countReportFeature(report ConversionReport, feature Feature) int {
+	n := 0
+	for _, loss := range report.Losses {
+		if loss.Feature == feature {
+			n++
+		}
+	}
+	return n
+}
+
+func TestGeminiUpstreamStreamThoughtThinkingNoteIsOncePerStream(t *testing.T) {
+	// Under the provider_reasoning_thinking capability every thought chunk
+	// mapped to a thinking block must record the note exactly once, not per
+	// chunk (report saturation / Dropped inflation).
+	ctx := geminiStreamTestContext()
+	ctx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureProviderReasoningText: {},
+	}}
+	s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy,
+		ChatCapabilities{ProviderReasoningThinking: true}, "resp_test", "gemini-3-pro-preview", 1700000000, nil)
+	chunks := []string{
+		`{"candidates":[{"content":{"parts":[{"text":"t1","thought":true}]},"index":0}]}`,
+		`{"candidates":[{"content":{"parts":[{"text":"t2","thought":true}]},"index":0}]}`,
+		`{"candidates":[{"content":{"parts":[{"text":"t3","thought":true}]},"index":0}]}`,
+		geminiFinishChunk,
+	}
+	if _, _, err := collectResponses(t, s, chunks...); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if n := countReportFeature(s.report, FeatureProviderReasoningText); n != 1 {
+		t.Fatalf("thinking note recorded %d times, want 1 (Dropped=%d): %+v", n, s.report.Dropped, s.report.Losses)
+	}
+}
+
+func TestGeminiUpstreamStreamPartMetadataLossesAreOncePerStream(t *testing.T) {
+	// Part-modifier and non-call thought-signature losses gate once per
+	// stream, like the candidate/chunk-level losses.
+	ctx := geminiStreamTestContext() // allows FeatureGeminiPartMetadata
+	ctx.LossPolicy.Allowed[FeatureGeminiResponseThoughtSignature] = struct{}{}
+	s := newGeminiStreamState(t, ctx)
+	chunks := []string{
+		`{"candidates":[{"content":{"parts":[{"text":"a","videoMetadata":{"fps":30}}]},"index":0}]}`,
+		`{"candidates":[{"content":{"parts":[{"text":"b","thoughtSignature":"sig"}]},"index":0}]}`,
+		`{"candidates":[{"content":{"parts":[{"text":"c","partMetadata":{"k":1},"thoughtSignature":"sig2"}]},"index":0}]}`,
+		geminiFinishChunk,
+	}
+	if _, _, err := collectResponses(t, s, chunks...); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if n := countReportFeature(s.report, FeatureGeminiPartMetadata); n != 1 {
+		t.Fatalf("part metadata loss recorded %d times, want 1: %+v", n, s.report.Losses)
+	}
+	if n := countReportFeature(s.report, FeatureGeminiResponseThoughtSignature); n != 1 {
+		t.Fatalf("thought signature loss recorded %d times, want 1: %+v", n, s.report.Losses)
+	}
+}
+
+func TestGeminiUpstreamStreamEmptyThoughtPartRecordsNothing(t *testing.T) {
+	// A signature-only thought chunk (empty text) emits nothing and must not
+	// record a provider-reasoning-text note before the empty-delta short
+	// circuit.
+	ctx := geminiStreamTestContext()
+	ctx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureProviderReasoningText:          {},
+		FeatureGeminiResponseThoughtSignature: {},
+	}}
+	s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy,
+		ChatCapabilities{ProviderReasoningThinking: true}, "resp_test", "gemini-3-pro-preview", 1700000000, nil)
+	events, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"sig"}]},"index":0}]}`,
+	))
+	if err != nil {
+		t.Fatalf("chunk: %v", err)
+	}
+	if len(events) != 2 { // only created + in_progress
+		t.Fatalf("signature-only thought part emitted %d events, want 2 (lifecycle only)", len(events))
+	}
+	if n := countReportFeature(s.report, FeatureProviderReasoningText); n != 0 {
+		t.Fatalf("empty thought delta recorded a reasoning-text note: %+v", s.report.Losses)
+	}
+}
+
+func TestGeminiUpstreamStreamBlockedNoteFollowsSuccessfulRefusal(t *testing.T) {
+	// The prompt-blocked note describes an encoding that was actually
+	// rendered; when the refusal text exceeds the bound the chunk fails and
+	// no note may be logged for it.
+	s := newGeminiStreamState(t, nil)
+	long := strings.Repeat("x", maxStreamAccumulatedBytes+1)
+	// A blockReason with no candidates goes through appendRefusal, whose
+	// bound rejects the synthesized refusal text only when the block reason
+	// itself is long; use a long blockReason so the refusal text exceeds it.
+	_, err := s.Convert(geminiChunk(t,
+		`{"promptFeedback":{"blockReason":"`+long+`"}}`,
+	))
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("oversized refusal: err = %T %v, want *UpstreamWireError", err, err)
+	}
+	if n := countReportFeature(s.report, FeatureGeminiPromptBlocked); n != 0 {
+		t.Fatalf("note recorded for a rejected refusal: %+v", s.report.Losses)
 	}
 }
 

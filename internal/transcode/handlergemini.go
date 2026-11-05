@@ -31,7 +31,8 @@ func upstreamClientQuery(r *http.Request, client ClientProtocol) (url.Values, er
 // journaled URL, so a malformed query is a client fault and is refused
 // whole. The error names only the parse failure, never a value: url's
 // EscapeError embeds raw bytes of the offending escape, so the underlying
-// error is wrapped with %w and never interpolated.
+// url.ParseQuery error is deliberately discarded and only the sentinel
+// errClientQueryParameter is wrapped with %w.
 func parseClientQuery(rawQuery string) (url.Values, error) {
 	query, err := url.ParseQuery(rawQuery)
 	if err != nil {
@@ -60,10 +61,12 @@ func HasQueryCredential(rawQuery string) bool {
 		// Cut on a raw %3D / %3d before QueryUnescape: unescaping is
 		// all-or-nothing, so a malformed escape later in the pair (e.g.
 		// "key%3Dsecret%zz") would otherwise discard the unescape and hide
-		// the credential name.
-		if idx := strings.Index(strings.ToLower(name), "%3d"); idx >= 0 {
-			name = name[:idx]
-		}
+		// the credential name. The scan reads raw bytes only: lowercasing
+		// first would change the byte length for non-ASCII input (invalid
+		// UTF-8 becomes the 3-byte RuneError; U+023A lowercases to a 3-byte
+		// rune), so an index into the lowered string could exceed len(name)
+		// and panic, or shift left and miss the marker.
+		name = cutRawPercent3D(name)
 		if unescaped, err := url.QueryUnescape(name); err == nil {
 			// An escaped '=' (raw "key%3DSECRET" or "key%3D%3D=x") still
 			// names the credential parameter, so the unescaped name is cut
@@ -76,6 +79,19 @@ func HasQueryCredential(rawQuery string) bool {
 		}
 	}
 	return false
+}
+
+// cutRawPercent3D returns s cut at the first raw "%3d" / "%3D" spelling,
+// scanning bytes without changing length. It exists because
+// strings.ToLower can expand or shrink non-ASCII input, making an index into
+// the lowered string unusable on the original.
+func cutRawPercent3D(s string) string {
+	for i := 0; i+2 < len(s); i++ {
+		if s[i] == '%' && s[i+1] == '3' && (s[i+2] == 'd' || s[i+2] == 'D') {
+			return s[:i]
+		}
+	}
+	return s
 }
 
 // rawQueryPairs splits a raw query into its non-empty pairs, treating both
