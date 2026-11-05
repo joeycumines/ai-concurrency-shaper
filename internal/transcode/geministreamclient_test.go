@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
 // geminiSSEBody encodes typed Responses events as an upstream SSE body.
@@ -676,12 +678,227 @@ func TestGeminiStreamResponsesSummaryCoverageProvesContentNotBytes(t *testing.T)
 	assertGeminiLossRefused(t, reader, output, err, FeatureReasoningSummary)
 }
 
+func TestGeminiStreamClientIncompleteReasonMustBeKnown(t *testing.T) {
+	// An incomplete terminal with a missing or unrecognized reason must never
+	// fall through to a STOP completion: that would report an incomplete
+	// response as a normal finish.
+	incompleteEvent := func(reason *string) ResponseIncompleteEvent {
+		env := fsmEnvelope("resp_1", "incomplete")
+		if reason != nil {
+			env.IncompleteDetails = &ResponsesIncompleteDetails{Reason: *reason}
+		}
+		return ResponseIncompleteEvent{
+			Type: "response.incomplete", SequenceNumber: 2, Response: env,
+		}
+	}
+	known := func(reason string) bool {
+		return reason == "max_output_tokens" || reason == "content_filter"
+	}
+	nilReason := (*string)(nil)
+	for _, tc := range []struct {
+		name   string
+		event  ResponseIncompleteEvent
+		wantOK bool
+	}{
+		{name: "missing incomplete_details", event: incompleteEvent(nilReason)},
+		{name: "empty reason", event: incompleteEvent(new(""))},
+		{name: "unknown reason", event: incompleteEvent(new("pause_turn"))},
+		{name: "max_output_tokens", event: incompleteEvent(new("max_output_tokens")), wantOK: true},
+		{name: "content_filter", event: incompleteEvent(new("content_filter")), wantOK: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newGeminiStreamClientState(testStreamContext(), UpstreamResponses, usageOnlyPolicy(), "resp_1", "gemini-x")
+			state.ctx.LossPolicy = state.policy
+			if _, err := state.Convert(fsmCreated(1)); err != nil {
+				t.Fatalf("created: %v", err)
+			}
+			chunks, err := state.Convert(tc.event)
+			if tc.wantOK {
+				if err != nil || len(chunks) != 1 {
+					t.Fatalf("known reason: chunks=%v err=%v, want one terminal chunk", chunks, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("incomplete with reason %v: accepted with chunks %v, want an error", tc.event.Response.IncompleteDetails, chunks)
+			}
+			var unrep *UnrepresentableError
+			if !known("") && errors.As(err, &unrep) {
+				// unknown non-empty reason: unrepresentable
+			} else if !isUpstreamConversionError(err) && !errors.As(err, &unrep) {
+				t.Fatalf("err = %T %v, want a wire error or UnrepresentableError", err, err)
+			}
+			if len(chunks) != 0 || strings.Contains(fmt.Sprint(chunks), `"STOP"`) {
+				t.Fatalf("failed incomplete emitted chunks %v, want none", chunks)
+			}
+		})
+	}
+}
+
+func TestGeminiStreamClientOutputItemDoneCoversModeledItems(t *testing.T) {
+	// Every output item type the wire union models must be handled on
+	// output_item.done: function_call_output is a policy-gated loss (never a
+	// silent drop), and text deltas carrying logprobs are loss-gated once.
+	callOutputDone := func(seq int64) ResponseOutputItemDoneEvent {
+		return ResponseOutputItemDoneEvent{
+			Type: "response.output_item.done", SequenceNumber: seq, OutputIndex: 0,
+			Item: &ResponsesFunctionCallOutputResultItem{
+				ID: "r1", Type: "function_call_output", Status: ResponsesItemCompleted,
+				CallID: "call_1", Output: ResponsesFunctionOutput{Text: new("ok")},
+			},
+		}
+	}
+	callOutputAdded := func(seq int64) ResponseOutputItemAddedEvent {
+		return ResponseOutputItemAddedEvent{
+			Type: "response.output_item.added", SequenceNumber: seq, OutputIndex: 0,
+			Item: &ResponsesFunctionCallOutputResultItem{
+				ID: "r1", Type: "function_call_output", Status: ResponsesItemInProgress,
+				CallID: "call_1", Output: ResponsesFunctionOutput{Text: new("ok")},
+			},
+		}
+	}
+	callOutput := func(s *geminiStreamClientState, seq int64) error {
+		t.Helper()
+		if _, err := s.Convert(callOutputAdded(seq)); err != nil {
+			return err
+		}
+		_, err := s.Convert(callOutputDone(seq + 1))
+		return err
+	}
+	logprobsDelta := func(seq int64) ResponseTextDeltaEvent {
+		return ResponseTextDeltaEvent{
+			Type: "response.output_text.delta", SequenceNumber: seq,
+			ItemID: "msg_1", OutputIndex: 0, ContentIndex: 0, Delta: "hi",
+			Logprobs: []openairesponses.TextLogprob{{Token: "hi", Logprob: -0.1}},
+		}
+	}
+	textOpen := func(s *geminiStreamClientState) {
+		t.Helper()
+		if _, err := s.Convert(fsmCreated(1)); err != nil {
+			t.Fatalf("created: %v", err)
+		}
+		if _, err := s.Convert(fsmMessageAdded(2, 0, "msg_1")); err != nil {
+			t.Fatalf("message added: %v", err)
+		}
+		if _, err := s.Convert(fsmTextPartAdded(3, 0, 0, "msg_1")); err != nil {
+			t.Fatalf("part added: %v", err)
+		}
+	}
+
+	// function_call_output under a strict policy: refused with the
+	// output_item_boundaries loss, not silently dropped.
+	s := newGeminiStreamClientState(testStreamContext(), UpstreamResponses, StrictLossPolicy(), "resp_1", "gemini-x")
+	if _, err := s.Convert(fsmCreated(1)); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	err := callOutput(s, 2)
+	var unsupported *UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureOutputItemBoundaries) {
+		t.Fatalf("function_call_output: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureOutputItemBoundaries)
+	}
+
+	// Under an allowing policy the stream completes and the loss is recorded.
+	s = newGeminiStreamClientState(testStreamContext(), UpstreamResponses,
+		usageOnlyPolicy(FeatureOutputItemBoundaries), "resp_1", "gemini-x")
+	if _, err := s.Convert(fsmCreated(1)); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	if err := callOutput(s, 2); err != nil {
+		t.Fatalf("allowed function_call_output: %v", err)
+	}
+	if !reportHasFeature(s.report, FeatureOutputItemBoundaries) {
+		t.Fatalf("function_call_output loss not recorded: %+v", s.report.Losses)
+	}
+
+	// Text deltas with logprobs: gated once per stream under FeatureLogprobs.
+	s = newGeminiStreamClientState(testStreamContext(), UpstreamResponses, StrictLossPolicy(), "resp_1", "gemini-x")
+	textOpen(s)
+	if _, err := s.Convert(logprobsDelta(4)); err == nil {
+		t.Fatal("logprobs delta under strict policy: accepted")
+	} else if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureLogprobs) {
+		t.Fatalf("logprobs delta: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureLogprobs)
+	}
+	s = newGeminiStreamClientState(testStreamContext(), UpstreamResponses,
+		usageOnlyPolicy(FeatureLogprobs), "resp_1", "gemini-x")
+	textOpen(s)
+	for _, seq := range []int64{4, 5} {
+		if _, err := s.Convert(logprobsDelta(seq)); err != nil {
+			t.Fatalf("allowed logprobs delta %d: %v", seq, err)
+		}
+	}
+	if n := countReportFeature(s.report, FeatureLogprobs); n != 1 {
+		t.Fatalf("logprobs loss recorded %d times for two deltas, want 1: %+v", n, s.report.Losses)
+	}
+}
+
 func TestGeminiStreamClientBudgetIsUpstreamFault(t *testing.T) {
 	state := newGeminiStreamClientState(testStreamContext(), UpstreamMessages, StrictLossPolicy(), "resp_1", "gemini-x")
 	state.budget.semanticBytes = state.budget.semanticBytesBudget
 	_, err := state.textChunk("x", false)
 	if !isUpstreamConversionError(err) {
 		t.Fatalf("semantic budget: err = %T %v, want an upstream conversion error", err, err)
+	}
+}
+
+func TestGeminiStreamClientSummaryRetentionIsBudgetedAndGatedBeforeMutation(t *testing.T) {
+	// A reasoning-summary delta that is retained for coverage proof must be
+	// charged against the semantic-bytes budget even when thoughts are not
+	// rendered, so an upstream cannot grow the retained copy without bound.
+	reasoningOpen := func(s *geminiStreamClientState, seq int64) {
+		t.Helper()
+		if _, err := s.Convert(fsmCreated(1)); err != nil {
+			t.Fatalf("created: %v", err)
+		}
+		if _, err := s.Convert(ResponseOutputItemAddedEvent{
+			Type: "response.output_item.added", SequenceNumber: seq,
+			OutputIndex: 0,
+			Item: &ResponsesReasoningOutputItem{
+				ID: "rs_1", Type: "reasoning", Status: ResponsesItemInProgress,
+				Summary: []ResponsesReasoningSummary{},
+			},
+		}); err != nil {
+			t.Fatalf("item added: %v", err)
+		}
+		if _, err := s.Convert(ResponseReasoningSummaryPartAddedEvent{
+			Type: "response.reasoning_summary_part.added", SequenceNumber: seq + 1,
+			ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0,
+			Part: openairesponses.SummaryTextPart{Type: "summary_text", Text: ""},
+		}); err != nil {
+			t.Fatalf("part added: %v", err)
+		}
+	}
+	newSummaryState := func() *geminiStreamClientState {
+		state := newGeminiStreamClientState(testStreamContext(), UpstreamResponses, usageOnlyPolicy(FeatureProviderReasoningText), "resp_1", "gemini-x")
+		state.ctx.GeminiIncludeThoughts = false
+		reasoningOpen(state, 2)
+		return state
+	}
+	state := newSummaryState()
+	state.budget.semanticBytes = state.budget.semanticBytesBudget
+	_, err := state.Convert(ResponseReasoningSummaryTextDeltaEvent{
+		Type: "response.reasoning_summary_text.delta", SequenceNumber: 5,
+		ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0, Delta: "x",
+	})
+	if !isUpstreamConversionError(err) {
+		t.Fatalf("retained summary delta: err = %T %v, want an upstream conversion error", err, err)
+	}
+
+	// When the policy disallows provider reasoning text, the loss is evaluated
+	// before any state is retained: no summary entry may exist afterwards.
+	state = newGeminiStreamClientState(testStreamContext(), UpstreamResponses, StrictLossPolicy(), "resp_1", "gemini-x")
+	state.ctx.GeminiIncludeThoughts = false
+	reasoningOpen(state, 2)
+	_, err = state.Convert(ResponseReasoningSummaryTextDeltaEvent{
+		Type: "response.reasoning_summary_text.delta", SequenceNumber: 5,
+		ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0, Delta: "x",
+	})
+	var unsupported *UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureProviderReasoningText) {
+		t.Fatalf("strict policy: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureProviderReasoningText)
+	}
+	if len(state.streamedSummary) != 0 || state.budget.stateEntries != 0 {
+		t.Fatalf("loss checked after mutation: streamedSummary=%v stateEntries=%d, want empty/0",
+			state.streamedSummary, state.budget.stateEntries)
 	}
 }
 

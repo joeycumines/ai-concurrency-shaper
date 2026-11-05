@@ -30,11 +30,42 @@ func TestHasQueryCredential(t *testing.T) {
 		{query: "alt=sse;;oauth_token=T&", want: true},
 		{query: "monkey=1;keys=2", want: false},
 		{query: "foo=1;keys=2", want: false},
+		// Non-ASCII bytes change length under strings.ToLower (invalid UTF-8
+		// becomes the 3-byte RuneError; U+023A lowercases to a 3-byte rune),
+		// so an index into the lowered string can exceed len(name) and panic.
+		// Such a pair's name is not a credential to the upstream either, but
+		// the scan must not crash on it.
+		{query: "\x80\x80\x80%3d", want: false},
+		{query: "\x80\x80\x80%3d=x", want: false},
+		{query: "Ⱥ%3Dsecret", want: false},
+		// A credential followed by non-ASCII is still detected: the raw cut
+		// leaves exactly "key".
+		{query: "key%3D\x80secret", want: true},
+		{query: "key%3dȺsecret", want: true},
+		{query: "key%3Dsecret\x80\x80", want: true},
+		// U+0130 lowercases to 1 byte ('i'), shifting a lowered index left;
+		// the raw byte scan is unaffected.
+		{query: "İkey%3Dsecret%zz", want: false},
+		{query: "key%3Dİsecret%zz", want: true},
 	}
 	for _, tt := range tests {
 		if got := HasQueryCredential(tt.query); got != tt.want {
 			t.Errorf("HasQueryCredential(%q) = %v, want %v", tt.query, got, tt.want)
 		}
+	}
+}
+
+func TestHasQueryCredentialNeverPanicsOnArbitraryBytes(t *testing.T) {
+	// Every byte string must be handled without a slice-bounds panic; the
+	// scan reads the raw bytes only.
+	probes := []string{
+		string([]byte{0x80, 0x80, '%', '3', 'd'}),
+		string([]byte{0xff, 0xfe, '%', '3', 'D', 'k', 'e', 'y'}),
+		"ȺȾ%3d",
+		"İẞ%3D",
+	}
+	for _, p := range probes {
+		_ = HasQueryCredential(p)
 	}
 }
 

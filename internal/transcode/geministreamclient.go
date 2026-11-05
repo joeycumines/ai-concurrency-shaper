@@ -40,11 +40,17 @@ type geminiStreamClientState struct {
 	// non-streaming render.
 	phaseLossNoted     bool
 	reasoningLossNoted bool
+	// outputItemBoundariesLossNoted and logprobsLossNoted keep the
+	// once-per-stream records of conversation-state output items and text
+	// logprobs, neither of which a Gemini stream carries.
+	outputItemBoundariesLossNoted bool
+	logprobsLossNoted             bool
 	// streamedSummary accumulates, per reasoning item id, the summary text
 	// that arrived as summary deltas: only that text was rendered as thoughts
 	// or recorded as provider reasoning loss, so only an exact content match
-	// proves the item's final summary covered.
-	streamedSummary map[string]string
+	// proves the item's final summary covered. The retained copy is charged
+	// against the semantic-bytes budget like any other retained text.
+	streamedSummary map[string]*strings.Builder
 
 	sawTerminal bool
 }
@@ -107,6 +113,15 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 
 	switch value := event.(type) {
 	case ResponseTextDeltaEvent:
+		if len(value.Logprobs) > 0 && !s.logprobsLossNoted {
+			s.logprobsLossNoted = true
+			if err := s.report.Lose(
+				s.policy, FeatureLogprobs, "output_text.delta.logprobs",
+				"text logprobs cannot be reproduced in a Gemini stream",
+			); err != nil {
+				return nil, err
+			}
+		}
 		return s.textChunk(value.Delta, false)
 	case ResponseRefusalDeltaEvent:
 		if !s.refusalNoted {
@@ -120,18 +135,9 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 		}
 		return s.textChunk(value.Delta, false)
 	case ResponseReasoningSummaryTextDeltaEvent:
-		if value.Delta != "" {
-			if s.streamedSummary == nil {
-				s.streamedSummary = make(map[string]string)
-			}
-			if _, seen := s.streamedSummary[value.ItemID]; !seen {
-				if err := s.budget.addStateEntries(1); err != nil {
-					return nil, s.wireError(err)
-				}
-			}
-			s.streamedSummary[value.ItemID] += value.Delta
-		}
 		if !s.ctx.GeminiIncludeThoughts {
+			// The loss decision comes first: a refused event must not leave
+			// retained state or budget charges behind.
 			if !s.thoughtLossNoted {
 				s.thoughtLossNoted = true
 				if err := s.report.Lose(
@@ -141,6 +147,29 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 					return nil, err
 				}
 			}
+		}
+		if value.Delta != "" {
+			// Retain the streamed text for the coverage proof in
+			// loseReasoning: the retained copy is semantic state, so it is
+			// charged like rendered text (textChunk charges its own copy when
+			// thoughts are included — retention and emission are separate).
+			if err := s.budget.addSemanticBytes(int64(len(value.Delta))); err != nil {
+				return nil, s.wireError(err)
+			}
+			if s.streamedSummary == nil {
+				s.streamedSummary = make(map[string]*strings.Builder)
+			}
+			buf := s.streamedSummary[value.ItemID]
+			if buf == nil {
+				if err := s.budget.addStateEntries(1); err != nil {
+					return nil, s.wireError(err)
+				}
+				buf = &strings.Builder{}
+				s.streamedSummary[value.ItemID] = buf
+			}
+			buf.WriteString(value.Delta)
+		}
+		if !s.ctx.GeminiIncludeThoughts {
 			return nil, nil
 		}
 		return s.textChunk(value.Delta, true)
@@ -152,6 +181,18 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 			return nil, s.losePhase(item)
 		case *ResponsesReasoningOutputItem:
 			return nil, s.loseReasoning(item)
+		case *ResponsesFunctionCallOutputResultItem:
+			// A tool result echoed in the upstream output is conversation
+			// state, not model output; the non-streaming render records it
+			// under the same policy-gated loss rather than dropping it.
+			if s.outputItemBoundariesLossNoted {
+				return nil, nil
+			}
+			s.outputItemBoundariesLossNoted = true
+			return nil, s.report.Lose(
+				s.policy, FeatureOutputItemBoundaries, "output[].function_call_output",
+				"tool results are conversation-state output items, not part of the model response",
+			)
 		}
 		return nil, nil
 	case ResponseCompletedEvent:
@@ -200,7 +241,8 @@ func (s *geminiStreamClientState) loseReasoning(item *ResponsesReasoningOutputIt
 	for _, summary := range item.Summary {
 		summaryText.WriteString(summary.Text)
 	}
-	summarized := summaryText.Len() > 0 && s.streamedSummary[item.ID] == summaryText.String()
+	summarized := summaryText.Len() > 0 && s.streamedSummary[item.ID] != nil &&
+		s.streamedSummary[item.ID].String() == summaryText.String()
 	if summarized && item.EncryptedContent == "" && len(item.Content) == 0 {
 		return nil
 	}
@@ -258,12 +300,30 @@ func (s *geminiStreamClientState) functionCallChunk(item *ResponsesFunctionCallO
 // it.
 func (s *geminiStreamClientState) terminalChunk(response ResponseEnvelope, status string) ([]geminiResponse, error) {
 	stop := CanonicalStopEndTurn
-	if status == "incomplete" && response.IncompleteDetails != nil {
+	if status == "incomplete" {
+		// An incomplete response must map to a truthful finish reason: a
+		// missing or unrecognized incomplete_details.reason must never fall
+		// through to STOP, which would report the incomplete response as a
+		// normal completion.
+		if response.IncompleteDetails == nil || response.IncompleteDetails.Reason == "" {
+			return nil, s.wireError(errors.New(
+				"responses incomplete event carries no incomplete_details.reason",
+			))
+		}
 		switch response.IncompleteDetails.Reason {
 		case "max_output_tokens":
 			stop = CanonicalStopMaxTokens
 		case "content_filter":
 			stop = CanonicalStopRefusal
+		default:
+			return nil, &UnrepresentableError{
+				Protocol: string(s.upstream),
+				Path:     "incomplete_details.reason",
+				Detail: fmt.Sprintf(
+					"the upstream ended the response incomplete with reason %q, which has no Gemini finishReason mapping",
+					response.IncompleteDetails.Reason,
+				),
+			}
 		}
 	}
 	canonical := CanonicalResponse{
