@@ -120,12 +120,8 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 
 	switch value := event.(type) {
 	case ResponseTextDeltaEvent:
-		if len(value.Logprobs) > 0 && !s.logprobsLossNoted {
-			s.logprobsLossNoted = true
-			if err := s.report.Lose(
-				s.policy, FeatureLogprobs, "output_text.delta.logprobs",
-				"text logprobs cannot be reproduced in a Gemini stream",
-			); err != nil {
+		if len(value.Logprobs) > 0 {
+			if err := s.loseLogprobs("output_text.delta.logprobs"); err != nil {
 				return nil, err
 			}
 		}
@@ -180,6 +176,35 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 			return nil, nil
 		}
 		return s.textChunk(value.Delta, true)
+	case ResponseTextDoneEvent:
+		if len(value.Logprobs) > 0 {
+			return nil, s.loseLogprobs("output_text.done.logprobs")
+		}
+		return nil, nil
+	case ResponseContentPartDoneEvent:
+		// The adjacent done event repeats the part, and a part may carry
+		// logprobs by itself.
+		if part, ok := value.Part.(*ResponsesStreamOutputTextPart); ok && len(part.Logprobs) > 0 {
+			return nil, s.loseLogprobs("content_part.done.logprobs")
+		}
+		return nil, nil
+	case ResponseOutputItemAddedEvent:
+		// Metadata the Gemini dialect cannot carry is decided when the item
+		// is announced, before any of its content reaches the client.
+		switch item := value.Item.(type) {
+		case *ResponsesOutputMessage:
+			return nil, s.losePhase(item)
+		case *ResponsesFunctionCallOutputResultItem:
+			return nil, s.loseFunctionCallOutput()
+		case *ResponsesReasoningOutputItem:
+			// A bare reasoning item may still stream its full summary, which
+			// the done check proves covered; only content the stream cannot
+			// render is a loss at announcement.
+			if item.EncryptedContent != "" || len(item.Content) > 0 {
+				return nil, s.loseReasoning(item)
+			}
+		}
+		return nil, nil
 	case ResponseOutputItemDoneEvent:
 		switch item := value.Item.(type) {
 		case *ResponsesFunctionCallOutputItem:
@@ -192,14 +217,7 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 			// A tool result echoed in the upstream output is conversation
 			// state, not model output; the non-streaming render records it
 			// under the same policy-gated loss rather than dropping it.
-			if s.outputItemBoundariesLossNoted {
-				return nil, nil
-			}
-			s.outputItemBoundariesLossNoted = true
-			return nil, s.report.Lose(
-				s.policy, FeatureOutputItemBoundaries, "output[].function_call_output",
-				"tool results are conversation-state output items, not part of the model response",
-			)
+			return nil, s.loseFunctionCallOutput()
 		}
 		return nil, nil
 	case ResponseCompletedEvent:
@@ -259,6 +277,32 @@ func (s *geminiStreamClientState) loseReasoning(item *ResponsesReasoningOutputIt
 	return s.report.Lose(
 		s.policy, FeatureReasoningSummary, "output[].reasoning",
 		"Responses reasoning output cannot be reproduced in a Gemini stream",
+	)
+}
+
+// loseFunctionCallOutput records the approved loss of a conversation-state
+// tool-result output item once per stream: it is not model output.
+func (s *geminiStreamClientState) loseFunctionCallOutput() error {
+	if s.outputItemBoundariesLossNoted {
+		return nil
+	}
+	s.outputItemBoundariesLossNoted = true
+	return s.report.Lose(
+		s.policy, FeatureOutputItemBoundaries, "output[].function_call_output",
+		"tool results are conversation-state output items, not part of the model response",
+	)
+}
+
+// loseLogprobs records the approved loss of text logprobs once per stream: a
+// Gemini part carries no logprobs, whichever event carried them.
+func (s *geminiStreamClientState) loseLogprobs(path string) error {
+	if s.logprobsLossNoted {
+		return nil
+	}
+	s.logprobsLossNoted = true
+	return s.report.Lose(
+		s.policy, FeatureLogprobs, path,
+		"text logprobs cannot be reproduced in a Gemini stream",
 	)
 }
 

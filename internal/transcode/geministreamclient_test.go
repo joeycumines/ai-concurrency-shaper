@@ -983,3 +983,173 @@ func TestGeminiStreamClientFailureEventsLatch(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiStreamClientOutputItemAddedIsGated(t *testing.T) {
+	// Metadata a Gemini stream cannot carry is decided when the item is
+	// announced: an upstream must not get its text deltas through before the
+	// done event reveals the incompatibility.
+	newState := func(policy LossPolicy) *geminiStreamClientState {
+		state := newGeminiStreamClientState(
+			testStreamContext(), UpstreamResponses, policy, "resp_1", "gemini-x",
+		)
+		if _, err := state.Convert(fsmCreated(1)); err != nil {
+			t.Fatalf("created: %v", err)
+		}
+		return state
+	}
+	messageAdded := func(seq int64, phase string) ResponseOutputItemAddedEvent {
+		event := fsmMessageAdded(seq, 0, "msg_1")
+		event.Item.(*ResponsesOutputMessage).Phase = phase
+		return event
+	}
+	callOutputAdded := func(seq int64) ResponseOutputItemAddedEvent {
+		return ResponseOutputItemAddedEvent{
+			Type: "response.output_item.added", SequenceNumber: seq, OutputIndex: 0,
+			Item: &ResponsesFunctionCallOutputResultItem{
+				ID: "r1", Type: "function_call_output", Status: ResponsesItemInProgress,
+				CallID: "call_1", Output: ResponsesFunctionOutput{Text: new("ok")},
+			},
+		}
+	}
+	callOutputDone := func(seq int64) ResponseOutputItemDoneEvent {
+		return ResponseOutputItemDoneEvent{
+			Type: "response.output_item.done", SequenceNumber: seq, OutputIndex: 0,
+			Item: &ResponsesFunctionCallOutputResultItem{
+				ID: "r1", Type: "function_call_output", Status: ResponsesItemCompleted,
+				CallID: "call_1", Output: ResponsesFunctionOutput{Text: new("ok")},
+			},
+		}
+	}
+	reasoningAdded := func(seq int64, item *ResponsesReasoningOutputItem) ResponseOutputItemAddedEvent {
+		return ResponseOutputItemAddedEvent{
+			Type: "response.output_item.added", SequenceNumber: seq, OutputIndex: 0, Item: item,
+		}
+	}
+	var unsupported *UnsupportedFeatureError
+	wantRefused := func(t *testing.T, err error, feature Feature) {
+		t.Helper()
+		if !errors.As(err, &unsupported) || unsupported.Feature != string(feature) {
+			t.Fatalf("err = %T %v, want UnsupportedFeatureError(%s)", err, err, feature)
+		}
+	}
+
+	t.Run("phase refuses before the text", func(t *testing.T) {
+		state := newState(StrictLossPolicy())
+		wantRefused(t, convertErr(state, messageAdded(2, "final_answer")), FeatureOutputPhase)
+		chunks, err := state.Convert(fsmTextDelta(3, 0, 0, "msg_1", "leak"))
+		if err == nil || len(chunks) != 0 {
+			t.Fatalf("delta after the refusal = %v, err %v; want no chunk", chunks, err)
+		}
+	})
+
+	t.Run("tool result refuses at added", func(t *testing.T) {
+		state := newState(StrictLossPolicy())
+		wantRefused(t, convertErr(state, callOutputAdded(2)), FeatureOutputItemBoundaries)
+	})
+
+	t.Run("tool result is recorded once", func(t *testing.T) {
+		state := newState(usageOnlyPolicy(FeatureOutputItemBoundaries))
+		if err := convertErr(state, callOutputAdded(2)); err != nil {
+			t.Fatalf("added: %v", err)
+		}
+		if err := convertErr(state, callOutputDone(3)); err != nil {
+			t.Fatalf("done: %v", err)
+		}
+		if n := countReportFeature(state.report, FeatureOutputItemBoundaries); n != 1 {
+			t.Fatalf("loss recorded %d times, want 1: %+v", n, state.report.Losses)
+		}
+	})
+
+	t.Run("encrypted reasoning refuses at added", func(t *testing.T) {
+		state := newState(StrictLossPolicy())
+		wantRefused(t, convertErr(state, reasoningAdded(2, &ResponsesReasoningOutputItem{
+			ID: "rs_1", Type: "reasoning", Status: ResponsesItemInProgress,
+			Summary: []ResponsesReasoningSummary{}, EncryptedContent: "opaque",
+		})), FeatureReasoningSummary)
+	})
+
+	t.Run("reasoning content refuses at added", func(t *testing.T) {
+		state := newState(StrictLossPolicy())
+		wantRefused(t, convertErr(state, reasoningAdded(2, &ResponsesReasoningOutputItem{
+			ID: "rs_1", Type: "reasoning", Status: ResponsesItemInProgress,
+			Summary: []ResponsesReasoningSummary{},
+			Content: []openairesponses.ReasoningText{{Type: "reasoning_text", Text: "hidden"}},
+		})), FeatureReasoningSummary)
+	})
+
+	t.Run("bare reasoning item is not lost at added", func(t *testing.T) {
+		state := newState(StrictLossPolicy())
+		if err := convertErr(state, reasoningAdded(2, &ResponsesReasoningOutputItem{
+			ID: "rs_1", Type: "reasoning", Status: ResponsesItemInProgress,
+			Summary: []ResponsesReasoningSummary{},
+		})); err != nil {
+			t.Fatalf("bare reasoning item: %v", err)
+		}
+		if reportHasFeature(state.report, FeatureReasoningSummary) {
+			t.Fatalf("bare reasoning item recorded a loss: %+v", state.report.Losses)
+		}
+	})
+}
+
+// convertErr runs one typed event through the state and returns its error.
+func convertErr(state *geminiStreamClientState, event ResponsesSSEEvent) error {
+	_, err := state.Convert(event)
+	return err
+}
+
+func TestGeminiStreamClientDoneOnlyLogprobsAreGated(t *testing.T) {
+	// Logprobs carried only on the done events must not bypass the loss gate.
+	logprob := []openairesponses.TextLogprob{{Token: "hi", Logprob: -0.1}}
+	openText := func(t *testing.T, policy LossPolicy) *geminiStreamClientState {
+		t.Helper()
+		state := newGeminiStreamClientState(
+			testStreamContext(), UpstreamResponses, policy, "resp_1", "gemini-x",
+		)
+		for _, event := range []ResponsesSSEEvent{
+			fsmCreated(1),
+			fsmMessageAdded(2, 0, "msg_1"),
+			fsmTextPartAdded(3, 0, 0, "msg_1"),
+			fsmTextDelta(4, 0, 0, "msg_1", "hi"),
+		} {
+			if _, err := state.Convert(event); err != nil {
+				t.Fatalf("%s: %v", event.EventType(), err)
+			}
+		}
+		return state
+	}
+	textDone := func(seq int64) ResponseTextDoneEvent {
+		return ResponseTextDoneEvent{
+			Type: "response.output_text.done", SequenceNumber: seq,
+			ItemID: "msg_1", OutputIndex: 0, ContentIndex: 0, Text: "hi",
+			Logprobs: logprob,
+		}
+	}
+	partDone := func(seq int64) ResponseContentPartDoneEvent {
+		return ResponseContentPartDoneEvent{
+			Type: "response.content_part.done", SequenceNumber: seq,
+			ItemID: "msg_1", OutputIndex: 0, ContentIndex: 0,
+			Part: &ResponsesStreamOutputTextPart{
+				Type: "output_text", Text: "hi",
+				Annotations: []ResponsesAnnotation{}, Logprobs: logprob,
+			},
+		}
+	}
+	var unsupported *UnsupportedFeatureError
+
+	state := openText(t, StrictLossPolicy())
+	err := convertErr(state, textDone(5))
+	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureLogprobs) {
+		t.Fatalf("done-only logprobs: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureLogprobs)
+	}
+
+	state = openText(t, usageOnlyPolicy(FeatureLogprobs))
+	if err := convertErr(state, textDone(5)); err != nil {
+		t.Fatalf("allowed text done: %v", err)
+	}
+	if err := convertErr(state, partDone(6)); err != nil {
+		t.Fatalf("allowed part done: %v", err)
+	}
+	if n := countReportFeature(state.report, FeatureLogprobs); n != 1 {
+		t.Fatalf("logprobs loss recorded %d times for the done events, want 1: %+v", n, state.report.Losses)
+	}
+}
