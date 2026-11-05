@@ -1153,3 +1153,126 @@ func TestGeminiStreamClientDoneOnlyLogprobsAreGated(t *testing.T) {
 		t.Fatalf("logprobs loss recorded %d times for the done events, want 1: %+v", n, state.report.Losses)
 	}
 }
+
+func TestGeminiStreamClientEmptyDeltasRecordNothing(t *testing.T) {
+	// An empty delta encodes nothing, so it must not produce a loss or note
+	// even when the corresponding non-empty delta would be refused.
+	openMessage := func(t *testing.T, policy LossPolicy) *geminiStreamClientState {
+		t.Helper()
+		state := newGeminiStreamClientState(
+			testStreamContext(), UpstreamResponses, policy, "resp_1", "gemini-x",
+		)
+		if _, err := state.Convert(fsmCreated(1)); err != nil {
+			t.Fatalf("created: %v", err)
+		}
+		if _, err := state.Convert(fsmMessageAdded(2, 0, "msg_1")); err != nil {
+			t.Fatalf("message added: %v", err)
+		}
+		return state
+	}
+
+	reasoning := newGeminiStreamClientState(
+		testStreamContext(), UpstreamResponses, StrictLossPolicy(), "resp_1", "gemini-x",
+	)
+	reasoning.ctx.GeminiIncludeThoughts = false
+	for _, event := range []ResponsesSSEEvent{
+		fsmCreated(1),
+		ResponseOutputItemAddedEvent{
+			Type: "response.output_item.added", SequenceNumber: 2, OutputIndex: 0,
+			Item: &ResponsesReasoningOutputItem{
+				ID: "rs_1", Type: "reasoning", Status: ResponsesItemInProgress,
+				Summary: []ResponsesReasoningSummary{},
+			},
+		},
+		ResponseReasoningSummaryPartAddedEvent{
+			Type: "response.reasoning_summary_part.added", SequenceNumber: 3,
+			ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0,
+			Part: openairesponses.SummaryTextPart{Type: "summary_text", Text: ""},
+		},
+	} {
+		if _, err := reasoning.Convert(event); err != nil {
+			t.Fatalf("%s: %v", event.EventType(), err)
+		}
+	}
+	if _, err := reasoning.Convert(ResponseReasoningSummaryTextDeltaEvent{
+		Type: "response.reasoning_summary_text.delta", SequenceNumber: 4,
+		ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0, Delta: "",
+	}); err != nil {
+		t.Fatalf("empty reasoning delta: %v", err)
+	}
+	if reportHasFeature(reasoning.report, FeatureProviderReasoningText) {
+		t.Fatalf("empty reasoning delta recorded a loss: %+v", reasoning.report.Losses)
+	}
+
+	state := openMessage(t, StrictLossPolicy())
+	if _, err := state.Convert(ResponseContentPartAddedEvent{
+		Type: "response.content_part.added", SequenceNumber: 3,
+		ItemID: "msg_1", OutputIndex: 0, ContentIndex: 0,
+		Part: &ResponsesStreamRefusalPart{Type: "refusal", Refusal: ""},
+	}); err != nil {
+		t.Fatalf("refusal part added: %v", err)
+	}
+	if _, err := state.Convert(ResponseRefusalDeltaEvent{
+		Type: "response.refusal.delta", SequenceNumber: 4,
+		ItemID: "msg_1", OutputIndex: 0, ContentIndex: 0, Delta: "",
+	}); err != nil {
+		t.Fatalf("empty refusal delta: %v", err)
+	}
+	if reportHasFeature(state.report, FeatureGeminiRefusalText) {
+		t.Fatalf("empty refusal delta recorded a note: %+v", state.report.Losses)
+	}
+}
+
+func TestGeminiStreamClientRejectedRefusalDeltaRecordsNoNote(t *testing.T) {
+	// The refusal note describes rendered text: a delta the semantic budget
+	// rejects must not leave it in the report.
+	state := newGeminiStreamClientState(
+		testStreamContext(), UpstreamResponses, usageOnlyPolicy(FeatureGeminiRefusalText), "resp_1", "gemini-x",
+	)
+	for _, event := range []ResponsesSSEEvent{
+		fsmCreated(1),
+		fsmMessageAdded(2, 0, "msg_1"),
+		ResponseContentPartAddedEvent{
+			Type: "response.content_part.added", SequenceNumber: 3,
+			ItemID: "msg_1", OutputIndex: 0, ContentIndex: 0,
+			Part: &ResponsesStreamRefusalPart{Type: "refusal", Refusal: ""},
+		},
+	} {
+		if _, err := state.Convert(event); err != nil {
+			t.Fatalf("%s: %v", event.EventType(), err)
+		}
+	}
+	state.budget.semanticBytes = state.budget.semanticBytesBudget
+	if _, err := state.Convert(ResponseRefusalDeltaEvent{
+		Type: "response.refusal.delta", SequenceNumber: 4,
+		ItemID: "msg_1", OutputIndex: 0, ContentIndex: 0, Delta: "x",
+	}); err == nil {
+		t.Fatal("refusal delta over the semantic budget: nil error")
+	}
+	if reportHasFeature(state.report, FeatureGeminiRefusalText) {
+		t.Fatalf("refusal note recorded for a rejected delta: %+v", state.report.Losses)
+	}
+}
+
+func TestGeminiStreamClientTerminalUsageDecidesBeforeNotes(t *testing.T) {
+	// The finish-refusal note describes a terminal that committed; when the
+	// usage loss rejects the terminal, the note must not be recorded.
+	state := newGeminiStreamClientState(
+		testStreamContext(), UpstreamResponses, StrictLossPolicy(), "resp_1", "gemini-x",
+	)
+	if _, err := state.Convert(fsmCreated(1)); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	envelope := fsmEnvelope("resp_1", "incomplete")
+	envelope.IncompleteDetails = &ResponsesIncompleteDetails{Reason: "content_filter"}
+	_, err := state.Convert(ResponseIncompleteEvent{
+		Type: "response.incomplete", SequenceNumber: 2, Response: envelope,
+	})
+	var unsupported *UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureUsageUnknown) {
+		t.Fatalf("terminal without usage: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureUsageUnknown)
+	}
+	if reportHasFeature(state.report, FeatureGeminiFinishRefusal) {
+		t.Fatalf("finish-refusal note recorded for a rejected terminal: %+v", state.report.Losses)
+	}
+}

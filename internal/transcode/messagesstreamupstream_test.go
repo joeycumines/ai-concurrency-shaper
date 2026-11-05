@@ -372,3 +372,73 @@ func TestGeminiStreamMessagesErrorEventLatchesFailure(t *testing.T) {
 		t.Fatalf("blank error event latched %v, want a message naming the type", blank.streamError)
 	}
 }
+
+func TestAnthropicUpstreamIgnoredBlockLossesAreGated(t *testing.T) {
+	policy := LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureAuthenticatedThinking: {},
+		FeatureAnthropicServerTools:  {},
+	}}
+	newState := func(t *testing.T) *anthropicUpstreamResponsesStreamState {
+		t.Helper()
+		s := newAnthropicUpstreamResponsesStreamState("resp_1", "claude-x", policy)
+		if _, err := s.Convert(anthropicmessages.StreamEvent{
+			Type:    anthropicmessages.StreamEventTypeMessageStart,
+			Message: &anthropicmessages.Response{},
+		}); err != nil {
+			t.Fatalf("message_start: %v", err)
+		}
+		return s
+	}
+	blockStart := func(index int, kind anthropicmessages.ContentBlockType) anthropicmessages.StreamEvent {
+		return anthropicmessages.StreamEvent{
+			Type:         anthropicmessages.StreamEventTypeContentBlockStart,
+			Index:        new(index),
+			ContentBlock: &anthropicmessages.ContentBlock{Type: kind},
+		}
+	}
+
+	// Repeated ignored blocks record one loss per stream, not one per block.
+	s := newState(t)
+	for index, kind := range []anthropicmessages.ContentBlockType{
+		anthropicmessages.ContentBlockTypeThinking,
+		anthropicmessages.ContentBlockTypeRedactedThinking,
+	} {
+		if _, err := s.Convert(blockStart(index, kind)); err != nil {
+			t.Fatalf("thinking block %d: %v", index, err)
+		}
+	}
+	if n := countReportFeature(s.report, FeatureAuthenticatedThinking); n != 1 {
+		t.Fatalf("thinking loss recorded %d times, want 1: %+v", n, s.report.Losses)
+	}
+
+	s = newState(t)
+	for index, kind := range []anthropicmessages.ContentBlockType{
+		anthropicmessages.ContentBlockTypeServerToolUse,
+		anthropicmessages.ContentBlockTypeWebSearchToolResult,
+	} {
+		if _, err := s.Convert(blockStart(index, kind)); err != nil {
+			t.Fatalf("server tool block %d: %v", index, err)
+		}
+	}
+	if n := countReportFeature(s.report, FeatureAnthropicServerTools); n != 1 {
+		t.Fatalf("server-tool loss recorded %d times, want 1: %+v", n, s.report.Losses)
+	}
+
+	// A block rejected by the state-entry budget records no loss.
+	s = newState(t)
+	s.budget.stateEntries = s.budget.stateEntriesBudget
+	if _, err := s.Convert(blockStart(0, anthropicmessages.ContentBlockTypeThinking)); err == nil {
+		t.Fatal("thinking block over the state-entry budget: nil error")
+	}
+	if reportHasFeature(s.report, FeatureAuthenticatedThinking) {
+		t.Fatalf("thinking loss recorded for a rejected block: %+v", s.report.Losses)
+	}
+	s = newState(t)
+	s.budget.stateEntries = s.budget.stateEntriesBudget
+	if _, err := s.Convert(blockStart(0, anthropicmessages.ContentBlockTypeServerToolUse)); err == nil {
+		t.Fatal("server tool block over the state-entry budget: nil error")
+	}
+	if reportHasFeature(s.report, FeatureAnthropicServerTools) {
+		t.Fatalf("server-tool loss recorded for a rejected block: %+v", s.report.Losses)
+	}
+}

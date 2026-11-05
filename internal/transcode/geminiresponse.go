@@ -259,38 +259,43 @@ func DecodeGeminiResponse(
 			switch {
 			case part.Text != nil:
 				if part.Thought != nil && *part.Thought {
-					flushText()
-					text := *part.Text
-					switch {
-					case capabilities.ProviderReasoningThinking:
-						message.Parts = append(message.Parts, CanonicalThinkingPart{
-							Text:      text,
-							Signature: SyntheticThinkingSignature,
-						})
-						if err := report.Note(
-							FeatureProviderReasoningText,
-							partPath,
-							"provider reasoning mapped to a native thinking block (provider_reasoning_thinking encoding)",
-						); err != nil {
-							return CanonicalResponse{}, report, err
-						}
-					case capabilities.ProviderReasoningText:
-						message.Parts = append(message.Parts, CanonicalText{Text: text})
-						if err := report.Note(
-							FeatureProviderReasoningText,
-							partPath,
-							chatProviderReasoningMappedDetail,
-						); err != nil {
-							return CanonicalResponse{}, report, err
-						}
-					default:
-						if err := report.Lose(
-							policy,
-							FeatureProviderReasoningText,
-							partPath,
-							chatProviderReasoningDroppedDetail,
-						); err != nil {
-							return CanonicalResponse{}, report, err
+					// An empty thought part renders nothing, so it records
+					// no mapping and splits no text run, matching the
+					// streaming empty-delta short circuit. A signature
+					// attached to it is still gated below.
+					if text := *part.Text; text != "" {
+						flushText()
+						switch {
+						case capabilities.ProviderReasoningThinking:
+							message.Parts = append(message.Parts, CanonicalThinkingPart{
+								Text:      text,
+								Signature: SyntheticThinkingSignature,
+							})
+							if err := report.Note(
+								FeatureProviderReasoningText,
+								partPath,
+								"provider reasoning mapped to a native thinking block (provider_reasoning_thinking encoding)",
+							); err != nil {
+								return CanonicalResponse{}, report, err
+							}
+						case capabilities.ProviderReasoningText:
+							message.Parts = append(message.Parts, CanonicalText{Text: text})
+							if err := report.Note(
+								FeatureProviderReasoningText,
+								partPath,
+								chatProviderReasoningMappedDetail,
+							); err != nil {
+								return CanonicalResponse{}, report, err
+							}
+						default:
+							if err := report.Lose(
+								policy,
+								FeatureProviderReasoningText,
+								partPath,
+								chatProviderReasoningDroppedDetail,
+							); err != nil {
+								return CanonicalResponse{}, report, err
+							}
 						}
 					}
 				} else {

@@ -127,6 +127,16 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 		}
 		return s.textChunk(value.Delta, false)
 	case ResponseRefusalDeltaEvent:
+		if value.Delta == "" {
+			// An empty delta encodes nothing: no note, no chunk.
+			return nil, nil
+		}
+		chunks, err := s.textChunk(value.Delta, false)
+		if err != nil {
+			return nil, err
+		}
+		// The note describes rendered text, so it follows the successful
+		// encoding.
 		if !s.refusalNoted {
 			s.refusalNoted = true
 			if err := s.report.Note(
@@ -136,8 +146,13 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 				return nil, err
 			}
 		}
-		return s.textChunk(value.Delta, false)
+		return chunks, nil
 	case ResponseReasoningSummaryTextDeltaEvent:
+		if value.Delta == "" {
+			// An empty delta encodes nothing, so it records neither a loss
+			// nor retained summary state.
+			return nil, nil
+		}
 		if !s.ctx.GeminiIncludeThoughts {
 			// The loss decision comes first: a refused event must not leave
 			// retained state or budget charges behind.
@@ -383,11 +398,13 @@ func (s *geminiStreamClientState) terminalChunk(response ResponseEnvelope, statu
 		Stop:  CanonicalStop{Reason: stop},
 		Usage: responsesEnvelopeUsage(response.Usage),
 	}
-	finish, err := geminiFinishReason(canonical, &s.report)
+	// Usage is decided first: its losses can reject the terminal, and the
+	// finish-refusal note below describes a terminal that committed.
+	usage, err := geminiResponseUsage(canonical, s.ctx, &s.report)
 	if err != nil {
 		return nil, err
 	}
-	usage, err := geminiResponseUsage(canonical, s.ctx, &s.report)
+	finish, err := geminiFinishReason(canonical, &s.report)
 	if err != nil {
 		return nil, err
 	}
