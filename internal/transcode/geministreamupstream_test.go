@@ -1288,3 +1288,22 @@ func TestGeminiUpstreamStreamContinuationTokenRejectedBeforeLosses(t *testing.T)
 		t.Fatalf("continuationToken rejection recorded %+v", s.report.Losses)
 	}
 }
+
+func TestGeminiUpstreamStreamContinuationTokenRejectsBeforeParts(t *testing.T) {
+	// The continuation token decides the chunk before its parts are converted,
+	// so a rejected chunk leaves no item and no part-level loss.
+	ctx := geminiStreamTestContext() // allows the part-metadata loss
+	s := newGeminiStreamState(t, ctx)
+	_, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"content":{"parts":[{"text":"hi","partMetadata":{"k":1}}]},"continuationToken":"tok","index":0}]}`,
+	))
+	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
+		t.Fatalf("continuationToken with parts: err = %T %v, want *UnrepresentableError", err, err)
+	}
+	if len(s.items) != 0 {
+		t.Fatalf("continuationToken rejection left %d items", len(s.items))
+	}
+	if len(s.report.Losses) != 0 {
+		t.Fatalf("continuationToken rejection recorded %+v", s.report.Losses)
+	}
+}

@@ -331,6 +331,11 @@ func (s *geminiResponsesStreamState) convertChunk(chunk geminigeneratecontent.Ge
 			}
 		}
 	}
+	// A continuation token is unrepresentable: reject the chunk before any
+	// part or metadata is committed.
+	if err := rejectContinuationToken(candidate); err != nil {
+		return nil, err
+	}
 
 	events := s.startEvents()
 
@@ -995,17 +1000,26 @@ func (s *geminiResponsesStreamState) closeAllAndHold() []ResponsesSSEEvent {
 	return append(s.closeOpenMessage(), s.closeOpenReasoning()...)
 }
 
+// rejectContinuationToken refuses a candidate carrying an unrepresentable
+// continuation token. It is pure, so callers run it before committing output.
+func rejectContinuationToken(candidate *geminigeneratecontent.Candidate) error {
+	if candidate.ContinuationToken == nil || *candidate.ContinuationToken == "" {
+		return nil
+	}
+	return &UnrepresentableError{
+		Protocol: string(UpstreamGemini),
+		Path:     "candidates[].continuationToken",
+		Detail:   "a continuation token cannot be represented in the target dialect",
+	}
+}
+
 // recordCandidateMetadata records the per-chunk candidate metadata losses once
 // per stream.
 func (s *geminiResponsesStreamState) recordCandidateMetadata(candidate *geminigeneratecontent.Candidate) error {
-	// A continuation token is unrepresentable, so it rejects the chunk before
-	// any loss for the same candidate is recorded.
-	if candidate.ContinuationToken != nil && *candidate.ContinuationToken != "" {
-		return &UnrepresentableError{
-			Protocol: string(UpstreamGemini),
-			Path:     "candidates[].continuationToken",
-			Detail:   "a continuation token cannot be represented in the target dialect",
-		}
+	// A trailing chunk carrying a continuation token is still unrepresentable;
+	// the non-trailing path already rejected it before committing output.
+	if err := rejectContinuationToken(candidate); err != nil {
+		return err
 	}
 	if len(candidate.SafetyRatings) > 0 && !s.safetyLossRecorded {
 		s.safetyLossRecorded = true
@@ -1207,11 +1221,12 @@ func (s *geminiResponsesStreamState) releaseTerminal() ([]ResponsesSSEEvent, boo
 
 // FinalizeEOF releases the held terminal when the stream ended after a finish
 // chunk (Gemini has no [DONE] sentinel, so EOF is the release). A stream that
-// ends before any finish reason is a truncation, never a success.
+// ends before any finish reason, or that failed at any point, is never a
+// success.
 func (s *geminiResponsesStreamState) FinalizeEOF() ([]ResponsesSSEEvent, error) {
 	if s.streamError != nil {
-		// The stream ended on an in-stream error frame: propagate the
-		// failure; a failed exchange is never a successful completion.
+		// The stream failed earlier: propagate the failure; a failed exchange
+		// is never a successful completion.
 		return nil, s.streamError
 	}
 	if s.sawTerm {
