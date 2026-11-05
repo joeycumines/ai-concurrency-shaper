@@ -318,3 +318,127 @@ func TestAnthropicUpstreamStreamBudgetIsUpstreamFault(t *testing.T) {
 		t.Fatalf("event budget: err = %T %v, want an upstream conversion error", err, err)
 	}
 }
+
+func TestGeminiStreamMessagesErrorEventLatchesFailure(t *testing.T) {
+	// The upstream error event is a failure terminal: the composed converter
+	// and the upstream state must keep reporting it, never a clean terminal.
+	upstream := newAnthropicUpstreamResponsesStreamState("resp_1", "claude-x", usageOnlyPolicy())
+	gemini := newGeminiStreamClientState(
+		testStreamContext(), UpstreamMessages, usageOnlyPolicy(), "resp_1", "claude-x",
+	)
+	converter := newMessagesToGeminiConverter(upstream, gemini)
+
+	if _, err := converter.Convert(SSEEvent{
+		Event: "message_start",
+		Data:  []byte(`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+	}); err != nil {
+		t.Fatalf("message_start: %v", err)
+	}
+	if _, err := converter.Convert(SSEEvent{
+		Event: "error",
+		Data:  []byte(`{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`),
+	}); err == nil || !isUpstreamConversionError(err) {
+		t.Fatalf("error event: err = %T %v, want an upstream conversion error", err, err)
+	}
+	latched := upstream.streamError
+	if latched == nil || !strings.Contains(latched.Error(), "busy") {
+		t.Fatalf("upstream failure not latched: %v", latched)
+	}
+	if _, err := upstream.Convert(anthropicmessages.StreamEvent{
+		Type: anthropicmessages.StreamEventTypePing,
+	}); !errors.Is(err, latched) {
+		t.Fatalf("event after error: err = %v, want the latched %v", err, latched)
+	}
+	batch, err := converter.FinalizeEOF()
+	if !errors.Is(err, latched) {
+		t.Fatalf("FinalizeEOF after error event: err = %v, want the latched %v", err, latched)
+	}
+	if batch.Terminal || len(batch.Events) != 0 {
+		t.Fatalf("FinalizeEOF after error event released %+v", batch)
+	}
+
+	// An error event with no message still names the failure type, so the
+	// latched failure and the client-facing event are not blank.
+	blank := newAnthropicUpstreamResponsesStreamState("resp_1", "claude-x", usageOnlyPolicy())
+	if _, err := blank.Convert(anthropicmessages.StreamEvent{
+		Type: anthropicmessages.StreamEventTypeError,
+		Error: &anthropicmessages.StreamError{
+			Type: "overloaded_error",
+		},
+	}); err != nil {
+		t.Fatalf("blank error event: %v", err)
+	}
+	if blank.streamError == nil || !strings.Contains(blank.streamError.Error(), "overloaded_error") {
+		t.Fatalf("blank error event latched %v, want a message naming the type", blank.streamError)
+	}
+}
+
+func TestAnthropicUpstreamIgnoredBlockLossesAreGated(t *testing.T) {
+	policy := LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureAuthenticatedThinking: {},
+		FeatureAnthropicServerTools:  {},
+	}}
+	newState := func(t *testing.T) *anthropicUpstreamResponsesStreamState {
+		t.Helper()
+		s := newAnthropicUpstreamResponsesStreamState("resp_1", "claude-x", policy)
+		if _, err := s.Convert(anthropicmessages.StreamEvent{
+			Type:    anthropicmessages.StreamEventTypeMessageStart,
+			Message: &anthropicmessages.Response{},
+		}); err != nil {
+			t.Fatalf("message_start: %v", err)
+		}
+		return s
+	}
+	blockStart := func(index int, kind anthropicmessages.ContentBlockType) anthropicmessages.StreamEvent {
+		return anthropicmessages.StreamEvent{
+			Type:         anthropicmessages.StreamEventTypeContentBlockStart,
+			Index:        new(index),
+			ContentBlock: &anthropicmessages.ContentBlock{Type: kind},
+		}
+	}
+
+	// Repeated ignored blocks record one loss per stream, not one per block.
+	s := newState(t)
+	for index, kind := range []anthropicmessages.ContentBlockType{
+		anthropicmessages.ContentBlockTypeThinking,
+		anthropicmessages.ContentBlockTypeRedactedThinking,
+	} {
+		if _, err := s.Convert(blockStart(index, kind)); err != nil {
+			t.Fatalf("thinking block %d: %v", index, err)
+		}
+	}
+	if n := countReportFeature(s.report, FeatureAuthenticatedThinking); n != 1 {
+		t.Fatalf("thinking loss recorded %d times, want 1: %+v", n, s.report.Losses)
+	}
+
+	s = newState(t)
+	for index, kind := range []anthropicmessages.ContentBlockType{
+		anthropicmessages.ContentBlockTypeServerToolUse,
+		anthropicmessages.ContentBlockTypeWebSearchToolResult,
+	} {
+		if _, err := s.Convert(blockStart(index, kind)); err != nil {
+			t.Fatalf("server tool block %d: %v", index, err)
+		}
+	}
+	if n := countReportFeature(s.report, FeatureAnthropicServerTools); n != 1 {
+		t.Fatalf("server-tool loss recorded %d times, want 1: %+v", n, s.report.Losses)
+	}
+
+	// A block rejected by the state-entry budget records no loss.
+	s = newState(t)
+	s.budget.stateEntries = s.budget.stateEntriesBudget
+	if _, err := s.Convert(blockStart(0, anthropicmessages.ContentBlockTypeThinking)); err == nil {
+		t.Fatal("thinking block over the state-entry budget: nil error")
+	}
+	if reportHasFeature(s.report, FeatureAuthenticatedThinking) {
+		t.Fatalf("thinking loss recorded for a rejected block: %+v", s.report.Losses)
+	}
+	s = newState(t)
+	s.budget.stateEntries = s.budget.stateEntriesBudget
+	if _, err := s.Convert(blockStart(0, anthropicmessages.ContentBlockTypeServerToolUse)); err == nil {
+		t.Fatal("server tool block over the state-entry budget: nil error")
+	}
+	if reportHasFeature(s.report, FeatureAnthropicServerTools) {
+		t.Fatalf("server-tool loss recorded for a rejected block: %+v", s.report.Losses)
+	}
+}

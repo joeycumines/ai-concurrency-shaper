@@ -401,3 +401,37 @@ func TestDecodeGeminiResponseBlockReasonWithCandidateIsCorrupt(t *testing.T) {
 		}
 	}
 }
+
+func TestDecodeGeminiResponseEmptyThoughtPartRecordsNothing(t *testing.T) {
+	// An empty thought part renders nothing, so it records no reasoning note,
+	// matching the streaming empty-delta short circuit.
+	response, report, err := DecodeGeminiResponse(
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought":true}]},"finishReason":"STOP","index":0}],"modelVersion":"gemini-3-pro-preview"}`),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		StrictLossPolicy(),
+		NewExchangeIDs(),
+	)
+	if err != nil {
+		t.Fatalf("empty thought part: %v", err)
+	}
+	for _, item := range response.Items {
+		if message, ok := item.(*CanonicalMessageItem); ok && len(message.Parts) != 0 {
+			t.Fatalf("empty thought part produced %d parts", len(message.Parts))
+		}
+	}
+	if reportHasFeature(report, FeatureProviderReasoningText) {
+		t.Fatalf("empty thought part recorded a reasoning entry: %+v", report.Losses)
+	}
+
+	// A signature attached to the empty part is still an observable loss.
+	_, _, err = DecodeGeminiResponse(
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought":true,"thoughtSignature":"sig"}]},"finishReason":"STOP","index":0}],"modelVersion":"gemini-3-pro-preview"}`),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		StrictLossPolicy(),
+		NewExchangeIDs(),
+	)
+	var unsupported *UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureGeminiResponseThoughtSignature) {
+		t.Fatalf("empty thought part signature: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureGeminiResponseThoughtSignature)
+	}
+}

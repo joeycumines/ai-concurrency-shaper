@@ -39,6 +39,15 @@ type anthropicUpstreamResponsesStreamState struct {
 	finalUsage   *anthropicmessages.Usage
 	stopReason   anthropicmessages.StopReason
 	sawStopValue bool
+	// streamError latches the failure carried by an upstream error event:
+	// every later call and FinalizeEOF propagate it, so a failed stream can
+	// never report a clean terminal.
+	streamError error
+	// authenticatedThinkingLossRecorded and serverToolsLossRecorded gate the
+	// losses for content blocks a Gemini stream cannot carry to once per
+	// stream: a provider may repeat the same kind of block many times.
+	authenticatedThinkingLossRecorded bool
+	serverToolsLossRecorded           bool
 }
 
 // anthropicStreamBlock tracks one open content block: its output item and the
@@ -82,6 +91,9 @@ func newAnthropicUpstreamResponsesStreamState(
 func (s *anthropicUpstreamResponsesStreamState) Convert(
 	event anthropicmessages.StreamEvent,
 ) ([]ResponsesSSEEvent, error) {
+	if s.streamError != nil {
+		return nil, s.streamError
+	}
 	if s.stopped {
 		return nil, upstreamWireError(
 			UpstreamMessages,
@@ -115,12 +127,19 @@ func (s *anthropicUpstreamResponsesStreamState) Convert(
 				errors.New("anthropic error event has no error object"),
 			)
 		}
+		message := event.Error.Message
+		if message == "" {
+			message = fmt.Sprintf(
+				"the upstream sent an error event (type %s)", event.Error.Type,
+			)
+		}
 		s.stopped = true
+		s.streamError = upstreamStreamFailure(message)
 		return []ResponsesSSEEvent{ResponseErrorEvent{
 			Type:           "error",
 			SequenceNumber: s.nextSequence(),
 			Code:           event.Error.Type,
-			Message:        event.Error.Message,
+			Message:        message,
 		}}, nil
 	default:
 		return nil, upstreamWireError(
@@ -258,16 +277,19 @@ func (s *anthropicUpstreamResponsesStreamState) blockStart(
 
 	case anthropicmessages.ContentBlockTypeThinking,
 		anthropicmessages.ContentBlockTypeRedactedThinking:
-		if err := s.report.Lose(
-			s.policy,
-			FeatureAuthenticatedThinking,
-			"content_block",
-			"the provider's authenticated thinking block cannot be reproduced in a Gemini stream",
-		); err != nil {
-			return nil, err
-		}
 		if err := s.budget.addStateEntries(1); err != nil {
 			return nil, s.wireError(err)
+		}
+		if !s.authenticatedThinkingLossRecorded {
+			s.authenticatedThinkingLossRecorded = true
+			if err := s.report.Lose(
+				s.policy,
+				FeatureAuthenticatedThinking,
+				"content_block",
+				"the provider's authenticated thinking block cannot be reproduced in a Gemini stream",
+			); err != nil {
+				return nil, err
+			}
 		}
 		s.ignored[index] = true
 		return nil, nil
@@ -279,16 +301,19 @@ func (s *anthropicUpstreamResponsesStreamState) blockStart(
 		anthropicmessages.ContentBlockTypeCodeExecution,
 		anthropicmessages.ContentBlockTypeCodeExecutionResult,
 		anthropicmessages.ContentBlockTypeContainerUpload:
-		if err := s.report.Lose(
-			s.policy,
-			FeatureAnthropicServerTools,
-			"content_block",
-			"server-side tool output cannot be reproduced in a Gemini stream",
-		); err != nil {
-			return nil, err
-		}
 		if err := s.budget.addStateEntries(1); err != nil {
 			return nil, s.wireError(err)
+		}
+		if !s.serverToolsLossRecorded {
+			s.serverToolsLossRecorded = true
+			if err := s.report.Lose(
+				s.policy,
+				FeatureAnthropicServerTools,
+				"content_block",
+				"server-side tool output cannot be reproduced in a Gemini stream",
+			); err != nil {
+				return nil, err
+			}
 		}
 		s.ignored[index] = true
 		return nil, nil
@@ -631,6 +656,12 @@ func newMessagesToGeminiConverter(
 
 // Convert processes one upstream Anthropic SSE frame.
 func (c *messagesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.upstream.streamError != nil {
+		return convertedBatch{}, c.upstream.streamError
+	}
+	if c.gemini.streamError != nil {
+		return convertedBatch{}, c.gemini.streamError
+	}
 	event, err := decodeAnthropicStreamFrame(frame)
 	if err != nil {
 		return convertedBatch{}, err
@@ -644,6 +675,12 @@ func (c *messagesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, err
 
 // FinalizeEOF reports a truncation when the upstream ended before message_stop.
 func (c *messagesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.upstream.streamError != nil {
+		return convertedBatch{}, c.upstream.streamError
+	}
+	if c.gemini.streamError != nil {
+		return convertedBatch{}, c.gemini.streamError
+	}
 	if !c.upstream.stopped {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamMessages,

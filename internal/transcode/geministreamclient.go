@@ -53,6 +53,10 @@ type geminiStreamClientState struct {
 	streamedSummary map[string]*strings.Builder
 
 	sawTerminal bool
+	// streamError latches the first failure, including a failure terminal
+	// (response.failed, response.error): every later call and FinalizeEOF
+	// propagate it, so a failed stream can never report a clean terminal.
+	streamError error
 }
 
 func newGeminiStreamClientState(
@@ -93,6 +97,9 @@ func (s *geminiStreamClientState) wireError(err error) error {
 
 // Convert processes one typed Responses event into zero or more chunks.
 func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResponse, error) {
+	if s.streamError != nil {
+		return nil, s.streamError
+	}
 	if s.sawTerminal {
 		return nil, s.wireError(errors.New("responses stream event after terminal"))
 	}
@@ -113,17 +120,23 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 
 	switch value := event.(type) {
 	case ResponseTextDeltaEvent:
-		if len(value.Logprobs) > 0 && !s.logprobsLossNoted {
-			s.logprobsLossNoted = true
-			if err := s.report.Lose(
-				s.policy, FeatureLogprobs, "output_text.delta.logprobs",
-				"text logprobs cannot be reproduced in a Gemini stream",
-			); err != nil {
+		if len(value.Logprobs) > 0 {
+			if err := s.loseLogprobs("output_text.delta.logprobs"); err != nil {
 				return nil, err
 			}
 		}
 		return s.textChunk(value.Delta, false)
 	case ResponseRefusalDeltaEvent:
+		if value.Delta == "" {
+			// An empty delta encodes nothing: no note, no chunk.
+			return nil, nil
+		}
+		chunks, err := s.textChunk(value.Delta, false)
+		if err != nil {
+			return nil, err
+		}
+		// The note describes rendered text, so it follows the successful
+		// encoding.
 		if !s.refusalNoted {
 			s.refusalNoted = true
 			if err := s.report.Note(
@@ -133,8 +146,13 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 				return nil, err
 			}
 		}
-		return s.textChunk(value.Delta, false)
+		return chunks, nil
 	case ResponseReasoningSummaryTextDeltaEvent:
+		if value.Delta == "" {
+			// An empty delta encodes nothing, so it records neither a loss
+			// nor retained summary state.
+			return nil, nil
+		}
 		if !s.ctx.GeminiIncludeThoughts {
 			// The loss decision comes first: a refused event must not leave
 			// retained state or budget charges behind.
@@ -173,6 +191,35 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 			return nil, nil
 		}
 		return s.textChunk(value.Delta, true)
+	case ResponseTextDoneEvent:
+		if len(value.Logprobs) > 0 {
+			return nil, s.loseLogprobs("output_text.done.logprobs")
+		}
+		return nil, nil
+	case ResponseContentPartDoneEvent:
+		// The adjacent done event repeats the part, and a part may carry
+		// logprobs by itself.
+		if part, ok := value.Part.(*ResponsesStreamOutputTextPart); ok && len(part.Logprobs) > 0 {
+			return nil, s.loseLogprobs("content_part.done.logprobs")
+		}
+		return nil, nil
+	case ResponseOutputItemAddedEvent:
+		// Metadata the Gemini dialect cannot carry is decided when the item
+		// is announced, before any of its content reaches the client.
+		switch item := value.Item.(type) {
+		case *ResponsesOutputMessage:
+			return nil, s.losePhase(item)
+		case *ResponsesFunctionCallOutputResultItem:
+			return nil, s.loseFunctionCallOutput()
+		case *ResponsesReasoningOutputItem:
+			// A bare reasoning item may still stream its full summary, which
+			// the done check proves covered; only content the stream cannot
+			// render is a loss at announcement.
+			if item.EncryptedContent != "" || len(item.Content) > 0 {
+				return nil, s.loseReasoning(item)
+			}
+		}
+		return nil, nil
 	case ResponseOutputItemDoneEvent:
 		switch item := value.Item.(type) {
 		case *ResponsesFunctionCallOutputItem:
@@ -185,14 +232,7 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 			// A tool result echoed in the upstream output is conversation
 			// state, not model output; the non-streaming render records it
 			// under the same policy-gated loss rather than dropping it.
-			if s.outputItemBoundariesLossNoted {
-				return nil, nil
-			}
-			s.outputItemBoundariesLossNoted = true
-			return nil, s.report.Lose(
-				s.policy, FeatureOutputItemBoundaries, "output[].function_call_output",
-				"tool results are conversation-state output items, not part of the model response",
-			)
+			return nil, s.loseFunctionCallOutput()
 		}
 		return nil, nil
 	case ResponseCompletedEvent:
@@ -201,10 +241,12 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 		return s.terminalChunk(value.Response, "incomplete")
 	case ResponseFailedEvent:
 		s.sawTerminal = true
-		return nil, upstreamStreamFailure("the upstream response failed")
+		s.streamError = upstreamStreamFailure("the upstream response failed")
+		return nil, s.streamError
 	case ResponseErrorEvent:
 		s.sawTerminal = true
-		return nil, upstreamStreamFailure(value.Message)
+		s.streamError = upstreamStreamFailure(value.Message)
+		return nil, s.streamError
 	default:
 		// Lifecycle events with no client-visible content (created, in
 		// progress, part and item boundaries) produce no chunk.
@@ -250,6 +292,32 @@ func (s *geminiStreamClientState) loseReasoning(item *ResponsesReasoningOutputIt
 	return s.report.Lose(
 		s.policy, FeatureReasoningSummary, "output[].reasoning",
 		"Responses reasoning output cannot be reproduced in a Gemini stream",
+	)
+}
+
+// loseFunctionCallOutput records the approved loss of a conversation-state
+// tool-result output item once per stream: it is not model output.
+func (s *geminiStreamClientState) loseFunctionCallOutput() error {
+	if s.outputItemBoundariesLossNoted {
+		return nil
+	}
+	s.outputItemBoundariesLossNoted = true
+	return s.report.Lose(
+		s.policy, FeatureOutputItemBoundaries, "output[].function_call_output",
+		"tool results are conversation-state output items, not part of the model response",
+	)
+}
+
+// loseLogprobs records the approved loss of text logprobs once per stream: a
+// Gemini part carries no logprobs, whichever event carried them.
+func (s *geminiStreamClientState) loseLogprobs(path string) error {
+	if s.logprobsLossNoted {
+		return nil
+	}
+	s.logprobsLossNoted = true
+	return s.report.Lose(
+		s.policy, FeatureLogprobs, path,
+		"text logprobs cannot be reproduced in a Gemini stream",
 	)
 }
 
@@ -330,11 +398,13 @@ func (s *geminiStreamClientState) terminalChunk(response ResponseEnvelope, statu
 		Stop:  CanonicalStop{Reason: stop},
 		Usage: responsesEnvelopeUsage(response.Usage),
 	}
-	finish, err := geminiFinishReason(canonical, &s.report)
+	// Usage is decided first: its losses can reject the terminal, and the
+	// finish-refusal note below describes a terminal that committed.
+	usage, err := geminiResponseUsage(canonical, s.ctx, &s.report)
 	if err != nil {
 		return nil, err
 	}
-	usage, err := geminiResponseUsage(canonical, s.ctx, &s.report)
+	finish, err := geminiFinishReason(canonical, &s.report)
 	if err != nil {
 		return nil, err
 	}
@@ -439,6 +509,9 @@ func newChatToGeminiConverter(
 
 // Convert processes one upstream Chat SSE frame through both state machines.
 func (c *chatToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.gemini.streamError != nil {
+		return convertedBatch{}, c.gemini.streamError
+	}
 	chunk, err := chatStreamChunkFromSSE(frame)
 	if errors.Is(err, errChatStreamDone) {
 		if !c.chat.sawFinish {
@@ -497,6 +570,9 @@ func (c *chatToGeminiConverter) releaseTerminals() (convertedBatch, error) {
 // finishing chunk without the [DONE] sentinel. A stream that ends without any
 // finish reason is a truncation, never a released terminal.
 func (c *chatToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.gemini.streamError != nil {
+		return convertedBatch{}, c.gemini.streamError
+	}
 	if c.chat.sawFinish && !c.chat.terminalReleased {
 		if err := c.chat.noteMissingSentinel(); err != nil {
 			return convertedBatch{}, err
@@ -545,6 +621,9 @@ func newResponsesToGeminiConverter(state *geminiStreamClientState) *responsesToG
 
 // Convert processes one upstream Responses SSE frame.
 func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
+	}
 	data := trimJSONSpace(frame.Data)
 	if isResponsesDoneSentinel(data) {
 		if c.state.sawTerminal {
@@ -589,6 +668,9 @@ func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, er
 // FinalizeEOF reports a truncation when the upstream ended before a terminal
 // condition; a stream that reached its terminal has nothing left to release.
 func (c *responsesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
+	}
 	if !c.state.sawTerminal {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamResponses,

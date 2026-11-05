@@ -46,9 +46,10 @@ type geminiResponsesStreamState struct {
 
 	started bool
 	sawTerm bool
-	// streamError records the failure of an in-stream error frame: the
-	// terminal was reached by a failure, not by a finish, so FinalizeEOF
-	// propagates it instead of releasing a success terminal.
+	// streamError latches the first failure of the stream, whatever its
+	// cause: the exchange ended on a failure, not on a finish, so every later
+	// call and FinalizeEOF propagate it instead of releasing a success
+	// terminal.
 	streamError error
 	// sawCandidate records that any earlier chunk carried a candidate, and
 	// promptBlocked that an earlier chunk was prompt-blocked, so the
@@ -101,6 +102,7 @@ type geminiResponsesStreamState struct {
 	thoughtLossNoted           bool
 	partMetadataLossRecorded   bool
 	partSignatureLossRecorded  bool
+	callIDSynthesizedNoted     bool
 }
 
 type geminiPartKey struct {
@@ -152,16 +154,32 @@ func (s *geminiResponsesStreamState) checkAccumulated(builder *strings.Builder, 
 			maxStreamAccumulatedBytes,
 		))
 	}
-	return s.chargeTotal(added, what)
+	if err := s.checkTotal(added, what); err != nil {
+		return err
+	}
+	s.totalAccumulated += int64(added)
+	return nil
 }
 
-// chargeTotal adds n retained semantic bytes (text, refusal, tool arguments,
-// tool-call identity) to the exchange-wide accumulated total. Everything
-// charged here is repeated in done events and the terminal envelope, so the
-// release bounds derive from this total.
-func (s *geminiResponsesStreamState) chargeTotal(n int, what string) error {
-	s.totalAccumulated += int64(n)
-	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
+// checkDeltaBounds validates one delta before any item or part is opened: a
+// delta that cannot fit the per-part and exchange-wide bounds must not leave
+// output behind.
+func (s *geminiResponsesStreamState) checkDeltaBounds(n int, what string) error {
+	if n > maxStreamAccumulatedBytes {
+		return s.wireError(fmt.Errorf(
+			"gemini stream accumulated %s exceeds %d bytes",
+			what,
+			maxStreamAccumulatedBytes,
+		))
+	}
+	return s.checkTotal(n, what)
+}
+
+// checkTotal reports whether n more retained semantic bytes fit the
+// exchange-wide accumulated total. It never mutates the total, so a rejected
+// charge leaves no state behind.
+func (s *geminiResponsesStreamState) checkTotal(n int, what string) error {
+	if s.totalAccumulated+int64(n) > maxStreamTotalAccumulatedBytes {
 		return s.wireError(fmt.Errorf(
 			"gemini stream accumulated %s exceeds the exchange total of %d bytes",
 			what,
@@ -171,8 +189,35 @@ func (s *geminiResponsesStreamState) chargeTotal(n int, what string) error {
 	return nil
 }
 
-// Convert processes one Gemini stream chunk into typed Responses events.
+// chargeTotal adds n retained semantic bytes (text, refusal, tool arguments,
+// tool-call identity) to the exchange-wide accumulated total. Everything
+// charged here is repeated in done events and the terminal envelope, so the
+// release bounds derive from this total. The check runs before the add.
+func (s *geminiResponsesStreamState) chargeTotal(n int, what string) error {
+	if err := s.checkTotal(n, what); err != nil {
+		return err
+	}
+	s.totalAccumulated += int64(n)
+	return nil
+}
+
+// Convert processes one Gemini stream chunk into typed Responses events. The
+// first failure is latched: every later call, and FinalizeEOF, returns it, so
+// a stream that failed can never release a success terminal.
 func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.GenerateContentResponse) ([]ResponsesSSEEvent, error) {
+	if s.streamError != nil {
+		return nil, s.streamError
+	}
+	events, err := s.convertChunk(chunk)
+	if err != nil {
+		s.streamError = err
+		return nil, err
+	}
+	return events, nil
+}
+
+// convertChunk converts one chunk, leaving failure latching to Convert.
+func (s *geminiResponsesStreamState) convertChunk(chunk geminigeneratecontent.GenerateContentResponse) ([]ResponsesSSEEvent, error) {
 	if err := s.budget.addEvent(); err != nil {
 		return nil, s.wireError(err)
 	}
@@ -180,13 +225,11 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 	// An in-stream error frame is an upstream failure terminal: the HTTP
 	// status was 200, so the body carries the only truthful signal.
 	if chunk.Error != nil {
-		s.sawTerm = true
 		message := chunk.Error.Message
 		if message == "" {
 			message = fmt.Sprintf("the upstream sent an error frame (code %d, status %s)", chunk.Error.Code, chunk.Error.Status)
 		}
-		s.streamError = upstreamStreamFailure(message)
-		return nil, s.streamError
+		return nil, upstreamStreamFailure(message)
 	}
 
 	// Candidate shape: the gateway never requests more than one candidate, so
@@ -244,18 +287,18 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 			events = append(events, refusal...)
 			s.refused = true
 			s.heldTerminal = s.closeAllAndHold()
+			// The blocked-prompt chunk is usually the only chunk, so its
+			// usage and metadata are recorded here, not lost with it.
+			if err := s.recordChunkMetadata(chunk); err != nil {
+				return nil, err
+			}
 			// The note describes the refusal encoding, so it is recorded only
-			// after the refusal passed its budget and bound checks.
+			// after the encoding and the chunk metadata committed.
 			if err := s.report.Note(
 				FeatureGeminiPromptBlocked,
 				"promptFeedback.blockReason",
 				fmt.Sprintf("the prompt was blocked (blockReason %s) and the stream is rendered as a refusal", reason),
 			); err != nil {
-				return nil, err
-			}
-			// The blocked-prompt chunk is usually the only chunk, so its
-			// usage and metadata are recorded here, not lost with it.
-			if err := s.recordChunkMetadata(chunk); err != nil {
 				return nil, err
 			}
 			return events, nil
@@ -272,6 +315,21 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 	if s.sawTerm {
 		// After the finish chunk only accounting may follow.
 		return s.absorbTrailing(chunk)
+	}
+
+	// A finish reason the target cannot represent rejects the chunk before any
+	// part, item, or metadata is committed: a rejected chunk leaves no output.
+	reason := ""
+	if candidate.FinishReason != nil && *candidate.FinishReason != "" &&
+		*candidate.FinishReason != "FINISH_REASON_UNSPECIFIED" {
+		reason = *candidate.FinishReason
+		if reason != "STOP" && reason != "MAX_TOKENS" && !refusalFinishReasons[reason] {
+			return nil, &UnrepresentableError{
+				Protocol: string(UpstreamGemini),
+				Path:     "candidates[].finishReason",
+				Detail:   fmt.Sprintf("the provider ended the stream with finishReason %s", reason),
+			}
+		}
 	}
 
 	events := s.startEvents()
@@ -303,21 +361,7 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 
 	// A chunk carrying finishReason is terminal: hold the item-closing events
 	// and the terminal envelope for release at EOF (or a late [DONE]).
-	if candidate.FinishReason != nil && *candidate.FinishReason != "" &&
-		*candidate.FinishReason != "FINISH_REASON_UNSPECIFIED" {
-		reason := *candidate.FinishReason
-		switch {
-		case reason == "STOP", reason == "MAX_TOKENS":
-			// mapped below at release
-		case refusalFinishReasons[reason]:
-			// rendered as a refusal at release
-		default:
-			return nil, &UnrepresentableError{
-				Protocol: string(UpstreamGemini),
-				Path:     "candidates[].finishReason",
-				Detail:   fmt.Sprintf("the provider ended the stream with finishReason %s", reason),
-			}
-		}
+	if reason != "" {
 		s.sawTerm = true
 		s.finishReason = reason
 		if refusalFinishReasons[reason] {
@@ -479,7 +523,9 @@ func (s *geminiResponsesStreamState) convertPart(
 		}
 	}
 	// A signature on a non-call part is an observable loss, once per stream.
-	if part.ThoughtSignature != nil && part.FunctionCall == nil && !s.partSignatureLossRecorded {
+	// An explicit empty signature carries no signature.
+	if part.ThoughtSignature != nil && *part.ThoughtSignature != "" &&
+		part.FunctionCall == nil && !s.partSignatureLossRecorded {
 		s.partSignatureLossRecorded = true
 		if err := s.report.Lose(
 			s.policy,
@@ -509,9 +555,14 @@ func (s *geminiResponsesStreamState) convertPart(
 		}
 		// Same capability rules as the non-streaming decode: thought text is
 		// provider reasoning; mapped under the capability or an approved
-		// loss, each recorded once per stream.
+		// loss, each recorded once per stream. The encoding commits first, so
+		// a rejected delta leaves no note behind.
 		switch {
 		case s.capabilities.ProviderReasoningThinking:
+			events, err := s.emitThoughtText(*part.Text, path)
+			if err != nil {
+				return nil, err
+			}
 			if !s.thoughtThinkingNoted {
 				s.thoughtThinkingNoted = true
 				if err := s.report.Note(
@@ -522,12 +573,12 @@ func (s *geminiResponsesStreamState) convertPart(
 					return nil, err
 				}
 			}
-			events, err := s.emitThoughtText(*part.Text, path)
+			return events, nil
+		case s.capabilities.ProviderReasoningText:
+			events, err := s.emitTextDelta(*part.Text)
 			if err != nil {
 				return nil, err
 			}
-			return events, nil
-		case s.capabilities.ProviderReasoningText:
 			if !s.thoughtTextNoted {
 				s.thoughtTextNoted = true
 				if err := s.report.Note(
@@ -538,6 +589,7 @@ func (s *geminiResponsesStreamState) convertPart(
 					return nil, err
 				}
 			}
+			return events, nil
 		default:
 			if !s.thoughtLossNoted {
 				s.thoughtLossNoted = true
@@ -559,6 +611,11 @@ func (s *geminiResponsesStreamState) convertPart(
 func (s *geminiResponsesStreamState) emitTextDelta(delta string) ([]ResponsesSSEEvent, error) {
 	if delta == "" {
 		return nil, nil
+	}
+	// The bounds are checked before the item and part are opened, so a delta
+	// that cannot fit leaves no output behind.
+	if err := s.checkDeltaBounds(len(delta), "text delta"); err != nil {
+		return nil, err
 	}
 	events, err := s.ensureMessageOpen()
 	if err != nil {
@@ -615,6 +672,11 @@ func (s *geminiResponsesStreamState) emitThoughtText(delta, path string) ([]Resp
 		return nil, nil
 	}
 	_ = path
+	// The bounds are checked before the reasoning item is opened, so a delta
+	// that cannot fit leaves no output behind.
+	if err := s.checkDeltaBounds(len(delta), "thought delta"); err != nil {
+		return nil, err
+	}
 	events, err := s.ensureReasoningOpen()
 	if err != nil {
 		return nil, err
@@ -763,9 +825,10 @@ func (s *geminiResponsesStreamState) convertFunctionCall(
 	if err := s.chargeTotal(len(callID)+len(name), "tool-call identity"); err != nil {
 		return nil, err
 	}
-	if synthesizedCallID {
-		// The note is recorded only after the synthesized identity passed the
-		// exchange-total charge.
+	if synthesizedCallID && !s.callIDSynthesizedNoted {
+		// The note is recorded only once per stream, after the synthesized
+		// identity passed the exchange-total charge.
+		s.callIDSynthesizedNoted = true
 		if err := s.report.Note(
 			FeatureGeminiCallIDSynthesized, path,
 			"the upstream function call carried no id; a proxy-minted call id was emitted",
@@ -809,20 +872,18 @@ func (s *geminiResponsesStreamState) convertFunctionCall(
 // refusal text is streamed as one delta so the done event reconciles with it;
 // the part stays open until closeAllAndHold.
 func (s *geminiResponsesStreamState) appendRefusal(text string) ([]ResponsesSSEEvent, error) {
+	// The refusal text comes from the upstream (finishMessage), so it has the
+	// same per-part bound as streamed text. The bounds are checked before any
+	// item or part is opened.
+	if err := s.checkDeltaBounds(len(text), "refusal"); err != nil {
+		return nil, err
+	}
 	events, err := s.ensureMessageOpen()
 	if err != nil {
 		return nil, err
 	}
 	if err := s.budget.addPart(); err != nil {
 		return nil, s.wireError(err)
-	}
-	// The refusal text comes from the upstream (finishMessage), so it has
-	// the same per-part bound as streamed text.
-	if len(text) > maxStreamAccumulatedBytes {
-		return nil, s.wireError(fmt.Errorf(
-			"gemini stream refusal exceeds %d bytes",
-			maxStreamAccumulatedBytes,
-		))
 	}
 	if err := s.chargeTotal(len(text), "refusal"); err != nil {
 		return nil, err
@@ -937,6 +998,15 @@ func (s *geminiResponsesStreamState) closeAllAndHold() []ResponsesSSEEvent {
 // recordCandidateMetadata records the per-chunk candidate metadata losses once
 // per stream.
 func (s *geminiResponsesStreamState) recordCandidateMetadata(candidate *geminigeneratecontent.Candidate) error {
+	// A continuation token is unrepresentable, so it rejects the chunk before
+	// any loss for the same candidate is recorded.
+	if candidate.ContinuationToken != nil && *candidate.ContinuationToken != "" {
+		return &UnrepresentableError{
+			Protocol: string(UpstreamGemini),
+			Path:     "candidates[].continuationToken",
+			Detail:   "a continuation token cannot be represented in the target dialect",
+		}
+	}
 	if len(candidate.SafetyRatings) > 0 && !s.safetyLossRecorded {
 		s.safetyLossRecorded = true
 		if err := s.report.Lose(
@@ -983,13 +1053,6 @@ func (s *geminiResponsesStreamState) recordCandidateMetadata(candidate *geminige
 			"the candidate token count breakdown cannot be reproduced in the target response",
 		); err != nil {
 			return err
-		}
-	}
-	if candidate.ContinuationToken != nil && *candidate.ContinuationToken != "" {
-		return &UnrepresentableError{
-			Protocol: string(UpstreamGemini),
-			Path:     "candidates[].continuationToken",
-			Detail:   "a continuation token cannot be represented in the target dialect",
 		}
 	}
 	return nil
@@ -1230,6 +1293,9 @@ func newGeminiToResponsesConverter(state *geminiResponsesStreamState) *geminiToR
 
 // Convert processes one upstream Gemini SSE frame.
 func (c *geminiToResponsesConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
+	}
 	if frame.Event != "" {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamGemini, http.StatusOK,
@@ -1315,6 +1381,9 @@ func newGeminiToAnthropicConverter(
 
 // Convert processes one upstream Gemini SSE frame through both state machines.
 func (c *geminiToAnthropicConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.gemini.streamError != nil {
+		return convertedBatch{}, c.gemini.streamError
+	}
 	if frame.Event != "" {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamGemini, http.StatusOK,
