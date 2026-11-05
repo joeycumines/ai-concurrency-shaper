@@ -53,6 +53,10 @@ type geminiStreamClientState struct {
 	streamedSummary map[string]*strings.Builder
 
 	sawTerminal bool
+	// streamError latches the first failure, including a failure terminal
+	// (response.failed, response.error): every later call and FinalizeEOF
+	// propagate it, so a failed stream can never report a clean terminal.
+	streamError error
 }
 
 func newGeminiStreamClientState(
@@ -93,6 +97,9 @@ func (s *geminiStreamClientState) wireError(err error) error {
 
 // Convert processes one typed Responses event into zero or more chunks.
 func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResponse, error) {
+	if s.streamError != nil {
+		return nil, s.streamError
+	}
 	if s.sawTerminal {
 		return nil, s.wireError(errors.New("responses stream event after terminal"))
 	}
@@ -201,10 +208,12 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 		return s.terminalChunk(value.Response, "incomplete")
 	case ResponseFailedEvent:
 		s.sawTerminal = true
-		return nil, upstreamStreamFailure("the upstream response failed")
+		s.streamError = upstreamStreamFailure("the upstream response failed")
+		return nil, s.streamError
 	case ResponseErrorEvent:
 		s.sawTerminal = true
-		return nil, upstreamStreamFailure(value.Message)
+		s.streamError = upstreamStreamFailure(value.Message)
+		return nil, s.streamError
 	default:
 		// Lifecycle events with no client-visible content (created, in
 		// progress, part and item boundaries) produce no chunk.
@@ -439,6 +448,9 @@ func newChatToGeminiConverter(
 
 // Convert processes one upstream Chat SSE frame through both state machines.
 func (c *chatToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.gemini.streamError != nil {
+		return convertedBatch{}, c.gemini.streamError
+	}
 	chunk, err := chatStreamChunkFromSSE(frame)
 	if errors.Is(err, errChatStreamDone) {
 		if !c.chat.sawFinish {
@@ -497,6 +509,9 @@ func (c *chatToGeminiConverter) releaseTerminals() (convertedBatch, error) {
 // finishing chunk without the [DONE] sentinel. A stream that ends without any
 // finish reason is a truncation, never a released terminal.
 func (c *chatToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.gemini.streamError != nil {
+		return convertedBatch{}, c.gemini.streamError
+	}
 	if c.chat.sawFinish && !c.chat.terminalReleased {
 		if err := c.chat.noteMissingSentinel(); err != nil {
 			return convertedBatch{}, err
@@ -545,6 +560,9 @@ func newResponsesToGeminiConverter(state *geminiStreamClientState) *responsesToG
 
 // Convert processes one upstream Responses SSE frame.
 func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
+	}
 	data := trimJSONSpace(frame.Data)
 	if isResponsesDoneSentinel(data) {
 		if c.state.sawTerminal {
@@ -589,6 +607,9 @@ func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, er
 // FinalizeEOF reports a truncation when the upstream ended before a terminal
 // condition; a stream that reached its terminal has nothing left to release.
 func (c *responsesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
+	}
 	if !c.state.sawTerminal {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamResponses,

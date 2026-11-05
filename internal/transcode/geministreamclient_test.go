@@ -919,3 +919,67 @@ func TestGeminiStreamChatUpstreamLengthIsMaxTokens(t *testing.T) {
 		t.Fatalf("finish %q, want MAX_TOKENS; body %s", finish, rec.Body.String())
 	}
 }
+
+func TestGeminiStreamClientFailureEventsLatch(t *testing.T) {
+	// A failed/error event is a failure terminal, not a success one: every
+	// later call, [DONE], and EOF must propagate the latched failure instead
+	// of reporting a clean terminal.
+	tests := []struct {
+		name  string
+		event func(seq int64) ResponsesSSEEvent
+	}{
+		{
+			name: "failed event",
+			event: func(seq int64) ResponsesSSEEvent {
+				return ResponseFailedEvent{
+					Type: "response.failed", SequenceNumber: seq,
+					Response: fsmEnvelope("resp_1", "failed"),
+				}
+			},
+		},
+		{
+			name: "error event",
+			event: func(seq int64) ResponsesSSEEvent {
+				return ResponseErrorEvent{
+					Type: "error", SequenceNumber: seq, Code: "server_error", Message: "boom",
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := newGeminiStreamClientState(
+				testStreamContext(), UpstreamResponses, usageOnlyPolicy(), "resp_1", "gemini-x",
+			)
+			if _, err := state.Convert(fsmCreated(0)); err != nil {
+				t.Fatalf("created: %v", err)
+			}
+			chunks, failure := state.Convert(tt.event(1))
+			if failure == nil || !isUpstreamConversionError(failure) {
+				t.Fatalf("failure event: err = %T %v, want an upstream conversion error", failure, failure)
+			}
+			if len(chunks) != 0 {
+				t.Fatalf("failure event produced chunks: %v", chunks)
+			}
+			if _, err := state.Convert(fsmMessageAdded(2, 0, "msg_1")); !errors.Is(err, failure) {
+				t.Fatalf("event after failure: err = %v, want the latched %v", err, failure)
+			}
+
+			converter := newResponsesToGeminiConverter(state)
+			batch, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")})
+			if !errors.Is(err, failure) {
+				t.Fatalf("[DONE] after failure: err = %v, want the latched %v", err, failure)
+			}
+			if batch.Terminal || len(batch.Events) != 0 {
+				t.Fatalf("[DONE] after failure released %+v", batch)
+			}
+			batch, err = converter.FinalizeEOF()
+			if !errors.Is(err, failure) {
+				t.Fatalf("FinalizeEOF after failure: err = %v, want the latched %v", err, failure)
+			}
+			if batch.Terminal || len(batch.Events) != 0 {
+				t.Fatalf("FinalizeEOF after failure released %+v", batch)
+			}
+		})
+	}
+}

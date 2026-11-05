@@ -39,6 +39,10 @@ type anthropicUpstreamResponsesStreamState struct {
 	finalUsage   *anthropicmessages.Usage
 	stopReason   anthropicmessages.StopReason
 	sawStopValue bool
+	// streamError latches the failure carried by an upstream error event:
+	// every later call and FinalizeEOF propagate it, so a failed stream can
+	// never report a clean terminal.
+	streamError error
 }
 
 // anthropicStreamBlock tracks one open content block: its output item and the
@@ -82,6 +86,9 @@ func newAnthropicUpstreamResponsesStreamState(
 func (s *anthropicUpstreamResponsesStreamState) Convert(
 	event anthropicmessages.StreamEvent,
 ) ([]ResponsesSSEEvent, error) {
+	if s.streamError != nil {
+		return nil, s.streamError
+	}
 	if s.stopped {
 		return nil, upstreamWireError(
 			UpstreamMessages,
@@ -115,12 +122,19 @@ func (s *anthropicUpstreamResponsesStreamState) Convert(
 				errors.New("anthropic error event has no error object"),
 			)
 		}
+		message := event.Error.Message
+		if message == "" {
+			message = fmt.Sprintf(
+				"the upstream sent an error event (type %s)", event.Error.Type,
+			)
+		}
 		s.stopped = true
+		s.streamError = upstreamStreamFailure(message)
 		return []ResponsesSSEEvent{ResponseErrorEvent{
 			Type:           "error",
 			SequenceNumber: s.nextSequence(),
 			Code:           event.Error.Type,
-			Message:        event.Error.Message,
+			Message:        message,
 		}}, nil
 	default:
 		return nil, upstreamWireError(
@@ -631,6 +645,12 @@ func newMessagesToGeminiConverter(
 
 // Convert processes one upstream Anthropic SSE frame.
 func (c *messagesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.upstream.streamError != nil {
+		return convertedBatch{}, c.upstream.streamError
+	}
+	if c.gemini.streamError != nil {
+		return convertedBatch{}, c.gemini.streamError
+	}
 	event, err := decodeAnthropicStreamFrame(frame)
 	if err != nil {
 		return convertedBatch{}, err
@@ -644,6 +664,12 @@ func (c *messagesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, err
 
 // FinalizeEOF reports a truncation when the upstream ended before message_stop.
 func (c *messagesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.upstream.streamError != nil {
+		return convertedBatch{}, c.upstream.streamError
+	}
+	if c.gemini.streamError != nil {
+		return convertedBatch{}, c.gemini.streamError
+	}
 	if !c.upstream.stopped {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamMessages,

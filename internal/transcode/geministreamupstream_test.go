@@ -805,6 +805,93 @@ func TestGeminiUpstreamStreamErrorFrameFinalizeEOFStaysFailed(t *testing.T) {
 	}
 }
 
+func TestGeminiUpstreamStreamDoneAfterErrorStaysFailed(t *testing.T) {
+	// A failed stream must stay failed: neither the Responses nor the
+	// Anthropic composition may release the held terminal on [DONE], and a
+	// later chunk must keep returning the latched failure instead of being
+	// absorbed as trailing accounting.
+	errFrame := SSEEvent{Data: []byte(`{"error":{"code":500,"status":"INTERNAL","message":"boom"}}`)}
+
+	t.Run("responses", func(t *testing.T) {
+		s := newGeminiStreamState(t, nil)
+		c := newGeminiToResponsesConverter(s)
+		if _, err := c.Convert(errFrame); err == nil || !isUpstreamConversionError(err) {
+			t.Fatalf("error frame: err = %T %v, want an upstream conversion error", err, err)
+		}
+		batch, err := c.Convert(SSEEvent{Data: []byte(`[DONE]`)})
+		if err == nil || !isUpstreamConversionError(err) {
+			t.Fatalf("[DONE] after error: err = %T %v, want the latched upstream failure", err, err)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("[DONE] after error released events %v (terminal %v)", batch.Events, batch.Terminal)
+		}
+		if _, err := c.Convert(SSEEvent{Data: []byte(`{"usageMetadata":{"totalTokenCount":1}}`)}); err == nil {
+			t.Fatal("chunk after error: accepted, want the latched failure")
+		}
+	})
+
+	t.Run("anthropic composition", func(t *testing.T) {
+		ctx := geminiStreamTestContext()
+		ctx.LossPolicy.Allowed[FeatureUsageUnknown] = struct{}{}
+		gemini := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_a", "m", 1, nil)
+		anthropic := newAnthropicResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "msg_a", "m", 1)
+		c := newGeminiToAnthropicConverter(gemini, anthropic)
+		if _, err := c.Convert(errFrame); err == nil || !isUpstreamConversionError(err) {
+			t.Fatalf("error frame: err = %T %v, want an upstream conversion error", err, err)
+		}
+		batch, err := c.Convert(SSEEvent{Data: []byte(`[DONE]`)})
+		if err == nil || !isUpstreamConversionError(err) {
+			t.Fatalf("[DONE] after error: err = %T %v, want the latched upstream failure", err, err)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("[DONE] after error released events %v (terminal %v)", batch.Events, batch.Terminal)
+		}
+	})
+}
+
+func TestGeminiUpstreamStreamTrailingFailureDoesNotReleaseTerminal(t *testing.T) {
+	// A chunk rejected after the finish chunk was accepted is still a stream
+	// failure: EOF must propagate it, never release the held success.
+	s := newGeminiStreamState(t, nil)
+	if _, err := s.Convert(geminiChunk(t, geminiFinishChunk)); err != nil {
+		t.Fatalf("finish chunk: %v", err)
+	}
+	if _, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"content":{"parts":[{"text":"late"}]},"index":0}]}`,
+	)); err == nil {
+		t.Fatal("content after finish: nil error")
+	}
+	final, err := s.FinalizeEOF()
+	if err == nil || !isUpstreamConversionError(err) {
+		t.Fatalf("FinalizeEOF after a trailing failure: err = %T %v, want the latched upstream failure", err, err)
+	}
+	if len(final) != 0 {
+		t.Fatalf("FinalizeEOF released events after a trailing failure: %v", final)
+	}
+}
+
+func TestGeminiUpstreamStreamBlockedMetadataFailureDoesNotReleaseTerminal(t *testing.T) {
+	// The blocked-prompt chunk fails its metadata loss under this policy:
+	// the refusal encoding never committed, so EOF must fail rather than
+	// release the held refusal terminal.
+	ctx := geminiStreamTestContext()
+	ctx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureGeminiPromptBlocked: {}}}
+	s := newGeminiStreamState(t, ctx)
+	if _, err := s.Convert(geminiChunk(t,
+		`{"promptFeedback":{"blockReason":"SAFETY","safetyRatings":[{"category":"HARM_CATEGORY_HARASSMENT","probability":"HIGH"}]}}`,
+	)); err == nil {
+		t.Fatal("blocked chunk with an unapproved safety loss: nil error")
+	}
+	final, err := s.FinalizeEOF()
+	var unsupported *UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureGeminiSafetyMetadata) {
+		t.Fatalf("FinalizeEOF after a rejected blocked chunk: err = %T %v, want the latched %s refusal", err, err, FeatureGeminiSafetyMetadata)
+	}
+	if len(final) != 0 {
+		t.Fatalf("FinalizeEOF released events after a rejected blocked chunk: %v", final)
+	}
+}
+
 func TestGeminiUpstreamStreamBlockReasonWithCandidateIsCorrupt(t *testing.T) {
 	s := newGeminiStreamState(t, nil)
 	_, err := s.Convert(geminiChunk(t,

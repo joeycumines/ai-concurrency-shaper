@@ -318,3 +318,57 @@ func TestAnthropicUpstreamStreamBudgetIsUpstreamFault(t *testing.T) {
 		t.Fatalf("event budget: err = %T %v, want an upstream conversion error", err, err)
 	}
 }
+
+func TestGeminiStreamMessagesErrorEventLatchesFailure(t *testing.T) {
+	// The upstream error event is a failure terminal: the composed converter
+	// and the upstream state must keep reporting it, never a clean terminal.
+	upstream := newAnthropicUpstreamResponsesStreamState("resp_1", "claude-x", usageOnlyPolicy())
+	gemini := newGeminiStreamClientState(
+		testStreamContext(), UpstreamMessages, usageOnlyPolicy(), "resp_1", "claude-x",
+	)
+	converter := newMessagesToGeminiConverter(upstream, gemini)
+
+	if _, err := converter.Convert(SSEEvent{
+		Event: "message_start",
+		Data:  []byte(`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
+	}); err != nil {
+		t.Fatalf("message_start: %v", err)
+	}
+	if _, err := converter.Convert(SSEEvent{
+		Event: "error",
+		Data:  []byte(`{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`),
+	}); err == nil || !isUpstreamConversionError(err) {
+		t.Fatalf("error event: err = %T %v, want an upstream conversion error", err, err)
+	}
+	latched := upstream.streamError
+	if latched == nil || !strings.Contains(latched.Error(), "busy") {
+		t.Fatalf("upstream failure not latched: %v", latched)
+	}
+	if _, err := upstream.Convert(anthropicmessages.StreamEvent{
+		Type: anthropicmessages.StreamEventTypePing,
+	}); !errors.Is(err, latched) {
+		t.Fatalf("event after error: err = %v, want the latched %v", err, latched)
+	}
+	batch, err := converter.FinalizeEOF()
+	if !errors.Is(err, latched) {
+		t.Fatalf("FinalizeEOF after error event: err = %v, want the latched %v", err, latched)
+	}
+	if batch.Terminal || len(batch.Events) != 0 {
+		t.Fatalf("FinalizeEOF after error event released %+v", batch)
+	}
+
+	// An error event with no message still names the failure type, so the
+	// latched failure and the client-facing event are not blank.
+	blank := newAnthropicUpstreamResponsesStreamState("resp_1", "claude-x", usageOnlyPolicy())
+	if _, err := blank.Convert(anthropicmessages.StreamEvent{
+		Type: anthropicmessages.StreamEventTypeError,
+		Error: &anthropicmessages.StreamError{
+			Type: "overloaded_error",
+		},
+	}); err != nil {
+		t.Fatalf("blank error event: %v", err)
+	}
+	if blank.streamError == nil || !strings.Contains(blank.streamError.Error(), "overloaded_error") {
+		t.Fatalf("blank error event latched %v, want a message naming the type", blank.streamError)
+	}
+}

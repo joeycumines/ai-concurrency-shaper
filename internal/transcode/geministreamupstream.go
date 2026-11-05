@@ -46,9 +46,10 @@ type geminiResponsesStreamState struct {
 
 	started bool
 	sawTerm bool
-	// streamError records the failure of an in-stream error frame: the
-	// terminal was reached by a failure, not by a finish, so FinalizeEOF
-	// propagates it instead of releasing a success terminal.
+	// streamError latches the first failure of the stream, whatever its
+	// cause: the exchange ended on a failure, not on a finish, so every later
+	// call and FinalizeEOF propagate it instead of releasing a success
+	// terminal.
 	streamError error
 	// sawCandidate records that any earlier chunk carried a candidate, and
 	// promptBlocked that an earlier chunk was prompt-blocked, so the
@@ -171,8 +172,23 @@ func (s *geminiResponsesStreamState) chargeTotal(n int, what string) error {
 	return nil
 }
 
-// Convert processes one Gemini stream chunk into typed Responses events.
+// Convert processes one Gemini stream chunk into typed Responses events. The
+// first failure is latched: every later call, and FinalizeEOF, returns it, so
+// a stream that failed can never release a success terminal.
 func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.GenerateContentResponse) ([]ResponsesSSEEvent, error) {
+	if s.streamError != nil {
+		return nil, s.streamError
+	}
+	events, err := s.convertChunk(chunk)
+	if err != nil {
+		s.streamError = err
+		return nil, err
+	}
+	return events, nil
+}
+
+// convertChunk converts one chunk, leaving failure latching to Convert.
+func (s *geminiResponsesStreamState) convertChunk(chunk geminigeneratecontent.GenerateContentResponse) ([]ResponsesSSEEvent, error) {
 	if err := s.budget.addEvent(); err != nil {
 		return nil, s.wireError(err)
 	}
@@ -180,13 +196,11 @@ func (s *geminiResponsesStreamState) Convert(chunk geminigeneratecontent.Generat
 	// An in-stream error frame is an upstream failure terminal: the HTTP
 	// status was 200, so the body carries the only truthful signal.
 	if chunk.Error != nil {
-		s.sawTerm = true
 		message := chunk.Error.Message
 		if message == "" {
 			message = fmt.Sprintf("the upstream sent an error frame (code %d, status %s)", chunk.Error.Code, chunk.Error.Status)
 		}
-		s.streamError = upstreamStreamFailure(message)
-		return nil, s.streamError
+		return nil, upstreamStreamFailure(message)
 	}
 
 	// Candidate shape: the gateway never requests more than one candidate, so
@@ -1230,6 +1244,9 @@ func newGeminiToResponsesConverter(state *geminiResponsesStreamState) *geminiToR
 
 // Convert processes one upstream Gemini SSE frame.
 func (c *geminiToResponsesConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
+	}
 	if frame.Event != "" {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamGemini, http.StatusOK,
@@ -1315,6 +1332,9 @@ func newGeminiToAnthropicConverter(
 
 // Convert processes one upstream Gemini SSE frame through both state machines.
 func (c *geminiToAnthropicConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.gemini.streamError != nil {
+		return convertedBatch{}, c.gemini.streamError
+	}
 	if frame.Event != "" {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamGemini, http.StatusOK,
