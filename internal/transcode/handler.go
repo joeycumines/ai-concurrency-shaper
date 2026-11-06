@@ -325,7 +325,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outReq, err := h.buildUpstreamRequest(r, upstreamBody, context.StreamIntent)
+	outReq, err := h.buildUpstreamRequest(r, upstreamBody, context)
 	if err != nil {
 		// An unallowed client query parameter or an invalid inbound
 		// credential is a client fault (400); other request-construction
@@ -552,6 +552,14 @@ type HandlerConfig struct {
 	// provider mapping that emitted them.
 	Continuity    *ContinuityStore
 	ContinuityKey string
+
+	// GeminiSignatures, when non-nil, is the bounded per-provider store of
+	// Gemini function-call thought signatures, used by renderers whose
+	// upstream is Gemini to restore signatures on replayed calls.
+	// GeminiSignatureScope scopes the store to the provider. A nil store
+	// behaves as an empty store.
+	GeminiSignatures     *GeminiSignatureStore
+	GeminiSignatureScope string
 }
 
 // RoundTrip executes an outbound HTTP request through the proxy engine.

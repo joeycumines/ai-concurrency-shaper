@@ -8,6 +8,9 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
 )
 
+// streamResponse translates an upstream SSE stream into client SSE events,
+// delegating copy and cancellation to stream.Proxy and sealing downstream
+// writes before returning.
 func (h *TranscodeHandler) streamResponse(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -119,16 +122,15 @@ func (h *TranscodeHandler) streamResponse(
 	// Response-side approved losses are logged with the same fidelity as
 	// request-side losses.
 	h.logConversionReport(*converter.ConversionReport(), r, "response")
-	// Opt-in continuity for streams: on a successful Responses->Chat stream,
-	// retain the conversation that produced the emitted id (request turns +
-	// terminal assistant turns) so a follow-up works exactly like the
-	// non-streaming path. Only the Responses-client/Chat-upstream converter
-	// carries a chatResponsesStreamState; every other direction is a no-op.
+	// Opt-in continuity for streams: on a successful Responses-client
+	// stream, retain the conversation that produced the emitted id
+	// (request turns + terminal assistant turns) so a follow-up works
+	// exactly like the non-streaming path. Any converter implementing
+	// continuityTurnSource participates; every other direction is a no-op.
 	if classification == streamOutcomeSuccess && h.cfg.Continuity != nil &&
-		h.cfg.Mapping.ClientProtocol == ClientResponses &&
-		h.cfg.Mapping.UpstreamProtocol == UpstreamChatCompletions {
-		if chat, ok := converter.(*chatToResponsesConverter); ok && chat != nil && chat.state != nil {
-			if id, turns, depth, omitted, ok := chat.state.continuityTurns(context.RequestTurns, context.RequestDepth); ok {
+		h.cfg.Mapping.ClientProtocol == ClientResponses {
+		if src, ok := converter.(continuityTurnSource); ok && src != nil {
+			if id, turns, depth, omitted, ok := src.continuityTurns(context.RequestTurns, context.RequestDepth); ok {
 				if omitted > 0 {
 					h.logRequestError(r, fmt.Errorf(
 						"[%s] continuity retained history omitted %d tool call(s) whose arguments are not a JSON object; a follow-up previous_response_id replays without them",
@@ -148,7 +150,6 @@ func (h *TranscodeHandler) streamResponse(
 }
 
 // newFrameConverter builds the direction-specific stream converter.
-
 func (h *TranscodeHandler) newFrameConverter(
 	context *ExchangeContext,
 ) (frameConverter, error) {
@@ -172,6 +173,28 @@ func (h *TranscodeHandler) newFrameConverter(
 		)
 		return newChatToResponsesConverter(state), nil
 
+	case client == ClientGemini && upstream == UpstreamChatCompletions:
+		chat := newChatResponsesStreamState(
+			context,
+			h.cfg.Mapping.LossPolicy,
+			h.cfg.Mapping.ChatCapabilities,
+			responseID,
+			model,
+			createdAt,
+			nil, // Responses envelope is internal to the composition
+		)
+		gemini := newGeminiStreamClientState(context, upstream, h.cfg.Mapping.LossPolicy, responseID, model)
+		return newChatToGeminiConverter(chat, gemini), nil
+
+	case client == ClientGemini && upstream == UpstreamResponses:
+		state := newGeminiStreamClientState(context, upstream, h.cfg.Mapping.LossPolicy, responseID, model)
+		return newResponsesToGeminiConverter(state), nil
+
+	case client == ClientGemini && upstream == UpstreamMessages:
+		upstreamState := newAnthropicUpstreamResponsesStreamState(responseID, model, h.cfg.Mapping.LossPolicy)
+		gemini := newGeminiStreamClientState(context, upstream, h.cfg.Mapping.LossPolicy, responseID, model)
+		return newMessagesToGeminiConverter(upstreamState, gemini), nil
+
 	case client == ClientMessages && upstream == UpstreamResponses:
 		state := newAnthropicResponsesStreamState(
 			context,
@@ -182,6 +205,38 @@ func (h *TranscodeHandler) newFrameConverter(
 			createdAt,
 		)
 		return newResponsesToAnthropicConverter(state), nil
+
+	case client == ClientResponses && upstream == UpstreamGemini:
+		state := newGeminiResponsesStreamState(
+			context,
+			h.cfg.Mapping.LossPolicy,
+			h.cfg.Mapping.ChatCapabilities,
+			responseID,
+			model,
+			createdAt,
+			context.OriginalResponsesRequest,
+		)
+		return newGeminiToResponsesConverter(state), nil
+
+	case client == ClientMessages && upstream == UpstreamGemini:
+		gemini := newGeminiResponsesStreamState(
+			context,
+			h.cfg.Mapping.LossPolicy,
+			h.cfg.Mapping.ChatCapabilities,
+			responseID,
+			model,
+			createdAt,
+			nil, // Responses envelope is internal to the composition
+		)
+		anthropic := newAnthropicResponsesStreamState(
+			context,
+			h.cfg.Mapping.LossPolicy,
+			h.cfg.Mapping.ChatCapabilities,
+			context.IDs.New("msg_"),
+			model,
+			createdAt,
+		)
+		return newGeminiToAnthropicConverter(gemini, anthropic), nil
 
 	case client == ClientMessages && upstream == UpstreamChatCompletions:
 		chat := newChatResponsesStreamState(
@@ -211,7 +266,3 @@ func (h *TranscodeHandler) newFrameConverter(
 		)
 	}
 }
-
-// writeLocalError writes a plain-text local error. Dialect-correct rendering
-// is used for API errors; local infrastructure errors are plain text because
-// they are not provider API errors.

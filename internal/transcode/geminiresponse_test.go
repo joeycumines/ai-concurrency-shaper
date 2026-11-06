@@ -78,8 +78,9 @@ func TestDecodeGeminiResponsePromptBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Status != CanonicalResponseCompleted || resp.Stop.Reason != CanonicalStopRefusal {
-		t.Fatalf("status/stop = %q/%q, want completed refusal", resp.Status, resp.Stop.Reason)
+	if resp.Status != CanonicalResponseIncomplete || resp.Stop.Reason != CanonicalStopRefusal ||
+		resp.IncompleteReason != "content_filter" {
+		t.Fatalf("status/stop/incomplete = %q/%q/%q, want incomplete content_filter refusal", resp.Status, resp.Stop.Reason, resp.IncompleteReason)
 	}
 	if len(resp.Items) != 1 {
 		t.Fatalf("items = %v", resp.Items)
@@ -247,8 +248,9 @@ func TestDecodeGeminiResponseRefusalFinishReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Status != CanonicalResponseCompleted || resp.Stop.Reason != CanonicalStopRefusal {
-		t.Fatalf("status/stop = %q/%q", resp.Status, resp.Stop.Reason)
+	if resp.Status != CanonicalResponseIncomplete || resp.Stop.Reason != CanonicalStopRefusal ||
+		resp.IncompleteReason != "content_filter" {
+		t.Fatalf("status/stop/incomplete = %q/%q/%q", resp.Status, resp.Stop.Reason, resp.IncompleteReason)
 	}
 	msg := resp.Items[0].(*CanonicalMessageItem)
 	if len(msg.Parts) != 2 {
@@ -275,7 +277,7 @@ func TestDecodeGeminiResponseMaxTokens(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if resp.Status != CanonicalResponseIncomplete || resp.Stop.Reason != CanonicalStopMaxTokens ||
-		resp.IncompleteReason != "max_tokens" {
+		resp.IncompleteReason != "max_output_tokens" {
 		t.Fatalf("status/stop/incomplete = %q/%q/%q", resp.Status, resp.Stop.Reason, resp.IncompleteReason)
 	}
 }
@@ -379,5 +381,57 @@ func TestDecodeGeminiResponseCorruptWire(t *testing.T) {
 	_, _, err := decodeGemini(`{"candidates": [`, permissivePolicy())
 	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("err = %v (%T), want *UpstreamWireError", err, err)
+	}
+}
+
+func TestDecodeGeminiResponseBlockReasonWithCandidateIsCorrupt(t *testing.T) {
+	// The stream path rejects a chunk carrying both promptFeedback.blockReason
+	// and a candidate as corrupt wire; the non-streaming decode must too,
+	// otherwise the finish-reason switch overwrites the blocked-prompt
+	// incomplete status while IncompleteReason stays content_filter.
+	for _, finish := range []string{"STOP", "SAFETY", "MAX_TOKENS"} {
+		body := `{
+			"promptFeedback": {"blockReason": "SAFETY"},
+			"candidates": [{"content": {"role": "model", "parts": [{"text": "hi"}]}, "finishReason": "` + finish + `", "index": 0}],
+			"modelVersion": "m"
+		}`
+		_, _, err := decodeGemini(body, permissivePolicy())
+		if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+			t.Fatalf("finishReason %s: err = %v (%T), want *UpstreamWireError", finish, err, err)
+		}
+	}
+}
+
+func TestDecodeGeminiResponseEmptyThoughtPartRecordsNothing(t *testing.T) {
+	// An empty thought part renders nothing, so it records no reasoning note,
+	// matching the streaming empty-delta short circuit.
+	response, report, err := DecodeGeminiResponse(
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought":true}]},"finishReason":"STOP","index":0}],"modelVersion":"gemini-3-pro-preview"}`),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		StrictLossPolicy(),
+		NewExchangeIDs(),
+	)
+	if err != nil {
+		t.Fatalf("empty thought part: %v", err)
+	}
+	for _, item := range response.Items {
+		if message, ok := item.(*CanonicalMessageItem); ok && len(message.Parts) != 0 {
+			t.Fatalf("empty thought part produced %d parts", len(message.Parts))
+		}
+	}
+	if reportHasFeature(report, FeatureProviderReasoningText) {
+		t.Fatalf("empty thought part recorded a reasoning entry: %+v", report.Losses)
+	}
+
+	// A signature attached to the empty part is still an observable loss.
+	_, _, err = DecodeGeminiResponse(
+		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought":true,"thoughtSignature":"sig"}]},"finishReason":"STOP","index":0}],"modelVersion":"gemini-3-pro-preview"}`),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		StrictLossPolicy(),
+		NewExchangeIDs(),
+	)
+	var unsupported *UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureGeminiResponseThoughtSignature) {
+		t.Fatalf("empty thought part signature: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureGeminiResponseThoughtSignature)
 	}
 }

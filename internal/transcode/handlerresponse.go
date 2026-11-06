@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+// jsonResponse converts a non-streaming upstream response back to the client
+// schema and writes it downstream.
 func (h *TranscodeHandler) jsonResponse(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -136,11 +138,10 @@ func (h *TranscodeHandler) jsonResponse(
 	}
 }
 
-// checkDecodedRequestSize rejects decoded requests that amplify beyond the
-// decoded-request body limit (the decoded limit is separate
-// from the accepted raw-body limit). The typed error renders as 413 in the
-// client dialect, never the generic conversion 400.
-
+// conversionProvenance classifies a response-conversion error: corrupt
+// upstream wire data (UpstreamWireError) is an upstream body failure; valid
+// source features the transcoder does not support (UnsupportedFeatureError),
+// loss-policy rejections, and target-render failures stay local.
 func conversionProvenance(err error) ExchangeProvenance {
 	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
 		return ProvenanceUpstreamBodyError
@@ -148,10 +149,23 @@ func conversionProvenance(err error) ExchangeProvenance {
 	return ProvenanceLocalResponseConversionError
 }
 
+// storeGeminiCallSignatures retains the thought signatures a Gemini upstream
+// attached to its function calls, keyed by the client-visible call id, so a
+// later turn replays them through RenderGeminiRequest. A nil store is an
+// empty store: nothing is retained and the renderer falls back to the
+// documented placeholder.
+func (h *TranscodeHandler) storeGeminiCallSignatures(context *ExchangeContext, response CanonicalResponse) {
+	if h.cfg.GeminiSignatures == nil || len(response.Source.GeminiCallSignatures) == 0 {
+		return
+	}
+	for callID, signature := range response.Source.GeminiCallSignatures {
+		h.cfg.GeminiSignatures.Put(h.cfg.GeminiSignatureScope, callID, signature)
+	}
+}
+
 // convertResponse decodes the upstream JSON response into the canonical IR
 // and renders the client response envelope. The output dialect is determined
 // by the CLIENT protocol, never by the upstream protocol.
-
 func (h *TranscodeHandler) convertResponse(
 	r *http.Request,
 	body []byte,
@@ -184,6 +198,28 @@ func (h *TranscodeHandler) convertResponse(
 			// The decode's provider reasoning drop is part of the same
 			// exchange log as the render's losses (request-side merge
 			// precedent).
+			report.Losses = append(report.Losses, decodeReport.Losses...)
+			h.logConversionReport(report, r, "response")
+			return converted, ProvenanceLocalResponseConversionError, nil
+		case UpstreamGemini:
+			response, decodeReport, err := DecodeGeminiResponse(
+				body,
+				h.cfg.Mapping.ChatCapabilities,
+				h.cfg.Mapping.LossPolicy,
+				context.IDs,
+			)
+			if err != nil {
+				return nil, conversionProvenance(err), err
+			}
+			converted, report, err := RenderResponsesResponse(response, context)
+			if err != nil {
+				return nil, conversionProvenance(err), err
+			}
+			// Retain the thought signatures the upstream attached to its
+			// function calls, keyed by the client-visible call id, so a
+			// later turn replays them (Gemini 3 rejects calls without one).
+			h.storeGeminiCallSignatures(context, response)
+			h.recordContinuityFromEnvelope(r, context, response, converted)
 			report.Losses = append(report.Losses, decodeReport.Losses...)
 			h.logConversionReport(report, r, "response")
 			return converted, ProvenanceLocalResponseConversionError, nil
@@ -228,6 +264,25 @@ func (h *TranscodeHandler) convertResponse(
 			h.logConversionReport(report, r, "response")
 			return converted, ProvenanceLocalResponseConversionError, nil
 
+		case UpstreamGemini:
+			response, decodeReport, err := DecodeGeminiResponse(
+				body,
+				h.cfg.Mapping.ChatCapabilities,
+				h.cfg.Mapping.LossPolicy,
+				context.IDs,
+			)
+			if err != nil {
+				return nil, conversionProvenance(err), err
+			}
+			converted, report, err := RenderMessagesResponse(response, context)
+			if err != nil {
+				return nil, conversionProvenance(err), err
+			}
+			h.storeGeminiCallSignatures(context, response)
+			report.Losses = append(report.Losses, decodeReport.Losses...)
+			h.logConversionReport(report, r, "response")
+			return converted, ProvenanceLocalResponseConversionError, nil
+
 		default:
 			return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
 				"unsupported upstream protocol %q for messages client",
@@ -235,6 +290,53 @@ func (h *TranscodeHandler) convertResponse(
 			)
 		}
 
+	case ClientGemini:
+		switch h.cfg.Mapping.UpstreamProtocol {
+		case UpstreamChatCompletions:
+			response, decodeReport, err := DecodeChatResponseWithPolicy(
+				body,
+				h.cfg.Mapping.ChatCapabilities,
+				h.cfg.Mapping.LossPolicy,
+			)
+			if err != nil {
+				return nil, conversionProvenance(err), err
+			}
+			converted, report, err := RenderGeminiResponse(response, context)
+			if err != nil {
+				return nil, conversionProvenance(err), err
+			}
+			report.Losses = append(report.Losses, decodeReport.Losses...)
+			h.logConversionReport(report, r, "response")
+			return converted, ProvenanceLocalResponseConversionError, nil
+		case UpstreamResponses:
+			response, err := DecodeResponsesResponse(body)
+			if err != nil {
+				return nil, conversionProvenance(err), err
+			}
+			converted, report, err := RenderGeminiResponse(response, context)
+			if err != nil {
+				return nil, conversionProvenance(err), err
+			}
+			h.logConversionReport(report, r, "response")
+			return converted, ProvenanceLocalResponseConversionError, nil
+		case UpstreamMessages:
+			response, decodeReport, err := DecodeMessagesResponse(body, h.cfg.Mapping.LossPolicy)
+			if err != nil {
+				return nil, conversionProvenance(err), err
+			}
+			converted, report, err := RenderGeminiResponse(response, context)
+			if err != nil {
+				return nil, conversionProvenance(err), err
+			}
+			report.Losses = append(report.Losses, decodeReport.Losses...)
+			h.logConversionReport(report, r, "response")
+			return converted, ProvenanceLocalResponseConversionError, nil
+		default:
+			return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
+				"unsupported upstream protocol %q for gemini client",
+				h.cfg.Mapping.UpstreamProtocol,
+			)
+		}
 	default:
 		return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
 			"unsupported client protocol %q",
@@ -243,10 +345,12 @@ func (h *TranscodeHandler) convertResponse(
 	}
 }
 
-// streamResponse translates an upstream SSE stream into client SSE events,
-// delegating copy and cancellation to stream.Proxy and sealing downstream
-// writes before returning.
-
+// copyResponseHeaders copies the upstream response headers a transcoded
+// route is allowed to expose to the client-facing origin: the request-id
+// family and the provider rate-limit informational headers. Everything else — Set-Cookie and other control headers,
+// entity metadata, and provider extension headers — is stripped: the
+// translated response is a new representation and the client's origin must
+// not receive cross-provider control signals.
 func (h *TranscodeHandler) copyResponseHeaders(dst, src http.Header) {
 	for name, values := range src {
 		if !isAllowedResponseHeader(name) {
@@ -262,7 +366,6 @@ func (h *TranscodeHandler) copyResponseHeaders(dst, src http.Header) {
 // exposed on a transcoded route. The allowed set is the request-id family and
 // the rate-limit informational headers of the pinned providers (OpenAI
 // x-ratelimit-*, Anthropic anthropic-ratelimit-*), plus Retry-After.
-
 func isAllowedResponseHeader(name string) bool {
 	lower := strings.ToLower(name)
 	switch lower {
@@ -274,10 +377,9 @@ func isAllowedResponseHeader(name string) bool {
 		strings.HasPrefix(lower, "anthropic-ratelimit-")
 }
 
-// isEventStreamMediaType reports whether the media type is exactly
-// text/event-stream, shared by the Accept parsing and the response
-// Content-Type matching.
-
+// isEventStream reports whether the response is an SSE stream, matched by
+// media type exactly — text/event-streaming and other lookalikes are not
+// streams.
 func isEventStream(resp *http.Response) bool {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	return err == nil && isEventStreamMediaType(mediaType)
@@ -290,7 +392,6 @@ func isEventStream(resp *http.Response) bool {
 // only within the application tree:
 // text/example+json is NOT JSON, per RFC 6839 — the suffix is only defined
 // for application/*.
-
 func isJSON(resp *http.Response) bool {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil {
@@ -305,9 +406,3 @@ func isJSON(resp *http.Response) bool {
 	}
 	return strings.HasSuffix(mediaType, "+json")
 }
-
-// IsUpgradeRequest reports whether the request carries an Upgrade token.
-// It is the single upgrade classifier shared by the transcode handler and
-// the natively served routes, so both boundaries classify identically. A nil
-// request (or one with a nil Header, as a hand-built request may carry)
-// carries no upgrade token, matching the pre-unification native helper.

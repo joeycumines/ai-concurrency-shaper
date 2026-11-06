@@ -94,9 +94,11 @@ func messagesStop(resp anthropicmessages.Response) (
 	case anthropicmessages.StopReasonToolUse:
 		return CanonicalResponseCompleted, CanonicalStop{Reason: CanonicalStopToolUse}, "", nil
 	case anthropicmessages.StopReasonMaxTokens:
-		return CanonicalResponseIncomplete, CanonicalStop{Reason: CanonicalStopMaxTokens}, "max_tokens", nil
+		return CanonicalResponseIncomplete, CanonicalStop{Reason: CanonicalStopMaxTokens}, "max_output_tokens", nil
 	case anthropicmessages.StopReasonRefusal:
-		return CanonicalResponseCompleted, CanonicalStop{Reason: CanonicalStopRefusal}, "", nil
+		// A filtered response is incomplete with reason content_filter, as
+		// the streaming decode and the Gemini decode represent it.
+		return CanonicalResponseIncomplete, CanonicalStop{Reason: CanonicalStopRefusal}, "content_filter", nil
 	case anthropicmessages.StopReasonPauseTurn:
 		return "", CanonicalStop{}, "", &UnrepresentableError{
 			Protocol: "messages",

@@ -8,7 +8,6 @@ package transcode
 
 import (
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -60,13 +59,6 @@ func TestLossKeysReachableAndStrictRejected(t *testing.T) {
 	scenarios := lossScenariosReachable(t)
 	// The scenario matrix must cover every registered key exactly once.
 	registered := allLossKeys()
-	// The gemini_* keys are exercised by loss_scenarios_gemini_test.go, which
-	// lands with the Gemini conversion directions; skip them here until then.
-	for key := range registered {
-		if strings.HasPrefix(string(key), "gemini_") {
-			delete(registered, key)
-		}
-	}
 	seen := map[Feature]bool{}
 	for _, s := range scenarios {
 		if seen[s.key] {

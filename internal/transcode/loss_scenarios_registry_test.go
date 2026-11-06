@@ -17,5 +17,6 @@ func lossScenariosReachable(t *testing.T) []lossScenario {
 		lossScenariosResponseProvenance(t),
 		lossScenariosStreamQuirks(t),
 		lossScenariosImageMetadata(t),
+		lossScenariosGemini(t),
 	)
 }
