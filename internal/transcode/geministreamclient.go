@@ -508,6 +508,11 @@ func geminiStreamErrorFrame(err error) (frameEvent, bool) {
 type chatToGeminiConverter struct {
 	chat   *chatResponsesStreamState
 	gemini *geminiStreamClientState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode or convert — so a caller that ignores the returned error cannot
+	// still obtain a clean terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newChatToGeminiConverter(
@@ -518,7 +523,22 @@ func newChatToGeminiConverter(
 }
 
 // Convert processes one upstream Chat SSE frame through both state machines.
+// The first failure of any kind latches: every later call, and FinalizeEOF,
+// propagates it.
 func (c *chatToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *chatToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatch, error) {
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
 	}
@@ -580,6 +600,9 @@ func (c *chatToGeminiConverter) releaseTerminals() (convertedBatch, error) {
 // finishing chunk without the [DONE] sentinel. A stream that ends without any
 // finish reason is a truncation, never a released terminal.
 func (c *chatToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
 	}
@@ -594,7 +617,10 @@ func (c *chatToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
 		batch.Terminal = true
 		return batch, nil
 	}
-	if c.chat.sawFinish || c.gemini.sawTerminal {
+	// The terminal is reportable only when the Gemini state actually
+	// committed it: a release that failed left the Chat flags set but never
+	// produced the client's terminal chunk.
+	if c.gemini.sawTerminal {
 		return convertedBatch{Terminal: true}, nil
 	}
 	return convertedBatch{}, upstreamWireError(
@@ -623,14 +649,33 @@ type responsesToGeminiConverter struct {
 	// missingEventNameNoted gates the missing-event-name note to once per
 	// stream.
 	missingEventNameNoted bool
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode, validate, or convert — so a caller that ignores the returned
+	// error cannot still obtain a clean terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newResponsesToGeminiConverter(state *geminiStreamClientState) *responsesToGeminiConverter {
 	return &responsesToGeminiConverter{state: state}
 }
 
-// Convert processes one upstream Responses SSE frame.
+// Convert processes one upstream Responses SSE frame. The first failure of
+// any kind latches: every later call, and FinalizeEOF, propagates it.
 func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *responsesToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatch, error) {
 	if c.state.streamError != nil {
 		return convertedBatch{}, c.state.streamError
 	}
@@ -678,8 +723,8 @@ func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, er
 // FinalizeEOF reports a truncation when the upstream ended before a terminal
 // condition; a stream that reached its terminal has nothing left to release.
 func (c *responsesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
-	if c.state.streamError != nil {
-		return convertedBatch{}, c.state.streamError
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
 	}
 	if !c.state.sawTerminal {
 		return convertedBatch{}, upstreamWireError(

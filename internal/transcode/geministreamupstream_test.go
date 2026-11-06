@@ -849,6 +849,67 @@ func TestGeminiUpstreamStreamDoneAfterErrorStaysFailed(t *testing.T) {
 	})
 }
 
+func TestGeminiUpstreamStreamTrailingFrameFailureLatches(t *testing.T) {
+	// A frame the converter rejects after the finish chunk — a non-empty SSE
+	// event name, which Gemini's data-only stream cannot carry — must latch
+	// on the converter itself: [DONE] and FinalizeEOF keep reporting the
+	// failure instead of releasing the held success terminal.
+	t.Run("responses", func(t *testing.T) {
+		s := newGeminiStreamState(t, nil)
+		c := newGeminiToResponsesConverter(s)
+		if _, err := c.Convert(SSEEvent{Data: []byte(geminiFinishChunk)}); err != nil {
+			t.Fatalf("finish chunk: %v", err)
+		}
+		_, latched := c.Convert(SSEEvent{Event: "message", Data: []byte(`{}`)})
+		if latched == nil || !isUpstreamConversionError(latched) {
+			t.Fatalf("event-named frame: err = %T %v, want an upstream conversion error", latched, latched)
+		}
+		batch, err := c.Convert(SSEEvent{Data: []byte("[DONE]")})
+		if !errors.Is(err, latched) {
+			t.Fatalf("[DONE] after a failed frame: err = %v, want the latched %v", err, latched)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("[DONE] after a failed frame released %+v", batch)
+		}
+		batch, err = c.FinalizeEOF()
+		if !errors.Is(err, latched) {
+			t.Fatalf("FinalizeEOF after a failed frame: err = %v, want the latched %v", err, latched)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("FinalizeEOF after a failed frame released %+v", batch)
+		}
+	})
+
+	t.Run("anthropic composition", func(t *testing.T) {
+		ctx := geminiStreamTestContext()
+		ctx.LossPolicy.Allowed[FeatureUsageUnknown] = struct{}{}
+		gemini := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_a", "m", 1, nil)
+		anthropic := newAnthropicResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "msg_a", "m", 1)
+		c := newGeminiToAnthropicConverter(gemini, anthropic)
+		if _, err := c.Convert(SSEEvent{Data: []byte(geminiFinishChunk)}); err != nil {
+			t.Fatalf("finish chunk: %v", err)
+		}
+		_, latched := c.Convert(SSEEvent{Event: "message", Data: []byte(`{}`)})
+		if latched == nil || !isUpstreamConversionError(latched) {
+			t.Fatalf("event-named frame: err = %T %v, want an upstream conversion error", latched, latched)
+		}
+		batch, err := c.Convert(SSEEvent{Data: []byte("[DONE]")})
+		if !errors.Is(err, latched) {
+			t.Fatalf("[DONE] after a failed frame: err = %v, want the latched %v", err, latched)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("[DONE] after a failed frame released %+v", batch)
+		}
+		batch, err = c.FinalizeEOF()
+		if !errors.Is(err, latched) {
+			t.Fatalf("FinalizeEOF after a failed frame: err = %v, want the latched %v", err, latched)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("FinalizeEOF after a failed frame released %+v", batch)
+		}
+	})
+}
+
 func TestGeminiUpstreamStreamTrailingFailureDoesNotReleaseTerminal(t *testing.T) {
 	// A chunk rejected after the finish chunk was accepted is still a stream
 	// failure: EOF must propagate it, never release the held success.

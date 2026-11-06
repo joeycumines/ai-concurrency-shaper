@@ -663,6 +663,11 @@ func (s *anthropicUpstreamResponsesStreamState) nextSequence() int64 {
 type messagesToGeminiConverter struct {
 	upstream *anthropicUpstreamResponsesStreamState
 	gemini   *geminiStreamClientState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode or convert — so a caller that ignores the returned error cannot
+	// still obtain a clean terminal from a later frame or EOF.
+	streamError error
 }
 
 func newMessagesToGeminiConverter(
@@ -672,8 +677,22 @@ func newMessagesToGeminiConverter(
 	return &messagesToGeminiConverter{upstream: upstream, gemini: gemini}
 }
 
-// Convert processes one upstream Anthropic SSE frame.
+// Convert processes one upstream Anthropic SSE frame. The first failure of
+// any kind latches: every later call, and FinalizeEOF, propagates it.
 func (c *messagesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *messagesToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatch, error) {
 	if c.upstream.streamError != nil {
 		return convertedBatch{}, c.upstream.streamError
 	}
@@ -698,6 +717,9 @@ func (c *messagesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
 	}
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
+	}
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
 	}
 	if !c.upstream.stopped {
 		return convertedBatch{}, upstreamWireError(

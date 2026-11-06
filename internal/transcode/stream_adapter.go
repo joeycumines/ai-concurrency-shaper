@@ -54,8 +54,11 @@ func (c *chatToResponsesConverter) Convert(
 			))
 		}
 		batch, err := marshalResponsesEvents(held)
+		if err != nil {
+			return convertedBatch{}, err
+		}
 		batch.Terminal = true
-		return batch, err
+		return batch, nil
 	}
 	if err != nil {
 		return convertedBatch{}, err
@@ -80,8 +83,11 @@ func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
 		return convertedBatch{}, err
 	}
 	batch, err := marshalResponsesEvents(events)
+	if err != nil {
+		return convertedBatch{}, err
+	}
 	batch.Terminal = true
-	return batch, err
+	return batch, nil
 }
 
 // marshalResponsesEvents validates and marshals typed Responses events into
@@ -208,8 +214,11 @@ func (c *responsesToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 		return convertedBatch{}, err
 	}
 	batch, err := marshalAnthropicEvents(events)
+	if err != nil {
+		return convertedBatch{}, err
+	}
 	batch.Terminal = true
-	return batch, err
+	return batch, nil
 }
 
 // marshalAnthropicEvents marshals typed Anthropic events into frames. The

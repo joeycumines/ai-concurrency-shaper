@@ -1300,14 +1300,34 @@ func (s *geminiResponsesStreamState) continuityTurns(
 // (no event name); a non-empty event name or a [DONE] sentinel is handled here.
 type geminiToResponsesConverter struct {
 	state *geminiResponsesStreamState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode or convert, or a marshal that failed — so a caller that ignores
+	// the returned error cannot still obtain a clean terminal from [DONE] or
+	// EOF.
+	streamError error
 }
 
 func newGeminiToResponsesConverter(state *geminiResponsesStreamState) *geminiToResponsesConverter {
 	return &geminiToResponsesConverter{state: state}
 }
 
-// Convert processes one upstream Gemini SSE frame.
+// Convert processes one upstream Gemini SSE frame. The first failure of any
+// kind latches: every later call, and FinalizeEOF, propagates it.
 func (c *geminiToResponsesConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *geminiToResponsesConverter) convertFrame(frame SSEEvent) (convertedBatch, error) {
 	if c.state.streamError != nil {
 		return convertedBatch{}, c.state.streamError
 	}
@@ -1334,8 +1354,11 @@ func (c *geminiToResponsesConverter) Convert(frame SSEEvent) (convertedBatch, er
 			))
 		}
 		batch, err := marshalResponsesEvents(held)
+		if err != nil {
+			return convertedBatch{}, err
+		}
 		batch.Terminal = true
-		return batch, err
+		return batch, nil
 	}
 	chunk, err := geminigeneratecontent.DecodeResponse(frame.Data)
 	if err != nil {
@@ -1353,13 +1376,19 @@ func (c *geminiToResponsesConverter) Convert(frame SSEEvent) (convertedBatch, er
 
 // FinalizeEOF releases the held terminal on upstream EOF.
 func (c *geminiToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
 		return convertedBatch{}, err
 	}
 	batch, err := marshalResponsesEvents(events)
+	if err != nil {
+		return convertedBatch{}, err
+	}
 	batch.Terminal = true
-	return batch, err
+	return batch, nil
 }
 
 // ConversionReport returns the accumulated report of the state.
@@ -1385,6 +1414,12 @@ func (c *geminiToResponsesConverter) continuityTurns(
 type geminiToAnthropicConverter struct {
 	gemini    *geminiResponsesStreamState
 	anthropic *anthropicResponsesStreamState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode, a downstream conversion that failed, or a marshal that failed —
+	// so a caller that ignores the returned error cannot still obtain a clean
+	// terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newGeminiToAnthropicConverter(
@@ -1395,7 +1430,22 @@ func newGeminiToAnthropicConverter(
 }
 
 // Convert processes one upstream Gemini SSE frame through both state machines.
+// The first failure of any kind latches: every later call, and FinalizeEOF,
+// propagates it.
 func (c *geminiToAnthropicConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *geminiToAnthropicConverter) convertFrame(frame SSEEvent) (convertedBatch, error) {
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
 	}
@@ -1456,6 +1506,9 @@ func (c *geminiToAnthropicConverter) convertResponsesEvents(
 
 // FinalizeEOF releases the held Gemini terminal through the Anthropic state.
 func (c *geminiToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
 	events, err := c.gemini.FinalizeEOF()
 	if err != nil {
 		return convertedBatch{}, err

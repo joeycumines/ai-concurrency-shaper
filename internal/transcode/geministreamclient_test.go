@@ -1086,6 +1086,93 @@ func TestGeminiStreamClientPolicyRefusalIsLatched(t *testing.T) {
 	})
 }
 
+func TestGeminiStreamResponsesToGeminiFailedFrameStaysFailed(t *testing.T) {
+	// A frame the converter itself rejects after the terminal was reached —
+	// corrupt bytes here — must latch on the converter: a later [DONE] or EOF
+	// returns the failure, never a clean terminal release.
+	ctx := testStreamContext()
+	ctx.LossPolicy = usageOnlyPolicy()
+	state := newGeminiStreamClientState(ctx, UpstreamResponses, usageOnlyPolicy(), "resp_1", "gemini-x")
+	c := newResponsesToGeminiConverter(state)
+
+	created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1.0,"status":"in_progress","model":"gemini-x","output":[]}}`)
+	if _, err := c.Convert(SSEEvent{Data: created}); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	completed := []byte(`{"type":"response.completed","sequence_number":1,"response":{"id":"resp_1","object":"response","created_at":1.0,"status":"completed","model":"gemini-x","output":[],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`)
+	batch, err := c.Convert(SSEEvent{Data: completed})
+	if err != nil {
+		t.Fatalf("completed: %v", err)
+	}
+	if !batch.Terminal {
+		t.Fatalf("completed batch is not terminal: %+v", batch)
+	}
+
+	_, latched := c.Convert(SSEEvent{Data: []byte(`{"type": oops`)})
+	if latched == nil || !isUpstreamConversionError(latched) {
+		t.Fatalf("corrupt frame: err = %T %v, want an upstream conversion error", latched, latched)
+	}
+	batch, err = c.Convert(SSEEvent{Data: []byte("[DONE]")})
+	if !errors.Is(err, latched) {
+		t.Fatalf("[DONE] after a failed frame: err = %v, want the latched %v", err, latched)
+	}
+	if batch.Terminal || len(batch.Events) != 0 {
+		t.Fatalf("[DONE] after a failed frame released %+v", batch)
+	}
+	batch, err = c.FinalizeEOF()
+	if !errors.Is(err, latched) {
+		t.Fatalf("FinalizeEOF after a failed frame: err = %v, want the latched %v", err, latched)
+	}
+	if batch.Terminal || len(batch.Events) != 0 {
+		t.Fatalf("FinalizeEOF after a failed frame released %+v", batch)
+	}
+}
+
+func TestGeminiStreamChatToGeminiFailedFrameStaysFailed(t *testing.T) {
+	// A Chat frame that fails to decode after the finish chunk must latch on
+	// the converter: [DONE] and EOF keep reporting the failure, never release
+	// the held terminal as a clean completion.
+	ctx := testStreamContext()
+	ctx.LossPolicy = usageOnlyPolicy()
+	chat := newChatResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_1", "gpt-4.1", 1, nil)
+	gemini := newGeminiStreamClientState(ctx, UpstreamChatCompletions, ctx.LossPolicy, "resp_1", "gemini-x")
+	c := newChatToGeminiConverter(chat, gemini)
+
+	delta, err := json.Marshal(chatChunk(t, ChatStreamDelta{Content: new("hi")}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Convert(SSEEvent{Data: delta}); err != nil {
+		t.Fatalf("text delta: %v", err)
+	}
+	finish, err := json.Marshal(chatChunk(t, ChatStreamDelta{}, new("stop")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Convert(SSEEvent{Data: finish}); err != nil {
+		t.Fatalf("finish chunk: %v", err)
+	}
+
+	_, latched := c.Convert(SSEEvent{Data: []byte(`{"choices":[ oops`)})
+	if latched == nil || !isUpstreamConversionError(latched) {
+		t.Fatalf("corrupt frame: err = %T %v, want an upstream conversion error", latched, latched)
+	}
+	batch, err := c.Convert(SSEEvent{Data: []byte("[DONE]")})
+	if !errors.Is(err, latched) {
+		t.Fatalf("[DONE] after a failed frame: err = %v, want the latched %v", err, latched)
+	}
+	if batch.Terminal || len(batch.Events) != 0 {
+		t.Fatalf("[DONE] after a failed frame released %+v", batch)
+	}
+	batch, err = c.FinalizeEOF()
+	if !errors.Is(err, latched) {
+		t.Fatalf("FinalizeEOF after a failed frame: err = %v, want the latched %v", err, latched)
+	}
+	if batch.Terminal || len(batch.Events) != 0 {
+		t.Fatalf("FinalizeEOF after a failed frame released %+v", batch)
+	}
+}
+
 func TestGeminiStreamClientOutputItemAddedIsGated(t *testing.T) {
 	// Metadata a Gemini stream cannot carry is decided when the item is
 	// announced: an upstream must not get its text deltas through before the
