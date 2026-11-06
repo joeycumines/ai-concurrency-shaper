@@ -135,11 +135,13 @@ func parseTranscodeEndpoint(
 	if upstream {
 		switch transcode.UpstreamProtocol(protocolName) {
 		case transcode.UpstreamResponses,
-			transcode.UpstreamChatCompletions:
+			transcode.UpstreamChatCompletions,
+			transcode.UpstreamMessages,
+			transcode.UpstreamGemini:
 			return "", transcode.UpstreamProtocol(protocolName), path, nil
 		}
 		return "", "", "", fmt.Errorf(
-			"unknown upstream protocol %q (want responses or chat-completions)",
+			"unknown upstream protocol %q (want responses, chat-completions, messages, or gemini)",
 			protocolName,
 		)
 	}
@@ -147,13 +149,18 @@ func parseTranscodeEndpoint(
 	switch transcode.ClientProtocol(protocolName) {
 	case transcode.ClientResponses, transcode.ClientMessages:
 		return transcode.ClientProtocol(protocolName), "", path, nil
+	case transcode.ClientGemini:
+		if _, err := transcode.ParseGeminiClientRoutePath(path); err != nil {
+			return "", "", "", err
+		}
+		return transcode.ClientGemini, "", path, nil
 	case transcode.ClientProtocol(transcode.UpstreamChatCompletions):
 		return "", "", "", fmt.Errorf(
 			"chat-completions is not a valid client protocol; it is upstream-only",
 		)
 	}
 	return "", "", "", fmt.Errorf(
-		"unknown client protocol %q (want responses or messages)",
+		"unknown client protocol %q (want responses, messages, or gemini)",
 		protocolName,
 	)
 }
@@ -202,7 +209,7 @@ func parseTranscodeRoute(value string) (proxy.TranscodeMapping, error) {
 // buildTranscodeMappings, which re-runs the strictness rejection against
 // the final policy.
 func provisionalStrictnessLoss(m transcode.Mapping) transcode.Mapping {
-	if m.ClientProtocol == transcode.ClientMessages &&
+	if (m.ClientProtocol == transcode.ClientMessages || m.ClientProtocol == transcode.ClientGemini) &&
 		m.UpstreamProtocol == transcode.UpstreamResponses {
 		m.LossPolicy = transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
 			transcode.FeatureToolSchemaStrictness: {},
@@ -515,25 +522,39 @@ var defaultTranscodeAllowedQuery = map[string]struct{}{
 }
 
 var defaultTranscodeLosses = map[transcode.Feature]struct{}{
-	transcode.FeatureReasoningSummary:            {},
-	transcode.FeatureAuthenticatedThinking:       {},
-	transcode.FeatureMidConversationSystem:       {},
-	transcode.FeatureResponsesControls:           {},
-	transcode.FeatureAnthropicControls:           {},
-	transcode.FeatureRequestCitations:            {},
-	transcode.FeatureBuiltinTools:                {},
-	transcode.FeatureUsageUnknown:                {},
-	transcode.FeatureUsageCacheReadUnknown:       {},
-	transcode.FeatureUsageCacheWriteUnknown:      {},
-	transcode.FeatureUsageReasoningUnknown:       {},
-	transcode.FeatureRequestReasoning:            {},
-	transcode.FeatureToolResultErrorStatus:       {},
-	transcode.FeatureToolResultMultimodalContent: {},
-	transcode.FeatureToolResultJSONEnvelope:      {},
-	transcode.FeatureDeveloperRole:               {},
-	transcode.FeatureImageDetailOriginal:         {},
-	transcode.FeatureResponseServiceTier:         {},
-	transcode.FeatureOutputPhase:                 {},
+	transcode.FeatureReasoningSummary:                  {},
+	transcode.FeatureAuthenticatedThinking:             {},
+	transcode.FeatureMidConversationSystem:             {},
+	transcode.FeatureResponsesControls:                 {},
+	transcode.FeatureAnthropicControls:                 {},
+	transcode.FeatureRequestCitations:                  {},
+	transcode.FeatureBuiltinTools:                      {},
+	transcode.FeatureUsageUnknown:                      {},
+	transcode.FeatureUsageCacheReadUnknown:             {},
+	transcode.FeatureUsageCacheWriteUnknown:            {},
+	transcode.FeatureUsageReasoningUnknown:             {},
+	transcode.FeatureRequestReasoning:                  {},
+	transcode.FeatureToolResultErrorStatus:             {},
+	transcode.FeatureToolResultMultimodalContent:       {},
+	transcode.FeatureToolResultJSONEnvelope:            {},
+	transcode.FeatureDeveloperRole:                     {},
+	transcode.FeatureImageDetailOriginal:               {},
+	transcode.FeatureResponseServiceTier:               {},
+	transcode.FeatureOutputPhase:                       {},
+	transcode.FeatureGeminiGenerationControls:          {},
+	transcode.FeatureGeminiSafetySettings:              {},
+	transcode.FeatureGeminiRequestControls:             {},
+	transcode.FeatureGeminiThoughtSignature:            {},
+	transcode.FeatureGeminiPartMetadata:                {},
+	transcode.FeatureGeminiClientQuery:                 {},
+	transcode.FeatureGeminiThoughtSignaturePlaceholder: {},
+	transcode.FeatureGeminiSafetyMetadata:              {},
+	transcode.FeatureGeminiGroundingMetadata:           {},
+	transcode.FeatureGeminiUsageBreakdown:              {},
+	transcode.FeatureGeminiResponseThoughtSignature:    {},
+	transcode.FeatureGeminiModelStatus:                 {},
+	transcode.FeatureGeminiToolStrictness:              {},
+	transcode.FeatureGeminiImageDetail:                 {},
 }
 
 func mergedLossPolicy(
@@ -634,7 +655,22 @@ func mergedAllowedQuery(
 	return out
 }
 
+// geminiGenerateRoute is the client route template of the Gemini
+// GenerateContent presets; the model is a path parameter.
+const geminiGenerateRoute = "/v1beta/models/{model}:generateContent"
+
+// geminiPresetFlags selects the Gemini GenerateContent presets. The zero
+// value adds none, so callers that do not set it keep their mappings.
+type geminiPresetFlags struct {
+	GeminiChat      bool
+	GeminiResponses bool
+	GeminiMessages  bool
+	ResponsesGemini bool
+	MessagesGemini  bool
+}
+
 type transcodeCLIOptions struct {
+	geminiPresets       geminiPresetFlags
 	lossPolicy          transcode.LossPolicy
 	negatedLosses       map[transcode.Feature]struct{}
 	capabilities        transcode.ChatCapabilities

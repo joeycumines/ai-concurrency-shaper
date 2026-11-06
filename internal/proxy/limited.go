@@ -128,7 +128,10 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	rec, recIsRecorder := w.(*statusRecorder)
 	var stopComments func()
 	commitComments := false
-	if p.queueComments > 0 {
+	// Gemini operations never commit a comment stream: their response is a JSON
+	// document or a Google-dialect event stream, not a comment-prefixed SSE
+	// body.
+	if p.queueComments > 0 && !transcode.IsGeminiOperationPath(r.URL.Path) {
 		if recIsRecorder && queueCommentsEligible(r) && transcode.AcceptIsEventStream(r.Header.Get("Accept")) {
 			if canCommitCommentsWithUnreadBody(r) || http.NewResponseController(rec).EnableFullDuplex() == nil {
 				commitComments = !bodyBlocksStreamCommit(w, r, ctx)

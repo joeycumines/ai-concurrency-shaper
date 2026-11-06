@@ -39,9 +39,11 @@ import (
 //
 // via is the one routing-active fact: it names the model's native upstream
 // dialect (responses, messages, or chat) so natively served routes can
-// forward with only the model identifier rewritten. Every other fact stays
-// presentation-only: validated and frozen for the served catalog, never read
-// by a resolution or rendering path.
+// forward with only the model identifier rewritten. max_output is the second
+// routing-relevant fact: a Gemini client that omits maxOutputTokens, routed to
+// the Anthropic Messages upstream (which requires max_tokens), takes it as the
+// output ceiling. Every other fact stays presentation-only: validated and
+// frozen for the served catalog, never read by a resolution or rendering path.
 //
 // The first '=' splits the surrogate@provider left side from the wire id and
 // facts; the first '@' splits the surrogate from the provider; the first ';'
@@ -523,7 +525,10 @@ func hasTranscodeRoutes(p *Provider) bool {
 	return len(p.TranscodeRoutes) > 0 ||
 		p.TranscodeResponsesChat ||
 		p.TranscodeMessagesChat ||
-		p.TranscodeMessagesResponses
+		p.TranscodeMessagesResponses ||
+		p.TranscodeGeminiChat ||
+		p.TranscodeGeminiResponses ||
+		p.TranscodeGeminiMessages
 }
 
 // hasNativeRoutes reports whether the provider declares any natively
@@ -644,12 +649,17 @@ func (e modelTableEntry) factSuffix() string {
 func modelMapFromTable(subset []modelTableEntry) transcode.ModelMap {
 	exact := make(map[string]transcode.ModelMapping, len(subset))
 	for _, entry := range subset {
-		exact[entry.Surrogate] = transcode.ModelMapping{
+		mapping := transcode.ModelMapping{
 			ClientModel:         entry.Surrogate,
 			UpstreamModel:       entry.Wire,
 			ClientResponseModel: entry.Surrogate,
 			Via:                 entry.Via,
 		}
+		if entry.MaxOutput != nil {
+			value := *entry.MaxOutput
+			mapping.MaxOutput = &value
+		}
+		exact[entry.Surrogate] = mapping
 	}
 	return transcode.ModelMap{
 		Exact:              exact,

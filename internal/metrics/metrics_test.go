@@ -133,10 +133,10 @@ func TestCollector_RequestLog(t *testing.T) {
 	c := NewCollector()
 
 	// Record some requests.
-	c.RecordRequest("POST", "/v1/messages", 200, 150*time.Millisecond, true)
-	c.RecordRequest("GET", "/health", 200, 2*time.Millisecond, false)
-	c.RecordRequest("POST", "/v1/messages", 504, 30*time.Second, true)
-	c.RecordRequest("POST", "/v1/chat/completions", 429, 5*time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, 150*time.Millisecond, true)
+	c.RecordRequest("GET", "/health", "", 200, 2*time.Millisecond, false)
+	c.RecordRequest("POST", "/v1/messages", "", 504, 30*time.Second, true)
+	c.RecordRequest("POST", "/v1/chat/completions", "", 429, 5*time.Millisecond, true)
 
 	entries := c.LogEntries()
 	if len(entries) != 4 {
@@ -163,7 +163,7 @@ func TestCollector_RingBufferWrap(t *testing.T) {
 
 	// Overflow the ring buffer.
 	for range maxLogEntries + 100 {
-		c.RecordRequest("GET", "/test", 200, time.Millisecond, false)
+		c.RecordRequest("GET", "/test", "", 200, time.Millisecond, false)
 	}
 
 	entries := c.LogEntries()
@@ -175,10 +175,10 @@ func TestCollector_RingBufferWrap(t *testing.T) {
 func TestCollector_RouteStats(t *testing.T) {
 	c := NewCollector()
 
-	c.RecordRequest("POST", "/v1/messages", 200, 100*time.Millisecond, true)
-	c.RecordRequest("POST", "/v1/messages", 200, 200*time.Millisecond, true)
-	c.RecordRequest("POST", "/v1/messages", 504, 30*time.Second, true)
-	c.RecordRequest("POST", "/v1/chat/completions", 200, 50*time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, 100*time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, 200*time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 504, 30*time.Second, true)
+	c.RecordRequest("POST", "/v1/chat/completions", "", 200, 50*time.Millisecond, true)
 
 	rs := c.RouteStats()
 	msgStats, ok := rs["POST /v1/messages"]
@@ -206,7 +206,7 @@ func TestCollector_Throughput(t *testing.T) {
 
 	// Record some requests.
 	for range 10 {
-		c.RecordRequest("POST", "/v1/messages", 200, 10*time.Millisecond, true)
+		c.RecordRequest("POST", "/v1/messages", "", 200, 10*time.Millisecond, true)
 		time.Sleep(5 * time.Millisecond)
 	}
 
@@ -233,7 +233,7 @@ func TestCollector_ThroughputAccuracy(t *testing.T) {
 	// Record 10 requests with ~10ms spacing, so total elapsed ~100ms.
 	// Expected RPS ≈ 10 / 0.1 ≈ 100 (order of magnitude).
 	for range 10 {
-		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -255,7 +255,7 @@ func TestCollector_ThroughputRampUp(t *testing.T) {
 	// we divide by actual elapsed time, not by the full window.
 	c := NewCollector()
 
-	c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
 	// Immediately query — should be > 0 (1 request / ~0s ≈ large, but at least > 0).
 	rps := c.Throughput()
 	if rps <= 0 {
@@ -269,7 +269,7 @@ func TestCollector_ThroughputAfterReset(t *testing.T) {
 
 	// Record some requests to establish a baseline.
 	for range 5 {
-		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
 	}
 
 	before := c.Throughput()
@@ -286,7 +286,7 @@ func TestCollector_ThroughputAfterReset(t *testing.T) {
 	}
 
 	// Record new requests — throughput should ramp up from 0.
-	c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
 	afterNew := c.Throughput()
 	if afterNew <= 0 {
 		t.Errorf("throughput after Reset() + new request should be > 0, got %f", afterNew)
@@ -302,7 +302,7 @@ func TestCollector_ThroughputSteadyState(t *testing.T) {
 	// Record 20 requests with 50ms spacing = ~1s total elapsed.
 	// Expected RPS ≈ 20 / 1.0 ≈ 20.
 	for range 20 {
-		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
 		time.Sleep(50 * time.Millisecond)
 	}
 
@@ -334,7 +334,7 @@ func TestCollector_ThroughputDecaysAfterTrafficStops(t *testing.T) {
 
 	// Record some requests to populate the window.
 	for range 5 {
-		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
 		time.Sleep(20 * time.Millisecond)
 	}
 
@@ -365,7 +365,7 @@ func TestCollector_ThroughputSparklineDecaysAfterTrafficStops(t *testing.T) {
 	c.tpStart = now
 
 	for range 5 {
-		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
 		time.Sleep(20 * time.Millisecond)
 	}
 
@@ -402,8 +402,8 @@ func TestCollector_ThroughputNoIdleTimeDebtAfterLongPause(t *testing.T) {
 	c.tpStart = longAgo
 	c.tpMu.Unlock()
 
-	c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
-	c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
 
 	spark := c.ThroughputSparkline(4)
 	total := 0
@@ -432,7 +432,7 @@ func TestCollector_ThroughputNoDriftOverTime(t *testing.T) {
 	// Record ~50 requests with ~10ms spacing = ~500ms of traffic.
 	// Expected RPS ≈ 50 / 0.5 ≈ 100.
 	for range 50 {
-		c.RecordRequest("POST", "/v1/messages", 200, time.Millisecond, true)
+		c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
 		time.Sleep(10 * time.Millisecond)
 	}
 
@@ -472,7 +472,7 @@ func TestCollector_Reset(t *testing.T) {
 	c.IncTimeout()
 	c.IncCancelled()
 	c.RecordStatus(200)
-	c.RecordRequest("POST", "/v1/messages", 200, 10*time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, 10*time.Millisecond, true)
 
 	c.Reset()
 
@@ -645,11 +645,11 @@ func TestCollector_RouteTimeoutTracking(t *testing.T) {
 	c := NewCollector()
 
 	// Record some requests with various statuses.
-	c.RecordRequest("POST", "/v1/messages", 200, 100*time.Millisecond, true)
-	c.RecordRequest("POST", "/v1/messages", 504, 30*time.Second, true)
-	c.RecordRequest("POST", "/v1/messages", 503, 50*time.Millisecond, true)
-	c.RecordRequest("POST", "/v1/messages", 200, 200*time.Millisecond, true)
-	c.RecordRequest("POST", "/v1/chat/completions", 504, 10*time.Second, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, 100*time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 504, 30*time.Second, true)
+	c.RecordRequest("POST", "/v1/messages", "", 503, 50*time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/messages", "", 200, 200*time.Millisecond, true)
+	c.RecordRequest("POST", "/v1/chat/completions", "", 504, 10*time.Second, true)
 
 	rs := c.RouteStats()
 	msgStats := rs["POST /v1/messages"]
