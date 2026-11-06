@@ -87,13 +87,26 @@ func newAnthropicUpstreamResponsesStreamState(
 }
 
 // Convert processes one decoded Anthropic event into zero or more typed
-// Responses events.
+// Responses events. The first failure of any kind latches: every later call
+// propagates it, so a stream that failed can never report a clean terminal.
 func (s *anthropicUpstreamResponsesStreamState) Convert(
 	event anthropicmessages.StreamEvent,
 ) ([]ResponsesSSEEvent, error) {
 	if s.streamError != nil {
 		return nil, s.streamError
 	}
+	events, err := s.convertEvent(event)
+	if err != nil {
+		s.streamError = err
+		return nil, err
+	}
+	return events, nil
+}
+
+// convertEvent converts one event, leaving failure latching to Convert.
+func (s *anthropicUpstreamResponsesStreamState) convertEvent(
+	event anthropicmessages.StreamEvent,
+) ([]ResponsesSSEEvent, error) {
 	if s.stopped {
 		return nil, upstreamWireError(
 			UpstreamMessages,
@@ -134,6 +147,8 @@ func (s *anthropicUpstreamResponsesStreamState) Convert(
 			)
 		}
 		s.stopped = true
+		// The error event returns the client-visible error event with a nil
+		// error, so it latches itself; the wrapper never sees it.
 		s.streamError = upstreamStreamFailure(message)
 		return []ResponsesSSEEvent{ResponseErrorEvent{
 			Type:           "error",
@@ -540,43 +555,18 @@ func (s *anthropicUpstreamResponsesStreamState) messageStop() ([]ResponsesSSEEve
 	if !s.sawStopValue {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic message_stop without a stop_reason"))
 	}
-	s.stopped = true
 
-	usage := s.responsesUsage()
-	if usage != nil {
-		if err := s.report.Note(
-			FeatureUsageTotalDerived,
-			"usage.total_tokens",
-			"the Anthropic stream reports no total; the total is the input plus the output",
-		); err != nil {
-			return nil, err
-		}
-	}
+	// The stop reason decides first: a stop the terminal cannot carry refuses
+	// the stream before any terminal state or note commits.
+	var incompleteReason string
 	switch s.stopReason {
 	case anthropicmessages.StopReasonEndTurn,
 		anthropicmessages.StopReasonStopSequence,
 		anthropicmessages.StopReasonToolUse:
-		return []ResponsesSSEEvent{ResponseCompletedEvent{
-			Type:           "response.completed",
-			SequenceNumber: s.nextSequence(),
-			Response:       s.envelope("completed", usage, nil),
-		}}, nil
 	case anthropicmessages.StopReasonMaxTokens:
-		return []ResponsesSSEEvent{ResponseIncompleteEvent{
-			Type:           "response.incomplete",
-			SequenceNumber: s.nextSequence(),
-			Response: s.envelope("incomplete", usage, &ResponsesIncompleteDetails{
-				Reason: "max_output_tokens",
-			}),
-		}}, nil
+		incompleteReason = "max_output_tokens"
 	case anthropicmessages.StopReasonRefusal:
-		return []ResponsesSSEEvent{ResponseIncompleteEvent{
-			Type:           "response.incomplete",
-			SequenceNumber: s.nextSequence(),
-			Response: s.envelope("incomplete", usage, &ResponsesIncompleteDetails{
-				Reason: "content_filter",
-			}),
-		}}, nil
+		incompleteReason = "content_filter"
 	case anthropicmessages.StopReasonPauseTurn:
 		return nil, &UnrepresentableError{
 			Protocol: "messages",
@@ -590,6 +580,34 @@ func (s *anthropicUpstreamResponsesStreamState) messageStop() ([]ResponsesSSEEve
 			fmt.Errorf("anthropic stop_reason %q is unknown", s.stopReason),
 		)
 	}
+
+	s.stopped = true
+	usage := s.responsesUsage()
+	if usage != nil {
+		// The note describes a terminal that committed, so it follows the
+		// stop-reason decision.
+		if err := s.report.Note(
+			FeatureUsageTotalDerived,
+			"usage.total_tokens",
+			"the Anthropic stream reports no total; the total is the input plus the output",
+		); err != nil {
+			return nil, err
+		}
+	}
+	if incompleteReason == "" {
+		return []ResponsesSSEEvent{ResponseCompletedEvent{
+			Type:           "response.completed",
+			SequenceNumber: s.nextSequence(),
+			Response:       s.envelope("completed", usage, nil),
+		}}, nil
+	}
+	return []ResponsesSSEEvent{ResponseIncompleteEvent{
+		Type:           "response.incomplete",
+		SequenceNumber: s.nextSequence(),
+		Response: s.envelope("incomplete", usage, &ResponsesIncompleteDetails{
+			Reason: incompleteReason,
+		}),
+	}}, nil
 }
 
 // responsesUsage builds the terminal envelope usage. It is present only when

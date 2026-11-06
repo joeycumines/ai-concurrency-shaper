@@ -95,11 +95,23 @@ func (s *geminiStreamClientState) wireError(err error) error {
 	return upstreamWireError(s.upstream, http.StatusOK, err)
 }
 
-// Convert processes one typed Responses event into zero or more chunks.
+// Convert processes one typed Responses event into zero or more chunks. The
+// first failure of any kind latches: every later call, and FinalizeEOF,
+// propagates it, so a stream that failed can never report a clean terminal.
 func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResponse, error) {
 	if s.streamError != nil {
 		return nil, s.streamError
 	}
+	chunks, err := s.convertEvent(event)
+	if err != nil {
+		s.streamError = err
+		return nil, err
+	}
+	return chunks, nil
+}
+
+// convertEvent converts one event, leaving failure latching to Convert.
+func (s *geminiStreamClientState) convertEvent(event ResponsesSSEEvent) ([]geminiResponse, error) {
 	if s.sawTerminal {
 		return nil, s.wireError(errors.New("responses stream event after terminal"))
 	}
@@ -241,12 +253,10 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 		return s.terminalChunk(value.Response, "incomplete")
 	case ResponseFailedEvent:
 		s.sawTerminal = true
-		s.streamError = upstreamStreamFailure("the upstream response failed")
-		return nil, s.streamError
+		return nil, upstreamStreamFailure("the upstream response failed")
 	case ResponseErrorEvent:
 		s.sawTerminal = true
-		s.streamError = upstreamStreamFailure(value.Message)
-		return nil, s.streamError
+		return nil, upstreamStreamFailure(value.Message)
 	default:
 		// Lifecycle events with no client-visible content (created, in
 		// progress, part and item boundaries) produce no chunk.

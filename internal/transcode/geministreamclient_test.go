@@ -984,6 +984,108 @@ func TestGeminiStreamClientFailureEventsLatch(t *testing.T) {
 	}
 }
 
+func TestGeminiStreamClientPolicyRefusalIsLatched(t *testing.T) {
+	// A policy refusal is a stream failure like any other: the state must
+	// latch it, so no later event — the item done whose once-flag was already
+	// consumed, the terminal, [DONE], or EOF — can still complete the stream,
+	// and the text following a refused item never reaches the client.
+	var unsupported *UnsupportedFeatureError
+	refusePhase := func(t *testing.T, state *geminiStreamClientState) error {
+		t.Helper()
+		event := fsmMessageAdded(2, 0, "msg_1")
+		event.Item.(*ResponsesOutputMessage).Phase = "final_answer"
+		err := convertErr(state, event)
+		if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureOutputPhase) {
+			t.Fatalf("phased message added: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureOutputPhase)
+		}
+		return err
+	}
+
+	t.Run("no text leaks after a refused item", func(t *testing.T) {
+		state := newGeminiStreamClientState(
+			testStreamContext(), UpstreamResponses, StrictLossPolicy(), "resp_1", "gemini-x",
+		)
+		if _, err := state.Convert(fsmCreated(1)); err != nil {
+			t.Fatalf("created: %v", err)
+		}
+		refusal := refusePhase(t, state)
+		for _, event := range []ResponsesSSEEvent{
+			fsmTextPartAdded(3, 0, 0, "msg_1"),
+			fsmTextDelta(4, 0, 0, "msg_1", "leak"),
+			fsmTextDone(5, 0, 0, "msg_1", "leak"),
+			fsmTextPartDone(6, 0, 0, "msg_1"),
+			// The phase once-flag was consumed by the refusal itself, so a
+			// done that repeats the phase must not sail through on it.
+			fsmItemDone(7, 0, "msg_1"),
+			fsmComplete(8),
+		} {
+			chunks, err := state.Convert(event)
+			if !errors.Is(err, refusal) {
+				t.Fatalf("%s after the refusal: err = %v, want the latched %v", event.EventType(), err, refusal)
+			}
+			if len(chunks) != 0 {
+				t.Fatalf("%s after the refusal emitted %v", event.EventType(), chunks)
+			}
+		}
+		converter := newResponsesToGeminiConverter(state)
+		batch, err := converter.Convert(SSEEvent{Data: []byte("[DONE]")})
+		if !errors.Is(err, refusal) {
+			t.Fatalf("[DONE] after the refusal: err = %v, want the latched %v", err, refusal)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("[DONE] after the refusal released %+v", batch)
+		}
+		batch, err = converter.FinalizeEOF()
+		if !errors.Is(err, refusal) {
+			t.Fatalf("FinalizeEOF after the refusal: err = %v, want the latched %v", err, refusal)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("FinalizeEOF after the refusal released %+v", batch)
+		}
+	})
+
+	t.Run("event after the terminal latches", func(t *testing.T) {
+		// The terminal's usage losses read the exchange context's policy, so
+		// the context must approve them for the terminal to commit.
+		ctx := testStreamContext()
+		ctx.LossPolicy = usageOnlyPolicy()
+		state := newGeminiStreamClientState(
+			ctx, UpstreamResponses, usageOnlyPolicy(), "resp_1", "gemini-x",
+		)
+		if _, err := state.Convert(fsmCreated(1)); err != nil {
+			t.Fatalf("created: %v", err)
+		}
+		if _, err := state.Convert(fsmComplete(2)); err != nil {
+			t.Fatalf("completed: %v", err)
+		}
+		// A trailing event after the terminal is corrupt wire; the state must
+		// latch that failure too, so [DONE] cannot still report a clean
+		// terminal for a stream that ended dirty.
+		trailing, err := state.Convert(fsmMessageAdded(3, 0, "msg_1"))
+		if err == nil {
+			t.Fatal("event after the terminal: nil error")
+		}
+		if len(trailing) != 0 {
+			t.Fatalf("event after the terminal emitted %v", trailing)
+		}
+		converter := newResponsesToGeminiConverter(state)
+		batch, done := converter.Convert(SSEEvent{Data: []byte("[DONE]")})
+		if !errors.Is(done, err) {
+			t.Fatalf("[DONE] after a trailing failure: err = %v, want the latched %v", done, err)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("[DONE] after a trailing failure released %+v", batch)
+		}
+		batch, finalize := converter.FinalizeEOF()
+		if !errors.Is(finalize, err) {
+			t.Fatalf("FinalizeEOF after a trailing failure: err = %v, want the latched %v", finalize, err)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("FinalizeEOF after a trailing failure released %+v", batch)
+		}
+	})
+}
+
 func TestGeminiStreamClientOutputItemAddedIsGated(t *testing.T) {
 	// Metadata a Gemini stream cannot carry is decided when the item is
 	// announced: an upstream must not get its text deltas through before the
@@ -1035,10 +1137,17 @@ func TestGeminiStreamClientOutputItemAddedIsGated(t *testing.T) {
 
 	t.Run("phase refuses before the text", func(t *testing.T) {
 		state := newState(StrictLossPolicy())
-		wantRefused(t, convertErr(state, messageAdded(2, "final_answer")), FeatureOutputPhase)
-		chunks, err := state.Convert(fsmTextDelta(3, 0, 0, "msg_1", "leak"))
-		if err == nil || len(chunks) != 0 {
-			t.Fatalf("delta after the refusal = %v, err %v; want no chunk", chunks, err)
+		refusal := convertErr(state, messageAdded(2, "final_answer"))
+		wantRefused(t, refusal, FeatureOutputPhase)
+		// The content part is opened between the refusal and the delta so the
+		// FSM itself has no reason to reject: only the latched refusal can
+		// stop the text.
+		if _, err := state.Convert(fsmTextPartAdded(3, 0, 0, "msg_1")); !errors.Is(err, refusal) {
+			t.Fatalf("part added after the refusal: err = %v, want the latched %v", err, refusal)
+		}
+		chunks, err := state.Convert(fsmTextDelta(4, 0, 0, "msg_1", "leak"))
+		if !errors.Is(err, refusal) || len(chunks) != 0 {
+			t.Fatalf("delta after the refusal = %v, err %v; want the latched %v and no chunk", chunks, err, refusal)
 		}
 	})
 
