@@ -39,9 +39,10 @@ type anthropicUpstreamResponsesStreamState struct {
 	finalUsage   *anthropicmessages.Usage
 	stopReason   anthropicmessages.StopReason
 	sawStopValue bool
-	// streamError latches the failure carried by an upstream error event:
-	// every later call and FinalizeEOF propagate it, so a failed stream can
-	// never report a clean terminal.
+	// streamError latches the first failure of any kind: an upstream error
+	// event, a refused conversion, any error the conversion returns. Every
+	// later call and FinalizeEOF propagate it, so a failed stream can never
+	// report a clean terminal.
 	streamError error
 	// authenticatedThinkingLossRecorded and serverToolsLossRecorded gate the
 	// losses for content blocks a Gemini stream cannot carry to once per

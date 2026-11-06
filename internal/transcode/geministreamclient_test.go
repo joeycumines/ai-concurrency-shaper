@@ -1014,8 +1014,8 @@ func TestGeminiStreamClientPolicyRefusalIsLatched(t *testing.T) {
 			fsmTextDelta(4, 0, 0, "msg_1", "leak"),
 			fsmTextDone(5, 0, 0, "msg_1", "leak"),
 			fsmTextPartDone(6, 0, 0, "msg_1"),
-			// The phase once-flag was consumed by the refusal itself, so a
-			// done that repeats the phase must not sail through on it.
+			// The item done carries no phase of its own; it is the latched
+			// refusal that stops it, not a once-flag.
 			fsmItemDone(7, 0, "msg_1"),
 			fsmComplete(8),
 		} {
