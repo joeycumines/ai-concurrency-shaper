@@ -511,43 +511,40 @@ func (s *geminiResponsesStreamState) convertPart(
 		}
 	}
 
-	// Part modifiers are an observable loss, once per stream.
-	if (geminigeneratecontent.RawMemberPresent(part.VideoMetadata) ||
+	// Part modifiers and a signature on a non-call part are observable
+	// losses, once per stream. The loss describes the part's encoding, so it
+	// is recorded only after the part's payload committed — a part whose
+	// payload was refused (bounds, an invalid function call) leaves neither
+	// behind. A signature-only part or an empty thought commits nothing and
+	// emits nothing, but the signature loss still describes that exact
+	// part: it is recorded before the empty return.
+	//
+	// partMetadataLoss is deferred until the payload commits; it takes no
+	// effect on signature-only and empty-thought parts (they carry no other
+	// payload, so the metadata accompanies no encoding at all).
+	partMetadata := geminigeneratecontent.RawMemberPresent(part.VideoMetadata) ||
 		geminigeneratecontent.RawMemberPresent(part.SpeechMetadata) ||
 		geminigeneratecontent.RawMemberPresent(part.PartMetadata) ||
 		geminigeneratecontent.RawMemberPresent(part.MediaResolution) ||
-		part.MediaProcessing != nil) && !s.partMetadataLossRecorded {
-		s.partMetadataLossRecorded = true
-		if err := s.report.Lose(
-			s.policy,
-			FeatureGeminiPartMetadata,
-			path,
-			"part modifier metadata cannot be reproduced in the target response",
-		); err != nil {
-			return nil, err
-		}
-	}
-	// A signature on a non-call part is an observable loss, once per stream.
-	// An explicit empty signature carries no signature.
-	if part.ThoughtSignature != nil && *part.ThoughtSignature != "" &&
-		part.FunctionCall == nil && !s.partSignatureLossRecorded {
-		s.partSignatureLossRecorded = true
-		if err := s.report.Lose(
-			s.policy,
-			FeatureGeminiResponseThoughtSignature,
-			path,
-			"a thought signature on a non-function-call stream part cannot be reproduced in the target response",
-		); err != nil {
-			return nil, err
-		}
-	}
+		part.MediaProcessing != nil
 
 	if part.FunctionCall != nil {
-		return s.convertFunctionCall(part, path)
+		events, err := s.convertFunctionCall(part, path)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.losePartMetadata(partMetadata, path); err != nil {
+			return nil, err
+		}
+		return events, nil
 	}
 
 	if part.Text == nil {
-		// A signature-only part carries no payload and emits nothing.
+		// A signature-only part carries no payload and emits nothing, but its
+		// signature is still an observable loss of that part.
+		if err := s.loseNonCallSignature(part, path); err != nil {
+			return nil, err
+		}
 		return nil, nil
 	}
 	thought := part.Thought != nil && *part.Thought
@@ -562,12 +559,36 @@ func (s *geminiResponsesStreamState) convertPart(
 		// provider reasoning; mapped under the capability or an approved
 		// loss, each recorded once per stream. The encoding commits first, so
 		// a rejected delta leaves no note behind.
+		var events []ResponsesSSEEvent
 		switch {
 		case s.capabilities.ProviderReasoningThinking:
-			events, err := s.emitThoughtText(*part.Text, path)
+			var err error
+			events, err = s.emitThoughtText(*part.Text, path)
 			if err != nil {
 				return nil, err
 			}
+		case s.capabilities.ProviderReasoningText:
+			var err error
+			events, err = s.emitTextDelta(*part.Text)
+			if err != nil {
+				return nil, err
+			}
+		default:
+			if err := s.loseThought(path); err != nil {
+				return nil, err
+			}
+			if err := s.losePartMetadata(partMetadata, path); err != nil {
+				return nil, err
+			}
+			return nil, nil
+		}
+		if err := s.losePartMetadata(partMetadata, path); err != nil {
+			return nil, err
+		}
+		if err := s.loseNonCallSignature(part, path); err != nil {
+			return nil, err
+		}
+		if s.capabilities.ProviderReasoningThinking {
 			if !s.thoughtThinkingNoted {
 				s.thoughtThinkingNoted = true
 				if err := s.report.Note(
@@ -578,37 +599,77 @@ func (s *geminiResponsesStreamState) convertPart(
 					return nil, err
 				}
 			}
-			return events, nil
-		case s.capabilities.ProviderReasoningText:
-			events, err := s.emitTextDelta(*part.Text)
-			if err != nil {
+		} else if !s.thoughtTextNoted {
+			s.thoughtTextNoted = true
+			if err := s.report.Note(
+				FeatureProviderReasoningText,
+				path,
+				"provider reasoning text mapped to ordinary text (provider_reasoning_text capability)",
+			); err != nil {
 				return nil, err
 			}
-			if !s.thoughtTextNoted {
-				s.thoughtTextNoted = true
-				if err := s.report.Note(
-					FeatureProviderReasoningText,
-					path,
-					"provider reasoning text mapped to ordinary text (provider_reasoning_text capability)",
-				); err != nil {
-					return nil, err
-				}
-			}
-			return events, nil
-		default:
-			if !s.thoughtLossNoted {
-				s.thoughtLossNoted = true
-				if err := s.report.Lose(
-					s.policy, FeatureProviderReasoningText, path,
-					"provider reasoning text cannot be reproduced in the target response",
-				); err != nil {
-					return nil, err
-				}
-			}
-			return nil, nil
 		}
+		return events, nil
 	}
-	return s.emitTextDelta(*part.Text)
+
+	events, err := s.emitTextDelta(*part.Text)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.losePartMetadata(partMetadata, path); err != nil {
+		return nil, err
+	}
+	if err := s.loseNonCallSignature(part, path); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+// losePartMetadata records the approved loss of part modifier metadata, once
+// per stream, only for a part whose payload committed.
+func (s *geminiResponsesStreamState) losePartMetadata(present bool, path string) error {
+	if !present || s.partMetadataLossRecorded {
+		return nil
+	}
+	s.partMetadataLossRecorded = true
+	return s.report.Lose(
+		s.policy,
+		FeatureGeminiPartMetadata,
+		path,
+		"part modifier metadata cannot be reproduced in the target response",
+	)
+}
+
+// loseThought records the approved loss of thought text under no reasoning
+// capability, once per stream.
+func (s *geminiResponsesStreamState) loseThought(path string) error {
+	if s.thoughtLossNoted {
+		return nil
+	}
+	s.thoughtLossNoted = true
+	return s.report.Lose(
+		s.policy, FeatureProviderReasoningText, path,
+		"provider reasoning text cannot be reproduced in the target response",
+	)
+}
+
+// loseNonCallSignature records the approved loss of a thought signature on a
+// non-function-call part, once per stream, only for a part whose payload
+// committed. An explicit empty signature carries no signature.
+func (s *geminiResponsesStreamState) loseNonCallSignature(part geminigeneratecontent.Part, path string) error {
+	if part.ThoughtSignature == nil || *part.ThoughtSignature == "" || part.FunctionCall != nil {
+		return nil
+	}
+	if s.partSignatureLossRecorded {
+		return nil
+	}
+	s.partSignatureLossRecorded = true
+	return s.report.Lose(
+		s.policy,
+		FeatureGeminiResponseThoughtSignature,
+		path,
+		"a thought signature on a non-function-call stream part cannot be reproduced in the target response",
+	)
 }
 
 // emitTextDelta opens the message item and content part on first text and

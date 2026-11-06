@@ -172,7 +172,23 @@ func (c *responsesToAnthropicConverter) Convert(
 	// No synthesized name is stored on the frame: routing below uses the
 	// decoded event's own Type, not this frame's Event field, and nothing
 	// reads frame.Event on this branch. Writing it implied the synthesized
-	// name was consumed downstream, which it is not.
+	// name was consumed downstream, which it is not. The note follows the
+	// state conversion: it describes routing that produced client output, so
+	// a frame the state refused leaves no note behind.
+	if frame.Event != "" {
+		if err := validateEventNameMatchesJSONType(frame); err != nil {
+			return convertedBatch{}, upstreamWireError(
+				UpstreamResponses,
+				http.StatusOK,
+				err,
+			)
+		}
+	}
+
+	anthropicEvents, err := c.state.Convert(event)
+	if err != nil {
+		return convertedBatch{}, err
+	}
 	if frame.Event == "" {
 		if !c.missingEventNameNoted {
 			c.missingEventNameNoted = true
@@ -184,17 +200,6 @@ func (c *responsesToAnthropicConverter) Convert(
 				return convertedBatch{}, err
 			}
 		}
-	} else if err := validateEventNameMatchesJSONType(frame); err != nil {
-		return convertedBatch{}, upstreamWireError(
-			UpstreamResponses,
-			http.StatusOK,
-			err,
-		)
-	}
-
-	anthropicEvents, err := c.state.Convert(event)
-	if err != nil {
-		return convertedBatch{}, err
 	}
 	batch, err := marshalAnthropicEvents(anthropicEvents)
 	if err != nil {

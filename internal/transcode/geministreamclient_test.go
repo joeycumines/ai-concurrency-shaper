@@ -1173,6 +1173,199 @@ func TestGeminiStreamChatToGeminiFailedFrameStaysFailed(t *testing.T) {
 	}
 }
 
+func TestGeminiStreamClientTextDeltaLogprobsAfterChunk(t *testing.T) {
+	// A text delta the semantic budget rejects must leave no FeatureLogprobs
+	// entry behind: the loss describes text that reached the client.
+	openText := func(t *testing.T) *geminiStreamClientState {
+		t.Helper()
+		state := newGeminiStreamClientState(
+			testStreamContext(), UpstreamResponses, usageOnlyPolicy(FeatureLogprobs), "resp_1", "gemini-x",
+		)
+		for _, event := range []ResponsesSSEEvent{
+			fsmCreated(1),
+			fsmMessageAdded(2, 0, "msg_1"),
+			fsmTextPartAdded(3, 0, 0, "msg_1"),
+		} {
+			if _, err := state.Convert(event); err != nil {
+				t.Fatalf("%s: %v", event.EventType(), err)
+			}
+		}
+		return state
+	}
+
+	state := openText(t)
+	// The next semantic-byte charge cannot fit, so the delta's chunk is
+	// refused even though the loss is allowed.
+	state.budget.semanticBytesBudget = 1
+	delta := fsmTextDelta(4, 0, 0, "msg_1", "hi")
+	delta.Logprobs = []ResponsesTextLogprob{{Token: "hi", Logprob: -0.1}}
+	_, err := state.Convert(delta)
+	if err == nil {
+		t.Fatal("budget-exhausted delta: nil error")
+	}
+	if n := countReportFeature(state.report, FeatureLogprobs); n != 0 {
+		t.Fatalf("logprobs loss recorded for a rejected delta: %+v", state.report.Losses)
+	}
+
+	// The same delta with budget available records the loss once.
+	state = openText(t)
+	if _, err := state.Convert(delta); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+	if n := countReportFeature(state.report, FeatureLogprobs); n != 1 {
+		t.Fatalf("logprobs loss recorded %d times, want 1: %+v", n, state.report.Losses)
+	}
+}
+
+func TestGeminiStreamClientReasoningDeltaLossAfterRetention(t *testing.T) {
+	// A reasoning-summary delta the retention budget rejects must leave no
+	// FeatureProviderReasoningText loss and no retained summary behind.
+	open := func(t *testing.T) *geminiStreamClientState {
+		t.Helper()
+		state := newGeminiStreamClientState(
+			testStreamContext(), UpstreamResponses, usageOnlyPolicy(FeatureProviderReasoningText), "resp_1", "gemini-x",
+		)
+		state.ctx.GeminiIncludeThoughts = false
+		for _, event := range []ResponsesSSEEvent{
+			fsmCreated(1),
+			ResponseOutputItemAddedEvent{
+				Type: "response.output_item.added", SequenceNumber: 2, OutputIndex: 0,
+				Item: &ResponsesReasoningOutputItem{
+					ID: "rs_1", Type: "reasoning", Status: ResponsesItemInProgress,
+					Summary: []ResponsesReasoningSummary{},
+				},
+			},
+			ResponseReasoningSummaryPartAddedEvent{
+				Type: "response.reasoning_summary_part.added", SequenceNumber: 3,
+				ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0,
+				Part: openairesponses.SummaryTextPart{Type: "summary_text", Text: ""},
+			},
+		} {
+			if _, err := state.Convert(event); err != nil {
+				t.Fatalf("%s: %v", event.EventType(), err)
+			}
+		}
+		return state
+	}
+
+	state := open(t)
+	// The next semantic-byte charge cannot fit, so the delta's retention is
+	// refused even though the loss is allowed.
+	state.budget.semanticBytesBudget = 1
+	_, err := state.Convert(ResponseReasoningSummaryTextDeltaEvent{
+		Type: "response.reasoning_summary_text.delta", SequenceNumber: 4,
+		ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0, Delta: "hmm",
+	})
+	if err == nil {
+		t.Fatal("budget-exhausted summary delta: nil error")
+	}
+	if n := countReportFeature(state.report, FeatureProviderReasoningText); n != 0 {
+		t.Fatalf("reasoning loss recorded for a rejected delta: %+v", state.report.Losses)
+	}
+
+	// The same delta with budget available records the loss once.
+	state = open(t)
+	if _, err := state.Convert(ResponseReasoningSummaryTextDeltaEvent{
+		Type: "response.reasoning_summary_text.delta", SequenceNumber: 4,
+		ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0, Delta: "hmm",
+	}); err != nil {
+		t.Fatalf("summary delta: %v", err)
+	}
+	if n := countReportFeature(state.report, FeatureProviderReasoningText); n != 1 {
+		t.Fatalf("reasoning loss recorded %d times, want 1: %+v", n, state.report.Losses)
+	}
+}
+
+func TestGeminiStreamClientContentPartAddedLogprobsAreGated(t *testing.T) {
+	// Logprobs announced on the content_part.added part must not bypass the
+	// loss gate: refused under a strict policy, recorded once when allowed.
+	openMessage := func(t *testing.T, policy LossPolicy) *geminiStreamClientState {
+		t.Helper()
+		state := newGeminiStreamClientState(
+			testStreamContext(), UpstreamResponses, policy, "resp_1", "gemini-x",
+		)
+		if _, err := state.Convert(fsmCreated(1)); err != nil {
+			t.Fatalf("created: %v", err)
+		}
+		if _, err := state.Convert(fsmMessageAdded(2, 0, "msg_1")); err != nil {
+			t.Fatalf("message added: %v", err)
+		}
+		return state
+	}
+	partAdded := func(seq int64, logprobs []openairesponses.TextLogprob) ResponseContentPartAddedEvent {
+		return ResponseContentPartAddedEvent{
+			Type: "response.content_part.added", SequenceNumber: seq,
+			ItemID: "msg_1", OutputIndex: 0, ContentIndex: 0,
+			Part: &ResponsesStreamOutputTextPart{
+				Type: "output_text", Text: "",
+				Annotations: []ResponsesAnnotation{}, Logprobs: logprobs,
+			},
+		}
+	}
+	logprob := []openairesponses.TextLogprob{{Token: "hi", Logprob: -0.1}}
+	var unsupported *UnsupportedFeatureError
+
+	state := openMessage(t, StrictLossPolicy())
+	err := convertErr(state, partAdded(3, logprob))
+	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureLogprobs) {
+		t.Fatalf("added-only logprobs: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureLogprobs)
+	}
+
+	state = openMessage(t, usageOnlyPolicy(FeatureLogprobs))
+	if err := convertErr(state, partAdded(3, logprob)); err != nil {
+		t.Fatalf("allowed part added: %v", err)
+	}
+	if n := countReportFeature(state.report, FeatureLogprobs); n != 1 {
+		t.Fatalf("logprobs loss recorded %d times, want 1: %+v", n, state.report.Losses)
+	}
+	// A second announcement in the same stream (the next content part)
+	// records nothing further.
+	second := partAdded(4, logprob)
+	second.ContentIndex = 1
+	if err := convertErr(state, second); err != nil {
+		t.Fatalf("second part added: %v", err)
+	}
+	if n := countReportFeature(state.report, FeatureLogprobs); n != 1 {
+		t.Fatalf("logprobs loss recorded %d times after two announcements, want 1: %+v", n, state.report.Losses)
+	}
+}
+
+func TestResponsesToGeminiMissingEventNameNotedOnlyForConvertedEvents(t *testing.T) {
+	// A data-only frame whose event the state refuses must leave no
+	// missing-event-name note; a converted data-only frame records it once.
+	ctx := testStreamContext()
+	ctx.LossPolicy = usageOnlyPolicy()
+	state := newGeminiStreamClientState(ctx, UpstreamResponses, usageOnlyPolicy(), "resp_1", "gemini-x")
+	c := newResponsesToGeminiConverter(state)
+
+	created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1.0,"status":"in_progress","model":"gemini-x","output":[]}}`)
+	if _, err := c.Convert(SSEEvent{Data: created}); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	if n := countReportFeature(state.report, FeatureMissingEventName); n != 1 {
+		t.Fatalf("missing-event-name note recorded %d times, want 1: %+v", n, state.report.Losses)
+	}
+
+	// The refused frame: a phased message the strict loss policy rejects. The
+	// created frame arrives NAMED so the once-gate is still closed when the
+	// refused data-only frame arrives — only then does the count prove which
+	// frame recorded the note.
+	phased := []byte(`{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"msg_1","type":"message","status":"in_progress","role":"assistant","content":[],"phase":"final_answer"}}`)
+	strictState := newGeminiStreamClientState(
+		testStreamContext(), UpstreamResponses, StrictLossPolicy(), "resp_1", "gemini-x",
+	)
+	strict := newResponsesToGeminiConverter(strictState)
+	if _, err := strict.Convert(SSEEvent{Event: "response.created", Data: created}); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	if _, err := strict.Convert(SSEEvent{Data: phased}); err == nil {
+		t.Fatal("phased message under strict policy: nil error")
+	}
+	if n := countReportFeature(strictState.report, FeatureMissingEventName); n != 0 {
+		t.Fatalf("missing-event-name note recorded for a refused frame: %+v", strictState.report.Losses)
+	}
+}
+
 func TestGeminiStreamClientOutputItemAddedIsGated(t *testing.T) {
 	// Metadata a Gemini stream cannot carry is decided when the item is
 	// announced: an upstream must not get its text deltas through before the

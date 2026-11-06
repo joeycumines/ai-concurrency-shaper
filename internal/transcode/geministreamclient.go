@@ -132,12 +132,18 @@ func (s *geminiStreamClientState) convertEvent(event ResponsesSSEEvent) ([]gemin
 
 	switch value := event.(type) {
 	case ResponseTextDeltaEvent:
+		chunks, err := s.textChunk(value.Delta, false)
+		if err != nil {
+			return nil, err
+		}
+		// The loss describes text that reached the client, so it follows the
+		// committed chunk.
 		if len(value.Logprobs) > 0 {
 			if err := s.loseLogprobs("output_text.delta.logprobs"); err != nil {
 				return nil, err
 			}
 		}
-		return s.textChunk(value.Delta, false)
+		return chunks, nil
 	case ResponseRefusalDeltaEvent:
 		if value.Delta == "" {
 			// An empty delta encodes nothing: no note, no chunk.
@@ -165,9 +171,37 @@ func (s *geminiStreamClientState) convertEvent(event ResponsesSSEEvent) ([]gemin
 			// nor retained summary state.
 			return nil, nil
 		}
+		if !s.ctx.GeminiIncludeThoughts && !s.policy.Allows(FeatureProviderReasoningText) {
+			// The policy gate is peeked BEFORE any state changes: a refused
+			// loss must leave no retained summary or budget charge behind.
+			return nil, &UnsupportedFeatureError{
+				Protocol: "transcode",
+				Path:     "candidates[0].content.parts[].thought",
+				Feature:  string(FeatureProviderReasoningText),
+			}
+		}
+		// Retain the streamed text for the coverage proof in loseReasoning,
+		// in both render modes: the retained copy is semantic state, so it is
+		// charged like rendered text (textChunk charges its own copy when
+		// thoughts are included — retention and emission are separate).
+		if err := s.budget.addSemanticBytes(int64(len(value.Delta))); err != nil {
+			return nil, s.wireError(err)
+		}
+		if s.streamedSummary == nil {
+			s.streamedSummary = make(map[string]*strings.Builder)
+		}
+		buf := s.streamedSummary[value.ItemID]
+		if buf == nil {
+			if err := s.budget.addStateEntries(1); err != nil {
+				return nil, s.wireError(err)
+			}
+			buf = &strings.Builder{}
+			s.streamedSummary[value.ItemID] = buf
+		}
+		buf.WriteString(value.Delta)
 		if !s.ctx.GeminiIncludeThoughts {
-			// The loss decision comes first: a refused event must not leave
-			// retained state or budget charges behind.
+			// The loss follows the committed retention: it describes
+			// reasoning text the client did not receive.
 			if !s.thoughtLossNoted {
 				s.thoughtLossNoted = true
 				if err := s.report.Lose(
@@ -177,29 +211,6 @@ func (s *geminiStreamClientState) convertEvent(event ResponsesSSEEvent) ([]gemin
 					return nil, err
 				}
 			}
-		}
-		if value.Delta != "" {
-			// Retain the streamed text for the coverage proof in
-			// loseReasoning: the retained copy is semantic state, so it is
-			// charged like rendered text (textChunk charges its own copy when
-			// thoughts are included — retention and emission are separate).
-			if err := s.budget.addSemanticBytes(int64(len(value.Delta))); err != nil {
-				return nil, s.wireError(err)
-			}
-			if s.streamedSummary == nil {
-				s.streamedSummary = make(map[string]*strings.Builder)
-			}
-			buf := s.streamedSummary[value.ItemID]
-			if buf == nil {
-				if err := s.budget.addStateEntries(1); err != nil {
-					return nil, s.wireError(err)
-				}
-				buf = &strings.Builder{}
-				s.streamedSummary[value.ItemID] = buf
-			}
-			buf.WriteString(value.Delta)
-		}
-		if !s.ctx.GeminiIncludeThoughts {
 			return nil, nil
 		}
 		return s.textChunk(value.Delta, true)
@@ -213,6 +224,13 @@ func (s *geminiStreamClientState) convertEvent(event ResponsesSSEEvent) ([]gemin
 		// logprobs by itself.
 		if part, ok := value.Part.(*ResponsesStreamOutputTextPart); ok && len(part.Logprobs) > 0 {
 			return nil, s.loseLogprobs("content_part.done.logprobs")
+		}
+		return nil, nil
+	case ResponseContentPartAddedEvent:
+		// The announced part may carry logprobs by itself, before any delta
+		// repeats them; the same loss gate decides them here.
+		if part, ok := value.Part.(*ResponsesStreamOutputTextPart); ok && len(part.Logprobs) > 0 {
+			return nil, s.loseLogprobs("content_part.added.logprobs")
 		}
 		return nil, nil
 	case ResponseOutputItemAddedEvent:
@@ -694,6 +712,18 @@ func (c *responsesToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatc
 	if err != nil {
 		return convertedBatch{}, err
 	}
+	if frame.Event != "" {
+		if err := validateEventNameMatchesJSONType(frame); err != nil {
+			return convertedBatch{}, upstreamWireError(UpstreamResponses, http.StatusOK, err)
+		}
+	}
+	chunks, err := c.state.Convert(event)
+	if err != nil {
+		return convertedBatch{}, err
+	}
+	// The note is recorded only for a frame the state actually converted: it
+	// describes routing that produced client output, and a refused frame
+	// leaves the note behind on a failed exchange otherwise.
 	if frame.Event == "" {
 		if !c.missingEventNameNoted {
 			c.missingEventNameNoted = true
@@ -705,12 +735,6 @@ func (c *responsesToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatc
 				return convertedBatch{}, err
 			}
 		}
-	} else if err := validateEventNameMatchesJSONType(frame); err != nil {
-		return convertedBatch{}, upstreamWireError(UpstreamResponses, http.StatusOK, err)
-	}
-	chunks, err := c.state.Convert(event)
-	if err != nil {
-		return convertedBatch{}, err
 	}
 	batch, err := marshalGeminiChunks(chunks)
 	if err != nil {
