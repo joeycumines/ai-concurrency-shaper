@@ -304,6 +304,41 @@ func TestGeminiUpstreamStreamThoughtCapability(t *testing.T) {
 	})
 }
 
+// TestGeminiUpstreamStreamNullRawMemberIsNotAPayload proves an explicit JSON
+// null on a raw-member payload field is not a payload, matching Part.Validate
+// and the non-streaming decode: the text renders, and a bare null member
+// part is a no-op rather than an unrepresentable refusal.
+func TestGeminiUpstreamStreamNullRawMemberIsNotAPayload(t *testing.T) {
+	t.Run("text with a null payload member renders", func(t *testing.T) {
+		ctx := geminiStreamTestContext()
+		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_t", "m", 1, nil)
+		events, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"hi","executableCode":null}]},"index":0}]}`,
+		))
+		if err != nil {
+			t.Fatalf("text with null executableCode: %v", err)
+		}
+		types := geminiStreamEventTypes(events)
+		if !contains(types, "response.output_text.delta") {
+			t.Fatalf("types = %v, want a text delta", types)
+		}
+	})
+
+	t.Run("bare null member part is refused at the wire boundary", func(t *testing.T) {
+		// The wire model's own payload-union count (Part.Validate) treats an
+		// explicit null as absent, so a part carrying ONLY a null payload
+		// member has no payload and is refused at decode — no state machine
+		// ever observes it. Pinned so the decode boundary stays the single
+		// authority for the payload union.
+		_, err := geminigeneratecontent.DecodeResponse([]byte(
+			`{"candidates":[{"content":{"parts":[{"executableCode":null}]},"index":0}]}`,
+		))
+		if err == nil || !strings.Contains(err.Error(), "part requires a payload member") {
+			t.Fatalf("bare null member part: err = %v, want the missing-payload wire rejection", err)
+		}
+	})
+}
+
 func contains(list []string, want string) bool {
 	return slices.Contains(list, want)
 }

@@ -264,9 +264,11 @@ func DecodeGeminiResponse(
 					// streaming empty-delta short circuit. A signature
 					// attached to it is still gated below.
 					if text := *part.Text; text != "" {
-						flushText()
 						switch {
 						case capabilities.ProviderReasoningThinking:
+							// Only a mapped thought opens a new part: the
+							// pending text run ends here.
+							flushText()
 							message.Parts = append(message.Parts, CanonicalThinkingPart{
 								Text:      text,
 								Signature: SyntheticThinkingSignature,
@@ -279,7 +281,8 @@ func DecodeGeminiResponse(
 								return CanonicalResponse{}, report, err
 							}
 						case capabilities.ProviderReasoningText:
-							message.Parts = append(message.Parts, CanonicalText{Text: text})
+							// Reasoning mapped to text joins the pending run.
+							pendingText.WriteString(text)
 							if err := report.Note(
 								FeatureProviderReasoningText,
 								partPath,
@@ -288,6 +291,11 @@ func DecodeGeminiResponse(
 								return CanonicalResponse{}, report, err
 							}
 						default:
+							// A dropped thought renders nothing, so the
+							// pending text run stays un-split: [a, thought,
+							// c] concatenates to one "ac" text part, the
+							// same result as a stream that never carried
+							// the thought.
 							if err := report.Lose(
 								policy,
 								FeatureProviderReasoningText,
@@ -323,6 +331,13 @@ func DecodeGeminiResponse(
 						)
 					}
 					callID = ids.New(gcallPrefix)
+					if err := report.Note(
+						FeatureGeminiCallIDSynthesized,
+						partPath+".functionCall",
+						"a functionCall without an id was given a proxy-minted id",
+					); err != nil {
+						return CanonicalResponse{}, report, err
+					}
 				}
 				args := call.Args
 				if len(bytes.TrimSpace(args)) == 0 {
@@ -344,6 +359,12 @@ func DecodeGeminiResponse(
 						response.Source.GeminiCallSignatures = make(map[string]string)
 					}
 					response.Source.GeminiCallSignatures[callID] = *part.ThoughtSignature
+				}
+			case part.FunctionResponse != nil:
+				return CanonicalResponse{}, report, &UnrepresentableError{
+					Protocol: string(UpstreamGemini),
+					Path:     partPath,
+					Detail:   "a functionResponse part cannot appear in a model response",
 				}
 			case part.InlineData != nil, part.FileData != nil,
 				geminigeneratecontent.RawMemberPresent(part.ExecutableCode),

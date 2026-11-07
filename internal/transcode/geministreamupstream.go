@@ -493,11 +493,16 @@ func (s *geminiResponsesStreamState) convertPart(
 ) ([]ResponsesSSEEvent, error) {
 	path := fmt.Sprintf("candidates[].content.parts[%d]", partIndex)
 
-	// Unsupported payloads are unrepresentable in the Responses stream.
+	// Unsupported payloads are unrepresentable in the Responses stream. Raw
+	// member payloads are read with RawMemberPresent, matching Part.Validate
+	// and the non-streaming decode: an explicit JSON null is not a payload.
 	switch {
 	case part.InlineData != nil, part.FileData != nil,
-		part.ExecutableCode != nil, part.CodeExecutionResult != nil,
-		part.ToolCall != nil, part.ToolResponse != nil, part.AudioTranscription != nil:
+		geminigeneratecontent.RawMemberPresent(part.ExecutableCode),
+		geminigeneratecontent.RawMemberPresent(part.CodeExecutionResult),
+		geminigeneratecontent.RawMemberPresent(part.ToolCall),
+		geminigeneratecontent.RawMemberPresent(part.ToolResponse),
+		geminigeneratecontent.RawMemberPresent(part.AudioTranscription):
 		return nil, &UnrepresentableError{
 			Protocol: string(UpstreamGemini),
 			Path:     path,
