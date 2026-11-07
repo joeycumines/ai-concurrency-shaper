@@ -1005,6 +1005,47 @@ func TestDecodeResponsesSSEEvent(t *testing.T) {
 	}
 }
 
+// TestResponsesAnnotationPayloadRejectedAtWireBoundary pins the load-bearing
+// fact behind the annotations scope decision: the wire shadow models
+// Annotation as a bare type tag, so a REAL annotation payload (a url_citation
+// carrying its variant fields) is rejected by strict decode before any state
+// machine observes it — on the stream surface and on the non-streaming
+// output surface alike. Only degenerate type-only tags survive decode, and
+// every consumer (both client renders and the non-streaming decode) drops
+// those identically, so no dialect needs an annotation loss key. The
+// adjudication and its full evidence chain live in the conversion blueprint;
+// this test exists so the decode boundary cannot silently widen.
+func TestResponsesAnnotationPayloadRejectedAtWireBoundary(t *testing.T) {
+	streamFrame := `{"type":"response.content_part.added","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[{"type":"url_citation","url":"https://example.com","title":"example","start_index":0,"end_index":4}]}}`
+	if _, err := decodeResponsesSSEEvent([]byte(streamFrame)); err == nil {
+		t.Fatal("stream frame with a real url_citation payload: nil error, want the strict-decode rejection")
+	}
+
+	nonStreaming := `{"id":"r","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hi","annotations":[{"type":"url_citation","url":"https://example.com","title":"example","start_index":0,"end_index":4}]}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`
+	if _, err := DecodeResponsesResponse([]byte(nonStreaming)); err == nil {
+		t.Fatal("non-streaming response with a real url_citation payload: nil error, want the strict-decode rejection")
+	}
+
+	// Only the degenerate type-only tag survives decode; every consumer
+	// drops it without a loss key, and internal emitters emit empty arrays.
+	degenerate := `{"type":"response.content_part.added","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[{"type":"url_citation"}]}}`
+	event, err := decodeResponsesSSEEvent([]byte(degenerate))
+	if err != nil {
+		t.Fatalf("degenerate type-only tag: %v", err)
+	}
+	added, ok := event.(ResponseContentPartAddedEvent)
+	if !ok {
+		t.Fatalf("event type %T", event)
+	}
+	part, ok := added.Part.(*ResponsesStreamOutputTextPart)
+	if !ok {
+		t.Fatalf("part type %T", added.Part)
+	}
+	if len(part.Annotations) != 1 || part.Annotations[0].Type != "url_citation" {
+		t.Fatalf("annotations = %+v, want the surviving type-only tag", part.Annotations)
+	}
+}
+
 func TestValidateFinalToolInput(t *testing.T) {
 	if err := validateFinalToolInput(`{"x":1}`); err != nil {
 		t.Fatal(err)
