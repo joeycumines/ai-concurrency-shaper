@@ -422,6 +422,58 @@ func TestGeminiUpstreamStreamPartLossesFollowPayloadCommit(t *testing.T) {
 		}
 	})
 
+	t.Run("empty thought with signature still loses the signature", func(t *testing.T) {
+		// The pinned contract (TestDecodeGeminiResponseEmptyThoughtPartRecords
+		// Nothing): an empty thought part renders nothing, but a signature
+		// attached to it is still an observable loss of that part — refused
+		// under a policy that does not approve it, recorded once when
+		// approved.
+		ctx := geminiStreamTestContext()
+		ctx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{}}
+		s := newGeminiResponsesStreamState(
+			ctx, ctx.LossPolicy, ChatCapabilities{ProviderReasoningThinking: true}, "resp_t", "m", 1, nil,
+		)
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"sig"}]},"index":0}]}`,
+		))
+		var unsupported *UnsupportedFeatureError
+		if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureGeminiResponseThoughtSignature) {
+			t.Fatalf("empty thought signature under strict policy: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureGeminiResponseThoughtSignature)
+		}
+
+		ctx2 := geminiStreamTestContext()
+		s2 := newGeminiResponsesStreamState(
+			ctx2, ctx2.LossPolicy, ChatCapabilities{ProviderReasoningThinking: true}, "resp_t", "m", 1, nil,
+		)
+		if _, err := s2.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"sig"}]},"index":0}]}`,
+		)); err != nil {
+			t.Fatalf("empty thought signature under approved policy: %v", err)
+		}
+		if n := countReportFeature(s2.report, FeatureGeminiResponseThoughtSignature); n != 1 {
+			t.Fatalf("signature loss recorded %d times, want 1: %+v", n, s2.report.Losses)
+		}
+	})
+
+	t.Run("dropped thought with signature still loses the signature", func(t *testing.T) {
+		// No reasoning capability: the thought text is an approved loss, and
+		// the signature on that same part is a separate observable loss —
+		// matching the non-streaming decode, which records both.
+		ctx := geminiStreamTestContext()
+		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_t", "m", 1, nil)
+		if _, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"hmm","thought":true,"thoughtSignature":"sig"}]},"index":0}]}`,
+		)); err != nil {
+			t.Fatalf("dropped thought with signature: %v", err)
+		}
+		if n := countReportFeature(s.report, FeatureProviderReasoningText); n != 1 {
+			t.Fatalf("reasoning loss recorded %d times, want 1: %+v", n, s.report.Losses)
+		}
+		if n := countReportFeature(s.report, FeatureGeminiResponseThoughtSignature); n != 1 {
+			t.Fatalf("signature loss recorded %d times, want 1: %+v", n, s.report.Losses)
+		}
+	})
+
 	t.Run("signature-only part records before its nil return", func(t *testing.T) {
 		// A signature-only part emits no content events (only the lifecycle
 		// pair the chunk itself opens) but still loses the signature: the

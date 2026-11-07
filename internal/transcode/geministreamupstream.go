@@ -557,7 +557,13 @@ func (s *geminiResponsesStreamState) convertPart(
 		if *part.Text == "" {
 			// An empty thought delta carries no payload: the empty-delta
 			// short circuit in emitThoughtText applies, and no note or loss
-			// is recorded for an encoding that produced nothing.
+			// is recorded for an encoding that produced nothing. A signature
+			// attached to the empty part is still an observable loss of that
+			// exact part (the non-streaming decode records it too), so it is
+			// decided before the empty return.
+			if err := s.loseNonCallSignature(part, path); err != nil {
+				return nil, err
+			}
 			return nil, nil
 		}
 		// Same capability rules as the non-streaming decode: thought text is
@@ -579,10 +585,16 @@ func (s *geminiResponsesStreamState) convertPart(
 				return nil, err
 			}
 		default:
+			// The dropped thought commits as an approved loss, so its
+			// modifiers and signature are decided here — both remain
+			// observable losses of the part the stream dropped.
 			if err := s.loseThought(path); err != nil {
 				return nil, err
 			}
 			if err := s.losePartMetadata(partMetadata, path); err != nil {
+				return nil, err
+			}
+			if err := s.loseNonCallSignature(part, path); err != nil {
 				return nil, err
 			}
 			return nil, nil

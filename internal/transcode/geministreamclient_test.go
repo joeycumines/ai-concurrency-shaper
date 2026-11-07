@@ -1128,6 +1128,34 @@ func TestGeminiStreamResponsesToGeminiFailedFrameStaysFailed(t *testing.T) {
 	}
 }
 
+// TestGeminiStreamResponsesToGeminiStateLatchHoldsAtEOF proves a failure
+// latched in the state — fed to the state directly, so the converter's own
+// latch never fired — cannot be washed out at EOF: FinalizeEOF returns the
+// state's failure instead of a clean terminal.
+func TestGeminiStreamResponsesToGeminiStateLatchHoldsAtEOF(t *testing.T) {
+	ctx := testStreamContext()
+	ctx.LossPolicy = usageOnlyPolicy()
+	state := newGeminiStreamClientState(ctx, UpstreamResponses, usageOnlyPolicy(), "resp_1", "gemini-x")
+	if _, err := state.Convert(fsmCreated(1)); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	_, failure := state.Convert(ResponseErrorEvent{
+		Type: "error", SequenceNumber: 2, Code: "server_error", Message: "boom",
+	})
+	if failure == nil || !isUpstreamConversionError(failure) {
+		t.Fatalf("error event: err = %T %v, want an upstream conversion error", failure, failure)
+	}
+
+	c := newResponsesToGeminiConverter(state)
+	batch, err := c.FinalizeEOF()
+	if !errors.Is(err, failure) {
+		t.Fatalf("FinalizeEOF after a state-latched failure: err = %v, want the latched %v", err, failure)
+	}
+	if batch.Terminal || len(batch.Events) != 0 {
+		t.Fatalf("FinalizeEOF after a state-latched failure returned %+v", batch)
+	}
+}
+
 func TestGeminiStreamChatToGeminiFailedFrameStaysFailed(t *testing.T) {
 	// A Chat frame that fails to decode after the finish chunk must latch on
 	// the converter: [DONE] and EOF keep reporting the failure, never release

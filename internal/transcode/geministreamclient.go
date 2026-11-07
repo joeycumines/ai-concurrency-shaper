@@ -747,8 +747,14 @@ func (c *responsesToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatc
 // FinalizeEOF reports a truncation when the upstream ended before a terminal
 // condition; a stream that reached its terminal has nothing left to release.
 func (c *responsesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	// Both latches are checked: the converter's own (a frame it failed on)
+	// and the state's (a failure fed to the state directly). Either way, a
+	// failed stream can never report a clean terminal at EOF.
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
+	}
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
 	}
 	if !c.state.sawTerminal {
 		return convertedBatch{}, upstreamWireError(
