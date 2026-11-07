@@ -359,7 +359,11 @@ func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 		batch.Terminal = true
 		return batch, nil
 	}
-	if c.chat.sawFinish || c.anthropic.sawTerminal {
+	// A terminal is reported only when the Anthropic state committed one: a
+	// [DONE] whose release failed mid-conversion leaves the chat flags set
+	// but no committed terminal, and EOF must report the failure, not a
+	// clean success.
+	if c.anthropic.sawTerminal {
 		return convertedBatch{Terminal: true}, nil
 	}
 	return convertedBatch{}, errors.New(

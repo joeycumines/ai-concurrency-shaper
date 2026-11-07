@@ -390,3 +390,64 @@ func TestChatStreamComposedPrematureDone(t *testing.T) {
 		t.Fatalf("premature [DONE] must not emit a success terminal: %q", output)
 	}
 }
+
+// TestChatStreamComposedFailedReleaseNeverCleanAtEOF proves a [DONE] whose
+// terminal release fails mid-conversion cannot be reported as a success
+// terminal at EOF: FinalizeEOF must return the failure, not a clean
+// Terminal batch. The release here fails inside the Anthropic render (a
+// strict usage policy refusing the terminal's unknown breakdown), after the
+// chat state has already marked the finish and released the terminal.
+func TestChatStreamComposedFailedReleaseNeverCleanAtEOF(t *testing.T) {
+	chat := newChatResponsesStreamState(
+		testStreamContext(),
+		permissiveLossPolicy(),
+		ChatCapabilities{},
+		"resp_1",
+		"gpt-4.1",
+		1710000000,
+		nil,
+	)
+	// Early-usage-only policy: the message_start usage loss (which the chat
+	// stream cannot provide) is approved, but the terminal's unknown
+	// breakdown components are refused, so the release through the Anthropic
+	// state fails inside the terminal conversion.
+	anthropic := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		LossPolicy{Allowed: map[Feature]struct{}{FeatureUsageUnknown: {}}},
+		ChatCapabilities{},
+		"msg_1",
+		"claude-x",
+		1710000000,
+	)
+	converter := newChatToAnthropicConverter(chat, anthropic)
+
+	if _, err := converter.Convert(SSEEvent{Data: []byte(
+		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`,
+	)}); err != nil {
+		t.Fatal(err)
+	}
+	// A finish chunk with bare usage (no breakdown details) holds the
+	// terminal; the [DONE] release then hits the strict usage refusal.
+	if _, err := converter.Convert(SSEEvent{Data: []byte(
+		`{"id":"c","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}`,
+	)}); err != nil {
+		t.Fatal(err)
+	}
+	_, releaseErr := converter.Convert(SSEEvent{Data: []byte("[DONE]")})
+	if releaseErr == nil {
+		t.Fatal("[DONE] release: nil error, want the strict usage refusal")
+	}
+	var unsupported *UnsupportedFeatureError
+	if !errors.As(releaseErr, &unsupported) {
+		t.Fatalf("[DONE] release: err = %T %v, want an UnsupportedFeatureError", releaseErr, releaseErr)
+	}
+
+	// EOF after the failed release must NOT return a clean terminal.
+	batch, err := converter.FinalizeEOF()
+	if err == nil {
+		t.Fatalf("FinalizeEOF after a failed release: nil error, batch %+v", batch)
+	}
+	if batch.Terminal || len(batch.Events) != 0 {
+		t.Fatalf("FinalizeEOF after a failed release returned %+v, want an empty non-terminal batch", batch)
+	}
+}
