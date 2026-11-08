@@ -1546,6 +1546,9 @@ func (c *geminiToAnthropicConverter) convertFrame(frame SSEEvent) (convertedBatc
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
 	}
+	if c.anthropic.streamError != nil {
+		return convertedBatch{}, c.anthropic.streamError
+	}
 	if frame.Event != "" {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamGemini, http.StatusOK,

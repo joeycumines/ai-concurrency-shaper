@@ -220,8 +220,32 @@ func TestComposedConvertersCheckAnthropicStateLatch(t *testing.T) {
 		if latched == nil {
 			t.Fatal("event after the terminal: nil error")
 		}
-		batch, err := c.FinalizeEOF()
+		batch, err := c.Convert(SSEEvent{Data: []byte("[DONE]")})
+		assertLatchedBatch(t, "[DONE] after an Anthropic state failure", batch, err, latched)
+		batch, err = c.FinalizeEOF()
 		assertLatchedBatch(t, "FinalizeEOF after an Anthropic state failure", batch, err, latched)
+	})
+
+	t.Run("chat to gemini checks the chat state latch", func(t *testing.T) {
+		ctx := testStreamContext()
+		ctx.LossPolicy = usageOnlyPolicy()
+		chat := newChatResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_1", "gpt-4.1", 1710000000, nil)
+		gemini := newGeminiStreamClientState(ctx, UpstreamChatCompletions, ctx.LossPolicy, "resp_1", "gemini-x")
+		c := newChatToGeminiConverter(chat, gemini)
+		if _, err := c.Convert(chatFrame(t, ChatStreamDelta{Content: new("hi")}, nil)); err != nil {
+			t.Fatalf("text delta: %v", err)
+		}
+		if _, err := c.Convert(chatFrame(t, ChatStreamDelta{}, new("stop"))); err != nil {
+			t.Fatalf("finish chunk: %v", err)
+		}
+		_, latched := chat.Convert(chatChunk(t, ChatStreamDelta{Content: new("late")}, nil))
+		if latched == nil {
+			t.Fatal("content after finish: nil error")
+		}
+		batch, err := c.Convert(SSEEvent{Data: []byte("[DONE]")})
+		assertLatchedBatch(t, "[DONE] after a chat state failure", batch, err, latched)
+		batch, err = c.FinalizeEOF()
+		assertLatchedBatch(t, "FinalizeEOF after a chat state failure", batch, err, latched)
 	})
 }
 

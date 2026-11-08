@@ -556,6 +556,9 @@ func (c *chatToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) 
 
 // convertFrame converts one frame, leaving failure latching to Convert.
 func (c *chatToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatch, error) {
+	if c.chat.streamError != nil {
+		return convertedBatch{}, c.chat.streamError
+	}
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
 	}
@@ -617,8 +620,13 @@ func (c *chatToGeminiConverter) releaseTerminals() (convertedBatch, error) {
 // finishing chunk without the [DONE] sentinel. A stream that ends without any
 // finish reason is a truncation, never a released terminal.
 func (c *chatToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	// Every latch is checked: the converter's own (a frame it failed on) and
+	// both states' (a failure fed to a state directly).
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
+	}
+	if c.chat.streamError != nil {
+		return convertedBatch{}, c.chat.streamError
 	}
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
