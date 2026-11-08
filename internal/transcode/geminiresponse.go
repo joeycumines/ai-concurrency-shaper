@@ -350,7 +350,9 @@ func DecodeGeminiResponse(
 				}
 				response.Items = append(response.Items, item)
 				// The note describes a minted id the response carries, so it
-				// follows the committed call.
+				// follows the committed call. A later refusal of the response
+				// (a part modifier, IR validation) can still leave it in the
+				// returned report; callers discard the report on error.
 				if callID != call.ID {
 					if err := report.Note(
 						FeatureGeminiCallIDSynthesized,
