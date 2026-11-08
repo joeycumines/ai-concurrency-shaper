@@ -1005,16 +1005,14 @@ func TestDecodeResponsesSSEEvent(t *testing.T) {
 	}
 }
 
-// TestResponsesAnnotationPayloadRejectedAtWireBoundary pins the load-bearing
-// fact behind the annotations scope decision: the wire shadow models
-// Annotation as a bare type tag, so a REAL annotation payload (a url_citation
-// carrying its variant fields) is rejected by strict decode before any state
-// machine observes it — on the stream surface and on the non-streaming
-// output surface alike. Only degenerate type-only tags survive decode, and
-// every consumer (both client renders and the non-streaming decode) drops
-// those identically, so no dialect needs an annotation loss key. The
-// adjudication and its full evidence chain live in the conversion blueprint;
-// this test exists so the decode boundary cannot silently widen.
+// TestResponsesAnnotationPayloadRejectedAtWireBoundary pins the decode
+// boundary for Responses annotations: the wire shadow models Annotation as a
+// bare type tag, so a REAL annotation payload (a url_citation carrying its
+// variant fields) is rejected by strict decode before any state machine
+// observes it — on the stream surface and on the non-streaming output
+// surface alike — while a degenerate type-only tag survives decode and
+// reaches the state machine. The test keeps that boundary from silently
+// widening.
 func TestResponsesAnnotationPayloadRejectedAtWireBoundary(t *testing.T) {
 	streamFrame := `{"type":"response.content_part.added","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[{"type":"url_citation","url":"https://example.com","title":"example","start_index":0,"end_index":4}]}}`
 	if _, err := decodeResponsesSSEEvent([]byte(streamFrame)); err == nil {

@@ -331,16 +331,11 @@ func DecodeGeminiResponse(
 						)
 					}
 					callID = ids.New(gcallPrefix)
-					if err := report.Note(
-						FeatureGeminiCallIDSynthesized,
-						partPath+".functionCall",
-						"a functionCall without an id was given a proxy-minted id",
-					); err != nil {
-						return CanonicalResponse{}, report, err
-					}
 				}
+				// An absent or explicit-null args member is no arguments,
+				// matching the wire model (RawMemberPresent) and the stream.
 				args := call.Args
-				if len(bytes.TrimSpace(args)) == 0 {
+				if !geminigeneratecontent.RawMemberPresent(args) {
 					args = json.RawMessage("{}")
 				} else if !jsonObjectShaped(args) {
 					return CanonicalResponse{}, report, upstreamWireError(
@@ -354,6 +349,17 @@ func DecodeGeminiResponse(
 					Arguments: ParseToolArguments(string(args)),
 				}
 				response.Items = append(response.Items, item)
+				// The note describes a minted id the response carries, so it
+				// follows the committed call.
+				if callID != call.ID {
+					if err := report.Note(
+						FeatureGeminiCallIDSynthesized,
+						partPath+".functionCall",
+						"a functionCall without an id was given a proxy-minted id",
+					); err != nil {
+						return CanonicalResponse{}, report, err
+					}
+				}
 				if part.ThoughtSignature != nil && *part.ThoughtSignature != "" {
 					if response.Source.GeminiCallSignatures == nil {
 						response.Source.GeminiCallSignatures = make(map[string]string)
