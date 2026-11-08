@@ -769,6 +769,42 @@ func TestResponsesStreamEventNameToleranceOutputEquivalence(t *testing.T) {
 	}
 }
 
+// TestResponsesStreamMissingEventNameNotedOnlyForConvertedEvents proves the
+// missing-event-name note is recorded only for a frame the state actually
+// converted: a data-only frame whose event the state refuses must leave no
+// note, because the note describes routing that produced client output.
+func TestResponsesStreamMissingEventNameNotedOnlyForConvertedEvents(t *testing.T) {
+	// A phased message item the strict loss policy refuses. The created frame
+	// arrives NAMED so the once-gate is still closed when the refused data-only
+	// frame arrives — only then does the count prove which frame recorded the
+	// note.
+	created := `{"type":"response.created","sequence_number":0,"response":{"id":"resp_1","object":"response","created_at":1.0,"status":"in_progress","model":"gpt-4.1","output":[]}}`
+	phased := `{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"msg_1","type":"message","status":"in_progress","role":"assistant","content":[],"phase":"final_answer"}}`
+
+	state := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		usageOnlyPolicy(),
+		ChatCapabilities{},
+		"msg_1",
+		"gpt-4.1",
+		1,
+	)
+	converter := newResponsesToAnthropicConverter(state)
+	if _, err := converter.Convert(SSEEvent{Event: "response.created", Data: []byte(created)}); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	if n := countReportFeature(state.report, FeatureMissingEventName); n != 0 {
+		t.Fatalf("named frame recorded %d missing-event-name notes, want 0: %+v", n, state.report.Losses)
+	}
+	_, err := converter.Convert(SSEEvent{Data: []byte(phased)})
+	if err == nil {
+		t.Fatal("phased message under strict policy: nil error")
+	}
+	if n := countReportFeature(state.report, FeatureMissingEventName); n != 0 {
+		t.Fatalf("missing-event-name note recorded %d times for a refused frame, want 0: %+v", n, state.report.Losses)
+	}
+}
+
 // TestResponsesStreamMismatchedEventNameRejected proves the tolerance is
 // scoped to an ABSENT event name: a present name that disagrees with the
 // JSON type stays a typed upstream wire error.

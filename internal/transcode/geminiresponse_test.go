@@ -194,6 +194,189 @@ func TestDecodeGeminiResponseFunctionCallNoID(t *testing.T) {
 	}
 }
 
+// TestDecodeGeminiResponseDroppedThoughtKeepsTextRun proves a thought part
+// dropped under the no-capability arm does not split adjacent text parts:
+// [text a, thought b, text c] renders ONE CanonicalText "ac" in one message.
+func TestDecodeGeminiResponseDroppedThoughtKeepsTextRun(t *testing.T) {
+	body := `{
+		"candidates": [{
+			"content": {"role": "model", "parts": [
+				{"text": "a"},
+				{"text": "b", "thought": true},
+				{"text": "c"}
+			]},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "m"
+	}`
+	resp, report, err := decodeGemini(body, permissivePolicy())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !reportHasFeature(report, FeatureProviderReasoningText) {
+		t.Fatalf("report lacks the dropped-thought loss: %+v", report.Losses)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %v, want one message item", resp.Items)
+	}
+	msg, ok := resp.Items[0].(*CanonicalMessageItem)
+	if !ok {
+		t.Fatalf("item type %T", resp.Items[0])
+	}
+	if len(msg.Parts) != 1 {
+		t.Fatalf("parts = %v, want the un-split text run", msg.Parts)
+	}
+	if text, ok := msg.Parts[0].(CanonicalText); !ok || text.Text != "ac" {
+		t.Fatalf("part = %#v, want one CanonicalText \"ac\"", msg.Parts[0])
+	}
+}
+
+// TestDecodeGeminiResponseFunctionResponseRejected proves a functionResponse
+// part in a model response is refused as unrepresentable by the non-streaming
+// decode, exactly as the streaming convertPart refuses it.
+func TestDecodeGeminiResponseFunctionResponseRejected(t *testing.T) {
+	body := `{
+		"candidates": [{
+			"content": {"role": "model", "parts": [
+				{"functionResponse": {"name": "f", "response": {"ok": true}}}
+			]},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "m"
+	}`
+	_, _, err := decodeGemini(body, permissivePolicy())
+	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
+		t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
+	}
+	if !strings.Contains(err.Error(), "functionResponse") {
+		t.Fatalf("error = %q, want the functionResponse violation", err.Error())
+	}
+}
+
+// TestDecodeGeminiResponseSynthesizedCallIDNoted proves the non-streaming
+// decode records the synthesized-call-id note when a functionCall carries no
+// id and a proxy-minted gcall_ id is emitted.
+func TestDecodeGeminiResponseSynthesizedCallIDNoted(t *testing.T) {
+	body := `{
+		"candidates": [{
+			"content": {"role": "model", "parts": [
+				{"functionCall": {"name": "f", "args": {}}}
+			]},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "m"
+	}`
+	resp, report, err := decodeGemini(body, permissivePolicy())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	call, ok := resp.Items[0].(*CanonicalFunctionCallItem)
+	if !ok || !strings.HasPrefix(call.CallID, "gcall_") {
+		t.Fatalf("call = %#v, want a gcall_ mint", resp.Items[0])
+	}
+	if n := countReportFeature(report, FeatureGeminiCallIDSynthesized); n != 1 {
+		t.Fatalf("synthesized-call-id notes = %d, want 1: %+v", n, report.Losses)
+	}
+}
+
+// TestDecodeGeminiResponseNullArgsMatchStream proves an explicit JSON null
+// functionCall.args (which the wire model treats as absent) decodes to an
+// empty-object call, exactly as the stream renders it, with the synthesized
+// call-id note recorded once — never a refusal that leaves the note behind.
+func TestDecodeGeminiResponseNullArgsMatchStream(t *testing.T) {
+	part := `{"functionCall": {"name": "f", "args": null}}`
+	body := `{"candidates": [{"content": {"role": "model", "parts": [` + part + `]}, "finishReason": "STOP"}], "modelVersion": "m"}`
+	resp, report, err := decodeGemini(body, permissivePolicy())
+	if err != nil {
+		t.Fatalf("null args: %v (report %+v)", err, report.Losses)
+	}
+	call, ok := resp.Items[0].(*CanonicalFunctionCallItem)
+	if !ok || call.Arguments.Raw != "{}" {
+		t.Fatalf("call = %#v, want empty-object arguments", resp.Items[0])
+	}
+	if n := countReportFeature(report, FeatureGeminiCallIDSynthesized); n != 1 {
+		t.Fatalf("call-id notes = %d, want 1: %+v", n, report.Losses)
+	}
+
+	ctx := geminiStreamTestContext()
+	s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_t", "m", 1, nil)
+	events, err := s.Convert(geminiChunk(t, `{"candidates":[{"content":{"parts":[`+part+`]},"index":0}]}`))
+	if err != nil {
+		t.Fatalf("stream null args: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if done, ok := event.(ResponseFunctionCallArgumentsDoneEvent); ok {
+			found = true
+			if done.Arguments != "{}" {
+				t.Fatalf("stream arguments = %q, want {}", done.Arguments)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("stream emitted no arguments done event: %v", geminiStreamEventTypes(events))
+	}
+}
+
+// TestDecodeGeminiResponseDroppedThoughtSignatureParity pins the
+// non-streaming decode against the stream for a dropped thought carrying a
+// signature: both the reasoning loss and the signature loss are recorded, and
+// a policy refusing the signature refuses the part.
+func TestDecodeGeminiResponseDroppedThoughtSignatureParity(t *testing.T) {
+	body := `{
+		"candidates": [{
+			"content": {"role": "model", "parts": [
+				{"text": "hmm", "thought": true, "thoughtSignature": "sig"}
+			]},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "m"
+	}`
+	_, report, err := decodeGemini(body, permissivePolicy())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if n := countReportFeature(report, FeatureProviderReasoningText); n != 1 {
+		t.Fatalf("reasoning loss recorded %d times, want 1: %+v", n, report.Losses)
+	}
+	if n := countReportFeature(report, FeatureGeminiResponseThoughtSignature); n != 1 {
+		t.Fatalf("signature loss recorded %d times, want 1: %+v", n, report.Losses)
+	}
+	_, _, err = decodeGemini(body, LossPolicy{Allowed: map[Feature]struct{}{FeatureProviderReasoningText: {}}})
+	var unsupported *UnsupportedFeatureError
+	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureGeminiResponseThoughtSignature) {
+		t.Fatalf("refused signature: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureGeminiResponseThoughtSignature)
+	}
+}
+
+// TestDecodeGeminiResponseReasoningTextJoinsTextRun pins that reasoning
+// mapped to text under provider_reasoning_text joins the surrounding text
+// run, as the stream concatenates it into the open text part.
+func TestDecodeGeminiResponseReasoningTextJoinsTextRun(t *testing.T) {
+	body := `{
+		"candidates": [{
+			"content": {"role": "model", "parts": [
+				{"text": "a"},
+				{"text": "b", "thought": true},
+				{"text": "c"}
+			]},
+			"finishReason": "STOP"
+		}],
+		"modelVersion": "m"
+	}`
+	resp, _, err := DecodeGeminiResponse([]byte(body), ChatCapabilities{ProviderReasoningText: true}, permissivePolicy(), NewExchangeIDs())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	msg, ok := resp.Items[0].(*CanonicalMessageItem)
+	if !ok || len(msg.Parts) != 1 {
+		t.Fatalf("items = %#v, want one message item with one part", resp.Items)
+	}
+	if text, ok := msg.Parts[0].(CanonicalText); !ok || text.Text != "abc" {
+		t.Fatalf("part = %#v, want one CanonicalText \"abc\"", msg.Parts[0])
+	}
+}
+
 func TestDecodeGeminiResponseThoughtText(t *testing.T) {
 	body := `{
 		"candidates": [{

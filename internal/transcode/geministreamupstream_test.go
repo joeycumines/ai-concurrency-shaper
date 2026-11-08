@@ -32,6 +32,14 @@ func geminiStreamTestContext() *ExchangeContext {
 	}
 }
 
+// geminiStreamSignatureTestContext is geminiStreamTestContext with the
+// non-call thought-signature loss approved, for tests that exercise it.
+func geminiStreamSignatureTestContext() *ExchangeContext {
+	ctx := geminiStreamTestContext()
+	ctx.LossPolicy.Allowed[FeatureGeminiResponseThoughtSignature] = struct{}{}
+	return ctx
+}
+
 func geminiChunk(t *testing.T, body string) geminigeneratecontent.GenerateContentResponse {
 	t.Helper()
 	chunk, err := geminigeneratecontent.DecodeResponse([]byte(body))
@@ -303,8 +311,333 @@ func TestGeminiUpstreamStreamThoughtCapability(t *testing.T) {
 	})
 }
 
+// TestGeminiUpstreamStreamNullRawMemberIsNotAPayload proves an explicit JSON
+// null on a raw-member payload field is not a payload, matching Part.Validate
+// and the non-streaming decode: the text renders, and a bare null member
+// part is a no-op rather than an unrepresentable refusal.
+func TestGeminiUpstreamStreamNullRawMemberIsNotAPayload(t *testing.T) {
+	t.Run("text with a null payload member renders", func(t *testing.T) {
+		ctx := geminiStreamTestContext()
+		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_t", "m", 1, nil)
+		events, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"hi","executableCode":null}]},"index":0}]}`,
+		))
+		if err != nil {
+			t.Fatalf("text with null executableCode: %v", err)
+		}
+		types := geminiStreamEventTypes(events)
+		if !contains(types, "response.output_text.delta") {
+			t.Fatalf("types = %v, want a text delta", types)
+		}
+	})
+
+	t.Run("bare null member part is refused at the wire boundary", func(t *testing.T) {
+		// The wire model's own payload-union count (Part.Validate) treats an
+		// explicit null as absent, so a part carrying ONLY a null payload
+		// member has no payload and is refused at decode — no state machine
+		// ever observes it. Pinned so the decode boundary stays the single
+		// authority for the payload union.
+		_, err := geminigeneratecontent.DecodeResponse([]byte(
+			`{"candidates":[{"content":{"parts":[{"executableCode":null}]},"index":0}]}`,
+		))
+		if err == nil || !strings.Contains(err.Error(), "part requires a payload member") {
+			t.Fatalf("bare null member part: err = %v, want the missing-payload wire rejection", err)
+		}
+	})
+}
+
 func contains(list []string, want string) bool {
 	return slices.Contains(list, want)
+}
+
+// TestGeminiUpstreamStreamPartLossesFollowPayloadCommit proves the
+// part-metadata and thought-signature losses are recorded only after the
+// encoding they describe commits: a part whose payload is refused (bounds,
+// invalid arguments) leaves neither loss behind, and the happy path records
+// each once.
+func TestGeminiUpstreamStreamPartLossesFollowPayloadCommit(t *testing.T) {
+	t.Run("oversized thought with part metadata leaves no losses", func(t *testing.T) {
+		ctx := geminiStreamTestContext()
+		s := newGeminiResponsesStreamState(
+			ctx, ctx.LossPolicy, ChatCapabilities{ProviderReasoningThinking: true}, "resp_t", "m", 1, nil,
+		)
+		big := strings.Repeat("a", maxStreamAccumulatedBytes+1)
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"`+big+`","thought":true,"partMetadata":{"foo":1}}]},"index":0}]}`,
+		))
+		if err == nil || !isUpstreamConversionError(err) {
+			t.Fatalf("oversized thought delta: err = %T %v, want the bound's upstream conversion error", err, err)
+		}
+		if n := countReportFeature(s.report, FeatureGeminiPartMetadata); n != 0 {
+			t.Fatalf("part metadata loss recorded for a refused payload: %+v", s.report.Losses)
+		}
+	})
+
+	t.Run("refused functionCall with part metadata leaves no losses", func(t *testing.T) {
+		ctx := geminiStreamTestContext()
+		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_t", "m", 1, nil)
+		// A function call with no name is refused inside the call conversion,
+		// after the part-metadata decision point today.
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"functionCall":{"args":{"x":1}},"partMetadata":{"foo":1}}]},"index":0}]}`,
+		))
+		if err == nil {
+			t.Fatal("nameless functionCall: nil error")
+		}
+		if n := countReportFeature(s.report, FeatureGeminiPartMetadata); n != 0 {
+			t.Fatalf("part metadata loss recorded for a refused payload: %+v", s.report.Losses)
+		}
+	})
+
+	t.Run("signature with oversized text delta leaves no signature loss", func(t *testing.T) {
+		// The signature loss is approved, so the part fails on the delta
+		// bound itself, never on a policy refusal decided up front.
+		ctx := geminiStreamSignatureTestContext()
+		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_t", "m", 1, nil)
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"`+strings.Repeat("a", maxStreamAccumulatedBytes+1)+
+				`","thoughtSignature":"sig"}]},"index":0}]}`,
+		))
+		if err == nil || !isUpstreamConversionError(err) {
+			t.Fatalf("oversized text delta: err = %T %v, want the bound's upstream conversion error", err, err)
+		}
+		if n := countReportFeature(s.report, FeatureGeminiResponseThoughtSignature); n != 0 {
+			t.Fatalf("signature loss recorded for a refused payload: %+v", s.report.Losses)
+		}
+	})
+
+	t.Run("happy path records each loss once", func(t *testing.T) {
+		ctx := geminiStreamSignatureTestContext()
+		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_t", "m", 1, nil)
+		if _, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"hi","partMetadata":{"foo":1},"thoughtSignature":"sig"}]},"index":0}]}`,
+		)); err != nil {
+			t.Fatalf("part with metadata and signature: %v", err)
+		}
+		if n := countReportFeature(s.report, FeatureGeminiPartMetadata); n != 1 {
+			t.Fatalf("part metadata loss recorded %d times, want 1: %+v", n, s.report.Losses)
+		}
+		if n := countReportFeature(s.report, FeatureGeminiResponseThoughtSignature); n != 1 {
+			t.Fatalf("signature loss recorded %d times, want 1: %+v", n, s.report.Losses)
+		}
+		// A second part with the same modifiers records nothing further.
+		if _, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"again","partMetadata":{"foo":1},"thoughtSignature":"sig2"}]},"index":0}]}`,
+		)); err != nil {
+			t.Fatalf("second part: %v", err)
+		}
+		if n := countReportFeature(s.report, FeatureGeminiPartMetadata); n != 1 {
+			t.Fatalf("part metadata loss recorded %d times after two parts, want 1: %+v", n, s.report.Losses)
+		}
+	})
+
+	t.Run("empty thought with signature still loses the signature", func(t *testing.T) {
+		// The pinned contract (TestDecodeGeminiResponseEmptyThoughtPartRecords
+		// Nothing): an empty thought part renders nothing, but a signature
+		// attached to it is still an observable loss of that part — refused
+		// under a policy that does not approve it, recorded once when
+		// approved.
+		ctx := geminiStreamTestContext()
+		ctx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{}}
+		s := newGeminiResponsesStreamState(
+			ctx, ctx.LossPolicy, ChatCapabilities{ProviderReasoningThinking: true}, "resp_t", "m", 1, nil,
+		)
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"sig"}]},"index":0}]}`,
+		))
+		var unsupported *UnsupportedFeatureError
+		if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureGeminiResponseThoughtSignature) {
+			t.Fatalf("empty thought signature under strict policy: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureGeminiResponseThoughtSignature)
+		}
+
+		ctx2 := geminiStreamSignatureTestContext()
+		s2 := newGeminiResponsesStreamState(
+			ctx2, ctx2.LossPolicy, ChatCapabilities{ProviderReasoningThinking: true}, "resp_t", "m", 1, nil,
+		)
+		if _, err := s2.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"","thought":true,"thoughtSignature":"sig"}]},"index":0}]}`,
+		)); err != nil {
+			t.Fatalf("empty thought signature under approved policy: %v", err)
+		}
+		if n := countReportFeature(s2.report, FeatureGeminiResponseThoughtSignature); n != 1 {
+			t.Fatalf("signature loss recorded %d times, want 1: %+v", n, s2.report.Losses)
+		}
+	})
+
+	t.Run("dropped thought with signature still loses the signature", func(t *testing.T) {
+		// No reasoning capability: the thought text is an approved loss, and
+		// the signature on that same part is a separate observable loss —
+		// matching the non-streaming decode, which records both.
+		ctx := geminiStreamSignatureTestContext()
+		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_t", "m", 1, nil)
+		if _, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"hmm","thought":true,"thoughtSignature":"sig"}]},"index":0}]}`,
+		)); err != nil {
+			t.Fatalf("dropped thought with signature: %v", err)
+		}
+		if n := countReportFeature(s.report, FeatureProviderReasoningText); n != 1 {
+			t.Fatalf("reasoning loss recorded %d times, want 1: %+v", n, s.report.Losses)
+		}
+		if n := countReportFeature(s.report, FeatureGeminiResponseThoughtSignature); n != 1 {
+			t.Fatalf("signature loss recorded %d times, want 1: %+v", n, s.report.Losses)
+		}
+	})
+
+	t.Run("signature-only part records before its nil return", func(t *testing.T) {
+		// A signature-only part emits no content events (only the lifecycle
+		// pair the chunk itself opens) but still loses the signature: the
+		// loss must be recorded before the nil return.
+		ctx := geminiStreamSignatureTestContext()
+		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_t", "m", 1, nil)
+		events, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig"}]},"index":0}]}`,
+		))
+		if err != nil {
+			t.Fatalf("signature-only part: %v", err)
+		}
+		types := geminiStreamEventTypes(events)
+		want := []string{"response.created", "response.in_progress"}
+		if strings.Join(types, ",") != strings.Join(want, ",") {
+			t.Fatalf("signature-only part emitted %v, want only %v", types, want)
+		}
+		if n := countReportFeature(s.report, FeatureGeminiResponseThoughtSignature); n != 1 {
+			t.Fatalf("signature loss recorded %d times, want 1: %+v", n, s.report.Losses)
+		}
+	})
+}
+
+// TestGeminiUpstreamStreamPartGatesDecidedBeforeCommit proves every policy
+// gate a part needs is decided before any of its payload commits: a part
+// refused for one of its losses leaves no other entry, no stored signature,
+// and no events behind. Part metadata is gated on every part shape, matching
+// the non-streaming decode, including parts that carry no other payload.
+func TestGeminiUpstreamStreamPartGatesDecidedBeforeCommit(t *testing.T) {
+	newState := func(caps ChatCapabilities, allowed ...Feature) (*geminiResponsesStreamState, *ExchangeContext) {
+		ctx := geminiStreamTestContext()
+		ctx.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{}}
+		for _, feature := range allowed {
+			ctx.LossPolicy.Allowed[feature] = struct{}{}
+		}
+		return newGeminiResponsesStreamState(ctx, ctx.LossPolicy, caps, "resp_t", "m", 1, nil), ctx
+	}
+	refusedFeature := func(t *testing.T, err error, want Feature) {
+		t.Helper()
+		var unsupported *UnsupportedFeatureError
+		if !errors.As(err, &unsupported) || unsupported.Feature != string(want) {
+			t.Fatalf("err = %T %v, want UnsupportedFeatureError(%s)", err, err, want)
+		}
+	}
+
+	for name, body := range map[string]string{
+		"signature-only part": `{"thoughtSignature":"sig","partMetadata":{"foo":1}}`,
+		"empty thought part":  `{"text":"","thought":true,"thoughtSignature":"sig","partMetadata":{"foo":1}}`,
+	} {
+		t.Run(name+" with refused metadata is refused", func(t *testing.T) {
+			s, _ := newState(ChatCapabilities{ProviderReasoningThinking: true}, FeatureGeminiResponseThoughtSignature)
+			_, err := s.Convert(geminiChunk(t, `{"candidates":[{"content":{"parts":[`+body+`]},"index":0}]}`))
+			refusedFeature(t, err, FeatureGeminiPartMetadata)
+			if n := countReportFeature(s.report, FeatureGeminiResponseThoughtSignature); n != 0 {
+				t.Fatalf("signature loss recorded for a refused part: %+v", s.report.Losses)
+			}
+		})
+		t.Run(name+" with approved metadata records it once", func(t *testing.T) {
+			s, _ := newState(
+				ChatCapabilities{ProviderReasoningThinking: true},
+				FeatureGeminiResponseThoughtSignature, FeatureGeminiPartMetadata,
+			)
+			if _, err := s.Convert(geminiChunk(t, `{"candidates":[{"content":{"parts":[`+body+`]},"index":0}]}`)); err != nil {
+				t.Fatalf("approved part: %v", err)
+			}
+			if n := countReportFeature(s.report, FeatureGeminiPartMetadata); n != 1 {
+				t.Fatalf("part metadata loss recorded %d times, want 1: %+v", n, s.report.Losses)
+			}
+		})
+	}
+
+	t.Run("refusal precedence matches the non-streaming decode", func(t *testing.T) {
+		// With both the signature and the metadata refused, the stream names
+		// the same feature the non-streaming decode refuses first.
+		for name, part := range map[string]string{
+			"signature-only part": `{"thoughtSignature":"sig","partMetadata":{"foo":1}}`,
+			"text part":           `{"text":"hi","thoughtSignature":"sig","partMetadata":{"foo":1}}`,
+		} {
+			s, _ := newState(ChatCapabilities{})
+			_, streamErr := s.Convert(geminiChunk(t, `{"candidates":[{"content":{"parts":[`+part+`]},"index":0}]}`))
+			_, _, decodeErr := DecodeGeminiResponse(
+				[]byte(`{"candidates":[{"content":{"role":"model","parts":[`+part+`]},"finishReason":"STOP"}],"modelVersion":"m"}`),
+				ChatCapabilities{}, LossPolicy{Allowed: map[Feature]struct{}{}}, NewExchangeIDs(),
+			)
+			var streamRefusal, decodeRefusal *UnsupportedFeatureError
+			if !errors.As(streamErr, &streamRefusal) || !errors.As(decodeErr, &decodeRefusal) ||
+				streamRefusal.Feature != decodeRefusal.Feature {
+				t.Fatalf("%s: stream err %v, non-streaming err %v; want the same refused feature", name, streamErr, decodeErr)
+			}
+		}
+	})
+
+	t.Run("dropped thought with refused metadata leaves no reasoning loss", func(t *testing.T) {
+		s, _ := newState(ChatCapabilities{}, FeatureProviderReasoningText)
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"hmm","thought":true,"partMetadata":{"foo":1}}]},"index":0}]}`,
+		))
+		refusedFeature(t, err, FeatureGeminiPartMetadata)
+		if n := countReportFeature(s.report, FeatureProviderReasoningText); n != 0 {
+			t.Fatalf("reasoning loss recorded for a refused part: %+v", s.report.Losses)
+		}
+	})
+
+	t.Run("dropped thought with refused signature leaves no reasoning loss", func(t *testing.T) {
+		s, _ := newState(ChatCapabilities{}, FeatureProviderReasoningText, FeatureGeminiPartMetadata)
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"hmm","thought":true,"thoughtSignature":"sig","partMetadata":{"foo":1}}]},"index":0}]}`,
+		))
+		refusedFeature(t, err, FeatureGeminiResponseThoughtSignature)
+		if n := countReportFeature(s.report, FeatureProviderReasoningText); n != 0 {
+			t.Fatalf("reasoning loss recorded for a refused part: %+v", s.report.Losses)
+		}
+		if n := countReportFeature(s.report, FeatureGeminiPartMetadata); n != 0 {
+			t.Fatalf("part metadata loss recorded for a refused part: %+v", s.report.Losses)
+		}
+	})
+
+	t.Run("text part with refused signature leaves no metadata loss", func(t *testing.T) {
+		s, _ := newState(ChatCapabilities{}, FeatureGeminiPartMetadata)
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"text":"hi","thoughtSignature":"sig","partMetadata":{"foo":1}}]},"index":0}]}`,
+		))
+		refusedFeature(t, err, FeatureGeminiResponseThoughtSignature)
+		if n := countReportFeature(s.report, FeatureGeminiPartMetadata); n != 0 {
+			t.Fatalf("part metadata loss recorded for a refused part: %+v", s.report.Losses)
+		}
+	})
+
+	t.Run("function call with refused metadata stores no signature", func(t *testing.T) {
+		s, ctx := newState(ChatCapabilities{})
+		store := NewGeminiSignatureStore(GeminiSignatureConfig{Capacity: 16, TTL: time.Hour})
+		ctx.GeminiSignatures = store
+		ctx.GeminiSignatureScope = "gemini"
+		events, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"f","args":{}},"thoughtSignature":"sig","partMetadata":{"foo":1}}]},"index":0}]}`,
+		))
+		refusedFeature(t, err, FeatureGeminiPartMetadata)
+		if len(events) != 0 {
+			t.Fatalf("refused call emitted %v", geminiStreamEventTypes(events))
+		}
+		if got, ok := store.Get("gemini", "call-1"); ok {
+			t.Fatalf("refused call stored signature %q", got)
+		}
+	})
+
+	t.Run("id-less function call with refused metadata records no call-id note", func(t *testing.T) {
+		s, _ := newState(ChatCapabilities{})
+		_, err := s.Convert(geminiChunk(t,
+			`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"f","args":{}},"partMetadata":{"foo":1}}]},"index":0}]}`,
+		))
+		refusedFeature(t, err, FeatureGeminiPartMetadata)
+		if n := countReportFeature(s.report, FeatureGeminiCallIDSynthesized); n != 0 {
+			t.Fatalf("call-id note recorded for a refused call: %+v", s.report.Losses)
+		}
+	})
 }
 
 func TestGeminiUpstreamStreamPromptBlocked(t *testing.T) {
@@ -776,7 +1109,7 @@ func TestGeminiUpstreamStreamClampNotesAreOncePerStream(t *testing.T) {
 	if _, err := s.Convert(geminiChunk(t, geminiFinishChunk)); err != nil {
 		t.Fatalf("finish chunk: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := s.Convert(geminiChunk(t, badUsage)); err != nil {
 			t.Fatalf("usage chunk %d: %v", i, err)
 		}
@@ -845,6 +1178,67 @@ func TestGeminiUpstreamStreamDoneAfterErrorStaysFailed(t *testing.T) {
 		}
 		if batch.Terminal || len(batch.Events) != 0 {
 			t.Fatalf("[DONE] after error released events %v (terminal %v)", batch.Events, batch.Terminal)
+		}
+	})
+}
+
+func TestGeminiUpstreamStreamTrailingFrameFailureLatches(t *testing.T) {
+	// A frame the converter rejects after the finish chunk — a non-empty SSE
+	// event name, which Gemini's data-only stream cannot carry — must latch
+	// on the converter itself: [DONE] and FinalizeEOF keep reporting the
+	// failure instead of releasing the held success terminal.
+	t.Run("responses", func(t *testing.T) {
+		s := newGeminiStreamState(t, nil)
+		c := newGeminiToResponsesConverter(s)
+		if _, err := c.Convert(SSEEvent{Data: []byte(geminiFinishChunk)}); err != nil {
+			t.Fatalf("finish chunk: %v", err)
+		}
+		_, latched := c.Convert(SSEEvent{Event: "message", Data: []byte(`{}`)})
+		if latched == nil || !isUpstreamConversionError(latched) {
+			t.Fatalf("event-named frame: err = %T %v, want an upstream conversion error", latched, latched)
+		}
+		batch, err := c.Convert(SSEEvent{Data: []byte("[DONE]")})
+		if !errors.Is(err, latched) {
+			t.Fatalf("[DONE] after a failed frame: err = %v, want the latched %v", err, latched)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("[DONE] after a failed frame released %+v", batch)
+		}
+		batch, err = c.FinalizeEOF()
+		if !errors.Is(err, latched) {
+			t.Fatalf("FinalizeEOF after a failed frame: err = %v, want the latched %v", err, latched)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("FinalizeEOF after a failed frame released %+v", batch)
+		}
+	})
+
+	t.Run("anthropic composition", func(t *testing.T) {
+		ctx := geminiStreamTestContext()
+		ctx.LossPolicy.Allowed[FeatureUsageUnknown] = struct{}{}
+		gemini := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_a", "m", 1, nil)
+		anthropic := newAnthropicResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "msg_a", "m", 1)
+		c := newGeminiToAnthropicConverter(gemini, anthropic)
+		if _, err := c.Convert(SSEEvent{Data: []byte(geminiFinishChunk)}); err != nil {
+			t.Fatalf("finish chunk: %v", err)
+		}
+		_, latched := c.Convert(SSEEvent{Event: "message", Data: []byte(`{}`)})
+		if latched == nil || !isUpstreamConversionError(latched) {
+			t.Fatalf("event-named frame: err = %T %v, want an upstream conversion error", latched, latched)
+		}
+		batch, err := c.Convert(SSEEvent{Data: []byte("[DONE]")})
+		if !errors.Is(err, latched) {
+			t.Fatalf("[DONE] after a failed frame: err = %v, want the latched %v", err, latched)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("[DONE] after a failed frame released %+v", batch)
+		}
+		batch, err = c.FinalizeEOF()
+		if !errors.Is(err, latched) {
+			t.Fatalf("FinalizeEOF after a failed frame: err = %v, want the latched %v", err, latched)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("FinalizeEOF after a failed frame released %+v", batch)
 		}
 	})
 }
@@ -1283,6 +1677,25 @@ func TestGeminiUpstreamStreamContinuationTokenRejectedBeforeLosses(t *testing.T)
 	))
 	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
 		t.Fatalf("continuationToken with safety ratings: err = %T %v, want *UnrepresentableError", err, err)
+	}
+	if len(s.report.Losses) != 0 {
+		t.Fatalf("continuationToken rejection recorded %+v", s.report.Losses)
+	}
+}
+
+func TestGeminiUpstreamStreamContinuationTokenRejectsBeforeParts(t *testing.T) {
+	// The continuation token decides the chunk before its parts are converted,
+	// so a rejected chunk leaves no item and no part-level loss.
+	ctx := geminiStreamTestContext() // allows the part-metadata loss
+	s := newGeminiStreamState(t, ctx)
+	_, err := s.Convert(geminiChunk(t,
+		`{"candidates":[{"content":{"parts":[{"text":"hi","partMetadata":{"k":1}}]},"continuationToken":"tok","index":0}]}`,
+	))
+	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
+		t.Fatalf("continuationToken with parts: err = %T %v, want *UnrepresentableError", err, err)
+	}
+	if len(s.items) != 0 {
+		t.Fatalf("continuationToken rejection left %d items", len(s.items))
 	}
 	if len(s.report.Losses) != 0 {
 		t.Fatalf("continuationToken rejection recorded %+v", s.report.Losses)

@@ -185,6 +185,10 @@ type chatResponsesStreamState struct {
 	// gateway that repeats the terminal many times push real entries out of a
 	// saturated report (4096) for a single exchange.
 	usageMergeNoted bool
+
+	// streamError latches the first failure Convert returned, so a caller
+	// that ignores it can never release the held terminal afterwards.
+	streamError error
 }
 
 // wireError marks a conversion error as corrupt upstream Chat wire data: the
@@ -660,6 +664,21 @@ func sameCreatedCacheTokens(a, b *int64) bool {
 //     bare tail;
 //  3. terminal — built at release by the [DONE] frame only, with the final usage.
 func (s *chatResponsesStreamState) Convert(
+	chunk ChatStreamResponse,
+) ([]ResponsesSSEEvent, error) {
+	if s.streamError != nil {
+		return nil, s.streamError
+	}
+	events, err := s.convertChunk(chunk)
+	if err != nil {
+		s.streamError = err
+		return nil, err
+	}
+	return events, nil
+}
+
+// convertChunk converts one chunk, leaving failure latching to Convert.
+func (s *chatResponsesStreamState) convertChunk(
 	chunk ChatStreamResponse,
 ) ([]ResponsesSSEEvent, error) {
 	if err := s.budget.addEvent(); err != nil {
@@ -1965,6 +1984,9 @@ func (s *chatResponsesStreamState) releaseTerminal() ([]ResponsesSSEEvent, bool)
 // finish_reason is still a typed truncation, never a fabricated success. A
 // zero-output finish releases the same way: the terminal was reached.
 func (s *chatResponsesStreamState) FinalizeEOF() ([]ResponsesSSEEvent, error) {
+	if s.streamError != nil {
+		return nil, s.streamError
+	}
 	if s.sawFinish && !s.terminalReleased {
 		if err := s.noteMissingSentinel(); err != nil {
 			return nil, err
@@ -2686,6 +2708,10 @@ type anthropicResponsesStreamState struct {
 
 	// Accumulated content blocks for the final message envelope.
 	message AnthropicMessageResponse
+
+	// streamError latches the first failure Convert returned, so a caller
+	// that ignores it can never report the terminal as clean afterwards.
+	streamError error
 }
 
 // responsePartKey identifies a Responses content part by its owning output
@@ -2763,8 +2789,25 @@ func newAnthropicResponsesStreamState(
 	}
 }
 
-// Convert processes one typed Responses event into Anthropic events.
+// Convert processes one typed Responses event into Anthropic events. The
+// first failure of any kind latches: every later call, and FinalizeEOF,
+// propagates it, so a stream that failed can never report a clean terminal.
 func (s *anthropicResponsesStreamState) Convert(
+	event ResponsesSSEEvent,
+) ([]AnthropicStreamEvent, error) {
+	if s.streamError != nil {
+		return nil, s.streamError
+	}
+	events, err := s.convertEvent(event)
+	if err != nil {
+		s.streamError = err
+		return nil, err
+	}
+	return events, nil
+}
+
+// convertEvent converts one event, leaving failure latching to Convert.
+func (s *anthropicResponsesStreamState) convertEvent(
 	event ResponsesSSEEvent,
 ) ([]AnthropicStreamEvent, error) {
 	if s.sawTerminal {
@@ -4401,6 +4444,9 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 // terminal condition. A stream that ended without a terminal condition is
 // never reported as success.
 func (s *anthropicResponsesStreamState) FinalizeEOF() ([]AnthropicStreamEvent, error) {
+	if s.streamError != nil {
+		return nil, s.streamError
+	}
 	if s.sawTerminal {
 		// The terminal was emitted at response.completed (or as an error
 		// event); nothing more to emit.

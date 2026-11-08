@@ -373,6 +373,147 @@ func TestGeminiStreamMessagesErrorEventLatchesFailure(t *testing.T) {
 	}
 }
 
+func TestGeminiStreamMessagesStopFailuresLatch(t *testing.T) {
+	// A message_stop that fails — an unrepresentable stop reason, an unknown
+	// one, or a terminal the Gemini state refuses — is a stream failure:
+	// FinalizeEOF must return it, never a clean terminal, and the usage note
+	// must not be recorded for a stop that never committed.
+	newConverter := func() (*messagesToGeminiConverter, *anthropicUpstreamResponsesStreamState) {
+		upstream := newAnthropicUpstreamResponsesStreamState("resp_1", "claude-x", usageOnlyPolicy())
+		gemini := newGeminiStreamClientState(
+			testStreamContext(), UpstreamMessages, usageOnlyPolicy(), "resp_1", "claude-x",
+		)
+		return newMessagesToGeminiConverter(upstream, gemini), upstream
+	}
+	start := func(t *testing.T, c *messagesToGeminiConverter) {
+		t.Helper()
+		if _, err := c.Convert(SSEEvent{
+			Event: "message_start",
+			Data:  []byte(`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-x","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":1}}}`),
+		}); err != nil {
+			t.Fatalf("message_start: %v", err)
+		}
+	}
+	messageDelta := func(t *testing.T, c *messagesToGeminiConverter, stopReason string) {
+		t.Helper()
+		if _, err := c.Convert(SSEEvent{
+			Event: "message_delta",
+			Data:  []byte(`{"type":"message_delta","delta":{"stop_reason":"` + stopReason + `","stop_sequence":null},"usage":{"output_tokens":2}}`),
+		}); err != nil {
+			t.Fatalf("message_delta(%s): %v", stopReason, err)
+		}
+	}
+	messageStop := func(t *testing.T, c *messagesToGeminiConverter) error {
+		t.Helper()
+		_, err := c.Convert(SSEEvent{
+			Event: "message_stop",
+			Data:  []byte(`{"type":"message_stop"}`),
+		})
+		return err
+	}
+
+	t.Run("pause_turn", func(t *testing.T) {
+		c, upstream := newConverter()
+		start(t, c)
+		messageDelta(t, c, "pause_turn")
+		err := messageStop(t, c)
+		if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
+			t.Fatalf("message_stop(pause_turn): err = %T %v, want *UnrepresentableError", err, err)
+		}
+		if n := countReportFeature(upstream.report, FeatureUsageTotalDerived); n != 0 {
+			t.Fatalf("usage note recorded for a refused stop: %+v", upstream.report.Losses)
+		}
+		batch, finalize := c.FinalizeEOF()
+		if !errors.Is(finalize, err) {
+			t.Fatalf("FinalizeEOF after pause_turn: err = %v, want the latched %v", finalize, err)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("FinalizeEOF after pause_turn released %+v", batch)
+		}
+	})
+
+	t.Run("unknown stop reason", func(t *testing.T) {
+		c, upstream := newConverter()
+		start(t, c)
+		messageDelta(t, c, "because")
+		err := messageStop(t, c)
+		if err == nil || !isUpstreamConversionError(err) {
+			t.Fatalf("message_stop(unknown): err = %T %v, want an upstream conversion error", err, err)
+		}
+		if n := countReportFeature(upstream.report, FeatureUsageTotalDerived); n != 0 {
+			t.Fatalf("usage note recorded for a refused stop: %+v", upstream.report.Losses)
+		}
+		batch, finalize := c.FinalizeEOF()
+		if !errors.Is(finalize, err) {
+			t.Fatalf("FinalizeEOF after an unknown stop reason: err = %v, want the latched %v", finalize, err)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("FinalizeEOF after an unknown stop reason released %+v", batch)
+		}
+	})
+
+	t.Run("terminal conversion refusal", func(t *testing.T) {
+		// The message_stop itself is valid, but the Gemini client state
+		// refuses the terminal: strict policy rejects the absent usage (this
+		// delta carries no usage object, so the whole usage is unknown). The
+		// composition must stay failed, never report a clean terminal.
+		ctx := testStreamContext()
+		ctx.LossPolicy = StrictLossPolicy()
+		upstream := newAnthropicUpstreamResponsesStreamState("resp_1", "claude-x", usageOnlyPolicy())
+		gemini := newGeminiStreamClientState(ctx, UpstreamMessages, StrictLossPolicy(), "resp_1", "claude-x")
+		c := newMessagesToGeminiConverter(upstream, gemini)
+		start(t, c)
+		if _, err := c.Convert(SSEEvent{
+			Event: "message_delta",
+			Data:  []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`),
+		}); err != nil {
+			t.Fatalf("message_delta without usage: %v", err)
+		}
+		err := messageStop(t, c)
+		var unsupported *UnsupportedFeatureError
+		if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureUsageUnknown) {
+			t.Fatalf("message_stop with an unknown-usage terminal: err = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureUsageUnknown)
+		}
+		batch, finalize := c.FinalizeEOF()
+		if !errors.Is(finalize, err) {
+			t.Fatalf("FinalizeEOF after a refused terminal: err = %v, want the latched %v", finalize, err)
+		}
+		if batch.Terminal || len(batch.Events) != 0 {
+			t.Fatalf("FinalizeEOF after a refused terminal released %+v", batch)
+		}
+	})
+
+	t.Run("a normal stop still completes and notes the derived total", func(t *testing.T) {
+		ctx := testStreamContext()
+		ctx.LossPolicy = usageOnlyPolicy()
+		upstream := newAnthropicUpstreamResponsesStreamState("resp_1", "claude-x", usageOnlyPolicy())
+		gemini := newGeminiStreamClientState(ctx, UpstreamMessages, usageOnlyPolicy(), "resp_1", "claude-x")
+		c := newMessagesToGeminiConverter(upstream, gemini)
+		start(t, c)
+		messageDelta(t, c, "end_turn")
+		batch, err := c.Convert(SSEEvent{
+			Event: "message_stop",
+			Data:  []byte(`{"type":"message_stop"}`),
+		})
+		if err != nil {
+			t.Fatalf("message_stop(end_turn): %v", err)
+		}
+		if !batch.Terminal {
+			t.Fatalf("normal message_stop produced no terminal: %+v", batch)
+		}
+		if n := countReportFeature(upstream.report, FeatureUsageTotalDerived); n != 1 {
+			t.Fatalf("usage note for a normal stop recorded %d times, want 1: %+v", n, upstream.report.Losses)
+		}
+		final, err := c.FinalizeEOF()
+		if err != nil {
+			t.Fatalf("FinalizeEOF after a normal stop: %v", err)
+		}
+		if !final.Terminal {
+			t.Fatalf("FinalizeEOF after a normal stop: %+v", final)
+		}
+	})
+}
+
 func TestAnthropicUpstreamIgnoredBlockLossesAreGated(t *testing.T) {
 	policy := LossPolicy{Allowed: map[Feature]struct{}{
 		FeatureAuthenticatedThinking: {},

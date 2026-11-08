@@ -95,11 +95,23 @@ func (s *geminiStreamClientState) wireError(err error) error {
 	return upstreamWireError(s.upstream, http.StatusOK, err)
 }
 
-// Convert processes one typed Responses event into zero or more chunks.
+// Convert processes one typed Responses event into zero or more chunks. The
+// first failure of any kind latches: every later call, and FinalizeEOF,
+// propagates it, so a stream that failed can never report a clean terminal.
 func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResponse, error) {
 	if s.streamError != nil {
 		return nil, s.streamError
 	}
+	chunks, err := s.convertEvent(event)
+	if err != nil {
+		s.streamError = err
+		return nil, err
+	}
+	return chunks, nil
+}
+
+// convertEvent converts one event, leaving failure latching to Convert.
+func (s *geminiStreamClientState) convertEvent(event ResponsesSSEEvent) ([]geminiResponse, error) {
 	if s.sawTerminal {
 		return nil, s.wireError(errors.New("responses stream event after terminal"))
 	}
@@ -120,12 +132,19 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 
 	switch value := event.(type) {
 	case ResponseTextDeltaEvent:
+		chunks, err := s.textChunk(value.Delta, false)
+		if err != nil {
+			return nil, err
+		}
+		// The loss is recorded only after the chunk committed, so a delta the
+		// budget rejects leaves no loss behind; a refused loss discards the
+		// chunk with the rest of the failed stream.
 		if len(value.Logprobs) > 0 {
 			if err := s.loseLogprobs("output_text.delta.logprobs"); err != nil {
 				return nil, err
 			}
 		}
-		return s.textChunk(value.Delta, false)
+		return chunks, nil
 	case ResponseRefusalDeltaEvent:
 		if value.Delta == "" {
 			// An empty delta encodes nothing: no note, no chunk.
@@ -154,8 +173,34 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 			return nil, nil
 		}
 		if !s.ctx.GeminiIncludeThoughts {
-			// The loss decision comes first: a refused event must not leave
-			// retained state or budget charges behind.
+			// The policy gate is peeked BEFORE any state changes: a refused
+			// loss must leave no retained summary or budget charge behind.
+			if err := s.policy.refusal(FeatureProviderReasoningText, "candidates[0].content.parts[].thought"); err != nil {
+				return nil, err
+			}
+		}
+		// Retain the streamed text for the coverage proof in loseReasoning,
+		// in both render modes: the retained copy is semantic state, so it is
+		// charged like rendered text (textChunk charges its own copy when
+		// thoughts are included — retention and emission are separate).
+		if err := s.budget.addSemanticBytes(int64(len(value.Delta))); err != nil {
+			return nil, s.wireError(err)
+		}
+		if s.streamedSummary == nil {
+			s.streamedSummary = make(map[string]*strings.Builder)
+		}
+		buf := s.streamedSummary[value.ItemID]
+		if buf == nil {
+			if err := s.budget.addStateEntries(1); err != nil {
+				return nil, s.wireError(err)
+			}
+			buf = &strings.Builder{}
+			s.streamedSummary[value.ItemID] = buf
+		}
+		buf.WriteString(value.Delta)
+		if !s.ctx.GeminiIncludeThoughts {
+			// The loss follows the committed retention: it describes
+			// reasoning text the client did not receive.
 			if !s.thoughtLossNoted {
 				s.thoughtLossNoted = true
 				if err := s.report.Lose(
@@ -165,29 +210,6 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 					return nil, err
 				}
 			}
-		}
-		if value.Delta != "" {
-			// Retain the streamed text for the coverage proof in
-			// loseReasoning: the retained copy is semantic state, so it is
-			// charged like rendered text (textChunk charges its own copy when
-			// thoughts are included — retention and emission are separate).
-			if err := s.budget.addSemanticBytes(int64(len(value.Delta))); err != nil {
-				return nil, s.wireError(err)
-			}
-			if s.streamedSummary == nil {
-				s.streamedSummary = make(map[string]*strings.Builder)
-			}
-			buf := s.streamedSummary[value.ItemID]
-			if buf == nil {
-				if err := s.budget.addStateEntries(1); err != nil {
-					return nil, s.wireError(err)
-				}
-				buf = &strings.Builder{}
-				s.streamedSummary[value.ItemID] = buf
-			}
-			buf.WriteString(value.Delta)
-		}
-		if !s.ctx.GeminiIncludeThoughts {
 			return nil, nil
 		}
 		return s.textChunk(value.Delta, true)
@@ -201,6 +223,13 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 		// logprobs by itself.
 		if part, ok := value.Part.(*ResponsesStreamOutputTextPart); ok && len(part.Logprobs) > 0 {
 			return nil, s.loseLogprobs("content_part.done.logprobs")
+		}
+		return nil, nil
+	case ResponseContentPartAddedEvent:
+		// The announced part may carry logprobs by itself, before any delta
+		// repeats them; the same loss gate decides them here.
+		if part, ok := value.Part.(*ResponsesStreamOutputTextPart); ok && len(part.Logprobs) > 0 {
+			return nil, s.loseLogprobs("content_part.added.logprobs")
 		}
 		return nil, nil
 	case ResponseOutputItemAddedEvent:
@@ -241,12 +270,10 @@ func (s *geminiStreamClientState) Convert(event ResponsesSSEEvent) ([]geminiResp
 		return s.terminalChunk(value.Response, "incomplete")
 	case ResponseFailedEvent:
 		s.sawTerminal = true
-		s.streamError = upstreamStreamFailure("the upstream response failed")
-		return nil, s.streamError
+		return nil, upstreamStreamFailure("the upstream response failed")
 	case ResponseErrorEvent:
 		s.sawTerminal = true
-		s.streamError = upstreamStreamFailure(value.Message)
-		return nil, s.streamError
+		return nil, upstreamStreamFailure(value.Message)
 	default:
 		// Lifecycle events with no client-visible content (created, in
 		// progress, part and item boundaries) produce no chunk.
@@ -498,6 +525,11 @@ func geminiStreamErrorFrame(err error) (frameEvent, bool) {
 type chatToGeminiConverter struct {
 	chat   *chatResponsesStreamState
 	gemini *geminiStreamClientState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode or convert — so a caller that ignores the returned error cannot
+	// still obtain a clean terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newChatToGeminiConverter(
@@ -508,7 +540,25 @@ func newChatToGeminiConverter(
 }
 
 // Convert processes one upstream Chat SSE frame through both state machines.
+// The first failure of any kind latches: every later call, and FinalizeEOF,
+// propagates it.
 func (c *chatToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *chatToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatch, error) {
+	if c.chat.streamError != nil {
+		return convertedBatch{}, c.chat.streamError
+	}
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
 	}
@@ -570,6 +620,14 @@ func (c *chatToGeminiConverter) releaseTerminals() (convertedBatch, error) {
 // finishing chunk without the [DONE] sentinel. A stream that ends without any
 // finish reason is a truncation, never a released terminal.
 func (c *chatToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	// Every latch is checked: the converter's own (a frame it failed on) and
+	// both states' (a failure fed to a state directly).
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	if c.chat.streamError != nil {
+		return convertedBatch{}, c.chat.streamError
+	}
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
 	}
@@ -584,7 +642,10 @@ func (c *chatToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
 		batch.Terminal = true
 		return batch, nil
 	}
-	if c.chat.sawFinish || c.gemini.sawTerminal {
+	// The terminal is reportable only when the Gemini state actually
+	// committed it: a release that failed left the Chat flags set but never
+	// produced the client's terminal chunk.
+	if c.gemini.sawTerminal {
 		return convertedBatch{Terminal: true}, nil
 	}
 	return convertedBatch{}, upstreamWireError(
@@ -613,14 +674,33 @@ type responsesToGeminiConverter struct {
 	// missingEventNameNoted gates the missing-event-name note to once per
 	// stream.
 	missingEventNameNoted bool
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode, validate, or convert — so a caller that ignores the returned
+	// error cannot still obtain a clean terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newResponsesToGeminiConverter(state *geminiStreamClientState) *responsesToGeminiConverter {
 	return &responsesToGeminiConverter{state: state}
 }
 
-// Convert processes one upstream Responses SSE frame.
+// Convert processes one upstream Responses SSE frame. The first failure of
+// any kind latches: every later call, and FinalizeEOF, propagates it.
 func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *responsesToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatch, error) {
 	if c.state.streamError != nil {
 		return convertedBatch{}, c.state.streamError
 	}
@@ -639,6 +719,18 @@ func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, er
 	if err != nil {
 		return convertedBatch{}, err
 	}
+	if frame.Event != "" {
+		if err := validateEventNameMatchesJSONType(frame); err != nil {
+			return convertedBatch{}, upstreamWireError(UpstreamResponses, http.StatusOK, err)
+		}
+	}
+	chunks, err := c.state.Convert(event)
+	if err != nil {
+		return convertedBatch{}, err
+	}
+	// The note is recorded only for a frame the state actually converted: it
+	// describes routing that produced client output, and a refused frame
+	// leaves the note behind on a failed exchange otherwise.
 	if frame.Event == "" {
 		if !c.missingEventNameNoted {
 			c.missingEventNameNoted = true
@@ -650,12 +742,6 @@ func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, er
 				return convertedBatch{}, err
 			}
 		}
-	} else if err := validateEventNameMatchesJSONType(frame); err != nil {
-		return convertedBatch{}, upstreamWireError(UpstreamResponses, http.StatusOK, err)
-	}
-	chunks, err := c.state.Convert(event)
-	if err != nil {
-		return convertedBatch{}, err
 	}
 	batch, err := marshalGeminiChunks(chunks)
 	if err != nil {
@@ -668,6 +754,12 @@ func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, er
 // FinalizeEOF reports a truncation when the upstream ended before a terminal
 // condition; a stream that reached its terminal has nothing left to release.
 func (c *responsesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	// Both latches are checked: the converter's own (a frame it failed on)
+	// and the state's (a failure fed to the state directly). Either way, a
+	// failed stream can never report a clean terminal at EOF.
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
 	if c.state.streamError != nil {
 		return convertedBatch{}, c.state.streamError
 	}

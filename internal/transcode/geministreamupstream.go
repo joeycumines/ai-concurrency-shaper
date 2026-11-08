@@ -331,6 +331,11 @@ func (s *geminiResponsesStreamState) convertChunk(chunk geminigeneratecontent.Ge
 			}
 		}
 	}
+	// A continuation token is unrepresentable: reject the chunk before any
+	// part or metadata is committed.
+	if err := rejectContinuationToken(candidate); err != nil {
+		return nil, err
+	}
 
 	events := s.startEvents()
 
@@ -488,11 +493,16 @@ func (s *geminiResponsesStreamState) convertPart(
 ) ([]ResponsesSSEEvent, error) {
 	path := fmt.Sprintf("candidates[].content.parts[%d]", partIndex)
 
-	// Unsupported payloads are unrepresentable in the Responses stream.
+	// Unsupported payloads are unrepresentable in the Responses stream. Raw
+	// member payloads are read with RawMemberPresent, matching Part.Validate
+	// and the non-streaming decode: an explicit JSON null is not a payload.
 	switch {
 	case part.InlineData != nil, part.FileData != nil,
-		part.ExecutableCode != nil, part.CodeExecutionResult != nil,
-		part.ToolCall != nil, part.ToolResponse != nil, part.AudioTranscription != nil:
+		geminigeneratecontent.RawMemberPresent(part.ExecutableCode),
+		geminigeneratecontent.RawMemberPresent(part.CodeExecutionResult),
+		geminigeneratecontent.RawMemberPresent(part.ToolCall),
+		geminigeneratecontent.RawMemberPresent(part.ToolResponse),
+		geminigeneratecontent.RawMemberPresent(part.AudioTranscription):
 		return nil, &UnrepresentableError{
 			Protocol: string(UpstreamGemini),
 			Path:     path,
@@ -506,63 +516,76 @@ func (s *geminiResponsesStreamState) convertPart(
 		}
 	}
 
-	// Part modifiers are an observable loss, once per stream.
-	if (geminigeneratecontent.RawMemberPresent(part.VideoMetadata) ||
+	// Part modifiers, a signature on a non-call part, and a dropped thought
+	// are observable losses, once per stream. Every policy gate the part
+	// needs is decided BEFORE any of its payload commits, so a part refused
+	// for one loss leaves no other entry, no stored signature, and no events
+	// behind. Each loss is recorded only AFTER the payload committed, so a
+	// part whose payload is refused (bounds, an invalid function call) leaves
+	// none. Signature-only and empty-thought parts commit no payload, yet the
+	// metadata and signature they carry are still losses of that exact part:
+	// the non-streaming decode records both on every part shape.
+	partMetadata := geminigeneratecontent.RawMemberPresent(part.VideoMetadata) ||
 		geminigeneratecontent.RawMemberPresent(part.SpeechMetadata) ||
 		geminigeneratecontent.RawMemberPresent(part.PartMetadata) ||
 		geminigeneratecontent.RawMemberPresent(part.MediaResolution) ||
-		part.MediaProcessing != nil) && !s.partMetadataLossRecorded {
-		s.partMetadataLossRecorded = true
-		if err := s.report.Lose(
-			s.policy,
-			FeatureGeminiPartMetadata,
-			path,
-			"part modifier metadata cannot be reproduced in the target response",
-		); err != nil {
-			return nil, err
-		}
-	}
-	// A signature on a non-call part is an observable loss, once per stream.
-	// An explicit empty signature carries no signature.
-	if part.ThoughtSignature != nil && *part.ThoughtSignature != "" &&
-		part.FunctionCall == nil && !s.partSignatureLossRecorded {
-		s.partSignatureLossRecorded = true
-		if err := s.report.Lose(
-			s.policy,
-			FeatureGeminiResponseThoughtSignature,
-			path,
-			"a thought signature on a non-function-call stream part cannot be reproduced in the target response",
-		); err != nil {
-			return nil, err
-		}
+		part.MediaProcessing != nil
+	thought := part.Thought != nil && *part.Thought
+	dropsThought := thought && part.Text != nil && *part.Text != "" &&
+		!s.capabilities.ProviderReasoningThinking && !s.capabilities.ProviderReasoningText
+	if err := s.decidePartLosses(part, path, partMetadata, dropsThought); err != nil {
+		return nil, err
 	}
 
 	if part.FunctionCall != nil {
-		return s.convertFunctionCall(part, path)
+		events, err := s.convertFunctionCall(part, path)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.losePartMetadata(partMetadata, path); err != nil {
+			return nil, err
+		}
+		return events, nil
 	}
 
-	if part.Text == nil {
-		// A signature-only part carries no payload and emits nothing.
-		return nil, nil
+	if part.Text == nil || (thought && *part.Text == "") {
+		// A signature-only part, or an empty thought (the empty-delta short
+		// circuit in emitThoughtText applies), carries no payload and emits
+		// nothing, and records no reasoning note or loss for an encoding that
+		// produced nothing.
+		return nil, s.losePartModifiers(part, path, partMetadata)
 	}
-	thought := part.Thought != nil && *part.Thought
 	if thought {
-		if *part.Text == "" {
-			// An empty thought delta carries no payload: the empty-delta
-			// short circuit in emitThoughtText applies, and no note or loss
-			// is recorded for an encoding that produced nothing.
-			return nil, nil
-		}
 		// Same capability rules as the non-streaming decode: thought text is
 		// provider reasoning; mapped under the capability or an approved
 		// loss, each recorded once per stream. The encoding commits first, so
 		// a rejected delta leaves no note behind.
+		var events []ResponsesSSEEvent
 		switch {
 		case s.capabilities.ProviderReasoningThinking:
-			events, err := s.emitThoughtText(*part.Text, path)
+			var err error
+			events, err = s.emitThoughtText(*part.Text, path)
 			if err != nil {
 				return nil, err
 			}
+		case s.capabilities.ProviderReasoningText:
+			var err error
+			events, err = s.emitTextDelta(*part.Text)
+			if err != nil {
+				return nil, err
+			}
+		default:
+			// The dropped thought commits as an approved loss, and its
+			// modifiers and signature remain observable losses of the part.
+			if err := s.loseThought(path); err != nil {
+				return nil, err
+			}
+			return nil, s.losePartModifiers(part, path, partMetadata)
+		}
+		if err := s.losePartModifiers(part, path, partMetadata); err != nil {
+			return nil, err
+		}
+		if s.capabilities.ProviderReasoningThinking {
 			if !s.thoughtThinkingNoted {
 				s.thoughtThinkingNoted = true
 				if err := s.report.Note(
@@ -573,37 +596,116 @@ func (s *geminiResponsesStreamState) convertPart(
 					return nil, err
 				}
 			}
-			return events, nil
-		case s.capabilities.ProviderReasoningText:
-			events, err := s.emitTextDelta(*part.Text)
-			if err != nil {
+		} else if !s.thoughtTextNoted {
+			s.thoughtTextNoted = true
+			if err := s.report.Note(
+				FeatureProviderReasoningText,
+				path,
+				"provider reasoning text mapped to ordinary text (provider_reasoning_text capability)",
+			); err != nil {
 				return nil, err
 			}
-			if !s.thoughtTextNoted {
-				s.thoughtTextNoted = true
-				if err := s.report.Note(
-					FeatureProviderReasoningText,
-					path,
-					"provider reasoning text mapped to ordinary text (provider_reasoning_text capability)",
-				); err != nil {
-					return nil, err
-				}
-			}
-			return events, nil
-		default:
-			if !s.thoughtLossNoted {
-				s.thoughtLossNoted = true
-				if err := s.report.Lose(
-					s.policy, FeatureProviderReasoningText, path,
-					"provider reasoning text cannot be reproduced in the target response",
-				); err != nil {
-					return nil, err
-				}
-			}
-			return nil, nil
+		}
+		return events, nil
+	}
+
+	events, err := s.emitTextDelta(*part.Text)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.losePartModifiers(part, path, partMetadata); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+// decidePartLosses peeks every policy gate the part's losses need — a dropped
+// thought, a non-call signature, part modifier metadata — before any of the
+// part's payload commits. The losses themselves are recorded afterwards by
+// loseThought and losePartModifiers, which then cannot be refused.
+func (s *geminiResponsesStreamState) decidePartLosses(
+	part geminigeneratecontent.Part, path string, partMetadata, dropsThought bool,
+) error {
+	if dropsThought {
+		if err := s.policy.refusal(FeatureProviderReasoningText, path); err != nil {
+			return err
 		}
 	}
-	return s.emitTextDelta(*part.Text)
+	// The order matches the non-streaming decode, so both name the same
+	// feature when more than one is refused.
+	if hasNonCallSignature(part) {
+		if err := s.policy.refusal(FeatureGeminiResponseThoughtSignature, path); err != nil {
+			return err
+		}
+	}
+	if partMetadata {
+		if err := s.policy.refusal(FeatureGeminiPartMetadata, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// losePartModifiers records the part's metadata and non-call signature
+// losses, both already decided by decidePartLosses.
+func (s *geminiResponsesStreamState) losePartModifiers(
+	part geminigeneratecontent.Part, path string, partMetadata bool,
+) error {
+	if err := s.losePartMetadata(partMetadata, path); err != nil {
+		return err
+	}
+	return s.loseNonCallSignature(part, path)
+}
+
+// losePartMetadata records the approved loss of part modifier metadata, once
+// per stream. Its policy gate was decided before the part's payload committed.
+func (s *geminiResponsesStreamState) losePartMetadata(present bool, path string) error {
+	if !present || s.partMetadataLossRecorded {
+		return nil
+	}
+	s.partMetadataLossRecorded = true
+	return s.report.Lose(
+		s.policy,
+		FeatureGeminiPartMetadata,
+		path,
+		"part modifier metadata cannot be reproduced in the target response",
+	)
+}
+
+// loseThought records the approved loss of thought text under no reasoning
+// capability, once per stream. Its policy gate was decided before the part's
+// payload committed.
+func (s *geminiResponsesStreamState) loseThought(path string) error {
+	if s.thoughtLossNoted {
+		return nil
+	}
+	s.thoughtLossNoted = true
+	return s.report.Lose(
+		s.policy, FeatureProviderReasoningText, path,
+		"provider reasoning text cannot be reproduced in the target response",
+	)
+}
+
+// hasNonCallSignature reports whether the part carries a thought signature
+// that no function call retains. An explicit empty signature carries none.
+func hasNonCallSignature(part geminigeneratecontent.Part) bool {
+	return part.ThoughtSignature != nil && *part.ThoughtSignature != "" && part.FunctionCall == nil
+}
+
+// loseNonCallSignature records the approved loss of a thought signature on a
+// non-function-call part, once per stream. Its policy gate was decided before
+// the part's payload committed.
+func (s *geminiResponsesStreamState) loseNonCallSignature(part geminigeneratecontent.Part, path string) error {
+	if !hasNonCallSignature(part) || s.partSignatureLossRecorded {
+		return nil
+	}
+	s.partSignatureLossRecorded = true
+	return s.report.Lose(
+		s.policy,
+		FeatureGeminiResponseThoughtSignature,
+		path,
+		"a thought signature on a non-function-call stream part cannot be reproduced in the target response",
+	)
 }
 
 // emitTextDelta opens the message item and content part on first text and
@@ -995,17 +1097,26 @@ func (s *geminiResponsesStreamState) closeAllAndHold() []ResponsesSSEEvent {
 	return append(s.closeOpenMessage(), s.closeOpenReasoning()...)
 }
 
+// rejectContinuationToken refuses a candidate carrying an unrepresentable
+// continuation token. It is pure, so callers run it before committing output.
+func rejectContinuationToken(candidate *geminigeneratecontent.Candidate) error {
+	if candidate.ContinuationToken == nil || *candidate.ContinuationToken == "" {
+		return nil
+	}
+	return &UnrepresentableError{
+		Protocol: string(UpstreamGemini),
+		Path:     "candidates[].continuationToken",
+		Detail:   "a continuation token cannot be represented in the target dialect",
+	}
+}
+
 // recordCandidateMetadata records the per-chunk candidate metadata losses once
 // per stream.
 func (s *geminiResponsesStreamState) recordCandidateMetadata(candidate *geminigeneratecontent.Candidate) error {
-	// A continuation token is unrepresentable, so it rejects the chunk before
-	// any loss for the same candidate is recorded.
-	if candidate.ContinuationToken != nil && *candidate.ContinuationToken != "" {
-		return &UnrepresentableError{
-			Protocol: string(UpstreamGemini),
-			Path:     "candidates[].continuationToken",
-			Detail:   "a continuation token cannot be represented in the target dialect",
-		}
+	// A trailing chunk carrying a continuation token is still unrepresentable;
+	// the non-trailing path already rejected it before committing output.
+	if err := rejectContinuationToken(candidate); err != nil {
+		return err
 	}
 	if len(candidate.SafetyRatings) > 0 && !s.safetyLossRecorded {
 		s.safetyLossRecorded = true
@@ -1207,11 +1318,12 @@ func (s *geminiResponsesStreamState) releaseTerminal() ([]ResponsesSSEEvent, boo
 
 // FinalizeEOF releases the held terminal when the stream ended after a finish
 // chunk (Gemini has no [DONE] sentinel, so EOF is the release). A stream that
-// ends before any finish reason is a truncation, never a success.
+// ends before any finish reason, or that failed at any point, is never a
+// success.
 func (s *geminiResponsesStreamState) FinalizeEOF() ([]ResponsesSSEEvent, error) {
 	if s.streamError != nil {
-		// The stream ended on an in-stream error frame: propagate the
-		// failure; a failed exchange is never a successful completion.
+		// The stream failed earlier: propagate the failure; a failed exchange
+		// is never a successful completion.
 		return nil, s.streamError
 	}
 	if s.sawTerm {
@@ -1285,14 +1397,34 @@ func (s *geminiResponsesStreamState) continuityTurns(
 // (no event name); a non-empty event name or a [DONE] sentinel is handled here.
 type geminiToResponsesConverter struct {
 	state *geminiResponsesStreamState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode or convert, or a marshal that failed — so a caller that ignores
+	// the returned error cannot still obtain a clean terminal from [DONE] or
+	// EOF.
+	streamError error
 }
 
 func newGeminiToResponsesConverter(state *geminiResponsesStreamState) *geminiToResponsesConverter {
 	return &geminiToResponsesConverter{state: state}
 }
 
-// Convert processes one upstream Gemini SSE frame.
+// Convert processes one upstream Gemini SSE frame. The first failure of any
+// kind latches: every later call, and FinalizeEOF, propagates it.
 func (c *geminiToResponsesConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *geminiToResponsesConverter) convertFrame(frame SSEEvent) (convertedBatch, error) {
 	if c.state.streamError != nil {
 		return convertedBatch{}, c.state.streamError
 	}
@@ -1319,8 +1451,11 @@ func (c *geminiToResponsesConverter) Convert(frame SSEEvent) (convertedBatch, er
 			))
 		}
 		batch, err := marshalResponsesEvents(held)
+		if err != nil {
+			return convertedBatch{}, err
+		}
 		batch.Terminal = true
-		return batch, err
+		return batch, nil
 	}
 	chunk, err := geminigeneratecontent.DecodeResponse(frame.Data)
 	if err != nil {
@@ -1338,13 +1473,19 @@ func (c *geminiToResponsesConverter) Convert(frame SSEEvent) (convertedBatch, er
 
 // FinalizeEOF releases the held terminal on upstream EOF.
 func (c *geminiToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
 		return convertedBatch{}, err
 	}
 	batch, err := marshalResponsesEvents(events)
+	if err != nil {
+		return convertedBatch{}, err
+	}
 	batch.Terminal = true
-	return batch, err
+	return batch, nil
 }
 
 // ConversionReport returns the accumulated report of the state.
@@ -1370,6 +1511,12 @@ func (c *geminiToResponsesConverter) continuityTurns(
 type geminiToAnthropicConverter struct {
 	gemini    *geminiResponsesStreamState
 	anthropic *anthropicResponsesStreamState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode, a downstream conversion that failed, or a marshal that failed —
+	// so a caller that ignores the returned error cannot still obtain a clean
+	// terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newGeminiToAnthropicConverter(
@@ -1380,9 +1527,27 @@ func newGeminiToAnthropicConverter(
 }
 
 // Convert processes one upstream Gemini SSE frame through both state machines.
+// The first failure of any kind latches: every later call, and FinalizeEOF,
+// propagates it.
 func (c *geminiToAnthropicConverter) Convert(frame SSEEvent) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *geminiToAnthropicConverter) convertFrame(frame SSEEvent) (convertedBatch, error) {
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
+	}
+	if c.anthropic.streamError != nil {
+		return convertedBatch{}, c.anthropic.streamError
 	}
 	if frame.Event != "" {
 		return convertedBatch{}, upstreamWireError(
@@ -1440,7 +1605,16 @@ func (c *geminiToAnthropicConverter) convertResponsesEvents(
 }
 
 // FinalizeEOF releases the held Gemini terminal through the Anthropic state.
+// The Anthropic state's latch is checked as well as the converter's (the
+// Gemini state's is checked by its own FinalizeEOF): a failure fed to it
+// directly after the release must not be washed out by an empty clean batch.
 func (c *geminiToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	if c.anthropic.streamError != nil {
+		return convertedBatch{}, c.anthropic.streamError
+	}
 	events, err := c.gemini.FinalizeEOF()
 	if err != nil {
 		return convertedBatch{}, err
