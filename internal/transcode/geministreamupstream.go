@@ -620,7 +620,7 @@ func (s *geminiResponsesStreamState) convertPart(
 }
 
 // decidePartLosses peeks every policy gate the part's losses need — a dropped
-// thought, part modifier metadata, a non-call signature — before any of the
+// thought, a non-call signature, part modifier metadata — before any of the
 // part's payload commits. The losses themselves are recorded afterwards by
 // loseThought and losePartModifiers, which then cannot be refused.
 func (s *geminiResponsesStreamState) decidePartLosses(
@@ -631,13 +631,15 @@ func (s *geminiResponsesStreamState) decidePartLosses(
 			return err
 		}
 	}
-	if partMetadata {
-		if err := s.policy.refusal(FeatureGeminiPartMetadata, path); err != nil {
+	// The order matches the non-streaming decode, so both name the same
+	// feature when more than one is refused.
+	if hasNonCallSignature(part) {
+		if err := s.policy.refusal(FeatureGeminiResponseThoughtSignature, path); err != nil {
 			return err
 		}
 	}
-	if hasNonCallSignature(part) {
-		if err := s.policy.refusal(FeatureGeminiResponseThoughtSignature, path); err != nil {
+	if partMetadata {
+		if err := s.policy.refusal(FeatureGeminiPartMetadata, path); err != nil {
 			return err
 		}
 	}

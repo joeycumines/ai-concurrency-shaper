@@ -365,8 +365,8 @@ func TestGeminiUpstreamStreamPartLossesFollowPayloadCommit(t *testing.T) {
 		_, err := s.Convert(geminiChunk(t,
 			`{"candidates":[{"content":{"parts":[{"text":"`+big+`","thought":true,"partMetadata":{"foo":1}}]},"index":0}]}`,
 		))
-		if err == nil {
-			t.Fatal("oversized thought delta: nil error")
+		if err == nil || !isUpstreamConversionError(err) {
+			t.Fatalf("oversized thought delta: err = %T %v, want the bound's upstream conversion error", err, err)
 		}
 		if n := countReportFeature(s.report, FeatureGeminiPartMetadata); n != 0 {
 			t.Fatalf("part metadata loss recorded for a refused payload: %+v", s.report.Losses)
@@ -390,14 +390,16 @@ func TestGeminiUpstreamStreamPartLossesFollowPayloadCommit(t *testing.T) {
 	})
 
 	t.Run("signature with oversized text delta leaves no signature loss", func(t *testing.T) {
-		ctx := geminiStreamTestContext()
+		// The signature loss is approved, so the part fails on the delta
+		// bound itself, never on a policy refusal decided up front.
+		ctx := geminiStreamSignatureTestContext()
 		s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy, ChatCapabilities{}, "resp_t", "m", 1, nil)
 		_, err := s.Convert(geminiChunk(t,
 			`{"candidates":[{"content":{"parts":[{"text":"`+strings.Repeat("a", maxStreamAccumulatedBytes+1)+
 				`","thoughtSignature":"sig"}]},"index":0}]}`,
 		))
-		if err == nil {
-			t.Fatal("oversized text delta: nil error")
+		if err == nil || !isUpstreamConversionError(err) {
+			t.Fatalf("oversized text delta: err = %T %v, want the bound's upstream conversion error", err, err)
 		}
 		if n := countReportFeature(s.report, FeatureGeminiResponseThoughtSignature); n != 0 {
 			t.Fatalf("signature loss recorded for a refused payload: %+v", s.report.Losses)
@@ -551,6 +553,27 @@ func TestGeminiUpstreamStreamPartGatesDecidedBeforeCommit(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("refusal precedence matches the non-streaming decode", func(t *testing.T) {
+		// With both the signature and the metadata refused, the stream names
+		// the same feature the non-streaming decode refuses first.
+		for name, part := range map[string]string{
+			"signature-only part": `{"thoughtSignature":"sig","partMetadata":{"foo":1}}`,
+			"text part":           `{"text":"hi","thoughtSignature":"sig","partMetadata":{"foo":1}}`,
+		} {
+			s, _ := newState(ChatCapabilities{})
+			_, streamErr := s.Convert(geminiChunk(t, `{"candidates":[{"content":{"parts":[`+part+`]},"index":0}]}`))
+			_, _, decodeErr := DecodeGeminiResponse(
+				[]byte(`{"candidates":[{"content":{"role":"model","parts":[`+part+`]},"finishReason":"STOP"}],"modelVersion":"m"}`),
+				ChatCapabilities{}, LossPolicy{Allowed: map[Feature]struct{}{}}, NewExchangeIDs(),
+			)
+			var streamRefusal, decodeRefusal *UnsupportedFeatureError
+			if !errors.As(streamErr, &streamRefusal) || !errors.As(decodeErr, &decodeRefusal) ||
+				streamRefusal.Feature != decodeRefusal.Feature {
+				t.Fatalf("%s: stream err %v, non-streaming err %v; want the same refused feature", name, streamErr, decodeErr)
+			}
+		}
+	})
 
 	t.Run("dropped thought with refused metadata leaves no reasoning loss", func(t *testing.T) {
 		s, _ := newState(ChatCapabilities{}, FeatureProviderReasoningText)
