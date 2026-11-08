@@ -708,19 +708,27 @@ func (c *messagesToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatch
 	if err != nil {
 		return convertedBatch{}, err
 	}
-	return convertGeminiEvents(c.gemini, events)
+	batch, err := convertGeminiEvents(c.gemini, events)
+	if err != nil && c.upstream.streamError != nil {
+		// An upstream error event latched the upstream state and was
+		// re-rendered by the Gemini state as its own failure: the upstream
+		// instance is the root failure, so Convert and FinalizeEOF report the
+		// same one.
+		return convertedBatch{}, c.upstream.streamError
+	}
+	return batch, err
 }
 
 // FinalizeEOF reports a truncation when the upstream ended before message_stop.
 func (c *messagesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
 	if c.upstream.streamError != nil {
 		return convertedBatch{}, c.upstream.streamError
 	}
 	if c.gemini.streamError != nil {
 		return convertedBatch{}, c.gemini.streamError
-	}
-	if c.streamError != nil {
-		return convertedBatch{}, c.streamError
 	}
 	if !c.upstream.stopped {
 		return convertedBatch{}, upstreamWireError(

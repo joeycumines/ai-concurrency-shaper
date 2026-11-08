@@ -20,16 +20,40 @@ import (
 // marshaling typed Responses events into frames.
 type chatToResponsesConverter struct {
 	state *chatResponsesStreamState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode, convert, or marshal — so a caller that ignores the returned
+	// error cannot still obtain a clean terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newChatToResponsesConverter(state *chatResponsesStreamState) *chatToResponsesConverter {
 	return &chatToResponsesConverter{state: state}
 }
 
-// Convert processes one upstream Chat SSE frame.
+// Convert processes one upstream Chat SSE frame. The first failure of any
+// kind latches: every later call, and FinalizeEOF, propagates it.
 func (c *chatToResponsesConverter) Convert(
 	frame SSEEvent,
 ) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *chatToResponsesConverter) convertFrame(
+	frame SSEEvent,
+) (convertedBatch, error) {
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
+	}
 	chunk, err := chatStreamChunkFromSSE(frame)
 	if errors.Is(err, errChatStreamDone) {
 		// [DONE] is the protocol terminal: release the held terminal batch
@@ -78,6 +102,9 @@ func (c *chatToResponsesConverter) Convert(
 // as an ungated note. A stream that ends without any finish_reason is
 // still a typed truncation error.
 func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
 		return convertedBatch{}, err
@@ -122,6 +149,11 @@ type responsesToAnthropicConverter struct {
 	// missingEventNameNoted gates the missing-event-name note to once per
 	// stream (a data-only gateway omits the name on every frame).
 	missingEventNameNoted bool
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode, validate, convert, or marshal — so a caller that ignores the
+	// returned error cannot still obtain a clean terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newResponsesToAnthropicConverter(
@@ -130,10 +162,29 @@ func newResponsesToAnthropicConverter(
 	return &responsesToAnthropicConverter{state: state}
 }
 
-// Convert processes one upstream Responses SSE frame.
+// Convert processes one upstream Responses SSE frame. The first failure of
+// any kind latches: every later call, and FinalizeEOF, propagates it.
 func (c *responsesToAnthropicConverter) Convert(
 	frame SSEEvent,
 ) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *responsesToAnthropicConverter) convertFrame(
+	frame SSEEvent,
+) (convertedBatch, error) {
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
+	}
 	data := trimJSONSpace(frame.Data)
 	if isResponsesDoneSentinel(data) {
 		// The Responses protocol has no [DONE] sentinel; this is defensive
@@ -214,6 +265,9 @@ func (c *responsesToAnthropicConverter) Convert(
 
 // FinalizeEOF releases a held terminal or reports a truncation error.
 func (c *responsesToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
 		return convertedBatch{}, err
@@ -256,6 +310,12 @@ func marshalAnthropicEvents(
 type chatToAnthropicConverter struct {
 	chat      *chatResponsesStreamState
 	anthropic *anthropicResponsesStreamState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode, a conversion or release that failed, or a marshal that failed —
+	// so a caller that ignores the returned error cannot still obtain a clean
+	// terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newChatToAnthropicConverter(
@@ -269,9 +329,32 @@ func newChatToAnthropicConverter(
 }
 
 // Convert processes one upstream Chat SSE frame through both state machines.
+// The first failure of any kind latches: every later call, and FinalizeEOF,
+// propagates it.
 func (c *chatToAnthropicConverter) Convert(
 	frame SSEEvent,
 ) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	batch, err := c.convertFrame(frame)
+	if err != nil {
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *chatToAnthropicConverter) convertFrame(
+	frame SSEEvent,
+) (convertedBatch, error) {
+	if c.chat.streamError != nil {
+		return convertedBatch{}, c.chat.streamError
+	}
+	if c.anthropic.streamError != nil {
+		return convertedBatch{}, c.anthropic.streamError
+	}
 	chunk, err := chatStreamChunkFromSSE(frame)
 	if errors.Is(err, errChatStreamDone) {
 		// [DONE] is the protocol terminal: release the held terminal (which
@@ -348,6 +431,18 @@ func (c *chatToAnthropicConverter) releaseTerminals() (convertedBatch, error) {
 // stream that ends WITHOUT any finish_reason is a typed upstream truncation,
 // never a released terminal.
 func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
+	// Every latch is checked: the converter's own (a frame it failed on) and
+	// both states' (a failure fed to a state directly), so a failed stream
+	// never reports a clean terminal or a different error at EOF.
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	if c.chat.streamError != nil {
+		return convertedBatch{}, c.chat.streamError
+	}
+	if c.anthropic.streamError != nil {
+		return convertedBatch{}, c.anthropic.streamError
+	}
 	if c.chat.sawFinish && !c.chat.terminalReleased {
 		if err := c.chat.noteMissingSentinel(); err != nil {
 			return convertedBatch{}, err

@@ -1583,9 +1583,15 @@ func (c *geminiToAnthropicConverter) convertResponsesEvents(
 }
 
 // FinalizeEOF releases the held Gemini terminal through the Anthropic state.
+// The Anthropic state's latch is checked as well as the converter's (the
+// Gemini state's is checked by its own FinalizeEOF): a failure fed to it
+// directly after the release must not be washed out by an empty clean batch.
 func (c *geminiToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
+	}
+	if c.anthropic.streamError != nil {
+		return convertedBatch{}, c.anthropic.streamError
 	}
 	events, err := c.gemini.FinalizeEOF()
 	if err != nil {

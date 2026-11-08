@@ -441,10 +441,11 @@ func TestChatStreamComposedFailedReleaseNeverCleanAtEOF(t *testing.T) {
 		t.Fatalf("[DONE] release: err = %T %v, want an UnsupportedFeatureError", releaseErr, releaseErr)
 	}
 
-	// EOF after the failed release must NOT return a clean terminal.
+	// EOF after the failed release must NOT return a clean terminal, and must
+	// report the release failure itself rather than a generic truncation.
 	batch, err := converter.FinalizeEOF()
-	if err == nil {
-		t.Fatalf("FinalizeEOF after a failed release: nil error, batch %+v", batch)
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("FinalizeEOF after a failed release: err = %v, want the release failure %v (batch %+v)", err, releaseErr, batch)
 	}
 	if batch.Terminal || len(batch.Events) != 0 {
 		t.Fatalf("FinalizeEOF after a failed release returned %+v, want an empty non-terminal batch", batch)
