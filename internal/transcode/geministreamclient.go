@@ -136,8 +136,9 @@ func (s *geminiStreamClientState) convertEvent(event ResponsesSSEEvent) ([]gemin
 		if err != nil {
 			return nil, err
 		}
-		// The loss describes text that reached the client, so it follows the
-		// committed chunk.
+		// The loss is recorded only after the chunk committed, so a delta the
+		// budget rejects leaves no loss behind; a refused loss discards the
+		// chunk with the rest of the failed stream.
 		if len(value.Logprobs) > 0 {
 			if err := s.loseLogprobs("output_text.delta.logprobs"); err != nil {
 				return nil, err
@@ -171,13 +172,11 @@ func (s *geminiStreamClientState) convertEvent(event ResponsesSSEEvent) ([]gemin
 			// nor retained summary state.
 			return nil, nil
 		}
-		if !s.ctx.GeminiIncludeThoughts && !s.policy.Allows(FeatureProviderReasoningText) {
+		if !s.ctx.GeminiIncludeThoughts {
 			// The policy gate is peeked BEFORE any state changes: a refused
 			// loss must leave no retained summary or budget charge behind.
-			return nil, &UnsupportedFeatureError{
-				Protocol: "transcode",
-				Path:     "candidates[0].content.parts[].thought",
-				Feature:  string(FeatureProviderReasoningText),
+			if err := s.policy.refusal(FeatureProviderReasoningText, "candidates[0].content.parts[].thought"); err != nil {
+				return nil, err
 			}
 		}
 		// Retain the streamed text for the coverage proof in loseReasoning,

@@ -516,22 +516,26 @@ func (s *geminiResponsesStreamState) convertPart(
 		}
 	}
 
-	// Part modifiers and a signature on a non-call part are observable
-	// losses, once per stream. The loss describes the part's encoding, so it
-	// is recorded only after the part's payload committed — a part whose
-	// payload was refused (bounds, an invalid function call) leaves neither
-	// behind. A signature-only part or an empty thought commits nothing and
-	// emits nothing, but the signature loss still describes that exact
-	// part: it is recorded before the empty return.
-	//
-	// partMetadataLoss is deferred until the payload commits; it takes no
-	// effect on signature-only and empty-thought parts (they carry no other
-	// payload, so the metadata accompanies no encoding at all).
+	// Part modifiers, a signature on a non-call part, and a dropped thought
+	// are observable losses, once per stream. Every policy gate the part
+	// needs is decided BEFORE any of its payload commits, so a part refused
+	// for one loss leaves no other entry, no stored signature, and no events
+	// behind. Each loss is recorded only AFTER the payload committed, so a
+	// part whose payload is refused (bounds, an invalid function call) leaves
+	// none. Signature-only and empty-thought parts commit no payload, yet the
+	// metadata and signature they carry are still losses of that exact part:
+	// the non-streaming decode records both on every part shape.
 	partMetadata := geminigeneratecontent.RawMemberPresent(part.VideoMetadata) ||
 		geminigeneratecontent.RawMemberPresent(part.SpeechMetadata) ||
 		geminigeneratecontent.RawMemberPresent(part.PartMetadata) ||
 		geminigeneratecontent.RawMemberPresent(part.MediaResolution) ||
 		part.MediaProcessing != nil
+	thought := part.Thought != nil && *part.Thought
+	dropsThought := thought && part.Text != nil && *part.Text != "" &&
+		!s.capabilities.ProviderReasoningThinking && !s.capabilities.ProviderReasoningText
+	if err := s.decidePartLosses(part, path, partMetadata, dropsThought); err != nil {
+		return nil, err
+	}
 
 	if part.FunctionCall != nil {
 		events, err := s.convertFunctionCall(part, path)
@@ -544,28 +548,14 @@ func (s *geminiResponsesStreamState) convertPart(
 		return events, nil
 	}
 
-	if part.Text == nil {
-		// A signature-only part carries no payload and emits nothing, but its
-		// signature is still an observable loss of that part.
-		if err := s.loseNonCallSignature(part, path); err != nil {
-			return nil, err
-		}
-		return nil, nil
+	if part.Text == nil || (thought && *part.Text == "") {
+		// A signature-only part, or an empty thought (the empty-delta short
+		// circuit in emitThoughtText applies), carries no payload and emits
+		// nothing, and records no reasoning note or loss for an encoding that
+		// produced nothing.
+		return nil, s.losePartModifiers(part, path, partMetadata)
 	}
-	thought := part.Thought != nil && *part.Thought
 	if thought {
-		if *part.Text == "" {
-			// An empty thought delta carries no payload: the empty-delta
-			// short circuit in emitThoughtText applies, and no note or loss
-			// is recorded for an encoding that produced nothing. A signature
-			// attached to the empty part is still an observable loss of that
-			// exact part (the non-streaming decode records it too), so it is
-			// decided before the empty return.
-			if err := s.loseNonCallSignature(part, path); err != nil {
-				return nil, err
-			}
-			return nil, nil
-		}
 		// Same capability rules as the non-streaming decode: thought text is
 		// provider reasoning; mapped under the capability or an approved
 		// loss, each recorded once per stream. The encoding commits first, so
@@ -585,24 +575,14 @@ func (s *geminiResponsesStreamState) convertPart(
 				return nil, err
 			}
 		default:
-			// The dropped thought commits as an approved loss, so its
-			// modifiers and signature are decided here — both remain
-			// observable losses of the part the stream dropped.
+			// The dropped thought commits as an approved loss, and its
+			// modifiers and signature remain observable losses of the part.
 			if err := s.loseThought(path); err != nil {
 				return nil, err
 			}
-			if err := s.losePartMetadata(partMetadata, path); err != nil {
-				return nil, err
-			}
-			if err := s.loseNonCallSignature(part, path); err != nil {
-				return nil, err
-			}
-			return nil, nil
+			return nil, s.losePartModifiers(part, path, partMetadata)
 		}
-		if err := s.losePartMetadata(partMetadata, path); err != nil {
-			return nil, err
-		}
-		if err := s.loseNonCallSignature(part, path); err != nil {
+		if err := s.losePartModifiers(part, path, partMetadata); err != nil {
 			return nil, err
 		}
 		if s.capabilities.ProviderReasoningThinking {
@@ -633,17 +613,50 @@ func (s *geminiResponsesStreamState) convertPart(
 	if err != nil {
 		return nil, err
 	}
-	if err := s.losePartMetadata(partMetadata, path); err != nil {
-		return nil, err
-	}
-	if err := s.loseNonCallSignature(part, path); err != nil {
+	if err := s.losePartModifiers(part, path, partMetadata); err != nil {
 		return nil, err
 	}
 	return events, nil
 }
 
+// decidePartLosses peeks every policy gate the part's losses need — a dropped
+// thought, part modifier metadata, a non-call signature — before any of the
+// part's payload commits. The losses themselves are recorded afterwards by
+// loseThought and losePartModifiers, which then cannot be refused.
+func (s *geminiResponsesStreamState) decidePartLosses(
+	part geminigeneratecontent.Part, path string, partMetadata, dropsThought bool,
+) error {
+	if dropsThought {
+		if err := s.policy.refusal(FeatureProviderReasoningText, path); err != nil {
+			return err
+		}
+	}
+	if partMetadata {
+		if err := s.policy.refusal(FeatureGeminiPartMetadata, path); err != nil {
+			return err
+		}
+	}
+	if hasNonCallSignature(part) {
+		if err := s.policy.refusal(FeatureGeminiResponseThoughtSignature, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// losePartModifiers records the part's metadata and non-call signature
+// losses, both already decided by decidePartLosses.
+func (s *geminiResponsesStreamState) losePartModifiers(
+	part geminigeneratecontent.Part, path string, partMetadata bool,
+) error {
+	if err := s.losePartMetadata(partMetadata, path); err != nil {
+		return err
+	}
+	return s.loseNonCallSignature(part, path)
+}
+
 // losePartMetadata records the approved loss of part modifier metadata, once
-// per stream, only for a part whose payload committed.
+// per stream. Its policy gate was decided before the part's payload committed.
 func (s *geminiResponsesStreamState) losePartMetadata(present bool, path string) error {
 	if !present || s.partMetadataLossRecorded {
 		return nil
@@ -658,7 +671,8 @@ func (s *geminiResponsesStreamState) losePartMetadata(present bool, path string)
 }
 
 // loseThought records the approved loss of thought text under no reasoning
-// capability, once per stream.
+// capability, once per stream. Its policy gate was decided before the part's
+// payload committed.
 func (s *geminiResponsesStreamState) loseThought(path string) error {
 	if s.thoughtLossNoted {
 		return nil
@@ -670,14 +684,17 @@ func (s *geminiResponsesStreamState) loseThought(path string) error {
 	)
 }
 
+// hasNonCallSignature reports whether the part carries a thought signature
+// that no function call retains. An explicit empty signature carries none.
+func hasNonCallSignature(part geminigeneratecontent.Part) bool {
+	return part.ThoughtSignature != nil && *part.ThoughtSignature != "" && part.FunctionCall == nil
+}
+
 // loseNonCallSignature records the approved loss of a thought signature on a
-// non-function-call part, once per stream, only for a part whose payload
-// committed. An explicit empty signature carries no signature.
+// non-function-call part, once per stream. Its policy gate was decided before
+// the part's payload committed.
 func (s *geminiResponsesStreamState) loseNonCallSignature(part geminigeneratecontent.Part, path string) error {
-	if part.ThoughtSignature == nil || *part.ThoughtSignature == "" || part.FunctionCall != nil {
-		return nil
-	}
-	if s.partSignatureLossRecorded {
+	if !hasNonCallSignature(part) || s.partSignatureLossRecorded {
 		return nil
 	}
 	s.partSignatureLossRecorded = true

@@ -529,6 +529,21 @@ func (p LossPolicy) Allows(feature Feature) bool {
 	return ok
 }
 
+// refusal returns the error Lose reports when the policy does not permit
+// losing the feature at path, or nil when it does. A conversion that must
+// decide a loss before the encoding it describes commits peeks here and
+// records with Lose afterwards; both report the same refusal by construction.
+func (p LossPolicy) refusal(feature Feature, path string) error {
+	if p.Allows(feature) {
+		return nil
+	}
+	return &UnsupportedFeatureError{
+		Protocol: "transcode",
+		Path:     path,
+		Feature:  string(feature),
+	}
+}
+
 // UnsupportedFeatureError reports a request or response field that uses a
 // feature this transcoder does not support in the target dialect.
 type UnsupportedFeatureError struct {
@@ -623,12 +638,8 @@ func (r *ConversionReport) Lose(
 	path string,
 	detail string,
 ) error {
-	if !policy.Allows(feature) {
-		return &UnsupportedFeatureError{
-			Protocol: "transcode",
-			Path:     path,
-			Feature:  string(feature),
-		}
+	if err := policy.refusal(feature, path); err != nil {
+		return err
 	}
 	if err := r.reserve(); err != nil {
 		if errors.Is(err, errEntryDropped) {
