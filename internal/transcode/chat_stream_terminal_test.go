@@ -437,8 +437,7 @@ func TestChatStreamComposedFailedReleaseNeverCleanAtEOF(t *testing.T) {
 	if releaseErr == nil {
 		t.Fatal("[DONE] release: nil error, want the strict usage refusal")
 	}
-	var unsupported *UnsupportedFeatureError
-	if !errors.As(releaseErr, &unsupported) {
+	if _, ok := errors.AsType[*UnsupportedFeatureError](releaseErr); !ok {
 		t.Fatalf("[DONE] release: err = %T %v, want an UnsupportedFeatureError", releaseErr, releaseErr)
 	}
 

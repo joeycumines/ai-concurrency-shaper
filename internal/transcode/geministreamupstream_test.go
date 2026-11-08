@@ -966,7 +966,7 @@ func TestGeminiUpstreamStreamClampNotesAreOncePerStream(t *testing.T) {
 	if _, err := s.Convert(geminiChunk(t, geminiFinishChunk)); err != nil {
 		t.Fatalf("finish chunk: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := s.Convert(geminiChunk(t, badUsage)); err != nil {
 			t.Fatalf("usage chunk %d: %v", i, err)
 		}

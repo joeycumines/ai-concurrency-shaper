@@ -417,8 +417,7 @@ func TestGeminiStreamMessagesStopFailuresLatch(t *testing.T) {
 		start(t, c)
 		messageDelta(t, c, "pause_turn")
 		err := messageStop(t, c)
-		var unrepresentable *UnrepresentableError
-		if !errors.As(err, &unrepresentable) {
+		if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
 			t.Fatalf("message_stop(pause_turn): err = %T %v, want *UnrepresentableError", err, err)
 		}
 		if n := countReportFeature(upstream.report, FeatureUsageTotalDerived); n != 0 {

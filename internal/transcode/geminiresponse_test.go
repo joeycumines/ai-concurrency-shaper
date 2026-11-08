@@ -245,8 +245,7 @@ func TestDecodeGeminiResponseFunctionResponseRejected(t *testing.T) {
 		"modelVersion": "m"
 	}`
 	_, _, err := decodeGemini(body, permissivePolicy())
-	var unrepresentable *UnrepresentableError
-	if !errors.As(err, &unrepresentable) {
+	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
 		t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
 	}
 	if !strings.Contains(err.Error(), "functionResponse") {
