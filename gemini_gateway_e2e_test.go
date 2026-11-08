@@ -171,7 +171,7 @@ func stripGeneratedIDs(s string) string {
 // trimmed first.
 func stripQueueComments(s string) string {
 	var out []string
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if strings.HasPrefix(strings.TrimLeft(line, " \t\r"), ":") {
 			continue
 		}
@@ -478,7 +478,7 @@ func TestE2E_GeminiGateway_SuiteMountParity(t *testing.T) {
 				// -queue-comments (the gate is on the Gemini operation path,
 				// which is what every *G*-client case here exercises).
 				if strings.Contains(tc.suitePath, "/v1beta/") {
-					for _, line := range strings.Split(bodySuite, "\n") {
+					for line := range strings.SplitSeq(bodySuite, "\n") {
 						if strings.HasPrefix(strings.TrimLeft(line, " \t\r"), ":") {
 							t.Fatalf("Gemini client received an SSE comment line %q under -queue-comments", line)
 						}

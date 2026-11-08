@@ -95,8 +95,8 @@ func readSSE(t *testing.T, resp *http.Response) []string {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			frames = append(frames, strings.TrimPrefix(line, "data: "))
+		if after, ok := strings.CutPrefix(line, "data: "); ok {
+			frames = append(frames, after)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -226,8 +226,8 @@ func TestGeminiUpstreamStreamMessagesCancel(t *testing.T) {
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text()
-			if strings.HasPrefix(line, "data: ") {
-				frames = append(frames, strings.TrimPrefix(line, "data: "))
+			if after, ok := strings.CutPrefix(line, "data: "); ok {
+				frames = append(frames, after)
 			}
 			// Cancel after the first data frame arrives.
 			if len(frames) == 1 {

@@ -571,7 +571,7 @@ func TestGeminiUpstreamResponsesOwnDialect404(t *testing.T) {
 	stub := newGeminiUpstreamStub(t, func(n int, r *http.Request, body []byte) (int, string, http.Header) {
 		return http.StatusOK, geminiOKResponse, nil
 	})
-	responsesMapping := TranscodeMapping{Mapping: transcode.Mapping{
+	responsesMapping := TranscodeMapping{
 		ClientRoute:      transcode.RouteKey{Method: http.MethodPost, Path: "/v1/responses"},
 		ClientProtocol:   transcode.ClientResponses,
 		UpstreamProtocol: transcode.UpstreamChatCompletions,
@@ -586,8 +586,7 @@ func TestGeminiUpstreamResponsesOwnDialect404(t *testing.T) {
 			transcode.FeatureUsageCacheWriteUnknown: {},
 			transcode.FeatureUsageReasoningUnknown:  {},
 			transcode.FeatureParallelToolCalls:      {},
-		}},
-	}}
+		}}}
 	gemMapping := responsesGeminiMapping()
 	gemMapping.Mapping.ModelMap = transcode.ModelMap{
 		AllowIdentity: false,
@@ -727,7 +726,7 @@ func TestGeminiUpstreamStrictDefaultsRefuseInjectedLosses(t *testing.T) {
 		return m
 	}
 	strictMapping := func(route transcode.RouteKey, client transcode.ClientProtocol) TranscodeMapping {
-		m := TranscodeMapping{Mapping: transcode.Mapping{
+		m := TranscodeMapping{
 			ClientRoute:        route,
 			ClientProtocol:     client,
 			UpstreamProtocol:   transcode.UpstreamGemini,
@@ -746,8 +745,7 @@ func TestGeminiUpstreamStrictDefaultsRefuseInjectedLosses(t *testing.T) {
 			Auth: transcode.AuthPolicy{
 				Mode:   transcode.AuthGoogAPIKey,
 				Secret: auth.NewStaticSecretSource("gemini-secret"),
-			},
-		}}
+			}}
 		return m
 	}
 
