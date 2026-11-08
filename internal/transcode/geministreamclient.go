@@ -523,6 +523,8 @@ func geminiStreamErrorFrame(err error) (frameEvent, bool) {
 // chatToGeminiConverter composes the Chat-to-Responses state with the
 // Responses-to-Gemini state strictly in memory, like chatToAnthropicConverter.
 type chatToGeminiConverter struct {
+	deliveryGate
+
 	chat   *chatResponsesStreamState
 	gemini *geminiStreamClientState
 
@@ -546,8 +548,14 @@ func (c *chatToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, error) 
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	chatMark, geminiMark := c.chat.beginCall(), c.gemini.beginCall()
 	batch, err := c.convertFrame(frame)
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
 	if err != nil {
+		c.chat.rollbackCall(chatMark)
+		c.gemini.rollbackCall(geminiMark)
 		c.streamError = err
 		return convertedBatch{}, err
 	}
@@ -620,11 +628,28 @@ func (c *chatToGeminiConverter) releaseTerminals() (convertedBatch, error) {
 // finishing chunk without the [DONE] sentinel. A stream that ends without any
 // finish reason is a truncation, never a released terminal.
 func (c *chatToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
-	// Every latch is checked: the converter's own (a frame it failed on) and
-	// both states' (a failure fed to a state directly).
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	chatMark, geminiMark := c.chat.beginCall(), c.gemini.beginCall()
+	batch, err := c.finalizeEOF()
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.chat.rollbackCall(chatMark)
+		c.gemini.rollbackCall(geminiMark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// finalizeEOF releases the Chat held terminal at EOF, leaving failure latching
+// to FinalizeEOF.
+func (c *chatToGeminiConverter) finalizeEOF() (convertedBatch, error) {
+	// Both states' latches are checked: a failure fed to a state directly must
+	// not be washed out at EOF.
 	if c.chat.streamError != nil {
 		return convertedBatch{}, c.chat.streamError
 	}
@@ -632,11 +657,13 @@ func (c *chatToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
 		return convertedBatch{}, c.gemini.streamError
 	}
 	if c.chat.sawFinish && !c.chat.terminalReleased {
-		if err := c.chat.noteMissingSentinel(); err != nil {
-			return convertedBatch{}, err
-		}
 		batch, err := c.releaseTerminals()
 		if err != nil {
+			return convertedBatch{}, err
+		}
+		// The note follows the release, so it describes a completion that was
+		// actually released on EOF.
+		if err := c.chat.noteMissingSentinel(); err != nil {
 			return convertedBatch{}, err
 		}
 		batch.Terminal = true
@@ -669,6 +696,8 @@ func (c *chatToGeminiConverter) ConversionReport() *ConversionReport {
 // responsesToGeminiConverter decodes upstream Responses SSE and feeds the typed
 // events to the Gemini state, like responsesToAnthropicConverter.
 type responsesToGeminiConverter struct {
+	deliveryGate
+
 	state *geminiStreamClientState
 
 	// missingEventNameNoted gates the missing-event-name note to once per
@@ -691,8 +720,13 @@ func (c *responsesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, er
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	mark := c.state.beginCall()
 	batch, err := c.convertFrame(frame)
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
 	if err != nil {
+		c.state.rollbackCall(mark)
 		c.streamError = err
 		return convertedBatch{}, err
 	}
@@ -763,6 +797,22 @@ func (c *responsesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
 	if c.state.streamError != nil {
 		return convertedBatch{}, c.state.streamError
 	}
+	mark := c.state.beginCall()
+	batch, err := c.finalizeEOF()
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.state.rollbackCall(mark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// finalizeEOF reports the truncation when no terminal was committed, leaving
+// failure latching to FinalizeEOF.
+func (c *responsesToGeminiConverter) finalizeEOF() (convertedBatch, error) {
 	if !c.state.sawTerminal {
 		return convertedBatch{}, upstreamWireError(
 			UpstreamResponses,

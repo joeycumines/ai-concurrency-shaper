@@ -260,13 +260,18 @@ func TestGeminiUpstreamStreamFunctionCallStoresSignature(t *testing.T) {
 	store := NewGeminiSignatureStore(GeminiSignatureConfig{Capacity: 16, TTL: time.Hour})
 	ctx.GeminiSignatures = store
 	ctx.GeminiSignatureScope = "gemini"
-	s := newGeminiStreamState(t, ctx)
-	events, err := s.Convert(geminiChunk(t,
-		`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"get_weather","args":{"city":"Paris"}},"thoughtSignature":"sig-abc"}]},"index":0}]}`))
+	// The signature is written when the converter call that carries it
+	// succeeds, so the call goes through the converter boundary.
+	c := newGeminiToResponsesConverter(newGeminiStreamState(t, ctx))
+	batch, err := c.Convert(SSEEvent{Data: []byte(
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"get_weather","args":{"city":"Paris"}},"thoughtSignature":"sig-abc"}]},"index":0}]}`)})
 	if err != nil {
 		t.Fatalf("convert: %v", err)
 	}
-	types := geminiStreamEventTypes(events)
+	types := make([]string, 0, len(batch.Events))
+	for _, event := range batch.Events {
+		types = append(types, event.Type)
+	}
 	want := []string{
 		"response.created", "response.in_progress",
 		"response.output_item.added",
@@ -569,8 +574,8 @@ func TestGeminiUpstreamStreamPartGatesDecidedBeforeCommit(t *testing.T) {
 			)
 			var streamRefusal, decodeRefusal *UnsupportedFeatureError
 			if !errors.As(streamErr, &streamRefusal) || !errors.As(decodeErr, &decodeRefusal) ||
-				streamRefusal.Feature != decodeRefusal.Feature {
-				t.Fatalf("%s: stream err %v, non-streaming err %v; want the same refused feature", name, streamErr, decodeErr)
+				streamRefusal.Feature != decodeRefusal.Feature || streamRefusal.Path != decodeRefusal.Path {
+				t.Fatalf("%s: stream err %v, non-streaming err %v; want the same refused feature at the same path", name, streamErr, decodeErr)
 			}
 		}
 	})

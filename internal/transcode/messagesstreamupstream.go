@@ -662,6 +662,8 @@ func (s *anthropicUpstreamResponsesStreamState) nextSequence() int64 {
 // messagesToGeminiConverter composes the Anthropic-to-Responses state with the
 // Gemini client state in memory, like the other composed converters.
 type messagesToGeminiConverter struct {
+	deliveryGate
+
 	upstream *anthropicUpstreamResponsesStreamState
 	gemini   *geminiStreamClientState
 
@@ -684,8 +686,14 @@ func (c *messagesToGeminiConverter) Convert(frame SSEEvent) (convertedBatch, err
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	upstreamMark, geminiMark := c.upstream.beginCall(), c.gemini.beginCall()
 	batch, err := c.convertFrame(frame)
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
 	if err != nil {
+		c.upstream.rollbackCall(upstreamMark)
+		c.gemini.rollbackCall(geminiMark)
 		c.streamError = err
 		return convertedBatch{}, err
 	}
@@ -724,6 +732,24 @@ func (c *messagesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	upstreamMark, geminiMark := c.upstream.beginCall(), c.gemini.beginCall()
+	batch, err := c.finalizeEOF()
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.upstream.rollbackCall(upstreamMark)
+		c.gemini.rollbackCall(geminiMark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// finalizeEOF reports a truncation unless both message_stop and the Gemini
+// terminal it produces were committed, leaving failure latching to
+// FinalizeEOF.
+func (c *messagesToGeminiConverter) finalizeEOF() (convertedBatch, error) {
 	if c.upstream.streamError != nil {
 		return convertedBatch{}, c.upstream.streamError
 	}
@@ -735,6 +761,15 @@ func (c *messagesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
 			UpstreamMessages,
 			http.StatusOK,
 			errors.New("messages stream ended before message_stop"),
+		)
+	}
+	// message_stop commits a terminal on the Gemini client; a stop without a
+	// committed terminal is not a clean end of the stream.
+	if !c.gemini.sawTerminal {
+		return convertedBatch{}, upstreamWireError(
+			UpstreamMessages,
+			http.StatusOK,
+			errors.New("messages stream stopped without a committed terminal"),
 		)
 	}
 	return convertedBatch{Terminal: true}, nil

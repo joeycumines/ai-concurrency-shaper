@@ -19,6 +19,8 @@ import (
 // chatToResponsesConverter adapts chatResponsesStreamState to frameConverter,
 // marshaling typed Responses events into frames.
 type chatToResponsesConverter struct {
+	deliveryGate
+
 	state *chatResponsesStreamState
 
 	// streamError latches the converter's own failure — a frame it could not
@@ -39,8 +41,13 @@ func (c *chatToResponsesConverter) Convert(
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	mark := c.state.beginCall()
 	batch, err := c.convertFrame(frame)
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
 	if err != nil {
+		c.state.rollbackCall(mark)
 		c.streamError = err
 		return convertedBatch{}, err
 	}
@@ -105,6 +112,22 @@ func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	mark := c.state.beginCall()
+	batch, err := c.finalizeEOF()
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.state.rollbackCall(mark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// finalizeEOF releases the held terminal at EOF, leaving failure latching to
+// FinalizeEOF.
+func (c *chatToResponsesConverter) finalizeEOF() (convertedBatch, error) {
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
 		return convertedBatch{}, err
@@ -144,6 +167,8 @@ func marshalResponsesEvents(
 // frameConverter. Upstream Responses SSE frames are decoded into typed
 // Responses events, converted, and marshaled into Anthropic frames.
 type responsesToAnthropicConverter struct {
+	deliveryGate
+
 	state *anthropicResponsesStreamState
 
 	// missingEventNameNoted gates the missing-event-name note to once per
@@ -170,8 +195,13 @@ func (c *responsesToAnthropicConverter) Convert(
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	mark := c.state.beginCall()
 	batch, err := c.convertFrame(frame)
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
 	if err != nil {
+		c.state.rollbackCall(mark)
 		c.streamError = err
 		return convertedBatch{}, err
 	}
@@ -268,6 +298,22 @@ func (c *responsesToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	mark := c.state.beginCall()
+	batch, err := c.finalizeEOF()
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.state.rollbackCall(mark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// finalizeEOF releases a held terminal or reports the truncation, leaving
+// failure latching to FinalizeEOF.
+func (c *responsesToAnthropicConverter) finalizeEOF() (convertedBatch, error) {
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
 		return convertedBatch{}, err
@@ -308,6 +354,8 @@ func marshalAnthropicEvents(
 // Anthropic state machines strictly in memory. Typed Responses events flow
 // from one state machine into the other without intermediate JSON.
 type chatToAnthropicConverter struct {
+	deliveryGate
+
 	chat      *chatResponsesStreamState
 	anthropic *anthropicResponsesStreamState
 
@@ -337,8 +385,14 @@ func (c *chatToAnthropicConverter) Convert(
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	chatMark, anthropicMark := c.chat.beginCall(), c.anthropic.beginCall()
 	batch, err := c.convertFrame(frame)
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
 	if err != nil {
+		c.chat.rollbackCall(chatMark)
+		c.anthropic.rollbackCall(anthropicMark)
 		c.streamError = err
 		return convertedBatch{}, err
 	}
@@ -431,12 +485,28 @@ func (c *chatToAnthropicConverter) releaseTerminals() (convertedBatch, error) {
 // stream that ends WITHOUT any finish_reason is a typed upstream truncation,
 // never a released terminal.
 func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
-	// Every latch is checked: the converter's own (a frame it failed on) and
-	// both states' (a failure fed to a state directly), so a failed stream
-	// never reports a clean terminal or a different error at EOF.
 	if c.streamError != nil {
 		return convertedBatch{}, c.streamError
 	}
+	chatMark, anthropicMark := c.chat.beginCall(), c.anthropic.beginCall()
+	batch, err := c.finalizeEOF()
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.chat.rollbackCall(chatMark)
+		c.anthropic.rollbackCall(anthropicMark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// finalizeEOF releases the Chat held terminal at EOF, leaving failure latching
+// to FinalizeEOF.
+func (c *chatToAnthropicConverter) finalizeEOF() (convertedBatch, error) {
+	// Both states' latches are checked: a failure fed to a state directly must
+	// not be washed out at EOF.
 	if c.chat.streamError != nil {
 		return convertedBatch{}, c.chat.streamError
 	}
@@ -444,11 +514,13 @@ func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
 		return convertedBatch{}, c.anthropic.streamError
 	}
 	if c.chat.sawFinish && !c.chat.terminalReleased {
-		if err := c.chat.noteMissingSentinel(); err != nil {
-			return convertedBatch{}, err
-		}
 		batch, err := c.releaseTerminals()
 		if err != nil {
+			return convertedBatch{}, err
+		}
+		// The note follows the release, so it describes a completion that was
+		// actually released on EOF.
+		if err := c.chat.noteMissingSentinel(); err != nil {
 			return convertedBatch{}, err
 		}
 		batch.Terminal = true
@@ -555,11 +627,11 @@ func (c *chatToResponsesConverter) ConversionReport() *ConversionReport {
 	return &c.state.report
 }
 
-// ErrorEvent builds a client-dialect Responses error event frame. The
-// sequence number continues from the builder so a mid-stream error terminal
-// never collides with response.created's zero.
+// ErrorEvent builds a client-dialect Responses error event frame. The sequence
+// number continues from the delivered events, so a mid-stream error terminal
+// never collides with a delivered event or leaves a gap.
 func (c *chatToResponsesConverter) ErrorEvent(err error) (frameEvent, bool) {
-	return responsesErrorFrame(err, c.state.builder.NextSequenceNumber())
+	return responsesErrorFrame(err, c.nextDeliveredSequence())
 }
 
 // continuityTurns implements continuityTurnSource so streamResponse records
@@ -567,6 +639,9 @@ func (c *chatToResponsesConverter) ErrorEvent(err error) (frameEvent, bool) {
 func (c *chatToResponsesConverter) continuityTurns(
 	requestTurns []CanonicalTurn, depth int,
 ) (string, []CanonicalTurn, int, int, bool) {
+	if c.streamError != nil {
+		return "", nil, 0, 0, false
+	}
 	return c.state.continuityTurns(requestTurns, depth)
 }
 

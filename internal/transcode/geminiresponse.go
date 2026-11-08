@@ -46,8 +46,26 @@ var refusalFinishReasons = map[string]bool{
 // never forwarded); content parts stay strict through Part.UnmarshalJSON.
 // Corrupt wire (type errors, duplicate keys, trailing data, malformed JSON)
 // is an *UpstreamWireError; valid-but-unrepresentable content is an
-// *UnrepresentableError (local, breaker-neutral).
+// *UnrepresentableError (local, breaker-neutral). A refused decode returns an
+// empty report: the losses and notes of a conversion that does not complete
+// are not reported.
 func DecodeGeminiResponse(
+	body []byte,
+	capabilities ChatCapabilities,
+	policy LossPolicy,
+	ids *ExchangeIDs,
+) (CanonicalResponse, ConversionReport, error) {
+	response, report, err := decodeGeminiResponse(body, capabilities, policy, ids)
+	if err != nil {
+		return CanonicalResponse{}, ConversionReport{}, err
+	}
+	return response, report, nil
+}
+
+// decodeGeminiResponse is the decode behind DecodeGeminiResponse. On error its
+// report may hold entries recorded before the refusal; DecodeGeminiResponse
+// discards them.
+func decodeGeminiResponse(
 	body []byte,
 	capabilities ChatCapabilities,
 	policy LossPolicy,
@@ -322,6 +340,12 @@ func DecodeGeminiResponse(
 			case part.FunctionCall != nil:
 				flushText()
 				call := part.FunctionCall
+				if call.Name == "" {
+					return CanonicalResponse{}, report, upstreamWireError(
+						UpstreamGemini, 0,
+						errors.New("gemini functionCall has no name"),
+					)
+				}
 				callID := call.ID
 				if callID == "" {
 					if ids == nil {
@@ -350,9 +374,8 @@ func DecodeGeminiResponse(
 				}
 				response.Items = append(response.Items, item)
 				// The note describes a minted id the response carries, so it
-				// follows the committed call. A later refusal of the response
-				// (a part modifier, IR validation) can still leave it in the
-				// returned report; callers discard the report on error.
+				// follows the committed call. A refused response returns no
+				// report at all (DecodeGeminiResponse).
 				if callID != call.ID {
 					if err := report.Note(
 						FeatureGeminiCallIDSynthesized,

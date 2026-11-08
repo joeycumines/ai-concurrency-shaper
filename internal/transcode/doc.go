@@ -174,7 +174,10 @@
 // Every supported stream event (chat chunks, responses events, anthropic
 // events, gemini generateContent chunks) passes through one lifecycle state
 // machine per direction
-// (responses_stream_fsm.go, the direction converters in stream_converters.go):
+// (responses_stream_fsm.go, the state machines in chatstream*.go,
+// anthropicresponses*.go and geministream*.go, and the direction converters in
+// stream_adapter.go, geministreamconverters.go, geministreamclient.go and
+// messagesstreamupstream.go):
 // duplicate and post-done events are rejected, a terminal requires every child
 // lifecycle closed, output indexes are unique, terminal snapshots reconcile
 // with the incremental observation, and total event/item/part/state/byte

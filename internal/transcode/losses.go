@@ -676,6 +676,27 @@ func (r *ConversionReport) Note(feature Feature, path string, detail string) err
 	return nil
 }
 
+// reportMark is the observable prefix of a ConversionReport. A converter call
+// takes one before it runs and restores it when the call fails, so no entry a
+// failed call recorded stays in the report the handler logs.
+type reportMark struct {
+	losses        int
+	dropped       int
+	overflowNoted bool
+}
+
+// mark returns the report's observable prefix.
+func (r *ConversionReport) mark() reportMark {
+	return reportMark{losses: len(r.Losses), dropped: r.Dropped, overflowNoted: r.overflowNoted}
+}
+
+// restore discards every entry and count recorded after the mark.
+func (r *ConversionReport) restore(m reportMark) {
+	r.Losses = r.Losses[:m.losses]
+	r.Dropped = m.dropped
+	r.overflowNoted = m.overflowNoted
+}
+
 // decodeJSONObject ensures function-call arguments are objects before
 // converting them to Anthropic tool_use.input, whose final input must be an
 // object. It delegates to the wire layer's shared strict object decoder so
