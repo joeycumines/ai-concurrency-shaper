@@ -153,82 +153,6 @@ func (s *chatResponsesStreamState) convertDelta(
 ) ([]ResponsesSSEEvent, error) {
 	var events []ResponsesSSEEvent
 
-	// Reasoning→content/tool transition (provider_reasoning_thinking): the
-	// open reasoning item's summary lifecycle must close INLINE — before
-	// the content/tool events — so the anthropic state emits
-	// signature_delta + content_block_stop for the thinking block before
-	// the next block opens. Holding the close until finish() scrambled the
-	// order on the wire (text block closed before the thinking block's
-	// signature).
-	//
-	// The close fires ONLY at a real transition — a delta that actually
-	// carries content or tool output. A reasoning-only delta must NOT
-	// close the item: sealing it here would fragment contiguous reasoning
-	// into one thinking block per delta (one-block-per-delta, operator-
-	// observed 2026-09-08 — Claude Code rendered one ∴ fragment per line).
-	hasOutput := (delta.Content != nil && *delta.Content != "") ||
-		(delta.Refusal != nil && *delta.Refusal != "") ||
-		len(delta.ToolCalls) > 0
-	if hasOutput {
-		closeEvents, err := s.closeOpenReasoningItem()
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, closeEvents...)
-	}
-
-	if delta.Content != nil && *delta.Content != "" {
-		item, addedEvents, err := s.openMessageItemForPart("output_text")
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, addedEvents...)
-		message := item.item.(*ResponsesOutputMessage)
-		contentIndex := item.openPartIndex
-		events = append(events, s.builder.TextDelta(
-			message.ID,
-			item.outputIndex,
-			contentIndex,
-			*delta.Content,
-		))
-		key := chatPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
-		builder := s.textBufs[key]
-		if builder == nil {
-			builder = &strings.Builder{}
-			s.textBufs[key] = builder
-		}
-		builder.WriteString(*delta.Content)
-		if err := s.checkAccumulated(builder, len(*delta.Content), "text"); err != nil {
-			return nil, err
-		}
-	}
-
-	if delta.Refusal != nil && *delta.Refusal != "" {
-		item, addedEvents, err := s.openMessageItemForPart("refusal")
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, addedEvents...)
-		message := item.item.(*ResponsesOutputMessage)
-		contentIndex := item.openPartIndex
-		events = append(events, s.builder.RefusalDelta(
-			message.ID,
-			item.outputIndex,
-			contentIndex,
-			*delta.Refusal,
-		))
-		key := chatPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
-		builder := s.refusalBufs[key]
-		if builder == nil {
-			builder = &strings.Builder{}
-			s.refusalBufs[key] = builder
-		}
-		builder.WriteString(*delta.Refusal)
-		if err := s.checkAccumulated(builder, len(*delta.Refusal), "refusal"); err != nil {
-			return nil, err
-		}
-	}
-
 	// Provider plaintext reasoning arrives in two provider spellings:
 	// `reasoning` (OpenRouter style) and `reasoning_content` (the
 	// DeepSeek/Qwen convention real open-weights gateways stream). They are
@@ -268,15 +192,6 @@ func (s *chatResponsesStreamState) convertDelta(
 			// sealed block. Each burst therefore renders as its own
 			// thinking block with its own marker signature — the Anthropic
 			// dialect's sequential-blocks contract permits exactly that.
-			if !s.reasoningReportRecorded {
-				if err := s.report.Note(
-					FeatureProviderReasoningText,
-					reasoningPath,
-					"provider reasoning mapped to native thinking blocks (provider_reasoning_thinking encoding)",
-				); err != nil {
-					return nil, err
-				}
-			}
 			reasoningClosed := false
 			if len(s.items) > 0 {
 				if reasoning, ok := s.items[len(s.items)-1].item.(*ResponsesReasoningOutputItem); ok &&
@@ -337,27 +252,51 @@ func (s *chatResponsesStreamState) convertDelta(
 					),
 				)
 			}
+			item := &s.items[len(s.items)-1]
+			reasoning := item.item.(*ResponsesReasoningOutputItem)
 			events = append(events, s.builder.ReasoningSummaryTextDelta(
-				s.items[len(s.items)-1].item.(*ResponsesReasoningOutputItem).ID,
-				s.items[len(s.items)-1].outputIndex,
+				reasoning.ID,
+				item.outputIndex,
 				0,
 				reasoningText,
 			))
-			reasoning := s.items[len(s.items)-1].item.(*ResponsesReasoningOutputItem)
-			if len(reasoning.Summary) == 0 {
-				reasoning.Summary = []ResponsesReasoningSummary{{
-					Type: "summary_text",
-					Text: reasoningText,
-				}}
-			} else {
-				reasoning.Summary[0].Text += reasoningText
+			// The summary text accumulates in a per-item strings.Builder under
+			// the same per-item and exchange-total bounds as text and refusal
+			// (checkAccumulated), never via += on the summary string. The part
+			// stays empty while the item is open; the accumulated text is
+			// materialized into the summary when the item closes.
+			key := chatPartKey{outputIndex: item.outputIndex, contentIndex: 0}
+			buf := s.reasoningBufs[key]
+			if buf == nil {
+				buf = &strings.Builder{}
+				s.reasoningBufs[key] = buf
 			}
-			if err := s.chargeIdentity(len(reasoningText)); err != nil {
+			// The bound is checked BEFORE the write: a rejected delta must
+			// not mutate the accumulated state.
+			if err := s.checkAccumulated(buf, len(reasoningText), "reasoning summary text"); err != nil {
 				return nil, err
+			}
+			buf.WriteString(reasoningText)
+			if len(reasoning.Summary) == 0 {
+				reasoning.Summary = []ResponsesReasoningSummary{{Type: "summary_text", Text: ""}}
+			}
+			// The encoding note is recorded exactly once per stream, never
+			// once per delta, and only after the delta's accumulated charge
+			// has committed.
+			// The once-per-stream flag is set only after the note commits
+			// (decide before commit, record after commit).
+			if !s.reasoningReportRecorded {
+				if err := s.report.Note(
+					FeatureProviderReasoningText,
+					reasoningPath,
+					"provider reasoning mapped to native thinking blocks (provider_reasoning_thinking encoding)",
+				); err != nil {
+					return nil, err
+				}
+				s.reasoningReportRecorded = true
 			}
 		} else if !s.capabilities.ProviderReasoningText {
 			if !s.reasoningReportRecorded {
-				s.reasoningReportRecorded = true
 				if err := s.report.Lose(
 					s.policy,
 					FeatureProviderReasoningText,
@@ -366,6 +305,7 @@ func (s *chatResponsesStreamState) convertDelta(
 				); err != nil {
 					return nil, err
 				}
+				s.reasoningReportRecorded = true
 			}
 		} else {
 			item, addedEvents, err := s.openMessageItemForPart("output_text")
@@ -387,14 +327,13 @@ func (s *chatResponsesStreamState) convertDelta(
 				builder = &strings.Builder{}
 				s.textBufs[key] = builder
 			}
-			builder.WriteString(reasoningText)
 			if err := s.checkAccumulated(builder, len(reasoningText), "text"); err != nil {
 				return nil, err
 			}
+			builder.WriteString(reasoningText)
 			// The encoding note is recorded exactly once per stream, never
-			// once per delta.
+			// once per delta; the flag is set after the note commits.
 			if !s.reasoningReportRecorded {
-				s.reasoningReportRecorded = true
 				if err := s.report.Note(
 					FeatureProviderReasoningText,
 					reasoningPath,
@@ -402,8 +341,89 @@ func (s *chatResponsesStreamState) convertDelta(
 				); err != nil {
 					return nil, err
 				}
+				s.reasoningReportRecorded = true
 			}
 		}
+	}
+
+	// Reasoning→content/tool transition (provider_reasoning_thinking): the
+	// open reasoning item's summary lifecycle must close INLINE — before
+	// the content/tool events — so the anthropic state emits
+	// signature_delta + content_block_stop for the thinking block before
+	// the next block opens. Holding the close until finish() scrambled the
+	// order on the wire (text block closed before the thinking block's
+	// signature). The reasoning block ABOVE ran first, so a single delta
+	// carrying reasoning AND content/tool_calls appends the reasoning to
+	// the (possibly newly opened) reasoning item first and only then seals
+	// it: the wire order matches the delta's chronological order, and a
+	// tool call never starts while a thinking block is still open.
+	//
+	// The close fires ONLY at a real transition — a delta that actually
+	// carries content or tool output. A reasoning-only delta must NOT
+	// close the item: sealing it here would fragment contiguous reasoning
+	// into one thinking block per delta (one-block-per-delta, operator-
+	// observed 2026-09-08 — Claude Code rendered one ∴ fragment per line).
+	hasOutput := (delta.Content != nil && *delta.Content != "") ||
+		(delta.Refusal != nil && *delta.Refusal != "") ||
+		len(delta.ToolCalls) > 0
+	if hasOutput {
+		closeEvents, err := s.closeOpenReasoningItem()
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, closeEvents...)
+	}
+
+	if delta.Content != nil && *delta.Content != "" {
+		item, addedEvents, err := s.openMessageItemForPart("output_text")
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, addedEvents...)
+		message := item.item.(*ResponsesOutputMessage)
+		contentIndex := item.openPartIndex
+		events = append(events, s.builder.TextDelta(
+			message.ID,
+			item.outputIndex,
+			contentIndex,
+			*delta.Content,
+		))
+		key := chatPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
+		builder := s.textBufs[key]
+		if builder == nil {
+			builder = &strings.Builder{}
+			s.textBufs[key] = builder
+		}
+		if err := s.checkAccumulated(builder, len(*delta.Content), "text"); err != nil {
+			return nil, err
+		}
+		builder.WriteString(*delta.Content)
+	}
+
+	if delta.Refusal != nil && *delta.Refusal != "" {
+		item, addedEvents, err := s.openMessageItemForPart("refusal")
+		if err != nil {
+			return nil, err
+		}
+		events = append(events, addedEvents...)
+		message := item.item.(*ResponsesOutputMessage)
+		contentIndex := item.openPartIndex
+		events = append(events, s.builder.RefusalDelta(
+			message.ID,
+			item.outputIndex,
+			contentIndex,
+			*delta.Refusal,
+		))
+		key := chatPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
+		builder := s.refusalBufs[key]
+		if builder == nil {
+			builder = &strings.Builder{}
+			s.refusalBufs[key] = builder
+		}
+		if err := s.checkAccumulated(builder, len(*delta.Refusal), "refusal"); err != nil {
+			return nil, err
+		}
+		builder.WriteString(*delta.Refusal)
 	}
 
 	for _, call := range delta.ToolCalls {
@@ -583,12 +603,23 @@ func (s *chatResponsesStreamState) closeOpenReasoningItem() ([]ResponsesSSEEvent
 		return nil, nil
 	}
 	reasoning.Status = ResponsesItemCompleted
+	// Materialize the accumulated summary text from the per-item builder,
+	// exactly as finish() does for text and refusal parts.
+	summaryText := ""
+	if buf := s.reasoningBufs[chatPartKey{outputIndex: item.outputIndex, contentIndex: 0}]; buf != nil {
+		summaryText = buf.String()
+	}
+	if len(reasoning.Summary) == 0 {
+		reasoning.Summary = []ResponsesReasoningSummary{{Type: "summary_text", Text: summaryText}}
+	} else {
+		reasoning.Summary[0].Text = summaryText
+	}
 	return []ResponsesSSEEvent{
 		s.builder.ReasoningSummaryTextDone(
 			reasoning.ID,
 			item.outputIndex,
 			0,
-			reasoning.Summary[0].Text,
+			summaryText,
 		),
 		s.builder.ReasoningSummaryPartDone(
 			reasoning.ID,
@@ -596,7 +627,7 @@ func (s *chatResponsesStreamState) closeOpenReasoningItem() ([]ResponsesSSEEvent
 			0,
 			openairesponses.SummaryTextPart{
 				Type: "summary_text",
-				Text: reasoning.Summary[0].Text,
+				Text: summaryText,
 			},
 		),
 		s.builder.OutputItemDone(

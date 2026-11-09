@@ -441,12 +441,15 @@ func responsesInputToTurns(
 		if itemIdentityNoted {
 			return nil
 		}
-		itemIdentityNoted = true
-		return report.Note(
+		if err := report.Note(
 			FeaturePreviousResponseID,
 			"input[].id",
 			"input item ids are not forwarded (the target dialect has no item identity)",
-		)
+		); err != nil {
+			return err
+		}
+		itemIdentityNoted = true
+		return nil
 	}
 	for i, item := range input.Items {
 		switch value := item.(type) {
@@ -1060,12 +1063,15 @@ func DecodeMessagesRequest(
 		if cacheControlNoted {
 			return nil
 		}
-		cacheControlNoted = true
-		return result.Report.Note(
+		if err := result.Report.Note(
 			FeatureAnthropicControls,
 			"cache_control",
 			"cache_control performance hints are not forwarded (chat upstreams cache automatically)",
-		)
+		); err != nil {
+			return err
+		}
+		cacheControlNoted = true
+		return nil
 	}
 	if envelope.System != nil {
 		for _, block := range envelope.System.ContentBlocks {

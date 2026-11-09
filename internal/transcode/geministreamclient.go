@@ -157,13 +157,13 @@ func (s *geminiStreamClientState) convertEvent(event ResponsesSSEEvent) ([]gemin
 		// The note describes rendered text, so it follows the successful
 		// encoding.
 		if !s.refusalNoted {
-			s.refusalNoted = true
 			if err := s.report.Note(
 				FeatureGeminiRefusalText, "candidates[0].content.parts[].text",
 				"the refusal is rendered as ordinary text",
 			); err != nil {
 				return nil, err
 			}
+			s.refusalNoted = true
 		}
 		return chunks, nil
 	case ResponseReasoningSummaryTextDeltaEvent:
@@ -197,18 +197,26 @@ func (s *geminiStreamClientState) convertEvent(event ResponsesSSEEvent) ([]gemin
 			buf = &strings.Builder{}
 			s.streamedSummary[value.ItemID] = buf
 		}
+		// The per-buffer bound is checked BEFORE the write: a rejected
+		// delta must not mutate the retained summary.
+		if buf.Len()+len(value.Delta) > maxStreamAccumulatedBytes {
+			return nil, s.wireError(fmt.Errorf(
+				"gemini stream accumulated reasoning summary text exceeds %d bytes",
+				maxStreamAccumulatedBytes,
+			))
+		}
 		buf.WriteString(value.Delta)
 		if !s.ctx.GeminiIncludeThoughts {
 			// The loss follows the committed retention: it describes
 			// reasoning text the client did not receive.
 			if !s.thoughtLossNoted {
-				s.thoughtLossNoted = true
 				if err := s.report.Lose(
 					s.policy, FeatureProviderReasoningText, "candidates[0].content.parts[].thought",
 					"provider reasoning text is not returned unless the client requests thoughts",
 				); err != nil {
 					return nil, err
 				}
+				s.thoughtLossNoted = true
 			}
 			return nil, nil
 		}
@@ -676,9 +684,7 @@ func (c *chatToGeminiConverter) finalizeEOF() (convertedBatch, error) {
 		return convertedBatch{Terminal: true}, nil
 	}
 	return convertedBatch{}, upstreamWireError(
-		UpstreamChatCompletions,
-		http.StatusOK,
-		errors.New("chat stream ended before a terminal condition"),
+		UpstreamChatCompletions, http.StatusOK, errStreamTruncated,
 	)
 }
 
@@ -815,9 +821,7 @@ func (c *responsesToGeminiConverter) FinalizeEOF() (convertedBatch, error) {
 func (c *responsesToGeminiConverter) finalizeEOF() (convertedBatch, error) {
 	if !c.state.sawTerminal {
 		return convertedBatch{}, upstreamWireError(
-			UpstreamResponses,
-			http.StatusOK,
-			errors.New("responses stream ended before a terminal condition"),
+			UpstreamResponses, http.StatusOK, errStreamTruncated,
 		)
 	}
 	return convertedBatch{Terminal: true}, nil

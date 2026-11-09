@@ -161,7 +161,7 @@ func (s *chatResponsesStreamState) absorbPhase2Accounting(chunk ChatStreamRespon
 		); err != nil {
 			return err
 		}
-		s.usageMergeNoted = true
+		s.usageMergeNoted = true // set after the note commits
 	}
 	s.usage = converted
 	return nil

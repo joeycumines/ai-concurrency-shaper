@@ -149,6 +149,9 @@ func (s *geminiResponsesStreamState) wireError(err error) error {
 // semantic bytes, mirroring the chat state's bound. It runs BEFORE the added
 // bytes are written, so the per-buffer bound includes them.
 func (s *geminiResponsesStreamState) checkAccumulated(builder *strings.Builder, added int, what string) error {
+	// The bounds are checked BEFORE the caller writes the delta into the
+	// builder: a rejected delta must not mutate the accumulated state (or
+	// pay the allocation) at all.
 	if builder.Len()+added > maxStreamAccumulatedBytes {
 		return s.wireError(fmt.Errorf(
 			"gemini stream accumulated %s exceeds %d bytes",

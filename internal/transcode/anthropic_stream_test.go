@@ -8,6 +8,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
 // TestAnthropicStreamPartBlockIdentity proves two message items with the same
@@ -492,5 +494,101 @@ func TestAnthropicNonStreamUnknownUsageLoss(t *testing.T) {
 	}
 	if message.Usage == nil {
 		t.Fatal("required Messages usage omitted")
+	}
+}
+
+// anthropicThinkingLifecycleState builds a fresh state with the
+// provider_reasoning_thinking capability so reasoning events render as
+// native thinking blocks.
+func anthropicThinkingLifecycleState(t *testing.T) *anthropicResponsesStreamState {
+	t.Helper()
+	return newAnthropicResponsesStreamState(
+		testStreamContext(),
+		permissiveLossPolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"msg_1",
+		"claude-x",
+		1710000000,
+	)
+}
+
+// reasoningTextDelta must charge the event budget once (convertEvent already
+// did) and bound the accumulated thinking text per item.
+// reasoningTextDelta must charge the event budget once (convertEvent already
+// did) and bound the accumulated thinking text per item.
+func TestAnthropicStreamReasoningDeltaChargedOnceAndBounded(t *testing.T) {
+	state := anthropicThinkingLifecycleState(t)
+	feedAnthropicCreated(t, state, 0)
+	if _, err := state.Convert(ResponseOutputItemAddedEvent{
+		Type: "response.output_item.added", SequenceNumber: 1, OutputIndex: 0,
+		Item: &ResponsesReasoningOutputItem{ID: "rs_1", Type: "reasoning", Status: ResponsesItemInProgress},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.Convert(ResponseReasoningSummaryPartAddedEvent{
+		Type: "response.reasoning_summary_part.added", SequenceNumber: 2,
+		ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0,
+		Part: openairesponses.SummaryTextPart{Type: "summary_text", Text: ""},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Cumulative 64KiB deltas stay under the 4MiB exchange total for 16
+	// deltas, so only the per-item 1MiB bound can fire — and it must name
+	// thinking text.
+	chunk := strings.Repeat("y", 64<<10)
+	var err error
+	for seq := int64(3); err == nil && seq < 3+17; seq++ {
+		_, err = state.Convert(ResponseReasoningSummaryTextDeltaEvent{
+			Type: "response.reasoning_summary_text.delta", SequenceNumber: seq,
+			ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0, Delta: chunk,
+		})
+	}
+	if err == nil {
+		t.Fatal("unbounded thinking text accepted (17 x 64KiB > 1MiB per-item bound)")
+	}
+	if !strings.Contains(err.Error(), "thinking") {
+		t.Fatalf("error = %q, want it to name thinking text (per-item accumulated bound)", err.Error())
+	}
+	var wireErr *UpstreamWireError
+	if _, ok := asUpstreamWire(err, &wireErr); !ok {
+		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	}
+
+	// The event budget is charged exactly once per event: a stream of N
+	// reasoning deltas must accept exactly N events before the bound, i.e.
+	// the budget error must not fire at half the count. Drive a fresh state
+	// with tiny deltas up to the event budget and count accepted events.
+	state2 := anthropicThinkingLifecycleState(t)
+	feedAnthropicCreated(t, state2, 0)
+	if _, err := state2.Convert(ResponseOutputItemAddedEvent{
+		Type: "response.output_item.added", SequenceNumber: 1, OutputIndex: 0,
+		Item: &ResponsesReasoningOutputItem{ID: "rs_1", Type: "reasoning", Status: ResponsesItemInProgress},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state2.Convert(ResponseReasoningSummaryPartAddedEvent{
+		Type: "response.reasoning_summary_part.added", SequenceNumber: 2,
+		ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0,
+		Part: openairesponses.SummaryTextPart{Type: "summary_text", Text: ""},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	accepted := 0
+	for seq := int64(3); ; seq++ {
+		_, err := state2.Convert(ResponseReasoningSummaryTextDeltaEvent{
+			Type: "response.reasoning_summary_text.delta", SequenceNumber: seq,
+			ItemID: "rs_1", OutputIndex: 0, SummaryIndex: 0, Delta: "z",
+		})
+		if err != nil {
+			break
+		}
+		accepted++
+	}
+	// 3 events were consumed before the deltas (created, item added, part
+	// added); the budget is maxStreamTotalEvents, so a double-charged delta
+	// path accepts only about half of the remaining events.
+	want := maxStreamTotalEvents - 3
+	if accepted != want {
+		t.Fatalf("accepted %d reasoning deltas, want %d (event budget charged once per event; double charge would halve it)", accepted, want)
 	}
 }

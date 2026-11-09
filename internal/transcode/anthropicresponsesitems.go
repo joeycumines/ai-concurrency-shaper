@@ -494,21 +494,24 @@ func (s *anthropicResponsesStreamState) reconcileToolArguments(
 // a corrupt upstream must not amplify memory without
 // limit across many parts.
 func (s *anthropicResponsesStreamState) checkAccumulated(builder *strings.Builder, added int, what string) error {
-	if builder.Len() > maxStreamAccumulatedBytes {
+	// The bounds are checked BEFORE the caller writes the delta into the
+	// builder: a rejected delta must not mutate the accumulated state (or
+	// pay the allocation) at all.
+	if builder.Len()+added > maxStreamAccumulatedBytes {
 		return s.wireError(fmt.Errorf(
 			"responses stream accumulated %s exceeds %d bytes",
 			what,
 			maxStreamAccumulatedBytes,
 		))
 	}
-	s.totalAccumulated += int64(added)
-	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
+	if s.totalAccumulated+int64(added) > maxStreamTotalAccumulatedBytes {
 		return s.wireError(fmt.Errorf(
 			"responses stream accumulated %s exceeds the exchange total of %d bytes",
 			what,
 			maxStreamTotalAccumulatedBytes,
 		))
 	}
+	s.totalAccumulated += int64(added)
 	return nil
 }
 

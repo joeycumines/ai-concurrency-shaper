@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 )
@@ -220,11 +219,14 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 		if errors.Is(err, io.EOF) {
 			batch, finalErr := r.conv.FinalizeEOF()
 			if finalErr != nil {
-				// A generated-bound refusal is the delivery's own failure, not a
-				// truncation: it keeps its type for the outcome classifier.
-				if !isSSEBoundError(finalErr) {
-					finalErr = fmt.Errorf("%w: %v", errStreamTruncated, finalErr)
-				}
+				// The EOF failure keeps its own identity for the outcome
+				// classifier and the client-facing error event: a genuine
+				// truncation is marked errStreamTruncated by the truncation
+				// sites themselves, a generated-bound refusal keeps
+				// *SSEBoundError, and any other typed failure (policy
+				// refusal, unrepresentable output, usage arithmetic, upstream
+				// wire) passes through unwrapped — never relabeled a
+				// truncation.
 				if frameErr := r.appendErrorEvent(finalErr); frameErr != nil {
 					finalErr = frameErr
 				}
@@ -277,8 +279,15 @@ func (r *convertingReader) appendErrorEvent(err error) error {
 // upstream provenance: the error came from real upstream data that failed
 // conversion, not from a local decode/render/validation step. Corrupt
 // upstream wire (UpstreamWireError) is always upstream; a
-// StreamConversionError is upstream only when its provenance says so.
+// StreamConversionError is upstream only when its provenance says so. A
+// genuine truncation is NOT an upstream error frame: the error event is
+// generated locally when the upstream stops sending, so a concurrent
+// client cancel must still classify as a client abort, not an upstream
+// failure.
 func isUpstreamConversionError(err error) bool {
+	if errors.Is(err, errStreamTruncated) {
+		return false
+	}
 	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
 		return true
 	}
@@ -391,14 +400,14 @@ func (r *convertingReader) UpstreamBodyError() bool {
 // while every client-visible rendering is truncated.
 func truncateErrorText(err error, max int) error {
 	message := err.Error()
-	if len(message) <= max {
+	// BoundErrorMessage is the one rune-safe truncation helper (the cut lands
+	// on a rune boundary); slicing raw bytes here could split a multibyte
+	// rune and emit U+FFFD mojibake downstream.
+	truncated := BoundErrorMessage(message, max)
+	if truncated == message {
 		return err
 	}
-	// The ellipsis must not push the text past the configured bound.
-	if max > 3 {
-		return truncatedError{err: err, text: message[:max-3] + "…"}
-	}
-	return truncatedError{err: err, text: message[:max]}
+	return truncatedError{err: err, text: truncated}
 }
 
 type truncatedError struct {

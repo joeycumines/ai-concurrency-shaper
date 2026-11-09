@@ -104,7 +104,6 @@ func (s *geminiResponsesStreamState) convertPart(
 		// them in.
 		if s.capabilities.ProviderReasoningThinking {
 			if !s.thoughtThinkingNoted {
-				s.thoughtThinkingNoted = true
 				if err := s.report.Note(
 					FeatureProviderReasoningText,
 					path,
@@ -112,6 +111,7 @@ func (s *geminiResponsesStreamState) convertPart(
 				); err != nil {
 					return nil, err
 				}
+				s.thoughtThinkingNoted = true
 			}
 		} else if !s.thoughtTextNoted {
 			s.thoughtTextNoted = true
@@ -226,11 +226,14 @@ func (s *geminiResponsesStreamState) loseThought(path string) error {
 	if s.thoughtLossNoted {
 		return nil
 	}
-	s.thoughtLossNoted = true
-	return s.report.Lose(
+	if err := s.report.Lose(
 		s.policy, FeatureProviderReasoningText, path,
 		"provider reasoning text cannot be reproduced in the target response",
-	)
+	); err != nil {
+		return err
+	}
+	s.thoughtLossNoted = true
+	return nil
 }
 
 // hasNonCallSignature reports whether the part carries a thought signature
@@ -307,12 +310,10 @@ func (s *geminiResponsesStreamState) convertFunctionCall(
 		callID = s.ctx.IDs.New("gcall_")
 		synthesizedCallID = true
 	}
-	name := call.Name
-	if s.ctx.ToolNames != nil {
-		if clientName, ns := s.ctx.ToolNames.clientCallName(call.Name); ns != "" {
-			name = clientName
-		}
-	}
+	// Map the flattened wire name back to the client-visible tool name AND
+	// its namespace qualifier, exactly as the chat paths do
+	// (clientCallName is nil-safe and identity-maps an unmapped name).
+	name, namespace := s.ctx.ToolNames.clientCallName(call.Name)
 	// The call identity renders into the done events and the terminal
 	// envelope, so it is retained semantic state like the arguments.
 	if err := s.chargeTotal(len(callID)+len(name), "tool-call identity"); err != nil {
@@ -327,14 +328,15 @@ func (s *geminiResponsesStreamState) convertFunctionCall(
 	}
 	if synthesizedCallID && !s.callIDSynthesizedNoted {
 		// The note is recorded only once per stream, after the synthesized
-		// identity passed the exchange-total charge.
-		s.callIDSynthesizedNoted = true
+		// identity passed the exchange-total charge; the flag is set after
+		// the note commits.
 		if err := s.report.Note(
 			FeatureGeminiCallIDSynthesized, path+".functionCall",
 			"the upstream function call carried no id; a proxy-minted call id was emitted",
 		); err != nil {
 			return nil, err
 		}
+		s.callIDSynthesizedNoted = true
 	}
 	events := s.closeOpenMessage()
 	events = append(events, s.closeOpenReasoning()...)
@@ -345,6 +347,7 @@ func (s *geminiResponsesStreamState) convertFunctionCall(
 		CallID:    callID,
 		Name:      name,
 		Arguments: args,
+		Namespace: namespace,
 	}
 	s.items = append(s.items, openResponsesItem{outputIndex: outputIndex, item: item})
 	// Queue the thought signature for the next turn, keyed by the

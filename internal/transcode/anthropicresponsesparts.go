@@ -47,7 +47,6 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 			maxStreamPartsPerItem,
 		))
 	}
-
 	var events []AnthropicStreamEvent
 	switch event.Part.(type) {
 	case *ResponsesStreamOutputTextPart, *ResponsesStreamRefusalPart:
@@ -104,10 +103,10 @@ func (s *anthropicResponsesStreamState) textDelta(
 		builder = &strings.Builder{}
 		s.textBufs[key] = builder
 	}
-	builder.WriteString(event.Delta)
 	if err := s.checkAccumulated(builder, len(event.Delta), "text"); err != nil {
 		return nil, err
 	}
+	builder.WriteString(event.Delta)
 	text := event.Delta
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,
@@ -220,12 +219,12 @@ func (s *anthropicResponsesStreamState) functionArgumentsDelta(
 	if err != nil {
 		return nil, err
 	}
-	pending.arguments.WriteString(event.Delta)
 	// The accumulated arguments are emitted as one generated downstream
-	// frame at output_item.done: bound their cumulative size and the exchange-wide total.
+	// frame at output_item.done: bound their cumulative size and the exchange-wide total BEFORE the write.
 	if err := s.checkAccumulated(&pending.arguments, len(event.Delta), "tool arguments"); err != nil {
 		return nil, err
 	}
+	pending.arguments.WriteString(event.Delta)
 	// A block that never started (the added item lacked call identity, which
 	// is corrupt wire rejected at output_item.done) must not receive an
 	// input_json_delta without a content_block_start: the bytes are still
@@ -330,10 +329,10 @@ func (s *anthropicResponsesStreamState) refusalDelta(
 		builder = &strings.Builder{}
 		s.refusalBufs[key] = builder
 	}
-	builder.WriteString(event.Delta)
 	if err := s.checkAccumulated(builder, len(event.Delta), "refusal"); err != nil {
 		return nil, err
 	}
+	builder.WriteString(event.Delta)
 	text := event.Delta
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,
@@ -452,13 +451,17 @@ func (s *anthropicResponsesStreamState) loseReasoningOnce() error {
 	if s.reasoningLossRecorded {
 		return nil
 	}
-	s.reasoningLossRecorded = true
-	return s.report.Lose(
+	err := s.report.Lose(
 		s.policy,
 		FeatureReasoningSummary,
 		"stream[].reasoning",
 		"OpenAI reasoning cannot be reproduced in an Anthropic stream",
 	)
+	if err != nil {
+		return err
+	}
+	s.reasoningLossRecorded = true
+	return nil
 }
 
 // reasoningPartAdded opens the native thinking content block for a
@@ -513,9 +516,19 @@ func (s *anthropicResponsesStreamState) reasoningTextDelta(
 			"reasoning summary delta with no open thinking block",
 		))
 	}
-	if err := s.budget.addEvent(); err != nil {
-		return nil, s.wireError(err)
+	// The event budget was already charged once for this event in
+	// convertEvent; charging it again here would halve the effective event
+	// budget for thinking streams.
+	key := responsePartKey{ItemID: event.ItemID, ContentIndex: event.SummaryIndex}
+	builder := s.thinkingBufs[key]
+	if builder == nil {
+		builder = &strings.Builder{}
+		s.thinkingBufs[key] = builder
 	}
+	if err := s.checkAccumulated(builder, len(event.Delta), "thinking text"); err != nil {
+		return nil, err
+	}
+	builder.WriteString(event.Delta)
 	delta := event.Delta
 	return []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,

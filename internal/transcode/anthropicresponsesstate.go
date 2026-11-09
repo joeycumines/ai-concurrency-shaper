@@ -76,6 +76,11 @@ type anthropicResponsesStreamState struct {
 	textBufs    map[responsePartKey]*strings.Builder
 	refusalBufs map[responsePartKey]*strings.Builder
 
+	// thinkingBufs accumulates streamed thinking text per open thinking
+	// block, bounded per block and per exchange by checkAccumulated exactly
+	// like text and refusal.
+	thinkingBufs map[responsePartKey]*strings.Builder
+
 	// tool blocks buffered until call identity is complete.
 	pendingToolStart map[string]*pendingToolBlock // keyed by item_id
 
@@ -231,6 +236,7 @@ func newAnthropicResponsesStreamState(
 		partCounts:            make(map[string]int),
 		textBufs:              make(map[responsePartKey]*strings.Builder),
 		refusalBufs:           make(map[responsePartKey]*strings.Builder),
+		thinkingBufs:          make(map[responsePartKey]*strings.Builder),
 		pendingToolStart:      make(map[string]*pendingToolBlock),
 		bufferedToolFragments: make(map[string][]string),
 		closedToolCalls:       make(map[string]anthropicClosedToolCall),
@@ -395,7 +401,9 @@ func (s *anthropicResponsesStreamState) loseUnknownUsageComponentsOnce(usage *Re
 	if s.usageComponentsLossRecorded || usage == nil {
 		return nil
 	}
-	s.usageComponentsLossRecorded = true
+	// The once-per-stream gate is set only after every component decision
+	// below commits (decide before commit, record after commit): a refused
+	// component must not latch the gate and silence the remaining components.
 	if usage.InputTokensDetails == nil {
 		if err := s.report.Lose(
 			s.policy,
@@ -428,6 +436,7 @@ func (s *anthropicResponsesStreamState) loseUnknownUsageComponentsOnce(usage *Re
 			return err
 		}
 	}
+	s.usageComponentsLossRecorded = true
 	return nil
 }
 

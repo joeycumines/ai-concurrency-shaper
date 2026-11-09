@@ -1706,3 +1706,70 @@ func TestGeminiUpstreamStreamContinuationTokenRejectsBeforeParts(t *testing.T) {
 		t.Fatalf("continuationToken rejection recorded %+v", s.report.Losses)
 	}
 }
+
+// A Gemini stream function call whose flat name maps back to a namespaced
+// client tool must render the client name AND the namespace on the added and
+// done items; an empty-namespace mapping must still rename.
+
+func TestGeminiStreamFunctionCallCarriesNamespace(t *testing.T) {
+	ctx := geminiStreamTestContext()
+	ctx.ToolNames = &ToolNames{
+		FlatToRef: map[string]ToolNameRef{
+			"multi_agent_v1_spawn_agent": {Namespace: "multi_agent_v1", Name: "spawn_agent"},
+			"plain_tool":                 {Name: "plain"},
+		},
+	}
+	s := newGeminiResponsesStreamState(ctx, ctx.LossPolicy,
+		ChatCapabilities{}, "resp_test", "gemini-3-pro-preview", 1700000000, nil)
+	chunks := []string{
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c1","name":"multi_agent_v1_spawn_agent","args":{"x":1}}}]},"index":0}]}`,
+		`{"candidates":[{"content":{"parts":[{"functionCall":{"id":"c2","name":"plain_tool","args":{}}}]},"index":0}]}`,
+		geminiFinishChunk,
+	}
+	events, _, err := collectResponses(t, s, chunks...)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	findCalls := func(evts []ResponsesSSEEvent) map[string]*ResponsesFunctionCallOutputItem {
+		out := map[string]*ResponsesFunctionCallOutputItem{}
+		for _, e := range evts {
+			switch v := e.(type) {
+			case ResponseOutputItemAddedEvent:
+				if fc, ok := v.Item.(*ResponsesFunctionCallOutputItem); ok {
+					out[fc.CallID] = fc
+				}
+			case ResponseOutputItemDoneEvent:
+				if fc, ok := v.Item.(*ResponsesFunctionCallOutputItem); ok {
+					out[fc.CallID] = fc
+				}
+			}
+		}
+		return out
+	}
+	calls := findCalls(events)
+	ns, ok := calls["c1"]
+	if !ok {
+		t.Fatalf("namespaced call not found: %+v", calls)
+	}
+	if ns.Name != "spawn_agent" || ns.Namespace != "multi_agent_v1" {
+		t.Fatalf("namespaced call = name %q namespace %q, want spawn_agent/multi_agent_v1", ns.Name, ns.Namespace)
+	}
+	plain, ok := calls["c2"]
+	if !ok {
+		t.Fatalf("plain call not found: %+v", calls)
+	}
+	if plain.Name != "plain" || plain.Namespace != "" {
+		t.Fatalf("plain call = name %q namespace %q, want plain/\"\" (empty-namespace mapping must still rename)", plain.Name, plain.Namespace)
+	}
+	// The terminal envelope must carry the namespace too.
+	for _, e := range events {
+		if done, ok := e.(ResponseCompletedEvent); ok {
+			for _, item := range done.Response.Output {
+				if fc, ok := item.(*ResponsesFunctionCallOutputItem); ok && fc.CallID == "c1" &&
+					(fc.Name != "spawn_agent" || fc.Namespace != "multi_agent_v1") {
+					t.Fatalf("terminal envelope call = %+v, want spawn_agent/multi_agent_v1", fc)
+				}
+			}
+		}
+	}
+}

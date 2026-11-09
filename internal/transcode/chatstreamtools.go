@@ -35,7 +35,6 @@ func (s *chatResponsesStreamState) convertToolCall(
 	// the chunk id: record the synthesis once per stream as an ungated
 	// note naming the source.
 	if call.ID != nil && strings.Contains(*call.ID, ":legacy-function-call-") && !s.legacyFunctionCallNoted {
-		s.legacyFunctionCallNoted = true
 		if err := s.report.Note(
 			FeatureLegacyFunctionCall,
 			"choices[].delta.function_call",
@@ -43,6 +42,7 @@ func (s *chatResponsesStreamState) convertToolCall(
 		); err != nil {
 			return nil, err
 		}
+		s.legacyFunctionCallNoted = true
 	}
 
 	// A fragment carrying the id of a call that was already sealed inline
@@ -181,13 +181,14 @@ func (s *chatResponsesStreamState) convertToolCall(
 		pending.name = *call.Function.Name
 	}
 	if call.Function.Arguments != "" {
-		pending.pending.WriteString(call.Function.Arguments)
-		pending.complete.WriteString(call.Function.Arguments)
 		// The complete buffer is emitted as one generated downstream frame
-		// at finish: bound its cumulative size.
+		// at finish: bound its cumulative size BEFORE the write, so a
+		// rejected fragment leaves the accumulated state untouched.
 		if err := s.checkAccumulated(&pending.complete, len(call.Function.Arguments), "tool arguments"); err != nil {
 			return nil, err
 		}
+		pending.pending.WriteString(call.Function.Arguments)
+		pending.complete.WriteString(call.Function.Arguments)
 	}
 
 	// Emit the output_item.added only once identity (call ID + name) is

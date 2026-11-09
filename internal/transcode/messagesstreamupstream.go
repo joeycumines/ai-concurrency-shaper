@@ -758,9 +758,7 @@ func (c *messagesToGeminiConverter) finalizeEOF() (convertedBatch, error) {
 	}
 	if !c.upstream.stopped {
 		return convertedBatch{}, upstreamWireError(
-			UpstreamMessages,
-			http.StatusOK,
-			errors.New("messages stream ended before message_stop"),
+			UpstreamMessages, http.StatusOK, errStreamTruncated,
 		)
 	}
 	// message_stop commits a terminal on the Gemini client; a stop without a

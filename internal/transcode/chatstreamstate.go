@@ -72,6 +72,12 @@ type chatResponsesStreamState struct {
 	textBufs    map[chatPartKey]*strings.Builder
 	refusalBufs map[chatPartKey]*strings.Builder
 
+	// reasoningBufs accumulates the reasoning summary text per open reasoning
+	// item in a strings.Builder, bounded per item and per exchange by
+	// checkAccumulated exactly like text and refusal. The accumulated string
+	// is materialized into the item's summary once, when the item closes.
+	reasoningBufs map[chatPartKey]*strings.Builder
+
 	// serviceTierLossRecorded and logprobsLossRecorded gate the per-chunk
 	// envelope losses to exactly once per stream.
 	serviceTierLossRecorded bool
@@ -155,21 +161,24 @@ func (s *chatResponsesStreamState) wireError(err error) error {
 // can amplify memory without bound. The typed upstream wire error classifies the exchange as an upstream
 // failure.
 func (s *chatResponsesStreamState) checkAccumulated(builder *strings.Builder, added int, what string) error {
-	if builder.Len() > maxStreamAccumulatedBytes {
+	// The bounds are checked BEFORE the caller writes the delta into the
+	// builder: a rejected delta must not mutate the accumulated state (or
+	// pay the allocation) at all.
+	if builder.Len()+added > maxStreamAccumulatedBytes {
 		return s.wireError(fmt.Errorf(
 			"chat stream accumulated %s exceeds %d bytes",
 			what,
 			maxStreamAccumulatedBytes,
 		))
 	}
-	s.totalAccumulated += int64(added)
-	if s.totalAccumulated > maxStreamTotalAccumulatedBytes {
+	if s.totalAccumulated+int64(added) > maxStreamTotalAccumulatedBytes {
 		return s.wireError(fmt.Errorf(
 			"chat stream accumulated %s exceeds the exchange total of %d bytes",
 			what,
 			maxStreamTotalAccumulatedBytes,
 		))
 	}
+	s.totalAccumulated += int64(added)
 	return nil
 }
 
@@ -210,13 +219,16 @@ func (s *chatResponsesStreamState) loseServiceTierOnce() error {
 	if s.serviceTierLossRecorded {
 		return nil
 	}
-	s.serviceTierLossRecorded = true
-	return s.report.Lose(
+	if err := s.report.Lose(
 		s.policy,
 		FeatureResponseServiceTier,
 		"service_tier",
 		"the upstream chat service tier actually served cannot be reproduced in the client dialect",
-	)
+	); err != nil {
+		return err
+	}
+	s.serviceTierLossRecorded = true
+	return nil
 }
 
 // loseLogprobsOnce records the log-probabilities loss exactly once per
@@ -225,13 +237,16 @@ func (s *chatResponsesStreamState) loseLogprobsOnce() error {
 	if s.logprobsLossRecorded {
 		return nil
 	}
-	s.logprobsLossRecorded = true
-	return s.report.Lose(
+	if err := s.report.Lose(
 		s.policy,
 		FeatureLogprobs,
 		"choices[].logprobs",
 		"chat response logprobs cannot be reproduced in the client dialect",
-	)
+	); err != nil {
+		return err
+	}
+	s.logprobsLossRecorded = true
+	return nil
 }
 
 func newChatResponsesStreamState(
@@ -244,17 +259,18 @@ func newChatResponsesStreamState(
 	echo *ResponsesRequestEcho,
 ) *chatResponsesStreamState {
 	return &chatResponsesStreamState{
-		ctx:          ctx,
-		policy:       policy,
-		capabilities: capabilities,
-		responseID:   responseID,
-		model:        model,
-		createdAt:    createdAt,
-		echo:         echo,
-		budget:       newStreamBudget(),
-		pendingCalls: make(map[int]*pendingToolCall),
-		textBufs:     make(map[chatPartKey]*strings.Builder),
-		refusalBufs:  make(map[chatPartKey]*strings.Builder),
+		ctx:           ctx,
+		policy:        policy,
+		capabilities:  capabilities,
+		responseID:    responseID,
+		model:         model,
+		createdAt:     createdAt,
+		echo:          echo,
+		budget:        newStreamBudget(),
+		pendingCalls:  make(map[int]*pendingToolCall),
+		textBufs:      make(map[chatPartKey]*strings.Builder),
+		refusalBufs:   make(map[chatPartKey]*strings.Builder),
+		reasoningBufs: make(map[chatPartKey]*strings.Builder),
 	}
 }
 
@@ -267,7 +283,6 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 	if s.usageComponentsLossRecorded || usage == nil {
 		return nil
 	}
-	s.usageComponentsLossRecorded = true
 	// A component is unknown only when NO signal exists anywhere: the top-level provider extensions make the same components known
 	// as the pinned detail objects.
 	if usage.PromptTokensDetails == nil &&
@@ -292,6 +307,9 @@ func (s *chatResponsesStreamState) loseUnknownUsageComponentsOnce(usage *ChatLLM
 			return err
 		}
 	}
+	// The once-per-stream gate is set only after every component decision
+	// above commits (decide before commit, record after commit).
+	s.usageComponentsLossRecorded = true
 	return nil
 }
 

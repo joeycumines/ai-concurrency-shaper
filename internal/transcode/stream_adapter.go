@@ -533,8 +533,8 @@ func (c *chatToAnthropicConverter) finalizeEOF() (convertedBatch, error) {
 	if c.anthropic.sawTerminal {
 		return convertedBatch{Terminal: true}, nil
 	}
-	return convertedBatch{}, errors.New(
-		"chat stream ended before a terminal condition",
+	return convertedBatch{}, upstreamWireError(
+		UpstreamChatCompletions, http.StatusOK, errStreamTruncated,
 	)
 }
 

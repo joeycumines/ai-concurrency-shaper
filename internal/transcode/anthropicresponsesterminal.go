@@ -3,6 +3,7 @@ package transcode
 import (
 	"errors"
 	"fmt"
+	"net/http"
 )
 
 func (s *anthropicResponsesStreamState) completed(
@@ -394,9 +395,7 @@ func (s *anthropicResponsesStreamState) finalizeEOF() ([]AnthropicStreamEvent, e
 		// event); nothing more to emit.
 		return nil, nil
 	}
-	return nil, errors.New(
-		"responses stream ended before a terminal condition",
-	)
+	return nil, upstreamWireError(UpstreamResponses, http.StatusOK, errStreamTruncated)
 }
 
 // responsesUsagePresence reports which counts a Responses usage actually

@@ -2,6 +2,7 @@ package transcode
 
 import (
 	"errors"
+	"net/http"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
@@ -122,12 +123,23 @@ func (s *chatResponsesStreamState) finish(
 			continue
 		}
 		reasoning.Status = ResponsesItemCompleted
+		// Materialize the accumulated summary text from the per-item builder,
+		// exactly as the message parts are materialized above.
+		summaryText := ""
+		if buf := s.reasoningBufs[chatPartKey{outputIndex: item.outputIndex, contentIndex: 0}]; buf != nil {
+			summaryText = buf.String()
+		}
+		if len(reasoning.Summary) == 0 {
+			reasoning.Summary = []ResponsesReasoningSummary{{Type: "summary_text", Text: summaryText}}
+		} else {
+			reasoning.Summary[0].Text = summaryText
+		}
 		events = append(events,
 			s.builder.ReasoningSummaryTextDone(
 				reasoning.ID,
 				item.outputIndex,
 				0,
-				reasoning.Summary[0].Text,
+				summaryText,
 			),
 			s.builder.ReasoningSummaryPartDone(
 				reasoning.ID,
@@ -135,7 +147,7 @@ func (s *chatResponsesStreamState) finish(
 				0,
 				openairesponses.SummaryTextPart{
 					Type: "summary_text",
-					Text: reasoning.Summary[0].Text,
+					Text: summaryText,
 				},
 			),
 			s.builder.OutputItemDone(
@@ -400,9 +412,7 @@ func (s *chatResponsesStreamState) finalizeEOF() ([]ResponsesSSEEvent, error) {
 		// terminal; nothing more to emit.
 		return nil, nil
 	}
-	return nil, errors.New(
-		"chat stream ended before a terminal condition",
-	)
+	return nil, upstreamWireError(UpstreamChatCompletions, http.StatusOK, errStreamTruncated)
 }
 
 // noteMissingSentinel records the missing-[DONE] provider quirk as an

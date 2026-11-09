@@ -478,3 +478,73 @@ func TestChatAudioOutputRouting(t *testing.T) {
 		t.Fatalf("empty audio object err = %T %v, want *UpstreamWireError", err, err)
 	}
 }
+
+// Two reasoning deltas under provider_reasoning_thinking must record the
+// provider-reasoning note exactly once per stream.
+func TestChatStreamThinkingNoteIsOncePerStream(t *testing.T) {
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		permissiveLossPolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"resp_1",
+		"gpt-4.1",
+		1710000000,
+		nil,
+	)
+	for i := range 3 {
+		if _, err := state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: new("think")}, nil)); err != nil {
+			t.Fatalf("delta %d: %v", i, err)
+		}
+	}
+	if n := countReportFeature(state.report, FeatureProviderReasoningText); n != 1 {
+		t.Fatalf("thinking note recorded %d times, want exactly 1 (Dropped=%d): %+v",
+			n, state.report.Dropped, state.report.Losses)
+	}
+}
+
+// Reasoning summary deltas accumulate without a per-item bound and with a
+// mislabeled exchange-total error: cumulative deltas past maxStreamAccumulatedBytes
+// but under the exchange total must fail naming reasoning summary text.
+func TestChatStreamReasoningSummaryBoundedPerItem(t *testing.T) {
+	state := newChatResponsesStreamState(
+		testStreamContext(),
+		permissiveLossPolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"resp_1",
+		"gpt-4.1",
+		1710000000,
+		nil,
+	)
+	// maxStreamAccumulatedBytes cumulative in ~64KiB deltas stays under the
+	// 4MiB exchange total, so only the per-item bound can fire.
+	chunk := strings.Repeat("x", 64<<10)
+	var err error
+	for i := 0; err == nil && i < 20; i++ {
+		_, err = state.Convert(chatChunk(t, ChatStreamDelta{Reasoning: new(chunk)}, nil))
+	}
+	if err == nil {
+		t.Fatal("oversized cumulative reasoning summary accepted")
+	}
+	var wireErr *UpstreamWireError
+	if _, ok := asUpstreamWire(err, &wireErr); !ok {
+		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	}
+	if !strings.Contains(err.Error(), "reasoning summary") {
+		t.Fatalf("error = %q, want it to name reasoning summary text", err.Error())
+	}
+}
+
+func asUpstreamWire(err error, target **UpstreamWireError) (error, bool) {
+	for err != nil {
+		if w, ok := err.(*UpstreamWireError); ok {
+			*target = w
+			return err, true
+		}
+		u, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return err, false
+		}
+		err = u.Unwrap()
+	}
+	return err, false
+}
