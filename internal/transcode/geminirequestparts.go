@@ -88,9 +88,9 @@ func (d *geminiDecoder) part(
 		}
 		return []CanonicalPart{call}, nil
 	case part.FunctionResponse != nil:
-		if role != CanonicalUser {
-			return nil, fmt.Errorf("%s.functionResponse is only valid in a user turn", path)
-		}
+		// contentTurns assigns the result to a user turn; the wire content's
+		// role is not a constraint, because the Gemini API accepts a
+		// functionResponse in a model content and agy sends it that way.
 		result, err := d.functionResponse(path, content, *part.FunctionResponse, idless)
 		if err != nil {
 			return nil, err
@@ -199,9 +199,9 @@ func (d *geminiDecoder) callID(path string, id string, name string) (string, err
 	}
 }
 
-// functionResponse converts a functionResponse of a user turn. Its parts,
-// scheduling, and willContinue members have no canonical form and are
-// rejected.
+// functionResponse converts a tool result. Its parts, scheduling, and
+// willContinue members have no canonical form and are rejected. The caller
+// places the result in a user turn whatever role the wire content declared.
 func (d *geminiDecoder) functionResponse(
 	path string,
 	content int,

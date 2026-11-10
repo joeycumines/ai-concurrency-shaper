@@ -124,11 +124,6 @@ func TestDecodeGeminiRequestRejections(t *testing.T) {
 			want: "not a JSON object",
 		},
 		{
-			name: "function response in a model turn",
-			body: `{"contents":[{"role":"model","parts":[{"functionResponse":{"name":"f","response":{"output":"x"}}}]}]}`,
-			want: "only valid in a user turn",
-		},
-		{
 			name: "function response scheduling is rejected",
 			body: `{"contents":[{"role":"model","parts":[{"functionCall":{"id":"c1","name":"f"}}]},{"role":"user","parts":[{"functionResponse":{"id":"c1","name":"f","response":{"output":"x"},"scheduling":"SILENT"}}]}]}`,
 			want: "scheduling is not supported",
@@ -226,6 +221,150 @@ func TestDecodeGeminiRequestRejections(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDecodeGeminiRequestModelRoleFunctionResponse pins the shape agy 1.5.3
+// actually sends (captured live): a run of parallel functionCalls in one
+// model content, then a separate model content holding their functionResponse
+// parts. The Gemini API accepts the form, so the decoder must canonicalize
+// each functionResponse into a user turn instead of rejecting the content, and
+// a gemini->chat exchange must render the assistant tool calls followed by
+// the tool messages.
+func TestDecodeGeminiRequestModelRoleFunctionResponse(t *testing.T) {
+	body := `{
+		"contents": [
+			{"role": "user", "parts": [{"text": "Read hello.txt and second.txt."}]},
+			{"role": "model", "parts": [
+				{"functionCall": {"id": "call_a", "name": "read_file", "args": {"Path": "hello.txt"}}},
+				{"functionCall": {"id": "call_b", "name": "read_file", "args": {"Path": "second.txt"}}}
+			]},
+			{"role": "model", "parts": [
+				{"functionResponse": {"id": "call_a", "name": "read_file", "response": {"output": "hello"}}},
+				{"functionResponse": {"id": "call_b", "name": "read_file", "response": {"output": "second"}}}
+			]}
+		]
+	}`
+	result, _ := geminiDecodeOK(t, body, StrictLossPolicy(), UpstreamChatCompletions)
+	turns := result.Request.Turns
+	wantRoles := []CanonicalRole{CanonicalUser, CanonicalAssistant, CanonicalUser}
+	if len(turns) != len(wantRoles) {
+		t.Fatalf("got %d turns, want %d: %+v", len(turns), len(wantRoles), turns)
+	}
+	for i, want := range wantRoles {
+		if turns[i].Role != want {
+			t.Fatalf("turn %d role = %q, want %q", i, turns[i].Role, want)
+		}
+	}
+	if len(turns[1].Parts) != 2 {
+		t.Fatalf("assistant turn parts = %d, want the two function calls", len(turns[1].Parts))
+	}
+	results := turns[2].Parts
+	if len(results) != 2 {
+		t.Fatalf("user turn parts = %d, want the two function results", len(results))
+	}
+	for i, want := range []struct {
+		callID string
+		text   string
+	}{{"call_a", "hello"}, {"call_b", "second"}} {
+		result, ok := results[i].(CanonicalFunctionResult)
+		if !ok {
+			t.Fatalf("result %d = %T, want CanonicalFunctionResult", i, results[i])
+		}
+		if result.CallID != want.callID {
+			t.Fatalf("result %d call id = %q, want %q", i, result.CallID, want.callID)
+		}
+		if len(result.Parts) != 1 || result.Parts[0].(CanonicalText).Text != want.text {
+			t.Fatalf("result %d parts = %+v, want text %q", i, result.Parts, want.text)
+		}
+	}
+
+	rendered, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("RenderChatRequest: %v", err)
+	}
+	var wire struct {
+		Messages []struct {
+			Role      string `json:"role"`
+			Content   any    `json:"content"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+			ToolCallID string `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(rendered, &wire); err != nil {
+		t.Fatalf("unmarshal rendered chat request: %v", err)
+	}
+	if len(wire.Messages) != 4 {
+		t.Fatalf("rendered messages = %d, want user + assistant + two tool messages: %s", len(wire.Messages), rendered)
+	}
+	if wire.Messages[0].Role != "user" || wire.Messages[1].Role != "assistant" {
+		t.Fatalf("message roles = %q, %q, want user, assistant", wire.Messages[0].Role, wire.Messages[1].Role)
+	}
+	if len(wire.Messages[1].ToolCalls) != 2 {
+		t.Fatalf("assistant tool calls = %d, want 2: %s", len(wire.Messages[1].ToolCalls), rendered)
+	}
+	if got := wire.Messages[1].ToolCalls[0]; got.ID != "call_a" || got.Function.Name != "read_file" || got.Function.Arguments != `{"Path": "hello.txt"}` {
+		t.Fatalf("first tool call = %+v", got)
+	}
+	if got := wire.Messages[1].ToolCalls[1]; got.ID != "call_b" || got.Function.Name != "read_file" || got.Function.Arguments != `{"Path": "second.txt"}` {
+		t.Fatalf("second tool call = %+v", got)
+	}
+	for i, want := range []struct {
+		callID string
+		text   string
+	}{{"call_a", "hello"}, {"call_b", "second"}} {
+		message := wire.Messages[2+i]
+		if message.Role != "tool" || message.ToolCallID != want.callID {
+			t.Fatalf("tool message %d = %q %q, want tool %q", i, message.Role, message.ToolCallID, want.callID)
+		}
+		if message.Content != want.text {
+			t.Fatalf("tool message %d content = %#v, want %q", i, message.Content, want.text)
+		}
+	}
+}
+
+// TestDecodeGeminiRequestMixedModelContentSplitsByPartRole pins the general
+// rule behind the canonicalization: a content's functionResponse parts form
+// a user turn even when the content also carries model-side parts, and part
+// order is preserved across the split.
+func TestDecodeGeminiRequestMixedModelContentSplitsByPartRole(t *testing.T) {
+	body := `{
+		"contents": [
+			{"role": "user", "parts": [{"text": "run it"}]},
+			{"role": "model", "parts": [{"functionCall": {"id": "c1", "name": "f", "args": {}}}]},
+			{"role": "model", "parts": [
+				{"text": "checking"},
+				{"functionResponse": {"id": "c1", "name": "f", "response": {"output": "ok"}}},
+				{"text": "done"}
+			]}
+		]
+	}`
+	result, _ := geminiDecodeOK(t, body, StrictLossPolicy(), UpstreamChatCompletions)
+	wantRoles := []CanonicalRole{CanonicalUser, CanonicalAssistant, CanonicalAssistant, CanonicalUser, CanonicalAssistant}
+	turns := result.Request.Turns
+	if len(turns) != len(wantRoles) {
+		t.Fatalf("got %d turns, want %d: %+v", len(turns), len(wantRoles), turns)
+	}
+	for i, want := range wantRoles {
+		if turns[i].Role != want {
+			t.Fatalf("turn %d role = %q, want %q", i, turns[i].Role, want)
+		}
+	}
+	if got := turns[2].Parts[0].(CanonicalText).Text; got != "checking" {
+		t.Fatalf("assistant text = %q, want checking", got)
+	}
+	if _, ok := turns[3].Parts[0].(CanonicalFunctionResult); !ok {
+		t.Fatalf("turn 3 part = %T, want the function result", turns[3].Parts[0])
+	}
+	if got := turns[4].Parts[0].(CanonicalText).Text; got != "done" {
+		t.Fatalf("trailing assistant text = %q, want done", got)
 	}
 }
 

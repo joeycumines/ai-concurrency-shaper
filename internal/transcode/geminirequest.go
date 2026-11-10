@@ -144,16 +144,13 @@ func (d *geminiDecoder) request(
 		}
 	}
 	for i, content := range req.Contents {
-		turn, err := d.contentTurn(i, content)
+		turns, err := d.contentTurns(i, content)
 		if err != nil {
 			return err
 		}
 		// A content whose every part was dropped under an approved loss has no
-		// canonical form; the loss is already recorded, so the turn is skipped.
-		if len(turn.Parts) == 0 {
-			continue
-		}
-		out.Turns = append(out.Turns, turn)
+		// canonical form; the loss is already recorded, so no turn is emitted.
+		out.Turns = append(out.Turns, turns...)
 	}
 	if err := d.tools(req.Tools, out); err != nil {
 		return err
@@ -198,9 +195,18 @@ func (d *geminiDecoder) systemTurn(content geminigeneratecontent.Content) (Canon
 	return CanonicalTurn{Role: CanonicalSystem, Parts: parts}, true, nil
 }
 
-// contentTurn converts contents[i] into one canonical turn, preserving the
-// turn boundary. A role-less content is read as a user turn with a note.
-func (d *geminiDecoder) contentTurn(i int, content geminigeneratecontent.Content) (CanonicalTurn, error) {
+// contentTurns converts contents[i] into one or more canonical turns,
+// preserving the turn boundary. A role-less content is read as a user turn
+// with a note.
+//
+// A functionResponse part is a tool result and belongs to a user turn in the
+// canonical IR whatever role its content declares. The Gemini API accepts a
+// functionResponse in a model content and agy sends every tool result that
+// way, so the canonical role of each converted part follows its kind:
+// function results form user turns, every other part keeps the content's
+// role. A content that mixes them therefore yields more than one canonical
+// turn, in part order.
+func (d *geminiDecoder) contentTurns(i int, content geminigeneratecontent.Content) ([]CanonicalTurn, error) {
 	path := fmt.Sprintf("contents[%d]", i)
 	var role CanonicalRole
 	switch content.Role {
@@ -215,41 +221,45 @@ func (d *geminiDecoder) contentTurn(i int, content geminigeneratecontent.Content
 			path+".role",
 			"a content with no role is read as a user turn",
 		); err != nil {
-			return CanonicalTurn{}, err
+			return nil, err
 		}
 	default:
-		return CanonicalTurn{}, fmt.Errorf("%s.role %q is not supported (want user or model)", path, content.Role)
+		return nil, fmt.Errorf("%s.role %q is not supported (want user or model)", path, content.Role)
 	}
 	if len(content.Parts) == 0 {
-		return CanonicalTurn{}, fmt.Errorf("%s.parts is required", path)
+		return nil, fmt.Errorf("%s.parts is required", path)
 	}
 
-	// A user content's functionResponse parts may omit their ids. Count them
-	// by name first, so the correlation rule sees the whole content.
+	// functionResponse parts may omit their ids. Count them by name first,
+	// so the correlation rule sees the whole content.
 	idless := make(map[string]int)
-	if role == CanonicalUser {
-		for _, part := range content.Parts {
-			if part.FunctionResponse != nil && part.FunctionResponse.ID == "" {
-				idless[part.FunctionResponse.Name]++
-			}
+	for _, part := range content.Parts {
+		if part.FunctionResponse != nil && part.FunctionResponse.ID == "" {
+			idless[part.FunctionResponse.Name]++
 		}
 	}
 
-	var parts []CanonicalPart
+	var turns []CanonicalTurn
 	for j, part := range content.Parts {
 		partPath := fmt.Sprintf("%s.parts[%d]", path, j)
 		converted, err := d.part(partPath, role, i, part, idless)
 		if err != nil {
-			return CanonicalTurn{}, err
+			return nil, err
 		}
-		parts = append(parts, converted...)
+		for _, canonical := range converted {
+			partRole := role
+			if _, isResult := canonical.(CanonicalFunctionResult); isResult {
+				partRole = CanonicalUser
+			}
+			if len(turns) == 0 || turns[len(turns)-1].Role != partRole {
+				turns = append(turns, CanonicalTurn{Role: partRole})
+			}
+			turns[len(turns)-1].Parts = append(turns[len(turns)-1].Parts, canonical)
+		}
 	}
-	if len(parts) == 0 {
-		// Every part was dropped under an approved loss, which already recorded
-		// each drop. The caller omits the empty turn.
-		return CanonicalTurn{Role: role}, nil
-	}
-	return CanonicalTurn{Role: role, Parts: parts}, nil
+	// Every part was dropped under an approved loss (the loss was recorded as
+	// each was converted); the caller emits no turn.
+	return turns, nil
 }
 
 // geminiTextOnly reports whether a part carries text and nothing else but
