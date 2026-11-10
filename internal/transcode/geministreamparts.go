@@ -315,8 +315,9 @@ func (s *geminiResponsesStreamState) convertFunctionCall(
 	// (clientCallName is nil-safe and identity-maps an unmapped name).
 	name, namespace := s.ctx.ToolNames.clientCallName(call.Name)
 	// The call identity renders into the done events and the terminal
-	// envelope, so it is retained semantic state like the arguments.
-	if err := s.chargeTotal(len(callID)+len(name), "tool-call identity"); err != nil {
+	// envelope, so it is retained semantic state like the arguments; the
+	// namespace renders alongside the name, so its bytes are charged too.
+	if err := s.chargeTotal(len(callID)+len(name)+len(namespace), "tool-call identity"); err != nil {
 		return nil, err
 	}
 	// The part's metadata gate follows the call's wire checks and precedes every

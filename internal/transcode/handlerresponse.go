@@ -179,6 +179,7 @@ func (h *TranscodeHandler) convertResponse(
 				body,
 				h.cfg.Mapping.ChatCapabilities,
 				h.cfg.Mapping.LossPolicy,
+				context.ToolNames,
 			)
 			if err != nil {
 				return nil, conversionProvenance(err), err
@@ -237,6 +238,7 @@ func (h *TranscodeHandler) convertResponse(
 				body,
 				h.cfg.Mapping.ChatCapabilities,
 				h.cfg.Mapping.LossPolicy,
+				context.ToolNames,
 			)
 			if err != nil {
 				return nil, conversionProvenance(err), err
@@ -297,6 +299,7 @@ func (h *TranscodeHandler) convertResponse(
 				body,
 				h.cfg.Mapping.ChatCapabilities,
 				h.cfg.Mapping.LossPolicy,
+				context.ToolNames,
 			)
 			if err != nil {
 				return nil, conversionProvenance(err), err

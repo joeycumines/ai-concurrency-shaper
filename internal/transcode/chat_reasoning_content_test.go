@@ -78,7 +78,7 @@ func TestDecodeChatResponseReasoningContentMirrorsReasoning(t *testing.T) {
 
 	// Without the capability: the same typed rejection as message.reasoning,
 	// naming the actual field.
-	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy(), nil)
 	var unsupported *UnsupportedFeatureError
 	if !errors.As(err, &unsupported) {
 		t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
@@ -88,7 +88,7 @@ func TestDecodeChatResponseReasoningContentMirrorsReasoning(t *testing.T) {
 	}
 
 	// With the capability (a CLI default): mapped to ordinary text.
-	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy())
+	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("decode with capability: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestDecodeChatResponseReasoningContradictionRejected(t *testing.T) {
 		"id":"x","object":"chat.completion","created":1,"model":"m",
 		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"answer","reasoning":"a","reasoning_content":"b"}}]
 	}`)
-	if _, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy()); err == nil {
+	if _, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy(), nil); err == nil {
 		t.Fatal("expected contradiction rejection for reasoning + reasoning_content in one message")
 	}
 }
@@ -283,7 +283,7 @@ func TestChatProviderReasoningCapabilityOffParity(t *testing.T) {
 		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"answer","reasoning_content":"deep think"}}]
 	}`)
 
-	nonStream, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, approved)
+	nonStream, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, approved, nil)
 	if err != nil {
 		t.Fatalf("decode with an approved provider_reasoning_text loss: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestChatProviderReasoningCapabilityOffParity(t *testing.T) {
 		"id":"x","object":"chat.completion","created":1,"model":"m",
 		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"answer","reasoning":"a","reasoning_content":"b"}}]
 	}`)
-	if _, _, err := DecodeChatResponseWithPolicy(both, ChatCapabilities{ProviderReasoningText: true}, approved); err == nil {
+	if _, _, err := DecodeChatResponseWithPolicy(both, ChatCapabilities{ProviderReasoningText: true}, approved, nil); err == nil {
 		t.Fatal("non-stream accepted two reasoning spellings with an approved loss")
 	}
 }
@@ -392,7 +392,7 @@ func TestChatReasoningBothDetailShared(t *testing.T) {
 		"id":"x","object":"chat.completion","created":1,"model":"m",
 		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"answer","reasoning":"a","reasoning_content":"b"}}]
 	}`)
-	_, _, err := DecodeChatResponseWithPolicy(nonStream, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy())
+	_, _, err := DecodeChatResponseWithPolicy(nonStream, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy(), nil)
 	assertChatReasoningBothDetail(t, err)
 
 	// Streaming chat surface: one delta carrying both spellings.
@@ -425,7 +425,7 @@ func TestChatAudioOutputRouting(t *testing.T) {
 		`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 
 	// Audio data unapproved (strict, no loss): rejection.
-	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy(), nil)
 	if _, ok := errors.AsType[*UnsupportedFeatureError](err); !ok {
 		t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 	}
@@ -434,7 +434,7 @@ func TestChatAudioOutputRouting(t *testing.T) {
 	// observably.
 	policy := StrictLossPolicy()
 	policy.Allowed[FeatureProviderAudioData] = struct{}{}
-	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, policy)
+	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, policy, nil)
 	if err != nil {
 		t.Fatalf("decode with approved loss: %v", err)
 	}
@@ -473,7 +473,7 @@ func TestChatAudioOutputRouting(t *testing.T) {
 		`"choices":[{"index":0,"finish_reason":"stop",` +
 		`"message":{"role":"assistant","content":"hi","audio":{"id":"","data":"","expires_at":0,"transcript":""}}}],` +
 		`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
-	_, _, err = DecodeChatResponseWithPolicy(emptyBody, ChatCapabilities{}, permissiveLossPolicy())
+	_, _, err = DecodeChatResponseWithPolicy(emptyBody, ChatCapabilities{}, permissiveLossPolicy(), nil)
 	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("empty audio object err = %T %v, want *UpstreamWireError", err, err)
 	}

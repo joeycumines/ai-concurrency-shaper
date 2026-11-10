@@ -143,7 +143,7 @@ func lossScenariosResponseProvenance(t *testing.T) []lossScenario {
 			note: true,
 			run: func(policy LossPolicy) (ConversionReport, error) {
 				body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"function_call","message":{"role":"assistant","content":null,"function_call":{"name":"f","arguments":"{}"}}}]}`
-				_, report, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, policy)
+				_, report, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, policy, nil)
 				return report, err
 			},
 		},

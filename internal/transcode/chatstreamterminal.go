@@ -51,6 +51,14 @@ func (s *chatResponsesStreamState) finish(
 			continue
 		}
 		for contentIndex, part := range message.Content {
+			// A part already sealed inline at a part-type transition
+			// (closeOpenPart) or at a message→tool transition
+			// (closeOpenMessageItem) must not be closed twice: emitting
+			// the done events again would duplicate a part.done on the
+			// wire.
+			if _, sealed := item.sealedParts[int64(contentIndex)]; sealed {
+				continue
+			}
 			key := chatPartKey{outputIndex: item.outputIndex, contentIndex: int64(contentIndex)}
 			switch value := part.(type) {
 			case *ResponsesOutputText:
@@ -262,6 +270,7 @@ func (s *chatResponsesStreamState) continuityTurns(requestTurns []CanonicalTurn,
 			part := CanonicalFunctionCall{
 				CallID:    value.CallID,
 				Name:      value.Name,
+				Namespace: value.Namespace,
 				Arguments: arguments.Object,
 			}
 			if len(turns) > 0 && turns[len(turns)-1].Role == CanonicalAssistant {

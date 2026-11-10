@@ -220,7 +220,10 @@ func (c *responsesToAnthropicConverter) convertFrame(
 		// The Responses protocol has no [DONE] sentinel; this is defensive
 		// tolerance for a chat-style upstream. The terminal was already
 		// emitted at response.completed; a [DONE] before any terminal is a
-		// truncation and must not end the stream cleanly.
+		// truncation and must not end the stream cleanly. Deliberately NOT
+		// errStreamTruncated: the sentinel is a protocol violation the
+		// upstream itself declared, an upstream-wire class on its own, not
+		// an EOF truncation the reader marks at the truncation sites.
 		if c.state.sawTerminal {
 			return convertedBatch{Terminal: true}, nil
 		}

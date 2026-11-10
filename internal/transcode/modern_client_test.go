@@ -146,7 +146,7 @@ func TestOpenAIChatResponseProviderExtensions(t *testing.T) {
 	}
 
 	// The full conversion path must accept the same body.
-	decoded, _, err := DecodeChatResponseWithPolicy(raw, ChatCapabilities{}, StrictLossPolicy())
+	decoded, _, err := DecodeChatResponseWithPolicy(raw, ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("DecodeChatResponse: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestOpenAIChatResponseMessageLevelExtensions(t *testing.T) {
 		t.Fatalf("stop_reason = %+v", msg.ChatAssistantMessage.StopReason)
 	}
 
-	decoded, _, err := DecodeChatResponseWithPolicy(raw, ChatCapabilities{}, StrictLossPolicy())
+	decoded, _, err := DecodeChatResponseWithPolicy(raw, ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("DecodeChatResponse: %v", err)
 	}
@@ -662,7 +662,7 @@ func TestAnthropicRequestCitationsReplay(t *testing.T) {
 // accepted on both the non-streaming and the streaming decode.
 func TestOpenAIChatNullSystemFingerprint(t *testing.T) {
 	response := []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"global.zai.glm-5.3","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"message":{"role":"assistant","content":"Hi","refusal":null},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}`)
-	decoded, _, err := DecodeChatResponseWithPolicy(response, ChatCapabilities{}, StrictLossPolicy())
+	decoded, _, err := DecodeChatResponseWithPolicy(response, ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("DecodeChatResponse with null system_fingerprint: %v", err)
 	}

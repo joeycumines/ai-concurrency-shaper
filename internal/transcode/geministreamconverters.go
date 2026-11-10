@@ -61,7 +61,9 @@ func (c *geminiToResponsesConverter) convertFrame(frame SSEEvent) (convertedBatc
 	data := trimJSONSpace(frame.Data)
 	if string(data) == "[DONE]" {
 		// Google never sends [DONE]. After the terminal it releases the held
-		// terminal; before it, the stream is truncated.
+		// terminal; before it, the stream is truncated. Deliberately not
+		// errStreamTruncated: the sentinel is a protocol violation
+		// (upstream-wire class), not an EOF truncation.
 		if !c.state.sawTerm {
 			return convertedBatch{}, upstreamWireError(
 				UpstreamGemini, http.StatusOK,
@@ -211,6 +213,8 @@ func (c *geminiToAnthropicConverter) convertFrame(frame SSEEvent) (convertedBatc
 	}
 	data := trimJSONSpace(frame.Data)
 	if string(data) == "[DONE]" {
+		// Same as above: not errStreamTruncated — a [DONE] before a terminal
+		// is a sentinel protocol violation, not an EOF truncation.
 		if !c.gemini.sawTerm {
 			return convertedBatch{}, upstreamWireError(
 				UpstreamGemini, http.StatusOK,

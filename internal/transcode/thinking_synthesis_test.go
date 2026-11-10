@@ -20,7 +20,7 @@ import (
 func TestNonStreamReasoningRendersThinkingBlockWithMarker(t *testing.T) {
 	response, _, err := DecodeChatResponseWithPolicy([]byte(
 		`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"It is sunny.","reasoning_content":"I should check the weather."}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}`,
-	), ChatCapabilities{ProviderReasoningThinking: true}, StrictLossPolicy())
+	), ChatCapabilities{ProviderReasoningThinking: true}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestNonStreamReasoningRendersThinkingBlockWithMarker(t *testing.T) {
 func TestNonStreamReasoningTextMappingUnchangedWithoutCapability(t *testing.T) {
 	response, _, err := DecodeChatResponseWithPolicy([]byte(
 		`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"It is sunny.","reasoning_content":"I should check the weather."}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}`,
-	), ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy())
+	), ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

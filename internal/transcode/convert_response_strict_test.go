@@ -15,7 +15,7 @@ func TestChatUsageTotalMismatchRelayed(t *testing.T) {
 		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],` +
 		`"usage":{"prompt_tokens":293360,"completion_tokens":221,"total_tokens":293640,` +
 		`"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}`)
-	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy())
+	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("inconsistent usage totals must not fail the decode: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestChatResponseToolCallsDuplicateKeysAndEmptyArguments(t *testing.T) {
 		`"tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"query\":\"hello\",\"query\":\"world\"}"}}]}}],` +
 		`"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`)
 
-	resDup, _, err := DecodeChatResponseWithPolicy(bodyDup, ChatCapabilities{}, permissiveLossPolicy())
+	resDup, _, err := DecodeChatResponseWithPolicy(bodyDup, ChatCapabilities{}, permissiveLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("decode chat response with duplicate tool arguments failed: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestChatResponseToolCallsDuplicateKeysAndEmptyArguments(t *testing.T) {
 		`"tool_calls":[{"id":"call_2","type":"function","function":{"name":"get_time","arguments":""}}]}}],` +
 		`"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}`)
 
-	resEmpty, _, err := DecodeChatResponseWithPolicy(bodyEmpty, ChatCapabilities{}, permissiveLossPolicy())
+	resEmpty, _, err := DecodeChatResponseWithPolicy(bodyEmpty, ChatCapabilities{}, permissiveLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("decode chat response with empty tool arguments failed: %v", err)
 	}

@@ -64,13 +64,11 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 	addItem("item_a", 0, 1)
 	addItem("item_b", 1, 2)
 	addPart("item_a", 0, 3)
-	addPart("item_b", 1, 4)
 
-	// A delta for item_a content_index 0 must target item_a's block (0),
-	// not item_b's (1).
+	// A delta for item_a content_index 0 must target item_a's block (0).
 	events, err := state.Convert(ResponseTextDeltaEvent{
 		Type:           "response.output_text.delta",
-		SequenceNumber: 5,
+		SequenceNumber: 4,
 		ItemID:         "item_a",
 		OutputIndex:    0,
 		ContentIndex:   0,
@@ -84,9 +82,109 @@ func TestAnthropicStreamPartBlockIdentity(t *testing.T) {
 		t.Fatalf("item_a delta targets %v, want block 0", events)
 	}
 
-	events, err = state.Convert(ResponseTextDeltaEvent{
+	// While item_a's block is still open, a second part (item_b's) must be
+	// rejected: the Messages dialect carries exactly one open content block.
+	_, err = state.Convert(ResponseContentPartAddedEvent{
+		Type:           "response.content_part.added",
+		SequenceNumber: 5,
+		ItemID:         "item_b",
+		OutputIndex:    1,
+		ContentIndex:   0,
+		Part: &ResponsesStreamOutputTextPart{
+			Type:        "output_text",
+			Text:        "",
+			Annotations: []ResponsesAnnotation{},
+		},
+	})
+	assertAnthropicWireError(t, err, "while another content block is open")
+
+	// The state latches the failure, so the continuation replays the same
+	// prefix on a fresh state (the converter-level rollback path is covered
+	// by the composed-converter tests). After item_a's part closes, item_b's
+	// part opens its own block (1), and its deltas target it — never item_a's
+	// closed block.
+	state2 := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		permissiveLossPolicy(),
+		ChatCapabilities{},
+		"msg_1",
+		"claude-x",
+		1,
+	)
+	feedAnthropicCreated(t, state2, 0)
+	addItem2 := func(itemID string, outputIndex, sequence int64) {
+		t.Helper()
+		if _, err := state2.Convert(ResponseOutputItemAddedEvent{
+			Type:           "response.output_item.added",
+			SequenceNumber: sequence,
+			OutputIndex:    outputIndex,
+			Item: &ResponsesOutputMessage{
+				ID:      itemID,
+				Type:    "message",
+				Role:    "assistant",
+				Status:  ResponsesItemInProgress,
+				Content: ResponsesOutputContentParts{},
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	addItem2("item_a", 0, 1)
+	addItem2("item_b", 1, 2)
+	if _, err := state2.Convert(ResponseContentPartAddedEvent{
+		Type:           "response.content_part.added",
+		SequenceNumber: 3,
+		ItemID:         "item_a",
+		OutputIndex:    0,
+		ContentIndex:   0,
+		Part:           &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state2.Convert(ResponseTextDeltaEvent{
 		Type:           "response.output_text.delta",
+		SequenceNumber: 4,
+		ItemID:         "item_a",
+		OutputIndex:    0,
+		ContentIndex:   0,
+		Delta:          "hello",
+		Logprobs:       []ResponsesTextLogprob{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state2.Convert(ResponseTextDoneEvent{
+		Type:           "response.output_text.done",
+		SequenceNumber: 5,
+		ItemID:         "item_a",
+		OutputIndex:    0,
+		ContentIndex:   0,
+		Text:           "hello",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state2.Convert(ResponseContentPartDoneEvent{
+		Type:           "response.content_part.done",
 		SequenceNumber: 6,
+		ItemID:         "item_a",
+		OutputIndex:    0,
+		ContentIndex:   0,
+		Part:           &ResponsesStreamOutputTextPart{Type: "output_text", Text: "hello", Annotations: []ResponsesAnnotation{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state2.Convert(ResponseContentPartAddedEvent{
+		Type:           "response.content_part.added",
+		SequenceNumber: 7,
+		ItemID:         "item_b",
+		OutputIndex:    1,
+		ContentIndex:   0,
+		Part:           &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	events, err = state2.Convert(ResponseTextDeltaEvent{
+		Type:           "response.output_text.delta",
+		SequenceNumber: 8,
 		ItemID:         "item_b",
 		OutputIndex:    1,
 		ContentIndex:   0,

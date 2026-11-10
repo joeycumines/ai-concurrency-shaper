@@ -85,6 +85,10 @@ func TestEOFErrorClassificationKeepsConcreteTypes(t *testing.T) {
 			name:           "upstream wire error keeps its type",
 			err:            wire,
 			wantTruncation: false,
+			// *UpstreamWireError is corrupt upstream wire: the classifier
+			// must call it an upstream failure, and the reader sets
+			// SawUpstreamErrorFrame for it when it emits the error frame.
+			wantUpstream: true,
 			check: func(t *testing.T, err error) {
 				if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 					t.Fatalf("err = %T %v, want *UpstreamWireError preserved", err, err)
@@ -98,6 +102,27 @@ func TestEOFErrorClassificationKeepsConcreteTypes(t *testing.T) {
 			check: func(t *testing.T, err error) {
 				if !errors.Is(err, errStreamTruncated) {
 					t.Fatalf("err = %v, want errors.Is(err, errStreamTruncated)", err)
+				}
+			},
+		},
+		{
+			// The real shape the converters' finalizeEOF returns: the
+			// sentinel wrapped in *UpstreamWireError. errors.Is must survive
+			// the wrapper (UpstreamWireError.Unwrap exposes the cause), and
+			// the truncation must NOT set SawUpstreamErrorFrame — a local
+			// truncation is not a frame of real upstream data, so a
+			// concurrent client cancel must not classify as a definitive
+			// upstream failure.
+			name:           "wrapped truncation is a truncation, not an upstream frame",
+			err:            upstreamWireError(UpstreamResponses, 200, errStreamTruncated),
+			wantTruncation: true,
+			wantUpstream:   false,
+			check: func(t *testing.T, err error) {
+				if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+					t.Fatalf("err = %T %v, want *UpstreamWireError preserved", err, err)
+				}
+				if !errors.Is(err, errStreamTruncated) {
+					t.Fatalf("err = %v, want errors.Is(err, errStreamTruncated) through the UpstreamWireError wrap", err)
 				}
 			},
 		},
@@ -137,11 +162,22 @@ func TestEOFErrorClassificationKeepsConcreteTypes(t *testing.T) {
 			// The outcome classifier must agree: a truncation or an
 			// upstream body error is an upstream failure; a local typed
 			// failure is a local conversion failure.
+			// Build the observation the way the reader reports it, so the
+			// test pins the flag-driven classifier against the real flags:
+			// a truncation must not set SawUpstreamErrorFrame, an
+			// *UpstreamWireError must.
 			outcome := classifyStreamObservation(streamObservation{
-				ReaderErr:     err,
-				SawErrorEvent: true,
-				SawTerminal:   false,
+				ReaderErr:             err,
+				SawErrorEvent:         reader.SawErrorEvent(),
+				SawTerminal:           reader.SawTerminal(),
+				SawUpstreamErrorFrame: reader.SawUpstreamErrorFrame(),
 			})
+			if tc.wantTruncation && reader.SawUpstreamErrorFrame() {
+				t.Fatalf("SawUpstreamErrorFrame = true for a truncation; a truncation is not a frame of real upstream data")
+			}
+			if _, ok := errors.AsType[*UpstreamWireError](tc.err); ok && !tc.wantTruncation && !reader.SawUpstreamErrorFrame() {
+				t.Fatalf("SawUpstreamErrorFrame = false for *UpstreamWireError; corrupt upstream wire must mark the frame upstream")
+			}
 			if want := tc.wantTruncation || tc.wantUpstream; (outcome == streamOutcomeUpstreamFailure) != want {
 				t.Fatalf("outcome = %v, want upstream failure = %v for err = %T %v", outcome, want, err, err)
 			}

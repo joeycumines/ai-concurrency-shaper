@@ -547,6 +547,7 @@ func canonicalContentPartsToChatUserMessage(
 // message with content, refusal, and tool calls.
 func canonicalAssistantTurnToChatMessage(
 	turn CanonicalTurn,
+	names *ToolNames,
 ) (ChatMessage, error) {
 	var blocks []ChatContentBlock
 	var toolCalls []ChatMessageToolCall
@@ -566,7 +567,23 @@ func canonicalAssistantTurnToChatMessage(
 
 		case CanonicalFunctionCall:
 			callID := value.CallID
+			// The canonical part carries the BARE name plus its namespace;
+			// the chat wire carries only the flat name, re-derived from both
+			// via ToolNames.flatName, so the upstream never learns the bare
+			// form of a namespaced child. An undeclared namespace cannot be
+			// flattened here: the decode path already refused or loss-recorded
+			// it.
 			name := value.Name
+			if value.Namespace != "" {
+				flat, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name})
+				if !ok {
+					return ChatMessage{}, fmt.Errorf(
+						"assistant message part %d: call %q references namespace %q, which this request does not declare",
+						i, value.Name, value.Namespace,
+					)
+				}
+				name = flat
+			}
 			arguments := string(value.Arguments)
 			if arguments == "" {
 				arguments = "{}"

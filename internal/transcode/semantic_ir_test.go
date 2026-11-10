@@ -363,7 +363,7 @@ func TestToolArgumentsFidelityAcrossTargets(t *testing.T) {
 	const invalidRawEscaped = `{\"city\":`
 	response, _, err := DecodeChatResponseWithPolicy([]byte(
 		`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"`+invalidRawEscaped+`"}}]}}]}`,
-	), ChatCapabilities{}, StrictLossPolicy())
+	), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -233,7 +233,7 @@ func TestFieldCaptureCodexNamespaceRequestReplayed(t *testing.T) {
 	}
 
 	chat := `{"id":"c","object":"chat.completion","created":1,"model":"glm-5.3-flash","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"spawn_agent","arguments":"{\"message\":\"x\"}"}}]}}]}`
-	response, _, err := DecodeChatResponseWithPolicy([]byte(chat), ChatCapabilities{}, policy)
+	response, _, err := DecodeChatResponseWithPolicy([]byte(chat), ChatCapabilities{}, policy, result.ToolNames)
 	if err != nil {
 		t.Fatalf("decode chat tool call: %v", err)
 	}

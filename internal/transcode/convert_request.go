@@ -509,27 +509,25 @@ func responsesInputToTurns(
 			if err != nil {
 				return nil, fmt.Errorf("input item %d: function call arguments: %w", i, err)
 			}
-			// Replayed history must use the same flat name the model was
-			// taught for a namespaced child, so the target never learns the bare form.
-			name := value.Name
+			// Replayed history keeps the BARE name + namespace in the
+			// canonical part; each target render re-derives the flat wire
+			// name from Namespace+Name via ToolNames.flatName, so the
+			// upstream never learns the bare form of a namespaced child.
+			// When THIS request does not declare the namespace, the
+			// qualifier cannot be mapped: forwarding the bare name is only
+			// honest when nothing else owns it. If a surviving tool already
+			// answers to that name, the replayed call would be re-pointed
+			// at a DIFFERENT tool, which is a reinterpretation of
+			// client-sent history and never permitted. Otherwise the
+			// unqualified name is a genuine loss of the namespace, recorded
+			// under its own policy-gated key rather than a note that
+			// claimed the bare form was fine.
 			if value.Namespace != "" {
-				if flat, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name}); ok {
-					name = flat
-				} else {
-					// The namespace is not declared by THIS request, so the
-					// qualifier cannot be mapped. Forwarding the bare name is
-					// only honest when nothing else owns it: if a surviving
-					// tool already answers to that name, the replayed call
-					// would be re-pointed at a DIFFERENT tool, which is a
-					// reinterpretation of client-sent history and never
-					// permitted. Otherwise the unqualified name is a genuine
-					// loss of the namespace, recorded under its own
-					// policy-gated key rather than a note that claimed the
-					// bare form was fine.
+				if _, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name}); !ok {
 					owned := false
-					if _, clash := reserved[name]; clash {
+					if _, clash := reserved[value.Name]; clash {
 						owned = true
-					} else if _, clash := names.FlatToRef[name]; clash {
+					} else if _, clash := names.FlatToRef[value.Name]; clash {
 						owned = true
 					}
 					if owned {
@@ -552,7 +550,8 @@ func responsesInputToTurns(
 			}
 			part := CanonicalFunctionCall{
 				CallID:    value.CallID,
-				Name:      name,
+				Name:      value.Name,
+				Namespace: value.Namespace,
 				Arguments: raw,
 			}
 			turns = appendFunctionCallTurn(turns, part)
@@ -1759,6 +1758,7 @@ func RenderResponsesRequest(
 					Type:      "function_call",
 					CallID:    value.CallID,
 					Name:      value.Name,
+					Namespace: value.Namespace,
 					Arguments: arguments,
 				})
 
@@ -2221,7 +2221,7 @@ func RenderChatRequest(
 			}
 
 		case CanonicalAssistant:
-			message, err := canonicalAssistantTurnToChatMessage(turn)
+			message, err := canonicalAssistantTurnToChatMessage(turn, context.ToolNames)
 			if err != nil {
 				return nil, report, err
 			}

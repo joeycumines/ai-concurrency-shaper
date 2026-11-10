@@ -176,12 +176,28 @@ func (s *anthropicResponsesStreamState) reconcileTerminalOutput(
 			// The thinking-rendering reasoning item: the summary text was
 			// streamed as thinking deltas (provider_reasoning_thinking);
 			// identity and type already reconciled above, and the done
-			// event marked it observed.
+			// event marked it observed. The envelope's summary must match
+			// the summary snapshots observed at part-done, exactly like
+			// message text reconciles against the accumulated deltas: the
+			// part-done buffers are deleted at close, so the terminal
+			// reconciles against the recorded done snapshots instead.
 			if _, done := s.doneItems[itemID]; !done {
 				return s.wireError(fmt.Errorf(
 					"terminal envelope reasoning item %q was never closed by output_item.done",
 					itemID,
 				))
+			}
+			doneSummaries, ok := s.thinkingDoneSummaries[itemID]
+			if !ok {
+				doneSummaries = map[int64]string{}
+			}
+			for summaryIndex, summary := range value.Summary {
+				if doneText, seen := doneSummaries[int64(summaryIndex)]; seen && doneText != summary.Text {
+					return s.wireError(fmt.Errorf(
+						"terminal envelope reasoning item %q summary %d does not match the observed part-done snapshot",
+						itemID, summaryIndex,
+					))
+				}
 			}
 		case *ResponsesFunctionCallOutputItem:
 			closed, ok := s.closedToolCalls[itemID]

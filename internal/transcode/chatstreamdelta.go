@@ -500,7 +500,21 @@ func (s *chatResponsesStreamState) openMessageItemForPartWithEvents(
 		}
 	}
 
-	// Otherwise open a new content part.
+	// Otherwise open a new content part. The Anthropic render carries
+	// exactly one open content block, so a new part may open only after the
+	// previous part was sealed: close the open part inline (value done +
+	// part done) at the part-type transition, the same way the message item
+	// is sealed at a message→tool transition. Without this the render would
+	// receive two concurrent content_part.added events and emit two
+	// interleaved content_block_start events, which the Messages dialect
+	// forbids.
+	if item.openPartIndex >= 0 && item.openPartIndex < int64(len(message.Content)) {
+		closeEvents, err := s.closeOpenPart(item, message)
+		if err != nil {
+			return nil, nil, err
+		}
+		prefix = append(prefix, closeEvents...)
+	}
 	if len(message.Content) >= maxStreamPartsPerItem {
 		return nil, nil, s.wireError(fmt.Errorf(
 			"chat stream content parts per item exceed the exchange bound of %d",
@@ -637,6 +651,57 @@ func (s *chatResponsesStreamState) closeOpenReasoningItem() ([]ResponsesSSEEvent
 	}, nil
 }
 
+// closeOpenPart seals one open content part of a message item inline at a
+// part-type transition (text → refusal or refusal → text): the value done
+// event, then the part done event, exactly as finish() emits them, but AT THE
+// TRANSITION so the next content_part.added never opens a second concurrent
+// content block (the Anthropic dialect carries exactly one). The part stays
+// in message.Content with its materialized value; the item is NOT closed.
+func (s *chatResponsesStreamState) closeOpenPart(
+	item *openResponsesItem,
+	message *ResponsesOutputMessage,
+) ([]ResponsesSSEEvent, error) {
+	contentIndex := item.openPartIndex
+	if contentIndex < 0 || contentIndex >= int64(len(message.Content)) {
+		return nil, nil
+	}
+	key := chatPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
+	var events []ResponsesSSEEvent
+	switch value := message.Content[contentIndex].(type) {
+	case *ResponsesOutputText:
+		if builder := s.textBufs[key]; builder != nil {
+			value.Text = builder.String()
+		}
+		events = append(events,
+			s.builder.TextDone(message.ID, item.outputIndex, contentIndex, value.Text),
+			s.builder.ContentPartDone(message.ID, item.outputIndex, contentIndex,
+				&ResponsesStreamOutputTextPart{
+					Type:        "output_text",
+					Text:        value.Text,
+					Annotations: []ResponsesAnnotation{},
+				}),
+		)
+	case *ResponsesOutputRefusal:
+		if builder := s.refusalBufs[key]; builder != nil {
+			value.Refusal = builder.String()
+		}
+		events = append(events,
+			s.builder.RefusalDone(message.ID, item.outputIndex, contentIndex, value.Refusal),
+			s.builder.ContentPartDone(message.ID, item.outputIndex, contentIndex,
+				&ResponsesStreamRefusalPart{
+					Type:    "refusal",
+					Refusal: value.Refusal,
+				}),
+		)
+	}
+	if item.sealedParts == nil {
+		item.sealedParts = make(map[int64]struct{})
+	}
+	item.sealedParts[contentIndex] = struct{}{}
+	item.openPartIndex = -1
+	return events, nil
+}
+
 // closeOpenMessageItem closes the trailing open message item inline at a
 // message→tool transition: each content part's done event, then
 // output_item.done — the same sequence finish() emits, but AT THE TRANSITION
@@ -686,6 +751,13 @@ func (s *chatResponsesStreamState) closeOpenMessageItem() ([]ResponsesSSEEvent, 
 			)
 		}
 	}
+	if item.sealedParts == nil {
+		item.sealedParts = make(map[int64]struct{})
+	}
+	for contentIndex := range message.Content {
+		item.sealedParts[int64(contentIndex)] = struct{}{}
+	}
+	item.openPartIndex = -1
 	message.Status = ResponsesItemCompleted
 	events = append(events, s.builder.OutputItemDone(item.outputIndex, message))
 	return events, nil

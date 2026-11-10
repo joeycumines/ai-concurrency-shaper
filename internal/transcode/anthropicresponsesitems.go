@@ -535,6 +535,17 @@ func (s *anthropicResponsesStreamState) accumulatedRefusal(key responsePartKey) 
 	return ""
 }
 
+// accumulatedThinking returns the accumulated thinking text of a reasoning
+// summary part, or the empty string when the part never accumulated a delta.
+// The empty string is the reconciliation baseline: a zero-delta part
+// reconciles with an empty done snapshot and contradicts any non-empty one.
+func (s *anthropicResponsesStreamState) accumulatedThinking(key responsePartKey) string {
+	if builder := s.thinkingBufs[key]; builder != nil {
+		return builder.String()
+	}
+	return ""
+}
+
 // jsonObjectsEqual compares two decoded JSON objects semantically: key order
 // and whitespace are ignored; values are compared byte-exactly.
 func jsonObjectsEqual(a, b map[string]json.RawMessage) bool {

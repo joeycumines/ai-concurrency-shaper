@@ -84,11 +84,16 @@ type CanonicalDocument struct {
 func (CanonicalDocument) isCanonicalPart() {}
 
 // CanonicalFunctionCall is a model-initiated function call. Arguments is a
-// validated complete JSON object.
+// validated complete JSON object. Namespace carries the Responses tool
+// namespace qualifier of a namespaced child; renderers that flatten names
+// (chat, gemini) re-derive the flat wire name from Namespace+Name via
+// ToolNames.flatName, and renderers that carry it separately (responses,
+// messages) set it on the wire item directly.
 type CanonicalFunctionCall struct {
 	ItemID    string
 	CallID    string
 	Name      string
+	Namespace string
 	Arguments json.RawMessage // validated complete JSON object
 }
 
@@ -554,11 +559,14 @@ type CanonicalMessageItem struct {
 
 func (*CanonicalMessageItem) isCanonicalResponseItem() {}
 
-// CanonicalFunctionCallItem is an output function_call item.
+// CanonicalFunctionCallItem is an output function_call item. Namespace
+// carries the Responses tool namespace qualifier of a namespaced child
+// (empty for an ordinary function), mirroring CanonicalFunctionCall.
 type CanonicalFunctionCallItem struct {
 	ItemID    string
 	CallID    string
 	Name      string
+	Namespace string
 	Arguments ToolArguments
 }
 

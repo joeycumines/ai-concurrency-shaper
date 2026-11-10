@@ -144,9 +144,22 @@ func geminiResponseParts(
 					Detail:   "the model-generated tool arguments are not a JSON object and cannot be represented as functionCall.args",
 				}
 			}
+			// The canonical item carries the BARE name + namespace; the
+			// Gemini wire carries only the flat name, re-derived from both.
+			name := value.Name
+			if value.Namespace != "" {
+				flat, ok := context.ToolNames.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name})
+				if !ok {
+					return nil, "", fmt.Errorf(
+						"output[].function_call: call %q references namespace %q, which this request does not declare",
+						value.Name, value.Namespace,
+					)
+				}
+				name = flat
+			}
 			parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{
 				ID:   value.CallID,
-				Name: value.Name,
+				Name: name,
 				Args: json.RawMessage(value.Arguments.Raw),
 			}})
 		case *CanonicalFunctionResultItem:

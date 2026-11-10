@@ -155,6 +155,7 @@ func (s *geminiResponsesStreamState) continuityTurns(
 			part := CanonicalFunctionCall{
 				CallID:    value.CallID,
 				Name:      value.Name,
+				Namespace: value.Namespace,
 				Arguments: arguments.Object,
 			}
 			if len(turns) > 0 && turns[len(turns)-1].Role == CanonicalAssistant {

@@ -168,7 +168,7 @@ func renderMessagesTurns(
 
 		case CanonicalUser, CanonicalAssistant:
 			sawDialog = true
-			message, err := messagesTurn(turn, path)
+			message, err := messagesTurn(turn, path, context.ToolNames)
 			if err != nil {
 				return err
 			}
@@ -242,7 +242,7 @@ func messagesSystemBlocks(turn CanonicalTurn, path string) ([]anthropicmessages.
 // messagesTurn renders one user or assistant turn as one message. A user turn's
 // tool results must come before any other part, because Messages requires
 // tool_result blocks first in a user message.
-func messagesTurn(turn CanonicalTurn, path string) (anthropicmessages.Message, error) {
+func messagesTurn(turn CanonicalTurn, path string, names *ToolNames) (anthropicmessages.Message, error) {
 	role := anthropicmessages.RoleUser
 	if turn.Role == CanonicalAssistant {
 		role = anthropicmessages.RoleAssistant
@@ -281,7 +281,20 @@ func messagesTurn(turn CanonicalTurn, path string) (anthropicmessages.Message, e
 			}
 			sawOther = true
 			id := value.CallID
+			// The canonical part carries the BARE name + namespace; the
+			// Messages wire carries only the flat name, re-derived from both
+			// via ToolNames.flatName.
 			name := value.Name
+			if value.Namespace != "" {
+				flat, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name})
+				if !ok {
+					return anthropicmessages.Message{}, fmt.Errorf(
+						"%s: call %q references namespace %q, which this request does not declare",
+						partPath, value.Name, value.Namespace,
+					)
+				}
+				name = flat
+			}
 			blocks = append(blocks, anthropicmessages.ContentBlock{
 				Type:  anthropicmessages.ContentBlockTypeToolUse,
 				ID:    &id,

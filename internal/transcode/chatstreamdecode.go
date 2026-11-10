@@ -17,7 +17,10 @@ var errChatStreamDone = errors.New("chat stream [DONE] sentinel")
 // when the [DONE] sentinel arrives before any terminal condition. The
 // sentinel itself decides the result: the exchange is an upstream body
 // failure and the reader must stop immediately rather than wait on an
-// upstream that keeps the connection open after [DONE].
+// upstream that keeps the connection open after [DONE]. Deliberately NOT
+// wrapped with errStreamTruncated: a [DONE] before a terminal is a sentinel
+// protocol violation (upstream-wire class), not an EOF truncation the reader
+// marks at the truncation sites, so the two classes stay distinguishable.
 func errChatDoneBeforeTerminal() error {
 	return upstreamWireError(
 		UpstreamChatCompletions,

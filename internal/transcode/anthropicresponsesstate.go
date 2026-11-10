@@ -142,6 +142,17 @@ type anthropicResponsesStreamState struct {
 	// render as thinking blocks carrying the marker signature.
 	capabilities ChatCapabilities
 
+	// thinkingDoneSummaries records each reasoning summary part's done
+	// snapshot (keyed by summary index) so the terminal envelope can be
+	// reconciled against what was actually observed, since the per-part
+	// buffers are deleted at part-done.
+	thinkingDoneSummaries map[string]map[int64]string
+
+	// openThinkingItem is the item id of the OPEN thinking block: a
+	// reasoning summary delta must target it, so deltas can never be
+	// accumulated into a block that does not own them.
+	openThinkingItem string
+
 	// reasoningBlockIndex is the content-block index of the OPEN thinking
 	// block (nil when none is open).
 	reasoningBlockIndex *int
@@ -237,6 +248,7 @@ func newAnthropicResponsesStreamState(
 		textBufs:              make(map[responsePartKey]*strings.Builder),
 		refusalBufs:           make(map[responsePartKey]*strings.Builder),
 		thinkingBufs:          make(map[responsePartKey]*strings.Builder),
+		thinkingDoneSummaries: make(map[string]map[int64]string),
 		pendingToolStart:      make(map[string]*pendingToolBlock),
 		bufferedToolFragments: make(map[string][]string),
 		closedToolCalls:       make(map[string]anthropicClosedToolCall),
@@ -363,7 +375,7 @@ func (s *anthropicResponsesStreamState) convertEvent(
 		case ResponseReasoningSummaryTextDeltaEvent:
 			return s.reasoningTextDelta(value)
 		case ResponseReasoningSummaryTextDoneEvent:
-			return nil, nil
+			return s.reasoningTextDone(value)
 		case ResponseReasoningSummaryPartDoneEvent:
 			return s.reasoningPartDone(value)
 		}

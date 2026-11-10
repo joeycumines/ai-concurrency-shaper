@@ -47,6 +47,19 @@ func (s *anthropicResponsesStreamState) contentPartAdded(
 			maxStreamPartsPerItem,
 		))
 	}
+	// The Anthropic dialect carries exactly one open content block: a part
+	// added while any other block (text, refusal, thinking, or a started tool
+	// block) is still open cannot be rendered without interleaving two
+	// content_block_start events, which the Messages streaming contract
+	// forbids. The Responses FSM tracks part phases per item, so such an
+	// interleave is FSM-legal but unrenderable — reject as corrupt upstream
+	// wire rather than emit a malformed interleaved block sequence.
+	if s.anyContentBlockOpen() {
+		return nil, s.wireError(fmt.Errorf(
+			"content part added for %q while another content block is open",
+			event.ItemID,
+		))
+	}
 	var events []AnthropicStreamEvent
 	switch event.Part.(type) {
 	case *ResponsesStreamOutputTextPart, *ResponsesStreamRefusalPart:
@@ -472,16 +485,17 @@ func (s *anthropicResponsesStreamState) loseReasoningOnce() error {
 func (s *anthropicResponsesStreamState) reasoningPartAdded(
 	event ResponseReasoningSummaryPartAddedEvent,
 ) ([]AnthropicStreamEvent, error) {
-	if s.reasoningBlockIndex != nil {
-		// The Anthropic dialect cannot represent two concurrently-open
-		// content blocks: the Responses FSM tracks reasoning phase per
-		// item, so interleaved part lifecycles across items are FSM-legal
-		// but unrenderable — reject as corrupt upstream wire rather than
-		// misattribute deltas into the wrong block. Observed live: the
-		// previous behavior panicked on the nil'd index once the first
-		// part had closed.
+	// The Anthropic dialect carries exactly one open content block: a
+	// thinking part added while any other block is open (text, refusal, or
+	// a started tool block) is unrenderable, not just a second thinking
+	// block. The Responses FSM tracks reasoning phase per item, so such an
+	// interleave is FSM-legal but emits two concurrent content_block_start
+	// events — reject as corrupt upstream wire rather than interleave them.
+	// (The previous behavior panicked on the nil'd index once the first
+	// part had closed.)
+	if s.anyContentBlockOpen() {
 		return nil, s.wireError(fmt.Errorf(
-			"reasoning summary part added for %q while a thinking block is open",
+			"reasoning summary part added for %q while another content block is open",
 			event.ItemID,
 		))
 	}
@@ -493,6 +507,7 @@ func (s *anthropicResponsesStreamState) reasoningPartAdded(
 	}
 	thinking := ""
 	s.reasoningBlockIndex = new(int(int(s.blockIndex)))
+	s.openThinkingItem = event.ItemID
 	s.blockIndex++
 	emptySignature := ""
 	return []AnthropicStreamEvent{{
@@ -514,6 +529,15 @@ func (s *anthropicResponsesStreamState) reasoningTextDelta(
 	if s.reasoningBlockIndex == nil {
 		return nil, s.wireError(errors.New(
 			"reasoning summary delta with no open thinking block",
+		))
+	}
+	// The delta must target the open thinking block's own item: the FSM
+	// already rejects a delta outside an open part, but the render side
+	// refuses to accumulate bytes into a block that does not own them.
+	if s.openThinkingItem != event.ItemID {
+		return nil, s.wireError(fmt.Errorf(
+			"reasoning summary delta for %q does not target the open thinking block's item %q",
+			event.ItemID, s.openThinkingItem,
 		))
 	}
 	// The event budget was already charged once for this event in
@@ -540,6 +564,32 @@ func (s *anthropicResponsesStreamState) reasoningTextDelta(
 	}}, nil
 }
 
+// reasoningTextDone reconciles the reasoning summary text done snapshot
+// against the accumulated thinking deltas, exactly like textDone and
+// refusalDone: the upstream's fragments and its final snapshot must agree.
+func (s *anthropicResponsesStreamState) reasoningTextDone(
+	event ResponseReasoningSummaryTextDoneEvent,
+) ([]AnthropicStreamEvent, error) {
+	if s.reasoningBlockIndex == nil {
+		return nil, s.wireError(errors.New(
+			"reasoning summary text done with no open thinking block",
+		))
+	}
+	if s.openThinkingItem != event.ItemID {
+		return nil, s.wireError(fmt.Errorf(
+			"reasoning summary text done for %q does not target the open thinking block's item %q",
+			event.ItemID, s.openThinkingItem,
+		))
+	}
+	key := responsePartKey{ItemID: event.ItemID, ContentIndex: event.SummaryIndex}
+	if accumulated := s.accumulatedThinking(key); accumulated != event.Text {
+		return nil, s.wireError(errors.New(
+			"reasoning summary text done does not match the accumulated thinking text",
+		))
+	}
+	return nil, nil
+}
+
 // reasoningPartDone closes the thinking block: the signature delta (the
 // marker signature) precedes content_block_stop exactly as the Anthropic
 // streaming contract requires.
@@ -563,7 +613,27 @@ func (s *anthropicResponsesStreamState) reasoningPartDone(
 		Type:  AnthropicStreamEventTypeContentBlockStop,
 		Index: new(int(*s.reasoningBlockIndex)),
 	}}
+	key := responsePartKey{ItemID: event.ItemID, ContentIndex: event.SummaryIndex}
+	// The done snapshot must match the accumulated deltas, exactly like text
+	// and refusal: a mismatch means the upstream's fragments and its final
+	// snapshot disagree. A part that accumulated nothing reconciles with the
+	// empty string.
+	if accumulated := s.accumulatedThinking(key); accumulated != event.Part.Text {
+		return nil, s.wireError(errors.New(
+			"reasoning summary part done does not match the accumulated thinking text",
+		))
+	}
+	// The part is closed: its buffer must not survive to inherit bytes if the
+	// key is ever reused, and the exchange total keeps its charge (the bytes
+	// were delivered on the wire). The done snapshot is recorded instead, so
+	// the terminal envelope can be reconciled against what was observed.
+	delete(s.thinkingBufs, key)
+	if s.thinkingDoneSummaries[event.ItemID] == nil {
+		s.thinkingDoneSummaries[event.ItemID] = make(map[int64]string)
+	}
+	s.thinkingDoneSummaries[event.ItemID][event.SummaryIndex] = event.Part.Text
 	s.reasoningBlockIndex = nil
+	s.openThinkingItem = ""
 	// The closed thinking block may have freed the wire for the next
 	// deferred block.
 	drain, err := s.drainDeferredTools()

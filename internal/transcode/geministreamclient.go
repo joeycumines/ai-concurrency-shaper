@@ -749,6 +749,9 @@ func (c *responsesToGeminiConverter) convertFrame(frame SSEEvent) (convertedBatc
 		if c.state.sawTerminal {
 			return convertedBatch{Terminal: true}, nil
 		}
+		// Deliberately not errStreamTruncated: a [DONE] before a terminal is
+		// a sentinel protocol violation (upstream-wire class), not an EOF
+		// truncation marked at the truncation sites.
 		return convertedBatch{}, upstreamWireError(
 			UpstreamResponses,
 			http.StatusOK,
@@ -839,19 +842,60 @@ func (c *responsesToGeminiConverter) ConversionReport() *ConversionReport {
 
 // mergeConversionReports combines two state reports. Entries are kept once per
 // feature and path, in order, and the dropped counts are summed so a saturated
-// report stays visible.
+// report stays visible. When the same feature at different paths was recorded
+// on both sides of a composed converter, the two entries describe one feature's
+// fate on the wire and the upstream side: a loss record is the more severe,
+// truthful outcome (the feature was dropped), so it wins over a note (a
+// sanctioned encoding) claiming the feature was mapped. Without this, a
+// chat→Gemini stream could report the same provider reasoning both as mapped
+// to native thinking blocks and as dropped.
 func mergeConversionReports(a, b *ConversionReport) *ConversionReport {
 	merged := ConversionReport{Dropped: a.Dropped + b.Dropped}
-	seen := make(map[string]struct{}, len(a.Losses)+len(b.Losses))
+	seen := make(map[string]ConversionLoss, len(a.Losses)+len(b.Losses))
+	order := make([]string, 0, len(a.Losses)+len(b.Losses))
 	for _, losses := range [][]ConversionLoss{a.Losses, b.Losses} {
 		for _, loss := range losses {
 			key := fmt.Sprintf("%s at %s", loss.Feature, loss.Path)
 			if _, ok := seen[key]; ok {
 				continue
 			}
-			seen[key] = struct{}{}
-			merged.Losses = append(merged.Losses, loss)
+			seen[key] = loss
+			order = append(order, key)
 		}
+	}
+	// Collapse same-feature entries (ignoring the path) when one side lost
+	// the feature and the other only noted an encoding: keep the loss.
+	byFeature := make(map[Feature][]string, len(seen))
+	for _, key := range order {
+		loss := seen[key]
+		byFeature[loss.Feature] = append(byFeature[loss.Feature], key)
+	}
+	drop := make(map[string]struct{})
+	for _, keys := range byFeature {
+		if len(keys) < 2 {
+			continue
+		}
+		hasLoss := false
+		for _, key := range keys {
+			if seen[key].Kind == LossRecord {
+				hasLoss = true
+				break
+			}
+		}
+		if !hasLoss {
+			continue
+		}
+		for _, key := range keys {
+			if seen[key].Kind != LossRecord {
+				drop[key] = struct{}{}
+			}
+		}
+	}
+	for _, key := range order {
+		if _, ok := drop[key]; ok {
+			continue
+		}
+		merged.Losses = append(merged.Losses, seen[key])
 	}
 	return &merged
 }

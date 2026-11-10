@@ -823,7 +823,7 @@ func TestRenderResponsesRequestStopSequencesLoss(t *testing.T) {
 }
 
 func TestDecodeChatResponseFixture(t *testing.T) {
-	response, _, err := DecodeChatResponseWithPolicy(testcorpus.ChatCompletionsResponseJSON(), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy(testcorpus.ChatCompletionsResponseJSON(), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -861,11 +861,11 @@ func TestDecodeChatResponseProviderReasoning(t *testing.T) {
 		"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"answer","reasoning":"think"}}]
 	}`)
 	// Without the capability: rejection.
-	if _, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy()); err == nil {
+	if _, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy(), nil); err == nil {
 		t.Fatal("expected provider reasoning rejection")
 	}
 	// With the capability: mapped to ordinary text.
-	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{ProviderReasoningText: true}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -892,7 +892,7 @@ func TestDecodeChatResponseMultipleChoicesRejected(t *testing.T) {
 			{"index":1,"finish_reason":"stop","message":{"role":"assistant","content":"b"}}
 		]
 	}`)
-	if _, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy()); err == nil {
+	if _, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy(), nil); err == nil {
 		t.Fatal("expected multiple-choice rejection")
 	}
 }
@@ -905,7 +905,7 @@ func TestDecodeChatResponseToolCalls(t *testing.T) {
 			"tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"x\":1}"}}]
 		}}]
 	}`)
-	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1091,7 +1091,7 @@ func TestRenderMessagesResponseFromResponses(t *testing.T) {
 }
 
 func TestRenderResponsesResponseFromChat(t *testing.T) {
-	response, _, err := DecodeChatResponseWithPolicy(testcorpus.ChatCompletionsResponseJSON(), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy(testcorpus.ChatCompletionsResponseJSON(), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1425,8 +1425,7 @@ func TestDecodeChatResponseContentFilterIncomplete(t *testing.T) {
 	response, _, err := DecodeChatResponseWithPolicy(
 		[]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"x"},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`),
 		ChatCapabilities{ParallelToolCalls: true, ReasoningEffort: true},
-		StrictLossPolicy(),
-	)
+		StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

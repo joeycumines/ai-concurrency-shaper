@@ -267,14 +267,29 @@ func RenderGeminiRequest(
 					InlineData: &geminigeneratecontent.Blob{MimeType: p.MediaType, Data: p.Base64},
 				})
 			case CanonicalFunctionCall:
+				// The canonical part carries the BARE name + namespace; the
+				// Gemini wire carries only the flat name, re-derived from both
+				// via ToolNames.flatName (the functionResponse name below
+				// must match what the model was taught).
+				name := p.Name
+				if p.Namespace != "" {
+					flat, ok := context.ToolNames.flatName(ToolNameRef{Namespace: p.Namespace, Name: p.Name})
+					if !ok {
+						return nil, report, fmt.Errorf(
+							"turn %d part %d: call %q references namespace %q, which this request does not declare",
+							i, j, p.Name, p.Namespace,
+						)
+					}
+					name = flat
+				}
 				call := &geminiRenderFunctionCall{
-					Name: p.Name,
+					Name: name,
 					Args: p.Arguments,
 				}
 				if !strings.HasPrefix(p.CallID, gcallPrefix) {
 					call.ID = p.CallID
 				}
-				callNames[p.CallID] = p.Name
+				callNames[p.CallID] = name
 				part := geminiRenderPart{FunctionCall: call}
 				// Thought-signature rules (§13.3): a stored signature wins;
 				// otherwise the first functionCall of each current-turn model

@@ -42,7 +42,7 @@ func lossScenariosReasoning(t *testing.T) []lossScenario {
 			perm: []Feature{FeatureProviderAudioData},
 			note: true,
 			run: func(policy LossPolicy) (ConversionReport, error) {
-				_, report, err := DecodeChatResponseWithPolicy(chatAudioOutputBody, ChatCapabilities{}, policy)
+				_, report, err := DecodeChatResponseWithPolicy(chatAudioOutputBody, ChatCapabilities{}, policy, nil)
 				return report, err
 			},
 		},
@@ -52,7 +52,7 @@ func lossScenariosReasoning(t *testing.T) []lossScenario {
 			key:  FeatureProviderAudioData,
 			perm: []Feature{FeatureProviderAudioData},
 			run: func(policy LossPolicy) (ConversionReport, error) {
-				_, report, err := DecodeChatResponseWithPolicy(chatAudioOutputBody, ChatCapabilities{}, policy)
+				_, report, err := DecodeChatResponseWithPolicy(chatAudioOutputBody, ChatCapabilities{}, policy, nil)
 				return report, err
 			},
 		},

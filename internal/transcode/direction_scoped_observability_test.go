@@ -57,7 +57,7 @@ func TestResponsesSourceServiceTierRejectedUnderStrictPolicy(t *testing.T) {
 func TestChatSourceWithoutUsageRecordsOmissionNoteOnResponsesRender(t *testing.T) {
 	response, _, err := DecodeChatResponseWithPolicy([]byte(
 		`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`,
-	), ChatCapabilities{}, StrictLossPolicy())
+	), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

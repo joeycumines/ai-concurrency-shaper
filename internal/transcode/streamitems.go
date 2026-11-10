@@ -13,6 +13,11 @@ type openResponsesItem struct {
 	// openPartIndex is the content index of the currently open content part,
 	// or -1 when no part is open.
 	openPartIndex int64
+
+	// sealedParts records the content indexes already closed inline at a
+	// part-type transition (closeOpenPart), so finish() never emits a
+	// duplicate value-done/part-done for them.
+	sealedParts map[int64]struct{}
 }
 
 // isMessage reports whether the open item is a message item.

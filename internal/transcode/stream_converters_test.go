@@ -1102,22 +1102,40 @@ func TestChatToAnthropicInterleavedContentAndRefusal(t *testing.T) {
 		return events
 	}
 
-	// Text part opens, then refusal part opens, then both receive deltas.
+	// Text part opens, then a refusal delta arrives: the part-type
+	// transition seals the text part inline (value done + part done) before
+	// the refusal part opens, because the Anthropic dialect carries exactly
+	// one open content block — two concurrent content_part.added events
+	// would render as two interleaved content_block_start events. Each
+	// contiguous text/refusal run therefore opens its own sequential block.
 	events := feed(`{"content":"hello"}`)
 	events = append(events, feed(`{"refusal":"no way"}`)...)
 	events = append(events, feed(`{"content":" world"}`)...)
 	events = append(events, feed(`{"refusal":"!"}`)...)
 
-	// Collect per-block text. Each contiguous text/refusal run opens its own
-	// content part (the Responses protocol has no part reuse), so every
-	// delta must land in the block its part opened — never merged into the
-	// lowest open block.
+	// Collect per-block text. Every delta must land in the block its part
+	// opened — never merged into another block — and no two blocks may be
+	// open at once on the wire.
 	blockText := map[int]string{}
+	openBlocks := 0
+	maxOpen := 0
 	for _, event := range events {
-		if event.Type == AnthropicStreamEventTypeContentBlockDelta &&
-			event.Delta != nil && event.Delta.Text != nil && event.Index != nil {
-			blockText[*event.Index] += *event.Delta.Text
+		switch event.Type {
+		case AnthropicStreamEventTypeContentBlockStart:
+			openBlocks++
+			if openBlocks > maxOpen {
+				maxOpen = openBlocks
+			}
+		case AnthropicStreamEventTypeContentBlockStop:
+			openBlocks--
+		case AnthropicStreamEventTypeContentBlockDelta:
+			if event.Delta != nil && event.Delta.Text != nil && event.Index != nil {
+				blockText[*event.Index] += *event.Delta.Text
+			}
 		}
+	}
+	if maxOpen > 1 {
+		t.Fatalf("interleaved wire: max concurrent open blocks = %d, want 1", maxOpen)
 	}
 	want := map[int]string{
 		0: "hello",
@@ -1134,7 +1152,9 @@ func TestChatToAnthropicInterleavedContentAndRefusal(t *testing.T) {
 		}
 	}
 
-	// The finish must close both blocks and emit the terminal.
+	// The finish must close the still-open last block (the earlier parts
+	// were sealed inline at each part-type transition) and emit the
+	// terminal.
 	batch, err := converter.Convert(SSEEvent{Data: []byte(
 		`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 	)})
@@ -1165,8 +1185,22 @@ func TestChatToAnthropicInterleavedContentAndRefusal(t *testing.T) {
 			blockStops++
 		}
 	}
-	if blockStops != 4 {
-		t.Fatalf("content block stops = %d, want 4", blockStops)
+	if blockStops != 1 {
+		t.Fatalf("content block stops at finish = %d, want 1 (the three earlier blocks were sealed inline at their part-type transitions)", blockStops)
+	}
+	// Across the whole stream (delta events + finish) every started block
+	// must be stopped exactly once: 4 starts, 4 stops, no duplicates.
+	totalStarts, totalStops := 0, 0
+	for _, event := range append(events, stops...) {
+		switch event.Type {
+		case AnthropicStreamEventTypeContentBlockStart:
+			totalStarts++
+		case AnthropicStreamEventTypeContentBlockStop:
+			totalStops++
+		}
+	}
+	if totalStarts != 4 || totalStops != 4 {
+		t.Fatalf("blocks: starts=%d stops=%d, want 4 each", totalStarts, totalStops)
 	}
 }
 

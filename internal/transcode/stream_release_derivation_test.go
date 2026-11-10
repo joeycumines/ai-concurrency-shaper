@@ -16,6 +16,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
 // sseReplayReader replays a fixed sequence of raw SSE frames without
@@ -457,10 +459,19 @@ func TestPerEventFramingChargeCoversAllShapes(t *testing.T) {
 		ResponseOutputItemAddedEvent{Type: "response.output_item.added", SequenceNumber: 1, OutputIndex: 0, Item: &ResponsesOutputMessage{ID: "msg_worst_case_identity_string", Type: "message", Role: "assistant", Status: ResponsesItemInProgress, Content: ResponsesOutputContentParts{}}},
 		ResponseContentPartAddedEvent{Type: "response.content_part.added", SequenceNumber: 2, ItemID: "msg_worst_case_identity_string", OutputIndex: 0, ContentIndex: 0, Part: &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}}},
 		ResponseTextDeltaEvent{Type: "response.output_text.delta", SequenceNumber: 3, ItemID: "msg_worst_case_identity_string", OutputIndex: 0, ContentIndex: 0, Delta: "x", Logprobs: []ResponsesTextLogprob{}},
-		ResponseReasoningSummaryPartAddedEvent{Type: "response.reasoning_summary_part.added", SequenceNumber: 4, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Part: *part},
-		ResponseReasoningSummaryTextDeltaEvent{Type: "response.reasoning_summary_text.delta", SequenceNumber: 5, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Delta: "x"},
-		ResponseReasoningSummaryTextDoneEvent{Type: "response.reasoning_summary_text.done", SequenceNumber: 6, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Text: "x"},
-		ResponseReasoningSummaryPartDoneEvent{Type: "response.reasoning_summary_part.done", SequenceNumber: 7, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Part: *part},
+		// The text part is closed before the reasoning part opens: the
+		// Anthropic dialect carries exactly one open content block, so a
+		// reasoning part added while a text block is open is rejected as
+		// corrupt upstream wire (the shapes below would be unrenderable).
+		ResponseTextDoneEvent{Type: "response.output_text.done", SequenceNumber: 4, ItemID: "msg_worst_case_identity_string", OutputIndex: 0, ContentIndex: 0, Text: "x"},
+		ResponseContentPartDoneEvent{Type: "response.content_part.done", SequenceNumber: 5, ItemID: "msg_worst_case_identity_string", OutputIndex: 0, ContentIndex: 0, Part: &ResponsesStreamOutputTextPart{Type: "output_text", Text: "x", Annotations: []ResponsesAnnotation{}}},
+		ResponseReasoningSummaryPartAddedEvent{Type: "response.reasoning_summary_part.added", SequenceNumber: 6, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Part: *part},
+		ResponseReasoningSummaryTextDeltaEvent{Type: "response.reasoning_summary_text.delta", SequenceNumber: 7, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Delta: "x"},
+		ResponseReasoningSummaryTextDoneEvent{Type: "response.reasoning_summary_text.done", SequenceNumber: 8, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Text: "x"},
+		// The part-done snapshot must carry the accumulated text ("x"), not
+		// the empty added part: reasoningPartDone now reconciles the done
+		// snapshot against the accumulated thinking deltas.
+		ResponseReasoningSummaryPartDoneEvent{Type: "response.reasoning_summary_part.done", SequenceNumber: 9, ItemID: "rs_worst_case_identity_string", OutputIndex: 1, SummaryIndex: 0, Part: openairesponses.SummaryTextPart{Type: "summary_text", Text: "x"}},
 	} {
 		out, err := anthropicState.Convert(ev)
 		if err != nil {
