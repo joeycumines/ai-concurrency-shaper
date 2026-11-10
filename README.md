@@ -951,12 +951,17 @@ per-request map — not a name separator — is what maps the call back.
 Replayed history keeps the same flat names, so the upstream is not taught
 the bare form for any namespace this request declares. If replayed history
 names a namespace the request no longer declares for that name, the
-qualifier cannot be mapped: that is the `namespace_replay_undeclared` loss.
-It is NOT in the default approved set, so a strict default rejects the
-exchange until the operator approves it with
-`-transcode-allow-loss namespace_replay_undeclared`. When the bare name is
-already owned by a surviving tool the exchange is refused outright: no
-policy can approve re-pointing a client-sent call at a different tool.
+qualifier cannot be mapped: that is the `namespace_replay_undeclared` loss,
+and the call is rendered under its bare child name (the only representation
+the target can receive). It is approved by default because a Codex
+auto-compaction request legitimately declares no tools at all while
+replaying the thread's namespaced calls, so the exchange is served rather
+than turned away at its context limit. Every drop is still recorded in the
+per-request report; deny it with
+`-transcode-allow-loss '!namespace_replay_undeclared'` to restore the strict
+refusal. When the bare name is already owned by a surviving tool the exchange
+is refused outright: no policy can approve re-pointing a client-sent call at
+a different tool.
 `tool_choice` has no namespaced selector (Codex sends `"auto"`), and a named
 choice addresses the flattened name: a bare child name is ambiguous when it
 collides with another tool, so the qualified `namespace__child` form is the

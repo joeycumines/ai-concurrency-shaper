@@ -519,11 +519,14 @@ func responsesInputToTurns(
 			// answers to that name, the replayed call would be re-pointed
 			// at a DIFFERENT tool, which is a reinterpretation of
 			// client-sent history and never permitted. Otherwise the
-			// unqualified name is a genuine loss of the namespace, recorded
-			// under its own policy-gated key rather than a note that
-			// claimed the bare form was fine.
-			if value.Namespace != "" {
-				if _, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name}); !ok {
+			// unqualified name is the only representation the target can
+			// receive: the loss is recorded under its own policy-gated key,
+			// and the canonical part carries no qualifier so every
+			// flattening renderer emits the bare name instead of refusing a
+			// drop the policy already decided.
+			namespace := value.Namespace
+			if namespace != "" {
+				if _, ok := names.flatName(ToolNameRef{Namespace: namespace, Name: value.Name}); !ok {
 					owned := false
 					if _, clash := reserved[value.Name]; clash {
 						owned = true
@@ -546,12 +549,13 @@ func responsesInputToTurns(
 					); err != nil {
 						return nil, err
 					}
+					namespace = ""
 				}
 			}
 			part := CanonicalFunctionCall{
 				CallID:    value.CallID,
 				Name:      value.Name,
-				Namespace: value.Namespace,
+				Namespace: namespace,
 				Arguments: raw,
 			}
 			turns = appendFunctionCallTurn(turns, part)

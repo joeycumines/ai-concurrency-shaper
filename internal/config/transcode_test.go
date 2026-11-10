@@ -729,6 +729,33 @@ func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 	}
 }
 
+// TestDefaultLossPolicyApprovesUndeclaredNamespaceReplay pins the default
+// that keeps Codex auto-compaction requests served: the client declares no
+// tools and asks for a handoff summary while replaying the thread's
+// namespaced calls, so the qualifier cannot be mapped and the unowned bare
+// child name is the only truthful rendering. The loss stays observable and
+// deniable (!namespace_replay_undeclared); it is never silent.
+func TestDefaultLossPolicyApprovesUndeclaredNamespaceReplay(t *testing.T) {
+	def := mergedLossPolicy(transcode.StrictLossPolicy(), nil, false)
+	if !def.Allows(transcode.FeatureNamespaceReplayUndeclared) {
+		t.Fatal("the default loss policy must approve namespace_replay_undeclared")
+	}
+
+	strict := mergedLossPolicy(transcode.StrictLossPolicy(), nil, true)
+	if strict.Allows(transcode.FeatureNamespaceReplayUndeclared) {
+		t.Fatal("strict defaults must not approve namespace_replay_undeclared")
+	}
+
+	denied := mergedLossPolicy(
+		transcode.StrictLossPolicy(),
+		map[transcode.Feature]struct{}{transcode.FeatureNamespaceReplayUndeclared: {}},
+		false,
+	)
+	if denied.Allows(transcode.FeatureNamespaceReplayUndeclared) {
+		t.Fatal("!namespace_replay_undeclared must deny the default approval")
+	}
+}
+
 // TestExplicitModelMapRejectsUnknownModel proves identity fallback applies
 // only when no model mappings were supplied.
 func TestExplicitModelMapRejectsUnknownModel(t *testing.T) {

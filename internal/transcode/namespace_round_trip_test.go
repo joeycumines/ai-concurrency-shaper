@@ -365,16 +365,21 @@ func TestUndeclaredNamespaceReplayIsPolicyGatedAndNeverMisattributes(t *testing.
 		if !found {
 			t.Fatalf("report = %+v, want a recorded namespace_replay_undeclared loss", result.Report.Losses)
 		}
-		var gotName string
+		var gotName, gotNamespace string
 		for _, turn := range result.Request.Turns {
 			for _, part := range turn.Parts {
 				if call, ok := part.(CanonicalFunctionCall); ok {
 					gotName = call.Name
+					gotNamespace = call.Namespace
 				}
 			}
 		}
 		if gotName != "unknown" {
 			t.Fatalf("history call name = %q, want the bare name under an approved loss", gotName)
+		}
+		if gotNamespace != "" {
+			t.Fatalf("history call namespace = %q, want it cleared after the approved loss so "+
+				"every flattening renderer emits the bare name", gotNamespace)
 		}
 	})
 

@@ -548,6 +548,7 @@ var defaultTranscodeLosses = map[transcode.Feature]struct{}{
 	transcode.FeatureGeminiPartMetadata:                {},
 	transcode.FeatureGeminiClientQuery:                 {},
 	transcode.FeatureGeminiThoughtSignaturePlaceholder: {},
+	transcode.FeatureNamespaceReplayUndeclared:         {},
 	transcode.FeatureGeminiSafetyMetadata:              {},
 	transcode.FeatureGeminiGroundingMetadata:           {},
 	transcode.FeatureGeminiUsageBreakdown:              {},
