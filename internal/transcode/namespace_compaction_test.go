@@ -100,6 +100,40 @@ func TestCompactionRequestReplaysNamespacedCallsAsBareNames(t *testing.T) {
 		}
 	})
 
+	t.Run("every flattening renderer carries the bare name", func(t *testing.T) {
+		result, _, err := DecodeResponsesRequest([]byte(compactionRequestBody), compactionLossPolicy())
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+
+		geminiContext := testExchangeContext()
+		geminiContext.LossPolicy = permissivePolicy()
+		geminiContext.GeminiSignatures = NewGeminiSignatureStore(GeminiSignatureConfig{})
+		geminiBody, _, err := RenderGeminiRequest(result.Request, geminiContext)
+		if err != nil {
+			t.Fatalf("gemini render: %v", err)
+		}
+		if !strings.Contains(string(geminiBody), `"name":"spawn_agent"`) ||
+			strings.Contains(string(geminiBody), "multi_agent_v1") {
+			t.Fatalf("gemini render did not carry the bare call name: %s", geminiBody)
+		}
+
+		maxOutput := 64
+		result.Request.MaxOutputTokens = &maxOutput
+		messagesContext := testExchangeContext()
+		messagesContext.LossPolicy = permissivePolicy()
+		messagesContext.RequestedClientModel = "m"
+		messagesContext.UpstreamModel = "claude-x"
+		messagesBody, _, err := RenderMessagesRequest(result.Request, messagesContext)
+		if err != nil {
+			t.Fatalf("messages render: %v", err)
+		}
+		if !strings.Contains(string(messagesBody), `"name":"spawn_agent"`) ||
+			strings.Contains(string(messagesBody), "multi_agent_v1") {
+			t.Fatalf("messages render did not carry the bare call name: %s", messagesBody)
+		}
+	})
+
 	t.Run("handler and chat render carry the bare name", func(t *testing.T) {
 		mapping := responsesMapping(t)
 		mapping.LossPolicy = compactionLossPolicy()

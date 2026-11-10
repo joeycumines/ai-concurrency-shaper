@@ -281,9 +281,11 @@ func messagesTurn(turn CanonicalTurn, path string, names *ToolNames) (anthropicm
 			}
 			sawOther = true
 			id := value.CallID
-			// The canonical part carries the BARE name + namespace; the
-			// Messages wire carries only the flat name, re-derived from both
-			// via ToolNames.flatName.
+			// The canonical part carries the BARE name plus the namespace
+			// this exchange declared; the Messages wire carries only the flat
+			// name, re-derived from both via ToolNames.flatName. An approved
+			// undeclared replay arrives with the qualifier already cleared by
+			// the decode.
 			name := value.Name
 			if value.Namespace != "" {
 				flat, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name})

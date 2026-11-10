@@ -267,10 +267,12 @@ func RenderGeminiRequest(
 					InlineData: &geminigeneratecontent.Blob{MimeType: p.MediaType, Data: p.Base64},
 				})
 			case CanonicalFunctionCall:
-				// The canonical part carries the BARE name + namespace; the
-				// Gemini wire carries only the flat name, re-derived from both
-				// via ToolNames.flatName (the functionResponse name below
-				// must match what the model was taught).
+				// The canonical part carries the BARE name plus the namespace
+				// this exchange declared; the Gemini wire carries only the
+				// flat name, re-derived from both via ToolNames.flatName (the
+				// functionResponse name below must match what the model was
+				// taught). An approved undeclared replay arrives with the
+				// qualifier already cleared by the decode.
 				name := p.Name
 				if p.Namespace != "" {
 					flat, ok := context.ToolNames.flatName(ToolNameRef{Namespace: p.Namespace, Name: p.Name})

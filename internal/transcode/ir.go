@@ -85,10 +85,12 @@ func (CanonicalDocument) isCanonicalPart() {}
 
 // CanonicalFunctionCall is a model-initiated function call. Arguments is a
 // validated complete JSON object. Namespace carries the Responses tool
-// namespace qualifier of a namespaced child; renderers that flatten names
-// (chat, gemini) re-derive the flat wire name from Namespace+Name via
-// ToolNames.flatName, and renderers that carry it separately (responses,
-// messages) set it on the wire item directly.
+// namespace qualifier of a DECLARED namespaced child; the flattening
+// renderers (chat, gemini, messages) re-derive the flat wire name from
+// Namespace+Name via ToolNames.flatName, and the Responses renderer carries
+// the qualifier on the wire item directly. An approved replay of a namespace
+// this request does not declare arrives with Namespace already cleared, so
+// every flattening renderer emits the bare child name.
 type CanonicalFunctionCall struct {
 	ItemID    string
 	CallID    string

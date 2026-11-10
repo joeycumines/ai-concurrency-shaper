@@ -567,12 +567,14 @@ func canonicalAssistantTurnToChatMessage(
 
 		case CanonicalFunctionCall:
 			callID := value.CallID
-			// The canonical part carries the BARE name plus its namespace;
-			// the chat wire carries only the flat name, re-derived from both
-			// via ToolNames.flatName, so the upstream never learns the bare
-			// form of a namespaced child. An undeclared namespace cannot be
-			// flattened here: the decode path already refused or loss-recorded
-			// it.
+			// The canonical part carries the BARE name plus the namespace
+			// this exchange declared; the chat wire carries only the flat
+			// name, re-derived from both via ToolNames.flatName, so the
+			// upstream never learns the bare form of a declared namespaced
+			// child. An approved undeclared replay arrives with the qualifier
+			// already cleared by the decode, so an empty Namespace here is
+			// the sanctioned bare form; the decode path has already refused
+			// or loss-recorded any unapproved one.
 			name := value.Name
 			if value.Namespace != "" {
 				flat, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name})
