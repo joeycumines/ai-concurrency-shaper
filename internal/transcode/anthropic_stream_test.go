@@ -690,3 +690,210 @@ func TestAnthropicStreamReasoningDeltaChargedOnceAndBounded(t *testing.T) {
 		t.Fatalf("accepted %d reasoning deltas, want %d (event budget charged once per event; double charge would halve it)", accepted, want)
 	}
 }
+
+func summaryTextPart(text string) ResponsesSummaryTextPart {
+	return ResponsesSummaryTextPart{Type: "summary_text", Text: text}
+}
+
+// reasoningLifecycleState builds an anthropic state with the thinking
+// capability on and drives it through created -> reasoning item added ->
+// summary part added -> summary text delta -> summary text done, returning
+// with the thinking block open.
+func reasoningLifecycleState(t *testing.T) *anthropicResponsesStreamState {
+	t.Helper()
+	return reasoningLifecycleStateAt(t, 0, "think")
+}
+
+// reasoningLifecycleStateAt is reasoningLifecycleState with a chosen summary
+// index and text, for probing non-conforming upstreams.
+func reasoningLifecycleStateAt(t *testing.T, summaryIndex int64, text string) *anthropicResponsesStreamState {
+	t.Helper()
+	state := newAnthropicResponsesStreamState(
+		testStreamContext(),
+		permissiveLossPolicy(),
+		ChatCapabilities{ProviderReasoningThinking: true},
+		"msg_1",
+		"claude-x",
+		1,
+	)
+	created := ResponseCreatedEvent{
+		Type: "response.created", SequenceNumber: 0,
+		Response: ResponseEnvelope{
+			ID: "resp_1", Object: "response", CreatedAt: 1, Status: "in_progress", Model: "m",
+			Output: []ResponsesOutputItem{},
+			Usage: &ResponsesUsage{
+				InputTokens: 0, OutputTokens: 0, TotalTokens: 0,
+				InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 0},
+				OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 0},
+			},
+		},
+	}
+	if _, err := state.Convert(created); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	if _, err := state.Convert(ResponseOutputItemAddedEvent{
+		Type: "response.output_item.added", SequenceNumber: 1,
+		OutputIndex: 0,
+		Item:        &ResponsesReasoningOutputItem{ID: "rs_1", Type: "reasoning", Status: ResponsesItemInProgress, Summary: []ResponsesReasoningSummary{}},
+	}); err != nil {
+		t.Fatalf("reasoning item added: %v", err)
+	}
+	if _, err := state.Convert(ResponseReasoningSummaryPartAddedEvent{
+		Type: "response.reasoning_summary_part.added", SequenceNumber: 2,
+		ItemID:       "rs_1",
+		OutputIndex:  0,
+		SummaryIndex: summaryIndex,
+		Part:         summaryTextPart(""),
+	}); err != nil {
+		t.Fatalf("summary part added: %v", err)
+	}
+	if _, err := state.Convert(ResponseReasoningSummaryTextDeltaEvent{
+		Type: "response.reasoning_summary_text.delta", SequenceNumber: 3,
+		ItemID:       "rs_1",
+		OutputIndex:  0,
+		SummaryIndex: summaryIndex,
+		Delta:        text,
+	}); err != nil {
+		t.Fatalf("summary text delta: %v", err)
+	}
+	if _, err := state.Convert(ResponseReasoningSummaryTextDoneEvent{
+		Type: "response.reasoning_summary_text.done", SequenceNumber: 4,
+		ItemID:       "rs_1",
+		OutputIndex:  0,
+		SummaryIndex: summaryIndex,
+		Text:         text,
+	}); err != nil {
+		t.Fatalf("summary text done: %v", err)
+	}
+	return state
+}
+
+// TestReasoningPartDoneRequiresOpenThinkingItem verifies the
+// openThinkingItem guard: a part-done for an item other than the open
+// thinking block's own item is corrupt wire, not a seal of the wrong block,
+// and the open block survives the rejection.
+func TestReasoningPartDoneRequiresOpenThinkingItem(t *testing.T) {
+	state := reasoningLifecycleState(t)
+	// Call the render-side method directly with a foreign item id: the
+	// openThinkingItem guard must reject it as corrupt wire, leave the open
+	// block untouched, and produce a typed upstream wire error.
+	_, err := state.reasoningPartDone(ResponseReasoningSummaryPartDoneEvent{
+		Type: "response.reasoning_summary_part.done", SequenceNumber: 5,
+		ItemID:       "rs_other",
+		OutputIndex:  0,
+		SummaryIndex: 0,
+		Part:         summaryTextPart("think"),
+	})
+	assertAnthropicWireError(t, err, "does not target the open thinking block's item")
+	if state.reasoningBlockIndex == nil {
+		t.Fatal("the open thinking block must survive the rejected part-done")
+	}
+	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
+		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
+	}
+}
+
+// TestReasoningPartDoneChargesStateEntries verifies each recorded
+// thinkingDoneSummaries map and entry is charged against the state-entries
+// budget (the fix for the uncharged done-summary bookkeeping).
+func TestReasoningPartDoneChargesStateEntries(t *testing.T) {
+	state := reasoningLifecycleState(t)
+	before := state.budget.stateEntries
+	if _, err := state.Convert(ResponseReasoningSummaryPartDoneEvent{
+		Type: "response.reasoning_summary_part.done", SequenceNumber: 5,
+		ItemID:       "rs_1",
+		OutputIndex:  0,
+		SummaryIndex: 0,
+		Part:         summaryTextPart("think"),
+	}); err != nil {
+		t.Fatalf("part done: %v", err)
+	}
+	if got := state.budget.stateEntries - before; got != 2 {
+		t.Fatalf("stateEntries charged = %d, want 2 (one map + one entry)", got)
+	}
+	if state.thinkingDoneSummaries["rs_1"][0] != "think" {
+		t.Fatalf("done summary not recorded: %+v", state.thinkingDoneSummaries)
+	}
+}
+
+// TestTerminalReasoningSummaryCountCompleteness verifies the terminal
+// reconciliation's completeness check: every observed part-done summary must
+// be covered by the envelope's summary list.
+func TestTerminalReasoningSummaryCountCompleteness(t *testing.T) {
+	state := reasoningLifecycleState(t)
+	if _, err := state.Convert(ResponseReasoningSummaryPartDoneEvent{
+		Type: "response.reasoning_summary_part.done", SequenceNumber: 5,
+		ItemID:       "rs_1",
+		OutputIndex:  0,
+		SummaryIndex: 0,
+		Part:         summaryTextPart("think"),
+	}); err != nil {
+		t.Fatalf("part done: %v", err)
+	}
+	// The item done carries the summary so the item reconciles, but the
+	// completed ENVELOPE omits it: the observed part-done count (1) exceeds
+	// the envelope's summary count (0).
+	if _, err := state.Convert(ResponseOutputItemDoneEvent{
+		Type: "response.output_item.done", SequenceNumber: 6,
+		OutputIndex: 0,
+		Item: &ResponsesReasoningOutputItem{ID: "rs_1", Type: "reasoning", Status: ResponsesItemCompleted,
+			Summary: []ResponsesReasoningSummary{{Type: "summary_text", Text: "think"}}},
+	}); err != nil {
+		t.Fatalf("item done: %v", err)
+	}
+	envelope := ResponseEnvelope{
+		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "completed", Model: "m",
+		Output: []ResponsesOutputItem{
+			&ResponsesReasoningOutputItem{ID: "rs_1", Type: "reasoning", Status: ResponsesItemCompleted, Summary: []ResponsesReasoningSummary{}},
+		},
+		Usage: &ResponsesUsage{
+			InputTokens: 0, OutputTokens: 0, TotalTokens: 0,
+			InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 0},
+			OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 0},
+		},
+	}
+	_, err := state.Convert(ResponseCompletedEvent{
+		Type: "response.completed", SequenceNumber: 7,
+		Response: envelope,
+	})
+	assertAnthropicWireError(t, err, "does not cover the observed part-done summary 0")
+
+	// Coverage is by index, not by count: an observed part-done at index 1
+	// with an envelope carrying one summary leaves the observed summary out
+	// even though the counts are equal.
+	shifted := reasoningLifecycleStateAt(t, 1, "other")
+	if _, err := shifted.Convert(ResponseReasoningSummaryPartDoneEvent{
+		Type: "response.reasoning_summary_part.done", SequenceNumber: 5,
+		ItemID:       "rs_1",
+		OutputIndex:  0,
+		SummaryIndex: 1,
+		Part:         summaryTextPart("other"),
+	}); err != nil {
+		t.Fatalf("shifted part done: %v", err)
+	}
+	if _, err := shifted.Convert(ResponseOutputItemDoneEvent{
+		Type: "response.output_item.done", SequenceNumber: 6,
+		OutputIndex: 0,
+		Item: &ResponsesReasoningOutputItem{ID: "rs_1", Type: "reasoning", Status: ResponsesItemCompleted,
+			Summary: []ResponsesReasoningSummary{{Type: "summary_text", Text: "other"}}},
+	}); err != nil {
+		t.Fatalf("shifted item done: %v", err)
+	}
+	shiftedEnvelope := ResponseEnvelope{
+		ID: "resp_1", Object: "response", CreatedAt: 1, Status: "completed", Model: "m",
+		Output: []ResponsesOutputItem{
+			&ResponsesReasoningOutputItem{ID: "rs_1", Type: "reasoning", Status: ResponsesItemCompleted,
+				Summary: []ResponsesReasoningSummary{{Type: "summary_text", Text: "other"}}},
+		},
+		Usage: &ResponsesUsage{
+			InputTokens: 0, OutputTokens: 0, TotalTokens: 0,
+			InputTokensDetails:  &UsageInputTokensDetails{CachedTokens: 0},
+			OutputTokensDetails: &UsageOutputTokensDetails{ReasoningTokens: 0},
+		},
+	}
+	_, err = shifted.Convert(ResponseCompletedEvent{
+		Type: "response.completed", SequenceNumber: 7,
+		Response: shiftedEnvelope,
+	})
+	assertAnthropicWireError(t, err, "does not cover the observed part-done summary 1")
+}

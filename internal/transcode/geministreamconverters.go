@@ -300,23 +300,11 @@ func (c *geminiToAnthropicConverter) finalizeEOF() (convertedBatch, error) {
 	return c.convertResponsesEvents(events, true)
 }
 
-// ConversionReport merges both states' reports like chatToAnthropicConverter.
+// ConversionReport merges both states' reports like every other composed
+// converter: one entry per feature at path, a loss record winning over a note
+// for the same key, dropped counts summed.
 func (c *geminiToAnthropicConverter) ConversionReport() *ConversionReport {
-	merged := ConversionReport{
-		Dropped: c.gemini.report.Dropped + c.anthropic.report.Dropped,
-	}
-	seen := make(map[string]struct{}, len(c.gemini.report.Losses)+len(c.anthropic.report.Losses))
-	for _, losses := range [][]ConversionLoss{c.gemini.report.Losses, c.anthropic.report.Losses} {
-		for _, loss := range losses {
-			key := fmt.Sprintf("%s at %s", loss.Feature, loss.Path)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			merged.Losses = append(merged.Losses, loss)
-		}
-	}
-	return &merged
+	return mergeConversionReports(&c.gemini.report, &c.anthropic.report)
 }
 
 // ErrorEvent builds a client-dialect Anthropic error event frame.

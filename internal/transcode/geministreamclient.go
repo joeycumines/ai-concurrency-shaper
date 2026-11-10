@@ -389,9 +389,23 @@ func (s *geminiStreamClientState) functionCallChunk(item *ResponsesFunctionCallO
 			Detail:   "the model-generated tool arguments are not a JSON object and cannot be represented as functionCall.args",
 		}
 	}
+	// The canonical item carries the BARE name + namespace; the Gemini wire
+	// carries only the flat name, re-derived from both exactly like the
+	// non-streaming render (geminiResponseParts).
+	name := item.Name
+	if item.Namespace != "" {
+		flat, ok := s.ctx.ToolNames.flatName(ToolNameRef{Namespace: item.Namespace, Name: item.Name})
+		if !ok {
+			return nil, fmt.Errorf(
+				"output_item.done function call %q references namespace %q, which this request does not declare",
+				item.Name, item.Namespace,
+			)
+		}
+		name = flat
+	}
 	call := &geminiFunctionCall{
 		ID:   item.CallID,
-		Name: item.Name,
+		Name: name,
 		Args: json.RawMessage(args.Raw),
 	}
 	s.sentPart = true
@@ -693,8 +707,9 @@ func (c *chatToGeminiConverter) ErrorEvent(err error) (frameEvent, bool) {
 	return geminiStreamErrorFrame(err)
 }
 
-// ConversionReport merges the losses of both states, keeping the first entry
-// per feature and path, as the composed Messages converter does.
+// ConversionReport merges the losses of both states: one entry per feature at
+// path, a loss record winning over a note for the same key, dropped counts
+// summed.
 func (c *chatToGeminiConverter) ConversionReport() *ConversionReport {
 	return mergeConversionReports(&c.chat.report, &c.gemini.report)
 }
@@ -842,13 +857,14 @@ func (c *responsesToGeminiConverter) ConversionReport() *ConversionReport {
 
 // mergeConversionReports combines two state reports. Entries are kept once per
 // feature and path, in order, and the dropped counts are summed so a saturated
-// report stays visible. When the same feature at different paths was recorded
-// on both sides of a composed converter, the two entries describe one feature's
+// report stays visible. When the same feature at the SAME path was recorded on
+// both sides of a composed converter, the two entries describe one occurrence's
 // fate on the wire and the upstream side: a loss record is the more severe,
 // truthful outcome (the feature was dropped), so it wins over a note (a
 // sanctioned encoding) claiming the feature was mapped. Without this, a
 // chat→Gemini stream could report the same provider reasoning both as mapped
-// to native thinking blocks and as dropped.
+// to native thinking blocks and as dropped. Entries for the same feature at
+// DIFFERENT paths are distinct occurrences and are all kept.
 func mergeConversionReports(a, b *ConversionReport) *ConversionReport {
 	merged := ConversionReport{Dropped: a.Dropped + b.Dropped}
 	seen := make(map[string]ConversionLoss, len(a.Losses)+len(b.Losses))
@@ -856,45 +872,19 @@ func mergeConversionReports(a, b *ConversionReport) *ConversionReport {
 	for _, losses := range [][]ConversionLoss{a.Losses, b.Losses} {
 		for _, loss := range losses {
 			key := fmt.Sprintf("%s at %s", loss.Feature, loss.Path)
-			if _, ok := seen[key]; ok {
+			if existing, ok := seen[key]; ok {
+				// Same feature at the same path: the loss record is the
+				// more severe truthful outcome and wins over a note.
+				if existing.Kind != LossRecord && loss.Kind == LossRecord {
+					seen[key] = loss
+				}
 				continue
 			}
 			seen[key] = loss
 			order = append(order, key)
 		}
 	}
-	// Collapse same-feature entries (ignoring the path) when one side lost
-	// the feature and the other only noted an encoding: keep the loss.
-	byFeature := make(map[Feature][]string, len(seen))
 	for _, key := range order {
-		loss := seen[key]
-		byFeature[loss.Feature] = append(byFeature[loss.Feature], key)
-	}
-	drop := make(map[string]struct{})
-	for _, keys := range byFeature {
-		if len(keys) < 2 {
-			continue
-		}
-		hasLoss := false
-		for _, key := range keys {
-			if seen[key].Kind == LossRecord {
-				hasLoss = true
-				break
-			}
-		}
-		if !hasLoss {
-			continue
-		}
-		for _, key := range keys {
-			if seen[key].Kind != LossRecord {
-				drop[key] = struct{}{}
-			}
-		}
-	}
-	for _, key := range order {
-		if _, ok := drop[key]; ok {
-			continue
-		}
 		merged.Losses = append(merged.Losses, seen[key])
 	}
 	return &merged

@@ -192,10 +192,31 @@ func (s *anthropicResponsesStreamState) reconcileTerminalOutput(
 				doneSummaries = map[int64]string{}
 			}
 			for summaryIndex, summary := range value.Summary {
-				if doneText, seen := doneSummaries[int64(summaryIndex)]; seen && doneText != summary.Text {
+				doneText, seen := doneSummaries[int64(summaryIndex)]
+				// A summary the stream never observed at part-done is tolerated:
+				// the item-done lifecycle only requires the part-done to precede
+				// the item done, and an upstream whose part-done snapshot was
+				// empty (or omitted) can legitimately carry text only in the
+				// terminal envelope. A summary that WAS observed must match,
+				// exactly like message text reconciles against the accumulated
+				// deltas.
+				if seen && doneText != summary.Text {
 					return s.wireError(fmt.Errorf(
 						"terminal envelope reasoning item %q summary %d does not match the observed part-done snapshot",
 						itemID, summaryIndex,
+					))
+				}
+			}
+			// Completeness in the other direction, exactly like the message
+			// path's part-count check: every observed part-done summary must
+			// appear in the envelope. The index bounds decide coverage, not
+			// the count: a sparse or shifted set of observed indexes can have
+			// the same length as the envelope while leaving a summary out.
+			for summaryIndex := range doneSummaries {
+				if summaryIndex < 0 || summaryIndex >= int64(len(value.Summary)) {
+					return s.wireError(fmt.Errorf(
+						"terminal envelope reasoning item %q summary count %d does not cover the observed part-done summary %d",
+						itemID, len(value.Summary), summaryIndex,
 					))
 				}
 			}

@@ -1693,3 +1693,143 @@ func TestGeminiStreamClientTerminalUsageDecidesBeforeNotes(t *testing.T) {
 		t.Fatalf("finish-refusal note recorded for a rejected terminal: %+v", state.report.Losses)
 	}
 }
+
+// TestMergeConversionReports verifies the composed-converter merge contract:
+// entries dedupe by "feature at path", a LossRecord beats a NoteRecord on the
+// same key (the loss is the more severe truthful outcome), same-feature
+// entries at different paths are all kept, order is preserved, and Dropped
+// counts sum.
+func TestMergeConversionReports(t *testing.T) {
+	note := ConversionLoss{Feature: FeatureProviderReasoningText, Path: "choices[0].delta.reasoning", Detail: "mapped to text", Kind: NoteRecord}
+	loss := ConversionLoss{Feature: FeatureProviderReasoningText, Path: "choices[0].delta.reasoning", Detail: "dropped", Kind: LossRecord}
+	otherPath := ConversionLoss{Feature: FeatureProviderReasoningText, Path: "choices[0].delta.reasoning_content", Detail: "mapped to text", Kind: NoteRecord}
+
+	a := &ConversionReport{
+		Losses:  []ConversionLoss{note, otherPath},
+		Dropped: 1,
+	}
+	b := &ConversionReport{
+		Losses:  []ConversionLoss{loss},
+		Dropped: 2,
+	}
+	merged := mergeConversionReports(a, b)
+	if merged.Dropped != 3 {
+		t.Fatalf("Dropped = %d, want 3 (summed)", merged.Dropped)
+	}
+	if len(merged.Losses) != 2 {
+		t.Fatalf("len(Losses) = %d, want 2 (same-key dedupe, cross-path kept): %+v", len(merged.Losses), merged.Losses)
+	}
+	if merged.Losses[0].Kind != LossRecord || merged.Losses[0].Detail != "dropped" {
+		t.Fatalf("same-key entry = %+v, want the LossRecord to win over the Note", merged.Losses[0])
+	}
+	if merged.Losses[1] != otherPath {
+		t.Fatalf("different-path entry = %+v, want %+v (no cross-path collapse)", merged.Losses[1], otherPath)
+	}
+
+	// Note-first, loss-second is the order a composed converter produces;
+	// the reverse order must give the same result.
+	mergedReverse := mergeConversionReports(b, a)
+	if len(mergedReverse.Losses) != 2 || mergedReverse.Losses[0].Kind != LossRecord {
+		t.Fatalf("reverse order: %+v, want LossRecord first", mergedReverse.Losses)
+	}
+
+	// Two notes on the same feature at the same path collapse to the
+	// first-seen; different paths are distinct.
+	n2 := ConversionLoss{Feature: FeatureProviderReasoningText, Path: note.Path, Detail: "second", Kind: NoteRecord}
+	m := mergeConversionReports(
+		&ConversionReport{Losses: []ConversionLoss{note}},
+		&ConversionReport{Losses: []ConversionLoss{n2}},
+	)
+	if len(m.Losses) != 1 || m.Losses[0].Detail != "mapped to text" {
+		t.Fatalf("note-note dedupe = %+v, want first-seen kept", m.Losses)
+	}
+}
+
+// TestGeminiStreamFunctionCallFlattensNamespacedName verifies
+// functionCallChunk re-derives the flat wire name from the canonical item's
+// namespace + bare name via ToolNames.flatName, exactly like the
+// non-streaming render, and fails when the namespace was not declared.
+func TestGeminiStreamFunctionCallFlattensNamespacedName(t *testing.T) {
+	ctx := testStreamContext()
+	ctx.ToolNames = &ToolNames{
+		FlatToRef: map[string]ToolNameRef{"ns_f": {Namespace: "ns", Name: "f"}},
+		RefToFlat: map[ToolNameRef]string{{Namespace: "ns", Name: "f"}: "ns_f"},
+	}
+	state := newGeminiStreamClientState(ctx, UpstreamResponses, permissiveLossPolicy(), "resp_1", "gemini-x")
+	if _, err := state.Convert(fsmCreated(1)); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	if _, err := state.Convert(ResponseOutputItemAddedEvent{
+		Type: "response.output_item.added", SequenceNumber: 2,
+		OutputIndex: 0,
+		Item: &ResponsesFunctionCallOutputItem{
+			ID: "fc_1", Type: "function_call", Status: ResponsesItemInProgress,
+			CallID: "call_1", Name: "f", Namespace: "ns", Arguments: "",
+		},
+	}); err != nil {
+		t.Fatalf("item added: %v", err)
+	}
+	item := &ResponsesFunctionCallOutputItem{
+		ID: "fc_1", Type: "function_call", Status: ResponsesItemCompleted,
+		CallID: "call_1", Name: "f", Namespace: "ns", Arguments: `{"q":"x"}`,
+	}
+	chunks, err := state.Convert(ResponseOutputItemDoneEvent{
+		Type: "response.output_item.done", SequenceNumber: 3,
+		OutputIndex: 0,
+		Item:        item,
+	})
+	if err != nil {
+		t.Fatalf("item done: %v", err)
+	}
+	found := false
+	for _, chunk := range chunks {
+		raw, err := json.Marshal(chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var frame map[string]any
+		if err := json.Unmarshal(raw, &frame); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range frame["candidates"].([]any) {
+			for _, p := range c.(map[string]any)["content"].(map[string]any)["parts"].([]any) {
+				if fc, ok := p.(map[string]any)["functionCall"]; ok {
+					found = true
+					if fc.(map[string]any)["name"] != "ns_f" {
+						t.Fatalf("functionCall name = %v, want flat ns_f", fc.(map[string]any)["name"])
+					}
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no functionCall chunk rendered")
+	}
+
+	// An undeclared namespace must fail, never render the bare name.
+	bad := newGeminiStreamClientState(testStreamContext(), UpstreamResponses, permissiveLossPolicy(), "resp_2", "gemini-x")
+	if _, err := bad.Convert(fsmCreated(1)); err != nil {
+		t.Fatalf("created: %v", err)
+	}
+	if _, err := bad.Convert(ResponseOutputItemAddedEvent{
+		Type: "response.output_item.added", SequenceNumber: 2,
+		OutputIndex: 0,
+		Item: &ResponsesFunctionCallOutputItem{
+			ID: "fc_2", Type: "function_call", Status: ResponsesItemInProgress,
+			CallID: "call_2", Name: "f", Namespace: "undeclared", Arguments: "",
+		},
+	}); err != nil {
+		t.Fatalf("item added: %v", err)
+	}
+	_, err = bad.Convert(ResponseOutputItemDoneEvent{
+		Type: "response.output_item.done", SequenceNumber: 3,
+		OutputIndex: 0,
+		Item: &ResponsesFunctionCallOutputItem{
+			ID: "fc_2", Type: "function_call", Status: ResponsesItemCompleted,
+			CallID: "call_2", Name: "f", Namespace: "undeclared", Arguments: `{}`,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not declare") {
+		t.Fatalf("undeclared namespace: err = %v, want a declaration error", err)
+	}
+}

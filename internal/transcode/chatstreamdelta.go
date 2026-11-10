@@ -509,11 +509,8 @@ func (s *chatResponsesStreamState) openMessageItemForPartWithEvents(
 	// interleaved content_block_start events, which the Messages dialect
 	// forbids.
 	if item.openPartIndex >= 0 && item.openPartIndex < int64(len(message.Content)) {
-		closeEvents, err := s.closeOpenPart(item, message)
-		if err != nil {
-			return nil, nil, err
-		}
-		prefix = append(prefix, closeEvents...)
+		events := s.closeOpenPart(item, message)
+		prefix = append(prefix, events...)
 	}
 	if len(message.Content) >= maxStreamPartsPerItem {
 		return nil, nil, s.wireError(fmt.Errorf(
@@ -660,10 +657,10 @@ func (s *chatResponsesStreamState) closeOpenReasoningItem() ([]ResponsesSSEEvent
 func (s *chatResponsesStreamState) closeOpenPart(
 	item *openResponsesItem,
 	message *ResponsesOutputMessage,
-) ([]ResponsesSSEEvent, error) {
+) []ResponsesSSEEvent {
 	contentIndex := item.openPartIndex
 	if contentIndex < 0 || contentIndex >= int64(len(message.Content)) {
-		return nil, nil
+		return nil
 	}
 	key := chatPartKey{outputIndex: item.outputIndex, contentIndex: contentIndex}
 	var events []ResponsesSSEEvent
@@ -699,7 +696,12 @@ func (s *chatResponsesStreamState) closeOpenPart(
 	}
 	item.sealedParts[contentIndex] = struct{}{}
 	item.openPartIndex = -1
-	return events, nil
+	// The sealed part's accumulator is released: the value was materialized
+	// into the part above, and keeping the builder would leak its bytes if
+	// the key were ever reused.
+	delete(s.textBufs, key)
+	delete(s.refusalBufs, key)
+	return events
 }
 
 // closeOpenMessageItem closes the trailing open message item inline at a
@@ -722,6 +724,14 @@ func (s *chatResponsesStreamState) closeOpenMessageItem() ([]ResponsesSSEEvent, 
 	}
 	var events []ResponsesSSEEvent
 	for contentIndex, part := range message.Content {
+		// A part already sealed inline at a part-type transition
+		// (closeOpenPart) must not be closed twice here: emitting its done
+		// events again would duplicate a part.done on the wire (the
+		// Anthropic state fails on the second content_part.done), exactly
+		// as finish() skips sealed parts.
+		if _, sealed := item.sealedParts[int64(contentIndex)]; sealed {
+			continue
+		}
 		key := chatPartKey{outputIndex: item.outputIndex, contentIndex: int64(contentIndex)}
 		switch value := part.(type) {
 		case *ResponsesOutputText:
@@ -755,6 +765,12 @@ func (s *chatResponsesStreamState) closeOpenMessageItem() ([]ResponsesSSEEvent, 
 		item.sealedParts = make(map[int64]struct{})
 	}
 	for contentIndex := range message.Content {
+		// The part's accumulator is released with its seal: the value was
+		// materialized into the part above (or at the inline seal), and
+		// keeping the builder would leak its bytes if the key were reused.
+		key := chatPartKey{outputIndex: item.outputIndex, contentIndex: int64(contentIndex)}
+		delete(s.textBufs, key)
+		delete(s.refusalBufs, key)
 		item.sealedParts[int64(contentIndex)] = struct{}{}
 	}
 	item.openPartIndex = -1

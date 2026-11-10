@@ -601,6 +601,16 @@ func (s *anthropicResponsesStreamState) reasoningPartDone(
 			"reasoning summary part done with no open thinking block",
 		))
 	}
+	// The part-done must target the open thinking block's own item, exactly
+	// as reasoningTextDelta and reasoningTextDone do: closing a block the
+	// event does not own would record the wrong summary and seal the wrong
+	// block.
+	if s.openThinkingItem != event.ItemID {
+		return nil, s.wireError(fmt.Errorf(
+			"reasoning summary part done for %q does not target the open thinking block's item %q",
+			event.ItemID, s.openThinkingItem,
+		))
+	}
 	signature := SyntheticThinkingSignature
 	events := []AnthropicStreamEvent{{
 		Type:  AnthropicStreamEventTypeContentBlockDelta,
@@ -629,7 +639,13 @@ func (s *anthropicResponsesStreamState) reasoningPartDone(
 	// the terminal envelope can be reconciled against what was observed.
 	delete(s.thinkingBufs, key)
 	if s.thinkingDoneSummaries[event.ItemID] == nil {
+		if err := s.budget.addStateEntries(1); err != nil {
+			return nil, s.wireError(err)
+		}
 		s.thinkingDoneSummaries[event.ItemID] = make(map[int64]string)
+	}
+	if err := s.budget.addStateEntries(1); err != nil {
+		return nil, s.wireError(err)
 	}
 	s.thinkingDoneSummaries[event.ItemID][event.SummaryIndex] = event.Part.Text
 	s.reasoningBlockIndex = nil

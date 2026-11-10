@@ -92,10 +92,14 @@ func TestChatToAnthropicNeverEmitsConcurrentBlocks(t *testing.T) {
 		newAnthropicResponsesStreamState(testStreamContext(), permissiveLossPolicy(),
 			ChatCapabilities{ProviderReasoningThinking: true}, "resp_1", "m", 1),
 	)
-	feed := func(deltaJSON string) []AnthropicStreamEvent {
+	feed := func(deltaJSON string, finish string) []AnthropicStreamEvent {
 		t.Helper()
+		finishField := "null"
+		if finish != "" {
+			finishField = `"` + finish + `"`
+		}
 		batch, err := conv.Convert(SSEEvent{Data: []byte(
-			`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":` + deltaJSON + `,"finish_reason":null}]}`,
+			`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":` + deltaJSON + `,"finish_reason":` + finishField + `}]}`,
 		)})
 		if err != nil {
 			t.Fatalf("feed %s: %v", deltaJSON, err)
@@ -113,13 +117,26 @@ func TestChatToAnthropicNeverEmitsConcurrentBlocks(t *testing.T) {
 	var all []AnthropicStreamEvent
 	// Combined and split bursts: reasoning+content in one delta, reasoning
 	// alone, content alone, reasoning+tool_calls, tool, content, tool.
-	all = append(all, feed(`{"reasoning":"step1","content":"ans"}`)...)
-	all = append(all, feed(`{"reasoning":"step2"}`)...)
-	all = append(all, feed(`{"content":"more"}`)...)
-	all = append(all, feed(`{"reasoning":"step3","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]}`)...)
-	all = append(all, feed(`{"reasoning":"step4"}`)...)
-	all = append(all, feed(`{"content":"final"}`)...)
-	all = append(all, feed(`{"tool_calls":[{"index":1,"id":"call_2","type":"function","function":{"name":"g","arguments":"{}"}}]}`)...)
+	all = append(all, feed(`{"reasoning":"step1","content":"ans"}`, "")...)
+	all = append(all, feed(`{"reasoning":"step2"}`, "")...)
+	all = append(all, feed(`{"content":"more"}`, "")...)
+	all = append(all, feed(`{"reasoning":"step3","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]}`, "")...)
+	all = append(all, feed(`{"reasoning":"step4"}`, "")...)
+	all = append(all, feed(`{"content":"final"}`, "")...)
+	all = append(all, feed(`{"tool_calls":[{"index":1,"id":"call_2","type":"function","function":{"name":"g","arguments":"{}"}}]}`, "")...)
+	// Terminal: finish_reason releases the held terminal via [DONE].
+	all = append(all, feed(`{}`, "stop")...)
+	batch, err := conv.Convert(SSEEvent{Data: []byte("[DONE]")})
+	if err != nil {
+		t.Fatalf("[DONE]: %v", err)
+	}
+	for _, frame := range batch.Events {
+		var event AnthropicStreamEvent
+		if err := json.Unmarshal(frame.Data, &event); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, event)
+	}
 
 	open := 0
 	maxOpen := 0
@@ -140,7 +157,133 @@ func TestChatToAnthropicNeverEmitsConcurrentBlocks(t *testing.T) {
 	if maxOpen > 1 {
 		t.Fatalf("interleaved wire: max concurrent open content blocks = %d (starts=%d stops=%d)", maxOpen, starts, stops)
 	}
-	if starts != stops+open {
-		t.Fatalf("starts=%d stops=%d open=%d", starts, stops, open)
+	if open != 0 {
+		t.Fatalf("the terminal must seal every block: open = %d after [DONE] (starts=%d stops=%d)", open, starts, stops)
+	}
+	if starts != stops {
+		t.Fatalf("starts = %d, stops = %d: every started block must be stopped", starts, stops)
+	}
+	// The bursts render as separate sealed blocks per transition:
+	// 4 thinking + 2 text + 2 tool.
+	if starts != 9 {
+		t.Fatalf("started blocks = %d, want 9 (4 thinking + 2 text + 2 tool)", starts)
+	}
+	messageStops := 0
+	for _, e := range all {
+		if e.Type == AnthropicStreamEventTypeMessageStop {
+			messageStops++
+		}
+	}
+	if messageStops != 1 {
+		t.Fatalf("message_stop count = %d, want exactly one success terminal", messageStops)
+	}
+}
+
+// TestChatToAnthropicSealedPartNotReEmittedAtItemClose reproduces the
+// closeOpenMessageItem double-done defect: a part sealed inline at a
+// part-type transition (text -> refusal via closeOpenPart) must NOT be
+// closed a second time when the message item itself closes at a
+// message->reasoning (or message->tool) transition. On the base commit the
+// item close re-emitted the sealed part's done events, and the Anthropic
+// state machine failed on the duplicated content_part.done.
+func TestChatToAnthropicSealedPartNotReEmittedAtItemClose(t *testing.T) {
+	newConv := func() *chatToAnthropicConverter {
+		return newChatToAnthropicConverter(
+			newChatResponsesStreamState(testStreamContext(), permissiveLossPolicy(),
+				ChatCapabilities{ProviderReasoningThinking: true}, "resp_1", "m", 1, nil),
+			newAnthropicResponsesStreamState(testStreamContext(), permissiveLossPolicy(),
+				ChatCapabilities{ProviderReasoningThinking: true}, "resp_1", "m", 1),
+		)
+	}
+	feed := func(t *testing.T, conv *chatToAnthropicConverter, deltaJSON string, finish string) []AnthropicStreamEvent {
+		t.Helper()
+		finishField := "null"
+		if finish != "" {
+			finishField = `"` + finish + `"`
+		}
+		batch, err := conv.Convert(SSEEvent{Data: []byte(
+			`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":` + deltaJSON + `,"finish_reason":` + finishField + `}]}`,
+		)})
+		if err != nil {
+			t.Fatalf("feed %s: %v", deltaJSON, err)
+		}
+		var events []AnthropicStreamEvent
+		for _, frame := range batch.Events {
+			var event AnthropicStreamEvent
+			if err := json.Unmarshal(frame.Data, &event); err != nil {
+				t.Fatal(err)
+			}
+			events = append(events, event)
+		}
+		return events
+	}
+
+	countType := func(events []AnthropicStreamEvent, typ AnthropicStreamEventType) int {
+		n := 0
+		for _, e := range events {
+			if e.Type == typ {
+				n++
+			}
+		}
+		return n
+	}
+
+	run := func(t *testing.T, conv *chatToAnthropicConverter, toolVariant bool) []AnthropicStreamEvent {
+		var all []AnthropicStreamEvent
+		// Open a text part and emit text.
+		all = append(all, feed(t, conv, `{"content":"a"}`, "")...)
+		// Transition text -> refusal: closeOpenPart seals the text part inline
+		// (its done events are emitted here, exactly once).
+		all = append(all, feed(t, conv, `{"refusal":"no"}`, "")...)
+		if toolVariant {
+			// Message -> tool transition: closeOpenMessageItem must skip the
+			// already-sealed text part and close only the open refusal part.
+			all = append(all, feed(t, conv, `{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]}`, "")...)
+		} else {
+			// Message -> reasoning transition: same close path.
+			all = append(all, feed(t, conv, `{"reasoning":"x"}`, "")...)
+		}
+		// Terminal: finish_reason plus [DONE] releases the held terminal.
+		all = append(all, feed(t, conv, `{}`, "stop")...)
+		batch, err := conv.Convert(SSEEvent{Data: []byte("[DONE]")})
+		if err != nil {
+			t.Fatalf("[DONE]: %v", err)
+		}
+		for _, frame := range batch.Events {
+			var event AnthropicStreamEvent
+			if err := json.Unmarshal(frame.Data, &event); err != nil {
+				t.Fatal(err)
+			}
+			all = append(all, event)
+		}
+		return all
+	}
+
+	for _, toolVariant := range []bool{false, true} {
+		name := "reasoning transition"
+		if toolVariant {
+			name = "tool transition"
+		}
+		t.Run(name, func(t *testing.T) {
+			conv := newConv()
+			all := run(t, conv, toolVariant)
+			// Exactly one content_block_start/stop pair per block: the text
+			// and refusal parts, plus the thinking block (reasoning variant)
+			// or the tool_use block (tool variant).
+			wantBlocks := 3
+			if got := countType(all, AnthropicStreamEventTypeContentBlockStart); got != wantBlocks {
+				t.Fatalf("content_block_start count = %d, want %d", got, wantBlocks)
+			}
+			if got := countType(all, AnthropicStreamEventTypeContentBlockStop); got != wantBlocks {
+				t.Fatalf("content_block_stop count = %d, want %d (a sealed part was re-emitted at the item close)", got, wantBlocks)
+			}
+			// Exactly one success terminal.
+			if got := countType(all, AnthropicStreamEventTypeMessageStop); got != 1 {
+				t.Fatalf("message_stop count = %d, want 1", got)
+			}
+			if got := countType(all, AnthropicStreamEventTypeError); got != 0 {
+				t.Fatalf("unexpected error events: %d", got)
+			}
+		})
 	}
 }
