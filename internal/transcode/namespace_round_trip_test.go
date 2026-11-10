@@ -7,6 +7,7 @@ package transcode
 // plus its separate namespace qualifier.
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,12 +58,22 @@ func TestNamespaceToolRoundTripNonStreaming(t *testing.T) {
 	if strings.Contains(upstreamBody, "namespace") {
 		t.Fatalf("namespace grouping leaked into the chat request: %s", upstreamBody)
 	}
-	out := rec.Body.String()
-	if !strings.Contains(out, `"type":"function_call"`) {
-		t.Fatalf("missing function_call item: %s", out)
+	var envelope struct {
+		Output []struct {
+			Type      string `json:"type"`
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"output"`
 	}
-	if !strings.Contains(out, `"name":"spawn_agent"`) || !strings.Contains(out, `"namespace":"multi_agent_v1"`) {
-		t.Fatalf("function_call lacks the bare name + namespace qualifier: %s", out)
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(envelope.Output) != 1 {
+		t.Fatalf("output items = %d, want the one function call: %s", len(envelope.Output), rec.Body.String())
+	}
+	call := envelope.Output[0]
+	if call.Type != "function_call" || call.Name != "spawn_agent" || call.Namespace != "multi_agent_v1" {
+		t.Fatalf("function_call = %+v, want the bare child name plus its namespace qualifier", call)
 	}
 }
 
@@ -541,11 +552,21 @@ func TestNamespaceToolRoundTripResponsesToGeminiNonStreaming(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
-	out := rec.Body.String()
-	if !strings.Contains(out, `"type":"function_call"`) {
-		t.Fatalf("missing function_call item: %s", out)
+	var envelope struct {
+		Output []struct {
+			Type      string `json:"type"`
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"output"`
 	}
-	if !strings.Contains(out, `"name":"spawn_agent"`) || !strings.Contains(out, `"namespace":"multi_agent_v1"`) {
-		t.Fatalf("function_call lacks the bare name + namespace qualifier: %s", out)
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(envelope.Output) != 1 {
+		t.Fatalf("output items = %d, want the one function call: %s", len(envelope.Output), rec.Body.String())
+	}
+	call := envelope.Output[0]
+	if call.Type != "function_call" || call.Name != "spawn_agent" || call.Namespace != "multi_agent_v1" {
+		t.Fatalf("function_call = %+v, want the bare child name plus its namespace qualifier", call)
 	}
 }
