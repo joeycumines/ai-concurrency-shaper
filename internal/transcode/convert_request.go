@@ -509,13 +509,14 @@ func responsesInputToTurns(
 			if err != nil {
 				return nil, fmt.Errorf("input item %d: function call arguments: %w", i, err)
 			}
-			// Replayed history keeps the BARE name + namespace in the
-			// canonical part; each target render re-derives the flat wire
-			// name from Namespace+Name via ToolNames.flatName, so the
-			// upstream never learns the bare form of a namespaced child.
-			// When THIS request does not declare the namespace, the
-			// qualifier cannot be mapped: forwarding the bare name is only
-			// honest when nothing else owns it. If a surviving tool already
+			// Replayed history carries the BARE name plus its namespace
+			// while THIS request declares that namespace; each target render
+			// re-derives the flat wire name from Namespace+Name via
+			// ToolNames.flatName, so the upstream never learns the bare form
+			// of a declared namespaced child. When the request does not
+			// declare the namespace, the qualifier cannot be mapped:
+			// forwarding the bare name is only honest when nothing else owns
+			// it. If a surviving tool already
 			// answers to that name, the replayed call would be re-pointed
 			// at a DIFFERENT tool, which is a reinterpretation of
 			// client-sent history and never permitted. Otherwise the

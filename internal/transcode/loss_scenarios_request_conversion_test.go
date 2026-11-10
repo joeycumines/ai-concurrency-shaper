@@ -217,8 +217,9 @@ func lossScenariosRequestConversion(t *testing.T) []lossScenario {
 		{
 			// A replayed function_call naming a namespace this request does not
 			// declare: the qualifier cannot be mapped, so the call is recorded
-			// as this loss rather than forwarded unqualified. The bare name here
-			// is owned by nothing, so the conversion is not refused outright.
+			// as this loss and forwarded under the bare child name (the only
+			// representation the target can receive). The bare name here is
+			// owned by nothing, so the conversion is not refused outright.
 			key: FeatureNamespaceReplayUndeclared,
 			perm: []Feature{
 				FeatureNamespaceReplayUndeclared,
