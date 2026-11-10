@@ -410,3 +410,84 @@ func clampResponsesUsage(u *ResponsesUsage, presence usagePresence) usageClamp {
 	)
 	return clamp
 }
+
+// saturatingUsageSum returns the derived total when the two present components
+// add, and the saturated bound when the addition cannot be represented: the
+// source's arithmetic is never an exchange failure
+// (internal/transcode/errors.go documents this), and the emitted value is never
+// a silent wrap. It delegates to usage_clamp.go's checkedUsageSum so the
+// overflow rule lives in one place; the int width is the wire's width, and
+// the int64 conversion is lossless on every supported build. At 64-bit
+// extremes the old int-width wrap check could return a wrapped sum as exact;
+// the delegation fails closed (saturate) there instead, which is the
+// documented policy, not a behavior change on any representable count.
+func saturatingUsageSum(a, b int) int {
+	if a < 0 || b < 0 {
+		// A negative source count has no defensible sum; the clamp records
+		// usage_negative_counts naming the component it corrected.
+		return 0
+	}
+	if sum, ok := checkedUsageSum(int64(a), int64(b)); ok {
+		return int(sum)
+	}
+	return math.MaxInt
+}
+
+// saturatingUsageDifference returns known - other, clamped at zero. The source
+// reporting a total SMALLER than a component it contains is a provider
+// accounting quirk (a gateway whose total excludes cached tokens while its
+// prompt count includes them, for example): it is absorbed, never rejected,
+// because the same bytes would otherwise succeed on one direction and fail on
+// the other. Zero is the only defensible count for the derived component -
+// any other value, including a copy of the sibling operand, would report a
+// number derived from nothing. The sibling usage clamp then records the
+// resulting total mismatch, so the correction stays visible. The subtraction
+// runs in int64 so the clamp rule (negatives to zero, never wrap) matches
+// usage_clamp.go's clampNegative on every width. At 64-bit extremes the old
+// int-width subtraction could return a wrapped negative, violating its own
+// clamped-at-zero contract; the int64 form returns zero there instead.
+func saturatingUsageDifference(known, other int) int {
+	if diff := int64(known) - int64(other); diff > 0 {
+		return int(diff)
+	}
+	return 0
+}
+
+// checkedAdd returns a+b and whether the result fits. Token counts are
+// bounded in practice, but a hostile sum must never wrap into a wrong value.
+// It delegates to usage_clamp.go's checkedUsageSum so the overflow rule lives
+// in one place; the int64 conversion is lossless on every supported build.
+func checkedAdd(a, b int) (int, bool) {
+	sum, ok := checkedUsageSum(int64(a), int64(b))
+	if !ok {
+		return 0, false
+	}
+	return int(sum), true
+}
+
+// checkedSub returns a-b and whether the result is non-negative and fits.
+// The non-negativity is the caller's derivation rule (a derived component is
+// never negative). The overflow pre-check cannot itself wrap (b < 0 keeps
+// MaxInt64+b representable), so the int64 subtraction that follows is exact;
+// like checkedUsageSum it fails closed on extremes rather than wrapping.
+func checkedSub(a, b int) (int, bool) {
+	if b < 0 && int64(a) > math.MaxInt64+int64(b) {
+		return 0, false
+	}
+	diff := int64(a) - int64(b)
+	if diff < 0 {
+		return 0, false
+	}
+	return int(diff), true
+}
+
+// checkedInt64ToInt converts an int64 token count to int with an explicit
+// range check: the Messages wire types use platform int, and a silent
+// wrap on 32-bit builds would emit a corrupt negative count.
+func checkedInt64ToInt(value int64) (int, error) {
+	converted := int(value)
+	if int64(converted) != value {
+		return 0, fmt.Errorf("token count %d does not fit the platform int width", value)
+	}
+	return converted, nil
+}

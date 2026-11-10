@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 )
@@ -55,6 +54,12 @@ var errStreamTruncated = errors.New("upstream stream ended before a terminal con
 type convertedBatch struct {
 	Events   []frameEvent
 	Terminal bool
+
+	// staged holds the serialized frames of a batch the converter admitted
+	// inside its own call (see deliveryGate). admitted reports that the
+	// admission ran, so the reader does not admit the batch a second time.
+	staged   []byte
+	admitted bool
 }
 
 // frameConverter converts one upstream SSE event into downstream frames.
@@ -147,13 +152,17 @@ func newConvertingReaderWithLimits(
 	if errorMessageMax <= 0 {
 		errorMessageMax = DefaultErrorMessageBytes
 	}
-	return &convertingReader{
+	r := &convertingReader{
 		source:            source,
 		conv:              conv,
 		generatedFrameMax: generatedFrameMax,
 		generatedBatchMax: generatedBatchMax,
 		errorMessageMax:   errorMessageMax,
 	}
+	if gated, ok := conv.(deliveryAware); ok {
+		gated.installDelivery(r.admit)
+	}
+	return r
 }
 
 // Read returns the next chunk of downstream SSE bytes.
@@ -210,7 +219,14 @@ func (r *convertingReader) Read(p []byte) (int, error) {
 		if errors.Is(err, io.EOF) {
 			batch, finalErr := r.conv.FinalizeEOF()
 			if finalErr != nil {
-				finalErr = fmt.Errorf("%w: %v", errStreamTruncated, finalErr)
+				// The EOF failure keeps its own identity for the outcome
+				// classifier and the client-facing error event: a genuine
+				// truncation is marked errStreamTruncated by the truncation
+				// sites themselves, a generated-bound refusal keeps
+				// *SSEBoundError, and any other typed failure (policy
+				// refusal, unrepresentable output, usage arithmetic, upstream
+				// wire) passes through unwrapped — never relabeled a
+				// truncation.
 				if frameErr := r.appendErrorEvent(finalErr); frameErr != nil {
 					finalErr = frameErr
 				}
@@ -263,8 +279,15 @@ func (r *convertingReader) appendErrorEvent(err error) error {
 // upstream provenance: the error came from real upstream data that failed
 // conversion, not from a local decode/render/validation step. Corrupt
 // upstream wire (UpstreamWireError) is always upstream; a
-// StreamConversionError is upstream only when its provenance says so.
+// StreamConversionError is upstream only when its provenance says so. A
+// genuine truncation is NOT an upstream error frame: the error event is
+// generated locally when the upstream stops sending, so a concurrent
+// client cancel must still classify as a client abort, not an upstream
+// failure.
 func isUpstreamConversionError(err error) bool {
+	if errors.Is(err, errStreamTruncated) {
+		return false
+	}
 	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
 		return true
 	}
@@ -282,31 +305,43 @@ func isUpstreamConversionError(err error) bool {
 	}
 }
 
-// appendBatch buffers the converted frames and records the terminal/error
-// state.
-// appendBatch commits a converted batch ATOMICALLY: the whole batch is first
-// staged into a temporary buffer, validating every frame against
-// generatedFrameMax and the staged total against generatedBatchMax; only a
-// fully validated batch is copied into the live downstream buffer and only
-// then does a terminal batch set sawTerminal. A success terminal can never
-// escape before a later size failure, and a terminal batch exceeding
-// generatedBatchMax is never partially delivered — the converter may then
-// emit exactly one error event.
-func (r *convertingReader) appendBatch(batch convertedBatch) error {
+// admit stages a converted batch for delivery. Every frame must fit the
+// generated-frame bound, the staged batch the generated-batch bound, and the
+// exchange-wide total the generated total bound. A batch that passes returns
+// its serialized frames and is charged to the total; a refused batch is not
+// charged. The admission runs inside the converter call that produced the batch
+// (see deliveryGate), so a refusal rolls that call back.
+func (r *convertingReader) admit(batch convertedBatch) ([]byte, error) {
 	var staged bytes.Buffer
 	for _, event := range batch.Events {
 		if err := writeFrameBytesBounded(&staged, event, r.generatedFrameMax); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if staged.Len() > r.generatedBatchMax {
-		return &SSEBoundError{Bound: r.generatedBatchMax}
+		return nil, &SSEBoundError{Bound: r.generatedBatchMax}
 	}
 	if r.generatedTotal+int64(staged.Len()) > maxStreamGeneratedBytes {
-		return &SSEBoundError{Bound: int(maxStreamGeneratedBytes)}
+		return nil, &SSEBoundError{Bound: int(maxStreamGeneratedBytes)}
 	}
 	r.generatedTotal += int64(staged.Len())
-	_, _ = r.buf.Write(staged.Bytes())
+	return staged.Bytes(), nil
+}
+
+// appendBatch delivers a converted batch into the downstream buffer and records
+// its terminal and error state. A batch the converter admitted inside its call
+// is already staged; any other batch is admitted here. A terminal batch sets
+// sawTerminal only once it is buffered, so a success terminal never escapes
+// ahead of a size refusal.
+func (r *convertingReader) appendBatch(batch convertedBatch) error {
+	staged := batch.staged
+	if !batch.admitted {
+		var err error
+		if staged, err = r.admit(batch); err != nil {
+			return err
+		}
+	}
+	_, _ = r.buf.Write(staged)
 	for _, event := range batch.Events {
 		if event.Type == "error" {
 			r.sawErrorEvent = true
@@ -365,14 +400,14 @@ func (r *convertingReader) UpstreamBodyError() bool {
 // while every client-visible rendering is truncated.
 func truncateErrorText(err error, max int) error {
 	message := err.Error()
-	if len(message) <= max {
+	// BoundErrorMessage is the one rune-safe truncation helper (the cut lands
+	// on a rune boundary); slicing raw bytes here could split a multibyte
+	// rune and emit U+FFFD mojibake downstream.
+	truncated := BoundErrorMessage(message, max)
+	if truncated == message {
 		return err
 	}
-	// The ellipsis must not push the text past the configured bound.
-	if max > 3 {
-		return truncatedError{err: err, text: message[:max-3] + "…"}
-	}
-	return truncatedError{err: err, text: message[:max]}
+	return truncatedError{err: err, text: truncated}
 }
 
 type truncatedError struct {

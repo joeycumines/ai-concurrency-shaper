@@ -1005,6 +1005,45 @@ func TestDecodeResponsesSSEEvent(t *testing.T) {
 	}
 }
 
+// TestResponsesAnnotationPayloadRejectedAtWireBoundary pins the decode
+// boundary for Responses annotations: the wire shadow models Annotation as a
+// bare type tag, so a REAL annotation payload (a url_citation carrying its
+// variant fields) is rejected by strict decode before any state machine
+// observes it — on the stream surface and on the non-streaming output
+// surface alike — while a degenerate type-only tag survives decode and
+// reaches the state machine. The test keeps that boundary from silently
+// widening.
+func TestResponsesAnnotationPayloadRejectedAtWireBoundary(t *testing.T) {
+	streamFrame := `{"type":"response.content_part.added","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[{"type":"url_citation","url":"https://example.com","title":"example","start_index":0,"end_index":4}]}}`
+	if _, err := decodeResponsesSSEEvent([]byte(streamFrame)); err == nil {
+		t.Fatal("stream frame with a real url_citation payload: nil error, want the strict-decode rejection")
+	}
+
+	nonStreaming := `{"id":"r","object":"response","created_at":1,"status":"completed","model":"m","output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"hi","annotations":[{"type":"url_citation","url":"https://example.com","title":"example","start_index":0,"end_index":4}]}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`
+	if _, err := DecodeResponsesResponse([]byte(nonStreaming)); err == nil {
+		t.Fatal("non-streaming response with a real url_citation payload: nil error, want the strict-decode rejection")
+	}
+
+	// Only the degenerate type-only tag survives decode; every consumer
+	// drops it without a loss key, and internal emitters emit empty arrays.
+	degenerate := `{"type":"response.content_part.added","sequence_number":3,"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[{"type":"url_citation"}]}}`
+	event, err := decodeResponsesSSEEvent([]byte(degenerate))
+	if err != nil {
+		t.Fatalf("degenerate type-only tag: %v", err)
+	}
+	added, ok := event.(ResponseContentPartAddedEvent)
+	if !ok {
+		t.Fatalf("event type %T", event)
+	}
+	part, ok := added.Part.(*ResponsesStreamOutputTextPart)
+	if !ok {
+		t.Fatalf("part type %T", added.Part)
+	}
+	if len(part.Annotations) != 1 || part.Annotations[0].Type != "url_citation" {
+		t.Fatalf("annotations = %+v, want the surviving type-only tag", part.Annotations)
+	}
+}
+
 func TestValidateFinalToolInput(t *testing.T) {
 	if err := validateFinalToolInput(`{"x":1}`); err != nil {
 		t.Fatal(err)
@@ -1063,22 +1102,40 @@ func TestChatToAnthropicInterleavedContentAndRefusal(t *testing.T) {
 		return events
 	}
 
-	// Text part opens, then refusal part opens, then both receive deltas.
+	// Text part opens, then a refusal delta arrives: the part-type
+	// transition seals the text part inline (value done + part done) before
+	// the refusal part opens, because the Anthropic dialect carries exactly
+	// one open content block — two concurrent content_part.added events
+	// would render as two interleaved content_block_start events. Each
+	// contiguous text/refusal run therefore opens its own sequential block.
 	events := feed(`{"content":"hello"}`)
 	events = append(events, feed(`{"refusal":"no way"}`)...)
 	events = append(events, feed(`{"content":" world"}`)...)
 	events = append(events, feed(`{"refusal":"!"}`)...)
 
-	// Collect per-block text. Each contiguous text/refusal run opens its own
-	// content part (the Responses protocol has no part reuse), so every
-	// delta must land in the block its part opened — never merged into the
-	// lowest open block.
+	// Collect per-block text. Every delta must land in the block its part
+	// opened — never merged into another block — and no two blocks may be
+	// open at once on the wire.
 	blockText := map[int]string{}
+	openBlocks := 0
+	maxOpen := 0
 	for _, event := range events {
-		if event.Type == AnthropicStreamEventTypeContentBlockDelta &&
-			event.Delta != nil && event.Delta.Text != nil && event.Index != nil {
-			blockText[*event.Index] += *event.Delta.Text
+		switch event.Type {
+		case AnthropicStreamEventTypeContentBlockStart:
+			openBlocks++
+			if openBlocks > maxOpen {
+				maxOpen = openBlocks
+			}
+		case AnthropicStreamEventTypeContentBlockStop:
+			openBlocks--
+		case AnthropicStreamEventTypeContentBlockDelta:
+			if event.Delta != nil && event.Delta.Text != nil && event.Index != nil {
+				blockText[*event.Index] += *event.Delta.Text
+			}
 		}
+	}
+	if maxOpen > 1 {
+		t.Fatalf("interleaved wire: max concurrent open blocks = %d, want 1", maxOpen)
 	}
 	want := map[int]string{
 		0: "hello",
@@ -1095,7 +1152,9 @@ func TestChatToAnthropicInterleavedContentAndRefusal(t *testing.T) {
 		}
 	}
 
-	// The finish must close both blocks and emit the terminal.
+	// The finish must close the still-open last block (the earlier parts
+	// were sealed inline at each part-type transition) and emit the
+	// terminal.
 	batch, err := converter.Convert(SSEEvent{Data: []byte(
 		`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 	)})
@@ -1126,8 +1185,22 @@ func TestChatToAnthropicInterleavedContentAndRefusal(t *testing.T) {
 			blockStops++
 		}
 	}
-	if blockStops != 4 {
-		t.Fatalf("content block stops = %d, want 4", blockStops)
+	if blockStops != 1 {
+		t.Fatalf("content block stops at finish = %d, want 1 (the three earlier blocks were sealed inline at their part-type transitions)", blockStops)
+	}
+	// Across the whole stream (delta events + finish) every started block
+	// must be stopped exactly once: 4 starts, 4 stops, no duplicates.
+	totalStarts, totalStops := 0, 0
+	for _, event := range append(events, stops...) {
+		switch event.Type {
+		case AnthropicStreamEventTypeContentBlockStart:
+			totalStarts++
+		case AnthropicStreamEventTypeContentBlockStop:
+			totalStops++
+		}
+	}
+	if totalStarts != 4 || totalStops != 4 {
+		t.Fatalf("blocks: starts=%d stops=%d, want 4 each", totalStarts, totalStops)
 	}
 }
 

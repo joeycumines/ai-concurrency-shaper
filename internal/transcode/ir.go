@@ -84,11 +84,16 @@ type CanonicalDocument struct {
 func (CanonicalDocument) isCanonicalPart() {}
 
 // CanonicalFunctionCall is a model-initiated function call. Arguments is a
-// validated complete JSON object.
+// validated complete JSON object. Namespace carries the Responses tool
+// namespace qualifier of a namespaced child; renderers that flatten names
+// (chat, gemini) re-derive the flat wire name from Namespace+Name via
+// ToolNames.flatName, and renderers that carry it separately (responses,
+// messages) set it on the wire item directly.
 type CanonicalFunctionCall struct {
 	ItemID    string
 	CallID    string
 	Name      string
+	Namespace string
 	Arguments json.RawMessage // validated complete JSON object
 }
 
@@ -211,11 +216,14 @@ type CanonicalRequest struct {
 	// cleanly.
 	RetainedTurns int
 
-	ToolChoice       *CanonicalToolChoice
-	ParallelTools    *bool
-	MaxOutputTokens  *int
-	Temperature      *float64
-	TopP             *float64
+	ToolChoice      *CanonicalToolChoice
+	ParallelTools   *bool
+	MaxOutputTokens *int
+	Temperature     *float64
+	TopP            *float64
+	// TopK is the top-k sampling cutoff. Only the Messages target carries it;
+	// other targets record top_k as a loss instead.
+	TopK             *int
 	StopSequences    []string
 	StructuredOutput *CanonicalStructuredOutput
 	Stream           bool
@@ -297,6 +305,23 @@ type ExchangeContext struct {
 	// profile map ("low", "medium", "high", or "" when unset). The render
 	// applies it to the upstream request when the capability is granted.
 	ResolvedReasoningTier string
+
+	// ModelMaxOutputTokens is the model table's max_output for the resolved
+	// model (nil when the table declares none). A Messages upstream needs a
+	// max_tokens value, and a Gemini client may omit maxOutputTokens.
+	ModelMaxOutputTokens *int
+
+	// GeminiIncludeThoughts records that the Gemini client asked for thought
+	// parts in the response (generationConfig.thinkingConfig.includeThoughts).
+	GeminiIncludeThoughts bool
+
+	// GeminiSignatures, when non-nil, is the per-provider thought-signature
+	// store a Gemini upstream's function-call signatures are retained in and
+	// restored from (multi-turn tool use on Gemini 3). GeminiSignatureScope
+	// is the provider name the store is keyed under. A nil store behaves as
+	// an empty store.
+	GeminiSignatures     *GeminiSignatureStore
+	GeminiSignatureScope string
 }
 
 // lossPolicy returns the exchange loss policy, or the strictest policy when
@@ -534,11 +559,14 @@ type CanonicalMessageItem struct {
 
 func (*CanonicalMessageItem) isCanonicalResponseItem() {}
 
-// CanonicalFunctionCallItem is an output function_call item.
+// CanonicalFunctionCallItem is an output function_call item. Namespace
+// carries the Responses tool namespace qualifier of a namespaced child
+// (empty for an ordinary function), mirroring CanonicalFunctionCall.
 type CanonicalFunctionCallItem struct {
 	ItemID    string
 	CallID    string
 	Name      string
+	Namespace string
 	Arguments ToolArguments
 }
 
@@ -595,6 +623,12 @@ type ResponseSourceArtifacts struct {
 	// enters (the Responses→Messages drop was
 	// silent).
 	ResponsesServiceTier string
+
+	// GeminiCallSignatures carries the thought signatures a Gemini upstream
+	// attached to its function-call parts, keyed by call id. They are retained
+	// in the signature store so a later request replays them, and never cross
+	// to another protocol.
+	GeminiCallSignatures map[string]string
 }
 
 // CanonicalResponse is the decoded model response in canonical form: an

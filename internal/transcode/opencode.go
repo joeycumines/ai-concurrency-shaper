@@ -260,8 +260,11 @@ func deriveSessionKey(parts ...string) string {
 // clientProtocolToNative maps a transcode client protocol to the document
 // dialect used for first-user-text extraction.
 func clientProtocolToNative(protocol ClientProtocol) NativeProtocol {
-	if protocol == ClientMessages {
+	switch protocol {
+	case ClientMessages:
 		return NativeMessages
+	case ClientGemini:
+		return NativeGemini
 	}
 	return NativeResponses
 }
@@ -275,6 +278,7 @@ func FirstUserText(protocol NativeProtocol, body []byte) string {
 	var doc struct {
 		Messages []json.RawMessage `json:"messages"`
 		Input    json.RawMessage   `json:"input"`
+		Contents []json.RawMessage `json:"contents"`
 	}
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return ""
@@ -285,9 +289,39 @@ func FirstUserText(protocol NativeProtocol, body []byte) string {
 			return truncateRunes(text, maxText)
 		}
 		return truncateRunes(firstChatUserText(doc.Messages), maxText)
+	case NativeGemini:
+		return truncateRunes(firstGeminiUserText(doc.Contents), maxText)
 	default:
 		return truncateRunes(firstChatUserText(doc.Messages), maxText)
 	}
+}
+
+// firstGeminiUserText reads contents-shaped input: the first user content
+// (a content with no role reads as user) and the concatenation of its
+// non-thought text parts.
+func firstGeminiUserText(contents []json.RawMessage) string {
+	for _, raw := range contents {
+		var content struct {
+			Role  string `json:"role"`
+			Parts []struct {
+				Text    *string `json:"text"`
+				Thought *bool   `json:"thought"`
+			} `json:"parts"`
+		}
+		if err := json.Unmarshal(raw, &content); err != nil || (content.Role != "user" && content.Role != "") {
+			continue
+		}
+		var out strings.Builder
+		for _, part := range content.Parts {
+			if part.Text != nil && (part.Thought == nil || !*part.Thought) {
+				out.WriteString(*part.Text)
+			}
+		}
+		if out.Len() > 0 {
+			return out.String()
+		}
+	}
+	return ""
 }
 
 // firstChatUserText reads messages-shaped arrays (messages and chat

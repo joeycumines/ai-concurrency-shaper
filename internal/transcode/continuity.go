@@ -299,6 +299,7 @@ func responseItemsToTurns(response CanonicalResponse) ([]CanonicalTurn, int) {
 			part := CanonicalFunctionCall{
 				CallID:    value.CallID,
 				Name:      value.Name,
+				Namespace: value.Namespace,
 				Arguments: value.Arguments.Object,
 			}
 			if len(turns) > 0 && turns[len(turns)-1].Role == CanonicalAssistant {

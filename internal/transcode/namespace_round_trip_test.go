@@ -7,6 +7,7 @@ package transcode
 // plus its separate namespace qualifier.
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -57,12 +58,22 @@ func TestNamespaceToolRoundTripNonStreaming(t *testing.T) {
 	if strings.Contains(upstreamBody, "namespace") {
 		t.Fatalf("namespace grouping leaked into the chat request: %s", upstreamBody)
 	}
-	out := rec.Body.String()
-	if !strings.Contains(out, `"type":"function_call"`) {
-		t.Fatalf("missing function_call item: %s", out)
+	var envelope struct {
+		Output []struct {
+			Type      string `json:"type"`
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"output"`
 	}
-	if !strings.Contains(out, `"name":"spawn_agent"`) || !strings.Contains(out, `"namespace":"multi_agent_v1"`) {
-		t.Fatalf("function_call lacks the bare name + namespace qualifier: %s", out)
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(envelope.Output) != 1 {
+		t.Fatalf("output items = %d, want the one function call: %s", len(envelope.Output), rec.Body.String())
+	}
+	call := envelope.Output[0]
+	if call.Type != "function_call" || call.Name != "spawn_agent" || call.Namespace != "multi_agent_v1" {
+		t.Fatalf("function_call = %+v, want the bare child name plus its namespace qualifier", call)
 	}
 }
 
@@ -233,7 +244,7 @@ func TestFieldCaptureCodexNamespaceRequestReplayed(t *testing.T) {
 	}
 
 	chat := `{"id":"c","object":"chat.completion","created":1,"model":"glm-5.3-flash","choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-1","type":"function","function":{"name":"spawn_agent","arguments":"{\"message\":\"x\"}"}}]}}]}`
-	response, _, err := DecodeChatResponseWithPolicy([]byte(chat), ChatCapabilities{}, policy)
+	response, _, err := DecodeChatResponseWithPolicy([]byte(chat), ChatCapabilities{}, policy, result.ToolNames)
 	if err != nil {
 		t.Fatalf("decode chat tool call: %v", err)
 	}
@@ -508,5 +519,54 @@ func TestUndeclaredNamespaceRefusalCoversNamespaceOwnedNames(t *testing.T) {
 				t.Errorf("error = %q, want it to contain %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestNamespaceToolRoundTripResponsesToGeminiNonStreaming proves the
+// non-streaming Gemini decode restores a namespace child's identity exactly
+// like the streaming decode: the Gemini wire carries only the flat name, and
+// the Responses client must receive the bare name plus its qualifier.
+func TestNamespaceToolRoundTripResponsesToGeminiNonStreaming(t *testing.T) {
+	key, err := NewRouteKey(http.MethodPost, "/v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping := Mapping{
+		ClientRoute:      key,
+		ClientProtocol:   ClientResponses,
+		UpstreamProtocol: UpstreamGemini,
+		UpstreamPath:     "/v1beta",
+	}
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"spawn_agent","args":{"message":"x"}}}]},"finishReason":"STOP","index":0}],"modelVersion":"m"}`,
+			)),
+		}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(namespaceToolRequestBody))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var envelope struct {
+		Output []struct {
+			Type      string `json:"type"`
+			Name      string `json:"name"`
+			Namespace string `json:"namespace"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(envelope.Output) != 1 {
+		t.Fatalf("output items = %d, want the one function call: %s", len(envelope.Output), rec.Body.String())
+	}
+	call := envelope.Output[0]
+	if call.Type != "function_call" || call.Name != "spawn_agent" || call.Namespace != "multi_agent_v1" {
+		t.Fatalf("function_call = %+v, want the bare child name plus its namespace qualifier", call)
 	}
 }

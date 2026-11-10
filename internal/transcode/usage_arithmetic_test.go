@@ -116,7 +116,7 @@ func TestResponsesUsageMismatchNonStreamingRelayed(t *testing.T) {
 // conversion that emits them, never to the decode.
 func TestChatUsageMismatchNonStreamingRelayed(t *testing.T) {
 	body := []byte(`{"object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":20}}`)
-	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	response, report, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("mismatch must be relayed, not rejected: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestUsageAbsentVsZeroPreserved(t *testing.T) {
 	// Chat usage without total_tokens: the shadow marks the total unknown,
 	// the decode must not fabricate a mismatch.
 	body := []byte(`{"object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
-	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("chat decode with absent total rejected: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestChatResponsesRenderDerivedTotalSaturates(t *testing.T) {
 	body := []byte(`{"object":"chat.completion","created":1,"model":"m",` +
 		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],` +
 		`"usage":{"prompt_tokens":9223372036854775807,"completion_tokens":1}}`)
-	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestChatResponsesRenderPostClampMismatchNoted(t *testing.T) {
 		`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],` +
 		`"usage":{"prompt_tokens":-2,"completion_tokens":5,"total_tokens":3,` +
 		`"prompt_tokens_details":{"cached_tokens":1}}}`)
-	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -610,7 +610,7 @@ func TestUsageClampDetailFidelity(t *testing.T) {
 			`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],` +
 			`"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,` +
 			`"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":0}}}`)
-		response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy())
+		response, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, permissiveLossPolicy(), nil)
 		if err != nil {
 			t.Fatalf("decode: %v", err)
 		}

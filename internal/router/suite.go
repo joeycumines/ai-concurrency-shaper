@@ -148,6 +148,16 @@ func (h *CatalogSuiteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Gemini GenerateContent routes carry the model in the path, so the
+	// suite routes them without reading the body: no buffer admission, no
+	// inspection read, no read deadline.
+	if r.Method == http.MethodPost {
+		if match, ok := transcode.MatchGeminiRequestPath(r.Method, reqPath); ok {
+			h.serveGemini(w, r, match)
+			return
+		}
+	}
+
 	// Any other route: if fallback handler exists and suite is not strict, forward
 	if !h.strict && h.fallback != nil {
 		h.fallback.ServeHTTP(w, r)
@@ -163,6 +173,38 @@ func (h *CatalogSuiteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	// path names no dialect of its own.
 	h.writeDialectError(w, h.defaultCatalogShape(), http.StatusNotFound,
 		"not found on this suite mount")
+}
+
+// serveGemini routes a Gemini GenerateContent request by the model named in
+// its path. The target provider's handler is handed the request unchanged:
+// the suite never buffers the body on this path.
+func (h *CatalogSuiteHandler) serveGemini(w http.ResponseWriter, r *http.Request, match transcode.GeminiRouteMatch) {
+	target, found := h.modelMap[match.Model]
+	if found {
+		if _, ok := target.supportedRoutes[match.Key]; ok {
+			target.handler.ServeHTTP(w, r)
+			return
+		}
+		h.writeGeminiError(w, http.StatusNotFound,
+			fmt.Sprintf("model %q is not available for %s", match.Model, match.TemplatePath))
+		return
+	}
+	if !h.strict && h.fallback != nil {
+		h.fallback.ServeHTTP(w, r)
+		return
+	}
+	h.writeGeminiError(w, http.StatusNotFound,
+		fmt.Sprintf("model %q not found in catalog suite", match.Model))
+}
+
+// writeGeminiError renders a suite-level error as a Google error envelope,
+// bounded like every other suite error.
+func (h *CatalogSuiteHandler) writeGeminiError(w http.ResponseWriter, status int, message string) {
+	message = transcode.BoundErrorMessage(message, h.limits.ErrorMessageBytes)
+	_ = transcode.WriteDialectHTTPError(w, transcode.ClientGemini, transcode.CanonicalAPIError{
+		Status:  status,
+		Message: message,
+	})
 }
 
 func isCatalogRoute(path string) bool {

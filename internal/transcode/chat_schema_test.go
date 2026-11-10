@@ -25,7 +25,7 @@ func currentChatResponse() string {
 // Chat response (logprobs:null, service_tier present, pinned usage details)
 // strict-decodes — no unknown-field failure.
 func TestChatResponseCurrentShapeStrictDecodes(t *testing.T) {
-	response, _, err := DecodeChatResponseWithPolicy([]byte(currentChatResponse()), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(currentChatResponse()), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("strict decode: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestChatResponseCurrentShapeConverts(t *testing.T) {
 	// cache-creation component — the source provided neither, so both
 	// renders enter the usage-timing loss decision: strict rejects, an
 	// approved usage_timing loss converts.
-	response, _, err := DecodeChatResponseWithPolicy([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestChatResponseCurrentShapeConverts(t *testing.T) {
 
 	// service_tier present: strict policy rejects, permissive policy
 	// converts (the explicit loss decision, never a silent drop).
-	response, _, err = DecodeChatResponseWithPolicy([]byte(currentChatResponse()), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err = DecodeChatResponseWithPolicy([]byte(currentChatResponse()), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestChatResponseCurrentShapeConverts(t *testing.T) {
 // silent drop).
 func TestChatResponseTypedLogprobsLossDecision(t *testing.T) {
 	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":{"content":[{"token":"hi","bytes":[104,105],"logprob":-0.5,"top_logprobs":[{"token":"hi","bytes":[104,105],"logprob":-0.5}]}],"refusal":[]},"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
-	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("typed logprobs must strict-decode: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestStreamToolCallDeltaKeepsIndex(t *testing.T) {
 // completions; post-fix it decodes into a known reasoning breakdown.
 func TestChatResponseTopLevelReasoningTokens(t *testing.T) {
 	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30,"reasoning_tokens":15}}`
-	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestChatResponseTopLevelReasoningTokens(t *testing.T) {
 // prompt_cache_hit_tokens when there are no details.
 func TestChatUsageExtensionPrecedence(t *testing.T) {
 	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"reasoning_tokens":99,"cached_tokens":9,"prompt_cache_hit_tokens":8,"completion_tokens_details":{"accepted_prediction_tokens":0,"audio_tokens":0,"reasoning_tokens":7,"rejected_prediction_tokens":0},"prompt_tokens_details":{"cached_tokens":2}}}`
-	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestChatUsageExtensionPrecedence(t *testing.T) {
 	}
 
 	noDetails := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"cached_tokens":9,"prompt_cache_hit_tokens":8}}`
-	response, _, err = DecodeChatResponseWithPolicy([]byte(noDetails), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err = DecodeChatResponseWithPolicy([]byte(noDetails), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +360,7 @@ func TestChatUsageExtensionPrecedence(t *testing.T) {
 // without a canonical home (derivable uncached prompt) and never leaks.
 func TestChatUsageDeepSeekCacheConvention(t *testing.T) {
 	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"reasoning_tokens":2,"prompt_cache_hit_tokens":4,"prompt_cache_miss_tokens":6}}`
-	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestChatUsageDeepSeekCacheConvention(t *testing.T) {
 // and must never be forwarded to the client.
 func TestChatUsageUnknownFieldTolerated(t *testing.T) {
 	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"bogus_tokens":1}}`
-	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("unknown usage field tolerated decode = %v, want success", err)
 	}

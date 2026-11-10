@@ -214,17 +214,22 @@ func New(opts ...Option) (*Proxy, error) {
 		}
 		h := transcode.NewTranscodeHandler(
 			transcode.HandlerConfig{
-				Mapping:       mapping,
-				Upstream:      cfg.upstream,
-				BodyLimits:    m.BodyLimits,
-				FlowLogDir:    m.FlowLogDir,
-				Continuity:    m.Continuity,
-				ContinuityKey: m.ContinuityKey,
+				Mapping:              mapping,
+				Upstream:             cfg.upstream,
+				BodyLimits:           m.BodyLimits,
+				FlowLogDir:           m.FlowLogDir,
+				Continuity:           m.Continuity,
+				ContinuityKey:        m.ContinuityKey,
+				GeminiSignatures:     m.GeminiSignatures,
+				GeminiSignatureScope: m.GeminiSignatureScope,
 			},
 			p.RoundTrip,
 			nil,
 		)
 		p.transcodeHandlers = append(p.transcodeHandlers, h)
+		if m.ClientProtocol == transcode.ClientGemini {
+			p.geminiRoutes = true
+		}
 		handlersByRoute[m.ClientRoute] = append(handlersByRoute[m.ClientRoute], targetTranscodeHandler{
 			mapping: m,
 			handler: h,
@@ -255,6 +260,9 @@ func New(opts ...Option) (*Proxy, error) {
 		p.nativeRoutes = append(p.nativeRoutes, cfg.nativeRoutes[i])
 		nr := &p.nativeRoutes[len(p.nativeRoutes)-1]
 		nr.ModelMap = cloneModelMap(nr.ModelMap)
+		if nr.Protocol == transcode.NativeGemini {
+			p.geminiRoutes = true
+		}
 		if _, dup := p.nativeRouteMap[nr.RouteKey]; dup {
 			return nil, fmt.Errorf("proxy: duplicate native route %s %s",
 				nr.RouteKey.Method, nr.RouteKey.Path)

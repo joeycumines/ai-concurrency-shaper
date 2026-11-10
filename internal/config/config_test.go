@@ -876,7 +876,7 @@ func TestResolveAndValidate_AuthGrammar(t *testing.T) {
 		{name: "empty file path", authSrc: "file:",
 			want: "file path must not be empty"},
 		{name: "unknown mode", authMd: "hmac",
-			want: `-auth-mode "hmac" must be auto|none|bearer|x-api-key|api-key|header:NAME`},
+			want: `-auth-mode "hmac" must be auto|none|bearer|x-api-key|api-key|goog-api-key|header:NAME`},
 		{name: "bearer without source", authMd: "bearer",
 			want: `-auth-mode "bearer" requires -auth-source`},
 		{name: "x-api-key without source", authMd: "x-api-key",

@@ -152,6 +152,7 @@ func DecodeChatResponseWithPolicy(
 	body []byte,
 	capabilities ChatCapabilities,
 	policy LossPolicy,
+	names *ToolNames,
 ) (CanonicalResponse, ConversionReport, error) {
 	// Presence-aware shadow decode: absent-vs-zero is distinguishable.
 	var shadow chatResponseShadow
@@ -500,7 +501,7 @@ func DecodeChatResponseWithPolicy(
 	// the model-generated arguments byte-exact. The
 	// answer-content parts render even while provider reasoning is dropped
 	// under an approved loss, so the client still receives a rendered response.
-	parts, calls, err := chatMessageToCanonicalParts(message, capabilities, policy, &report)
+	parts, calls, err := chatMessageToCanonicalParts(message, capabilities, policy, &report, names)
 	if err != nil {
 		return CanonicalResponse{}, report, err
 	}
@@ -552,6 +553,7 @@ func chatMessageToCanonicalParts(
 	capabilities ChatCapabilities,
 	policy LossPolicy,
 	report *ConversionReport,
+	names *ToolNames,
 ) ([]CanonicalPart, []*CanonicalFunctionCallItem, error) {
 	var parts []CanonicalPart
 	var calls []*CanonicalFunctionCallItem
@@ -697,9 +699,14 @@ func chatMessageToCanonicalParts(
 			// preserved byte-exact — invalid model output is preserved, not
 			// rejected. The empty-string-to-"{}"
 			// substitution exists only in the render direction.
+			// The chat upstream saw only the FLAT name; map it back to the
+			// client's bare name + namespace qualifier so the Responses
+			// client sees the tool it declared.
+			callName, callNamespace := names.clientCallName(name)
 			calls = append(calls, &CanonicalFunctionCallItem{
 				CallID:    *call.ID,
-				Name:      name,
+				Name:      callName,
+				Namespace: callNamespace,
 				Arguments: ParseToolArguments(call.Function.Arguments),
 			})
 		}
@@ -890,6 +897,7 @@ func DecodeResponsesResponse(
 				ItemID:    value.ID,
 				CallID:    value.CallID,
 				Name:      value.Name,
+				Namespace: value.Namespace,
 				Arguments: ParseToolArguments(value.Arguments),
 			})
 			sawToolUse = true
@@ -1055,16 +1063,19 @@ func RenderResponsesResponse(
 
 		case *CanonicalFunctionCallItem:
 			// The Responses function_call arguments field is a string:
-			// the model-generated raw text is preserved byte-exact.
-			callName, callNamespace := context.ToolNames.clientCallName(value.Name)
+			// the model-generated raw text is preserved byte-exact. The
+			// canonical item already carries the client's bare name plus
+			// namespace (the decode mapped the flat upstream name back via
+			// ToolNames.clientCallName where the upstream flattened it), so
+			// they render directly.
 			envelope.Output = append(envelope.Output, &ResponsesFunctionCallOutputItem{
 				ID:        context.IDs.New("fc_"),
 				Type:      "function_call",
 				Status:    ResponsesItemCompleted,
 				CallID:    value.CallID,
-				Name:      callName,
+				Name:      value.Name,
 				Arguments: value.Arguments.Raw,
-				Namespace: callNamespace,
+				Namespace: value.Namespace,
 			})
 
 		case *CanonicalFunctionResultItem:
@@ -1393,7 +1404,19 @@ func RenderMessagesResponse(
 				}
 			}
 			callID := value.CallID
+			// The canonical item carries the BARE name + namespace; the
+			// Messages wire carries only the flat name, re-derived from both.
 			name := value.Name
+			if value.Namespace != "" {
+				flat, ok := context.ToolNames.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name})
+				if !ok {
+					return nil, report, fmt.Errorf(
+						"output[].tool_use: call %q references namespace %q, which this request does not declare",
+						value.Name, value.Namespace,
+					)
+				}
+				name = flat
+			}
 			out.Content = append(out.Content, AnthropicContentBlock{
 				Type:  AnthropicContentBlockTypeToolUse,
 				ID:    &callID,

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/geminigeneratecontent"
 )
 
 // Anthropic HTTP error contract:
@@ -118,6 +120,18 @@ func ReadCanonicalUpstreamError(
 			if result.RequestID == "" {
 				result.RequestID = envelope.RequestID
 			}
+			return normalizeCanonicalError(result), nil
+		}
+
+	case UpstreamGemini:
+		// A decodable envelope never falls back to the raw body: that would
+		// copy its details into the client error. The message comes from the
+		// envelope, or from its status when the message is empty.
+		envelope, err := geminigeneratecontent.DecodeErrorEnvelope(body)
+		if err == nil {
+			result.Message = geminiUpstreamMessage(result.Status, envelope.Error)
+			result.Code = envelope.Error.Status
+			result.Type = typeForStatus(result.Status)
 			return normalizeCanonicalError(result), nil
 		}
 	}
@@ -259,6 +273,15 @@ func WriteDialectHTTPError(
 		body.Error.Message = apiErr.Message
 
 		payload, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+		w.WriteHeader(apiErr.Status)
+		return writeAll(w, payload)
+
+	case ClientGemini:
+		payload, err := json.Marshal(geminiClientError(apiErr))
 		if err != nil {
 			return err
 		}

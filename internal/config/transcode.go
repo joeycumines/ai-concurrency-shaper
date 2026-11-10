@@ -21,6 +21,7 @@ import (
 	"log"
 	"maps"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
@@ -40,19 +41,33 @@ func buildTranscodeMappings(
 	allowedQuery := mergedAllowedQuery(opts.clientQuery, opts.negatedQuery, opts.strictDefaults)
 
 	// mappingLossPolicy derives one mapping's effective loss policy from the
-	// merged CLI policy: a fresh copy plus the directional
-	// Messages->Responses tool-strictness injection, unless defaults are
-	// strict or the operator negated the feature. The injection is what
-	// makes enabling the direction work out of the box — Messages tools
-	// carry no strictness semantic and the Responses function-tool contract
-	// demands explicit strict — and it applies to EVERY spelling of the
-	// direction, preset and explicit route alike, so the two cannot drift.
+	// merged CLI policy: a fresh copy plus the directional injections, unless
+	// defaults are strict or the operator negated the feature. The injections
+	// are what make enabling a direction work out of the box, and they apply
+	// to EVERY spelling of the direction, preset and explicit route alike, so
+	// the two cannot drift:
+	//   - Messages->Responses and Gemini->Responses: Messages/Gemini tools
+	//     carry no strictness semantic and the Responses function-tool
+	//     contract demands explicit strict, so strict:false is emitted under
+	//     tool_schema_strictness.
+	//   - Any mapping whose upstream is Gemini: metadata (Claude Code always
+	//     sends metadata.user_id and the Messages decoder always fills
+	//     CanonicalRequest.Metadata) and parallel_tool_calls (Codex commonly
+	//     sends parallel_tool_calls: false), which a Gemini request cannot
+	//     reproduce.
 	mappingLossPolicy := func(m transcode.Mapping) transcode.LossPolicy {
-		lp := transcode.LossPolicy{Allowed: make(map[transcode.Feature]struct{}, len(lossPolicy.Allowed)+1)}
+		lp := transcode.LossPolicy{Allowed: make(map[transcode.Feature]struct{}, len(lossPolicy.Allowed)+3)}
 		maps.Copy(lp.Allowed, lossPolicy.Allowed)
-		if !opts.strictDefaults && m.ClientProtocol == transcode.ClientMessages && m.UpstreamProtocol == transcode.UpstreamResponses {
+		if !opts.strictDefaults && (m.ClientProtocol == transcode.ClientMessages || m.ClientProtocol == transcode.ClientGemini) && m.UpstreamProtocol == transcode.UpstreamResponses {
 			if _, negated := opts.negatedLosses[transcode.FeatureToolSchemaStrictness]; !negated {
 				lp.Allowed[transcode.FeatureToolSchemaStrictness] = struct{}{}
+			}
+		}
+		if !opts.strictDefaults && m.UpstreamProtocol == transcode.UpstreamGemini {
+			for _, feature := range []transcode.Feature{transcode.FeatureMetadata, transcode.FeatureParallelToolCalls} {
+				if _, negated := opts.negatedLosses[feature]; !negated {
+					lp.Allowed[feature] = struct{}{}
+				}
 			}
 		}
 		return lp
@@ -110,7 +125,68 @@ func buildTranscodeMappings(
 			Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
 		}))
 	}
+	if opts.geminiPresets.GeminiChat {
+		mappings = append(mappings, lossMapping(transcode.Mapping{
+			ClientRoute:      mustRouteKey(httpMethodPost, geminiGenerateRoute),
+			ClientProtocol:   transcode.ClientGemini,
+			UpstreamProtocol: transcode.UpstreamChatCompletions,
+			UpstreamPath:     "/v1/chat/completions",
+			ModelMap:         transcode.ModelMap{AllowIdentity: true},
+			Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
+		}))
+	}
+	if opts.geminiPresets.GeminiResponses {
+		mappings = append(mappings, lossMapping(transcode.Mapping{
+			ClientRoute:      mustRouteKey(httpMethodPost, geminiGenerateRoute),
+			ClientProtocol:   transcode.ClientGemini,
+			UpstreamProtocol: transcode.UpstreamResponses,
+			UpstreamPath:     "/v1/responses",
+			ModelMap:         transcode.ModelMap{AllowIdentity: true},
+			Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
+		}))
+	}
+	if opts.geminiPresets.GeminiMessages {
+		mappings = append(mappings, lossMapping(transcode.Mapping{
+			ClientRoute:      mustRouteKey(httpMethodPost, geminiGenerateRoute),
+			ClientProtocol:   transcode.ClientGemini,
+			UpstreamProtocol: transcode.UpstreamMessages,
+			UpstreamPath:     "/v1/messages",
+			ModelMap:         transcode.ModelMap{AllowIdentity: true},
+			Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
+		}))
+	}
+	if opts.geminiPresets.ResponsesGemini {
+		mappings = append(mappings, lossMapping(transcode.Mapping{
+			ClientRoute:      mustRouteKey(httpMethodPost, "/v1/responses"),
+			ClientProtocol:   transcode.ClientResponses,
+			UpstreamProtocol: transcode.UpstreamGemini,
+			UpstreamPath:     "/v1beta",
+			ModelMap:         transcode.ModelMap{AllowIdentity: true},
+			Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
+		}))
+	}
+	if opts.geminiPresets.MessagesGemini {
+		mappings = append(mappings, lossMapping(transcode.Mapping{
+			ClientRoute:      mustRouteKey(httpMethodPost, "/v1/messages"),
+			ClientProtocol:   transcode.ClientMessages,
+			UpstreamProtocol: transcode.UpstreamGemini,
+			UpstreamPath:     "/v1beta",
+			ModelMap:         transcode.ModelMap{AllowIdentity: true},
+			Auth:             transcode.AuthPolicy{Mode: transcode.AuthNone},
+		}))
+	}
 	return mappings, nil
+}
+
+// sortedNativeProtocols returns the keys of a dialect-keyed map in sorted
+// order, so startup refusals are deterministic.
+func sortedNativeProtocols[V any](m map[transcode.NativeProtocol]V) []transcode.NativeProtocol {
+	out := make([]transcode.NativeProtocol, 0, len(m))
+	for dialect := range m {
+		out = append(out, dialect)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func mustRouteKey(method, path string) transcode.RouteKey {
@@ -148,10 +224,19 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	if p.TranscodeContinuityTTL < 0 {
 		return fmt.Errorf("-transcode-continuity-ttl must be nonnegative, got %s", p.TranscodeContinuityTTL)
 	}
+	if p.TranscodeSignatureCap < 0 {
+		return fmt.Errorf("-transcode-gemini-signature-capacity must be nonnegative, got %d", p.TranscodeSignatureCap)
+	}
+	if p.TranscodeSignatureTTL < 0 {
+		return fmt.Errorf("-transcode-gemini-signature-ttl must be nonnegative, got %s", p.TranscodeSignatureTTL)
+	}
 	// The continuity store is shared by this resolve's mappings only: one an
 	// earlier resolve built reflects its capacity and TTL, not the current
 	// ones.
 	p.continuityStore = nil
+	// The signature store is likewise rebuilt per resolve; it is created only
+	// when a mapping targets a Gemini upstream (below).
+	p.geminiSignatureStore = nil
 
 	var parsedRoutes []proxy.TranscodeMapping
 	for _, r := range p.TranscodeRoutes {
@@ -255,6 +340,13 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 		clientQuery:         allowedQuery,
 		negatedQuery:        negatedQuery,
 		strictDefaults:      p.TranscodeStrictDefaults,
+		geminiPresets: geminiPresetFlags{
+			GeminiChat:      p.TranscodeGeminiChat,
+			GeminiResponses: p.TranscodeGeminiResponses,
+			GeminiMessages:  p.TranscodeGeminiMessages,
+			ResponsesGemini: p.TranscodeResponsesGemini,
+			MessagesGemini:  p.TranscodeMessagesGemini,
+		},
 	}
 
 	mappings, err := buildTranscodeMappings(
@@ -367,6 +459,22 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 			mappings[i].ContinuityKey = p.Name
 		}
 
+		if mappings[i].UpstreamProtocol == transcode.UpstreamGemini {
+			if p.geminiSignatureStore == nil {
+				p.geminiSignatureStore = transcode.NewGeminiSignatureStore(transcode.GeminiSignatureConfig{
+					Capacity: p.TranscodeSignatureCap,
+					TTL:      p.TranscodeSignatureTTL,
+				})
+				log.Printf(
+					"transcode: gemini signature store enabled (capacity %d, ttl %s)",
+					p.geminiSignatureStore.Capacity(),
+					p.geminiSignatureStore.TTL(),
+				)
+			}
+			mappings[i].GeminiSignatures = p.geminiSignatureStore
+			mappings[i].GeminiSignatureScope = effectiveName(p)
+		}
+
 		if err := mappings[i].Mapping.Validate(); err != nil {
 			return fmt.Errorf("transcode mapping %s %s: %w", mappings[i].ClientRoute.Method, mappings[i].ClientRoute.Path, err)
 		}
@@ -375,45 +483,64 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 	// A client route carrying several transcode mappings is dispatched by the
 	// request model's native dialect, so a target no model can select is dead
 	// configuration: the operator's flags promise a route that cannot happen.
-	// The responses target is selected only by a model declaring
-	// via=responses (a -model-table fact; -transcode-model cannot carry one).
-	// The chat target is also the dispatcher's fallback, so any model that
-	// resolves with no declared dialect reaches it: a via-less map entry or
-	// identity resolution counts, not only via=chat. Routes are checked in
+	// Any non-chat dialect is selected only by a model declaring via=<dialect>
+	// (a -model-table fact; -transcode-model cannot carry one). The chat
+	// target is also the dispatcher's fallback, so any model that resolves
+	// with no declared dialect reaches it: a via-less map entry or identity
+	// resolution counts, not only via=chat. Routes are checked in
 	// configuration order, so the refusal is deterministic.
+	type dialectReach struct {
+		present    bool
+		selectable bool
+	}
 	type routeReach struct {
-		mappings  int
-		chat      bool
-		responses bool
-		hasChat   bool
-		hasResp   bool
+		mappings int
+		dialects map[transcode.NativeProtocol]*dialectReach
 	}
 	reach := make(map[transcode.RouteKey]*routeReach, len(mappings))
 	var routeOrder []transcode.RouteKey
+	upstreamDialect := func(p transcode.UpstreamProtocol) (transcode.NativeProtocol, bool) {
+		switch p {
+		case transcode.UpstreamChatCompletions:
+			return transcode.NativeChat, true
+		case transcode.UpstreamResponses:
+			return transcode.NativeResponses, true
+		case transcode.UpstreamMessages:
+			return transcode.NativeMessages, true
+		case transcode.UpstreamGemini:
+			return transcode.NativeGemini, true
+		default:
+			return "", false
+		}
+	}
 	for _, m := range mappings {
 		r := reach[m.ClientRoute]
 		if r == nil {
-			r = &routeReach{}
+			r = &routeReach{dialects: map[transcode.NativeProtocol]*dialectReach{}}
 			reach[m.ClientRoute] = r
 			routeOrder = append(routeOrder, m.ClientRoute)
 		}
 		r.mappings++
-		switch m.UpstreamProtocol {
-		case transcode.UpstreamChatCompletions:
-			r.hasChat = true
-		case transcode.UpstreamResponses:
-			r.hasResp = true
+		dialect, ok := upstreamDialect(m.UpstreamProtocol)
+		if !ok {
+			continue
 		}
+		d := r.dialects[dialect]
+		if d == nil {
+			d = &dialectReach{}
+			r.dialects[dialect] = d
+		}
+		d.present = true
 		modelMap := m.Mapping.ModelMap
-		if modelMap.AllowIdentity && !modelMap.RequireExplicitMap {
-			r.chat = true
+		if dialect == transcode.NativeChat && modelMap.AllowIdentity && !modelMap.RequireExplicitMap {
+			d.selectable = true
 		}
 		for _, mapping := range modelMap.Exact {
-			switch mapping.Via {
-			case "", transcode.NativeChat:
-				r.chat = true
-			case transcode.NativeResponses:
-				r.responses = true
+			switch {
+			case dialect == transcode.NativeChat && (mapping.Via == "" || mapping.Via == transcode.NativeChat):
+				d.selectable = true
+			case mapping.Via == dialect:
+				d.selectable = true
 			}
 		}
 	}
@@ -423,11 +550,11 @@ func (p *Provider) resolveTranscode(modelTable []modelTableEntry) error {
 			continue
 		}
 		var missing []string
-		if r.hasChat && !r.chat {
-			missing = append(missing, string(transcode.NativeChat))
-		}
-		if r.hasResp && !r.responses {
-			missing = append(missing, string(transcode.NativeResponses))
+		for _, dialect := range sortedNativeProtocols(r.dialects) {
+			d := r.dialects[dialect]
+			if d.present && !d.selectable {
+				missing = append(missing, string(dialect))
+			}
 		}
 		if len(missing) == 0 {
 			continue

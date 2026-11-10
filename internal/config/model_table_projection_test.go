@@ -249,8 +249,10 @@ func TestModelTable_DuplicateDefaultPerProviderRejected(t *testing.T) {
 	)
 }
 
-// TestModelTable_FactsIgnoredByProjection proves facts never reach the
-// projected resolution map.
+// TestModelTable_FactsIgnoredByProjection proves presentation facts never reach
+// the projected resolution map. max_output is the one routing-relevant fact: it
+// projects onto ModelMapping.MaxOutput, which the Anthropic Messages renderer
+// reads for max_tokens.
 func TestModelTable_FactsIgnoredByProjection(t *testing.T) {
 	bare := resolveModelTableArgs(t,
 		"-upstream", "https://api.openai.com",
@@ -260,12 +262,22 @@ func TestModelTable_FactsIgnoredByProjection(t *testing.T) {
 	full := resolveModelTableArgs(t,
 		"-upstream", "https://api.openai.com",
 		"-transcode-responses-chat",
-		"-model-table", "a@openai=w;context=128000;max_output=4096;efforts=low+high;modalities=text+image;default",
+		"-model-table", "a@openai=w;context=128000;efforts=low+high;modalities=text+image;default",
 	)
 	bareExact := bare.Providers[0].TranscodeMappings()[0].Mapping.ModelMap.Exact
 	fullExact := full.Providers[0].TranscodeMappings()[0].Mapping.ModelMap.Exact
 	if !reflect.DeepEqual(bareExact, fullExact) {
-		t.Fatalf("facts changed the projected map: %+v vs %+v", bareExact, fullExact)
+		t.Fatalf("presentation facts changed the projected map: %+v vs %+v", bareExact, fullExact)
+	}
+
+	withMax := resolveModelTableArgs(t,
+		"-upstream", "https://api.openai.com",
+		"-transcode-responses-chat",
+		"-model-table", "a@openai=w;max_output=4096",
+	)
+	got := withMax.Providers[0].TranscodeMappings()[0].Mapping.ModelMap.Exact["a"].MaxOutput
+	if got == nil || *got != 4096 {
+		t.Fatalf("max_output projected as %v, want 4096", got)
 	}
 }
 

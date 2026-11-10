@@ -1,802 +1,289 @@
 package transcode
 
 import (
-	"bufio"
 	"encoding/json"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"slices"
-	"strings"
 	"testing"
 )
 
-// anthropicBlockEvents collects (event type, content block index) pairs in
-// order from an Anthropic dialect SSE body.
-func anthropicBlockEvents(t *testing.T, body string) []struct {
-	Type  string
-	Index int
-} {
+// zzAnthropicFeed converts one raw Responses SSE data payload through the
+// direct Responses→Anthropic converter and returns the decoded Anthropic
+// events.
+func zzAnthropicFeed(t *testing.T, conv *responsesToAnthropicConverter, data string) []AnthropicStreamEvent {
 	t.Helper()
-	var events []struct {
-		Type  string
-		Index int
-	}
-	scanner := bufio.NewScanner(strings.NewReader(body))
-	eventType := ""
-	for scanner.Scan() {
-		line := scanner.Text()
-		if after, ok := strings.CutPrefix(line, "event: "); ok {
-			eventType = after
-			continue
-		}
-		after, ok := strings.CutPrefix(line, "data: ")
-		if !ok {
-			continue
-		}
-		if eventType != "content_block_start" && eventType != "content_block_stop" {
-			continue
-		}
-		var frame struct {
-			Index int `json:"index"`
-		}
-		if err := json.Unmarshal([]byte(after), &frame); err != nil {
-			t.Fatalf("unmarshal %s frame: %v", eventType, err)
-		}
-		events = append(events, struct {
-			Type  string
-			Index int
-		}{Type: eventType, Index: frame.Index})
-	}
-	if err := scanner.Err(); err != nil {
-		t.Fatal(err)
-	}
-	return events
-}
-
-// positions returns the first position of an event in the collected order.
-func eventPosition(events []struct {
-	Type  string
-	Index int
-}, eventType string, index int) int {
-	for i, event := range events {
-		if event.Type == eventType && event.Index == index {
-			return i
-		}
-	}
-	return -1
-}
-
-func TestStreamTextThenToolClosesEachBlockBeforeTheNext(t *testing.T) {
-	mapping := messagesMapping(t, UpstreamChatCompletions)
-	// The Messages contract requires usage on message_start, which the chat
-	// upstream can only provide later: the CLI default approves that known
-	// loss, so the ordering under test is reached rather than the rejection.
-	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureUsageUnknown: {}}}
-	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-			Body: io.NopCloser(strings.NewReader(
-				"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"content\":\"thinking out loud\"}}]}\n\n" +
-					"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}\n\n" +
-					"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}]}}]}\n\n" +
-					"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
-					"data: [DONE]\n\n")),
-		}, nil
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
-		strings.NewReader(`{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"stream":true}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	out := rec.Body.String()
-	events := anthropicBlockEvents(t, out)
-
-	textStart := eventPosition(events, "content_block_start", 0)
-	textStop := eventPosition(events, "content_block_stop", 0)
-	toolStart := eventPosition(events, "content_block_start", 1)
-	toolStop := eventPosition(events, "content_block_stop", 1)
-	if textStart < 0 || textStop < 0 || toolStart < 0 || toolStop < 0 {
-		t.Fatalf("missing block transitions: %+v\n%s", events, out)
-	}
-	if !(textStart < textStop && textStop < toolStart && toolStart < toolStop) {
-		t.Fatalf("blocks must close before the next opens: text start %d, text stop %d, tool start %d, tool stop %d: %+v",
-			textStart, textStop, toolStart, toolStop, events)
-	}
-	stops := 0
-	for _, event := range events {
-		if event.Type == "content_block_stop" {
-			stops++
-		}
-	}
-	if stops != 2 {
-		t.Fatalf("started blocks = 2, stops = %d: %+v", stops, events)
-	}
-}
-
-func TestStreamTextOnlyStillStopsItsBlock(t *testing.T) {
-	mapping := messagesMapping(t, UpstreamChatCompletions)
-	// The Messages contract requires usage on message_start, which the chat
-	// upstream can only provide later: the CLI default approves that known
-	// loss, so the ordering under test is reached rather than the rejection.
-	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureUsageUnknown: {}}}
-	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-			Body: io.NopCloser(strings.NewReader(
-				"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"content\":\"just text\"}}]}\n\n" +
-					"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
-					"data: [DONE]\n\n")),
-		}, nil
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
-		strings.NewReader(`{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"stream":true}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	out := rec.Body.String()
-	events := anthropicBlockEvents(t, out)
-	start := eventPosition(events, "content_block_start", 0)
-	stop := eventPosition(events, "content_block_stop", 0)
-	if start < 0 || stop < 0 || start > stop {
-		t.Fatalf("a text-only stream must open and close one block: %+v\n%s", events, out)
-	}
-	stops := 0
-	for _, event := range events {
-		if event.Type == "content_block_stop" {
-			stops++
-		}
-	}
-	if stops != 1 {
-		t.Fatalf("text-only stream stops = %d, want 1: %+v", stops, events)
-	}
-}
-
-// TestStreamContentAfterToolCallStillCompletes proves the lifecycle that
-// closes a message item at a tool transition still completes when the model
-// emits content after the tool call: the closed item is never appended to, a
-// new message item opens, and every block still closes before the next opens.
-func TestStreamContentAfterToolCallStillCompletes(t *testing.T) {
-	mapping := messagesMapping(t, UpstreamChatCompletions)
-	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureUsageUnknown: {}}}
-	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-			Body: io.NopCloser(strings.NewReader(
-				"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"content\":\"before\"}}]}\n\n" +
-					"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}\n\n" +
-					"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}]}}]}\n\n" +
-					"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"content\":\"after\"}}]}\n\n" +
-					"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
-					"data: [DONE]\n\n")),
-		}, nil
-	})
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
-		strings.NewReader(`{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"stream":true}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	out := rec.Body.String()
-	if strings.Contains(out, "event: error") {
-		t.Fatalf("content after a tool call must still complete, got an error event: %s", out)
-	}
-	events := anthropicBlockEvents(t, out)
-	if len(events) == 0 {
-		t.Fatalf("no block events: %s", out)
-	}
-	// Every block must close before the next one opens, on every transition of
-	// this exchange: text, tool, then the resumed text.
-	open := 0
-	for _, event := range events {
-		switch event.Type {
-		case "content_block_start":
-			if open != 0 {
-				t.Fatalf("a block started while another was open: %+v", events)
-			}
-			open = event.Index + 1
-		case "content_block_stop":
-			if open == 0 {
-				t.Fatalf("a block stopped while none was open: %+v", events)
-			}
-			open = 0
-		}
-	}
-	if open != 0 {
-		t.Fatalf("a block was left open at the end: %+v", events)
-	}
-	if len(events) != 6 {
-		t.Fatalf("want three sealed blocks (text, tool, resumed text): %+v", events)
-	}
-	if !strings.Contains(out, "after") {
-		t.Fatalf("the content emitted after the tool call is missing: %s", out)
-	}
-}
-
-// TestChatStateSealsMessageBeforeThinking proves the producer closes an open
-// message item before it opens a reasoning item: a thinking block must not
-// start while the text block is still open.
-func TestChatStateSealsMessageBeforeThinking(t *testing.T) {
-	state := newChatResponsesStreamState(
-		testStreamContext(),
-		LossPolicy{},
-		ChatCapabilities{ProviderReasoningThinking: true},
-		"resp_1",
-		"m",
-		1,
-		nil,
-	)
-	first, err := state.Convert(chatChunk(t, ChatStreamDelta{Content: new("spoken")}, nil))
+	batch, err := conv.Convert(SSEEvent{Data: []byte(data)})
 	if err != nil {
-		t.Fatalf("content convert: %v", err)
+		t.Fatalf("frame %.70s: %v", data, err)
 	}
-	second, err := state.Convert(chatChunk(t, ChatStreamDelta{ReasoningContent: new("thought")}, nil))
-	if err != nil {
-		t.Fatalf("reasoning convert: %v", err)
-	}
-
-	var names []string
-	for _, event := range append(append([]ResponsesSSEEvent{}, first...), second...) {
-		switch event.(type) {
-		case ResponseContentPartDoneEvent:
-			names = append(names, "content_part.done")
-		case ResponseOutputItemDoneEvent:
-			names = append(names, "output_item.done")
-		case ResponseOutputItemAddedEvent:
-			names = append(names, "output_item.added")
+	var events []AnthropicStreamEvent
+	for _, frame := range batch.Events {
+		var event AnthropicStreamEvent
+		if err := json.Unmarshal(frame.Data, &event); err != nil {
+			t.Fatal(err)
 		}
+		events = append(events, event)
 	}
-	// The second batch must open the reasoning item only after the message
-	// item has been fully closed.
-	indexOf := func(name string) int {
-		for i, seen := range names {
-			if seen == name {
-				return i
-			}
-		}
-		return -1
-	}
-	var addedAt []int
-	for i, seen := range names {
-		if seen == "output_item.added" {
-			addedAt = append(addedAt, i)
-		}
-	}
-	if len(addedAt) != 2 || indexOf("content_part.done") < 0 || indexOf("output_item.done") < 0 {
-		t.Fatalf("unexpected event sequence: %v", names)
-	}
-	// The message opens first; the thinking item must open only after the
-	// message's part and item are both done.
-	partDone, itemDone, thinkingAdded := indexOf("content_part.done"), indexOf("output_item.done"), addedAt[1]
-	if !(addedAt[0] < partDone && partDone < itemDone && itemDone < thinkingAdded) {
-		t.Fatalf("the message must be sealed before the thinking item opens: %v", names)
-	}
+	return events
 }
 
-// streamChatUpstream drives one Messages->Chat stream through a handler whose
-// chat capability set the test controls.
-func streamChatUpstream(t *testing.T, capabilities ChatCapabilities, sse string) *httptest.ResponseRecorder {
-	t.Helper()
-	mapping := messagesMapping(t, UpstreamChatCompletions)
-	mapping.ModelMap = ModelMap{AllowIdentity: true}
-	mapping.Auth = AuthPolicy{Mode: AuthNone}
-	mapping.AllowedClientQuery = map[string]struct{}{}
-	mapping.ChatCapabilities = capabilities
-	mapping.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureUsageCacheReadUnknown:  {},
-		FeatureUsageCacheWriteUnknown: {},
-		FeatureUsageReasoningUnknown:  {},
-		FeatureUsageUnknown:           {},
-	}}
-	handler := NewTranscodeHandler(
-		HandlerConfig{
-			Mapping:  mapping,
-			Upstream: mustParseURL(t, "https://upstream.example"),
-			BodyLimits: BodyLimits{
-				AcceptedRequestBytes:    1 << 20,
-				SuccessfulResponseBytes: 1 << 20,
-			},
-		},
-		func(req *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
-				Body:       io.NopCloser(strings.NewReader(sse)),
-			}, nil
-		},
-		nil,
+const zzCreated = `{"type":"response.created","sequence_number":1,"response":{"id":"r1","object":"response","created_at":1,"status":"in_progress","model":"m","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}`
+
+// TestAnthropicStreamRejectsConcurrentContentBlocks proves the reported
+// defect class is closed: a reasoning_summary_part.added (or a second
+// message's content_part.added) arriving while any content block is still
+// open is corrupt upstream wire, never two concurrent content_block_start
+// events on the Messages wire.
+func TestAnthropicStreamRejectsConcurrentContentBlocks(t *testing.T) {
+	newConv := func() *responsesToAnthropicConverter {
+		return newResponsesToAnthropicConverter(newAnthropicResponsesStreamState(
+			testStreamContext(), permissiveLossPolicy(),
+			ChatCapabilities{ProviderReasoningThinking: true}, "msg_1", "m", 1,
+		))
+	}
+	msgAdded := `{"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"m1","type":"message","role":"assistant","status":"in_progress","content":[]}}`
+	partAdded := `{"type":"response.content_part.added","sequence_number":3,"item_id":"m1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}`
+	textDelta := `{"type":"response.output_text.delta","sequence_number":4,"item_id":"m1","output_index":0,"content_index":0,"delta":"hi","logprobs":[]}`
+
+	t.Run("reasoning part while text block open", func(t *testing.T) {
+		conv := newConv()
+		zzAnthropicFeed(t, conv, zzCreated)
+		zzAnthropicFeed(t, conv, msgAdded)
+		zzAnthropicFeed(t, conv, partAdded)
+		zzAnthropicFeed(t, conv, textDelta)
+		// A reasoning item whose summary part opens while the text block is
+		// open must fail as upstream wire.
+		zzAnthropicFeed(t, conv, `{"type":"response.output_item.added","sequence_number":5,"output_index":1,"item":{"id":"r1","type":"reasoning","status":"in_progress","summary":[]}}`)
+		_, err := conv.Convert(SSEEvent{Data: []byte(`{"type":"response.reasoning_summary_part.added","sequence_number":6,"item_id":"r1","output_index":1,"summary_index":0,"part":{"type":"summary_text","text":""}}`)})
+		assertAnthropicWireError(t, err, "while another content block is open")
+	})
+
+	t.Run("text part while thinking block open", func(t *testing.T) {
+		conv := newConv()
+		zzAnthropicFeed(t, conv, zzCreated)
+		zzAnthropicFeed(t, conv, `{"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"r1","type":"reasoning","status":"in_progress","summary":[]}}`)
+		zzAnthropicFeed(t, conv, `{"type":"response.reasoning_summary_part.added","sequence_number":3,"item_id":"r1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
+		zzAnthropicFeed(t, conv, `{"type":"response.reasoning_summary_text.delta","sequence_number":4,"item_id":"r1","output_index":0,"summary_index":0,"delta":"think"}`)
+		// A second message item's content part while the thinking block is
+		// open must fail as upstream wire.
+		zzAnthropicFeed(t, conv, `{"type":"response.output_item.added","sequence_number":5,"output_index":1,"item":{"id":"m1","type":"message","role":"assistant","status":"in_progress","content":[]}}`)
+		_, err := conv.Convert(SSEEvent{Data: []byte(`{"type":"response.content_part.added","sequence_number":6,"item_id":"m1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}`)})
+		assertAnthropicWireError(t, err, "while another content block is open")
+	})
+
+	t.Run("second message part while first open", func(t *testing.T) {
+		conv := newConv()
+		zzAnthropicFeed(t, conv, zzCreated)
+		zzAnthropicFeed(t, conv, msgAdded)
+		zzAnthropicFeed(t, conv, partAdded)
+		zzAnthropicFeed(t, conv, textDelta)
+		zzAnthropicFeed(t, conv, `{"type":"response.output_item.added","sequence_number":5,"output_index":1,"item":{"id":"m2","type":"message","role":"assistant","status":"in_progress","content":[]}}`)
+		_, err := conv.Convert(SSEEvent{Data: []byte(`{"type":"response.content_part.added","sequence_number":6,"item_id":"m2","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}`)})
+		assertAnthropicWireError(t, err, "while another content block is open")
+	})
+}
+
+// TestChatToAnthropicNeverEmitsConcurrentBlocks drives the composed
+// chat→Responses→Anthropic path (the OpenRouter/DeepSeek reasoning +
+// reasoning_content gateway shape) through reasoning/content/tool bursts and
+// asserts the emitted Anthropic wire never has two concurrent open blocks.
+func TestChatToAnthropicNeverEmitsConcurrentBlocks(t *testing.T) {
+	conv := newChatToAnthropicConverter(
+		newChatResponsesStreamState(testStreamContext(), permissiveLossPolicy(),
+			ChatCapabilities{ProviderReasoningThinking: true}, "resp_1", "m", 1, nil),
+		newAnthropicResponsesStreamState(testStreamContext(), permissiveLossPolicy(),
+			ChatCapabilities{ProviderReasoningThinking: true}, "resp_1", "m", 1),
 	)
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
-		strings.NewReader(`{"model":"m","max_tokens":64,"messages":[{"role":"user","content":"hi"}],"stream":true}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	return rec
-}
-
-// assertBlocksSealedInOrder proves every content block closes before the next
-// opens, count blocks by their stops, and no error event was emitted.
-func assertBlocksSealedInOrder(t *testing.T, out string, wantStops int) []struct {
-	Type  string
-	Index int
-} {
-	t.Helper()
-	if strings.Contains(out, "event: error") {
-		t.Fatalf("stream must complete without an error event: %s", out)
-	}
-	events := anthropicBlockEvents(t, out)
-	open := 0
-	for _, event := range events {
-		switch event.Type {
-		case "content_block_start":
-			if open != 0 {
-				t.Fatalf("a block started while another was open: %+v", events)
-			}
-			open = event.Index + 1
-		case "content_block_stop":
-			if open == 0 {
-				t.Fatalf("a block stopped while none was open: %+v", events)
-			}
-			open = 0
-		}
-	}
-	if open != 0 {
-		t.Fatalf("a block was left open at the end: %+v", events)
-	}
-	stops := 0
-	for _, event := range events {
-		if event.Type == "content_block_stop" {
-			stops++
-		}
-	}
-	if stops != wantStops {
-		t.Fatalf("stopped blocks = %d, want %d: %+v", stops, wantStops, events)
-	}
-	return events
-}
-
-// TestStreamToolThenThinkingClosesEachBlockBeforeTheNext proves a started tool
-// block is sealed when a reasoning item must open: the tool_use block cannot
-// stay open while the thinking block opens.
-func TestStreamToolThenThinkingClosesEachBlockBeforeTheNext(t *testing.T) {
-	rec := streamChatUpstream(t, ChatCapabilities{ProviderReasoningThinking: true},
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"thinking\"}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
-			"data: [DONE]\n\n")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	out := rec.Body.String()
-	events := assertBlocksSealedInOrder(t, out, 2)
-	toolStop := eventPosition(events, "content_block_stop", 0)
-	thinkingStart := eventPosition(events, "content_block_start", 1)
-	if toolStop < 0 || thinkingStart < 0 {
-		t.Fatalf("expected a sealed tool block and an opened thinking block: %+v\n%s", events, out)
-	}
-	if toolStop > thinkingStart {
-		t.Fatalf("the tool block must close before the thinking block opens: tool stop %d, thinking start %d: %+v",
-			toolStop, thinkingStart, events)
-	}
-	if !strings.Contains(out, "thinking") {
-		t.Fatalf("the reasoning content is missing: %s", out)
-	}
-}
-
-// TestStreamReasoningThenRefusalClosesEachBlockBeforeTheNext proves a refusal
-// arriving while a reasoning item is open seals the reasoning item first: the
-// thinking block cannot stay open while the refusal part opens.
-func TestStreamReasoningThenRefusalClosesEachBlockBeforeTheNext(t *testing.T) {
-	rec := streamChatUpstream(t, ChatCapabilities{ProviderReasoningThinking: true},
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"thinking\"}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"refusal\":\"cannot comply\"}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
-			"data: [DONE]\n\n")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	out := rec.Body.String()
-	events := assertBlocksSealedInOrder(t, out, 2)
-	thinkingStop := eventPosition(events, "content_block_stop", 0)
-	refusalStart := eventPosition(events, "content_block_start", 1)
-	if thinkingStop < 0 || refusalStart < 0 {
-		t.Fatalf("expected a sealed thinking block and an opened refusal block: %+v\n%s", events, out)
-	}
-	if thinkingStop > refusalStart {
-		t.Fatalf("the thinking block must close before the refusal part opens: thinking stop %d, refusal start %d: %+v",
-			thinkingStop, refusalStart, events)
-	}
-	if !strings.Contains(out, "cannot comply") {
-		t.Fatalf("the refusal content is missing: %s", out)
-	}
-}
-
-// TestStreamLateToolFragmentAfterSealRejected proves a fragment reusing the id
-// of an already-sealed call is corrupt upstream wire: it must fail the stream
-// instead of forking a duplicate call id into the terminal envelope.
-func TestStreamLateToolFragmentAfterSealRejected(t *testing.T) {
-	rec := streamChatUpstream(t, ChatCapabilities{},
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}]}}]}\n\n"+
-			// Content resumes, sealing the tool call inline.
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"content\":\"after\"}}]}\n\n"+
-			// A late fragment for the sealed call arrives, carrying enough
-			// identity that a forked call would complete and duplicate the
-			// sealed call id in the terminal envelope.
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"more\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
-			"data: [DONE]\n\n")
-	out := rec.Body.String()
-	if !strings.Contains(out, "event: error") {
-		t.Fatalf("a late fragment for a sealed call must fail the stream: %s", out)
-	}
-	if strings.Contains(out, "event: message_stop") {
-		t.Fatalf("a failed stream must not report a successful terminal: %s", out)
-	}
-	if strings.Count(out, `"call-1"`) > 1 {
-		t.Fatalf("the sealed call id must not be duplicated: %s", out)
-	}
-}
-
-// TestStreamLateSealedCallIDRejectedBeforeAdoption proves the tombstone also
-// covers the adoption path: a sealed call's id arriving again must be rejected
-// even when an unstarted pending call would otherwise adopt it through its
-// fragment index, because either resolution forks a duplicate call id.
-func TestStreamLateSealedCallIDRejectedBeforeAdoption(t *testing.T) {
-	rec := streamChatUpstream(t, ChatCapabilities{},
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"content\":\"after\"}}]}\n\n"+
-			// A new index-0 call arrives without an id (unstarted).
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"other\",\"arguments\":\"\"}}]}}]}\n\n"+
-			// The sealed call's id arrives; index resolution would adopt it.
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"arguments\":\"x\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
-			"data: [DONE]\n\n")
-	out := rec.Body.String()
-	if !strings.Contains(out, "reuses the id") {
-		t.Fatalf("a sealed call id must be rejected before adoption: %s", out)
-	}
-	if strings.Contains(out, "event: message_stop") {
-		t.Fatalf("a failed stream must not report a successful terminal: %s", out)
-	}
-	if got := strings.Count(out, `"call-1"`); got != 1 {
-		t.Fatalf("the sealed call id must appear exactly once (its original block), got %d: %s", got, out)
-	}
-	if strings.Contains(out, `"name":"other"`) {
-		t.Fatalf("the forked call block must never open: %s", out)
-	}
-}
-
-// anthropicEvent captures one content-block event's type, block index, and
-// (for input_json_delta) its partial JSON payload.
-type anthropicEvent struct {
-	Type  string
-	Index int
-	Data  string
-}
-
-// anthropicEventsDetailed collects the content-block events of an Anthropic
-// dialect SSE body, including delta payloads.
-func anthropicEventsDetailed(t *testing.T, body string) []anthropicEvent {
-	t.Helper()
-	var events []anthropicEvent
-	scanner := bufio.NewScanner(strings.NewReader(body))
-	eventType := ""
-	for scanner.Scan() {
-		line := scanner.Text()
-		if after, ok := strings.CutPrefix(line, "event: "); ok {
-			eventType = after
-			continue
-		}
-		after, ok := strings.CutPrefix(line, "data: ")
-		if !ok {
-			continue
-		}
-		switch eventType {
-		case "content_block_start", "content_block_stop":
-			var frame struct {
-				Index int `json:"index"`
-			}
-			if err := json.Unmarshal([]byte(after), &frame); err != nil {
-				t.Fatalf("unmarshal %s frame: %v", eventType, err)
-			}
-			events = append(events, anthropicEvent{Type: eventType, Index: frame.Index})
-		case "content_block_delta":
-			var frame struct {
-				Index int `json:"index"`
-				Delta struct {
-					Type        string `json:"type"`
-					PartialJSON string `json:"partial_json"`
-				} `json:"delta"`
-			}
-			if err := json.Unmarshal([]byte(after), &frame); err != nil {
-				t.Fatalf("unmarshal delta frame: %v", err)
-			}
-			if frame.Delta.Type == "input_json_delta" {
-				events = append(events, anthropicEvent{Type: "input_json_delta", Index: frame.Index, Data: frame.Delta.PartialJSON})
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		t.Fatal(err)
-	}
-	return events
-}
-
-// toolCallInputs assembles each block's input_json_delta payloads in order.
-func toolCallInputs(events []anthropicEvent) map[int]string {
-	inputs := map[int]string{}
-	for _, event := range events {
-		if event.Type == "input_json_delta" {
-			inputs[event.Index] += event.Data
-		}
-	}
-	return inputs
-}
-
-// assertBlocksSequential proves one block opens at a time and closes before
-// the next opens, returning the ordered block indexes.
-func assertBlocksSequential(t *testing.T, out string) []int {
-	t.Helper()
-	if strings.Contains(out, "event: error") {
-		t.Fatalf("stream must complete without an error event: %s", out)
-	}
-	events := anthropicBlockEvents(t, out)
-	var order []int
-	open := -1
-	for _, event := range events {
-		switch event.Type {
-		case "content_block_start":
-			if open >= 0 {
-				t.Fatalf("block %d opened while block %d was open: %+v", event.Index, open, events)
-			}
-			open = event.Index
-			order = append(order, event.Index)
-		case "content_block_stop":
-			if open != event.Index {
-				t.Fatalf("block %d stopped while block %d was open: %+v", event.Index, open, events)
-			}
-			open = -1
-		}
-	}
-	if open >= 0 {
-		t.Fatalf("block %d was left open at the end: %+v", open, events)
-	}
-	return order
-}
-
-// TestStreamParallelToolCallsSealedInReservationOrder proves two parallel
-// calls with interleaved argument fragments render as two sequential tool_use
-// blocks, each closed before the next opens and each carrying its own complete
-// arguments.
-func TestStreamParallelToolCallsSealedInReservationOrder(t *testing.T) {
-	rec := streamChatUpstream(t, ChatCapabilities{},
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"type\":\"function\",\"function\":{\"name\":\"fa\",\"arguments\":\"{\\\"x\\\":\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"type\":\"function\",\"function\":{\"name\":\"fb\",\"arguments\":\"{\\\"y\\\":\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"2}\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
-			"data: [DONE]\n\n")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	out := rec.Body.String()
-	order := assertBlocksSequential(t, out)
-	if len(order) != 2 || order[0] != 0 || order[1] != 1 {
-		t.Fatalf("blocks must be sequential in reservation order, got %v: %s", order, out)
-	}
-	inputs := toolCallInputs(anthropicEventsDetailed(t, out))
-	if inputs[0] != `{"x":1}` {
-		t.Errorf("block 0 input = %q, want {\\\"x\\\":1}", inputs[0])
-	}
-	if inputs[1] != `{"y":2}` {
-		t.Errorf("block 1 input = %q, want {\\\"y\\\":2}", inputs[1])
-	}
-	if !strings.Contains(out, "call-a") || !strings.Contains(out, "call-b") {
-		t.Errorf("both call ids must appear: %s", out)
-	}
-}
-
-// TestStreamThreeParallelToolCallsStaySequential proves three parallel calls
-// render as three sequential blocks in reservation order.
-func TestStreamThreeParallelToolCallsStaySequential(t *testing.T) {
-	rec := streamChatUpstream(t, ChatCapabilities{},
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"type\":\"function\",\"function\":{\"name\":\"fa\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"type\":\"function\",\"function\":{\"name\":\"fb\",\"arguments\":\"{\\\"b\\\":2}\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":2,\"id\":\"call-c\",\"type\":\"function\",\"function\":{\"name\":\"fc\",\"arguments\":\"{\\\"c\\\":3}\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
-			"data: [DONE]\n\n")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	out := rec.Body.String()
-	order := assertBlocksSequential(t, out)
-	if len(order) != 3 || order[0] != 0 || order[1] != 1 || order[2] != 2 {
-		t.Fatalf("three calls must render sequentially in reservation order, got %v: %s", order, out)
-	}
-	inputs := toolCallInputs(anthropicEventsDetailed(t, out))
-	wants := map[int]string{0: `{"a":1}`, 1: `{"b":2}`, 2: `{"c":3}`}
-	for index, want := range wants {
-		if inputs[index] != want {
-			t.Errorf("block %d input = %q, want %q", index, inputs[index], want)
-		}
-	}
-}
-
-// TestStreamDeferredToolFragmentsReplayedInOrder proves a deferred call's
-// fragments are buffered and replayed byte-identically in arrival order.
-func TestStreamDeferredToolFragmentsReplayedInOrder(t *testing.T) {
-	rec := streamChatUpstream(t, ChatCapabilities{},
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"type\":\"function\",\"function\":{\"name\":\"fa\",\"arguments\":\"{\\\"a\\\":\"}}]}}]}\n\n"+
-			// All of B's fragments arrive while A's block is still open.
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"type\":\"function\",\"function\":{\"name\":\"fb\",\"arguments\":\"{\\\"b\\\":\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"\\\"two\\\"\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"}\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"+
-			"data: [DONE]\n\n")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
-	}
-	out := rec.Body.String()
-	order := assertBlocksSequential(t, out)
-	if len(order) != 2 || order[0] != 0 || order[1] != 1 {
-		t.Fatalf("blocks = %v: %s", order, out)
-	}
-	// Block 1's deltas must preserve the arrival order of B's fragments.
-	var deltas []string
-	for _, event := range anthropicEventsDetailed(t, out) {
-		if event.Type == "input_json_delta" && event.Index == 1 {
-			deltas = append(deltas, event.Data)
-		}
-	}
-	wantDeltas := []string{`{"b":`, `"two"`, `}`}
-	if len(deltas) != len(wantDeltas) {
-		t.Fatalf("deferred deltas = %q, want %q", deltas, wantDeltas)
-	}
-	for i, want := range wantDeltas {
-		if deltas[i] != want {
-			t.Fatalf("deferred delta %d = %q, want %q (full %q)", i, deltas[i], want, deltas)
-		}
-	}
-	if joined := strings.Join(deltas, ""); joined != `{"b":"two"}` {
-		t.Fatalf("deferred input = %q", joined)
-	}
-}
-
-// TestStreamTruncatedWhileToolBlockDeferredRejected proves the terminal gate
-// still rejects a stream that ends while a tool block is deferred: an early
-// seal (or a never-started deferred block) never hides a missing terminal.
-func TestStreamTruncatedWhileToolBlockDeferredRejected(t *testing.T) {
-	rec := streamChatUpstream(t, ChatCapabilities{},
-		"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call-a\",\"type\":\"function\",\"function\":{\"name\":\"fa\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n\n"+
-			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"finish_reason\":null,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call-b\",\"type\":\"function\",\"function\":{\"name\":\"fb\",\"arguments\":\"{\\\"b\\\":2}\"}}]}}]}\n\n")
-	// The upstream ends without a finish chunk and without [DONE].
-	out := rec.Body.String()
-	if !strings.Contains(out, "event: error") {
-		t.Fatalf("a stream ending with a deferred block must fail: %s", out)
-	}
-	if strings.Contains(out, "event: message_stop") {
-		t.Fatalf("a truncated stream must not report a successful terminal: %s", out)
-	}
-}
-
-// TestAnthropicDeferredToolCallsDrainOutOfOrder feeds the Anthropic adapter
-// three parallel function-call items whose done events arrive in reverse order
-// and proves the deferral cascades: every block opens and closes exactly once
-// in reservation order, and no deferred or pending block is left behind.
-func TestAnthropicDeferredToolCallsDrainOutOfOrder(t *testing.T) {
-	state := anthropicLifecycleState(t)
-	feedAnthropicCreated(t, state, 0)
-
-	added := func(seq, index int64, itemID, callID, name string) {
+	feed := func(deltaJSON string, finish string) []AnthropicStreamEvent {
 		t.Helper()
-		if _, err := state.Convert(ResponseOutputItemAddedEvent{
-			Type: "response.output_item.added", SequenceNumber: seq,
-			OutputIndex: index,
-			Item: &ResponsesFunctionCallOutputItem{
-				ID: itemID, Type: "function_call", Status: ResponsesItemInProgress,
-				CallID: callID, Name: name, Arguments: "",
-			},
-		}); err != nil {
-			t.Fatalf("added %s: %v", itemID, err)
+		finishField := "null"
+		if finish != "" {
+			finishField = `"` + finish + `"`
 		}
-	}
-	args := func(seq, index int64, itemID, delta string) {
-		t.Helper()
-		if _, err := state.Convert(ResponseFunctionCallArgumentsDeltaEvent{
-			Type: "response.function_call_arguments.delta", SequenceNumber: seq,
-			ItemID: itemID, OutputIndex: index, Delta: delta,
-		}); err != nil {
-			t.Fatalf("delta %s: %v", itemID, err)
-		}
-	}
-	doneSeq := int64(6)
-	done := func(index int64, itemID, callID, name, arguments string) []AnthropicStreamEvent {
-		t.Helper()
-		// The FSM requires the call's arguments to be done before the item's
-		// done, exactly as the producer emits them.
-		doneSeq++
-		if _, err := state.Convert(ResponseFunctionCallArgumentsDoneEvent{
-			Type: "response.function_call_arguments.done", SequenceNumber: doneSeq,
-			ItemID: itemID, OutputIndex: index, Arguments: arguments,
-		}); err != nil {
-			t.Fatalf("arguments done %s: %v", itemID, err)
-		}
-		doneSeq++
-		events, err := state.Convert(ResponseOutputItemDoneEvent{
-			Type: "response.output_item.done", SequenceNumber: doneSeq,
-			OutputIndex: index,
-			Item: &ResponsesFunctionCallOutputItem{
-				ID: itemID, Type: "function_call", Status: ResponsesItemCompleted,
-				CallID: callID, Name: name, Arguments: arguments,
-			},
-		})
+		batch, err := conv.Convert(SSEEvent{Data: []byte(
+			`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":` + deltaJSON + `,"finish_reason":` + finishField + `}]}`,
+		)})
 		if err != nil {
-			t.Fatalf("done %s: %v", itemID, err)
+			t.Fatalf("feed %s: %v", deltaJSON, err)
+		}
+		var events []AnthropicStreamEvent
+		for _, frame := range batch.Events {
+			var event AnthropicStreamEvent
+			if err := json.Unmarshal(frame.Data, &event); err != nil {
+				t.Fatal(err)
+			}
+			events = append(events, event)
+		}
+		return events
+	}
+	var all []AnthropicStreamEvent
+	// Combined and split bursts: reasoning+content in one delta, reasoning
+	// alone, content alone, reasoning+tool_calls, tool, content, tool.
+	all = append(all, feed(`{"reasoning":"step1","content":"ans"}`, "")...)
+	all = append(all, feed(`{"reasoning":"step2"}`, "")...)
+	all = append(all, feed(`{"content":"more"}`, "")...)
+	all = append(all, feed(`{"reasoning":"step3","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]}`, "")...)
+	all = append(all, feed(`{"reasoning":"step4"}`, "")...)
+	all = append(all, feed(`{"content":"final"}`, "")...)
+	all = append(all, feed(`{"tool_calls":[{"index":1,"id":"call_2","type":"function","function":{"name":"g","arguments":"{}"}}]}`, "")...)
+	// Terminal: finish_reason releases the held terminal via [DONE].
+	all = append(all, feed(`{}`, "stop")...)
+	batch, err := conv.Convert(SSEEvent{Data: []byte("[DONE]")})
+	if err != nil {
+		t.Fatalf("[DONE]: %v", err)
+	}
+	for _, frame := range batch.Events {
+		var event AnthropicStreamEvent
+		if err := json.Unmarshal(frame.Data, &event); err != nil {
+			t.Fatal(err)
+		}
+		all = append(all, event)
+	}
+
+	open := 0
+	maxOpen := 0
+	starts, stops := 0, 0
+	for _, e := range all {
+		switch e.Type {
+		case AnthropicStreamEventTypeContentBlockStart:
+			open++
+			starts++
+			if open > maxOpen {
+				maxOpen = open
+			}
+		case AnthropicStreamEventTypeContentBlockStop:
+			open--
+			stops++
+		}
+	}
+	if maxOpen > 1 {
+		t.Fatalf("interleaved wire: max concurrent open content blocks = %d (starts=%d stops=%d)", maxOpen, starts, stops)
+	}
+	if open != 0 {
+		t.Fatalf("the terminal must seal every block: open = %d after [DONE] (starts=%d stops=%d)", open, starts, stops)
+	}
+	if starts != stops {
+		t.Fatalf("starts = %d, stops = %d: every started block must be stopped", starts, stops)
+	}
+	// The bursts render as separate sealed blocks per transition:
+	// 4 thinking + 2 text + 2 tool.
+	if starts != 9 {
+		t.Fatalf("started blocks = %d, want 9 (4 thinking + 2 text + 2 tool)", starts)
+	}
+	messageStops := 0
+	for _, e := range all {
+		if e.Type == AnthropicStreamEventTypeMessageStop {
+			messageStops++
+		}
+	}
+	if messageStops != 1 {
+		t.Fatalf("message_stop count = %d, want exactly one success terminal", messageStops)
+	}
+}
+
+// TestChatToAnthropicSealedPartNotReEmittedAtItemClose reproduces the
+// closeOpenMessageItem double-done defect: a part sealed inline at a
+// part-type transition (text -> refusal via closeOpenPart) must NOT be
+// closed a second time when the message item itself closes at a
+// message->reasoning (or message->tool) transition. On the base commit the
+// item close re-emitted the sealed part's done events, and the Anthropic
+// state machine failed on the duplicated content_part.done.
+func TestChatToAnthropicSealedPartNotReEmittedAtItemClose(t *testing.T) {
+	newConv := func() *chatToAnthropicConverter {
+		return newChatToAnthropicConverter(
+			newChatResponsesStreamState(testStreamContext(), permissiveLossPolicy(),
+				ChatCapabilities{ProviderReasoningThinking: true}, "resp_1", "m", 1, nil),
+			newAnthropicResponsesStreamState(testStreamContext(), permissiveLossPolicy(),
+				ChatCapabilities{ProviderReasoningThinking: true}, "resp_1", "m", 1),
+		)
+	}
+	feed := func(t *testing.T, conv *chatToAnthropicConverter, deltaJSON string, finish string) []AnthropicStreamEvent {
+		t.Helper()
+		finishField := "null"
+		if finish != "" {
+			finishField = `"` + finish + `"`
+		}
+		batch, err := conv.Convert(SSEEvent{Data: []byte(
+			`{"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":` + deltaJSON + `,"finish_reason":` + finishField + `}]}`,
+		)})
+		if err != nil {
+			t.Fatalf("feed %s: %v", deltaJSON, err)
+		}
+		var events []AnthropicStreamEvent
+		for _, frame := range batch.Events {
+			var event AnthropicStreamEvent
+			if err := json.Unmarshal(frame.Data, &event); err != nil {
+				t.Fatal(err)
+			}
+			events = append(events, event)
 		}
 		return events
 	}
 
-	added(1, 0, "fc_a", "call_a", "fa") // A starts (no block open)
-	added(2, 1, "fc_b", "call_b", "fb") // B defers behind A
-	added(3, 2, "fc_c", "call_c", "fc") // C defers behind A
-	args(4, 0, "fc_a", `{"a":1}`)
-	args(5, 1, "fc_b", `{"b":2}`)
-	args(6, 2, "fc_c", `{"c":3}`)
-	// The done events arrive in reverse order: C, B, then A.
-	done(2, "fc_c", "call_c", "fc", `{"c":3}`)
-	done(1, "fc_b", "call_b", "fb", `{"b":2}`)
-	cascade := done(0, "fc_a", "call_a", "fa", `{"a":1}`)
-
-	var starts, stops []int
-	inputs := map[int]string{}
-	for _, event := range cascade {
-		switch event.Type {
-		case AnthropicStreamEventTypeContentBlockStart:
-			starts = append(starts, *event.Index)
-		case AnthropicStreamEventTypeContentBlockStop:
-			stops = append(stops, *event.Index)
-		case AnthropicStreamEventTypeContentBlockDelta:
-			if event.Delta != nil && event.Delta.Type == AnthropicStreamDeltaTypeInputJSONDelta {
-				inputs[*event.Index] += *event.Delta.PartialJSON
+	countType := func(events []AnthropicStreamEvent, typ AnthropicStreamEventType) int {
+		n := 0
+		for _, e := range events {
+			if e.Type == typ {
+				n++
 			}
 		}
+		return n
 	}
-	// A's stop plus B's and C's start/stop (both already done) drain together.
-	if want := []int{1, 2}; !slices.Equal(starts, want) {
-		t.Fatalf("cascade starts = %v, want %v", starts, want)
+
+	run := func(t *testing.T, conv *chatToAnthropicConverter, toolVariant bool) []AnthropicStreamEvent {
+		var all []AnthropicStreamEvent
+		// Open a text part and emit text.
+		all = append(all, feed(t, conv, `{"content":"a"}`, "")...)
+		// Transition text -> refusal: closeOpenPart seals the text part inline
+		// (its done events are emitted here, exactly once).
+		all = append(all, feed(t, conv, `{"refusal":"no"}`, "")...)
+		if toolVariant {
+			// Message -> tool transition: closeOpenMessageItem must skip the
+			// already-sealed text part and close only the open refusal part.
+			all = append(all, feed(t, conv, `{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}]}`, "")...)
+		} else {
+			// Message -> reasoning transition: same close path.
+			all = append(all, feed(t, conv, `{"reasoning":"x"}`, "")...)
+		}
+		// Terminal: finish_reason plus [DONE] releases the held terminal.
+		all = append(all, feed(t, conv, `{}`, "stop")...)
+		batch, err := conv.Convert(SSEEvent{Data: []byte("[DONE]")})
+		if err != nil {
+			t.Fatalf("[DONE]: %v", err)
+		}
+		for _, frame := range batch.Events {
+			var event AnthropicStreamEvent
+			if err := json.Unmarshal(frame.Data, &event); err != nil {
+				t.Fatal(err)
+			}
+			all = append(all, event)
+		}
+		return all
 	}
-	if want := []int{0, 1, 2}; !slices.Equal(stops, want) {
-		t.Fatalf("cascade stops = %v, want %v", stops, want)
-	}
-	if inputs[1] != `{"b":2}` || inputs[2] != `{"c":3}` {
-		t.Fatalf("cascade inputs = %v, want buffered arguments for B and C", inputs)
-	}
-	if len(state.deferredTools) != 0 || len(state.pendingToolStart) != 0 {
-		t.Fatalf("deferred=%d pending=%d, want both empty after the cascade",
-			len(state.deferredTools), len(state.pendingToolStart))
+
+	for _, toolVariant := range []bool{false, true} {
+		name := "reasoning transition"
+		if toolVariant {
+			name = "tool transition"
+		}
+		t.Run(name, func(t *testing.T) {
+			conv := newConv()
+			all := run(t, conv, toolVariant)
+			// Exactly one content_block_start/stop pair per block: the text
+			// and refusal parts, plus the thinking block (reasoning variant)
+			// or the tool_use block (tool variant).
+			wantBlocks := 3
+			if got := countType(all, AnthropicStreamEventTypeContentBlockStart); got != wantBlocks {
+				t.Fatalf("content_block_start count = %d, want %d", got, wantBlocks)
+			}
+			if got := countType(all, AnthropicStreamEventTypeContentBlockStop); got != wantBlocks {
+				t.Fatalf("content_block_stop count = %d, want %d (a sealed part was re-emitted at the item close)", got, wantBlocks)
+			}
+			// Exactly one success terminal.
+			if got := countType(all, AnthropicStreamEventTypeMessageStop); got != 1 {
+				t.Fatalf("message_stop count = %d, want 1", got)
+			}
+			if got := countType(all, AnthropicStreamEventTypeError); got != 0 {
+				t.Fatalf("unexpected error events: %d", got)
+			}
+		})
 	}
 }

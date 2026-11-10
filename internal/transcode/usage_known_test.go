@@ -21,7 +21,7 @@ const usageCounterexample = `{"id":"c","object":"chat.completion","created":1,"m
 // detail objects, so strict policy rejects and under an approved loss the
 // zeros are emitted with the loss recorded exactly once. The known totals are preserved.
 func TestUsageCounterexampleResponsesLossGated(t *testing.T) {
-	response, _, err := DecodeChatResponseWithPolicy([]byte(usageCounterexample), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(usageCounterexample), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestUsageCounterexampleResponsesLossGated(t *testing.T) {
 // rejects, and under an approved loss the breakdown zeros are emitted with
 // the loss recorded exactly once.
 func TestUsageCounterexampleMessagesLossGated(t *testing.T) {
-	response, _, err := DecodeChatResponseWithPolicy([]byte(usageCounterexample), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(usageCounterexample), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestUsageCounterexampleMessagesLossGated(t *testing.T) {
 // unknown output total on the Responses target.
 func TestUsagePartialPreservesKnownTotals(t *testing.T) {
 	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"total_tokens":12}}`
-	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestUsagePartialPreservesKnownTotals(t *testing.T) {
 	// The known total is preserved; the required part totals are
 	// loss-gated.
 	totalOnly := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"total_tokens":12}}`
-	response, _, err = DecodeChatResponseWithPolicy([]byte(totalOnly), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err = DecodeChatResponseWithPolicy([]byte(totalOnly), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

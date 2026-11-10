@@ -19,17 +19,48 @@ import (
 // chatToResponsesConverter adapts chatResponsesStreamState to frameConverter,
 // marshaling typed Responses events into frames.
 type chatToResponsesConverter struct {
+	deliveryGate
+
 	state *chatResponsesStreamState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode, convert, or marshal — so a caller that ignores the returned
+	// error cannot still obtain a clean terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newChatToResponsesConverter(state *chatResponsesStreamState) *chatToResponsesConverter {
 	return &chatToResponsesConverter{state: state}
 }
 
-// Convert processes one upstream Chat SSE frame.
+// Convert processes one upstream Chat SSE frame. The first failure of any
+// kind latches: every later call, and FinalizeEOF, propagates it.
 func (c *chatToResponsesConverter) Convert(
 	frame SSEEvent,
 ) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	mark := c.state.beginCall()
+	batch, err := c.convertFrame(frame)
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.state.rollbackCall(mark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *chatToResponsesConverter) convertFrame(
+	frame SSEEvent,
+) (convertedBatch, error) {
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
+	}
 	chunk, err := chatStreamChunkFromSSE(frame)
 	if errors.Is(err, errChatStreamDone) {
 		// [DONE] is the protocol terminal: release the held terminal batch
@@ -54,8 +85,11 @@ func (c *chatToResponsesConverter) Convert(
 			))
 		}
 		batch, err := marshalResponsesEvents(held)
+		if err != nil {
+			return convertedBatch{}, err
+		}
 		batch.Terminal = true
-		return batch, err
+		return batch, nil
 	}
 	if err != nil {
 		return convertedBatch{}, err
@@ -75,13 +109,35 @@ func (c *chatToResponsesConverter) Convert(
 // as an ungated note. A stream that ends without any finish_reason is
 // still a typed truncation error.
 func (c *chatToResponsesConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	mark := c.state.beginCall()
+	batch, err := c.finalizeEOF()
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.state.rollbackCall(mark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// finalizeEOF releases the held terminal at EOF, leaving failure latching to
+// FinalizeEOF.
+func (c *chatToResponsesConverter) finalizeEOF() (convertedBatch, error) {
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
 		return convertedBatch{}, err
 	}
 	batch, err := marshalResponsesEvents(events)
+	if err != nil {
+		return convertedBatch{}, err
+	}
 	batch.Terminal = true
-	return batch, err
+	return batch, nil
 }
 
 // marshalResponsesEvents validates and marshals typed Responses events into
@@ -111,11 +167,18 @@ func marshalResponsesEvents(
 // frameConverter. Upstream Responses SSE frames are decoded into typed
 // Responses events, converted, and marshaled into Anthropic frames.
 type responsesToAnthropicConverter struct {
+	deliveryGate
+
 	state *anthropicResponsesStreamState
 
 	// missingEventNameNoted gates the missing-event-name note to once per
 	// stream (a data-only gateway omits the name on every frame).
 	missingEventNameNoted bool
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode, validate, convert, or marshal — so a caller that ignores the
+	// returned error cannot still obtain a clean terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newResponsesToAnthropicConverter(
@@ -124,16 +187,43 @@ func newResponsesToAnthropicConverter(
 	return &responsesToAnthropicConverter{state: state}
 }
 
-// Convert processes one upstream Responses SSE frame.
+// Convert processes one upstream Responses SSE frame. The first failure of
+// any kind latches: every later call, and FinalizeEOF, propagates it.
 func (c *responsesToAnthropicConverter) Convert(
 	frame SSEEvent,
 ) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	mark := c.state.beginCall()
+	batch, err := c.convertFrame(frame)
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.state.rollbackCall(mark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *responsesToAnthropicConverter) convertFrame(
+	frame SSEEvent,
+) (convertedBatch, error) {
+	if c.state.streamError != nil {
+		return convertedBatch{}, c.state.streamError
+	}
 	data := trimJSONSpace(frame.Data)
 	if isResponsesDoneSentinel(data) {
 		// The Responses protocol has no [DONE] sentinel; this is defensive
 		// tolerance for a chat-style upstream. The terminal was already
 		// emitted at response.completed; a [DONE] before any terminal is a
-		// truncation and must not end the stream cleanly.
+		// truncation and must not end the stream cleanly. Deliberately NOT
+		// errStreamTruncated: the sentinel is a protocol violation the
+		// upstream itself declared, an upstream-wire class on its own, not
+		// an EOF truncation the reader marks at the truncation sites.
 		if c.state.sawTerminal {
 			return convertedBatch{Terminal: true}, nil
 		}
@@ -166,7 +256,23 @@ func (c *responsesToAnthropicConverter) Convert(
 	// No synthesized name is stored on the frame: routing below uses the
 	// decoded event's own Type, not this frame's Event field, and nothing
 	// reads frame.Event on this branch. Writing it implied the synthesized
-	// name was consumed downstream, which it is not.
+	// name was consumed downstream, which it is not. The note follows the
+	// state conversion: it describes routing that produced client output, so
+	// a frame the state refused leaves no note behind.
+	if frame.Event != "" {
+		if err := validateEventNameMatchesJSONType(frame); err != nil {
+			return convertedBatch{}, upstreamWireError(
+				UpstreamResponses,
+				http.StatusOK,
+				err,
+			)
+		}
+	}
+
+	anthropicEvents, err := c.state.Convert(event)
+	if err != nil {
+		return convertedBatch{}, err
+	}
 	if frame.Event == "" {
 		if !c.missingEventNameNoted {
 			c.missingEventNameNoted = true
@@ -178,17 +284,6 @@ func (c *responsesToAnthropicConverter) Convert(
 				return convertedBatch{}, err
 			}
 		}
-	} else if err := validateEventNameMatchesJSONType(frame); err != nil {
-		return convertedBatch{}, upstreamWireError(
-			UpstreamResponses,
-			http.StatusOK,
-			err,
-		)
-	}
-
-	anthropicEvents, err := c.state.Convert(event)
-	if err != nil {
-		return convertedBatch{}, err
 	}
 	batch, err := marshalAnthropicEvents(anthropicEvents)
 	if err != nil {
@@ -203,13 +298,35 @@ func (c *responsesToAnthropicConverter) Convert(
 
 // FinalizeEOF releases a held terminal or reports a truncation error.
 func (c *responsesToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	mark := c.state.beginCall()
+	batch, err := c.finalizeEOF()
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.state.rollbackCall(mark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// finalizeEOF releases a held terminal or reports the truncation, leaving
+// failure latching to FinalizeEOF.
+func (c *responsesToAnthropicConverter) finalizeEOF() (convertedBatch, error) {
 	events, err := c.state.FinalizeEOF()
 	if err != nil {
 		return convertedBatch{}, err
 	}
 	batch, err := marshalAnthropicEvents(events)
+	if err != nil {
+		return convertedBatch{}, err
+	}
 	batch.Terminal = true
-	return batch, err
+	return batch, nil
 }
 
 // marshalAnthropicEvents marshals typed Anthropic events into frames. The
@@ -240,8 +357,16 @@ func marshalAnthropicEvents(
 // Anthropic state machines strictly in memory. Typed Responses events flow
 // from one state machine into the other without intermediate JSON.
 type chatToAnthropicConverter struct {
+	deliveryGate
+
 	chat      *chatResponsesStreamState
 	anthropic *anthropicResponsesStreamState
+
+	// streamError latches the converter's own failure — a frame it could not
+	// decode, a conversion or release that failed, or a marshal that failed —
+	// so a caller that ignores the returned error cannot still obtain a clean
+	// terminal from [DONE] or EOF.
+	streamError error
 }
 
 func newChatToAnthropicConverter(
@@ -255,9 +380,38 @@ func newChatToAnthropicConverter(
 }
 
 // Convert processes one upstream Chat SSE frame through both state machines.
+// The first failure of any kind latches: every later call, and FinalizeEOF,
+// propagates it.
 func (c *chatToAnthropicConverter) Convert(
 	frame SSEEvent,
 ) (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	chatMark, anthropicMark := c.chat.beginCall(), c.anthropic.beginCall()
+	batch, err := c.convertFrame(frame)
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.chat.rollbackCall(chatMark)
+		c.anthropic.rollbackCall(anthropicMark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// convertFrame converts one frame, leaving failure latching to Convert.
+func (c *chatToAnthropicConverter) convertFrame(
+	frame SSEEvent,
+) (convertedBatch, error) {
+	if c.chat.streamError != nil {
+		return convertedBatch{}, c.chat.streamError
+	}
+	if c.anthropic.streamError != nil {
+		return convertedBatch{}, c.anthropic.streamError
+	}
 	chunk, err := chatStreamChunkFromSSE(frame)
 	if errors.Is(err, errChatStreamDone) {
 		// [DONE] is the protocol terminal: release the held terminal (which
@@ -334,22 +488,56 @@ func (c *chatToAnthropicConverter) releaseTerminals() (convertedBatch, error) {
 // stream that ends WITHOUT any finish_reason is a typed upstream truncation,
 // never a released terminal.
 func (c *chatToAnthropicConverter) FinalizeEOF() (convertedBatch, error) {
+	if c.streamError != nil {
+		return convertedBatch{}, c.streamError
+	}
+	chatMark, anthropicMark := c.chat.beginCall(), c.anthropic.beginCall()
+	batch, err := c.finalizeEOF()
+	if err == nil {
+		batch, err = c.gate(batch)
+	}
+	if err != nil {
+		c.chat.rollbackCall(chatMark)
+		c.anthropic.rollbackCall(anthropicMark)
+		c.streamError = err
+		return convertedBatch{}, err
+	}
+	return batch, nil
+}
+
+// finalizeEOF releases the Chat held terminal at EOF, leaving failure latching
+// to FinalizeEOF.
+func (c *chatToAnthropicConverter) finalizeEOF() (convertedBatch, error) {
+	// Both states' latches are checked: a failure fed to a state directly must
+	// not be washed out at EOF.
+	if c.chat.streamError != nil {
+		return convertedBatch{}, c.chat.streamError
+	}
+	if c.anthropic.streamError != nil {
+		return convertedBatch{}, c.anthropic.streamError
+	}
 	if c.chat.sawFinish && !c.chat.terminalReleased {
-		if err := c.chat.noteMissingSentinel(); err != nil {
-			return convertedBatch{}, err
-		}
 		batch, err := c.releaseTerminals()
 		if err != nil {
+			return convertedBatch{}, err
+		}
+		// The note follows the release, so it describes a completion that was
+		// actually released on EOF.
+		if err := c.chat.noteMissingSentinel(); err != nil {
 			return convertedBatch{}, err
 		}
 		batch.Terminal = true
 		return batch, nil
 	}
-	if c.chat.sawFinish || c.anthropic.sawTerminal {
+	// A terminal is reported only when the Anthropic state committed one: a
+	// [DONE] whose release failed mid-conversion leaves the chat flags set
+	// but no committed terminal, and EOF must report the failure, not a
+	// clean success.
+	if c.anthropic.sawTerminal {
 		return convertedBatch{Terminal: true}, nil
 	}
-	return convertedBatch{}, errors.New(
-		"chat stream ended before a terminal condition",
+	return convertedBatch{}, upstreamWireError(
+		UpstreamChatCompletions, http.StatusOK, errStreamTruncated,
 	)
 }
 
@@ -442,11 +630,22 @@ func (c *chatToResponsesConverter) ConversionReport() *ConversionReport {
 	return &c.state.report
 }
 
-// ErrorEvent builds a client-dialect Responses error event frame. The
-// sequence number continues from the builder so a mid-stream error terminal
-// never collides with response.created's zero.
+// ErrorEvent builds a client-dialect Responses error event frame. The sequence
+// number continues from the delivered events, so a mid-stream error terminal
+// never collides with a delivered event or leaves a gap.
 func (c *chatToResponsesConverter) ErrorEvent(err error) (frameEvent, bool) {
-	return responsesErrorFrame(err, c.state.builder.NextSequenceNumber())
+	return responsesErrorFrame(err, c.nextDeliveredSequence())
+}
+
+// continuityTurns implements continuityTurnSource so streamResponse records
+// continuity for any Responses-client converter, not just the chat upstream.
+func (c *chatToResponsesConverter) continuityTurns(
+	requestTurns []CanonicalTurn, depth int,
+) (string, []CanonicalTurn, int, int, bool) {
+	if c.streamError != nil {
+		return "", nil, 0, 0, false
+	}
+	return c.state.continuityTurns(requestTurns, depth)
 }
 
 // ConversionReport returns the accumulated approved losses of the
@@ -461,27 +660,12 @@ func (c *responsesToAnthropicConverter) ErrorEvent(err error) (frameEvent, bool)
 }
 
 // ConversionReport returns the merged approved losses of both states of the
-// composed conversion. Both states convert the same source usage, so both can
-// record the same clamp fact; the merge keeps the first entry per feature at
-// path (the chat state's, which names the source numbers), matching the
-// per-request log line's dedupe. The dropped counts of both states are summed:
-// a saturated sub-report must stay visible in the merged report.
+// composed conversion, merged exactly like every other composed converter:
+// one entry per feature at path, with a recorded loss winning over a note for
+// the same key, and the dropped counts of both states summed so a saturated
+// sub-report stays visible.
 func (c *chatToAnthropicConverter) ConversionReport() *ConversionReport {
-	merged := ConversionReport{
-		Dropped: c.chat.report.Dropped + c.anthropic.report.Dropped,
-	}
-	seen := make(map[string]struct{}, len(c.chat.report.Losses)+len(c.anthropic.report.Losses))
-	for _, losses := range [][]ConversionLoss{c.chat.report.Losses, c.anthropic.report.Losses} {
-		for _, loss := range losses {
-			key := fmt.Sprintf("%s at %s", loss.Feature, loss.Path)
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			merged.Losses = append(merged.Losses, loss)
-		}
-	}
-	return &merged
+	return mergeConversionReports(&c.chat.report, &c.anthropic.report)
 }
 
 // ErrorEvent builds a client-dialect Anthropic error event frame (the

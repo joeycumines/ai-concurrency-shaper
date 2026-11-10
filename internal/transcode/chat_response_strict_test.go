@@ -122,7 +122,7 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy())
+			_, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy(), nil)
 			if tt.wantAccept {
 				if err != nil {
 					t.Fatalf("decode = %v, want acceptance", err)
@@ -155,7 +155,7 @@ func TestChatResponseStrictPresenceMatrix(t *testing.T) {
 // become a successful assistant response.
 func TestChatResponseNonStreamingCounterexampleIsRejected(t *testing.T) {
 	body := []byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"user","content":"x"}}]}`)
-	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy(), nil)
 	var wireErr *UpstreamWireError
 	if !errors.As(err, &wireErr) {
 		t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
@@ -204,7 +204,7 @@ func TestChatResponseOfficialShapesStillDecode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			response, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy())
+			response, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -276,7 +276,7 @@ func TestChatResponseDecodesMatchedStopExtension(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			response, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy())
+			response, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy(), nil)
 			if err != nil {
 				t.Fatalf("matched_stop response rejected: %v", err)
 			}
@@ -291,7 +291,7 @@ func TestChatResponseDecodesMatchedStopExtension(t *testing.T) {
 	// now TOLERATED (never a failure), not rejected. The modeled
 	// matched_stop extension above still decodes.
 	bogus := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"},"bogus_field":1}]}`
-	if _, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy()); err != nil {
+	if _, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy(), nil); err != nil {
 		t.Fatalf("unknown choice field tolerated decode = %v, want success", err)
 	}
 }
@@ -323,7 +323,7 @@ func TestChatResponseDecodesMatchedStopMessageExtension(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			response, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy())
+			response, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy(), nil)
 			if err != nil {
 				t.Fatalf("message-level matched_stop response rejected: %v", err)
 			}
@@ -337,7 +337,7 @@ func TestChatResponseDecodesMatchedStopMessageExtension(t *testing.T) {
 	// field on the upstream response envelope is a provider extension and is
 	// now TOLERATED (never a failure), not rejected.
 	bogus := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x","bogus_field":1}}]}`
-	if _, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy()); err != nil {
+	if _, _, err := DecodeChatResponseWithPolicy([]byte(bogus), ChatCapabilities{}, StrictLossPolicy(), nil); err != nil {
 		t.Fatalf("unknown message field tolerated decode = %v, want success", err)
 	}
 }
@@ -348,7 +348,7 @@ func TestChatResponseDecodesMatchedStopMessageExtension(t *testing.T) {
 // non-stream and stream alike.
 func TestChatResponseUnknownFinishReasonRefused(t *testing.T) {
 	body := []byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"frobnicate","message":{"role":"assistant","content":"x"}}]}`)
-	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy())
+	_, _, err := DecodeChatResponseWithPolicy(body, ChatCapabilities{}, StrictLossPolicy(), nil)
 	target := &UnsupportedFeatureError{}
 	if !errors.As(err, &target) {
 		t.Fatalf("err = %T: %v, want keyed refusal", err, err)

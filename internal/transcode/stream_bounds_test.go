@@ -326,7 +326,7 @@ func TestStreamTotalStateBound(t *testing.T) {
 		}
 		for i := range maxStreamPartsPerItem {
 			if _, err := state.Convert(ResponseContentPartAddedEvent{
-				Type: "response.content_part.added", SequenceNumber: int64(i + 2),
+				Type: "response.content_part.added", SequenceNumber: int64(3*i + 2),
 				ItemID:       "m1",
 				OutputIndex:  0,
 				ContentIndex: int64(i),
@@ -334,9 +334,25 @@ func TestStreamTotalStateBound(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("part %d: %v", i, err)
 			}
+			// The Messages dialect carries exactly one open content block:
+			// seal the part before the next one opens, exactly as the chat
+			// direction does at a part-type transition.
+			if _, err := state.Convert(ResponseTextDoneEvent{
+				Type: "response.output_text.done", SequenceNumber: int64(3*i + 3),
+				ItemID: "m1", OutputIndex: 0, ContentIndex: int64(i), Text: "",
+			}); err != nil {
+				t.Fatalf("text done %d: %v", i, err)
+			}
+			if _, err := state.Convert(ResponseContentPartDoneEvent{
+				Type: "response.content_part.done", SequenceNumber: int64(3*i + 4),
+				ItemID: "m1", OutputIndex: 0, ContentIndex: int64(i),
+				Part: &ResponsesStreamOutputTextPart{Type: "output_text", Text: "", Annotations: []ResponsesAnnotation{}},
+			}); err != nil {
+				t.Fatalf("part done %d: %v", i, err)
+			}
 		}
 		_, err := state.Convert(ResponseContentPartAddedEvent{
-			Type: "response.content_part.added", SequenceNumber: maxStreamPartsPerItem + 2,
+			Type: "response.content_part.added", SequenceNumber: 3*maxStreamPartsPerItem + 2,
 			ItemID:       "m1",
 			OutputIndex:  0,
 			ContentIndex: maxStreamPartsPerItem,

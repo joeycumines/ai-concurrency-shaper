@@ -83,7 +83,7 @@ func TestUpstreamWireDecodeMatrix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy())
+			_, _, err := DecodeChatResponseWithPolicy([]byte(tt.body), ChatCapabilities{}, StrictLossPolicy(), nil)
 			if tt.wantAccept {
 				if err != nil {
 					t.Fatalf("decode = %v, want acceptance", err)

@@ -29,7 +29,7 @@ import (
 func TestContractRoleUnknownFieldToleratedOnUpstreamResponse(t *testing.T) {
 	// An arbitrary, unmodeled field at both the chat envelope and usage.
 	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","provider_meta_x":"v","choices":[{"index":0,"logprobs":null,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2,"provider_meta_y":3}}`
-	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy())
+	response, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("upstream response with unknown provider fields rejected: %v", err)
 	}
@@ -108,13 +108,13 @@ func TestContractRoleUnknownFieldRejectedOnClientRequest(t *testing.T) {
 func TestContractRoleUnionArmStrictnessPreserved(t *testing.T) {
 	// Cross-arm leakage: a text block carrying image_url.
 	crossArm := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"x","image_url":{"url":"https://example.test/x.png"}}]}}]}`
-	if _, _, err := DecodeChatResponseWithPolicy([]byte(crossArm), ChatCapabilities{}, StrictLossPolicy()); err == nil {
+	if _, _, err := DecodeChatResponseWithPolicy([]byte(crossArm), ChatCapabilities{}, StrictLossPolicy(), nil); err == nil {
 		t.Fatal("text content block carrying image_url accepted; want rejection")
 	}
 
 	// Unknown content-block type.
 	unknownType := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":[{"type":"thinking","thinking":"x"}]}}]}`
-	if _, _, err := DecodeChatResponseWithPolicy([]byte(unknownType), ChatCapabilities{}, StrictLossPolicy()); err == nil {
+	if _, _, err := DecodeChatResponseWithPolicy([]byte(unknownType), ChatCapabilities{}, StrictLossPolicy(), nil); err == nil {
 		t.Fatal("unknown content-block type accepted; want rejection")
 	}
 }
@@ -205,11 +205,11 @@ func TestLogConversionReportNoteUnderAllowedKeyProvesKindWins(t *testing.T) {
 // rejection parity), so its content can never be silently dropped.
 func TestContractRoleNonStreamDeltaArmRejected(t *testing.T) {
 	body := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","delta":{"content":"SHOULD NOT BE DROPPED"},"message":{"role":"assistant","content":"ok"}}]}`
-	if _, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy()); err == nil {
+	if _, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy(), nil); err == nil {
 		t.Fatal("non-streaming chat response with a delta arm accepted; want rejection")
 	}
 	// A normal non-streaming response still decodes.
-	if _, _, err := DecodeChatResponseWithPolicy([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`), ChatCapabilities{}, StrictLossPolicy()); err != nil {
+	if _, _, err := DecodeChatResponseWithPolicy([]byte(`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}]}`), ChatCapabilities{}, StrictLossPolicy(), nil); err != nil {
 		t.Fatalf("normal non-streaming response rejected: %v", err)
 	}
 }
@@ -222,7 +222,7 @@ func TestContractRoleNonStreamDeltaArmRejected(t *testing.T) {
 func TestContractRoleLegacyFunctionCallMapped(t *testing.T) {
 	// Non-streaming message.function_call maps to one tool call.
 	nonStream := `{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"function_call","message":{"role":"assistant","content":null,"function_call":{"name":"f","arguments":"{}"}}}]}`
-	resp, report, err := DecodeChatResponseWithPolicy([]byte(nonStream), ChatCapabilities{}, StrictLossPolicy())
+	resp, report, err := DecodeChatResponseWithPolicy([]byte(nonStream), ChatCapabilities{}, StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("non-streaming message.function_call rejected: %v", err)
 	}

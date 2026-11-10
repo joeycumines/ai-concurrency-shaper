@@ -138,8 +138,7 @@ func TestFieldCaptureQwenNonstreamDecodes(t *testing.T) {
 	response, _, err := DecodeChatResponseWithPolicy(
 		body,
 		ChatCapabilities{ProviderReasoningText: true},
-		StrictLossPolicy(),
-	)
+		StrictLossPolicy(), nil)
 	if err != nil {
 		t.Fatalf("field capture rejected by production decode: %v", err)
 	}

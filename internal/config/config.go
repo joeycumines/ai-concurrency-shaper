@@ -192,7 +192,7 @@ type Provider struct {
 	AuthSourceTimeout time.Duration
 	// AuthMode selects how the credential is attached upstream:
 	// "auto" (default when a source is set), "none", "bearer", "x-api-key",
-	// "api-key", or "header:<NAME>". Auto derives from the upstream host.
+	// "api-key", "goog-api-key", or "header:<NAME>". Auto derives from the upstream host.
 	AuthMode string
 	// AuthHeader names the injection target when AuthMode is header.
 	AuthHeader string
@@ -205,6 +205,11 @@ type Provider struct {
 	TranscodeRoutes            []string
 	TranscodeResponsesChat     bool
 	TranscodeMessagesChat      bool
+	TranscodeGeminiChat        bool
+	TranscodeGeminiResponses   bool
+	TranscodeGeminiMessages    bool
+	TranscodeResponsesGemini   bool
+	TranscodeMessagesGemini    bool
 	TranscodeMessagesResponses bool
 	// NativeRouteFlags holds the raw -native-route values; resolved into
 	// NativeRoute declarations by resolveTranscode.
@@ -227,6 +232,8 @@ type Provider struct {
 	TranscodeContinuity       bool
 	TranscodeContinuityCap    int
 	TranscodeContinuityTTL    time.Duration
+	TranscodeSignatureCap     int
+	TranscodeSignatureTTL     time.Duration
 	TranscodeAuth             string
 	TranscodeAuthSource       string
 	TranscodeAuthHeader       string
@@ -369,6 +376,10 @@ type Provider struct {
 	// continuityStore is the shared continuity store for this provider's
 	// transcoded routes. Nil when continuity is not enabled.
 	continuityStore *transcode.ContinuityStore
+	// geminiSignatureStore is the shared thought-signature store for this
+	// provider's Gemini-upstream mappings. Nil when no mapping targets
+	// gemini.
+	geminiSignatureStore *transcode.GeminiSignatureStore
 }
 
 // TranscodeMappings returns the resolved transcode route mappings for this provider,

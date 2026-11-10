@@ -189,15 +189,46 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 	})
 
 	t.Run("identity immutability", func(t *testing.T) {
-		state := newChatResponsesStreamState(
-			testStreamContext(),
-			StrictLossPolicy(),
-			ChatCapabilities{},
-			"resp_1",
-			"gpt-4.1",
-			1710000000,
-			nil,
-		)
+		newState := func() *chatResponsesStreamState {
+			return newChatResponsesStreamState(
+				testStreamContext(),
+				StrictLossPolicy(),
+				ChatCapabilities{},
+				"resp_1",
+				"gpt-4.1",
+				1710000000,
+				nil,
+			)
+		}
+		// A rejected fragment fails the stream (the state latches the
+		// failure), so each rejection runs on a fresh state that replays the
+		// accepted prefix, and the accepted sequence continues on state. The
+		// rejected state must keep reporting the same failure.
+		state := newState()
+		var accepted []ChatStreamResponse
+		accept := func(chunk ChatStreamResponse) error {
+			_, err := state.Convert(chunk)
+			if err == nil {
+				accepted = append(accepted, chunk)
+			}
+			return err
+		}
+		reject := func(t *testing.T, chunk ChatStreamResponse) error {
+			t.Helper()
+			rejected := newState()
+			for _, prior := range accepted {
+				if _, err := rejected.Convert(prior); err != nil {
+					t.Fatalf("replaying the accepted prefix: %v", err)
+				}
+			}
+			_, err := rejected.Convert(chunk)
+			if err != nil {
+				if _, again := rejected.Convert(chunk); !errors.Is(again, err) {
+					t.Fatalf("after a rejection: err = %v, want the latched %v", again, err)
+				}
+			}
+			return err
+		}
 		chunk := func(calls ...ChatToolCallDelta) ChatStreamResponse {
 			return ChatStreamResponse{
 				ID:      "c",
@@ -211,7 +242,7 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 			}
 		}
 		// The added event is announced once id and name are both known.
-		if _, err := state.Convert(chunk(ChatToolCallDelta{
+		if err := accept(chunk(ChatToolCallDelta{
 			Index: new(0),
 			ID:    new("call_1"),
 			Type:  new("function"),
@@ -241,7 +272,7 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
-				_, err := state.Convert(chunk(tt.call))
+				err := reject(t, chunk(tt.call))
 				if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 					t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 				}
@@ -249,7 +280,7 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 		}
 		// An index-less, id-less continuation resolves to the single pending
 		// call and is accepted.
-		if _, err := state.Convert(chunk(ChatToolCallDelta{
+		if err := accept(chunk(ChatToolCallDelta{
 			Function: ChatToolCallFunction{
 				Arguments: `"y":1}`,
 			},
@@ -257,7 +288,7 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 			t.Fatalf("single-pending continuation rejected: %v", err)
 		}
 		// A second call opens at index 1.
-		if _, err := state.Convert(chunk(ChatToolCallDelta{
+		if err := accept(chunk(ChatToolCallDelta{
 			Index: new(1),
 			ID:    new("call_2"),
 			Type:  new("function"),
@@ -270,7 +301,7 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 		}
 		// The fragment id resolves to call_1 while its index resolves to
 		// call_2: the conflicting index must never be silently ignored.
-		_, err := state.Convert(chunk(ChatToolCallDelta{
+		err := reject(t, chunk(ChatToolCallDelta{
 			Index: new(1),
 			ID:    new("call_1"),
 		}))
@@ -283,14 +314,14 @@ func TestChatStreamToolCallFragmentEnforced(t *testing.T) {
 		}
 		// With two pending calls, an index-less, id-less fragment is
 		// ambiguous.
-		_, err = state.Convert(chunk(ChatToolCallDelta{
+		err = reject(t, chunk(ChatToolCallDelta{
 			Function: ChatToolCallFunction{Name: new("h")},
 		}))
 		if !errors.As(err, &wireErr) {
 			t.Fatalf("err = %T %v, want *UpstreamWireError", err, err)
 		}
 		// Same identity fragments remain accepted (argument continuation).
-		if _, err := state.Convert(chunk(ChatToolCallDelta{
+		if err := accept(chunk(ChatToolCallDelta{
 			Index: new(0),
 			ID:    new("call_1"),
 			Type:  new("function"),

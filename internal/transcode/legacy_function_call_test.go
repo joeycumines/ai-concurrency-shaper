@@ -123,7 +123,7 @@ func TestLegacyFunctionCallCorruptFragmentsRejected(t *testing.T) {
 		`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"function_call","message":{"role":"assistant","content":null,"function_call":{"name":"f","arguments":null}}}]} `,
 		`{"id":"c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"finish_reason":"function_call","message":{"role":"assistant","content":null,"function_call":{}}}]} `,
 	} {
-		if _, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy()); err == nil {
+		if _, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy(), nil); err == nil {
 			t.Fatalf("non-streaming fragment accepted: %s", body)
 		}
 	}

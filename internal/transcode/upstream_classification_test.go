@@ -27,7 +27,7 @@ func TestChatResponseWithoutModelIsLocalConversionError(t *testing.T) {
 		"absent model": `{"id":"c","object":"chat.completion","created":1,"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
 		"empty model":  `{"id":"c","object":"chat.completion","created":1,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`,
 	} {
-		_, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy())
+		_, _, err := DecodeChatResponseWithPolicy([]byte(body), ChatCapabilities{}, StrictLossPolicy(), nil)
 		if err == nil {
 			t.Fatalf("%s: decode must fail", name)
 		}
