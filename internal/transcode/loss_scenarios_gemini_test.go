@@ -21,7 +21,7 @@ func geminiRequestScenario(body string) func(LossPolicy) (ConversionReport, erro
 // policy and returns the report the decode produced.
 func geminiResponseScenario(body string) func(LossPolicy) (ConversionReport, error) {
 	return func(policy LossPolicy) (ConversionReport, error) {
-		_, report, err := DecodeGeminiResponse([]byte(body), ChatCapabilities{}, policy, NewExchangeIDs())
+		_, report, err := DecodeGeminiResponse([]byte(body), ChatCapabilities{}, policy, NewExchangeIDs(), nil)
 		return report, err
 	}
 }

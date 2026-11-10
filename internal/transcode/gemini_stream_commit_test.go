@@ -136,7 +136,7 @@ func TestGeminiStreamRecordsMatchNonStreamingDecode(t *testing.T) {
 			}
 			_, decodeReport, err := DecodeGeminiResponse(
 				[]byte(`{"candidates":[{"content":{"role":"model","parts":[`+tc.part+`]},"finishReason":"STOP","index":0}],"modelVersion":"m"}`),
-				tc.caps, policy, NewExchangeIDs(),
+				tc.caps, policy, NewExchangeIDs(), nil,
 			)
 			if err != nil {
 				t.Fatalf("non-streaming: %v", err)

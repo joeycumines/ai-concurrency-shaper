@@ -54,8 +54,9 @@ func DecodeGeminiResponse(
 	capabilities ChatCapabilities,
 	policy LossPolicy,
 	ids *ExchangeIDs,
+	names *ToolNames,
 ) (CanonicalResponse, ConversionReport, error) {
-	response, report, err := decodeGeminiResponse(body, capabilities, policy, ids)
+	response, report, err := decodeGeminiResponse(body, capabilities, policy, ids, names)
 	if err != nil {
 		return CanonicalResponse{}, ConversionReport{}, err
 	}
@@ -70,6 +71,7 @@ func decodeGeminiResponse(
 	capabilities ChatCapabilities,
 	policy LossPolicy,
 	ids *ExchangeIDs,
+	names *ToolNames,
 ) (CanonicalResponse, ConversionReport, error) {
 	var report ConversionReport
 	resp, err := geminigeneratecontent.DecodeResponse(body)
@@ -367,9 +369,14 @@ func decodeGeminiResponse(
 						fmt.Errorf("gemini functionCall %q args must be a JSON object", call.Name),
 					)
 				}
+				// Gemini carries only the flat wire name; a Responses client
+				// receives its declared bare name plus the separate
+				// namespace qualifier, exactly like the streaming decode.
+				name, namespace := names.clientCallName(call.Name)
 				item := &CanonicalFunctionCallItem{
 					CallID:    callID,
-					Name:      call.Name,
+					Name:      name,
+					Namespace: namespace,
 					Arguments: ParseToolArguments(string(args)),
 				}
 				response.Items = append(response.Items, item)

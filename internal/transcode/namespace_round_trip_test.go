@@ -510,3 +510,42 @@ func TestUndeclaredNamespaceRefusalCoversNamespaceOwnedNames(t *testing.T) {
 		})
 	}
 }
+
+// TestNamespaceToolRoundTripResponsesToGeminiNonStreaming proves the
+// non-streaming Gemini decode restores a namespace child's identity exactly
+// like the streaming decode: the Gemini wire carries only the flat name, and
+// the Responses client must receive the bare name plus its qualifier.
+func TestNamespaceToolRoundTripResponsesToGeminiNonStreaming(t *testing.T) {
+	key, err := NewRouteKey(http.MethodPost, "/v1/responses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping := Mapping{
+		ClientRoute:      key,
+		ClientProtocol:   ClientResponses,
+		UpstreamProtocol: UpstreamGemini,
+		UpstreamPath:     "/v1beta",
+	}
+	handler := testHandler(t, mapping, func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"spawn_agent","args":{"message":"x"}}}]},"finishReason":"STOP","index":0}],"modelVersion":"m"}`,
+			)),
+		}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(namespaceToolRequestBody))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, `"type":"function_call"`) {
+		t.Fatalf("missing function_call item: %s", out)
+	}
+	if !strings.Contains(out, `"name":"spawn_agent"`) || !strings.Contains(out, `"namespace":"multi_agent_v1"`) {
+		t.Fatalf("function_call lacks the bare name + namespace qualifier: %s", out)
+	}
+}

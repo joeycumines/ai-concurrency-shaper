@@ -8,7 +8,7 @@ import (
 
 // decodeGemini runs DecodeGeminiResponse under the given policy.
 func decodeGemini(body string, policy LossPolicy) (CanonicalResponse, ConversionReport, error) {
-	return DecodeGeminiResponse([]byte(body), ChatCapabilities{}, policy, NewExchangeIDs())
+	return DecodeGeminiResponse([]byte(body), ChatCapabilities{}, policy, NewExchangeIDs(), nil)
 }
 
 const geminiTextResponse = `{
@@ -364,7 +364,7 @@ func TestDecodeGeminiResponseReasoningTextJoinsTextRun(t *testing.T) {
 		}],
 		"modelVersion": "m"
 	}`
-	resp, _, err := DecodeGeminiResponse([]byte(body), ChatCapabilities{ProviderReasoningText: true}, permissivePolicy(), NewExchangeIDs())
+	resp, _, err := DecodeGeminiResponse([]byte(body), ChatCapabilities{ProviderReasoningText: true}, permissivePolicy(), NewExchangeIDs(), nil)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -401,7 +401,7 @@ func TestDecodeGeminiResponseThoughtText(t *testing.T) {
 		t.Fatalf("parts = %v, want only the answer text", msg.Parts)
 	}
 	// With the thinking capability: a synthetic thinking block.
-	resp, report, err = DecodeGeminiResponse([]byte(body), ChatCapabilities{ProviderReasoningThinking: true}, permissivePolicy(), NewExchangeIDs())
+	resp, report, err = DecodeGeminiResponse([]byte(body), ChatCapabilities{ProviderReasoningThinking: true}, permissivePolicy(), NewExchangeIDs(), nil)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -592,7 +592,7 @@ func TestDecodeGeminiResponseEmptyThoughtPartRecordsNothing(t *testing.T) {
 		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought":true}]},"finishReason":"STOP","index":0}],"modelVersion":"gemini-3-pro-preview"}`),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		StrictLossPolicy(),
-		NewExchangeIDs(),
+		NewExchangeIDs(), nil,
 	)
 	if err != nil {
 		t.Fatalf("empty thought part: %v", err)
@@ -611,7 +611,7 @@ func TestDecodeGeminiResponseEmptyThoughtPartRecordsNothing(t *testing.T) {
 		[]byte(`{"candidates":[{"content":{"role":"model","parts":[{"text":"","thought":true,"thoughtSignature":"sig"}]},"finishReason":"STOP","index":0}],"modelVersion":"gemini-3-pro-preview"}`),
 		ChatCapabilities{ProviderReasoningThinking: true},
 		StrictLossPolicy(),
-		NewExchangeIDs(),
+		NewExchangeIDs(), nil,
 	)
 	var unsupported *UnsupportedFeatureError
 	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureGeminiResponseThoughtSignature) {

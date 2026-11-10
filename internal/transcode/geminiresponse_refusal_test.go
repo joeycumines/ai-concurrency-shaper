@@ -11,7 +11,7 @@ import (
 func TestDecodeGeminiResponseRefusedResponseReportsNothing(t *testing.T) {
 	body := `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"f","args":{}}},{"text":"hi","partMetadata":{"foo":1}}]},"finishReason":"STOP","index":0}],"modelVersion":"m"}`
 	_, report, err := DecodeGeminiResponse(
-		[]byte(body), ChatCapabilities{}, LossPolicy{Allowed: map[Feature]struct{}{}}, NewExchangeIDs(),
+		[]byte(body), ChatCapabilities{}, LossPolicy{Allowed: map[Feature]struct{}{}}, NewExchangeIDs(), nil,
 	)
 	var unsupported *UnsupportedFeatureError
 	if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureGeminiPartMetadata) {
@@ -28,7 +28,7 @@ func TestDecodeGeminiResponseRefusedResponseReportsNothing(t *testing.T) {
 func TestDecodeGeminiResponseRejectsNamelessFunctionCall(t *testing.T) {
 	body := `{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"args":{}}}]},"finishReason":"STOP","index":0}],"modelVersion":"m"}`
 	_, _, err := DecodeGeminiResponse(
-		[]byte(body), ChatCapabilities{}, StrictLossPolicy(), NewExchangeIDs(),
+		[]byte(body), ChatCapabilities{}, StrictLossPolicy(), NewExchangeIDs(), nil,
 	)
 	if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 		t.Fatalf("non-streaming err = %T %v, want an upstream wire fault", err, err)

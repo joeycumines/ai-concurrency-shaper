@@ -570,7 +570,7 @@ func TestGeminiUpstreamStreamPartGatesDecidedBeforeCommit(t *testing.T) {
 			_, streamErr := s.Convert(geminiChunk(t, `{"candidates":[{"content":{"parts":[`+part+`]},"index":0}]}`))
 			_, _, decodeErr := DecodeGeminiResponse(
 				[]byte(`{"candidates":[{"content":{"role":"model","parts":[`+part+`]},"finishReason":"STOP"}],"modelVersion":"m"}`),
-				ChatCapabilities{}, LossPolicy{Allowed: map[Feature]struct{}{}}, NewExchangeIDs(),
+				ChatCapabilities{}, LossPolicy{Allowed: map[Feature]struct{}{}}, NewExchangeIDs(), nil,
 			)
 			var streamRefusal, decodeRefusal *UnsupportedFeatureError
 			if !errors.As(streamErr, &streamRefusal) || !errors.As(decodeErr, &decodeRefusal) ||
