@@ -89,12 +89,17 @@ const (
 	FeatureToolResultTextJoin Feature = "tool_result_text_join"
 	// NamespaceReplayUndeclared covers replayed history whose function call
 	// names a namespace this request does not declare. The qualifier cannot
-	// be mapped, so the upstream is not taught the name: the call is a
-	// policy-gated loss, NOT a note, because forwarding it unqualified can
-	// re-point the call at a different surviving tool. When the bare name IS
-	// owned by a surviving tool the conversion is refused outright instead -
-	// a reinterpretation of client-sent history is never a loss the operator
-	// can approve.
+	// be mapped, so the bare child name is the only representation the
+	// target can receive; the canonical part therefore carries no qualifier
+	// after the loss is recorded, and every flattening renderer emits the
+	// bare name. It is approved by default because a Codex auto-compaction
+	// request declares no tools at all while replaying the thread's
+	// namespaced calls (observed 2026-11-10), so the loss is normal client
+	// traffic; deny it with -transcode-allow-loss
+	// !namespace_replay_undeclared to restore the strict refusal. When the
+	// bare name IS owned by a surviving tool the conversion is refused
+	// outright instead - a reinterpretation of client-sent history is never
+	// a loss the operator can approve.
 	FeatureNamespaceReplayUndeclared Feature = "namespace_replay_undeclared"
 	// OutputItemBoundaries covers output item boundaries (and
 	// conversation-state output items such as function_call_output) that the
@@ -402,7 +407,7 @@ var lossRegistry = []lossEntry{
 	{FeatureToolSchemaStrictness, "the source tool schema has no strictness semantic; the Responses function-tool contract requires explicit strict, emitted as strict:false under this permission"},
 	{FeatureToolResultErrorStatus, "the tool result error status cannot be reproduced in the target; the permissive encoding is the visible error_status_prefix text"},
 	{FeatureToolResultMultimodalContent, "multimodal tool-result content cannot be carried by a Chat tool message; under this permission it is encoded as the tool_result_json_envelope text"},
-	{FeatureNamespaceReplayUndeclared, "replayed function_call history names a namespace this request does not declare for that name; the qualifier cannot be mapped, so the upstream is not taught the name and the replayed call may be unresolvable there"},
+	{FeatureNamespaceReplayUndeclared, "replayed function_call history names a namespace this request does not declare for that name; the qualifier cannot be mapped, so the call is forwarded under its bare child name (the only representation the target can receive) and the replayed call may be unresolvable there"},
 	{FeatureOutputItemBoundaries, "output item boundaries and conversation-state output items (function_call_output) cannot be reproduced in the target"},
 	{FeatureOutputPhase, "the output message phase (commentary vs final_answer) cannot be reproduced in the target"},
 	{FeatureMissingStreamSentinel, "the upstream chat stream ended after a finishing chunk without the [DONE] sentinel; the completion was released on EOF and the provider quirk recorded"},
