@@ -950,15 +950,25 @@ child is qualified deterministically (`namespace__child`), and the
 per-request map — not a name separator — is what maps the call back.
 Replayed history keeps the same flat names, so the upstream is not taught
 the bare form for any namespace this request declares. If replayed history
-names a namespace the request no longer declares for that name, the
-qualifier cannot be mapped: that is the `namespace_replay_undeclared` loss,
-and the call is rendered under its bare child name (the only representation
-the target can receive). It is approved by default because a Codex
-auto-compaction request legitimately declares no tools at all while
-replaying the thread's namespaced calls, so the exchange is served rather
-than turned away at its context limit. Every drop is still recorded in the
+names a namespace the exchange no longer declares for that name, the
+qualifier cannot be mapped for a flattening target: that is the
+`namespace_replay_undeclared` loss, and the call is rendered under its bare
+child name, which is the only representation a Chat, Gemini, or Messages
+request can receive. A target that carries the qualifier natively — a
+Responses upstream — receives it unchanged and records no loss, so the
+decision is made per exchange by the renderer that knows the target rather
+than once at decode.
+
+The loss is approved by default because a Codex auto-compaction request
+legitimately declares no tools at all while replaying the thread's namespaced
+calls, so the exchange is served rather than turned away at its context
+limit. Because the decision is per exchange, the same holds for history the
+`-transcode-continuity` store reconstructed: a tool-less follow-up is served
+under the bare name, while a follow-up that declares the qualifier again
+resolves it to its flat name. Every drop is still recorded in the
 per-request report; deny it with
-`-transcode-allow-loss '!namespace_replay_undeclared'` to restore the strict
+`-transcode-allow-loss '!namespace_replay_undeclared'`, or withdraw every
+default at once with `-transcode-strict-defaults`, to restore the strict
 refusal. When the bare name is already owned by a surviving tool the exchange
 is refused outright: no policy can approve re-pointing a client-sent call at
 a different tool.

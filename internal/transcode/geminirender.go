@@ -175,7 +175,8 @@ func RenderGeminiRequest(
 	// One content per canonical turn, in order. The client decoders already
 	// group parallel calls and their results into single turns.
 	callNames := make(map[string]string) // call id -> function name, for result name resolution
-	currentTurn := len(request.Turns)    // index of the first current-turn model content
+	replay := newNamespaceReplayResolve(context.ToolNames, request.Tools, policy, &report)
+	currentTurn := len(request.Turns) // index of the first current-turn model content
 	for i, turn := range request.Turns {
 		if turn.Role == CanonicalUser {
 			hasNonResult := false
@@ -267,22 +268,13 @@ func RenderGeminiRequest(
 					InlineData: &geminigeneratecontent.Blob{MimeType: p.MediaType, Data: p.Base64},
 				})
 			case CanonicalFunctionCall:
-				// The canonical part carries the BARE name plus the namespace
-				// this exchange declared; the Gemini wire carries only the
-				// flat name, re-derived from both via ToolNames.flatName (the
-				// functionResponse name below must match what the model was
-				// taught). An approved undeclared replay arrives with the
-				// qualifier already cleared by the decode.
-				name := p.Name
-				if p.Namespace != "" {
-					flat, ok := context.ToolNames.flatName(ToolNameRef{Namespace: p.Namespace, Name: p.Name})
-					if !ok {
-						return nil, report, fmt.Errorf(
-							"turn %d part %d: call %q references namespace %q, which this request does not declare",
-							i, j, p.Name, p.Namespace,
-						)
-					}
-					name = flat
+				// The call's namespace qualifier is resolved for THIS
+				// exchange: the Gemini wire carries only the flat name, and
+				// the functionResponse name rendered below must match what the
+				// model was taught (callNames).
+				name, err := replay.wireName(p, fmt.Sprintf("turn %d part %d", i, j))
+				if err != nil {
+					return nil, report, err
 				}
 				call := &geminiRenderFunctionCall{
 					Name: name,
