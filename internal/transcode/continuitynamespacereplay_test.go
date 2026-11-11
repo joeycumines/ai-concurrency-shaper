@@ -1,13 +1,13 @@
 package transcode
 
-// Proxy-reconstructed history must be adjudicated exactly like inline
-// history. The continuity store retains canonical turns and never re-decodes
-// them, so any decision written into a canonical part at decode time is either
-// absent or stale by the time a follow-up renders. These tests pin the
-// consequence that matters most: a retained namespaced call must resolve
-// against the FOLLOW-UP's declared tools, so a follow-up that re-declares the
-// qualifier renders the flat child name instead of being misattributed to a
-// different surviving tool that happens to share the bare name.
+// Proxy-reconstructed history must be adjudicated like inline history. The
+// continuity store retains canonical turns and never re-decodes them, so any
+// decision written into a canonical part at decode time is stale for a later
+// exchange. These tests pin the consequence that matters most: a retained
+// namespaced call must resolve against the FOLLOW-UP's declared tools, so a
+// follow-up that declares the qualifier renders the qualified flat name instead
+// of the bare name, which would silently re-point the call at a different
+// surviving tool that owns it.
 
 import (
 	"encoding/json"
@@ -20,27 +20,18 @@ import (
 	"time"
 )
 
-// collisionToolRequest declares a plain tool AND a namespace child with the
-// same bare name, so the child's flat wire name is qualified
-// (multi_agent_v1__spawn_agent) and is distinguishable from the plain tool.
-const collisionToolRequest = `{
-	"model": "m",
-	"input": "delegate",
-	"tools": [
-		{"type": "function", "name": "spawn_agent", "description": "plain", "strict": false,
-		 "parameters": {"type": "object", "properties": {}}},
-		{"type": "namespace", "name": "multi_agent_v1", "description": "agents", "tools": [
-			{"type": "function", "name": "spawn_agent", "description": "child", "strict": false,
-			 "parameters": {"type": "object", "properties": {"message": {"type": "string"}}}}]}
-	]
-}`
-
-// TestContinuityFollowUpRedefiningTheQualifierResolvesTheDeclaredName proves
-// the retained qualifier is still live at render time: the follow-up declares
-// the namespace again, so the retained call must render the qualified flat
-// name. Rendering the bare name there would silently re-point a namespaced
-// call at the plain tool that owns it.
-func TestContinuityFollowUpRedefiningTheQualifierResolvesTheDeclaredName(t *testing.T) {
+// TestContinuityFollowUpDeclaringTheQualifierResolvesTheDeclaredName proves the
+// retained qualifier is still LIVE at render time, which only holds when no
+// earlier exchange destroyed it.
+//
+// The chain is built by a tool-less exchange — the compaction shape, where the
+// qualifier cannot be mapped for a chat target — and the follow-up then
+// declares the namespace. A decision baked into the retained part by the
+// tool-less exchange would make the follow-up render the BARE name, and because
+// the follow-up also declares a plain tool called spawn_agent, that bare name
+// addresses the WRONG tool. Resolving per exchange renders the qualified flat
+// name instead.
+func TestContinuityFollowUpDeclaringTheQualifierResolvesTheDeclaredName(t *testing.T) {
 	var upstreamBodies []string
 	mapping := responsesMapping(t)
 	mapping.ModelMap = ModelMap{AllowIdentity: true}
@@ -64,9 +55,8 @@ func TestContinuityFollowUpRedefiningTheQualifierResolvesTheDeclaredName(t *test
 				Header:     http.Header{"Content-Type": []string{"application/json"}},
 				Body: io.NopCloser(strings.NewReader(
 					`{"id":"chatcmpl-1","object":"chat.completion","created":1710000000,"model":"m",` +
-						`"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant",` +
-						`"content":null,"tool_calls":[{"id":"call-1","type":"function",` +
-						`"function":{"name":"multi_agent_v1__spawn_agent","arguments":"{}"}}]}}]}`,
+						`"choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant",` +
+						`"content":"summary"}}]}`,
 				)),
 			}, nil
 		},
@@ -80,7 +70,23 @@ func TestContinuityFollowUpRedefiningTheQualifierResolvesTheDeclaredName(t *test
 		return rec.Code, rec.Body.Bytes()
 	}
 
-	code, first := post(collisionToolRequest)
+	// Turn 1: a tool-less exchange whose history carries the namespaced call.
+	// For a chat target the qualifier cannot be mapped, so the bare name is
+	// rendered and the drop recorded. store is left at its default so the
+	// chain is retained for the follow-up.
+	toolLess := `{
+		"model": "m",
+		"tools": [],
+		"tool_choice": "auto",
+		"input": [
+			{"type": "message", "role": "user",
+			 "content": [{"type": "input_text", "text": "delegate the review"}]},
+			{"type": "function_call", "call_id": "call-1", "name": "spawn_agent",
+			 "namespace": "multi_agent_v1", "arguments": "{\"message\":\"review it\"}"},
+			{"type": "function_call_output", "call_id": "call-1", "output": "agent-1"}
+		]
+	}`
+	code, first := post(toolLess)
 	if code != http.StatusOK {
 		t.Fatalf("turn 1 status = %d: %s", code, first)
 	}
@@ -93,12 +99,29 @@ func TestContinuityFollowUpRedefiningTheQualifierResolvesTheDeclaredName(t *test
 	if firstEnvelope.ID == "" {
 		t.Fatal("turn 1 emitted no response id")
 	}
-	// The upstream call was the qualified flat name; the client saw the bare
-	// child name plus its qualifier, and that is what the store retained.
-	if !strings.Contains(string(first), `"namespace":"multi_agent_v1"`) {
-		t.Fatalf("turn 1 did not restore the qualifier to the client: %s", first)
+
+	// The retained chain carries the qualifier the client sent, whatever the
+	// tool-less exchange had to render.
+	retained, _, ok := resolveContinuityChain(store, "test-map", firstEnvelope.ID)
+	if !ok {
+		t.Fatal("turn 1 chain was not retained")
+	}
+	var retainedNamespaces []string
+	for _, turn := range retained {
+		for _, part := range turn.Parts {
+			if call, ok := part.(CanonicalFunctionCall); ok {
+				retainedNamespaces = append(retainedNamespaces, call.Namespace)
+			}
+		}
+	}
+	if len(retainedNamespaces) != 1 || retainedNamespaces[0] != "multi_agent_v1" {
+		t.Fatalf("retained call namespaces = %v, want the client-sent qualifier preserved by the "+
+			"tool-less exchange that could not map it", retainedNamespaces)
 	}
 
+	// The follow-up declares both a plain spawn_agent and the namespace child,
+	// so the child's flat name is qualified and the bare name belongs to the
+	// plain tool.
 	followUp := `{"model":"m","input":"continue","tools":[` +
 		`{"type": "function", "name": "spawn_agent", "description": "plain", "strict": false,` +
 		` "parameters": {"type": "object", "properties": {}}},` +
@@ -115,7 +138,7 @@ func TestContinuityFollowUpRedefiningTheQualifierResolvesTheDeclaredName(t *test
 	}
 	if name := chatHistoryName(t, upstreamBodies[1]); name != "multi_agent_v1__spawn_agent" {
 		t.Fatalf("re-declared follow-up history call name = %q, want the qualified flat name "+
-			"(the bare name would re-point the call at the plain tool)\n%s",
+			"(the bare name addresses the plain tool instead)\n%s",
 			name, upstreamBodies[1])
 	}
 }
