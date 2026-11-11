@@ -132,7 +132,7 @@ func renderMessagesTurns(
 	out *anthropicmessages.Request,
 	report *ConversionReport,
 ) error {
-	replay := newNamespaceReplayResolve(context.ToolNames, request.Tools, context.lossPolicy(), report)
+	replay := newNamespaceReplayResolve(context.toolNames(), request.Tools, context.lossPolicy(), report)
 	var system []anthropicmessages.ContentBlock
 	systemTurns := 0
 	sawDialog := false

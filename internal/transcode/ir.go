@@ -341,6 +341,16 @@ func (c *ExchangeContext) lossPolicy() LossPolicy {
 	return c.LossPolicy
 }
 
+// toolNames returns the exchange's flattened-namespace map, or nil when the
+// context is nil. ToolNames methods are nil-safe, so a renderer that tolerates
+// a nil context (lossPolicy and the signature store both do) keeps working.
+func (c *ExchangeContext) toolNames() *ToolNames {
+	if c == nil {
+		return nil
+	}
+	return c.ToolNames
+}
+
 // RequirePortableArtifacts enforces that provider-authenticated artifacts
 // never cross protocol boundaries. Thinking blocks and reasoning items may
 // only be passed through unchanged to the same protocol; crossing protocols

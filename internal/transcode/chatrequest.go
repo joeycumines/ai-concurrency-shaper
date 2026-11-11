@@ -149,7 +149,7 @@ func RenderChatRequest(
 	// The namespace qualifier a replayed call carries is resolved for THIS
 	// exchange: the canonical part keeps client-sent data, and retained
 	// history never passes through decode, so the decision cannot live there.
-	replay := newNamespaceReplayResolve(context.ToolNames, request.Tools, context.lossPolicy(), &report)
+	replay := newNamespaceReplayResolve(context.toolNames(), request.Tools, context.lossPolicy(), &report)
 	// retainedChannel marks each rendered message as reconstructed from the
 	// continuity store rather than authored by this request, so a request-side
 	// gate can tell the two apart. The retained turns are a prefix of Turns.
