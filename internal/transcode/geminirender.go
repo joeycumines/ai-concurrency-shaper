@@ -175,7 +175,7 @@ func RenderGeminiRequest(
 	// One content per canonical turn, in order. The client decoders already
 	// group parallel calls and their results into single turns.
 	callNames := make(map[string]string) // call id -> function name, for result name resolution
-	replay := newNamespaceReplayResolve(context.ToolNames, request.Tools, policy, &report)
+	replay := newNamespaceReplayResolve(context.toolNames(), request.Tools, policy, &report)
 	currentTurn := len(request.Turns) // index of the first current-turn model content
 	for i, turn := range request.Turns {
 		if turn.Role == CanonicalUser {
