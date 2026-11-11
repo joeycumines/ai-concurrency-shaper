@@ -215,11 +215,12 @@ func lossScenariosRequestConversion(t *testing.T) []lossScenario {
 			},
 		},
 		{
-			// A replayed function_call naming a namespace this request does not
-			// declare: the qualifier cannot be mapped, so the call is recorded
-			// as this loss and forwarded under the bare child name (the only
-			// representation the target can receive). The bare name here is
-			// owned by nothing, so the conversion is not refused outright.
+			// A replayed function_call naming a namespace the rendering
+			// exchange does not declare: the qualifier stays on the canonical
+			// part and the flattening renderer decides it, so the call is
+			// recorded as this loss and forwarded under the bare child name.
+			// The bare name here is owned by nothing, so the conversion is not
+			// refused outright.
 			key: FeatureNamespaceReplayUndeclared,
 			perm: []Feature{
 				FeatureNamespaceReplayUndeclared,
@@ -229,7 +230,7 @@ func lossScenariosRequestConversion(t *testing.T) []lossScenario {
 				FeatureUsageUnknown,
 			},
 			run: func(policy LossPolicy) (ConversionReport, error) {
-				result, _, err := DecodeResponsesRequest([]byte(`{
+				result, echo, err := DecodeResponsesRequest([]byte(`{
 					"model": "m",
 					"tools": [
 						{"type": "namespace", "name": "declared", "description": "d", "tools": [
@@ -241,7 +242,15 @@ func lossScenariosRequestConversion(t *testing.T) []lossScenario {
 						 "namespace": "undeclared", "arguments": "{}"}
 					]
 				}`), policy)
-				return result.Report, err
+				if err != nil {
+					return result.Report, err
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				context.OriginalResponsesRequest = echo
+				context.ToolNames = result.ToolNames
+				_, report, err := RenderChatRequest(result.Request, context, ChatCapabilities{})
+				return report, err
 			},
 		},
 	}

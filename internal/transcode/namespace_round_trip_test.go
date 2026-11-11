@@ -329,72 +329,69 @@ func TestNestedNamespaceKeepsInnerQualifier(t *testing.T) {
 }
 
 // TestUndeclaredNamespaceReplayIsPolicyGatedAndNeverMisattributes pins the
-// contract for replayed history whose namespace this request does NOT declare.
-// The qualifier cannot be mapped, so the call is a policy-gated
-// namespace_replay_undeclared loss - not a note, because forwarding the bare
-// name silently re-points the call when a surviving tool already owns it.
+// contract for replayed history whose namespace the rendering exchange does NOT
+// declare. The qualifier stays on the canonical part (client-sent data), and a
+// flattening renderer decides it for its own exchange: the call is a
+// policy-gated namespace_replay_undeclared loss - not a note, because
+// forwarding the bare name silently re-points the call when a surviving tool
+// already owns it.
 //
 // Sub-case 1: the bare name is owned by nothing, so under a permissive policy
-// the call is forwarded and the loss is recorded.
+// the call is forwarded under its bare name and the loss is recorded.
 // Sub-case 2: the bare name IS owned by a surviving tool, so the exchange is
 // refused outright - no policy can approve a reinterpretation of client-sent
 // history.
 func TestUndeclaredNamespaceReplayIsPolicyGatedAndNeverMisattributes(t *testing.T) {
+	renderChat := func(t *testing.T, body string, policy LossPolicy) (string, ConversionReport, error) {
+		t.Helper()
+		result, echo, err := DecodeResponsesRequest([]byte(body), policy)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		context := testExchangeContext()
+		context.LossPolicy = policy
+		context.OriginalResponsesRequest = echo
+		context.ToolNames = result.ToolNames
+		rendered, report, err := RenderChatRequest(result.Request, context, ChatCapabilities{})
+		return string(rendered), report, err
+	}
+	body := `{
+		"model": "m",
+		"tools": [
+			{"type": "namespace", "name": "declared", "description": "d", "tools": [
+				{"type": "function", "name": "known", "description": "x", "strict": false,
+				 "parameters": {"type": "object", "properties": {}}}]}
+		],
+		"input": [
+			{"type": "function_call", "call_id": "call-1", "name": "unknown", "namespace": "undeclared", "arguments": "{}"}
+		]
+	}`
+
 	t.Run("unowned_bare_name_is_an_approved_loss", func(t *testing.T) {
 		policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureNamespaceReplayUndeclared: {}}}
-		result, _, err := DecodeResponsesRequest([]byte(`{
-			"model": "m",
-			"tools": [
-				{"type": "namespace", "name": "declared", "description": "d", "tools": [
-					{"type": "function", "name": "known", "description": "x", "strict": false,
-					 "parameters": {"type": "object", "properties": {}}}]}
-			],
-			"input": [
-				{"type": "function_call", "call_id": "call-1", "name": "unknown", "namespace": "undeclared", "arguments": "{}"}
-			]
-		}`), policy)
+		rendered, report, err := renderChat(t, body, policy)
 		if err != nil {
 			t.Fatalf("an approved undeclared-namespace replay must convert: %v", err)
 		}
 		var found bool
-		for _, loss := range result.Report.Losses {
+		for _, loss := range report.Losses {
 			if loss.Feature == FeatureNamespaceReplayUndeclared && strings.Contains(loss.Detail, "undeclared") {
 				found = true
 			}
 		}
 		if !found {
-			t.Fatalf("report = %+v, want a recorded namespace_replay_undeclared loss", result.Report.Losses)
+			t.Fatalf("report = %+v, want a recorded namespace_replay_undeclared loss", report.Losses)
 		}
-		var gotName, gotNamespace string
-		for _, turn := range result.Request.Turns {
-			for _, part := range turn.Parts {
-				if call, ok := part.(CanonicalFunctionCall); ok {
-					gotName = call.Name
-					gotNamespace = call.Namespace
-				}
-			}
+		if !strings.Contains(rendered, `"name":"unknown"`) {
+			t.Fatalf("rendered chat = %s, want the bare call name under the approved loss", rendered)
 		}
-		if gotName != "unknown" {
-			t.Fatalf("history call name = %q, want the bare name under an approved loss", gotName)
-		}
-		if gotNamespace != "" {
-			t.Fatalf("history call namespace = %q, want it cleared after the approved loss so "+
-				"every flattening renderer emits the bare name", gotNamespace)
+		if strings.Contains(rendered, "undeclared") {
+			t.Fatalf("rendered chat = %s, want no undeclared qualifier forwarded", rendered)
 		}
 	})
 
 	t.Run("unapproved_is_rejected", func(t *testing.T) {
-		_, _, err := DecodeResponsesRequest([]byte(`{
-			"model": "m",
-			"tools": [
-				{"type": "namespace", "name": "declared", "description": "d", "tools": [
-					{"type": "function", "name": "known", "description": "x", "strict": false,
-					 "parameters": {"type": "object", "properties": {}}}]}
-			],
-			"input": [
-				{"type": "function_call", "call_id": "call-1", "name": "unknown", "namespace": "undeclared", "arguments": "{}"}
-			]
-		}`), StrictLossPolicy())
+		_, _, err := renderChat(t, body, StrictLossPolicy())
 		if err == nil {
 			t.Fatal("want a rejection when namespace_replay_undeclared is not approved")
 		}
@@ -407,7 +404,7 @@ func TestUndeclaredNamespaceReplayIsPolicyGatedAndNeverMisattributes(t *testing.
 		// A PERMISSIVE policy still must not let the call be re-pointed at the
 		// surviving plain tool that already owns the bare name.
 		policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureNamespaceReplayUndeclared: {}}}
-		_, _, err := DecodeResponsesRequest([]byte(`{
+		_, _, err := renderChat(t, `{
 			"model": "m",
 			"tools": [
 				{"type": "function", "name": "search", "description": "x", "strict": false,
@@ -419,13 +416,43 @@ func TestUndeclaredNamespaceReplayIsPolicyGatedAndNeverMisattributes(t *testing.
 			"input": [
 				{"type": "function_call", "call_id": "call-1", "name": "search", "namespace": "undeclared", "arguments": "{}"}
 			]
-		}`), policy)
+		}`, policy)
 		if err == nil {
 			t.Fatal("want a refusal: the bare name belongs to another declared tool, so forwarding it " +
 				"would attribute the call to that tool instead")
 		}
 		if !strings.Contains(err.Error(), "already used by another declared tool") {
 			t.Errorf("error = %q, want it to name the collision", err.Error())
+		}
+	})
+
+	t.Run("a_target_that_carries_the_qualifier_is_not_refused", func(t *testing.T) {
+		// The refusal exists to prevent misattribution, so it applies only
+		// where the target must collapse the qualifier. A Responses target
+		// carries it, so forwarding the call unchanged reinterprets nothing.
+		policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureNamespaceReplayUndeclared: {}}}
+		result, echo, err := DecodeResponsesRequest([]byte(`{
+			"model": "m",
+			"tools": [
+				{"type": "function", "name": "search", "description": "x", "strict": false,
+				 "parameters": {"type": "object", "properties": {}}}
+			],
+			"input": [
+				{"type": "function_call", "call_id": "call-1", "name": "search", "namespace": "undeclared", "arguments": "{}"}
+			]
+		}`), policy)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		context := testExchangeContext()
+		context.LossPolicy = policy
+		context.OriginalResponsesRequest = echo
+		rendered, _, err := RenderResponsesRequest(result.Request, context)
+		if err != nil {
+			t.Fatalf("a qualifier-carrying target must not refuse: %v", err)
+		}
+		if !strings.Contains(string(rendered), `"name":"search","arguments":"{}","namespace":"undeclared"`) {
+			t.Fatalf("responses render = %s, want the call carried unchanged", rendered)
 		}
 	})
 }
@@ -515,7 +542,15 @@ func TestUndeclaredNamespaceRefusalCoversNamespaceOwnedNames(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			body := `{"model": "m", "tools": [` + tc.tools + `], "input": [` +
 				`{"type": "function_call", "call_id": "call-1", ` + tc.replay + `, "arguments": "{}"}]}`
-			_, _, err := DecodeResponsesRequest([]byte(body), permissive)
+			result, echo, err := DecodeResponsesRequest([]byte(body), permissive)
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			context := testExchangeContext()
+			context.LossPolicy = permissive
+			context.OriginalResponsesRequest = echo
+			context.ToolNames = result.ToolNames
+			_, _, err = RenderChatRequest(result.Request, context, ChatCapabilities{})
 			if err == nil {
 				t.Fatalf("want a refusal: the replayed name is owned, so forwarding it would "+
 					"re-point the call at the owning tool (replayed %s)", tc.replay)

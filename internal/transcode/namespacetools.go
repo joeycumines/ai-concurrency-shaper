@@ -64,18 +64,89 @@ type namespaceChild struct {
 	Tool      openairesponses.Tool
 }
 
-// errNamespacedReplayCollides reports a replayed function call whose namespace
-// this request does not declare when the bare name is already owned by a tool
-// that DID survive. Forwarding it would tell the upstream the model previously
-// called a different tool under the same name, reinterpreting client-sent
-// history, so the exchange is refused rather than silently misattributed.
-func errNamespacedReplayCollides(value *openairesponses.FunctionCallInput, index int) error {
-	return fmt.Errorf(
-		"input item %d: function call %q declares namespace %q, which this request does not "+
-			"declare for that name, and the name is already used by another declared tool; "+
-			"replaying it would attribute the call to that tool instead",
-		index, value.Name, value.Namespace,
-	)
+// namespaceReplayOwnedName reports whether any tool this exchange renders to the
+// upstream already answers to bareName. The universe is exactly the rendered
+// wire names — a plain function keeps its own name, and a namespace child is
+// known by its flat name (bare while unique, qualified otherwise) — so a
+// replayed call can never be forwarded under a name another tool owns.
+func namespaceReplayOwnedName(tools []CanonicalTool, bareName string) bool {
+	for _, tool := range tools {
+		if tool.Name == bareName {
+			return true
+		}
+	}
+	return false
+}
+
+// namespaceReplayResolve is the per-exchange adjudication of a replayed
+// function call's namespace qualifier.
+//
+// The canonical part keeps the qualifier the client sent: a Responses target
+// carries it on the wire, and history the continuity store reconstructed never
+// passes through decode, so a decision written into the part at decode time
+// would be missing or stale for a later exchange. Each flattening renderer
+// therefore decides for its own exchange:
+//
+//   - no qualifier: the bare name is the call's name;
+//   - the exchange declares this (namespace, name) pair: the flat wire name,
+//     so the upstream sees exactly the tool it was taught;
+//   - the exchange does not declare the pair and a surviving tool owns the bare
+//     name: an error, because forwarding it would attribute a client-sent call
+//     to a different tool (no policy can approve that);
+//   - otherwise: one namespace_replay_undeclared loss, and the bare name,
+//     which is the only representation a flattening target can receive.
+type namespaceReplayResolve struct {
+	names  *ToolNames
+	tools  []CanonicalTool
+	policy LossPolicy
+	report *ConversionReport
+}
+
+// newNamespaceReplayResolve builds the per-exchange resolver. report is the
+// exchange's request-side report, so each decision is recorded once, in the
+// stage that performs it.
+func newNamespaceReplayResolve(
+	names *ToolNames,
+	tools []CanonicalTool,
+	policy LossPolicy,
+	report *ConversionReport,
+) namespaceReplayResolve {
+	return namespaceReplayResolve{names: names, tools: tools, policy: policy, report: report}
+}
+
+// wireName returns the name the upstream must be given for call, recording the
+// adjudication at path. An error means the exchange cannot be served without
+// reinterpreting client-sent history, or that the loss policy refused the drop.
+func (r namespaceReplayResolve) wireName(call CanonicalFunctionCall, path string) (string, error) {
+	if call.Namespace == "" {
+		return call.Name, nil
+	}
+	ref := ToolNameRef{Namespace: call.Namespace, Name: call.Name}
+	if flat, ok := r.names.flatName(ref); ok {
+		return flat, nil
+	}
+	if namespaceReplayOwnedName(r.tools, call.Name) {
+		return "", fmt.Errorf(
+			"%s: function call %q declares namespace %q, which this request does not "+
+				"declare for that name, and the name is already used by another declared tool; "+
+				"forwarding it would attribute the call to that tool instead",
+			path, call.Name, call.Namespace,
+		)
+	}
+	if err := r.report.Lose(
+		r.policy,
+		FeatureNamespaceReplayUndeclared,
+		path,
+		fmt.Sprintf(
+			"replayed call %q references namespace %q, which this request does not declare for that name; "+
+				"the qualifier cannot be mapped, so the call is forwarded under its bare child name",
+			call.Name,
+			call.Namespace,
+		),
+	); err != nil {
+		return "", err
+	}
+	return call.Name, nil
 }
 
 // flattenNamespaceTool returns the nested function tools of a namespace

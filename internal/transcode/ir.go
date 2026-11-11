@@ -84,13 +84,19 @@ type CanonicalDocument struct {
 func (CanonicalDocument) isCanonicalPart() {}
 
 // CanonicalFunctionCall is a model-initiated function call. Arguments is a
-// validated complete JSON object. Namespace carries the Responses tool
-// namespace qualifier of a DECLARED namespaced child; the flattening
-// renderers (chat, gemini, messages) re-derive the flat wire name from
-// Namespace+Name via ToolNames.flatName, and the Responses renderer carries
-// the qualifier on the wire item directly. An approved replay of a namespace
-// this request does not declare arrives with Namespace already cleared, so
-// every flattening renderer emits the bare child name.
+// validated complete JSON object.
+//
+// Namespace carries the Responses tool namespace qualifier the call was made
+// under, verbatim: it is client-sent data on a replayed call and a
+// source-of-truth fact on a model call, so the canonical part never drops it.
+// The Responses renderer carries it on the wire item directly. The flattening
+// renderers (chat, gemini, messages) have no namespace field, so each one
+// resolves the qualifier for ITS exchange through namespaceReplayResolve: the
+// declared pair renders its flat wire name, and a qualifier the exchange does
+// not declare is either refused (a surviving tool owns the bare name) or
+// rendered bare under the namespace_replay_undeclared loss. Because the
+// decision belongs to the rendering exchange, history the continuity store
+// reconstructed is adjudicated exactly like inline history.
 type CanonicalFunctionCall struct {
 	ItemID    string
 	CallID    string

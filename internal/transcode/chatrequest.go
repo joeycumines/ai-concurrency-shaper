@@ -146,6 +146,10 @@ func RenderChatRequest(
 	// multiple system turns is a sanctioned note under the same key.
 	rendered := make([]ChatMessage, 0, len(request.Turns))
 	systemChannel := make([]bool, 0, len(request.Turns))
+	// The namespace qualifier a replayed call carries is resolved for THIS
+	// exchange: the canonical part keeps client-sent data, and retained
+	// history never passes through decode, so the decision cannot live there.
+	replay := newNamespaceReplayResolve(context.ToolNames, request.Tools, context.lossPolicy(), &report)
 	// retainedChannel marks each rendered message as reconstructed from the
 	// continuity store rather than authored by this request, so a request-side
 	// gate can tell the two apart. The retained turns are a prefix of Turns.
@@ -153,6 +157,7 @@ func RenderChatRequest(
 	turnIndex := 0
 	for _, turn := range request.Turns {
 		retained := turnIndex < request.RetainedTurns
+		turnPath := fmt.Sprintf("turns[%d]", turnIndex)
 		turnIndex++
 		switch turn.Role {
 		case CanonicalSystem:
@@ -206,7 +211,7 @@ func RenderChatRequest(
 			}
 
 		case CanonicalAssistant:
-			message, err := canonicalAssistantTurnToChatMessage(turn, context.ToolNames)
+			message, err := canonicalAssistantTurnToChatMessage(turn, turnPath, replay)
 			if err != nil {
 				return nil, report, err
 			}

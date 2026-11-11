@@ -336,8 +336,6 @@ func DecodeResponsesRequest(
 		}
 		turns, err := responsesInputToTurns(
 			*request.Input,
-			names,
-			reserved,
 			policy,
 			&result.Report,
 			&result.Request.Artifacts,

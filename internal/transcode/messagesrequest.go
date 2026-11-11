@@ -132,6 +132,7 @@ func renderMessagesTurns(
 	out *anthropicmessages.Request,
 	report *ConversionReport,
 ) error {
+	replay := newNamespaceReplayResolve(context.ToolNames, request.Tools, context.lossPolicy(), report)
 	var system []anthropicmessages.ContentBlock
 	systemTurns := 0
 	sawDialog := false
@@ -168,7 +169,7 @@ func renderMessagesTurns(
 
 		case CanonicalUser, CanonicalAssistant:
 			sawDialog = true
-			message, err := messagesTurn(turn, path, context.ToolNames)
+			message, err := messagesTurn(turn, path, replay)
 			if err != nil {
 				return err
 			}
@@ -242,7 +243,7 @@ func messagesSystemBlocks(turn CanonicalTurn, path string) ([]anthropicmessages.
 // messagesTurn renders one user or assistant turn as one message. A user turn's
 // tool results must come before any other part, because Messages requires
 // tool_result blocks first in a user message.
-func messagesTurn(turn CanonicalTurn, path string, names *ToolNames) (anthropicmessages.Message, error) {
+func messagesTurn(turn CanonicalTurn, path string, replay namespaceReplayResolve) (anthropicmessages.Message, error) {
 	role := anthropicmessages.RoleUser
 	if turn.Role == CanonicalAssistant {
 		role = anthropicmessages.RoleAssistant
@@ -281,21 +282,11 @@ func messagesTurn(turn CanonicalTurn, path string, names *ToolNames) (anthropicm
 			}
 			sawOther = true
 			id := value.CallID
-			// The canonical part carries the BARE name plus the namespace
-			// this exchange declared; the Messages wire carries only the flat
-			// name, re-derived from both via ToolNames.flatName. An approved
-			// undeclared replay arrives with the qualifier already cleared by
-			// the decode.
-			name := value.Name
-			if value.Namespace != "" {
-				flat, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name})
-				if !ok {
-					return anthropicmessages.Message{}, fmt.Errorf(
-						"%s: call %q references namespace %q, which this request does not declare",
-						partPath, value.Name, value.Namespace,
-					)
-				}
-				name = flat
+			// The call's namespace qualifier is resolved for THIS exchange:
+			// the Messages wire carries only the flat name.
+			name, err := replay.wireName(value, partPath)
+			if err != nil {
+				return anthropicmessages.Message{}, err
 			}
 			blocks = append(blocks, anthropicmessages.ContentBlock{
 				Type:  anthropicmessages.ContentBlockTypeToolUse,

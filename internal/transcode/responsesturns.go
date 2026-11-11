@@ -14,8 +14,6 @@ import (
 // is preserved.
 func responsesInputToTurns(
 	input ResponsesInput,
-	names *ToolNames,
-	reserved map[string]struct{},
 	policy LossPolicy,
 	report *ConversionReport,
 	artifacts *SourceArtifacts,
@@ -108,54 +106,17 @@ func responsesInputToTurns(
 			if err != nil {
 				return nil, fmt.Errorf("input item %d: function call arguments: %w", i, err)
 			}
-			// Replayed history carries the BARE name plus its namespace
-			// while THIS request declares that namespace; each target render
-			// re-derives the flat wire name from Namespace+Name via
-			// ToolNames.flatName, so the upstream never learns the bare form
-			// of a declared namespaced child. When the request does not
-			// declare the namespace, the qualifier cannot be mapped:
-			// forwarding the bare name is only honest when nothing else owns
-			// it. If a surviving tool already
-			// answers to that name, the replayed call would be re-pointed
-			// at a DIFFERENT tool, which is a reinterpretation of
-			// client-sent history and never permitted. Otherwise the
-			// unqualified name is the only representation the target can
-			// receive: the loss is recorded under its own policy-gated key,
-			// and the canonical part carries no qualifier so every
-			// flattening renderer emits the bare name instead of refusing a
-			// drop the policy already decided.
-			namespace := value.Namespace
-			if namespace != "" {
-				if _, ok := names.flatName(ToolNameRef{Namespace: namespace, Name: value.Name}); !ok {
-					owned := false
-					if _, clash := reserved[value.Name]; clash {
-						owned = true
-					} else if _, clash := names.FlatToRef[value.Name]; clash {
-						owned = true
-					}
-					if owned {
-						return nil, errNamespacedReplayCollides(value, i)
-					}
-					if err := report.Lose(
-						policy,
-						FeatureNamespaceReplayUndeclared,
-						fmt.Sprintf("input[%d].namespace", i),
-						fmt.Sprintf(
-							"replayed call %q references namespace %q, which this request does not declare "+
-								"for that name; the upstream is not taught this name, so the replayed call may be unresolvable there",
-							value.Name,
-							value.Namespace,
-						),
-					); err != nil {
-						return nil, err
-					}
-					namespace = ""
-				}
-			}
+			// Replayed history keeps the qualifier the client sent. Whether
+			// this exchange can map it is decided by the target renderer, not
+			// here: the qualifier is client-sent data a Responses target
+			// carries natively, and history reconstructed by the continuity
+			// store never passes through this decode, so a decision written
+			// into the canonical part would be missing or stale for the
+			// exchange that actually renders it.
 			part := CanonicalFunctionCall{
 				CallID:    value.CallID,
 				Name:      value.Name,
-				Namespace: namespace,
+				Namespace: value.Namespace,
 				Arguments: raw,
 			}
 			turns = appendFunctionCallTurn(turns, part)

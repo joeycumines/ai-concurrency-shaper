@@ -298,10 +298,12 @@ func canonicalContentPartsToChatUserMessage(
 }
 
 // canonicalAssistantTurnToChatMessage renders an assistant turn into a Chat
-// message with content, refusal, and tool calls.
+// message with content, refusal, and tool calls. replay resolves each call's
+// namespace qualifier for THIS exchange (see namespaceReplayResolve).
 func canonicalAssistantTurnToChatMessage(
 	turn CanonicalTurn,
-	names *ToolNames,
+	turnPath string,
+	replay namespaceReplayResolve,
 ) (ChatMessage, error) {
 	var blocks []ChatContentBlock
 	var toolCalls []ChatMessageToolCall
@@ -321,24 +323,9 @@ func canonicalAssistantTurnToChatMessage(
 
 		case CanonicalFunctionCall:
 			callID := value.CallID
-			// The canonical part carries the BARE name plus the namespace
-			// this exchange declared; the chat wire carries only the flat
-			// name, re-derived from both via ToolNames.flatName, so the
-			// upstream never learns the bare form of a declared namespaced
-			// child. An approved undeclared replay arrives with the qualifier
-			// already cleared by the decode, so an empty Namespace here is
-			// the sanctioned bare form; the decode path has already refused
-			// or loss-recorded any unapproved one.
-			name := value.Name
-			if value.Namespace != "" {
-				flat, ok := names.flatName(ToolNameRef{Namespace: value.Namespace, Name: value.Name})
-				if !ok {
-					return ChatMessage{}, fmt.Errorf(
-						"assistant message part %d: call %q references namespace %q, which this request does not declare",
-						i, value.Name, value.Namespace,
-					)
-				}
-				name = flat
+			name, err := replay.wireName(value, fmt.Sprintf("%s.parts[%d]", turnPath, i))
+			if err != nil {
+				return ChatMessage{}, err
 			}
 			arguments := string(value.Arguments)
 			if arguments == "" {
