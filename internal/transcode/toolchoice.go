@@ -26,22 +26,20 @@ func canonicalizeResponsesToolChoice(
 }
 
 // canonicalizeAnthropicToolChoice maps the Anthropic tool_choice union to the
-// canonical form. disable_parallel_tool_use is not portable to the target
-// providers and is rejected or approved as a parallel-tool-calls loss.
+// canonical form. disable_parallel_tool_use is the Anthropic spelling of the
+// canonical parallel-tools setting, so it is CARRIED (not decided here): the
+// Messages target renders it natively, and a target that cannot reproduce it
+// takes the parallel_tool_calls loss at its own render stage. Deciding it at
+// decode would destroy a value another target carries and, because
+// parallel_tool_calls is not a default loss, would refuse a valid native
+// request by default.
 func canonicalizeAnthropicToolChoice(
 	choice AnthropicToolChoice,
-	report *ConversionReport,
-	policy LossPolicy,
+	request *CanonicalRequest,
 ) (*CanonicalToolChoice, error) {
 	if choice.DisableParallelToolUse != nil && *choice.DisableParallelToolUse {
-		if err := report.Lose(
-			policy,
-			FeatureParallelToolCalls,
-			"tool_choice.disable_parallel_tool_use",
-			"disable_parallel_tool_use is not portable to the target provider",
-		); err != nil {
-			return nil, err
-		}
+		disabled := false
+		request.ParallelTools = &disabled
 	}
 	switch choice.Type {
 	case "auto", "none", "any":
@@ -84,15 +82,20 @@ func canonicalizeAnthropicToolChoice(
 // all (built-in-tool or server-tool loss): "required" against zero tools is
 // a client-dialect error (the converter would otherwise render an invalid
 // upstream request), and "auto" is dropped with an observable note because
-// an empty tool list leaves it meaningless. When the client sent no tools
-// at all the choice passes through untouched — the upstream judges that
-// incoherence, not the converter (TestDecodeResponsesRequestToolChoiceRequired
-// pins it).
+// an empty tool list leaves it meaningless. "none" is PRESERVED: it names no
+// tool, so it cannot dangle, and "call no tool" is exactly what an empty tool
+// list already means — dropping it would change nothing the upstream reads.
+// When the client sent no tools at all the choice passes through untouched —
+// the upstream judges that incoherence, not the converter
+// (TestDecodeResponsesRequestToolChoiceRequired pins it). droppedFeature names
+// the key of the loss that removed the tools, so the note is filed under the
+// decision that actually happened rather than a fixed guess.
 func reconcileToolChoice(
 	choice *CanonicalToolChoice,
 	requestToolCount int,
 	request *CanonicalRequest,
 	report *ConversionReport,
+	droppedFeature Feature,
 ) (*CanonicalToolChoice, error) {
 	if choice == nil {
 		return nil, nil
@@ -118,7 +121,7 @@ func reconcileToolChoice(
 		)
 	case "auto":
 		if err := report.Note(
-			FeatureBuiltinTools,
+			droppedFeature,
 			"tool_choice",
 			"tool_choice auto dropped with the last tool (no tools remain to choose among)",
 		); err != nil {

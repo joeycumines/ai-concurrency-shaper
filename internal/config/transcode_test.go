@@ -203,6 +203,13 @@ func TestBuildTranscodeMappingsDefaults(t *testing.T) {
 			!m.Mapping.LossPolicy.Allows(transcode.FeatureDeveloperRole) {
 			t.Errorf("mapping %d: compatibility-default losses missing", i)
 		}
+		// A real Messages client routinely carries both a top-level system
+		// field and an inline system-role message, so the split system prompt
+		// must be served by default: the join is content-lossless and the
+		// decision is still recorded.
+		if !m.Mapping.LossPolicy.Allows(transcode.FeatureMultipleSystemTurns) {
+			t.Errorf("mapping %d: multiple_system_turns must be a default approval", i)
+		}
 		if !m.Mapping.LossPolicy.Allows(transcode.FeatureImageInput) {
 			t.Errorf("mapping %d: CLI image_input loss not merged", i)
 		}

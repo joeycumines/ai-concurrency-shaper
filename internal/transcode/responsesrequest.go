@@ -157,7 +157,6 @@ func DecodeResponsesRequest(
 	}
 
 	result.Request.ClientModel = request.Model
-	result.Request.Stream = request.Stream.Value
 	// An explicitly present body stream field (true or false, never null) is
 	// recorded as present so the handler can apply the documented precedence
 	// over the Accept header. An absent or null field
@@ -258,6 +257,13 @@ func DecodeResponsesRequest(
 	if len(names.RefToFlat) > 0 {
 		result.ToolNames = names
 	}
+	// Two different tools that flatten to one name cannot be told apart: the
+	// IR keeps only the innermost qualifier, so the response could not restore
+	// which tool a call belonged to. Refuse locally before any upstream
+	// request rather than re-pointing one tool at the other.
+	if err := checkNamespaceToolNames(result.Request.Tools, result.ToolNames); err != nil {
+		return DecodeResult{}, nil, err
+	}
 
 	// Tool choice, reconciled against the tools that survive conversion: an
 	// approved built-in drop can leave "required" or a named function choice
@@ -268,11 +274,43 @@ func DecodeResponsesRequest(
 		if err != nil {
 			return DecodeResult{}, nil, err
 		}
+		// A named choice names the tool the CLIENT knows. When that tool is a
+		// namespace child whose flat name had to be qualified, the client's
+		// name is the bare child name, and ToolNames exists exactly to
+		// translate it: resolve a name that matches exactly one child, and
+		// leave an ambiguous or unknown name alone so reconciliation still
+		// reports a genuinely dangling reference.
+		if choice.Mode == "named" {
+			flat, resolved, err := resolveNamedToolChoice(names, result.Request, choice.Name)
+			if err != nil {
+				return DecodeResult{}, nil, err
+			}
+			if resolved {
+				choice.Name = flat
+			} else if namedChoicePlainOwner(names, result.Request.Tools, choice.Name) &&
+				namespaceChildSharesBareName(names, choice.Name) {
+				// The client named a bare child name that a plain function owns
+				// while a namespace child of the same bare name was qualified;
+				// the plain function wins, and the possible reinterpretation is
+				// recorded rather than left silent.
+				if err := result.Report.Note(
+					FeatureNamespaceReplayUndeclared,
+					"tool_choice",
+					fmt.Sprintf(
+						"tool_choice named %q, which a plain function owns while a namespace child of that bare name was qualified; the plain function is the target",
+						choice.Name,
+					),
+				); err != nil {
+					return DecodeResult{}, nil, err
+				}
+			}
+		}
 		choice, err = reconcileToolChoice(
 			choice,
 			len(request.Tools),
 			&result.Request,
 			&result.Report,
+			FeatureBuiltinTools,
 		)
 		if err != nil {
 			return DecodeResult{}, nil, err

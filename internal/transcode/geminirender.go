@@ -119,7 +119,13 @@ func RenderGeminiRequest(
 		return nil, report, err
 	}
 	policy := context.lossPolicy()
-	if err := RequirePortableArtifacts(request, UpstreamGemini, policy, &report); err != nil {
+	if err := RequirePortableArtifacts(request, policy, &report); err != nil {
+		return nil, report, err
+	}
+	// Responses request fields Gemini cannot reproduce take the shared
+	// envelope decision, so a Responses-to-Gemini route never drops a client
+	// field silently. Gemini has no reasoning-effort control.
+	if err := responsesEchoLosses(context, &report, false); err != nil {
 		return nil, report, err
 	}
 
@@ -272,7 +278,7 @@ func RenderGeminiRequest(
 				// exchange: the Gemini wire carries only the flat name, and
 				// the functionResponse name rendered below must match what the
 				// model was taught (callNames).
-				name, err := replay.wireName(p, fmt.Sprintf("turn %d part %d", i, j))
+				name, err := replay.wireName(p, path)
 				if err != nil {
 					return nil, report, err
 				}

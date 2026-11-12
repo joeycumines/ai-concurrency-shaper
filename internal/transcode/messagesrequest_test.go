@@ -67,8 +67,11 @@ func TestRenderMessagesRequestMaxTokens(t *testing.T) {
 			t.Fatalf("losses = %+v, want one note", report.Losses)
 		}
 		note := report.Losses[0]
-		if note.Kind != NoteRecord || note.Feature != FeatureGeminiMaxTokensFromModelTable {
-			t.Fatalf("note = %+v, want the max_output note", note)
+		if note.Kind != NoteRecord || note.Feature != FeatureMessagesMaxTokensFromModelTable {
+			t.Fatalf("note = %+v, want the Messages max_output note", note)
+		}
+		if note.Path != "max_tokens" {
+			t.Fatalf("path = %q, want the Messages field name", note.Path)
 		}
 	})
 

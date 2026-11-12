@@ -1,10 +1,10 @@
 package transcode
 
-// The Gemini and Messages request renderers tolerate a nil ExchangeContext:
-// ExchangeContext.lossPolicy reports the strictest policy for it and the Gemini
-// signature store is explicitly nil-guarded. (RenderChatRequest does not — it
-// reads the Responses request echo unconditionally — so nil context is not part
-// of its contract.)
+// All four request renderers tolerate a nil ExchangeContext:
+// ExchangeContext.lossPolicy reports the strictest policy for it, toolNames
+// reports a nil map, and the Gemini signature store is explicitly nil-guarded.
+// The renderers therefore treat "no context" as the strictest ordinary render,
+// never as a programming error.
 //
 // The per-exchange namespace resolver is built before any turn is inspected, so
 // dereferencing the context there would turn a render that used to work into an
@@ -30,7 +30,7 @@ func nilContextRequest() CanonicalRequest {
 	}
 }
 
-func TestGeminiAndMessagesRenderersTolerateNilExchangeContext(t *testing.T) {
+func TestRequestRenderersTolerateNilExchangeContext(t *testing.T) {
 	t.Run("gemini", func(t *testing.T) {
 		if _, _, err := RenderGeminiRequest(nilContextRequest(), nil); err != nil {
 			t.Fatalf("nil context must render, got %v", err)
@@ -39,6 +39,22 @@ func TestGeminiAndMessagesRenderersTolerateNilExchangeContext(t *testing.T) {
 
 	t.Run("messages", func(t *testing.T) {
 		if _, _, err := RenderMessagesRequest(nilContextRequest(), nil); err != nil {
+			t.Fatalf("nil context must render, got %v", err)
+		}
+	})
+
+	t.Run("chat", func(t *testing.T) {
+		// The Chat renderer reads the Responses request echo and the resolved
+		// reasoning tier, so a nil context must be guarded rather than
+		// dereferenced: every other renderer in this package treats nil as the
+		// ordinary strict render.
+		if _, _, err := RenderChatRequest(nilContextRequest(), nil, ChatCapabilities{}); err != nil {
+			t.Fatalf("nil context must render, got %v", err)
+		}
+	})
+
+	t.Run("responses", func(t *testing.T) {
+		if _, _, err := RenderResponsesRequest(nilContextRequest(), nil); err != nil {
 			t.Fatalf("nil context must render, got %v", err)
 		}
 	})

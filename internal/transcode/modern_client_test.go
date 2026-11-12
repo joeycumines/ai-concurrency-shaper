@@ -56,8 +56,13 @@ func TestAnthropicRequestModernClientFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	// The thinking display preference is Messages-native, so decode keeps it:
+	// the loss belongs to a target whose wire cannot carry it.
 	if result.Request.Thinking == nil || result.Request.Thinking.Type != "adaptive" {
 		t.Fatalf("thinking = %+v", result.Request.Thinking)
+	}
+	if result.Request.Thinking.Display != "omitted" {
+		t.Fatalf("thinking display = %q, want it preserved through decode", result.Request.Thinking.Display)
 	}
 	// Inline system role becomes a canonical system turn.
 	foundSystem := false
@@ -464,17 +469,19 @@ func TestMessagesSystemCoexistence(t *testing.T) {
 		t.Fatalf("mid_conversation_system entries = %d, want exactly 1: %+v", found, report.Losses)
 	}
 
-	// The Responses render cannot express two system turns as one
-	// instructions string: strict rejects, and the permission records the
-	// loss and emits NO instructions — the multi-turn system prompt is the
-	// shape the loss drops (the single-turn builder only runs for exactly
-	// one system turn), never an illegal items array.
+	// The Responses render holds system content in one instructions string.
+	// It must not discard the prompt because the source split it across turns:
+	// every system-channel turn's text joins in encounter order, and the two
+	// position decisions are recorded (the mid-conversation move and the
+	// multi-turn join) rather than applied silently. Strict still refuses the
+	// mid-conversation position.
 	if _, _, err := RenderResponsesRequest(result.Request, testExchangeContext()); err == nil {
-		t.Fatal("strict responses render accepted multiple system turns; want rejection")
+		t.Fatal("strict responses render accepted a mid-conversation system turn; want rejection")
 	}
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureMultipleSystemTurns: {},
+		FeatureMidConversationSystem: {},
+		FeatureMultipleSystemTurns:   {},
 	}}
 	responsesRendered, report, err := RenderResponsesRequest(result.Request, permissive)
 	if err != nil {
@@ -483,15 +490,19 @@ func TestMessagesSystemCoexistence(t *testing.T) {
 	if !reportHasFeature(report, FeatureMultipleSystemTurns) {
 		t.Fatalf("report lacks the multiple-system-turns loss: %+v", report)
 	}
+	if !reportHasFeature(report, FeatureMidConversationSystem) {
+		t.Fatalf("report lacks the mid-conversation-system loss: %+v", report)
+	}
 	var envelope openairesponses.Request
 	if err := strictDecode(responsesRendered, &envelope); err != nil {
 		t.Fatalf("rendered responses: %v\n%s", err, responsesRendered)
 	}
-	if envelope.Instructions != nil {
-		t.Fatalf(
-			"instructions = %q, want nil (the approved loss drops the whole multi-turn system prompt)",
-			*envelope.Instructions,
-		)
+	if envelope.Instructions == nil {
+		t.Fatal("instructions = nil, want every system turn's text joined (discarding the prompt " +
+			"entirely is a stronger loss than the one the report describes)")
+	}
+	if *envelope.Instructions != "top\ninline" {
+		t.Fatalf("instructions = %q, want the two system turns joined in encounter order", *envelope.Instructions)
 	}
 	if strings.Contains(string(responsesRendered), `"items"`) {
 		t.Fatalf("multi-turn instructions rendered as items: %s", responsesRendered)

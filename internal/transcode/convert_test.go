@@ -565,28 +565,20 @@ func TestDecodeResponsesRequestReasoningArtifact(t *testing.T) {
 }
 
 func TestDecodeMessagesRequestFixture(t *testing.T) {
-	// The fixture carries top_k, which is rejected under the strict policy.
-	_, err := DecodeMessagesRequest(
+	// The fixture carries top_k. The Messages target carries it natively, so
+	// the decoder stores it and the loss belongs to the renderer that cannot
+	// reproduce it: decoding under the strict policy must succeed.
+	result, err := DecodeMessagesRequest(
 		testcorpus.AnthropicMessagesRequestJSON(),
 		StrictLossPolicy(),
 	)
-	if err == nil {
-		t.Fatal("expected top_k rejection under strict policy")
+	if err != nil {
+		t.Fatalf("decode must not depend on the target: %v", err)
 	}
-	var target *UnsupportedFeatureError
-	if !errors.As(err, &target) {
-		t.Fatalf("error = %T: %v", err, err)
-	}
-	if target.Feature != string(FeatureTopK) {
-		t.Fatalf("feature = %q, want top_k", target.Feature)
+	if result.Request.TopK == nil || *result.Request.TopK != 40 {
+		t.Fatalf("top_k = %v, want it preserved on the canonical request", result.Request.TopK)
 	}
 
-	// With top_k allowed, the fixture decodes.
-	policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureTopK: {}}}
-	result, err := DecodeMessagesRequest(testcorpus.AnthropicMessagesRequestJSON(), policy)
-	if err != nil {
-		t.Fatalf("decode with top_k loss: %v", err)
-	}
 	if result.Request.ClientModel != "claude-sonnet-4-20250514" {
 		t.Fatalf("model = %q", result.Request.ClientModel)
 	}
@@ -643,21 +635,48 @@ func TestDecodeMessagesRequestThinkingArtifact(t *testing.T) {
 }
 
 func TestRequirePortableArtifacts(t *testing.T) {
+	// Artifacts are opaque to every target and the IR records no position for
+	// them, so no renderer can put them back: the gate is one decision for
+	// every target, same protocol included. An earlier contract exempted the
+	// same protocol, but no renderer ever read the artifacts back, so that
+	// exemption described a pass-through that did not exist.
 	request := CanonicalRequest{
 		Artifacts: SourceArtifacts{
 			AnthropicThinkingBlocks: []json.RawMessage{json.RawMessage(`{}`)},
 		},
 	}
 	var report ConversionReport
-	// Crossing to Chat requires a loss.
-	err := RequirePortableArtifacts(request, UpstreamChatCompletions, StrictLossPolicy(), &report)
+	// The strict policy refuses for every target.
+	err := RequirePortableArtifacts(request, StrictLossPolicy(), &report)
 	if err == nil {
-		t.Fatal("expected thinking rejection crossing to chat")
+		t.Fatal("expected thinking rejection under the strict policy")
 	}
-	// Staying on Messages is fine.
-	err = RequirePortableArtifacts(request, UpstreamMessages, StrictLossPolicy(), &report)
+	// Approval records the loss, for every target.
+	policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureAuthenticatedThinking: {}}}
+	err = RequirePortableArtifacts(request, policy, &report)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !reportHasFeature(report, FeatureAuthenticatedThinking) {
+		t.Fatalf("report = %+v, want the authenticated_thinking loss", report.Losses)
+	}
+
+	// The Responses artifact kind takes the reasoning_summary decision.
+	reasoning := CanonicalRequest{
+		Artifacts: SourceArtifacts{
+			ResponsesReasoningItems: []json.RawMessage{json.RawMessage(`{"type":"reasoning"}`)},
+		},
+	}
+	var reasoningReport ConversionReport
+	if err := RequirePortableArtifacts(reasoning, StrictLossPolicy(), &reasoningReport); err == nil {
+		t.Fatal("expected reasoning rejection under the strict policy")
+	}
+	reasoningPolicy := LossPolicy{Allowed: map[Feature]struct{}{FeatureReasoningSummary: {}}}
+	if err := RequirePortableArtifacts(reasoning, reasoningPolicy, &reasoningReport); err != nil {
+		t.Fatal(err)
+	}
+	if !reportHasFeature(reasoningReport, FeatureReasoningSummary) {
+		t.Fatalf("report = %+v, want the reasoning_summary loss", reasoningReport.Losses)
 	}
 }
 
@@ -1400,13 +1419,25 @@ func TestRenderResponsesRequestImageDetailDefaultsAuto(t *testing.T) {
 }
 
 func TestDecodeMessagesRequestStrictness(t *testing.T) {
-	// disable_parallel_tool_use: true is rejected under the strict policy.
-	_, err := DecodeMessagesRequest(
+	// disable_parallel_tool_use is the Anthropic spelling of the canonical
+	// parallel-tools setting, so decode CARRIES it instead of destroying it: a
+	// Messages target renders it natively, and a target that cannot reproduce
+	// it takes the parallel_tool_calls loss at its own render stage. Refusing
+	// it here would lose nothing while rejecting a valid native request.
+	result, err := DecodeMessagesRequest(
 		[]byte(`{"model":"m","max_tokens":10,"messages":[{"role":"user","content":"x"}],"tool_choice":{"type":"auto","disable_parallel_tool_use":true}}`),
 		StrictLossPolicy(),
 	)
-	if err == nil {
-		t.Fatal("disable_parallel_tool_use accepted under the strict policy")
+	if err != nil {
+		t.Fatalf("decode must not depend on the target: %v", err)
+	}
+	if result.Request.ParallelTools == nil || *result.Request.ParallelTools {
+		t.Fatalf("parallel tool calls = %v, want the false the client asked for", result.Request.ParallelTools)
+	}
+	// The decision belongs to a target that cannot carry it.
+	context := testExchangeContext()
+	if _, _, err := RenderChatRequest(result.Request, context, ChatCapabilities{}); err == nil {
+		t.Fatal("chat render accepted a parallel-tools disable without its capability")
 	}
 
 	// Non-string metadata values are rejected, not dropped.

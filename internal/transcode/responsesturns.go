@@ -75,6 +75,9 @@ func responsesInputToTurns(
 			if err := loseInputPhase(policy, report, value.Phase, i); err != nil {
 				return nil, err
 			}
+			if err := annotatedInputLosses(value.Content, i, policy, report); err != nil {
+				return nil, err
+			}
 			parts, err := responsesOutputContentToCanonical(value.Content)
 			if err != nil {
 				return nil, fmt.Errorf("input item %d: %w", i, err)
@@ -272,10 +275,12 @@ func responsesInputContentPartToCanonical(
 		}, nil
 
 	case *ResponsesOutputText:
-		// Assistant easy-message history turns carry output-type parts;
-		// they map exactly like
-		// responsesOutputContentToCanonical — only .Text/.Refusal reach the
-		// IR, annotations never do.
+		// Assistant easy-message history turns carry output-type parts; they
+		// map exactly like responsesOutputContentToCanonical — the text
+		// reaches the IR losslessly. Annotations are citation metadata the
+		// target request cannot reproduce; they are recorded at the item level
+		// by the caller (see annotatedInputLosses) rather than dropped silently,
+		// matching the Anthropic decoder's request_citations decision.
 		return CanonicalText{Text: value.Text}, nil
 
 	case *ResponsesOutputRefusal:
@@ -325,6 +330,34 @@ func responsesFunctionOutputToCanonical(
 		parts = append(parts, converted)
 	}
 	return parts, nil
+}
+
+// annotatedInputLosses records the request_citations decision for a previous
+// output message replayed as input whose output_text parts carry annotations.
+// The Anthropic decoder records the same key for equivalent citation metadata,
+// so the two source decoders agree: citation structure is an approved loss (or
+// a refusal), while the text itself reaches the IR losslessly.
+func annotatedInputLosses(
+	content ResponsesOutputContentParts,
+	index int,
+	policy LossPolicy,
+	report *ConversionReport,
+) error {
+	for partIndex, part := range content {
+		text, ok := part.(*ResponsesOutputText)
+		if !ok || len(text.Annotations) == 0 {
+			continue
+		}
+		if err := report.Lose(
+			policy,
+			FeatureRequestCitations,
+			fmt.Sprintf("input[%d].content[%d].annotations", index, partIndex),
+			"request citations on replayed output text cannot be reproduced in the target request",
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // splitImageDataURL parses a base64 data URL of the form

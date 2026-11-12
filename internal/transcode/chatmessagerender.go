@@ -81,16 +81,18 @@ func canonicalTextTurnToChatMessage(
 
 // joinChatSystemMessages consolidates rendered system-channel messages into
 // one leading system message, joining their text with "\n\n" in encounter
-// order. Every input message is text-only (canonicalTextTurnTo
-// ChatMessage rejects anything else), so the join cannot lose content.
-func joinChatSystemMessages(leading, midDialog []ChatMessage) ChatMessage {
-	texts := make([]string, 0, len(leading)+len(midDialog))
-	for _, group := range [][]ChatMessage{leading, midDialog} {
-		for _, message := range group {
-			for _, block := range message.Content.ContentBlocks {
-				if block.Text != nil {
-					texts = append(texts, *block.Text)
-				}
+// order. Every input message is text-only (canonicalTextTurnToChatMessage
+// rejects anything else), so the join cannot lose content. An EMPTY text block
+// carries no bytes and is skipped: joining it would invent a leading, trailing,
+// or doubled separator that the model would read as prompt text, and it would
+// also let an all-dropped system turn slip past the degenerate-conversation
+// guard in RenderChatRequest.
+func joinChatSystemMessages(messages []ChatMessage) ChatMessage {
+	texts := make([]string, 0, len(messages))
+	for _, message := range messages {
+		for _, block := range message.Content.ContentBlocks {
+			if block.Text != nil && *block.Text != "" {
+				texts = append(texts, *block.Text)
 			}
 		}
 	}
@@ -320,6 +322,14 @@ func canonicalAssistantTurnToChatMessage(
 		case CanonicalRefusal:
 			// Refusal is a top-level assistant message field in Chat.
 			refusal = &value.Text
+
+		case CanonicalThinkingPart:
+			// Marker-signature thinking is proxy-synthesized reasoning: the
+			// request path scrubs it from replayed history before upstream
+			// rendering, so it never reaches a Chat upstream. A non-marker
+			// thinking part is a source-authenticated artifact gated by
+			// RequirePortableArtifacts, which runs before this loop.
+			continue
 
 		case CanonicalFunctionCall:
 			callID := value.CallID

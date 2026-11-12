@@ -65,14 +65,24 @@ func TestRenderChatToolResultMultimodalMatrix(t *testing.T) {
 		}
 	}
 
-	// Strict policy: rejected with a LOCAL unrepresentable error.
+	// Strict policy: rejected with a LOCAL client-dialect refusal that names
+	// the feature key which refused (the policy error is returned as-is, so an
+	// operator can see tool_result_multimodal_content rather than a generic
+	// unrepresentable error).
 	var strictReport ConversionReport
 	_, err := renderChatToolResult(multimodal(), ChatCapabilities{}, StrictLossPolicy(), &strictReport)
 	if err == nil {
 		t.Fatal("strict policy accepted multimodal tool-result content")
 	}
-	if _, ok := errors.AsType[*UnrepresentableError](err); !ok {
-		t.Fatalf("err = %T %v, want *UnrepresentableError", err, err)
+	var featureErr *UnsupportedFeatureError
+	if !errors.As(err, &featureErr) {
+		t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
+	}
+	if featureErr.Feature != string(FeatureToolResultMultimodalContent) {
+		t.Fatalf("feature = %q, want %s", featureErr.Feature, FeatureToolResultMultimodalContent)
+	}
+	if _, ok := errors.AsType[*UnrepresentableError](err); ok {
+		t.Fatalf("err = %T %v, want the policy error, not a generic unrepresentable error", err, err)
 	}
 	if _, ok := errors.AsType[*UpstreamWireError](err); ok {
 		t.Fatal("invalid model output must never classify as corrupt upstream wire")

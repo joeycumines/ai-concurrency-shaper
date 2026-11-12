@@ -209,12 +209,11 @@ func TestChatContentBlockPerArmPositives(t *testing.T) {
 // "tool": auto/none/any carrying a name are contradictory union arms,
 // rejected instead of silently dropping the name.
 func TestAnthropicToolChoiceNameRejected(t *testing.T) {
-	var report ConversionReport
+	var request CanonicalRequest
 	for _, mode := range []string{"auto", "none", "any"} {
 		if _, err := canonicalizeAnthropicToolChoice(
 			AnthropicToolChoice{Type: mode, Name: "f"},
-			&report,
-			StrictLossPolicy(),
+			&request,
 		); err == nil {
 			t.Fatalf("tool_choice %s with name accepted", mode)
 		}
@@ -222,15 +221,13 @@ func TestAnthropicToolChoiceNameRejected(t *testing.T) {
 	// Type tool requires a name and accepts one.
 	if _, err := canonicalizeAnthropicToolChoice(
 		AnthropicToolChoice{Type: "tool", Name: "f"},
-		&report,
-		StrictLossPolicy(),
+		&request,
 	); err != nil {
 		t.Fatalf("tool with name rejected: %v", err)
 	}
 	if _, err := canonicalizeAnthropicToolChoice(
 		AnthropicToolChoice{Type: "tool"},
-		&report,
-		StrictLossPolicy(),
+		&request,
 	); err == nil {
 		t.Fatal("tool without name accepted")
 	}
@@ -245,8 +242,7 @@ func TestAnthropicToolChoiceNameRejected(t *testing.T) {
 	} {
 		choice, err := canonicalizeAnthropicToolChoice(
 			AnthropicToolChoice{Type: tt.in},
-			&report,
-			StrictLossPolicy(),
+			&request,
 		)
 		if err != nil {
 			t.Fatalf("%s: %v", tt.in, err)
@@ -258,8 +254,7 @@ func TestAnthropicToolChoiceNameRejected(t *testing.T) {
 	// An unknown type is rejected, never defaulted.
 	if _, err := canonicalizeAnthropicToolChoice(
 		AnthropicToolChoice{Type: "bogus"},
-		&report,
-		StrictLossPolicy(),
+		&request,
 	); err == nil {
 		t.Fatal("unknown tool_choice type accepted")
 	}
