@@ -29,10 +29,15 @@ func RenderMessagesRequest(
 	}
 	if err := RequirePortableArtifacts(
 		request,
-		UpstreamMessages,
 		context.lossPolicy(),
 		&report,
 	); err != nil {
+		return nil, report, err
+	}
+	// Responses request fields the Messages wire cannot reproduce take the
+	// shared envelope decision, so a Responses-sourced exchange never drops a
+	// client field silently. Messages has no reasoning-effort control.
+	if err := responsesEchoLosses(context, &report, false); err != nil {
 		return nil, report, err
 	}
 
@@ -70,12 +75,18 @@ func RenderMessagesRequest(
 			Type:         request.Thinking.Type,
 			BudgetTokens: request.Thinking.BudgetTokens,
 		}
+		// The Messages target carries the client's thinking display
+		// preference natively.
+		if request.Thinking.Display != "" {
+			display := request.Thinking.Display
+			out.Thinking.Display = &display
+		}
 	}
 	if request.StructuredOutput != nil {
 		if err := report.Lose(
 			context.lossPolicy(),
 			FeatureStructuredOutput,
-			"generationConfig.responseSchema",
+			"text.format",
 			"structured output cannot be enforced by an Anthropic Messages upstream",
 		); err != nil {
 			return nil, report, err
@@ -103,8 +114,8 @@ func messagesMaxTokens(
 	}
 	if context != nil && context.ModelMaxOutputTokens != nil {
 		if err := report.Note(
-			FeatureGeminiMaxTokensFromModelTable,
-			"generationConfig.maxOutputTokens",
+			FeatureMessagesMaxTokensFromModelTable,
+			"max_tokens",
 			"the Anthropic Messages upstream requires max_tokens; the model table's max_output supplies it",
 		); err != nil {
 			return 0, err
@@ -135,32 +146,52 @@ func renderMessagesTurns(
 	replay := newNamespaceReplayResolve(context.toolNames(), request.Tools, context.lossPolicy(), report)
 	var system []anthropicmessages.ContentBlock
 	systemTurns := 0
-	sawDialog := false
+	// sawClientDialog and sawRetainedDialog are tracked separately for the same
+	// reason the Chat renderer tracks them: a client-authored system turn that
+	// physically follows RETAINED dialog is a position the PROXY created, so it
+	// must not be charged to the client. A retained system turn, by contrast,
+	// is mid-dialog as soon as any dialog precedes it.
+	sawClientDialog := false
+	sawRetainedDialog := false
 	for i, turn := range request.Turns {
 		path := fmt.Sprintf("messages[%d]", i)
+		retained := i < request.RetainedTurns
 		switch turn.Role {
 		case CanonicalSystem, CanonicalDeveloper:
 			if turn.Role == CanonicalDeveloper {
-				if err := report.Lose(
-					context.lossPolicy(),
+				if err := chargePosition(
+					request,
+					i,
 					FeatureDeveloperRole,
-					"messages[].role",
+					path,
 					"developer role is not supported by the Anthropic Messages upstream; developer content renders as system content",
-				); err != nil {
-					return err
-				}
-			}
-			if sawDialog {
-				if err := report.Lose(
+					report,
 					context.lossPolicy(),
-					FeatureMidConversationSystem,
-					"messages[]",
-					"mid-conversation system turns cannot keep their position in a Messages request; they consolidate into the leading system field",
 				); err != nil {
 					return err
 				}
 			}
-			blocks, err := messagesSystemBlocks(turn, path)
+			midDialog := sawClientDialog
+			if retained {
+				midDialog = sawRetainedDialog || sawClientDialog
+			}
+			if midDialog {
+				// Only a position this request created may be charged; a
+				// retained mid-conversation turn is the proxy's own history,
+				// already consolidated once when the chain was first rendered.
+				if err := chargePosition(
+					request,
+					i,
+					FeatureMidConversationSystem,
+					path,
+					"mid-conversation system turns cannot keep their position in a Messages request; they consolidate into the leading system field",
+					report,
+					context.lossPolicy(),
+				); err != nil {
+					return err
+				}
+			}
+			blocks, err := messagesSystemBlocks(turn, path, context.lossPolicy(), report)
 			if err != nil {
 				return err
 			}
@@ -168,7 +199,11 @@ func renderMessagesTurns(
 			systemTurns++
 
 		case CanonicalUser, CanonicalAssistant:
-			sawDialog = true
+			if retained {
+				sawRetainedDialog = true
+			} else {
+				sawClientDialog = true
+			}
 			message, err := messagesTurn(turn, path, replay)
 			if err != nil {
 				return err
@@ -179,7 +214,15 @@ func renderMessagesTurns(
 			return fmt.Errorf("%s: canonical role %q has no Messages form", path, turn.Role)
 		}
 	}
-	if systemTurns > 1 && !sawDialogAfterSystem(request) {
+	// The leading-consolidation Note documents the merge of multiple leading
+	// system turns into the single system field, exactly as the Chat renderer
+	// notes its own leading merge. It is a sanctioned ENCODING (content is
+	// joined, not dropped), so it consults no policy and applies whether the
+	// turns were client-authored or reconstructed by the continuity store: the
+	// merge happens either way, and the two targets must agree on reporting it.
+	// A client-authored system turn AFTER dialog is the separate policy-gated
+	// loss charged per turn above, so only the leading-only merge is noted here.
+	if systemTurns > 1 && !sawClientDialogAfterSystem(request, request.RetainedTurns) {
 		if err := report.Note(
 			FeatureMidConversationSystem,
 			"messages[]",
@@ -200,17 +243,24 @@ func renderMessagesTurns(
 	return nil
 }
 
-// sawDialogAfterSystem reports whether any system-channel turn follows a dialog
-// turn. Such a turn is already recorded as the mid_conversation_system loss, so
-// the leading-consolidation note applies only when no such turn exists.
-func sawDialogAfterSystem(request CanonicalRequest) bool {
-	sawDialog := false
-	for _, turn := range request.Turns {
+// sawClientDialogAfterSystem reports whether a SYSTEM-channel turn the client
+// authored follows a dialog turn the CLIENT also authored. Such a turn is the
+// policy-gated mid_conversation_system loss charged per turn, so the
+// leading-consolidation Note applies only when no such turn exists. The
+// provenance test MUST mirror the per-turn classification exactly: retained
+// dialog does not demote a client system turn (the proxy created that
+// position), so it must not suppress the leading note either. A retained system
+// turn after dialog is a Note, never a loss, so it never suppresses the note.
+func sawClientDialogAfterSystem(request CanonicalRequest, retained int) bool {
+	sawClientDialog := false
+	for i, turn := range request.Turns {
 		switch turn.Role {
 		case CanonicalUser, CanonicalAssistant:
-			sawDialog = true
+			if i >= retained {
+				sawClientDialog = true
+			}
 		case CanonicalSystem, CanonicalDeveloper:
-			if sawDialog {
+			if sawClientDialog && i >= retained {
 				return true
 			}
 		}
@@ -219,17 +269,30 @@ func sawDialogAfterSystem(request CanonicalRequest) bool {
 }
 
 // messagesSystemBlocks renders a system or developer turn as text blocks. Only
-// text is representable in the system field.
-func messagesSystemBlocks(turn CanonicalTurn, path string) ([]anthropicmessages.ContentBlock, error) {
+// text is representable in the system field, so a non-text part (an image or a
+// document) takes the same system_non_text_content decision the Chat, Responses
+// and Gemini targets apply: dropped observably when the operator approves the
+// loss, and refused with the feature key otherwise — never a harder rule than
+// the other targets.
+func messagesSystemBlocks(
+	turn CanonicalTurn,
+	path string,
+	policy LossPolicy,
+	report *ConversionReport,
+) ([]anthropicmessages.ContentBlock, error) {
 	var blocks []anthropicmessages.ContentBlock
 	for j, part := range turn.Parts {
 		text, ok := part.(CanonicalText)
 		if !ok {
-			return nil, &UnrepresentableError{
-				Protocol: "messages",
-				Path:     fmt.Sprintf("%s.parts[%d]", path, j),
-				Detail:   fmt.Sprintf("the system field carries only text, not %T", part),
+			if err := report.Lose(
+				policy,
+				FeatureSystemNonTextContent,
+				fmt.Sprintf("%s.parts[%d]", path, j),
+				"non-text system content cannot be carried by the Anthropic Messages system field",
+			); err != nil {
+				return nil, err
 			}
+			continue
 		}
 		value := text.Text
 		blocks = append(blocks, anthropicmessages.ContentBlock{
@@ -263,7 +326,7 @@ func messagesTurn(turn CanonicalTurn, path string, replay namespaceReplayResolve
 			}
 			if sawOther {
 				return anthropicmessages.Message{}, errors.New(
-					"functionResponse parts must precede other parts in a user content for this upstream",
+					"tool_result blocks must precede other blocks in a Messages user message",
 				)
 			}
 			block, err := messagesToolResultBlock(value, partPath)
@@ -302,6 +365,14 @@ func messagesTurn(turn CanonicalTurn, path string, replay namespaceReplayResolve
 				Type: anthropicmessages.ContentBlockTypeText,
 				Text: &text,
 			})
+
+		case CanonicalThinkingPart:
+			// Marker-signature thinking is proxy-synthesized reasoning: the
+			// request path scrubs it from replayed history before upstream
+			// rendering, so it never reaches a Messages upstream. A non-marker
+			// part is a source-authenticated artifact gated by
+			// RequirePortableArtifacts, which runs before this loop.
+			continue
 
 		case CanonicalImage, CanonicalDocument:
 			sawOther = true
@@ -455,7 +526,11 @@ func renderMessagesTools(
 	report *ConversionReport,
 ) error {
 	for i, tool := range request.Tools {
-		if tool.Strict != nil {
+		// strict:false asserts NO enforcement, which is exactly what the
+		// Messages wire does, so only a truthy strict is a loss: gating on
+		// presence would refuse every Responses-sourced tool while losing
+		// nothing.
+		if tool.Strict != nil && *tool.Strict {
 			if err := report.Lose(
 				context.lossPolicy(),
 				FeatureToolSchemaStrictness,
@@ -482,13 +557,28 @@ func renderMessagesTools(
 		}
 		out.ToolChoice = &choice
 	}
-	if request.ParallelTools != nil && !*request.ParallelTools && len(request.Tools) > 0 {
-		choice := anthropicmessages.ToolChoice{Type: "auto"}
-		if out.ToolChoice != nil {
-			choice = *out.ToolChoice
+	// A disabled parallel-call request rides disable_parallel_tool_use on the
+	// choice. With no tools the Messages wire has nothing to attach it to, so
+	// the setting cannot be expressed and must be recorded as the approved loss
+	// (or refused) — never silently dropped.
+	if request.ParallelTools != nil && !*request.ParallelTools {
+		if len(request.Tools) == 0 {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureParallelToolCalls,
+				"parallel_tool_calls",
+				"a disabled parallel-tool-call setting cannot be carried by an Anthropic Messages request that declares no tools",
+			); err != nil {
+				return err
+			}
+		} else {
+			choice := anthropicmessages.ToolChoice{Type: "auto"}
+			if out.ToolChoice != nil {
+				choice = *out.ToolChoice
+			}
+			choice.DisableParallelToolUse = new(true)
+			out.ToolChoice = &choice
 		}
-		choice.DisableParallelToolUse = new(true)
-		out.ToolChoice = &choice
 	}
 	return nil
 }

@@ -891,6 +891,17 @@ the same key. The strict programmatic policy rejects the position loss;
 pass `-transcode-chat-capability system_anywhere` to restore positional
 rendering for upstreams that accept it.
 
+Both Messages and Responses upstreams hold system content in a single field
+too, and neither discards a split prompt: every system turn's text is joined in
+encounter order into that one field, so a request that carries an `instructions`
+string plus a system-role input item (or a top-level `system` plus an inline
+system message) keeps all of its prompt. Each position decision — a
+mid-conversation system turn, a developer-role turn collapsing into a
+role-neutral field, and the multi-turn join itself — is recorded rather than
+applied silently, and a turn the continuity store reconstructed is recorded as a
+Note instead of a policy-gated loss: the proxy created that position, so it is
+not charged to the client.
+
 ### Thinking budgets and reasoning effort
 
 Anthropic `thinking` on a Messages client maps to chat `reasoning_effort`
@@ -907,6 +918,13 @@ a deterministic, documented threshold table (`<1024` minimal, `<4096` low,
 The thinking members are validated per type (`enabled` carries
 `budget_tokens`, `disabled` carries none, `adaptive` carries `display`) —
 a cross-type member is a malformed request, not a silently ignored field.
+`display` is a Messages-native field, so the Messages target renders it and
+every other target records the `request_reasoning` loss for the preference it
+cannot reproduce; the decoder never destroys it, because the decision belongs to
+the target that knows it cannot carry it. The same rule covers `top_k` and
+`disable_parallel_tool_use`: both are carried by the canonical request and lost
+only by a renderer whose wire has no such field, so a Messages→Messages exchange
+keeps them while a Messages→Chat exchange records the loss.
 Request-side reasoning controls — an enabled `thinking` budget or a
 Responses `reasoning.effort` — are gated by their own `request_reasoning`
 loss key, distinct from the response-side `provider_reasoning_text` (chat
@@ -973,9 +991,16 @@ refusal. When the bare name is already owned by a surviving tool the exchange
 is refused outright: no policy can approve re-pointing a client-sent call at
 a different tool.
 `tool_choice` has no namespaced selector (Codex sends `"auto"`), and a named
-choice addresses the flattened name: a bare child name is ambiguous when it
-collides with another tool, so the qualified `namespace__child` form is the
-one that stays addressable. Namespace tools are modeled as a deliberate
+choice addresses the tool the client knows: a name that matches a plain
+function or a properly declared flat name is used as-is, and a name matching
+exactly one namespace child whose flat name had to be qualified is resolved
+through the per-exchange map. A name matching no surviving tool, or one that
+more than one namespace child shares, is refused rather than guessed. A
+namespace whose inner grouping cannot be represented — two different outer
+namespaces that each contain an inner namespace of the same name with a child
+of the same name — is refused before any upstream request, because the IR keeps
+only the innermost qualifier and the two tools would be indistinguishable.
+Namespace tools are modeled as a deliberate
 extension beyond the pinned OpenAI SDK revision; the wire shadow's
 modeled-extension comments record the exact shapes.
 

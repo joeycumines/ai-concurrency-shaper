@@ -47,16 +47,13 @@ func DecodeMessagesRequest(
 		result.Request.Stream = *envelope.Stream
 	}
 
-	if envelope.TopK != nil {
-		if err := result.Report.Lose(
-			policy,
-			FeatureTopK,
-			"top_k",
-			"top_k has no portable equivalent in the target protocols",
-		); err != nil {
-			return DecodeResult{}, err
-		}
-	}
+	// top_k is a sampling cutoff the Messages target carries natively, so the
+	// decoder (which has no target) stores it: deciding the loss here would
+	// destroy a value another target can reproduce, and top_k is not a default
+	// loss, so a default deployment would refuse the request outright. The
+	// Chat and Responses renderers record the loss because THEIR wire has no
+	// such field.
+	result.Request.TopK = envelope.TopK
 
 	// The modern Anthropic envelope controls are client-side semantics with
 	// no target representation: output_config.budget_tokens is an output
@@ -229,9 +226,21 @@ func DecodeMessagesRequest(
 					envelope.Thinking.Type,
 				)
 			}
-			result.Request.Thinking = &CanonicalThinking{
-				Type: envelope.Thinking.Type,
+			// display belongs to the adaptive arm alone. Accepting it on
+			// disabled would silently tolerate a contradictory union member.
+			if envelope.Thinking.Type == "disabled" && envelope.Thinking.Display != nil {
+				return DecodeResult{}, errors.New(
+					"messages thinking type disabled cannot carry display (it belongs to adaptive)",
+				)
 			}
+			// The Messages target carries display natively, so the decoder
+			// (which has no target) stores it; each other target records the
+			// request_reasoning loss for the preference it cannot reproduce.
+			thinking := &CanonicalThinking{Type: envelope.Thinking.Type}
+			if envelope.Thinking.Display != nil {
+				thinking.Display = *envelope.Thinking.Display
+			}
+			result.Request.Thinking = thinking
 		default:
 			return DecodeResult{}, fmt.Errorf(
 				"messages thinking type %q is invalid (want enabled, disabled, or adaptive)",
@@ -282,9 +291,11 @@ func DecodeMessagesRequest(
 			return DecodeResult{}, fmt.Errorf("messages[%d]: %w", i, err)
 		}
 		if len(parts) == 0 && len(message.Content.ContentBlocks) > 0 {
-			// When all content blocks in an assistant turn were scrubbed (e.g.
-			// synthetic thinking blocks), preserve the turn with an empty text
-			// part so canonical validation does not reject an empty turn.
+			// When every content block in the turn was scrubbed (e.g. synthetic
+			// marker-signature thinking blocks, in an assistant turn or a
+			// system-role one), preserve the turn with an empty text part so
+			// canonical validation does not reject a turn whose blocks were all
+			// proxy-synthesized.
 			parts = []CanonicalPart{CanonicalText{Text: ""}}
 		}
 		result.Request.Turns = append(result.Request.Turns, CanonicalTurn{
@@ -361,8 +372,7 @@ func DecodeMessagesRequest(
 	if envelope.ToolChoice != nil {
 		choice, err := canonicalizeAnthropicToolChoice(
 			*envelope.ToolChoice,
-			&result.Report,
-			policy,
+			&result.Request,
 		)
 		if err != nil {
 			return DecodeResult{}, err
@@ -372,6 +382,7 @@ func DecodeMessagesRequest(
 			len(envelope.Tools),
 			&result.Request,
 			&result.Report,
+			FeatureAnthropicServerTools,
 		)
 		if err != nil {
 			return DecodeResult{}, err

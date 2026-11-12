@@ -430,13 +430,17 @@ func TestMultiAgentPrimingRequiresDeclaredTools(t *testing.T) {
 		{Role: CanonicalSystem, Parts: []CanonicalPart{CanonicalText{Text: "You are an AI assistant."}}},
 		{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: "hi"}}},
 	}
-	// A namespace child counts even though it was flattened: the gate checks
-	// the FLAT names the upstream will actually see.
+	// Priming checks the FLAT names the upstream will actually see. Decode
+	// stores the resolved flat name in CanonicalTool.Name, so a namespaced
+	// child appears there like any other function tool; a child that had to be
+	// collision-qualified does NOT (its flat name is not one of the five), and
+	// priming it would tell the model to call a tool the upstream never
+	// received. The namespace map is deliberately NOT consulted: the qualifier
+	// alone is not a contract about the children the upstream was sent.
 	names := &ToolNames{
 		FlatToRef: map[string]ToolNameRef{"spawn_agent": {Namespace: "multi_agent_v1", Name: "spawn_agent"}},
 		RefToFlat: map[ToolNameRef]string{{Namespace: "multi_agent_v1", Name: "spawn_agent"}: "spawn_agent"},
 	}
-
 	for _, tc := range []struct {
 		name      string
 		tools     []CanonicalTool
@@ -446,7 +450,14 @@ func TestMultiAgentPrimingRequiresDeclaredTools(t *testing.T) {
 		{name: "no tools at all", wantPrime: false},
 		{name: "only an unrelated tool", tools: []CanonicalTool{{Name: "get_weather"}}, wantPrime: false},
 		{name: "a top-level tool spelled like a sub-agent tool", tools: []CanonicalTool{{Name: "spawn_agent"}}, wantPrime: true},
-		{name: "an unrelated top-level tool plus a flattened namespace child", tools: []CanonicalTool{{Name: "get_weather"}}, toolNames: names, wantPrime: true},
+		{name: "a flattened namespace child reaching the upstream under its bare name", tools: []CanonicalTool{{Name: "get_weather"}, {Name: "spawn_agent"}}, wantPrime: true},
+		{
+			// A collision-qualified child is NOT a name the reminder can use.
+			name:      "a collision-qualified namespace child",
+			tools:     []CanonicalTool{{Name: "get_weather"}, {Name: "multi_agent_v1__spawn_agent"}},
+			toolNames: names,
+			wantPrime: false,
+		},
 		{
 			// The namespace NAME is not a contract about its children: a
 			// multi_agent_v1 group holding only list_agents must NOT be primed

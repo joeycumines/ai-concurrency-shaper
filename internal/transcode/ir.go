@@ -196,10 +196,15 @@ type SourceArtifacts struct {
 
 // CanonicalThinking is the decoded Anthropic Messages thinking
 // configuration. Type is one of "enabled", "disabled", or "adaptive";
-// BudgetTokens is set only when Type is "enabled".
+// BudgetTokens is set only when Type is "enabled", and Display only when Type
+// is "adaptive" (the official per-type member sets). Display is the client's
+// thinking-visibility preference; the Messages target carries it natively, so
+// the other targets take the request_reasoning loss instead of the decoder
+// destroying it.
 type CanonicalThinking struct {
 	Type         string
 	BudgetTokens *int
+	Display      string
 }
 
 // CanonicalRequest is the decoded request in canonical form.
@@ -351,35 +356,38 @@ func (c *ExchangeContext) toolNames() *ToolNames {
 	return c.ToolNames
 }
 
-// RequirePortableArtifacts enforces that provider-authenticated artifacts
-// never cross protocol boundaries. Thinking blocks and reasoning items may
-// only be passed through unchanged to the same protocol; crossing protocols
-// requires an approved loss or a rejection.
+// RequirePortableArtifacts enforces that provider-authenticated artifacts never
+// reach an upstream silently. Thinking blocks and reasoning items are opaque to
+// every target: the canonical IR records no position for them, so no renderer
+// can put them back where they were, and a same-protocol target would therefore
+// receive a request that omitted them with no record at all. The honest
+// contract is one decision for every target: an approved loss drops them
+// observably, and the strict policy refuses. (A same-protocol pass-through
+// would need per-artifact position metadata, which the IR deliberately does not
+// carry; that is recorded as a known limitation rather than implemented by
+// inventing an order.)
 func RequirePortableArtifacts(
 	request CanonicalRequest,
-	target UpstreamProtocol,
 	policy LossPolicy,
 	report *ConversionReport,
 ) error {
-	if target != UpstreamMessages &&
-		len(request.Artifacts.AnthropicThinkingBlocks) != 0 {
+	if len(request.Artifacts.AnthropicThinkingBlocks) != 0 {
 		if err := report.Lose(
 			policy,
 			FeatureAuthenticatedThinking,
 			"messages[].content[]",
-			"Anthropic thinking blocks cannot be translated across protocols",
+			"Anthropic thinking blocks cannot be reproduced in a target request",
 		); err != nil {
 			return err
 		}
 	}
 
-	if target != UpstreamResponses &&
-		len(request.Artifacts.ResponsesReasoningItems) != 0 {
+	if len(request.Artifacts.ResponsesReasoningItems) != 0 {
 		if err := report.Lose(
 			policy,
 			FeatureReasoningSummary,
 			"input[]",
-			"Responses reasoning items cannot be reproduced in the target protocol",
+			"Responses reasoning items cannot be reproduced in a target request",
 		); err != nil {
 			return err
 		}
@@ -395,10 +403,23 @@ func RequirePortableArtifacts(
 
 // ValidateCanonicalRequest checks the IR invariants before rendering:
 // every turn role is one of the canonical values, every turn has content,
-// every part is non-nil, tool calls carry non-empty identity (item/call id
-// and name) with object-shaped arguments, and tool results carry a non-empty
-// call id.
+// every part is non-nil, RetainedTurns is a prefix of the turn list, tool calls
+// carry non-empty identity (item/call id and name) with object-shaped
+// arguments, and tool results carry a non-empty call id.
 func ValidateCanonicalRequest(request CanonicalRequest) error {
+	// RetainedTurns decides which turns were reconstructed by the proxy rather
+	// than authored by the client, so an out-of-range value would silently
+	// reclassify client input as proxy history (or exempt nothing at all).
+	if request.RetainedTurns < 0 {
+		return fmt.Errorf("retained turn count %d is negative", request.RetainedTurns)
+	}
+	if request.RetainedTurns > len(request.Turns) {
+		return fmt.Errorf(
+			"retained turn count %d exceeds the %d request turns",
+			request.RetainedTurns,
+			len(request.Turns),
+		)
+	}
 	for turnIndex, turn := range request.Turns {
 		switch turn.Role {
 		case CanonicalUser, CanonicalAssistant, CanonicalSystem, CanonicalDeveloper:

@@ -23,35 +23,20 @@ var multiAgentToolNames = map[string]struct{}{
 	"close_agent": {}, "resume_agent": {},
 }
 
-// multiAgentNamespace is the Codex namespace that groups those children.
-const multiAgentNamespace = "multi_agent_v1"
-
 // declaresMultiAgentTools reports whether this request will render at least
 // one of the sub-agent tools the reminder names. It checks the FLAT names the
-// upstream will actually see - a namespace child is looked up by its resolved
-// flat name, so a child that had to be collision-qualified still counts,
-// while a request that declares none of them is never primed.
-func declaresMultiAgentTools(tools []CanonicalTool, context *ExchangeContext) bool {
-	// Every entry here is already a flat function tool: namespace children
-	// were flattened to their resolved names at decode.
+// upstream will actually see: decode already resolved each namespace child to
+// its flat name and stored it in CanonicalTool.Name, so a child that had to be
+// collision-qualified is NOT counted (its flat name is not one of the five).
+// Priming on the qualifier an upstream never received would make the model call
+// a tool that does not exist, so the check stays on rendered names only. The
+// namespace NAME alone is not a contract about its children either: a
+// multi_agent_v1 group holding only `list_agents` must not be primed with a
+// reminder naming five tools the upstream was never sent.
+func declaresMultiAgentTools(tools []CanonicalTool) bool {
 	for _, tool := range tools {
 		if _, ok := multiAgentToolNames[tool.Name]; ok {
 			return true
-		}
-	}
-	// A namespace child reaches the upstream under its resolved FLAT name, so
-	// look the five up there too. The namespace NAME alone is not a contract
-	// about its children - a multi_agent_v1 group holding only `list_agents`
-	// would otherwise be primed with a reminder naming five tools the upstream
-	// was never sent.
-	if context != nil && context.ToolNames != nil {
-		for ref := range context.ToolNames.RefToFlat {
-			if ref.Namespace != multiAgentNamespace {
-				continue
-			}
-			if _, ok := multiAgentToolNames[ref.Name]; ok {
-				return true
-			}
 		}
 	}
 	return false

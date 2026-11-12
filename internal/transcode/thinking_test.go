@@ -11,6 +11,18 @@ import (
 // through decode + chat render and returns the rendered body and report.
 func decodeThinking(t *testing.T, thinking string, capabilities ChatCapabilities) ([]byte, ConversionReport, error) {
 	t.Helper()
+	return decodeThinkingPolicy(t, thinking, capabilities, StrictLossPolicy())
+}
+
+// decodeThinkingPolicy is decodeThinking with an explicit exchange loss policy,
+// for cases whose Chat render legitimately takes a loss the caller approved.
+func decodeThinkingPolicy(
+	t *testing.T,
+	thinking string,
+	capabilities ChatCapabilities,
+	policy LossPolicy,
+) ([]byte, ConversionReport, error) {
+	t.Helper()
 	body := []byte(`{
 		"model":"m",
 		"max_tokens":100,
@@ -22,7 +34,9 @@ func decodeThinking(t *testing.T, thinking string, capabilities ChatCapabilities
 	if err != nil {
 		return nil, ConversionReport{}, err
 	}
-	rendered, report, err := RenderChatRequest(result.Request, testExchangeContext(), capabilities)
+	ctx := testExchangeContext()
+	ctx.LossPolicy = policy
+	rendered, report, err := RenderChatRequest(result.Request, ctx, capabilities)
 	return rendered, report, err
 }
 
@@ -67,7 +81,12 @@ func TestDecodeMessagesRequestThinkingConfig(t *testing.T) {
 		t.Fatalf("reasoning_effort = %v, want medium", probe.ReasoningEffort)
 	}
 
-	adaptive, report, err := decodeThinking(t, `{"type":"adaptive","display":"omitted"}`, ChatCapabilities{ReasoningEffort: true})
+	// The thinking display preference is Messages-native, so a Chat render
+	// loses it: approve request_reasoning to reach the render.
+	displayPolicy := LossPolicy{Allowed: map[Feature]struct{}{FeatureRequestReasoning: {}}}
+	adaptive, report, err := decodeThinkingPolicy(
+		t, `{"type":"adaptive","display":"omitted"}`, ChatCapabilities{ReasoningEffort: true}, displayPolicy,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,8 +99,15 @@ func TestDecodeMessagesRequestThinkingConfig(t *testing.T) {
 	if probe2.ReasoningEffort != nil {
 		t.Fatalf("adaptive reasoning_effort = %v, want omitted", *probe2.ReasoningEffort)
 	}
-	if len(report.Losses) != 1 || report.Losses[0].Feature != FeatureRequestReasoning {
-		t.Fatalf("adaptive report = %+v, want one request_reasoning note", report.Losses)
+	// Two request_reasoning entries: the adaptive encoding Note and the
+	// thinking-display loss the Chat target must record.
+	if len(report.Losses) != 2 {
+		t.Fatalf("adaptive report = %+v, want the encoding Note plus the display loss", report.Losses)
+	}
+	for _, loss := range report.Losses {
+		if loss.Feature != FeatureRequestReasoning {
+			t.Fatalf("adaptive report = %+v, want request_reasoning entries", report.Losses)
+		}
 	}
 
 	disabled, _, err := decodeThinking(t, `{"type":"disabled"}`, ChatCapabilities{ReasoningEffort: true})
@@ -144,7 +170,9 @@ func TestMessagesThinkingDisabledNoted(t *testing.T) {
 // budget under a chat provider without the reasoning_effort capability is a
 // loss/reject decision (request_reasoning), never a silent drop.
 func TestDecodeMessagesRequestThinkingNoCapability(t *testing.T) {
-	_, _, err := decodeThinking(t, `{"type":"enabled","budget_tokens":4096}`, ChatCapabilities{})
+	_, _, err := decodeThinkingPolicy(
+		t, `{"type":"enabled","budget_tokens":4096}`, ChatCapabilities{}, StrictLossPolicy(),
+	)
 	if err == nil {
 		t.Fatal("expected rejection without the reasoning_effort capability")
 	}
@@ -209,7 +237,12 @@ func TestMessagesThinkingRejectedOnResponsesTarget(t *testing.T) {
 	}
 
 	// Adaptive and disabled carry no budget; the target's own default is the
-	// exact semantic, so they are not gated.
+	// exact semantic. Adaptive with a display preference loses that
+	// preference on a non-Messages target, so approve request_reasoning.
+	permissive := testExchangeContext()
+	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureRequestReasoning: {},
+	}}
 	for _, thinking := range []string{
 		`{"type":"adaptive","display":"omitted"}`,
 		`{"type":"disabled"}`,
@@ -219,7 +252,7 @@ func TestMessagesThinkingRejectedOnResponsesTarget(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode %s: %v", thinking, err)
 		}
-		if _, _, err := RenderResponsesRequest(r.Request, testExchangeContext()); err != nil {
+		if _, _, err := RenderResponsesRequest(r.Request, permissive); err != nil {
 			t.Fatalf("render %s: %v", thinking, err)
 		}
 	}

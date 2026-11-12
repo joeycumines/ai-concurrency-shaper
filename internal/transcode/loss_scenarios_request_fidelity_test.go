@@ -145,7 +145,7 @@ func lossScenariosRequestFidelity(t *testing.T) []lossScenario {
 				context := testExchangeContext()
 				context.LossPolicy = policy
 				var report ConversionReport
-				err := RequirePortableArtifacts(request, UpstreamChatCompletions, policy, &report)
+				err := RequirePortableArtifacts(request, policy, &report)
 				return report, err
 			},
 		},
@@ -153,10 +153,19 @@ func lossScenariosRequestFidelity(t *testing.T) []lossScenario {
 			key:  FeatureTopK,
 			perm: []Feature{FeatureTopK},
 			run: func(policy LossPolicy) (ConversionReport, error) {
+				// top_k is carried by the Messages target, so the decoder stores
+				// it and the CHAT renderer takes the loss: the decision belongs
+				// to the target that cannot reproduce it.
 				result, err := DecodeMessagesRequest([]byte(
 					`{"model":"m","max_tokens":10,"top_k":5,"messages":[{"role":"user","content":"hi"}]}`,
 				), policy)
-				return result.Report, err
+				if err != nil {
+					return result.Report, err
+				}
+				context := testExchangeContext()
+				context.LossPolicy = policy
+				_, report, err := RenderChatRequest(result.Request, context, ChatCapabilities{})
+				return report, err
 			},
 		},
 	}

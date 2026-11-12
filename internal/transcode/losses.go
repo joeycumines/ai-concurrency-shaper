@@ -683,6 +683,26 @@ func (r *ConversionReport) Note(feature Feature, path string, detail string) err
 	return nil
 }
 
+// absorb folds a scratch report into r through the SAME bounded path Lose and
+// Note use, so a transactional sub-render can collect into its own report and
+// commit on success without exceeding the entry bound. Entries beyond the bound
+// are counted in Dropped exactly as a direct Lose would count them, and
+// overflowNoted is carried across so at most one aggregated report_overflow
+// note exists across both reports.
+func (r *ConversionReport) absorb(other ConversionReport) {
+	r.overflowNoted = r.overflowNoted || other.overflowNoted
+	for _, loss := range other.Losses {
+		if err := r.reserve(); err != nil {
+			// reserve has already recorded the overflow fact (the note once,
+			// the Dropped count per entry); the entry itself is intentionally
+			// not recorded, matching Lose and Note.
+			continue
+		}
+		r.Losses = append(r.Losses, loss)
+	}
+	r.Dropped += other.Dropped
+}
+
 // reportMark is the observable prefix of a ConversionReport. A converter call
 // takes one before it runs and restores it when the call fails, so no entry a
 // failed call recorded stays in the report the handler logs.

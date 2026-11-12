@@ -114,18 +114,17 @@ func renderChatToolResult(
 	}
 
 	// Multimodal content: the content-shape loss and the sanctioned
-	// encoding loss gate the deterministic JSON text envelope.
+	// encoding loss gate the deterministic JSON text envelope. The policy error
+	// from Lose is returned as-is: it is already local, typed, and names the
+	// exact feature key that refused, which a generic UnrepresentableError
+	// would hide from the operator.
 	if err := report.Lose(
 		policy,
 		FeatureToolResultMultimodalContent,
 		"messages[].tool_result.content",
 		"the multimodal tool-result content cannot be carried exactly by a Chat tool message",
 	); err != nil {
-		return ChatMessage{}, &UnrepresentableError{
-			Protocol: "chat",
-			Path:     "messages[].tool_result.content",
-			Detail:   "the multimodal tool-result content cannot be represented as a Chat tool message",
-		}
+		return ChatMessage{}, err
 	}
 	envelopeText, err := encodeToolResultEnvelope(parts)
 	if err != nil {
@@ -137,11 +136,7 @@ func renderChatToolResult(
 		"messages[].tool_result.content",
 		"the multimodal tool-result content is encoded as the deterministic transcode JSON text envelope (tool_result_json_envelope, transcode_version 1)",
 	); err != nil {
-		return ChatMessage{}, &UnrepresentableError{
-			Protocol: "chat",
-			Path:     "messages[].tool_result.content",
-			Detail:   "the multimodal tool-result content cannot be represented as a Chat tool message",
-		}
+		return ChatMessage{}, err
 	}
 	callID := result.CallID
 	return ChatMessage{
@@ -198,7 +193,13 @@ func renderChatToolResultMultipart(
 			}
 			detail, err := chatImageDetail(value.Detail, "messages[].tool_result.content", policy, scratch)
 			if err != nil {
-				return ChatMessage{}, false, err
+				// A policy refusal (not an encoding failure) is a DECLINE, not
+				// a fatal error: the JSON envelope carries no detail field and
+				// is gated by its own approved keys, so the caller's fallback
+				// serves this request where the multipart path cannot. Failing
+				// here would turn a request the envelope converts fine into a
+				// rejection.
+				return ChatMessage{}, false, nil
 			}
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeImage,
@@ -218,8 +219,7 @@ func renderChatToolResultMultipart(
 	if len(blocks) == 0 {
 		return ChatMessage{}, false, nil
 	}
-	report.Losses = append(report.Losses, scratch.Losses...)
-	report.Dropped += scratch.Dropped
+	report.absorb(*scratch)
 	callID := result.CallID
 	return ChatMessage{
 		Role:            ChatMessageRoleTool,
@@ -265,6 +265,18 @@ func encodeToolResultEnvelope(parts []CanonicalPart) (string, error) {
 				URL:       url,
 			})
 		case CanonicalDocument:
+			if value.FileID != "" {
+				// The Chat envelope has no file-id arm: it can carry inline
+				// data or a url, but an id-only document names content the
+				// envelope cannot express. Saying so is the honest outcome;
+				// routing it through encodeDataURL would fail with "empty
+				// data", which misdescribes the problem entirely.
+				return "", &UnrepresentableError{
+					Protocol: "chat",
+					Path:     "messages[].tool_result.content",
+					Detail:   "a file identifier document has no Chat tool-result form",
+				}
+			}
 			url := value.URL
 			if url == "" {
 				var err error

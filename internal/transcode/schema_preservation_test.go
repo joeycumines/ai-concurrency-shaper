@@ -313,8 +313,9 @@ func TestSchemaMalformedRejected(t *testing.T) {
 // fixtures (which carry schemas) decode and render unchanged after the
 // RawMessage conversion.
 func TestSchemaOfficialFixturesStillDecode(t *testing.T) {
-	policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureTopK: {}}}
-	result, err := DecodeMessagesRequest(testcorpus.AnthropicMessagesRequestJSON(), policy)
+	// The Messages target carries top_k natively, so decode needs no approval;
+	// the Responses render below does, because its wire has no such field.
+	result, err := DecodeMessagesRequest(testcorpus.AnthropicMessagesRequestJSON(), StrictLossPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,6 +331,8 @@ func TestSchemaOfficialFixturesStillDecode(t *testing.T) {
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
 		FeatureToolSchemaStrictness: {},
+		// The fixture carries top_k, which the Responses wire cannot carry.
+		FeatureTopK: {},
 	}}
 	if _, _, err := RenderResponsesRequest(result.Request, context); err != nil {
 		t.Fatal(err)

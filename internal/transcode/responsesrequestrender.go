@@ -25,7 +25,6 @@ func RenderResponsesRequest(
 	}
 	if err := RequirePortableArtifacts(
 		request,
-		UpstreamResponses,
 		context.lossPolicy(),
 		&report,
 	); err != nil {
@@ -40,35 +39,90 @@ func RenderResponsesRequest(
 	var instructions *string
 	input := make(ResponsesInputItems, 0)
 
-	// Split turns into instructions (system/developer) and input items.
-	var systemTurns, conversationTurns []CanonicalTurn
-	for _, turn := range request.Turns {
+	// Split turns into instructions (system/developer) and input items,
+	// remembering each system-channel turn's position and whether a dialog
+	// turn preceded it: both the position loss and the multi-turn decision are
+	// adjudicated per turn below.
+	type systemChannelTurn struct {
+		turn      CanonicalTurn
+		index     int
+		midDialog bool
+		developer bool
+	}
+	var systemTurns []systemChannelTurn
+	var conversationTurns []CanonicalTurn
+	// sawClientDialog and sawRetainedDialog are tracked separately: a
+	// system-channel turn the CLIENT authored is mid-dialog only once the
+	// client's own request opened dialog, because retained history physically
+	// precedes the client's turns and demoting a client's instructions for the
+	// proxy's own history would charge the client for a position it never
+	// created. A retained system turn is mid-dialog as soon as any dialog
+	// precedes it.
+	sawClientDialog := false
+	sawRetainedDialog := false
+	for i, turn := range request.Turns {
+		retained := i < request.RetainedTurns
 		switch turn.Role {
 		case CanonicalSystem, CanonicalDeveloper:
-			systemTurns = append(systemTurns, turn)
+			midDialog := sawClientDialog
+			if retained {
+				midDialog = sawRetainedDialog || sawClientDialog
+			}
+			systemTurns = append(systemTurns, systemChannelTurn{
+				turn:      turn,
+				index:     i,
+				midDialog: midDialog,
+				developer: turn.Role == CanonicalDeveloper,
+			})
 		default:
+			if retained {
+				sawRetainedDialog = true
+			} else {
+				sawClientDialog = true
+			}
 			conversationTurns = append(conversationTurns, turn)
 		}
 	}
 
 	// The create-request instructions is a plain string (the pinned
-	// ResponseNewParams shape). Text-only system prompts render as that
-	// string; non-text parts (images, documents) or multiple system turns
-	// cannot be expressed in the string and are a loss/reject decision —
-	// never an illegal items array.
-	if len(systemTurns) > 1 {
-		if err := report.Lose(
-			context.lossPolicy(),
-			FeatureMultipleSystemTurns,
-			"instructions",
-			"multiple system turns cannot be expressed in a single instructions string",
-		); err != nil {
-			return nil, report, err
+	// ResponseNewParams shape). Every system-channel turn's text joins into
+	// that one string in encounter order, exactly as the Chat target joins its
+	// system messages: a target that holds a single system field must not
+	// discard the prompt because the source happened to split it. A non-text
+	// part (an image or a document) takes the system_non_text_content
+	// decision individually, and a mid-conversation or developer turn records
+	// its own position decision, so nothing moves silently.
+	var instructionsBuilder strings.Builder
+	textParts := 0
+	for _, channel := range systemTurns {
+		turnPath := fmt.Sprintf("turns[%d]", channel.index)
+		if channel.midDialog {
+			if err := chargePosition(
+				request,
+				channel.index,
+				FeatureMidConversationSystem,
+				turnPath,
+				"a system turn after a dialog turn moves into the single instructions string; its position is lost (content and authority preserved)",
+				&report,
+				context.lossPolicy(),
+			); err != nil {
+				return nil, report, err
+			}
 		}
-	}
-	if len(systemTurns) == 1 {
-		var builder strings.Builder
-		for _, part := range systemTurns[0].Parts {
+		if channel.developer {
+			if err := chargePosition(
+				request,
+				channel.index,
+				FeatureDeveloperRole,
+				turnPath,
+				"the create-request instructions string is role-neutral; the developer-role distinction is lost",
+				&report,
+				context.lossPolicy(),
+			); err != nil {
+				return nil, report, err
+			}
+		}
+		for _, part := range channel.turn.Parts {
 			text, ok := part.(CanonicalText)
 			if !ok {
 				if err := loseSystemPart(context.lossPolicy(), &report, part); err != nil {
@@ -76,24 +130,61 @@ func RenderResponsesRequest(
 				}
 				continue
 			}
-			if builder.Len() > 0 {
-				builder.WriteByte('\n')
+			// An empty text part carries no bytes: skipping it cannot lose
+			// content, and joining it would invent a leading or doubled
+			// separator that the model would see as prompt text.
+			if text.Text == "" {
+				continue
 			}
-			builder.WriteString(text.Text)
-		}
-		if builder.Len() > 0 {
-			if len(systemTurns[0].Parts) > 1 {
-				if err := report.Note(
-					FeatureMultipleSystemTurns,
-					"instructions",
-					"multiple system text parts join into one instructions string (instructions_text_join encoding)",
-				); err != nil {
-					return nil, report, err
-				}
+			if instructionsBuilder.Len() > 0 {
+				instructionsBuilder.WriteByte('\n')
 			}
-			rendered := builder.String()
-			instructions = &rendered
+			instructionsBuilder.WriteString(text.Text)
+			textParts++
 		}
+	}
+	if len(systemTurns) > 1 {
+		// More than one system-channel turn cannot keep its own boundary in
+		// one instructions string. The decision is a policy-gated loss when the
+		// CLIENT authored more than one system turn, and a Note otherwise (the
+		// surplus came from the continuity store's reconstructed prefix, already
+		// decided when the chain was first rendered). Counting client-authored
+		// turns — not positions — is what makes this right when a retained turn
+		// physically precedes a client one.
+		clientTurns := 0
+		for _, channel := range systemTurns {
+			if channel.index >= request.RetainedTurns {
+				clientTurns++
+			}
+		}
+		if clientTurns > 1 {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureMultipleSystemTurns,
+				"instructions",
+				"multiple system turns cannot keep their boundaries in a single instructions string; their text joins in order",
+			); err != nil {
+				return nil, report, err
+			}
+		} else if err := report.Note(
+			FeatureMultipleSystemTurns,
+			"instructions",
+			"multiple system turns cannot keep their boundaries in a single instructions string; their text joins in order (the surplus turns came from the proxy's retained continuity history, not this request)",
+		); err != nil {
+			return nil, report, err
+		}
+	} else if textParts > 1 {
+		if err := report.Note(
+			FeatureMultipleSystemTurns,
+			"instructions",
+			"multiple system text parts join into one instructions string (instructions_text_join encoding)",
+		); err != nil {
+			return nil, report, err
+		}
+	}
+	if instructionsBuilder.Len() > 0 {
+		rendered := instructionsBuilder.String()
+		instructions = &rendered
 	}
 
 	// Render user/assistant turns into input items, preserving order. A
@@ -197,6 +288,19 @@ func RenderResponsesRequest(
 		Stream: wire.Field[bool]{Value: true, Present: request.Stream},
 	}
 
+	// Top-k sampling has no Responses representation: only a Messages or
+	// Gemini target carries the cutoff.
+	if request.TopK != nil {
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeatureTopK,
+			"top_k",
+			"top-k sampling is not supported by a Responses upstream",
+		); err != nil {
+			return nil, report, err
+		}
+	}
+
 	// Stop sequences are not representable in Responses.
 	if len(request.StopSequences) > 0 {
 		if err := report.Lose(
@@ -289,6 +393,18 @@ func RenderResponsesRequest(
 		var capabilities ChatCapabilities
 		if context != nil {
 			capabilities = context.Capabilities
+		}
+		// The client's thinking-visibility preference is a Messages-native
+		// field with no Responses representation.
+		if request.Thinking.Display != "" {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureRequestReasoning,
+				"thinking.display",
+				"the thinking display preference cannot be reproduced by a Responses request",
+			); err != nil {
+				return nil, report, err
+			}
 		}
 		switch request.Thinking.Type {
 		case "enabled":
@@ -512,6 +628,14 @@ func canonicalPartsToResponsesContent(
 			return ResponsesInputMessageContent{}, errors.New(
 				"function calls and results must be rendered as separate input items",
 			)
+
+		case CanonicalThinkingPart:
+			// Marker-signature thinking is proxy-synthesized reasoning: the
+			// request path scrubs it from replayed history before upstream
+			// rendering, so it never reaches a Responses upstream. A non-marker
+			// part is a source-authenticated artifact gated by
+			// RequirePortableArtifacts, which runs before this loop.
+			continue
 
 		default:
 			return ResponsesInputMessageContent{}, fmt.Errorf(

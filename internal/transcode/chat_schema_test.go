@@ -210,6 +210,9 @@ func TestNonStreamToolCallNoIndexOnWire(t *testing.T) {
 	})
 
 	context := testExchangeContext()
+	// The fixture carries top_k, which the Chat target cannot reproduce: the
+	// decision belongs to the render stage, so approve it here.
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureTopK: {}}}
 	caps := defaultChatCapabilities()
 	caps.ParallelToolCalls = true
 	rendered, _, err := RenderChatRequest(result.Request, context, caps)

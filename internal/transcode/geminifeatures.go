@@ -34,10 +34,6 @@ const (
 	// FeatureGeminiEmptyContent marks a candidate with no parts, rendered with
 	// one empty text part so SDK text accessors do not fail.
 	FeatureGeminiEmptyContent Feature = "gemini_empty_content"
-	// FeatureGeminiMaxTokensFromModelTable marks a request without
-	// maxOutputTokens whose Anthropic max_tokens came from the model table's
-	// max_output fact.
-	FeatureGeminiMaxTokensFromModelTable Feature = "gemini_max_tokens_from_model_table"
 	// FeatureGeminiFunctionResponseObject marks a function result carried to
 	// Gemini as the {"output"|"error": text} object shape.
 	FeatureGeminiFunctionResponseObject Feature = "gemini_function_response_object"

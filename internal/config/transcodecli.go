@@ -525,6 +525,7 @@ var defaultTranscodeLosses = map[transcode.Feature]struct{}{
 	transcode.FeatureReasoningSummary:                  {},
 	transcode.FeatureAuthenticatedThinking:             {},
 	transcode.FeatureMidConversationSystem:             {},
+	transcode.FeatureMultipleSystemTurns:               {},
 	transcode.FeatureResponsesControls:                 {},
 	transcode.FeatureAnthropicControls:                 {},
 	transcode.FeatureRequestCitations:                  {},

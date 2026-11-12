@@ -17,7 +17,6 @@ func RenderChatRequest(
 	}
 	if err := RequirePortableArtifacts(
 		request,
-		UpstreamChatCompletions,
 		context.lossPolicy(),
 		&report,
 	); err != nil {
@@ -62,56 +61,24 @@ func RenderChatRequest(
 
 	// Responses request fields that Chat can express are rendered; the rest
 	// must be rejected or approved as losses, never silently dropped (the
-	// strict-subset invariant).
-	if echo := context.OriginalResponsesRequest; echo != nil {
+	// strict-subset invariant). A nil context is the ordinary strict render,
+	// exactly as for the other three request renderers.
+	var echo *ResponsesRequestEcho
+	if context != nil {
+		echo = context.OriginalResponsesRequest
+	}
+	if echo != nil {
 		out.User = echo.User
 		out.Store = echo.Store
-		// Opt-in continuity (statefulness decision: OFF by default). When
-		// the store resolved this request's previous_response_id, the
-		// reconstructed history is already prepended to the rendered turns,
-		// so the field is consumed, not lost: skip the existing observable
-		// loss (the hit Note at decode already records the fact). A miss
-		// (RequestDepth 0) falls through to the loss, never a failure.
-		if echo.PreviousResponseID != nil && context.RequestDepth == 0 {
-			if err := report.Lose(
-				context.lossPolicy(),
-				FeaturePreviousResponseID,
-				"request.previous_response_id",
-				"the Responses previous_response_id field is not portable to a chat upstream",
-			); err != nil {
-				return nil, report, err
-			}
-		}
-		if echo.TopLogprobs != nil {
-			if err := report.Lose(
-				context.lossPolicy(),
-				FeatureRequestTopLogprobs,
-				"request.top_logprobs",
-				"the Responses top_logprobs field is not portable to a chat upstream",
-			); err != nil {
-				return nil, report, err
-			}
-		}
-		if echo.ServiceTier != nil {
-			if err := report.Lose(
-				context.lossPolicy(),
-				FeatureRequestServiceTier,
-				"request.service_tier",
-				"the Responses service_tier field is not portable to a chat upstream",
-			); err != nil {
-				return nil, report, err
-			}
-		}
-		if echo.Truncation != nil {
-			if err := report.Lose(
-				context.lossPolicy(),
-				FeatureRequestTruncation,
-				"request.truncation",
-				"the Responses truncation field is not portable to a chat upstream",
-			); err != nil {
-				return nil, report, err
-			}
-		}
+	}
+	// Every non-portable envelope field takes the shared decision, so Chat,
+	// Gemini and Messages cannot disagree about the key or the path. The
+	// previous_response_id loss is skipped by the helper when the continuity
+	// store resolved it: the reconstructed history is already prepended, so
+	// the field is consumed rather than lost, and the hit Note at decode
+	// already records the fact.
+	if err := responsesEchoLosses(context, &report, capabilities.ReasoningEffort); err != nil {
+		return nil, report, err
 	}
 
 	// Developer role: preserved when supported, otherwise an approved loss.
@@ -228,46 +195,62 @@ func RenderChatRequest(
 		out.Messages = rendered
 	} else {
 		var (
-			leading   []ChatMessage // system-channel messages before any dialog turn
-			midDialog []ChatMessage // system-channel messages after a dialog turn
-			dialog    []ChatMessage
+			// systemMessages holds every system-channel message in ENCOUNTER
+			// order. The consolidated leading message joins their text in that
+			// order, so separating the leading and mid-dialog groups can never
+			// reorder the prompt the model sees.
+			systemMessages []ChatMessage
+			dialog         []ChatMessage
+			// midDialog records, per system-channel message, whether a dialog
+			// turn preceded it, and clientMidDialog whether at least one of
+			// those mid-dialog messages was authored by THIS request.
+			midDialog       []bool
+			clientMidDialog bool
 		)
-		sawDialog := false
-		// midDialogAllRetained tracks whether every mid-dialog system message
-		// came from the continuity store rather than this request. A
-		// request-side gate polices CLIENT input, so a position the client's
-		// own request never created must not be charged to it: a retained
-		// system turn after dialog turns is the proxy's own history, already
-		// consolidated once when the chain was first rendered. The encoding is
-		// identical; only the policy decision differs, so it is recorded as a
-		// Note (visible, never silent) instead of a loss that can reject a
-		// request the client authored cleanly.
-		midDialogAllRetained := true
+		sawClientDialog := false
+		// sawRetainedDialog tracks dialog turns the continuity store
+		// reconstructed. A request-side gate polices CLIENT input, so a
+		// position the client's own request never created must not be charged
+		// to it: a retained system turn after retained dialog is the proxy's
+		// own history, already consolidated once when the chain was first
+		// rendered. The encoding is identical; only the policy decision
+		// differs, so it is recorded as a Note (visible, never silent).
+		sawRetainedDialog := false
 		for i, message := range rendered {
 			if !systemChannel[i] {
-				// Only a turn the CLIENT authored may move a later client
-				// system turn out of the leading position. Retained history
-				// sits in front of the client's own turns, so counting it
-				// would silently demote a client's instructions from index 0
-				// to a mid-conversation system turn and then charge the
-				// client for the position the proxy created.
-				if !retainedChannel[i] {
-					sawDialog = true
+				if retainedChannel[i] {
+					sawRetainedDialog = true
+				} else {
+					sawClientDialog = true
 				}
 				dialog = append(dialog, message)
 				continue
 			}
-			if sawDialog {
-				midDialog = append(midDialog, message)
-				if !retainedChannel[i] {
-					midDialogAllRetained = false
-				}
-			} else {
-				leading = append(leading, message)
+			systemMessages = append(systemMessages, message)
+			// A client-authored system turn is mid-dialog only when the
+			// CLIENT's own request has already opened dialog: retained history
+			// sits in front of the client's turns, and letting it demote the
+			// client's instructions would charge the client for a position the
+			// proxy created. A retained system turn is mid-dialog when any
+			// dialog precedes it, either the proxy's or the client's.
+			mid := sawClientDialog
+			if retainedChannel[i] {
+				mid = sawRetainedDialog || sawClientDialog
+			}
+			midDialog = append(midDialog, mid)
+			if mid && !retainedChannel[i] {
+				clientMidDialog = true
+			}
+		}
+		anyMidDialog := false
+		for _, mid := range midDialog {
+			if mid {
+				anyMidDialog = true
+				break
 			}
 		}
 		switch {
-		case len(midDialog) > 0 && midDialogAllRetained:
+		case anyMidDialog && !clientMidDialog:
 			if err := report.Note(
 				FeatureMidConversationSystem,
 				"messages[]",
@@ -275,8 +258,8 @@ func RenderChatRequest(
 			); err != nil {
 				return nil, report, err
 			}
-			out.Messages = append(out.Messages, joinChatSystemMessages(leading, midDialog))
-		case len(midDialog) > 0:
+			out.Messages = append(out.Messages, joinChatSystemMessages(systemMessages))
+		case anyMidDialog:
 			// The position/timing of system-channel content following
 			// dialog turns cannot survive; the consolidation is the
 			// approved loss.
@@ -288,8 +271,8 @@ func RenderChatRequest(
 			); err != nil {
 				return nil, report, err
 			}
-			out.Messages = append(out.Messages, joinChatSystemMessages(leading, midDialog))
-		case len(leading) > 1:
+			out.Messages = append(out.Messages, joinChatSystemMessages(systemMessages))
+		case len(systemMessages) > 1:
 			// Leading-only consolidation: open-weights templates reject a
 			// second system message even at index 1, so the merge is
 			// unconditional — but sanctioned and observable, never silent.
@@ -300,11 +283,11 @@ func RenderChatRequest(
 			); err != nil {
 				return nil, report, err
 			}
-			out.Messages = append(out.Messages, joinChatSystemMessages(leading, nil))
-		case len(leading) == 1:
+			out.Messages = append(out.Messages, joinChatSystemMessages(systemMessages))
+		case len(systemMessages) == 1:
 			// The common single-leading-system case renders exactly one
 			// system message at index 0 with its original blocks.
-			out.Messages = append(out.Messages, leading[0])
+			out.Messages = append(out.Messages, systemMessages[0])
 		}
 		out.Messages = append(out.Messages, dialog...)
 	}
@@ -312,8 +295,6 @@ func RenderChatRequest(
 	// A source request with no Chat-representable messages is a
 	// client-dialect invalid-request error before any upstream request:
 	// messages:null or an invented empty user prompt are never emitted.
-	// A source request with no Chat-representable messages is a
-	// client-dialect invalid-request error before any upstream request.
 	// A message whose content is a single EMPTY text block counts as
 	// non-representable: it arises only when every part of a system turn was
 	// dropped under an approved loss, and admitting it would send the
@@ -325,7 +306,13 @@ func RenderChatRequest(
 		// exact shape the empty-block synthesis produces when all of a
 		// system turn's parts were dropped. An assistant or tool message
 		// carrying real content is representable and must NOT be rejected
-		// just because the conversation has no user turn.
+		// just because the conversation has no user turn. The empty slice is
+		// NOT degenerate: the predicate means "every message is empty", which
+		// is vacuously true of nothing, and the caller's own length check owns
+		// that case.
+		if len(messages) == 0 {
+			return false
+		}
 		for _, m := range messages {
 			if m.Content == nil {
 				return false
@@ -354,7 +341,7 @@ func RenderChatRequest(
 	// the check stays true after namespace flattening: a top-level tool
 	// spelled like one of the five, or any child of the multi_agent_v1
 	// namespace (already flattened to its flat name at decode).
-	if capabilities.MultiAgentPriming && declaresMultiAgentTools(request.Tools, context) {
+	if capabilities.MultiAgentPriming && declaresMultiAgentTools(request.Tools) {
 		primed, err := applyMultiAgentPriming(out.Messages, &report)
 		if err != nil {
 			return nil, report, err
@@ -425,6 +412,19 @@ func RenderChatRequest(
 		}
 	}
 
+	// Top-k sampling has no Chat representation: only a Messages or Gemini
+	// target carries the cutoff, so a Messages-sourced top_k is a loss here.
+	if request.TopK != nil {
+		if err := report.Lose(
+			context.lossPolicy(),
+			FeatureTopK,
+			"top_k",
+			"top-k sampling is not supported by the configured chat provider",
+		); err != nil {
+			return nil, report, err
+		}
+	}
+
 	// Stop sequences.
 	if len(request.StopSequences) > 0 {
 		if !capabilities.StopSequences {
@@ -467,36 +467,14 @@ func RenderChatRequest(
 		}
 	}
 
-	// Reasoning effort (Responses source only).
+	// Reasoning effort (Responses source only). The loss decision for a target
+	// that cannot reproduce it was taken by responsesEchoLosses above; here
+	// the capability grant decides whether the value is emitted.
 	if context != nil && context.OriginalResponsesRequest != nil &&
 		context.OriginalResponsesRequest.Reasoning != nil &&
-		context.OriginalResponsesRequest.Reasoning.Effort != nil {
-		if !capabilities.ReasoningEffort {
-			if err := report.Lose(
-				context.lossPolicy(),
-				FeatureRequestReasoning,
-				"reasoning.effort",
-				"reasoning effort is not supported by the configured chat provider",
-			); err != nil {
-				return nil, report, err
-			}
-		} else {
-			out.ReasoningEffort = context.OriginalResponsesRequest.Reasoning.Effort
-		}
-	}
-	// The reasoning summary style has no Chat representation: only the
-	// effort is portable, so the summary request is a loss/reject decision.
-	if context != nil && context.OriginalResponsesRequest != nil &&
-		context.OriginalResponsesRequest.Reasoning != nil &&
-		context.OriginalResponsesRequest.Reasoning.Summary != nil {
-		if err := report.Lose(
-			context.lossPolicy(),
-			FeatureReasoningSummary,
-			"reasoning.summary",
-			"the reasoning summary style cannot be reproduced in a chat request",
-		); err != nil {
-			return nil, report, err
-		}
+		context.OriginalResponsesRequest.Reasoning.Effort != nil &&
+		capabilities.ReasoningEffort {
+		out.ReasoningEffort = context.OriginalResponsesRequest.Reasoning.Effort
 	}
 
 	// Anthropic Messages thinking (Messages source only): the client's
@@ -516,6 +494,18 @@ func RenderChatRequest(
 	// Without the ReasoningEffort capability an enabled budget is a
 	// loss/reject decision (request_reasoning), never a silent drop.
 	if request.Thinking != nil {
+		// The client's thinking-visibility preference is a Messages-native
+		// field with no Chat representation.
+		if request.Thinking.Display != "" {
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureRequestReasoning,
+				"thinking.display",
+				"the thinking display preference cannot be reproduced by a chat request",
+			); err != nil {
+				return nil, report, err
+			}
+		}
 		switch request.Thinking.Type {
 		case "enabled":
 			if request.Thinking.BudgetTokens == nil {
@@ -630,12 +620,13 @@ func transcodeToolResult(
 }
 
 // thinkingBudgetToEffort maps an Anthropic Messages thinking budget_tokens
-// value to the reasoning_effort vocabulary. The thresholds are the
-// documented midpoints of the classic Claude Code effort budgets
-// (minimal ~ 256, low ~ 1024, medium ~ 4096, high ~ 16384); the mapping is
-// deterministic, capped at "high" (the canonical vocabulary includes xhigh
-// and max, but no documented budget maps above high, so the projection never
-// synthesizes one), and reported as a named Note on every mapped exchange.
+// value to the reasoning_effort vocabulary. The thresholds ARE the classic
+// Claude Code effort budgets (low 1024, medium 4096, high 16384): a budget
+// below the next tier's budget projects to the lower tier, so the mapping is a
+// deterministic upper-bound projection rather than a midpoint search. It is
+// capped at "high" (the canonical vocabulary includes xhigh and max, but no
+// documented budget maps above high, so the projection never synthesizes one),
+// and reported as a named Note on every mapped exchange.
 func thinkingBudgetToEffort(budget int) string {
 	switch {
 	case budget < 1024:

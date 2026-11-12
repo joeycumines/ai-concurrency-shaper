@@ -56,6 +56,120 @@ func chooseToolFlatName(
 	return qualified
 }
 
+// resolveNamedToolChoice maps a client-sent named tool choice onto the flat
+// wire name when the name identifies a declared namespace child, and reports an
+// error when it identifies MORE THAN ONE. A client names the tool it knows, and
+// ToolNames exists exactly to translate that pair, so a qualified child is
+// reachable by its bare name.
+//
+// When a PLAIN function owns the name, the choice is left untouched (the plain
+// function is what the wire will carry), and resolved reports false. That is
+// still a possible reinterpretation — the client may have meant a namespace
+// child whose flat name was qualified — so the caller records a Note rather
+// than leaving it silent.
+func resolveNamedToolChoice(
+	names *ToolNames,
+	request CanonicalRequest,
+	name string,
+) (flat string, resolved bool, err error) {
+	if names == nil {
+		return "", false, nil
+	}
+	for _, tool := range request.Tools {
+		if tool.Name == name {
+			// A plain function (or the child that owns the bare flat name)
+			// answers to exactly this name already.
+			return "", false, nil
+		}
+	}
+	matches := make([]string, 0, 2)
+	for ref, value := range names.RefToFlat {
+		if ref.Name == name {
+			matches = append(matches, value)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", false, nil
+	case 1:
+		return matches[0], true, nil
+	default:
+		return "", false, fmt.Errorf(
+			"tool_choice names %q, which multiple declared namespace children share; the reference is ambiguous",
+			name,
+		)
+	}
+}
+
+// namedChoicePlainOwner reports whether a plain function (not a namespace
+// child) owns flatName, so a caller can Note that a client's named choice was
+// bound to it rather than reinterpreted.
+func namedChoicePlainOwner(names *ToolNames, tools []CanonicalTool, flatName string) bool {
+	for _, tool := range tools {
+		if tool.Name != flatName {
+			continue
+		}
+		// A flattened child owns no RefToFlat ENTRY under this name unless its
+		// bare name was unique; a plain function is never in FlatToRef.
+		if names != nil {
+			if _, isChild := names.FlatToRef[flatName]; isChild {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// namespaceChildSharesBareName reports whether a qualified namespace child was
+// flattened from the same bare name as the client's choice, so a plain
+// function winning that bare name is a possible reinterpretation worth noting.
+func namespaceChildSharesBareName(names *ToolNames, bareName string) bool {
+	if names == nil {
+		return false
+	}
+	for ref := range names.RefToFlat {
+		if ref.Name == bareName {
+			return true
+		}
+	}
+	return false
+}
+
+// checkNamespaceToolNames rejects a flattened namespace tool list whose names
+// are not unique. A ToolNameRef is keyed by the INNERMOST namespace, so two
+// different outer namespaces that both contain an inner namespace of the same
+// name with a child of the same name produce one ref for two different tools;
+// chooseToolFlatName then hands both the same flat name and the response can
+// only restore the ambiguous inner qualifier. The IR records no path through
+// the outer namespace, so the collision cannot be disambiguated honestly: it is
+// refused before any upstream request rather than silently re-pointing one tool
+// at the other.
+//
+// The check covers ONLY names that came from a namespace flatten. A request
+// that repeats an ordinary function name is the client's own incoherence and
+// was always forwarded for the upstream to judge; widening the refusal to it
+// would be a new, unrelated rejection.
+func checkNamespaceToolNames(tools []CanonicalTool, names *ToolNames) error {
+	if names == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(tools))
+	for _, tool := range tools {
+		if _, flattened := names.FlatToRef[tool.Name]; !flattened {
+			continue
+		}
+		if _, duplicate := seen[tool.Name]; duplicate {
+			return fmt.Errorf(
+				"the request declares two different namespace children that flatten to the same name %q; nested namespaces sharing an inner name and child name cannot be disambiguated",
+				tool.Name,
+			)
+		}
+		seen[tool.Name] = struct{}{}
+	}
+	return nil
+}
+
 // namespaceChild is one flattened namespace child together with the
 // namespace it was declared under: a nested namespace keeps its own name so
 // the response can restore the qualifier the client registered.
@@ -204,11 +318,15 @@ func flattenNamespaceTool(
 		}
 		return nil, nil
 	}
+	// The flatten itself is a sanctioned encoding, not a loss: the grouping is
+	// client-side structure and the functions themselves are fully portable.
+	// It is recorded under its OWN key so the log never reads as if a built-in
+	// tool had been dropped.
 	if err := report.Note(
-		FeatureBuiltinTools,
+		FeatureToolNamespaceFlatten,
 		fmt.Sprintf("tools[namespace=%s]", tool.Name),
 		fmt.Sprintf(
-			"namespace tool %q flattened into %d function tool(s) for the chat request",
+			"namespace tool %q flattened into %d function tool(s) for this target",
 			tool.Name,
 			len(out),
 		),
