@@ -193,7 +193,10 @@ func TestChatSystemMixedTextAndImageDrop(t *testing.T) {
 }
 
 // TestChatDeveloperSystemNonTextDecision proves the developer turn routed to
-// the system role (developer-role capability off) takes the same decision.
+// the system role (developer-role capability off) takes the same decision. The
+// developer_role decision records that the turn's CONTENT renders with the
+// system role, so it requires content to have rendered: a turn whose only part
+// was dropped collapses nothing and records only the drop.
 func TestChatDeveloperSystemNonTextDecision(t *testing.T) {
 	context := testExchangeContext()
 	// With developer-role off the developer turn routes to the system role,
@@ -204,6 +207,35 @@ func TestChatDeveloperSystemNonTextDecision(t *testing.T) {
 		FeatureDeveloperRole:        {},
 	}}
 	_, report, err := RenderChatRequest(
+		CanonicalRequest{
+			ClientModel: "m",
+			Turns: []CanonicalTurn{
+				{Role: CanonicalDeveloper, Parts: []CanonicalPart{
+					CanonicalText{Text: "follow the rules"},
+					CanonicalImage{MediaType: "image/png", URL: "https://example.test/x.png"},
+				}},
+				{Role: CanonicalUser, Parts: []CanonicalPart{CanonicalText{Text: "hi"}}},
+			},
+		},
+		context,
+		ChatCapabilities{},
+	)
+	if err != nil {
+		t.Fatalf("approved developer image drop rejected: %v", err)
+	}
+	if !reportHasFeature(report, FeatureSystemNonTextContent) {
+		t.Fatalf("report lacks system_non_text_content: %+v", report)
+	}
+	// The role-distinction loss and the content loss are independent: both
+	// must be recorded when the turn still renders its text.
+	if !reportHasFeature(report, FeatureDeveloperRole) {
+		t.Fatalf("report lacks developer_role: %+v", report)
+	}
+
+	// A developer turn whose ONLY part was dropped renders nothing, so no role
+	// distinction collapses: the client's developer turn is simply absent, and
+	// the content drop already says so.
+	_, report, err = RenderChatRequest(
 		CanonicalRequest{
 			ClientModel: "m",
 			Turns: []CanonicalTurn{
@@ -222,10 +254,8 @@ func TestChatDeveloperSystemNonTextDecision(t *testing.T) {
 	if !reportHasFeature(report, FeatureSystemNonTextContent) {
 		t.Fatalf("report lacks system_non_text_content: %+v", report)
 	}
-	// The role-distinction loss and the content loss are independent: both
-	// must be recorded.
-	if !reportHasFeature(report, FeatureDeveloperRole) {
-		t.Fatalf("report lacks developer_role: %+v", report)
+	if reportHasFeature(report, FeatureDeveloperRole) {
+		t.Fatalf("a developer turn that rendered nothing was charged developer_role: %+v", report)
 	}
 }
 

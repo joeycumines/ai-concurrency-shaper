@@ -163,6 +163,42 @@ func RenderGeminiRequest(
 		if retained {
 			midDialog = sawRetainedDialog || sawClientDialog
 		}
+		// Render the turn's parts FIRST: a turn whose parts all took a drop
+		// decision contributes nothing, so it occupies no position and takes
+		// no role decision. Charging before knowing the contribution would
+		// bill the client for a move that never happened.
+		var turnParts []geminiRenderPart
+		for j, part := range turn.Parts {
+			partPath := fmt.Sprintf("%s.parts[%d]", path, j)
+			switch p := part.(type) {
+			case CanonicalText:
+				// An empty text part carries no bytes; emitting it would put an
+				// empty prompt part on the wire for content the client never
+				// wrote.
+				if p.Text == "" {
+					continue
+				}
+				turnParts = append(turnParts, geminiRenderPart{Text: new(p.Text)})
+			case CanonicalThinkingPart:
+				// Marker-signature thinking is proxy-synthesized and scrubbed
+				// before upstream rendering; a real signature is refused
+				// centrally by ValidateCanonicalRequest. Either way nothing
+				// renders, in every turn role.
+				continue
+			default:
+				if err := report.Lose(
+					policy,
+					FeatureSystemNonTextContent,
+					partPath,
+					"non-text system prompt content cannot be expressed in Gemini's text-only systemInstruction",
+				); err != nil {
+					return nil, report, err
+				}
+			}
+		}
+		if len(turnParts) == 0 {
+			continue
+		}
 		if midDialog {
 			if err := chargePosition(
 				request,
@@ -189,39 +225,8 @@ func RenderGeminiRequest(
 				return nil, report, err
 			}
 		}
-		contributed := 0
-		for j, part := range turn.Parts {
-			partPath := fmt.Sprintf("%s.parts[%d]", path, j)
-			switch p := part.(type) {
-			case CanonicalText:
-				// An empty text part carries no bytes; emitting it would put an
-				// empty prompt part on the wire for content the client never
-				// wrote.
-				if p.Text == "" {
-					continue
-				}
-				systemParts = append(systemParts, geminiRenderPart{Text: new(p.Text)})
-				contributed++
-			case CanonicalThinkingPart:
-				// Marker-signature thinking is proxy-synthesized and scrubbed
-				// before upstream rendering; a real signature is refused
-				// centrally by ValidateCanonicalRequest. Either way nothing
-				// renders, in every turn role.
-				continue
-			default:
-				if err := report.Lose(
-					policy,
-					FeatureSystemNonTextContent,
-					partPath,
-					"non-text system prompt content cannot be expressed in Gemini's text-only systemInstruction",
-				); err != nil {
-					return nil, report, err
-				}
-			}
-		}
-		if contributed > 0 {
-			contributing = append(contributing, i)
-		}
+		systemParts = append(systemParts, turnParts...)
+		contributing = append(contributing, i)
 	}
 	if err := chargeSystemTurnJoin(
 		request,

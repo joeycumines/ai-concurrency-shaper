@@ -168,6 +168,17 @@ func renderMessagesTurns(
 		retained := i < request.RetainedTurns
 		switch turn.Role {
 		case CanonicalSystem, CanonicalDeveloper:
+			// Render the turn's blocks FIRST: a turn whose parts all took a
+			// drop decision contributes nothing, so it occupies no position and
+			// takes no role decision. Charging before knowing the contribution
+			// would bill the client for a move that never happened.
+			blocks, err := messagesSystemBlocks(turn, path, context.lossPolicy(), report)
+			if err != nil {
+				return err
+			}
+			if len(blocks) == 0 {
+				continue
+			}
 			if turn.Role == CanonicalDeveloper {
 				if err := chargePosition(
 					request,
@@ -201,14 +212,8 @@ func renderMessagesTurns(
 					return err
 				}
 			}
-			blocks, err := messagesSystemBlocks(turn, path, context.lossPolicy(), report)
-			if err != nil {
-				return err
-			}
 			system = append(system, blocks...)
-			if len(blocks) > 0 {
-				contributing = append(contributing, i)
-			}
+			contributing = append(contributing, i)
 
 		case CanonicalUser, CanonicalAssistant:
 			if retained {

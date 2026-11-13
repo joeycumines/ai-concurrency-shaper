@@ -110,6 +110,37 @@ func RenderResponsesRequest(
 	var contributing []int
 	for _, channel := range systemTurns {
 		turnPath := fmt.Sprintf("turns[%d]", channel.index)
+		// Render the turn's text FIRST: a turn whose parts all took a drop
+		// decision contributes nothing, so it occupies no position and takes no
+		// role decision. Charging before knowing the contribution would bill the
+		// client for a move that never happened.
+		var turnTexts []string
+		for _, part := range channel.turn.Parts {
+			text, ok := part.(CanonicalText)
+			if !ok {
+				if _, thinking := part.(CanonicalThinkingPart); thinking {
+					// Marker-signature thinking is proxy-synthesized reasoning
+					// the request path scrubs in every turn role; any other
+					// signature was already refused by
+					// ValidateCanonicalRequest.
+					continue
+				}
+				if err := loseSystemPart(context.lossPolicy(), &report, part); err != nil {
+					return nil, report, err
+				}
+				continue
+			}
+			// An empty text part carries no bytes: skipping it cannot lose
+			// content, and joining it would invent a leading or doubled
+			// separator that the model would see as prompt text.
+			if text.Text == "" {
+				continue
+			}
+			turnTexts = append(turnTexts, text.Text)
+		}
+		if len(turnTexts) == 0 {
+			continue
+		}
 		if channel.midDialog {
 			if err := chargePosition(
 				request,
@@ -136,38 +167,14 @@ func RenderResponsesRequest(
 				return nil, report, err
 			}
 		}
-		turnTextParts := 0
-		for _, part := range channel.turn.Parts {
-			text, ok := part.(CanonicalText)
-			if !ok {
-				if _, thinking := part.(CanonicalThinkingPart); thinking {
-					// Marker-signature thinking is proxy-synthesized reasoning
-					// the request path scrubs in every turn role; any other
-					// signature was already refused by
-					// ValidateCanonicalRequest.
-					continue
-				}
-				if err := loseSystemPart(context.lossPolicy(), &report, part); err != nil {
-					return nil, report, err
-				}
-				continue
-			}
-			// An empty text part carries no bytes: skipping it cannot lose
-			// content, and joining it would invent a leading or doubled
-			// separator that the model would see as prompt text.
-			if text.Text == "" {
-				continue
-			}
+		for _, text := range turnTexts {
 			if instructionsBuilder.Len() > 0 {
 				instructionsBuilder.WriteByte('\n')
 			}
-			instructionsBuilder.WriteString(text.Text)
+			instructionsBuilder.WriteString(text)
 			textParts++
-			turnTextParts++
 		}
-		if turnTextParts > 0 {
-			contributing = append(contributing, channel.index)
-		}
+		contributing = append(contributing, channel.index)
 	}
 	// More than one CONTRIBUTING system turn cannot keep its own boundary in
 	// one instructions string. The decision is the shared multiple_system_turns

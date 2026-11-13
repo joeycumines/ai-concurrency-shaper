@@ -48,6 +48,11 @@ func canonicalTextTurnToChatMessage(
 			// rendering, so it never reaches a Chat upstream. Any other
 			// signature was already refused by ValidateCanonicalRequest, which
 			// is the only place the scrub can be made provably safe.
+			//
+			// It counts as dropped so an all-scrubbed system or developer turn
+			// takes the same path as an all-dropped one (an empty text block
+			// the caller omits) instead of being refused as "empty".
+			dropped++
 			continue
 		default:
 			// Defensive: no request path reaches this arm today, because
@@ -85,6 +90,17 @@ func canonicalTextTurnToChatMessage(
 		}
 	}
 	return ChatMessage{Role: role, Content: &ChatMessageContent{ContentBlocks: blocks}}, nil
+}
+
+// consolidateChatSystemMessages turns the consolidating instruction messages
+// into the single leading system message: one message's blocks are carried
+// verbatim (so a lone system turn keeps its multi-block content and any image
+// numbering), and several are joined into one text block.
+func consolidateChatSystemMessages(messages []ChatMessage) ChatMessage {
+	if len(messages) == 1 {
+		return messages[0]
+	}
+	return joinChatSystemMessages(messages)
 }
 
 // joinChatSystemMessages consolidates rendered system-channel messages into
