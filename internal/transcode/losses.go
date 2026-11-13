@@ -617,28 +617,49 @@ func (r *ConversionReport) reserve() error {
 	if len(r.Losses) < maxStreamConversionReportEntries {
 		return nil
 	}
-	r.noteOverflow()
+	// Count the entry BEFORE the note is written: the note interpolates the
+	// count, so a note written first would report the number of entries
+	// dropped so far rather than the entry that just overflowed, which on the
+	// first saturation is zero.
 	r.Dropped++
+	r.noteOverflow()
 	return errEntryDropped
 }
 
-// noteOverflow appends the single aggregated report_overflow note, unless one
-// has already been recorded. reserve and absorb both go through it so the note
-// has exactly one spelling and can never be emitted twice.
+// overflowDetail spells the aggregated note's detail from a dropped count. It
+// says "beyond the observable bound" rather than "past the N-entry bound"
+// because the entries may have been dropped by an absorbed scratch report that
+// saturated while this report never did: the fact the note states is that
+// entries were dropped, which is true on both paths.
+func overflowDetail(dropped int) string {
+	return fmt.Sprintf(
+		"conversion report dropped %d entry(ies) beyond the %d-entry observable bound; further entries are aggregated here (observability saturation, never an exchange failure)",
+		dropped,
+		maxStreamConversionReportEntries,
+	)
+}
+
+// noteOverflow records the single aggregated report_overflow note, or refreshes
+// its detail when one already exists. reserve, absorb and restore all go
+// through it so the note has exactly one spelling, can never be emitted twice,
+// and never states a count that a later drop has made stale.
 func (r *ConversionReport) noteOverflow() {
 	if r.overflowNoted {
-		return
+		for i := range r.Losses {
+			if r.Losses[i].Feature == FeatureReportOverflow {
+				r.Losses[i].Detail = overflowDetail(r.Dropped)
+				return
+			}
+		}
+		// The note is no longer in the slice, so the flag described a state
+		// the entries disagree with: record it again rather than lose it.
 	}
 	r.overflowNoted = true
 	r.Losses = append(r.Losses, ConversionLoss{
 		Feature: FeatureReportOverflow,
 		Path:    "report",
-		Detail: fmt.Sprintf(
-			"conversion report dropped %d entry(ies) past the %d-entry bound; further entries are aggregated here (observability saturation, never an exchange failure)",
-			r.Dropped,
-			maxStreamConversionReportEntries,
-		),
-		Kind: NoteRecord,
+		Detail:  overflowDetail(r.Dropped),
+		Kind:    NoteRecord,
 	})
 }
 
@@ -745,11 +766,17 @@ func (r *ConversionReport) mark() reportMark {
 	return reportMark{losses: len(r.Losses), dropped: r.Dropped, overflowNoted: r.overflowNoted}
 }
 
-// restore discards every entry and count recorded after the mark.
+// restore discards every entry and count recorded after the mark. An overflow
+// note that survives the mark keeps its PLACE but not its stale count: the
+// refresh a later drop performed wrote into that entry, so the count is
+// rewritten to the restored value here.
 func (r *ConversionReport) restore(m reportMark) {
 	r.Losses = r.Losses[:m.losses]
 	r.Dropped = m.dropped
 	r.overflowNoted = m.overflowNoted
+	if r.overflowNoted {
+		r.noteOverflow()
+	}
 }
 
 // decodeJSONObject ensures function-call arguments are objects before

@@ -100,7 +100,17 @@ func RenderChatRequest(
 	// mid_conversation_system position loss, and a leading-only merge of
 	// multiple system turns is the shared join decision.
 	rendered := make([]ChatMessage, 0, len(request.Turns))
-	systemChannel := make([]bool, 0, len(request.Turns))
+	// instructionChannel marks each rendered message as an INSTRUCTION (a
+	// system or developer turn) rather than dialog. It is the placement fact
+	// used for emptiness filtering and join contribution; it is NOT the
+	// provenance fact, which retainedChannel owns.
+	instructionChannel := make([]bool, 0, len(request.Turns))
+	// consolidates marks the instruction messages that join the ONE leading
+	// system message: a system turn always does, and a developer turn does
+	// only when the developer-role capability forces it onto the system role.
+	// With the capability granted the developer message is carried in place,
+	// so the client's encounter order survives.
+	consolidates := make([]bool, 0, len(request.Turns))
 	// The namespace qualifier a replayed call carries is resolved for THIS
 	// exchange: the canonical part keeps client-sent data, and retained
 	// history never passes through decode, so the decision cannot live there.
@@ -133,16 +143,34 @@ func RenderChatRequest(
 				return nil, report, err
 			}
 			rendered = append(rendered, message)
-			systemChannel = append(systemChannel, true)
+			instructionChannel = append(instructionChannel, true)
+			consolidates = append(consolidates, true)
 			retainedChannel = append(retainedChannel, retained)
 			sourceTurn = append(sourceTurn, index)
 
 		case CanonicalDeveloper:
 			role := ChatMessageRoleDeveloper
-			channel := false
+			// A developer turn is an INSTRUCTION either way; only the role it
+			// renders under depends on the capability.
+			joinsSystem := false
 			if !capabilities.DeveloperRole {
 				role = ChatMessageRoleSystem
-				channel = true
+				joinsSystem = true
+			}
+			message, err := canonicalTextTurnToChatMessage(
+				turn,
+				turnPath,
+				role,
+				context.lossPolicy(),
+				&report,
+			)
+			if err != nil {
+				return nil, report, err
+			}
+			// The contribution comes FIRST: a developer turn that renders no
+			// text occupies no role and no position, so charging it would
+			// describe a collapse that never happened.
+			if joinsSystem && !chatMessageTextIsEmpty(message) {
 				// The role distinction is dropped for EVERY developer turn,
 				// retained or not; only the policy decision differs, and
 				// chargePosition owns that distinction so a retained turn
@@ -159,18 +187,9 @@ func RenderChatRequest(
 					return nil, report, err
 				}
 			}
-			message, err := canonicalTextTurnToChatMessage(
-				turn,
-				turnPath,
-				role,
-				context.lossPolicy(),
-				&report,
-			)
-			if err != nil {
-				return nil, report, err
-			}
 			rendered = append(rendered, message)
-			systemChannel = append(systemChannel, channel)
+			instructionChannel = append(instructionChannel, true)
+			consolidates = append(consolidates, joinsSystem)
 			retainedChannel = append(retainedChannel, retained)
 			sourceTurn = append(sourceTurn, index)
 
@@ -187,7 +206,8 @@ func RenderChatRequest(
 			}
 			for _, message := range messages {
 				rendered = append(rendered, message)
-				systemChannel = append(systemChannel, false)
+				instructionChannel = append(instructionChannel, false)
+				consolidates = append(consolidates, false)
 				retainedChannel = append(retainedChannel, retained)
 				sourceTurn = append(sourceTurn, index)
 			}
@@ -198,7 +218,8 @@ func RenderChatRequest(
 				return nil, report, err
 			}
 			rendered = append(rendered, message)
-			systemChannel = append(systemChannel, false)
+			instructionChannel = append(instructionChannel, false)
+			consolidates = append(consolidates, false)
 			retainedChannel = append(retainedChannel, retained)
 			sourceTurn = append(sourceTurn, index)
 		}
@@ -207,15 +228,16 @@ func RenderChatRequest(
 	if capabilities.SystemAnywhere {
 		// Fidelity mode for upstreams that accept system messages
 		// anywhere: positional rendering exactly as decoded, no report
-		// entries. The one thing this mode does NOT preserve is a
-		// system-channel message that carries no bytes at all: that shape is
+		// entries. The one thing this mode does NOT preserve is an
+		// INSTRUCTION message that carries no bytes at all: that shape is
 		// proxy-invented (the renderer synthesizes an empty text block for a
-		// turn whose parts were all dropped), and emitting it would send the
-		// upstream an empty system prompt the client never wrote — the same
-		// rule the consolidated path and the other three targets follow.
+		// turn whose parts were all dropped or scrubbed), and emitting it
+		// would send the upstream an empty system or developer prompt the
+		// client never wrote — the same rule the consolidated path and the
+		// other three targets follow.
 		filtered := make([]ChatMessage, 0, len(rendered))
 		for i, message := range rendered {
-			if systemChannel[i] && chatMessageTextIsEmpty(message) {
+			if instructionChannel[i] && chatMessageTextIsEmpty(message) {
 				continue
 			}
 			filtered = append(filtered, message)
@@ -223,16 +245,19 @@ func RenderChatRequest(
 		out.Messages = filtered
 	} else {
 		var (
-			// systemMessages holds every system-channel message in ENCOUNTER
-			// order. The consolidated leading message joins their text in that
-			// order, so separating the leading and mid-dialog groups can never
-			// reorder the prompt the model sees.
+			// systemMessages holds every consolidating instruction message in
+			// ENCOUNTER order. The consolidated leading message joins their
+			// text in that order, so separating the leading and mid-dialog
+			// groups can never reorder the prompt the model sees.
 			systemMessages []ChatMessage
-			dialog         []ChatMessage
-			// contributing records the canonical index of every system-channel
-			// turn that actually produced a message, which is what the shared
-			// join decision counts.
+			// contributing records the canonical index of every consolidating
+			// instruction turn that actually produced text, which is what the
+			// shared join decision counts.
 			contributing []int
+			// consolidatedAt is the index in rendered at which the consolidated
+			// system message belongs: the first CONTRIBUTING consolidating
+			// turn. -1 means nothing consolidates, so nothing is inserted.
+			consolidatedAt = -1
 		)
 		sawClientDialog := false
 		// sawRetainedDialog tracks dialog turns the continuity store
@@ -241,28 +266,37 @@ func RenderChatRequest(
 		// to it.
 		sawRetainedDialog := false
 		for i, message := range rendered {
-			if !systemChannel[i] {
+			if !instructionChannel[i] {
 				if retainedChannel[i] {
 					sawRetainedDialog = true
 				} else {
 					sawClientDialog = true
 				}
-				dialog = append(dialog, message)
+				continue
+			}
+			if !consolidates[i] {
+				// A developer turn carried in place under the developer-role
+				// capability is an instruction but not dialog: it must not open
+				// dialog, and it does not join the consolidated prompt because
+				// it renders at its own position.
+				continue
+			}
+			// A turn that rendered nothing occupies no position and contributes
+			// to no join: charging it would describe a move or a merge that
+			// never happened.
+			if chatMessageTextIsEmpty(message) {
 				continue
 			}
 			systemMessages = append(systemMessages, message)
-			// Only a message carrying real text contributed to the merged
-			// prompt: a turn whose parts were all dropped became an empty text
-			// block, and counting it would make the join decision describe a
-			// merge that never happened.
-			if !chatMessageTextIsEmpty(message) {
-				contributing = append(contributing, sourceTurn[i])
+			contributing = append(contributing, sourceTurn[i])
+			if consolidatedAt < 0 {
+				consolidatedAt = i
 			}
-			// A client-authored system turn is mid-dialog only when the
+			// A client-authored instruction turn is mid-dialog only when the
 			// CLIENT's own request has already opened dialog: retained history
 			// sits in front of the client's turns, and letting it demote the
 			// client's instructions would charge the client for a position the
-			// proxy created. A retained system turn is mid-dialog when any
+			// proxy created. A retained instruction turn is mid-dialog when any
 			// dialog precedes it, either the proxy's or the client's.
 			mid := sawClientDialog
 			if retainedChannel[i] {
@@ -271,9 +305,10 @@ func RenderChatRequest(
 			if !mid {
 				continue
 			}
-			// Each mid-dialog system turn is charged on its OWN provenance, so
-			// a retained turn and a client turn in the same conversation
-			// cannot be folded into one decision that hides which one paid.
+			// Each mid-dialog instruction turn is charged on its OWN
+			// provenance, so a retained turn and a client turn in the same
+			// conversation cannot be folded into one decision that hides which
+			// one paid.
 			if err := chargePosition(
 				request,
 				sourceTurn[i],
@@ -296,63 +331,45 @@ func RenderChatRequest(
 		); err != nil {
 			return nil, report, err
 		}
-		// A system message that would carry no bytes is not emitted. That
-		// shape arises when every part of a system turn was dropped under an
-		// approved loss (the renderer synthesizes an empty block so the
-		// message union stays valid) or when the consolidation joined only
-		// empty blocks: either way the prompt text would be proxy-invented,
-		// and the Responses target omits its instructions field for the same
-		// source shape. The degenerate-conversation guard below still owns the
-		// case where nothing else survives.
-		if len(systemMessages) == 1 && !chatMessageTextIsEmpty(systemMessages[0]) {
-			// The common single-leading-system case renders exactly one
-			// system message at index 0 with its original blocks.
-			out.Messages = append(out.Messages, systemMessages[0])
-		} else if len(systemMessages) > 1 {
-			consolidated := joinChatSystemMessages(systemMessages)
-			if !chatMessageTextIsEmpty(consolidated) {
-				out.Messages = append(out.Messages, consolidated)
+		// Emit in encounter order. Consolidating instruction messages vanish
+		// into the consolidated prompt, which takes the place of the first one
+		// that contributed; every other message — including a developer message
+		// the capability lets us keep, and including a dialog turn that
+		// physically precedes the first contributing system turn — keeps the
+		// position it rendered at.
+		for i, message := range rendered {
+			if i == consolidatedAt {
+				out.Messages = append(out.Messages, consolidateChatSystemMessages(systemMessages))
+				continue
 			}
+			if instructionChannel[i] && consolidates[i] {
+				continue
+			}
+			// A developer message carried in place is still proxy-invented
+			// when every part of its turn was dropped or scrubbed.
+			if instructionChannel[i] && chatMessageTextIsEmpty(message) {
+				continue
+			}
+			out.Messages = append(out.Messages, message)
 		}
-		out.Messages = append(out.Messages, dialog...)
+		if consolidatedAt < 0 && len(systemMessages) > 0 {
+			// Unreachable while consolidatedAt is assigned above on every
+			// contribution; kept honest rather than silently dropping the
+			// prompt if that assignment ever changes.
+			out.Messages = append([]ChatMessage{consolidateChatSystemMessages(systemMessages)}, out.Messages...)
+		}
 	}
 
 	// A source request with no Chat-representable messages is a
 	// client-dialect invalid-request error before any upstream request:
-	// messages:null or an invented empty user prompt are never emitted.
-	// A message whose content is a single EMPTY text block counts as
-	// non-representable: it arises only when every part of a system turn was
-	// dropped under an approved loss, and admitting it would send the
-	// upstream a conversation with no user turn at all. This keeps the
-	// Messages-to-Chat direction in agreement with the Responses target,
-	// which rejects the same source shape for the same reason.
-	isDegenerate := func(messages []ChatMessage) bool {
-		// Degenerate means EVERY message is a single EMPTY text block - the
-		// exact shape the empty-block synthesis produces when all of a
-		// system turn's parts were dropped. An assistant or tool message
-		// carrying real content is representable and must NOT be rejected
-		// just because the conversation has no user turn. The empty slice is
-		// NOT degenerate: the predicate means "every message is empty", which
-		// is vacuously true of nothing, and the caller's own length check owns
-		// that case.
-		if len(messages) == 0 {
-			return false
-		}
-		for _, m := range messages {
-			if m.Content == nil {
-				return false
-			}
-			blocks := m.Content.ContentBlocks
-			if len(blocks) != 1 || blocks[0].Type != ChatContentBlockTypeText {
-				return false
-			}
-			if blocks[0].Text == nil || *blocks[0].Text != "" {
-				return false
-			}
-		}
-		return true
-	}
-	if len(out.Messages) == 0 || isDegenerate(out.Messages) {
+	// messages:null or an invented empty user prompt are never emitted. Every
+	// contentless instruction message has already been filtered out, so an
+	// empty list means the source had nothing a chat message could carry — the
+	// same shape the Responses target rejects. A dialog turn the Messages
+	// decoder preserved with an empty text part is DELIBERATELY kept: the turn
+	// boundary is the point of that synthesis, and refusing it would delete a
+	// turn the model is expected to see.
+	if len(out.Messages) == 0 {
 		return nil, report, errors.New(
 			"the source request has no Chat-representable messages",
 		)
