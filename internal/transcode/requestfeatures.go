@@ -32,4 +32,16 @@ const (
 	// namespace this exchange does not declare, and filing a choice bind there
 	// sends an operator grepping either meaning to the other.
 	FeatureToolChoiceNamespaceBind Feature = "tool_choice_namespace_bind"
+	// FeatureRequestLogprobsReplay marks token log-probabilities carried on
+	// REPLAYED output text: the client is relaying scoring metadata it already
+	// received, not asking for something. The target request cannot reproduce
+	// them, and refusing the replay would break ordinary traffic — the next
+	// turn of a conversation replays the previous turn's own output — while
+	// approving request_top_logprobs would not cover it. So it is a Note, one
+	// per exchange, exactly like an input item id. It is deliberately its own
+	// key rather than FeatureLogprobs, which is the RESPONSE-side token
+	// log-probability surface: the same field can be a refusal in one direction
+	// and inert in the other, and one key covering both would let an operator
+	// approve one direction to change the other.
+	FeatureRequestLogprobsReplay Feature = "request_logprobs_replay"
 )

@@ -569,20 +569,31 @@ func renderMessagesTools(
 	// allowed). The two inert conditions — no tools declared, or a choice that
 	// forbids every call — are Notes from the shared helper, so they are never
 	// policy decisions: a default-deny key there would refuse a request that
-	// loses nothing.
+	// loses nothing, and no field may be written when no call can happen.
+	//
+	// A choice the client WROTE carries the value as sent. When the client wrote
+	// no choice, only a real disable justifies synthesizing one: carrying an
+	// "allowed" needs no field at all, because every dialect's default allows
+	// parallel calls, so inventing a tool_choice for it would put a field on the
+	// wire the client never asked for.
 	if request.ParallelTools != nil {
 		inert, err := chargeParallelToolsInert(request, "parallel_tool_calls", report)
 		if err != nil {
 			return err
 		}
 		if !inert {
-			choice := anthropicmessages.ToolChoice{Type: "auto"}
-			if out.ToolChoice != nil {
-				choice = *out.ToolChoice
-			}
 			disabled := !*request.ParallelTools
-			choice.DisableParallelToolUse = &disabled
-			out.ToolChoice = &choice
+			switch {
+			case out.ToolChoice != nil:
+				choice := *out.ToolChoice
+				choice.DisableParallelToolUse = &disabled
+				out.ToolChoice = &choice
+			case disabled:
+				out.ToolChoice = &anthropicmessages.ToolChoice{
+					Type:                   "auto",
+					DisableParallelToolUse: &disabled,
+				}
+			}
 		}
 	}
 	return nil

@@ -488,7 +488,7 @@ func RenderGeminiRequest(
 	// real and refusable loss. The two inert shapes (no tools, or a choice that
 	// forbids every call) and an explicit "allowed" are Notes/no-ops, because
 	// nothing is lost.
-	if err := chargeParallelTools(
+	if _, err := chargeParallelTools(
 		request,
 		false,
 		"parallel_tool_calls",
