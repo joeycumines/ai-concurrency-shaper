@@ -331,7 +331,7 @@ func TestNonTextSystemPartDiagnosticNamesTheOffender(t *testing.T) {
 
 	t.Run("responses arm names the part type", func(t *testing.T) {
 		var report ConversionReport
-		err := loseSystemPart(StrictLossPolicy(), &report, part)
+		err := loseSystemPart(StrictLossPolicy(), &report, part, "turns[0].parts[0]")
 		if err == nil {
 			t.Fatal("want an UnsupportedFeatureError for a non-text system part")
 		}
