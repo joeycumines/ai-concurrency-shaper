@@ -78,9 +78,14 @@ func TestChatSystemTurnOfScrubbedThinkingRendersNoSystemMessage(t *testing.T) {
 
 // TestChatDeveloperTurnIsNotDialog proves Chat's placement channel is not its
 // provenance channel. With developer_role on, a developer turn keeps the
-// developer role, stays at its encounter position, and opens no dialog: a
-// leading system turn after it is still a LEADING instruction, not a
-// mid-conversation system turn.
+// developer role and opens no dialog: it is an INSTRUCTION, so a following
+// system turn is not charged as a mid-DIALOG system turn.
+//
+// It is nevertheless charged a position, and that is honest rather than
+// incidental: the consolidated system prompt is emitted at index 0 because
+// open-weights chat templates reject a system message after index 0, so a system
+// turn that had a developer message before it really does move ahead of it. The
+// key records the move; the developer_role distinction is preserved.
 func TestChatDeveloperTurnIsNotDialog(t *testing.T) {
 	request := CanonicalRequest{
 		ClientModel: "m",
@@ -90,25 +95,32 @@ func TestChatDeveloperTurnIsNotDialog(t *testing.T) {
 			textTurn(CanonicalUser, "hi"),
 		},
 	}
-	rendered, report, err := RenderChatRequest(request, testExchangeContext(),
+	// The position the consolidation creates is charged, so a strict render
+	// refuses it; approve it to inspect the placement.
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureMidConversationSystem: {}}}
+	rendered, report, err := RenderChatRequest(request, context,
 		ChatCapabilities{DeveloperRole: true})
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if reportHasFeature(report, FeatureMidConversationSystem) {
-		t.Fatalf("a leading system turn after a developer turn was charged mid_conversation_system: %+v",
-			report.Losses)
+	// The developer ROLE is preserved, so no developer_role decision.
+	if reportHasFeature(report, FeatureDeveloperRole) {
+		t.Fatalf("a kept developer turn recorded developer_role: %+v", report.Losses)
+	}
+	if !reportHasAt(report, FeatureMidConversationSystem, "turns[1]") {
+		t.Fatalf("report = %+v, want the system turn's move charged at turns[1]", report.Losses)
 	}
 	messages := chatMessages(t, rendered)
 	if len(messages) != 3 {
-		t.Fatalf("messages = %d, want developer, system, user: %s", len(messages), rendered)
+		t.Fatalf("messages = %d, want system prompt, developer, user: %s", len(messages), rendered)
 	}
 	want := []struct {
 		role ChatMessageRole
 		text string
 	}{
-		{ChatMessageRoleDeveloper, "dev"},
 		{ChatMessageRoleSystem, "sys"},
+		{ChatMessageRoleDeveloper, "dev"},
 		{ChatMessageRoleUser, "hi"},
 	}
 	for i, entry := range want {
@@ -118,7 +130,8 @@ func TestChatDeveloperTurnIsNotDialog(t *testing.T) {
 		}
 	}
 
-	// The scope guard: a system turn after real DIALOG is still charged.
+	// The scope guard: a system turn after real DIALOG is charged under the same
+	// key, so the key does not depend on the developer message existing.
 	midDialog := CanonicalRequest{
 		ClientModel: "m",
 		Turns: []CanonicalTurn{
@@ -333,5 +346,67 @@ func TestChatSystemTurnAfterAKeptDeveloperTurnIsCharged(t *testing.T) {
 		if role, _ := messageRoleAndText(messages[i]); role != want {
 			t.Fatalf("messages[%d] role = %s, want %s", i, role, want)
 		}
+	}
+}
+
+// TestChatConsolidatedSystemPromptIsLeading proves the loss text is TRUE: the
+// consolidated system prompt is emitted at index 0, because every open-weights
+// chat template rejects a system message after index 0 and that is the whole
+// reason the consolidation exists. A contributing system turn that had a dialog
+// turn before it therefore really does move, which is exactly what
+// mid_conversation_system records.
+func TestChatConsolidatedSystemPromptIsLeading(t *testing.T) {
+	request := CanonicalRequest{
+		ClientModel: "m",
+		Turns: []CanonicalTurn{
+			textTurn(CanonicalUser, "u"),
+			textTurn(CanonicalSystem, "s"),
+			textTurn(CanonicalAssistant, "a"),
+		},
+	}
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureMidConversationSystem: {}}}
+	rendered, report, err := RenderChatRequest(request, context, ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !reportHasAt(report, FeatureMidConversationSystem, "turns[1]") {
+		t.Fatalf("report = %+v, want the position charged at turns[1]", report.Losses)
+	}
+	messages := chatMessages(t, rendered)
+	if len(messages) != 3 {
+		t.Fatalf("messages = %d, want 3: %s", len(messages), rendered)
+	}
+	if role, text := messageRoleAndText(messages[0]); role != ChatMessageRoleSystem || text != "s" {
+		t.Fatalf("messages[0] = (%s, %q), want the consolidated system prompt first: %s",
+			role, text, rendered)
+	}
+	for i := 1; i < len(messages); i++ {
+		if role, _ := messageRoleAndText(messages[i]); role == ChatMessageRoleSystem {
+			t.Fatalf("messages[%d] is a system message after index 0: %s", i, rendered)
+		}
+	}
+}
+
+// TestChatLeadingConsolidatedPromptStaysLeading is the scope guard: the common
+// leading case is unchanged and records no position.
+func TestChatLeadingConsolidatedPromptStaysLeading(t *testing.T) {
+	request := CanonicalRequest{
+		ClientModel: "m",
+		Turns: []CanonicalTurn{
+			textTurn(CanonicalSystem, "s"),
+			textTurn(CanonicalUser, "u"),
+		},
+	}
+	rendered, report, err := RenderChatRequest(request, testExchangeContext(), ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if reportHasFeature(report, FeatureMidConversationSystem) {
+		t.Fatalf("a leading system turn was charged a position: %+v", report.Losses)
+	}
+	messages := chatMessages(t, rendered)
+	if role, text := messageRoleAndText(messages[0]); role != ChatMessageRoleSystem || text != "s" {
+		t.Fatalf("messages[0] = (%s, %q), want the system prompt", role, text)
 	}
 }

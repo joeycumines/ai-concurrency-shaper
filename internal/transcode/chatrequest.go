@@ -265,15 +265,13 @@ func RenderChatRequest(
 		// position the client's own request never created must not be charged
 		// to it.
 		sawRetainedDialog := false
-		// keptSinceContributor records that an instruction message which renders
-		// IN PLACE (a developer turn the capability lets us keep) has appeared
-		// after the first contributing system turn. A later contributor's text
-		// then jumps over that message into the consolidated prompt, which is a
-		// real positional move. Two leading system turns with nothing surviving
-		// between them are NOT charged a position: their merge is the
-		// multiple_system_turns decision, which is what says the boundaries are
-		// lost.
-		keptSinceContributor := false
+		// keptBefore records that a message which renders IN PLACE and does NOT
+		// consolidate has already appeared. A developer turn the capability lets
+		// us keep is such a message: it does not open dialog (a leading developer
+		// message must not demote a following system turn to "mid-conversation"
+		// in the DIALOG sense), but it does occupy a position, so a system turn
+		// after it cannot stay where it rendered.
+		keptBefore := false
 		for i, message := range rendered {
 			if !instructionChannel[i] {
 				if retainedChannel[i] {
@@ -284,13 +282,7 @@ func RenderChatRequest(
 				continue
 			}
 			if !consolidates[i] {
-				// A developer turn carried in place under the developer-role
-				// capability is an instruction but not dialog: it must not open
-				// dialog, and it does not join the consolidated prompt because
-				// it renders at its own position.
-				if consolidatedAt >= 0 {
-					keptSinceContributor = true
-				}
+				keptBefore = true
 				continue
 			}
 			// A turn that rendered nothing occupies no position and contributes
@@ -305,17 +297,27 @@ func RenderChatRequest(
 			if firstContributor {
 				consolidatedAt = i
 			}
-			// A client-authored instruction turn is mid-dialog only when the
-			// CLIENT's own request has already opened dialog: retained history
-			// sits in front of the client's turns, and letting it demote the
-			// client's instructions would charge the client for a position the
-			// proxy created. A retained instruction turn is mid-dialog when any
-			// dialog precedes it, either the proxy's or the client's.
-			mid := sawClientDialog
+			// A client-authored instruction turn is charged only when the
+			// CLIENT's own request already placed something before it: retained
+			// history sits in front of the client's turns, and letting it demote
+			// the client's instructions would charge the client for a position
+			// the proxy created. A retained instruction turn is charged when
+			// anything precedes it, either the proxy's or the client's.
+			//
+			// The POSITION charge is about the encoding's real effect: the
+			// consolidated system prompt is emitted FIRST, because every
+			// open-weights chat template rejects a system message after index 0
+			// and that is the whole reason this consolidation exists. So a
+			// contributing system turn that had any non-consolidating message
+			// before it — dialog OR a kept instruction message — really does
+			// move, and that move is what the key records. Two leading system
+			// turns with nothing else before them move nowhere: their merge is
+			// the multiple_system_turns decision.
+			displaced := sawClientDialog || keptBefore
 			if retainedChannel[i] {
-				mid = sawRetainedDialog || sawClientDialog
+				displaced = sawRetainedDialog || sawClientDialog || keptBefore
 			}
-			if !mid && !keptSinceContributor {
+			if !displaced {
 				continue
 			}
 			// Each mid-dialog instruction turn is charged on its OWN
@@ -344,32 +346,27 @@ func RenderChatRequest(
 		); err != nil {
 			return nil, report, err
 		}
-		// Emit in encounter order. Consolidating instruction messages vanish
-		// into the consolidated prompt, which takes the place of the first one
-		// that contributed; every other message — including a developer message
-		// the capability lets us keep, and including a dialog turn that
-		// physically precedes the first contributing system turn — keeps the
-		// position it rendered at.
+		// Emit the consolidated prompt FIRST, then every non-consolidating
+		// message in encounter order. That leading position is not cosmetic: it
+		// is the entire reason this consolidation exists, because open-weights
+		// chat templates reject ANY system message after index 0. A contributing
+		// system turn that had something before it therefore really does move,
+		// which is what mid_conversation_system records; the remaining messages
+		// keep their relative order, so a developer message or dialog turn is
+		// never reordered against its neighbours.
+		if consolidatedAt >= 0 {
+			out.Messages = append(out.Messages, consolidateChatSystemMessages(systemMessages))
+		}
 		for i, message := range rendered {
-			if i == consolidatedAt {
-				out.Messages = append(out.Messages, consolidateChatSystemMessages(systemMessages))
-				continue
-			}
 			if instructionChannel[i] && consolidates[i] {
 				continue
 			}
-			// A developer message carried in place is still proxy-invented
-			// when every part of its turn was dropped or scrubbed.
+			// A developer message carried in place is still proxy-invented when
+			// every part of its turn was dropped or scrubbed.
 			if instructionChannel[i] && chatMessageTextIsEmpty(message) {
 				continue
 			}
 			out.Messages = append(out.Messages, message)
-		}
-		if consolidatedAt < 0 && len(systemMessages) > 0 {
-			// Unreachable while consolidatedAt is assigned above on every
-			// contribution; kept honest rather than silently dropping the
-			// prompt if that assignment ever changes.
-			out.Messages = append([]ChatMessage{consolidateChatSystemMessages(systemMessages)}, out.Messages...)
 		}
 	}
 
