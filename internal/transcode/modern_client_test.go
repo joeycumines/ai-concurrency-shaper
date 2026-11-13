@@ -415,13 +415,17 @@ func TestMessagesSystemCoexistence(t *testing.T) {
 	// render now rejects the position loss; under the
 	// mid_conversation_system permission the system-channel turns
 	// consolidate into one leading system message carrying both texts in
-	// order.
+	// order. The consolidation itself is the shared multiple_system_turns
+	// decision — the same key and severity the Responses, Messages and Gemini
+	// targets record — because a single-vocabulary join is what lets one
+	// policy control the encoding on every target.
 	if _, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{}); err == nil {
 		t.Fatal("strict chat render accepted a mid-conversation system turn; want rejection")
 	}
 	permissiveChat := testExchangeContext()
 	permissiveChat.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
 		FeatureMidConversationSystem: {},
+		FeatureMultipleSystemTurns:   {},
 	}}
 	rendered, report, err := RenderChatRequest(result.Request, permissiveChat, ChatCapabilities{})
 	if err != nil {

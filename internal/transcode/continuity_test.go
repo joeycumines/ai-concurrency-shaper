@@ -771,8 +771,13 @@ func TestClientAuthoredMidConversationSystemTurnStillGated(t *testing.T) {
 	}
 	_ = report
 	// The same client-authored shape must SUCCEED once the operator approves
-	// the key: the gate is a policy decision, not a hard rejection.
-	approved := LossPolicy{Allowed: map[Feature]struct{}{FeatureMidConversationSystem: {}}}
+	// the keys the shape actually needs: the mid-conversation position AND the
+	// merge of the client's two system turns into one leading message, which
+	// every target files under multiple_system_turns.
+	approved := LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureMidConversationSystem: {},
+		FeatureMultipleSystemTurns:   {},
+	}}
 	ctxOK := &ExchangeContext{
 		IDs:          NewExchangeIDs(),
 		LossPolicy:   approved,

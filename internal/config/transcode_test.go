@@ -736,6 +736,59 @@ func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 	}
 }
 
+// TestDefaultLossPolicyDecidesTheResponsesEnvelope pins the availability
+// contract of the Responses request-envelope fields on a non-Responses target.
+// The split is deliberate rather than incidental:
+//
+//   - previous_response_id is approved: continuity is opt-in (OFF by default),
+//     so an unresolved reference — including a store MISS — is the ordinary
+//     shape of a stateless deployment. Approving it is what makes the
+//     documented "a miss degrades to the observable loss, never a failure"
+//     contract true.
+//   - responses_controls is approved, so the shared decision for a Responses
+//     client's user and store fields (which Gemini and Messages cannot carry)
+//     stays observable instead of refusing a request a previous build served.
+//   - multiple_system_turns is approved, so a normal split-system request is
+//     joined and served rather than refused.
+//   - truncation, service_tier and top_logprobs are NOT approved: a default
+//     deployment refuses a Responses request that asks for them on a target
+//     that cannot honour them, where it previously dropped them silently. That
+//     is a documented availability change, so it is pinned here — quietly
+//     adding one of these keys to the defaults would silently restore the drop.
+func TestDefaultLossPolicyDecidesTheResponsesEnvelope(t *testing.T) {
+	def := mergedLossPolicy(transcode.StrictLossPolicy(), nil, false)
+
+	for _, feature := range []transcode.Feature{
+		transcode.FeaturePreviousResponseID,
+		transcode.FeatureResponsesControls,
+		transcode.FeatureMultipleSystemTurns,
+	} {
+		if !def.Allows(feature) {
+			t.Fatalf("the default loss policy must approve %s", feature)
+		}
+	}
+
+	for _, feature := range []transcode.Feature{
+		transcode.FeatureRequestTruncation,
+		transcode.FeatureRequestServiceTier,
+		transcode.FeatureRequestTopLogprobs,
+	} {
+		if def.Allows(feature) {
+			t.Fatalf("%s must NOT be approved by default: a default deployment refuses it rather than "+
+				"silently dropping the field", feature)
+		}
+		// The same policy refuses it rather than recording a silent drop.
+		var report transcode.ConversionReport
+		err := report.Lose(def, feature, "request", "detail")
+		if err == nil {
+			t.Fatalf("a default policy recorded %s as an approved loss", feature)
+		}
+		if !strings.Contains(err.Error(), string(feature)) {
+			t.Fatalf("err = %q, want it to name %s", err, feature)
+		}
+	}
+}
+
 // TestDefaultLossPolicyApprovesUndeclaredNamespaceReplay pins the default
 // that keeps Codex auto-compaction requests served: the client declares no
 // tools and asks for a handoff summary while replaying the thread's

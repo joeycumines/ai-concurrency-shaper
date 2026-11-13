@@ -866,14 +866,14 @@ Capabilities take effect when the client uses the corresponding feature:
   `-transcode-chat-capability '!provider_reasoning_thinking' -transcode-chat-capability provider_reasoning_text`.
 - `float64_bounds` forwards tool schemas byte-exact even when they carry a numeric bound at ±float64 max, which zod-generated MCP tool schemas put on every plain number. On by default, including under strict defaults. Withdraw it with `!float64_bounds` for an upstream that rejects such bounds (Amazon Bedrock's OpenAI-compatible endpoint refuses the whole request): exactly those vacuous bounds are removed, keeping every other byte's key order and number spelling, and the rewrite is recorded as a `vacuous_schema_bounds` note.
 - `metadata` forwards the client request's metadata as Chat Completions `metadata`. On by default, including under strict defaults. Withdraw it with `!metadata` for an upstream that validates metadata values against its own grammar (Amazon Bedrock's OpenAI-compatible endpoint rejects the quotes and braces in Claude Code's `user_id`); the metadata is then an observable loss under the `metadata` loss key, so also pass `-transcode-allow-loss metadata`.
-- `parallel_tool_calls` forwards the parallel-tool-calls configuration.
+- `parallel_tool_calls` forwards the parallel-tool-calls configuration. The setting is a boolean in the canonical IR, carried in both directions: an explicit `disable_parallel_tool_use: false` asserts that parallel calls ARE allowed. An explicit "allowed" costs nothing on any target, because omitting the field asserts the same thing, so it is never charged. A client's DISABLE is a real, policy-gated `parallel_tool_calls` loss wherever the target cannot express it (Chat with this capability withdrawn, and Gemini, whose function-calling mode always allows parallel calls), so `-transcode-allow-loss '!parallel_tool_calls'` can genuinely refuse it. Two shapes are inert on every target — a request declaring no tools, or a `tool_choice` of `none`, because no call can happen at all — and are recorded as a `parallel_tool_calls` NOTE rather than a loss, so an already-satisfied setting never turns into an availability failure.
 - `multi_agent_priming` appends a bounded sub-agent orchestration reminder to the leading system (or developer) turn, after the client's own instructions, so the client's bytes and order are unchanged. It is injected only when the request declares one of the sub-agent tools it names (by the flat names the upstream will see, so a flattened namespace child counts), and each injection is recorded as a per-exchange `multi_agent_priming` note. Chat upstreams only; on a Responses upstream the capability is accepted and has no effect.
 
 Several capabilities remain opt-in because generic and open-weights upstreams reject what they render:
 - `reasoning_effort` forwards Responses `reasoning.effort` (and Anthropic `thinking` budgets) as the chat `reasoning_effort` parameter; without it, the parameter drops observably under the default `request_reasoning` loss.
 - `developer_role` preserves Responses developer-role messages; without it, developer turns render as standard system messages, recorded under the default `developer_role` loss.
-- `system_anywhere` renders system/developer turns positionally for upstreams that accept system messages anywhere in conversation history.
-- `tool_result_images` renders multimodal tool-result content as multipart content in a chat tool message, order preserved. It is independent of `image_input` (an upstream can accept user images while rejecting tool-message image parts), but the multipart form needs the `image_url` vocabulary, so a mount that withdraws `image_input` falls back to the envelope even with this on.
+- `system_anywhere` renders system/developer turns positionally for upstreams that accept system messages anywhere in conversation history. Positional rendering still never emits a contentless system message: a system turn whose parts were all dropped contributes nothing.
+- `tool_result_images` renders multimodal tool-result content as multipart content in a chat tool message, order preserved. It is independent of `image_input` (an upstream can accept user images while rejecting tool-message image parts), but the multipart form needs the `image_url` vocabulary, so a mount that withdraws `image_input` falls back to the envelope even with this on. The multipart attempt is transactional and DECLINES only shapes it cannot represent (a document, an unencodable media type, no blocks), leaving the envelope's own approved keys to decide that content. It never declines on a decision the loss policy already took: an operator's denial of `image_detail_original` fails the request rather than falling through to an envelope that has no detail field and would therefore drop the detail entirely — a strictly stronger loss than the downgrade that was refused — and an invalid detail value fails the request exactly as it does for a user-message image.
 
 ### System message placement
 
@@ -885,10 +885,14 @@ envelope `system` plus inline mid-conversation `role: "system"` messages,
 and developer-role messages when the `developer_role` capability is off —
 consolidate into that single leading message with their content joined in
 order. When a system turn followed dialog turns, the position loss is
-approved under the default `mid_conversation_system` loss key; a leading-
-only merge of multiple system turns is recorded as a sanctioned note under
-the same key. The strict programmatic policy rejects the position loss;
-pass `-transcode-chat-capability system_anywhere` to restore positional
+approved under the default `mid_conversation_system` loss key; the merge
+itself — several system turns losing their boundaries in one field — is the
+separate `multiple_system_turns` decision, filed under that same key with the
+same severity by every target (Chat, Messages, Responses and Gemini), so a
+single `-transcode-allow-loss '!multiple_system_turns'` refuses the encoding
+wherever it would happen. The strict programmatic policy rejects the position
+loss and a client-authored merge; pass
+`-transcode-chat-capability system_anywhere` to restore positional
 rendering for upstreams that accept it.
 
 Both Messages and Responses upstreams hold system content in a single field
@@ -901,6 +905,32 @@ role-neutral field, and the multi-turn join itself — is recorded rather than
 applied silently, and a turn the continuity store reconstructed is recorded as a
 Note instead of a policy-gated loss: the proxy created that position, so it is
 not charged to the client.
+
+A turn whose parts carried no bytes contributes nothing: an all-dropped system
+turn produces no `system` field, no `instructions` string, and no consolidated
+chat message on any target. Empty prompt text the client never wrote is never
+invented, on any dialect.
+
+### Responses request-envelope fields on a non-Responses target
+
+A Responses client can send request-envelope fields only a Responses upstream
+understands. Each is either carried, approved, or refused — never dropped
+silently — and the same feature key and path are used whichever target renders
+the request, so the per-request log reads the same regardless of dialect:
+
+| Field | Target that carries it | Otherwise |
+| --- | --- | --- |
+| `previous_response_id` | Responses (forwards the id; a continuity-resolved chain is already prepended, so the id is omitted at depth > 0) | the **default-approved** `previous_response_id` loss when the continuity store did not resolve it — including a store MISS, so a miss degrades to the observable loss rather than a failure. Deny it with `-transcode-allow-loss '!previous_response_id'` |
+| `user`, `store` | Responses; Chat | `responses_controls` (default-approved). `store:false` is already satisfied by a target with no storage, so only `store:true` is a loss |
+| `truncation`, `service_tier`, `top_logprobs` | Responses | their own keys — **not** default-approved, so a default deployment refuses them on a non-Responses target |
+| `reasoning.effort` | Responses; Chat with the `reasoning_effort` capability | `request_reasoning` (default-approved) |
+| `reasoning.summary` | Responses | `reasoning_summary` (default-approved) |
+
+The three non-default keys are deliberate: a Responses client that asks for
+truncation, a service tier, or log-probability detail is asking for something
+the target cannot honour, and silently dropping it would change semantics the
+client can observe in the answer. Approve them for clients whose traffic
+carries them and whose behaviour does not depend on those fields.
 
 ### Thinking budgets and reasoning effort
 
@@ -992,11 +1022,16 @@ is refused outright: no policy can approve re-pointing a client-sent call at
 a different tool.
 `tool_choice` has no namespaced selector (Codex sends `"auto"`), and a named
 choice addresses the tool the client knows: a name that matches a plain
-function or a properly declared flat name is used as-is, and a name matching
-exactly one namespace child whose flat name had to be qualified is resolved
-through the per-exchange map. A name matching no surviving tool, or one that
-more than one namespace child shares, is refused rather than guessed. A
-namespace whose inner grouping cannot be represented — two different outer
+function or a declared flat name is used as-is. A name matching no surviving
+tool, or one that more than one namespace child shares, is refused rather than
+guessed — including when one of those children happens to own the bare name and
+a plain function owns it too. When a plain function owns the name while a
+namespace child of the same bare name was qualified, the plain function is the
+target and the possible reinterpretation is recorded under the
+`tool_choice_namespace_bind` note key (a sanctioned-encoding note, deliberately
+not policy-addressable, so it never appears under
+`namespace_replay_undeclared`, which means a replayed CALL named an undeclared
+namespace). A namespace whose inner grouping cannot be represented — two different outer
 namespaces that each contain an inner namespace of the same name with a child
 of the same name — is refused before any upstream request, because the IR keeps
 only the innermost qualifier and the two tools would be indistinguishable.

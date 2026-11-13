@@ -50,7 +50,13 @@ func RenderResponsesRequest(
 		developer bool
 	}
 	var systemTurns []systemChannelTurn
-	var conversationTurns []CanonicalTurn
+	// conversationTurns pairs each dialog turn with its CANONICAL index, so a
+	// refusal or report entry can name the turn the operator actually sent
+	// rather than a position in a filtered slice.
+	var conversationTurns []struct {
+		turn  CanonicalTurn
+		index int
+	}
 	// sawClientDialog and sawRetainedDialog are tracked separately: a
 	// system-channel turn the CLIENT authored is mid-dialog only once the
 	// client's own request opened dialog, because retained history physically
@@ -80,7 +86,10 @@ func RenderResponsesRequest(
 			} else {
 				sawClientDialog = true
 			}
-			conversationTurns = append(conversationTurns, turn)
+			conversationTurns = append(conversationTurns, struct {
+				turn  CanonicalTurn
+				index int
+			}{turn: turn, index: i})
 		}
 	}
 
@@ -94,6 +103,11 @@ func RenderResponsesRequest(
 	// its own position decision, so nothing moves silently.
 	var instructionsBuilder strings.Builder
 	textParts := 0
+	// contributing holds the index of every system-channel turn that actually
+	// contributed text. A turn whose parts were all dropped (a non-text part
+	// under an approved system_non_text_content) did not contribute, so it must
+	// not make the join decision describe a merge that never happened.
+	var contributing []int
 	for _, channel := range systemTurns {
 		turnPath := fmt.Sprintf("turns[%d]", channel.index)
 		if channel.midDialog {
@@ -122,9 +136,17 @@ func RenderResponsesRequest(
 				return nil, report, err
 			}
 		}
+		turnTextParts := 0
 		for _, part := range channel.turn.Parts {
 			text, ok := part.(CanonicalText)
 			if !ok {
+				if _, thinking := part.(CanonicalThinkingPart); thinking {
+					// Marker-signature thinking is proxy-synthesized reasoning
+					// the request path scrubs in every turn role; any other
+					// signature was already refused by
+					// ValidateCanonicalRequest.
+					continue
+				}
 				if err := loseSystemPart(context.lossPolicy(), &report, part); err != nil {
 					return nil, report, err
 				}
@@ -141,39 +163,29 @@ func RenderResponsesRequest(
 			}
 			instructionsBuilder.WriteString(text.Text)
 			textParts++
+			turnTextParts++
+		}
+		if turnTextParts > 0 {
+			contributing = append(contributing, channel.index)
 		}
 	}
-	if len(systemTurns) > 1 {
-		// More than one system-channel turn cannot keep its own boundary in
-		// one instructions string. The decision is a policy-gated loss when the
-		// CLIENT authored more than one system turn, and a Note otherwise (the
-		// surplus came from the continuity store's reconstructed prefix, already
-		// decided when the chain was first rendered). Counting client-authored
-		// turns — not positions — is what makes this right when a retained turn
-		// physically precedes a client one.
-		clientTurns := 0
-		for _, channel := range systemTurns {
-			if channel.index >= request.RetainedTurns {
-				clientTurns++
-			}
-		}
-		if clientTurns > 1 {
-			if err := report.Lose(
-				context.lossPolicy(),
-				FeatureMultipleSystemTurns,
-				"instructions",
-				"multiple system turns cannot keep their boundaries in a single instructions string; their text joins in order",
-			); err != nil {
-				return nil, report, err
-			}
-		} else if err := report.Note(
-			FeatureMultipleSystemTurns,
-			"instructions",
-			"multiple system turns cannot keep their boundaries in a single instructions string; their text joins in order (the surplus turns came from the proxy's retained continuity history, not this request)",
-		); err != nil {
-			return nil, report, err
-		}
-	} else if textParts > 1 {
+	// More than one CONTRIBUTING system turn cannot keep its own boundary in
+	// one instructions string. The decision is the shared multiple_system_turns
+	// one every target takes for this encoding: a policy-gated loss when the
+	// client authored more than one contributing turn, a Note otherwise (the
+	// surplus came from the continuity store's reconstructed prefix, already
+	// decided when the chain was first rendered).
+	if err := chargeSystemTurnJoin(
+		request,
+		contributing,
+		"instructions",
+		"multiple system turns cannot keep their boundaries in a single instructions string; their text joins in order",
+		&report,
+		context.lossPolicy(),
+	); err != nil {
+		return nil, report, err
+	}
+	if len(contributing) == 1 && textParts > 1 {
 		if err := report.Note(
 			FeatureMultipleSystemTurns,
 			"instructions",
@@ -198,10 +210,14 @@ func RenderResponsesRequest(
 	// (the directions disagreed).
 	if len(conversationTurns) == 0 {
 		return nil, report, errors.New(
-			"the source request has no Messages-representable conversation turns for the Responses input",
+			"the source request has no turn that can be represented in the Responses input",
 		)
 	}
-	for _, turn := range conversationTurns {
+	for _, entry := range conversationTurns {
+		turn := entry.turn
+		// turnPath names the canonical turn the operator sent, matching the
+		// path convention of every other render-side entry.
+		turnPath := fmt.Sprintf("turns[%d]", entry.index)
 		var contentParts []CanonicalPart
 		for _, part := range turn.Parts {
 			switch value := part.(type) {
@@ -269,6 +285,22 @@ func RenderResponsesRequest(
 			item, err := canonicalTurnPartsToEasyMessage(turn.Role, contentParts)
 			if err != nil {
 				return nil, report, err
+			}
+			if item.Content.Text == nil && len(item.Content.Parts) == 0 {
+				// Every part was scrubbed (marker-signature thinking is the only
+				// part type this renderer drops), so the item would carry a
+				// contentless union. Emitting it fails deep in the wire marshal
+				// with "no selected variant", which describes a marshaller bug
+				// rather than the request the operator sent; inventing an empty
+				// text part would put prompt text on the wire the client never
+				// wrote. The Messages decoder synthesizes an empty text part for
+				// exactly this shape, so a decoder-produced request never
+				// reaches here — this is the hand-built case, refused honestly
+				// and at the canonical path.
+				return nil, report, fmt.Errorf(
+					"%s has no content that the Responses input can carry after scrubbing proxy-synthesized thinking",
+					turnPath,
+				)
 			}
 			input = append(input, item)
 		}
@@ -363,12 +395,34 @@ func RenderResponsesRequest(
 		}
 	}
 
-	// Reasoning effort from the original request echo.
-	if context != nil && context.OriginalResponsesRequest != nil &&
-		context.OriginalResponsesRequest.Reasoning != nil &&
-		context.OriginalResponsesRequest.Reasoning.Effort != nil {
-		out.Reasoning = &ResponsesEnvelopeReasoning{
-			Effort: context.OriginalResponsesRequest.Reasoning.Effort,
+	// The Responses request-envelope echo. This renderer targets the very wire
+	// the echo was decoded from, so every field that wire models is restored
+	// exactly: dropping one would silently change what the client asked for
+	// (a new conversation instead of a continued one, no store, no truncation
+	// policy, no logprob detail, no reasoning-summary style). No same-protocol
+	// direction is constructible from configuration today, so this is the
+	// renderer's own contract rather than a live route, and the unit tests
+	// assert the RENDERED body rather than the absence of a report entry.
+	//
+	// previous_response_id is the one exception: a resolved chain was already
+	// prepended by the continuity store (RequestDepth > 0), so forwarding the
+	// id would make the upstream continue the conversation a second time. An
+	// UNRESOLVED id is forwarded as the client sent it.
+	if context != nil && context.OriginalResponsesRequest != nil {
+		echo := context.OriginalResponsesRequest
+		out.Store = echo.Store
+		out.User = echo.User
+		out.Truncation = echo.Truncation
+		out.ServiceTier = echo.ServiceTier
+		out.TopLogprobs = echo.TopLogprobs
+		if context.RequestDepth == 0 {
+			out.PreviousResponseID = echo.PreviousResponseID
+		}
+		if echo.Reasoning != nil {
+			out.Reasoning = &ResponsesEnvelopeReasoning{
+				Effort:  echo.Reasoning.Effort,
+				Summary: echo.Reasoning.Summary,
+			}
 		}
 	}
 
@@ -632,9 +686,10 @@ func canonicalPartsToResponsesContent(
 		case CanonicalThinkingPart:
 			// Marker-signature thinking is proxy-synthesized reasoning: the
 			// request path scrubs it from replayed history before upstream
-			// rendering, so it never reaches a Responses upstream. A non-marker
-			// part is a source-authenticated artifact gated by
-			// RequirePortableArtifacts, which runs before this loop.
+			// rendering, so it never reaches a Responses upstream. Any other
+			// signature was refused by ValidateCanonicalRequest, which is the
+			// only gate that inspects turn parts (the artifact gate covers
+			// request.Artifacts).
 			continue
 
 		default:

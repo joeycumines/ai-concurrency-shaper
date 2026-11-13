@@ -274,27 +274,24 @@ func DecodeResponsesRequest(
 		if err != nil {
 			return DecodeResult{}, nil, err
 		}
-		// A named choice names the tool the CLIENT knows. When that tool is a
-		// namespace child whose flat name had to be qualified, the client's
-		// name is the bare child name, and ToolNames exists exactly to
-		// translate it: resolve a name that matches exactly one child, and
-		// leave an ambiguous or unknown name alone so reconciliation still
-		// reports a genuinely dangling reference.
+		// A named choice names the tool the CLIENT knows. Two namespace
+		// children that share a bare child name make that name ambiguous, and
+		// no flat-name lookup can honestly resolve it: the request is refused
+		// rather than bound to whichever child claimed the bare name first.
+		// With no ambiguity the client's own spelling is already the wire
+		// name, because the flatten keeps a child's bare name while it is free.
 		if choice.Mode == "named" {
-			flat, resolved, err := resolveNamedToolChoice(names, result.Request, choice.Name)
-			if err != nil {
+			if err := resolveNamedToolChoice(names, choice.Name); err != nil {
 				return DecodeResult{}, nil, err
 			}
-			if resolved {
-				choice.Name = flat
-			} else if namedChoicePlainOwner(names, result.Request.Tools, choice.Name) &&
+			if namedChoicePlainOwner(names, result.Request.Tools, choice.Name) &&
 				namespaceChildSharesBareName(names, choice.Name) {
 				// The client named a bare child name that a plain function owns
 				// while a namespace child of the same bare name was qualified;
 				// the plain function wins, and the possible reinterpretation is
-				// recorded rather than left silent.
+				// recorded under its own key rather than left silent.
 				if err := result.Report.Note(
-					FeatureNamespaceReplayUndeclared,
+					FeatureToolChoiceNamespaceBind,
 					"tool_choice",
 					fmt.Sprintf(
 						"tool_choice named %q, which a plain function owns while a namespace child of that bare name was qualified; the plain function is the target",

@@ -141,9 +141,14 @@ func TestNamedToolChoiceResolvesThroughTheNamespaceMap(t *testing.T) {
 		t.Fatalf("tool_choice = %+v, want the plain tool's own name", plainResult.Request.ToolChoice)
 	}
 	// The bind is a possible reinterpretation (the client might have meant the
-	// qualified namespace child), so it is recorded rather than silent.
-	if !reportHasAt(plainResult.Report, FeatureNamespaceReplayUndeclared, "tool_choice") {
+	// qualified namespace child), so it is recorded rather than silent — under
+	// its own key, because a tool-choice bind is not a replayed call naming an
+	// undeclared namespace.
+	if !reportHasAt(plainResult.Report, FeatureToolChoiceNamespaceBind, "tool_choice") {
 		t.Fatalf("report = %+v, want a tool_choice note for the plain-owner bind", plainResult.Report.Losses)
+	}
+	if reportHasFeature(plainResult.Report, FeatureNamespaceReplayUndeclared) {
+		t.Fatalf("a choice bind was filed under namespace_replay_undeclared: %+v", plainResult.Report.Losses)
 	}
 
 	// A name matching NO surviving tool still refuses: the client asked for a

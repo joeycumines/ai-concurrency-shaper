@@ -54,10 +54,10 @@ const (
 	// any system-role message after index 0, including a second leading
 	// one. Under this permission system-channel turns consolidate into one
 	// leading system message (position/timing lost, content and authority
-	// preserved); leading-only consolidation of multiple system turns is a
-	// sanctioned note under the same key. The system_anywhere chat
-	// capability restores positional rendering for upstreams that accept
-	// system messages anywhere.
+	// preserved). The MERGE of several system turns is a separate decision
+	// under MultipleSystemTurns, filed identically by every target. The
+	// system_anywhere chat capability restores positional rendering for
+	// upstreams that accept system messages anywhere.
 	FeatureMidConversationSystem Feature = "mid_conversation_system"
 	// FeatureToolSchemaStrictness covers a source tool schema that carries
 	// no strictness semantic (Messages tools have none). Responses function
@@ -252,7 +252,9 @@ const (
 	// ResponsesControls covers the Responses envelope controls that are
 	// tolerated observably. Request-side, include and client_metadata are
 	// noted (sanctioned encodings) and prompt_cache_key is dropped under
-	// this permission; the conversation-state request controls (background,
+	// this permission, and user and store are dropped under it when the
+	// target models neither field (Gemini and Messages; Chat renders both);
+	// the conversation-state request controls (background,
 	// max_tool_calls, prompt, safety_identifier, status) are typed
 	// unsupported-feature errors under every policy — this key cannot
 	// un-gate them. Response-side, Responses envelope
@@ -405,7 +407,7 @@ var lossRegistry = []lossEntry{
 	{FeatureRequestTruncation, "the Responses truncation request field cannot be reproduced in the target request"},
 	{FeatureMultipleSystemTurns, "multiple system turns cannot be expressed in the target's single system/instructions shape"},
 	{FeatureSystemNonTextContent, "non-text system prompt content cannot be expressed in the target's system/instructions shape"},
-	{FeatureMidConversationSystem, "mid-conversation system turns cannot keep their position in a chat request; under this permission system-channel turns consolidate into one leading system message (position/timing lost, content and authority preserved), and leading-only consolidation of multiple system turns is a sanctioned note under the same key"},
+	{FeatureMidConversationSystem, "mid-conversation system turns cannot keep their position in a chat request; under this permission system-channel turns consolidate into one leading system message (position/timing lost, content and authority preserved). The merge of several system turns is the separate multiple_system_turns decision, filed identically by every target"},
 	{FeatureToolSchemaStrictness, "the source tool schema has no strictness semantic; the Responses function-tool contract requires explicit strict, emitted as strict:false under this permission"},
 	{FeatureToolResultErrorStatus, "the tool result error status cannot be reproduced in the target; the permissive encoding is the visible error_status_prefix text"},
 	{FeatureToolResultMultimodalContent, "multimodal tool-result content cannot be carried by a Chat tool message; under this permission it is encoded as the tool_result_json_envelope text"},
@@ -442,7 +444,7 @@ var lossRegistry = []lossEntry{
 	{FeatureAuthenticatedThinking, "Anthropic authenticated thinking blocks cannot cross protocol boundaries"},
 	{FeatureTopK, "the top_k setting cannot be reproduced in the target"},
 	{FeatureLogprobs, "token log-probabilities cannot be reproduced in the target"},
-	{FeatureResponsesControls, "the Responses envelope controls that are tolerated observably: include and client_metadata are noted and prompt_cache_key is dropped under this permission, and Responses envelope controls echoed on an upstream response are dropped under this permission; the request-side conversation-state controls (background, max_tool_calls, prompt, safety_identifier, status) remain typed unsupported-feature errors under every policy"},
+	{FeatureResponsesControls, "the Responses envelope controls that are tolerated observably: include and client_metadata are noted, prompt_cache_key is dropped, and user and store are dropped on a target that models neither (Chat renders both), all under this permission, and Responses envelope controls echoed on an upstream response are dropped under this permission; the request-side conversation-state controls (background, max_tool_calls, prompt, safety_identifier, status) remain typed unsupported-feature errors under every policy"},
 	{FeatureAnthropicControls, "the Anthropic Messages client-side envelope controls (context_management, output_config) have no representation in the target request; an approved loss drops them observably"},
 	{FeatureRequestCitations, "request citations on text blocks cannot be reproduced in the target request"},
 	{FeatureBuiltinTools, "Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject)"},
@@ -615,20 +617,29 @@ func (r *ConversionReport) reserve() error {
 	if len(r.Losses) < maxStreamConversionReportEntries {
 		return nil
 	}
-	if !r.overflowNoted {
-		r.overflowNoted = true
-		r.Losses = append(r.Losses, ConversionLoss{
-			Feature: FeatureReportOverflow,
-			Path:    "report",
-			Detail: fmt.Sprintf(
-				"conversion report reached the %d-entry bound; further entries are aggregated here (observability saturation, never an exchange failure)",
-				maxStreamConversionReportEntries,
-			),
-			Kind: NoteRecord,
-		})
-	}
+	r.noteOverflow()
 	r.Dropped++
 	return errEntryDropped
+}
+
+// noteOverflow appends the single aggregated report_overflow note, unless one
+// has already been recorded. reserve and absorb both go through it so the note
+// has exactly one spelling and can never be emitted twice.
+func (r *ConversionReport) noteOverflow() {
+	if r.overflowNoted {
+		return
+	}
+	r.overflowNoted = true
+	r.Losses = append(r.Losses, ConversionLoss{
+		Feature: FeatureReportOverflow,
+		Path:    "report",
+		Detail: fmt.Sprintf(
+			"conversion report dropped %d entry(ies) past the %d-entry bound; further entries are aggregated here (observability saturation, never an exchange failure)",
+			r.Dropped,
+			maxStreamConversionReportEntries,
+		),
+		Kind: NoteRecord,
+	})
 }
 
 // errEntryDropped is the internal sentinel reserve returns once the report
@@ -685,13 +696,27 @@ func (r *ConversionReport) Note(feature Feature, path string, detail string) err
 
 // absorb folds a scratch report into r through the SAME bounded path Lose and
 // Note use, so a transactional sub-render can collect into its own report and
-// commit on success without exceeding the entry bound. Entries beyond the bound
-// are counted in Dropped exactly as a direct Lose would count them, and
-// overflowNoted is carried across so at most one aggregated report_overflow
-// note exists across both reports.
+// commit on success without exceeding the entry bound.
+//
+// The scratch's own FeatureReportOverflow entry is a META-entry, not a feature
+// record: it is skipped, because r synthesizes its own note at the point r
+// saturates. Carrying the flag across instead would suppress that note (r would
+// finish with dropped entries and no explanation) and would also count the
+// meta-entry itself as a dropped feature record.
+//
+// The scratch's already-dropped count is carried as a COUNT, not replayed as
+// entries: replaying it through reserve would silently lose it whenever r still
+// had room, because reserve only counts an entry when the bound is reached. The
+// overflow note is emitted through the same guard the other entry paths use, so
+// the invariant "a report with Dropped > 0 says so, once" holds for the report
+// as a whole; when r has NOT reached its bound the note is still correct,
+// because it records that entries were dropped rather than claiming a saturation
+// that did not happen.
 func (r *ConversionReport) absorb(other ConversionReport) {
-	r.overflowNoted = r.overflowNoted || other.overflowNoted
 	for _, loss := range other.Losses {
+		if loss.Feature == FeatureReportOverflow {
+			continue
+		}
 		if err := r.reserve(); err != nil {
 			// reserve has already recorded the overflow fact (the note once,
 			// the Dropped count per entry); the entry itself is intentionally
@@ -701,6 +726,9 @@ func (r *ConversionReport) absorb(other ConversionReport) {
 		r.Losses = append(r.Losses, loss)
 	}
 	r.Dropped += other.Dropped
+	if r.Dropped > 0 {
+		r.noteOverflow()
+	}
 }
 
 // reportMark is the observable prefix of a ConversionReport. A converter call

@@ -33,13 +33,20 @@ func canonicalizeResponsesToolChoice(
 // decode would destroy a value another target carries and, because
 // parallel_tool_calls is not a default loss, would refuse a valid native
 // request by default.
+//
+// The setting is a BOOLEAN, not a flag: an explicit false asserts that parallel
+// calls ARE allowed, so both values must be carried. Dropping the false case left
+// ParallelTools nil, which then bypassed every target's parallel-tools gate.
+// The union arm is validated BEFORE the request is mutated, so a rejected type
+// leaves no half-applied setting (tests reuse one request across cases).
 func canonicalizeAnthropicToolChoice(
 	choice AnthropicToolChoice,
 	request *CanonicalRequest,
 ) (*CanonicalToolChoice, error) {
-	if choice.DisableParallelToolUse != nil && *choice.DisableParallelToolUse {
-		disabled := false
-		request.ParallelTools = &disabled
+	var parallel *bool
+	if choice.DisableParallelToolUse != nil {
+		enabled := !*choice.DisableParallelToolUse
+		parallel = &enabled
 	}
 	switch choice.Type {
 	case "auto", "none", "any":
@@ -52,6 +59,7 @@ func canonicalizeAnthropicToolChoice(
 				choice.Type,
 			)
 		}
+		request.ParallelTools = parallel
 		mode := "auto"
 		switch choice.Type {
 		case "none":
@@ -64,6 +72,7 @@ func canonicalizeAnthropicToolChoice(
 		if choice.Name == "" {
 			return nil, errors.New("messages tool_choice type tool requires name")
 		}
+		request.ParallelTools = parallel
 		return &CanonicalToolChoice{Mode: "named", Name: choice.Name}, nil
 	default:
 		return nil, &UnsupportedFeatureError{

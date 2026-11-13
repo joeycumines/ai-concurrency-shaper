@@ -22,4 +22,14 @@ const (
 	// never a policy decision, and never filed under builtin_tools (which means
 	// a tool was DROPPED).
 	FeatureToolNamespaceFlatten Feature = "tool_namespace_flatten"
+	// FeatureToolChoiceNamespaceBind marks a named tool_choice the CLIENT sent
+	// as a bare child name that a plain function owns, while a namespace child
+	// of the same bare name exists under a qualified flat name. The plain
+	// function is what the wire carries, and that is a plausible reading of the
+	// client's intent — but the client may have meant the child, so the bind is
+	// recorded rather than left silent. It is its OWN key, not
+	// namespace_replay_undeclared: that key means a REPLAYED CALL named a
+	// namespace this exchange does not declare, and filing a choice bind there
+	// sends an operator grepping either meaning to the other.
+	FeatureToolChoiceNamespaceBind Feature = "tool_choice_namespace_bind"
 )

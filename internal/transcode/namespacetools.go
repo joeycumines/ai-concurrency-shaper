@@ -56,49 +56,43 @@ func chooseToolFlatName(
 	return qualified
 }
 
-// resolveNamedToolChoice maps a client-sent named tool choice onto the flat
-// wire name when the name identifies a declared namespace child, and reports an
-// error when it identifies MORE THAN ONE. A client names the tool it knows, and
-// ToolNames exists exactly to translate that pair, so a qualified child is
-// reachable by its bare name.
+// resolveNamedToolChoice adjudicates a client-sent named tool choice against the
+// declared namespace children, and reports an error when the name identifies
+// MORE THAN ONE of them.
 //
-// When a PLAIN function owns the name, the choice is left untouched (the plain
-// function is what the wire will carry), and resolved reports false. That is
-// still a possible reinterpretation — the client may have meant a namespace
-// child whose flat name was qualified — so the caller records a Note rather
-// than leaving it silent.
+// The ambiguity test runs FIRST because it is the only case that can be wrong
+// silently. chooseToolFlatName gives a child the bare name only while that name
+// is free and reserves it thereafter, so whenever a namespace child shares the
+// requested bare name, some canonical tool already answers to it — whether that
+// is the first child itself or a plain function of the same name. Returning
+// early on that tool would bind a genuinely ambiguous reference to whichever
+// child claimed the name first, which is a guess the client cannot see.
+//
+// With no ambiguity established the choice needs no translation: the bare name
+// the client sent is already the wire name of the tool that owns it, because the
+// flatten keeps a child's bare name whenever it is free. The plain-owner bind is
+// still a possible reinterpretation — the client might have meant a child whose
+// flat name had to be qualified — so the caller records it.
 func resolveNamedToolChoice(
 	names *ToolNames,
-	request CanonicalRequest,
 	name string,
-) (flat string, resolved bool, err error) {
+) error {
 	if names == nil {
-		return "", false, nil
+		return nil
 	}
-	for _, tool := range request.Tools {
-		if tool.Name == name {
-			// A plain function (or the child that owns the bare flat name)
-			// answers to exactly this name already.
-			return "", false, nil
-		}
-	}
-	matches := make([]string, 0, 2)
-	for ref, value := range names.RefToFlat {
+	matches := 0
+	for ref := range names.RefToFlat {
 		if ref.Name == name {
-			matches = append(matches, value)
+			matches++
 		}
 	}
-	switch len(matches) {
-	case 0:
-		return "", false, nil
-	case 1:
-		return matches[0], true, nil
-	default:
-		return "", false, fmt.Errorf(
+	if matches > 1 {
+		return fmt.Errorf(
 			"tool_choice names %q, which multiple declared namespace children share; the reference is ambiguous",
 			name,
 		)
 	}
+	return nil
 }
 
 // namedChoicePlainOwner reports whether a plain function (not a namespace

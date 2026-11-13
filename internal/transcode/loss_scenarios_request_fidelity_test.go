@@ -46,15 +46,23 @@ func lossScenariosRequestFidelity(t *testing.T) []lossScenario {
 			},
 		},
 		{
+			// A parallel-tools disable the target cannot express is a real loss
+			// only when a tool call could actually happen: with no tools (or a
+			// none choice) the client's setting is already satisfied and the
+			// shape is a Note, which cannot satisfy this gated-loss scenario.
 			key:  FeatureParallelToolCalls,
 			perm: []Feature{FeatureParallelToolCalls},
 			run: func(policy LossPolicy) (ConversionReport, error) {
-				parallel := true
+				parallel := false
 				request := CanonicalRequest{
 					ClientModel: "m",
 					Turns: []CanonicalTurn{{
 						Role:  CanonicalUser,
 						Parts: []CanonicalPart{CanonicalText{Text: "hi"}},
+					}},
+					Tools: []CanonicalTool{{
+						Name:       "f",
+						JSONSchema: []byte(`{"type":"object"}`),
 					}},
 					ParallelTools: &parallel,
 				}

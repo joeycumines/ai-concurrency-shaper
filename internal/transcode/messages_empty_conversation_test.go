@@ -29,7 +29,10 @@ func TestMessagesEmptyConversationRejectedOnResponsesTarget(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: Messages→Responses must reject an empty conversation", name)
 		}
-		if !strings.Contains(err.Error(), "no Messages-representable conversation turns") {
+		// The message names no dialect: a Messages AND a Gemini source reach
+		// this renderer, so naming one would send the other's operator looking
+		// for a field their request never had.
+		if !strings.Contains(err.Error(), "no turn that can be represented in the Responses input") {
 			t.Fatalf("%s: err = %v, want the empty-conversation rejection", name, err)
 		}
 	}

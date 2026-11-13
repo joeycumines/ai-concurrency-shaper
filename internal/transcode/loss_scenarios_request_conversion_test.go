@@ -126,9 +126,12 @@ func lossScenariosRequestConversion(t *testing.T) []lossScenario {
 			// A system-channel turn following dialog turns cannot keep its
 			// position in a chat request: the consolidation
 			// into one leading system message is the approved loss; strict
-			// policy rejects the position loss.
+			// policy rejects the position loss. The merge of the two
+			// contributing turns rides the separate shared
+			// multiple_system_turns decision, so both permissions are granted
+			// here (only the key under test is a fixation point).
 			key:  FeatureMidConversationSystem,
-			perm: []Feature{FeatureMidConversationSystem},
+			perm: []Feature{FeatureMidConversationSystem, FeatureMultipleSystemTurns},
 			run: func(policy LossPolicy) (ConversionReport, error) {
 				request := CanonicalRequest{
 					ClientModel: "m",

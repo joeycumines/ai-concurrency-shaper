@@ -64,6 +64,12 @@ func responsesInputToTurns(
 			if err != nil {
 				return nil, fmt.Errorf("input item %d: %w", i, err)
 			}
+			// An easy message can carry output-type parts (an assistant
+			// history turn replayed without an item id), so its annotations are
+			// the same citation metadata as the previous-output arm's.
+			if err := annotatedInputPartLosses(value.Content.Parts, fmt.Sprintf("input[%d].content", i), policy, report); err != nil {
+				return nil, err
+			}
 			turns = append(turns, CanonicalTurn{Role: role, Parts: parts})
 
 		case *ResponsesPreviousOutputMessage:
@@ -345,16 +351,78 @@ func annotatedInputLosses(
 ) error {
 	for partIndex, part := range content {
 		text, ok := part.(*ResponsesOutputText)
-		if !ok || len(text.Annotations) == 0 {
+		if !ok {
 			continue
 		}
-		if err := report.Lose(
-			policy,
-			FeatureRequestCitations,
-			fmt.Sprintf("input[%d].content[%d].annotations", index, partIndex),
-			"request citations on replayed output text cannot be reproduced in the target request",
-		); err != nil {
-			return err
+		base := fmt.Sprintf("input[%d].content[%d]", index, partIndex)
+		if len(text.Annotations) > 0 {
+			if err := report.Lose(
+				policy,
+				FeatureRequestCitations,
+				base+".annotations",
+				"request citations on replayed output text cannot be reproduced in the target request",
+			); err != nil {
+				return err
+			}
+		}
+		// The same part can carry token log-probabilities, which the target
+		// request cannot reproduce either: a walker that checked only the
+		// annotations would drop these with no entry at all.
+		if len(text.Logprobs) > 0 {
+			if err := report.Lose(
+				policy,
+				FeatureLogprobs,
+				base+".logprobs",
+				"token log-probabilities on replayed output text cannot be reproduced in the target request",
+			); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// annotatedInputPartLosses is annotatedInputLosses for the arms that carry the
+// INPUT content union rather than the output content union: an easy message
+// routes its parts through responsesInputContentPartToCanonical, whose
+// *ResponsesOutputText arm drops the annotation and logprob structures.
+// basePath names the item's content array, so the entry points at the part the
+// caller can find on the wire.
+//
+// A function_call_output needs no equivalent: the pinned wire contract rejects
+// an output-typed part there (FunctionOutput.Validate), so no annotation or
+// logprob can reach that arm.
+func annotatedInputPartLosses(
+	parts []ResponsesInputContentPart,
+	basePath string,
+	policy LossPolicy,
+	report *ConversionReport,
+) error {
+	for partIndex, part := range parts {
+		text, ok := part.(*ResponsesOutputText)
+		if !ok {
+			continue
+		}
+		base := fmt.Sprintf("%s[%d]", basePath, partIndex)
+		if len(text.Annotations) > 0 {
+			if err := report.Lose(
+				policy,
+				FeatureRequestCitations,
+				base+".annotations",
+				"request citations on replayed output text cannot be reproduced in the target request",
+			); err != nil {
+				return err
+			}
+		}
+		if len(text.Logprobs) > 0 {
+			if err := report.Lose(
+				policy,
+				FeatureLogprobs,
+				base+".logprobs",
+				"token log-probabilities on replayed output text cannot be reproduced in the target request",
+			); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
