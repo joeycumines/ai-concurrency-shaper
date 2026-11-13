@@ -814,24 +814,23 @@ func validateCanonicalPart(part CanonicalPart) error {
 		if p.CallID == "" {
 			return errors.New("function result has empty call id")
 		}
-		// A function result carries CONTENT only. A call, a nested result and a
-		// refusal have no place inside one, and a thinking part cannot be
-		// placed at all (the IR records no position for it): refusing the shape
-		// here makes every renderer's failure the same typed refusal instead of
-		// four different ones — the Responses renderer used to strip a nested
-		// thinking part with no record at all.
+		// A thinking part cannot be placed inside a tool result: the IR records
+		// no position for one, so no renderer could put it back, and the
+		// Responses renderer would strip it with no record at all. Everything
+		// else the wire can carry stays legal here — an Anthropic tool_result's
+		// content is the same Content union, so the Messages decoder
+		// legitimately nests a tool_result (or a tool_use) inside one, and
+		// refusing that would reject a request the client sent in its own
+		// dialect.
 		for partIndex, nested := range p.Parts {
 			if nested == nil {
 				return fmt.Errorf("function result part %d is nil", partIndex)
 			}
-			switch nested.(type) {
-			case CanonicalText, CanonicalImage, CanonicalDocument:
-			default:
-				return fmt.Errorf(
-					"function result part %d: %T is not content a tool result can carry",
-					partIndex,
-					nested,
-				)
+			if _, thinking := nested.(CanonicalThinkingPart); thinking {
+				return &UnsupportedFeatureError{
+					Protocol: "transcode",
+					Feature:  string(FeatureAuthenticatedThinking),
+				}
 			}
 			if err := validateCanonicalPart(nested); err != nil {
 				return fmt.Errorf("function result part %d: %w", partIndex, err)

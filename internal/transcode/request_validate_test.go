@@ -8,7 +8,6 @@ package transcode
 // were never type-checked.
 
 import (
-	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,17 +83,20 @@ func TestValidateCanonicalRequestRejectsNestedThinkingInAFunctionResult(t *testi
 	}
 }
 
-// TestValidateCanonicalRequestRejectsStructuralPartsInAFunctionResult proves a
-// function result's nested parts are limited to content: a call, a nested
-// result, or a refusal has no place inside one, and each renderer would fail
-// with a different, less honest error.
-func TestValidateCanonicalRequestRejectsStructuralPartsInAFunctionResult(t *testing.T) {
-	cases := map[string]CanonicalPart{
-		"function call":   CanonicalFunctionCall{CallID: "c2", Name: "g", Arguments: json.RawMessage(`{}`)},
-		"nested result":   CanonicalFunctionResult{CallID: "c2"},
-		"refusal content": CanonicalRefusal{Text: "no"},
-	}
-	for name, part := range cases {
+// TestValidateCanonicalRequestRejectsAPlacedNowhereThinkingPart proves the ONE
+// restriction a tool result needs, and the one it must NOT have. A thinking part
+// has no place inside a result (the IR records no position for one, and the
+// Responses renderer would strip it silently), so it is refused. A nested
+// tool_result or tool_use is a different matter: an Anthropic tool_result's
+// content is the same Content union, so the Messages decoder legitimately
+// produces those shapes and refusing them would reject a request the client sent
+// in its own dialect. That reachability is pinned in
+// TestNestedToolResultIsReachableAndRenderable.
+func TestValidateCanonicalRequestRejectsAPlacedNowhereThinkingPart(t *testing.T) {
+	for name, part := range map[string]CanonicalPart{
+		"marker thinking":        CanonicalThinkingPart{Signature: SyntheticThinkingSignature},
+		"authenticated thinking": CanonicalThinkingPart{Signature: "provider-sig"},
+	} {
 		t.Run(name, func(t *testing.T) {
 			request := CanonicalRequest{
 				ClientModel: "m",
@@ -107,17 +109,16 @@ func TestValidateCanonicalRequestRejectsStructuralPartsInAFunctionResult(t *test
 			}
 			err := ValidateCanonicalRequest(request)
 			if err == nil {
-				t.Fatalf("a %s nested in a function result passed validation", name)
+				t.Fatalf("a %s part nested in a function result passed validation", name)
 			}
-			// Validation speaks in canonical indices ("turn N part M"), the
-			// vocabulary every renderer's refusal uses.
+			// Validation speaks in canonical indices ("turn N part M").
 			if !strings.Contains(err.Error(), "turn 0 part 0") {
 				t.Fatalf("err = %q, want it to name the canonical turn and part", err)
 			}
 		})
 	}
 
-	// Content parts still validate.
+	// Content still validates, including the nested shapes the wire allows.
 	request := CanonicalRequest{
 		ClientModel: "m",
 		Turns: []CanonicalTurn{{

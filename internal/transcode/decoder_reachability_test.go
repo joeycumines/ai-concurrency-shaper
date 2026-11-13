@@ -8,6 +8,7 @@ package transcode
 // its output validates.
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -114,5 +115,62 @@ func TestMessagesDecoderPositiveBudgetValidates(t *testing.T) {
 		if _, err := DecodeMessagesRequest(body, StrictLossPolicy()); err == nil {
 			t.Fatalf("budget %s was accepted by the decoder", budget)
 		}
+	}
+}
+
+// TestNestedToolResultIsReachableAndRenderable proves the central restriction
+// does not out-reach the wire. An Anthropic tool_result's content is the same
+// Content union, so the Messages decoder legitimately nests a tool_result (and a
+// tool_use) inside one; both must validate and render, because refusing them
+// would reject a request the client sent in its own dialect.
+func TestNestedToolResultIsReachableAndRenderable(t *testing.T) {
+	cases := map[string]string{
+		"nested tool_result": `{"model":"m","max_tokens":16,"messages":[` +
+			`{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"f","input":{}}]},` +
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[` +
+			`{"type":"tool_result","tool_use_id":"t2","content":"x"}]}]}]}`,
+		"nested tool_use": `{"model":"m","max_tokens":16,"messages":[` +
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[` +
+			`{"type":"tool_use","id":"t9","name":"g","input":{}}]}]}]}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if err := ValidateCanonicalRequest(result.Request); err != nil {
+				t.Fatalf("a decoder-produced nested result failed the central validator: %v", err)
+			}
+			for target, render := range allRequestRenderers() {
+				if _, _, err := render(result.Request, testExchangeContext()); err != nil {
+					// The target may legitimately lack a form for the nested
+					// shape; what it must not do is fail the CENTRAL gate.
+					if strings.Contains(err.Error(), "is not content a tool result can carry") {
+						t.Fatalf("%s: the central restriction rejected a decoder shape: %v", target, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestFunctionResultStillRejectsAPlacedNowhereThinkingPart keeps the restriction
+// meaningful: a thinking part genuinely has no place inside a tool result (the IR
+// records no position for it), so that shape stays refused.
+func TestFunctionResultStillRejectsAPlacedNowhereThinkingPart(t *testing.T) {
+	request := CanonicalRequest{
+		ClientModel: "m",
+		Turns: []CanonicalTurn{{
+			Role: CanonicalUser,
+			Parts: []CanonicalPart{
+				CanonicalFunctionResult{CallID: "c1", Parts: []CanonicalPart{
+					CanonicalThinkingPart{Signature: SyntheticThinkingSignature},
+				}},
+			},
+		}},
+	}
+	if err := ValidateCanonicalRequest(request); err == nil {
+		t.Fatal("a thinking part inside a tool result passed validation")
 	}
 }
