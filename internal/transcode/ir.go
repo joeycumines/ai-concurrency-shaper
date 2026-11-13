@@ -204,7 +204,11 @@ type SourceArtifacts struct {
 type CanonicalThinking struct {
 	Type         string
 	BudgetTokens *int
-	Display      string
+	// Display is the Anthropic thinking-visibility preference. The wire enum has
+	// exactly two members (summarized, omitted) and no empty one, so an empty
+	// value means ABSENT: decode rejects any other spelling, which is why a
+	// plain string loses no presence for a legal value.
+	Display string
 }
 
 // CanonicalRequest is the decoded request in canonical form.
@@ -362,10 +366,11 @@ func (c *ExchangeContext) toolNames() *ToolNames {
 // can put them back where they were, and a same-protocol target would therefore
 // receive a request that omitted them with no record at all. The honest
 // contract is one decision for every target: an approved loss drops them
-// observably, and the strict policy refuses. (A same-protocol pass-through
-// would need per-artifact position metadata, which the IR deliberately does not
-// carry; that is recorded as a known limitation rather than implemented by
-// inventing an order.)
+// observably, and the strict policy refuses. No same-protocol direction is
+// constructible: Mapping.Validate admits only cross-protocol pairs, so a
+// pass-through would need per-artifact position metadata the IR deliberately
+// does not carry — recorded as a known limitation rather than implemented by
+// inventing an order.
 func RequirePortableArtifacts(
 	request CanonicalRequest,
 	policy LossPolicy,

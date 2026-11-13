@@ -63,7 +63,10 @@ func responsesEchoLosses(
 	// observable under the envelope-controls key rather than silent. store:FALSE
 	// is the exception, because a target with no storage already satisfies it —
 	// only store:true asks for something the target cannot do.
-	if echo.User != nil && !carriage.User {
+	// An EXPLICIT empty user string carries no identifier, so a target with no
+	// user field already satisfies it — the same reasoning as store:false. Only
+	// a real value asks for something the target cannot do.
+	if echo.User != nil && *echo.User != "" && !carriage.User {
 		if err := report.Lose(
 			policy,
 			FeatureResponsesControls,

@@ -346,7 +346,7 @@ func DecodeResponsesRequest(
 			if err := result.Report.Lose(
 				policy,
 				FeatureStructuredOutput,
-				"text.format.type",
+				"structured_output.type",
 				"json_object mode cannot be reproduced in every target",
 			); err != nil {
 				return DecodeResult{}, nil, err

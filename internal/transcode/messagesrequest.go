@@ -71,7 +71,21 @@ func RenderMessagesRequest(
 	if err := renderMessagesMetadata(request, context, &out, &report); err != nil {
 		return nil, report, err
 	}
-	if request.Thinking != nil {
+	// An enabled thinking request with no budget is provider intent this wire
+	// cannot express: its enabled arm requires budget_tokens. Chat and Responses
+	// note that shape and emit nothing, so this target does the same rather than
+	// rendering a union the upstream rejects. Decode rejects it today; a
+	// hand-built CanonicalRequest or a future decode relaxation must never pass
+	// it silently.
+	if request.Thinking != nil && request.Thinking.Type == "enabled" && request.Thinking.BudgetTokens == nil {
+		if err := report.Note(
+			FeatureRequestReasoning,
+			"thinking",
+			"thinking enabled without a budget maps to the Anthropic Messages upstream's own default; the enabled arm requires budget_tokens, so no thinking config is sent",
+		); err != nil {
+			return nil, report, err
+		}
+	} else if request.Thinking != nil {
 		out.Thinking = &anthropicmessages.ThinkingConfig{
 			Type:         request.Thinking.Type,
 			BudgetTokens: request.Thinking.BudgetTokens,
@@ -84,10 +98,13 @@ func RenderMessagesRequest(
 		}
 	}
 	if request.StructuredOutput != nil {
+		// The decision names the canonical feature: the loss is the structured
+		// output, and the field that happens to carry it in one dialect is not
+		// a path a Gemini-sourced schema would ever have.
 		if err := report.Lose(
 			context.lossPolicy(),
 			FeatureStructuredOutput,
-			"text.format",
+			"structured_output",
 			"structured output cannot be enforced by an Anthropic Messages upstream",
 		); err != nil {
 			return nil, report, err
@@ -547,9 +564,17 @@ func renderMessagesTools(
 				return err
 			}
 		}
+		// The Anthropic tool contract requires input_schema. A source tool may
+		// omit its parameters (a Gemini function declaration need not carry a
+		// schema), and an absent one means "an object with no declared
+		// properties", not "no schema": emitting none is a malformed request.
+		schema := tool.JSONSchema
+		if len(schema) == 0 {
+			schema = json.RawMessage(`{"type":"object"}`)
+		}
 		rendered := anthropicmessages.Tool{
 			Name:        tool.Name,
-			InputSchema: tool.JSONSchema,
+			InputSchema: schema,
 		}
 		if tool.Description != "" {
 			description := tool.Description

@@ -52,7 +52,12 @@ func DecodeMessagesRequest(
 	// destroy a value another target can reproduce, and top_k is not a default
 	// loss, so a default deployment would refuse the request outright. The
 	// Chat and Responses renderers record the loss because THEIR wire has no
-	// such field.
+	// such field. A NEGATIVE cutoff is malformed by the API's own contract, so
+	// it is rejected at this boundary rather than forwarded (zero is the
+	// documented "no cutoff" value and is carried).
+	if envelope.TopK != nil && *envelope.TopK < 0 {
+		return DecodeResult{}, fmt.Errorf("messages top_k must not be negative, got %d", *envelope.TopK)
+	}
 	result.Request.TopK = envelope.TopK
 
 	// The modern Anthropic envelope controls are client-side semantics with
@@ -220,6 +225,19 @@ func DecodeMessagesRequest(
 				BudgetTokens: envelope.Thinking.BudgetTokens,
 			}
 		case "disabled", "adaptive":
+			if envelope.Thinking.Display != nil {
+				// The wire enum has exactly two members; an empty string and any
+				// other spelling are malformed rather than a legal "absent"
+				// (absence is the field being omitted).
+				switch *envelope.Thinking.Display {
+				case "summarized", "omitted":
+				default:
+					return DecodeResult{}, fmt.Errorf(
+						"messages thinking display %q is invalid (want summarized or omitted)",
+						*envelope.Thinking.Display,
+					)
+				}
+			}
 			if envelope.Thinking.BudgetTokens != nil {
 				return DecodeResult{}, fmt.Errorf(
 					"messages thinking type %s cannot carry budget_tokens (it belongs to enabled)",

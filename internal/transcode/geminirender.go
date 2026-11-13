@@ -295,7 +295,9 @@ func RenderGeminiRequest(
 			case CanonicalThinkingPart:
 				// Marker-signature thinking was proxy-synthesized: drop it
 				// silently (the scrub contract). A real signature was already
-				// handled by RequirePortableArtifacts.
+				// refused by ValidateCanonicalRequest, which is the only gate
+				// that inspects turn parts (the artifact gate covers
+				// request.Artifacts).
 				continue
 			case CanonicalImage:
 				if p.URL != "" {
@@ -541,7 +543,12 @@ func RenderGeminiRequest(
 	}
 
 	// Metadata and request-side reasoning have no Gemini request field that
-	// means the same thing.
+	// means the same thing. The reasoning decision is per ARM, because the arms
+	// carry different intents: "adaptive" delegates the decision to the model,
+	// which is exactly what Gemini does when thinkingConfig is absent, so it is a
+	// Note; "enabled" and "disabled" assert something this target cannot
+	// reproduce, so they are policy-gated. The display preference is its own
+	// field with its own path, matching Chat and Responses.
 	if len(request.Metadata) > 0 {
 		if err := report.Lose(
 			policy,
@@ -553,13 +560,38 @@ func RenderGeminiRequest(
 		}
 	}
 	if request.Thinking != nil {
-		if err := report.Lose(
-			policy,
-			FeatureRequestReasoning,
-			"thinking",
-			"request-side reasoning controls cannot be reproduced in a Gemini request (thinkingConfig is not mapped)",
-		); err != nil {
-			return nil, report, err
+		if request.Thinking.Display != "" {
+			if err := report.Lose(
+				policy,
+				FeatureRequestReasoning,
+				"thinking.display",
+				"the thinking display preference cannot be reproduced by a Gemini request",
+			); err != nil {
+				return nil, report, err
+			}
+		}
+		switch request.Thinking.Type {
+		case "adaptive":
+			// Delegation to the model is the absence of thinkingConfig, which is
+			// precisely what this renderer sends: nothing is lost.
+			if err := report.Note(
+				FeatureRequestReasoning,
+				"thinking",
+				"adaptive thinking maps to the absence of thinkingConfig: Gemini's own default IS the delegated decision",
+			); err != nil {
+				return nil, report, err
+			}
+		case "enabled", "disabled":
+			// A budget or an explicit no-thinking is a real intent this target
+			// cannot express, so an operator can refuse it.
+			if err := report.Lose(
+				policy,
+				FeatureRequestReasoning,
+				"thinking",
+				"request-side reasoning controls cannot be reproduced in a Gemini request (thinkingConfig is not mapped)",
+			); err != nil {
+				return nil, report, err
+			}
 		}
 	}
 

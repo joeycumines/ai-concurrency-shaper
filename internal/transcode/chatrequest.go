@@ -491,10 +491,13 @@ func RenderChatRequest(
 	// Structured output.
 	if request.StructuredOutput != nil {
 		if !capabilities.StructuredOutputs {
+			// The decision names the canonical feature: the loss is the
+			// structured output, and the field that happens to carry it in one
+			// dialect is not a path a Gemini-sourced schema would ever have.
 			if err := report.Lose(
 				context.lossPolicy(),
 				FeatureStructuredOutput,
-				"text.format",
+				"structured_output",
 				"structured output is not supported by the configured chat provider",
 			); err != nil {
 				return nil, report, err
