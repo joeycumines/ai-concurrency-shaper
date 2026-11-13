@@ -884,8 +884,9 @@ including a second leading one. System-channel turns — the Anthropic
 envelope `system` plus inline mid-conversation `role: "system"` messages,
 and developer-role messages when the `developer_role` capability is off —
 consolidate into that single leading message with their content joined in
-order. When a system turn followed dialog turns, the position loss is
-approved under the default `mid_conversation_system` loss key; the merge
+order. When a system turn followed dialog turns — or followed a developer-role
+message the `developer_role` capability lets us keep in place — the position
+loss is approved under the default `mid_conversation_system` loss key; the merge
 itself — several system turns losing their boundaries in one field — is the
 separate `multiple_system_turns` decision, filed under that same key with the
 same severity by every target (Chat, Messages, Responses and Gemini), so a
