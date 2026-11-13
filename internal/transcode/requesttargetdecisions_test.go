@@ -287,7 +287,7 @@ func TestMessagesLeadingMergeNoteFiresForRetainedTurns(t *testing.T) {
 func TestToolResultFileIDDocumentIsNamedHonestly(t *testing.T) {
 	_, err := encodeToolResultEnvelope([]CanonicalPart{
 		CanonicalDocument{FileID: "file-123"},
-	})
+	}, "turns[0].parts[0].content")
 	if err == nil {
 		t.Fatal("a file-id-only document must not encode")
 	}

@@ -91,10 +91,14 @@ func TestIsErrorToolResultConvertsUnderDefaultProfile(t *testing.T) {
 	// The decision is OBSERVABLE: exactly one request-stage loss line naming
 	// the feature (REM-M acceptance).
 	joined := logs.String()
-	if !strings.Contains(joined, "tool_result_error_status at messages[].tool_result.is_error") {
-		t.Fatalf("loss log lacks the tool_result_error_status entry: %q", joined)
+	// The decision names the canonical turn and part the client sent: a
+	// render-side path is indexed by the canonical turn, never by a wire
+	// fragment, matching the Chat, Messages, Gemini and Responses renderers.
+	const wantEntry = "tool_result_error_status at turns[0].parts[0].is_error"
+	if !strings.Contains(joined, wantEntry) {
+		t.Fatalf("loss log lacks the %q entry: %q", wantEntry, joined)
 	}
-	if got := strings.Count(joined, "tool_result_error_status at messages[].tool_result.is_error"); got != 1 {
+	if got := strings.Count(joined, wantEntry); got != 1 {
 		t.Fatalf("tool_result_error_status loss line appears %d times, want exactly 1", got)
 	}
 }
