@@ -410,3 +410,75 @@ func TestChatLeadingConsolidatedPromptStaysLeading(t *testing.T) {
 		t.Fatalf("messages[0] = (%s, %q), want the system prompt", role, text)
 	}
 }
+
+// TestChatDroppedKeptDeveloperDoesNotDisplaceSystem proves keptBefore counts a
+// message that ACTUALLY RENDERS. With developer_role on, a developer turn whose
+// only part was dropped renders nothing at all, so a following system turn has
+// nothing before it and its text cannot have moved: charging it would refuse a
+// strict request for a move that never happened.
+func TestChatDroppedKeptDeveloperDoesNotDisplaceSystem(t *testing.T) {
+	image := CanonicalImage{MediaType: "image/png", URL: "https://example.test/i.png"}
+	request := CanonicalRequest{
+		ClientModel: "m",
+		Turns: []CanonicalTurn{
+			{Role: CanonicalDeveloper, Parts: []CanonicalPart{image}},
+			textTurn(CanonicalSystem, "s"),
+			textTurn(CanonicalUser, "u"),
+		},
+	}
+	// Approve only the drop that empties the developer turn: any failure can
+	// then only be a position charge.
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureSystemNonTextContent: {},
+	}}
+	rendered, report, err := RenderChatRequest(request, context, ChatCapabilities{DeveloperRole: true})
+	if err != nil {
+		t.Fatalf("a dropped developer turn displaced the system turn: %v", err)
+	}
+	if reportHasFeature(report, FeatureMidConversationSystem) {
+		t.Fatalf("a system turn that moved nowhere was charged: %+v", report.Losses)
+	}
+	// The system prompt leads and the empty developer message is omitted.
+	messages := chatMessages(t, rendered)
+	if len(messages) != 2 {
+		t.Fatalf("messages = %d, want system + user: %s", len(messages), rendered)
+	}
+	for i, message := range messages {
+		if role, _ := messageRoleAndText(message); role == ChatMessageRoleDeveloper {
+			t.Fatalf("messages[%d] is an empty developer message: %s", i, rendered)
+		}
+	}
+}
+
+// TestChatDroppedSystemTurnDoesNotDisplaceTheNextOne proves the same rule for a
+// dropped SYSTEM turn: it contributes no text and emits nothing, so it must not
+// make the following contributing system turn appear displaced. That turn's move
+// is decided by what actually precedes it in the rendered list.
+func TestChatDroppedSystemTurnDoesNotDisplaceTheNextOne(t *testing.T) {
+	image := CanonicalImage{MediaType: "image/png", URL: "https://example.test/i.png"}
+	request := CanonicalRequest{
+		ClientModel: "m",
+		Turns: []CanonicalTurn{
+			textTurn(CanonicalSystem, "first"),
+			{Role: CanonicalSystem, Parts: []CanonicalPart{image}},
+			textTurn(CanonicalUser, "u"),
+		},
+	}
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureSystemNonTextContent: {},
+		FeatureMultipleSystemTurns:  {},
+	}}
+	rendered, report, err := RenderChatRequest(request, context, ChatCapabilities{})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if reportHasFeature(report, FeatureMidConversationSystem) {
+		t.Fatalf("the one contributing system turn was charged a move: %+v", report.Losses)
+	}
+	messages := chatMessages(t, rendered)
+	if role, text := messageRoleAndText(messages[0]); role != ChatMessageRoleSystem || text != "first" {
+		t.Fatalf("messages[0] = (%s, %q), want the contributing prompt", role, text)
+	}
+}
