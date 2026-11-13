@@ -72,20 +72,22 @@ func canonicalTextTurnToChatMessage(
 	// parts rather than emitting an invalid empty union.
 	if len(blocks) == 0 {
 		if dropped > 0 {
-			// Every part was dropped under an approved loss. Emit an empty
-			// text block so the system message stays a valid content union -
-			// but ONLY when this turn is not the whole conversation. A request
-			// whose entire conversation is a dropped system turn has no
-			// representable content at all, and admitting it here would
-			// disagree with the Responses target, which rejects exactly this
-			// shape precisely to match. Callers reject a degenerate rendered
-			// set; see the guard in RenderChatRequest.
+			// Every part was dropped under an approved loss or scrubbed as
+			// proxy-synthesized thinking. Emit an empty text block so the
+			// message stays a valid content union; the caller then omits it,
+			// because an empty prompt is proxy-invented text the model would
+			// read as an instruction the client never wrote. An all-dropped
+			// conversation is still refused by the caller's own
+			// len(out.Messages) == 0 guard, matching the Responses target.
 			empty := ""
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeText,
 				Text: &empty,
 			})
 		} else {
+			// Defensive: a turn with no parts at all is refused by
+			// ValidateCanonicalRequest, which every renderer passes first, so
+			// no request path reaches this arm.
 			return ChatMessage{}, errors.New("empty system or developer turn")
 		}
 	}
