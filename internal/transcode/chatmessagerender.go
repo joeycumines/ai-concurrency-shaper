@@ -114,6 +114,11 @@ func consolidateChatSystemMessages(messages []ChatMessage) ChatMessage {
 func joinChatSystemMessages(messages []ChatMessage) ChatMessage {
 	texts := make([]string, 0, len(messages))
 	for _, message := range messages {
+		if message.Content == nil {
+			// A contentless message contributes no text; its own caller has
+			// already decided not to emit it.
+			continue
+		}
 		for _, block := range message.Content.ContentBlocks {
 			if block.Text != nil && *block.Text != "" {
 				texts = append(texts, *block.Text)

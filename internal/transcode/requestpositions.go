@@ -38,12 +38,13 @@ func chargePosition(
 }
 
 // chargeSystemTurnJoin records the decision for several system-channel turns
-// that must share one system field in the target. A target with a single
-// system string or field cannot keep their boundaries, so the encoding joins
-// their text in encounter order — but only the CLIENT can be made to pay for
-// it: more than one client-authored contributing turn is a policy-gated loss,
-// while a surplus that came from the retained prefix is a Note, because the
-// proxy created those turns and their boundaries were already decided once.
+// that must share one system field in the target. Every dialect models at most
+// one system turn, so the encoding joins their text in encounter order and the
+// TURN BOUNDARY is what is lost — even on a target that emits one block or part
+// per text part and so preserves every byte. Only the CLIENT can be made to pay
+// for it: more than one client-authored contributing turn is a policy-gated
+// loss, while a surplus that came from the retained prefix is a Note, because
+// the proxy created those turns and their boundaries were already decided once.
 //
 // contributing holds the canonical index of each system-channel turn that
 // actually contributed content. A turn whose parts were all dropped contributed

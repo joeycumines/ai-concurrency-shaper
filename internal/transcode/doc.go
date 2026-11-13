@@ -81,13 +81,16 @@
 //	                       system-channel turns consolidate into one
 //	                       leading system message — a turn after dialog
 //	                       turns is loss-gated (FeatureMidConversation
-//	                       System) and a leading-only merge is a sanctioned
-//	                       note under the same key; the system_anywhere
-//	                       capability restores positional rendering
-//	Thinking blocks       exact only for Messages targets; loss-gated
-//	                       (FeatureAuthenticatedThinking) otherwise
-//	Reasoning items       exact only for Responses targets; loss-gated
-//	                       (FeatureReasoningSummary) otherwise
+//	                       System) and several contributing turns are the
+//	                       shared FeatureMultipleSystemTurns decision; a turn
+//	                       that rendered no content takes neither; the
+//	                       system_anywhere capability restores positional
+//	                       rendering
+//	Thinking blocks       loss-gated (FeatureAuthenticatedThinking) on every
+//	                       target: the IR records no position for an artifact,
+//	                       and no same-protocol route is constructible
+//	Reasoning items       loss-gated (FeatureReasoningSummary) on every target,
+//	                       for the same reason
 //	Input item identity   dropped unconditionally; the drop is noted
 //	                       observably under FeaturePreviousResponseID (input
 //	                       item ids are Responses conversation-state

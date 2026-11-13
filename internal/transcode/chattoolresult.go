@@ -182,8 +182,26 @@ func renderChatToolResultMultipart(
 	//     on a user-message image hard-fails: the content location must not
 	//     decide the verdict.
 	scratch := &ConversionReport{}
+	// The policy decisions run in a FIRST pass, before any decline. Declining
+	// short-circuits the walk, so a document seen early would otherwise hide
+	// every image after it: the same parts in the other order would fail while
+	// this order served them through the envelope, which carries no detail field
+	// at all. The verdict on a part the operator or the client got wrong must not
+	// depend on where the part sits.
+	details := make([]string, len(parts))
+	for i, part := range parts {
+		image, ok := part.(CanonicalImage)
+		if !ok {
+			continue
+		}
+		detail, err := chatImageDetail(image.Detail, path+".content", policy, scratch)
+		if err != nil {
+			return ChatMessage{}, false, err
+		}
+		details[i] = detail
+	}
 	var blocks []ChatContentBlock
-	for _, part := range parts {
+	for i, part := range parts {
 		switch value := part.(type) {
 		case CanonicalText:
 			text := value.Text
@@ -201,10 +219,7 @@ func renderChatToolResultMultipart(
 					return ChatMessage{}, false, nil
 				}
 			}
-			detail, err := chatImageDetail(value.Detail, path+".content", policy, scratch)
-			if err != nil {
-				return ChatMessage{}, false, err
-			}
+			detail := details[i]
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeImage,
 				ImageURL: &ChatInputImage{
