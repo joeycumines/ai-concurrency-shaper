@@ -36,6 +36,7 @@ type toolResultEnvelope struct {
 // typed local unrepresentable shape — never an upstream wire error.
 func renderChatToolResult(
 	result CanonicalFunctionResult,
+	path string,
 	capabilities ChatCapabilities,
 	policy LossPolicy,
 	report *ConversionReport,
@@ -47,7 +48,7 @@ func renderChatToolResult(
 		if err := report.Lose(
 			policy,
 			FeatureToolResultErrorStatus,
-			"messages[].tool_result.is_error",
+			path+".is_error",
 			"the tool result error status cannot be reproduced in the chat dialect; the permissive encoding is the visible error_status_prefix text",
 		); err != nil {
 			return ChatMessage{}, err
@@ -74,7 +75,7 @@ func renderChatToolResult(
 		if len(result.Parts) > 1 {
 			if err := report.Note(
 				FeatureToolResultTextJoin,
-				"messages[].tool_result.content",
+				path+".content",
 				"multi-part all-text tool result joined into one '\\n'-separated string (the chat tool message cannot carry part boundaries; every content byte is preserved)",
 			); err != nil {
 				return ChatMessage{}, err
@@ -102,7 +103,7 @@ func renderChatToolResult(
 	// content, so it is preferred whenever the capability is on; only the
 	// image parts require the ImageInput rendering vocabulary.
 	if capabilities.ToolResultImages {
-		toolMessage, ok, err := renderChatToolResultMultipart(result, parts, capabilities, policy, report)
+		toolMessage, ok, err := renderChatToolResultMultipart(result, path, parts, capabilities, policy, report)
 		if err != nil {
 			return ChatMessage{}, err
 		}
@@ -119,19 +120,19 @@ func renderChatToolResult(
 	if err := report.Lose(
 		policy,
 		FeatureToolResultMultimodalContent,
-		"messages[].tool_result.content",
+		path+".content",
 		"the multimodal tool-result content cannot be carried exactly by a Chat tool message",
 	); err != nil {
 		return ChatMessage{}, err
 	}
-	envelopeText, err := encodeToolResultEnvelope(parts)
+	envelopeText, err := encodeToolResultEnvelope(parts, path+".content")
 	if err != nil {
 		return ChatMessage{}, err
 	}
 	if err := report.Lose(
 		policy,
 		FeatureToolResultJSONEnvelope,
-		"messages[].tool_result.content",
+		path+".content",
 		"the multimodal tool-result content is encoded as the deterministic transcode JSON text envelope (tool_result_json_envelope, transcode_version 1)",
 	); err != nil {
 		return ChatMessage{}, err
@@ -153,6 +154,7 @@ func renderChatToolResult(
 // ImageInput rendering vocabulary in addition to ToolResultImages.
 func renderChatToolResultMultipart(
 	result CanonicalFunctionResult,
+	path string,
 	parts []CanonicalPart,
 	capabilities ChatCapabilities,
 	policy LossPolicy,
@@ -199,7 +201,7 @@ func renderChatToolResultMultipart(
 					return ChatMessage{}, false, nil
 				}
 			}
-			detail, err := chatImageDetail(value.Detail, "messages[].tool_result.content", policy, scratch)
+			detail, err := chatImageDetail(value.Detail, path+".content", policy, scratch)
 			if err != nil {
 				return ChatMessage{}, false, err
 			}
@@ -243,7 +245,7 @@ func allTextParts(parts []CanonicalPart) bool {
 // encodeToolResultEnvelope renders the deterministic tool_result_json_envelope
 // JSON text (transcode_version 1): text, image, and document parts in order,
 // with base64 images/documents carried as data URLs.
-func encodeToolResultEnvelope(parts []CanonicalPart) (string, error) {
+func encodeToolResultEnvelope(parts []CanonicalPart, path string) (string, error) {
 	envelope := toolResultEnvelope{TranscodeVersion: 1}
 	for i, part := range parts {
 		switch value := part.(type) {
@@ -258,7 +260,7 @@ func encodeToolResultEnvelope(parts []CanonicalPart) (string, error) {
 				var err error
 				url, err = imageDataURL(value.MediaType, value.Base64)
 				if err != nil {
-					return "", fmt.Errorf("tool result part %d: %w", i, err)
+					return "", fmt.Errorf("%s.parts[%d]: %w", path, i, err)
 				}
 			}
 			envelope.Content = append(envelope.Content, toolResultEnvelopeContent{
@@ -277,7 +279,7 @@ func encodeToolResultEnvelope(parts []CanonicalPart) (string, error) {
 				// problem entirely.
 				return "", &UnrepresentableError{
 					Protocol: "chat",
-					Path:     "messages[].tool_result.content",
+					Path:     fmt.Sprintf("%s.parts[%d]", path, i),
 					Detail:   fmt.Sprintf("a file identifier document (%q) has no Chat tool-result form", value.FileID),
 				}
 			}
@@ -286,7 +288,7 @@ func encodeToolResultEnvelope(parts []CanonicalPart) (string, error) {
 				var err error
 				url, err = encodeDataURL(value.MediaType, value.Base64)
 				if err != nil {
-					return "", fmt.Errorf("tool result part %d: %w", i, err)
+					return "", fmt.Errorf("%s.parts[%d]: %w", path, i, err)
 				}
 			}
 			envelope.Content = append(envelope.Content, toolResultEnvelopeContent{

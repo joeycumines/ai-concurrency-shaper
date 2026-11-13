@@ -152,6 +152,12 @@ func chatMessageTextIsEmpty(message ChatMessage) bool {
 // canonicalUserTurnToChatMessages renders a user turn into Chat messages:
 // function results become tool-role messages and the remaining content
 // becomes one user message. Image input requires the configured capability.
+//
+// A segment that rendered no blocks is SKIPPED rather than refused: the turn
+// is not empty, it has already produced the tool messages around that segment,
+// and refusing it would reject a turn whose only "empty" part was proxy
+// history the renderer itself scrubbed. The turn's parts are numbered by their
+// canonical index, so a part's report path survives the segmenting.
 func canonicalUserTurnToChatMessages(
 	turn CanonicalTurn,
 	turnPath string,
@@ -159,49 +165,59 @@ func canonicalUserTurnToChatMessages(
 	report *ConversionReport,
 	policy LossPolicy,
 ) ([]ChatMessage, error) {
-	var contentParts []CanonicalPart
-	var messages []ChatMessage
-	for _, part := range turn.Parts {
-		switch value := part.(type) {
-		case CanonicalFunctionResult:
-			if len(contentParts) > 0 {
-				message, err := canonicalContentPartsToChatUserMessage(
-					contentParts,
-					turnPath,
-					capabilities,
-					report,
-					policy,
-				)
-				if err != nil {
-					return nil, err
-				}
-				messages = append(messages, message)
-				contentParts = nil
-			}
-			// Tool messages use the dedicated tool-result renderer — never
-			// the user-message renderer.
-			toolMessage, err := renderChatToolResult(value, capabilities, policy, report)
-			if err != nil {
-				return nil, err
-			}
-			messages = append(messages, toolMessage)
-
-		default:
-			contentParts = append(contentParts, part)
-		}
-	}
-	if len(contentParts) > 0 {
-		message, err := canonicalContentPartsToChatUserMessage(
+	var (
+		contentParts   []CanonicalPart
+		contentIndexes []int
+		messages       []ChatMessage
+	)
+	flush := func() error {
+		message, produced, err := canonicalContentPartsToChatUserMessage(
 			contentParts,
+			contentIndexes,
 			turnPath,
 			capabilities,
 			report,
 			policy,
 		)
 		if err != nil {
+			return err
+		}
+		if produced {
+			messages = append(messages, message)
+		}
+		contentParts = nil
+		contentIndexes = nil
+		return nil
+	}
+	for i, part := range turn.Parts {
+		if value, ok := part.(CanonicalFunctionResult); ok {
+			if len(contentParts) > 0 {
+				if err := flush(); err != nil {
+					return nil, err
+				}
+			}
+			// Tool messages use the dedicated tool-result renderer — never
+			// the user-message renderer.
+			toolMessage, err := renderChatToolResult(
+				value,
+				fmt.Sprintf("%s.parts[%d]", turnPath, i),
+				capabilities,
+				policy,
+				report,
+			)
+			if err != nil {
+				return nil, err
+			}
+			messages = append(messages, toolMessage)
+			continue
+		}
+		contentParts = append(contentParts, part)
+		contentIndexes = append(contentIndexes, i)
+	}
+	if len(contentParts) > 0 {
+		if err := flush(); err != nil {
 			return nil, err
 		}
-		messages = append(messages, message)
 	}
 	return messages, nil
 }
@@ -259,16 +275,20 @@ func chatImageDetail(
 
 // canonicalContentPartsToChatUserMessage renders text and image parts into a
 // user message. Image input is rendered as image_url blocks and requires the
-// configured capability.
+// configured capability. indexes holds each part's canonical index in the
+// turn, so a drop names the part the operator actually sent. produced is false
+// when every part scrubbed or dropped and nothing remains to send.
 func canonicalContentPartsToChatUserMessage(
 	parts []CanonicalPart,
+	indexes []int,
 	turnPath string,
 	capabilities ChatCapabilities,
 	report *ConversionReport,
 	policy LossPolicy,
-) (ChatMessage, error) {
+) (ChatMessage, bool, error) {
 	var blocks []ChatContentBlock
 	for i, part := range parts {
+		partPath := fmt.Sprintf("%s.parts[%d]", turnPath, indexes[i])
 		switch value := part.(type) {
 		case CanonicalText:
 			// A client-authored empty text part is forwarded verbatim. That is
@@ -291,10 +311,10 @@ func canonicalContentPartsToChatUserMessage(
 				if err := report.Lose(
 					policy,
 					FeatureImageInput,
-					fmt.Sprintf("%s.parts[%d]", turnPath, i),
+					partPath,
 					"image input is not supported by the configured chat provider",
 				); err != nil {
-					return ChatMessage{}, err
+					return ChatMessage{}, false, err
 				}
 				continue
 			}
@@ -303,12 +323,12 @@ func canonicalContentPartsToChatUserMessage(
 				var err error
 				url, err = imageDataURL(value.MediaType, value.Base64)
 				if err != nil {
-					return ChatMessage{}, fmt.Errorf("content part %d: %w", i, err)
+					return ChatMessage{}, false, fmt.Errorf("content part %d: %w", i, err)
 				}
 			}
-			detail, err := chatImageDetail(value.Detail, fmt.Sprintf("%s.parts[%d]", turnPath, i), policy, report)
+			detail, err := chatImageDetail(value.Detail, partPath, policy, report)
 			if err != nil {
-				return ChatMessage{}, err
+				return ChatMessage{}, false, err
 			}
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeImage,
@@ -325,17 +345,17 @@ func canonicalContentPartsToChatUserMessage(
 			if err := report.Lose(
 				policy,
 				FeatureDocumentInput,
-				fmt.Sprintf("%s.parts[%d]", turnPath, i),
+				partPath,
 				"document input is not supported by the configured chat provider",
 			); err != nil {
-				return ChatMessage{}, err
+				return ChatMessage{}, false, err
 			}
 			continue
 
 		case CanonicalRefusal:
-			return ChatMessage{}, &UnsupportedFeatureError{
+			return ChatMessage{}, false, &UnsupportedFeatureError{
 				Protocol: "chat",
-				Path:     fmt.Sprintf("%s.parts[%d]", turnPath, i),
+				Path:     partPath,
 				Feature:  "refusal input content",
 			}
 
@@ -346,7 +366,7 @@ func canonicalContentPartsToChatUserMessage(
 			continue
 
 		default:
-			return ChatMessage{}, fmt.Errorf(
+			return ChatMessage{}, false, fmt.Errorf(
 				"content part %d: unknown canonical part %T",
 				i,
 				part,
@@ -354,9 +374,9 @@ func canonicalContentPartsToChatUserMessage(
 		}
 	}
 	if len(blocks) == 0 {
-		return ChatMessage{}, errors.New("user turn has no portable content")
+		return ChatMessage{}, false, nil
 	}
-	return ChatMessage{Role: ChatMessageRoleUser, Content: &ChatMessageContent{ContentBlocks: blocks}}, nil
+	return ChatMessage{Role: ChatMessageRoleUser, Content: &ChatMessageContent{ContentBlocks: blocks}}, true, nil
 }
 
 // canonicalAssistantTurnToChatMessage renders an assistant turn into a Chat

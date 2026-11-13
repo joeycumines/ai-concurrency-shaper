@@ -47,9 +47,7 @@ func TestMultipartDetailRefusalPropagatesToTheOperator(t *testing.T) {
 		FeatureToolResultJSONEnvelope:      {},
 	}}
 	var report ConversionReport
-	_, err := renderChatToolResult(
-		toolResultOriginalDetail(),
-		toolResultImageCapabilities(),
+	_, err := renderChatToolResult(toolResultOriginalDetail(), "turns[0].parts[0]", toolResultImageCapabilities(),
 		policy,
 		&report,
 	)
@@ -79,9 +77,7 @@ func TestMultipartDetailRefusalIsServedWhenApproved(t *testing.T) {
 		FeatureImageDetailOriginal:         {},
 	}}
 	var report ConversionReport
-	message, err := renderChatToolResult(
-		toolResultOriginalDetail(),
-		toolResultImageCapabilities(),
+	message, err := renderChatToolResult(toolResultOriginalDetail(), "turns[0].parts[0]", toolResultImageCapabilities(),
 		policy,
 		&report,
 	)
@@ -118,7 +114,7 @@ func TestMultipartDetailMalformedValueFails(t *testing.T) {
 		},
 	}
 	var report ConversionReport
-	if _, err := renderChatToolResult(result, toolResultImageCapabilities(), policy, &report); err == nil {
+	if _, err := renderChatToolResult(result, "turns[0].parts[0]", toolResultImageCapabilities(), policy, &report); err == nil {
 		t.Fatal("an image detail value outside the chat vocabulary was served in a tool result")
 	}
 
@@ -156,7 +152,7 @@ func TestMultipartDocumentStillDeclines(t *testing.T) {
 		},
 	}
 	var report ConversionReport
-	message, err := renderChatToolResult(result, toolResultImageCapabilities(), policy, &report)
+	message, err := renderChatToolResult(result, "turns[0].parts[0]", toolResultImageCapabilities(), policy, &report)
 	if err != nil {
 		t.Fatalf("a document must decline to the envelope, not fail: %v", err)
 	}

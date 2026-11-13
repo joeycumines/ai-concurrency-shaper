@@ -30,7 +30,7 @@ func TestRenderChatToolResultTextExact(t *testing.T) {
 	message, err := renderChatToolResult(CanonicalFunctionResult{
 		CallID: "call_1",
 		Parts:  []CanonicalPart{CanonicalText{Text: "analysis complete"}},
-	}, ChatCapabilities{}, StrictLossPolicy(), &report)
+	}, "turns[0].parts[0]", ChatCapabilities{}, StrictLossPolicy(), &report)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestRenderChatToolResultMultimodalMatrix(t *testing.T) {
 	// operator can see tool_result_multimodal_content rather than a generic
 	// unrepresentable error).
 	var strictReport ConversionReport
-	_, err := renderChatToolResult(multimodal(), ChatCapabilities{}, StrictLossPolicy(), &strictReport)
+	_, err := renderChatToolResult(multimodal(), "turns[0].parts[0]", ChatCapabilities{}, StrictLossPolicy(), &strictReport)
 	if err == nil {
 		t.Fatal("strict policy accepted multimodal tool-result content")
 	}
@@ -90,7 +90,7 @@ func TestRenderChatToolResultMultimodalMatrix(t *testing.T) {
 
 	// Permissive: the deterministic envelope encoding.
 	var report ConversionReport
-	message, err := renderChatToolResult(multimodal(), ChatCapabilities{}, toolResultPermissivePolicy(), &report)
+	message, err := renderChatToolResult(multimodal(), "turns[0].parts[0]", ChatCapabilities{}, toolResultPermissivePolicy(), &report)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestRenderChatToolResultMultimodalMatrix(t *testing.T) {
 			Base64:    "aGk=",
 		}},
 	}
-	message2, err := renderChatToolResult(base64Result, ChatCapabilities{}, toolResultPermissivePolicy(), &report2)
+	message2, err := renderChatToolResult(base64Result, "turns[0].parts[0]", ChatCapabilities{}, toolResultPermissivePolicy(), &report2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestRenderChatToolResultMultimodalMatrix(t *testing.T) {
 			URL:       "https://example.test/d.pdf",
 		}},
 	}
-	message3, err := renderChatToolResult(documentResult, ChatCapabilities{}, toolResultPermissivePolicy(), &report3)
+	message3, err := renderChatToolResult(documentResult, "turns[0].parts[0]", ChatCapabilities{}, toolResultPermissivePolicy(), &report3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestRenderChatToolResultMultimodalMatrix(t *testing.T) {
 			Base64:    "JVBERi0x",
 		}},
 	}
-	message4, err := renderChatToolResult(documentBase64, ChatCapabilities{}, toolResultPermissivePolicy(), &report4)
+	message4, err := renderChatToolResult(documentBase64, "turns[0].parts[0]", ChatCapabilities{}, toolResultPermissivePolicy(), &report4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestRenderChatToolResultMultimodalMatrix(t *testing.T) {
 			Base64:    "aGk=",
 		}},
 	}
-	if _, err := renderChatToolResult(badMedia, ChatCapabilities{}, toolResultPermissivePolicy(), &report5); err == nil {
+	if _, err := renderChatToolResult(badMedia, "turns[0].parts[0]", ChatCapabilities{}, toolResultPermissivePolicy(), &report5); err == nil {
 		t.Fatal("unsupported image media type accepted")
 	}
 }

@@ -24,6 +24,7 @@ func TestChatToolResultMultiPartTextJoinReported(t *testing.T) {
 		var report ConversionReport
 		msg, err := renderChatToolResult(
 			CanonicalFunctionResult{CallID: "call_1", Parts: multi},
+			"turns[0].parts[0]",
 			ChatCapabilities{},
 			policy,
 			&report,
@@ -64,6 +65,7 @@ func TestChatToolResultMultiPartTextJoinReported(t *testing.T) {
 			CallID: "call_1",
 			Parts:  []CanonicalPart{CanonicalText{Text: "only"}},
 		},
+		"turns[0].parts[0]",
 		ChatCapabilities{},
 		StrictLossPolicy(),
 		&singleReport,

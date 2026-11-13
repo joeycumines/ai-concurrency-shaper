@@ -30,7 +30,7 @@ func TestRenderChatToolResultMultipart(t *testing.T) {
 		},
 	}
 	var report ConversionReport
-	message, err := renderChatToolResult(result, toolResultImageCapabilities(), StrictLossPolicy(), &report)
+	message, err := renderChatToolResult(result, "turns[0].parts[0]", toolResultImageCapabilities(), StrictLossPolicy(), &report)
 	if err != nil {
 		t.Fatalf("multipart render under strict policy: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestRenderChatToolResultMultipartOrderPreserved(t *testing.T) {
 		},
 	}
 	var report ConversionReport
-	message, err := renderChatToolResult(result, toolResultImageCapabilities(), StrictLossPolicy(), &report)
+	message, err := renderChatToolResult(result, "turns[0].parts[0]", toolResultImageCapabilities(), StrictLossPolicy(), &report)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestRenderChatToolResultMultipartFallback(t *testing.T) {
 		},
 	}
 	var report ConversionReport
-	message, err := renderChatToolResult(document, toolResultImageCapabilities(), toolResultPermissivePolicy(), &report)
+	message, err := renderChatToolResult(document, "turns[0].parts[0]", toolResultImageCapabilities(), toolResultPermissivePolicy(), &report)
 	if err != nil {
 		t.Fatalf("document fallback: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestRenderChatToolResultMultipartFallback(t *testing.T) {
 		},
 	}
 	var report2 ConversionReport
-	if _, err := renderChatToolResult(badMedia, toolResultImageCapabilities(), toolResultPermissivePolicy(), &report2); err == nil {
+	if _, err := renderChatToolResult(badMedia, "turns[0].parts[0]", toolResultImageCapabilities(), toolResultPermissivePolicy(), &report2); err == nil {
 		t.Fatal("unsupported image media type accepted")
 	}
 }
@@ -156,9 +156,7 @@ func TestRenderChatToolResultMultipartRequiresImageInput(t *testing.T) {
 		},
 	}
 	var report ConversionReport
-	message, err := renderChatToolResult(
-		result,
-		ChatCapabilities{ToolResultImages: true},
+	message, err := renderChatToolResult(result, "turns[0].parts[0]", ChatCapabilities{ToolResultImages: true},
 		toolResultPermissivePolicy(),
 		&report,
 	)
@@ -181,7 +179,7 @@ func TestRenderChatToolResultMultipartInertForText(t *testing.T) {
 		Parts:  []CanonicalPart{CanonicalText{Text: "plain"}},
 	}
 	var report ConversionReport
-	message, err := renderChatToolResult(result, toolResultImageCapabilities(), StrictLossPolicy(), &report)
+	message, err := renderChatToolResult(result, "turns[0].parts[0]", toolResultImageCapabilities(), StrictLossPolicy(), &report)
 	if err != nil {
 		t.Fatal(err)
 	}

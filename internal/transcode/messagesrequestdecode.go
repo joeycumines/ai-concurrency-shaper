@@ -249,7 +249,13 @@ func DecodeMessagesRequest(
 		}
 	}
 
-	// System prompt becomes a system turn.
+	// System prompt becomes a system turn. The empty-part synthesis below is
+	// shared with the messages[] loop: a system prompt whose blocks were all
+	// scrubbed (marker-signature thinking), moved to artifacts (authenticated
+	// thinking), or dropped under an approved server-tool loss leaves zero
+	// parts, and canonical validation refuses a turn with no content. Keeping
+	// the turn with an empty text part preserves the boundary while leaving the
+	// artifact and loss decisions to the gates that own them.
 	if envelope.System != nil {
 		if err := envelope.System.Validate(); err != nil {
 			return DecodeResult{}, fmt.Errorf("messages system: %w", err)
@@ -257,6 +263,9 @@ func DecodeMessagesRequest(
 		parts, err := anthropicContentToCanonical(*envelope.System, policy, &result.Report, &result.Request.Artifacts)
 		if err != nil {
 			return DecodeResult{}, fmt.Errorf("messages system: %w", err)
+		}
+		if len(parts) == 0 && len(envelope.System.ContentBlocks) > 0 {
+			parts = []CanonicalPart{CanonicalText{Text: ""}}
 		}
 		result.Request.Turns = append(result.Request.Turns, CanonicalTurn{
 			Role:  CanonicalSystem,

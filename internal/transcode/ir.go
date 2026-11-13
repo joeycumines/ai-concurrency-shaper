@@ -809,13 +809,43 @@ func validateCanonicalPart(part CanonicalPart) error {
 		if p.CallID == "" {
 			return errors.New("function result has empty call id")
 		}
-		// Nested function-result parts validate recursively.
+		// A function result carries CONTENT only. A call, a nested result and a
+		// refusal have no place inside one, and a thinking part cannot be
+		// placed at all (the IR records no position for it): refusing the shape
+		// here makes every renderer's failure the same typed refusal instead of
+		// four different ones — the Responses renderer used to strip a nested
+		// thinking part with no record at all.
 		for partIndex, nested := range p.Parts {
 			if nested == nil {
 				return fmt.Errorf("function result part %d is nil", partIndex)
 			}
+			switch nested.(type) {
+			case CanonicalText, CanonicalImage, CanonicalDocument:
+			default:
+				return fmt.Errorf(
+					"function result part %d: %T is not content a tool result can carry",
+					partIndex,
+					nested,
+				)
+			}
 			if err := validateCanonicalPart(nested); err != nil {
 				return fmt.Errorf("function result part %d: %w", partIndex, err)
+			}
+		}
+	case CanonicalThinkingPart:
+		// Thinking may cross this boundary ONLY as proxy-synthesized reasoning,
+		// which every renderer scrubs — a synthetic signature must never reach
+		// an upstream. RequirePortableArtifacts gates request.Artifacts, not
+		// turn parts, so a part carrying any other signature is either
+		// source-authenticated provenance this IR cannot place (it records no
+		// position for a thinking part) or a provider artifact. Both are refused
+		// here rather than dropped by the first renderer that walks past them,
+		// and the check lives at this depth so it also covers a part nested
+		// inside a function result.
+		if p.Signature != SyntheticThinkingSignature {
+			return &UnsupportedFeatureError{
+				Protocol: "transcode",
+				Feature:  string(FeatureAuthenticatedThinking),
 			}
 		}
 	}

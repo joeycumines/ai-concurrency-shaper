@@ -226,19 +226,37 @@ func RenderResponsesRequest(
 		// path convention of every other render-side entry.
 		turnPath := fmt.Sprintf("turns[%d]", entry.index)
 		var contentParts []CanonicalPart
+		// produced counts the input items this turn contributed, so a turn that
+		// rendered nothing at all is refused honestly at its canonical path
+		// rather than vanishing from the conversation.
+		produced := 0
+		// flushContent appends the buffered content as one easy message. An
+		// empty item is SKIPPED rather than appended: the turn boundary is
+		// carried by the call and result items around it, and a content union
+		// with no arm fails deep in the wire marshal with "no selected
+		// variant", which describes a marshaller bug rather than the request
+		// the operator sent.
+		flushContent := func() error {
+			if len(contentParts) == 0 {
+				return nil
+			}
+			item, err := canonicalTurnPartsToEasyMessage(turn.Role, contentParts)
+			if err != nil {
+				return err
+			}
+			contentParts = nil
+			if item.Content.Text == nil && len(item.Content.Parts) == 0 {
+				return nil
+			}
+			input = append(input, item)
+			produced++
+			return nil
+		}
 		for _, part := range turn.Parts {
 			switch value := part.(type) {
 			case CanonicalFunctionCall:
-				if len(contentParts) > 0 {
-					item, err := canonicalTurnPartsToEasyMessage(
-						turn.Role,
-						contentParts,
-					)
-					if err != nil {
-						return nil, report, err
-					}
-					input = append(input, item)
-					contentParts = nil
+				if err := flushContent(); err != nil {
+					return nil, report, err
 				}
 				arguments := string(value.Arguments)
 				if arguments == "" {
@@ -251,18 +269,11 @@ func RenderResponsesRequest(
 					Namespace: value.Namespace,
 					Arguments: arguments,
 				})
+				produced++
 
 			case CanonicalFunctionResult:
-				if len(contentParts) > 0 {
-					item, err := canonicalTurnPartsToEasyMessage(
-						turn.Role,
-						contentParts,
-					)
-					if err != nil {
-						return nil, report, err
-					}
-					input = append(input, item)
-					contentParts = nil
+				if err := flushContent(); err != nil {
+					return nil, report, err
 				}
 				parts, err := transcodeToolResult(
 					value,
@@ -283,33 +294,26 @@ func RenderResponsesRequest(
 					CallID: value.CallID,
 					Output: output,
 				})
+				produced++
 
 			default:
 				contentParts = append(contentParts, part)
 			}
 		}
-		if len(contentParts) > 0 {
-			item, err := canonicalTurnPartsToEasyMessage(turn.Role, contentParts)
-			if err != nil {
-				return nil, report, err
-			}
-			if item.Content.Text == nil && len(item.Content.Parts) == 0 {
-				// Every part was scrubbed (marker-signature thinking is the only
-				// part type this renderer drops), so the item would carry a
-				// contentless union. Emitting it fails deep in the wire marshal
-				// with "no selected variant", which describes a marshaller bug
-				// rather than the request the operator sent; inventing an empty
-				// text part would put prompt text on the wire the client never
-				// wrote. The Messages decoder synthesizes an empty text part for
-				// exactly this shape, so a decoder-produced request never
-				// reaches here — this is the hand-built case, refused honestly
-				// and at the canonical path.
-				return nil, report, fmt.Errorf(
-					"%s has no content that the Responses input can carry after scrubbing proxy-synthesized thinking",
-					turnPath,
-				)
-			}
-			input = append(input, item)
+		if err := flushContent(); err != nil {
+			return nil, report, err
+		}
+		if produced == 0 {
+			// Nothing this turn carried survives: inventing an empty text part
+			// would put prompt text on the wire the client never wrote, and
+			// emitting nothing would delete a turn boundary. Refuse honestly,
+			// at the canonical path. The Messages decoder synthesizes an empty
+			// text part for exactly this shape, so a decoder-produced request
+			// never reaches here.
+			return nil, report, fmt.Errorf(
+				"%s has no content that the Responses input can carry after scrubbing proxy-synthesized thinking",
+				turnPath,
+			)
 		}
 	}
 

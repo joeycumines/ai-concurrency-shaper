@@ -55,6 +55,16 @@ func ValidateCanonicalRequest(request CanonicalRequest) error {
 				thinking.Type,
 			)
 		}
+		// A budget that is present must be usable. The Messages decoder
+		// rejects a non-positive one, and the Messages renderer copies it
+		// straight onto the wire, so a hand-built request would otherwise
+		// render a budget_tokens the upstream refuses.
+		if thinking.BudgetTokens != nil && *thinking.BudgetTokens <= 0 {
+			return fmt.Errorf(
+				"thinking budget_tokens must be positive, got %d",
+				*thinking.BudgetTokens,
+			)
+		}
 	}
 	for turnIndex, turn := range request.Turns {
 		switch turn.Role {
@@ -77,7 +87,7 @@ func ValidateCanonicalRequest(request CanonicalRequest) error {
 			// in assistant turns, function results only in user turns, and
 			// refusal only on assistant messages — enforced once here, not
 			// per-renderer.
-			switch value := part.(type) {
+			switch part.(type) {
 			case CanonicalFunctionCall:
 				if turn.Role != CanonicalAssistant {
 					return fmt.Errorf(
@@ -104,22 +114,6 @@ func ValidateCanonicalRequest(request CanonicalRequest) error {
 						partIndex,
 						turn.Role,
 					)
-				}
-			case CanonicalThinkingPart:
-				// Thinking may cross this boundary ONLY as proxy-synthesized
-				// reasoning, which every renderer scrubs — a synthetic
-				// signature must never reach an upstream. RequirePortableArtifacts
-				// gates request.Artifacts, not turn parts, so a part carrying any
-				// other signature is either source-authenticated provenance this
-				// IR cannot place (it records no position for a thinking part) or
-				// a provider artifact. Both are refused here rather than dropped
-				// by the first renderer that walks past them.
-				if value.Signature != SyntheticThinkingSignature {
-					return &UnsupportedFeatureError{
-						Protocol: "transcode",
-						Path:     fmt.Sprintf("turn %d part %d", turnIndex, partIndex),
-						Feature:  string(FeatureAuthenticatedThinking),
-					}
 				}
 			}
 			if err := validateCanonicalPart(part); err != nil {

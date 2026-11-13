@@ -177,7 +177,7 @@ func lossScenariosRequestConversion(t *testing.T) []lossScenario {
 					CallID:  "call_1",
 					IsError: true,
 					Parts:   []CanonicalPart{CanonicalText{Text: "boom"}},
-				}, ChatCapabilities{}, policy, &report)
+				}, "turns[0].parts[0]", ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
@@ -195,7 +195,7 @@ func lossScenariosRequestConversion(t *testing.T) []lossScenario {
 						MediaType: "image/png",
 						URL:       "https://example.test/x.png",
 					}},
-				}, ChatCapabilities{}, policy, &report)
+				}, "turns[0].parts[0]", ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
@@ -213,7 +213,7 @@ func lossScenariosRequestConversion(t *testing.T) []lossScenario {
 						MediaType: "image/png",
 						URL:       "https://example.test/x.png",
 					}},
-				}, ChatCapabilities{}, policy, &report)
+				}, "turns[0].parts[0]", ChatCapabilities{}, policy, &report)
 				return report, err
 			},
 		},
