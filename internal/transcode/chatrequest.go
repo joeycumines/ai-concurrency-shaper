@@ -254,10 +254,10 @@ func RenderChatRequest(
 			// instruction turn that actually produced text, which is what the
 			// shared join decision counts.
 			contributing []int
-			// consolidatedAt is the index in rendered at which the consolidated
-			// system message belongs: the first CONTRIBUTING consolidating
-			// turn. -1 means nothing consolidates, so nothing is inserted.
-			consolidatedAt = -1
+			// hasContributor records that at least one consolidating
+			// instruction turn carried text. Only then is a consolidated
+			// message emitted; otherwise the sequence is emitted unchanged.
+			hasContributor = false
 		)
 		sawClientDialog := false
 		// sawRetainedDialog tracks dialog turns the continuity store
@@ -299,12 +299,9 @@ func RenderChatRequest(
 			if chatMessageTextIsEmpty(message) {
 				continue
 			}
-			firstContributor := consolidatedAt < 0
 			systemMessages = append(systemMessages, message)
 			contributing = append(contributing, sourceTurn[i])
-			if firstContributor {
-				consolidatedAt = i
-			}
+			hasContributor = true
 			// A client-authored instruction turn is charged only when the
 			// CLIENT's own request already placed something before it: retained
 			// history sits in front of the client's turns, and letting it demote
@@ -362,7 +359,7 @@ func RenderChatRequest(
 		// which is what mid_conversation_system records; the remaining messages
 		// keep their relative order, so a developer message or dialog turn is
 		// never reordered against its neighbours.
-		if consolidatedAt >= 0 {
+		if hasContributor {
 			out.Messages = append(out.Messages, consolidateChatSystemMessages(systemMessages))
 		}
 		for i, message := range rendered {
