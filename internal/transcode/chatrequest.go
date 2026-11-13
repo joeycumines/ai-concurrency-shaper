@@ -76,26 +76,14 @@ func RenderChatRequest(
 	// previous_response_id loss is skipped by the helper when the continuity
 	// store resolved it: the reconstructed history is already prepended, so
 	// the field is consumed rather than lost, and the hit Note at decode
-	// already records the fact.
-	if err := responsesEchoLosses(context, &report, capabilities.ReasoningEffort); err != nil {
+	// already records the fact. Chat models user and store natively, so they
+	// are rendered above rather than charged.
+	if err := responsesEchoLosses(context, &report, echoCarriage{
+		Effort: capabilities.ReasoningEffort,
+		User:   true,
+		Store:  true,
+	}); err != nil {
 		return nil, report, err
-	}
-
-	// Developer role: preserved when supported, otherwise an approved loss.
-	for _, turn := range request.Turns {
-		if turn.Role != CanonicalDeveloper {
-			continue
-		}
-		if !capabilities.DeveloperRole {
-			if err := report.Lose(
-				context.lossPolicy(),
-				FeatureDeveloperRole,
-				"messages[].role",
-				"developer role is not supported by the configured chat provider",
-			); err != nil {
-				return nil, report, err
-			}
-		}
 	}
 
 	// Messages: system/developer turns become system/developer messages; user
@@ -110,7 +98,7 @@ func RenderChatRequest(
 	// capability is off) consolidate into exactly one leading system
 	// message: a turn following dialog turns is the policy-gated
 	// mid_conversation_system position loss, and a leading-only merge of
-	// multiple system turns is a sanctioned note under the same key.
+	// multiple system turns is the shared join decision.
 	rendered := make([]ChatMessage, 0, len(request.Turns))
 	systemChannel := make([]bool, 0, len(request.Turns))
 	// The namespace qualifier a replayed call carries is resolved for THIS
@@ -121,15 +109,22 @@ func RenderChatRequest(
 	// continuity store rather than authored by this request, so a request-side
 	// gate can tell the two apart. The retained turns are a prefix of Turns.
 	retainedChannel := make([]bool, 0, len(request.Turns))
+	// sourceTurn records, per rendered message, the canonical turn index it
+	// came from. One canonical turn can render as several messages (a user
+	// turn splits around its tool results), so the report path must name the
+	// turn, never the rendered position.
+	sourceTurn := make([]int, 0, len(request.Turns))
 	turnIndex := 0
 	for _, turn := range request.Turns {
 		retained := turnIndex < request.RetainedTurns
 		turnPath := fmt.Sprintf("turns[%d]", turnIndex)
+		index := turnIndex
 		turnIndex++
 		switch turn.Role {
 		case CanonicalSystem:
 			message, err := canonicalTextTurnToChatMessage(
 				turn,
+				turnPath,
 				ChatMessageRoleSystem,
 				context.lossPolicy(),
 				&report,
@@ -140,6 +135,7 @@ func RenderChatRequest(
 			rendered = append(rendered, message)
 			systemChannel = append(systemChannel, true)
 			retainedChannel = append(retainedChannel, retained)
+			sourceTurn = append(sourceTurn, index)
 
 		case CanonicalDeveloper:
 			role := ChatMessageRoleDeveloper
@@ -147,9 +143,25 @@ func RenderChatRequest(
 			if !capabilities.DeveloperRole {
 				role = ChatMessageRoleSystem
 				channel = true
+				// The role distinction is dropped for EVERY developer turn,
+				// retained or not; only the policy decision differs, and
+				// chargePosition owns that distinction so a retained turn
+				// cannot reject a cleanly authored request.
+				if err := chargePosition(
+					request,
+					index,
+					FeatureDeveloperRole,
+					turnPath,
+					"developer role is not supported by the configured chat provider; the turn renders with the system role",
+					&report,
+					context.lossPolicy(),
+				); err != nil {
+					return nil, report, err
+				}
 			}
 			message, err := canonicalTextTurnToChatMessage(
 				turn,
+				turnPath,
 				role,
 				context.lossPolicy(),
 				&report,
@@ -160,10 +172,12 @@ func RenderChatRequest(
 			rendered = append(rendered, message)
 			systemChannel = append(systemChannel, channel)
 			retainedChannel = append(retainedChannel, retained)
+			sourceTurn = append(sourceTurn, index)
 
 		case CanonicalUser:
 			messages, err := canonicalUserTurnToChatMessages(
 				turn,
+				turnPath,
 				capabilities,
 				&report,
 				context.lossPolicy(),
@@ -175,6 +189,7 @@ func RenderChatRequest(
 				rendered = append(rendered, message)
 				systemChannel = append(systemChannel, false)
 				retainedChannel = append(retainedChannel, retained)
+				sourceTurn = append(sourceTurn, index)
 			}
 
 		case CanonicalAssistant:
@@ -185,14 +200,27 @@ func RenderChatRequest(
 			rendered = append(rendered, message)
 			systemChannel = append(systemChannel, false)
 			retainedChannel = append(retainedChannel, retained)
+			sourceTurn = append(sourceTurn, index)
 		}
 	}
 
 	if capabilities.SystemAnywhere {
 		// Fidelity mode for upstreams that accept system messages
 		// anywhere: positional rendering exactly as decoded, no report
-		// entries.
-		out.Messages = rendered
+		// entries. The one thing this mode does NOT preserve is a
+		// system-channel message that carries no bytes at all: that shape is
+		// proxy-invented (the renderer synthesizes an empty text block for a
+		// turn whose parts were all dropped), and emitting it would send the
+		// upstream an empty system prompt the client never wrote — the same
+		// rule the consolidated path and the other three targets follow.
+		filtered := make([]ChatMessage, 0, len(rendered))
+		for i, message := range rendered {
+			if systemChannel[i] && chatMessageTextIsEmpty(message) {
+				continue
+			}
+			filtered = append(filtered, message)
+		}
+		out.Messages = filtered
 	} else {
 		var (
 			// systemMessages holds every system-channel message in ENCOUNTER
@@ -201,20 +229,16 @@ func RenderChatRequest(
 			// reorder the prompt the model sees.
 			systemMessages []ChatMessage
 			dialog         []ChatMessage
-			// midDialog records, per system-channel message, whether a dialog
-			// turn preceded it, and clientMidDialog whether at least one of
-			// those mid-dialog messages was authored by THIS request.
-			midDialog       []bool
-			clientMidDialog bool
+			// contributing records the canonical index of every system-channel
+			// turn that actually produced a message, which is what the shared
+			// join decision counts.
+			contributing []int
 		)
 		sawClientDialog := false
 		// sawRetainedDialog tracks dialog turns the continuity store
 		// reconstructed. A request-side gate polices CLIENT input, so a
 		// position the client's own request never created must not be charged
-		// to it: a retained system turn after retained dialog is the proxy's
-		// own history, already consolidated once when the chain was first
-		// rendered. The encoding is identical; only the policy decision
-		// differs, so it is recorded as a Note (visible, never silent).
+		// to it.
 		sawRetainedDialog := false
 		for i, message := range rendered {
 			if !systemChannel[i] {
@@ -227,6 +251,13 @@ func RenderChatRequest(
 				continue
 			}
 			systemMessages = append(systemMessages, message)
+			// Only a message carrying real text contributed to the merged
+			// prompt: a turn whose parts were all dropped became an empty text
+			// block, and counting it would make the join decision describe a
+			// merge that never happened.
+			if !chatMessageTextIsEmpty(message) {
+				contributing = append(contributing, sourceTurn[i])
+			}
 			// A client-authored system turn is mid-dialog only when the
 			// CLIENT's own request has already opened dialog: retained history
 			// sits in front of the client's turns, and letting it demote the
@@ -237,57 +268,51 @@ func RenderChatRequest(
 			if retainedChannel[i] {
 				mid = sawRetainedDialog || sawClientDialog
 			}
-			midDialog = append(midDialog, mid)
-			if mid && !retainedChannel[i] {
-				clientMidDialog = true
+			if !mid {
+				continue
 			}
-		}
-		anyMidDialog := false
-		for _, mid := range midDialog {
-			if mid {
-				anyMidDialog = true
-				break
-			}
-		}
-		switch {
-		case anyMidDialog && !clientMidDialog:
-			if err := report.Note(
+			// Each mid-dialog system turn is charged on its OWN provenance, so
+			// a retained turn and a client turn in the same conversation
+			// cannot be folded into one decision that hides which one paid.
+			if err := chargePosition(
+				request,
+				sourceTurn[i],
 				FeatureMidConversationSystem,
-				"messages[]",
-				"retained conversation history carried system turns after dialog turns; they consolidate into the leading system message (the position was already lost when the chain was first rendered, so it is not re-charged to this request)",
-			); err != nil {
-				return nil, report, err
-			}
-			out.Messages = append(out.Messages, joinChatSystemMessages(systemMessages))
-		case anyMidDialog:
-			// The position/timing of system-channel content following
-			// dialog turns cannot survive; the consolidation is the
-			// approved loss.
-			if err := report.Lose(
-				context.lossPolicy(),
-				FeatureMidConversationSystem,
-				"messages[]",
+				fmt.Sprintf("turns[%d]", sourceTurn[i]),
 				"mid-conversation system turns cannot keep their position in a chat request; system-channel turns consolidate into one leading system message (position/timing lost, content and authority preserved)",
+				&report,
+				context.lossPolicy(),
 			); err != nil {
 				return nil, report, err
 			}
-			out.Messages = append(out.Messages, joinChatSystemMessages(systemMessages))
-		case len(systemMessages) > 1:
-			// Leading-only consolidation: open-weights templates reject a
-			// second system message even at index 1, so the merge is
-			// unconditional — but sanctioned and observable, never silent.
-			if err := report.Note(
-				FeatureMidConversationSystem,
-				"messages[]",
-				"multiple leading system turns consolidate into one leading system message",
-			); err != nil {
-				return nil, report, err
-			}
-			out.Messages = append(out.Messages, joinChatSystemMessages(systemMessages))
-		case len(systemMessages) == 1:
+		}
+		if err := chargeSystemTurnJoin(
+			request,
+			contributing,
+			"messages[0]",
+			"multiple system turns cannot keep their boundaries in one leading chat system message; their text joins in order",
+			&report,
+			context.lossPolicy(),
+		); err != nil {
+			return nil, report, err
+		}
+		// A system message that would carry no bytes is not emitted. That
+		// shape arises when every part of a system turn was dropped under an
+		// approved loss (the renderer synthesizes an empty block so the
+		// message union stays valid) or when the consolidation joined only
+		// empty blocks: either way the prompt text would be proxy-invented,
+		// and the Responses target omits its instructions field for the same
+		// source shape. The degenerate-conversation guard below still owns the
+		// case where nothing else survives.
+		if len(systemMessages) == 1 && !chatMessageTextIsEmpty(systemMessages[0]) {
 			// The common single-leading-system case renders exactly one
 			// system message at index 0 with its original blocks.
 			out.Messages = append(out.Messages, systemMessages[0])
+		} else if len(systemMessages) > 1 {
+			consolidated := joinChatSystemMessages(systemMessages)
+			if !chatMessageTextIsEmpty(consolidated) {
+				out.Messages = append(out.Messages, consolidated)
+			}
 		}
 		out.Messages = append(out.Messages, dialog...)
 	}
@@ -396,14 +421,18 @@ func RenderChatRequest(
 		out.ToolChoice = &choice
 	}
 
-	// Parallel tool calls.
+	// Parallel tool calls. When the capability is granted the field is
+	// forwarded verbatim; otherwise the shared decision applies, so an explicit
+	// true (already satisfied by omission) and an inert request (no tools, or a
+	// none choice) are not charged, while a real disable is a refusable loss.
 	if request.ParallelTools != nil {
 		if !capabilities.ParallelToolCalls {
-			if err := report.Lose(
-				context.lossPolicy(),
-				FeatureParallelToolCalls,
+			if err := chargeParallelTools(
+				request,
+				false,
 				"parallel_tool_calls",
-				"parallel tool calls are not supported by the configured chat provider",
+				&report,
+				context.lossPolicy(),
 			); err != nil {
 				return nil, report, err
 			}

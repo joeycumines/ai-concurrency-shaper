@@ -124,55 +124,114 @@ func RenderGeminiRequest(
 	}
 	// Responses request fields Gemini cannot reproduce take the shared
 	// envelope decision, so a Responses-to-Gemini route never drops a client
-	// field silently. Gemini has no reasoning-effort control.
-	if err := responsesEchoLosses(context, &report, false); err != nil {
+	// field silently. Gemini has no reasoning-effort control, no user field,
+	// and no store.
+	if err := responsesEchoLosses(context, &report, echoCarriage{}); err != nil {
 		return nil, report, err
 	}
 
 	out := geminiRenderRequest{}
 
 	// System/developer turns concatenate into one systemInstruction with one
-	// text part per canonical text part, in order. A system turn after a
-	// dialog turn still moves into systemInstruction under the existing
-	// mid_conversation_system loss.
+	// text part per canonical text part, in order. The position and role
+	// decisions are taken per turn through the helpers every other renderer
+	// uses, so this target cannot drift: a system turn after dialog takes the
+	// mid_conversation_system position decision, a developer turn takes the
+	// developer_role decision, and several contributing turns take the shared
+	// join decision.
 	var systemParts []geminiRenderPart
-	sawDialog := false
+	var contributing []int
+	sawClientDialog := false
+	// sawRetainedDialog tracks dialog turns the continuity store
+	// reconstructed. A request-side gate polices CLIENT input, so a position
+	// the client's own request never created must not be charged to it: a
+	// client system turn physically following retained dialog is still the
+	// client's own leading instruction.
+	sawRetainedDialog := false
 	for i, turn := range request.Turns {
 		if turn.Role != CanonicalSystem && turn.Role != CanonicalDeveloper {
-			sawDialog = true
+			if i < request.RetainedTurns {
+				sawRetainedDialog = true
+			} else {
+				sawClientDialog = true
+			}
 			continue
 		}
-		if sawDialog {
-			if err := report.Lose(
-				policy,
+		path := fmt.Sprintf("turns[%d]", i)
+		retained := i < request.RetainedTurns
+		midDialog := sawClientDialog
+		if retained {
+			midDialog = sawRetainedDialog || sawClientDialog
+		}
+		if midDialog {
+			if err := chargePosition(
+				request,
+				i,
 				FeatureMidConversationSystem,
-				fmt.Sprintf("turns[%d]", i),
+				path,
 				"a system turn after a dialog turn still moves into systemInstruction; its position is lost",
+				&report,
+				policy,
 			); err != nil {
 				return nil, report, err
 			}
 		}
+		if turn.Role == CanonicalDeveloper {
+			if err := chargePosition(
+				request,
+				i,
+				FeatureDeveloperRole,
+				path,
+				"Gemini's systemInstruction is role-neutral; the developer-role distinction is lost",
+				&report,
+				policy,
+			); err != nil {
+				return nil, report, err
+			}
+		}
+		contributed := 0
 		for j, part := range turn.Parts {
-			path := fmt.Sprintf("turns[%d].parts[%d]", i, j)
+			partPath := fmt.Sprintf("%s.parts[%d]", path, j)
 			switch p := part.(type) {
 			case CanonicalText:
+				// An empty text part carries no bytes; emitting it would put an
+				// empty prompt part on the wire for content the client never
+				// wrote.
+				if p.Text == "" {
+					continue
+				}
 				systemParts = append(systemParts, geminiRenderPart{Text: new(p.Text)})
+				contributed++
 			case CanonicalThinkingPart:
 				// Marker-signature thinking is proxy-synthesized and scrubbed
-				// before upstream rendering; a real signature is covered by
-				// RequirePortableArtifacts above. Either way nothing renders.
+				// before upstream rendering; a real signature is refused
+				// centrally by ValidateCanonicalRequest. Either way nothing
+				// renders, in every turn role.
 				continue
 			default:
 				if err := report.Lose(
 					policy,
 					FeatureSystemNonTextContent,
-					path,
+					partPath,
 					"non-text system prompt content cannot be expressed in Gemini's text-only systemInstruction",
 				); err != nil {
 					return nil, report, err
 				}
 			}
 		}
+		if contributed > 0 {
+			contributing = append(contributing, i)
+		}
+	}
+	if err := chargeSystemTurnJoin(
+		request,
+		contributing,
+		"systemInstruction",
+		"multiple system turns consolidate into one Gemini systemInstruction",
+		&report,
+		policy,
+	); err != nil {
+		return nil, report, err
 	}
 	if len(systemParts) > 0 {
 		out.SystemInstruction = &geminiRenderContent{Parts: systemParts}
@@ -418,16 +477,20 @@ func RenderGeminiRequest(
 		out.ToolConfig = &cfg
 	}
 
-	// Parallel tool calls: explicitly false is a loss; true or nil renders nothing.
-	if request.ParallelTools != nil && !*request.ParallelTools {
-		if err := report.Lose(
-			policy,
-			FeatureParallelToolCalls,
-			"parallel_tool_calls",
-			"Gemini has no parallel-tool-call disable; function calling mode always allows parallel calls",
-		); err != nil {
-			return nil, report, err
-		}
+	// Parallel tool calls. Gemini's function-calling mode always allows
+	// parallel calls, so a client's explicit disable cannot be honoured: with
+	// tools declared the upstream may emit calls the client forbade, which is a
+	// real and refusable loss. The two inert shapes (no tools, or a choice that
+	// forbids every call) and an explicit "allowed" are Notes/no-ops, because
+	// nothing is lost.
+	if err := chargeParallelTools(
+		request,
+		false,
+		"parallel_tool_calls",
+		&report,
+		policy,
+	); err != nil {
+		return nil, report, err
 	}
 
 	// Generation config.

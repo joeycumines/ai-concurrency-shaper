@@ -99,31 +99,37 @@ func TestMessagesClientMidConversationSystemIsStillGated(t *testing.T) {
 	}
 }
 
-// TestMessagesLeadingMergeNoteCountsClientTurns proves the leading-merge Note
-// reports a real consolidation of two leading system turns whichever provenance
-// they came from: the merge is a sanctioned encoding (content is joined, not
-// dropped), so it consults no policy and the Chat target reports the identical
-// shape. One client turn plus one retained turn still consolidates two system
-// blocks, so it is noted too.
+// TestMessagesLeadingMergeNoteCountsClientTurns proves the leading-merge
+// decision reports a real consolidation of two leading system turns whichever
+// provenance they came from: the merge is a sanctioned encoding (content is
+// joined, not dropped) and every target files it under the same
+// multiple_system_turns key with the same severity, so one policy controls it
+// everywhere. A retained surplus is a Note; the client's own surplus is gated.
 func TestMessagesLeadingMergeNoteCountsClientTurns(t *testing.T) {
 	text := func(s string) []CanonicalPart { return []CanonicalPart{CanonicalText{Text: s}} }
 
-	// Two client leading system turns.
+	// Two client leading system turns: the client's own surplus, so the
+	// shared gated loss, exactly as the Responses target reports it.
 	client := retainedMessagesRequest([]CanonicalTurn{
 		{Role: CanonicalSystem, Parts: text("one")},
 		{Role: CanonicalSystem, Parts: text("two")},
 		{Role: CanonicalUser, Parts: text("hi")},
 	}, 0)
-	_, report, err := RenderMessagesRequest(client, testExchangeContext())
+	if _, _, err := RenderMessagesRequest(client, testExchangeContext()); err == nil {
+		t.Fatal("strict render accepted the client's two-turn system prompt")
+	}
+	permitting := testExchangeContext()
+	permitting.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureMultipleSystemTurns: {}}}
+	_, report, err := RenderMessagesRequest(client, permitting)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if !reportHasFeature(report, FeatureMidConversationSystem) {
-		t.Fatalf("report = %+v, want the leading-merge Note", report.Losses)
+	if !reportHasFeature(report, FeatureMultipleSystemTurns) {
+		t.Fatalf("report = %+v, want the leading-merge decision", report.Losses)
 	}
 
 	// One retained leading system turn plus one client one: two system blocks
-	// still consolidate into one field, so the merge is still reported.
+	// still consolidate, and only the client's share is the client's.
 	mixed := retainedMessagesRequest([]CanonicalTurn{
 		{Role: CanonicalSystem, Parts: text("retained")},
 		{Role: CanonicalSystem, Parts: text("client")},
@@ -133,20 +139,21 @@ func TestMessagesLeadingMergeNoteCountsClientTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if !reportHasFeature(report, FeatureMidConversationSystem) {
+	if !reportHasFeature(report, FeatureMultipleSystemTurns) {
 		t.Fatalf("report = %+v, want the leading-merge Note for the mixed leading turns", report.Losses)
 	}
 	for _, loss := range report.Losses {
-		if loss.Feature == FeatureMidConversationSystem && loss.Kind == LossRecord {
-			t.Fatalf("a sanctioned merge was recorded as a policy-gated loss: %+v", loss)
+		if loss.Feature == FeatureMultipleSystemTurns && loss.Kind == LossRecord {
+			t.Fatalf("a retained-surplus merge was recorded as a policy-gated loss: %+v", loss)
 		}
 	}
 }
 
 // TestMessagesClientLeadingMergeAfterRetainedDialogIsNoted proves retained
-// dialog does not suppress the leading-merge Note for two CLIENT leading system
-// turns: the proxy created the earlier dialog position, so the client's own
-// leading turns still consolidate and must still be reported.
+// dialog does not change the leading merge for two CLIENT leading system turns:
+// the proxy created the earlier dialog position, so the client's own leading
+// turns still consolidate and must still be reported. The client authored both
+// contributing turns, so the shared decision is the gated one.
 func TestMessagesClientLeadingMergeAfterRetainedDialogIsNoted(t *testing.T) {
 	text := func(s string) []CanonicalPart { return []CanonicalPart{CanonicalText{Text: s}} }
 	request := retainedMessagesRequest([]CanonicalTurn{
@@ -158,16 +165,16 @@ func TestMessagesClientLeadingMergeAfterRetainedDialogIsNoted(t *testing.T) {
 		{Role: CanonicalSystem, Parts: text("two")},
 		{Role: CanonicalUser, Parts: text("hi")},
 	}, 2)
-	_, report, err := RenderMessagesRequest(request, testExchangeContext())
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureMultipleSystemTurns: {}}}
+	_, report, err := RenderMessagesRequest(request, context)
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if !reportHasFeature(report, FeatureMidConversationSystem) {
-		t.Fatalf("report = %+v, want the leading-merge Note", report.Losses)
+	if !reportHasFeature(report, FeatureMultipleSystemTurns) {
+		t.Fatalf("report = %+v, want the leading-merge decision", report.Losses)
 	}
-	for _, loss := range report.Losses {
-		if loss.Feature == FeatureMidConversationSystem && loss.Kind == LossRecord {
-			t.Fatalf("the client's leading turns were charged as a position loss: %+v", loss)
-		}
+	if reportHasFeature(report, FeatureMidConversationSystem) {
+		t.Fatalf("the leading merge was filed under mid_conversation_system: %+v", report.Losses)
 	}
 }

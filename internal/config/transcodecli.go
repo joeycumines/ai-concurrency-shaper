@@ -522,6 +522,13 @@ var defaultTranscodeAllowedQuery = map[string]struct{}{
 }
 
 var defaultTranscodeLosses = map[transcode.Feature]struct{}{
+	// previous_response_id references conversation state the target does not
+	// keep. Continuity is opt-in (OFF by default), so an unresolved reference —
+	// including a continuity store MISS — is the ordinary shape of a stateless
+	// deployment rather than a client fault. Approving it is what makes the
+	// documented "a miss degrades to the observable loss, never a failure"
+	// contract true; deny it with -transcode-allow-loss '!previous_response_id'.
+	transcode.FeaturePreviousResponseID:                {},
 	transcode.FeatureReasoningSummary:                  {},
 	transcode.FeatureAuthenticatedThinking:             {},
 	transcode.FeatureMidConversationSystem:             {},

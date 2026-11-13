@@ -31,8 +31,47 @@ func chargePosition(
 		return report.Note(
 			feature,
 			path,
-			detail+" (the turn came from the proxy's retained continuity history, not this request, and the position was already decided when the chain was first rendered)",
+			detail+" (the turn came from the proxy's retained continuity history, not this request, and the encoding was already decided once when the chain was first rendered)",
 		)
 	}
 	return report.Lose(policy, feature, path, detail)
+}
+
+// chargeSystemTurnJoin records the decision for several system-channel turns
+// that must share one system field in the target. A target with a single
+// system string or field cannot keep their boundaries, so the encoding joins
+// their text in encounter order — but only the CLIENT can be made to pay for
+// it: more than one client-authored contributing turn is a policy-gated loss,
+// while a surplus that came from the retained prefix is a Note, because the
+// proxy created those turns and their boundaries were already decided once.
+//
+// contributing holds the canonical index of each system-channel turn that
+// actually contributed content. A turn whose parts were all dropped contributed
+// nothing and must not count: that would make the decision describe a merge
+// that never happened. One or zero contributing turns take no decision at all.
+func chargeSystemTurnJoin(
+	request CanonicalRequest,
+	contributing []int,
+	path string,
+	detail string,
+	report *ConversionReport,
+	policy LossPolicy,
+) error {
+	if len(contributing) <= 1 {
+		return nil
+	}
+	clientTurns := 0
+	for _, index := range contributing {
+		if index >= request.RetainedTurns {
+			clientTurns++
+		}
+	}
+	if clientTurns > 1 {
+		return report.Lose(policy, FeatureMultipleSystemTurns, path, detail)
+	}
+	return report.Note(
+		FeatureMultipleSystemTurns,
+		path,
+		detail+" (the surplus turns came from the proxy's retained continuity history, not this request)",
+	)
 }

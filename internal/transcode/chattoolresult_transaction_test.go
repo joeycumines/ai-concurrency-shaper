@@ -15,38 +15,6 @@ import (
 	"testing"
 )
 
-// TestMultipartDetailRefusalFallsBackToEnvelope proves a refused
-// image_detail_original declines the multipart attempt instead of failing the
-// request the envelope converts fine.
-func TestMultipartDetailRefusalFallsBackToEnvelope(t *testing.T) {
-	result := CanonicalFunctionResult{
-		CallID: "call_1",
-		Parts: []CanonicalPart{
-			CanonicalText{Text: "look"},
-			CanonicalImage{MediaType: "image/png", Base64: "aGk=", Detail: "original"},
-		},
-	}
-	// The envelope conversions are approved; image_detail_original is denied.
-	policy := LossPolicy{Allowed: map[Feature]struct{}{
-		FeatureToolResultMultimodalContent: {},
-		FeatureToolResultJSONEnvelope:      {},
-	}}
-	var report ConversionReport
-	message, err := renderChatToolResult(result, toolResultImageCapabilities(), policy, &report)
-	if err != nil {
-		t.Fatalf("a refused detail must fall back to the envelope, got %v", err)
-	}
-	if message.Content == nil || message.Content.ContentStr == nil {
-		t.Fatalf("content = %+v, want the JSON envelope string arm", message.Content)
-	}
-	if reportHasFeature(report, FeatureImageDetailOriginal) {
-		t.Fatalf("the declined attempt leaked its detail loss: %+v", report.Losses)
-	}
-	if !reportHasFeature(report, FeatureToolResultJSONEnvelope) {
-		t.Fatalf("report = %+v, want the envelope decision", report.Losses)
-	}
-}
-
 // TestConversionReportAbsorbRespectsTheBound proves a scratch commit cannot
 // exceed the report entry bound and cannot add a second overflow note.
 func TestConversionReportAbsorbRespectsTheBound(t *testing.T) {

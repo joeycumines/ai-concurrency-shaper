@@ -787,8 +787,14 @@ func TestGeminiUpstreamStrictDefaultsRefuseInjectedLosses(t *testing.T) {
 		`{"model":"gemini-2.5-flash","max_tokens":8,"messages":[{"role":"user","content":"hi"}],"metadata":{"user_id":"u-1"}}`); code != http.StatusBadRequest || !strings.Contains(body, "metadata") {
 		t.Fatalf("strict policy M2G+metadata: status %d, body %s", code, body)
 	}
+	// A disabled parallel-tool-call setting is NOT a policy decision on a
+	// Gemini target: function-calling mode always allows parallel calls, so the
+	// disable is a provider limitation the client cannot make Gemini honour, and
+	// with no tools declared the model cannot emit a call at all. Refusing by
+	// default would turn an inert client setting into an availability failure,
+	// so it is recorded as a Note and served under every policy.
 	if code, body := post(t, pStrict, "/v1/responses",
-		`{"model":"gemini-2.5-flash","input":"hi","parallel_tool_calls":false}`); code != http.StatusBadRequest || !strings.Contains(body, "parallel_tool_calls") {
+		`{"model":"gemini-2.5-flash","input":"hi","parallel_tool_calls":false}`); code != http.StatusOK {
 		t.Fatalf("strict policy R2G+parallel_tool_calls: status %d, body %s", code, body)
 	}
 }

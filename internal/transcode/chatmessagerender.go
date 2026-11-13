@@ -17,13 +17,14 @@ import (
 // text block so the message shape stays valid.
 func canonicalTextTurnToChatMessage(
 	turn CanonicalTurn,
+	turnPath string,
 	role ChatMessageRole,
 	policy LossPolicy,
 	report *ConversionReport,
 ) (ChatMessage, error) {
 	var blocks []ChatContentBlock
 	dropped := 0
-	for _, part := range turn.Parts {
+	for i, part := range turn.Parts {
 		switch value := part.(type) {
 		case CanonicalText:
 			text := value.Text
@@ -35,12 +36,19 @@ func canonicalTextTurnToChatMessage(
 			if err := report.Lose(
 				policy,
 				FeatureSystemNonTextContent,
-				"messages[].content",
+				fmt.Sprintf("%s.parts[%d]", turnPath, i),
 				"non-text system content cannot be carried by a chat system message",
 			); err != nil {
 				return ChatMessage{}, err
 			}
 			dropped++
+		case CanonicalThinkingPart:
+			// Marker-signature thinking is proxy-synthesized reasoning: the
+			// request path scrubs it from replayed history before upstream
+			// rendering, so it never reaches a Chat upstream. Any other
+			// signature was already refused by ValidateCanonicalRequest, which
+			// is the only place the scrub can be made provably safe.
+			continue
 		default:
 			// Defensive: no request path reaches this arm today, because
 			// ValidateCanonicalRequest pre-empts refusal/call/result in a
@@ -50,7 +58,7 @@ func canonicalTextTurnToChatMessage(
 			// it - a message that merely repeated the path would not.
 			return ChatMessage{}, &UnsupportedFeatureError{
 				Protocol: "chat",
-				Path:     "messages[].content",
+				Path:     fmt.Sprintf("%s.parts[%d]", turnPath, i),
 				Feature:  fmt.Sprintf("non-text %T in %s message", part, role),
 			}
 		}
@@ -108,11 +116,29 @@ func joinChatSystemMessages(messages []ChatMessage) ChatMessage {
 	}
 }
 
+// chatMessageTextIsEmpty reports whether a rendered system-channel message
+// carries no text bytes at all. Such a message is proxy-invented: it exists only
+// because canonicalTextTurnToChatMessage synthesizes an empty text block for a
+// turn whose parts were all dropped, and emitting it would send the upstream an
+// empty system prompt the client never wrote.
+func chatMessageTextIsEmpty(message ChatMessage) bool {
+	if message.Content == nil {
+		return false
+	}
+	for _, block := range message.Content.ContentBlocks {
+		if block.Text != nil && *block.Text != "" {
+			return false
+		}
+	}
+	return true
+}
+
 // canonicalUserTurnToChatMessages renders a user turn into Chat messages:
 // function results become tool-role messages and the remaining content
 // becomes one user message. Image input requires the configured capability.
 func canonicalUserTurnToChatMessages(
 	turn CanonicalTurn,
+	turnPath string,
 	capabilities ChatCapabilities,
 	report *ConversionReport,
 	policy LossPolicy,
@@ -125,6 +151,7 @@ func canonicalUserTurnToChatMessages(
 			if len(contentParts) > 0 {
 				message, err := canonicalContentPartsToChatUserMessage(
 					contentParts,
+					turnPath,
 					capabilities,
 					report,
 					policy,
@@ -150,6 +177,7 @@ func canonicalUserTurnToChatMessages(
 	if len(contentParts) > 0 {
 		message, err := canonicalContentPartsToChatUserMessage(
 			contentParts,
+			turnPath,
 			capabilities,
 			report,
 			policy,
@@ -218,6 +246,7 @@ func chatImageDetail(
 // configured capability.
 func canonicalContentPartsToChatUserMessage(
 	parts []CanonicalPart,
+	turnPath string,
 	capabilities ChatCapabilities,
 	report *ConversionReport,
 	policy LossPolicy,
@@ -226,6 +255,15 @@ func canonicalContentPartsToChatUserMessage(
 	for i, part := range parts {
 		switch value := part.(type) {
 		case CanonicalText:
+			// A client-authored empty text part is forwarded verbatim. That is
+			// deliberate and differs from the SYSTEM-channel rule: there, an
+			// empty block is proxy-invented filler and is dropped. Here it can
+			// be the Messages decoder's own synthesis for a dialog turn whose
+			// blocks were all proxy-synthesized thinking (see
+			// messagesrequestdecode), which exists precisely to PRESERVE the
+			// turn boundary. Dropping it would either delete an assistant turn
+			// the model is expected to see or refuse the request outright, so
+			// preserving the boundary wins over suppressing zero bytes.
 			text := value.Text
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeText,
@@ -237,7 +275,7 @@ func canonicalContentPartsToChatUserMessage(
 				if err := report.Lose(
 					policy,
 					FeatureImageInput,
-					"messages[].content",
+					fmt.Sprintf("%s.parts[%d]", turnPath, i),
 					"image input is not supported by the configured chat provider",
 				); err != nil {
 					return ChatMessage{}, err
@@ -252,7 +290,7 @@ func canonicalContentPartsToChatUserMessage(
 					return ChatMessage{}, fmt.Errorf("content part %d: %w", i, err)
 				}
 			}
-			detail, err := chatImageDetail(value.Detail, "messages[].content", policy, report)
+			detail, err := chatImageDetail(value.Detail, fmt.Sprintf("%s.parts[%d]", turnPath, i), policy, report)
 			if err != nil {
 				return ChatMessage{}, err
 			}
@@ -271,7 +309,7 @@ func canonicalContentPartsToChatUserMessage(
 			if err := report.Lose(
 				policy,
 				FeatureDocumentInput,
-				"messages[].content",
+				fmt.Sprintf("%s.parts[%d]", turnPath, i),
 				"document input is not supported by the configured chat provider",
 			); err != nil {
 				return ChatMessage{}, err
@@ -281,9 +319,15 @@ func canonicalContentPartsToChatUserMessage(
 		case CanonicalRefusal:
 			return ChatMessage{}, &UnsupportedFeatureError{
 				Protocol: "chat",
-				Path:     "messages[].content",
+				Path:     fmt.Sprintf("%s.parts[%d]", turnPath, i),
 				Feature:  "refusal input content",
 			}
+
+		case CanonicalThinkingPart:
+			// A marker-signature thinking part is proxy-synthesized reasoning
+			// the request path scrubs in every turn role; anything else was
+			// already refused by ValidateCanonicalRequest.
+			continue
 
 		default:
 			return ChatMessage{}, fmt.Errorf(
@@ -326,9 +370,10 @@ func canonicalAssistantTurnToChatMessage(
 		case CanonicalThinkingPart:
 			// Marker-signature thinking is proxy-synthesized reasoning: the
 			// request path scrubs it from replayed history before upstream
-			// rendering, so it never reaches a Chat upstream. A non-marker
-			// thinking part is a source-authenticated artifact gated by
-			// RequirePortableArtifacts, which runs before this loop.
+			// rendering, so it never reaches a Chat upstream. Any other
+			// signature was refused by ValidateCanonicalRequest, which is the
+			// only gate that inspects turn parts (the artifact gate covers
+			// request.Artifacts).
 			continue
 
 		case CanonicalFunctionCall:
@@ -363,6 +408,19 @@ func canonicalAssistantTurnToChatMessage(
 		}
 	}
 	content := ChatMessageContent{ContentBlocks: blocks}
+	// A turn whose every part was scrubbed (only marker-signature thinking can
+	// be) would become a bodiless assistant message: no content, no tool calls,
+	// no refusal. The upstream would have to interpret a turn carrying nothing,
+	// and the operator would see a message the client never wrote. Refuse it
+	// locally instead; the Messages decoder synthesizes an empty text part for
+	// exactly this shape, so a decoder-produced request never reaches here.
+	if len(blocks) == 0 && len(toolCalls) == 0 && refusal == nil {
+		return ChatMessage{}, &UnrepresentableError{
+			Protocol: "chat",
+			Path:     turnPath,
+			Detail:   "the turn has no content that a chat assistant message can carry after scrubbing proxy-synthesized thinking",
+		}
+	}
 	message := ChatMessage{
 		Role: ChatMessageRoleAssistant,
 	}

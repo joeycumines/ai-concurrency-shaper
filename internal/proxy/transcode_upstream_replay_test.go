@@ -124,9 +124,14 @@ func TestReplayClaudeCodeMidConversationSystem(t *testing.T) {
 		UpstreamPath:     "/v1/chat/completions",
 		// The CLI-default approvals this scenario needs: the position loss
 		// is approved out of the box (Claude Code sends mid-conversation
-		// system on every request), alongside the usage-timing losses.
+		// system on every request), and so is the join of the envelope system
+		// plus the inline one — every target files that merge under
+		// multiple_system_turns, and it is a default approval precisely so a
+		// normal Claude Code request is served rather than refused. The usage
+		// timing losses are here for the same reason.
 		LossPolicy: transcode.LossPolicy{Allowed: map[transcode.Feature]struct{}{
 			transcode.FeatureMidConversationSystem:  {},
+			transcode.FeatureMultipleSystemTurns:    {},
 			transcode.FeatureUsageCacheReadUnknown:  {},
 			transcode.FeatureUsageCacheWriteUnknown: {},
 			transcode.FeatureUsageReasoningUnknown:  {},

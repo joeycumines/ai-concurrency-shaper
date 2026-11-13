@@ -26,16 +26,14 @@ type toolResultEnvelope struct {
 // renderChatToolResult renders a function result into a complete Chat
 // tool-role message — the dedicated tool-result renderer, never the
 // user-message renderer. Exact text results stay exact
-// text. Image, document, or mixed results are rejected under strict policy
-// (UnrepresentableError — local, never corrupt wire) unless the
-// ToolResultImages capability is enabled, in which case they render as
-// multipart content blocks (text and image_url parts, order preserved) so a
-// vision model can see the image. Without that capability they fall back to
-// the observable encoding: the deterministic JSON text envelope
+// text. Image, document, or mixed results render as multipart content blocks
+// (text and image_url parts, order preserved) so a vision model can see the
+// image when the ToolResultImages capability is enabled. Otherwise they fall
+// back to the observable encoding: the deterministic JSON text envelope
 // (transcode_version 1), gated by the tool_result_multimodal_content and
 // tool_result_json_envelope permissions and recorded in the conversion
-// report. Invalid wire (image_url blocks inside a tool-role message for a
-// target that cannot carry them) is never emitted.
+// report. An error is always one of the policy refusals those keys report or a
+// typed local unrepresentable shape — never an upstream wire error.
 func renderChatToolResult(
 	result CanonicalFunctionResult,
 	capabilities ChatCapabilities,
@@ -163,14 +161,24 @@ func renderChatToolResultMultipart(
 	if !capabilities.ImageInput {
 		return ChatMessage{}, false, nil
 	}
-	// The attempt is TRANSACTIONAL. This renderer may decline (a document
-	// part, or an image media type the encoder rejects) and the caller then
-	// falls back to the envelope, which carries no detail field and never
-	// renders a part. Recording into the caller's report as we go would
-	// therefore leave notes and policy-gated losses describing content that
-	// never reached the wire - and, for a client-sent image_detail_original,
-	// could turn a request the envelope converts fine into a rejection. So
-	// collect into a scratch report and commit it only on success.
+	// The attempt is TRANSACTIONAL. This renderer may DECLINE a shape the
+	// multipart form cannot represent (a document, an image media type the
+	// encoder rejects, no blocks) and the caller then falls back to the
+	// envelope, which carries no detail field and never renders a part.
+	// Recording into the caller's report as we go would leave notes and
+	// policy-gated losses describing content that never reached the wire, so a
+	// scratch report is collected and committed only on success.
+	//
+	// A decision the POLICY already took is NOT a decline. Propagating it is the
+	// only honest outcome:
+	//   - a denied image_detail_original means the operator refused the
+	//     downgrade to "high". The envelope has no detail field at all, so
+	//     falling back would apply a total drop — strictly stronger than the
+	//     downgrade that was refused.
+	//   - an invalid detail value is malformed client input. Declining would
+	//     serve it with the value silently re-encoded away, while the same value
+	//     on a user-message image hard-fails: the content location must not
+	//     decide the verdict.
 	scratch := &ConversionReport{}
 	var blocks []ChatContentBlock
 	for _, part := range parts {
@@ -193,13 +201,7 @@ func renderChatToolResultMultipart(
 			}
 			detail, err := chatImageDetail(value.Detail, "messages[].tool_result.content", policy, scratch)
 			if err != nil {
-				// A policy refusal (not an encoding failure) is a DECLINE, not
-				// a fatal error: the JSON envelope carries no detail field and
-				// is gated by its own approved keys, so the caller's fallback
-				// serves this request where the multipart path cannot. Failing
-				// here would turn a request the envelope converts fine into a
-				// rejection.
-				return ChatMessage{}, false, nil
+				return ChatMessage{}, false, err
 			}
 			blocks = append(blocks, ChatContentBlock{
 				Type: ChatContentBlockTypeImage,
@@ -268,13 +270,15 @@ func encodeToolResultEnvelope(parts []CanonicalPart) (string, error) {
 			if value.FileID != "" {
 				// The Chat envelope has no file-id arm: it can carry inline
 				// data or a url, but an id-only document names content the
-				// envelope cannot express. Saying so is the honest outcome;
-				// routing it through encodeDataURL would fail with "empty
-				// data", which misdescribes the problem entirely.
+				// envelope cannot express. Saying so — and naming the
+				// identifier, which is the only handle the operator has —
+				// is the honest outcome; routing it through encodeDataURL
+				// would fail with "empty data", which misdescribes the
+				// problem entirely.
 				return "", &UnrepresentableError{
 					Protocol: "chat",
 					Path:     "messages[].tool_result.content",
-					Detail:   "a file identifier document has no Chat tool-result form",
+					Detail:   fmt.Sprintf("a file identifier document (%q) has no Chat tool-result form", value.FileID),
 				}
 			}
 			url := value.URL

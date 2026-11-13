@@ -1434,10 +1434,22 @@ func TestDecodeMessagesRequestStrictness(t *testing.T) {
 	if result.Request.ParallelTools == nil || *result.Request.ParallelTools {
 		t.Fatalf("parallel tool calls = %v, want the false the client asked for", result.Request.ParallelTools)
 	}
-	// The decision belongs to a target that cannot carry it.
-	context := testExchangeContext()
-	if _, _, err := RenderChatRequest(result.Request, context, ChatCapabilities{}); err == nil {
-		t.Fatal("chat render accepted a parallel-tools disable without its capability")
+	// The decision belongs to a target that cannot carry it — but only where the
+	// loss is REAL. This request declares no tools, so no call can happen and
+	// the client's disable is already satisfied: the render records a Note and
+	// serves it, rather than refusing a request that loses nothing.
+	if _, report, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{}); err != nil {
+		t.Fatalf("a tool-less disable must not refuse a default deployment: %v", err)
+	} else if !reportHasFeature(report, FeatureParallelToolCalls) {
+		t.Fatalf("report = %+v, want the parallel_tool_calls Note", report.Losses)
+	}
+
+	// With tools declared the same disable IS a real loss, so the same target
+	// refuses it under a policy that does not approve it.
+	withTools := result.Request
+	withTools.Tools = []CanonicalTool{{Name: "f", JSONSchema: []byte(`{"type":"object"}`)}}
+	if _, _, err := RenderChatRequest(withTools, testExchangeContext(), ChatCapabilities{}); err == nil {
+		t.Fatal("chat render accepted a real parallel-tools disable without its capability")
 	}
 
 	// Non-string metadata values are rejected, not dropped.
@@ -1884,10 +1896,13 @@ func TestRenderChatRequestMidConversationSystemConsolidates(t *testing.T) {
 	}
 
 	// Approved policy: exactly one leading system message carrying all
-	// system-channel text in order, and exactly one recorded loss.
+	// system-channel text in order, and exactly one recorded position loss.
+	// The merge itself is the separate shared multiple_system_turns decision,
+	// which every target files under the same key.
 	permissive := testExchangeContext()
 	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
 		FeatureMidConversationSystem: {},
+		FeatureMultipleSystemTurns:   {},
 	}}
 	rendered, report, err := RenderChatRequest(result.Request, permissive, ChatCapabilities{})
 	if err != nil {
@@ -1935,9 +1950,11 @@ func TestRenderChatRequestMidConversationSystemConsolidates(t *testing.T) {
 func TestRenderChatRequestLeadingSystemPairMergesWithNote(t *testing.T) {
 	// Two LEADING system turns (envelope.system + an inline system before
 	// any dialog) also consolidate: open-weights Jinja templates reject a
-	// second system message even at index 1. Leading-only consolidation is
-	// a sanctioned note under the same key — observable without a policy
-	// approval, so the strict render succeeds with the note recorded.
+	// second system message even at index 1. The merge takes the shared
+	// multiple_system_turns decision — the same key and severity the
+	// Responses, Messages and Gemini targets record — so one policy controls
+	// the encoding everywhere; under the strict policy the client's own
+	// surplus refuses, and under the approval it renders with one loss.
 	body := []byte(`{
 		"model":"m",
 		"max_tokens":100,
@@ -1951,9 +1968,14 @@ func TestRenderChatRequestLeadingSystemPairMergesWithNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, report, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{})
+	if _, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{}); err == nil {
+		t.Fatal("strict render accepted a client-authored two-turn system prompt")
+	}
+	permissive := testExchangeContext()
+	permissive.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureMultipleSystemTurns: {}}}
+	rendered, report, err := RenderChatRequest(result.Request, permissive, ChatCapabilities{})
 	if err != nil {
-		t.Fatalf("strict render rejected a leading-only system merge: %v", err)
+		t.Fatalf("approved render rejected a leading-only system merge: %v", err)
 	}
 	var chat ChatRequest
 	if err := strictDecode(rendered, &chat); err != nil {
@@ -1980,12 +2002,15 @@ func TestRenderChatRequestLeadingSystemPairMergesWithNote(t *testing.T) {
 	}
 	found := 0
 	for _, loss := range report.Losses {
-		if loss.Feature == FeatureMidConversationSystem {
+		if loss.Feature == FeatureMultipleSystemTurns {
 			found++
 		}
 	}
 	if found != 1 {
-		t.Fatalf("mid_conversation_system entries = %d, want exactly 1: %+v", found, report.Losses)
+		t.Fatalf("multiple_system_turns entries = %d, want exactly 1: %+v", found, report.Losses)
+	}
+	if reportHasFeature(report, FeatureMidConversationSystem) {
+		t.Fatalf("the leading merge was filed under mid_conversation_system: %+v", report.Losses)
 	}
 }
 

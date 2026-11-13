@@ -28,8 +28,14 @@ func chatSystemNonTextRequest(part CanonicalPart) CanonicalRequest {
 }
 
 // TestChatSystemImageLossApproved proves an approved
-// system_non_text_content drop is observable (the loss is recorded) and the
-// system message stays a valid content union.
+// system_non_text_content drop is observable (the loss is recorded) and that
+// the dropped turn invents no system content.
+//
+// An all-dropped system turn must not become an empty system message: the block
+// would hold no bytes, so the proxy would be inventing a system prompt the
+// client never wrote, and the Responses target omits its instructions field for
+// the identical source shape. The drop is observable through the recorded loss
+// instead.
 func TestChatSystemImageLossApproved(t *testing.T) {
 	context := testExchangeContext()
 	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
@@ -58,13 +64,9 @@ func TestChatSystemImageLossApproved(t *testing.T) {
 	if err := json.Unmarshal(rendered, &request); err != nil {
 		t.Fatalf("rendered request is not JSON: %v", err)
 	}
-	if len(request.Messages) == 0 || request.Messages[0].Role != "system" {
-		t.Fatalf("messages = %+v, want a leading system message", request.Messages)
-	}
-	// The system content must remain a valid text union (never an empty or
-	// image-bearing block array).
-	if !strings.Contains(string(request.Messages[0].Content), `"type":"text"`) {
-		t.Fatalf("system content = %s, want a text block", request.Messages[0].Content)
+	if len(request.Messages) != 1 || request.Messages[0].Role != "user" {
+		t.Fatalf("messages = %+v, want only the user message: an all-dropped system turn "+
+			"must not become an empty system prompt", request.Messages)
 	}
 	if strings.Contains(string(rendered), "image_url") {
 		t.Fatalf("dropped system image leaked into the request: %s", rendered)
@@ -262,8 +264,14 @@ func TestChatSystemNonTextRejectsContentFreeConversation(t *testing.T) {
 // passed the entire package. They are defensive, so a unit test calls the
 // renderers directly with a part the request IR would pre-empt, which is
 // exactly the case a future caller could introduce.
+//
+// The probe is a refusal part rather than a thinking part: a thinking part is
+// no longer "non-text content" in these arms. Marker-signature thinking is
+// scrubbed in every turn role, and any other signature is refused centrally by
+// ValidateCanonicalRequest with authenticated_thinking, so it cannot reach this
+// diagnostic at all.
 func TestNonTextSystemPartDiagnosticNamesTheOffender(t *testing.T) {
-	part := CanonicalThinkingPart{Text: "hidden", Signature: "sig"}
+	part := CanonicalRefusal{Text: "hidden"}
 
 	t.Run("chat arm names the part type and the role", func(t *testing.T) {
 		ctx := testExchangeContext()
@@ -271,7 +279,7 @@ func TestNonTextSystemPartDiagnosticNamesTheOffender(t *testing.T) {
 		var report ConversionReport
 		_, err := canonicalTextTurnToChatMessage(
 			CanonicalTurn{Role: CanonicalSystem, Parts: []CanonicalPart{part}},
-			ChatMessageRoleSystem, ctx.LossPolicy, &report,
+			"turns[0]", ChatMessageRoleSystem, ctx.LossPolicy, &report,
 		)
 		if err == nil {
 			t.Fatal("want an UnsupportedFeatureError for a non-text system part")
@@ -280,7 +288,7 @@ func TestNonTextSystemPartDiagnosticNamesTheOffender(t *testing.T) {
 		if !errors.As(err, &ufe) {
 			t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 		}
-		if !strings.Contains(ufe.Feature, "CanonicalThinkingPart") {
+		if !strings.Contains(ufe.Feature, "CanonicalRefusal") {
 			t.Errorf("Feature = %q, want it to name the offending part type", ufe.Feature)
 		}
 		if !strings.Contains(ufe.Feature, "system") {
@@ -301,7 +309,7 @@ func TestNonTextSystemPartDiagnosticNamesTheOffender(t *testing.T) {
 		if !errors.As(err, &ufe) {
 			t.Fatalf("err = %T %v, want *UnsupportedFeatureError", err, err)
 		}
-		if !strings.Contains(ufe.Feature, "CanonicalThinkingPart") {
+		if !strings.Contains(ufe.Feature, "CanonicalRefusal") {
 			t.Errorf("Feature = %q, want it to name the offending part type", ufe.Feature)
 		}
 		if ufe.Feature == ufe.Path {

@@ -201,19 +201,9 @@ func TestMarkerThinkingIsScrubbedByEveryRenderer(t *testing.T) {
 			}},
 		},
 	}
-	for name, render := range map[string]func(*ExchangeContext) ([]byte, ConversionReport, error){
-		"chat": func(context *ExchangeContext) ([]byte, ConversionReport, error) {
-			return RenderChatRequest(request, context, ChatCapabilities{})
-		},
-		"messages": func(context *ExchangeContext) ([]byte, ConversionReport, error) {
-			return RenderMessagesRequest(request, context)
-		},
-		"responses": func(context *ExchangeContext) ([]byte, ConversionReport, error) {
-			return RenderResponsesRequest(request, context)
-		},
-	} {
+	for name, render := range allRequestRenderers() {
 		t.Run(name, func(t *testing.T) {
-			rendered, _, err := render(testExchangeContext())
+			rendered, _, err := render(request, testExchangeContext())
 			if err != nil {
 				t.Fatalf("render: %v", err)
 			}
@@ -224,38 +214,53 @@ func TestMarkerThinkingIsScrubbedByEveryRenderer(t *testing.T) {
 	}
 }
 
-// TestMessagesDisableParallelToolUseWithoutToolsIsReported proves a tool-less
-// Messages exchange cannot silently drop the setting: the Messages wire has
-// nothing to attach disable_parallel_tool_use to, so it takes the approved loss.
-func TestMessagesDisableParallelToolUseWithoutToolsIsReported(t *testing.T) {
+// TestMessagesDisableParallelToolUseWithoutToolsIsNoted proves a tool-less
+// Messages exchange cannot silently drop the setting — and that it must not
+// REFUSE it either.
+//
+// The setting is a Note here rather than a policy-gated loss because it is
+// already satisfied: with no tools declared the model cannot emit a tool call at
+// all, parallel or otherwise. parallel_tool_calls is not a default approval, so
+// charging it would refuse a request that loses nothing; the Note records the
+// elision without pretending a client intent was destroyed.
+func TestMessagesDisableParallelToolUseWithoutToolsIsNoted(t *testing.T) {
 	request := decodeMessagesForTest(t,
 		`{"model":"m","max_tokens":10,"tool_choice":{"type":"auto","disable_parallel_tool_use":true},`+
 			`"messages":[{"role":"user","content":"hi"}]}`)
 	if request.ParallelTools == nil || *request.ParallelTools {
 		t.Fatalf("parallel tools = %v, want false", request.ParallelTools)
 	}
-	// Strict: the drop is a policy decision, so it refuses with the key named.
-	_, _, err := RenderMessagesRequest(request, testExchangeContext())
-	if err == nil {
-		t.Fatal("a tool-less disable was silently dropped under strict policy")
+	// Strict: the elision is observable without a policy decision, so the
+	// request renders.
+	_, report, err := RenderMessagesRequest(request, testExchangeContext())
+	if err != nil {
+		t.Fatalf("a tool-less disable refused a default deployment: %v", err)
 	}
-	if !strings.Contains(err.Error(), string(FeatureParallelToolCalls)) {
-		t.Fatalf("err = %v, want it to name %s", err, FeatureParallelToolCalls)
+	found := false
+	for _, loss := range report.Losses {
+		if loss.Feature != FeatureParallelToolCalls {
+			continue
+		}
+		found = true
+		if loss.Kind != NoteRecord {
+			t.Fatalf("the inert tool-less disable recorded a %v: %+v", loss.Kind, loss)
+		}
 	}
-	// Approved: the loss is recorded and the request renders.
-	context := testExchangeContext()
-	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{FeatureParallelToolCalls: {}}}
-	if _, report, err := RenderMessagesRequest(request, context); err != nil {
-		t.Fatalf("approved render: %v", err)
-	} else if !reportHasFeature(report, FeatureParallelToolCalls) {
-		t.Fatalf("report = %+v, want the parallel_tool_calls loss", report.Losses)
+	if !found {
+		t.Fatalf("report = %+v, want the parallel_tool_calls Note", report.Losses)
 	}
 }
 
 // TestMessagesLeadingMergeNoteFiresForRetainedTurns proves the leading-merge
-// Note reports the consolidation even when the leading system turns came from
-// the continuity store: the merge is a sanctioned encoding, not a policy gate,
-// and the Chat target reports the identical shape.
+// decision is reported even when the leading system turns came from the
+// continuity store: the merge is a sanctioned encoding, not a policy gate, and
+// the other three targets report the identical shape.
+//
+// The decision is filed under multiple_system_turns rather than
+// mid_conversation_system: the same encoding must carry the same key on every
+// target, or an operator denying multiple_system_turns would refuse the
+// Responses target while the identical source rendered here. A leading merge is
+// also not a mid-conversation move.
 func TestMessagesLeadingMergeNoteFiresForRetainedTurns(t *testing.T) {
 	text := func(s string) []CanonicalPart { return []CanonicalPart{CanonicalText{Text: s}} }
 	request := retainedMessagesRequest([]CanonicalTurn{
@@ -267,11 +272,11 @@ func TestMessagesLeadingMergeNoteFiresForRetainedTurns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if !reportHasFeature(report, FeatureMidConversationSystem) {
+	if !reportHasFeature(report, FeatureMultipleSystemTurns) {
 		t.Fatalf("report = %+v, want the leading-merge Note for retained leading turns", report.Losses)
 	}
 	for _, loss := range report.Losses {
-		if loss.Feature == FeatureMidConversationSystem && loss.Kind == LossRecord {
+		if loss.Feature == FeatureMultipleSystemTurns && loss.Kind == LossRecord {
 			t.Fatalf("a sanctioned merge was recorded as a policy-gated loss: %+v", loss)
 		}
 	}
@@ -280,7 +285,6 @@ func TestMessagesLeadingMergeNoteFiresForRetainedTurns(t *testing.T) {
 // TestToolResultFileIDDocumentIsNamedHonestly proves a file-id-only document
 // fails with a message that names the identifier rather than "empty data".
 func TestToolResultFileIDDocumentIsNamedHonestly(t *testing.T) {
-	var report ConversionReport
 	_, err := encodeToolResultEnvelope([]CanonicalPart{
 		CanonicalDocument{FileID: "file-123"},
 	})
@@ -294,5 +298,9 @@ func TestToolResultFileIDDocumentIsNamedHonestly(t *testing.T) {
 	if !strings.Contains(unrepresentable.Detail, "file identifier") {
 		t.Fatalf("detail = %q, want it to name the file identifier", unrepresentable.Detail)
 	}
-	_ = report
+	// The identifier itself is the operator's only handle on the offending
+	// document, so the message must carry it, not just its category.
+	if !strings.Contains(unrepresentable.Detail, "file-123") {
+		t.Fatalf("detail = %q, want it to name the identifier value", unrepresentable.Detail)
+	}
 }
