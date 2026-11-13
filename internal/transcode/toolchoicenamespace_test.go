@@ -60,11 +60,19 @@ func TestNamedToolChoiceSharedBareNameIsRefused(t *testing.T) {
 	}
 }
 
-// TestNamedToolChoiceSharedBareNameIsRefusedEvenWithAPlainOwner proves the
-// refusal does not depend on which tool claimed the bare flat name: a plain
-// function that owns the name does not make an ambiguous child reference safe
-// to bind, because the client may have meant either child.
-func TestNamedToolChoiceSharedBareNameIsRefusedEvenWithAPlainOwner(t *testing.T) {
+// TestNamedToolChoicePlainOwnerWinsEvenWithSharedChildNames proves a plain
+// function that owns the bare name IS the referent, even when several namespace
+// children also carry that bare name. The flatten qualified every one of those
+// children, so the wire carries exactly one tool named "dup" — the plain
+// function — and a named choice in the Responses union (which has no namespace
+// selector) can only denote it.
+//
+// This case previously refused. Refusing bought the operator nothing and cost a
+// request that the wire answers unambiguously; the possible reinterpretation is
+// recorded instead, which is the invariant that matters: the bind is never
+// silent. Genuine ambiguity — several children sharing a bare name with NO plain
+// owner — still refuses, because then nothing on the wire is the referent.
+func TestNamedToolChoicePlainOwnerWinsEvenWithSharedChildNames(t *testing.T) {
 	body := []byte(`{
 		"model":"m",
 		"input":"hi",
@@ -79,12 +87,15 @@ func TestNamedToolChoiceSharedBareNameIsRefusedEvenWithAPlainOwner(t *testing.T)
 			]}
 		]
 	}`)
-	choice, _, err := decodeToolChoice(t, body, StrictLossPolicy())
-	if err == nil {
-		t.Fatalf("an ambiguous named choice was accepted and bound to %+v", choice)
+	choice, report, err := decodeToolChoice(t, body, StrictLossPolicy())
+	if err != nil {
+		t.Fatalf("the plain owner was refused: %v", err)
 	}
-	if !strings.Contains(err.Error(), "ambiguous") {
-		t.Fatalf("err = %q, want it to explain the ambiguity", err)
+	if choice == nil || choice.Mode != "named" || choice.Name != "dup" {
+		t.Fatalf("tool_choice = %+v, want the plain function's own name", choice)
+	}
+	if !reportHasAt(report, FeatureToolChoiceNamespaceBind, "tool_choice") {
+		t.Fatalf("the plain-owner bind was not recorded: %+v", report.Losses)
 	}
 }
 

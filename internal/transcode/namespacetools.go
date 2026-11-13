@@ -57,42 +57,63 @@ func chooseToolFlatName(
 }
 
 // resolveNamedToolChoice adjudicates a client-sent named tool choice against the
-// declared namespace children, and reports an error when the name identifies
-// MORE THAN ONE of them.
+// declared namespace children and returns the wire name the target must render.
 //
-// The ambiguity test runs FIRST because it is the only case that can be wrong
-// silently. chooseToolFlatName gives a child the bare name only while that name
-// is free and reserves it thereafter, so whenever a namespace child shares the
-// requested bare name, some canonical tool already answers to it — whether that
-// is the first child itself or a plain function of the same name. Returning
-// early on that tool would bind a genuinely ambiguous reference to whichever
-// child claimed the name first, which is a guess the client cannot see.
+// The client names a tool it knows: the bare function name it declared. The
+// flatten may have moved that name, and the wire carries only the flat name, so
+// the outcomes are, in order:
 //
-// With no ambiguity established the choice needs no translation: the bare name
-// the client sent is already the wire name of the tool that owns it, because the
-// flatten keeps a child's bare name whenever it is free. The plain-owner bind is
-// still a possible reinterpretation — the client might have meant a child whose
-// flat name had to be qualified — so the caller records it.
+//   - a PLAIN function owns the bare name: it is the only wire tool answering
+//     to it (every child sharing that name was qualified), so the choice binds
+//     as sent. The plain-owner bind is still a possible reinterpretation — the
+//     client might have meant a child whose flat name had to be qualified — so
+//     the caller notes it.
+//   - exactly ONE namespace child shares it: that child's flat wire name,
+//     which differs from the client's spelling whenever the bare name was
+//     displaced. Returning the bare spelling here would bind the choice to a
+//     DIFFERENT tool.
+//   - no child shares it, but the name is a flat name the PROXY invented (e.g.
+//     "ns1__foo" for ns1.foo): the client could not have known that spelling, so
+//     it names nothing — refused as dangling rather than reinterpreted.
+//   - several children share it and no plain function owns it: nothing on the
+//     wire is the referent, so the reference is refused as ambiguous.
 func resolveNamedToolChoice(
 	names *ToolNames,
+	tools []CanonicalTool,
 	name string,
-) error {
+) (string, error) {
 	if names == nil {
-		return nil
+		return name, nil
 	}
-	matches := 0
-	for ref := range names.RefToFlat {
+	if namedChoicePlainOwner(names, tools, name) {
+		return name, nil
+	}
+	var (
+		matchedFlat string
+		matches     int
+	)
+	for ref, flat := range names.RefToFlat {
 		if ref.Name == name {
 			matches++
+			matchedFlat = flat
 		}
 	}
-	if matches > 1 {
-		return fmt.Errorf(
+	switch {
+	case matches > 1:
+		return "", fmt.Errorf(
 			"tool_choice names %q, which multiple declared namespace children share; the reference is ambiguous",
 			name,
 		)
+	case matches == 1:
+		return matchedFlat, nil
 	}
-	return nil
+	if _, synthetic := names.FlatToRef[name]; synthetic {
+		return "", fmt.Errorf(
+			"tool_choice names tool %q, which only this proxy's namespace flatten could have produced and no declared tool answers to; the reference names nothing",
+			name,
+		)
+	}
+	return name, nil
 }
 
 // namedChoicePlainOwner reports whether a plain function (not a namespace
