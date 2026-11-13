@@ -104,3 +104,33 @@ func TestMultipartDocumentOnlyStillDeclines(t *testing.T) {
 		t.Fatalf("an image decision was recorded for a document-only result: %+v", report.Losses)
 	}
 }
+
+// TestMultipartDetailsNameTheirOwnPart proves two images in one tool result are
+// reported at their OWN paths. The aggregated request log dedupes by
+// "feature at path", so a shared path collapses two different decisions into one
+// line and understates what the conversion did.
+func TestMultipartDetailsNameTheirOwnPart(t *testing.T) {
+	parts := []CanonicalPart{
+		CanonicalImage{MediaType: "image/png", Base64: "AAAA", Detail: "original"},
+		CanonicalImage{MediaType: "image/png", Base64: "BBBB"},
+	}
+	policy := LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureImageDetailOriginal: {},
+	}}
+	report := ConversionReport{}
+	if _, err := renderChatToolResult(
+		CanonicalFunctionResult{CallID: "call_1", Parts: parts},
+		"turns[0].parts[0]",
+		multipartCaps(),
+		policy,
+		&report,
+	); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if !reportHasAt(report, FeatureImageDetailOriginal, "turns[0].parts[0].parts[0]") {
+		t.Fatalf("report = %+v, want the detail downgrade at the first image", report.Losses)
+	}
+	if !reportHasAt(report, FeatureImageDetailInvented, "turns[0].parts[0].parts[1]") {
+		t.Fatalf("report = %+v, want the invented detail at the second image", report.Losses)
+	}
+}

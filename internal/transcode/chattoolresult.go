@@ -194,7 +194,11 @@ func renderChatToolResultMultipart(
 		if !ok {
 			continue
 		}
-		detail, err := chatImageDetail(image.Detail, path+".content", policy, scratch)
+		// The path names the PART. Two images in one tool result can need
+		// different decisions, and the aggregated request log dedupes by
+		// "feature at path": a shared path would collapse them into one line and
+		// understate what the conversion decided.
+		detail, err := chatImageDetail(image.Detail, fmt.Sprintf("%s.parts[%d]", path, i), policy, scratch)
 		if err != nil {
 			return ChatMessage{}, false, err
 		}
