@@ -1021,17 +1021,21 @@ refusal. When the bare name is already owned by a surviving tool the exchange
 is refused outright: no policy can approve re-pointing a client-sent call at
 a different tool.
 `tool_choice` has no namespaced selector (Codex sends `"auto"`), and a named
-choice addresses the tool the client knows: a name that matches a plain
-function or a declared flat name is used as-is. A name matching no surviving
-tool, or one that more than one namespace child shares, is refused rather than
-guessed — including when one of those children happens to own the bare name and
-a plain function owns it too. When a plain function owns the name while a
-namespace child of the same bare name was qualified, the plain function is the
-target and the possible reinterpretation is recorded under the
+choice addresses the tool the client knows. A plain function that owns the name
+is the target, even when namespace children also carry that bare name — the
+flatten qualified every one of them, so the wire holds exactly one tool under it,
+and the possible reinterpretation is recorded under the
 `tool_choice_namespace_bind` note key (a sanctioned-encoding note, deliberately
 not policy-addressable, so it never appears under
 `namespace_replay_undeclared`, which means a replayed CALL named an undeclared
-namespace). A namespace whose inner grouping cannot be represented — two different outer
+namespace). A bare name exactly one namespace child shares is translated to that
+child's flat wire name, which differs from the client's spelling whenever the
+bare name was displaced by another tool. A name no declared tool answers to is
+refused — including a spelling only this proxy's flatten could have produced
+(`ns__child`), which the client could not have known. A bare name that more than
+one namespace child shares, with no plain function owning it, is refused as
+ambiguous rather than guessed.
+A namespace whose inner grouping cannot be represented — two different outer
 namespaces that each contain an inner namespace of the same name with a child
 of the same name — is refused before any upstream request, because the IR keeps
 only the innermost qualifier and the two tools would be indistinguishable.

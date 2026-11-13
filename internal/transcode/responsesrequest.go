@@ -274,15 +274,17 @@ func DecodeResponsesRequest(
 		if err != nil {
 			return DecodeResult{}, nil, err
 		}
-		// A named choice names the tool the CLIENT knows. Two namespace
-		// children that share a bare child name make that name ambiguous, and
-		// no flat-name lookup can honestly resolve it: the request is refused
-		// rather than bound to whichever child claimed the bare name first.
-		// With no ambiguity the client's own spelling is already the wire
-		// name, because the flatten keeps a child's bare name while it is free.
+		// A named choice names the tool the CLIENT knows. The flatten may have
+		// moved that name, so the adjudication resolves it to the wire name the
+		// target must render (see resolveNamedToolChoice) and refuses a name no
+		// declared tool answers to rather than silently reinterpreting it.
 		if choice.Mode == "named" {
-			if err := resolveNamedToolChoice(names, choice.Name); err != nil {
+			resolved, err := resolveNamedToolChoice(names, result.Request.Tools, choice.Name)
+			if err != nil {
 				return DecodeResult{}, nil, err
+			}
+			if resolved != choice.Name {
+				choice.Name = resolved
 			}
 			if namedChoicePlainOwner(names, result.Request.Tools, choice.Name) &&
 				namespaceChildSharesBareName(names, choice.Name) {
