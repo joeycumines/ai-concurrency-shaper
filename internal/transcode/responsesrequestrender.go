@@ -318,17 +318,35 @@ func RenderResponsesRequest(
 	}
 
 	out := openairesponses.Request{
-		Model:             model,
-		Instructions:      instructions,
-		Input:             &ResponsesInput{Items: input},
-		MaxOutputTokens:   request.MaxOutputTokens,
-		ParallelToolCalls: request.ParallelTools,
-		Temperature:       request.Temperature,
-		TopP:              request.TopP,
-		Metadata:          request.Metadata,
+		Model:           model,
+		Instructions:    instructions,
+		Input:           &ResponsesInput{Items: input},
+		MaxOutputTokens: request.MaxOutputTokens,
+		Temperature:     request.Temperature,
+		TopP:            request.TopP,
+		Metadata:        request.Metadata,
 		// The stream field is emitted only when true, matching the
 		// pre-contract behavior (a non-streaming request body omits it).
 		Stream: wire.Field[bool]{Value: true, Present: request.Stream},
+	}
+
+	// Parallel tool calls, decided once by the shared helper: this wire models
+	// the field, so the helper's only job here is to keep it off a request with
+	// no tool a call could invoke and to note an inert setting.
+	if request.ParallelTools != nil {
+		emit, err := chargeParallelTools(
+			request,
+			true,
+			"parallel_tool_calls",
+			&report,
+			context.lossPolicy(),
+		)
+		if err != nil {
+			return nil, report, err
+		}
+		if emit {
+			out.ParallelToolCalls = request.ParallelTools
+		}
 	}
 
 	// Top-k sampling has no Responses representation: only a Messages or

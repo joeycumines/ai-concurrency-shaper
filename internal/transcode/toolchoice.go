@@ -86,19 +86,18 @@ func canonicalizeAnthropicToolChoice(
 // reconcileToolChoice checks a canonicalized tool choice against the tools
 // that actually survive conversion. A named choice must
 // reference a surviving tool under every policy — a dangling reference is
-// malformed no matter how many tools the client sent. A mode choice is only
-// reconciled when the client DID send tools and the converter dropped them
-// all (built-in-tool or server-tool loss): "required" against zero tools is
-// a client-dialect error (the converter would otherwise render an invalid
-// upstream request), and "auto" is dropped with an observable note because
-// an empty tool list leaves it meaningless. "none" is PRESERVED: it names no
-// tool, so it cannot dangle, and "call no tool" is exactly what an empty tool
-// list already means — dropping it would change nothing the upstream reads.
-// When the client sent no tools at all the choice passes through untouched —
-// the upstream judges that incoherence, not the converter
-// (TestDecodeResponsesRequestToolChoiceRequired pins it). droppedFeature names
-// the key of the loss that removed the tools, so the note is filed under the
-// decision that actually happened rather than a fixed guess.
+// malformed no matter how many tools the client sent. A MODE choice is
+// reconciled when the client DID send tools and the converter dropped them all
+// (built-in-tool or server-tool loss): every mode choice is then dropped with
+// the tools, because OpenAI Chat, OpenAI Responses and Anthropic Messages all
+// reject tool_choice when no tool is declared ("tool_choice is only allowed
+// when tools are specified"). "required" is refused instead: it asserts that a
+// call must happen, and no remaining tool can satisfy that. When the client sent
+// no tools at all the choice passes through untouched — the upstream judges that
+// incoherence, not the converter (TestDecodeResponsesRequestToolChoiceRequired
+// pins it). droppedFeature names the key of the loss that removed the tools, so
+// the note is filed under the decision that actually happened rather than a
+// fixed guess.
 func reconcileToolChoice(
 	choice *CanonicalToolChoice,
 	requestToolCount int,
@@ -123,22 +122,22 @@ func reconcileToolChoice(
 	if requestToolCount == 0 || len(request.Tools) > 0 {
 		return choice, nil
 	}
-	switch choice.Mode {
-	case "required":
+	if choice.Mode == "required" {
 		return nil, errors.New(
 			"tool_choice required but no portable tools remain after the tool loss",
 		)
-	case "auto":
-		if err := report.Note(
-			droppedFeature,
-			"tool_choice",
-			"tool_choice auto dropped with the last tool (no tools remain to choose among)",
-		); err != nil {
-			return nil, err
-		}
-		return nil, nil
 	}
-	return choice, nil
+	if err := report.Note(
+		droppedFeature,
+		"tool_choice",
+		fmt.Sprintf(
+			"tool_choice %s dropped with the last tool (every tool dialect rejects a tool choice when no tool is declared, and no tools remain to choose among)",
+			choice.Mode,
+		),
+	); err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 // canonicalToolChoiceToResponses renders the canonical tool choice into the

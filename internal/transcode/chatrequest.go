@@ -438,22 +438,23 @@ func RenderChatRequest(
 		out.ToolChoice = &choice
 	}
 
-	// Parallel tool calls. When the capability is granted the field is
-	// forwarded verbatim; otherwise the shared decision applies, so an explicit
-	// true (already satisfied by omission) and an inert request (no tools, or a
-	// none choice) are not charged, while a real disable is a refusable loss.
+	// Parallel tool calls, decided once by the shared helper. The capability
+	// decides whether chat can CARRY the field at all; the helper decides
+	// whether it should be emitted (a real setting with a call that can happen)
+	// or only noted (an inert one, because no field may be written without
+	// tools), and charges a refusable loss for a disable chat cannot express.
 	if request.ParallelTools != nil {
-		if !capabilities.ParallelToolCalls {
-			if err := chargeParallelTools(
-				request,
-				false,
-				"parallel_tool_calls",
-				&report,
-				context.lossPolicy(),
-			); err != nil {
-				return nil, report, err
-			}
-		} else {
+		emit, err := chargeParallelTools(
+			request,
+			capabilities.ParallelToolCalls,
+			"parallel_tool_calls",
+			&report,
+			context.lossPolicy(),
+		)
+		if err != nil {
+			return nil, report, err
+		}
+		if emit {
 			out.ParallelToolCalls = request.ParallelTools
 		}
 	}

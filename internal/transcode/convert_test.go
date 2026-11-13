@@ -383,7 +383,11 @@ func TestDecodeResponsesRequestToolChoiceReconciliation(t *testing.T) {
 		}
 	})
 
-	t.Run("none with no surviving tools is preserved", func(t *testing.T) {
+	t.Run("none with no surviving tools drops with a note", func(t *testing.T) {
+		// Every tool dialect rejects tool_choice when no tool is declared, so a
+		// preserved "none" would turn a locally preventable incompatibility
+		// into an upstream 400. The FIELD is what the upstream rejects; the
+		// meaning it carried is already expressed by the empty tool list.
 		result, _, err := DecodeResponsesRequest(
 			fmt.Appendf(nil, builtinBody, `"none"`),
 			permissive,
@@ -391,8 +395,17 @@ func TestDecodeResponsesRequestToolChoiceReconciliation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("none tool_choice rejected: %v", err)
 		}
-		if result.Request.ToolChoice == nil || result.Request.ToolChoice.Mode != "none" {
-			t.Fatalf("tool choice = %+v, want none preserved", result.Request.ToolChoice)
+		if result.Request.ToolChoice != nil {
+			t.Fatalf("tool choice = %+v, want it dropped with the tools", result.Request.ToolChoice)
+		}
+		found := false
+		for _, loss := range result.Report.Losses {
+			if loss.Feature == FeatureBuiltinTools && loss.Path == "tool_choice" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("report = %+v, want a builtin_tools note at tool_choice", result.Report.Losses)
 		}
 	})
 

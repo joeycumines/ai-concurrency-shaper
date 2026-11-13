@@ -115,7 +115,7 @@ func TestFunctionOutputRejectsOutputTypedParts(t *testing.T) {
 // that dropping them is recorded rather than silent. Both are non-portable
 // structures the target request cannot reproduce, and both live on this part, so
 // a walker that checks only one of them leaves the other dropped with no entry.
-func TestReplayedLogprobsAreLossGated(t *testing.T) {
+func TestReplayedLogprobsAreNotedNotLossGatedOnTheRequestPath(t *testing.T) {
 	part := `{"type":"output_text","text":"chosen","annotations":[],"logprobs":[` +
 		`{"token":"chosen","logprob":-0.1}]}`
 	cases := []struct {
@@ -142,17 +142,23 @@ func TestReplayedLogprobsAreLossGated(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureLogprobs: {}}}
-			result, _, err := DecodeResponsesRequest([]byte(tc.body), policy)
+			// Log-probabilities on REPLAYED output are provider scoring
+			// metadata the client is relaying, not a request for new ones: they
+			// take a deduped Note under their own request-side key, so a
+			// default deployment keeps serving an ordinary next turn.
+			// FeatureLogprobs is the RESPONSE-side token-logprob surface, and
+			// must not be charged here — approving it must never silently
+			// change the request path.
+			result, _, err := DecodeResponsesRequest([]byte(tc.body), StrictLossPolicy())
 			if err != nil {
-				t.Fatalf("decode: %v", err)
+				t.Fatalf("replayed log-probabilities were refused under the strict policy: %v", err)
 			}
-			if !reportHasAt(result.Report, FeatureLogprobs, tc.wantPath) {
-				t.Fatalf("report = %+v, want logprobs at %s", result.Report.Losses, tc.wantPath)
+			if !reportHasAt(result.Report, FeatureRequestLogprobsReplay, tc.wantPath) {
+				t.Fatalf("report = %+v, want the replay Note at %s", result.Report.Losses, tc.wantPath)
 			}
-			// Strict policy refuses rather than dropping them silently.
-			if _, _, err := DecodeResponsesRequest([]byte(tc.body), StrictLossPolicy()); err == nil {
-				t.Fatal("strict decode accepted replayed log-probabilities")
+			if reportHasFeature(result.Report, FeatureLogprobs) {
+				t.Fatalf("the response-side logprobs key was charged on the request path: %+v",
+					result.Report.Losses)
 			}
 			// The text itself is still lossless.
 			found := false

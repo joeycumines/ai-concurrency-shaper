@@ -215,19 +215,31 @@ func TestParallelDenialRefusesOnlyWhereIntentIsLost(t *testing.T) {
 
 // TestMessagesParallelCarriageIsUnchanged is the scope guard: the Messages
 // target expresses the setting natively, so a tools-declared request records no
-// decision and still emits the flag.
+// policy decision. Only a real DISABLE needs the flag — an explicit "allowed"
+// asserts the dialect default, so carrying it would invent a tool_choice the
+// client never wrote for a value that changes nothing.
 func TestMessagesParallelCarriageIsUnchanged(t *testing.T) {
-	for _, parallel := range []bool{true, false} {
-		request := parallelRequest(parallel, oneTool(), nil)
-		rendered, report, err := RenderMessagesRequest(request, testExchangeContext())
-		if err != nil {
-			t.Fatalf("render: %v", err)
-		}
-		if reportHasFeature(report, FeatureParallelToolCalls) {
-			t.Fatalf("the Messages target recorded a decision it can express natively: %+v", report.Losses)
-		}
-		if !strings.Contains(string(rendered), "disable_parallel_tool_use") {
-			t.Fatalf("the flag is missing from the Messages wire: %s", rendered)
-		}
+	disabled := parallelRequest(false, oneTool(), nil)
+	rendered, report, err := RenderMessagesRequest(disabled, testExchangeContext())
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if reportHasFeature(report, FeatureParallelToolCalls) {
+		t.Fatalf("the Messages target recorded a decision it can express natively: %+v", report.Losses)
+	}
+	if !strings.Contains(string(rendered), "disable_parallel_tool_use") {
+		t.Fatalf("the disable is missing from the Messages wire: %s", rendered)
+	}
+
+	allowed := parallelRequest(true, oneTool(), nil)
+	rendered, report, err = RenderMessagesRequest(allowed, testExchangeContext())
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if reportHasFeature(report, FeatureParallelToolCalls) {
+		t.Fatalf("the Messages target recorded a decision it can express natively: %+v", report.Losses)
+	}
+	if strings.Contains(string(rendered), "tool_choice") {
+		t.Fatalf("an allowed setting invented a tool_choice the client never wrote: %s", rendered)
 	}
 }

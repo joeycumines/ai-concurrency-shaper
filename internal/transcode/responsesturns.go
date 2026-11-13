@@ -34,6 +34,10 @@ func responsesInputToTurns(
 	// observable: one deduped note per exchange under the conversation-state
 	// feature, never a silent elision.
 	itemIdentityNoted := false
+	// replayedLogprobsNoted dedupes the replayed-logprob Note across the WHOLE
+	// exchange, exactly like the item identity note: the same fact on several
+	// replayed parts is one line.
+	replayedLogprobsNoted := false
 	noteItemIdentity := func() error {
 		if itemIdentityNoted {
 			return nil
@@ -67,7 +71,7 @@ func responsesInputToTurns(
 			// An easy message can carry output-type parts (an assistant
 			// history turn replayed without an item id), so its annotations are
 			// the same citation metadata as the previous-output arm's.
-			if err := annotatedInputPartLosses(value.Content.Parts, fmt.Sprintf("input[%d].content", i), policy, report); err != nil {
+			if err := annotatedInputPartLosses(value.Content.Parts, fmt.Sprintf("input[%d].content", i), policy, report, &replayedLogprobsNoted); err != nil {
 				return nil, err
 			}
 			turns = append(turns, CanonicalTurn{Role: role, Parts: parts})
@@ -81,7 +85,7 @@ func responsesInputToTurns(
 			if err := loseInputPhase(policy, report, value.Phase, i); err != nil {
 				return nil, err
 			}
-			if err := annotatedInputLosses(value.Content, i, policy, report); err != nil {
+			if err := annotatedInputLosses(value.Content, i, policy, report, &replayedLogprobsNoted); err != nil {
 				return nil, err
 			}
 			parts, err := responsesOutputContentToCanonical(value.Content)
@@ -338,16 +342,52 @@ func responsesFunctionOutputToCanonical(
 	return parts, nil
 }
 
-// annotatedInputLosses records the request_citations decision for a previous
-// output message replayed as input whose output_text parts carry annotations.
-// The Anthropic decoder records the same key for equivalent citation metadata,
-// so the two source decoders agree: citation structure is an approved loss (or
-// a refusal), while the text itself reaches the IR losslessly.
+// replayedOutputTextDecisions records the decisions for one replayed output_text
+// part at path: citation STRUCTURE is client-visible content, so its loss is
+// policy-gated under request_citations; token log-probabilities are scoring
+// metadata the client is relaying, so they are one deduped Note per exchange
+// under their own request-side key. Both walkers below are this function, so the
+// two arms cannot drift.
+func replayedOutputTextDecisions(
+	text *ResponsesOutputText,
+	path string,
+	policy LossPolicy,
+	report *ConversionReport,
+	noteLogprobs *bool,
+) error {
+	if len(text.Annotations) > 0 {
+		if err := report.Lose(
+			policy,
+			FeatureRequestCitations,
+			path+".annotations",
+			"request citations on replayed output text cannot be reproduced in the target request",
+		); err != nil {
+			return err
+		}
+	}
+	if len(text.Logprobs) > 0 && !*noteLogprobs {
+		*noteLogprobs = true
+		if err := report.Note(
+			FeatureRequestLogprobsReplay,
+			path+".logprobs",
+			"token log-probabilities on replayed output text are provider scoring metadata the client is relaying; they are not forwarded (the source supplied them for the previous response, not as a request for new ones)",
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// annotatedInputLosses records the replayed-output decisions for a previous
+// output message replayed as input. The Anthropic decoder records the same
+// citation key for equivalent citation metadata, so the two source decoders
+// agree.
 func annotatedInputLosses(
 	content ResponsesOutputContentParts,
 	index int,
 	policy LossPolicy,
 	report *ConversionReport,
+	noteLogprobs *bool,
 ) error {
 	for partIndex, part := range content {
 		text, ok := part.(*ResponsesOutputText)
@@ -355,28 +395,8 @@ func annotatedInputLosses(
 			continue
 		}
 		base := fmt.Sprintf("input[%d].content[%d]", index, partIndex)
-		if len(text.Annotations) > 0 {
-			if err := report.Lose(
-				policy,
-				FeatureRequestCitations,
-				base+".annotations",
-				"request citations on replayed output text cannot be reproduced in the target request",
-			); err != nil {
-				return err
-			}
-		}
-		// The same part can carry token log-probabilities, which the target
-		// request cannot reproduce either: a walker that checked only the
-		// annotations would drop these with no entry at all.
-		if len(text.Logprobs) > 0 {
-			if err := report.Lose(
-				policy,
-				FeatureLogprobs,
-				base+".logprobs",
-				"token log-probabilities on replayed output text cannot be reproduced in the target request",
-			); err != nil {
-				return err
-			}
+		if err := replayedOutputTextDecisions(text, base, policy, report, noteLogprobs); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -397,6 +417,7 @@ func annotatedInputPartLosses(
 	basePath string,
 	policy LossPolicy,
 	report *ConversionReport,
+	noteLogprobs *bool,
 ) error {
 	for partIndex, part := range parts {
 		text, ok := part.(*ResponsesOutputText)
@@ -404,25 +425,8 @@ func annotatedInputPartLosses(
 			continue
 		}
 		base := fmt.Sprintf("%s[%d]", basePath, partIndex)
-		if len(text.Annotations) > 0 {
-			if err := report.Lose(
-				policy,
-				FeatureRequestCitations,
-				base+".annotations",
-				"request citations on replayed output text cannot be reproduced in the target request",
-			); err != nil {
-				return err
-			}
-		}
-		if len(text.Logprobs) > 0 {
-			if err := report.Lose(
-				policy,
-				FeatureLogprobs,
-				base+".logprobs",
-				"token log-probabilities on replayed output text cannot be reproduced in the target request",
-			); err != nil {
-				return err
-			}
+		if err := replayedOutputTextDecisions(text, base, policy, report, noteLogprobs); err != nil {
+			return err
 		}
 	}
 	return nil

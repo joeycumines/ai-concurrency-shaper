@@ -23,48 +23,63 @@ package transcode
 // This mirrors the reasoning already applied to `strict:false` and to the
 // Messages wire's own disable flag.
 
-// chargeParallelTools records the decision for a request's explicit
-// parallel-tool-calls setting, given whether the TARGET can express it. The
-// request is the one being rendered, so its tool list and choice are the ones
-// the upstream will actually see. A nil return with carriage true means the
-// caller should emit the field itself.
+// chargeParallelTools decides whether a request's explicit parallel-tool-calls
+// setting reaches the wire, given whether the TARGET can express it. It returns
+// emit=true only when the caller should write the field.
+//
+// The request is the one being rendered, so its tool list and choice are the
+// ones the upstream will actually see — which is what makes the two inert
+// conditions real:
+//
+//   - no tools declared, or a tool_choice that forbids every call: no call can
+//     happen, so the setting is already satisfied. Emitting it would be an
+//     upstream error (every dialect rejects parallel_tool_calls without tools),
+//     and charging it would refuse a request that loses nothing. One Note,
+//     never a loss, for either value.
+//   - an explicit "allowed" (true) asserts the dialect default, so it is never
+//     charged; it is emitted only where the target models the field, because it
+//     is the client's own value and dropping it would silently change a setting
+//     the client wrote.
+//   - a real disable (false) is a policy-gated loss where the target cannot
+//     express it (the upstream may then emit calls the client forbade), and is
+//     emitted where it can.
 func chargeParallelTools(
 	request CanonicalRequest,
 	carriage bool,
 	path string,
 	report *ConversionReport,
 	policy LossPolicy,
-) error {
+) (bool, error) {
 	if request.ParallelTools == nil {
-		return nil
+		return false, nil
 	}
-	// An explicit true asserts the dialect default, so every target already
-	// satisfies it by omitting the field.
-	if *request.ParallelTools {
-		return nil
-	}
-	// Inert first: no tool call can happen, so nothing is lost no matter what
-	// the target can express. Note it rather than charge a key that is not
-	// default-approved.
 	inert, err := chargeParallelToolsInert(request, path, report)
-	if err != nil || inert {
-		return err
+	if err != nil {
+		return false, err
+	}
+	if inert {
+		return false, nil
+	}
+	if *request.ParallelTools {
+		// Already satisfied by the dialect default; no charge either way.
+		return carriage, nil
 	}
 	if !carriage {
-		return report.Lose(
+		return false, report.Lose(
 			policy,
 			FeatureParallelToolCalls,
 			path,
 			"the target cannot disable parallel tool calls, so the upstream may emit calls the client forbade",
 		)
 	}
-	return nil
+	return true, nil
 }
 
 // chargeParallelToolsInert records the Note for an inert parallel-tools setting
 // and reports whether the setting was inert. A false result means the request
 // COULD emit a tool call, so the caller decides between a loss and native
-// carriage.
+// carriage. It applies to BOTH values: no field can be written when no call can
+// happen, so an explicit "allowed" is as inert as an explicit disable.
 func chargeParallelToolsInert(
 	request CanonicalRequest,
 	path string,
