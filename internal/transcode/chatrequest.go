@@ -282,7 +282,15 @@ func RenderChatRequest(
 				continue
 			}
 			if !consolidates[i] {
-				keptBefore = true
+				// A non-consolidating instruction message occupies a position
+				// only if it actually renders. With developer_role on, a
+				// developer turn whose every part was dropped or scrubbed
+				// produces an empty message that is omitted entirely, so a
+				// following system turn has nothing before it and its text
+				// cannot have moved.
+				if !chatMessageTextIsEmpty(message) {
+					keptBefore = true
+				}
 				continue
 			}
 			// A turn that rendered nothing occupies no position and contributes
