@@ -8,7 +8,6 @@ package transcode
 // developer_role capability lets us keep is mistaken for dialog.
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -127,7 +126,7 @@ func TestChatDeveloperTurnIsNotDialog(t *testing.T) {
 			textTurn(CanonicalSystem, "late"),
 		},
 	}
-	_, report, err = RenderChatRequest(midDialog, testExchangeContext(),
+	_, _, err = RenderChatRequest(midDialog, testExchangeContext(),
 		ChatCapabilities{DeveloperRole: true})
 	if err == nil {
 		t.Fatal("a client-authored mid-dialog system turn was accepted under strict policy")
@@ -272,14 +271,6 @@ func TestAllDroppedSystemTurnIsNotChargedAMidConversationPosition(t *testing.T) 
 	}
 }
 
-// chatReportEnvelope is the field subset these assertions need.
-type chatReportEnvelope struct {
-	Messages []struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
-	} `json:"messages"`
-}
-
 // allRequestRenderersWithDeveloperRole is allRequestRenderers with Chat's
 // developer-role capability GRANTED, which is the case where the placement and
 // provenance channels can be confused.
@@ -290,4 +281,57 @@ func allRequestRenderersWithDeveloperRole() map[string]func(CanonicalRequest, *E
 	}
 	delete(renderers, "chat")
 	return renderers
+}
+
+// TestChatSystemTurnAfterAKeptDeveloperTurnIsCharged proves the position rule is
+// truthful for the ONE shape a kept developer message can still displace: a
+// consolidating system turn that follows it cannot stay where it was, because
+// the join moves its text to the first contributing turn. A leading developer
+// message is different — nothing precedes the system turn, so it keeps its
+// position and is charged nothing.
+func TestChatSystemTurnAfterAKeptDeveloperTurnIsCharged(t *testing.T) {
+	request := CanonicalRequest{
+		ClientModel: "m",
+		Turns: []CanonicalTurn{
+			textTurn(CanonicalSystem, "first"),
+			textTurn(CanonicalDeveloper, "dev"),
+			textTurn(CanonicalSystem, "second"),
+			textTurn(CanonicalUser, "hi"),
+		},
+	}
+	context := testExchangeContext()
+	context.LossPolicy = LossPolicy{Allowed: map[Feature]struct{}{
+		FeatureMultipleSystemTurns:   {},
+		FeatureMidConversationSystem: {},
+	}}
+	rendered, report, err := RenderChatRequest(request, context,
+		ChatCapabilities{DeveloperRole: true})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	// The two system turns contribute, so the shared join decision applies.
+	if !reportHasFeature(report, FeatureMultipleSystemTurns) {
+		t.Fatalf("report = %+v, want the join decision", report.Losses)
+	}
+	// The second system turn is displaced by the kept developer message, so its
+	// position is charged; the first is not.
+	var charged []string
+	for _, loss := range report.Losses {
+		if loss.Feature == FeatureMidConversationSystem {
+			charged = append(charged, loss.Path)
+		}
+	}
+	if len(charged) != 1 || charged[0] != "turns[2]" {
+		t.Fatalf("mid_conversation_system entries = %v, want exactly turns[2]", charged)
+	}
+	// The rendered order is consolidated prompt, developer, user.
+	messages := chatMessages(t, rendered)
+	if len(messages) != 3 {
+		t.Fatalf("messages = %d, want consolidated, developer, user: %s", len(messages), rendered)
+	}
+	for i, want := range []ChatMessageRole{ChatMessageRoleSystem, ChatMessageRoleDeveloper, ChatMessageRoleUser} {
+		if role, _ := messageRoleAndText(messages[i]); role != want {
+			t.Fatalf("messages[%d] role = %s, want %s", i, role, want)
+		}
+	}
 }

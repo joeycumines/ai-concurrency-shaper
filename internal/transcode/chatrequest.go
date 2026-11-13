@@ -265,6 +265,15 @@ func RenderChatRequest(
 		// position the client's own request never created must not be charged
 		// to it.
 		sawRetainedDialog := false
+		// keptSinceContributor records that an instruction message which renders
+		// IN PLACE (a developer turn the capability lets us keep) has appeared
+		// after the first contributing system turn. A later contributor's text
+		// then jumps over that message into the consolidated prompt, which is a
+		// real positional move. Two leading system turns with nothing surviving
+		// between them are NOT charged a position: their merge is the
+		// multiple_system_turns decision, which is what says the boundaries are
+		// lost.
+		keptSinceContributor := false
 		for i, message := range rendered {
 			if !instructionChannel[i] {
 				if retainedChannel[i] {
@@ -279,6 +288,9 @@ func RenderChatRequest(
 				// capability is an instruction but not dialog: it must not open
 				// dialog, and it does not join the consolidated prompt because
 				// it renders at its own position.
+				if consolidatedAt >= 0 {
+					keptSinceContributor = true
+				}
 				continue
 			}
 			// A turn that rendered nothing occupies no position and contributes
@@ -287,9 +299,10 @@ func RenderChatRequest(
 			if chatMessageTextIsEmpty(message) {
 				continue
 			}
+			firstContributor := consolidatedAt < 0
 			systemMessages = append(systemMessages, message)
 			contributing = append(contributing, sourceTurn[i])
-			if consolidatedAt < 0 {
+			if firstContributor {
 				consolidatedAt = i
 			}
 			// A client-authored instruction turn is mid-dialog only when the
@@ -302,7 +315,7 @@ func RenderChatRequest(
 			if retainedChannel[i] {
 				mid = sawRetainedDialog || sawClientDialog
 			}
-			if !mid {
+			if !mid && !keptSinceContributor {
 				continue
 			}
 			// Each mid-dialog instruction turn is charged on its OWN
