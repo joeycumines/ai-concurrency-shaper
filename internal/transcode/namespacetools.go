@@ -152,14 +152,15 @@ func namespaceChildSharesBareName(names *ToolNames, bareName string) bool {
 }
 
 // checkNamespaceToolNames rejects a flattened namespace tool list whose names
-// are not unique. A ToolNameRef is keyed by the INNERMOST namespace, so two
-// different outer namespaces that both contain an inner namespace of the same
-// name with a child of the same name produce one ref for two different tools;
-// chooseToolFlatName then hands both the same flat name and the response can
-// only restore the ambiguous inner qualifier. The IR records no path through
-// the outer namespace, so the collision cannot be disambiguated honestly: it is
-// refused before any upstream request rather than silently re-pointing one tool
-// at the other.
+// are not unique. Two causes, one refusal, because both leave the proxy unable
+// to restore which tool a call belonged to: a ToolNameRef is keyed by the
+// INNERMOST namespace, so two different outer namespaces that both contain an
+// inner namespace of the same name with a child of the same name produce one ref
+// for two different tools; and a single namespace that declares the same child
+// name twice produces one ref for two declarations. In both cases
+// chooseToolFlatName hands both the same flat name, and the IR records no path
+// that could tell them apart, so the collision is refused before any upstream
+// request rather than silently re-pointing one tool at the other.
 //
 // The check covers ONLY names that came from a namespace flatten. A request
 // that repeats an ordinary function name is the client's own incoherence and
@@ -176,7 +177,7 @@ func checkNamespaceToolNames(tools []CanonicalTool, names *ToolNames) error {
 		}
 		if _, duplicate := seen[tool.Name]; duplicate {
 			return fmt.Errorf(
-				"the request declares two different namespace children that flatten to the same name %q; nested namespaces sharing an inner name and child name cannot be disambiguated",
+				"the request declares two different namespace children that flatten to the same name %q; a nested namespace whose inner name and child name repeat another's, or a namespace that declares one child twice, cannot be disambiguated",
 				tool.Name,
 			)
 		}

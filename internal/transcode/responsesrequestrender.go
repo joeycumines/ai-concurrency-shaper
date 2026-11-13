@@ -115,7 +115,7 @@ func RenderResponsesRequest(
 		// role decision. Charging before knowing the contribution would bill the
 		// client for a move that never happened.
 		var turnTexts []string
-		for _, part := range channel.turn.Parts {
+		for partIndex, part := range channel.turn.Parts {
 			text, ok := part.(CanonicalText)
 			if !ok {
 				if _, thinking := part.(CanonicalThinkingPart); thinking {
@@ -125,7 +125,12 @@ func RenderResponsesRequest(
 					// ValidateCanonicalRequest.
 					continue
 				}
-				if err := loseSystemPart(context.lossPolicy(), &report, part); err != nil {
+				if err := loseSystemPart(
+					context.lossPolicy(),
+					&report,
+					part,
+					fmt.Sprintf("%s.parts[%d]", turnPath, partIndex),
+				); err != nil {
 					return nil, report, err
 				}
 				continue
@@ -605,11 +610,15 @@ func responsesToolStrictField(
 // An image or document follows the system_non_text_content loss decision
 // (approved drop, else typed rejection); any other non-text part is a stable
 // typed rejection — never a leaked Go type name, matching the chat-side
-// decision.
+// decision. path names the CANONICAL turn and part: a dropped part never lands
+// in the instructions string, so naming that field would point at content it
+// never entered, and two distinct drops would collapse into one deduplicated
+// log line.
 func loseSystemPart(
 	policy LossPolicy,
 	report *ConversionReport,
 	part CanonicalPart,
+	path string,
 ) error {
 	switch part.(type) {
 	case CanonicalImage, CanonicalDocument:
@@ -620,14 +629,14 @@ func loseSystemPart(
 		// diagnose it; a message that merely repeated the path would not.
 		return &UnsupportedFeatureError{
 			Protocol: "responses",
-			Path:     "instructions",
+			Path:     path,
 			Feature:  fmt.Sprintf("system prompt part %T cannot be expressed in the create-request instructions string", part),
 		}
 	}
 	return report.Lose(
 		policy,
 		FeatureSystemNonTextContent,
-		"instructions",
+		path,
 		"the system prompt part cannot be expressed in the string-only create-request instructions",
 	)
 }
