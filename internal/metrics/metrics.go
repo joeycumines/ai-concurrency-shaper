@@ -26,8 +26,9 @@
 package metrics
 
 import (
+	"cmp"
 	"net/http"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,8 +47,8 @@ type InFlightEntry struct {
 	Method    string
 	Path      string
 	Limited   bool
-	QueueTime time.Time // when the request entered the queue (zero if passthrough)
-	StartTime time.Time // when the request started being proxied
+	QueueTime time.Time // when the request was registered, before admission
+	StartTime time.Time // when the request started being proxied (zero until then)
 }
 
 // Age returns how long this request has been in-flight (being proxied).
@@ -215,10 +216,10 @@ func (c *Collector) RegisterInFlight(method, path string, limited bool) uint64 {
 	c.flightSeq++
 	id := c.flightSeq
 	now := time.Now()
-	// StartTime stays ZERO while the request waits for a slot: the queued
-	// state is `StartTime.IsZero()` (the convention InFlightSnapshot's sort
-	// and OldestQueuedAge already assume), and MarkInFlightStarted sets it
-	// at admission. Registration time is carried by QueueTime.
+	// StartTime stays ZERO until admission: the queued state is
+	// `StartTime.IsZero()` (the convention InFlightSnapshot's sort and
+	// OldestQueuedAge both use), and MarkInFlightStarted sets it when the
+	// request starts being proxied. Registration time is carried by QueueTime.
 	c.flightByID[id] = &InFlightEntry{
 		ID:        id,
 		Method:    method,
@@ -246,28 +247,45 @@ func (c *Collector) DeregisterInFlight(id uint64) {
 	delete(c.flightByID, id)
 }
 
-// InFlightSnapshot returns a snapshot of all currently in-flight requests,
-// sorted by start time (oldest first).
+// InFlightSnapshot returns a snapshot of all currently in-flight requests.
+//
+// Requests being proxied come first, oldest StartTime first; requests still
+// queued (zero StartTime) follow, oldest QueueTime first. The registration ID
+// — unique and never reused, see Reset — breaks any remaining tie, so entries
+// with distinct IDs have a fixed relative order independent of the order the
+// registry map yields them.
 func (c *Collector) InFlightSnapshot() []InFlightEntry {
+	out := c.copyInFlight()
+	slices.SortFunc(out, func(a, b InFlightEntry) int {
+		aQueued, bQueued := a.StartTime.IsZero(), b.StartTime.IsZero()
+		if aQueued != bQueued {
+			if aQueued {
+				return 1 // a request being proxied sorts before a queued one
+			}
+			return -1
+		}
+		// Same admission state, so compare the time that state is measured
+		// from: the sort key is (queued last, that time oldest first, ID).
+		at, bt := a.StartTime, b.StartTime
+		if aQueued {
+			at, bt = a.QueueTime, b.QueueTime
+		}
+		if diff := at.Compare(bt); diff != 0 {
+			return diff
+		}
+		return cmp.Compare(a.ID, b.ID)
+	})
+	return out
+}
+
+// copyInFlight copies the in-flight registry under flightMu.
+func (c *Collector) copyInFlight() []InFlightEntry {
 	c.flightMu.Lock()
 	defer c.flightMu.Unlock()
 	out := make([]InFlightEntry, 0, len(c.flightByID))
 	for _, e := range c.flightByID {
 		out = append(out, *e)
 	}
-	// Sort by start time, oldest first.
-	// Entries with zero StartTime (still queued) sort to the end.
-	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i], out[j]
-		aZero, bZero := a.StartTime.IsZero(), b.StartTime.IsZero()
-		if aZero != bZero {
-			return !aZero // non-zero sorts before zero
-		}
-		if aZero {
-			return false
-		}
-		return a.StartTime.Before(b.StartTime)
-	})
 	return out
 }
 
@@ -519,6 +537,8 @@ func (c *Collector) Reset() {
 	c.logMu.Unlock()
 	c.flightMu.Lock()
 	c.flightByID = make(map[uint64]*InFlightEntry)
+	// flightSeq deliberately keeps its value: IDs stay unique and monotonic
+	// across a Reset, so an ID can never name two different requests.
 	c.flightMu.Unlock()
 	c.tpMu.Lock()
 	for i := range c.tpCounts {
@@ -531,7 +551,10 @@ func (c *Collector) Reset() {
 	c.tpMu.Unlock()
 }
 
-// Snapshot returns a consistent point-in-time copy of all metrics.
+// Snapshot returns a copy of all metrics. Each view is read under its own lock,
+// one after another, so a view is internally consistent but the views are not
+// one atomic instant: a request may complete while the snapshot is being
+// assembled and so be missing from one view while present in another.
 func (c *Collector) Snapshot() Snapshot {
 	var s Snapshot
 	s.Active = c.active.Load()
@@ -596,7 +619,9 @@ func (c *Collector) Snapshot() Snapshot {
 	return s
 }
 
-// Snapshot is a serialised view of Collector at a point in time.
+// Snapshot is a serialised view of Collector. Its views are assembled one
+// after another rather than atomically, so a request that completes mid-read
+// can be missing from one view while present in another.
 type Snapshot struct {
 	Active int64
 	Queued int64

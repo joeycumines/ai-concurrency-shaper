@@ -16,6 +16,7 @@
 package metrics
 
 import (
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -575,6 +576,103 @@ func TestCollector_InFlight(t *testing.T) {
 	if c.InFlightCount() != 0 {
 		t.Errorf("InFlightCount after all done: got %d, want 0", c.InFlightCount())
 	}
+}
+
+// assertInFlightOrder asserts that every one of 50 consecutive snapshots
+// reports exactly want, in order. Repeating it is what makes the assertion
+// evidence: the entries come from a map, so a single snapshot can produce the
+// expected order by iteration luck even when the sort does not establish it.
+func assertInFlightOrder(t *testing.T, c *Collector, want []uint64) {
+	t.Helper()
+	for trial := range 50 {
+		snap := c.InFlightSnapshot()
+		got := make([]uint64, len(snap))
+		for i, e := range snap {
+			got[i] = e.ID
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("trial %d: order = %v, want %v", trial, got, want)
+		}
+	}
+}
+
+func TestCollector_InFlightSnapshot_DeterministicOrder(t *testing.T) {
+	// The in-flight panel must render in a stable, deterministic order:
+	// started requests oldest-first by StartTime, queued requests (zero
+	// StartTime) last, ordered by QueueTime, with the monotonic ID as the
+	// final tie-breaker so that two entries sharing a compared time still
+	// have a fixed relative order regardless of map iteration order.
+	c := NewCollector()
+
+	// Register a mix: queued-only and started. IDs ascend with registration.
+	idQueued1 := c.RegisterInFlight("POST", "/v1/messages", true)
+	idQueued2 := c.RegisterInFlight("POST", "/v1/chat/completions", true)
+	idStarted1 := c.RegisterInFlight("GET", "/health", false)
+	idStarted2 := c.RegisterInFlight("POST", "/v1/responses", true)
+
+	// Overwrite both StartTimes with one identical time.Now() value after
+	// MarkInFlightStarted, so the only remaining distinction between the two
+	// started entries is the tie-break. Their QueueTimes are then set in the
+	// REVERSE of their registration order, so an entry that breaks the tie on
+	// QueueTime instead of ID cannot pass.
+	c.MarkInFlightStarted(idStarted1)
+	c.MarkInFlightStarted(idStarted2)
+	c.flightMu.Lock()
+	same := time.Now()
+	c.flightByID[idStarted1].StartTime = same
+	c.flightByID[idStarted2].StartTime = same
+	c.flightByID[idStarted1].QueueTime = same.Add(-1 * time.Second)
+	c.flightByID[idStarted2].QueueTime = same.Add(-2 * time.Second)
+	c.flightByID[idQueued1].QueueTime = same
+	c.flightByID[idQueued2].QueueTime = same
+	c.flightMu.Unlock()
+
+	assertInFlightOrder(t, c, []uint64{idStarted1, idStarted2, idQueued1, idQueued2})
+}
+
+func TestCollector_InFlightSnapshot_StartedOrderedByStartTime(t *testing.T) {
+	// Started requests sort oldest StartTime first, and StartTime outranks
+	// registration order: a later-registered request that reached admission
+	// earlier — the ordinary production case, since a request can start while
+	// an older one is still queued — sorts first.
+	c := NewCollector()
+	idStartedLate := c.RegisterInFlight("POST", "/started-late", true)   // lower ID, starts later
+	idStartedEarly := c.RegisterInFlight("GET", "/started-early", false) // higher ID, starts earlier
+
+	c.MarkInFlightStarted(idStartedLate)
+	c.MarkInFlightStarted(idStartedEarly)
+	c.flightMu.Lock()
+	now := time.Now()
+	c.flightByID[idStartedLate].StartTime = now.Add(-1 * time.Second)
+	c.flightByID[idStartedEarly].StartTime = now.Add(-5 * time.Second)
+	c.flightMu.Unlock()
+
+	assertInFlightOrder(t, c, []uint64{idStartedEarly, idStartedLate})
+}
+
+func TestCollector_InFlightSnapshot_QueuedOrderedByQueueTime(t *testing.T) {
+	// Queued requests (zero StartTime) sort after every started request and,
+	// among themselves, oldest QueueTime first even when QueueTime order is
+	// the reverse of registration order. A queued request that has waited
+	// longer than a started one has been running still sorts last: the group
+	// outranks the age.
+	c := NewCollector()
+	idQNew := c.RegisterInFlight("POST", "/new", true)
+	idQOld := c.RegisterInFlight("POST", "/old", true)
+	idStartedNewer := c.RegisterInFlight("POST", "/started-newer", true)
+	idStartedOlder := c.RegisterInFlight("GET", "/started-older", false)
+
+	c.MarkInFlightStarted(idStartedNewer)
+	c.MarkInFlightStarted(idStartedOlder)
+	c.flightMu.Lock()
+	now := time.Now()
+	c.flightByID[idStartedOlder].StartTime = now.Add(-8 * time.Second)
+	c.flightByID[idStartedNewer].StartTime = now.Add(-5 * time.Second)
+	c.flightByID[idQOld].QueueTime = now.Add(-10 * time.Second)
+	c.flightByID[idQNew].QueueTime = now.Add(-1 * time.Second)
+	c.flightMu.Unlock()
+
+	assertInFlightOrder(t, c, []uint64{idStartedOlder, idStartedNewer, idQOld, idQNew})
 }
 
 func TestInFlightEntry_Age(t *testing.T) {
