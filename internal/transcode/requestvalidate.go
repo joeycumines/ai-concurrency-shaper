@@ -4,7 +4,7 @@ package transcode
 // it is the single gate every request renderer must pass, and the rules it
 // enforces are product contracts rather than type shape: a role may not carry a
 // part its dialect never places there, a retained-turn count must be a real
-// prefix, the thinking union must be one of its three arms, and thinking may
+// prefix, the thinking union must be one of its four arms, and thinking may
 // only cross the boundary as proxy-synthesized reasoning.
 
 import "fmt"
@@ -31,23 +31,49 @@ func ValidateCanonicalRequest(request CanonicalRequest) error {
 	// The thinking union is validated here for the same reason RetainedTurns is:
 	// decode enforces the Anthropic contract, so a violation can only arrive on a
 	// hand-built CanonicalRequest. Without this check a bogus type fell through
-	// both Chat's and Responses' switch silently, and a display on a non-adaptive
-	// type rendered an invalid Messages union beside budget_tokens. enabled
-	// WITHOUT a budget stays valid — the renderers map it to a named Note.
+	// every renderer's switch silently, and a display on a type whose arm does
+	// not carry one rendered an invalid Messages union beside budget_tokens.
+	// enabled WITHOUT a budget stays valid — the renderers map it to a named
+	// Note. The same per-arm rules decode applies are enforced here, display
+	// spelled one of summarized|omitted|updates (the beta-gated member) and
+	// carried only by the enabled and adaptive arms.
 	if thinking := request.Thinking; thinking != nil {
 		switch thinking.Type {
-		case "enabled", "disabled", "adaptive":
+		case "enabled", "disabled", "between_tools", "adaptive":
 		default:
 			return fmt.Errorf(
-				"thinking type %q is invalid (want enabled, disabled, or adaptive)",
+				"thinking type %q is invalid (want enabled, disabled, between_tools, or adaptive)",
 				thinking.Type,
 			)
 		}
-		if thinking.Type != "adaptive" && thinking.Display != "" {
-			return fmt.Errorf(
-				"thinking type %s cannot carry display (it belongs to adaptive)",
-				thinking.Type,
-			)
+		if thinking.Display != "" {
+			switch thinking.Display {
+			case "summarized", "omitted", "updates":
+			default:
+				return fmt.Errorf(
+					"thinking display %q is invalid (want summarized, omitted, or updates)",
+					thinking.Display,
+				)
+			}
+			if thinking.Type != "enabled" && thinking.Type != "adaptive" {
+				return fmt.Errorf(
+					"thinking type %s cannot carry display (there is nothing to display)",
+					thinking.Type,
+				)
+			}
+			// enabled WITHOUT a budget cannot reach a renderer: the Messages
+			// target refuses to emit an enabled arm without budget_tokens (so
+			// it drops the whole config), and the other targets map the shape
+			// to a "no thinking control" Note. Either way a client-chosen
+			// display would be destroyed without an entry naming it, so the
+			// combination is refused here rather than silently losing it. It is
+			// unreachable from decode (which requires the budget), so this only
+			// polices a hand-built request.
+			if thinking.Type == "enabled" && thinking.BudgetTokens == nil {
+				return fmt.Errorf(
+					"thinking type enabled with a display requires budget_tokens; without it the display cannot be rendered",
+				)
+			}
 		}
 		if thinking.Type != "enabled" && thinking.BudgetTokens != nil {
 			return fmt.Errorf(

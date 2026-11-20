@@ -195,19 +195,20 @@ type SourceArtifacts struct {
 }
 
 // CanonicalThinking is the decoded Anthropic Messages thinking
-// configuration. Type is one of "enabled", "disabled", or "adaptive";
-// BudgetTokens is set only when Type is "enabled", and Display only when Type
-// is "adaptive" (the official per-type member sets). Display is the client's
-// thinking-visibility preference; the Messages target carries it natively, so
-// the other targets take the request_reasoning loss instead of the decoder
-// destroying it.
+// configuration. Type is one of "enabled", "disabled", "between_tools", or
+// "adaptive"; BudgetTokens is set only when Type is "enabled", and Display
+// only when Type is "enabled" or "adaptive" (the official per-type member
+// sets). Display is the client's thinking-visibility preference; the Messages
+// target carries it natively, so the other targets take the request_reasoning
+// loss instead of the decoder destroying it.
 type CanonicalThinking struct {
 	Type         string
 	BudgetTokens *int
 	// Display is the Anthropic thinking-visibility preference. The wire enum has
-	// exactly two members (summarized, omitted) and no empty one, so an empty
-	// value means ABSENT: decode rejects any other spelling, which is why a
-	// plain string loses no presence for a legal value.
+	// exactly three members (summarized, omitted, and the beta-gated updates)
+	// and no empty one, so an empty value means ABSENT: decode rejects any
+	// other spelling, which is why a plain string loses no presence for a
+	// legal value.
 	Display string
 }
 

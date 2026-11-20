@@ -470,6 +470,10 @@ func RenderResponsesRequest(
 	//                model; the absence of reasoning.effort is the exact
 	//                semantic (the upstream applies its own default).
 	//  - "disabled"  no thinking requested; nothing is emitted.
+	//  - "between_tools"
+	//                no up-front thinking with progress updates between tool
+	//                calls; reasoning.effort can assert neither, so it is a
+	//                policy-gated loss.
 	//  - "enabled"   the explicit budget_tokens maps through the documented
 	//                deterministic threshold table thinkingBudgetToEffort
 	//                and is reported as a named Note.
@@ -548,6 +552,18 @@ func RenderResponsesRequest(
 				FeatureRequestReasoning,
 				"thinking",
 				"thinking disabled maps to the absence of Responses reasoning.effort",
+			); err != nil {
+				return nil, report, err
+			}
+		case "between_tools":
+			// No up-front thinking plus progress updates between tool calls:
+			// reasoning.effort has no way to assert either, so emitting an
+			// effort here would contradict the request.
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureRequestReasoning,
+				"thinking",
+				"between_tools thinking asserts no up-front thinking with progress updates between tool calls; a Responses request can express neither",
 			); err != nil {
 				return nil, report, err
 			}

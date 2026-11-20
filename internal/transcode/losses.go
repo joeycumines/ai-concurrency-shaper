@@ -186,8 +186,9 @@ const (
 	// and must never reuse this key.
 	FeatureProviderReasoningText Feature = "provider_reasoning_text"
 	// RequestReasoning covers request-side reasoning controls — the Anthropic
-	// Messages thinking budget (an explicit enabled budget_tokens) and the
-	// Responses reasoning.effort — that the target request cannot reproduce.
+	// Messages thinking budget (an explicit enabled budget_tokens), its display
+	// preference and between_tools setting, and the Responses
+	// reasoning.effort — that the target request cannot reproduce.
 	// It is deliberately distinct from ProviderReasoningText: an operator
 	// must never have to approve losing response reasoning text just to
 	// strip a request knob, or vice versa.
@@ -269,6 +270,22 @@ const (
 	// already carried by max_tokens, and context_management edits direct
 	// server-side context trimming. An approved loss drops them observably.
 	FeatureAnthropicControls Feature = "anthropic_controls"
+	// AnthropicToolChanges covers the mid-conversation tool-change blocks
+	// (inline-tools-2026-09-15 / mid-conversation-tool-changes-2026-07-01):
+	// tool_addition and tool_removal inside a role:"system" message change
+	// which tools the model is offered from that point onward without editing
+	// the tools array. A chat target carries one global tool list, so the
+	// availability TIMING cannot be reproduced: a definition is hoisted into
+	// the request's tools (offered from the start), and a withdrawal or a
+	// reference to a tool the request does not declare cannot be expressed at
+	// all. Because that changes what the model can call, it is a policy-gated
+	// loss rather than a Note — but it is DEFAULT-APPROVED, exactly like
+	// previous_response_id and tool_result_error_status: claude-cli 2.x sends
+	// these blocks on ordinary agentic traffic, so refusing them by default
+	// would make the proxy unusable with the flagship client. Deny it with
+	// -transcode-allow-loss '!anthropic_tool_changes' to restore the strict
+	// refusal.
+	FeatureAnthropicToolChanges Feature = "anthropic_tool_changes"
 	// RequestCitations covers request citations on text content blocks (e.g.
 	// Anthropic Messages citations from earlier turns, web search, or documents)
 	// that the target request cannot reproduce natively: an approved loss
@@ -430,7 +447,7 @@ var lossRegistry = []lossEntry{
 	{FeatureUsageCacheExceedsInput, "the source usage's cached breakdown exceeds the input total; the cached components are clamped to the input total (the note names the source numbers) so the rendered usage stays arithmetically valid"},
 	{FeatureUsageNegativeCounts, "the source usage reports negative token counts; each negative count is clamped to zero (the note names the source numbers) so the rendered usage stays nonnegative"},
 	{FeatureProviderReasoningText, "provider reasoning text in a RESPONSE (the chat extension spelled `reasoning` or, in the DeepSeek/Qwen convention real open-weights gateways emit, `reasoning_content`) cannot be reproduced in the target; it may map only to ordinary text, an approved loss, or a rejection (request-side reasoning controls are the separate request_reasoning key)"},
-	{FeatureRequestReasoning, "request-side reasoning controls (the Anthropic thinking budget and display preference, and the Responses reasoning.effort) cannot be reproduced in the target request; a control that merely delegates the decision to the model (adaptive) is a Note, because the target's default already satisfies it"},
+	{FeatureRequestReasoning, "request-side reasoning controls (the Anthropic thinking budget, display preference, and between_tools setting, and the Responses reasoning.effort) cannot be reproduced in the target request; a control that merely delegates the decision to the model (adaptive) is a Note, because the target's default already satisfies it"},
 	{FeatureReasoningSummary, "reasoning summaries (output and request-side summary style) cannot be reproduced in the target"},
 	{FeatureToolResultJSONEnvelope, "multimodal tool results are encoded as the deterministic transcode JSON text envelope (transcode_version 1) inside a Chat tool message"},
 	{FeatureDeveloperRole, "the developer-role distinction cannot be reproduced in the target"},
@@ -447,6 +464,7 @@ var lossRegistry = []lossEntry{
 	{FeatureResponsesControls, "the Responses envelope controls that are tolerated observably: include and client_metadata are noted, prompt_cache_key is dropped, and user and store are dropped on a target that models neither (Chat renders both), all under this permission, and Responses envelope controls echoed on an upstream response are dropped under this permission; the request-side conversation-state controls (background, max_tool_calls, prompt, safety_identifier, status) remain typed unsupported-feature errors under every policy"},
 	{FeatureAnthropicControls, "the Anthropic Messages client-side envelope controls (context_management, output_config) have no representation in the target request; an approved loss drops them observably"},
 	{FeatureRequestCitations, "request citations on text blocks cannot be reproduced in the target request"},
+	{FeatureAnthropicToolChanges, "Anthropic mid-conversation tool-change blocks (tool_addition / tool_removal in a role:\"system\" message) change which tools the model is offered from that point onward; a chat target carries one global tool list, so a tool definition is hoisted into the request's tools (offered from the start) and a withdrawal or an undeclarable reference cannot be expressed"},
 	{FeatureBuiltinTools, "Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject)"},
 	{FeatureAnthropicServerTools, "Anthropic Messages server-side tools and server-executed content (type-discriminated tools[] definitions, server_tool_use / web_search_tool_result / code_execution blocks, container_upload references) cannot be reproduced in a chat request; an approved loss drops them observably"},
 	{FeatureResponseServiceTier, "the upstream service tier actually served cannot be reproduced in the target"},
