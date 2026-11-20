@@ -53,7 +53,204 @@ const (
 	ContentBlockTypeCodeExecution       ContentBlockType = "code_execution"
 	ContentBlockTypeCodeExecutionResult ContentBlockType = "code_execution_tool_result"
 	ContentBlockTypeContainerUpload     ContentBlockType = "container_upload"
+
+	// Mid-conversation tool-change blocks (inline-tools-2026-09-15 /
+	// mid-conversation-tool-changes-2026-07-01). They are content blocks in
+	// the content array of a role:"system" message and change which tools the
+	// model is offered from that point in the conversation onward, without
+	// editing the tools array (so the cached prefix survives).
+	ContentBlockTypeToolAddition ContentBlockType = "tool_addition"
+	ContentBlockTypeToolRemoval  ContentBlockType = "tool_removal"
+	// ContentBlockTypeMCPToolListing is a RESPONSE block (mcp-client-2026-09-15)
+	// recording a server's fetched tool list, which pins that list when the
+	// client sends the message back unchanged.
+	ContentBlockTypeMCPToolListing ContentBlockType = "mcp_tool_listing"
 )
+
+// ToolChangeType is the discriminant of a tool-change block's `tool` payload.
+type ToolChangeType string
+
+// ToolChangeType values: the reference arms name a tool declared in the
+// request's tools array, and tool_definition (tool_addition only, under the
+// inline-tools beta) carries a full tools entry instead.
+const (
+	ToolChangeTypeReference           ToolChangeType = "tool_reference"
+	ToolChangeTypeMCPReference        ToolChangeType = "mcp_tool_reference"
+	ToolChangeTypeMCPToolsetReference ToolChangeType = "mcp_toolset_reference"
+	ToolChangeTypeDefinition          ToolChangeType = "tool_definition"
+)
+
+// ToolChange is the `tool` payload of a tool_addition or tool_removal block.
+// The reference arms name a tool the request already declared, so the arm's
+// own fields are strict: an unknown field, a missing name, or a member from
+// another arm is a malformed block rather than a silently discarded field.
+type ToolChange struct {
+	Type ToolChangeType
+	// Name names the tool for tool_reference, and the member tool for
+	// mcp_tool_reference.
+	Name string
+	// ServerName names the MCP server for mcp_tool_reference and
+	// mcp_toolset_reference.
+	ServerName string
+	// Definition is the raw tools entry carried by tool_definition: a custom
+	// tool, an Anthropic-defined client/server tool, or an mcp_toolset. It is
+	// preserved byte-exact so the caller can decode it against whichever
+	// tool schema it needs, never a generic envelope.
+	Definition json.RawMessage
+}
+
+// UnmarshalJSON decodes the arm the discriminant names, rejecting both an
+// unknown arm and a member that belongs to a different one.
+func (t *ToolChange) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		Type ToolChangeType `json:"type"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	var change ToolChange
+	switch probe.Type {
+	case ToolChangeTypeReference:
+		var shadow struct {
+			Type ToolChangeType `json:"type"`
+			Name string         `json:"name"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("tool_reference: %w", err)
+		}
+		change.Type = shadow.Type
+		change.Name = shadow.Name
+
+	case ToolChangeTypeMCPReference:
+		var shadow struct {
+			Type       ToolChangeType `json:"type"`
+			ServerName string         `json:"server_name"`
+			Name       string         `json:"name"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("mcp_tool_reference: %w", err)
+		}
+		change.Type = shadow.Type
+		change.ServerName = shadow.ServerName
+		change.Name = shadow.Name
+
+	case ToolChangeTypeMCPToolsetReference:
+		var shadow struct {
+			Type       ToolChangeType `json:"type"`
+			ServerName string         `json:"server_name"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("mcp_toolset_reference: %w", err)
+		}
+		change.Type = shadow.Type
+		change.ServerName = shadow.ServerName
+
+	case ToolChangeTypeDefinition:
+		var shadow struct {
+			Type       ToolChangeType  `json:"type"`
+			Definition json.RawMessage `json:"definition"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("tool_definition: %w", err)
+		}
+		change.Type = shadow.Type
+		change.Definition = shadow.Definition
+
+	default:
+		return fmt.Errorf("unknown tool change type %q", probe.Type)
+	}
+	*t = change
+	return t.Validate()
+}
+
+// MarshalJSON emits the arm's own fields, so a decoded-then-rendered block is
+// wire-identical to its source.
+func (t ToolChange) MarshalJSON() ([]byte, error) {
+	switch t.Type {
+	case ToolChangeTypeReference:
+		return json.Marshal(struct {
+			Type ToolChangeType `json:"type"`
+			Name string         `json:"name"`
+		}{t.Type, t.Name})
+	case ToolChangeTypeMCPReference:
+		return json.Marshal(struct {
+			Type       ToolChangeType `json:"type"`
+			ServerName string         `json:"server_name"`
+			Name       string         `json:"name"`
+		}{t.Type, t.ServerName, t.Name})
+	case ToolChangeTypeMCPToolsetReference:
+		return json.Marshal(struct {
+			Type       ToolChangeType `json:"type"`
+			ServerName string         `json:"server_name"`
+		}{t.Type, t.ServerName})
+	case ToolChangeTypeDefinition:
+		return json.Marshal(struct {
+			Type       ToolChangeType  `json:"type"`
+			Definition json.RawMessage `json:"definition"`
+		}{t.Type, t.Definition})
+	default:
+		return nil, fmt.Errorf("unknown tool change type %q", t.Type)
+	}
+}
+
+// Validate checks the arm's required members and that a definition is exactly
+// one JSON object. A reference arm requires the name it references, because a
+// nameless reference can never resolve.
+func (t ToolChange) Validate() error {
+	switch t.Type {
+	case ToolChangeTypeReference:
+		if t.Name == "" {
+			return errors.New("tool_reference has no name")
+		}
+	case ToolChangeTypeMCPReference:
+		if t.ServerName == "" || t.Name == "" {
+			return errors.New("mcp_tool_reference requires server_name and name")
+		}
+	case ToolChangeTypeMCPToolsetReference:
+		if t.ServerName == "" {
+			return errors.New("mcp_toolset_reference has no server_name")
+		}
+	case ToolChangeTypeDefinition:
+		if err := validateJSONObject(t.Definition); err != nil {
+			return fmt.Errorf("tool_definition: %w", err)
+		}
+	default:
+		return fmt.Errorf("unknown tool change type %q", t.Type)
+	}
+	return nil
+}
+
+// validateJSONObject requires raw to be exactly one JSON object.
+func validateJSONObject(raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return errors.New("definition is empty")
+	}
+	if trimmed[0] != '{' {
+		return errors.New("definition is not a JSON object")
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &probe); err != nil {
+		return errors.New("definition is not a JSON object")
+	}
+	return nil
+}
+
+// validateJSONArray requires raw to be exactly one JSON array.
+func validateJSONArray(raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return errors.New("tools is empty")
+	}
+	if trimmed[0] != '[' {
+		return errors.New("tools is not a JSON array")
+	}
+	var probe []json.RawMessage
+	if err := json.Unmarshal(trimmed, &probe); err != nil {
+		return errors.New("tools is not a JSON array")
+	}
+	return nil
+}
 
 // SourceType is the type of an image or document source.
 type SourceType string
@@ -401,6 +598,18 @@ type ContentBlock struct {
 	// contract requires it on every such block; it is decoded so a real
 	// replayed conversation decodes instead of failing as unknown field.
 	ServerName *string `json:"server_name,omitempty"`
+
+	// Tool is the `tool` payload of a tool_addition / tool_removal block, and
+	// ToolChange is the discriminator of that payload (nil on every other
+	// block type). ServerName is not reused for it: an MCP server named by a
+	// tool-change reference is a different semantic from the server that owns
+	// an mcp_tool_use, and conflating them would let one overwrite the other.
+	Tool *ToolChange `json:"tool,omitempty"`
+
+	// Tools is the fetched tool list of a response-side mcp_tool_listing
+	// block, preserved as its raw JSON array so the client can be handed back
+	// exactly what the server recorded.
+	Tools json.RawMessage `json:"tools,omitempty"`
 }
 
 // UnmarshalJSON decodes the tagged union per-arm: each type admits exactly
@@ -586,6 +795,41 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 		block.IsError = shadow.IsError
 		block.CacheControl = shadow.CacheControl
 
+	case ContentBlockTypeToolAddition, ContentBlockTypeToolRemoval:
+		// The mid-conversation tool-change blocks. `tool` is a discriminated
+		// payload whose arms the ToolChange decoder validates strictly, so an
+		// unknown arm or a member from another arm is malformed rather than a
+		// silently dropped field. cache_control is admitted on the BLOCK (the
+		// contract allows it on the block or in the definition, never both);
+		// the convert layer decides whether it can be honoured.
+		var shadow struct {
+			Type         ContentBlockType `json:"type"`
+			Tool         *ToolChange      `json:"tool"`
+			CacheControl any              `json:"cache_control,omitempty"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("%s block: %w", probe.Type, err)
+		}
+		block.Type = shadow.Type
+		block.Tool = shadow.Tool
+		block.CacheControl = shadow.CacheControl
+
+	case ContentBlockTypeMCPToolListing:
+		// Response-side: the server's fetched tool list, pinned by sending the
+		// message back unchanged. mcp_server_name is required so the listing
+		// can be attributed to its server.
+		var shadow struct {
+			Type          ContentBlockType `json:"type"`
+			MCPServerName *string          `json:"mcp_server_name"`
+			Tools         json.RawMessage  `json:"tools"`
+		}
+		if err := wire.Decode(data, &shadow); err != nil {
+			return fmt.Errorf("mcp_tool_listing block: %w", err)
+		}
+		block.Type = shadow.Type
+		block.ServerName = shadow.MCPServerName
+		block.Tools = shadow.Tools
+
 	default:
 		return fmt.Errorf("unknown anthropic content block type %q", probe.Type)
 	}
@@ -673,6 +917,26 @@ func (b ContentBlock) Validate() error {
 		}
 		if b.Content == nil {
 			return errors.New("mcp_tool_result block has no content")
+		}
+	case ContentBlockTypeToolAddition, ContentBlockTypeToolRemoval:
+		if b.Tool == nil {
+			return fmt.Errorf("%s block has no tool", b.Type)
+		}
+		// tool_definition is the inline-tools-2026-09-15 arm and is only legal
+		// on an addition: a removal always names a tool by reference.
+		if b.Type == ContentBlockTypeToolRemoval &&
+			b.Tool.Type == ToolChangeTypeDefinition {
+			return errors.New(
+				"tool_removal cannot carry tool_definition (a removal names a tool by reference)",
+			)
+		}
+		return b.Tool.Validate()
+	case ContentBlockTypeMCPToolListing:
+		if b.ServerName == nil || *b.ServerName == "" {
+			return errors.New("mcp_tool_listing block has no mcp_server_name")
+		}
+		if err := validateJSONArray(b.Tools); err != nil {
+			return fmt.Errorf("mcp_tool_listing: %w", err)
 		}
 	default:
 		return fmt.Errorf("unknown anthropic content block type %q", b.Type)
@@ -969,16 +1233,22 @@ type Request struct {
 // ThinkingConfig is the Anthropic Messages thinking request configuration.
 // The official contract is:
 //
-//	{"type": "enabled", "budget_tokens": N}
+//	{"type": "enabled", "budget_tokens": N, "display": "summarized"|"omitted"|"updates"|null}
 //	{"type": "disabled"}
-//	{"type": "adaptive", "display": "omitted"}
+//	{"type": "between_tools"}
+//	{"type": "adaptive", "display": "summarized"|"omitted"|"updates"|null}
 //
 // "adaptive" (used by Claude Code 2.1.x effort picker) delegates the
-// thinking decision to the model/server. Unknown fields are rejected by the
-// strict wire decode; the Type value and the per-type member set (a
-// budget_tokens on disabled/adaptive or a display on enabled is malformed,
-// never silently ignored) are validated by the transcode
-// layer.
+// thinking decision to the model/server, and "between_tools" (Claude Sonnet
+// 5.5) turns off up-front thinking while keeping the progress updates models
+// write between tool calls. display works on BOTH the enabled and the
+// adaptive arm; its "updates" member is beta-gated by the
+// thinking-display-updates-2026-08-18 Anthropic-Beta header (claude-cli 2.x
+// sends it), and it is invalid on disabled, which has nothing to display, and
+// on between_tools, which accepts no other field. Unknown fields are rejected
+// by the strict wire decode; the Type value and the per-type member set (a
+// budget_tokens outside enabled, or a display on an arm that has none, is
+// malformed, never silently ignored) are validated by the transcode layer.
 type ThinkingConfig struct {
 	Type         string  `json:"type"`
 	BudgetTokens *int    `json:"budget_tokens,omitempty"`

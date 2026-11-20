@@ -3,7 +3,7 @@ package transcode
 // A request-side reasoning control is a real Gemini loss when the client asked
 // for something Gemini's thinkingConfig cannot express, and a Note when the
 // client merely delegated the decision — which is exactly what Gemini does. The
-// three arms are not one decision, and thinking.display is a separate field.
+// four arms are not one decision, and thinking.display is a separate field.
 
 import (
 	"strings"

@@ -125,18 +125,21 @@ func TestDecodeMessagesRequestThinkingConfig(t *testing.T) {
 	}
 }
 
-// TestDecodeMessagesRequestThinkingRejections verifies the invalid shapes:
-// enabled without a budget, an unknown type, and cross-type members
-// (budget_tokens on disabled/adaptive, display on enabled — the official
-// contract is enabled={type,budget_tokens}, disabled={type},
-// adaptive={type,display}) all fail the decode.
+// TestDecodeMessagesRequestThinkingRejections verifies the invalid shapes: an
+// unknown type, cross-type members that no arm of the contract carries
+// (budget_tokens on disabled/between_tools/adaptive, display on the arms with
+// nothing to display), and an enabled budget that is not positive. The
+// contract's own arms — enabled={type,budget_tokens,display?},
+// disabled={type}, between_tools={type}, adaptive={type,display?} — all decode.
 func TestDecodeMessagesRequestThinkingRejections(t *testing.T) {
 	for _, thinking := range []string{
 		`{"type":"enabled"}`,
 		`{"type":"enabled","budget_tokens":0}`,
 		`{"type":"bogus"}`,
-		`{"type":"enabled","budget_tokens":4096,"display":"omitted"}`,
 		`{"type":"disabled","budget_tokens":4096}`,
+		`{"type":"disabled","display":"omitted"}`,
+		`{"type":"between_tools","budget_tokens":4096}`,
+		`{"type":"between_tools","display":"omitted"}`,
 		`{"type":"adaptive","budget_tokens":4096,"display":"omitted"}`,
 	} {
 		if _, _, err := decodeThinking(t, thinking, ChatCapabilities{ReasoningEffort: true}); err == nil {

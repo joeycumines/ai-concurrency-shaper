@@ -44,11 +44,13 @@ type anthropicUpstreamResponsesStreamState struct {
 	// later call and FinalizeEOF propagate it, so a failed stream can never
 	// report a clean terminal.
 	streamError error
-	// authenticatedThinkingLossRecorded and serverToolsLossRecorded gate the
-	// losses for content blocks a Gemini stream cannot carry to once per
-	// stream: a provider may repeat the same kind of block many times.
+	// authenticatedThinkingLossRecorded, serverToolsLossRecorded and
+	// toolChangesLossRecorded gate the losses for content blocks a Gemini
+	// stream cannot carry to once per stream: a provider may repeat the same
+	// kind of block many times.
 	authenticatedThinkingLossRecorded bool
 	serverToolsLossRecorded           bool
+	toolChangesLossRecorded           bool
 }
 
 // anthropicStreamBlock tracks one open content block: its output item and the
@@ -309,6 +311,35 @@ func (s *anthropicUpstreamResponsesStreamState) blockStart(
 		}
 		s.ignored[index] = true
 		return nil, nil
+
+	case anthropicmessages.ContentBlockTypeMCPToolListing:
+		// The MCP connector's fetched tool list (mcp-client-2026-09-15). It
+		// pins provider-side tool-search state, carries no conversation
+		// content, and was never requested by the client, so the omission is a
+		// Note rather than an operator-refusable loss.
+		if err := s.budget.addStateEntries(1); err != nil {
+			return nil, s.wireError(err)
+		}
+		if !s.toolChangesLossRecorded {
+			s.toolChangesLossRecorded = true
+			if err := s.report.Note(
+				FeatureAnthropicToolChanges,
+				"content_block",
+				"an MCP tool listing pins the provider's tool search state and cannot be reproduced in a client stream",
+			); err != nil {
+				return nil, err
+			}
+		}
+		s.ignored[index] = true
+		return nil, nil
+
+	case anthropicmessages.ContentBlockTypeToolAddition,
+		anthropicmessages.ContentBlockTypeToolRemoval:
+		// Request-only blocks: their presence on the response surface is
+		// contradictory upstream wire, never a feature to absorb.
+		return nil, s.wireError(fmt.Errorf(
+			"content block %d is a request-only tool change block", index,
+		))
 
 	case anthropicmessages.ContentBlockTypeServerToolUse,
 		anthropicmessages.ContentBlockTypeWebSearchToolResult,

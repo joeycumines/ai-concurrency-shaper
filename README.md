@@ -933,6 +933,35 @@ the target cannot honour, and silently dropping it would change semantics the
 client can observe in the answer. Approve them for clients whose traffic
 carries them and whose behaviour does not depend on those fields.
 
+### Mid-conversation system messages and tool changes
+
+Claude Code appends `role: "system"` messages mid-conversation, under the
+`context-management` / `inline-tools` / `mid-conversation-tool-changes` betas.
+Two things follow, and both are observable:
+
+- A system message whose content is **only** a tool change is not a
+  conversational turn. It contributes its tool change and nothing else, so it
+  never becomes an empty text turn — that would put prompt text on the wire the
+  client never wrote and charge it a position it never occupied.
+- `tool_addition` and `tool_removal` change which tools the model is offered
+  from that point onward. A chat target carries one global tool list, so a
+  `tool_definition` is **hoisted** into the request's tools: the tool stays
+  available and its definition survives byte-exact, and the availability-timing
+  change is recorded as a Note. A definition that reuses an earlier name is the
+  contract's schema-change mechanism — the newest definition serves the whole
+  request and each supersession is noted, never silently rewritten and never two
+  entries under one name. Definitions decode through the same strict `tools[]`
+  path as declared tools, so an unknown definition field is an error and a
+  type-tagged server tool is refused. A withdrawal, or a reference to a tool the
+  request does not declare, is the `anthropic_tool_changes` loss — approved by
+  default because ordinary claude-cli agentic traffic sends these blocks, and
+  deniable with `-transcode-allow-loss '!anthropic_tool_changes'`. An
+  `mcp_toolset` definition has no chat request form and is refused; a
+  response-side `mcp_tool_listing` is noted (provider tool-search state the
+  client never asked for). The union stays strict: an undocumented block type, an
+  unknown reference arm, a member from another arm, and a `tool_definition` on a
+  removal are all typed errors.
+
 ### Thinking budgets and reasoning effort
 
 Anthropic `thinking` on a Messages client maps to chat `reasoning_effort`
@@ -946,13 +975,22 @@ absence of `reasoning_effort`) and the elision is reported;
 `type: enabled` maps `budget_tokens` through
 a deterministic, documented threshold table (`<1024` minimal, `<4096` low,
 `<16384` medium, else high) and the mapping is reported on every exchange.
-The thinking members are validated per type (`enabled` carries
-`budget_tokens`, `disabled` carries none, `adaptive` carries `display`) —
-a cross-type member is a malformed request, not a silently ignored field.
-`display` is a Messages-native field, so the Messages target renders it and
-every other target records the `request_reasoning` loss for the preference it
-cannot reproduce; the decoder never destroys it, because the decision belongs to
-the target that knows it cannot carry it. The same rule covers `top_k` and
+The thinking members are validated per type (`enabled` carries `budget_tokens`
+and an optional `display`, `disabled` carries nothing, `between_tools` carries
+nothing, `adaptive` carries an optional `display`) — a cross-type member is a
+malformed request, not a silently ignored field. `display` is the
+thinking-visibility preference: `summarized`, `omitted`, or the beta-gated
+`updates` (what Claude Code selects with the `Anthropic-Beta` member
+`thinking-display-updates-2026-08-18`), and the contract documents it on both
+the `enabled` and the `adaptive` arm. It is a Messages-native field, so the
+Messages target renders it and every other target records the
+`request_reasoning` loss for the preference it cannot reproduce; the decoder
+never destroys it, because the decision belongs to the target that knows it
+cannot carry it. `between_tools` — Claude Sonnet 5.5's lowest setting, which
+turns off up-front thinking while keeping the progress updates models write
+between tool calls — is carried natively by a Messages target and is a
+policy-gated `request_reasoning` loss everywhere else, because no other dialect
+can assert either half of what it asks for. The same rule covers `top_k` and
 `disable_parallel_tool_use`: both are carried by the canonical request and lost
 only by a renderer whose wire has no such field, so a Messages→Messages exchange
 keeps them while a Messages→Chat exchange records the loss.

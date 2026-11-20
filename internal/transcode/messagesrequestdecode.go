@@ -196,20 +196,39 @@ func DecodeMessagesRequest(
 		}
 	}
 
-	// Thinking configuration. "enabled" requires an explicit budget; members
-	// are validated per type against the official contract (enabled={type,
-	// budget_tokens}, disabled={type}, adaptive={type,display}) so a
-	// cross-type member is a malformed request, never silently ignored.
-	// The strict wire decode already rejected unknown
-	// fields inside the object.
+	// Thinking configuration. The contract has four arms —
+	// enabled={type,budget_tokens,display?}, disabled={type},
+	// between_tools={type}, adaptive={type,display?} — and display's enum is
+	// summarized|omitted|updates, the last gated upstream by the
+	// Anthropic-Beta member thinking-display-updates-2026-08-18 that
+	// claude-cli 2.x sends. Every member is validated per arm, so a
+	// cross-type member is a malformed request rather than silently ignored,
+	// and no spelling outside the enum is treated as a legal "absent"
+	// (absence is the field being omitted). The strict wire decode already
+	// rejected unknown fields inside the object.
 	if envelope.Thinking != nil {
+		thinking := &CanonicalThinking{Type: envelope.Thinking.Type}
 		switch envelope.Thinking.Type {
-		case "enabled":
-			if envelope.Thinking.Display != nil {
-				return DecodeResult{}, errors.New(
-					"messages thinking type enabled cannot carry display (it belongs to adaptive)",
+		case "enabled", "disabled", "between_tools", "adaptive":
+		default:
+			return DecodeResult{}, fmt.Errorf(
+				"messages thinking type %q is invalid (want enabled, disabled, between_tools, or adaptive)",
+				envelope.Thinking.Type,
+			)
+		}
+		if envelope.Thinking.Display != nil {
+			switch display := *envelope.Thinking.Display; display {
+			case "summarized", "omitted", "updates":
+				thinking.Display = display
+			default:
+				return DecodeResult{}, fmt.Errorf(
+					"messages thinking display %q is invalid (want summarized, omitted, or updates)",
+					display,
 				)
 			}
+		}
+		switch envelope.Thinking.Type {
+		case "enabled":
 			if envelope.Thinking.BudgetTokens == nil {
 				return DecodeResult{}, errors.New(
 					"messages thinking type enabled requires budget_tokens",
@@ -220,51 +239,49 @@ func DecodeMessagesRequest(
 					"messages thinking budget_tokens must be positive",
 				)
 			}
-			result.Request.Thinking = &CanonicalThinking{
-				Type:         "enabled",
-				BudgetTokens: envelope.Thinking.BudgetTokens,
-			}
-		case "disabled", "adaptive":
-			if envelope.Thinking.Display != nil {
-				// The wire enum has exactly two members; an empty string and any
-				// other spelling are malformed rather than a legal "absent"
-				// (absence is the field being omitted).
-				switch *envelope.Thinking.Display {
-				case "summarized", "omitted":
-				default:
-					return DecodeResult{}, fmt.Errorf(
-						"messages thinking display %q is invalid (want summarized or omitted)",
-						*envelope.Thinking.Display,
-					)
-				}
-			}
-			if envelope.Thinking.BudgetTokens != nil {
-				return DecodeResult{}, fmt.Errorf(
-					"messages thinking type %s cannot carry budget_tokens (it belongs to enabled)",
-					envelope.Thinking.Type,
-				)
-			}
-			// display belongs to the adaptive arm alone. Accepting it on
-			// disabled would silently tolerate a contradictory union member.
-			if envelope.Thinking.Type == "disabled" && envelope.Thinking.Display != nil {
+			thinking.BudgetTokens = envelope.Thinking.BudgetTokens
+		case "disabled":
+			// disabled turns thinking off outright, so there is nothing to
+			// display.
+			if thinking.Display != "" {
 				return DecodeResult{}, errors.New(
-					"messages thinking type disabled cannot carry display (it belongs to adaptive)",
+					"messages thinking type disabled cannot carry display (there is nothing to display)",
 				)
 			}
-			// The Messages target carries display natively, so the decoder
-			// (which has no target) stores it; each other target records the
-			// request_reasoning loss for the preference it cannot reproduce.
-			thinking := &CanonicalThinking{Type: envelope.Thinking.Type}
-			if envelope.Thinking.Display != nil {
-				thinking.Display = *envelope.Thinking.Display
+		case "between_tools":
+			// The lowest setting on Claude Sonnet 5.5: it turns off up-front
+			// thinking and accepts no other field at all.
+			if thinking.Display != "" {
+				return DecodeResult{}, errors.New(
+					"messages thinking type between_tools cannot carry display (it accepts no other field)",
+				)
 			}
-			result.Request.Thinking = thinking
-		default:
+		}
+		// budget_tokens belongs to the enabled arm alone; accepting it on
+		// another arm would silently tolerate a contradictory union member.
+		if envelope.Thinking.Type != "enabled" && envelope.Thinking.BudgetTokens != nil {
 			return DecodeResult{}, fmt.Errorf(
-				"messages thinking type %q is invalid (want enabled, disabled, or adaptive)",
+				"messages thinking type %s cannot carry budget_tokens (it belongs to enabled)",
 				envelope.Thinking.Type,
 			)
 		}
+		// The Messages target carries display natively, so the decoder (which
+		// has no target) stores it; each other target records the
+		// request_reasoning loss for the preference it cannot reproduce.
+		result.Request.Thinking = thinking
+	}
+
+	// Mid-conversation tool definitions (inline-tools-2026-09-15). A
+	// tool_addition carrying `tool_definition` offers a NEW or CHANGED tool
+	// from that point onward; a chat target has one global tool list, so the
+	// only representable form is the tool being present for the whole request.
+	// Hoisting it preserves the tool's availability and its definition
+	// losslessly, and the timing change is recorded as a Note. This runs BEFORE
+	// the message walks so a hoisted definition is never also charged as a
+	// withdrawal-style loss below.
+	hoisted, hoistedOut, err := hoistToolDefinitions(&envelope, &result)
+	if err != nil {
+		return DecodeResult{}, err
 	}
 
 	// System prompt becomes a system turn. The empty-part synthesis below is
@@ -318,17 +335,37 @@ func DecodeMessagesRequest(
 			return DecodeResult{}, fmt.Errorf("messages[%d]: %w", i, err)
 		}
 		if len(parts) == 0 && len(message.Content.ContentBlocks) > 0 {
-			// When every content block in the turn was scrubbed (e.g. synthetic
-			// marker-signature thinking blocks, in an assistant turn or a
-			// system-role one), preserve the turn with an empty text part so
-			// canonical validation does not reject a turn whose blocks were all
-			// proxy-synthesized.
-			parts = []CanonicalPart{CanonicalText{Text: ""}}
+			// A tool-change-only message is the one shape that is not a turn: a
+			// mid-conversation tool_addition / tool_removal carries availability
+			// semantics, never conversation content, so synthesizing an empty
+			// text part would invent prompt text the client never wrote and
+			// charge the client a mid-conversation-system move for a turn that
+			// exists only because of a hoist. Every OTHER all-scrubbed turn
+			// (proxy-synthesized marker thinking, an approved server-tool drop)
+			// keeps its boundary with an empty part, so canonical validation
+			// does not reject it.
+			if !carriesOnlyToolChanges(message.Content.ContentBlocks) {
+				parts = []CanonicalPart{CanonicalText{Text: ""}}
+			}
+		} else if len(parts) == 0 && len(message.Content.ContentBlocks) == 0 &&
+			message.Content.ContentStr == nil {
+			if _, wasHoisted := hoistedOut[i]; wasHoisted {
+				// All of this message's blocks became request tools.
+				continue
+			}
+			// An explicit empty content ARRAY is not a legal Messages message
+			// (the union selects a variant, and an empty array selects none), so
+			// it is a client-dialect error rather than a silently dropped turn.
+			return DecodeResult{}, fmt.Errorf(
+				"messages[%d]: content array is empty", i,
+			)
 		}
-		result.Request.Turns = append(result.Request.Turns, CanonicalTurn{
-			Role:  role,
-			Parts: parts,
-		})
+		if len(parts) > 0 {
+			result.Request.Turns = append(result.Request.Turns, CanonicalTurn{
+				Role:  role,
+				Parts: parts,
+			})
+		}
 	}
 
 	// Tools. The input_schema raw bytes are preserved — validated as exactly
@@ -393,6 +430,44 @@ func DecodeMessagesRequest(
 		})
 	}
 
+	// Tools defined mid-conversation (hoisted above) join the declared list.
+	// A definition that reuses an earlier name is a SCHEMA CHANGE from its
+	// position onward — the contract's normal mechanism for shipping a tool
+	// whose schema changed — while a chat request carries ONE schema per name
+	// for the whole conversation. The only representable encoding is
+	// last-definition-wins: the newest definition serves every turn, and the
+	// turns authored against the earlier one are served the newer schema. That
+	// is a sanctioned encoding, not a policy decision (no policy could restore
+	// per-turn schemas), so it is recorded as a Note per superseded
+	// declaration. It is NOT a hard error: refusing it would 400 exactly the
+	// traffic this path exists to serve.
+	for _, hoist := range hoisted {
+		previous := -1
+		for j, existing := range result.Request.Tools {
+			if existing.Name == hoist.tool.Name {
+				previous = j
+				break
+			}
+		}
+		if previous >= 0 {
+			if err := result.Report.Note(
+				FeatureAnthropicToolChanges,
+				hoist.path,
+				fmt.Sprintf(
+					"tool %q is redefined mid-conversation; the newest definition serves the whole request, so turns authored against the earlier schema see the updated one",
+					hoist.tool.Name,
+				),
+			); err != nil {
+				return DecodeResult{}, err
+			}
+			// Last-definition-wins: replace in place so the tool list never
+			// carries two entries under one name.
+			result.Request.Tools[previous] = hoist.tool
+			continue
+		}
+		result.Request.Tools = append(result.Request.Tools, hoist.tool)
+	}
+
 	// Tool choice: Anthropic "auto"/"none"/"any"/named tool, reconciled
 	// against the surviving tools so a dangling reference never reaches a
 	// renderer.
@@ -418,6 +493,154 @@ func DecodeMessagesRequest(
 	}
 
 	return result, nil
+}
+
+// carriesOnlyToolChanges reports whether every block in content is a
+// mid-conversation tool change. Such a message carries availability semantics
+// and no conversation content, so it is not a conversational turn: keeping it
+// as an empty text turn would put proxy-invented prompt text on the wire and
+// charge the client a position it never occupied.
+func carriesOnlyToolChanges(blocks []anthropicmessages.ContentBlock) bool {
+	if len(blocks) == 0 {
+		return false
+	}
+	for _, block := range blocks {
+		switch block.Type {
+		case AnthropicContentBlockTypeToolAddition, AnthropicContentBlockTypeToolRemoval:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// hoistToolDefinitions extracts every tool_addition carrying a tool_definition
+// and returns the tools it declares. The definition is a tools[] entry (a custom
+// tool, an Anthropic-defined client or server tool, or an mcp_toolset), so it is
+// decoded exactly like one.
+//
+// A chat target carries ONE global tool list, so the only representable form of
+// "offer this tool from here onward" is the tool being present for the whole
+// request. Hoisting preserves the definition losslessly and records the timing
+// change as a Note. The extracted block is REMOVED from the envelope so the
+// content walk cannot also charge it as a withdrawal-style loss.
+//
+// The reference and removal arms carry no definition and are left in place for
+// the content walk to decide.
+func hoistToolDefinitions(
+	envelope *anthropicmessages.Request,
+	result *DecodeResult,
+) ([]hoistedTool, map[int]struct{}, error) {
+	var hoisted []hoistedTool
+	// emptied records the message indices that contained ONLY hoisted
+	// definitions: after the tool is lifted into the request's tools list those
+	// messages hold no content, and they are not turns. Distinguishing them
+	// from a client-sent empty array is what keeps a genuinely empty array a
+	// typed rejection.
+	emptied := make(map[int]struct{})
+	for i := range envelope.Messages {
+		message := &envelope.Messages[i]
+		if message.Content.ContentBlocks == nil {
+			continue
+		}
+		blocks := message.Content.ContentBlocks[:0]
+		for j := range message.Content.ContentBlocks {
+			block := message.Content.ContentBlocks[j]
+			if block.Type != AnthropicContentBlockTypeToolAddition ||
+				block.Tool == nil ||
+				block.Tool.Type != anthropicmessages.ToolChangeTypeDefinition {
+				blocks = append(blocks, block)
+				continue
+			}
+			tool, err := decodeHoistedTool(*block.Tool)
+			if err != nil {
+				return nil, nil, fmt.Errorf(
+					"messages[%d].content[%d]: tool_addition: %w", i, j, err,
+				)
+			}
+			hoisted = append(hoisted, hoistedTool{
+				tool: tool,
+				path: fmt.Sprintf("messages[%d].content[%d]", i, j),
+			})
+			// The tool becomes available for the whole request, so its earlier
+			// availability threshold is gone. Recorded once per block, naming
+			// the REAL message and block index: a bare `messages[]` collides
+			// across messages, and the report dedupes by (feature, path), so
+			// two hoists in different messages would be logged as one.
+			if err := result.Report.Note(
+				FeatureAnthropicToolChanges,
+				fmt.Sprintf("messages[%d].content[%d]", i, j),
+				fmt.Sprintf(
+					"tool %q defined mid-conversation is offered for the whole request (a chat target has one global tool list, so the availability point cannot be expressed)",
+					tool.Name,
+				),
+			); err != nil {
+				return nil, nil, err
+			}
+		}
+		if len(blocks) == 0 && len(message.Content.ContentBlocks) > 0 {
+			emptied[i] = struct{}{}
+		}
+		// Keep the two states distinguishable: an emptied content array must
+		// stay empty rather than become a nil-block sentinel.
+		message.Content.ContentBlocks = blocks
+	}
+	return hoisted, emptied, nil
+}
+
+// hoistedTool pairs a tool hoisted out of a mid-conversation definition with the
+// canonical path it came from, so every decision about it names real
+// coordinates rather than a report-slice index.
+type hoistedTool struct {
+	tool CanonicalTool
+	path string
+}
+
+// decodeHoistedTool decodes a tool_definition payload as a canonical tool.
+//
+// The definition is a tools[] entry, so it is decoded through the SAME
+// anthropicmessages.Tool type the declared list uses. That is load-bearing:
+// Tool.UnmarshalJSON routes a client-function spelling through the STRICT
+// client decode (unknown fields rejected) and a type-tagged server tool through
+// the tolerant capture the loss report needs. Reimplementing the decode here
+// with a bare json.Unmarshal silently discarded every documented tools[] member
+// outside a five-field probe (input_examples, strict, allowed_callers,
+// defer_loading, cache_control, max_uses, ...) — the exact client-contract hole
+// the strict decode exists to close.
+func decodeHoistedTool(change anthropicmessages.ToolChange) (CanonicalTool, error) {
+	var tool anthropicmessages.Tool
+	if err := json.Unmarshal(change.Definition, &tool); err != nil {
+		return CanonicalTool{}, err
+	}
+	// A definition carrying a type discriminator is a server-side tool. This
+	// loop runs before the declared-tools walk (which files server tools under
+	// anthropic_server_tools), so hoisting one here would smuggle a server tool
+	// past that gate; it is refused instead.
+	if tool.Type != "" && tool.Type != anthropicClientFunctionToolType {
+		return CanonicalTool{}, fmt.Errorf(
+			"the %q server-side tool definition cannot be reproduced in a chat request",
+			tool.Type,
+		)
+	}
+	if err := tool.Validate(); err != nil {
+		return CanonicalTool{}, err
+	}
+	schema := tool.InputSchema
+	if len(schema) == 0 {
+		schema = json.RawMessage(`{"type":"object"}`)
+	}
+	if _, err := decodeJSONObject(string(schema)); err != nil {
+		return CanonicalTool{}, fmt.Errorf("input_schema: %w", err)
+	}
+	description := ""
+	if tool.Description != nil {
+		description = *tool.Description
+	}
+	return CanonicalTool{
+		Name:        tool.Name,
+		Description: description,
+		JSONSchema:  schema,
+	}, nil
 }
 
 // anthropicContentToCanonical maps Anthropic message content (string or
@@ -554,6 +777,27 @@ func anthropicContentToCanonical(
 				IsError: isError,
 				Parts:   resultParts,
 			})
+
+		case AnthropicContentBlockTypeToolAddition,
+			AnthropicContentBlockTypeToolRemoval:
+			// A mid-conversation tool change: the block alters which tools the
+			// model is offered from this point onward. It contributes no
+			// conversation content, so it produces no canonical part; its only
+			// honest fate on a target with one global tool list is the
+			// anthropic_tool_changes decision. A tool_definition is handled
+			// separately by hoistToolDefinitions before this walk, so a
+			// surviving block here is a withdrawal or a reference.
+			if err := report.Lose(
+				policy,
+				FeatureAnthropicToolChanges,
+				fmt.Sprintf("messages[].content[%d]", i),
+				fmt.Sprintf(
+					"the %q mid-conversation tool change cannot keep its availability timing in a chat request",
+					string(block.Type),
+				),
+			); err != nil {
+				return nil, err
+			}
 
 		case AnthropicContentBlockTypeServerToolUse,
 			AnthropicContentBlockTypeWebSearchToolResult,
