@@ -638,6 +638,17 @@ func (s *anthropicUpstreamResponsesStreamState) messageDelta(
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic message_delta before message_start"))
 	}
 	if event.Delta != nil && event.Delta.StopReason != nil {
+		if s.sawStopValue && s.stopReason != *event.Delta.StopReason {
+			// A contradictory second stop reason is malformed wire: the
+			// later value could overwrite a refusal into a success terminal.
+			// A repeated identical reason is allowed (providers send a second
+			// message_delta for cumulative usage), so only the conflicting
+			// case fails the exchange.
+			return nil, s.wireError(fmt.Errorf(
+				"anthropic message_delta stop_reason %q contradicts earlier %q",
+				*event.Delta.StopReason, s.stopReason,
+			))
+		}
 		if err := s.requireClosedBlocks(event.Type); err != nil {
 			return nil, err
 		}
@@ -654,10 +665,16 @@ func (s *anthropicUpstreamResponsesStreamState) messageDelta(
 // message_delta follows every block's stop; closing a block after the final
 // stop reason would conceal an out-of-order upstream lifecycle.
 func (s *anthropicUpstreamResponsesStreamState) requireClosedBlocks(event anthropicmessages.StreamEventType) error {
+	// A map's iteration order is random; report the earliest unclosed block so
+	// the diagnostic is stable across runs when several blocks are open.
+	var first int64 = -1
 	for index, block := range s.blocks {
-		if !block.closed {
-			return s.wireError(fmt.Errorf("anthropic %s before content block %d stopped", event, index))
+		if !block.closed && (first < 0 || index < first) {
+			first = index
 		}
+	}
+	if first >= 0 {
+		return s.wireError(fmt.Errorf("anthropic %s before content block %d stopped", event, first))
 	}
 	return nil
 }

@@ -216,7 +216,6 @@ func TestMCPToolListingRejectsCorruptModeledFields(t *testing.T) {
 		`[{"name":"echo","input_schema":[]}]`,
 		`[{"name":"echo","input_schema":"object"}]`,
 		`[{"name":"echo","input_schema":{},"description":false}]`,
-		`[{"name":"echo","input_schema":{},"unknown":true}]`,
 		`[{"name":"echo","name":"other","input_schema":{}}]`,
 	} {
 		t.Run(tools, func(t *testing.T) {
@@ -241,6 +240,14 @@ func TestMCPToolListingRejectsCorruptModeledFields(t *testing.T) {
 				t.Fatalf("missing or cross-arm member accepted: %s", body)
 			}
 		})
+	}
+
+	// Unknown fields in a listing's tools are provider extensions on a
+	// subject-to-change surface; they are skipped, never fatal.
+	var extended ContentBlock
+	extendedBody := `{"type":"mcp_tool_listing","mcp_server_name":"s","tools":[{"name":"echo","input_schema":{},"unknown":true}]}`
+	if err := wire.Decode([]byte(extendedBody), &extended); err != nil {
+		t.Fatalf("a provider extension in a dropped listing must be tolerated: %v", err)
 	}
 }
 

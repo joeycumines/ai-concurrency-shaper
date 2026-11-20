@@ -192,6 +192,37 @@ func TestMessagesInlineToolRejectsSourceKindConflictBeforeLoss(t *testing.T) {
 	}
 }
 
+func TestMessagesDuplicateDeclarationCitesOriginalPath(t *testing.T) {
+	// tools[] declares "db" twice; a later inline provider-type definition
+	// conflicts. The diagnostic must point at the first declaration.
+	def := func(kind string) string {
+		return `{"type":"tool_addition","tool":{"type":"tool_definition","definition":` + kind + `}}`
+	}
+	server := `{"type":"web_search_20250305","name":"db"}`
+	body := []byte(`{"model":"m","max_tokens":16,` +
+		`"tools":[{"name":"db","input_schema":{"type":"object"}},{"name":"db","input_schema":{"type":"object"}}],` +
+		`"messages":[{"role":"user","content":"hi"},` +
+		`{"role":"system","content":[` + def(server) + `]}]}`)
+	_, err := DecodeMessagesRequest(body, messagesToolStateApproval())
+	requireMessagesToolContractError(t, err, wire.DecodeContradictoryUnion)
+	if !strings.Contains(err.Error(), `but was declared as "custom" at tools[0] (tool_name_conflict)`) {
+		t.Fatalf("duplicate definition cited the wrong origin: %v", err)
+	}
+
+	// Two versions of the same provider tool family share a normalized kind;
+	// the conflict still cites the FIRST declaration's type and path together.
+	computer := `{"type":"computer_20260101","name":"db"}`
+	body = []byte(`{"model":"m","max_tokens":16,` +
+		`"tools":[{"type":"web_search_20250305","name":"db"},{"type":"web_search_20260101","name":"db"}],` +
+		`"messages":[{"role":"user","content":"hi"},` +
+		`{"role":"system","content":[` + def(computer) + `]}]}`)
+	_, err = DecodeMessagesRequest(body, messagesToolStateApproval())
+	requireMessagesToolContractError(t, err, wire.DecodeContradictoryUnion)
+	if !strings.Contains(err.Error(), `but was declared as "web_search_20250305" at tools[0] (tool_name_conflict)`) {
+		t.Fatalf("same-kind duplicates cited a mixed origin: %v", err)
+	}
+}
+
 func TestMessagesToolChangePlacement(t *testing.T) {
 	change := `{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"db","input_schema":{"type":"object"}}}}]}`
 	user := `{"role":"user","content":"hi"}`

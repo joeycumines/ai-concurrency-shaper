@@ -40,6 +40,58 @@ func TestDecodeMessagesResponseKeepsBlockOrder(t *testing.T) {
 	}
 }
 
+// TestDecodeMessagesResponseListingKeepsTurnBoundary proves a dropped MCP
+// tool listing does not split adjacent text blocks into separate messages.
+func TestDecodeMessagesResponseListingKeepsTurnBoundary(t *testing.T) {
+	body := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-x",` +
+		`"content":[` +
+		`{"type":"text","text":"Hello"},` +
+		`{"type":"mcp_tool_listing","mcp_server_name":"calendar","tools":[]},` +
+		`{"type":"text","text":" world"}],` +
+		`"stop_reason":"end_turn","stop_sequence":null,` +
+		`"usage":{"input_tokens":3,"output_tokens":2}}`
+	resp, report, err := decodeMessagesBody(t, body, LossPolicy{})
+	if err != nil {
+		t.Fatalf("DecodeMessagesResponse: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("items = %d, want one message item containing both text parts", len(resp.Items))
+	}
+	item, ok := resp.Items[0].(*CanonicalMessageItem)
+	if !ok || len(item.Parts) != 2 {
+		t.Fatalf("item 0 = %#v, want one message with two text parts", resp.Items[0])
+	}
+	if !reportHasFeature(report, FeatureAnthropicToolChanges) {
+		t.Fatalf("dropped listing produced no note: %+v", report.Losses)
+	}
+}
+
+// TestDecodeMessagesResponseListingToleratesProviderExtensions proves an
+// unmodeled field in a dropped MCP tool listing does not fail the exchange.
+// The listing carries no client-visible content, so a provider extension on
+// this subject-to-change response surface must be skipped, not fatal.
+func TestDecodeMessagesResponseListingToleratesProviderExtensions(t *testing.T) {
+	body := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-x",` +
+		`"content":[` +
+		`{"type":"text","text":"Hello"},` +
+		`{"type":"mcp_tool_listing","mcp_server_name":"calendar","tools":` +
+		`[{"name":"echo","input_schema":{"type":"object"},"provider_extension":42}]},` +
+		`{"type":"text","text":" world"}],` +
+		`"stop_reason":"end_turn","stop_sequence":null,` +
+		`"usage":{"input_tokens":3,"output_tokens":2}}`
+	resp, report, err := decodeMessagesBody(t, body, LossPolicy{})
+	if err != nil {
+		t.Fatalf("DecodeMessagesResponse rejected a provider extension on a dropped listing: %v", err)
+	}
+	item, ok := resp.Items[0].(*CanonicalMessageItem)
+	if !ok || len(item.Parts) != 2 {
+		t.Fatalf("item 0 = %#v, want one message with two text parts", resp.Items[0])
+	}
+	if !reportHasFeature(report, FeatureAnthropicToolChanges) {
+		t.Fatalf("dropped listing produced no note: %+v", report.Losses)
+	}
+}
+
 func TestDecodeMessagesResponseStopReasons(t *testing.T) {
 	tests := []struct {
 		name       string
