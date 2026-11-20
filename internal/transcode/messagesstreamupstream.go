@@ -14,9 +14,11 @@ import (
 
 // anthropicUpstreamResponsesStreamState converts Anthropic Messages stream
 // events into the typed Responses events the Gemini client state consumes.
-// Each content block becomes one output item, in block order. The Gemini
-// state validates the emitted sequence with the Responses lifecycle machine,
-// so an ordering defect here fails the stream instead of reaching the client.
+// Each visible content block becomes one output item, in block order.
+// Discarded blocks retain their kind and lifecycle state: omitting their
+// payload does not permit an invalid delta or an unclosed block. The Gemini
+// state also validates the emitted sequence with the Responses lifecycle
+// machine, so an ordering defect fails the stream instead of reaching the client.
 //
 // Usage is reported only when both the message_start and the final
 // message_delta carried a usage object. Otherwise the terminal envelope has no
@@ -34,7 +36,6 @@ type anthropicUpstreamResponsesStreamState struct {
 	sequence     int64
 	nextOutput   int64
 	blocks       map[int64]*anthropicStreamBlock
-	ignored      map[int64]bool
 	startUsage   *anthropicmessages.Usage
 	finalUsage   *anthropicmessages.Usage
 	stopReason   anthropicmessages.StopReason
@@ -53,10 +54,13 @@ type anthropicUpstreamResponsesStreamState struct {
 	toolChangesLossRecorded           bool
 }
 
-// anthropicStreamBlock tracks one open content block: its output item and the
-// text or arguments accumulated so far, which the closing events repeat.
+// anthropicStreamBlock tracks every content block until the stream ends. A
+// visible block retains its output identity and accumulated text or arguments.
+// An ignored block retains only its kind and closure; the same lifecycle checks
+// apply even though it contributes no client-visible output.
 type anthropicStreamBlock struct {
 	kind        anthropicmessages.ContentBlockType
+	ignored     bool
 	outputIndex int64
 	itemID      string
 	callID      string
@@ -85,7 +89,6 @@ func newAnthropicUpstreamResponsesStreamState(
 		policy:     policy,
 		budget:     newStreamBudget(),
 		blocks:     make(map[int64]*anthropicStreamBlock),
-		ignored:    make(map[int64]bool),
 	}
 }
 
@@ -118,6 +121,9 @@ func (s *anthropicUpstreamResponsesStreamState) convertEvent(
 		)
 	}
 	if err := s.budget.addEvent(); err != nil {
+		return nil, s.wireError(err)
+	}
+	if err := validateAnthropicEventPayload(event); err != nil {
 		return nil, s.wireError(err)
 	}
 	switch event.Type {
@@ -184,6 +190,9 @@ func (s *anthropicUpstreamResponsesStreamState) messageStart(
 			http.StatusOK,
 			errors.New("anthropic message_start has no message"),
 		)
+	}
+	if len(event.Message.Content) > 0 {
+		return nil, s.wireError(errors.New("anthropic message_start carries content; content must arrive through content_block events"))
 	}
 	s.started = true
 	s.startUsage = event.Message.Usage
@@ -309,7 +318,7 @@ func (s *anthropicUpstreamResponsesStreamState) blockStart(
 				return nil, err
 			}
 		}
-		s.ignored[index] = true
+		s.blocks[index] = &anthropicStreamBlock{kind: block.Type, ignored: true}
 		return nil, nil
 
 	case anthropicmessages.ContentBlockTypeMCPToolListing:
@@ -330,7 +339,7 @@ func (s *anthropicUpstreamResponsesStreamState) blockStart(
 				return nil, err
 			}
 		}
-		s.ignored[index] = true
+		s.blocks[index] = &anthropicStreamBlock{kind: block.Type, ignored: true}
 		return nil, nil
 
 	case anthropicmessages.ContentBlockTypeToolAddition,
@@ -362,7 +371,7 @@ func (s *anthropicUpstreamResponsesStreamState) blockStart(
 				return nil, err
 			}
 		}
-		s.ignored[index] = true
+		s.blocks[index] = &anthropicStreamBlock{kind: block.Type, ignored: true}
 		return nil, nil
 
 	default:
@@ -381,11 +390,17 @@ func (s *anthropicUpstreamResponsesStreamState) requireOpenable(event anthropicm
 	if !s.started {
 		return upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content block before message_start"))
 	}
+	if s.sawStopValue {
+		return s.wireError(errors.New("anthropic content block after final message_delta"))
+	}
 	if event.Index == nil || event.ContentBlock == nil {
 		return upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content_block_start has no index or block"))
 	}
 	index := int64(*event.Index)
-	if _, reused := s.blocks[index]; reused || s.ignored[index] {
+	if index < 0 {
+		return s.wireError(fmt.Errorf("anthropic content block index %d is negative", index))
+	}
+	if _, reused := s.blocks[index]; reused {
 		return upstreamWireError(UpstreamMessages, http.StatusOK, fmt.Errorf("anthropic content block index %d reused", index))
 	}
 	return nil
@@ -397,23 +412,28 @@ func (s *anthropicUpstreamResponsesStreamState) blockDelta(
 	if !s.started {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content delta before message_start"))
 	}
+	if s.sawStopValue {
+		return nil, s.wireError(errors.New("anthropic content delta after final message_delta"))
+	}
 	if event.Index == nil || event.Delta == nil {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content_block_delta has no index or delta"))
 	}
 	index := int64(*event.Index)
-	if s.ignored[index] {
-		return nil, nil
-	}
 	tracked, ok := s.blocks[index]
 	if !ok || tracked.closed {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, fmt.Errorf("anthropic delta for unopened block %d", index))
 	}
 	delta := event.Delta
+	if err := validateAnthropicBlockDelta(tracked.kind, *delta); err != nil {
+		return nil, s.wireError(fmt.Errorf("content block %d: %w", index, err))
+	}
+	if tracked.ignored {
+		// The frame/event bounds apply to discarded deltas. Their payloads
+		// are not retained, so they consume no accumulated semantic bytes.
+		return nil, nil
+	}
 	switch delta.Type {
 	case anthropicmessages.StreamDeltaTypeTextDelta:
-		if tracked.kind != anthropicmessages.ContentBlockTypeText {
-			return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic text_delta on a non-text block"))
-		}
 		out, err := s.textDelta(tracked, derefString(delta.Text))
 		if err != nil {
 			return nil, err
@@ -421,9 +441,6 @@ func (s *anthropicUpstreamResponsesStreamState) blockDelta(
 		return []ResponsesSSEEvent{out}, nil
 
 	case anthropicmessages.StreamDeltaTypeInputJSONDelta:
-		if tracked.kind != anthropicmessages.ContentBlockTypeToolUse {
-			return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic input_json_delta on a non-tool block"))
-		}
 		partial := derefString(delta.PartialJSON)
 		if err := s.budget.addSemanticBytes(int64(len(partial))); err != nil {
 			return nil, s.wireError(err)
@@ -453,6 +470,64 @@ func (s *anthropicUpstreamResponsesStreamState) blockDelta(
 	}
 }
 
+// validateAnthropicBlockDelta keeps the delta union consistent with the block
+// that receives it. Thinking and server-tool arguments may be discarded under
+// an approved loss, but their deltas still need the correct kind and payload.
+// Blocks whose complete payload arrives in content_block_start accept no delta.
+func validateAnthropicBlockDelta(
+	kind anthropicmessages.ContentBlockType,
+	delta anthropicmessages.StreamDelta,
+) error {
+	remaining := delta
+	remaining.Type = ""
+	var field string
+	var present bool
+	switch delta.Type {
+	case anthropicmessages.StreamDeltaTypeTextDelta:
+		if kind == anthropicmessages.ContentBlockTypeText {
+			field, present = "text", delta.Text != nil
+			remaining.Text = nil
+		}
+	case anthropicmessages.StreamDeltaTypeInputJSONDelta:
+		switch kind {
+		case anthropicmessages.ContentBlockTypeToolUse,
+			anthropicmessages.ContentBlockTypeServerToolUse,
+			anthropicmessages.ContentBlockTypeMCPToolUse,
+			anthropicmessages.ContentBlockTypeCodeExecution:
+			// code_execution is an admitted compatibility spelling for an
+			// invocation; the documented API uses server_tool_use with that
+			// name. Keep its argument deltas while checking their shape.
+			field, present = "partial_json", delta.PartialJSON != nil
+			remaining.PartialJSON = nil
+		}
+	case anthropicmessages.StreamDeltaTypeThinkingDelta:
+		if kind == anthropicmessages.ContentBlockTypeThinking {
+			field, present = "thinking", delta.Thinking != nil
+			remaining.Thinking = nil
+		}
+	case anthropicmessages.StreamDeltaTypeSignatureDelta:
+		if kind == anthropicmessages.ContentBlockTypeThinking {
+			field, present = "signature", delta.Signature != nil
+			remaining.Signature = nil
+		}
+	case anthropicmessages.StreamDeltaTypeCitationsDelta:
+		if kind == anthropicmessages.ContentBlockTypeText {
+			field, present = "citation", delta.Citation != nil
+			remaining.Citation = nil
+		}
+	}
+	if field == "" {
+		return fmt.Errorf("anthropic delta type %q is not valid on a %q block", delta.Type, kind)
+	}
+	if !present {
+		return fmt.Errorf("anthropic %s has no %s", delta.Type, field)
+	}
+	if remaining != (anthropicmessages.StreamDelta{}) {
+		return fmt.Errorf("anthropic %s carries fields from another delta arm", delta.Type)
+	}
+	return nil
+}
+
 // textDelta records one text fragment and returns its delta event.
 func (s *anthropicUpstreamResponsesStreamState) textDelta(
 	tracked *anthropicStreamBlock,
@@ -479,18 +554,21 @@ func (s *anthropicUpstreamResponsesStreamState) blockStop(
 	if !s.started {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content_block_stop before message_start"))
 	}
+	if s.sawStopValue {
+		return nil, s.wireError(errors.New("anthropic content_block_stop after final message_delta"))
+	}
 	if event.Index == nil {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content_block_stop has no index"))
 	}
 	index := int64(*event.Index)
-	if s.ignored[index] {
-		return nil, nil
-	}
 	tracked, ok := s.blocks[index]
 	if !ok || tracked.closed {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, fmt.Errorf("anthropic stop for unopened block %d", index))
 	}
 	tracked.closed = true
+	if tracked.ignored {
+		return nil, nil
+	}
 	switch tracked.kind {
 	case anthropicmessages.ContentBlockTypeText:
 		text := tracked.text.String()
@@ -560,6 +638,9 @@ func (s *anthropicUpstreamResponsesStreamState) messageDelta(
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic message_delta before message_start"))
 	}
 	if event.Delta != nil && event.Delta.StopReason != nil {
+		if err := s.requireClosedBlocks(event.Type); err != nil {
+			return nil, err
+		}
 		s.stopReason = *event.Delta.StopReason
 		s.sawStopValue = true
 	}
@@ -569,20 +650,26 @@ func (s *anthropicUpstreamResponsesStreamState) messageDelta(
 	return nil, nil
 }
 
+// requireClosedBlocks checks visible and discarded blocks alike. The final
+// message_delta follows every block's stop; closing a block after the final
+// stop reason would conceal an out-of-order upstream lifecycle.
+func (s *anthropicUpstreamResponsesStreamState) requireClosedBlocks(event anthropicmessages.StreamEventType) error {
+	for index, block := range s.blocks {
+		if !block.closed {
+			return s.wireError(fmt.Errorf("anthropic %s before content block %d stopped", event, index))
+		}
+	}
+	return nil
+}
+
 // messageStop ends the response. Every block must be closed and a stop reason
 // must have arrived, because the terminal event reports the stop reason.
 func (s *anthropicUpstreamResponsesStreamState) messageStop() ([]ResponsesSSEEvent, error) {
 	if !s.started {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic message_stop before message_start"))
 	}
-	for index, block := range s.blocks {
-		if !block.closed {
-			return nil, upstreamWireError(
-				UpstreamMessages,
-				http.StatusOK,
-				fmt.Errorf("anthropic message_stop before content block %d stopped", index),
-			)
-		}
+	if err := s.requireClosedBlocks(anthropicmessages.StreamEventTypeMessageStop); err != nil {
+		return nil, err
 	}
 	if !s.sawStopValue {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic message_stop without a stop_reason"))
@@ -828,16 +915,37 @@ func decodeAnthropicStreamFrame(frame SSEEvent) (anthropicmessages.StreamEvent, 
 	if err := wire.DecodeTolerant(data, &event); err != nil {
 		return event, upstreamWireError(UpstreamMessages, http.StatusOK, err)
 	}
-	if event.Type == anthropicmessages.StreamEventTypeContentBlockDelta && event.Delta != nil {
-		var raw struct {
-			Delta json.RawMessage `json:"delta"`
+	// Envelope extensions remain tolerant. Known payload members, however,
+	// belong to particular event arms; accepting them elsewhere would silently
+	// discard content before the block lifecycle can see it. Check presence
+	// here as well as decoded values below so explicit null cannot mask a
+	// contradictory arm.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return event, upstreamWireError(UpstreamMessages, http.StatusOK, err)
+	}
+	for field := range raw {
+		if !anthropicEventFieldAllowed(event.Type, field) {
+			return event, upstreamWireError(UpstreamMessages, http.StatusOK,
+				fmt.Errorf("anthropic %s carries %s from another event arm", event.Type, field))
 		}
-		if err := wire.DecodeTolerant(data, &raw); err != nil {
+	}
+	if event.Type == anthropicmessages.StreamEventTypeContentBlockDelta && event.Delta != nil {
+		if err := validateAnthropicDeltaFields(raw["delta"], event.Delta.Type); err != nil {
+			return event, upstreamWireError(UpstreamMessages, http.StatusOK, fmt.Errorf("content_block_delta delta: %w", err))
+		}
+	}
+	if event.Type == anthropicmessages.StreamEventTypeMessageDelta && event.Delta != nil {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw["delta"], &fields); err != nil {
 			return event, upstreamWireError(UpstreamMessages, http.StatusOK, err)
 		}
-		var delta anthropicmessages.StreamDelta
-		if err := wire.Decode(raw.Delta, &delta); err != nil {
-			return event, upstreamWireError(UpstreamMessages, http.StatusOK, fmt.Errorf("content_block_delta delta: %w", err))
+		for field := range fields {
+			switch field {
+			case "type", "text", "partial_json", "thinking", "signature", "citation":
+				return event, upstreamWireError(UpstreamMessages, http.StatusOK,
+					fmt.Errorf("anthropic message_delta carries content delta field %q", field))
+			}
 		}
 	}
 	if frame.Event != "" && frame.Event != string(event.Type) {
@@ -848,6 +956,100 @@ func decodeAnthropicStreamFrame(frame SSEEvent) (anthropicmessages.StreamEvent, 
 		)
 	}
 	return event, nil
+}
+
+// anthropicEventFieldAllowed restricts known payload fields to their event arm
+// without rejecting unrelated provider extensions on the event envelope.
+func anthropicEventFieldAllowed(kind anthropicmessages.StreamEventType, field string) bool {
+	switch field {
+	case "message":
+		return kind == anthropicmessages.StreamEventTypeMessageStart
+	case "index":
+		return kind == anthropicmessages.StreamEventTypeContentBlockStart ||
+			kind == anthropicmessages.StreamEventTypeContentBlockDelta ||
+			kind == anthropicmessages.StreamEventTypeContentBlockStop
+	case "content_block":
+		return kind == anthropicmessages.StreamEventTypeContentBlockStart
+	case "delta":
+		return kind == anthropicmessages.StreamEventTypeContentBlockDelta ||
+			kind == anthropicmessages.StreamEventTypeMessageDelta
+	case "usage":
+		return kind == anthropicmessages.StreamEventTypeMessageDelta
+	case "error":
+		return kind == anthropicmessages.StreamEventTypeError
+	default:
+		return true
+	}
+}
+
+// validateAnthropicEventPayload also protects callers supplying decoded
+// events directly. A message delta carries stop/usage metadata, never content
+// fragments; unknown metadata is handled tolerantly by the wire decoder.
+func validateAnthropicEventPayload(event anthropicmessages.StreamEvent) error {
+	for _, field := range []struct {
+		name    string
+		present bool
+	}{
+		{"message", event.Message != nil},
+		{"index", event.Index != nil},
+		{"content_block", event.ContentBlock != nil},
+		{"delta", event.Delta != nil},
+		{"usage", event.Usage != nil},
+		{"error", event.Error != nil},
+	} {
+		if field.present && !anthropicEventFieldAllowed(event.Type, field.name) {
+			return fmt.Errorf("anthropic %s carries %s from another event arm", event.Type, field.name)
+		}
+	}
+	if event.Type == anthropicmessages.StreamEventTypeMessageDelta && event.Delta != nil {
+		remaining := *event.Delta
+		remaining.StopReason, remaining.StopSequence = nil, nil
+		if remaining != (anthropicmessages.StreamDelta{}) {
+			return errors.New("anthropic message_delta carries content delta fields")
+		}
+	}
+	return nil
+}
+
+// validateAnthropicDeltaFields decodes a content delta against its own arm.
+// The broad StreamDelta struct also carries message_delta fields, so decoding
+// against it alone would admit another arm's keys, including explicit nulls
+// that a pointer-based semantic check cannot distinguish from absence.
+func validateAnthropicDeltaFields(raw json.RawMessage, kind anthropicmessages.StreamDeltaType) error {
+	switch kind {
+	case anthropicmessages.StreamDeltaTypeTextDelta:
+		var delta struct {
+			Type anthropicmessages.StreamDeltaType `json:"type"`
+			Text *string                           `json:"text"`
+		}
+		return wire.Decode(raw, &delta)
+	case anthropicmessages.StreamDeltaTypeInputJSONDelta:
+		var delta struct {
+			Type        anthropicmessages.StreamDeltaType `json:"type"`
+			PartialJSON *string                           `json:"partial_json"`
+		}
+		return wire.Decode(raw, &delta)
+	case anthropicmessages.StreamDeltaTypeThinkingDelta:
+		var delta struct {
+			Type     anthropicmessages.StreamDeltaType `json:"type"`
+			Thinking *string                           `json:"thinking"`
+		}
+		return wire.Decode(raw, &delta)
+	case anthropicmessages.StreamDeltaTypeSignatureDelta:
+		var delta struct {
+			Type      anthropicmessages.StreamDeltaType `json:"type"`
+			Signature *string                           `json:"signature"`
+		}
+		return wire.Decode(raw, &delta)
+	case anthropicmessages.StreamDeltaTypeCitationsDelta:
+		var delta struct {
+			Type     anthropicmessages.StreamDeltaType `json:"type"`
+			Citation *anthropicmessages.TextCitation   `json:"citation"`
+		}
+		return wire.Decode(raw, &delta)
+	default:
+		return fmt.Errorf("unknown anthropic content delta type %q", kind)
+	}
 }
 
 // convertGeminiEvents feeds Responses events to the Gemini state and marshals

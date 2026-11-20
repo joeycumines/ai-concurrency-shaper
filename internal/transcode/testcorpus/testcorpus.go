@@ -77,14 +77,19 @@ var (
 	camelReasoningFormatFieldJSON []byte
 	//go:embed testdata/field/claude_server_tool_definition_field.json
 	claudeServerToolDefinitionFieldJSON []byte
-	//go:embed testdata/field/claude_thinking_display_updates_field.json
-	claudeThinkingDisplayUpdatesFieldJSON []byte
-	//go:embed testdata/field/claude_thinking_between_tools_field.json
-	claudeThinkingBetweenToolsFieldJSON []byte
-	//go:embed testdata/field/claude_tool_addition_definition_field.json
-	claudeToolAdditionDefinitionFieldJSON []byte
-	//go:embed testdata/field/claude_tool_removal_reference_field.json
-	claudeToolRemovalReferenceFieldJSON []byte
+)
+
+// Synthetic conformance fixtures follow the documented Anthropic beta contracts.
+// These are constructed examples, separate from the field-capture corpus above.
+var (
+	//go:embed testdata/anthropic_thinking_display_updates.json
+	claudeThinkingDisplayUpdatesJSON []byte
+	//go:embed testdata/anthropic_thinking_between_tools.json
+	claudeThinkingBetweenToolsJSON []byte
+	//go:embed testdata/anthropic_tool_addition_definition.json
+	claudeToolAdditionDefinitionJSON []byte
+	//go:embed testdata/anthropic_tool_removal_reference.json
+	claudeToolRemovalReferenceJSON []byte
 )
 
 // FieldQwenStreamSSE returns the qwen-style chat stream capture: choice-level
@@ -161,43 +166,37 @@ func FieldClaudeServerToolDefinitionJSON() []byte {
 	return claudeServerToolDefinitionFieldJSON
 }
 
-// FieldClaudeThinkingDisplayUpdatesJSON returns the Claude Code thinking
-// shape that a live claude-cli 2.1.328 exchange sent and the proxy refused
-// with `messages thinking display "updates" is invalid`: manual extended
-// thinking (enabled + budget_tokens) carrying the beta-gated "updates"
-// display, alongside the Anthropic-Beta member
-// thinking-display-updates-2026-08-18 the client selects it with. The
-// envelope ids, narrative, and tool schema are reconstructed; the shape — the
-// arm, the display spelling, and the beta header that gates it — is
-// byte-faithful to the reported exchange.
-func FieldClaudeThinkingDisplayUpdatesJSON() []byte {
-	return claudeThinkingDisplayUpdatesFieldJSON
+// ClaudeThinkingDisplayUpdatesJSON is a synthetic conformance fixture for
+// adaptive thinking with the updates display on Claude Opus 5.5. It is not a
+// retained CLI capture. Handler tests supply the required
+// thinking-display-updates-2026-08-18 beta header separately; enabled thinking
+// with a manual budget is covered by generic union tests, because Opus 5.5
+// requires adaptive thinking.
+func ClaudeThinkingDisplayUpdatesJSON() []byte {
+	return claudeThinkingDisplayUpdatesJSON
 }
 
-// FieldClaudeThinkingBetweenToolsJSON returns the Claude Sonnet 5.5 lowest
-// thinking setting: type between_tools, which takes no other field and turns
-// off up-front thinking while keeping the progress updates models write
-// between tool calls. Reconstructed like the display capture above.
-func FieldClaudeThinkingBetweenToolsJSON() []byte {
-	return claudeThinkingBetweenToolsFieldJSON
+// ClaudeThinkingBetweenToolsJSON is a synthetic conformance fixture for
+// Claude Sonnet 5.5's bare between_tools arm. No original CLI capture is
+// retained for this fixture.
+func ClaudeThinkingBetweenToolsJSON() []byte {
+	return claudeThinkingBetweenToolsJSON
 }
 
-// FieldClaudeToolAdditionDefinitionJSON returns the shape a live claude-cli
-// 2.1.328 request sent and the proxy refused with `unknown anthropic content
-// block type "tool_addition"`: a mid-conversation role:"system" message whose
-// content mixes a text block with an inline-tools tool_addition carrying a full
-// tool_definition (and a block-level cache_control). Reconstructed from the
-// documented contract; the arm and its payload shape are the captured ones.
-func FieldClaudeToolAdditionDefinitionJSON() []byte {
-	return claudeToolAdditionDefinitionFieldJSON
+// ClaudeToolAdditionDefinitionJSON is a synthetic inline-tools conformance
+// fixture. A final system message follows a user turn and adds a tool by value
+// with block-level cache_control. It is constructed from the documented
+// contract, not presented as an original CLI capture.
+func ClaudeToolAdditionDefinitionJSON() []byte {
+	return claudeToolAdditionDefinitionJSON
 }
 
-// FieldClaudeToolRemovalReferenceJSON returns the withdrawal counterpart: a
+// ClaudeToolRemovalReferenceJSON is a synthetic withdrawal fixture: a
 // role:"system" message whose content is a tool_removal naming a declared tool
 // by tool_reference. A chat target has one global tool list, so this is the
 // policy-gated anthropic_tool_changes loss rather than a representable change.
-func FieldClaudeToolRemovalReferenceJSON() []byte {
-	return claudeToolRemovalReferenceFieldJSON
+func ClaudeToolRemovalReferenceJSON() []byte {
+	return claudeToolRemovalReferenceJSON
 }
 
 // ChatCompletionsRequestJSON returns the raw chat completions request fixture

@@ -93,8 +93,9 @@
 //	 tool changes          tools (a Note: the availability point cannot be
 //	                       expressed); a withdrawal or undeclarable reference
 //	                       is loss-gated (FeatureAnthropicToolChanges); an
-//	                       mcp_toolset definition is unsupported; a
-//	                       tool-change-only system message is not a turn
+//	                       mcp_toolset definition is unsupported; replayed
+//	                       MCP listings are loss-gated, response listings noted;
+//	                       a tool-change-only system message is not a turn
 //	Reasoning items       loss-gated (FeatureReasoningSummary) on every target,
 //	                       for the same reason
 //	Input item identity   dropped unconditionally; the drop is noted
