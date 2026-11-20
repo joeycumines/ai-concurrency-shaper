@@ -75,6 +75,45 @@ func TestDecodeRejectsDuplicateKeys(t *testing.T) {
 	}
 }
 
+// Raw schema numbers need not fit float64. Structural checks must still
+// inspect every later key and leave the numeric representation unchanged.
+func TestDecodeStructuralChecksPreserveLargeNumbers(t *testing.T) {
+	for name, decode := range map[string]func([]byte, any) error{"strict": Decode, "tolerant": DecodeTolerant} {
+		t.Run(name, func(t *testing.T) {
+			type document struct {
+				Raw json.RawMessage `json:"raw"`
+				ID  string          `json:"id"`
+			}
+			for _, raw := range []string{`1e10000`, `-1e10000`, `{"const":1e10000}`, `[1e10000,9007199254740993]`} {
+				var out document
+				if err := decode([]byte(`{"raw":`+raw+`,"id":"ok"}`), &out); err != nil {
+					t.Errorf("valid raw number %s rejected: %v", raw, err)
+				} else if string(out.Raw) != raw || out.ID != "ok" {
+					t.Errorf("raw number or following field changed: %+v", out)
+				}
+			}
+			for _, raw := range []string{
+				`{"raw":{"const":1e10000,"title":"a","title":"b"},"id":"ok"}`,
+				`{"raw":[1e10000,{"title":"a","title":"b"}],"id":"ok"}`,
+				`{"raw":1e10000,"id":"a","id":"b"}`,
+			} {
+				var out document
+				err := decode([]byte(raw), &out)
+				var malformed *DecodeError
+				if !errors.As(err, &malformed) || malformed.Kind != DecodeDuplicateKey {
+					t.Errorf("duplicate after a large number: error=%T: %v", err, err)
+				}
+			}
+			var out document
+			err := decode([]byte(`{"raw":{"const":1e10000},"id":null}`), &out)
+			var malformed *DecodeError
+			if !errors.As(err, &malformed) || malformed.Kind != DecodeIllegalNull || malformed.Path != ".id" {
+				t.Errorf("null after a large number: error=%T: %v", err, err)
+			}
+		})
+	}
+}
+
 func TestDecodeRejectsUnknownFields(t *testing.T) {
 	type doc struct {
 		A int `json:"a"`

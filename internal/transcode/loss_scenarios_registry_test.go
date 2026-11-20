@@ -39,6 +39,7 @@ func lossScenariosAnthropicToolChanges(t *testing.T) []lossScenario {
 					`"messages":[{"role":"user","content":"hi"},`+
 					`{"role":"system","content":[{"type":"tool_removal",`+
 					`"tool":{"type":"tool_reference","name":"get_weather"}}]},`+
+					`{"role":"assistant","content":"ok"},`+
 					`{"role":"user","content":"go"}]}`), policy)
 				return result.Report, err
 			},

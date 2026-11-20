@@ -201,7 +201,7 @@ func derivedUsageTotal(input, output int64) (int64, string) {
 	}
 	return math.MaxInt64, fmt.Sprintf(
 		"the derived usage total (input %d + output %d) exceeds the representable range; the total is saturated to %d",
-		input, output, math.MaxInt64,
+		input, output, int64(math.MaxInt64),
 	)
 }
 

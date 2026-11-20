@@ -81,7 +81,7 @@ func TestMessagesDecodeRejectsAnUnknownThinkingDisplay(t *testing.T) {
 
 // TestMessagesDecodeDoesNotInventAnAbsentDisplay proves absence stays absent: no
 // display is synthesized on decode or on the wire, and an explicit JSON null —
-// which the contract types as legal (`"summarized" or "omitted" or null`) —
+// which the enabled and adaptive arms permit —
 // decodes as ABSENT rather than as the illegal empty string, on every arm that
 // carries a display.
 func TestMessagesDecodeDoesNotInventAnAbsentDisplay(t *testing.T) {
@@ -89,8 +89,8 @@ func TestMessagesDecodeDoesNotInventAnAbsentDisplay(t *testing.T) {
 		`{"type":"adaptive"}`,
 		`{"type":"adaptive","display":null}`,
 		`{"type":"enabled","budget_tokens":4096,"display":null}`,
-		`{"type":"disabled","display":null}`,
-		`{"type":"between_tools","display":null}`,
+		`{"type":"disabled"}`,
+		`{"type":"between_tools"}`,
 	} {
 		body := messagesThinkingBody(thinking)
 		result, err := DecodeMessagesRequest(body, StrictLossPolicy())
@@ -107,5 +107,23 @@ func TestMessagesDecodeDoesNotInventAnAbsentDisplay(t *testing.T) {
 		if strings.Contains(string(rendered), `"display"`) {
 			t.Fatalf("%s: an absent display was invented on the wire: %s", thinking, rendered)
 		}
+	}
+}
+
+// An excluded union member is invalid even when its value is null. Decode
+// must distinguish that field presence from an optional field on a legal arm.
+func TestMessagesThinkingRejectsCrossArmNullMembers(t *testing.T) {
+	for _, thinking := range []string{
+		`{"type":"disabled","display":null}`,
+		`{"type":"between_tools","display":null}`,
+		`{"type":"disabled","budget_tokens":null}`,
+		`{"type":"between_tools","budget_tokens":null}`,
+		`{"type":"adaptive","budget_tokens":null}`,
+	} {
+		t.Run(thinking, func(t *testing.T) {
+			if _, err := DecodeMessagesRequest(messagesThinkingBody(thinking), StrictLossPolicy()); err == nil {
+				t.Fatalf("accepted a member excluded from this thinking arm: %s", thinking)
+			}
+		})
 	}
 }

@@ -271,6 +271,9 @@ func JSONObject(raw string) (map[string]json.RawMessage, error) {
 // silently (last value wins); the wire layer rejects the document.
 func checkDuplicateKeys(data []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
+	// This pass checks structure, not numeric ranges. A valid raw JSON
+	// number outside float64 must not end the walk before later keys.
+	dec.UseNumber()
 	// stack of seen-key sets, one per open object. Each frame records
 	// whether the next string token is a key (after '{' or after a value in
 	// an object) or a value (after a key). Array frames are inert: strings
@@ -354,6 +357,9 @@ func checkIllegalNulls(data []byte, dst any) error {
 		typ = typ.Elem()
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
+	// Raw schemas and skipped provider fields may contain numbers outside
+	// float64. Preserve their lexemes while checking the surrounding shape.
+	dec.UseNumber()
 	return checkNullValue(dec, typ, "")
 }
 

@@ -595,99 +595,80 @@ func TestDecodeMessagesServerBlocksKeyed(t *testing.T) {
 }
 
 // TestAnthropicToolsTypeDiscriminantIsNotOverAdmitted pins the tools[]
-// classification. A `type` discriminant may take the SERVER path only for a
-// MODELLED server spelling. Admitting every non-empty type silently
-// reclassified a client function tool a gateway happened to spell
-// {"type":"function",...} into a "server tool" and dropped it under a key
-// whose name says server - a silent reinterpretation of client-sent input.
-// The explicit client-function spelling must be carried through, and any
-// other unmodelled type must be a client-dialect error, not a silent drop.
+// classification. Custom functions (untyped, the official "custom" spelling,
+// and the compatibility "function" spelling) remain callable under every
+// policy. Provider-defined tools, including a future unknown type, take the
+// registered anthropic_server_tools decision: strict refuses them and an
+// approving policy drops them with a loss record. A modeled MCP toolset uses
+// its required server identity rather than a function name.
 func TestAnthropicToolsTypeDiscriminantIsNotOverAdmitted(t *testing.T) {
-	body := func(tools string) []byte {
-		return []byte(`{"model":"m","max_tokens":64,"tools":[` + tools + `],` +
+	body := func(tool string) []byte {
+		return []byte(`{"model":"m","max_tokens":64,"tools":[` + tool + `],` +
 			`"messages":[{"role":"user","content":"hi"}]}`)
 	}
-	clientFn := `{"type":"function","name":"get_weather","input_schema":{"type":"object"}}`
-	untypedFn := `{"name":"get_weather","input_schema":{"type":"object"}}`
-
-	permissive := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicServerTools: {}}}
-
-	t.Run("explicit client function type is carried through", func(t *testing.T) {
-		result, err := DecodeMessagesRequest(body(clientFn), permissive)
-		if err != nil {
-			t.Fatalf("a client function tool must convert: %v", err)
+	policies := []struct {
+		name   string
+		policy LossPolicy
+	}{
+		{name: "strict", policy: StrictLossPolicy()},
+		{name: "approved", policy: LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicServerTools: {}}}},
+	}
+	for _, client := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "untyped", definition: `{"name":"get_weather","input_schema":{"type":"object"}}`},
+		{name: "custom", definition: `{"type":"custom","name":"get_weather","input_schema":{"type":"object"}}`},
+		{name: "function", definition: `{"type":"function","name":"get_weather","input_schema":{"type":"object"}}`},
+	} {
+		for _, policy := range policies {
+			t.Run("client/"+client.name+"/"+policy.name, func(t *testing.T) {
+				result, err := DecodeMessagesRequest(body(client.definition), policy.policy)
+				if err != nil {
+					t.Fatalf("a client function tool must convert: %v", err)
+				}
+				if len(result.Request.Tools) != 1 || result.Request.Tools[0].Name != "get_weather" ||
+					string(result.Request.Tools[0].JSONSchema) != `{"type":"object"}` {
+					t.Fatalf("client function definition was not preserved: %+v", result.Request.Tools)
+				}
+				if len(result.Report.Losses) != 0 {
+					t.Fatalf("client function tool took an unexpected loss or note: %+v", result.Report.Losses)
+				}
+			})
 		}
-		if len(result.Request.Tools) != 1 || result.Request.Tools[0].Name != "get_weather" {
-			t.Fatalf("client function tool was not carried through: %+v", result.Request.Tools)
+	}
+	for _, provider := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "unknown type", definition: `{"type":"future_server_tool","name":"f"}`},
+		{name: "web search", definition: `{"type":"web_search_20250305","name":"web_search"}`},
+		{name: "MCP toolset", definition: `{"type":"mcp_toolset","mcp_server_name":"calendar"}`},
+	} {
+		for _, policy := range policies {
+			t.Run("provider/"+provider.name+"/"+policy.name, func(t *testing.T) {
+				result, err := DecodeMessagesRequest(body(provider.definition), policy.policy)
+				if !policy.policy.Allows(FeatureAnthropicServerTools) {
+					var unsupported *UnsupportedFeatureError
+					if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureAnthropicServerTools) ||
+						unsupported.Path != "tools[0]" {
+						t.Fatalf("strict refusal = %T: %v, want anthropic_server_tools at tools[0]", err, err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("approved provider tool must convert: %v", err)
+				}
+				if len(result.Request.Tools) != 0 {
+					t.Fatalf("provider tool leaked into callable functions: %+v", result.Request.Tools)
+				}
+				if len(result.Report.Losses) != 1 || result.Report.Losses[0].Feature != FeatureAnthropicServerTools ||
+					result.Report.Losses[0].Kind != LossRecord || result.Report.Losses[0].Path != "tools[0]" {
+					t.Fatalf("approved loss = %+v, want one anthropic_server_tools loss at tools[0]", result.Report.Losses)
+				}
+			})
 		}
-		for _, l := range result.Report.Losses {
-			if l.Feature == FeatureAnthropicServerTools {
-				t.Errorf("a client function tool must not be filed as a server tool: %+v", l)
-			}
-		}
-	})
-
-	t.Run("unmodelled type is an observable keyed loss, not a hard error", func(t *testing.T) {
-		// A NEW Anthropic server tool must be survivable by approving the
-		// existing flag, with no proxy rebuild. A hard error whose feature
-		// string is not a registered key cannot be cleared that way.
-		result, err := DecodeMessagesRequest(body(`{"type":"mcp_toolset","name":"f"}`), permissive)
-		if err != nil {
-			t.Fatalf("an unmodelled type must convert under approval: %v", err)
-		}
-		if len(result.Request.Tools) != 0 {
-			t.Errorf("a non-function tool must never reach the upstream: %+v", result.Request.Tools)
-		}
-		var sawKeyedLoss bool
-		for _, l := range result.Report.Losses {
-			if l.Feature == FeatureAnthropicServerTools {
-				sawKeyedLoss = true
-			}
-		}
-		if !sawKeyedLoss {
-			t.Error("an unmodelled type must record the keyed loss, never vanish silently")
-		}
-	})
-
-	t.Run("unmodelled type is a KEYED error when the loss is not approved", func(t *testing.T) {
-		_, err := DecodeMessagesRequest(body(`{"type":"mcp_toolset","name":"f"}`), StrictLossPolicy())
-		if err == nil {
-			t.Fatal("want a rejection when anthropic_server_tools is not approved")
-		}
-		if !strings.Contains(err.Error(), string(FeatureAnthropicServerTools)) {
-			t.Errorf("error = %q, want it to name the registered key so -transcode-allow-loss can clear it", err.Error())
-		}
-	})
-
-	t.Run("modelled server type still takes the keyed loss", func(t *testing.T) {
-		result, err := DecodeMessagesRequest(
-			body(`{"type":"web_search_20250305","name":"web_search"}`), permissive)
-		if err != nil {
-			t.Fatalf("modelled server type must convert under approval: %v", err)
-		}
-		if len(result.Request.Tools) != 0 {
-			t.Errorf("a server tool must never reach the upstream: %+v", result.Request.Tools)
-		}
-		var sawServerLoss bool
-		for _, l := range result.Report.Losses {
-			if l.Feature == FeatureAnthropicServerTools {
-				sawServerLoss = true
-			}
-		}
-		if !sawServerLoss {
-			t.Error("a modelled server tool must record the keyed loss")
-		}
-	})
-
-	t.Run("untyped client function tool is unaffected", func(t *testing.T) {
-		result, err := DecodeMessagesRequest(body(untypedFn), permissive)
-		if err != nil {
-			t.Fatalf("untyped client function tool must convert: %v", err)
-		}
-		if len(result.Request.Tools) != 1 {
-			t.Errorf("tools = %+v, want the untyped function tool carried through", result.Request.Tools)
-		}
-	})
+	}
 }
 
 // TestMCPBlocksDecodeTheShapeTheContractActuallyEmits pins the wire shapes

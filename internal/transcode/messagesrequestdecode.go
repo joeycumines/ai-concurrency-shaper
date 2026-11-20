@@ -1,9 +1,12 @@
 package transcode
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"strings"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/anthropicmessages"
@@ -11,11 +14,6 @@ import (
 
 // DecodeMessagesRequest decodes an Anthropic Messages request body into the
 // canonical IR.
-// anthropicClientFunctionToolType is the explicit spelling of an ordinary
-// client-side function tool. It is NOT a server tool: a gateway that sends
-// it must still get the tool forwarded, not dropped under a server key.
-const anthropicClientFunctionToolType = "function"
-
 func DecodeMessagesRequest(
 	body []byte,
 	policy LossPolicy,
@@ -29,6 +27,14 @@ func DecodeMessagesRequest(
 	}
 	if envelope.MaxTokens <= 0 {
 		return DecodeResult{}, errors.New("messages request max_tokens must be positive")
+	}
+	// Validate source relationships before any loss can discard the evidence:
+	// tool kind conflicts, role/placement, and inline cache controls belong to
+	// the client contract. The source slices remain intact, so every later
+	// decision retains its original message and block coordinates.
+	inlineTools, err := validateMessagesToolChanges(&envelope)
+	if err != nil {
+		return DecodeResult{}, err
 	}
 
 	var result DecodeResult
@@ -117,10 +123,10 @@ func DecodeMessagesRequest(
 		}
 	}
 	deferNoted := false
-	for _, tool := range envelope.Tools {
+	noteToolHints := func(tool anthropicmessages.Tool) error {
 		if tool.CacheControl != nil {
 			if err := noteCacheControl(); err != nil {
-				return DecodeResult{}, err
+				return err
 			}
 		}
 		if tool.DeferLoading != nil && *tool.DeferLoading && !deferNoted {
@@ -130,8 +136,19 @@ func DecodeMessagesRequest(
 				"tools[].defer_loading",
 				"deferred tool loading needs Anthropic server-side tool search; deferred tools are sent eagerly",
 			); err != nil {
-				return DecodeResult{}, err
+				return err
 			}
+		}
+		return nil
+	}
+	for _, tool := range envelope.Tools {
+		if err := noteToolHints(tool); err != nil {
+			return DecodeResult{}, err
+		}
+	}
+	for _, inline := range inlineTools {
+		if err := noteToolHints(inline.tool); err != nil {
+			return DecodeResult{}, err
 		}
 	}
 	// Blocks nest one level: tool_result content carries its own block
@@ -271,16 +288,10 @@ func DecodeMessagesRequest(
 		result.Request.Thinking = thinking
 	}
 
-	// Mid-conversation tool definitions (inline-tools-2026-09-15). A
-	// tool_addition carrying `tool_definition` offers a NEW or CHANGED tool
-	// from that point onward; a chat target has one global tool list, so the
-	// only representable form is the tool being present for the whole request.
-	// Hoisting it preserves the tool's availability and its definition
-	// losslessly, and the timing change is recorded as a Note. This runs BEFORE
-	// the message walks so a hoisted definition is never also charged as a
-	// withdrawal-style loss below.
-	hoisted, hoistedOut, err := hoistToolDefinitions(&envelope, &result)
-	if err != nil {
+	// A target has one global tool list. Resolve every definition against the
+	// original source registry before rendering conversation content, retaining
+	// one report decision per inline definition and its actual source path.
+	if err := normalizeMessagesTools(envelope.Tools, inlineTools, policy, &result); err != nil {
 		return DecodeResult{}, err
 	}
 
@@ -295,7 +306,7 @@ func DecodeMessagesRequest(
 		if err := envelope.System.Validate(); err != nil {
 			return DecodeResult{}, fmt.Errorf("messages system: %w", err)
 		}
-		parts, err := anthropicContentToCanonical(*envelope.System, policy, &result.Report, &result.Request.Artifacts)
+		parts, err := anthropicContentToCanonical(*envelope.System, "system", policy, &result.Report, &result.Request.Artifacts)
 		if err != nil {
 			return DecodeResult{}, fmt.Errorf("messages system: %w", err)
 		}
@@ -330,142 +341,29 @@ func DecodeMessagesRequest(
 				message.Role,
 			)
 		}
-		parts, err := anthropicContentToCanonical(message.Content, policy, &result.Report, &result.Request.Artifacts)
+		parts, err := anthropicContentToCanonical(message.Content, fmt.Sprintf("messages[%d].content", i), policy, &result.Report, &result.Request.Artifacts)
 		if err != nil {
 			return DecodeResult{}, fmt.Errorf("messages[%d]: %w", i, err)
 		}
 		if len(parts) == 0 && len(message.Content.ContentBlocks) > 0 {
-			// A tool-change-only message is the one shape that is not a turn: a
-			// mid-conversation tool_addition / tool_removal carries availability
-			// semantics, never conversation content, so synthesizing an empty
-			// text part would invent prompt text the client never wrote and
-			// charge the client a mid-conversation-system move for a turn that
-			// exists only because of a hoist. Every OTHER all-scrubbed turn
-			// (proxy-synthesized marker thinking, an approved server-tool drop)
-			// keeps its boundary with an empty part, so canonical validation
-			// does not reject it.
-			if !carriesOnlyToolChanges(message.Content.ContentBlocks) {
+			// Availability controls and replayed MCP listings carry only provider
+			// state. Their explicit decisions account for the omission; inventing
+			// an empty text part would create conversation content. Other scrubbed
+			// messages retain the established empty-part boundary encoding.
+			if !carriesOnlyToolState(message.Content.ContentBlocks) {
 				parts = []CanonicalPart{CanonicalText{Text: ""}}
 			}
 		} else if len(parts) == 0 && len(message.Content.ContentBlocks) == 0 &&
 			message.Content.ContentStr == nil {
-			if _, wasHoisted := hoistedOut[i]; wasHoisted {
-				// All of this message's blocks became request tools.
-				continue
-			}
-			// An explicit empty content ARRAY is not a legal Messages message
-			// (the union selects a variant, and an empty array selects none), so
-			// it is a client-dialect error rather than a silently dropped turn.
-			return DecodeResult{}, fmt.Errorf(
-				"messages[%d]: content array is empty", i,
-			)
+			return DecodeResult{}, fmt.Errorf("messages[%d]: content array is empty", i)
 		}
+
 		if len(parts) > 0 {
 			result.Request.Turns = append(result.Request.Turns, CanonicalTurn{
 				Role:  role,
 				Parts: parts,
 			})
 		}
-	}
-
-	// Tools. The input_schema raw bytes are preserved — validated as exactly
-	// one JSON object at this boundary, never decoded and remarshaled through
-	// a map, so large integers, decimals, and exponents survive byte-exact.
-	// Server-side definitions (type-discriminated, e.g. web_search_20250305)
-	// are the anthropic_server_tools loss decision — approved, they drop
-	// observably; rejected, the request fails with a keyed error — never a
-	// silent pass and never forwarded to a chat upstream that executes no
-	// server tools.
-	for i, tool := range envelope.Tools {
-		// A tools[] entry is classified by its `type` discriminant. Only the
-		// client-function spellings - absent, or the explicit "function" - are
-		// carried through. Everything else takes the anthropic_server_tools
-		// LOSS decision: approved, it drops observably; rejected, the request
-		// fails with a keyed error the operator can actually clear.
-		//
-		// This is deliberately a catch-all rather than a whitelist of known
-		// server spellings. A whitelist would make every NEW Anthropic server
-		// tool a hard error until the proxy is rebuilt, and the error could not
-		// be cleared with the documented flag because its feature string was
-		// not a registered key. Routing the whole class through the existing
-		// policy-gated key keeps new server tools survivable by approving the
-		// flag, while never dropping one silently.
-		//
-		// Admitting EVERY non-empty type would be wrong in the other
-		// direction: a client function tool a gateway spells
-		// {"type":"function",...} must still be forwarded, not filed as a
-		// server tool.
-		if tool.Type != "" && tool.Type != anthropicClientFunctionToolType {
-			if err := result.Report.Lose(
-				policy,
-				FeatureAnthropicServerTools,
-				fmt.Sprintf("tools[%d]", i),
-				fmt.Sprintf(
-					"the %q server-side tool cannot be reproduced in a chat request",
-					tool.Type,
-				),
-			); err != nil {
-				return DecodeResult{}, err
-			}
-			continue
-		}
-		if err := tool.Validate(); err != nil {
-			return DecodeResult{}, fmt.Errorf("messages tools[%d]: %w", i, err)
-		}
-		if _, err := decodeJSONObject(string(tool.InputSchema)); err != nil {
-			return DecodeResult{}, fmt.Errorf(
-				"messages tools[%d] input_schema: %w",
-				i,
-				err,
-			)
-		}
-		description := ""
-		if tool.Description != nil {
-			description = *tool.Description
-		}
-		result.Request.Tools = append(result.Request.Tools, CanonicalTool{
-			Name:        tool.Name,
-			Description: description,
-			JSONSchema:  tool.InputSchema,
-		})
-	}
-
-	// Tools defined mid-conversation (hoisted above) join the declared list.
-	// A definition that reuses an earlier name is a SCHEMA CHANGE from its
-	// position onward — the contract's normal mechanism for shipping a tool
-	// whose schema changed — while a chat request carries ONE schema per name
-	// for the whole conversation. The only representable encoding is
-	// last-definition-wins: the newest definition serves every turn, and the
-	// turns authored against the earlier one are served the newer schema. That
-	// is a sanctioned encoding, not a policy decision (no policy could restore
-	// per-turn schemas), so it is recorded as a Note per superseded
-	// declaration. It is NOT a hard error: refusing it would 400 exactly the
-	// traffic this path exists to serve.
-	for _, hoist := range hoisted {
-		previous := -1
-		for j, existing := range result.Request.Tools {
-			if existing.Name == hoist.tool.Name {
-				previous = j
-				break
-			}
-		}
-		if previous >= 0 {
-			if err := result.Report.Note(
-				FeatureAnthropicToolChanges,
-				hoist.path,
-				fmt.Sprintf(
-					"tool %q is redefined mid-conversation; the newest definition serves the whole request, so turns authored against the earlier schema see the updated one",
-					hoist.tool.Name,
-				),
-			); err != nil {
-				return DecodeResult{}, err
-			}
-			// Last-definition-wins: replace in place so the tool list never
-			// carries two entries under one name.
-			result.Request.Tools[previous] = hoist.tool
-			continue
-		}
-		result.Request.Tools = append(result.Request.Tools, hoist.tool)
 	}
 
 	// Tool choice: Anthropic "auto"/"none"/"any"/named tool, reconciled
@@ -495,18 +393,341 @@ func DecodeMessagesRequest(
 	return result, nil
 }
 
-// carriesOnlyToolChanges reports whether every block in content is a
-// mid-conversation tool change. Such a message carries availability semantics
-// and no conversation content, so it is not a conversational turn: keeping it
-// as an empty text turn would put proxy-invented prompt text on the wire and
-// charge the client a position it never occupied.
-func carriesOnlyToolChanges(blocks []anthropicmessages.ContentBlock) bool {
+// messagesInlineTool keeps the decoded definition beside its source path.
+// No content slice is filtered: reporting, validation and replay all retain
+// the coordinates the client actually sent.
+type messagesInlineTool struct {
+	tool anthropicmessages.Tool
+	path string
+}
+
+// validateMessagesToolChanges checks source-only relationships before losses
+// can erase them. A provider-defined tool dropped by policy still owns its
+// original name and cannot become an unrelated custom function later.
+func validateMessagesToolChanges(envelope *anthropicmessages.Request) ([]messagesInlineTool, error) {
+	type sourceTool struct {
+		kind         string
+		typeName     string
+		path         string
+		declarations int
+	}
+	registry := make(map[string]sourceTool)
+	register := func(tool anthropicmessages.Tool, path string, initial bool) error {
+		// An MCP toolset has server identity rather than a function name. It is
+		// validated by its own wire arm and remains an unsupported inline form.
+		if tool.Name == "" {
+			return nil
+		}
+		kind := messagesToolKind(tool)
+		typeName := tool.Type
+		if tool.IsClientFunction() {
+			typeName = "custom"
+		}
+		previous, exists := registry[tool.Name]
+		if exists && previous.kind != kind {
+			return &wire.DecodeError{
+				Kind: wire.DecodeContradictoryUnion,
+				Path: path + ".name",
+				Message: fmt.Sprintf("tool %q has type %q but was declared as %q at %s (tool_name_conflict)",
+					tool.Name, typeName, previous.typeName, previous.path),
+			}
+		}
+		if exists && !initial && previous.declarations > 1 {
+			return &wire.DecodeError{
+				Kind:    wire.DecodeContradictoryUnion,
+				Path:    path + ".name",
+				Message: fmt.Sprintf("inline definition of tool %q is ambiguous because tools[] declares that name more than once", tool.Name),
+			}
+		}
+		count := 1
+		if initial && exists {
+			// Ordinary duplicate tools remain the upstream's decision, as on
+			// the other request decoders. Only an inline replacement needs an
+			// unambiguous earlier definition to supersede.
+			count += previous.declarations
+		}
+		registry[tool.Name] = sourceTool{kind: kind, typeName: typeName, path: path, declarations: count}
+		return nil
+	}
+	for i, tool := range envelope.Tools {
+		if err := register(tool, fmt.Sprintf("tools[%d]", i), true); err != nil {
+			return nil, err
+		}
+	}
+
+	var inline []messagesInlineTool
+	var checkContent func(AnthropicContent, string, bool, bool) error
+	checkContent = func(content AnthropicContent, path string, changesAllowed, listingAllowed bool) error {
+		for i, block := range content.ContentBlocks {
+			blockPath := fmt.Sprintf("%s[%d]", path, i)
+			switch block.Type {
+			case AnthropicContentBlockTypeToolAddition, AnthropicContentBlockTypeToolRemoval:
+				if !changesAllowed {
+					return &wire.DecodeError{
+						Kind:    wire.DecodeContradictoryUnion,
+						Path:    blockPath,
+						Message: "tool changes are allowed only as top-level content of a system message in messages[]",
+					}
+				}
+				if block.Tool.Type == anthropicmessages.ToolChangeTypeReference {
+					// Availability may be removed and restored without destroying
+					// a declaration. A reference must nevertheless name a tool
+					// declared at this position, never a future definition.
+					if _, exists := registry[block.Tool.Name]; !exists {
+						return &wire.DecodeError{
+							Kind:    wire.DecodeMalformed,
+							Path:    blockPath + ".tool.name",
+							Message: fmt.Sprintf("tool %q is not declared at this position (tool_reference_unresolved)", block.Tool.Name),
+						}
+					}
+					continue
+				}
+				if block.Tool.Type != anthropicmessages.ToolChangeTypeDefinition {
+					// MCP members require provider server/tool-list context the
+					// canonical request cannot represent. Their structurally valid
+					// references remain the explicit tool-change loss decision;
+					// do not invent member resolution from a bare server name.
+					continue
+				}
+				var tool anthropicmessages.Tool
+				if err := wire.Decode(block.Tool.Definition, &tool); err != nil {
+					return fmt.Errorf("%s.tool.definition: %w", blockPath, err)
+				}
+				if block.CacheControl != nil && tool.CacheControl != nil {
+					return &wire.DecodeError{
+						Kind:    wire.DecodeContradictoryUnion,
+						Path:    blockPath + ".cache_control",
+						Message: "cache_control may be set on the tool_addition block or its definition, never both",
+					}
+				}
+				if tool.DeferLoading != nil && *tool.DeferLoading && tool.CacheControl != nil {
+					return &wire.DecodeError{
+						Kind:    wire.DecodeContradictoryUnion,
+						Path:    blockPath + ".tool.definition.cache_control",
+						Message: "a deferred tool definition cannot carry cache_control",
+					}
+				}
+				if err := register(tool, blockPath+".tool.definition", false); err != nil {
+					return err
+				}
+				inline = append(inline, messagesInlineTool{tool: tool, path: blockPath})
+
+			case AnthropicContentBlockTypeMCPToolListing:
+				if !listingAllowed {
+					return &wire.DecodeError{
+						Kind:    wire.DecodeContradictoryUnion,
+						Path:    blockPath,
+						Message: "an MCP tool listing may be replayed only as top-level assistant message content",
+					}
+				}
+			}
+			if block.Content != nil {
+				if err := checkContent(*block.Content, blockPath+".content", false, false); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if envelope.System != nil {
+		if err := envelope.System.Validate(); err != nil {
+			return nil, fmt.Errorf("messages system: %w", err)
+		}
+		if err := checkContent(*envelope.System, "system", false, false); err != nil {
+			return nil, err
+		}
+	}
+	for i, message := range envelope.Messages {
+		if err := message.Validate(); err != nil {
+			return nil, fmt.Errorf("messages[%d]: %w", i, err)
+		}
+		if err := checkContent(message.Content, fmt.Sprintf("messages[%d].content", i),
+			message.Role == AnthropicMessageRoleSystem, message.Role == AnthropicMessageRoleAssistant); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateToolChangePlacement(envelope.Messages); err != nil {
+		return nil, err
+	}
+	return inline, nil
+}
+
+// messagesToolKind distinguishes tool families before any approved drop. The
+// official tool directory versions provider-defined tools with _YYYYMMDD; changing
+// that date within a known family is a version update, not a different kind.
+// Unknown discriminants remain exact, and no predefined kind aliases a function.
+func messagesToolKind(tool anthropicmessages.Tool) string {
+	if tool.IsClientFunction() {
+		return "client:custom"
+	}
+	kind := tool.Type
+	if split := strings.LastIndexByte(kind, '_'); split >= 0 && len(kind)-split-1 == 8 {
+		version := kind[split+1:]
+		dated := true
+		for _, digit := range version {
+			if digit < '0' || digit > '9' {
+				dated = false
+				break
+			}
+		}
+		if dated {
+			switch kind[:split] {
+			case "advisor", "bash", "code_execution", "computer", "memory",
+				"text_editor", "tool_search_tool_bm25", "tool_search_tool_regex", "web_fetch", "web_search":
+				kind = kind[:split]
+			}
+		}
+	}
+	return "provider:" + kind
+}
+
+// validateToolChangePlacement applies the inline-tools boundary contract to a
+// consecutive group of system messages containing a change. Text-only system
+// groups keep the decoder's existing placement support.
+func validateToolChangePlacement(messages []anthropicmessages.Message) error {
+	for i := 0; i < len(messages); {
+		if messages[i].Role != AnthropicMessageRoleSystem {
+			i++
+			continue
+		}
+		start := i
+		changePath := ""
+		for i < len(messages) && messages[i].Role == AnthropicMessageRoleSystem {
+			for j, block := range messages[i].Content.ContentBlocks {
+				if changePath == "" && (block.Type == AnthropicContentBlockTypeToolAddition || block.Type == AnthropicContentBlockTypeToolRemoval) {
+					changePath = fmt.Sprintf("messages[%d].content[%d]", i, j)
+				}
+			}
+			i++
+		}
+		if changePath == "" {
+			continue
+		}
+		// The general system-message contract also permits a paused assistant
+		// turn ending in a server-tool result, but the tool-change beta
+		// explicitly excludes that boundary: only text can be appended there.
+		if start == 0 || messages[start-1].Role != AnthropicMessageRoleUser {
+			return &wire.DecodeError{
+				Kind:    wire.DecodeContradictoryUnion,
+				Path:    changePath,
+				Message: "a tool-change system group must follow a user message; only text system messages may follow a paused assistant server-tool result",
+			}
+		}
+		if i < len(messages) && messages[i].Role != AnthropicMessageRoleAssistant {
+			return &wire.DecodeError{
+				Kind:    wire.DecodeContradictoryUnion,
+				Path:    changePath,
+				Message: "a tool-change system group must precede an assistant message or end the conversation",
+			}
+		}
+	}
+	return nil
+}
+
+// normalizeMessagesTools uses one conversion path for declared and inline
+// functions. A name index bounds replacement work linearly in the tool count.
+func normalizeMessagesTools(declared []anthropicmessages.Tool, inline []messagesInlineTool, policy LossPolicy, result *DecodeResult) error {
+	indices := make(map[string]int)
+	for i, tool := range declared {
+		if !tool.IsClientFunction() {
+			if err := result.Report.Lose(policy, FeatureAnthropicServerTools, fmt.Sprintf("tools[%d]", i),
+				fmt.Sprintf("the %q provider-defined tool has no portable function schema", tool.Type)); err != nil {
+				return err
+			}
+			continue
+		}
+		canonical, err := canonicalMessagesFunctionTool(tool)
+		if err != nil {
+			return fmt.Errorf("messages tools[%d]: %w", i, err)
+		}
+		indices[tool.Name] = len(result.Request.Tools)
+		result.Request.Tools = append(result.Request.Tools, canonical)
+	}
+	for _, definition := range inline {
+		if !definition.tool.IsClientFunction() {
+			return &UnrepresentableError{
+				Protocol: "messages",
+				Path:     definition.path + ".tool.definition",
+				Detail:   fmt.Sprintf("the %q provider-defined tool definition has no portable function schema", definition.tool.Type),
+			}
+		}
+		canonical, err := canonicalMessagesFunctionTool(definition.tool)
+		if err != nil {
+			return fmt.Errorf("%s.tool.definition: %w", definition.path, err)
+		}
+		detail := fmt.Sprintf("tool %q defined mid-conversation is offered for the whole request (the target has one global tool list, so the availability point cannot be expressed)", canonical.Name)
+		previous, exists := indices[canonical.Name]
+		if exists {
+			same, err := sameMessagesFunctionDefinition(result.Request.Tools[previous], canonical)
+			if err != nil {
+				return fmt.Errorf("%s.tool.definition.input_schema: %w", definition.path, err)
+			}
+			if same {
+				detail = fmt.Sprintf("tool %q repeats the earlier function definition; it remains offered for the whole request (the target cannot express an inline availability point)", canonical.Name)
+			} else {
+				detail = fmt.Sprintf("tool %q is redefined mid-conversation; the newest definition serves the whole request, including turns authored against the earlier definition (the target cannot express an inline availability point)", canonical.Name)
+			}
+		}
+		// The runtime logger deduplicates feature/path pairs. One combined
+		// decision must describe both hoisting and any actual supersession.
+		if err := result.Report.Note(FeatureAnthropicToolChanges, definition.path, detail); err != nil {
+			return err
+		}
+		if exists {
+			result.Request.Tools[previous] = canonical
+		} else {
+			indices[canonical.Name] = len(result.Request.Tools)
+			result.Request.Tools = append(result.Request.Tools, canonical)
+		}
+	}
+	return nil
+}
+
+func canonicalMessagesFunctionTool(tool anthropicmessages.Tool) (CanonicalTool, error) {
+	if err := tool.Validate(); err != nil {
+		return CanonicalTool{}, err
+	}
+	if _, err := decodeJSONObject(string(tool.InputSchema)); err != nil {
+		return CanonicalTool{}, fmt.Errorf("input_schema: %w", err)
+	}
+	description := ""
+	if tool.Description != nil {
+		description = *tool.Description
+	}
+	return CanonicalTool{Name: tool.Name, Description: description, JSONSchema: tool.InputSchema}, nil
+}
+
+// sameMessagesFunctionDefinition ignores JSON object ordering and whitespace
+// when recognizing a repeated definition. UseNumber preserves numeric lexemes:
+// adjacent large integer values must never collapse through float64 rounding.
+func sameMessagesFunctionDefinition(a, b CanonicalTool) (bool, error) {
+	if a.Name != b.Name || a.Description != b.Description {
+		return false, nil
+	}
+	if bytes.Equal(a.JSONSchema, b.JSONSchema) {
+		return true, nil
+	}
+	var values [2]any
+	for i, schema := range []json.RawMessage{a.JSONSchema, b.JSONSchema} {
+		decoder := json.NewDecoder(bytes.NewReader(schema))
+		decoder.UseNumber()
+		if err := decoder.Decode(&values[i]); err != nil {
+			return false, err
+		}
+	}
+	return reflect.DeepEqual(values[0], values[1]), nil
+}
+
+// A message containing only these blocks carries provider tool state rather
+// than conversation content. Its hoisting or loss decisions account for the
+// state; no empty text turn is manufactured when the state disappears.
+func carriesOnlyToolState(blocks []anthropicmessages.ContentBlock) bool {
 	if len(blocks) == 0 {
 		return false
 	}
 	for _, block := range blocks {
 		switch block.Type {
-		case AnthropicContentBlockTypeToolAddition, AnthropicContentBlockTypeToolRemoval:
+		case AnthropicContentBlockTypeToolAddition, AnthropicContentBlockTypeToolRemoval, AnthropicContentBlockTypeMCPToolListing:
 		default:
 			return false
 		}
@@ -514,139 +735,11 @@ func carriesOnlyToolChanges(blocks []anthropicmessages.ContentBlock) bool {
 	return true
 }
 
-// hoistToolDefinitions extracts every tool_addition carrying a tool_definition
-// and returns the tools it declares. The definition is a tools[] entry (a custom
-// tool, an Anthropic-defined client or server tool, or an mcp_toolset), so it is
-// decoded exactly like one.
-//
-// A chat target carries ONE global tool list, so the only representable form of
-// "offer this tool from here onward" is the tool being present for the whole
-// request. Hoisting preserves the definition losslessly and records the timing
-// change as a Note. The extracted block is REMOVED from the envelope so the
-// content walk cannot also charge it as a withdrawal-style loss.
-//
-// The reference and removal arms carry no definition and are left in place for
-// the content walk to decide.
-func hoistToolDefinitions(
-	envelope *anthropicmessages.Request,
-	result *DecodeResult,
-) ([]hoistedTool, map[int]struct{}, error) {
-	var hoisted []hoistedTool
-	// emptied records the message indices that contained ONLY hoisted
-	// definitions: after the tool is lifted into the request's tools list those
-	// messages hold no content, and they are not turns. Distinguishing them
-	// from a client-sent empty array is what keeps a genuinely empty array a
-	// typed rejection.
-	emptied := make(map[int]struct{})
-	for i := range envelope.Messages {
-		message := &envelope.Messages[i]
-		if message.Content.ContentBlocks == nil {
-			continue
-		}
-		blocks := message.Content.ContentBlocks[:0]
-		for j := range message.Content.ContentBlocks {
-			block := message.Content.ContentBlocks[j]
-			if block.Type != AnthropicContentBlockTypeToolAddition ||
-				block.Tool == nil ||
-				block.Tool.Type != anthropicmessages.ToolChangeTypeDefinition {
-				blocks = append(blocks, block)
-				continue
-			}
-			tool, err := decodeHoistedTool(*block.Tool)
-			if err != nil {
-				return nil, nil, fmt.Errorf(
-					"messages[%d].content[%d]: tool_addition: %w", i, j, err,
-				)
-			}
-			hoisted = append(hoisted, hoistedTool{
-				tool: tool,
-				path: fmt.Sprintf("messages[%d].content[%d]", i, j),
-			})
-			// The tool becomes available for the whole request, so its earlier
-			// availability threshold is gone. Recorded once per block, naming
-			// the REAL message and block index: a bare `messages[]` collides
-			// across messages, and the report dedupes by (feature, path), so
-			// two hoists in different messages would be logged as one.
-			if err := result.Report.Note(
-				FeatureAnthropicToolChanges,
-				fmt.Sprintf("messages[%d].content[%d]", i, j),
-				fmt.Sprintf(
-					"tool %q defined mid-conversation is offered for the whole request (a chat target has one global tool list, so the availability point cannot be expressed)",
-					tool.Name,
-				),
-			); err != nil {
-				return nil, nil, err
-			}
-		}
-		if len(blocks) == 0 && len(message.Content.ContentBlocks) > 0 {
-			emptied[i] = struct{}{}
-		}
-		// Keep the two states distinguishable: an emptied content array must
-		// stay empty rather than become a nil-block sentinel.
-		message.Content.ContentBlocks = blocks
-	}
-	return hoisted, emptied, nil
-}
-
-// hoistedTool pairs a tool hoisted out of a mid-conversation definition with the
-// canonical path it came from, so every decision about it names real
-// coordinates rather than a report-slice index.
-type hoistedTool struct {
-	tool CanonicalTool
-	path string
-}
-
-// decodeHoistedTool decodes a tool_definition payload as a canonical tool.
-//
-// The definition is a tools[] entry, so it is decoded through the SAME
-// anthropicmessages.Tool type the declared list uses. That is load-bearing:
-// Tool.UnmarshalJSON routes a client-function spelling through the STRICT
-// client decode (unknown fields rejected) and a type-tagged server tool through
-// the tolerant capture the loss report needs. Reimplementing the decode here
-// with a bare json.Unmarshal silently discarded every documented tools[] member
-// outside a five-field probe (input_examples, strict, allowed_callers,
-// defer_loading, cache_control, max_uses, ...) — the exact client-contract hole
-// the strict decode exists to close.
-func decodeHoistedTool(change anthropicmessages.ToolChange) (CanonicalTool, error) {
-	var tool anthropicmessages.Tool
-	if err := json.Unmarshal(change.Definition, &tool); err != nil {
-		return CanonicalTool{}, err
-	}
-	// A definition carrying a type discriminator is a server-side tool. This
-	// loop runs before the declared-tools walk (which files server tools under
-	// anthropic_server_tools), so hoisting one here would smuggle a server tool
-	// past that gate; it is refused instead.
-	if tool.Type != "" && tool.Type != anthropicClientFunctionToolType {
-		return CanonicalTool{}, fmt.Errorf(
-			"the %q server-side tool definition cannot be reproduced in a chat request",
-			tool.Type,
-		)
-	}
-	if err := tool.Validate(); err != nil {
-		return CanonicalTool{}, err
-	}
-	schema := tool.InputSchema
-	if len(schema) == 0 {
-		schema = json.RawMessage(`{"type":"object"}`)
-	}
-	if _, err := decodeJSONObject(string(schema)); err != nil {
-		return CanonicalTool{}, fmt.Errorf("input_schema: %w", err)
-	}
-	description := ""
-	if tool.Description != nil {
-		description = *tool.Description
-	}
-	return CanonicalTool{
-		Name:        tool.Name,
-		Description: description,
-		JSONSchema:  schema,
-	}, nil
-}
-
 // anthropicContentToCanonical maps Anthropic message content (string or
 // blocks) to canonical parts.
 func anthropicContentToCanonical(
 	content AnthropicContent,
+	path string,
 	policy LossPolicy,
 	report *ConversionReport,
 	artifacts *SourceArtifacts,
@@ -656,6 +749,7 @@ func anthropicContentToCanonical(
 	}
 	var parts []CanonicalPart
 	for i, block := range content.ContentBlocks {
+		blockPath := fmt.Sprintf("%s[%d]", path, i)
 		if err := block.Validate(); err != nil {
 			return nil, fmt.Errorf("content block %d: %w", i, err)
 		}
@@ -701,6 +795,7 @@ func anthropicContentToCanonical(
 		case AnthropicContentBlockTypeToolResult:
 			resultParts, err := anthropicContentToCanonical(
 				*block.Content,
+				blockPath+".content",
 				policy,
 				report,
 				artifacts,
@@ -764,6 +859,7 @@ func anthropicContentToCanonical(
 		case AnthropicContentBlockTypeMCPToolResult:
 			resultParts, err := anthropicContentToCanonical(
 				*block.Content,
+				blockPath+".content",
 				policy,
 				report,
 				artifacts,
@@ -784,18 +880,31 @@ func anthropicContentToCanonical(
 			// model is offered from this point onward. It contributes no
 			// conversation content, so it produces no canonical part; its only
 			// honest fate on a target with one global tool list is the
-			// anthropic_tool_changes decision. A tool_definition is handled
-			// separately by hoistToolDefinitions before this walk, so a
-			// surviving block here is a withdrawal or a reference.
+			// anthropic_tool_changes decision. Definitions have already been
+			// normalized without filtering this source slice; skip only their
+			// content contribution so subsequent block paths stay unchanged.
+			if block.Tool.Type == anthropicmessages.ToolChangeTypeDefinition {
+				continue
+			}
 			if err := report.Lose(
 				policy,
 				FeatureAnthropicToolChanges,
-				fmt.Sprintf("messages[].content[%d]", i),
+				blockPath,
 				fmt.Sprintf(
 					"the %q mid-conversation tool change cannot keep its availability timing in a chat request",
 					string(block.Type),
 				),
 			); err != nil {
+				return nil, err
+			}
+
+		case AnthropicContentBlockTypeMCPToolListing:
+			// Replayed listings are client-supplied provider state. Unlike an
+			// unsolicited response listing, losing this request state is a
+			// policy decision. A listing contributes no conversation text; a
+			// listing-only assistant message is omitted with the state.
+			if err := report.Lose(policy, FeatureAnthropicToolChanges, blockPath,
+				"the replayed MCP tool listing pins provider tools; its provider-only state is dropped, and no conversation turn is invented when the message contains only listings"); err != nil {
 				return nil, err
 			}
 
@@ -811,7 +920,7 @@ func anthropicContentToCanonical(
 			if err := report.Lose(
 				policy,
 				FeatureAnthropicServerTools,
-				fmt.Sprintf("messages[].content[%d]", i),
+				blockPath,
 				fmt.Sprintf(
 					"the %q server-side block cannot be reproduced in a chat request",
 					string(block.Type),

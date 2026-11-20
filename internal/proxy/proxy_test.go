@@ -36,6 +36,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
@@ -1321,79 +1322,112 @@ func TestProxy_PhantomConcurrencyPenalty(t *testing.T) {
 }
 
 func TestProxy_PhantomConcurrencyPenaltyIgnoresClientContext(t *testing.T) {
-	// Verify that the phantom concurrency penalty holds the slot for its
-	// full duration even when the client disconnects (context cancelled).
-	// A malicious or impatient client must not be able to bypass the slot
-	// hold by closing the connection immediately after receiving the error
-	// response. The penalty runs asynchronously — the handler returns
-	// immediately, but the slot is held by a background goroutine.
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, `error`)
-	}))
-	t.Cleanup(upstream.Close)
+	// A definitive upstream failure keeps its slot after the handler returns,
+	// even if the client then cancels. Fake time and an in-memory transport
+	// make both the asynchronous return and the full hold observable without
+	// depending on network or scheduler latency.
+	synctest.Test(t, func(t *testing.T) {
+		const penalty = 200 * time.Millisecond
+		pat, _ := route.Parse("POST /v1/messages")
+		lim := queue.NewLimiterWithCooldown(1, 0)
+		b, err := circuitbreaker.New(
+			circuitbreaker.WithFailureThreshold(100),
+			circuitbreaker.WithBasePenalty(penalty),
+			circuitbreaker.WithMaxPenalty(penalty),
+		)
+		if err != nil {
+			t.Fatalf("circuitbreaker.New: %v", err)
+		}
+		var calls atomic.Int64
+		p, err := New(
+			WithUpstream(&url.URL{Scheme: "http", Host: "upstream.invalid"}),
+			WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+			WithLimiter(lim),
+			WithMetrics(metrics.NewCollector()),
+			WithBreaker(b),
+			WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				status, body := http.StatusOK, "ok"
+				if calls.Add(1) == 1 {
+					status, body = http.StatusInternalServerError, "error"
+				}
+				return &http.Response{
+					StatusCode:    status,
+					Header:        make(http.Header),
+					Body:          io.NopCloser(strings.NewReader(body)),
+					ContentLength: int64(len(body)),
+					Request:       req,
+				}, nil
+			})),
+		)
+		if err != nil {
+			t.Fatalf("proxy.New: %v", err)
+		}
 
-	upstreamURL, _ := url.Parse(upstream.URL)
-	pat, _ := route.Parse("POST /v1/messages")
-	met := metrics.NewCollector()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		start := time.Now()
+		p.ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError || rec.Body.String() != "error" {
+			t.Fatalf("first response = %d %q, want upstream 500 error", rec.Code, rec.Body.String())
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Fatalf("handler waited %v of fake time; the penalty must be asynchronous", elapsed)
+		}
+		if stats := b.Stats(); stats.TotalFailures != 1 || stats.CurrentPenalty != penalty {
+			t.Fatalf("breaker after upstream 500 = %+v, want one failure and %v penalty", stats, penalty)
+		}
+		// Cancel only after the upstream failure is established: a deadline
+		// racing the response would test the ambiguous-abort path instead.
+		cancel()
+		synctest.Wait()
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			t.Fatalf("first request context = %v, want cancellation", ctx.Err())
+		}
+		if stats := lim.Stats(); stats.Active != 1 || stats.TotalRel != 0 {
+			t.Fatalf("slot after cancellation = %+v, want the failure slot still held", stats)
+		}
 
-	b, err := circuitbreaker.New(
-		circuitbreaker.WithFailureThreshold(100),
-		circuitbreaker.WithBasePenalty(200*time.Millisecond),
-		circuitbreaker.WithMaxPenalty(200*time.Millisecond),
-	)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		rec2 := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			p.ServeHTTP(rec2, req2)
+			close(done)
+		}()
+		synctest.Wait()
+		if stats := lim.Stats(); stats.Active != 1 || stats.Waiters != 1 || calls.Load() != 1 {
+			t.Fatalf("before penalty expiry: limiter = %+v, upstream calls = %d; want one held slot and one queued request", stats, calls.Load())
+		}
+		time.Sleep(penalty - time.Nanosecond)
+		synctest.Wait()
+		if stats := lim.Stats(); stats.Active != 1 || stats.Waiters != 1 || stats.TotalRel != 0 || calls.Load() != 1 {
+			t.Fatalf("slot released before the full penalty: limiter = %+v, upstream calls = %d", stats, calls.Load())
+		}
+		select {
+		case <-done:
+			t.Fatal("queued request completed before the penalty expired")
+		default:
+		}
 
-	p, err := New(
-		WithUpstream(upstreamURL),
-		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
-		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
-		WithMetrics(met),
-		WithBreaker(b),
-	)
-	if err != nil {
-		t.Fatalf("proxy.New: %v", err)
-	}
-
-	// Send a request with a context that times out in 50ms — well before
-	// the 200ms penalty. The handler returns immediately (async release),
-	// but the slot must remain held for the full penalty duration.
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-	req = req.WithContext(ctx)
-	rec := httptest.NewRecorder()
-
-	// The handler should return quickly (async release), NOT block for the
-	// penalty duration.
-	start := time.Now()
-	p.ServeHTTP(rec, req)
-	handlerElapsed := time.Since(start)
-
-	// The handler must return quickly — it is NOT blocked by the penalty.
-	// The penalty goroutine holds the slot in the background.
-	if handlerElapsed > 100*time.Millisecond {
-		t.Errorf("handler blocked for %v, expected <100ms (async release)", handlerElapsed)
-	}
-
-	// Verify the slot is still held by sending a second request. With a
-	// concurrency of 1, it should block until the penalty expires.
-	start2 := time.Now()
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-	rec2 := httptest.NewRecorder()
-	p.ServeHTTP(rec2, req2)
-	elapsed2 := time.Since(start2)
-
-	// The second request should have waited at least the remaining penalty
-	// duration (~150ms since the first handler returned quickly). If the
-	// penalty were not running asynchronously, the second request would
-	// succeed almost instantly.
-	if elapsed2 < 100*time.Millisecond {
-		t.Errorf("second request completed in %v, expected penalty delay (slot held async)", elapsed2)
-	}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("queued request did not complete when the penalty expired")
+		}
+		if elapsed := time.Since(start); elapsed != penalty {
+			t.Fatalf("second completion = %v, want exactly %v of fake time", elapsed, penalty)
+		}
+		if rec2.Code != http.StatusOK || rec2.Body.String() != "ok" || calls.Load() != 2 {
+			t.Fatalf("second response = %d %q, upstream calls = %d; want 200 ok and two calls", rec2.Code, rec2.Body.String(), calls.Load())
+		}
+		if stats := lim.Stats(); stats.Active != 0 || stats.Waiters != 0 || stats.TotalAcq != 2 || stats.TotalRel != 2 {
+			t.Fatalf("after successful second request: limiter = %+v, want both slots released", stats)
+		}
+	})
 }
 
 func TestProxy_CircuitBreakerFedFromFailedResponse(t *testing.T) {
@@ -3911,62 +3945,94 @@ func TestProxy_Retry429DoesNotAmplify(t *testing.T) {
 }
 
 func TestProxy_FailureHoldWithoutBreaker(t *testing.T) {
-	// TDD: The failure hold (-failure-hold) must hold the slot after an
-	// upstream failure even when the circuit breaker is disabled. Without
-	// this, the failure path has no protection — the slot is released
-	// immediately, creating N+1 observed concurrency.
-	const failureHold = 200 * time.Millisecond
+	// The standalone failure hold must retain the slot independently of the
+	// breaker. The handler returns at the same fake time that the failure
+	// arrives, while the next request cannot reach upstream until the hold
+	// expires exactly.
+	synctest.Test(t, func(t *testing.T) {
+		const failureHold = 200 * time.Millisecond
+		pat, _ := route.Parse("POST /v1/messages")
+		lim := queue.NewLimiterWithCooldown(1, 0)
+		var calls atomic.Int64
+		p, err := New(
+			WithUpstream(&url.URL{Scheme: "http", Host: "upstream.invalid"}),
+			WithMatcher(route.NewMatcher([]route.Pattern{pat})),
+			WithLimiter(lim),
+			WithMetrics(metrics.NewCollector()),
+			WithFailureHold(failureHold),
+			// No breaker: the standalone hold owns the slot release.
+			WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				status, body := http.StatusOK, "ok"
+				if calls.Add(1) == 1 {
+					status, body = http.StatusInternalServerError, "error"
+				}
+				return &http.Response{
+					StatusCode:    status,
+					Header:        make(http.Header),
+					Body:          io.NopCloser(strings.NewReader(body)),
+					ContentLength: int64(len(body)),
+					Request:       req,
+				}, nil
+			})),
+		)
+		if err != nil {
+			t.Fatalf("proxy.New: %v", err)
+		}
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		fmt.Fprint(w, "error")
-	}))
-	t.Cleanup(upstream.Close)
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		start := time.Now()
+		p.ServeHTTP(rec, req)
+		if rec.Code != http.StatusInternalServerError || rec.Body.String() != "error" {
+			t.Fatalf("first response = %d %q, want upstream 500 error", rec.Code, rec.Body.String())
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Fatalf("handler waited %v of fake time; the failure hold must be asynchronous", elapsed)
+		}
+		synctest.Wait()
+		if stats := lim.Stats(); stats.Active != 1 || stats.TotalRel != 0 {
+			t.Fatalf("after failure response: limiter = %+v, want the slot still held", stats)
+		}
 
-	upstreamURL, _ := url.Parse(upstream.URL)
-	pat, _ := route.Parse("POST /v1/messages")
-	met := metrics.NewCollector()
-	lim := queue.NewLimiterWithCooldown(1, 0) // single slot for easy observation
+		req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
+		rec2 := httptest.NewRecorder()
+		done := make(chan struct{})
+		go func() {
+			p.ServeHTTP(rec2, req2)
+			close(done)
+		}()
+		synctest.Wait()
+		if stats := lim.Stats(); stats.Active != 1 || stats.Waiters != 1 || calls.Load() != 1 {
+			t.Fatalf("before hold expiry: limiter = %+v, upstream calls = %d; want one held slot and one queued request", stats, calls.Load())
+		}
+		time.Sleep(failureHold - time.Nanosecond)
+		synctest.Wait()
+		if stats := lim.Stats(); stats.Active != 1 || stats.Waiters != 1 || stats.TotalRel != 0 || calls.Load() != 1 {
+			t.Fatalf("slot released before the full failure hold: limiter = %+v, upstream calls = %d", stats, calls.Load())
+		}
+		select {
+		case <-done:
+			t.Fatal("queued request completed before the failure hold expired")
+		default:
+		}
 
-	p, err := New(
-		WithUpstream(upstreamURL),
-		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
-		WithLimiter(lim),
-		WithMetrics(met),
-		WithFailureHold(failureHold),
-		// NO breaker — the failure hold must work independently.
-	)
-	if err != nil {
-		t.Fatalf("proxy.New: %v", err)
-	}
-
-	// First request gets the slot, receives 500, failure hold begins.
-	start := time.Now()
-	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, req)
-	handlerElapsed := time.Since(start)
-
-	// The handler must return quickly (async release).
-	if handlerElapsed > 50*time.Millisecond {
-		t.Errorf("handler blocked for %v, expected <50ms (failure hold should be async)", handlerElapsed)
-	}
-
-	// The slot should NOT be immediately available — it's in failure hold.
-	// Send a second request; it should block until the hold expires.
-	start2 := time.Now()
-	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
-	rec2 := httptest.NewRecorder()
-	p.ServeHTTP(rec2, req2)
-	elapsed2 := time.Since(start2)
-
-	// The second request should have waited at least the failure hold duration.
-	if elapsed2 < 150*time.Millisecond {
-		t.Errorf("second request completed in %v, expected >= %v (failure hold)", elapsed2, failureHold)
-	}
-	if rec2.Code != http.StatusInternalServerError {
-		t.Errorf("second request status = %d, want 500", rec2.Code)
-	}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("queued request did not complete when the failure hold expired")
+		}
+		if elapsed := time.Since(start); elapsed != failureHold {
+			t.Fatalf("second completion = %v, want exactly %v of fake time", elapsed, failureHold)
+		}
+		if rec2.Code != http.StatusOK || rec2.Body.String() != "ok" || calls.Load() != 2 {
+			t.Fatalf("second response = %d %q, upstream calls = %d; want 200 ok and two calls", rec2.Code, rec2.Body.String(), calls.Load())
+		}
+		if stats := lim.Stats(); stats.Active != 0 || stats.Waiters != 0 || stats.TotalAcq != 2 || stats.TotalRel != 2 {
+			t.Fatalf("after successful second request: limiter = %+v, want both slots released", stats)
+		}
+	})
 }
 
 func TestProxy_PassthroughFailureHold(t *testing.T) {
