@@ -406,10 +406,11 @@ type messagesInlineTool struct {
 // original name and cannot become an unrelated custom function later.
 func validateMessagesToolChanges(envelope *anthropicmessages.Request) ([]messagesInlineTool, error) {
 	type sourceTool struct {
-		kind         string
-		typeName     string
-		path         string
-		declarations int
+		kind          string
+		typeName      string
+		firstTypeName string
+		path          string
+		declarations  int
 	}
 	registry := make(map[string]sourceTool)
 	register := func(tool anthropicmessages.Tool, path string, initial bool) error {
@@ -429,7 +430,7 @@ func validateMessagesToolChanges(envelope *anthropicmessages.Request) ([]message
 				Kind: wire.DecodeContradictoryUnion,
 				Path: path + ".name",
 				Message: fmt.Sprintf("tool %q has type %q but was declared as %q at %s (tool_name_conflict)",
-					tool.Name, typeName, previous.typeName, previous.path),
+					tool.Name, typeName, previous.firstTypeName, previous.path),
 			}
 		}
 		if exists && !initial && previous.declarations > 1 {
@@ -440,13 +441,24 @@ func validateMessagesToolChanges(envelope *anthropicmessages.Request) ([]message
 			}
 		}
 		count := 1
+		firstTypeName := typeName
 		if initial && exists {
 			// Ordinary duplicate tools remain the upstream's decision, as on
 			// the other request decoders. Only an inline replacement needs an
 			// unambiguous earlier definition to supersede.
 			count += previous.declarations
+			// Keep the first declaration's identity: it is the origin a later
+			// conflicting definition should cite, not the last duplicate.
+			path = previous.path
+			firstTypeName = previous.firstTypeName
 		}
-		registry[tool.Name] = sourceTool{kind: kind, typeName: typeName, path: path, declarations: count}
+		registry[tool.Name] = sourceTool{
+			kind:          kind,
+			typeName:      typeName,
+			firstTypeName: firstTypeName,
+			path:          path,
+			declarations:  count,
+		}
 		return nil
 	}
 	for i, tool := range envelope.Tools {
@@ -697,9 +709,12 @@ func canonicalMessagesFunctionTool(tool anthropicmessages.Tool) (CanonicalTool, 
 	return CanonicalTool{Name: tool.Name, Description: description, JSONSchema: tool.InputSchema}, nil
 }
 
-// sameMessagesFunctionDefinition ignores JSON object ordering and whitespace
-// when recognizing a repeated definition. UseNumber preserves numeric lexemes:
-// adjacent large integer values must never collapse through float64 rounding.
+// sameMessagesFunctionDefinition ignores JSON object ordering, whitespace and
+// numeric lexemes when recognizing a repeated definition: 1, 1.0 and 1e0 are
+// the same schema number. UseNumber preserves each token so a large integer
+// never collapses through float64; equalJSONValues compares tokens by exact
+// value with bounded work (no unbounded big-integer expansion of a
+// client-supplied exponent).
 func sameMessagesFunctionDefinition(a, b CanonicalTool) (bool, error) {
 	if a.Name != b.Name || a.Description != b.Description {
 		return false, nil
@@ -715,7 +730,186 @@ func sameMessagesFunctionDefinition(a, b CanonicalTool) (bool, error) {
 			return false, err
 		}
 	}
-	return reflect.DeepEqual(values[0], values[1]), nil
+	return equalJSONValues(values[0], values[1]), nil
+}
+
+// equalJSONValues compares decoded JSON values with exact numeric equality.
+// Only json.Number needs special handling; every other value is compared with
+// reflect.DeepEqual (the decoder already produced maps/slices/strings/bools).
+func equalJSONValues(a, b any) bool {
+	switch av := a.(type) {
+	case json.Number:
+		bv, ok := b.(json.Number)
+		if !ok {
+			return false
+		}
+		return equalJSONNumberLexemes(string(av), string(bv))
+	case map[string]any:
+		bv, ok := b.(map[string]any)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for key, value := range av {
+			other, present := bv[key]
+			if !present || !equalJSONValues(value, other) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		bv, ok := b.([]any)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if !equalJSONValues(av[i], bv[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(a, b)
+	}
+}
+
+// equalJSONNumberLexemes compares two JSON number tokens by value without
+// expanding client-supplied exponents. A token is normalized to a sign, its
+// significant digits with trailing zeros removed, and a decimal exponent.
+// Numbers whose exponent saturates are compared by raw lexeme (see
+// canonicalJSONNumber.saturated), so no exponent-sized work is ever performed
+// and two different spellings are never claimed to be the same value.
+func equalJSONNumberLexemes(a, b string) bool {
+	if a == b {
+		return true
+	}
+	an, aok := parseJSONNumber(a)
+	bn, bok := parseJSONNumber(b)
+	if !aok || !bok {
+		// A decode-validated schema cannot hold a non-number here; never
+		// claim equality for a token that cannot be normalized.
+		return false
+	}
+	if an.saturated || bn.saturated {
+		// Saturated exponents cannot be compared exactly without expanding
+		// them. Fall back to the lexemes: this may report equal values with
+		// different spellings as distinct, but it never hides a real schema
+		// change, which would violate loss-observability honesty.
+		return false
+	}
+	return an == bn
+}
+
+type canonicalJSONNumber struct {
+	sign      string
+	digits    string
+	exponent  int
+	saturated bool
+}
+
+// parseJSONNumber normalizes a JSON number lexeme into a sign, significant
+// digits (trailing zeros removed) and a decimal exponent. The exponent is a
+// saturating int so even 1e999999999999999999 is handled in constant space and
+// time; only the digit string, which is already bounded by the request size,
+// is ever allocated.
+func parseJSONNumber(lexeme string) (canonicalJSONNumber, bool) {
+	var out canonicalJSONNumber
+	if lexeme == "" {
+		return out, false
+	}
+	if lexeme[0] == '-' {
+		out.sign = "-"
+		lexeme = lexeme[1:]
+	} else if lexeme[0] == '+' {
+		return out, false // JSON numbers never carry a leading +
+	}
+	if lexeme == "" {
+		return out, false
+	}
+	exponent := 0
+	saturated := false
+	if i := strings.IndexAny(lexeme, "eE"); i >= 0 {
+		exp, sat, ok := boundedExponent(lexeme[i+1:])
+		if !ok {
+			return out, false
+		}
+		exponent = exp
+		saturated = sat
+		lexeme = lexeme[:i]
+	}
+	mantissa := lexeme
+	if i := strings.IndexByte(mantissa, '.'); i >= 0 {
+		var sat bool
+		exponent, sat = saturatingAdd(exponent, -(len(mantissa) - i - 1))
+		saturated = saturated || sat
+		mantissa = mantissa[:i] + mantissa[i+1:]
+	}
+	digits := strings.TrimLeft(mantissa, "0")
+	if digits == "" {
+		// Every zero is the same number, regardless of sign or exponent.
+		return canonicalJSONNumber{sign: "", digits: "0", exponent: 0}, true
+	}
+	trimmed := strings.TrimRight(digits, "0")
+	var sat bool
+	exponent, sat = saturatingAdd(exponent, len(digits)-len(trimmed))
+	saturated = saturated || sat
+	out.digits = trimmed
+	out.exponent = exponent
+	out.saturated = saturated
+	return out, true
+}
+
+// maxJSONExponentMagnitude is the saturation bound for decimal exponents. It
+// only needs to exceed every exponent that can appear inside the accepted
+// request size, so any two exponents that both saturate are indistinguishable
+// without materializing their digits.
+const maxJSONExponentMagnitude = 1 << 30
+
+func boundedExponent(lexeme string) (int, bool, bool) {
+	if lexeme == "" {
+		return 0, false, false
+	}
+	negative := false
+	if lexeme[0] == '-' || lexeme[0] == '+' {
+		negative = lexeme[0] == '-'
+		lexeme = lexeme[1:]
+	}
+	if lexeme == "" {
+		return 0, false, false
+	}
+	value := 0
+	saturated := false
+	for _, digit := range lexeme {
+		if digit < '0' || digit > '9' {
+			return 0, false, false
+		}
+		if value > maxJSONExponentMagnitude/10 {
+			value = maxJSONExponentMagnitude
+			saturated = true
+			break
+		}
+		value = value*10 + int(digit-'0')
+		if value > maxJSONExponentMagnitude {
+			value = maxJSONExponentMagnitude
+			saturated = true
+			break
+		}
+	}
+	if negative {
+		return -value, true, saturated
+	}
+	return value, true, saturated
+}
+
+func saturatingAdd(a, b int) (int, bool) {
+	sum := a + b
+	switch {
+	case sum > maxJSONExponentMagnitude:
+		return maxJSONExponentMagnitude, true
+	case sum < -maxJSONExponentMagnitude:
+		return -maxJSONExponentMagnitude, true
+	default:
+		return sum, false
+	}
 }
 
 // A message containing only these blocks carries provider tool state rather

@@ -505,6 +505,57 @@ func TestToolDefinitionUsesTheStrictClientContract(t *testing.T) {
 	}
 }
 
+// TestToolDefinitionEquivalentNumbersAreNotSuperseded proves numerically equal
+// schema numbers are the same definition even when their JSON lexemes differ.
+// A false "redefined mid-conversation" note would misreport loss observability.
+func TestToolDefinitionEquivalentNumbersAreNotSuperseded(t *testing.T) {
+	def := func(minimum string) string {
+		return `{"type":"tool_addition","tool":{"type":"tool_definition","definition":` +
+			`{"name":"db_query","input_schema":{"type":"object","minimum":` + minimum + `}}}}`
+	}
+	body := `{"model":"m","max_tokens":16,` +
+		`"messages":[{"role":"user","content":"x"},` +
+		`{"role":"system","content":[` + def("1") + `]},` +
+		`{"role":"system","content":[` + def("1.0") + `]}]}`
+	result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, loss := range result.Report.Losses {
+		if strings.Contains(loss.Detail, "redefined") {
+			t.Fatalf("equivalent schemas reported as a supersession: %+v", loss)
+		}
+	}
+}
+
+// TestToolDefinitionHugeExponentsStayBounded pins the availability invariant:
+// client-supplied exponents are never expanded. Saturated exponents are
+// compared by lexeme, so a different huge value must still be reported as a
+// supersession rather than silently treated as an unchanged repeat.
+func TestToolDefinitionHugeExponentsStayBounded(t *testing.T) {
+	def := func(minimum string) string {
+		return `{"type":"tool_addition","tool":{"type":"tool_definition","definition":` +
+			`{"name":"db_query","input_schema":{"type":"object","minimum":` + minimum + `}}}}`
+	}
+	body := `{"model":"m","max_tokens":16,` +
+		`"messages":[{"role":"user","content":"x"},` +
+		`{"role":"system","content":[` + def(`1e2000000000`) + `]},` +
+		`{"role":"system","content":[` + def(`1e2000000001`) + `]}]}`
+	result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	redefined := 0
+	for _, loss := range result.Report.Losses {
+		if strings.Contains(loss.Detail, "redefined") {
+			redefined++
+		}
+	}
+	if redefined != 1 {
+		t.Fatalf("distinct saturated-exponent schemas: got %d supersession notes, want 1: %+v", redefined, result.Report.Losses)
+	}
+}
+
 // TestToolDefinitionSchemaChangeIsLastDefinitionWins proves a mid-conversation
 // schema change is served rather than refused. The contract makes a later
 // definition REPLACE the earlier one from its position onward, and it is the

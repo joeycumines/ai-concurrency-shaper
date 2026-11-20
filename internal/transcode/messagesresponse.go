@@ -177,8 +177,9 @@ func messagesItems(
 			// it — the proxy simply cannot carry provider tool-search state into
 			// a client dialect. Recording it as a Note is the honest form: an
 			// operator-refusable loss here would let a strict client policy
-			// deny RESPONSES the client never asked about.
-			message = nil
+			// deny RESPONSES the client never asked about. The listing emits no
+			// item, so keep the current message pointer: adjacent text blocks
+			// stay in the SAME message item rather than becoming two turns.
 			if err := report.Note(
 				FeatureAnthropicToolChanges,
 				path,

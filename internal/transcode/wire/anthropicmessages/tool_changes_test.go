@@ -224,13 +224,19 @@ func TestMCPToolListingRejectsMalformedTools(t *testing.T) {
 		`[{"name":"f","input_schema":null}]`,
 		`[{"name":"f","input_schema":[]}]`,
 		`[{"name":"f","input_schema":{},"description":42}]`,
-		`[{"name":"f","input_schema":{},"unexpected":true}]`,
 	} {
 		var listing ContentBlock
 		body := `{"type":"mcp_tool_listing","mcp_server_name":"s","tools":` + tools + `}`
 		if err := json.Unmarshal([]byte(body), &listing); err == nil {
 			t.Fatalf("malformed listing accepted: %s", body)
 		}
+	}
+	// A listing is provider state that the convert layer drops, so an
+	// unmodeled provider extension must be skipped, not fail the exchange.
+	var extended ContentBlock
+	extendedBody := `{"type":"mcp_tool_listing","mcp_server_name":"s","tools":[{"name":"f","input_schema":{},"unexpected":true}]}`
+	if err := json.Unmarshal([]byte(extendedBody), &extended); err != nil {
+		t.Fatalf("a provider extension in a dropped listing must be tolerated: %v", err)
 	}
 	var empty ContentBlock
 	if err := json.Unmarshal([]byte(`{"type":"mcp_tool_listing","mcp_server_name":"s","tools":[]}`), &empty); err != nil {

@@ -267,7 +267,14 @@ func validateMCPToolListing(raw json.RawMessage) error {
 		InputSchema json.RawMessage `json:"input_schema"`
 		Description *string         `json:"description,omitempty"`
 	}
-	if err := wire.Decode(trimmed, &tools); err != nil {
+	// A tool listing is provider state, not client-authored conversation
+	// content: the convert layer drops it on both the response and replay
+	// paths. The modeled fields are checked below (name, input_schema), and
+	// DecodeTolerant still rejects duplicate keys, illegal nulls, malformed
+	// syntax and type-corrupt modeled fields. Only unmodeled provider
+	// extensions are skipped, so they cannot fail an exchange whose listing
+	// carries nothing client-visible.
+	if err := wire.DecodeTolerant(trimmed, &tools); err != nil {
 		return err
 	}
 	for i, tool := range tools {
