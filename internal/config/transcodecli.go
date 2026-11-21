@@ -528,14 +528,20 @@ var defaultTranscodeLosses = map[transcode.Feature]struct{}{
 	// deployment rather than a client fault. Approving it is what makes the
 	// documented "a miss degrades to the observable loss, never a failure"
 	// contract true; deny it with -transcode-allow-loss '!previous_response_id'.
-	transcode.FeaturePreviousResponseID:                {},
-	transcode.FeatureReasoningSummary:                  {},
-	transcode.FeatureAuthenticatedThinking:             {},
-	transcode.FeatureMidConversationSystem:             {},
-	transcode.FeatureMultipleSystemTurns:               {},
-	transcode.FeatureResponsesControls:                 {},
-	transcode.FeatureAnthropicControls:                 {},
-	transcode.FeatureRequestCitations:                  {},
+	transcode.FeaturePreviousResponseID:    {},
+	transcode.FeatureReasoningSummary:      {},
+	transcode.FeatureAuthenticatedThinking: {},
+	transcode.FeatureMidConversationSystem: {},
+	transcode.FeatureMultipleSystemTurns:   {},
+	transcode.FeatureResponsesControls:     {},
+	transcode.FeatureAnthropicControls:     {},
+	transcode.FeatureRequestCitations:      {},
+	// Mid-conversation tool changes are ordinary claude-cli 2.x agentic
+	// traffic (tool_addition / tool_removal inside a role:"system" message
+	// under the inline-tools beta). A chat target cannot reproduce availability
+	// timing, so the decision is a policy-gated loss — approved by default so
+	// the flagship client works, denyable with '!anthropic_tool_changes'.
+	transcode.FeatureAnthropicToolChanges:              {},
 	transcode.FeatureBuiltinTools:                      {},
 	transcode.FeatureUsageUnknown:                      {},
 	transcode.FeatureUsageCacheReadUnknown:             {},

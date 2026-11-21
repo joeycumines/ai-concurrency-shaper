@@ -736,6 +736,28 @@ func TestBuildTranscodeMappingsAppliesLossPolicy(t *testing.T) {
 	}
 }
 
+// TestDefaultLossPolicyApprovesAnthropicToolChanges pins the availability
+// decision for the mid-conversation tool-change blocks, on the same footing as
+// previous_response_id above: they are ordinary claude-cli 2.x agentic traffic
+// (a role:"system" message carrying tool_addition / tool_removal under the
+// inline-tools beta), so a default deployment that refused them would fail the
+// flagship client on every agentic turn. Approving the key is what makes the
+// timing change an OBSERVABLE loss; it never restores a silent drop — without
+// the approval, the conversion is a keyed refusal.
+func TestDefaultLossPolicyApprovesAnthropicToolChanges(t *testing.T) {
+	def := mergedLossPolicy(transcode.StrictLossPolicy(), nil, false)
+	if !def.Allows(transcode.FeatureAnthropicToolChanges) {
+		t.Fatal("the default loss policy must approve anthropic_tool_changes so claude-cli agentic traffic is served")
+	}
+	// Negation restores the strict refusal.
+	negated := mergedLossPolicy(transcode.StrictLossPolicy(), map[transcode.Feature]struct{}{
+		transcode.FeatureAnthropicToolChanges: {},
+	}, false)
+	if negated.Allows(transcode.FeatureAnthropicToolChanges) {
+		t.Fatal("-transcode-allow-loss '!anthropic_tool_changes' must withdraw the default")
+	}
+}
+
 // TestDefaultLossPolicyDecidesTheResponsesEnvelope pins the availability
 // contract of the Responses request-envelope fields on a non-Responses target.
 // The split is deliberate rather than incidental:

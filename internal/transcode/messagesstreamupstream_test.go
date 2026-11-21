@@ -215,6 +215,35 @@ func TestGeminiStreamMessagesMaxTokensIsIncomplete(t *testing.T) {
 	}
 }
 
+// TestGeminiStreamMessagesUnclosedBlockErrorIsStable proves the diagnostic
+// names the earliest unclosed block regardless of Go's map iteration order.
+func TestGeminiStreamMessagesUnclosedBlockErrorIsStable(t *testing.T) {
+	sse := anthropicStartSSE +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		anthropicStopSSE("end_turn")
+	for range 20 {
+		rec := serveGeminiStreamBody(t,
+			geminiMessagesStreamHandler(t, sse, nil),
+			geminiMessagesStreamTarget,
+			geminiMessagesBody,
+		)
+		frames := geminiStreamFrames(t, rec.Body.String())
+		if len(frames) == 0 {
+			t.Fatalf("no frames; body %q", rec.Body.String())
+		}
+		last := frames[len(frames)-1]
+		if _, ok := last["error"]; !ok {
+			t.Fatalf("two unclosed blocks did not fail the stream: %v", last)
+		}
+		if message, _ := last["error"].(map[string]any)["message"].(string); !strings.Contains(message, "content block 0 stopped") {
+			t.Fatalf("unclosed-block diagnostic is not stable: %v", last["error"])
+		}
+	}
+}
+
 func TestGeminiStreamMessagesFailuresNeverSucceed(t *testing.T) {
 	tests := []struct {
 		name string
@@ -243,6 +272,13 @@ func TestGeminiStreamMessagesFailuresNeverSucceed(t *testing.T) {
 			sse: anthropicStartSSE +
 				"event: content_block_start\n" +
 				`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+				anthropicStopSSE("end_turn"),
+		},
+		{
+			name: "contradictory second stop reason",
+			sse: anthropicStartSSE + anthropicTextBlockSSE +
+				"event: message_delta\n" +
+				`data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null},"usage":{"output_tokens":2}}` + "\n\n" +
 				anthropicStopSSE("end_turn"),
 		},
 	}

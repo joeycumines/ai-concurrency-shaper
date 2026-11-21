@@ -551,6 +551,11 @@ func RenderChatRequest(
 	//                 model; chat's absent reasoning_effort is the exact
 	//                 semantic (the provider applies its own default).
 	//  - "disabled"   no thinking requested; nothing is emitted.
+	//  - "between_tools"
+	//                 no up-front thinking, with progress updates still
+	//                 returned between tool calls. A chat request can
+	//                 express neither half, so it is a real intent this
+	//                 target cannot reproduce and stays policy-gated.
 	//  - "enabled"    the explicit budget_tokens maps through the
 	//                 documented deterministic threshold table in
 	//                 thinkingBudgetToEffort; the mapping is reported as a
@@ -625,6 +630,18 @@ func RenderChatRequest(
 				FeatureRequestReasoning,
 				"thinking",
 				"thinking disabled maps to the absence of chat reasoning_effort",
+			); err != nil {
+				return nil, report, err
+			}
+		case "between_tools":
+			// Two assertions no chat request can carry: thinking off up
+			// front, and progress updates between tool calls. Recording it as
+			// a Note would claim a mapping that does not exist.
+			if err := report.Lose(
+				context.lossPolicy(),
+				FeatureRequestReasoning,
+				"thinking",
+				"between_tools thinking asserts no up-front thinking with progress updates between tool calls; a chat request can express neither",
 			); err != nil {
 				return nil, report, err
 			}

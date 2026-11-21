@@ -170,6 +170,35 @@ func messagesItems(
 				return nil, err
 			}
 
+		case anthropicmessages.ContentBlockTypeMCPToolListing:
+			// The MCP connector's fetched tool list (mcp-client-2026-09-15): a
+			// client pins a server's tools by sending this block back. It
+			// carries no conversation content, and the CLIENT never requested
+			// it — the proxy simply cannot carry provider tool-search state into
+			// a client dialect. Recording it as a Note is the honest form: an
+			// operator-refusable loss here would let a strict client policy
+			// deny RESPONSES the client never asked about. The listing emits no
+			// item, so keep the current message pointer: adjacent text blocks
+			// stay in the SAME message item rather than becoming two turns.
+			if err := report.Note(
+				FeatureAnthropicToolChanges,
+				path,
+				"an MCP tool listing pins the provider's tool search state and cannot be reproduced in a client response",
+			); err != nil {
+				return nil, err
+			}
+
+		case anthropicmessages.ContentBlockTypeToolAddition,
+			anthropicmessages.ContentBlockTypeToolRemoval:
+			// A mid-conversation tool change is a REQUEST-side block. Finding
+			// one on the response surface is contradictory wire, not a feature
+			// to absorb.
+			return nil, upstreamWireError(
+				UpstreamMessages,
+				http.StatusOK,
+				fmt.Errorf("%s carries a request-only tool change block", path),
+			)
+
 		case anthropicmessages.ContentBlockTypeServerToolUse,
 			anthropicmessages.ContentBlockTypeWebSearchToolResult,
 			anthropicmessages.ContentBlockTypeMCPToolUse,

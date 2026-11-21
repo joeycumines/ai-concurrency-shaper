@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 	"reflect"
 	"testing"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/anthropicmessages"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/openairesponses"
 )
 
 // strictWireUnion is a wire union that must round-trip: any value accepted by
@@ -20,6 +22,20 @@ type strictWireUnion interface {
 
 func FuzzWireUnions(f *testing.F) {
 	seeds := [][]byte{
+		[]byte(`{"type":"tool_definition","definition":{"name":"f","input_schema":{"type":"object","const":1e10000}}}`),
+		[]byte(`{"type":"tool_definition","definition":{"name":"f","input_schema":{"const":1e10000,"title":"a","title":"b"}}}`),
+		[]byte(`{"type":"adaptive","display":"updates"}`),
+		[]byte(`{"type":"enabled","budget_tokens":4096,"display":null}`),
+		[]byte(`{"type":"disabled"}`),
+		[]byte(`{"type":"between_tools"}`),
+		[]byte(`{"type":"between_tools","display":null}`),
+		[]byte(`{"type":"tool_reference","name":"f"}`),
+		[]byte(`{"type":"mcp_tool_reference","server_name":"s","name":"f"}`),
+		[]byte(`{"type":"mcp_toolset_reference","server_name":"s"}`),
+		[]byte(`{"type":"tool_definition","definition":{"type":"custom","name":"f","input_schema":{"type":"object","const":9007199254740993}}}`),
+		[]byte(`[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"f","input_schema":{"type":"object"}}}}]`),
+		[]byte(`[{"type":"tool_removal","tool":{"type":"tool_reference","name":"f"}}]`),
+		[]byte(`[{"type":"mcp_tool_listing","mcp_server_name":"s","tools":[{"name":"f","input_schema":{"type":"object","const":9007199254740993}}]}]`),
 		[]byte(`"hello"`),
 		[]byte(`[]`),
 		[]byte(`[{"role":"user","content":"hello"}]`),
@@ -94,6 +110,18 @@ func FuzzWireUnions(f *testing.F) {
 				name: "chat tool choice",
 				new: func() strictWireUnion {
 					return &ChatToolChoice{}
+				},
+			},
+			{
+				name: "anthropic thinking configuration",
+				new: func() strictWireUnion {
+					return &anthropicmessages.ThinkingConfig{}
+				},
+			},
+			{
+				name: "anthropic tool change",
+				new: func() strictWireUnion {
+					return &anthropicmessages.ToolChange{}
 				},
 			},
 			{

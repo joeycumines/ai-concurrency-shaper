@@ -933,6 +933,55 @@ the target cannot honour, and silently dropping it would change semantics the
 client can observe in the answer. Approve them for clients whose traffic
 carries them and whose behaviour does not depend on those fields.
 
+### Mid-conversation system messages and tool changes
+
+Anthropic's `inline-tools-2026-09-15` and
+`mid-conversation-tool-changes-2026-07-01` betas carry `tool_addition` and
+`tool_removal` blocks in system messages. The conversion decisions are:
+
+- A message containing only tool changes contributes availability controls and
+  no prompt content. It is omitted after those controls are decided, without
+  inventing an empty text turn or charging `mid_conversation_system` for it.
+- An inline custom `tool_definition` joins the request's global tool list.
+  Its name, description and JSON Schema are retained; JSON serialization may
+  normalize whitespace and escaping, so the complete definition is not promised
+  byte-identical. The timing change is a Note. A later definition of the same
+  kind replaces the earlier schema for the whole request, and one combined Note
+  explains both the timing change and any supersession in the ordinary log.
+- Declared and inline custom tools use the same strict normalization. Absent
+  `type`, Anthropic's `type: "custom"` (including explicit `null`, which is the
+  untagged form), and the supported `type: "function"` compatibility spelling
+  all require a name and an object `input_schema`. Unknown fields are rejected. Cache hints and eager loading of deferred tools
+  receive the existing `anthropic_controls` Notes, including when those options
+  occur inside an inline definition.
+- Source validation precedes conversion: tool changes belong to a system group
+  after a user turn and before an assistant turn or the end of the array. A
+  different tool kind cannot reuse an available name, even when conversion will
+  drop the earlier server tool. A cache marker belongs on the addition block or
+  its definition, never both; a deferred definition cannot carry a cache marker.
+  A plain tool reference must resolve to a declared tool or an earlier inline
+  definition; an unresolved or forward reference is a client error. Every
+  decision keeps the original message and block coordinates.
+- Withdrawals and reference-only changes take the `anthropic_tool_changes`
+  loss: the target's global tool list cannot reproduce their availability
+  timing. This permission is approved by default and can be withdrawn with
+  `-transcode-allow-loss '!anthropic_tool_changes'`. Server-tool and
+  `mcp_toolset` inline definitions remain explicit unsupported forms.
+- An `mcp_tool_listing` in assistant request history also takes the
+  `anthropic_tool_changes` loss, because its pinned provider tool-search state
+  cannot be reproduced. Other content in that assistant message keeps its order;
+  a listing-only message adds no invented text. An upstream response listing is
+  recorded as a Note. Even discarded stream blocks retain their lifecycle:
+  missing or repeated stops and incompatible deltas fail the stream rather than
+  producing a successful completion.
+
+The supported wire union remains strict. Undocumented block types, unknown
+reference arms, cross-arm members, and a definition on a removal are errors.
+Listing blocks use `mcp_server_name`; `mcp_tool_use` uses its distinct
+`server_name` field. Support for replaying a listing with an observable loss does
+not imply support for invoking an MCP server through a transcoded request.
+See Anthropic's [mid-conversation tool contract](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages).
+
 ### Thinking budgets and reasoning effort
 
 Anthropic `thinking` on a Messages client maps to chat `reasoning_effort`
@@ -946,16 +995,29 @@ absence of `reasoning_effort`) and the elision is reported;
 `type: enabled` maps `budget_tokens` through
 a deterministic, documented threshold table (`<1024` minimal, `<4096` low,
 `<16384` medium, else high) and the mapping is reported on every exchange.
-The thinking members are validated per type (`enabled` carries
-`budget_tokens`, `disabled` carries none, `adaptive` carries `display`) —
-a cross-type member is a malformed request, not a silently ignored field.
-`display` is a Messages-native field, so the Messages target renders it and
-every other target records the `request_reasoning` loss for the preference it
-cannot reproduce; the decoder never destroys it, because the decision belongs to
-the target that knows it cannot carry it. The same rule covers `top_k` and
+The thinking members are validated per type (`enabled` carries `budget_tokens`
+and an optional `display`, `disabled` carries nothing, `between_tools` carries
+nothing, `adaptive` carries an optional `display`) — a cross-type member is a
+malformed request, including an excluded field explicitly set to JSON `null`.
+An optional `display: null` on `enabled` or `adaptive` means no display
+preference. `display` is the
+thinking-visibility preference: `summarized`, `omitted`, or the beta-gated
+`updates` (what Claude Code selects with the `Anthropic-Beta` member
+`thinking-display-updates-2026-08-18`), and the contract documents it on both
+the `enabled` and the `adaptive` arm. It is a Messages-native field, so the
+Messages target renders it and every other target records the
+`request_reasoning` loss for the preference it cannot reproduce; the decoder
+never destroys it, because the decision belongs to the target that knows it
+cannot carry it. `between_tools` — Claude Sonnet 5.5's lowest setting, which
+turns off up-front thinking while keeping the progress updates models write
+between tool calls — is carried natively by a Messages target and is a
+policy-gated `request_reasoning` loss everywhere else, because no other dialect
+can assert either half of what it asks for. The same rule covers `top_k` and
 `disable_parallel_tool_use`: both are carried by the canonical request and lost
-only by a renderer whose wire has no such field, so a Messages→Messages exchange
-keeps them while a Messages→Chat exchange records the loss.
+only by a renderer whose wire has no such field. The Messages renderer carries
+these controls natively; Messages→Chat records each unrepresentable preference.
+There is no configured Messages→Messages transcode direction; native passthrough
+forwards the original dialect instead.
 Request-side reasoning controls — an enabled `thinking` budget or a
 Responses `reasoning.effort` — are gated by their own `request_reasoning`
 loss key, distinct from the response-side `provider_reasoning_text` (chat
@@ -1068,8 +1130,9 @@ real `mcp_tool_use` carries `server_name` (the MCP server that owns the
 tool), which is decoded.
 
 A `tools[]` entry is classified by its `type` discriminant. The
-client-function spellings — absent, or the explicit `"type":"function"` —
-are carried through as ordinary client function tools, and they decode
+client-function spellings — absent, `"type":"custom"`, or the
+`"type":"function"` compatibility spelling — are carried through as ordinary
+client function tools, and they decode
 strictly, so an unmodelled property on a client tool is still a loud error.
 **Any** other `type` takes the `anthropic_server_tools` loss decision, so a
 new Anthropic server tool becomes usable by approving the flag, with no

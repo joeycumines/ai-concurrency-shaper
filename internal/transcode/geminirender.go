@@ -546,9 +546,9 @@ func RenderGeminiRequest(
 	// means the same thing. The reasoning decision is per ARM, because the arms
 	// carry different intents: "adaptive" delegates the decision to the model,
 	// which is exactly what Gemini does when thinkingConfig is absent, so it is a
-	// Note; "enabled" and "disabled" assert something this target cannot
-	// reproduce, so they are policy-gated. The display preference is its own
-	// field with its own path, matching Chat and Responses.
+	// Note; "enabled", "disabled" and "between_tools" assert something this
+	// target cannot reproduce, so they are policy-gated. The display preference
+	// is its own field with its own path, matching Chat and Responses.
 	if len(request.Metadata) > 0 {
 		if err := report.Lose(
 			policy,
@@ -581,9 +581,10 @@ func RenderGeminiRequest(
 			); err != nil {
 				return nil, report, err
 			}
-		case "enabled", "disabled":
-			// A budget or an explicit no-thinking is a real intent this target
-			// cannot express, so an operator can refuse it.
+		case "enabled", "disabled", "between_tools":
+			// A budget, an explicit no-thinking, or the between-tools shape is
+			// a real intent this target cannot express, so an operator can
+			// refuse it.
 			if err := report.Lose(
 				policy,
 				FeatureRequestReasoning,

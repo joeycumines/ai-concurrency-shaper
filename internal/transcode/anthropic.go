@@ -38,6 +38,10 @@ const (
 	AnthropicContentBlockTypeCodeExecution       = anthropicmessages.ContentBlockTypeCodeExecution
 	AnthropicContentBlockTypeCodeExecutionResult = anthropicmessages.ContentBlockTypeCodeExecutionResult
 	AnthropicContentBlockTypeContainerUpload     = anthropicmessages.ContentBlockTypeContainerUpload
+	// Mid-conversation tool-change blocks (inline-tools beta).
+	AnthropicContentBlockTypeToolAddition   = anthropicmessages.ContentBlockTypeToolAddition
+	AnthropicContentBlockTypeToolRemoval    = anthropicmessages.ContentBlockTypeToolRemoval
+	AnthropicContentBlockTypeMCPToolListing = anthropicmessages.ContentBlockTypeMCPToolListing
 )
 
 // AnthropicSourceType is the type of an image or document source.

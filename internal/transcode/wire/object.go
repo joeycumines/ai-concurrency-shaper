@@ -268,13 +268,22 @@ func JSONObject(raw string) (map[string]json.RawMessage, error) {
 
 // checkDuplicateKeys walks the JSON document and rejects any object that
 // contains a duplicated key, at any depth. encoding/json accepts duplicates
-// silently (last value wins); the wire layer rejects the document.
+// silently (last value wins) and matches struct fields case-insensitively, so
+// a key that differs from an earlier one only by case (e.g. "stop_reason" vs
+// "STOP_REASON") would silently overwrite the modeled field. Duplicate
+// detection therefore folds keys to lower case: any two keys in one object
+// that are equal under case folding are rejected, with the later key's
+// original spelling quoted in the error.
 func checkDuplicateKeys(data []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
+	// This pass checks structure, not numeric ranges. A valid raw JSON
+	// number outside float64 must not end the walk before later keys.
+	dec.UseNumber()
 	// stack of seen-key sets, one per open object. Each frame records
 	// whether the next string token is a key (after '{' or after a value in
 	// an object) or a value (after a key). Array frames are inert: strings
-	// inside arrays are values.
+	// inside arrays are values. Keys are stored case-folded so a case-variant
+	// alias of a modeled field is still a duplicate.
 	type frame struct {
 		isObject  bool
 		keys      map[string]struct{}
@@ -324,10 +333,11 @@ func checkDuplicateKeys(data []byte) error {
 				}
 				continue
 			}
-			if _, dup := top.keys[t]; dup {
+			folded := strings.ToLower(t)
+			if _, dup := top.keys[folded]; dup {
 				return fmt.Errorf("duplicate JSON key %q", t)
 			}
-			top.keys[t] = struct{}{}
+			top.keys[folded] = struct{}{}
 			top.expectKey = false
 		default:
 			// Numbers, booleans, and null: a completed value.
@@ -354,6 +364,9 @@ func checkIllegalNulls(data []byte, dst any) error {
 		typ = typ.Elem()
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
+	// Raw schemas and skipped provider fields may contain numbers outside
+	// float64. Preserve their lexemes while checking the surrounding shape.
+	dec.UseNumber()
 	return checkNullValue(dec, typ, "")
 }
 
