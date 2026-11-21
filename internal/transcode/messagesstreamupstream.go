@@ -40,6 +40,15 @@ type anthropicUpstreamResponsesStreamState struct {
 	finalUsage   *anthropicmessages.Usage
 	stopReason   anthropicmessages.StopReason
 	sawStopValue bool
+	// The content phase ends at the first message_delta, including one that
+	// carries only usage metadata. Later metadata cannot reopen content.
+	contentPhaseEnded bool
+	// startStopReason records a stop reason already present on the
+	// message_start envelope. Start metadata is authoritative: a later
+	// terminal under a different reason contradicts it and is malformed
+	// wire, so the refusal cannot be silently discarded by a success.
+	startStopReason   *anthropicmessages.StopReason
+	sawStartStopValue bool
 	// streamError latches the first failure of any kind: an upstream error
 	// event, a refused conversion, any error the conversion returns. Every
 	// later call and FinalizeEOF propagate it, so a failed stream can never
@@ -196,6 +205,11 @@ func (s *anthropicUpstreamResponsesStreamState) messageStart(
 	}
 	s.started = true
 	s.startUsage = event.Message.Usage
+	if event.Message.StopReason != nil {
+		reason := *event.Message.StopReason
+		s.startStopReason = &reason
+		s.sawStartStopValue = true
+	}
 	return []ResponsesSSEEvent{ResponseCreatedEvent{
 		Type:           "response.created",
 		SequenceNumber: s.nextSequence(),
@@ -390,8 +404,8 @@ func (s *anthropicUpstreamResponsesStreamState) requireOpenable(event anthropicm
 	if !s.started {
 		return upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content block before message_start"))
 	}
-	if s.sawStopValue {
-		return s.wireError(errors.New("anthropic content block after final message_delta"))
+	if s.contentPhaseEnded {
+		return s.wireError(errors.New("anthropic content block after message_delta"))
 	}
 	if event.Index == nil || event.ContentBlock == nil {
 		return upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content_block_start has no index or block"))
@@ -412,8 +426,8 @@ func (s *anthropicUpstreamResponsesStreamState) blockDelta(
 	if !s.started {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content delta before message_start"))
 	}
-	if s.sawStopValue {
-		return nil, s.wireError(errors.New("anthropic content delta after final message_delta"))
+	if s.contentPhaseEnded {
+		return nil, s.wireError(errors.New("anthropic content delta after message_delta"))
 	}
 	if event.Index == nil || event.Delta == nil {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content_block_delta has no index or delta"))
@@ -554,8 +568,8 @@ func (s *anthropicUpstreamResponsesStreamState) blockStop(
 	if !s.started {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content_block_stop before message_start"))
 	}
-	if s.sawStopValue {
-		return nil, s.wireError(errors.New("anthropic content_block_stop after final message_delta"))
+	if s.contentPhaseEnded {
+		return nil, s.wireError(errors.New("anthropic content_block_stop after message_delta"))
 	}
 	if event.Index == nil {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic content_block_stop has no index"))
@@ -637,6 +651,15 @@ func (s *anthropicUpstreamResponsesStreamState) messageDelta(
 	if !s.started {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic message_delta before message_start"))
 	}
+	if !s.contentPhaseEnded {
+		// The first message_delta ends the content phase whether or not it
+		// carries a stop reason; the closure check runs once at that
+		// transition, not per repeated delta.
+		if err := s.requireClosedBlocks(event.Type); err != nil {
+			return nil, err
+		}
+		s.contentPhaseEnded = true
+	}
 	if event.Delta != nil && event.Delta.StopReason != nil {
 		if s.sawStopValue && s.stopReason != *event.Delta.StopReason {
 			// A contradictory second stop reason is malformed wire: the
@@ -649,8 +672,13 @@ func (s *anthropicUpstreamResponsesStreamState) messageDelta(
 				*event.Delta.StopReason, s.stopReason,
 			))
 		}
-		if err := s.requireClosedBlocks(event.Type); err != nil {
-			return nil, err
+		if s.sawStartStopValue && *s.startStopReason != *event.Delta.StopReason {
+			// The message_start already declared this stop reason; a delta
+			// claiming a different one contradicts the start metadata.
+			return nil, s.wireError(fmt.Errorf(
+				"anthropic message_delta stop_reason %q contradicts message_start %q",
+				*event.Delta.StopReason, *s.startStopReason,
+			))
 		}
 		s.stopReason = *event.Delta.StopReason
 		s.sawStopValue = true
@@ -661,9 +689,9 @@ func (s *anthropicUpstreamResponsesStreamState) messageDelta(
 	return nil, nil
 }
 
-// requireClosedBlocks checks visible and discarded blocks alike. The final
-// message_delta follows every block's stop; closing a block after the final
-// stop reason would conceal an out-of-order upstream lifecycle.
+// requireClosedBlocks checks visible and discarded blocks alike. The first
+// message_delta follows every block's stop, independently of when a stop reason
+// arrives. Once that phase starts, the closed block set cannot change.
 func (s *anthropicUpstreamResponsesStreamState) requireClosedBlocks(event anthropicmessages.StreamEventType) error {
 	// A map's iteration order is random; report the earliest unclosed block so
 	// the diagnostic is stable across runs when several blocks are open.
@@ -690,6 +718,14 @@ func (s *anthropicUpstreamResponsesStreamState) messageStop() ([]ResponsesSSEEve
 	}
 	if !s.sawStopValue {
 		return nil, upstreamWireError(UpstreamMessages, http.StatusOK, errors.New("anthropic message_stop without a stop_reason"))
+	}
+	if s.sawStartStopValue && *s.startStopReason != s.stopReason {
+		// The start envelope declared a different stop reason; committing a
+		// terminal under another reason would discard the start metadata.
+		return nil, s.wireError(fmt.Errorf(
+			"anthropic message_stop stop_reason %q contradicts message_start %q",
+			s.stopReason, *s.startStopReason,
+		))
 	}
 
 	// The stop reason decides first: a stop the terminal cannot carry refuses
