@@ -277,17 +277,16 @@ func TestPTY_HScrollNetworkTab(t *testing.T) {
 	// At width 80 the waterfall column should be truncated. Scroll right
 	// multiple times and verify the output changes (the truncation window
 	// shifts).
-	before := h.Console().String()
+	before := screenBody(h.screenText())
 	for range 5 {
 		if _, err := h.Console().WriteString("l"); err != nil {
 			t.Fatalf("WriteString l: %v", err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	after := h.Console().String()
-	if before == after {
-		t.Error("Output should change after horizontal scrolling")
-	}
+	awaitScreen(t, h, "network columns moved horizontally", func(screen string) bool {
+		return screenBody(screen) != before
+	})
 
 	// Scroll back left and verify output returns.
 	for range 5 {
@@ -296,13 +295,9 @@ func TestPTY_HScrollNetworkTab(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	restored := h.Console().String()
-	// The last 5 presses of "h" should bring it back to the pre-scroll state,
-	// so the tail of the output should match the pre-scroll tail.
-	if !strings.HasSuffix(restored, before[len(before)-100:]) {
-		t.Logf("restored tail: %q", restored[len(restored)-100:])
-		t.Logf("before tail:   %q", before[len(before)-100:])
-	}
+	awaitScreen(t, h, "network columns returned to their original positions", func(screen string) bool {
+		return screenBody(screen) == before
+	})
 }
 
 func TestPTY_HScrollLogsTab(t *testing.T) {
@@ -323,15 +318,18 @@ func TestPTY_HScrollLogsTab(t *testing.T) {
 	}
 
 	// Scroll right and verify the output changes.
-	before := h.Console().String()
+	before := screenBody(h.screenText())
 	for range 5 {
 		if _, err := h.Console().WriteString("l"); err != nil {
 			t.Fatalf("WriteString l: %v", err)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	after := h.Console().String()
-	if before == after {
-		t.Error("Output should change after horizontal scrolling on Logs tab")
-	}
+	awaitScreen(t, h, "log content moved horizontally", func(screen string) bool {
+		return screenBody(screen) != before
+	})
+	writeKeys(t, h, "hhhhh")
+	awaitScreen(t, h, "log content returned to its original position", func(screen string) bool {
+		return screenBody(screen) == before
+	})
 }

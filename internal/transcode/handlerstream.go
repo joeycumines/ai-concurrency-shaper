@@ -69,6 +69,11 @@ func (h *TranscodeHandler) streamResponse(
 	// value.
 	var outcome Outcome
 	classification := classifyStreamObservation(observation)
+	if classification == streamOutcomeSuccess {
+		reportObservedUsage(r, sourceStreamUsage(converter), string(h.cfg.Mapping.UpstreamProtocol))
+	} else if observation.ReaderErr != nil {
+		h.diagnosticFailure(r, "conversion_response", observation.ReaderErr)
+	}
 	outcome.StreamOutcome = classification
 	switch classification {
 	case streamOutcomeSuccess:

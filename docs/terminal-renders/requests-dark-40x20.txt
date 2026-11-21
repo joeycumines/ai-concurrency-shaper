@@ -1,0 +1,20 @@
+ Alpha 東京 ↕                  6A 4Q DB 
+ 1  2 Requests  3  4  5  6  7  8        
+────────────────────────────────────────
+ REQUESTS · ALL PROVIDERS               
+ / filter · f failed · n network        
+ TIME     CODE OUTCOME   DURATION       
+ 12:08:00  400 failed       600ms       
+   alpha POST /v1/messages              
+ 12:08:01  200 completed    600ms       
+   beta POST /v1/messages               
+ 12:08:02  200 completed    600ms       
+   alpha POST /v1/messages              
+ 12:08:03  200 completed    600ms       
+   beta POST /v1/messages               
+ 12:08:04  200 completed    600ms       
+   alpha POST /v1/messages              
+ 12:08:05  400 failed       600ms       
+   beta POST /v1/messages               
+ 1–6 / 24 · [ ] page                    
+ Enter inspect · n wire · / filter · ^K 

@@ -108,6 +108,8 @@ type TUIHarness struct {
 	ctrl      *controllableUpstream
 	ctx       context.CancelFunc
 	proxyPort string
+	rows      int
+	cols      int
 }
 
 // freePort returns a free TCP port by asking the OS for port 0.
@@ -259,6 +261,8 @@ func startConsole(t *testing.T, binPath string, upstream *httptest.Server, upstr
 		ctrl:      ctrl,
 		ctx:       cancel,
 		proxyPort: port,
+		rows:      int(cfg.rows),
+		cols:      int(cfg.cols),
 	}
 
 	snap := console.Snapshot()

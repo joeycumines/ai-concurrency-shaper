@@ -16,6 +16,7 @@
 package tui
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -71,11 +72,32 @@ func (m *Model) visibleLogLines() []string {
 
 // computeVisibleNetworkEntries performs the actual filter logic used to
 // rebuild the networkFiltered cache.
-func (m Model) computeVisibleNetworkEntries() []*journal.Entry {
-	if m.journal == nil {
-		return nil
+func (m *Model) computeVisibleNetworkEntries() []*journal.Entry {
+	var all []*journal.Entry
+	m.networkSources = make(map[*journal.Entry]string)
+	if m.enriched() && m.networkAll {
+		for i, p := range m.providers {
+			if p.journal == nil {
+				continue
+			}
+			for _, e := range p.journal.Entries() {
+				all = append(all, e)
+				m.networkSources[e] = m.providerID(i)
+			}
+		}
+		if m.runtime.IngressJournal != nil {
+			for _, e := range m.runtime.IngressJournal.Entries() {
+				all = append(all, e)
+				m.networkSources[e] = "ingress"
+			}
+		}
+		sort.SliceStable(all, func(i, j int) bool { return all[i].Timing.QueueStart.Before(all[j].Timing.QueueStart) })
+	} else if m.journal != nil {
+		all = m.journal.Entries()
+		for _, e := range all {
+			m.networkSources[e] = m.providerID(m.active)
+		}
 	}
-	all := m.journal.Entries()
 	if all == nil {
 		return nil
 	}
@@ -86,7 +108,7 @@ func (m Model) computeVisibleNetworkEntries() []*journal.Entry {
 		for _, e := range all {
 			if strings.Contains(strings.ToLower(e.Name()), lower) ||
 				strings.Contains(strings.ToLower(e.Method), lower) ||
-				strings.Contains(strings.ToLower(e.URL.Path), lower) ||
+				networkMetadataMatches(e, lower) ||
 				strings.Contains(strconv.Itoa(e.StatusCode), lower) ||
 				strings.Contains(strings.ToLower(e.Type()), lower) {
 				filtered = append(filtered, e)
@@ -137,4 +159,35 @@ func (m Model) computeVisibleNetworkEntries() []*journal.Entry {
 	}
 
 	return filtered
+}
+
+// networkMetadataMatches searches bounded diagnostic metadata, never captured
+// bodies. That keeps filtering responsive even with multi-megabyte exchanges.
+func networkMetadataMatches(e *journal.Entry, q string) bool {
+	if strings.Contains(strings.ToLower(e.RequestID), q) {
+		return true
+	}
+	if e.URL != nil && strings.Contains(strings.ToLower(e.URL.Path), q) {
+		return true
+	}
+	d := e.Diagnostic
+	if d == nil {
+		return false
+	}
+	fields := []string{d.ClientProtocol, d.UpstreamProtocol, d.Model, d.ClientModel}
+	for _, f := range d.Failures {
+		fields = append(fields, f.Stage, f.Kind, f.Path, f.Feature, f.Fingerprint)
+	}
+	for _, v := range d.Decisions {
+		fields = append(fields, v.Stage, v.Feature, v.Path)
+	}
+	for k, v := range d.ClientVersions {
+		fields = append(fields, k, v)
+	}
+	for _, v := range fields {
+		if strings.Contains(strings.ToLower(v), q) {
+			return true
+		}
+	}
+	return false
 }

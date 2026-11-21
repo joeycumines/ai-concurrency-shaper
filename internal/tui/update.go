@@ -54,10 +54,19 @@ func (m Model) Init() tea.Cmd {
 	// tea.BackgroundColorMsg (handled in Update) and swaps to the light
 	// palette if the terminal reports a light background; terminals that do
 	// not answer simply keep the dark default.
+	if m.enriched() {
+		return tea.Batch(m.resyncTickCmd(), tea.RequestBackgroundColor, func() tea.Msg { return observabilityTick{} })
+	}
 	return tea.Batch(m.resyncTickCmd(), tea.RequestBackgroundColor)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.enriched() {
+		if next, cmd, handled := m.updateRuntime(msg); handled {
+			next.networkFiltered = next.computeVisibleNetworkEntries()
+			return next, cmd
+		}
+	}
 	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case resetMsg:
@@ -112,7 +121,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// UI for the light palette when the background is light; the dark
 		// palette is the built-in default. Rendering caches are invalidated so
 		// the next View repaints from the new theme, and scrollbars repaint too.
-		m.styles = newTheme(msg.IsDark())
+		if m.runtime.Theme == "" || m.runtime.Theme == "auto" {
+			m.themeDark = msg.IsDark()
+			m.styles = newTheme(msg.IsDark())
+		}
 		m.dashboardLinesCache = nil
 		m.applyScrollbarTheme()
 	case tea.KeyPressMsg:
@@ -184,7 +196,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
-	case "q", "ctrl+c":
+	case "ctrl+c":
 		// Best-effort final drain so the last render includes everything
 		// published before this key was processed (see flushPendingLogs).
 		m.flushPendingLogs()
@@ -232,6 +244,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 		}
 	}
 
+	if msg.String() == "q" {
+		m.flushPendingLogs()
+		return m, tea.Quit
+	}
 	keyCode := msg.Key().Code
 	if keyCode == tea.KeyHome {
 		m.hScroll[m.tab] = 0

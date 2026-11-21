@@ -1,0 +1,48 @@
+ ⚡ shaper  Alpha 東京   Beta                                                                                  15 active · 9 queued · 0 OPEN · busiest: Beta DB 
+ 1 Overview  2 Requests  3 Network  4 Logs  5 Concurrency  6 Routes  7 Insights  8 Controls                                                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ FIDELITY  7/8 · decisions/s                                                                                                                                    
+ ALL PROVIDERS · HISTORY                                                                                                                                        
+ 12:00:00 → 12:15:00 UTC · SQLite                                                                                                                               
+ 39 losses · 480 notes · 91 conv.fail                                                                                                                           
+ ▸losses ●notes ●rejected ●conv.fail                                                                                                                            
+   1.01│                                                            │                                                      │ SELECTED INTERVAL                  
+       │                                                            │                                                      │ 2026-11-21T12:08:00Z               
+       │                                                      ⢀⣀⣀⣀⣀⣀│⣀⣀⣀⣀⣀⡀                                                │ complete                           
+       │                                                      ⢸     │     ⡇                                                │ coverage 100.0%                    
+       │                                                      ⢸     │     ⡇                                                │                                    
+       │                                                      ⢸     │     ⡇                                                │ CONVERSION DECISIONS               
+       │                                                      ⢸     │     ⡇                                                │ 3 approved losses                  
+       │                                                      ⢸     │     ⡇                                                │ 4 semantic notes                   
+       │                                                      ⢸     │     ⡇                                                │ 0 dropped decisions                
+       │                                                      ⢸     │     ⡇                                                │                                    
+       │                                                      ⢸     │     ⡇                                                │ 3 request conversion failures      
+       │                                                      ⢸     │     ⡇                                                │ 4 response conversion failures     
+       │                                                      ⢸     │     ⡇                                                │ 0 rejected logical requests        
+       │                                                      ⢸     │     ⡇                                                │                                    
+       │                                                      ⢸     │     ⡇                                                │ Losses are explicit policy events. 
+       │                                                      ⢸     │     ⡇                                                │ A note is not a loss or failure.   
+       │⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠄  ⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⢼⠤⠤⠤⠤⠤│⠤⠤⠤⠤⠤⡧⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤⠤ │ i opens requests for exact evidenc 
+   0.50│                                                      ⢸     │     ⡇                                                │                                    
+       │                                                      ⢸     │     ⢇                                                │ Enter  inspect exact cell          
+       │                                                      ⡇     │     ⢸                                                │ i      open request cohort         
+       │                                                      ⡇     │     ⢸                                                │ b      brush a time interval       
+       │                                                      ⣿⠉⠉⠉⠉⠉│⠉⠉⠉⠉⠉⣿                                                │ e      export selected range       
+       │                                                      ⣿     │     ⣿                                                │                                    
+       │                                                      ⣿     │     ⣿                                                │                                    
+       │                                                      ⣿     │     ⣿                                                │                                    
+       │                                                      ⣿     │     ⣿                                                │                                    
+       │                                                      ⣿     │     ⣿                                                │                                    
+       │                                                      ⣿     │     ⣿                                                │                                    
+       │                                                      ⡇     │     ⢸                                                │                                    
+       │                                                      ⡇     │     ⢸                                                │                                    
+       │                                                      ⡇     │     ⢸                                                │                                    
+       │                                                      ⡇     │     ⢸                                                │                                    
+       │                                                      ⡇     │     ⢸                                                │                                    
+       │                                                      ⡇     │     ⢸                                                │                                    
+      0│⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡀··⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣇⣀⣀⣀⣀⣀│⣀⣀⣀⣀⣀⣸⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀ │                                    
+        12:00                                                                                                        12:15                                      
+ events                                                      ▲      ▲                                                                                           
+ ▸ 12:08:00 · complete                                                                                                                                          
+ 3 loss · 4 note · Enter detail                                                                                                                                 
+ t view · w window · r range · f live · + zoom · − zoom · i requests · e export · ^K commands                                                                   

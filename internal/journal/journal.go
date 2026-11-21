@@ -31,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/diagnostic"
 )
 
 const (
@@ -93,7 +95,11 @@ func (t Timing) DownloadDuration() time.Duration {
 
 // Entry is an immutable record of one HTTP request/response exchange.
 type Entry struct {
-	ID             uint64
+	ID uint64
+	// RequestID is the process-epoch-qualified logical identity shared with
+	// observations. Unlike a ring position it cannot refer to an evicted peer.
+	RequestID      string
+	Diagnostic     *diagnostic.Snapshot
 	Method         string
 	URL            *url.URL
 	RequestHeaders http.Header
@@ -111,6 +117,23 @@ type Entry struct {
 	Attempt              int
 	ContentType          string
 	ResponseSize         int64
+}
+
+// FindRequestID joins a fact to the exact retained exchange. A nil result means
+// the body evidence was evicted; callers must never substitute a nearby entry.
+func (j *Journal) FindRequestID(id string) *Entry {
+	if j == nil || id == "" {
+		return nil
+	}
+	j.mu.RLock()
+	defer j.mu.RUnlock()
+	for n := j.count - 1; n >= 0; n-- {
+		e := j.entries[(j.head+n)%j.capacity]
+		if e.RequestID == id {
+			return e
+		}
+	}
+	return nil
 }
 
 // Name returns the last meaningful segment of the URL path.

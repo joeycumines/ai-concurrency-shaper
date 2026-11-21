@@ -32,8 +32,11 @@ const logPollInterval = 100 * time.Millisecond
 // owns it, drains it, and resets every provider's metrics collector on
 // receipt. It must be buffered (cap >= 1) so the model's non-blocking send
 // never drops the very first request. A nil resetCh disables the signal.
-func Run(updates <-chan ProviderUpdate, metas []ProviderMeta, progCh chan<- *tea.Program, resetCh chan struct{}, logBuf *LogBuffer) *tea.Program {
+func Run(updates <-chan ProviderUpdate, metas []ProviderMeta, progCh chan<- *tea.Program, resetCh chan struct{}, logBuf *LogBuffer, options ...RuntimeOptions) *tea.Program {
 	m := NewModelForProviders(metas)
+	if len(options) != 0 {
+		m = m.WithRuntime(options[0])
+	}
 	if resetCh != nil {
 		m.resetCh = resetCh
 	}
@@ -41,7 +44,7 @@ func Run(updates <-chan ProviderUpdate, metas []ProviderMeta, progCh chan<- *tea
 		m.logBuf = logBuf
 
 	}
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, m.colorOptions()...)
 
 	done := make(chan struct{})
 

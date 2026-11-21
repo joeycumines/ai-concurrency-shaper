@@ -794,8 +794,34 @@ func (c *messagesToGeminiConverter) ConversionReport() *ConversionReport {
 func decodeAnthropicStreamFrame(frame SSEEvent) (anthropicmessages.StreamEvent, error) {
 	var event anthropicmessages.StreamEvent
 	data := trimJSONSpace(frame.Data)
-	if err := wire.DecodeTolerant(data, &event); err != nil {
+	// A stream start is a partial content block. A thinking signature arrives
+	// later in signature_delta; the complete-message union decoder must not
+	// require it prematurely. Every other union field stays strict.
+	var envelope struct {
+		Type         anthropicmessages.StreamEventType `json:"type"`
+		Message      *anthropicmessages.Response       `json:"message,omitempty"`
+		Index        *int                              `json:"index,omitempty"`
+		ContentBlock json.RawMessage                   `json:"content_block,omitempty"`
+		Delta        *anthropicmessages.StreamDelta    `json:"delta,omitempty"`
+		Usage        *anthropicmessages.Usage          `json:"usage,omitempty"`
+		Error        *anthropicmessages.StreamError    `json:"error,omitempty"`
+	}
+	if err := wire.DecodeTolerant(data, &envelope); err != nil {
 		return event, upstreamWireError(UpstreamMessages, http.StatusOK, err)
+	}
+	event = anthropicmessages.StreamEvent{Type: envelope.Type, Message: envelope.Message, Index: envelope.Index, Delta: envelope.Delta, Usage: envelope.Usage, Error: envelope.Error}
+	if len(envelope.ContentBlock) > 0 && string(envelope.ContentBlock) != "null" {
+		var block anthropicmessages.ContentBlock
+		var err error
+		if event.Type == anthropicmessages.StreamEventTypeContentBlockStart {
+			block, err = decodeAnthropicStartBlock(envelope.ContentBlock)
+		} else {
+			err = wire.Decode(envelope.ContentBlock, &block)
+		}
+		if err != nil {
+			return event, upstreamWireError(UpstreamMessages, http.StatusOK, err)
+		}
+		event.ContentBlock = &block
 	}
 	if event.Type == anthropicmessages.StreamEventTypeContentBlockDelta && event.Delta != nil {
 		var raw struct {

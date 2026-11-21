@@ -50,6 +50,7 @@ type statusRecorder struct {
 	writeFailed         bool
 	writeErr            error
 	proxyGeneratedError bool
+	localPanic          bool
 	transportErr        error
 	// upstreamAttempted records whether the upstream round trip actually
 	// started before transportErr was observed. It is the fact that separates
@@ -136,6 +137,7 @@ func (r *statusRecorder) SuppressFailedCloseComment() { r.dialectErrorFramed = t
 // failure status is: without it the client saw the queue comments and then a
 // silent clean EOF, and the journal kept the commit's 200.
 func (r *statusRecorder) recoverLocalPanic() {
+	r.localPanic = true
 	r.aborted = true
 	switch {
 	case !r.terminalWritten:

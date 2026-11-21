@@ -269,6 +269,9 @@ func packParts(parts []string, vw int, sep string) []string {
 // It always renders all content (including up to six in-flight requests);
 // renderDashboardContent() windows these lines by m.scroll and m.visibleRows().
 func (m Model) dashboardLines() []string {
+	if m.enriched() {
+		return m.runtimeOverviewLines()
+	}
 	var lines []string
 
 	if cb := m.snap.CircuitBreaker; cb != nil {

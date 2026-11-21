@@ -16,6 +16,7 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"time"
@@ -79,7 +80,7 @@ func (t *reauthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 
-	resend := req.Clone(req.Context())
+	resend := req.Clone(context.WithValue(req.Context(), authResendKey{}, true))
 	if req.GetBody != nil {
 		body, berr := req.GetBody()
 		if berr != nil {

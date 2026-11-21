@@ -336,7 +336,7 @@ func (m Model) chipRowsLayout() []chipLayout {
 	natural := make([]int, len(m.providers))
 	for i := range m.providers {
 		labels[i] = " " + m.providerLabel(i) + " "
-		natural[i] = lipgloss.Width(m.styles.chipActiveStyle.Render(labels[i]))
+		natural[i] = lipgloss.Width(labels[i]) + m.styles.chipActiveStyle.GetHorizontalFrameSize()
 	}
 
 	fullBudget := m.width - 2
@@ -554,6 +554,9 @@ func (m Model) row0ChipStart() int {
 }
 
 func (m Model) renderHeader() string {
+	if m.enriched() {
+		return m.runtimeHeader()
+	}
 	rows := m.chipRowsLayout()
 	headerStyle := m.styles.headerStyle
 	if m.width < 3 {
@@ -645,8 +648,11 @@ func (m Model) renderTab(i int, name string) string {
 }
 
 func (m Model) renderTabBar() string {
-	parts := make([]string, len(tabNames))
-	for i, name := range tabNames {
+	if m.enriched() {
+		return m.renderAdaptiveTabs()
+	}
+	parts := make([]string, 6)
+	for i, name := range tabNames[:6] {
 		parts[i] = m.renderTab(i, name)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
@@ -658,11 +664,14 @@ func (m Model) renderTabBar() string {
 // not a ratio of terminal width. The tab bar is left-aligned at x=0 with no
 // reflow; cells beyond the total bar width are empty space and return !ok.
 func (m Model) tabAt(x int) (tabID, bool) {
+	if m.enriched() {
+		return m.adaptiveTabAt(x)
+	}
 	if x < 0 {
 		return 0, false
 	}
 	offset := 0
-	for i, name := range tabNames {
+	for i, name := range tabNames[:6] {
 		// Measure using renderTab so hit-testing tracks the exact rendered
 		// geometry — the selected tab uses tabActiveStyle, others use
 		// tabInactiveStyle. Both share the same padding, but rendering must

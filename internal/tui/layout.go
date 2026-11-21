@@ -15,8 +15,6 @@
 
 package tui
 
-import ()
-
 // headerRowCount returns the number of rows the header occupies. In
 // single-provider mode (or when the switcher is elided) this is 1. In fleet
 // mode with wrapped provider chips it is the capped length of
@@ -25,6 +23,9 @@ import ()
 // invariants in header.go. The result is capped so at least 1 content row
 // remains.
 func (m Model) headerRowCount() int {
+	if m.enriched() {
+		return 1
+	}
 	rows := 1
 	if m.hasSwitcher() {
 		if layout := m.chipRowsLayout(); len(layout) > 1 {
@@ -46,6 +47,13 @@ func (m Model) contentStartRow() int {
 }
 
 func (m *Model) visibleRows() int {
+	if m.enriched() {
+		n := max(m.height-4, 0)
+		if m.mode == modeFilter {
+			n = max(n-1, 0)
+		}
+		return n
+	}
 	// Reserve only the chrome (header, tabbar, separator, footer). Filter input
 	// and active toasts are overlays above the footer; they reduce the
 	// scrollable content area only while they are present, so no space is
@@ -69,6 +77,12 @@ func (m *Model) visibleRows() int {
 // after reserving fixed header, filter summary, and count lines. For the
 // dashboard the entire content area is scrollable, so dataRows == visibleRows.
 func (m *Model) dataRows() int {
+	if m.enriched() && m.tab == tabRequests {
+		return max((m.visibleRows()-m.requestHeaderRows()-1)/m.factRowHeight(), 1)
+	}
+	if m.enriched() && m.tab == tabNetwork && m.width < 72 {
+		return max((m.visibleRows()-3)/m.networkRowHeight(), 1)
+	}
 	switch m.tab {
 	case tabRequests:
 		fixed := 2 // table header + count line
@@ -78,6 +92,9 @@ func (m *Model) dataRows() int {
 		return max(m.visibleRows()-fixed, 1)
 	case tabNetwork:
 		fixed := 2 // table header + count line
+		if m.enriched() {
+			fixed++
+		}
 		if m.networkFilterType != networkFilterAll || m.networkFilterStatus != networkStatusAll {
 			fixed++ // type/status filter summary
 		}
@@ -107,6 +124,12 @@ func (m *Model) dataRows() int {
 // scrollable area before the first data row. Clicks inside these rows should
 // not move the cursor.
 func (m Model) contentHeaderRows() int {
+	if m.enriched() && m.tab == tabRequests {
+		return m.requestHeaderRows()
+	}
+	if m.enriched() && m.tab == tabNetwork && m.width < 72 {
+		return 2
+	}
 	switch m.tab {
 	case tabRequests:
 		if m.filterText != "" {
@@ -115,6 +138,9 @@ func (m Model) contentHeaderRows() int {
 		return 1
 	case tabNetwork:
 		n := 1
+		if m.enriched() {
+			n++
+		}
 		if m.networkFilterType != networkFilterAll || m.networkFilterStatus != networkStatusAll {
 			n++
 		}
@@ -172,6 +198,14 @@ func (m *Model) gaugeTrackWidth() int {
 }
 
 func (m *Model) maxCursor() int {
+	if m.enriched() && m.tab == tabControls {
+		if p, ok := m.selectedControlProvider(); ok {
+			return max(len(p.Pools)-1, 0)
+		}
+	}
+	if m.enriched() && m.tab == tabRequests {
+		return max(len(m.insights.facts.Requests)-1, 0)
+	}
 	switch m.tab {
 	case tabDashboard:
 		return max(len(m.cachedDashboardLines())-1, 0)

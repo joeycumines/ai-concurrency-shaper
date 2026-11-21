@@ -16,13 +16,16 @@
 package auth
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestNewExecSecretSourceRejectsInvalidConfiguration(t *testing.T) {
-	abs := "/usr/bin/true"
+	// Construction never executes the helper. Use a native absolute path so
+	// duration-validation cases reach the same check on Windows and Unix.
+	abs := filepath.Join(t.TempDir(), "credential-helper")
 	cases := []struct {
 		name    string
 		argv    []string

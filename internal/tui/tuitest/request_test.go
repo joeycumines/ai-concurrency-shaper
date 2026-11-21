@@ -23,8 +23,6 @@ import (
 	"net/http"
 	"testing"
 	"time"
-
-	"github.com/joeycumines/go-prompt/termtest"
 )
 
 func TestPTY_RequestLogPopulates(t *testing.T) {
@@ -39,26 +37,16 @@ func TestPTY_RequestLogPopulates(t *testing.T) {
 		sendRequest(t, ctx, proxyURL+path)
 	}
 
-	// Wait for the TUI to render the dashboard. bubbletea's diff renderer only
-	// repaints changed cells, so a static label like "Throughput" is re-emitted
-	// by the periodic full redraw (every 10s via tea.ClearScreen), not on every
-	// frame. The 30s timeout spans multiple redraw cycles.
-	dashSnap := h.Console().Snapshot()
-	if err := h.Console().Expect(ctx, dashSnap, termtest.Contains("Throughput"),
-		"dashboard initial render"); err != nil {
-		t.Fatalf("TUI not rendering: %v\nFull output: %s", err, h.Console().String())
-	}
+	// Reconstruct the current cells so differential painting cannot hide an
+	// unchanged section heading from the assertion.
+	screenContains(t, h, "THROUGHPUT")
 
 	// Switch to the Requests tab.
-	snap := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("2"); err != nil {
 		t.Fatalf("WriteString 2: %v", err)
 	}
 
-	if err := h.Console().Expect(ctx, snap, termtest.Contains("POST"), "POST in request log"); err != nil {
-		t.Errorf("Requests tab should show POST method after injecting requests: %v", err)
-		t.Logf("Full output: %s", h.Console().String())
-	}
+	screenContains(t, h, "REQUESTS ·", "POST", "/v1/messages", "/v1/chat/completions", "/ 3")
 }
 
 func sendRequest(t *testing.T, ctx context.Context, url string) {

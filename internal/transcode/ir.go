@@ -273,6 +273,10 @@ type DecodeResult struct {
 // ExchangeContext carries per-exchange state required to render the client
 // response envelope and preserve identity across the conversion.
 type ExchangeContext struct {
+	// ResponseUsage is populated from already decoded source IR, and is published
+	// only after conversion and generated-response bounds succeed.
+	ResponseUsage *CanonicalUsage
+
 	RequestedClientModel string
 	UpstreamModel        string
 

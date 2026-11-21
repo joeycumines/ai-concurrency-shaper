@@ -133,6 +133,13 @@ func registerServerFlags(r *registrar, s *Server) {
 	r.boolVar(&s.TUI, "tui", false, "enable terminal dashboard")
 	r.boolVar(&s.Version, "version", false, "print version and exit")
 	r.stringVar(&s.MetricsBind, "metrics-bind", "", "dedicated listen address for the Prometheus /metrics endpoint (empty = disabled; server scope)")
+	r.stringVar(&s.HistoryDB, "history-db", "", "optional local SQLite observation database path (empty = bounded live memory only; server scope)")
+	r.durationVar(&s.HistoryRetention, "history-retention", 168*time.Hour, "observation history retention, 1h through 8760h (server scope)")
+	r.stringVar(&s.HistoryDurability, "history-durability", "normal", "SQLite synchronous policy: normal or full; queued observations are asynchronous (server scope)")
+	r.intVar(&s.DiagnosticCaptureBytes, "diagnostic-capture-bytes", 0, "total retained evidence body bytes per request across four legs, 0..1048576; 0 retains metadata only (server scope)")
+	r.stringVar(&s.TUITheme, "tui-theme", "auto", "terminal background theme: auto, dark, light (server scope)")
+	r.stringVar(&s.TUIColor, "tui-color", "auto", "terminal color profile: auto, truecolor, 256, 16, mono (server scope)")
+	r.stringVar(&s.ExportDir, "export-dir", ".", "existing directory for explicitly selected TUI exports (server scope)")
 	r.stringListVar(&s.ModelTable, "model-table", "global model table entry: surrogate@provider=wire[;facts] (repeatable; server scope)")
 	r.stringListVar(&s.CatalogSuites, "catalog-suite", "repeatable catalog suite mount: [name@]prefix[=models][;options] (repeatable; server scope)")
 

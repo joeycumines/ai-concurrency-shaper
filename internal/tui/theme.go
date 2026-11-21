@@ -99,7 +99,7 @@ func darkTheme() tuiTheme {
 	t := tuiTheme{
 		headerStyle: s().
 			Bold(true).
-			Foreground(lipgloss.Color("#E6EDF3")).
+			Foreground(lipgloss.Color("#FFFFFF")).
 			Background(lipgloss.Color("#1F6FEB")).
 			PaddingLeft(1).
 			PaddingRight(1),
@@ -109,7 +109,7 @@ func darkTheme() tuiTheme {
 			Foreground(lipgloss.Color("#58A6FF")),
 
 		dimStyle2: s().
-			Foreground(lipgloss.Color("#6E7681")),
+			Foreground(lipgloss.Color("#919AA5")),
 
 		sepStyle: s().
 			Foreground(lipgloss.Color("#30363D")),
@@ -194,7 +194,7 @@ func darkTheme() tuiTheme {
 			Render(" lim"),
 
 		passTag: s().
-			Foreground(lipgloss.Color("#6E7681")).
+			Foreground(lipgloss.Color("#919AA5")).
 			Render(" pas"),
 
 		overlayStyle: s().
@@ -253,7 +253,7 @@ func darkTheme() tuiTheme {
 			Background(lipgloss.Color("#388BFD")),
 
 		paletteDimStyle: s().
-			Foreground(lipgloss.Color("#6E7681")),
+			Foreground(lipgloss.Color("#919AA5")),
 	}
 	return t
 }

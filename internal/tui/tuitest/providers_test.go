@@ -27,27 +27,11 @@ import (
 	"time"
 )
 
-// repaintBudget is the per-assertion timeout. The dashboard's renderer paints
-// cell diffs (throughput digits) between full repaints, so a contiguous
-// header string is only observable in the raw PTY byte stream when a full
-// frame is emitted — which the binary does every redrawInterval (10s). A
-// snapshot taken at a random phase therefore waits a uniform 0-10s for the
-// next full frame; 15s covers the worst case with scheduling margin.
-const repaintBudget = 15 * time.Second
-
-// awaitRender waits until want appears in the console output produced after
-// this call, within repaintBudget. Failing fast per assertion (rather than
-// sharing one long budget) keeps each failure attributed to its own step.
+// awaitRender checks current cells, including differential paints, so the
+// assertion cannot be satisfied by a provider name in an earlier view.
 func awaitRender(t *testing.T, h *TUIHarness, want string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), repaintBudget)
-	defer cancel()
-	snap := h.Console().Snapshot()
-	if err := h.Console().Await(ctx, snap, func(out string) bool {
-		return strings.Contains(out, want)
-	}); err != nil {
-		t.Fatalf("never rendered %q: %v\nFull output: %s", want, err, h.Console().String())
-	}
+	screenContains(t, h, want)
 }
 
 // headerLine returns the header row of the current render: the first line of
@@ -124,7 +108,7 @@ func TestPTY_MultiProviderTabSwitch(t *testing.T) {
 	// Both provider names render as chips in the header of the first view.
 	// The launch await lands on the initial full paint, so the zero-state
 	// header is already in the buffer.
-	out := h.Console().String()
+	out := h.screenText()
 	for _, name := range []string{"prov1", "prov2"} {
 		if !strings.Contains(out, name) {
 			t.Fatalf("header should show chip %q; got: %q", name, out)
@@ -144,6 +128,7 @@ func TestPTY_MultiProviderTabSwitch(t *testing.T) {
 	if _, err := h.Console().WriteString("\t"); err != nil {
 		t.Fatalf("WriteString tab: %v", err)
 	}
+	awaitRender(t, h, "SELECTED PROVIDER · prov2")
 	awaitRender(t, h, "1 active · 0 queued · 0 OPEN · busiest: prov1")
 
 	// A parked request at prov2's mount drives the now-active view's counter.
@@ -170,14 +155,14 @@ func TestPTY_MultiProviderShiftTabRawEscape(t *testing.T) {
 	if _, err := h.Console().WriteString("\t"); err != nil {
 		t.Fatalf("WriteString tab: %v", err)
 	}
-	awaitRender(t, h, "prov2")
+	awaitRender(t, h, "SELECTED PROVIDER · prov2")
 
 	// Send the raw backward-cycle sequence. With two providers it must wrap
 	// from prov2 back to prov1, not advance to a nonexistent third provider.
 	if _, err := h.Console().WriteString("\x1b[Z"); err != nil {
 		t.Fatalf("WriteString ESC[Z: %v", err)
 	}
-	awaitRender(t, h, "prov1")
+	awaitRender(t, h, "SELECTED PROVIDER · prov1")
 }
 
 // TestPTY_MultiProviderTeardown probes shutdown while BOTH providers hold

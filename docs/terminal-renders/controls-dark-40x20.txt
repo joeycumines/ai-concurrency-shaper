@@ -1,0 +1,20 @@
+ Alpha 東京 ↕                  6A 4Q DB 
+ 1  2  3  4  5  6  7  8 Controls        
+────────────────────────────────────────
+ LOCAL RUNTIME CONTROLS                 
+ alpha · RUNNING                        
+ revision 2 · preview before apply      
+                                        
+ POOL          LIMIT USED HOLD WAIT     
+ default         16   12    3    4      
+                                        
+ p pause · u resume · d drain           
+ r resize · P/D expiry · x cancel ID    
+ Cooldown is part of occupied slots.    
+ Selected: default                      
+ baseline 12 · effective 16 · debt 0    
+                                        
+ RECENT CONTROL CHANGES                 
+                                        
+                                        
+ p pause · u resume · r resize · ^K     

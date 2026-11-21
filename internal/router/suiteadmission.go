@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/observation"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
@@ -101,18 +102,30 @@ func NewCatalogSuiteAdmission(limits transcode.BodyLimits) *CatalogSuiteAdmissio
 // The returned release is idempotent and safe to call from any goroutine, so
 // the caller can hand ownership of it to a body that outlives this function.
 func (h *CatalogSuiteHandler) acquireBufferSlot(r *http.Request) (func(), bool) {
-	select {
-	case h.admission.slots <- struct{}{}:
-		var once sync.Once
-		release := func() {
-			once.Do(func() {
-				<-h.admission.slots
-			})
-		}
-		return release, true
-	case <-r.Context().Done():
+	if r.Context().Err() != nil {
 		return nil, false
 	}
+	// An immediately available buffer is not a queue wait. The slow path
+	// contributes to the same logical request's union of admission phases,
+	// even while its final provider is still unresolved.
+	select {
+	case h.admission.slots <- struct{}{}:
+	default:
+		observed := observation.FromContext(r.Context())
+		observed.Queue(true)
+		defer observed.Queue(false)
+		select {
+		case h.admission.slots <- struct{}{}:
+		case <-r.Context().Done():
+			return nil, false
+		}
+	}
+	if r.Context().Err() != nil {
+		<-h.admission.slots
+		return nil, false
+	}
+	var once sync.Once
+	return func() { once.Do(func() { <-h.admission.slots }) }, true
 }
 
 // catalogHandoff owns the buffered request body for the rest of the exchange

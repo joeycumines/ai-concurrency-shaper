@@ -93,6 +93,7 @@ func (s *chatResponsesStreamState) convertChunk(
 			return nil, err
 		}
 		s.usage = converted
+		s.observedUsage = sourceChatUsage(chunk)
 	}
 
 	// The chunk envelope's service tier and per-choice token log

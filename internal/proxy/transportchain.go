@@ -119,7 +119,7 @@ func (t *attemptMarkingTransport) RoundTrip(req *http.Request) (*http.Response, 
 	if inner == nil {
 		inner = http.DefaultTransport
 	}
-	return inner.RoundTrip(req)
+	return observeAttempt(req, inner)
 }
 
 func (t *attemptMarkingTransport) Unwrap() http.RoundTripper {

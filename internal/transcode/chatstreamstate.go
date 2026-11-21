@@ -99,7 +99,8 @@ type chatResponsesStreamState struct {
 	// mutation.
 	budget streamBudget
 
-	usage *ResponsesUsage
+	usage         *ResponsesUsage
+	observedUsage CanonicalUsage
 
 	report ConversionReport
 

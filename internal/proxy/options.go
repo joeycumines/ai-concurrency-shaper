@@ -24,8 +24,10 @@ import (
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/control"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/observation"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
@@ -37,11 +39,14 @@ type Option interface {
 }
 
 type proxyConfig struct {
-	upstream     *url.URL
-	matcher      *route.Matcher
-	limiter      *queue.Limiter
-	metrics      *metrics.Collector
-	queueTimeout time.Duration
+	observations   *observation.Hub
+	runtimeControl *control.Controller
+	providerName   string
+	upstream       *url.URL
+	matcher        *route.Matcher
+	limiter        *queue.Limiter
+	metrics        *metrics.Collector
+	queueTimeout   time.Duration
 	// queueDepthLimit bounds how many requests may WAIT for a slot at once
 	// (0 = unbounded, the default). A limited request arriving when the
 	// waiters count already reaches the bound fails fast with 429 +

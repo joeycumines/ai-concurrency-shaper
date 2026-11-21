@@ -13,3 +13,7 @@ coverage/
 tmp/
 *.tmp
 /config.mk
+*.svg
+*.png
+# Embedded in the README.md
+!/docs/terminal-renders/rates-dark-160x48.png

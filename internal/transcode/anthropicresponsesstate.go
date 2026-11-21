@@ -31,8 +31,9 @@ func (s *anthropicResponsesStreamState) wireError(err error) error {
 // object; refusal becomes ordinary text content; OpenAI reasoning is never
 // synthesized as thinking.
 type anthropicResponsesStreamState struct {
-	ctx    *ExchangeContext
-	policy LossPolicy
+	observedUsage CanonicalUsage
+	ctx           *ExchangeContext
+	policy        LossPolicy
 
 	messageSent bool
 	blockIndex  int64

@@ -79,6 +79,14 @@ func (m Model) renderRequests() string {
 
 func (m Model) renderNetwork() string {
 	var b strings.Builder
+	if m.enriched() {
+		scope := m.providerID(m.active)
+		if m.networkAll {
+			scope = "ALL + INGRESS"
+		}
+		b.WriteString(m.styles.sectionStyle.Render(" NETWORK · " + scope + " · a scope · Enter evidence"))
+		b.WriteByte('\n')
+	}
 	entries := m.visibleNetworkEntries()
 
 	// Filter indicators.
@@ -112,7 +120,7 @@ func (m Model) renderNetwork() string {
 	}
 
 	if m.filterText != "" {
-		fmt.Fprintf(&b, "  Filter: %q  (%d / %d entries)\n", m.filterText, len(entries), m.journal.Len())
+		fmt.Fprintf(&b, "  Filter: %q  (%d / %d entries)\n", m.filterText, len(entries), m.networkRetainedCount())
 	}
 
 	visible := m.dataRows()
@@ -126,7 +134,11 @@ func (m Model) renderNetwork() string {
 			style = m.styles.rowSelectedStyle
 		}
 
-		name := truncate(e.Name(), 22)
+		name := e.Name()
+		if m.enriched() && m.networkAll {
+			name = m.networkSources[e] + "/" + name
+		}
+		name = truncate(name, 22)
 		stStr := m.networkStatusStyle(e.StatusCode).Render(fmt.Sprintf("%4d", e.StatusCode))
 		typeStr := e.Type()
 		if e.Aborted {
@@ -402,4 +414,14 @@ func (m Model) renderRoutes() string {
 	// fixed rows reserved by dataRows().
 	fmt.Fprintf(&b, "  %d-%d / %d routes\n", start+1, end, len(pairs))
 	return b.String()
+}
+
+func (m Model) networkRetainedCount() int {
+	if m.enriched() && m.networkAll {
+		return len(m.networkSources)
+	}
+	if m.journal == nil {
+		return 0
+	}
+	return m.journal.Len()
 }

@@ -1,0 +1,48 @@
+ ⚡ shaper  Alpha 東京   Beta                                                                                  15 active · 9 queued · 0 OPEN · busiest: Beta DB 
+ 1 Overview  2 Requests  3 Network  4 Logs  5 Concurrency  6 Routes  7 Insights  8 Controls                                                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ RATES  1/8 · events/s                                                                                                                                          
+ ALL PROVIDERS · HISTORY                                                                                                                                        
+ 12:00:00 → 12:15:00 UTC · SQLite                                                                                                                               
+ 7130 finished · 91 failed · p95 ≤20s                                                                                                                           
+ ▸arrived ●terminal ●failed ●attempts                                                                                                                           
+   21.2│                                                            │                                                      │ SELECTED INTERVAL                  
+       │                                                            │                                                      │ 2026-11-21T12:08:00Z               
+       │                                                            │⣀                                                     │ complete                           
+       │                                                          ⢀⠖│ ⠳⡀                                                   │ coverage 100.0%                    
+       │                                                         ⢀⠏⣀│⠒⣄⠹⡀                                                  │                                    
+       │                                                         ⡞⡴⡥│⠉⢮⢦⢳                                                  │ 140 arrived / 136 terminal         
+       │                                                        ⢰⣱⡵⠁│  ⢯⣆⣇                                                 │ 129 completed / 7 failed           
+       │                                                        ⢸⣷⠁ │  ⠈⣞⡜⡄                                                │ 0 aborted / 0 rejected             
+       │                                                       ⢀⣿⠇  │   ⠘⣷⡇                                                │ 147 attempts · 7 retries           
+       │                                                       ⢸⣼   │    ⠹⣇                                                │ 2 auth resends                     
+       │                                                       ⣷⡟   │     ⣿                                                │                                    
+       │                                                      ⢸⣽⠃   │     ⢹⡆                                               │ LATENCY BIN BOUNDS                 
+       │                                                      ⣸⡟    │     ⠈⣷                                               │ p50 5s … 10s                       
+       │                                                      ⣿⠇    │      ⢸⡇                                              │ p95 30s … 1m0s                     
+       │                                                     ⢰⡟     │       ⢿⡀                                             │ p99 30s … 1m0s                     
+       │                                                     ⣼⠃     │       ⠸⣧                                             │                                    
+       │                                                    ⢠⡟      │        ⢹⡇                                            │ 3 losses · 4 notes                 
+   10.6│                                                    ⣼⠃      │        ⠈⣿⡀                                           │ 136 usage reports                  
+       │                                                   ⢰⡏       │         ⢸⣣                                           │                                    
+       │                                                  ⢠⢿⠁       │          ⢫⢇                                          │ Enter  inspect exact cell          
+       │     ⣀⠤⠤⠤⠤⢄⡀                      ⢀⡠⠄  ⠤⠤⣀       ⢀⣮⠇        │          ⠈⢿⡄                    ⢀⠤⠤⠤⠤⠤⣀              │ i      open request cohort         
+       │   ⣀⠖⣁⠖⠒⠒⠒⢢⡘⢢⡀                   ⢰⢊⡰⠂  ⠒⠒⣄⠓⣄    ⢀⣜⡎         │           ⠘⢞⡆                 ⢀⡰⢊⠖⠒⠒⠒⠒⣄⠓⣄            │ b      brush a time interval       
+       │ ⢀⠖⡥⠒⠁     ⠘⠢⡵⢄                ⢠⠔⡳⠊       ⠓⠤⡓⠤⠤⠔⢪⠎          │            ⠘⡾⡄               ⢠⢮⠔⠊      ⠓⠤⡳⡀          │ e      export selected range       
+       │⠤⢋⠏          ⠸⢌⢣              ⢠⢮⠜⠁          ⠉⠦⠤⠜⠁           │             ⠸⣼              ⡸⢡⠎          ⠙⣧          │                                    
+       │⠒⠉            ⠈⢫⣣⡀          ⢀⣜⡱⠃                            │              ⠸⡳⡀          ⢰⢊⡝⠁            ⢫⡑⢆        │                                    
+       │                ⢱⡘⢢        ⢀⢎⡜                              │               ⠳⡓⣄       ⢀⡰⡳⠊               ⠘⢞⢢⡀      │                                    
+       │                 ⠈⢹⠦⠤⡀    ⡤⢋⠇                               │                ⠉⢮⠦⠤⡀   ⡤⢮⠜⠁                 ⠈⠱⢌⠱⢄    │                                    
+       │                   ⠧⠤⣉⣉⣉⣉⣉⠤⠋                                │                  ⠧⠤⣉⣉⣉⣉⠤⠎                     ⠈⠱⢌⣉⣉⣉ │                                    
+       │                                                            │                                                      │                                    
+       │                                                            │                                                      │                                    
+       │                                                            │                                                      │                                    
+       │                                                            │                                                      │                                    
+       │                                                            │                                                      │                                    
+       │                                                      ⢰⠒⠒⠒⠒⠒│⠒⠒⠒⠒⠒⡆                                                │                                    
+      0│⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡀··⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⡎·····│·····⢸⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀⣀ │                                    
+        12:00                                                                                                        12:15                                      
+ events                                                      ▲      ▲                                                                                           
+ ▸ 12:08:00 · complete                                                                                                                                          
+ 136 terminal  7 failures  147 attempts                                                                                                                         
+ t view · w window · r range · f live · + zoom · − zoom · i requests · e export · ^K commands                                                                   

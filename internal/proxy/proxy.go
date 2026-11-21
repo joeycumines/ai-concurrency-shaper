@@ -17,6 +17,8 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
@@ -24,8 +26,11 @@ import (
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/control"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/diagnostic"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/metrics"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/observation"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/route"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
@@ -33,11 +38,14 @@ import (
 
 // Proxy is a concurrency-bounded reverse proxy.
 type Proxy struct {
-	inner   *httputil.ReverseProxy
-	matcher *route.Matcher
-	limiter *queue.Limiter
-	m       *metrics.Collector
-	timeout time.Duration
+	observations   *observation.Hub
+	runtimeControl *control.Controller
+	providerName   string
+	inner          *httputil.ReverseProxy
+	matcher        *route.Matcher
+	limiter        *queue.Limiter
+	m              *metrics.Collector
+	timeout        time.Duration
 	// queueDepthLimit bounds concurrent waiters (0 = unbounded). See
 	// WithQueueDepthLimit.
 	queueDepthLimit int
@@ -138,6 +146,7 @@ func (p *Proxy) Catalog() *transcode.CatalogHandler {
 
 // ServeHTTP implements http.Handler.
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r = p.beginObservedRequest(r)
 	// The unlimited admission class exempts a request whose FIRST matching
 	// pattern declares :unlimited — including under -limit-all. The same
 	// first-match lookup drives limiter selection (acquireSlot/FindMatch),
@@ -174,6 +183,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if recPtr != nil {
 			status = recPtr.status
 		}
+
+		observedOutcome := observedFinishInfo(r, recPtr, aborted)
+		annotateObservedFailure(r, recPtr, observedOutcome)
 
 		// Finalize and record the journal entry BEFORE any counter publishes
 		// (the same counter-before-journal shape
@@ -224,8 +236,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					entry.ResponseSize = recPtr.bytesWritten
 				}
 			}
+			observed := observation.FromContext(r.Context())
+			entry.RequestID = observed.ID()
+			capture := diagnostic.FromContext(r.Context())
+			if recPtr == nil || recPtr.transcodeOutcome == nil {
+				capture.Complete(diagnostic.DownstreamResponse, !aborted && (recPtr == nil || !recPtr.downstreamWriteFailed()))
+			}
+			entry.Diagnostic = capture.Snapshot()
 			p.journal.Record(entry)
+			observed.SetJournalID(entry.ID)
 		}
+
+		observation.FromContext(r.Context()).Finish(observedOutcome)
 
 		p.m.RecordStatus(status)
 		if aborted {
@@ -308,6 +330,37 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := withSwitchingProtocolsResponseBodyState(r.Context())
 	ctx = withDownstreamUpgradeSupport(ctx, responseWriterCanHijack(w))
 	r = r.WithContext(ctx)
+
+	// Local runtime gating precedes request-body reads, limiter acquisition and
+	// breaker admission. A granted permit remains valid for this whole request.
+	// Local model discovery remains available while a provider is paused/draining.
+	if !catalog && p.runtimeControl != nil {
+		gateCtx, cancelGate := p.admissionContext(r.Context())
+		err := p.runtimeControl.GateObserved(gateCtx, p.providerName, func(waiting bool) {
+			observation.FromContext(r.Context()).Queue(waiting)
+			if waiting {
+				p.m.IncQueued()
+			} else {
+				p.m.DecQueued()
+			}
+		})
+		cancelGate()
+		if err != nil {
+			rec.proxyGeneratedError = true
+			switch {
+			case errors.Is(err, context.DeadlineExceeded):
+				p.m.IncTimeout()
+				http.Error(rec, "queue timeout", http.StatusGatewayTimeout)
+			case errors.Is(err, context.Canceled):
+				p.m.IncCancelled()
+				http.Error(rec, "request canceled", http.StatusServiceUnavailable)
+			default:
+				http.Error(rec, "provider admission unavailable", http.StatusServiceUnavailable)
+			}
+			finalize(false)
+			return
+		}
+	}
 
 	// Wrap request body to capture inbound data for the journal.
 	if p.journal != nil && r.Body != nil {

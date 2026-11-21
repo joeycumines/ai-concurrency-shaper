@@ -166,6 +166,9 @@ func New(opts ...Option) (*Proxy, error) {
 	}
 
 	p := &Proxy{
+		observations:           cfg.observations,
+		runtimeControl:         cfg.runtimeControl,
+		providerName:           cfg.providerName,
 		matcher:                cfg.matcher,
 		limiter:                cfg.limiter,
 		m:                      cfg.metrics,

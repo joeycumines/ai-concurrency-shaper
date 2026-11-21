@@ -19,6 +19,7 @@ package tuitest
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -157,13 +158,14 @@ func TestPTY_NavigationAllTabs(t *testing.T) {
 	defer h.Close()
 
 	// Verify all tabs are accessible by checking for unique content.
-	// Tab order: 1 Dashboard, 2 Requests, 3 Network, 4 Logs, 5 Concurrency, 6 Routes.
+	// Every numbered workspace must display its own current content, including
+	// the new time exploration and runtime control workspaces.
 	tabs := []struct {
 		key      string
 		contains string
 	}{
-		{"1", "Throughput"},
-		{"2", "No requests yet"},
+		{"1", "THROUGHPUT"},
+		{"2", "No matching requests in this selection."},
 		{"3", "Waterfall"},
 		// Match the truncation-safe prefix rather than the full string: the Logs tab
 		// truncates long lines to the column width, which can cut trailing content on
@@ -171,6 +173,8 @@ func TestPTY_NavigationAllTabs(t *testing.T) {
 		{"4", "auto-detecting LLM"},
 		{"5", "Concurrency Gauge"},
 		{"6", "No route data yet"},
+		{"7", "RATES"},
+		{"8", "LOCAL RUNTIME CONTROLS"},
 	}
 
 	for _, tab := range tabs {
@@ -179,11 +183,7 @@ func TestPTY_NavigationAllTabs(t *testing.T) {
 		}
 		time.Sleep(500 * time.Millisecond)
 
-		out := h.Console().String()
-		if !strings.Contains(out, tab.contains) {
-			t.Errorf("Tab %s should show %q", tab.key, tab.contains)
-			t.Logf("Full output: %s", out[:minLen(out, 500)])
-		}
+		screenContains(t, h, tab.contains)
 	}
 }
 
@@ -266,19 +266,19 @@ func TestPTY_NetworkDetailPinPersistsNewEntries(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	snap := h.Console().Snapshot()
-	if err := h.Console().Expect(ctx, snap, termtest.Contains("Request"), "network detail Request section"); err != nil {
-		t.Fatalf("Network detail should open: %v", err)
+	before := screenContains(t, h, "NETWORK EVIDENCE", "Request ID:", "POST", "/v1/messages")
+	identity := regexp.MustCompile(`Request ID:\s+(\S+)`).FindStringSubmatch(before)
+	if len(identity) != 2 {
+		t.Fatalf("inspector did not expose the exact retained request identity:\n%s", before)
 	}
 
 	// Record a newer entry while the detail is open.
-	sendRequest(t, t.Context(), proxyURL+"/v1/chat/completions")
+	sendRequest(t, ctx, proxyURL+"/v1/chat/completions")
 	time.Sleep(2 * time.Second)
 
-	// The detail should still show the original entry's Request section.
-	out := h.Console().String()
-	if !strings.Contains(out, "Request") {
-		t.Errorf("Network detail should still show the original entry after new records")
-		t.Logf("Full output: %s", out)
-	}
+	// Inspect current cells: stale scrollback from the original view cannot
+	// satisfy the pin. The newer path must not replace the selected request.
+	awaitScreen(t, h, "network inspector remains pinned after a newer request", func(screen string) bool {
+		return strings.Contains(screen, "NETWORK EVIDENCE") && strings.Contains(screen, "Request ID: "+identity[1]) && strings.Contains(screen, "/v1/messages") && !strings.Contains(screen, "/v1/chat/completions")
+	})
 }

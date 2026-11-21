@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/diagnostic"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/observation"
 )
 
 func (p ExchangeProvenance) String() string {
@@ -216,6 +218,7 @@ func (h *TranscodeHandler) ClientPath() string {
 // missing outcome.
 
 func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.startDiagnostic(r)
 	// Diagnostic full-flow tap (-transcode-flowlog-dir): captures the
 	// complete contents of every transcoded exchange to one JSON file each.
 	// Nil when disabled; every hook below is a nil-guarded no-op then.
@@ -291,6 +294,7 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// request, resolving the model through the map.
 	upstreamBody, context, err := h.convertRequest(r, body)
 	if err != nil {
+		h.diagnosticFailure(r, "conversion_request", err)
 		if r.Context().Err() != nil && isContextCancellationError(err) {
 			h.recordOutcome(r, Outcome{Provenance: ProvenanceClientAbort, ClientAborted: true})
 			// A cancelled client context means the exchange is already over.
@@ -313,6 +317,13 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fl.setUpstreamRequest(upstreamBody, context.StreamIntent)
+	dc := diagnostic.FromContext(r.Context())
+	dc.Models(context.RequestedClientModel, context.UpstreamModel, context.StreamIntent)
+	dc.Stage("request_rendered")
+	dc.SetBody(diagnostic.UpstreamRequest, upstreamBody, "application/json")
+	if obs := observation.FromContext(r.Context()); obs != nil {
+		obs.SetProtocols(string(h.cfg.Mapping.ClientProtocol), string(h.cfg.Mapping.UpstreamProtocol), context.UpstreamModel)
+	}
 
 	if CommittedStreamFromContext(r.Context()) && !context.StreamIntent {
 		h.logRequestError(r, fmt.Errorf("[%s] stream:false is incompatible with committed event-stream representation", ProvenanceLocalRequestConversionError))
@@ -428,6 +439,8 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	resp.Body = fl.wrapUpstreamBody(resp.Body, resp)
+	resp.Body = dc.WrapBody(diagnostic.UpstreamResponse, resp.Body, resp.Header.Get("Content-Type"), resp.StatusCode)
+	dc.Stage("response_headers")
 
 	// A 101 Switching Protocols response on a transcoded JSON/SSE create
 	// route is an upstream protocol error; it cannot be schema-transcoded.
@@ -501,6 +514,11 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // readRequestBody reads and bounds the client request body.
 
 func (h *TranscodeHandler) recordOutcome(r *http.Request, outcome Outcome) {
+	if r != nil {
+		c := diagnostic.FromContext(r.Context())
+		c.Complete(diagnostic.DownstreamResponse, outcome.DownstreamComplete)
+		c.Stage("terminal_" + outcome.Provenance.String())
+	}
 	// Diagnostic tap: stash the outcome on the per-exchange flow capture.
 	if r != nil {
 		flowFromContext(r.Context()).setOutcome(outcome)

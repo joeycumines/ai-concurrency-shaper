@@ -1,0 +1,48 @@
+ ⚡ shaper  Alpha 東京   Beta                                                                                  15 active · 9 queued · 0 OPEN · busiest: Beta DB 
+ 1 Overview  2 Requests  3 Network  4 Logs  5 Concurrency  6 Routes  7 Insights  8 Controls                                                                     
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ USAGE  6/8 · reported tokens/s                                                                                                                                 
+ ALL PROVIDERS · HISTORY                                                                                                                                        
+ 12:00:00 → 12:15:00 UTC · SQLite                                                                                                                               
+ 7130 reports · 0 corrections · v:metric                                                                                                                        
+ ▸input ●output ●total                                                                                                                                          
+   8.2k│                                                            │                                                      │ SELECTED INTERVAL                  
+       │                                                            │                                                      │ 2026-11-21T12:08:00Z               
+       │                                                            │⣀                                                     │ complete                           
+       │                                                           ⡖│ ⠙⡄                                                   │ coverage 100.0%                    
+       │                                                          ⡞ │  ⠹⡀                                                  │                                    
+       │                                                        ⢀⣰⠁ │   ⢳                                                  │ SOURCE-REPORTED USAGE              
+       │                                                        ⢸   │    ⣇                                                 │ 136 terminal usage reports         
+       │                                                       ⢀⡇   │    ⠘⡄                                                │                                    
+       │                                                       ⢸    │⠤⡀   ⡇                                                │ Input: 46480 tokens                
+       │                                                       ⡎  ⣠⠋│ ⠙⣄  ⢸                                                │   136 / 136 reports known          
+       │                                                      ⢰⠃ ⣠⠃ │  ⠈⣆ ⠈⡇                                               │ Output: 10336 tokens               
+       │                                                      ⡜ ⢀⠇  │   ⠘⡄ ⢸⡀                                              │   136 / 136 reports known          
+       │                                                     ⢠⠇ ⢸   │    ⠹⡀ ⢇                                              │ Total: 56816 tokens                
+       │                                                     ⢸  ⡜   │     ⡇ ⠸⡄                                             │   136 / 136 reports known          
+       │                                                     ⡇ ⢸⠁   │     ⢸⡀ ⢱                                             │                                    
+       │                                                    ⢸⠁⢀⡇    │      ⢣ ⠈⡇                                            │ 0 reported corrections             
+       │                                                    ⡎ ⡸     │      ⠘⡆ ⢸                                            │ 0 overflow omissions               
+   4.1k│                                                   ⢸⠁⢠⠇     │       ⢸⡀⠈⢇                                           │ Known zero is a reported zero.     
+       │                                                  ⢠⠇ ⡜      │        ⢣ ⠘⡆                                          │ Absent usage stays unknown.        
+       │                                        ⣀         ⡜ ⢰⠃      │        ⠈⢇ ⢸⡀                       ⣀⣀⣀               │ Input + output may differ from tot 
+       │     ⡤⠋⠉⠉⠉⠑⢢⡀                     ⢠⠜⠁  ⠉ ⠓⣄      ⡸⠁ ⡎       │         ⠸⡄ ⢱⡀                    ⠉⠉   ⠓⣄             │ v cycles tokens, coverage, reports 
+       │   ⡤⠋       ⠘⢆                   ⡸⠁        ⠓⣄  ⢠⠜⠁ ⡸⠁       │          ⢱⡀ ⢣                           ⠓⢤           │                                    
+       │ ⢀⠏   ⣀⣀⣀⣀⡀  ⠘⢢⡀               ⢠⠜⠁ ⢀⡀  ⣀⣀    ⠉⠉⠁  ⡸⠁        │           ⢱⡀⠈⢣                   ⣀⣀⣀⣀⣀    ⡇          │ Enter  inspect exact cell          
+       │⠤⠋  ⡤⠒⠁   ⠘⠢⢄  ⠱⡄             ⢠⠎ ⢠⠔⠊     ⠓⠤⡀     ⡰⠃         │            ⠱⡄⠘⡄                ⢠⠔⠁    ⠓⠤⡀ ⠸⢄         │ i      open request cohort         
+       │ ⢀⠖⠉        ⠈⢣⡀ ⠸⢄          ⡀⡸⠁⢀⡰⠃         ⠉⠒⣄⣀⡰⠊⠁          │             ⢱⡀⠙⡄             ⢀⡜⠁        ⠉⠲⡀⠈⢣        │ b      brush a time interval       
+       │⠤⠋            ⠈⢣ ⠈⢱        ⣠⠋⠁⢠⠎                            │              ⢱ ⠉⢦           ⡸⠁            ⢣ ⠈⠱⢄⡀     │ e      export selected range       
+       │               ⠈⢣⡀ ⠧⠤⣀⣀⣀⣀⣀⠖⠁⢀⡜⠁                             │               ⠳⡀ ⠓⠒⣄⣀⣀⣀⠆  ⡰⠊⠁             ⠈⠑⢆  ⠘⢢⣀⣀⣀ │                                    
+       │                 ⠈⢱        ⣠⠃                               │                ⠉⢦       ⢠⠜⠁                 ⠈⠱⢄⡀     │                                    
+       │                   ⠓⠒⠤⠤⠤⠤⠤⠒⠁                           ⢀⣰   │                  ⠓⠒⠤⠤⠤⠤⠒⠃                      ⠘⠢⠤⠤⠤ │                                    
+       │                                                      ⢠⠎ ⣇⠤⠒│⠉⠉⠒⠒⠤⡀                                                │                                    
+       │                                                    ⢠⠜⠁     │     ⠈⠑⢢⡀                                             │                                    
+       │                                                 ⢀⡰⠊⠁       │        ⠈⠑⠢⢄⡀                         ⣀               │                                    
+       │ ⣀⠤⠤⠤⠒⠒⠉⠉⠉⠉⠉⠑⠒⠢⠤⢄⣀⡀        ⣀⡄ ⢀⣀⡠⠔⠒⠊⠁  ⠉⠉⠉⠉⠉⠒⠒⠒⠊⠉⠁          │            ⠈⠑⠢⠤⣀⣀                ⠉⠉⠉⠉ ⠉⠉⠉⠉⠢⠤⢄⣀⡀      │                                    
+       │⠉                 ⠈⠉⠉⠒⠒⠒⠉⠉⠉ ⠘⠊⠁                             │                  ⠉⠉⠉⠉⠉⠉⠁                      ⠈⠉⠉⠉⠉⠉ │                                    
+      0│····························································│····················································· │                                    
+        12:00                                                                                                        12:15                                      
+ events                                                      ▲      ▲                                                                                           
+ ▸ 12:08:00 · complete                                                                                                                                          
+ 136 reports · 136/136/136 known                                                                                                                                
+ t view · w window · r range · f live · + zoom · − zoom · i requests · e export · ^K commands                                                                   

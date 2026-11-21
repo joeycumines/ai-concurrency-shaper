@@ -35,9 +35,11 @@ import (
 	"maps"
 	"net/url"
 	"time"
+	"unicode/utf8"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/auth"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/observation"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/proxy"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/rcclient"
@@ -98,6 +100,15 @@ type Server struct {
 	// MetricsBind is the dedicated listen address for the Prometheus
 	// /metrics endpoint (-metrics-bind). Empty disables the endpoint.
 	MetricsBind string
+	// History is opt-in; an empty path creates no database or history files.
+	HistoryDB                string
+	HistoryRetention         time.Duration
+	HistoryDurability        string
+	DiagnosticCaptureBytes   int
+	TUITheme                 string
+	TUIColor                 string
+	ExportDir                string
+	historyRetentionExplicit bool
 	// ModelTable holds the raw -model-table entries: each occurrence names one
 	// global model identity as surrogate@provider=wire[;facts]. The table is a
 	// single global namespace; ResolveAndValidate parses and freezes it.
@@ -591,6 +602,12 @@ func (p *Provider) resetDerivedResolveState() {
 }
 
 func (c *Config) resolveAndValidate() error {
+	if err := c.Server.validateObservability(); err != nil {
+		return err
+	}
+	if len(c.Providers) > observation.MaxProviders {
+		return fmt.Errorf("at most %d providers are supported", observation.MaxProviders)
+	}
 	if len(c.Providers) == 0 && len(c.Server.CatalogSuites) == 0 {
 		return errors.New("no providers configured")
 	}
@@ -609,6 +626,12 @@ func (c *Config) resolveAndValidate() error {
 	for i, p := range c.Providers {
 		if err := p.validateBasic(i, multi); err != nil {
 			return err
+		}
+		if p.EffectiveName() == "__unresolved__" {
+			return errors.New("provider name __unresolved__ is reserved for requests without a resolved provider")
+		}
+		if name := p.EffectiveName(); len(name) > observation.MaxProviderNameBytes || !utf8.ValidString(name) {
+			return fmt.Errorf("provider identity must be valid UTF-8 and at most %d bytes", observation.MaxProviderNameBytes)
 		}
 	}
 

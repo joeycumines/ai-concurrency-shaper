@@ -6,11 +6,13 @@ Sits in front of an upstream HTTP API (e.g. Anthropic, OpenAI) and limits concur
 
 The goal is that the upstream never *observes* more concurrency than you configured. Providers detect excess concurrency on their side, with their own accounting lag, and answer with 429s or temporary bans. So the proxy does more than count in-flight requests: it holds slots across the provider's accounting window after releases, cancellations, and failures, and a circuit breaker stops a failing upstream from being hammered.
 
-Optionally, it also transcodes between the OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Gemini GenerateContent APIs (see [Transcoding](#transcoding)). Run with `-tui` for a terminal dashboard with live metrics and request inspection.
+Optionally, it also transcodes between the OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, and Gemini GenerateContent APIs (see [Transcoding](#transcoding)). Run with `-tui` for an interactive terminal console with live metrics, exact request investigation, and reviewed runtime controls. Add `-history-db ./observations.sqlite` for persistent, interactive time-series analysis.
 
 <p align="center">
-  <img src="docs/assets/tui.webp" alt="TUI dashboard showing live request metrics" width="800">
+  <img src="docs/terminal-renders/rates-dark-160x48.png" alt="Implemented terminal Insights view: interactive rates, time cursor, request cohort, coverage and recorder health" width="1000">
 </p>
+
+The console supports small panes, e.g. even as small as **40×20**, with the same investigation and control workflows. The TUI utilizes separate light and dark palettes. See the [complete implementation specification](docs/multi-provider-observability.md), [runtime control contract](docs/runtime-control-and-observation-contract.md), and [render gallery](docs/terminal-renders/README.md). Gallery data is deterministic synthetic traffic rendered by the production Bubble Tea model.
 
 ## Install
 
@@ -59,6 +61,13 @@ Run `ai-concurrency-shaper -h` (also inside a provider section, e.g. `--provider
 | `-auth-header` | provider | _(required by `header:` mode)_ | Custom upstream auth header name (e.g. `X-Goog-Api-Key`) |
 | `-anthropic-version` | provider | `2023-06-01` | `Anthropic-Version` header value applied when the resolved mode is `x-api-key` |
 | `-tui` | server | `false` | Enable terminal dashboard |
+| `-tui-theme` | server | `auto` | Terminal background detection, or explicit `dark` / `light` |
+| `-tui-color` | server | `auto` | Terminal color detection, or `truecolor`, `256`, `16`, `mono` |
+| `-history-db` | server | _(unset)_ | Optional local SQLite file for observation history; unset creates no database |
+| `-history-retention` | server | `168h` | Final history horizon, from `1h` to `8760h`; fine-resolution tiers have shorter bounds |
+| `-history-durability` | server | `normal` | SQLite WAL synchronous policy: `normal` or `full` |
+| `-diagnostic-capture-bytes` | server | `0` | Optional total four-leg evidence prefix budget per request, up to 1 MiB; zero keeps metadata |
+| `-export-dir` | server | `.` | Existing local directory for fresh observation, request, log, control, and investigation exports |
 | `-version` | server | | Print version and exit |
 
 The tables in [Concurrency Protection](#concurrency-protection), [Circuit Breaker](#circuit-breaker), and [Retry Tuning](#retry-tuning) are all provider-scope.
@@ -114,6 +123,10 @@ Pass `-metrics-bind 127.0.0.1:2112` to expose a Prometheus text-format `/metrics
 
 #### Observability Semantics
 
+One typed observation hub feeds the terminal, optional SQLite history and the official Prometheus collector. The new `shaper_observed_*` families accompany the existing endpoint families without changing their meaning. Logical requests, actual transport attempts, union admission wait, time-weighted pool capacity, final delivered source usage, conversion decisions and recorder health have explicit contracts in the [measurement dictionary](docs/multi-provider-observability.md#5-prometheus-contract). Request IDs and private request metadata are not Prometheus labels. Scraping never creates or consumes a request or observation interval.
+
+The eight destinations are `1` Overview, `2` Requests, `3` Network, `4` Logs, `5` Concurrency, `6` Routes, `7` Insights and `8` Controls. Insights offers eight interactive views: rates, latency heatmaps, capacity, distributions, provider comparison, usage, fidelity, and actual attempts. Cursor, brush, time range, provider filtering, request cohorts and export share the accepted query. Local controls pause/resume/drain arrivals, resize configured positive pools, or cancel an exact live request through a paged review. Resize preserves active leases, cooldowns and breaker behavior.
+
 The TUI summary separates clean completions from incomplete exchanges. `Clean proxied` and `Clean passthrough` count requests whose HTTP exchange completed through the proxy. `Aborted` counts exchanges that did not complete cleanly, including client disconnects, downstream write/flush failures, and upstream response-body copy failures; the request and network views mark those rows as aborted and leave response-complete timing unset. Status buckets still count any committed HTTP status, so an aborted stream that already received `200` appears in both the `2xx` bucket and `Aborted`.
 
 For `101 Switching Protocols`, local inability to complete the requested upgrade (for example a non-Hijacker downstream writer or a `101` response body that is not bidirectional) and failed downstream 101 handshake write/flush are aborted HTTP exchanges, but they do not count as upstream breaker failures. Once the handshake succeeds, later WebSocket or other upgraded-protocol stream closes are treated as upgraded connection lifetime events, not HTTP response-body aborts.
@@ -160,7 +173,7 @@ Mount semantics:
 - Prefixes must not overlap: `/anthropic` and `/anthropic/v1` cannot coexist. Overlapping configurations are rejected at startup, before the listener binds.
 - Providers are matched on whole path segments, so `/anthropic2` never matches the `/anthropic` prefix.
 
-In the TUI, each provider keeps its own dashboard. When the terminal's width and height budget permits, the header shows one chip per provider (the active one highlighted), filled by the provider name instead of the `⚡ shaper` brand; `Tab`/`Shift+Tab` cycle providers, visible chips are clickable, and the number keys `1-6` still switch content tabs. A narrow or height-capped terminal may elide the chip row while retaining keyboard provider switching; the in-TUI help (`?`) advertises mouse controls only when those controls are visible. The header never leaves a truncated first chip alone on its row: when the first chip would not fit at its natural width beside the fleet identity, the row stays body-only and every chip starts on the next row; narrow terminals therefore show the body on row 0 with chips wrapped below, and wider terminals share leading chips beside the body, with clicks tracking the rendered spans.
+In the TUI, each provider keeps its own dashboard. When the terminal's width and height budget permits, the header shows one chip per provider (the active one highlighted), filled by the provider name instead of the `⚡ shaper` brand; `Tab`/`Shift+Tab` cycle providers, visible chips are clickable, and the number keys `1-8` switch content tabs. A narrow or height-capped terminal may elide the chip row while retaining keyboard provider switching; the in-TUI help (`?`) advertises mouse controls only when those controls are visible. The header never leaves a truncated first chip alone on its row: when the first chip would not fit at its natural width beside the fleet identity, the row stays body-only and every chip starts on the next row; narrow terminals therefore show the body on row 0 with chips wrapped below, and wider terminals share leading chips beside the body, with clicks tracking the rendered spans.
 
 #### Upstream Authentication
 
@@ -184,7 +197,7 @@ ai-concurrency-shaper \
 
 With auth enabled, every proxied request has all client HTTP credential headers (`Authorization`, `Proxy-Authorization`, `X-Api-Key`, `Api-Key`, `X-Goog-Api-Key`) plus protocol headers (`Anthropic-Version`, `Anthropic-Beta`) and cloud signature families (`x-amz-*`, `x-goog-*`) stripped first — then exactly one upstream credential is attached. A client that sends OpenAI's token to the Anthropic mount cannot leak it to Anthropic, and vice versa: leakage of these credential headers is structurally impossible, not merely discouraged. The injection happens inside Go's `Rewrite` hook, where hop-by-hop headers have already been removed, so a malicious `Connection` header list cannot strip the injected credential.
 
-One deliberate exception: **`Cookie` headers are forwarded verbatim** to whichever mount receives the request, even with auth enabled, because stripping them would break cookie-authenticated upstreams. The journal and TUI display raw headers and URLs, `Cookie` included: TUI output is not captured anywhere and is visible only to the local operator. If your clients send cookies you do not want forwarded, strip them before they reach the gateway.
+One deliberate exception: **`Cookie` headers are forwarded verbatim** to whichever mount receives the request, even with auth enabled, because stripping them would break cookie-authenticated upstreams. The journal and TUI display raw headers and URLs, `Cookie` included. The separately reviewed raw investigation export can write that retained evidence to a local file; the default metadata investigation export omits these private values. If your clients send cookies you do not want forwarded, strip them before they reach the gateway.
 
 The gateway never sends `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, or `Forwarded` upstream — client-supplied forwarding headers are removed and no client IP is injected (the gateway is a stealth hop). This is also true when auth is disabled.
 
@@ -209,7 +222,7 @@ Sources:
 | `none` | Strip-only hygiene: client credentials are removed, nothing is injected |
 | _(unset)_ | Auth disabled entirely: requests are forwarded verbatim |
 
-Where secrets can and cannot appear: a referenced variable's *value* is never logged, printed, or written anywhere by the proxy; startup logs name only the *reference* (`env:SHAPER_PROVIDER_ACME_API_KEY`). The journal and TUI may show raw credential headers and URLs (including upstream `Set-Cookie` and `?key=` query strings), since that output is visible only to the local operator. Log lines are different, because logs are captured: transport-error logs have every credential query parameter of every URL carried by a `*url.Error` reachable through the error chain's `Unwrap` links redacted (raw and quoted spellings; a URL a wrapper exposes only through a custom `As` method is not enumerable and stays out of scope). Passing secrets as literal argv values would expose them in `ps`/`/proc`; use env references instead.
+Where secrets can and cannot appear: startup and credential-source logs name only the *reference* (`env:SHAPER_PROVIDER_ACME_API_KEY`). The journal and TUI may show raw credential headers and URLs (including upstream `Set-Cookie` and `?key=` query strings), for local investigation. A separately reviewed raw export can include those values; metadata investigation exports omit them. Log lines are different, because logs are captured: transport-error logs have every credential query parameter of every URL carried by a `*url.Error` reachable through the error chain's `Unwrap` links redacted (raw and quoted spellings; a URL a wrapper exposes only through a custom `As` method is not enumerable and stays out of scope). Passing secrets as literal argv values would expose them in `ps`/`/proc`; use env references instead.
 
 Other credential channels outside the header allowlist are your responsibility: credentials embedded in path segments are forwarded by design and appear in route labels and request listings; request bodies captured for the TUI preview may contain whatever the client sent; custom secret headers not in the strip list above are forwarded verbatim and shown unredacted. If clients send secrets through these channels that you do not want stored or displayed locally, strip them before they reach the gateway.
 
