@@ -507,15 +507,20 @@ func TestToolDefinitionUsesTheStrictClientContract(t *testing.T) {
 
 // TestToolDefinitionEquivalentNumbersAreNotSuperseded proves numerically equal
 // schema numbers are the same definition even when their JSON lexemes differ.
-// A false "redefined mid-conversation" note would misreport loss observability.
-// The exponent branch of the comparator is exercised here (1 vs 1e0, 1000 vs
-// 1e3, 0.001 vs 1e-3, 1.5 vs 15e-1, -1 vs -1E+0, 0 vs 0e5, 100 vs 1e2,
-// 1 vs 10e-1), not just the plain decimal path (1 vs 1.0).
+// A false "redefined mid-conversation" report would misreport loss
+// observability. Equal repeats are Note-only and therefore succeed even under
+// StrictLossPolicy; only a genuine change is a policy-gated loss. The exponent
+// branch of the comparator is exercised here (1 vs 1e0, 1000 vs 1e3, 0.001 vs
+// 1e-3, 1.5 vs 15e-1, -1 vs -1E+0, 0 vs 0e5, 100 vs 1e2, 1 vs 10e-1), not
+// just the plain decimal path (1 vs 1.0).
 func TestToolDefinitionEquivalentNumbersAreNotSuperseded(t *testing.T) {
 	def := func(minimum string) string {
 		return `{"type":"tool_addition","tool":{"type":"tool_definition","definition":` +
 			`{"name":"db_query","input_schema":{"type":"object","minimum":` + minimum + `}}}}`
 	}
+	// The approved policy permits the supersession loss, so genuine changes
+	// decode while equal repeats stay Note-only.
+	policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicToolChanges: {}}}
 	equivalent := []string{"1.0", "1e0", "10e-1", "1E+0", "1.000"}
 	for _, minimum := range equivalent {
 		body := `{"model":"m","max_tokens":16,` +
@@ -524,7 +529,7 @@ func TestToolDefinitionEquivalentNumbersAreNotSuperseded(t *testing.T) {
 			`{"role":"system","content":[` + def(minimum) + `]}]}`
 		result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
 		if err != nil {
-			t.Fatalf("minimum %s: %v", minimum, err)
+			t.Fatalf("minimum %s (equal repeat) under strict policy: %v", minimum, err)
 		}
 		for _, loss := range result.Report.Losses {
 			if strings.Contains(loss.Detail, "redefined") {
@@ -533,24 +538,29 @@ func TestToolDefinitionEquivalentNumbersAreNotSuperseded(t *testing.T) {
 		}
 	}
 	// Distinct values that merely spell the same magnitude differently must
-	// still differ: 0e5 is zero, but 1e-3 is not 1.
+	// still differ: 0e5 is zero, but 1e-3 is not 1. Under the approved policy
+	// the genuine change decodes and is reported; under strict it is refused.
 	for _, pair := range [][2]string{{"0", "1e-3"}, {"1", "1e1"}, {"1000", "1e2"}, {"0.001", "1e-2"}} {
 		body := `{"model":"m","max_tokens":16,` +
 			`"messages":[{"role":"user","content":"x"},` +
 			`{"role":"system","content":[` + def(pair[0]) + `]},` +
 			`{"role":"system","content":[` + def(pair[1]) + `]}]}`
-		result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
+		result, err := DecodeMessagesRequest([]byte(body), policy)
 		if err != nil {
 			t.Fatalf("%s vs %s: %v", pair[0], pair[1], err)
 		}
+		// The combined Note plus the policy-gated Loss both carry "redefined".
 		redefined := 0
 		for _, loss := range result.Report.Losses {
 			if strings.Contains(loss.Detail, "redefined") {
 				redefined++
 			}
 		}
-		if redefined != 1 {
-			t.Fatalf("%s vs %s: got %d supersession notes, want 1: %+v", pair[0], pair[1], redefined, result.Report.Losses)
+		if redefined != 2 {
+			t.Fatalf("%s vs %s: got %d supersession reports, want 2 (Note + Loss): %+v", pair[0], pair[1], redefined, result.Report.Losses)
+		}
+		if _, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy()); err == nil {
+			t.Fatalf("%s vs %s accepted under strict policy", pair[0], pair[1])
 		}
 	}
 	// Mixed sign/exponent spellings of one value.
@@ -588,7 +598,9 @@ func TestToolDefinitionEquivalentNumbersAreNotSuperseded(t *testing.T) {
 // TestToolDefinitionHugeExponentsStayBounded pins the availability invariant:
 // client-supplied exponents are never expanded. Saturated exponents are
 // compared by lexeme, so a different huge value must still be reported as a
-// supersession rather than silently treated as an unchanged repeat.
+// supersession rather than silently treated as an unchanged repeat. The
+// supersession is a policy-gated loss, so the check runs under the approved
+// policy and also asserts the strict refusal.
 func TestToolDefinitionHugeExponentsStayBounded(t *testing.T) {
 	def := func(minimum string) string {
 		return `{"type":"tool_addition","tool":{"type":"tool_definition","definition":` +
@@ -598,7 +610,8 @@ func TestToolDefinitionHugeExponentsStayBounded(t *testing.T) {
 		`"messages":[{"role":"user","content":"x"},` +
 		`{"role":"system","content":[` + def(`1e2000000000`) + `]},` +
 		`{"role":"system","content":[` + def(`1e2000000001`) + `]}]}`
-	result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
+	policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicToolChanges: {}}}
+	result, err := DecodeMessagesRequest([]byte(body), policy)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,39 +621,57 @@ func TestToolDefinitionHugeExponentsStayBounded(t *testing.T) {
 			redefined++
 		}
 	}
-	if redefined != 1 {
-		t.Fatalf("distinct saturated-exponent schemas: got %d supersession notes, want 1: %+v", redefined, result.Report.Losses)
+	if redefined != 2 {
+		t.Fatalf("distinct saturated-exponent schemas: got %d supersession reports, want 2 (Note + Loss): %+v", redefined, result.Report.Losses)
+	}
+	if _, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy()); err == nil {
+		t.Fatal("distinct saturated-exponent schemas accepted under strict policy")
 	}
 }
 
 // TestToolDefinitionSchemaChangeIsLastDefinitionWins proves a mid-conversation
-// schema change is served rather than refused. The contract makes a later
+// schema change is served rather than refused when the policy approves the
+// anthropic_tool_changes loss (the default). The contract makes a later
 // definition REPLACE the earlier one from its position onward, and it is the
 // normal way a client ships a tool whose schema changed, so refusing it would
 // 400 the very traffic this path exists to serve. A chat request carries one
 // schema per name, so the only honest encoding is the newest definition serving
-// the whole request — recorded as a Note, never a silent rewrite, and never two
-// entries under one name.
+// the whole request — recorded as BOTH a policy-gated Loss (at
+// .tool.definition) and a Note, never a silent rewrite, and never two entries
+// under one name. Under StrictLossPolicy the same change is refused with a
+// named UnsupportedFeatureError: the supersession loses the historical meaning
+// of the earlier definition, so strict policy cannot approve it (see
+// TestToolRedefinitionIsPolicyGated).
 func TestToolDefinitionSchemaChangeIsLastDefinitionWins(t *testing.T) {
 	def := func(prop string) string {
 		return `{"type":"tool_addition","tool":{"type":"tool_definition","definition":` +
 			`{"name":"db_query","input_schema":{"type":"object","properties":{"` + prop + `":{"type":"string"}}}}}}`
 	}
 	cases := map[string]string{
-		"shadows a declared tool": `{"model":"m","max_tokens":16,` +
-			`"tools":[{"name":"db_query","input_schema":{"type":"object"}}],` +
-			`"messages":[{"role":"user","content":"x"},` +
-			`{"role":"system","content":[` + def("a") + `]}]}`,
 		"two definitions, one name": `{"model":"m","max_tokens":16,` +
 			`"messages":[{"role":"user","content":"x"},` +
 			`{"role":"system","content":[` + def("a") + `]},` +
 			`{"role":"system","content":[` + def("b") + `]}]}`,
+		"shadows a declared tool": `{"model":"m","max_tokens":16,` +
+			`"tools":[{"name":"db_query","input_schema":{"type":"object"}}],` +
+			`"messages":[{"role":"user","content":"x"},` +
+			`{"role":"system","content":[` + def("a") + `]}]}`,
 	}
+	policy := LossPolicy{Allowed: map[Feature]struct{}{FeatureAnthropicToolChanges: {}}}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
-			result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
+			// A strict policy refuses the genuine redefinition.
+			if _, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy()); err == nil {
+				t.Fatal("strict policy accepted a mid-conversation schema change")
+			} else {
+				var unsupported *UnsupportedFeatureError
+				if !errors.As(err, &unsupported) || unsupported.Feature != string(FeatureAnthropicToolChanges) {
+					t.Fatalf("strict refusal = %T %v, want UnsupportedFeatureError(%s)", err, err, FeatureAnthropicToolChanges)
+				}
+			}
+			result, err := DecodeMessagesRequest([]byte(body), policy)
 			if err != nil {
-				t.Fatalf("a mid-conversation schema change was refused: %v", err)
+				t.Fatalf("an approved schema change was refused: %v", err)
 			}
 			// Exactly one entry per name, carrying the NEWEST schema.
 			count := 0
@@ -656,18 +687,27 @@ func TestToolDefinitionSchemaChangeIsLastDefinitionWins(t *testing.T) {
 			if count != 1 {
 				t.Fatalf("%q appears %d times in the tool list, want exactly one", "db_query", count)
 			}
-			// The supersession is observable, not silent.
-			redefined := 0
+			// The supersession is observable, not silent: one policy-gated
+			// Loss at .tool.definition plus one combined Note at the path.
+			losses, notes := 0, 0
 			for _, loss := range result.Report.Losses {
-				if loss.Feature == FeatureAnthropicToolChanges && strings.Contains(loss.Detail, "redefined") {
-					redefined++
-					if loss.Kind != NoteRecord {
-						t.Fatalf("a supersession is a sanctioned encoding, got %v: %+v", loss.Kind, loss)
+				if loss.Feature != FeatureAnthropicToolChanges || !strings.Contains(loss.Detail, "redefined") {
+					continue
+				}
+				switch loss.Kind {
+				case LossRecord:
+					if !strings.Contains(loss.Path, ".tool.definition") {
+						t.Fatalf("supersession Loss at %q, want .tool.definition: %+v", loss.Path, loss)
 					}
+					losses++
+				case NoteRecord:
+					notes++
+				default:
+					t.Fatalf("unexpected kind %v: %+v", loss.Kind, loss)
 				}
 			}
-			if redefined != 1 {
-				t.Fatalf("supersession notes = %d, want exactly one: %+v", redefined, result.Report.Losses)
+			if losses != 1 || notes != 1 {
+				t.Fatalf("supersession records = %d Loss + %d Note, want 1+1: %+v", losses, notes, result.Report.Losses)
 			}
 			if err := ValidateCanonicalRequest(result.Request); err != nil {
 				t.Fatalf("validator refused the decoder output: %v", err)
