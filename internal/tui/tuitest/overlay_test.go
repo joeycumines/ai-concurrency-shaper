@@ -41,23 +41,14 @@ func TestPTY_RequestDetailOverlay(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	out := h.Console().String()
-	if !strings.Contains(out, "Request Detail") {
-		t.Errorf("Overlay should contain 'Request Detail', output:\n%s", out[len(out)-500:])
-	}
-	if !strings.Contains(out, "POST") {
-		t.Error("Overlay should contain method POST")
-	}
+	screenContains(t, h, "REQUEST", "Request ID:", "POST /v1/messages", "Outcome: completed", "Esc return")
 
 	if err := h.Console().Send("esc"); err != nil {
 		t.Fatalf("Send esc: %v", err)
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	out2 := h.Console().String()
-	if strings.Contains(out2[len(out2)-200:], "Request Detail") {
-		// The overlay text might still be in the accumulated output — that's OK
-		// What matters is the recent content doesn't have it
-		t.Log("Note: overlay text still in accumulated output (expected)")
-	}
+	awaitScreen(t, h, "request inspector closed", func(screen string) bool {
+		return strings.Contains(screen, "REQUESTS ·") && !strings.Contains(screen, "Request ID:")
+	})
 }

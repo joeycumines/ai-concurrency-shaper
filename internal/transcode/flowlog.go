@@ -37,6 +37,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/observation"
 )
 
 // flowBodyCap bounds a single captured streamed body. Client and converted
@@ -147,6 +149,7 @@ func flowOutcomeOf(outcome Outcome, streamClassified bool) *flowOutcome {
 // every leg of the flow plus the conversion verdicts.
 type flowRecord struct {
 	ID            string              `json:"id"`
+	RequestID     string              `json:"request_id,omitempty"`
 	StartedAt     string              `json:"started_at"`
 	DurationMs    int64               `json:"duration_ms"`
 	StreamIntent  bool                `json:"stream_intent"`
@@ -320,6 +323,7 @@ type flowCapture struct {
 	start time.Time
 
 	mu               sync.Mutex
+	requestID        string
 	method           string
 	path             string
 	query            string
@@ -479,6 +483,9 @@ func (fl *flowCapture) setClientRequest(r *http.Request) {
 	fl.mu.Lock()
 	defer fl.mu.Unlock()
 	fl.method = r.Method
+	if observed := observation.FromContext(r.Context()); observed != nil {
+		fl.requestID = observed.ID()
+	}
 	fl.path = r.URL.Path
 	fl.query = r.URL.RawQuery
 	fl.clientHeaders = r.Header.Clone()
@@ -615,6 +622,7 @@ func (fl *flowCapture) seal() {
 		)
 		rec := flowRecord{
 			ID:                  fmt.Sprintf("%06d", fl.seq),
+			RequestID:           fl.requestID,
 			StartedAt:           fl.start.UTC().Format(time.RFC3339Nano),
 			DurationMs:          time.Since(fl.start).Milliseconds(),
 			StreamIntent:        fl.streamIntent,

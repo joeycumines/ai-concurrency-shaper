@@ -132,23 +132,19 @@ func New(providers []Provider) (*Handler, error) {
 //
 // Inbound requests are shallow-cloned before mutating URL path fields, ensuring
 // the caller's request object and URL are never mutated.
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+// ProviderForPath resolves the same traversal-normalized mount as ServeHTTP.
+// It reads no body and returns a copy, so ingress instrumentation can name the
+// original provider before a catalog suite selects a final upstream.
+func (h *Handler) ProviderForPath(path string) (Provider, bool) {
+	p, _, ok := h.resolvePath(path)
+	return p, ok
+}
+func (h *Handler) resolvePath(path string) (Provider, string, bool) {
+	segs := segments(path)
 	if h.bare != nil {
-		r2 := new(http.Request)
-		*r2 = *r
-		if r.URL != nil {
-			r2.URL = new(url.URL)
-			*r2.URL = *r.URL
-			r2.URL.Path = joinSegments(segments(r.URL.Path))
-			r2.URL.RawPath = ""
-		}
-		h.bare.Proxy.ServeHTTP(w, r2)
-		return
+		return *h.bare, joinSegments(segs), true
 	}
-
-	segs := segments(r.URL.Path)
-	for i := range h.providers {
-		p := &h.providers[i]
+	for _, p := range h.providers {
 		pre := segments(p.Prefix)
 		if len(segs) < len(pre) {
 			continue
@@ -160,25 +156,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		if !match {
-			continue
+		if match {
+			return p, joinSegments(segs[len(pre):]), true
 		}
-
-		// Rebuild the path from the remaining segments. Clearing RawPath lets
-		// the downstream reverse proxy re-encode from the decoded Path.
-		r2 := new(http.Request)
-		*r2 = *r
-		if r.URL != nil {
-			r2.URL = new(url.URL)
-			*r2.URL = *r.URL
-			r2.URL.Path = joinSegments(segs[len(pre):])
-			r2.URL.RawPath = ""
-		}
-		p.Proxy.ServeHTTP(w, r2)
+	}
+	return Provider{}, "", false
+}
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := ""
+	if r.URL != nil {
+		path = r.URL.Path
+	}
+	p, remaining, ok := h.resolvePath(path)
+	if !ok {
+		http.NotFound(w, r)
 		return
 	}
-
-	http.NotFound(w, r)
+	r2 := new(http.Request)
+	*r2 = *r
+	if r.URL != nil {
+		r2.URL = new(url.URL)
+		*r2.URL = *r.URL
+		r2.URL.Path = remaining
+		r2.URL.RawPath = ""
+	}
+	p.Proxy.ServeHTTP(w, r2)
 }
 
 // segments resolves a path into its traversal-resolved /-separated segments.

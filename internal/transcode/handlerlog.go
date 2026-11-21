@@ -49,6 +49,7 @@ func derefInt(v *int) int {
 // Duplicate feature@path entries are deduped preserving first-seen order.
 func (h *TranscodeHandler) logConversionReport(report ConversionReport, r *http.Request, stage string) {
 	flowFromContext(r.Context()).addReport(stage, report)
+	h.diagnosticReport(r, stage, report)
 	if len(report.Losses) == 0 {
 		return
 	}

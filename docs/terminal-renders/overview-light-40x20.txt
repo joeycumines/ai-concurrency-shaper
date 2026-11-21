@@ -1,0 +1,20 @@
+ Alpha 東京 ↕                  6A 4Q DB 
+ 1 Overview  2  3  4  5  6  7  8        
+────────────────────────────────────────
+ OVERVIEW · Enter explores history      
+ 5.40 req/s · 6 active · 4 queued       
+                                        
+ Throughput · 10 seconds                
+  ▁▂▂▃▃▂▄▃▄▄▄▃▂▃▄▅▆▇▅▄▆▇█▇▆▅▄▄▅▆▄▄      
+                                        
+ Default pool · occupied / configured   
+  [█████████████████████████████████]   
+ 4 queued · oldest 0s                   
+                                        
+ 2xx:2480  4xx:12  5xx:4                
+ 2 aborted · 1 cancelled                
+ History healthy · pending 2/64         
+                                        
+                                        
+                                        
+ Enter explore · ^K commands · ? keys   

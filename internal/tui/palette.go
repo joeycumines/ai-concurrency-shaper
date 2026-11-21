@@ -21,6 +21,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/control"
 )
 
 // paletteCmdKind identifies what a command palette entry does when selected.
@@ -31,6 +32,11 @@ const (
 	cmdSwitchTab
 	cmdShowHelp
 	cmdResetStats
+	cmdInsightView
+	cmdRuntimeAction
+	cmdTheme
+	cmdExportSelection
+	cmdControlForm
 )
 
 // paletteCmd is one selectable entry in the command palette.
@@ -57,13 +63,20 @@ func (m Model) paletteCommands() []paletteCmd {
 		}
 		cmds = append(cmds, paletteCmd{label: "Switch to: " + label, kind: cmdSwitchProvider, arg: i})
 	}
-	for i, name := range tabNames {
+	for i, name := range m.availableTabs() {
 		cmds = append(cmds, paletteCmd{label: "Tab: " + strings.TrimSpace(name), kind: cmdSwitchTab, arg: i})
 	}
 	cmds = append(cmds,
 		paletteCmd{label: "Show help", kind: cmdShowHelp},
 		paletteCmd{label: "Reset stats", kind: cmdResetStats},
 	)
+
+	if m.enriched() {
+		for i, n := range insightNames {
+			cmds = append(cmds, paletteCmd{label: "Insights: " + n, kind: cmdInsightView, arg: i})
+		}
+		cmds = append(cmds, paletteCmd{label: "Runtime: pause new arrivals (review)", kind: cmdRuntimeAction, arg: 0}, paletteCmd{label: "Runtime: resume (review)", kind: cmdRuntimeAction, arg: 1}, paletteCmd{label: "Runtime: drain new arrivals (review)", kind: cmdRuntimeAction, arg: 2}, paletteCmd{label: "Theme: dark", kind: cmdTheme, arg: 0}, paletteCmd{label: "Theme: light", kind: cmdTheme, arg: 1}, paletteCmd{label: "Theme: terminal automatic", kind: cmdTheme, arg: 2}, paletteCmd{label: "Export: current selection", kind: cmdExportSelection}, paletteCmd{label: "Runtime: resize selected pool (review)", kind: cmdControlForm, arg: 0}, paletteCmd{label: "Runtime: cancel exact request ID (review)", kind: cmdControlForm, arg: 1}, paletteCmd{label: "Runtime: pause with expiry (review)", kind: cmdControlForm, arg: 2}, paletteCmd{label: "Runtime: drain with expiry (review)", kind: cmdControlForm, arg: 3})
+	}
 	return cmds
 }
 
@@ -137,9 +150,69 @@ func (m *Model) executePaletteCmd(cmd paletteCmd) tea.Cmd {
 	case cmdSwitchTab:
 		m.switchTab(tabID(cmd.arg))
 		m.closePalette()
+		if m.enriched() {
+			if m.tab == tabInsights {
+				return m.requestInsights()
+			}
+			if m.tab == tabRequests {
+				return m.requestFacts()
+			}
+		}
 	case cmdShowHelp:
+		if m.enriched() {
+			m.closePalette()
+			m.openRuntimeHelp()
+			return nil
+		}
 		m.mode = modeHelp
 		m.palette = paletteState{}
+
+	case cmdInsightView:
+		m.closePalette()
+		m.insights.view = cmd.arg
+		m.resetInsightView()
+		m.switchTab(tabInsights)
+		return m.requestInsights()
+	case cmdControlForm:
+		m.closePalette()
+		m.switchTab(tabControls)
+		keys := []string{"r", "x", "P", "D"}
+		next, command, _ := m.handleControlKey(keyForAction(keys[cmd.arg]))
+		*m = next
+		return command
+	case cmdRuntimeAction:
+		m.closePalette()
+		actions := []control.Action{control.Pause, control.Resume, control.Drain}
+		return m.previewControl(control.Command{Action: actions[cmd.arg], Provider: m.providerID(m.active)})
+	case cmdTheme:
+		m.closePalette()
+		if cmd.arg == 2 {
+			m.runtime.Theme = "auto"
+			return tea.RequestBackgroundColor
+		}
+		m.themeDark = cmd.arg == 0
+		if m.themeDark {
+			m.runtime.Theme = "dark"
+		} else {
+			m.runtime.Theme = "light"
+		}
+		m.styles = newTheme(m.themeDark)
+		m.applyScrollbarTheme()
+		m.dashboardLinesCache = nil
+	case cmdExportSelection:
+		m.closePalette()
+		kind := "measurements"
+		switch m.tab {
+		case tabRequests:
+			kind = "requests"
+		case tabNetwork:
+			kind = "network"
+		case tabLogs:
+			kind = "logs"
+		case tabControls:
+			kind = "controls"
+		}
+		return m.beginExport(kind)
 	case cmdResetStats:
 		m.mode = modeConfirm
 		m.palette = paletteState{}
@@ -271,4 +344,22 @@ func (m Model) renderCommandPalette() string {
 
 	content := strings.Join(lines, "\n")
 	return m.styles.paletteFrameStyle.Width(frameWidth).Render(content) + "\n"
+}
+
+func (m Model) paletteItemAt(x, y int) (int, bool) {
+	if x < 1 || x >= min(m.viewportWidth(), 60) {
+		return 0, false
+	}
+	remaining := max(m.visibleRows()-2, 1) - 1
+	visible := max(min(len(m.palette.cmds), remaining-1), 1)
+	if remaining < 2 {
+		visible = min(len(m.palette.cmds), remaining)
+	}
+	if visible <= 0 {
+		return 0, false
+	}
+	start := max(m.palette.cursor-visible+1, 0)
+	row := y - m.contentStartRow() - 2
+	index := start + row
+	return index, row >= 0 && row < visible && index < len(m.palette.cmds)
 }

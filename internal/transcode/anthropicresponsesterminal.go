@@ -366,6 +366,7 @@ func (s *anthropicResponsesStreamState) finalizeMessage(
 	stop CanonicalStopReason,
 	usage *ResponsesUsage,
 ) error {
+	s.observedUsage = responsesEnvelopeUsage(usage)
 	s.message.StopReason = new(stopReasonToAnthropic(stop))
 	converted, clamp, err := responsesUsageToAnthropicUsage(usage, responsesUsagePresence(usage))
 	if err != nil {

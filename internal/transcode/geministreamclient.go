@@ -14,7 +14,8 @@ import (
 // after the terminal chunk. The chunks carry no event name and no comment:
 // the Gemini SDK reads data-only frames.
 type geminiStreamClientState struct {
-	ctx *ExchangeContext
+	observedUsage CanonicalUsage
+	ctx           *ExchangeContext
 	// upstream is the protocol whose stream produced the events. Every
 	// event derives from upstream bytes, so a bound violation here is an
 	// upstream fault and is typed as that upstream's wire error.
@@ -447,6 +448,7 @@ func (s *geminiStreamClientState) terminalChunk(response ResponseEnvelope, statu
 		Stop:  CanonicalStop{Reason: stop},
 		Usage: responsesEnvelopeUsage(response.Usage),
 	}
+	s.observedUsage = canonical.Usage
 	// Usage is decided first: its losses can reject the terminal, and the
 	// finish-refusal note below describes a terminal that committed.
 	usage, err := geminiResponseUsage(canonical, s.ctx, &s.report)

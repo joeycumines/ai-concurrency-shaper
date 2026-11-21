@@ -1,0 +1,2 @@
+# Plain-text terminal frames retain their terminal-cell padding verbatim.
+/docs/terminal-renders/*.txt whitespace=-blank-at-eol

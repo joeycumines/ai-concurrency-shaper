@@ -18,6 +18,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/diagnostic"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -32,6 +33,7 @@ type upstreamAttemptStateKeyType struct{}
 var upstreamAttemptStateKey = upstreamAttemptStateKeyType{}
 
 type copyErrorState struct {
+	capture         *diagnostic.Capture
 	mu              sync.Mutex
 	upstreamReadErr error
 }
@@ -59,6 +61,9 @@ func upstreamAttemptStateFromContext(ctx context.Context) *upstreamAttemptState 
 }
 
 func (s *copyErrorState) recordUpstreamReadError(err error) {
+	if s != nil && err != nil && s.capture != nil {
+		s.capture.Complete(diagnostic.UpstreamResponse, errors.Is(err, io.EOF))
+	}
 	if s == nil || err == nil || errors.Is(err, io.EOF) {
 		return
 	}
@@ -85,6 +90,7 @@ type trackingReadCloser struct {
 
 func (b *trackingReadCloser) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
+	b.state.recordUpstreamReadBytes(n)
 	b.state.recordUpstreamReadError(err)
 	return n, err
 }
@@ -96,6 +102,7 @@ type trackingReadWriteCloser struct {
 
 func (b *trackingReadWriteCloser) Read(p []byte) (int, error) {
 	n, err := b.ReadWriteCloser.Read(p)
+	b.state.recordUpstreamReadBytes(n)
 	b.state.recordUpstreamReadError(err)
 	return n, err
 }
@@ -112,6 +119,15 @@ type trackingReadWriteCloseWriter struct {
 
 func (b *trackingReadWriteCloseWriter) Read(p []byte) (int, error) {
 	n, err := b.ReadWriteCloser.Read(p)
+	b.state.recordUpstreamReadBytes(n)
 	b.state.recordUpstreamReadError(err)
 	return n, err
+}
+
+// recordUpstreamReadBytes measures only the selected native response. Retained
+// bytes stay in the existing journal; this evidence leg is metadata-only.
+func (s *copyErrorState) recordUpstreamReadBytes(n int) {
+	if s != nil && s.capture != nil && n > 0 {
+		s.capture.ObserveBytes(diagnostic.UpstreamResponse, n)
+	}
 }

@@ -60,6 +60,8 @@ const (
 	tabLogs
 	tabConcurrency
 	tabRoutes
+	tabInsights
+	tabControls
 	numTabs
 )
 
@@ -67,7 +69,7 @@ const (
 // and for mouse hit-testing. Each entry is rendered as " "+name+" " with
 // PaddingLeft(1) PaddingRight(1) in the theme, so the visible cell width is
 // len-agnostic and measured via style rendering in tabAt().
-var tabNames = []string{"1 Overview", "2 Requests", "3 Network", "4 Logs", "5 Concurrency", "6 Routes"}
+var tabNames = []string{"1 Overview", "2 Requests", "3 Network", "4 Logs", "5 Concurrency", "6 Routes", "7 Insights", "8 Controls"}
 
 // networkFilterType controls which content types are shown in the Network tab.
 type networkFilterType int
@@ -91,6 +93,15 @@ const (
 )
 
 type Model struct {
+	runtime      RuntimeOptions
+	insights     insightsState
+	controlPanel controlPanelState
+	inspection   inspectionState
+	export       exportState
+	themeDark    bool
+	statusText   string
+	statusUntil  time.Time
+
 	width, height int
 	tab           tabID
 	mode          uiMode
@@ -114,11 +125,18 @@ type Model struct {
 	// Network tab state.
 	networkFilterType   networkFilterType
 	networkFilterStatus networkFilterStatus
+	networkAll          bool
+	networkSources      map[*journal.Entry]string
 
 	// networkFiltered caches the result of computeVisibleNetworkEntries()
-	// so the heavy filter work runs once per Update cycle instead of
-	// multiple times per View frame.
+	// so the heavy filter work runs once per generation instead of on every
+	// Update cycle (mouse motion, ticks and other high-frequency messages).
 	networkFiltered []*journal.Entry
+
+	// networkFilterGen captures every input to computeVisibleNetworkEntries:
+	// the filter controls, the active provider, and the journal state. It is
+	// compared against networkFilterSignature before rebuilding the cache.
+	networkFilterGen string
 
 	// dashboardLinesCache stores the rendered dashboard lines so
 	// dashboardLines() is called at most once per Update cycle instead of
@@ -214,6 +232,7 @@ type Model struct {
 // A single ProviderMeta with an empty Name reproduces the legacy single-provider
 // header (the "⚡ shaper" brand, no switcher chips).
 type ProviderMeta struct {
+	ID          string
 	Name        string
 	Concurrency int
 	Journal     *journal.Journal
@@ -229,6 +248,7 @@ type ProviderUpdate struct {
 // providerState is the live state kept for a single provider in a dashboard
 // model: its display name, concurrency limit, journal and latest snapshot.
 type providerState struct {
+	id      string
 	name    string
 	conc    int
 	snap    metrics.Snapshot
@@ -250,10 +270,13 @@ func NewModelForProviders(metas []ProviderMeta) Model {
 		hScroll:    make(map[tabID]int),
 		toastSeen:  make(map[string]struct{}),
 		styles:     newTheme(true),
+		themeDark:  true,
+		insights:   newInsightsState(),
 	}
 	for _, meta := range metas {
 		m.providers = append(m.providers, providerState{
 			name:    meta.Name,
+			id:      meta.ID,
 			conc:    meta.Concurrency,
 			journal: meta.Journal,
 		})

@@ -30,4 +30,34 @@ jobs:
       - run: make tools
       - run: make build
       - run: make lint
-      - run: make test GO_TEST_FLAGS=-race
+      # Keep every race assertion, including the public query deadline, while
+      # avoiding unrelated CPU-heavy test packages competing for that budget.
+      # GOFLAGS also instruments gateway binaries spawned by integration tests.
+      - run: make test GO_TEST_FLAGS="-race -p=1"
+        env:
+          GOFLAGS: "-race"
+
+  native:
+    name: Native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - run: go build ./...
+      - run: go test ./internal/... -count=1 -timeout=15m
+      - run: go test . -run '^(TestIngress|TestGateway)' -count=1 -timeout=5m

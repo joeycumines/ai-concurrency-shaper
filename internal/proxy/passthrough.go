@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/observation"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/retry"
 )
 
@@ -87,11 +88,11 @@ func (p *Proxy) servePassthrough(w http.ResponseWriter, r *http.Request, flightI
 		ctx := r.Context()
 		if p.timeout > 0 {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, p.timeout)
+			ctx, cancel = p.admissionContext(ctx)
 			defer cancel()
 		}
 
-		release, err := p.globalLimiter.Acquire(ctx)
+		release, err := p.globalLimiter.AcquireObserved(ctx, observation.FromContext(r.Context()).Queue)
 		p.m.DecQueued()
 
 		if err != nil {

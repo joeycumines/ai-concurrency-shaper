@@ -16,11 +16,15 @@
 package proxy
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/diagnostic"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/observation"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 )
 
 func responseHeaders(rec *statusRecorder) http.Header {
@@ -50,8 +54,25 @@ func parseRetryAfterFromRecorder(rec *statusRecorder, now time.Time) time.Durati
 // transport set up during construction.
 func (p *Proxy) RoundTrip(r *http.Request) (*http.Response, error) {
 	resp, err := p.transport.RoundTrip(r)
+	if _, ok := errors.AsType[*transcode.SigningError](err); ok {
+		if state, _ := r.Context().Value(observationStateKey{}).(*transportObservationState); state != nil {
+			state.mu.Lock()
+			state.localFailureStage = observation.StageAuthentication
+			state.mu.Unlock()
+		}
+	}
 	if resp != nil {
 		resp.Request = r
+		if transcode.OutcomeSinkFromContext(r.Context()) == nil {
+			capture := diagnostic.FromContext(r.Context())
+			capture.Metadata(diagnostic.UpstreamResponse, resp.Header.Get("Content-Type"), resp.StatusCode)
+			if resp.Body == nil || resp.Body == http.NoBody || resp.StatusCode == http.StatusSwitchingProtocols {
+				capture.Complete(diagnostic.UpstreamResponse, true)
+			}
+			if state := copyErrorStateFromContext(r.Context()); state != nil {
+				state.capture = capture
+			}
+		}
 	}
 	if resp != nil && resp.Body != nil {
 		if state := copyErrorStateFromContext(r.Context()); state != nil {

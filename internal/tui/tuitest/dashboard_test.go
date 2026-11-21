@@ -19,6 +19,7 @@ package tuitest
 
 import (
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -43,17 +44,18 @@ func TestPTY_DashboardSections(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	out := h.Console().String()
+	out := screenContains(t, h, "FLEET HEALTH", "ADMISSION POOLS", "THROUGHPUT", "REQUEST OUTCOMES", "HISTORY RECORDER", "5 received")
 
 	// Verify dashboard sections (Circuit Breaker is optional
 	// and only rendered when configured).
 	checks := []string{
-		"Throughput",
-		"Active",
-		"Queued",
-		"Status",
-		"In-Flight Requests",
-		"Summary",
+		"FLEET HEALTH",
+		"ACTIVE",
+		"QUEUED",
+		"ADMISSION POOLS",
+		"THROUGHPUT",
+		"REQUEST OUTCOMES",
+		"HISTORY RECORDER",
 	}
 	for _, check := range checks {
 		if !strings.Contains(out, check) {
@@ -80,13 +82,12 @@ func TestPTY_DashboardNarrowStatusVisibility(t *testing.T) {
 	// label. Before the budget/render mismatch fix the composed status row
 	// was 50 cells wide, so renderContentWithScrollbar truncated the
 	// rightmost cells and "4xx:" / "5xx:" were cut off the screen.
-	h := Launch(t, WithTermSize(40, 40))
+	h := Launch(t, WithTermSize(40, 40), WithArgs("-retry", "0", "-circuit-breaker=false"))
 	defer h.Close()
 
 	proxyURL := h.ProxyURL()
-	// Send 200s first so the 2xx statuses commit before the 500
-	// responses trip the circuit breaker; once it opens, later
-	// requests are rejected locally with a 503 (recorded as 5xx).
+	// Drive each class twice. Disable retries and the breaker so this
+	// viewport check observes six exact upstream responses without backoff.
 	for range 2 {
 		h.Ctrl().SetStatus(http.StatusOK)
 		sendRequest(t, t.Context(), proxyURL+"/v1/messages")
@@ -111,17 +112,21 @@ func TestPTY_DashboardNarrowStatusVisibility(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	out := h.Console().String()
-	for _, check := range []string{"2xx:", "4xx:", "5xx:"} {
-		if !strings.Contains(out, check) {
-			t.Errorf("40-column dashboard should show %q, got output:\n%s", check, out)
+	awaitScreen(t, h, "all nonzero status classes at 40 columns", func(screen string) bool {
+		for _, class := range []string{"2xx", "4xx", "5xx"} {
+			if !regexp.MustCompile(class + `:\s*2\b`).MatchString(screen) {
+				return false
+			}
 		}
-	}
+		return true
+	})
 }
 
 func TestPTY_DashboardScrollsDown(t *testing.T) {
-	// Use a short terminal so the dashboard content overflows.
-	h := Launch(t, WithTermSize(10, 80))
+	// Use a short terminal so the dashboard content overflows. The wide
+	// fleet overview needs 93 columns to fit its 92-cell rows; a narrower
+	// pane renders the compact overview, which has no FLEET HEALTH section.
+	h := Launch(t, WithTermSize(10, 100))
 	defer h.Close()
 
 	proxyURL := h.ProxyURL()
@@ -138,21 +143,23 @@ func TestPTY_DashboardScrollsDown(t *testing.T) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	before := h.Console().String()
-	if strings.Contains(before, "Summary") {
-		t.Fatal("Summary should not be visible before scrolling; terminal is too tall for this regression")
+	before := screenContains(t, h, "FLEET HEALTH")
+	if strings.Contains(before, "HISTORY RECORDER") {
+		t.Fatal("history recorder should not be visible before scrolling; terminal is too tall for this regression")
 	}
 
-	// Scroll down until the Summary section is visible.
-	for range 4 {
+	// The enriched overview has more rows. Half-page movement must still
+	// expose the lower sections even when only six content rows are available.
+	for range 16 {
 		if _, err := h.Console().WriteString(string([]byte{0x04})); err != nil {
 			t.Fatalf("WriteString ctrl-d: %v", err)
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
 
-	after := h.Console().String()
-	if !strings.Contains(after, "Summary") {
-		t.Error("Dashboard should scroll down far enough to reveal the Summary section")
-	}
+	screenContains(t, h, "HISTORY RECORDER")
+	writeKeys(t, h, strings.Repeat("\x15", 16))
+	awaitScreen(t, h, "overview scrolled back to the beginning", func(screen string) bool {
+		return strings.Contains(screen, "FLEET HEALTH") && !strings.Contains(screen, "HISTORY RECORDER")
+	})
 }

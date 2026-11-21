@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/joeycumines/ai-concurrency-shaper/internal/observation"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/queue"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/retry"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
@@ -48,7 +49,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 	var result exchangeResult
 	if p.timeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, p.timeout)
+		ctx, cancel = p.admissionContext(ctx)
 		defer cancel()
 	}
 
@@ -322,7 +323,7 @@ func (p *Proxy) serveLimited(w http.ResponseWriter, r *http.Request, flightID ui
 
 	if p.globalLimiter != nil {
 		var err error
-		globalRelease, err = p.globalLimiter.Acquire(ctx)
+		globalRelease, err = p.globalLimiter.AcquireObserved(ctx, observation.FromContext(r.Context()).Queue)
 		if err != nil {
 			p.m.DecQueued()
 			// Record the moment the global limiter wait ended so that
@@ -474,11 +475,11 @@ func (p *Proxy) acquireSlot(ctx context.Context, method, path string) (release f
 			key = pat.Raw
 		}
 		if lim, ok := p.routeLimiters[key]; ok {
-			rel, err := lim.Acquire(ctx)
+			rel, err := lim.AcquireObserved(ctx, observation.FromContext(ctx).Queue)
 			return rel, lim, err
 		}
 	}
-	rel, err := p.limiter.Acquire(ctx)
+	rel, err := p.limiter.AcquireObserved(ctx, observation.FromContext(ctx).Queue)
 	return rel, p.limiter, err
 }
 

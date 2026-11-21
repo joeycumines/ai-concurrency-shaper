@@ -51,6 +51,7 @@ func (h *TranscodeHandler) jsonResponse(
 
 	converted, provenance, err := h.convertResponse(r, body, context)
 	if err != nil {
+		h.diagnosticFailure(r, "conversion_response", err)
 		apiErr := CanonicalAPIError{
 			Status:  http.StatusBadGateway,
 			Type:    "api_error",
@@ -129,6 +130,9 @@ func (h *TranscodeHandler) jsonResponse(
 			Provenance:        ProvenanceDownstreamWriteError,
 		})
 	default:
+		if context.ResponseUsage != nil {
+			reportObservedUsage(r, *context.ResponseUsage, string(h.cfg.Mapping.UpstreamProtocol))
+		}
 		h.recordOutcome(r, Outcome{
 			UpstreamAttempted:  true,
 			UpstreamStatus:     Optional[int]{Value: resp.StatusCode, Set: true},
@@ -200,7 +204,10 @@ func (h *TranscodeHandler) convertResponse(
 			// exchange log as the render's losses (request-side merge
 			// precedent).
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
+			usage := response.Usage
+			context.ResponseUsage = &usage
 			return converted, ProvenanceLocalResponseConversionError, nil
 		case UpstreamGemini:
 			response, decodeReport, err := DecodeGeminiResponse(
@@ -223,7 +230,10 @@ func (h *TranscodeHandler) convertResponse(
 			h.storeGeminiCallSignatures(context, response)
 			h.recordContinuityFromEnvelope(r, context, response, converted)
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
+			usage := response.Usage
+			context.ResponseUsage = &usage
 			return converted, ProvenanceLocalResponseConversionError, nil
 		default:
 			return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(
@@ -252,7 +262,10 @@ func (h *TranscodeHandler) convertResponse(
 			// exchange log as the render's losses (request-side merge
 			// precedent).
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
+			usage := response.Usage
+			context.ResponseUsage = &usage
 			return converted, ProvenanceLocalResponseConversionError, nil
 
 		case UpstreamResponses:
@@ -265,6 +278,8 @@ func (h *TranscodeHandler) convertResponse(
 				return nil, conversionProvenance(err), err
 			}
 			h.logConversionReport(report, r, "response")
+			usage := response.Usage
+			context.ResponseUsage = &usage
 			return converted, ProvenanceLocalResponseConversionError, nil
 
 		case UpstreamGemini:
@@ -284,7 +299,10 @@ func (h *TranscodeHandler) convertResponse(
 			}
 			h.storeGeminiCallSignatures(context, response)
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
+			usage := response.Usage
+			context.ResponseUsage = &usage
 			return converted, ProvenanceLocalResponseConversionError, nil
 
 		default:
@@ -311,7 +329,10 @@ func (h *TranscodeHandler) convertResponse(
 				return nil, conversionProvenance(err), err
 			}
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
+			usage := response.Usage
+			context.ResponseUsage = &usage
 			return converted, ProvenanceLocalResponseConversionError, nil
 		case UpstreamResponses:
 			response, err := DecodeResponsesResponse(body)
@@ -323,6 +344,8 @@ func (h *TranscodeHandler) convertResponse(
 				return nil, conversionProvenance(err), err
 			}
 			h.logConversionReport(report, r, "response")
+			usage := response.Usage
+			context.ResponseUsage = &usage
 			return converted, ProvenanceLocalResponseConversionError, nil
 		case UpstreamMessages:
 			response, decodeReport, err := DecodeMessagesResponse(body, h.cfg.Mapping.LossPolicy)
@@ -334,7 +357,10 @@ func (h *TranscodeHandler) convertResponse(
 				return nil, conversionProvenance(err), err
 			}
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
+			usage := response.Usage
+			context.ResponseUsage = &usage
 			return converted, ProvenanceLocalResponseConversionError, nil
 		default:
 			return nil, ProvenanceLocalResponseConversionError, fmt.Errorf(

@@ -1,0 +1,20 @@
+ Alpha 東京 ↕                  6A 4Q DB 
+ 1  2  3 Network  4  5  6  7  8         
+────────────────────────────────────────
+ NETWORK EVIDENCE                       
+ 2/7 Decisions · Tab sections           
+ anthropic-messages → openai-responses  
+ Client model: agent-editor             
+ Resolved model: reasoning-large        
+                                        
+ FAILURES                               
+ request_decode · unknown_field         
+ path: $.descendant.new_client_field    
+ feature:                               
+ fingerprint:                           
+ request_decode/unknown_field/cc248f    
+ The client sent a field outside the    
+ pinned request contract.               
+                                        
+ 1–13 / 24 · e metadata · E raw         
+ e metadata · E raw · Esc back          

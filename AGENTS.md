@@ -25,6 +25,19 @@ Ensure these characteristics:
 - The TUI (charm/bubbletea v2) visualizes concurrency, queue state, and live metrics.
 - The binary is `go install`-able from `github.com/joeycumines/ai-concurrency-shaper`.
 
+### UI/UX
+
+- Provide first-party support for a wide range of terminal sizes, including 40x20, 120x40, 160x48, and larger or oddly-shaped terminals.
+- PRODUCT.md is the authoritative living document for UI/UX behavior; keep it current as behavior changes. DESIGN.md holds the visual system; keep it current as the design changes.
+- The TUI is optional: headless mode must also be fully supported, e.g. for running in-cluster.
+- Configuration can switch behavior drastically; handle every state, including with and without `-history-db`.
+
+### Documentation
+
+- docs/README.md explains that docs/ is supporting documentation with no freshness guarantee; the code and the minimal root living docs are the source of truth.
+- Avoid point-in-time snapshots, especially under docs/; update the living docs instead of freezing copies.
+- Never create markdown files in the project root unless explicitly requested.
+
 ### Admission and breaker invariants
 
 The product exists so an upstream never *observes* more concurrency than configured: providers detect excess concurrency on their side, with their own accounting lag, and respond with 429s or temporary bans. This admission core was hard to get right; every change to it must preserve:

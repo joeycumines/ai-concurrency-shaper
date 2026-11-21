@@ -10,7 +10,7 @@ Engineers and operators running HTTP proxies in front of AI/LLM providers. They 
 
 ## Product Purpose
 
-`ai-concurrency-shaper` is a reverse proxy that enforces bounded concurrency on configured routes and blocks excess requests until slots open. The built-in terminal dashboard (TUI) visualizes live throughput, concurrency, queue depth, status distribution, in-flight requests, circuit breaker state, network timing, and per-route statistics — without requiring a browser.
+`ai-concurrency-shaper` is a reverse proxy that enforces bounded concurrency on configured routes and blocks excess requests until slots open. The built-in terminal dashboard (TUI) visualizes live throughput, concurrency, queue depth, status distribution, in-flight requests, circuit breaker state, network timing, and per-route statistics — without requiring a browser. With observations enabled it adds an Insights workspace for interactive time-series analysis and a Controls workspace for reviewed runtime actions; both remain available in headless deployments through the observation hub and control API.
 
 ## Brand Personality
 
@@ -32,6 +32,15 @@ Engineers and operators running HTTP proxies in front of AI/LLM providers. They 
 3. **Keyboard-first, mouse-second.** All interactions work via keys; mouse is a convenience layer on top.
 4. **Calm under load.** High-contrast accents are reserved for actionable or anomalous states; normal operation stays readable over long sessions.
 5. **Terminal realism.** Design for real terminals: limited palette, mouse cell coordinates, no animation that depends on CSS.
+6. **Freeze before export.** A selection captured for export is an independent snapshot; later observation ticks cannot mutate it. Metadata is the safe default; only an explicitly reviewed raw bundle includes retained bodies, headers, and URLs.
+
+## Workspaces and analysis
+
+The numbered rail covers Overview, Requests, Network, Logs, Concurrency, Routes, Insights, and Controls. Insights is a shared query workspace with eight views: rates, latency heatmap, capacity, distribution, provider comparison, usage, fidelity, and physical attempts. Cursor movement, interval brushing, provider scope, absolute time range, histogram-bin selection, and request cohorts all operate on the same accepted query; a selection can be inspected or exported as whole contained intervals, with partial edges excluded. The selected interval shows coverage honestly: gaps stay missing, and source limits are labelled rather than drawn as zero.
+
+Controls pause, resume, or drain new arrival admission, resize a configured positive pool, and cancel an exact live request. Every action first renders a revision-bound effect review: the operator reads all pages before Apply is enabled, and a resize preserves active leases, cooldown holds, and breaker behavior. Nothing mutates runtime state merely by drawing a form or review.
+
+The same investigation and control workflows operate from 40×20 upward. The tab rail collapses to numeric targets and the active name on narrow panes; forms and reviews paginate with Cancel always visible and mutating Apply gated on at least 28 columns and six content rows. Wider panes add a persistent numerical inspector beside the chart and richer tables; resizing preserves time selection, query filters, and the selected request.
 
 ## Accessibility & Inclusion
 

@@ -93,6 +93,7 @@ func Parse(args []string) (*Config, error) {
 			return nil, err
 		}
 		recordExplicitFlags(fs, p0)
+		recordServerExplicitFlags(fs, &cfg.Server)
 		// A suite-only legacy invocation has no implicit provider. If any
 		// provider option was supplied, keep the implicit provider so normal
 		// semantic validation still reports -upstream is required instead of
@@ -129,6 +130,7 @@ func Parse(args []string) (*Config, error) {
 	if err := fs.Parse(serverSec.lex); err != nil {
 		return nil, fmt.Errorf("server section: %w", err)
 	}
+	recordServerExplicitFlags(fs, &cfg.Server)
 
 	for _, s := range sections[1:] {
 		switch s.kind {
@@ -189,6 +191,14 @@ func recordExplicitFlags(fs *flag.FlagSet, p *Provider) {
 		}
 		p.explicitFlags[f.Name] = f.Value.String()
 		p.explicitProviderFlags[f.Name] = struct{}{}
+	})
+}
+
+func recordServerExplicitFlags(fs *flag.FlagSet, s *Server) {
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "history-retention" {
+			s.historyRetentionExplicit = true
+		}
 	})
 }
 

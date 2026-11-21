@@ -1,0 +1,20 @@
+ Alpha 東京 ↕                  6A 4Q DB 
+ 1  2  3  4  5  6  7 Insights  8        
+────────────────────────────────────────
+ USAGE  6/8 · reported tokens/s         
+ ALL PROVIDERS · HISTORY                
+ 12:00:00 → 12:15:00 UTC · SQLite       
+ 7130 reports · 0 corrections · v:metri 
+ ▸input ●outpu ●total                   
+   8.2k│               ⢀│               
+       │              ⢠⢊│⢆              
+       │              ⣎⠎│⢞⡄             
+   4.1k│             ⢰⡏ │⠈⢷⡀            
+       │⣠⡪⠭⡢⡀   ⣠⠇⠨⣒⢔⠝  │ ⠈⢷⡀   ⢀⠭⢍⣢    
+       │⠁  ⠈⠚⢖⣒⠝⠁   ⠁ ⢀⢀│⡀ ⠈⠪⢖⡢⠒⠁  ⠘⠫⣒  
+      0│⠤⠔⠒⠢⠤⠤⠤⠤⠤⠂⠐⠒⠒⠊⠁⠁│⠈⠑⠒⠤⠤⠄··⠒⠒⠢⠤⠤  
+        12:00                    12:15  
+ events               ▲ ▲               
+ ▸ 12:08:00 · complete                  
+ 136 reports · 136/136/136 known        
+ t view · + zoom · i req · e save · ^K  

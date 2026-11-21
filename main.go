@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -43,6 +44,8 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/router"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/expfmt"
 )
 
 // version is set via ldflags at build time (e.g. -ldflags -X main.version=1.2.3).
@@ -73,7 +76,7 @@ func main() {
 // The journal backs the TUI's Network inspection panel. Its capacity scales inversely with the body limit so the
 // default worst-case memory footprint stays roughly bounded (~512 MiB) regardless
 // of how large -retry-max-body-mb is configured.
-func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journal.Journal, error) {
+func buildProvider(p *config.Provider, extra ...proxy.Option) (*proxy.Proxy, *metrics.Collector, *journal.Journal, error) {
 	maxBody := int64(p.RetryMaxBodyMB) << 20
 	journalCap := 512
 	if maxBody > 0 {
@@ -146,6 +149,7 @@ func buildProvider(p *config.Provider) (*proxy.Proxy, *metrics.Collector, *journ
 		opts = append(opts, proxy.WithModelCatalog(catalog))
 	}
 
+	opts = append(opts, extra...)
 	prx, err := proxy.New(opts...)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("proxy config: %w", err)
@@ -312,7 +316,7 @@ func drainResetSignals(resetCh <-chan struct{}) {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	cfg, err := config.Parse(os.Args[1:])
 	if err != nil {
 		if errors.Is(err, config.ErrHelp) {
@@ -360,6 +364,15 @@ func run() error {
 	if err := cfg.ResolveAndValidate(); err != nil {
 		return err
 	}
+	runtime, err := newGatewayRuntime(cfg)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		runErr = errors.Join(runErr, runtime.Close(closeCtx))
+	}()
 
 	// Embedded RC server and RC dialer lifecycle: close the dialers and stop
 	// the server after the HTTP servers shut down (runServerLifecycle below).
@@ -405,13 +418,13 @@ func run() error {
 		singleRoutes     map[transcode.RouteKey]struct{}
 	)
 	for _, pr := range cfg.Providers {
-		p, met, j, err := buildProvider(pr)
+		p, met, j, err := buildProvider(pr, proxy.WithObservation(runtime.hub, pr.EffectiveName()), proxy.WithRuntimeControl(runtime.controls, pr.EffectiveName()))
 		if err != nil {
 			return err
 		}
 		mets = append(mets, met)
 		js = append(js, j)
-		entries = append(entries, router.Provider{Name: pr.Name, Prefix: pr.Prefix, Proxy: p})
+		entries = append(entries, router.Provider{Name: pr.EffectiveName(), Prefix: pr.Prefix, Proxy: p})
 		providerName := pr.EffectiveName()
 		providerRoutes := make(map[transcode.RouteKey]struct{})
 		for _, mapping := range pr.TranscodeMappings() {
@@ -530,6 +543,10 @@ func run() error {
 			return fmt.Errorf("-metrics-bind %s: %w", cfg.Server.MetricsBind, err)
 		}
 		defer metricsLn.Close()
+		registry := prometheus.NewRegistry()
+		if err := registry.Register(runtime.hub.PrometheusCollector()); err != nil {
+			return err
+		}
 		mux := http.NewServeMux()
 		mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet {
@@ -554,17 +571,28 @@ func run() error {
 				}
 				snaps[i] = metrics.ProviderSnapshot{Name: pr.Name, Snapshot: snap}
 			}
-			// One grouped write: every metric family forms a single
-			// contiguous block across all providers, as the text format's
-			// grouping rule requires. A scrape that walked away cannot be
-			// written to anyway, so the error is deliberately discarded.
-			_ = metrics.WritePrometheusFleet(w, snaps)
+			// Build the complete exposition before writing: a Gather or
+			// formatting error must not produce a 200 with a truncated body.
+			var body bytes.Buffer
+			if err := metrics.WritePrometheusFleet(&body, snaps); err != nil {
+				return
+			}
+			families, err := registry.Gather()
+			if err != nil {
+				return
+			}
+			for _, family := range families {
+				if _, err := expfmt.MetricFamilyToText(&body, family); err != nil {
+					return
+				}
+			}
+			_, _ = w.Write(body.Bytes())
 		})
 		metricsSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		log.Printf("metrics endpoint listening on %s/metrics", metricsLn.Addr().String())
 	}
 
-	srv := &http.Server{Handler: h}
+	srv := &http.Server{Handler: runtime.observeIngress(h)}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -578,6 +606,7 @@ func run() error {
 		for i, pr := range cfg.Providers {
 			metas[i] = tui.ProviderMeta{
 				Name:        pr.Name,
+				ID:          pr.EffectiveName(),
 				Concurrency: pr.Concurrency,
 				Journal:     js[i],
 			}
@@ -586,7 +615,7 @@ func run() error {
 		progCh := make(chan *tea.Program, 1)
 		resetCh := make(chan struct{}, 1)
 		go func() {
-			tui.Run(updCh, metas, progCh, resetCh, logBuf)
+			tui.Run(updCh, metas, progCh, resetCh, logBuf, tui.RuntimeOptions{Observations: runtime.hub, Controls: runtime.controls, IngressJournal: runtime.ingressJournal, Theme: cfg.Server.TUITheme, Color: cfg.Server.TUIColor, ExportDir: cfg.Server.ExportDir})
 			// The dashboard is gone and its poller with it: stream any further
 			// logging (the shutdown sequence below) straight to stderr rather
 			// than parking it in a buffer nobody drains.
@@ -675,7 +704,7 @@ func run() error {
 // runServerLifecycle serves srv (and metricsSrv when both it and its listener
 // are non-nil) until the signal context is canceled or either server fails,
 // then gracefully shuts down every server and reports the outcome: nil for a
-// signal-initiated shutdown, otherwise the failing server's error.
+// completed signal-initiated shutdown, otherwise the server or shutdown error.
 //
 // The servers' listeners are already bound by the caller, and this function
 // takes ownership of both ln and metricsLn: they are closed before it returns
@@ -687,8 +716,11 @@ func run() error {
 // the signal context, releasing downstream context consumers (the TUI poller)
 // on the fatal-error path; it is idempotent, so the signal path needs no
 // explicit call. On a server failure the original error is preserved and
-// returned; a shutdown that cannot complete within its grace is logged, never
-// substituted for the server error.
+// returned. A shutdown exceeding its grace force-closes active connections. On
+// an intentional stop, expiry of that grace is reported as a warning rather
+// than a process failure if forced closure succeeds. Other shutdown errors and
+// any original server failure remain errors; runtime finalization separately
+// joins ingress handlers and drains the recorder before run returns.
 func runServerLifecycle(
 	ctx context.Context,
 	stop func(),
@@ -717,15 +749,20 @@ func runServerLifecycle(
 		}()
 	}
 
-	shutdown := func() {
+	shutdown := func() error {
 		log.Println("shutting down...")
 		var servers []*http.Server
 		if metricsSrv != nil {
 			servers = append(servers, metricsSrv)
 		}
 		servers = append(servers, srv)
-		if err := shutdownServers(5*time.Second, servers...); err != nil {
-			slog.Warn("graceful shutdown incomplete", "err", err)
+		shutdownErr := shutdownServers(5*time.Second, servers...)
+		if shutdownErr != nil {
+			if result, ok := shutdownErr.(*shutdownError); ok && result.failure == nil {
+				slog.Warn("graceful shutdown exceeded its deadline; active connections closed", "err", shutdownErr)
+			} else {
+				slog.Warn("HTTP shutdown failed", "err", shutdownErr)
+			}
 		}
 		// http.Server.Shutdown closes only the listeners the server has
 		// tracked, and a listener is tracked inside Serve, not before it. A
@@ -745,18 +782,33 @@ func runServerLifecycle(
 				_ = listener.Close()
 			}
 		}
+		return shutdownErr
 	}
 
 	select {
 	case <-ctx.Done():
-		shutdown()
-		return nil
+		err := shutdown()
+		if result, ok := err.(*shutdownError); ok {
+			return result.failure
+		}
+		return err
 	case err := <-errCh:
 		stop()
-		shutdown()
-		return err
+		return errors.Join(err, shutdown())
 	}
 }
+
+// shutdownError retains the complete drain/close diagnostics while separating
+// failures from an expired local grace followed by successful forced closure.
+// Only the intentional-stop path may disregard the latter. Recorder and
+// handler-finalization errors are returned independently by gatewayRuntime.Close.
+type shutdownError struct {
+	cause   error
+	failure error
+}
+
+func (e *shutdownError) Error() string { return e.cause.Error() }
+func (e *shutdownError) Unwrap() error { return e.cause }
 
 // shutdownServers gracefully stops every server within the shared grace
 // budget, each with its OWN full-length context and all Shutdown calls running
@@ -767,8 +819,12 @@ func runServerLifecycle(
 // idle-conn poll, abandoning active proxy connections instead of draining
 // them. Concurrency keeps the wall-clock ceiling at max(individual) <= grace.
 // The joined result reports which servers (if any) failed to drain cleanly.
+// Such servers are force-closed so active HTTP requests receive cancellation.
+// The gateway runtime separately cancels and joins every ingress handler, since
+// net/http does not track hijacked connections through Server.Close.
 func shutdownServers(grace time.Duration, servers ...*http.Server) error {
 	errs := make([]error, len(servers))
+	failures := make([]error, len(servers))
 	var wg sync.WaitGroup
 	for i, srv := range servers {
 		if srv == nil {
@@ -777,9 +833,26 @@ func shutdownServers(grace time.Duration, servers ...*http.Server) error {
 		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), grace)
 			defer cancel()
-			errs[i] = srv.Shutdown(ctx)
+			shutdownErr := srv.Shutdown(ctx)
+			if shutdownErr != nil {
+				// Match only this context's own expiry. In particular, a listener
+				// error that happens to wrap DeadlineExceeded is still a failure.
+				graceExpired := shutdownErr == context.DeadlineExceeded && ctx.Err() == context.DeadlineExceeded
+				// Shutdown does not close active connections when its context expires.
+				// Force Close cancels their HTTP contexts; gatewayRuntime then joins all
+				// ingress finalizers, including upgraded connections, before history seals.
+				closeErr := srv.Close()
+				errs[i] = errors.Join(shutdownErr, closeErr)
+				failures[i] = closeErr
+				if !graceExpired {
+					failures[i] = errs[i]
+				}
+			}
 		})
 	}
 	wg.Wait()
-	return errors.Join(errs...)
+	if cause := errors.Join(errs...); cause != nil {
+		return &shutdownError{cause: cause, failure: errors.Join(failures...)}
+	}
+	return nil
 }

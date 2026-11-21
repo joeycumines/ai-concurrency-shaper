@@ -25,6 +25,9 @@ import (
 )
 
 func (m Model) View() tea.View {
+	if m.enriched() {
+		return m.runtimeView()
+	}
 	var v tea.View
 	v.AltScreen = true
 	v.MouseMode = tea.MouseModeCellMotion
@@ -164,6 +167,10 @@ func (m Model) renderContent() string {
 		return m.renderConcurrency()
 	case tabRoutes:
 		return m.renderRoutes()
+	case tabInsights:
+		return m.renderInsights()
+	case tabControls:
+		return m.renderControls()
 	}
 	return ""
 }
@@ -242,6 +249,17 @@ func (m Model) renderContentWithScrollbar() string {
 // extends beyond the viewport. It scans the tab's rendered lines, so the
 // bound always matches what renderContentWithScrollbar would draw.
 func (m Model) maxHScroll() int {
+	if m.enriched() && m.tab == tabNetwork && m.width < 72 {
+		widest := 0
+		for _, e := range m.visibleNetworkEntries() {
+			p := ""
+			if e.URL != nil {
+				p = e.URL.Path
+			}
+			widest = max(widest, unstyledWidth("   "+m.networkSources[e]+" "+safeTerminal(p)))
+		}
+		return max(widest-m.viewportWidth(), 0)
+	}
 	width := m.viewportWidth()
 	maxWidth := 0
 	for line := range strings.SplitSeq(m.renderContent(), "\n") {

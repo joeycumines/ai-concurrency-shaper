@@ -22,8 +22,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/joeycumines/go-prompt/termtest"
 )
 
 // TestPTY_LogsTabShowsCapturedLogs verifies that application log output is
@@ -32,10 +30,6 @@ import (
 func TestPTY_LogsTabShowsCapturedLogs(t *testing.T) {
 	h := Launch(t)
 	defer h.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
-
-	snap := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("4"); err != nil {
 		t.Fatalf("WriteString 4: %v", err)
 	}
@@ -44,10 +38,7 @@ func TestPTY_LogsTabShowsCapturedLogs(t *testing.T) {
 	// endpoints" string: the Logs tab truncates long lines to the column width,
 	// which can cut trailing content on narrower viewports, so this prefix is the
 	// reliably-visible marker that the startup log was captured.
-	if err := h.Console().Expect(ctx, snap, termtest.Contains("auto-detecting LLM"), "captured startup log"); err != nil {
-		t.Errorf("Logs tab should show captured startup log: %v", err)
-		t.Logf("Full output: %s", h.Console().String())
-	}
+	screenContains(t, h, "auto-detecting LLM")
 }
 
 // TestPTY_NoStderrLogLeak verifies the startup/config logs never reach the
@@ -94,8 +85,6 @@ func TestPTY_GroupConflictWarningCaptured(t *testing.T) {
 		WithArgs("-limit", "POST /a:2@g", "-limit", "POST /b:3@g"),
 	)
 	defer h.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
 
 	// The warning must not leak to the PRE-TUI terminal (a bare stdlib line
 	// would land before the alt-screen takeover and corrupt the dashboard).
@@ -116,21 +105,14 @@ func TestPTY_GroupConflictWarningCaptured(t *testing.T) {
 
 	// The actionable warning must toast on whatever tab is active (the
 	// dashboard here) within a poll interval of startup.
-	snapToast := h.Console().Snapshot()
-	if err := h.Console().Expect(ctx, snapToast, termtest.Contains("WARNING: route"), "config warning toast"); err != nil {
-		t.Errorf("config warning should raise a dashboard toast: %v", err)
-		t.Logf("Full output: %s", h.Console().String())
-	}
+	screenContains(t, h, "WARNING: route")
 
 	if _, err := h.Console().WriteString("4"); err != nil {
 		t.Fatalf("WriteString 4: %v", err)
 	}
 
-	snap := h.Console().Snapshot()
-	if err := h.Console().Expect(ctx, snap, termtest.Contains("WARNING: route"), "captured config warning"); err != nil {
-		t.Errorf("Logs tab should show the captured config warning: %v", err)
-		t.Logf("Full output: %s", h.Console().String())
-	}
+	writeKeys(t, h, "/WARNING: route\r")
+	screenContains(t, h, `Filter: "WARNING: route"`, "WARNING: route")
 }
 
 // TestPTY_TransportErrorToast verifies an actionable (error) log line triggers a
@@ -151,90 +133,51 @@ func TestPTY_TransportErrorToast(t *testing.T) {
 
 	sendRequest(t, ctx, h.ProxyURL()+"/v1/messages")
 
-	snap := h.Console().Snapshot()
-	if err := h.Console().Expect(ctx, snap, termtest.Contains("transport error"), "transport error toast"); err != nil {
-		t.Errorf("expected transport-error toast after upstream failure: %v", err)
-		t.Logf("Full output: %s", h.Console().String())
-	}
+	screenContains(t, h, "transport error")
 }
 
 // TestPTY_LogDetailShowsFullMessage verifies that pressing Enter on a long
 // log line in the Logs tab opens a detail view showing the full wrapped
 // message (not just the truncated list row).
 func TestPTY_LogDetailShowsFullMessage(t *testing.T) {
-	h := Launch(t)
+	h := Launch(t, WithTermSize(20, 60))
 	defer h.Close()
-	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
-	defer cancel()
-
-	time.Sleep(2 * time.Second)
-
-	if _, err := h.Console().WriteString("4"); err != nil {
-		t.Fatalf("WriteString 4: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond)
-
-	// The startup log "auto-detecting LLM endpoints" is long enough to be
-	// truncated in the list but fully visible in the detail view.
-	if _, err := h.Console().WriteString("\r"); err != nil {
-		t.Fatalf("WriteString enter: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond)
-
-	snap := h.Console().Snapshot()
-	if err := h.Console().Expect(ctx, snap, termtest.Contains("Log Line"), "log detail heading"); err != nil {
-		t.Errorf("Log detail should show the heading: %v", err)
-		t.Logf("Full output: %s", h.Console().String())
-	}
-	if err := h.Console().Expect(ctx, snap, termtest.Contains("close"), "log detail close hint"); err != nil {
-		t.Errorf("Log detail should show the close hint: %v", err)
-	}
-
-	// Escape closes the detail.
-	if _, err := h.Console().WriteString("\x1b"); err != nil {
-		t.Fatalf("WriteString escape: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond)
+	writeKeys(t, h, "4/auto-detecting LLM\r")
+	screenContains(t, h, "Filter:", "auto-detecting")
+	writeKeys(t, h, "\r")
+	awaitScreen(t, h, "full wrapped log message", func(screen string) bool {
+		joined := strings.Join(strings.Fields(screen), " ")
+		return strings.Contains(joined, "LOG MESSAGE") && strings.Contains(joined, "auto-detecting LLM endpoints") && strings.Contains(joined, "at concurrency 4") && strings.Contains(joined, "Esc return")
+	})
+	writeKeys(t, h, "\x1b")
+	awaitScreen(t, h, "log inspector closed", func(screen string) bool {
+		return strings.Contains(screen, "Filter:") && !strings.Contains(screen, "LOG MESSAGE")
+	})
 }
 
 // TestPTY_LogDetailPinPersistsNewArrivals verifies that opening a log detail
 // and then letting new logs arrive keeps the ORIGINAL message displayed.
 func TestPTY_LogDetailPinPersistsNewArrivals(t *testing.T) {
-	h := Launch(t)
+	h := Launch(t, WithArgs("-retry", "0"))
 	defer h.Close()
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
+	writeKeys(t, h, "4/auto-detecting LLM\r")
+	screenContains(t, h, "Filter:", "auto-detecting")
+	writeKeys(t, h, "\r")
+	screenContains(t, h, "LOG MESSAGE", "auto-detecting LLM endpoints", "at concurrency 4", "Esc return")
 
-	time.Sleep(2 * time.Second)
-
-	// Switch to Logs tab and open detail on the first line.
-	if _, err := h.Console().WriteString("4"); err != nil {
-		t.Fatalf("WriteString 4: %v", err)
-	}
+	// Force an actual new log line; successful traffic need not log anything.
+	h.upstream.Close()
+	sendRequest(t, ctx, h.ProxyURL()+"/v1/messages")
+	// Give the normal polling update a chance to consume the new log while
+	// the inspector remains open. Modal evidence views suppress toast overlays.
 	time.Sleep(500 * time.Millisecond)
-	if _, err := h.Console().WriteString("\r"); err != nil {
-		t.Fatalf("WriteString enter: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond)
-
-	snap := h.Console().Snapshot()
-	if err := h.Console().Expect(ctx, snap, termtest.Contains("Log Line"), "log detail heading"); err != nil {
-		t.Fatalf("Log detail should open: %v", err)
-	}
-
-	// Generate new traffic (new log lines) while the detail is open.
-	sendRequest(t, t.Context(), h.ProxyURL()+"/v1/messages")
-	time.Sleep(2 * time.Second)
-
-	// The detail should still show a "Log Line" heading (the original item
-	// is still displayed), not have closed or shifted to the list view.
-	out := h.Console().String()
-	if !strings.Contains(out, "Log Line") {
-		t.Errorf("detail heading should still show Log Line after new arrivals")
-		t.Logf("Full output: %s", out)
-	}
-	if !strings.Contains(out, "close") {
-		t.Errorf("detail close hint should still be visible after new arrivals")
-		t.Logf("Full output: %s", out)
-	}
+	screenContains(t, h, "LOG MESSAGE", "auto-detecting LLM endpoints", "at concurrency 4", "Esc return")
+	writeKeys(t, h, "\x1b")
+	awaitScreen(t, h, "return to log list", func(screen string) bool {
+		return !strings.Contains(screen, "LOG MESSAGE") && strings.Contains(screen, "Filter:")
+	})
+	writeKeys(t, h, "/\x15transport error\r")
+	screenContains(t, h, `Filter: "transport error"`, "transport error")
 }
