@@ -828,7 +828,7 @@ func parseJSONNumber(lexeme string) (canonicalJSONNumber, bool) {
 	exponent := 0
 	saturated := false
 	if i := strings.IndexAny(lexeme, "eE"); i >= 0 {
-		exp, sat, ok := boundedExponent(lexeme[i+1:])
+		exp, ok, sat := boundedExponent(lexeme[i+1:])
 		if !ok {
 			return out, false
 		}

@@ -508,22 +508,79 @@ func TestToolDefinitionUsesTheStrictClientContract(t *testing.T) {
 // TestToolDefinitionEquivalentNumbersAreNotSuperseded proves numerically equal
 // schema numbers are the same definition even when their JSON lexemes differ.
 // A false "redefined mid-conversation" note would misreport loss observability.
+// The exponent branch of the comparator is exercised here (1 vs 1e0, 1000 vs
+// 1e3, 0.001 vs 1e-3, 1.5 vs 15e-1, -1 vs -1E+0, 0 vs 0e5, 100 vs 1e2,
+// 1 vs 10e-1), not just the plain decimal path (1 vs 1.0).
 func TestToolDefinitionEquivalentNumbersAreNotSuperseded(t *testing.T) {
 	def := func(minimum string) string {
 		return `{"type":"tool_addition","tool":{"type":"tool_definition","definition":` +
 			`{"name":"db_query","input_schema":{"type":"object","minimum":` + minimum + `}}}}`
 	}
+	equivalent := []string{"1.0", "1e0", "10e-1", "1E+0", "1.000"}
+	for _, minimum := range equivalent {
+		body := `{"model":"m","max_tokens":16,` +
+			`"messages":[{"role":"user","content":"x"},` +
+			`{"role":"system","content":[` + def("1") + `]},` +
+			`{"role":"system","content":[` + def(minimum) + `]}]}`
+		result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
+		if err != nil {
+			t.Fatalf("minimum %s: %v", minimum, err)
+		}
+		for _, loss := range result.Report.Losses {
+			if strings.Contains(loss.Detail, "redefined") {
+				t.Fatalf("1 vs %s reported as a supersession: %+v", minimum, loss)
+			}
+		}
+	}
+	// Distinct values that merely spell the same magnitude differently must
+	// still differ: 0e5 is zero, but 1e-3 is not 1.
+	for _, pair := range [][2]string{{"0", "1e-3"}, {"1", "1e1"}, {"1000", "1e2"}, {"0.001", "1e-2"}} {
+		body := `{"model":"m","max_tokens":16,` +
+			`"messages":[{"role":"user","content":"x"},` +
+			`{"role":"system","content":[` + def(pair[0]) + `]},` +
+			`{"role":"system","content":[` + def(pair[1]) + `]}]}`
+		result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
+		if err != nil {
+			t.Fatalf("%s vs %s: %v", pair[0], pair[1], err)
+		}
+		redefined := 0
+		for _, loss := range result.Report.Losses {
+			if strings.Contains(loss.Detail, "redefined") {
+				redefined++
+			}
+		}
+		if redefined != 1 {
+			t.Fatalf("%s vs %s: got %d supersession notes, want 1: %+v", pair[0], pair[1], redefined, result.Report.Losses)
+		}
+	}
+	// Mixed sign/exponent spellings of one value.
 	body := `{"model":"m","max_tokens":16,` +
 		`"messages":[{"role":"user","content":"x"},` +
-		`{"role":"system","content":[` + def("1") + `]},` +
-		`{"role":"system","content":[` + def("1.0") + `]}]}`
+		`{"role":"system","content":[` + def("-1") + `]},` +
+		`{"role":"system","content":[` + def("-1E+0") + `]}]}`
 	result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, loss := range result.Report.Losses {
 		if strings.Contains(loss.Detail, "redefined") {
-			t.Fatalf("equivalent schemas reported as a supersession: %+v", loss)
+			t.Fatalf("-1 vs -1E+0 reported as a supersession: %+v", loss)
+		}
+	}
+	// 0.001 vs 1e-3 and 1.5 vs 15e-1.
+	for _, pair := range [][2]string{{"0.001", "1e-3"}, {"1.5", "15e-1"}, {"100", "1e2"}, {"1000", "1e3"}, {"0", "0e5"}} {
+		body := `{"model":"m","max_tokens":16,` +
+			`"messages":[{"role":"user","content":"x"},` +
+			`{"role":"system","content":[` + def(pair[0]) + `]},` +
+			`{"role":"system","content":[` + def(pair[1]) + `]}]}`
+		result, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy())
+		if err != nil {
+			t.Fatalf("%s vs %s: %v", pair[0], pair[1], err)
+		}
+		for _, loss := range result.Report.Losses {
+			if strings.Contains(loss.Detail, "redefined") {
+				t.Fatalf("%s vs %s reported as a supersession: %+v", pair[0], pair[1], loss)
+			}
 		}
 	}
 }
