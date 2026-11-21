@@ -112,7 +112,12 @@ func TestMessagesInlineCacheControlExclusions(t *testing.T) {
 
 func TestMessagesToolRedefinitionReachesRuntimeLog(t *testing.T) {
 	body := []byte(`{"model":"m","max_tokens":16,"tools":[{"name":"db","input_schema":{"type":"object","properties":{"old":{"type":"string"}}}}],"messages":[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"name":"db","input_schema":{"type":"object","properties":{"new":{"type":"string"}}}}}}]}]}`)
-	result, err := DecodeMessagesRequest(body, StrictLossPolicy())
+	// A genuine redefinition is a policy-gated loss: strict refuses it, the
+	// approved policy applies it.
+	if _, err := DecodeMessagesRequest(body, StrictLossPolicy()); err == nil {
+		t.Fatal("strict policy accepted a redefinition")
+	}
+	result, err := DecodeMessagesRequest(body, messagesToolStateApproval())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +407,7 @@ func TestMessagesInlineDefinitionEqualityPreservesSchemaNumbers(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(`{"model":"m","max_tokens":16,"tools":[{"type":"custom","name":"db","input_schema":` + initial + `}],"messages":[{"role":"user","content":"hi"},{"role":"system","content":[{"type":"tool_addition","tool":{"type":"tool_definition","definition":{"type":"function","name":"db","input_schema":` + tc.schema + `}}}]}]}`)
-			result, err := DecodeMessagesRequest(body, StrictLossPolicy())
+			result, err := DecodeMessagesRequest(body, messagesToolStateApproval())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -418,8 +423,14 @@ func TestMessagesInlineDefinitionEqualityPreservesSchemaNumbers(t *testing.T) {
 					}
 				}
 			}
-			if count != 1 {
-				t.Fatalf("got %d decisions for one definition", count)
+			// An equal repeat records one Note; a genuine change records the
+			// combined Note plus the policy-gated Loss at .tool.definition.
+			want := 1
+			if tc.note == "redefined" {
+				want = 2
+			}
+			if count != want {
+				t.Fatalf("got %d decisions for one definition, want %d: %+v", count, want, result.Report.Losses)
 			}
 			rendered, _, err := RenderChatRequest(result.Request, testExchangeContext(), ChatCapabilities{})
 			if err != nil {

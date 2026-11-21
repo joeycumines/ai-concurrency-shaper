@@ -669,6 +669,7 @@ func normalizeMessagesTools(declared []anthropicmessages.Tool, inline []messages
 		}
 		detail := fmt.Sprintf("tool %q defined mid-conversation is offered for the whole request (the target has one global tool list, so the availability point cannot be expressed)", canonical.Name)
 		previous, exists := indices[canonical.Name]
+		redefined := false
 		if exists {
 			same, err := sameMessagesFunctionDefinition(result.Request.Tools[previous], canonical)
 			if err != nil {
@@ -678,6 +679,21 @@ func normalizeMessagesTools(declared []anthropicmessages.Tool, inline []messages
 				detail = fmt.Sprintf("tool %q repeats the earlier function definition; it remains offered for the whole request (the target cannot express an inline availability point)", canonical.Name)
 			} else {
 				detail = fmt.Sprintf("tool %q is redefined mid-conversation; the newest definition serves the whole request, including turns authored against the earlier definition (the target cannot express an inline availability point)", canonical.Name)
+				redefined = true
+			}
+		}
+		if redefined {
+			// A genuine supersession loses the historical meaning of the
+			// earlier definition (turns authored against it are reinterpreted
+			// under the newest schema), so it is a policy-gated loss, not just
+			// a Note: a strict policy must be able to refuse it.
+			if err := result.Report.Lose(
+				policy,
+				FeatureAnthropicToolChanges,
+				definition.path+".tool.definition",
+				"the redefined tool replaces the earlier definition for the whole request, so turns authored against the earlier definition lose their original interpretation",
+			); err != nil {
+				return err
 			}
 		}
 		// The runtime logger deduplicates feature/path pairs. One combined
