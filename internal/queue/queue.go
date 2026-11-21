@@ -47,6 +47,7 @@ type Limiter struct {
 	adaptiveTimer                              *time.Timer
 	timerEpoch                                 uint64
 	observer                                   func(time.Time, LimiterStats)
+	observerClock                              func() time.Time
 }
 
 type waiter struct {
@@ -294,13 +295,24 @@ func (l *Limiter) Stats() LimiterStats { l.mu.Lock(); defer l.mu.Unlock(); retur
 // the initial state. The callback runs under the limiter lock to preserve
 // event ordering; it must never call this limiter or perform I/O.
 func (l *Limiter) SetObserver(fn func(time.Time, LimiterStats)) {
+	l.SetObserverWithClock(fn, time.Now)
+}
+
+// SetObserverWithClock binds the observer's stamp to the same clock the sink
+// uses. The callback still runs under the limiter lock, preserving transition
+// order; the clock function must be safe for concurrent use.
+func (l *Limiter) SetObserverWithClock(fn func(time.Time, LimiterStats), clock func() time.Time) {
+	if clock == nil {
+		clock = time.Now
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.observer = fn
+	l.observerClock = clock
 	l.notifyLocked()
 }
 func (l *Limiter) notifyLocked() {
 	if l.observer != nil {
-		l.observer(time.Now(), l.statsLocked())
+		l.observer(l.observerClock(), l.statsLocked())
 	}
 }

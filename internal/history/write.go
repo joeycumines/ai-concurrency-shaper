@@ -34,6 +34,7 @@ func (s *Store) commit(ctx context.Context, packets []observation.Packet) error 
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := s.opts.Now()
+	retention := now.Add(-s.opts.Retention).UnixNano()
 	rawBefore := max(s.rawBefore, now.Add(-15*time.Minute).UTC().Truncate(time.Minute).UnixNano())
 	updates := make(map[rollupKey]observation.Interval)
 	latest := time.Time{}
@@ -103,7 +104,9 @@ func (s *Store) commit(ctx context.Context, packets []observation.Packet) error 
 					agg.Resources = append([]observation.ResourceIntegral(nil), v.Resources...)
 				} else {
 					oldStart, oldEnd := envelope(agg)
-					epsilon := time.Duration(agg.ClockUncertaintyNS + v.ClockUncertaintyNS)
+					// Only the two adjacent endpoint brackets matter for a
+					// boundary check; an accumulated sum would hide gaps.
+					epsilon := time.Duration(max(agg.ClockUncertaintyNS, v.ClockUncertaintyNS))
 					if a.After(oldEnd.Add(epsilon)) || b.Before(oldStart.Add(-epsilon)) {
 						agg.Gap = true
 					}
@@ -149,6 +152,9 @@ func (s *Store) commit(ctx context.Context, packets []observation.Packet) error 
 		}
 	}
 	for k, v := range updates {
+		if _, expired := envelope(v); expired.Before(time.Unix(0, retention)) {
+			continue
+		}
 		data, e := json.Marshal(v)
 		if e != nil {
 			return e
@@ -162,15 +168,18 @@ func (s *Store) commit(ctx context.Context, packets []observation.Packet) error 
 	// Cutoffs only move forward. A backward wall-clock step cannot reconstruct an
 	// expired rollup from a now-incomplete set of raw children.
 	minuteBefore := max(s.minuteBefore, now.Add(-24*time.Hour).UTC().Truncate(time.Hour).UnixNano())
-	retention := now.Add(-s.opts.Retention).UnixNano()
+	// Rollups must not outlive the configured retention. Receipts are kept
+	// through the end of the last surviving hourly window so a replay into
+	// that rollup cannot double-count after its receipt was expired.
+	alignedReceiptBefore := now.Add(-s.opts.Retention).UTC().Truncate(time.Hour).UnixNano()
 	for _, q := range []struct {
 		sql  string
 		args []any
 	}{
 		{"DELETE FROM buckets WHERE minute_ns < ?", []any{rawBefore}},
-		{"DELETE FROM rollups WHERE tier=60 AND window_ns < ?", []any{minuteBefore}},
+		{"DELETE FROM rollups WHERE tier=60 AND (window_ns < ? OR max_ns < ?)", []any{minuteBefore, retention}},
 		{"DELETE FROM rollups WHERE tier=3600 AND max_ns < ?", []any{retention}},
-		{"DELETE FROM receipts WHERE max_ns < ?", []any{retention}},
+		{"DELETE FROM receipts WHERE max_ns < ?", []any{alignedReceiptBefore}},
 		{"DELETE FROM requests WHERE at_ns < ?", []any{retention}},
 		{"DELETE FROM requests WHERE id IN (SELECT id FROM requests ORDER BY started_ns DESC,id DESC LIMIT -1 OFFSET 10000)", nil},
 		{"DELETE FROM markers WHERE at_ns < ?", []any{retention}},
@@ -219,9 +228,9 @@ func (s *Store) commit(ctx context.Context, packets []observation.Packet) error 
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	s.mu.Lock()
 	s.rawBefore = rawBefore
 	s.minuteBefore = minuteBefore
-	s.mu.Lock()
 	if latest.After(s.health.CommittedThrough) {
 		s.health.CommittedThrough = latest
 	}

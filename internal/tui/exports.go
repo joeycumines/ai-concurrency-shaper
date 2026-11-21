@@ -2,10 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/joeycumines/ai-concurrency-shaper/internal/control"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/investigation"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/journal"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/observation"
@@ -21,6 +23,7 @@ type exportState struct {
 type exportResultMsg struct {
 	path string
 	err  error
+	raw  bool
 }
 
 func (m Model) networkSelection(all bool) investigation.Selection {
@@ -40,6 +43,71 @@ func (m Model) networkSelection(all bool) investigation.Selection {
 	}
 	return selection
 }
+
+// clonePoints copies every slice reachable from a point so a later
+// observation tick cannot mutate the value an async export has already frozen.
+func clonePoints(points []observation.Point) []observation.Point {
+	if points == nil {
+		return nil
+	}
+	out := make([]observation.Point, len(points))
+	for i, p := range points {
+		out[i] = p
+		out[i].Resources = slices.Clone(p.Resources)
+	}
+	return out
+}
+
+func cloneQueryResult(result observation.QueryResult) observation.QueryResult {
+	result.Query.Providers = slices.Clone(result.Query.Providers)
+	result.Points = clonePoints(result.Points)
+	result.Markers = slices.Clone(result.Markers)
+	result.ByProvider = slices.Clone(result.ByProvider)
+	for i := range result.ByProvider {
+		result.ByProvider[i].Points = clonePoints(result.ByProvider[i].Points)
+	}
+	return result
+}
+
+func cloneRequestResult(result observation.RequestResult) observation.RequestResult {
+	result.Requests = slices.Clone(result.Requests)
+	for i := range result.Requests {
+		result.Requests[i].Attempts = slices.Clone(result.Requests[i].Attempts)
+		result.Requests[i].Usage = cloneUsage(result.Requests[i].Usage)
+	}
+	return result
+}
+
+func cloneUsage(u *observation.Usage) *observation.Usage {
+	if u == nil {
+		return nil
+	}
+	copy := *u
+	return &copy
+}
+
+func cloneControlSnapshot(s control.Snapshot) control.Snapshot {
+	s.Providers = slices.Clone(s.Providers)
+	for i := range s.Providers {
+		s.Providers[i].Pools = slices.Clone(s.Providers[i].Pools)
+	}
+	s.Audit = slices.Clone(s.Audit)
+	return s
+}
+
+func cloneFact(f observation.RequestFact) observation.RequestFact {
+	f.Attempts = slices.Clone(f.Attempts)
+	f.Usage = cloneUsage(f.Usage)
+	return f
+}
+
+func (m Model) savedExportLines(path string, raw bool) []string {
+	if raw {
+		return []string{"RAW INVESTIGATION EXPORT", "File: " + path, "", "This bundle includes retained raw bodies, arbitrary HTTP headers and URLs, and may contain credentials, prompts, tool arguments or responses.", "Review its contents before sharing. Existing files are never overwritten."}
+	}
+	return []string{"METADATA EXPORT (safe by default)", "File: " + path, "", "This export contains the frozen selection taken when you pressed export.", "Arbitrary bodies, headers and URLs are omitted from investigation bundles.", "Existing files are never overwritten."}
+}
+
 func (m *Model) beginExport(kind string) tea.Cmd {
 	if m.export.pending {
 		m.tell("Export is already writing")
@@ -54,26 +122,27 @@ func (m *Model) beginExport(kind string) tea.Cmd {
 	var selection *investigation.Selection
 	switch kind {
 	case "measurements":
-		result := m.insights.result
+		src := cloneQueryResult(m.insights.result)
+		result := cloneQueryResult(m.insights.result)
 		from, to := m.insights.selectionRange()
 		result.Query.From = from
 		result.Query.To = to
 		// Export every whole interval in the selected range; edge exclusions are
 		// explicit. The plotted cursor never supplies invented fractional counts.
 		result.Points = nil
-		for _, p := range m.insights.result.Points {
+		for _, p := range src.Points {
 			if !p.Start.Before(from) && !p.End.After(to) {
 				result.Points = append(result.Points, p)
 			}
 		}
 		result.Markers = nil
-		for _, v := range m.insights.result.Markers {
+		for _, v := range src.Markers {
 			if !v.At.Before(from) && v.At.Before(to) {
 				result.Markers = append(result.Markers, v)
 			}
 		}
 		result.ByProvider = nil
-		for _, series := range m.insights.result.ByProvider {
+		for _, series := range src.ByProvider {
 			copySeries := series
 			copySeries.Points = nil
 			for _, p := range series.Points {
@@ -89,17 +158,19 @@ func (m *Model) beginExport(kind string) tea.Cmd {
 			Observations observation.QueryResult `json:"observations"`
 		}{result.Query, "whole contained intervals; partial edges are excluded", result}
 	case "requests":
+		query := m.displayedFactQuery()
+		query.Providers = slices.Clone(query.Providers)
 		value = struct {
 			Query  observation.RequestQuery  `json:"query"`
 			Result observation.RequestResult `json:"result"`
-		}{m.displayedFactQuery(), m.insights.facts}
+		}{query, cloneRequestResult(m.insights.facts)}
 	case "logs":
 		value = struct {
 			Filter string   `json:"filter"`
 			Lines  []string `json:"lines"`
 		}{m.filterText, append([]string(nil), m.visibleLogLines()...)}
 	case "controls":
-		value = m.controlPanel.snapshot
+		value = cloneControlSnapshot(m.controlPanel.snapshot)
 	case "network":
 		s := m.networkSelection(true)
 		selection = &s
@@ -108,7 +179,7 @@ func (m *Model) beginExport(kind string) tea.Cmd {
 			s := m.networkSelection(false)
 			selection = &s
 		} else if m.inspection.fact != nil {
-			value = *m.inspection.fact
+			value = cloneFact(*m.inspection.fact)
 		} else if m.inspection.exportValue != nil {
 			value = m.inspection.exportValue
 		} else {
@@ -131,7 +202,7 @@ func (m *Model) beginExport(kind string) tea.Cmd {
 		} else {
 			path, err = investigation.WriteJSON(dir, kind, value)
 		}
-		return exportResultMsg{path, err}
+		return exportResultMsg{path: path, err: err}
 	}
 }
 func (m *Model) beginRawExport() tea.Cmd {
@@ -177,7 +248,10 @@ func (m *Model) writeRaw() tea.Cmd {
 	dir := m.runtime.ExportDir
 	m.export.rawReview = false
 	m.export.pending = true
-	return func() tea.Msg { p, e := investigation.Write(dir, s, true); return exportResultMsg{p, e} }
+	return func() tea.Msg {
+		p, e := investigation.Write(dir, s, true)
+		return exportResultMsg{path: p, err: e, raw: true}
+	}
 }
 func (m Model) handleExportKey(msg tea.KeyPressMsg) (Model, tea.Cmd, bool) {
 	e := &m.export
@@ -282,7 +356,9 @@ func (m Model) rawButtonAt(x, y int) int {
 	if x >= 0 && x < 12 {
 		return 0
 	}
-	if x >= 13 && x < 28 && m.rawCanApply() {
+	// The rendered button is " [ Export RAW ] ", occupying cells 13..28
+	// inclusive; a press on the closing bracket must still activate it.
+	if x >= 13 && x <= 28 && m.rawCanApply() {
 		return 1
 	}
 	return -1

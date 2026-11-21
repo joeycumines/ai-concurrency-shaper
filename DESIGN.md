@@ -20,11 +20,11 @@ The dashboard carries **two true-color palettes** behind one hue-to-state contra
 | Panel (`#21262D`)           | `#21262D` | Gauge empty track, subtle separators.                                  |
 | Text primary (`#E6EDF3`)    | `#E6EDF3` | Body text, selected row fg over accent.                                |
 | Text secondary (`#8B949E`)    | `#8B949E` | Dim labels, inactive tabs, footer/status text.                       |
-| Text muted (`#6E7681`)      | `#6E7681` | Very dim hints, passthrough tag.                                     |
+| Text muted / hint (`#919AA5`) | `#919AA5` | Very dim hints, passthrough tag, separators, and palette hints.      |
 | Accent blue (`#58A6FF`)     | `#58A6FF` | Tab active, link/section titles, table headers, borders.               |
 | Accent blue-bright (`#388BFD`)| `#388BFD`| Row selection background               |
 | Success green (`#3FB950`)     | `#3FB950` | Active gauge, 2xx status, download segment, CLOSED breaker.           |
-| Warning amber (`#D29922`)     | `#D29922` | Queue depth bar, queued waterfall segment, limited tag.               |
+| Queue fill (`#39D353`)         | `#39D353` | Default queue/occupied fill; severity escalates to amber/orange/red under pressure. |
 | Error red (`#F85149`)         | `#F85149` | 5xx status, OPEN breaker state.                                       |
 | Error/alert orange (`#F0883E`)| `#F0883E` | 4xx status, limited tag, limited-tag text, HALF_OPEN breaker.         |
 | Circuit closed green (`#3FB950`)| `#3FB950` | CLOSED circuit breaker state.                                          |
@@ -76,6 +76,8 @@ Toasts are self-colored on both palettes, so they stay legible regardless of the
 - Content area uses a right-hand scrollbar in the last column.
 - Dashboard stacks vertically: Circuit Breaker (when configured), Throughput, Active + Queued bars, Status, In-Flight Requests, Summary.
 - Scrollable tabs (Requests, Network, Logs, Concurrency, Routes) have tables/lists with selected-row highlight.
+- Insights uses the full pane for one of eight views (rates, latency heatmap, capacity, distribution, comparison, usage, fidelity, attempts) with a shared time cursor/brush and an interval-detail reading pane. At 110+ columns the numerical detail pane sits beside the chart; below that it is replaced by compact summary rows under the chart. From 40×20 upward the numbered rail names the active view and charts compress their labels without losing the selected range. Heatmaps expand bin rows when height allows; axis format switches from time-of-day to dates for ranges of a day or more.
+- Controls presents a provider/pool list and mutation forms; reviews paginate with a Cancel action that is always reachable. On narrow panes the tables shorten their column labels and the review uses the full content area.
 
 ## Components
 

@@ -129,15 +129,16 @@ type prepared struct {
 // opaque random token bound to a frozen command and exact runtime revision.
 // The caller never supplies the command again to Apply.
 type Controller struct {
-	mu        sync.Mutex
-	providers map[string]*provider
-	revision  uint64
-	prepared  map[string]*prepared
-	order     []string
-	audit     []Audit
-	cancel    func(string) bool
-	onChange  func(Audit)
-	closed    bool
+	mu         sync.Mutex
+	providers  map[string]*provider
+	revision   uint64
+	prepared   map[string]*prepared
+	order      []string
+	audit      []Audit
+	cancel     func(string, string) bool
+	cancelByID func(string) bool
+	onChange   func(Audit)
+	closed     bool
 }
 
 func New() *Controller {
@@ -163,7 +164,7 @@ func (c *Controller) RegisterProvider(name string, pools map[string]*queue.Limit
 		if id == "" || len(id) > 512 || l == nil || l.Limit() < 1 {
 			return fmt.Errorf("invalid pool %q", id)
 		}
-		p.pools[id] = &pool{limiter: l, baseline: l.Limit()}
+		p.pools[id] = &pool{limiter: l, baseline: l.Limit(), revision: l.Stats().Revision}
 	}
 	c.providers[name] = p
 	c.revision++
@@ -173,6 +174,19 @@ func (c *Controller) RegisterProvider(name string, pools map[string]*queue.Limit
 // SetCanceller connects exact logical-request cancellation. The function must
 // be bounded and memory-only, and must not call the controller.
 func (c *Controller) SetCanceller(cancel func(string) bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cancelByID = cancel
+	if cancel != nil {
+		c.cancel = func(_ string, id string) bool { return cancel(id) }
+	} else {
+		c.cancel = nil
+	}
+}
+
+// SetProviderCanceller connects cancellation that verifies the reviewed
+// provider identity rather than cancelling by request ID alone.
+func (c *Controller) SetProviderCanceller(cancel func(string, string) bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cancel = cancel
@@ -417,7 +431,7 @@ func (c *Controller) Apply(token string) (Result, error) {
 			pl.timer = time.AfterFunc(cmd.TTL, func() { c.expirePool(cmd.Provider, cmd.Pool, generation) })
 		}
 	case Cancel:
-		if !c.cancel(cmd.RequestID) {
+		if c.cancel == nil || !c.cancel(cmd.Provider, cmd.RequestID) {
 			c.mu.Unlock()
 			return Result{}, errors.New("request is no longer live")
 		}

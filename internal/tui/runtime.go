@@ -199,7 +199,9 @@ func (m Model) runtimeHeaderParts() (string, []runtimeProviderChip, string) {
 	x := unstyledWidth(brand)
 	for i := start; i < len(m.providers) && budget >= 4; i++ {
 		label := truncatePlain(safeTerminal(m.providerLabel(i)), min(23, budget-3))
-		width := unstyledWidth(label) + 2
+		// Match the horizontal frame of the chip style used by runtimeHeader
+		// so the recorded hit-test width equals the rendered width.
+		width := unstyledWidth(label) + m.styles.chipActiveStyle.GetHorizontalFrameSize()
 		chips = append(chips, runtimeProviderChip{i, x, width, label})
 		x += width + 1
 		budget -= width + 1

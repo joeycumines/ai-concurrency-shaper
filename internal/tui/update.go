@@ -63,7 +63,7 @@ func (m Model) Init() tea.Cmd {
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.enriched() {
 		if next, cmd, handled := m.updateRuntime(msg); handled {
-			next.networkFiltered = next.computeVisibleNetworkEntries()
+			next.refreshNetworkFilter()
 			return next, cmd
 		}
 	}
@@ -138,7 +138,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseReleaseMsg:
 		m, cmd = m.handleMouseRelease(msg)
 	}
-	m.networkFiltered = m.computeVisibleNetworkEntries()
+	m.refreshNetworkFilter()
 	m.toasts = toast.VisibleToasts(m.toasts)
 
 	// If the anchored Logs detail item was evicted from the ring, close the
@@ -205,6 +205,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	if m.mode == modeDetail {
 		switch msg.String() {
+		case "q":
+			m.flushPendingLogs()
+			return m, tea.Quit
 		case "esc", "enter", " ", "space":
 			m.mode = modeBrowse
 			m.logDetailAnchor = logDetailAnchor{}
@@ -217,6 +220,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 	if m.mode == modeFilter {
 		switch msg.String() {
+		case "q":
+			m.flushPendingLogs()
+			return m, tea.Quit
 		case "esc":
 			m.mode = modeBrowse
 			m.filterText = ""

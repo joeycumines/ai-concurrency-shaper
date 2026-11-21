@@ -16,6 +16,9 @@ func addDuration(a, b int64) int64 {
 	if b > 0 && a > math.MaxInt64-b {
 		return math.MaxInt64
 	}
+	if b < 0 && a < math.MinInt64-b {
+		return math.MinInt64
+	}
 	return a + b
 }
 func (c *Counters) Add(b Counters) {
@@ -164,13 +167,11 @@ func (a *Interval) Add(b Interval) {
 	a.Resources = mergeResources(a.Resources, b.Resources)
 	a.ElapsedNS = addDuration(a.ElapsedNS, b.ElapsedNS)
 	a.ClockUncertaintyNS = addDuration(a.ClockUncertaintyNS, b.ClockUncertaintyNS)
-	a.ClockStep = a.ClockStep || b.ClockStep
-	if b.Start.Before(a.Start) {
-		a.Start = b.Start
-	}
-	if b.End.After(a.End) {
-		a.End = b.End
-	}
+	a.ClockStep = a.ClockStep || b.ClockStep || a.End.Before(a.Start) || b.End.Before(b.Start)
+	as, ae := intervalEnvelope(*a)
+	bs, be := intervalEnvelope(b)
+	a.Start = minTime(as, bs)
+	a.End = maxTime(ae, be)
 	a.LastSequence = max(a.LastSequence, b.Sequence, b.LastSequence)
 }
 func intervalEnvelope(v Interval) (time.Time, time.Time) {

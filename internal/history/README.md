@@ -8,7 +8,7 @@ the directory's ACL. The deployment contract is one gateway writer per local
 file. WAL is required; a network filesystem is not a supported substitute.
 
 The pure-Go driver is `modernc.org/sqlite` v1.62.0 with its required
-`modernc.org/libc` v1.80.1. One connection owns writes; two query-only connections
+`modernc.org/libc` v1.82.6. One connection owns writes; two query-only connections
 serve reads. There is no cgo dependency. `normal` selects WAL `synchronous=NORMAL`;
 `full` selects `FULL`. These concern committed SQLite transactions. Neither
 makes the in-memory queue durable against process or power loss. A normal

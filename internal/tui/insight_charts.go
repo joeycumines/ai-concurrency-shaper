@@ -243,7 +243,7 @@ func (m Model) renderHeatmap() []string {
 		line.WriteString(m.styles.dimStyle2.Render(fmt.Sprintf("%7s│", label)))
 		for x := 0; x < g.w; x++ {
 			p, ok := pointAt(m.insights.result.Points, m.chartTime(x+g.x))
-			if !ok || p.Samples == 0 || !p.Complete {
+			if !ok || p.Samples == 0 {
 				if x == cursor {
 					line.WriteString(m.styles.sectionStyle.Render("│"))
 				} else {

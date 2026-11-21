@@ -56,38 +56,95 @@ func (s *Store) Read(ctx context.Context, q observation.Query, exclude observati
 	if err != nil {
 		return nil, nil, false, err
 	}
-	args := []any{q.From.UnixNano(), q.To.UnixNano()}
-	p1 := providerClause(q.Providers, &args)
-	args = append(args, q.From.UnixNano(), q.To.UnixNano())
-	p2 := providerClause(q.Providers, &args)
-	sqlText := `SELECT tier,window_ns,payload FROM rollups WHERE max_ns>? AND min_ns<?` + p1 + ` UNION ALL SELECT 1,minute_ns,payload FROM buckets WHERE max_ns>? AND min_ns<?` + p2 + ` ORDER BY 1 DESC,2 ASC LIMIT 100001`
-	rows, err := db.QueryContext(ctx, sqlText, args...)
-	if err != nil {
-		return nil, nil, false, err
+	// Fetch coarse rollups for the whole window. Fine tiers are fetched only
+	// near boundaries (where a coarse parent straddles q.From/q.To) and near
+	// the live exclusion seam, where selectTiers must fall back to children.
+	// That keeps the 100k-row / 64 MiB budget off interior rows the selector
+	// would discard without losing boundary data.
+	step := max(q.To.Sub(q.From)/time.Duration(q.MaxPoints), 1)
+	preferred := 1
+	if step >= time.Hour {
+		preferred = 3600
+	} else if step >= time.Minute {
+		preferred = 60
+	}
+	boundaryFrom := q.From.UTC().Truncate(time.Hour)
+	if boundaryFrom.After(q.From.Add(-time.Hour)) {
+		boundaryFrom = q.From.Add(-time.Hour)
+	}
+	boundaryTo := q.To.UTC().Truncate(time.Hour).Add(time.Hour)
+	if boundaryTo.Before(q.To.Add(time.Hour)) {
+		boundaryTo = q.To.Add(time.Hour)
 	}
 	encoded := make([]encodedRow, 0, 256)
 	truncated := false
 	bytes := 0
-	for rows.Next() {
-		var v encodedRow
-		if err = rows.Scan(&v.tier, &v.window, &v.data); err != nil {
-			_ = rows.Close()
-			return nil, nil, false, err
+	var fetchErr error
+	fetch := func(sqlText string, args []any) {
+		if truncated || fetchErr != nil {
+			return
 		}
-		bytes += len(v.data)
-		if len(encoded) >= observation.MaxSourceIntervals || bytes > 64<<20 {
-			truncated = true
-			break
+		rows, err := db.QueryContext(ctx, sqlText, args...)
+		if err != nil {
+			fetchErr = err
+			return
 		}
-		encoded = append(encoded, v)
+		defer rows.Close()
+		for rows.Next() {
+			var v encodedRow
+			if err = rows.Scan(&v.tier, &v.window, &v.data); err != nil {
+				fetchErr = err
+				return
+			}
+			bytes += len(v.data)
+			if len(encoded) >= observation.MaxSourceIntervals || bytes > 64<<20 {
+				truncated = true
+				return
+			}
+			encoded = append(encoded, v)
+		}
+		fetchErr = rows.Err()
 	}
-	err = rows.Err()
-	closeErr := rows.Close()
-	if err != nil {
-		return nil, nil, false, err
+	// Coarse and minute rollups across the whole range.
+	for _, tier := range []int{3600, 60} {
+		if tier < preferred {
+			continue
+		}
+		args := []any{q.From.UnixNano(), q.To.UnixNano(), tier}
+		p := providerClause(q.Providers, &args)
+		fetch(`SELECT tier,window_ns,payload FROM rollups WHERE max_ns>? AND min_ns<? AND tier=?`+p+` ORDER BY 2 ASC LIMIT 100001`, args)
 	}
-	if closeErr != nil {
-		return nil, nil, false, closeErr
+	// Raw and minute children near boundaries and the exclusion seam are
+	// required whenever a parent straddles a query edge or is excluded.
+	for _, tier := range []int{60, 1} {
+		_ = preferred
+		var from, to time.Time
+		if tier == 60 {
+			from, to = q.From.UTC().Truncate(time.Hour), boundaryTo
+		} else {
+			from, to = boundaryFrom, boundaryTo
+		}
+		args := []any{from.UnixNano(), to.UnixNano()}
+		p := providerClause(q.Providers, &args)
+		if tier == 1 {
+			fetch(`SELECT 1,minute_ns,payload FROM buckets WHERE max_ns>? AND min_ns<?`+p+` ORDER BY 2 ASC LIMIT 100001`, args)
+		} else {
+			fetch(`SELECT tier,window_ns,payload FROM rollups WHERE max_ns>? AND min_ns<? AND tier=60`+p+` ORDER BY 2 ASC LIMIT 100001`, args)
+		}
+	}
+	// If a parent at the exclusion seam was excluded, its children must be
+	// available regardless of the preferred tier.
+	if exclude.FromSequence > 0 {
+		args := []any{boundaryFrom.UnixNano(), boundaryTo.UnixNano()}
+		p := providerClause(q.Providers, &args)
+		fetch(`SELECT 1,minute_ns,payload FROM buckets WHERE max_ns>? AND min_ns<?`+p+` ORDER BY 2 ASC LIMIT 100001`, args)
+		args = []any{boundaryFrom.UnixNano(), boundaryTo.UnixNano()}
+		p = providerClause(q.Providers, &args)
+		fetch(`SELECT tier,window_ns,payload FROM rollups WHERE max_ns>? AND min_ns<? AND tier=60`+p+` ORDER BY 2 ASC LIMIT 100001`, args)
+	}
+	truncated = truncated || len(encoded) >= observation.MaxSourceIntervals || bytes > 64<<20
+	if fetchErr != nil {
+		return nil, nil, false, fetchErr
 	}
 	decoded, err := decodeRows(ctx, encoded)
 	if err != nil {
@@ -216,15 +273,18 @@ func selectTiers(q observation.Query, rows []sourceRow, exclude observation.Excl
 			if hn.parent != nil && ((preferred >= 3600 && full(hn.parent)) || len(hn.minutes) == 0) {
 				if allowed(hn.parent) {
 					selected = append(selected, &hn.parent.value)
+					continue
 				}
-				continue
+				// The parent straddles the excluded live tail; fall back to
+				// its children instead of dropping the whole hour.
 			}
 			for _, mn := range hn.minutes {
 				if mn.parent != nil && ((preferred >= 60 && full(mn.parent)) || len(mn.raw) == 0) {
 					if allowed(mn.parent) {
 						selected = append(selected, &mn.parent.value)
+						continue
 					}
-					continue
+					// Same fallback for an excluded minute rollup.
 				}
 				for _, raw := range mn.raw {
 					if allowed(raw) {

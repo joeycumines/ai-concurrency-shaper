@@ -376,6 +376,32 @@ func TestOpenIntervalBackwardClockIsVisible(t *testing.T) {
 	}
 }
 
+func TestSerializedWallJitterIsNotAClockStep(t *testing.T) {
+	start := time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)
+	elapsed := time.Second + 29_667*time.Nanosecond
+	// Simulate the native->SQLite round trip: the elapsed duration was
+	// measured monotonically, while the endpoints were read from the wall
+	// clock a few nanoseconds apart. Ordinary read granularity must not make
+	// a completed interval incomplete after serialization.
+	v := Interval{Samples: 1, Epoch: "epoch", Sequence: 1, LastSequence: 1, Provider: "north", Start: start, End: start.Add(time.Second + 29_000*time.Nanosecond), ElapsedNS: int64(elapsed), ClockUncertaintyNS: 84, Counts: Counters{Terminal: 1}}
+	result, err := Aggregate(context.Background(), Query{From: start, To: start.Add(time.Second + 29_000*time.Nanosecond), MaxPoints: 1}, []Interval{v})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Points) != 1 || result.Points[0].ClockStep || !result.Points[0].Complete || result.Points[0].ElapsedNS != int64(elapsed) {
+		t.Fatalf("wall jitter classified as clock step: %+v", result.Points[0])
+	}
+	// A genuine backward envelope still marks a step even without a persisted flag.
+	v.Start, v.End = start.Add(elapsed), start
+	result, err = Aggregate(context.Background(), Query{From: start, To: start.Add(time.Second + 29_667*time.Nanosecond), MaxPoints: 1}, []Interval{v})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Points) != 1 || !result.Points[0].ClockStep || result.Points[0].Complete {
+		t.Fatalf("backward envelope hidden: %+v", result.Points[0])
+	}
+}
+
 func TestConversionOmissionsRemainDistinctFromLossAndNote(t *testing.T) {
 	h, _ := newTestHub(t, "north")
 	_, r := h.Begin(context.Background(), BeginInfo{Provider: "north"})
@@ -454,5 +480,42 @@ func TestDetailOmissionsGetPersistentMarkerWithoutDroppingMeasurements(t *testin
 	h.Tick()
 	if len(sink.packets[1].Markers) != 0 {
 		t.Fatal("same omission marker repeated")
+	}
+}
+
+func TestIntervalAddPreservesBackwardStepEnvelope(t *testing.T) {
+	a := Interval{Start: time.Date(2026, 11, 21, 10, 0, 5, 0, time.UTC), End: time.Date(2026, 11, 21, 10, 0, 2, 0, time.UTC)}
+	b := Interval{Start: time.Date(2026, 11, 21, 10, 0, 2, 0, time.UTC), End: time.Date(2026, 11, 21, 10, 0, 6, 0, time.UTC)}
+	a.Add(b)
+	if !a.ClockStep || !a.End.Equal(time.Date(2026, 11, 21, 10, 0, 6, 0, time.UTC)) || !a.Start.Equal(time.Date(2026, 11, 21, 10, 0, 2, 0, time.UTC)) {
+		t.Fatalf("rollup envelope shrank: %+v", a)
+	}
+}
+
+func TestGapDetectionDoesNotAccumulateUncertainty(t *testing.T) {
+	start := time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)
+	rows := make([]Interval, 0, 5)
+	for i := range 5 {
+		rows = append(rows, Interval{Samples: 1, Epoch: "epoch", Sequence: uint64(i + 1), LastSequence: uint64(i + 1), Provider: "north", Start: start.Add(time.Duration(i) * 10 * time.Second), End: start.Add(time.Duration(i+1) * 10 * time.Second), ElapsedNS: int64(10 * time.Second), ClockUncertaintyNS: int64(10 * time.Millisecond), Counts: Counters{Terminal: 1}})
+	}
+	r, err := Aggregate(context.Background(), Query{From: start, To: start.Add(50 * time.Second), MaxPoints: 1}, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Points) != 1 || r.Points[0].Gap || !r.Points[0].Complete {
+		t.Fatalf("gap hidden by accumulated uncertainty: %+v", r.Points[0])
+	}
+}
+
+func TestOperatorCancellationIsDistinctFromClientAbort(t *testing.T) {
+	h, _ := newTestHub(t, "north")
+	_, r := h.Begin(context.Background(), BeginInfo{Provider: "north"})
+	r.Finish(FinishInfo{Status: 200, Outcome: OutcomeCompleted, Cancelled: true})
+	if r.Cancelled() {
+		t.Fatal("client cancellation reported as operator cancellation")
+	}
+	_, op := h.Begin(context.Background(), BeginInfo{Provider: "north"})
+	if !h.Cancel(op.ID()) || !op.Cancelled() {
+		t.Fatal("operator cancellation not reported")
 	}
 }

@@ -316,3 +316,44 @@ func TestSQLiteBackwardClockDoesNotDuplicateRollups(t *testing.T) {
 		t.Fatalf("clock step duplicated tiers or dropped a normalized envelope: %+v", rows)
 	}
 }
+
+func TestSQLiteSingleOwnerPerPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "owned.db")
+	first, err := Open(path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close(context.Background()) }()
+	_, err = Open(path, Options{})
+	if !errors.Is(err, ErrHistoryLocked) {
+		t.Fatalf("second owner admitted: %v", err)
+	}
+	if err = first.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Open(path, Options{})
+	if err != nil {
+		t.Fatalf("owner not released after close: %v", err)
+	}
+	if err = second.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSQLiteFailedOpenDoesNotPoisonPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "poison.db")
+	if err := os.WriteFile(path, []byte("not a database"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path, Options{}); err == nil {
+		t.Fatal("foreign database accepted")
+	}
+	if _, err := os.Stat(path + ".owner"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("owner file left behind after failed open: %v", err)
+	}
+	// The unrelated file must fail closed on every attempt, not be silently
+	// replaced with this application's schema after the first failure.
+	if _, err := Open(path, Options{}); err == nil {
+		t.Fatal("foreign file adopted after a failed open")
+	}
+}

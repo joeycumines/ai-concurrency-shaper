@@ -651,8 +651,8 @@ func (m Model) renderTabBar() string {
 	if m.enriched() {
 		return m.renderAdaptiveTabs()
 	}
-	parts := make([]string, 6)
-	for i, name := range tabNames[:6] {
+	parts := make([]string, len(tabNames))
+	for i, name := range tabNames {
 		parts[i] = m.renderTab(i, name)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
@@ -671,7 +671,7 @@ func (m Model) tabAt(x int) (tabID, bool) {
 		return 0, false
 	}
 	offset := 0
-	for i, name := range tabNames[:6] {
+	for i, name := range tabNames {
 		// Measure using renderTab so hit-testing tracks the exact rendered
 		// geometry — the selected tab uses tabActiveStyle, others use
 		// tabInactiveStyle. Both share the same padding, but rendering must

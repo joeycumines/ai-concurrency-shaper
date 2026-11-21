@@ -4,13 +4,16 @@ package history
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +52,40 @@ type Store struct {
 	closing                 bool
 	closeErr                error
 	rawBefore, minuteBefore int64
+	ownerFile               *os.File
+	ownerPath               string
+	ownerID                 string
+	ownsPath                bool
+}
+
+var ErrHistoryLocked = errors.New("history database is already owned by another process")
+
+// acquireOwner holds a dedicated lock file open for the Store's lifetime. A
+// held O_EXCL descriptor is a cross-platform single-owner claim: a second
+// process cannot create the same file until this one closes it. The database
+// also records a random owner token, so a stale file left by a crashed process
+// can be reclaimed only when no writer connection can be established.
+func acquireOwner(path string) (file *os.File, lockPath, id string, created bool, err error) {
+	token := make([]byte, 16)
+	if _, err = rand.Read(token); err != nil {
+		return nil, "", "", false, err
+	}
+	id = hex.EncodeToString(token)
+	lockPath = path + ".owner"
+	file, err = os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, "", "", false, ErrHistoryLocked
+		}
+		return nil, "", "", false, fmt.Errorf("create history owner file: %w", err)
+	}
+	created = true
+	if _, err = file.WriteString(id + "\n" + strconv.Itoa(os.Getpid()) + "\n"); err != nil {
+		_ = file.Close()
+		_ = os.Remove(lockPath)
+		return nil, "", "", false, fmt.Errorf("write history owner file: %w", err)
+	}
+	return file, lockPath, id, created, nil
 }
 
 // Open accepts an ordinary local filename, never a SQLite URI or network path.
@@ -70,26 +107,53 @@ func Open(path string, opts Options) (*Store, error) {
 	if opts.Durability != "normal" && opts.Durability != "full" {
 		return nil, errors.New("history durability must be normal or full")
 	}
-	dsn, err := localDSN(path, opts.ReadOnly)
+	dsn, err := localDSNWithDurability(path, opts.ReadOnly, opts.Durability)
 	if err != nil {
 		return nil, err
 	}
+	var ownerFile *os.File
+	var ownerPath, ownerID string
 	if !opts.ReadOnly {
-		f, e := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
-		if e == nil {
-			e = f.Close()
+		ownerFile, ownerPath, ownerID, _, err = acquireOwner(path)
+		if err != nil {
+			return nil, err
 		}
-		if e != nil && !errors.Is(e, os.ErrExist) {
-			return nil, fmt.Errorf("create history: %w", e)
+	}
+	_, statErr := os.Stat(path)
+	createdDB := errors.Is(statErr, os.ErrNotExist)
+	if createdDB {
+		// SQLite's mode=rw DSN does not create a missing database file.
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			_ = ownerFile.Close()
+			_ = os.Remove(ownerPath)
+			return nil, fmt.Errorf("create history: %w", err)
 		}
+		_ = f.Close()
 	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
+		if ownerFile != nil {
+			_ = ownerFile.Close()
+			_ = os.Remove(ownerPath)
+		}
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	fail := func(e error) (*Store, error) { _ = db.Close(); return nil, e }
+	fail := func(e error) (*Store, error) {
+		_ = db.Close()
+		if ownerFile != nil {
+			_ = ownerFile.Close()
+			_ = os.Remove(ownerPath)
+		}
+		if createdDB {
+			_ = os.Remove(path)
+			_ = os.Remove(path + "-wal")
+			_ = os.Remove(path + "-shm")
+		}
+		return nil, e
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err = db.PingContext(ctx); err != nil {
@@ -106,9 +170,6 @@ func Open(path string, opts Options) (*Store, error) {
 		if mode != "wal" {
 			return fail(fmt.Errorf("history requires local WAL mode; got %s", mode))
 		}
-		if _, err = db.ExecContext(ctx, "PRAGMA synchronous="+strings.ToUpper(opts.Durability)); err != nil {
-			return fail(err)
-		}
 	}
 	ro, err := localDSN(path, true)
 	if err != nil {
@@ -124,7 +185,13 @@ func Open(path string, opts Options) (*Store, error) {
 		_ = reader.Close()
 		return fail(err)
 	}
-	s := &Store{writer: db, reader: reader, opts: opts, queue: make(chan queuedPacket, QueueCapacity), done: make(chan struct{}), health: observation.Health{Enabled: true, Healthy: true, Capacity: QueueCapacity, ByteCapacity: ByteCapacity}}
+	if !opts.ReadOnly {
+		if _, err = db.ExecContext(ctx, "INSERT INTO metadata(key,value) VALUES('history_owner_id',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ownerID); err != nil {
+			_ = reader.Close()
+			return fail(err)
+		}
+	}
+	s := &Store{writer: db, reader: reader, opts: opts, queue: make(chan queuedPacket, QueueCapacity), done: make(chan struct{}), health: observation.Health{Enabled: true, Healthy: true, Capacity: QueueCapacity, ByteCapacity: ByteCapacity}, ownerFile: ownerFile, ownerPath: ownerPath, ownerID: ownerID, ownsPath: !opts.ReadOnly}
 	s.loadMetadata(ctx)
 	if opts.ReadOnly {
 		s.closing = true
@@ -135,6 +202,10 @@ func Open(path string, opts Options) (*Store, error) {
 	return s, nil
 }
 func localDSN(path string, readOnly bool) (string, error) {
+	return localDSNWithDurability(path, readOnly, "normal")
+}
+
+func localDSNWithDurability(path string, readOnly bool, durability string) (string, error) {
 	if path == "" || strings.ContainsRune(path, 0) || strings.HasPrefix(strings.ToLower(path), "file:") || strings.Contains(path, "://") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, `\\`) {
 		return "", errors.New("history requires an ordinary local filesystem path")
 	}
@@ -153,6 +224,11 @@ func localDSN(path string, readOnly bool) (string, error) {
 		q.Add("_pragma", "query_only(1)")
 	} else {
 		q.Set("mode", "rw")
+		if durability == "full" {
+			q.Add("_pragma", "synchronous(FULL)")
+		} else {
+			q.Add("_pragma", "synchronous(NORMAL)")
+		}
 	}
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "foreign_keys(1)")
@@ -247,6 +323,9 @@ func (s *Store) Enqueue(p observation.Packet) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closing {
+		s.health.DroppedBatches++
+		s.health.DroppedFacts += uint64(len(p.Requests))
+		s.health.DroppedMarkers += uint64(len(p.Markers))
 		return false
 	}
 	if size <= ByteCapacity-s.health.BufferedBytes {
@@ -327,6 +406,14 @@ func (s *Store) Close(ctx context.Context) error {
 			s.closeErr = err
 		}
 		s.writer = nil
+	}
+	if s.ownerFile != nil {
+		_ = s.ownerFile.Close()
+		s.ownerFile = nil
+	}
+	if s.ownsPath && s.ownerPath != "" {
+		_ = os.Remove(s.ownerPath)
+		s.ownerPath = ""
 	}
 	return s.closeErr
 }

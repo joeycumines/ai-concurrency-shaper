@@ -129,9 +129,14 @@ type Model struct {
 	networkSources      map[*journal.Entry]string
 
 	// networkFiltered caches the result of computeVisibleNetworkEntries()
-	// so the heavy filter work runs once per Update cycle instead of
-	// multiple times per View frame.
+	// so the heavy filter work runs once per generation instead of on every
+	// Update cycle (mouse motion, ticks and other high-frequency messages).
 	networkFiltered []*journal.Entry
+
+	// networkFilterGen captures every input to computeVisibleNetworkEntries:
+	// the filter controls, the active provider, and the journal state. It is
+	// compared against networkFilterSignature before rebuilding the cache.
+	networkFilterGen string
 
 	// dashboardLinesCache stores the rendered dashboard lines so
 	// dashboardLines() is called at most once per Update cycle instead of

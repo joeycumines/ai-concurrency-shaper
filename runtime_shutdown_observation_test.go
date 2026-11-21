@@ -174,3 +174,46 @@ func TestRuntimeCloseTimeoutLeavesRecorderOpenUntilIngressJoined(t *testing.T) {
 		t.Fatal("shutdown changed request identity")
 	}
 }
+
+func TestRuntimeCloseSealsWithReadyContextAfterSlowJoin(t *testing.T) {
+	rt, path := shutdownRuntimeFixture(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	handler := rt.observeIngress(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+	}))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if v := recover(); v != nil && v != http.ErrAbortHandler {
+				t.Errorf("handler panic: %v", v)
+			}
+		}()
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/slow", nil))
+	}()
+	<-entered
+	joined := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		joined <- rt.Close(ctx)
+	}()
+	if err := <-joined; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected join timeout, got %v", err)
+	}
+	close(release)
+	<-done
+	// The retry context is already expired: sealing must still get its own
+	// budget so the final tick and queued facts are not discarded.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := rt.Close(ctx); err != nil {
+		t.Fatalf("retry close=%v", err)
+	}
+	fact := persistedShutdownFact(t, path)
+	if fact.Outcome != observation.OutcomeCompleted && fact.Outcome != observation.OutcomeAborted {
+		t.Fatalf("terminal fact missing after seal: %+v", fact)
+	}
+}

@@ -86,6 +86,9 @@ func observedFinishInfo(r *http.Request, rec *statusRecorder, aborted bool) obse
 		bodyFailure, transportFailure = state.bodyFailure, state.transportFailure
 		lastStatus = state.lastStatus
 		localFailureStage = state.localFailureStage
+		// Each RoundTrip owns its own classification: a signing failure on
+		// an earlier attempt must not override the final attempt's outcome.
+		state.localFailureStage = ""
 		state.mu.Unlock()
 	}
 	if o := rec.transcodeOutcome; o != nil {
@@ -98,7 +101,11 @@ func observedFinishInfo(r *http.Request, rec *statusRecorder, aborted bool) obse
 		case transcode.ProvenanceDownstreamWriteError:
 			info.Outcome, info.Stage = observation.OutcomeFailed, observation.StageDownstream
 		case transcode.ProvenanceClientAbort:
-			info.Outcome = observation.OutcomeAborted
+			if o.UpstreamStatus.Set && o.UpstreamStatus.Value >= 400 {
+				info.Outcome, info.Stage = observation.OutcomeFailed, observation.StageUpstream
+			} else {
+				info.Outcome = observation.OutcomeAborted
+			}
 		default:
 			if o.UpstreamFailure || (o.UpstreamStatus.Set && o.UpstreamStatus.Value >= 400) {
 				info.Outcome, info.Stage = observation.OutcomeFailed, observation.StageUpstream

@@ -123,8 +123,10 @@ func TestPTY_DashboardNarrowStatusVisibility(t *testing.T) {
 }
 
 func TestPTY_DashboardScrollsDown(t *testing.T) {
-	// Use a short terminal so the dashboard content overflows.
-	h := Launch(t, WithTermSize(10, 80))
+	// Use a short terminal so the dashboard content overflows. The wide
+	// fleet overview needs 93 columns to fit its 92-cell rows; a narrower
+	// pane renders the compact overview, which has no FLEET HEALTH section.
+	h := Launch(t, WithTermSize(10, 100))
 	defer h.Close()
 
 	proxyURL := h.ProxyURL()

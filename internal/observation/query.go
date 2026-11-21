@@ -66,7 +66,7 @@ func (h *Hub) Query(ctx context.Context, q Query) (QueryResult, error) {
 			}
 			pc := *p
 			pc.integrate(t)
-			v := Interval{Samples: 1, Epoch: h.epoch, Sequence: h.seq + 1, LastSequence: h.seq + 1, Provider: p.name, Start: p.start, End: t, ElapsedNS: int64(max(t.Sub(p.start), 0)), ClockUncertaintyNS: addDuration(p.uncertainty, endUncertainty), ClockStep: absDuration(t.Round(0).Sub(p.start.Round(0))-max(t.Sub(p.start), 0)) > time.Duration(addDuration(p.uncertainty, endUncertainty)), Counts: p.counts, Duration: p.currentDuration, Admission: p.currentAdmission, AttemptDuration: p.currentAttempt, Gauges: pc.gauges}
+			v := Interval{Samples: 1, Epoch: h.epoch, Sequence: h.seq + 1, LastSequence: h.seq + 1, Provider: p.name, Start: p.start, End: t, ElapsedNS: int64(max(t.Sub(p.start), 0)), ClockUncertaintyNS: addDuration(p.uncertainty, endUncertainty), ClockStep: clockStep(max(t.Sub(p.start), 0), t.Round(0).Sub(p.start.Round(0)), addDuration(p.uncertainty, endUncertainty), t.Before(p.start)), Counts: p.counts, Duration: p.currentDuration, Admission: p.currentAdmission, AttemptDuration: p.currentAttempt, Gauges: pc.gauges}
 			for _, rs := range p.resources {
 				copyResource := *rs
 				copyResource.integrate(t)
@@ -250,7 +250,11 @@ func Aggregate(ctx context.Context, q Query, rows []Interval) (QueryResult, erro
 		p.Resources = mergeResources(p.Resources, v.Resources)
 		p.ElapsedNS = addDuration(p.ElapsedNS, v.ElapsedNS)
 		p.Samples = add64(p.Samples, max(uint64(1), v.Samples))
-		p.ClockStep = p.ClockStep || v.ClockStep || v.End.Before(v.Start) || (v.ElapsedNS > 0 && !v.Gap && !v.Overlap && absDuration(b.Sub(a)-time.Duration(v.ElapsedNS)) > time.Duration(v.ClockUncertaintyNS))
+		// Only a stored flag or an explicit backward envelope marks a step.
+		// Comparing serialized wall endpoints to elapsed time here mixes
+		// clock bases: elapsed is monotonic-derived and loses that component
+		// in JSON/SQLite, so ordinary read jitter becomes a false step.
+		p.ClockStep = p.ClockStep || v.ClockStep || v.End.Before(v.Start)
 		p.Overlap = p.Overlap || v.Overlap
 		if len(segments[v.Provider][i]) == 0 {
 			p.Gap = false
@@ -267,10 +271,12 @@ func Aggregate(ctx context.Context, q Query, rows []Interval) (QueryResult, erro
 			ss := segments[provider][i]
 			covered := int64(0)
 			cursor := p.Start
-			uncertainty := int64(0)
 			gap := len(ss) == 0 || p.Gap
 			for _, s := range ss {
-				uncertainty = addDuration(uncertainty, max(0, s.uncertainty))
+				// Each segment's bracket bounds only its own endpoints.
+				// Summing brackets across a cell grows to seconds at normal
+				// tick rates and hides genuine gaps late in the cell.
+				uncertainty := max(0, s.uncertainty)
 				a := maxTime(s.start, p.Start)
 				b := minTime(s.end, p.End)
 				if a.After(cursor) {
@@ -287,7 +293,11 @@ func Aggregate(ctx context.Context, q Query, rows []Interval) (QueryResult, erro
 					cursor = b
 				}
 			}
-			if p.End.Sub(cursor) > time.Duration(uncertainty) {
+			trailingUncertainty := int64(0)
+			if len(ss) > 0 {
+				trailingUncertainty = max(0, ss[len(ss)-1].uncertainty)
+			}
+			if p.End.Sub(cursor) > time.Duration(trailingUncertainty) {
 				gap = true
 			}
 			p.Coverage = min(1, max(0, float64(covered)/float64(p.End.Sub(p.Start))))
@@ -452,6 +462,11 @@ func FilterRequests(facts []RequestFact, q RequestQuery) RequestResult {
 	q = NormalizeRequestQuery(q)
 	unique := make(map[string]RequestFact, len(facts))
 	for _, f := range facts {
+		// A committed finished fact must never be replaced by a stale live
+		// snapshot captured before the write committed.
+		if prev, exists := unique[f.ID]; exists && !prev.Live && f.Live {
+			continue
+		}
 		unique[f.ID] = f
 	}
 	out := make([]RequestFact, 0, len(unique))
@@ -516,7 +531,7 @@ func MatchesDuration(f RequestFact, q RequestQuery) bool {
 				upper = int64(DurationBounds[i] * 1e9)
 			}
 			lowerOK := q.DurationMinNS == nil || lower >= *q.DurationMinNS
-			upperOK := q.DurationMaxNS == nil || (i < len(DurationBounds) && upper <= *q.DurationMaxNS)
+			upperOK := q.DurationMaxNS == nil || i == len(DurationBounds) || upper <= *q.DurationMaxNS
 			if lowerOK && upperOK {
 				return true
 			}

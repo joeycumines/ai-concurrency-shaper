@@ -2,8 +2,6 @@ package config
 
 import (
 	"errors"
-	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"time"
@@ -43,13 +41,6 @@ func (s *Server) validateObservability() error {
 	}
 	if strings.HasPrefix(strings.ToLower(s.HistoryDB), "file:") || strings.Contains(s.HistoryDB, "://") || strings.HasPrefix(s.HistoryDB, `\\`) || strings.HasPrefix(s.HistoryDB, "//") {
 		return errors.New("-history-db must be a local filesystem path, not a URI or network share")
-	}
-	info, err := os.Stat(s.ExportDir)
-	if err != nil {
-		return fmt.Errorf("-export-dir: %w", err)
-	}
-	if !info.IsDir() {
-		return errors.New("-export-dir must name an existing directory")
 	}
 	return nil
 }

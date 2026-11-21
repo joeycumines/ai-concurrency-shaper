@@ -204,6 +204,7 @@ func (h *TranscodeHandler) convertResponse(
 			// exchange log as the render's losses (request-side merge
 			// precedent).
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
 			usage := response.Usage
 			context.ResponseUsage = &usage
@@ -229,6 +230,7 @@ func (h *TranscodeHandler) convertResponse(
 			h.storeGeminiCallSignatures(context, response)
 			h.recordContinuityFromEnvelope(r, context, response, converted)
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
 			usage := response.Usage
 			context.ResponseUsage = &usage
@@ -260,6 +262,7 @@ func (h *TranscodeHandler) convertResponse(
 			// exchange log as the render's losses (request-side merge
 			// precedent).
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
 			usage := response.Usage
 			context.ResponseUsage = &usage
@@ -296,6 +299,7 @@ func (h *TranscodeHandler) convertResponse(
 			}
 			h.storeGeminiCallSignatures(context, response)
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
 			usage := response.Usage
 			context.ResponseUsage = &usage
@@ -325,6 +329,7 @@ func (h *TranscodeHandler) convertResponse(
 				return nil, conversionProvenance(err), err
 			}
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
 			usage := response.Usage
 			context.ResponseUsage = &usage
@@ -352,6 +357,7 @@ func (h *TranscodeHandler) convertResponse(
 				return nil, conversionProvenance(err), err
 			}
 			report.Losses = append(report.Losses, decodeReport.Losses...)
+			report.Dropped += decodeReport.Dropped
 			h.logConversionReport(report, r, "response")
 			usage := response.Usage
 			context.ResponseUsage = &usage

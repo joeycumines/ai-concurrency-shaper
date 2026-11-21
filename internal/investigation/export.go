@@ -9,6 +9,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -211,20 +213,67 @@ func Write(dir string, s Selection, raw bool) (string, error) {
 	return writeBytes(dir, kind, data)
 }
 
+// boundedBuffer accepts at most limit+1 bytes. Reaching the limit aborts the
+// encoder through io.ErrShortWrite, so an oversized export never accumulates a
+// second, multi-gigabyte copy in memory.
+type boundedBuffer struct {
+	buf   []byte
+	limit int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	remaining := b.limit + 1 - len(b.buf)
+	if remaining <= 0 {
+		return 0, io.ErrShortWrite
+	}
+	n := min(len(p), remaining)
+	if cap(b.buf)-len(b.buf) < n {
+		// Grow with headroom but never past the bound: appends must not
+		// temporarily allocate a second multi-gigabyte backing array.
+		capacity := min(max(2*cap(b.buf), 4096, len(b.buf)+n), b.limit+1)
+		next := make([]byte, len(b.buf), capacity)
+		copy(next, b.buf)
+		b.buf = next
+	}
+	b.buf = append(b.buf, p[:n]...)
+	if n < len(p) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
+}
+
+// v1IndentOptions reproduces json.MarshalIndent's syntax (HTML and U+2028/2029
+// escaping, invalid UTF-8 replacement, raw-string preservation) without its
+// accumulate-everything behavior. jsonv2's streaming encoder writes through to
+// the bounded sink instead, so an oversized value aborts early.
+var v1IndentOptions = []jsontext.Options{
+	jsontext.WithIndent("  "),
+	jsontext.EscapeForHTML(true),
+	jsontext.EscapeForJS(true),
+	jsontext.AllowInvalidUTF8(true),
+	jsontext.PreserveRawStrings(true),
+}
+
 // WriteJSON exports immutable measurements, selected request facts, logs or
 // control audit data. This generic function does not redact its caller's data;
 // the terminal names that scope explicitly before an export.
 func WriteJSON(dir, kind string, value any) (string, error) {
-	data, err := json.MarshalIndent(value, "", "  ")
+	var sink boundedBuffer
+	sink.limit = MaxExportBytes
+	err := jsonv2.MarshalWrite(&sink, value, v1IndentOptions...)
 	if err != nil {
+		if errors.Is(err, io.ErrShortWrite) {
+			return "", ErrExportTooLarge
+		}
 		return "", err
+	}
+	data := sink.buf
+	if len(data) > MaxExportBytes {
+		return "", ErrExportTooLarge
 	}
 	return writeBytes(dir, kind, data)
 }
 func writeBytes(dir, kind string, data []byte) (string, error) {
-	if len(data) > MaxExportBytes {
-		return "", ErrExportTooLarge
-	}
 	if dir == "" {
 		dir = "."
 	}

@@ -170,6 +170,7 @@ func (m *Model) executePaletteCmd(cmd paletteCmd) tea.Cmd {
 	case cmdInsightView:
 		m.closePalette()
 		m.insights.view = cmd.arg
+		m.resetInsightView()
 		m.switchTab(tabInsights)
 		return m.requestInsights()
 	case cmdControlForm:

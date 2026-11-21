@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,7 +28,7 @@ func TestObservationFlagsScopeAndBounds(t *testing.T) {
 	if _, err = Parse([]string{"--provider", "-upstream", "http://localhost:1234", "-history-db", "history.db"}); err == nil {
 		t.Fatal("server flag accepted inside provider scope")
 	}
-	for _, tc := range []struct{ flag, value string }{{"-history-retention", "0"}, {"-history-retention", "30m"}, {"-history-retention", "8761h"}, {"-history-durability", "off"}, {"-diagnostic-capture-bytes", "-1"}, {"-diagnostic-capture-bytes", "1048577"}, {"-tui-theme", "blue"}, {"-tui-color", "8"}, {"-history-db", "file:secret.db"}, {"-history-db", "//server/share/db"}, {"-export-dir", filepath.Join(dir, "absent")}} {
+	for _, tc := range []struct{ flag, value string }{{"-history-retention", "0"}, {"-history-retention", "30m"}, {"-history-retention", "8761h"}, {"-history-durability", "off"}, {"-diagnostic-capture-bytes", "-1"}, {"-diagnostic-capture-bytes", "1048577"}, {"-tui-theme", "blue"}, {"-tui-color", "8"}, {"-history-db", "file:secret.db"}, {"-history-db", "//server/share/db"}} {
 		t.Run(tc.flag+tc.value, func(t *testing.T) {
 			c, err := Parse([]string{tc.flag, tc.value, "-upstream", "http://localhost:1234"})
 			if err == nil {
@@ -38,6 +39,35 @@ func TestObservationFlagsScopeAndBounds(t *testing.T) {
 				t.Fatalf("accepted %s=%s", tc.flag, tc.value)
 			}
 		})
+	}
+}
+func TestExportDirDeferredToWriteTime(t *testing.T) {
+	dir := t.TempDir()
+	absent := filepath.Join(dir, "absent")
+	c, err := Parse([]string{"-upstream", "http://localhost:1234", "-export-dir", absent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err = c.ResolveAndValidate(); err != nil {
+		t.Fatalf("headless startup rejected absent export dir: %v", err)
+	}
+	if c.Server.ExportDir != absent {
+		t.Fatalf("export dir changed: %q", c.Server.ExportDir)
+	}
+	// A path that names a regular file is likewise not a startup concern; the
+	// export writer rejects it when an export is actually requested.
+	file := filepath.Join(dir, "not-a-dir")
+	if err = os.WriteFile(file, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := Parse([]string{"-upstream", "http://localhost:1234", "-export-dir", file})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	if err = c2.ResolveAndValidate(); err != nil {
+		t.Fatalf("headless startup rejected file export dir: %v", err)
 	}
 }
 func TestObservationReservedProvider(t *testing.T) {

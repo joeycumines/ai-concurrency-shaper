@@ -37,6 +37,26 @@ type resourceState struct {
 	integral ResourceIntegral
 	last     time.Time
 }
+
+// wallElapsedFloor covers the ordinary difference between monotonic elapsed
+// time and wall-clock readings over one interval. The clock-read bracket only
+// measures two consecutive Now calls; it does not bound the accumulated
+// granularity difference between the two endpoints of a live interval. Without
+// this floor, any native time.Now interval below a microsecond is falsely
+// reported as a clock step. Deliberately small compared with a real step.
+const wallElapsedFloor = 2 * time.Microsecond
+
+// ClockStep is computed only where both bases exist: the monotonic-derived
+// elapsed duration and the wall endpoints. A real step (an interval whose end
+// precedes its start, or a wall/monotonic divergence beyond the measured
+// bracket plus the granularity floor) is persisted with the interval so the
+// flag survives JSON/SQLite round trips. Aggregate trusts that persisted flag;
+// it must not recompute it from serialized endpoints, which have no monotonic
+// component.
+func clockStep(elapsed, wall time.Duration, uncertainty int64, backward bool) bool {
+	return backward || absDuration(wall-elapsed) > time.Duration(uncertainty)+wallElapsedFloor
+}
+
 type Hub struct {
 	mu                                      sync.Mutex
 	now                                     func() time.Time
@@ -59,16 +79,17 @@ type Hub struct {
 	closedHub                               bool
 }
 type Request struct {
-	h          *Hub
-	fact       RequestFact
-	started    time.Time
-	queueStart time.Time
-	queueDepth int
-	queueTotal time.Duration
-	queueEver  bool
-	done       bool
-	cancel     context.CancelFunc
-	attempt    *Attempt
+	h                *Hub
+	fact             RequestFact
+	started          time.Time
+	queueStart       time.Time
+	queueDepth       int
+	queueTotal       time.Duration
+	queueEver        bool
+	done             bool
+	cancel           context.CancelFunc
+	operatorCanceled bool
+	attempt          *Attempt
 }
 type Attempt struct {
 	r       *Request
@@ -592,17 +613,22 @@ func (r *Request) Finish(in FinishInfo) {
 	}
 	r.cancel()
 }
-func (h *Hub) Cancel(id string) bool {
+func (h *Hub) Cancel(id string) bool { return h.CancelProvider("", id) }
+
+// CancelProvider cancels only a request belonging to the named provider. An
+// empty provider matches any identity for direct callers.
+func (h *Hub) CancelProvider(provider, id string) bool {
 	if h == nil {
 		return false
 	}
 	h.mu.Lock()
 	r := h.live[id]
-	if r == nil || r.done {
+	if r == nil || r.done || (provider != "" && r.fact.Provider != provider) {
 		h.mu.Unlock()
 		return false
 	}
 	r.fact.Cancelled = true
+	r.operatorCanceled = true
 	cancel := r.cancel
 	h.mu.Unlock()
 	cancel()
@@ -625,6 +651,16 @@ func (r *Request) Snapshot() RequestFact {
 	}
 	return f
 }
+
+// Now returns the hub's configured clock for observers that must share its
+// time basis, such as limiter resource transitions.
+func (h *Hub) Now() time.Time {
+	if h == nil {
+		return time.Now()
+	}
+	return h.now()
+}
+
 func (h *Hub) SetResource(v Resource) {
 	if h == nil {
 		return
@@ -667,10 +703,12 @@ func (h *Hub) SetResourceAt(at time.Time, v Resource) {
 		r = &resourceState{value: v, last: t, integral: ResourceIntegral{Provider: v.Provider, ID: v.ID, Kind: v.Kind}}
 		p.resources[key] = r
 	} else {
-		if t.Before(r.last) {
-			return
+		// A transition is causally ordered by the limiter lock; a tick that
+		// integrated past its timestamp must not discard the new value. A
+		// late arrival contributes no elapsed time at the old value.
+		if t.After(r.last) {
+			r.integrate(t)
 		}
-		r.integrate(t)
 		r.value = v
 	}
 }
@@ -728,8 +766,18 @@ func (h *Hub) Snapshot() Snapshot {
 	if h == nil {
 		return Snapshot{}
 	}
+	// Sink health takes the store's mutex. Read it before h.mu so a slow
+	// writer commit cannot stall request-path admission behind a snapshot.
+	var health Health
+	if h.sink != nil {
+		health = h.sink.Health()
+	}
 	h.mu.Lock()
-	s := Snapshot{At: h.now(), Epoch: h.epoch, History: h.health(), LiveRequests: len(h.live), UntrackedRequests: h.untracked}
+	// The hub's own drop counters are written under h.mu; merging them here
+	// keeps the snapshot race-free without holding h.mu across Store.Health.
+	health.DroppedFacts = add64(health.DroppedFacts, h.droppedFacts)
+	health.DroppedMarkers = add64(health.DroppedMarkers, h.droppedMarkers)
+	s := Snapshot{At: h.now(), Epoch: h.epoch, History: health, LiveRequests: len(h.live), UntrackedRequests: h.untracked}
 	for _, p := range h.providers {
 		v := ProviderSnapshot{Provider: p.name, Totals: p.totals, Duration: p.duration, Admission: p.admission, AttemptDuration: p.attemptDuration, Active: p.active, Queued: p.queued, Exchanges: p.exchanges}
 		for _, r := range p.resources {
@@ -770,7 +818,9 @@ func (h *Hub) tickLocked() {
 	if h.sink != nil && (h.droppedFacts > h.reportedFactDrops || h.droppedMarkers > h.reportedMarkerDrops) {
 		h.markerSeq++
 		marker := Marker{ID: fmt.Sprintf("%s-m%016x", h.epoch, h.markerSeq), At: t, Kind: "detail_gap", Summary: fmt.Sprintf("Recorder detail buffers omitted %d request facts and %d markers; aggregate measurements remain counted.", h.droppedFacts-h.reportedFactDrops, h.droppedMarkers-h.reportedMarkerDrops)}
-		h.pendingMarkers = append(h.pendingMarkers, marker)
+		if len(h.pendingMarkers) < 1024 {
+			h.pendingMarkers = append(h.pendingMarkers, marker)
+		}
 		h.markers = append(h.markers, marker)
 		if len(h.markers) > 1024 {
 			h.markers = append([]Marker(nil), h.markers[len(h.markers)-1024:]...)
@@ -786,7 +836,14 @@ func (h *Hub) tickLocked() {
 		d := max(t.Sub(p.start), 0)
 		wall := t.Round(0).Sub(p.start.Round(0))
 		uncertainty := addDuration(p.uncertainty, endUncertainty)
-		iv := Interval{Samples: 1, Epoch: h.epoch, Sequence: h.seq, LastSequence: h.seq, Provider: p.name, Start: p.start, End: t, ElapsedNS: int64(d), ClockUncertaintyNS: uncertainty, ClockStep: absDuration(wall-d) > time.Duration(uncertainty), Counts: p.counts, Duration: p.currentDuration, Admission: p.currentAdmission, AttemptDuration: p.currentAttempt, Gauges: p.gauges}
+		// ClockStep is computed here, at the only point where both the
+		// monotonic elapsed duration and the wall endpoints are available.
+		// It is persisted with the interval. Aggregate must trust that flag:
+		// recomputing it from serialized wall endpoints compares a different
+		// clock basis and falsely marks ordinary sub-microsecond read jitter
+		// as a step. v.End.Before(v.Start) still detects a backward step in
+		// hand-authored or legacy intervals that arrive without the flag.
+		iv := Interval{Samples: 1, Epoch: h.epoch, Sequence: h.seq, LastSequence: h.seq, Provider: p.name, Start: p.start, End: t, ElapsedNS: int64(d), ClockUncertaintyNS: uncertainty, ClockStep: clockStep(d, wall, uncertainty, t.Before(p.start)), Counts: p.counts, Duration: p.currentDuration, Admission: p.currentAdmission, AttemptDuration: p.currentAttempt, Gauges: p.gauges}
 		for _, r := range p.resources {
 			r.integrate(t)
 			iv.Resources = append(iv.Resources, r.integral)
@@ -812,6 +869,15 @@ func (h *Hub) tickLocked() {
 		cut++
 	}
 	if cut > 0 {
+		// A query excludes persisted rows from ex.FromSequence onward. If a
+		// cut lands inside a sequence, the evicted providers' rows at that
+		// sequence vanish from both memory and disk. Extend the cut to the
+		// next whole sequence so the in-memory buffer always contains every
+		// provider for each sequence it reports.
+		dropped := h.closed[cut-1].Sequence
+		for cut < len(h.closed) && h.closed[cut].Sequence == dropped {
+			cut++
+		}
 		copy(h.closed, h.closed[cut:])
 		clear(h.closed[len(h.closed)-cut:])
 		h.closed = h.closed[:len(h.closed)-cut]
@@ -833,6 +899,9 @@ func (h *Hub) Close(ctx context.Context) error {
 	h.closeOnce.Do(func() { close(h.stop) })
 	select {
 	case <-ctx.Done():
+		// The ticker goroutine has not exited yet, so a later Close may still
+		// seal the recorder. Do not close the sink here: that would strand
+		// queued facts behind a still-running ticker.
 		return ctx.Err()
 	case <-h.stopped:
 	}
@@ -861,8 +930,17 @@ func (r *Request) IsFinished() bool {
 	return r.done
 }
 
-// sampleClock measures the actual clock-reading bracket. Unlike a fixed epsilon,
-// this budget follows scheduling/read uncertainty without erasing real steps.
+// Cancelled reports only an explicit operator cancellation, never an ordinary
+// client disconnect. It avoids cloning the full fact just to read one bit.
+func (r *Request) Cancelled() bool {
+	if r == nil {
+		return false
+	}
+	r.h.mu.Lock()
+	defer r.h.mu.Unlock()
+	return r.operatorCanceled
+}
+
 func (h *Hub) sampleClock() (time.Time, int64) {
 	a := h.now()
 	b := h.now()

@@ -41,8 +41,52 @@ func (m *Model) visibleEntries() []metrics.RequestLogEntry {
 	return filtered
 }
 
+// networkFilterSignature captures every cheap input to the network filter.
+// Journal length catches arrivals; a full rescan on the one-second
+// observability tick (see refreshNetworkFilter) catches in-place eviction.
+func (m *Model) networkFilterSignature() string {
+	var b strings.Builder
+	b.WriteString(m.filterText)
+	b.WriteByte('|')
+	b.WriteString(strconv.Itoa(int(m.networkFilterType)))
+	b.WriteByte('|')
+	b.WriteString(strconv.Itoa(int(m.networkFilterStatus)))
+	b.WriteByte('|')
+	b.WriteString(strconv.FormatBool(m.networkAll))
+	b.WriteByte('|')
+	b.WriteString(strconv.Itoa(m.active))
+	appendJournalSignature := func(j *journal.Journal) {
+		if j == nil {
+			b.WriteString("nil")
+			return
+		}
+		b.WriteString(strconv.Itoa(j.Len()))
+		b.WriteByte(';')
+	}
+	if m.networkAll {
+		for _, p := range m.providers {
+			appendJournalSignature(p.journal)
+		}
+		appendJournalSignature(m.runtime.IngressJournal)
+	} else {
+		appendJournalSignature(m.journal)
+	}
+	return b.String()
+}
+
+// refreshNetworkFilter rebuilds the cached visible-entry list only when an
+// input to the filter actually changed.
+func (m *Model) refreshNetworkFilter() {
+	gen := m.networkFilterSignature()
+	if gen == m.networkFilterGen {
+		return
+	}
+	m.networkFilterGen = gen
+	m.networkFiltered = m.computeVisibleNetworkEntries()
+}
+
 // visibleNetworkEntries returns the cached filtered list. The cache is
-// refreshed once per Update cycle to avoid redundant allocations.
+// refreshed only when its inputs change, not on every Update cycle.
 func (m Model) visibleNetworkEntries() []*journal.Entry {
 	return m.networkFiltered
 }

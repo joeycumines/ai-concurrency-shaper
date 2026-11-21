@@ -10,7 +10,10 @@ import (
 )
 
 func (m Model) runtimeOverviewLines() []string {
-	if m.width < 72 {
+	// Fleet rows are 92 cells wide and render into viewportWidth (m.width-1);
+	// the compact alternative is used below 93 so the wide table is never
+	// clipped.
+	if m.width < 93 {
 		return m.compactOverviewLines()
 	}
 	rows := []string{m.styles.sectionStyle.Render(" FLEET HEALTH · Tab changes provider · Enter explores time"), "", m.styles.tableHeaderStyle.Render(" PROVIDER                 STATE      ACTIVE  QUEUED    REQ/S   TERMINAL  FAILED   GLOBAL CAP")}

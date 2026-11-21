@@ -115,7 +115,10 @@ func (m Model) runtimeFooterActions() []footerAction {
 	case m.insights.inputMode:
 		return []footerAction{{"Enter query", "enter"}, {"Ctrl+U clear", "ctrl+u"}, {"Esc back", "esc"}}
 	case m.inspection.open:
-		return []footerAction{{"e metadata", "e"}, {"E raw", "E"}, {"Esc back", "esc"}}
+		if m.inspection.entry != nil {
+			return []footerAction{{"e metadata", "e"}, {"E raw", "E"}, {"Esc back", "esc"}}
+		}
+		return []footerAction{{"e metadata", "e"}, {"Esc back", "esc"}}
 	case m.mode == modeFilter:
 		return []footerAction{{"Enter keep", "enter"}, {"Esc clear", "esc"}, {"Ctrl+U clear", "ctrl+u"}}
 	case m.mode == modePalette:

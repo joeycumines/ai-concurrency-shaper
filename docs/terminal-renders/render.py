@@ -39,7 +39,10 @@ def position_terminal_cells(svg, plain, foreground):
     for group in root:
         if group.tag == "{http://www.w3.org/2000/svg}g" and "font-family" in group.attrib:
             group.set("fill", foreground)
-    columns = max(cell_width(line) for line in plain.read_text().splitlines())
+    plain_lines = [line for line in plain.read_text().splitlines() if line.strip()]
+    columns = max((cell_width(line) for line in plain_lines), default=0)
+    if columns <= 0:
+        raise ValueError("frame has no rendered columns; refusing to divide by zero")
     advance = (float(root.attrib["width"]) - 36) / columns
     for text in root.iter("{http://www.w3.org/2000/svg}text"):
         cursor = float(text.attrib["x"].removesuffix("px"))

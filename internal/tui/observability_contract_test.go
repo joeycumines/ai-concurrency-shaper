@@ -72,6 +72,20 @@ func TestPendingRequestExportBindsAcceptedQueryAndRows(t *testing.T) {
 	}
 }
 
+func TestExportSavedReviewDistinguishesRawFromMetadata(t *testing.T) {
+	m, _, _ := runtimeTestModel(t, 40, 20)
+	metadata := update(m, exportResultMsg{path: "/tmp/meta.json"})
+	raw := update(m, exportResultMsg{path: "/tmp/raw.json", raw: true})
+	metaText := strings.ToUpper(strings.Join(metadata.inspection.lines, " ") + " " + metadata.inspection.title)
+	rawText := strings.ToUpper(strings.Join(raw.inspection.lines, " ") + " " + raw.inspection.title)
+	if !strings.Contains(metaText, "METADATA") || strings.Contains(metaText, "RAW") {
+		t.Fatalf("metadata review mislabeled: %s", metaText)
+	}
+	if !strings.Contains(rawText, "RAW") || strings.Contains(rawText, "METADATA") {
+		t.Fatalf("raw review mislabeled: %s", rawText)
+	}
+}
+
 func TestAnnualRangeAndPresetsAreReachableInSmallPane(t *testing.T) {
 	m, _, _ := runtimeTestModel(t, 40, 20)
 	m.tab = tabInsights

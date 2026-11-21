@@ -1,7 +1,5 @@
 # Multi-provider observability and runtime console
 
-**Implementation specification · 21 November 2026**
-
 This document describes the implementation in this source tree. It supplements the existing [product identity](../PRODUCT.md), [gateway design](../DESIGN.md), and [runtime control contract](runtime-control-and-observation-contract.md). The terminal remains a Bubble Tea v2 application. Measurement collection runs in the gateway even when the terminal is disabled.
 
 ## 1. Operator experience
@@ -321,7 +319,7 @@ Dependency longevity is a choice supported by maintainership, documented compati
 
 ## 11. Build, run, and verify
 
-This source tree uses the upstream Go version declared in `go.mod` (Go 1.27.2). A headless invocation still collects observations and can expose metrics/history.
+This source tree uses the upstream Go version declared in `go.mod` (Go 1.27.4). A headless invocation still collects observations and can expose metrics/history.
 
 ```sh
 go build -o shaper .

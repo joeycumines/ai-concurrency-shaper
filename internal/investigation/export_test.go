@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/diagnostic"
@@ -81,6 +82,60 @@ func TestExportFreshPrivateFilesAndFailureCleanup(t *testing.T) {
 	items, err := os.ReadDir(dir)
 	if err != nil || len(items) != 2 {
 		t.Fatal("failed export left partial files")
+	}
+}
+
+func TestWriteJSONStreamingPreservesExactBytes(t *testing.T) {
+	dir := t.TempDir()
+	value := struct {
+		Numbers []int             `json:"numbers"`
+		Nested  map[string]string `json:"nested"`
+	}{Numbers: []int{1, 2, 3}, Nested: map[string]string{"k": "v<&>"}}
+	got, err := WriteJSON(dir, "measurements", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, want) {
+		t.Fatalf("streamed output differs from MarshalIndent:\n got: %s\nwant: %s", data, want)
+	}
+}
+
+func TestWriteJSONRejectsOversizedValueWithoutOOM(t *testing.T) {
+	// Each entry produces roughly 2 MiB of indented JSON, so the whole value
+	// would exceed 64 MiB many times over. A bounded encoder must abort long
+	// before the marshal buffer or the final file approaches that size.
+	const (
+		count = 80
+		bytes = 1 << 21
+	)
+	entries := make([]map[string]any, count)
+	for i := range entries {
+		entries[i] = map[string]any{"body": strings.Repeat("x", bytes)}
+	}
+	dir := t.TempDir()
+	var memBefore, memAfter runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&memBefore)
+	if _, err := WriteJSON(dir, "measurements", entries); !errors.Is(err, ErrExportTooLarge) {
+		t.Fatalf("oversized streaming export accepted: %v", err)
+	}
+	runtime.ReadMemStats(&memAfter)
+	items, err := os.ReadDir(dir)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("rejected export left files: %v %v", items, err)
+	}
+	// The encoder aborts as soon as the bounded sink reaches MaxExportBytes+1;
+	// it never writes a full 160 MiB document or an oversized file.
+	if grew := memAfter.HeapAlloc - memBefore.HeapAlloc; grew > 512<<20 {
+		t.Fatalf("oversized export retained %d bytes of heap", grew)
 	}
 }
 

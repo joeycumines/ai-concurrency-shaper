@@ -45,19 +45,22 @@ func TestMouseClickTabBarGeometry(t *testing.T) {
 		{"width80 x68 Routes start", 80, 68, tabDashboard, tabRoutes, false},
 		{"width80 x79 Routes last", 80, 79, tabDashboard, tabRoutes, false},
 		{"width120 x50 should be Logs not Network", 120, 50, tabDashboard, tabLogs, false},
-		{"width120 x90 beyond bar no-op from Dashboard", 120, 90, tabDashboard, tabDashboard, true},
-		{"width120 x90 beyond bar no-op from Requests", 120, 90, tabRequests, tabRequests, true},
+		{"width120 x108 beyond bar no-op from Dashboard", 120, 108, tabDashboard, tabDashboard, true},
+		{"width120 x108 beyond bar no-op from Requests", 120, 108, tabRequests, tabRequests, true},
 		{"width120 x20 still Requests", 120, 20, tabDashboard, tabRequests, false},
 		{"width120 x40 Network", 120, 40, tabDashboard, tabNetwork, false},
+		{"width120 x80 Insights", 120, 80, tabDashboard, tabInsights, false},
+		{"width120 x94 Controls", 120, 94, tabDashboard, tabControls, false},
 		{"width40 x12 Overview", 40, 12, tabDashboard, tabDashboard, false},
 		{"width40 x14 Requests", 40, 14, tabDashboard, tabRequests, false},
 		{"width40 x28 Network", 40, 28, tabDashboard, tabNetwork, false},
 		{"width40 x35 Network partial", 40, 35, tabDashboard, tabNetwork, false},
 		{"width40 x39 Network last visible", 40, 39, tabDashboard, tabNetwork, false},
-		{"width200 x90 beyond no-op", 200, 90, tabDashboard, tabDashboard, true},
+		{"width200 x108 beyond no-op", 200, 108, tabDashboard, tabDashboard, true},
 		{"width200 x79 still Routes", 200, 79, tabDashboard, tabRoutes, false},
+		{"width200 x107 Controls last", 200, 107, tabDashboard, tabControls, false},
 		{"width0 x50 beyond bar no-op", 0, 50, tabDashboard, tabDashboard, true},
-		{"width0 x90 beyond bar no-op", 0, 90, tabDashboard, tabDashboard, true},
+		{"width0 x108 beyond bar no-op", 0, 108, tabDashboard, tabDashboard, true},
 		{"width200 x50 still Logs", 200, 50, tabDashboard, tabLogs, false},
 	}
 	for _, tc := range tests {
@@ -84,12 +87,12 @@ func TestMouseClickTabBarGeometry(t *testing.T) {
 
 func TestTabAtBoundaries(t *testing.T) {
 	m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
-	m.width = 80
+	m.width = 120
 	m.height = 24
-	// Check total width is 80 via rendered tab bar.
+	// All eight destinations must be present in the rail; the bar is 108 cells.
 	bar := m.renderTabBar()
-	if w := uniseg.StringWidth(stripANSI(bar)); w != 80 {
-		t.Errorf("renderTabBar width = %d, want 80; bar=%q", w, stripANSI(bar))
+	if w := uniseg.StringWidth(stripANSI(bar)); w != 108 {
+		t.Errorf("renderTabBar width = %d, want 108; bar=%q", w, stripANSI(bar))
 	}
 	// Check individual offsets via tabAt
 	cases := []struct {
@@ -105,8 +108,12 @@ func TestTabAtBoundaries(t *testing.T) {
 		{51, tabConcurrency, true},
 		{68, tabRoutes, true},
 		{79, tabRoutes, true},
-		{80, 0, false},
-		{90, 0, false},
+		{80, tabInsights, true},
+		{93, tabInsights, true},
+		{94, tabControls, true},
+		{107, tabControls, true},
+		{108, 0, false},
+		{120, 0, false},
 		{-1, 0, false},
 	}
 	for _, c := range cases {
@@ -142,21 +149,20 @@ func TestMouseClickTabBarOffRowNoChange(t *testing.T) {
 }
 
 func TestMouseClickTabBarEmptySpaceNoOpAcrossWidths(t *testing.T) {
-	// Empty space is any x >= 80 (total bar width) when terminal wider than bar.
+	// Empty space is any x >= 108 (total bar width) when terminal wider than bar.
 	// Regardless of starting tab, clicking there must be no-op.
-	for _, width := range []int{80, 90, 120, 200} {
-		for _, start := range []tabID{tabDashboard, tabRequests, tabNetwork, tabLogs, tabConcurrency, tabRoutes} {
+	for _, width := range []int{108, 120, 200} {
+		for _, start := range []tabID{tabDashboard, tabRequests, tabNetwork, tabLogs, tabConcurrency, tabRoutes, tabInsights, tabControls} {
 			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
 			m.width = width
 			m.height = 24
 			m.tab = start
-			xBeyond := 85
-			if width < 85 {
-				// For width 80, beyond is 80 itself (last+1)
-				xBeyond = 80
+			xBeyond := 108
+			if width <= 108 {
+				xBeyond = 108
 			}
-			// Only test if beyond is within terminal (x < width) or for width 80 equal boundary.
-			if xBeyond >= width && width != 80 {
+			// Only test if beyond is within terminal (x < width).
+			if xBeyond >= width {
 				continue
 			}
 			m2 := update(m, tea.MouseClickMsg{X: xBeyond, Y: 1})
@@ -193,7 +199,7 @@ func TestMouseClickTabBarNarrowStillGeometry(t *testing.T) {
 // TestTabAtActiveStyleConsistency closes a rendering gap: no test previously
 // rendered with a non-zero active tab and checked
 // that tabAt boundaries hold. This iterates EVERY tab as the selected tab and
-// verifies the rendered bar is still 80 cells and tabAt's boundaries match.
+// verifies the rendered bar is still 108 cells and tabAt's boundaries match.
 func TestTabAtActiveStyleConsistency(t *testing.T) {
 	boundaries := []struct {
 		x    int
@@ -205,26 +211,28 @@ func TestTabAtActiveStyleConsistency(t *testing.T) {
 		{41, tabLogs}, {50, tabLogs},
 		{51, tabConcurrency}, {67, tabConcurrency},
 		{68, tabRoutes}, {79, tabRoutes},
-		{80, 0}, {90, 0}, {-1, 0},
+		{80, tabInsights}, {93, tabInsights},
+		{94, tabControls}, {107, tabControls},
+		{108, 0}, {120, 0}, {-1, 0},
 	}
 	for active := range numTabs {
 		t.Run(fmt.Sprintf("active=%d", active), func(t *testing.T) {
 			m := NewModelForProviders([]ProviderMeta{{Concurrency: 4}})
-			m.width = 80
+			m.width = 120
 			m.height = 24
 			m.tab = active
 
-			// The rendered bar must always be 80 cells: the theme gives
+			// The rendered bar must always be 108 cells: the theme gives
 			// active and inactive the same horizontal box model.
 			bar := m.renderTabBar()
-			if w := uniseg.StringWidth(stripANSI(bar)); w != 80 {
-				t.Fatalf("renderTabBar width = %d, want 80 (active=%d)", w, active)
+			if w := uniseg.StringWidth(stripANSI(bar)); w != 108 {
+				t.Fatalf("renderTabBar width = %d, want 108 (active=%d)", w, active)
 			}
 
 			// tabAt boundaries must hold regardless of which tab is selected.
 			for _, b := range boundaries {
 				got, ok := m.tabAt(b.x)
-				if b.x < 0 || b.x >= 80 {
+				if b.x < 0 || b.x >= 108 {
 					if ok {
 						t.Errorf("active=%d tabAt(%d) = ok, want !ok", active, b.x)
 					}
@@ -287,9 +295,9 @@ func TestMouseClickTabBarEmptySpaceKeepsFollowLogs(t *testing.T) {
 		t.Fatal("start state: followLogs should be true on Logs tab")
 	}
 
-	// Click empty space on the tab bar row (X=85, beyond the 80-cell bar
+	// Click empty space on the tab bar row (X=108, beyond the 108-cell bar
 	// but within the 120-wide terminal). tabAt returns !ok → no-op.
-	m2 := update(m, tea.MouseClickMsg{X: 85, Y: 1})
+	m2 := update(m, tea.MouseClickMsg{X: 108, Y: 1})
 	if !m2.followLogs {
 		t.Errorf("tab-bar empty-space click should preserve followLogs=true, got %v", m2.followLogs)
 	}

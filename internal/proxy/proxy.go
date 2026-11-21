@@ -242,7 +242,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if recPtr == nil || recPtr.transcodeOutcome == nil {
 				capture.Complete(diagnostic.DownstreamResponse, !aborted && (recPtr == nil || !recPtr.downstreamWriteFailed()))
 			}
-			entry.Diagnostic = capture.Snapshot()
+			entry.Diagnostic = capture.Seal()
 			p.journal.Record(entry)
 			observed.SetJournalID(entry.ID)
 		}

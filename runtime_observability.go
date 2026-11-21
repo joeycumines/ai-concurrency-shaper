@@ -49,7 +49,7 @@ func newGatewayRuntime(cfg *config.Config) (*gatewayRuntime, error) {
 	}
 	hub := observation.New(observation.Config{Providers: providers, History: store})
 	c := control.New()
-	c.SetCanceller(hub.Cancel)
+	c.SetProviderCanceller(hub.CancelProvider)
 	c.SetOnChange(func(a control.Audit) {
 		hub.Marker(observation.Marker{At: a.At, Provider: a.Command.Provider, Kind: "control_" + a.Kind, Summary: a.Summary, RequestID: a.Command.RequestID})
 		// %q neutralizes terminal/log control characters in configured names.
@@ -110,17 +110,19 @@ func (rt *gatewayRuntime) register(p *config.Provider) error {
 		if strings.HasPrefix(id, "route:") {
 			kind = "route"
 		}
-		l.SetObserver(func(at time.Time, s queue.LimiterStats) {
+		l.SetObserverWithClock(func(at time.Time, s queue.LimiterStats) {
 			rt.hub.SetResourceAt(at, observation.Resource{Provider: name, ID: id, Kind: kind, Limit: int64(s.Effective), Occupied: s.Occupied, Cooldown: s.Cooldown, Queued: s.Waiters, Known: true})
-		})
+		}, rt.hub.Now)
 	}
 	return nil
 }
 
 // Close rejects late ingress, cancels active handlers, and joins their final
-// journals/facts before sealing history. A timed-out join deliberately leaves
-// the recorder open: the caller receives an error and may retry Close after a
-// non-cooperative handler exits. No handler can publish behind a sealed recorder.
+// journals/facts before sealing history. When the join exceeds its deadline the
+// caller still receives the timeout and may retry Close after a non-cooperative
+// handler exits: the recorder is left open so no handler can publish behind a
+// sealed sink. A separate bounded attempt still seals the last tick and drains
+// already-queued observations, so slow ingress cannot discard committed facts.
 func (rt *gatewayRuntime) Close(ctx context.Context) error {
 	rt.lifecycleMu.Lock()
 	if !rt.closing {
@@ -133,15 +135,37 @@ func (rt *gatewayRuntime) Close(ctx context.Context) error {
 	rt.lifecycleMu.Unlock()
 	rt.cancelHandlers()
 	rt.controls.Close()
+
+	// A retry may arrive with an already-expired context. If all handlers have
+	// joined, complete the seal regardless: the caller's deadline governed the
+	// earlier join, not the independent final tick and sink drain.
+	var joinErr error
 	select {
 	case <-done:
-		return rt.hub.Close(ctx)
-	case <-ctx.Done():
-		rt.lifecycleMu.Lock()
-		active := rt.activeHandlers
-		rt.lifecycleMu.Unlock()
-		return fmt.Errorf("runtime shutdown waiting for %d ingress handlers before sealing history: %w", active, ctx.Err())
+	default:
+		select {
+		case <-done:
+		case <-ctx.Done():
+			rt.lifecycleMu.Lock()
+			active := rt.activeHandlers
+			rt.lifecycleMu.Unlock()
+			joinErr = fmt.Errorf("runtime shutdown waiting for %d ingress handlers before sealing history: %w", active, ctx.Err())
+		}
 	}
+
+	// On a join timeout the recorder must stay open so a handler that finally
+	// exits can publish its terminal fact; the retrying caller performs the
+	// seal once the join succeeds.
+	if joinErr != nil {
+		return joinErr
+	}
+	// Once all handlers have joined, give the final tick and SQLite drain
+	// their own budget. Reusing a nearly-expired ingress deadline would skip
+	// the seal and silently lose the queued tail precisely when handlers were
+	// slow to finish.
+	sealCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return rt.hub.Close(sealCtx)
 }
 func (rt *gatewayRuntime) enterHandler() bool {
 	rt.lifecycleMu.Lock()
@@ -167,6 +191,10 @@ func (rt *gatewayRuntime) leaveHandler() {
 // that do not enter a proxy. Body reads still happen only in the existing path.
 func (rt *gatewayRuntime) observeIngress(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL == nil {
+			http.Error(w, "invalid request URL", http.StatusBadRequest)
+			return
+		}
 		if !rt.enterHandler() {
 			http.Error(w, "gateway is shutting down", http.StatusServiceUnavailable)
 			return
@@ -232,7 +260,7 @@ func (rt *gatewayRuntime) observeIngress(next http.Handler) http.Handler {
 				if failure != nil {
 					panic(failure)
 				}
-				if request.Snapshot().Cancelled {
+				if request.Cancelled() {
 					// A local operator cancellation is not a successful empty 200
 					// or a successfully terminated chunked body for the client.
 					panic(http.ErrAbortHandler)
@@ -271,7 +299,7 @@ func (rt *gatewayRuntime) observeIngress(next http.Handler) http.Handler {
 			evidence := capture.Seal()
 			request.SetFingerprint(capture.FirstFailureFingerprint())
 			urlCopy := *r.URL
-			e := &journal.Entry{RequestID: request.ID(), Diagnostic: evidence, Method: r.Method, URL: &urlCopy, RequestHeaders: r.Header.Clone(), RequestBody: evidence.Legs[0].Body, RequestBodyTruncated: evidence.Legs[0].Truncated || !evidence.Legs[0].Complete, StatusCode: status, ResponseHeaders: writer.Header().Clone(), ResponseBody: evidence.Legs[3].Body, ResponseSize: evidence.Legs[3].ObservedBytes, ContentType: evidence.Legs[3].ContentType, Aborted: !evidence.Legs[3].Complete, Timing: journal.Timing{QueueEnd: started, ResponseHeaders: writer.HeadersAt}}
+			e := &journal.Entry{RequestID: request.ID(), Diagnostic: evidence, Method: r.Method, URL: &urlCopy, RequestHeaders: r.Header.Clone(), RequestBody: evidence.Legs[0].Body, RequestBodyTruncated: evidence.Legs[0].Truncated || !evidence.Legs[0].Complete, StatusCode: status, ResponseHeaders: writer.Header().Clone(), ResponseBody: evidence.Legs[3].Body, ResponseSize: evidence.Legs[3].ObservedBytes, ContentType: evidence.Legs[3].ContentType, Aborted: !evidence.Legs[3].Complete, Timing: journal.Timing{QueueStart: started, QueueEnd: started, ResponseHeaders: writer.HeadersAt}}
 			if evidence.Legs[3].Complete {
 				e.Timing.ResponseComplete = time.Now()
 			}
@@ -284,7 +312,7 @@ func (rt *gatewayRuntime) observeIngress(next http.Handler) http.Handler {
 			if failure != nil {
 				panic(failure)
 			}
-			if request.Snapshot().Cancelled {
+			if request.Cancelled() {
 				panic(http.ErrAbortHandler)
 			}
 		}()

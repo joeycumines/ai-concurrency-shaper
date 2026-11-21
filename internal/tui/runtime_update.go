@@ -36,6 +36,11 @@ func (m Model) updateRuntime(msg tea.Msg) (Model, tea.Cmd, bool) {
 		if m.runtime.Observations != nil {
 			m.insights.snapshot = m.runtime.Observations.Snapshot()
 		}
+		// Once per second, force a full rebuild so an in-place journal
+		// eviction (constant length, new entry IDs) is reflected even when
+		// no filter control changed. Between ticks the cheap signature gates
+		// the work away from mouse motion and other high-rate messages.
+		m.networkFilterGen = ""
 		if m.runtime.Controls != nil {
 			m.controlPanel.snapshot = m.runtime.Controls.Snapshot()
 			m.syncControlLimits()
@@ -110,7 +115,11 @@ func (m Model) updateRuntime(msg tea.Msg) (Model, tea.Cmd, bool) {
 			m.tell("Export failed: " + msg.err.Error())
 		} else {
 			m.tell("Saved " + msg.path)
-			m.inspection = inspectionState{open: true, title: "EXPORT SAVED", rawLines: []string{"File:", msg.path, "", "The export contains the frozen selection taken when you pressed export."}}
+			title := "EXPORT SAVED"
+			if msg.raw {
+				title = "RAW EXPORT SAVED"
+			}
+			m.inspection = inspectionState{open: true, title: title, rawLines: m.savedExportLines(msg.path, msg.raw)}
 			m.reflowInspection()
 		}
 		return m, nil, true
@@ -492,6 +501,7 @@ func (m Model) runtimeMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd, bool) {
 		}
 		if msg.Y == m.contentStartRow() {
 			m.insights.view = (m.insights.view + 1) % len(insightNames)
+			m.resetInsightView()
 			return m, nil, true
 		}
 		if msg.Y == m.contentStartRow()+2 {
@@ -550,7 +560,7 @@ func (m Model) runtimeMouseClick(msg tea.MouseClickMsg) (Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 	if m.tab == tabControls {
-		row := msg.Y - m.contentStartRow() - 5
+		row := msg.Y - m.contentStartRow() - m.controlPoolRowOffset()
 		if p, ok := m.selectedControlProvider(); ok && row >= 0 && row+m.controlPoolStart(len(p.Pools)) < len(p.Pools) {
 			m.cursor = row + m.controlPoolStart(len(p.Pools))
 		}

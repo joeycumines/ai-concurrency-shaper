@@ -50,6 +50,8 @@ func sourceStreamUsage(converter frameConverter) CanonicalUsage {
 	case *messagesToGeminiConverter:
 		return sourceMessagesUsage(c.upstream)
 	default:
-		return CanonicalUsage{}
+		// A converter outside the supported set must never be silently
+		// reported as "no usage": that would look like a genuine zero.
+		panic("observed stream usage: unsupported converter")
 	}
 }

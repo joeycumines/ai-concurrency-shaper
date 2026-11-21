@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -570,11 +571,10 @@ func run() (runErr error) {
 				}
 				snaps[i] = metrics.ProviderSnapshot{Name: pr.Name, Snapshot: snap}
 			}
-			// One grouped write: every metric family forms a single
-			// contiguous block across all providers, as the text format's
-			// grouping rule requires. A scrape that walked away cannot be
-			// written to anyway, so the error is deliberately discarded.
-			if err := metrics.WritePrometheusFleet(w, snaps); err != nil {
+			// Build the complete exposition before writing: a Gather or
+			// formatting error must not produce a 200 with a truncated body.
+			var body bytes.Buffer
+			if err := metrics.WritePrometheusFleet(&body, snaps); err != nil {
 				return
 			}
 			families, err := registry.Gather()
@@ -582,10 +582,11 @@ func run() (runErr error) {
 				return
 			}
 			for _, family := range families {
-				if _, err := expfmt.MetricFamilyToText(w, family); err != nil {
+				if _, err := expfmt.MetricFamilyToText(&body, family); err != nil {
 					return
 				}
 			}
+			_, _ = w.Write(body.Bytes())
 		})
 		metricsSrv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 		log.Printf("metrics endpoint listening on %s/metrics", metricsLn.Addr().String())

@@ -289,6 +289,9 @@ func (h *TranscodeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fl.setClientBody(body)
+	if obs := observation.FromContext(r.Context()); obs != nil {
+		obs.SetProtocols(string(h.cfg.Mapping.ClientProtocol), string(h.cfg.Mapping.UpstreamProtocol), "")
+	}
 
 	// Decode the source request into the canonical IR and render the target
 	// request, resolving the model through the map.

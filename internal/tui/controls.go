@@ -333,8 +333,13 @@ func (m Model) renderControls() string {
 	if !p.ExpiresAt.IsZero() {
 		rows = append(rows, " Override expires "+p.ExpiresAt.UTC().Format("15:04:05 UTC"))
 	}
-	if w < 70 {
-		rows = append(rows, m.styles.tableHeaderStyle.Render(" POOL          LIMIT USED HOLD WAIT"))
+	// Narrow rows are 35 cells wide (header) / 34 cells (data); wide rows
+	// are 82 cells. Use the actual rendered width as the breakpoint so a
+	// pane that can show the wide table never sees it clipped.
+	if w < 82 {
+		// Field columns below start at 14, 20, 25 and 30; the labels share
+		// those starts so each heading sits above its own field.
+		rows = append(rows, m.styles.tableHeaderStyle.Render(" POOL         LIMIT USED HOLD WAIT"))
 		for i := m.controlPoolStart(len(p.Pools)); i < min(m.controlPoolStart(len(p.Pools))+max(h-11, 1), len(p.Pools)); i++ {
 			pool := p.Pools[i]
 			label := truncatePlain(pool.ID, 12)
@@ -397,6 +402,17 @@ func (m Model) controlButtonAt(x, y int) int {
 		return 1
 	}
 	return -1
+}
+
+// controlPoolRowOffset is the number of fixed rows above the first pool row in
+// renderControls. An active override adds an "Override expires" row, so the
+// pointer hit-test must use the same offset the renderer used.
+func (m Model) controlPoolRowOffset() int {
+	offset := 5
+	if p, ok := m.selectedControlProvider(); ok && !p.ExpiresAt.IsZero() {
+		offset++
+	}
+	return offset
 }
 
 func (m Model) controlPoolStart(n int) int {
