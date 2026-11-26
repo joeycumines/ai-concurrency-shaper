@@ -8,13 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ### Added
 
-- Plain builds now report `dev` for every Go pseudo-version, including post-tag pseudo-versions and dirty builds, while tagged module builds and explicit `-ldflags "-X main.version=..."` overrides retain their release version.
+- `-version` reports the module version embedded in a tagged `go install` build (for example `v0.9.3`) and `dev` for local builds, Go pseudo-versions, and dirty builds; explicit `-ldflags "-X main.version=..."` overrides still win. Previously `-version` printed the compile-time default for every build.
 
 ### Fixed
 
-- Anthropic inline tool additions and removals, MCP listings, thinking display updates, and `between_tools` thinking now validate and preserve their supported wire variants without inventing prompt text or successful completion state.
-- Structural JSON validation keeps raw number tokens outside float64 range, and 32-bit targets compile the derived-usage overflow diagnostic with an explicitly 64-bit saturation bound.
-- A number of stream lifecycle, alias decoding, usage presence, tool-change, and exact JSON key identity edge cases are now rejected or completed according to the observed upstream wire contract rather than a proxy-generated success.
+- Anthropic inline tool additions and removals now decode as a documented reference union: `type: "custom"`, explicit `type: null` (the SDK's untagged form), and the `function` compatibility spelling all use the strict schema path. Definitions join the global tool list with a timing Note; changed definitions replace earlier ones only with the `anthropic_tool_changes` loss approved, plus a combined timing and supersession Note. Source roles, tool-change placement, unresolved plain references, cross-kind name conflicts and inline cache exclusions are validated before any conversion drop, with reports retaining original message and block coordinates. Tool-change-only system messages contribute no invented prompt text or conversation position. Replayed MCP listing blocks round-trip with `mcp_server_name` under `anthropic_tool_changes` (response listings produce a Note); inline server tools and `mcp_toolset` definitions remain explicit unsupported forms.
+- Anthropic thinking accepts the documented `updates` display on `enabled` and `adaptive` and the bare `between_tools` arm; the canonical union now has the four arms `enabled` (with `budget_tokens`), `disabled`, `between_tools`, and `adaptive`, with `display` carried by `enabled` and `adaptive`. `between_tools` is native on Messages targets and a policy-gated `request_reasoning` loss on Chat, Responses and Gemini. Per-arm wire decoding rejects excluded fields even when explicitly null, while a legal nullable display preference still means absence. Discarded stream content retains block kind and closure state, so invalid deltas, repeated or missing stops, and content smuggled into `message_start` cannot produce a successful completion. Synthetic conformance fixtures use compatible native model settings and legal tool-change placement and are identified separately from retained field captures.
+- Structural JSON validation retains raw number tokens outside float64 range without converting them, while duplicate keys and illegal nulls after those numbers still cannot escape. On 32-bit targets the derived-usage overflow diagnostic compiles with an explicitly 64-bit saturation bound.
+- Stream lifecycle, alias decoding, usage presence, tool-change, and exact JSON key identity edge cases are rejected or completed according to the observed upstream wire contract rather than a proxy-generated success. Exact JSON key identity includes case-variant duplicate keys; schema equality preserves Unicode and big-exponent spellings, and required usage presence is enforced.
 
 ## [0.9.2] - 2026-11-14
 
@@ -229,5 +230,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 - The four request renderers now agree on every turn role, not just the assistant role: a marker-signature thinking part is scrubbed from a system or user turn as well as an assistant one, and a thinking part with any other signature is refused centrally instead of being dropped by the first renderer that walked past it.
 
 
+[Unreleased]: https://github.com/joeycumines/ai-concurrency-shaper/compare/v0.9.3...HEAD
 [0.9.3]: https://github.com/joeycumines/ai-concurrency-shaper/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/joeycumines/ai-concurrency-shaper/compare/v0.9.1...v0.9.2
