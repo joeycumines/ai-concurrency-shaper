@@ -596,8 +596,8 @@ func TestToolDefinitionEquivalentNumbersAreNotSuperseded(t *testing.T) {
 }
 
 // TestToolDefinitionHugeExponentsStayBounded pins the availability invariant:
-// client-supplied exponents are never expanded. Saturated exponents are
-// compared by lexeme, so a different huge value must still be reported as a
+// client-supplied exponents are never expanded. Exact exponent comparison
+// ensures a different huge value is still reported as a
 // supersession rather than silently treated as an unchanged repeat. The
 // supersession is a policy-gated loss, so the check runs under the approved
 // policy and also asserts the strict refusal.
@@ -622,10 +622,10 @@ func TestToolDefinitionHugeExponentsStayBounded(t *testing.T) {
 		}
 	}
 	if redefined != 2 {
-		t.Fatalf("distinct saturated-exponent schemas: got %d supersession reports, want 2 (Note + Loss): %+v", redefined, result.Report.Losses)
+		t.Fatalf("distinct huge-exponent schemas: got %d supersession reports, want 2 (Note + Loss): %+v", redefined, result.Report.Losses)
 	}
 	if _, err := DecodeMessagesRequest([]byte(body), StrictLossPolicy()); err == nil {
-		t.Fatal("distinct saturated-exponent schemas accepted under strict policy")
+		t.Fatal("distinct huge-exponent schemas accepted under strict policy")
 	}
 }
 

@@ -273,6 +273,8 @@ const (
 	// AnthropicToolChanges covers mid-conversation tool changes and replayed
 	// MCP listings. A custom definition is hoisted into the global tool list;
 	// its timing and any schema supersession are recorded together as a Note.
+	// A changed definition also requires an approved loss before replacing
+	// the earlier definition; strict policy refuses that supersession.
 	// Withdrawals, references and a client's replayed MCP listing cannot be
 	// reproduced and are policy-gated losses. An upstream response listing is
 	// a Note. The permission is default-approved for client compatibility and
@@ -456,7 +458,7 @@ var lossRegistry = []lossEntry{
 	{FeatureResponsesControls, "the Responses envelope controls that are tolerated observably: include and client_metadata are noted, prompt_cache_key is dropped, and user and store are dropped on a target that models neither (Chat renders both), all under this permission, and Responses envelope controls echoed on an upstream response are dropped under this permission; the request-side conversation-state controls (background, max_tool_calls, prompt, safety_identifier, status) remain typed unsupported-feature errors under every policy"},
 	{FeatureAnthropicControls, "the Anthropic Messages client-side envelope controls (context_management, output_config) have no representation in the target request; an approved loss drops them observably"},
 	{FeatureRequestCitations, "request citations on text blocks cannot be reproduced in the target request"},
-	{FeatureAnthropicToolChanges, "Anthropic mid-conversation tool changes use a global tool list: definitions are hoisted with a Note that explains timing and schema replacement; withdrawals, references and replayed MCP listings are policy-gated losses, while upstream response listings produce a Note"},
+	{FeatureAnthropicToolChanges, "Anthropic mid-conversation tool changes use a global tool list: new and unchanged definitions are hoisted with a timing Note; changed definitions also require a policy-gated loss and their Note explains supersession; withdrawals, references and replayed MCP listings are policy-gated losses, while upstream response listings produce a Note"},
 	{FeatureBuiltinTools, "Responses built-in tools (web_search, file_search, code_interpreter, computer_use, and other non-function tool types) cannot be reproduced in a chat request; an approved loss drops them, and a tool_choice the drop leaves dangling is reconciled (auto drops with a note, required and named references reject)"},
 	{FeatureAnthropicServerTools, "Anthropic Messages server-side tools and server-executed content (type-discriminated tools[] definitions, server_tool_use / web_search_tool_result / code_execution blocks, container_upload references) cannot be reproduced in a chat request; an approved loss drops them observably"},
 	{FeatureResponseServiceTier, "the upstream service tier actually served cannot be reproduced in the target"},

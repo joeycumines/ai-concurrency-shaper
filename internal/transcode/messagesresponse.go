@@ -14,7 +14,8 @@ import (
 // fields are skipped, while each content block decodes strictly through its
 // per-arm decoder. Thinking and server-side blocks are approved losses under
 // policy or rejections. A usage object that is absent makes every count
-// unknown; a usage object that is present is known.
+// unknown; a present usage object must carry its required input and output
+// totals before those counts can be known.
 func DecodeMessagesResponse(
 	body []byte,
 	policy LossPolicy,
@@ -23,6 +24,11 @@ func DecodeMessagesResponse(
 	var resp anthropicmessages.Response
 	if err := wire.DecodeTolerant(body, &resp); err != nil {
 		return CanonicalResponse{}, report, upstreamWireError(UpstreamMessages, http.StatusOK, err)
+	}
+	if resp.Usage != nil {
+		if err := validateMessagesUsagePresence(body, "usage", true); err != nil {
+			return CanonicalResponse{}, report, upstreamWireError(UpstreamMessages, http.StatusOK, err)
+		}
 	}
 	if resp.Type != "message" {
 		return CanonicalResponse{}, report, upstreamWireError(

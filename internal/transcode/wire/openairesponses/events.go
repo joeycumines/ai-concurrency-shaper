@@ -478,8 +478,12 @@ func decodeStreamContentPart(data []byte) (StreamContentPart, error) {
 	var probe struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
-		return nil, err
+	// A wholly null part has no discriminator; an object's type:null is an
+	// illegal modeled value and still takes the exact-name decode below.
+	if !bytes.Equal(wire.TrimSpace(data), []byte("null")) {
+		if err := wire.DecodeTolerant(data, &probe); err != nil {
+			return nil, err
+		}
 	}
 	if probe.Type == "" {
 		return nil, &wire.DecodeError{
@@ -935,11 +939,9 @@ func DecodeEvent(data []byte) (Event, error) {
 	var probe struct {
 		Type wire.Field[string] `json:"type"`
 	}
-	// The probe is lenient: it reads only the first JSON value, so a
-	// trailing-value document is rejected with the typed trailing error by
-	// the strict decode below, never with a raw syntax error here.
-	dec := json.NewDecoder(bytes.NewReader(data))
-	if err := dec.Decode(&probe); err != nil {
+	// Read the exact type spelling. Unknown envelope fields are tolerated,
+	// but a noncanonical alias cannot select a different event arm.
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return nil, err
 	}
 	if probe.Type.Null {

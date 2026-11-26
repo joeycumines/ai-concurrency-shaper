@@ -977,6 +977,20 @@ func decodeAnthropicStreamFrame(frame SSEEvent) (anthropicmessages.StreamEvent, 
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return event, upstreamWireError(UpstreamMessages, http.StatusOK, err)
 	}
+	switch event.Type {
+	case anthropicmessages.StreamEventTypeMessageStart:
+		if event.Message != nil && event.Message.Usage != nil {
+			if err := validateMessagesUsagePresence(raw["message"], "message.usage", true); err != nil {
+				return event, upstreamWireError(UpstreamMessages, http.StatusOK, err)
+			}
+		}
+	case anthropicmessages.StreamEventTypeMessageDelta:
+		if event.Usage != nil {
+			if err := validateMessagesUsagePresence(data, "usage", false); err != nil {
+				return event, upstreamWireError(UpstreamMessages, http.StatusOK, err)
+			}
+		}
+	}
 	for field := range raw {
 		if !anthropicEventFieldAllowed(event.Type, field) {
 			return event, upstreamWireError(UpstreamMessages, http.StatusOK,

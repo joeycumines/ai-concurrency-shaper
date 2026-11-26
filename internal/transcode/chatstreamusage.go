@@ -14,17 +14,17 @@ func chatUsageKeyIsNull(chunkData json.RawMessage, key string) bool {
 	if len(chunkData) == 0 {
 		return false
 	}
-	var outer struct {
-		Usage json.RawMessage `json:"usage"`
-	}
+	// Use exact JSON keys here, matching the typed decoder: an unknown
+	// USAGE extension cannot replace the actual usage presence information.
+	var outer map[string]json.RawMessage
 	if err := json.Unmarshal(chunkData, &outer); err != nil {
 		return false
 	}
-	if len(outer.Usage) == 0 {
+	if len(outer["usage"]) == 0 {
 		return false
 	}
 	var probe map[string]json.RawMessage
-	if err := json.Unmarshal(outer.Usage, &probe); err != nil {
+	if err := json.Unmarshal(outer["usage"], &probe); err != nil {
 		return false
 	}
 	value, ok := probe[key]

@@ -1,6 +1,7 @@
 package openairesponses
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,8 +98,12 @@ func (parts *OutputContentParts) UnmarshalJSON(data []byte) error {
 		var probe struct {
 			Type string `json:"type"`
 		}
-		if err := json.Unmarshal(partData, &probe); err != nil {
-			return fmt.Errorf("output content part %d: %w", i, err)
+		// A wholly null part has no discriminator. An object's explicit
+		// type:null still goes through the modeled field's null validation.
+		if !bytes.Equal(wire.TrimSpace(partData), []byte("null")) {
+			if err := wire.DecodeTolerant(partData, &probe); err != nil {
+				return fmt.Errorf("output content part %d: %w", i, err)
+			}
 		}
 
 		if probe.Type == "" {
@@ -314,8 +319,11 @@ func DecodeOutputItem(data []byte) (OutputItem, error) {
 	var probe struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
-		return nil, err
+	// A wholly null item has no discriminator; report the missing type below.
+	if !bytes.Equal(wire.TrimSpace(data), []byte("null")) {
+		if err := wire.DecodeTolerant(data, &probe); err != nil {
+			return nil, err
+		}
 	}
 	if probe.Type == "" {
 		return nil, &wire.DecodeError{

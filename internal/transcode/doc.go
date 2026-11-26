@@ -91,8 +91,9 @@
 //	                       and no same-protocol route is constructible
 //	Mid-conversation      a tool_definition is hoisted into the request's
 //	 tool changes          tools (a Note: the availability point cannot be
-//	                       expressed); a withdrawal or undeclarable reference
-//	                       is loss-gated (FeatureAnthropicToolChanges); an
+//	                       expressed); supersession, a withdrawal or an
+//	                       undeclarable reference is loss-gated
+//	                       (FeatureAnthropicToolChanges); an
 //	                       mcp_toolset definition is unsupported; replayed
 //	                       MCP listings are loss-gated, response listings noted;
 //	                       a tool-change-only system message is not a turn
