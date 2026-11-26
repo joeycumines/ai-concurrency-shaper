@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -45,8 +46,63 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
 )
 
-// version is set via ldflags at build time (e.g. -ldflags -X main.version=1.2.3).
-var version = "dev"
+// version can be set with -ldflags "-X main.version=..." for builds that need
+// to override the module version. Otherwise -version reports the version Go
+// recorded in the binary, which is what `go install module@version` embeds.
+var version string
+
+func buildVersion() string {
+	if version != "" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := moduleReleaseVersion(info.Main.Version); v != "dev" {
+			return v
+		}
+	}
+	return "dev"
+}
+
+func moduleReleaseVersion(v string) string {
+	if v == "" || v == "(devel)" || strings.HasPrefix(v, "v0.0.0-") || isPseudoVersion(v) {
+		return "dev"
+	}
+	return v
+}
+
+func isPseudoVersion(v string) bool {
+	if i := strings.IndexByte(v, '+'); i >= 0 {
+		v = v[:i]
+	}
+	hashSeparator := strings.LastIndexByte(v, '-')
+	if hashSeparator < 0 {
+		return false
+	}
+	hash := v[hashSeparator+1:]
+	if len(hash) < 7 {
+		return false
+	}
+	for i := range len(hash) {
+		c := hash[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	timestampPart := v[:hashSeparator]
+	if len(timestampPart) < 15 {
+		return false
+	}
+	separator := timestampPart[len(timestampPart)-15]
+	if separator != '-' && separator != '.' {
+		return false
+	}
+	for i := len(timestampPart) - 14; i < len(timestampPart); i++ {
+		if timestampPart[i] < '0' || timestampPart[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -325,7 +381,7 @@ func run() error {
 	}
 
 	if cfg.Server.Version {
-		fmt.Println(version)
+		fmt.Println(buildVersion())
 		return nil
 	}
 

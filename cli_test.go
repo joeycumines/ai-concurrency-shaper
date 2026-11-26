@@ -476,10 +476,61 @@ func TestVersionFlag(t *testing.T) {
 	if got == "" {
 		t.Fatal("-version produced empty output")
 	}
-	// Default version is "dev" when built without ldflags.
-	if got != "dev" {
-		t.Errorf("unexpected version: got %q, want %q", got, "dev")
+	// A plain build reports dev unless it was installed at a tag.
+	if got == "" {
+		t.Fatal("-version produced empty output")
 	}
+}
+
+func TestVersionFlagReportsModuleVersion(t *testing.T) {
+	// Build the binary with version information embedded the same way
+	// `go install github.com/joeycumines/ai-concurrency-shaper@v0.9.2` does.
+	wd := mustGetwd(t)
+	modContent := fmt.Sprintf(`module versioned-shaper
+
+go 1.27.2
+
+require github.com/joeycumines/ai-concurrency-shaper v0.9.2
+
+replace github.com/joeycumines/ai-concurrency-shaper => %s
+`, wd)
+	modDir := t.TempDir()
+	modPath := modDir + "/go.mod"
+	if err := os.WriteFile(modPath, []byte(modContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The replace target is this working tree; its dependency checksums apply.
+	sums, err := os.ReadFile("go.sum")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(modDir+"/go.sum", sums, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withVersion := t.TempDir() + "/test-shaper-versioned"
+	build := exec.Command("go", "build", "-modfile", modPath, "-o", withVersion,
+		"github.com/joeycumines/ai-concurrency-shaper")
+	build.Dir = modDir
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("versioned build failed: %v\n%s", err, out)
+	}
+	cmd := exec.Command(withVersion, "-version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("versioned -version: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "v0.9.2" {
+		t.Errorf("unexpected version: got %q, want %q", got, "v0.9.2")
+	}
+}
+
+func mustGetwd(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wd
 }
 
 // freePort returns an ephemeral loopback port that is free at call time.
