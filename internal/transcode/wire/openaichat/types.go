@@ -77,7 +77,7 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 	var probe struct {
 		Type ContentBlockType `json:"type"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return err
 	}
 

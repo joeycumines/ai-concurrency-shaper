@@ -121,25 +121,26 @@ func (t Tool) Validate() error {
 // shared struct.
 func (t *Tool) UnmarshalJSON(data []byte) error {
 	var probe struct {
-		Type string `json:"type"`
+		Type wire.Field[string] `json:"type"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return err
 	}
-	if probe.Type != "function" && probe.Type != "namespace" {
-		if probe.Type == "" {
+	if probe.Type.Value != "function" && probe.Type.Value != "namespace" {
+		if probe.Type.Value == "" {
 			return &wire.DecodeError{
 				Kind:    wire.DecodeMissingRequired,
 				Path:    "tools[].type",
 				Message: "responses tool requires an explicit non-empty type",
 			}
 		}
-		// Lenient: built-in tool payloads are opaque and never forwarded.
+		// Built-in payloads are opaque and never forwarded, but their
+		// modeled identity must still reject aliases, nulls and type errors.
 		var builtin struct {
 			Type string `json:"type"`
 			Name string `json:"name,omitempty"`
 		}
-		if err := json.Unmarshal(data, &builtin); err != nil {
+		if err := wire.DecodeTolerant(data, &builtin); err != nil {
 			return err
 		}
 		t.Type = builtin.Type

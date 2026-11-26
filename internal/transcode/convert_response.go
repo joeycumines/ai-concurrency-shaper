@@ -262,7 +262,7 @@ func DecodeChatResponseWithPolicy(
 				Name      *string `json:"name"`
 				Arguments *string `json:"arguments"`
 			}
-			if err := json.Unmarshal(trimmed, &frag); err != nil {
+			if err := wire.DecodeTolerant(trimmed, &frag); err != nil {
 				return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 					UpstreamChatCompletions,
 					0,
@@ -463,7 +463,7 @@ func DecodeChatResponseWithPolicy(
 			Arguments *string `json:"arguments"`
 		}
 		// Validated above; a failure here is corrupt wire all the same.
-		if err := json.Unmarshal(bytes.TrimSpace(shadowChoice.Message.FunctionCall), &frag); err != nil {
+		if err := wire.DecodeTolerant(bytes.TrimSpace(shadowChoice.Message.FunctionCall), &frag); err != nil {
 			return CanonicalResponse{}, ConversionReport{}, upstreamWireError(
 				UpstreamChatCompletions,
 				0,

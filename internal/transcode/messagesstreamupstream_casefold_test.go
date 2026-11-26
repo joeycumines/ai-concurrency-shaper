@@ -1,62 +1,82 @@
 package transcode
 
 import (
-	"strings"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
 
-// TestDecodeAnthropicStreamFrameCaseAliasStopReason proves a case-variant
-// duplicate key cannot launder a stop reason: {"stop_reason":"refusal",
-// "STOP_REASON":"end_turn"} would let the uppercase key overwrite the modeled
-// field under encoding/json's case-insensitive matching, turning a refusal
-// into a success terminal. The wire layer rejects the case-variant duplicate,
-// so the frame fails before the stream state ever sees it.
+// Provider envelope names are exact: uppercase and Unicode case-fold aliases
+// are unknown metadata, so they must not overwrite or supply a stop reason.
+// Exact duplicate keys remain malformed independently of envelope tolerance.
 func TestDecodeAnthropicStreamFrameCaseAliasStopReason(t *testing.T) {
-	frame := SSEEvent{
-		Event: "message_delta",
-		Data:  []byte(`{"type":"message_delta","delta":{"stop_reason":"refusal","STOP_REASON":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}`),
-	}
-	_, err := decodeAnthropicStreamFrame(frame)
-	if err == nil {
-		t.Fatal("case-alias stop_reason decoded without error")
-	}
-	if !isUpstreamConversionError(err) {
-		t.Fatalf("err = %T %v, want an upstream conversion error", err, err)
-	}
-	if !strings.Contains(err.Error(), "duplicate") && !strings.Contains(err.Error(), "STOP_REASON") {
-		t.Fatalf("error should name the duplicate key: %v", err)
+	for kind, envelope := range map[string]string{
+		"message_delta": `{"type":"message_delta","delta":{%s},"usage":{"output_tokens":2}}`,
+		"message_start": `{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"m",%s,"usage":{"input_tokens":1,"output_tokens":0}}}`,
+	} {
+		t.Run(kind, func(t *testing.T) {
+			for _, fields := range []string{
+				`"stop_reason":"refusal","STOP_REASON":"end_turn"`,
+				`"STOP_REASON":"end_turn","stop_reason":"refusal"`,
+				`"stop_reason":"refusal","Stop_Reason":"end_turn"`,
+				`"Stop_Reason":"end_turn","stop_reason":"refusal"`,
+				`"stop_reason":"refusal","ſtop_reason":"end_turn"`,
+				`"ſtop_reason":"end_turn","stop_reason":"refusal"`,
+			} {
+				t.Run(fields, func(t *testing.T) {
+					event, err := decodeAnthropicStreamFrame(SSEEvent{
+						Event: kind,
+						Data:  []byte(fmt.Sprintf(envelope, fields+`,"stop_sequence":null`)),
+					})
+					if err != nil {
+						t.Fatalf("unknown provider metadata rejected: %v", err)
+					}
+					if kind == "message_delta" {
+						if event.Delta == nil || event.Delta.StopReason == nil || *event.Delta.StopReason != "refusal" {
+							t.Fatalf("canonical refusal changed: %+v", event.Delta)
+						}
+					} else if event.Message == nil || event.Message.StopReason == nil || *event.Message.StopReason != "refusal" {
+						t.Fatalf("canonical refusal changed: %+v", event.Message)
+					}
+				})
+			}
+
+			// An exact duplicate remains an upstream wire error.
+			_, err := decodeAnthropicStreamFrame(SSEEvent{
+				Event: kind,
+				Data:  []byte(fmt.Sprintf(envelope, `"stop_reason":"end_turn","stop_reason":"refusal","stop_sequence":null`)),
+			})
+			var malformed *wire.DecodeError
+			if !isUpstreamConversionError(err) || !errors.As(err, &malformed) || malformed.Kind != wire.DecodeDuplicateKey {
+				t.Fatalf("exact duplicate error = %T: %v, want an upstream duplicate-key failure", err, err)
+			}
+
+			// stop_reason is nullable at decode. Its noncanonical spelling
+			// leaves it absent; the stream state requires the canonical value
+			// before authorizing a terminal completion.
+			event, err := decodeAnthropicStreamFrame(SSEEvent{
+				Event: kind,
+				Data:  []byte(fmt.Sprintf(envelope, `"STOP_REASON":"end_turn","stop_sequence":null`)),
+			})
+			if err != nil {
+				t.Fatalf("unknown stop metadata rejected: %v", err)
+			}
+			if kind == "message_delta" {
+				if event.Delta == nil || event.Delta.StopReason != nil {
+					t.Fatalf("unknown spelling supplied stop_reason: %+v", event.Delta)
+				}
+			} else if event.Message == nil || event.Message.StopReason != nil {
+				t.Fatalf("unknown spelling supplied stop_reason: %+v", event.Message)
+			}
+		})
 	}
 
-	// The same alias on the message_start envelope is rejected too.
-	start := SSEEvent{
-		Event: "message_start",
-		Data:  []byte(`{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","content":[],"model":"m","stop_reason":"refusal","Stop_Reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}`),
-	}
-	if _, err := decodeAnthropicStreamFrame(start); err == nil || !isUpstreamConversionError(err) {
-		t.Fatalf("message_start case alias: err = %T %v, want an upstream conversion error", err, err)
-	}
-
-	// A control: the exact duplicate is rejected (pre-existing behavior),
-	// and a legitimately distinct key pair decodes fine.
+	// The event discriminator itself must be supplied canonically.
 	if _, err := decodeAnthropicStreamFrame(SSEEvent{
-		Event: "message_delta",
-		Data:  []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_reason":"refusal"}}`),
-	}); err == nil {
-		t.Fatal("exact duplicate stop_reason decoded without error")
-	}
-	var ev struct {
-		Type  string `json:"type"`
-		Delta *struct {
-			StopReason   *string `json:"stop_reason"`
-			StopSequence *string `json:"stop_sequence"`
-		} `json:"delta"`
-	}
-	if err := wire.Decode([]byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`), &ev); err != nil {
-		t.Fatalf("legitimate delta rejected: %v", err)
-	}
-	if ev.Delta == nil || ev.Delta.StopReason == nil || *ev.Delta.StopReason != "end_turn" {
-		t.Fatalf("legitimate delta = %+v", ev)
+		Event: "ping", Data: []byte(`{"TYPE":"ping"}`),
+	}); err == nil || !isUpstreamConversionError(err) {
+		t.Fatalf("missing canonical event type: err = %T %v, want upstream wire error", err, err)
 	}
 }

@@ -59,7 +59,7 @@ func parseLegacyFunctionCallFragment(raw json.RawMessage) (name *string, args *s
 		Name      *string `json:"name"`
 		Arguments *string `json:"arguments"`
 	}
-	if err := json.Unmarshal(trimmed, &frag); err != nil {
+	if err := wire.DecodeTolerant(trimmed, &frag); err != nil {
 		return nil, nil, false, false, err
 	}
 	hasName := frag.Name != nil && *frag.Name != ""
@@ -160,7 +160,7 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 	var probe struct {
 		Error *json.RawMessage `json:"error"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return ChatStreamResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			http.StatusOK,
@@ -171,7 +171,7 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 		var detail struct {
 			Message string `json:"message"`
 		}
-		_ = json.Unmarshal(*probe.Error, &detail)
+		_ = wire.DecodeTolerant(*probe.Error, &detail)
 		message := detail.Message
 		if message == "" {
 			message = "chat stream error frame"
@@ -408,7 +408,7 @@ func chatStreamChunkFromSSE(frame SSEEvent) (ChatStreamResponse, error) {
 		}
 	}
 	var chunk ChatStreamResponse
-	if err := json.Unmarshal(data, &chunk); err != nil {
+	if err := wire.DecodeTolerant(data, &chunk); err != nil {
 		return ChatStreamResponse{}, upstreamWireError(
 			UpstreamChatCompletions,
 			http.StatusOK,

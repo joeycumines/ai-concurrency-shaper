@@ -3,11 +3,12 @@ package transcode
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 )
 
 // SSE processing model:
@@ -200,7 +201,7 @@ func validateEventNameMatchesJSONType(event SSEEvent) error {
 	var probe struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(event.Data, &probe); err != nil {
+	if err := wire.DecodeTolerant(event.Data, &probe); err != nil {
 		return fmt.Errorf("SSE data is not JSON: %w", err)
 	}
 	if event.Event != probe.Type {

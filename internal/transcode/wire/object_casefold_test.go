@@ -2,16 +2,16 @@ package wire
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
 
-// TestDecodeRejectsCaseVariantDuplicateKeys proves that two keys in one JSON
-// object which differ only by case are duplicates: encoding/json v1 matches
-// struct fields case-insensitively, so the later-spelled key would silently
-// overwrite the modeled field. Both Decode and DecodeTolerant must reject
-// them, while the same key spellings in different objects (different scopes)
-// remain accepted.
+// TestDecodeRejectsCaseVariantDuplicateKeys proves that a case alias of an
+// already-present modeled field cannot overwrite it through encoding/json's
+// case-insensitive struct matching. Raw object keys retain their distinct JSON
+// identity. Strict decode rejects aliases; tolerant decode skips them as
+// unknown fields, preserving the value written under the exact modeled name.
 func TestDecodeRejectsCaseVariantDuplicateKeys(t *testing.T) {
 	type doc struct {
 		StopReason *string `json:"stop_reason"`
@@ -20,13 +20,14 @@ func TestDecodeRejectsCaseVariantDuplicateKeys(t *testing.T) {
 		} `json:"nested"`
 		Upper *string `json:"UPPER"`
 	}
-	reject := map[string]string{
-		"uppercase alias":   `{"stop_reason":"refusal","STOP_REASON":"end_turn"}`,
-		"mixed case alias":  `{"stop_reason":"refusal","Stop_Reason":"end_turn"}`,
-		"field alias":       `{"nested":{"text":"a"},"NESTED":{"text":"b"}}`,
-		"all lower vs caps": `{"UPPER":"a","upper":"b"}`,
+	reject := map[string]struct{ body, canonical string }{
+		"uppercase alias":   {`{"stop_reason":"refusal","STOP_REASON":"end_turn"}`, `{"stop_reason":"refusal"}`},
+		"mixed case alias":  {`{"stop_reason":"refusal","Stop_Reason":"end_turn"}`, `{"stop_reason":"refusal"}`},
+		"field alias":       {`{"nested":{"text":"a"},"NESTED":{"text":"b"}}`, `{"nested":{"text":"a"}}`},
+		"all lower vs caps": {`{"UPPER":"a","upper":"b"}`, `{"UPPER":"a"}`},
 	}
-	for name, docJSON := range reject {
+	for name, test := range reject {
+		docJSON := test.body
 		t.Run("Decode/"+name, func(t *testing.T) {
 			var out doc
 			err := Decode([]byte(docJSON), &out)
@@ -36,11 +37,15 @@ func TestDecodeRejectsCaseVariantDuplicateKeys(t *testing.T) {
 			}
 		})
 		t.Run("DecodeTolerant/"+name, func(t *testing.T) {
-			var out doc
-			err := DecodeTolerant([]byte(docJSON), &out)
-			var de *DecodeError
-			if !errors.As(err, &de) || de.Kind != DecodeDuplicateKey {
-				t.Fatalf("DecodeTolerant(%s): err = %v, want DecodeDuplicateKey", docJSON, err)
+			var out, canonical doc
+			if err := Decode([]byte(test.canonical), &canonical); err != nil {
+				t.Fatal(err)
+			}
+			if err := DecodeTolerant([]byte(docJSON), &out); err != nil {
+				t.Fatalf("DecodeTolerant(%s): %v", docJSON, err)
+			}
+			if !reflect.DeepEqual(out, canonical) {
+				t.Fatalf("unknown alias changed the canonical value: got %+v, want %+v", out, canonical)
 			}
 		})
 	}

@@ -105,7 +105,7 @@ func (t *ToolChange) UnmarshalJSON(data []byte) error {
 	var probe struct {
 		Type ToolChangeType `json:"type"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return err
 	}
 	var change ToolChange
@@ -455,7 +455,7 @@ func (c *TextCitation) UnmarshalJSON(data []byte) error {
 	var probe struct {
 		Type TextCitationType `json:"type"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return err
 	}
 
@@ -662,7 +662,7 @@ func (b *ContentBlock) UnmarshalJSON(data []byte) error {
 	var probe struct {
 		Type ContentBlockType `json:"type"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return err
 	}
 
@@ -1113,7 +1113,7 @@ func (t *Tool) UnmarshalJSON(data []byte) error {
 	var probe struct {
 		Type *string `json:"type"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return err
 	}
 	// The SDK's optional "custom" discriminator is nullable; explicit null is
@@ -1331,7 +1331,7 @@ func (t *ThinkingConfig) UnmarshalJSON(data []byte) error {
 	var probe struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return err
 	}
 	var config ThinkingConfig

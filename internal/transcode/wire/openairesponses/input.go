@@ -254,7 +254,7 @@ func DecodeInputContentPart(data []byte) (InputContentPart, error) {
 	var probe struct {
 		Type string `json:"type"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return nil, err
 	}
 	if probe.Type == "" {
@@ -724,7 +724,7 @@ func DecodeInputItem(data []byte) (InputItem, error) {
 		ID     string     `json:"id"`
 		Status ItemStatus `json:"status"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := wire.DecodeTolerant(data, &probe); err != nil {
 		return nil, err
 	}
 

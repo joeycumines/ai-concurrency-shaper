@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode/wire/anthropicmessages"
@@ -738,6 +740,14 @@ func sameMessagesFunctionDefinition(a, b CanonicalTool) (bool, error) {
 	if bytes.Equal(a.JSONSchema, b.JSONSchema) {
 		return true, nil
 	}
+	// encoding/json replaces unpaired UTF-16 surrogates and invalid UTF-8
+	// with U+FFFD. The raw schema sent upstream retains its original bytes,
+	// so equality of that lossy decoded view cannot establish an unchanged
+	// definition. Identical raw schemas already matched above; otherwise
+	// conservatively require the redefinition decision.
+	if !jsonStringsDecodeLosslessly(a.JSONSchema) || !jsonStringsDecodeLosslessly(b.JSONSchema) {
+		return false, nil
+	}
 	var values [2]any
 	for i, schema := range []json.RawMessage{a.JSONSchema, b.JSONSchema} {
 		decoder := json.NewDecoder(bytes.NewReader(schema))
@@ -747,6 +757,67 @@ func sameMessagesFunctionDefinition(a, b CanonicalTool) (bool, error) {
 		}
 	}
 	return equalJSONValues(values[0], values[1]), nil
+}
+
+// jsonStringsDecodeLosslessly checks that encoding/json can decode every
+// string in an already validated JSON document without replacing source characters.
+// Escaped backslashes are skipped, so a literal "\\ud800" is ordinary text;
+// a high-surrogate escape must be followed immediately by a low-surrogate
+// escape. The scan covers property names as well as string values and takes
+// work proportional to the schema bytes, never the values they describe.
+func jsonStringsDecodeLosslessly(raw []byte) bool {
+	if !utf8.Valid(raw) {
+		return false
+	}
+	unicodeEscape := func(at int) (uint16, bool) {
+		if len(raw)-at < 6 || raw[at] != '\\' || raw[at+1] != 'u' {
+			return 0, false
+		}
+		var value uint16
+		for _, digit := range raw[at+2 : at+6] {
+			value <<= 4
+			switch {
+			case digit >= '0' && digit <= '9':
+				value |= uint16(digit - '0')
+			case digit >= 'a' && digit <= 'f':
+				value |= uint16(digit-'a') + 10
+			case digit >= 'A' && digit <= 'F':
+				value |= uint16(digit-'A') + 10
+			default:
+				return 0, false
+			}
+		}
+		return value, true
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' {
+			continue
+		}
+		if i+1 >= len(raw) {
+			return false
+		}
+		if raw[i+1] != 'u' {
+			i++ // Skip both bytes of an ordinary JSON escape.
+			continue
+		}
+		code, ok := unicodeEscape(i)
+		if !ok {
+			return false
+		}
+		switch {
+		case code >= 0xD800 && code <= 0xDBFF:
+			low, ok := unicodeEscape(i + 6)
+			if !ok || low < 0xDC00 || low > 0xDFFF {
+				return false
+			}
+			i += 11 // Both six-byte escapes, excluding the loop's increment.
+		case code >= 0xDC00 && code <= 0xDFFF:
+			return false
+		default:
+			i += 5 // One six-byte escape, excluding the loop's increment.
+		}
+	}
+	return true
 }
 
 // equalJSONValues compares decoded JSON values with exact numeric equality.
@@ -790,10 +861,9 @@ func equalJSONValues(a, b any) bool {
 
 // equalJSONNumberLexemes compares two JSON number tokens by value without
 // expanding client-supplied exponents. A token is normalized to a sign, its
-// significant digits with trailing zeros removed, and a decimal exponent.
-// Numbers whose exponent saturates are compared by raw lexeme (see
-// canonicalJSONNumber.saturated), so no exponent-sized work is ever performed
-// and two different spellings are never claimed to be the same value.
+// significant digits with trailing zeros removed, and a signed decimal
+// exponent string. Even enormous exponents need work only proportional to
+// their spelling: numeric values and powers of ten are never materialized.
 func equalJSONNumberLexemes(a, b string) bool {
 	if a == b {
 		return true
@@ -805,28 +875,20 @@ func equalJSONNumberLexemes(a, b string) bool {
 		// claim equality for a token that cannot be normalized.
 		return false
 	}
-	if an.saturated || bn.saturated {
-		// Saturated exponents cannot be compared exactly without expanding
-		// them. Fall back to the lexemes: this may report equal values with
-		// different spellings as distinct, but it never hides a real schema
-		// change, which would violate loss-observability honesty.
-		return false
-	}
 	return an == bn
 }
 
 type canonicalJSONNumber struct {
-	sign      string
-	digits    string
-	exponent  int
-	saturated bool
+	sign     string
+	digits   string
+	exponent string
 }
 
 // parseJSONNumber normalizes a JSON number lexeme into a sign, significant
 // digits (trailing zeros removed) and a decimal exponent. The exponent is a
-// saturating int so even 1e999999999999999999 is handled in constant space and
-// time; only the digit string, which is already bounded by the request size,
-// is ever allocated.
+// normalized signed digit string, adjusted only by the mantissa's fractional
+// length and removed trailing zeros. Those lengths fit int on every platform;
+// the exponent's magnitude need not. Time and space are linear in the lexeme.
 func parseJSONNumber(lexeme string) (canonicalJSONNumber, bool) {
 	var out canonicalJSONNumber
 	if lexeme == "" {
@@ -841,48 +903,39 @@ func parseJSONNumber(lexeme string) (canonicalJSONNumber, bool) {
 	if lexeme == "" {
 		return out, false
 	}
-	exponent := 0
-	saturated := false
+	exponent := "0"
 	if i := strings.IndexAny(lexeme, "eE"); i >= 0 {
-		exp, ok, sat := boundedExponent(lexeme[i+1:])
+		exp, ok := normalizeJSONExponent(lexeme[i+1:])
 		if !ok {
 			return out, false
 		}
 		exponent = exp
-		saturated = sat
 		lexeme = lexeme[:i]
 	}
 	mantissa := lexeme
+	fractionDigits := 0
 	if i := strings.IndexByte(mantissa, '.'); i >= 0 {
-		var sat bool
-		exponent, sat = saturatingAdd(exponent, -(len(mantissa) - i - 1))
-		saturated = saturated || sat
+		fractionDigits = len(mantissa) - i - 1
 		mantissa = mantissa[:i] + mantissa[i+1:]
 	}
 	digits := strings.TrimLeft(mantissa, "0")
 	if digits == "" {
 		// Every zero is the same number, regardless of sign or exponent.
-		return canonicalJSONNumber{sign: "", digits: "0", exponent: 0}, true
+		return canonicalJSONNumber{digits: "0", exponent: "0"}, true
 	}
 	trimmed := strings.TrimRight(digits, "0")
-	var sat bool
-	exponent, sat = saturatingAdd(exponent, len(digits)-len(trimmed))
-	saturated = saturated || sat
 	out.digits = trimmed
-	out.exponent = exponent
-	out.saturated = saturated
+	// Both counts are nonnegative and bounded by the mantissa length, so
+	// their difference cannot overflow int, including on 32-bit targets.
+	out.exponent = adjustJSONExponent(exponent, len(digits)-len(trimmed)-fractionDigits)
 	return out, true
 }
 
-// maxJSONExponentMagnitude is the saturation bound for decimal exponents. It
-// only needs to exceed every exponent that can appear inside the accepted
-// request size, so any two exponents that both saturate are indistinguishable
-// without materializing their digits.
-const maxJSONExponentMagnitude = 1 << 30
-
-func boundedExponent(lexeme string) (int, bool, bool) {
+// normalizeJSONExponent removes an optional plus and leading zeros, and
+// canonicalizes either signed zero to "0", without parsing the magnitude.
+func normalizeJSONExponent(lexeme string) (string, bool) {
 	if lexeme == "" {
-		return 0, false, false
+		return "", false
 	}
 	negative := false
 	if lexeme[0] == '-' || lexeme[0] == '+' {
@@ -890,42 +943,110 @@ func boundedExponent(lexeme string) (int, bool, bool) {
 		lexeme = lexeme[1:]
 	}
 	if lexeme == "" {
-		return 0, false, false
+		return "", false
 	}
-	value := 0
-	saturated := false
 	for _, digit := range lexeme {
 		if digit < '0' || digit > '9' {
-			return 0, false, false
+			return "", false
 		}
-		if value > maxJSONExponentMagnitude/10 {
-			value = maxJSONExponentMagnitude
-			saturated = true
-			break
+	}
+	lexeme = strings.TrimLeft(lexeme, "0")
+	if lexeme == "" {
+		return "0", true
+	}
+	if negative {
+		return "-" + lexeme, true
+	}
+	return lexeme, true
+}
+
+// adjustJSONExponent adds a bounded mantissa-length adjustment to a normalized
+// exponent. Decimal carry/borrow touches each input digit at most once, and
+// the result has at most one extra digit. No work depends on the exponent's value.
+func adjustJSONExponent(exponent string, adjustment int) string {
+	if adjustment == 0 {
+		return exponent
+	}
+	change := strconv.Itoa(adjustment)
+	exponentNegative, changeNegative := exponent[0] == '-', change[0] == '-'
+	if exponentNegative {
+		exponent = exponent[1:]
+	}
+	if changeNegative {
+		change = change[1:]
+	}
+	negative := exponentNegative
+	var digits string
+	if exponentNegative == changeNegative {
+		digits = addJSONDecimalDigits(exponent, change)
+	} else {
+		// Normalized unsigned decimals compare by length, then lexically.
+		order := 0
+		switch {
+		case len(exponent) < len(change):
+			order = -1
+		case len(exponent) > len(change):
+			order = 1
+		default:
+			order = strings.Compare(exponent, change)
 		}
-		value = value*10 + int(digit-'0')
-		if value > maxJSONExponentMagnitude {
-			value = maxJSONExponentMagnitude
-			saturated = true
-			break
+		switch {
+		case order == 0:
+			return "0"
+		case order > 0:
+			digits = subtractJSONDecimalDigits(exponent, change)
+		default:
+			digits = subtractJSONDecimalDigits(change, exponent)
+			negative = changeNegative
 		}
 	}
 	if negative {
-		return -value, true, saturated
+		return "-" + digits
 	}
-	return value, true, saturated
+	return digits
 }
 
-func saturatingAdd(a, b int) (int, bool) {
-	sum := a + b
-	switch {
-	case sum > maxJSONExponentMagnitude:
-		return maxJSONExponentMagnitude, true
-	case sum < -maxJSONExponentMagnitude:
-		return -maxJSONExponentMagnitude, true
-	default:
-		return sum, false
+// addJSONDecimalDigits adds normalized unsigned decimal strings.
+func addJSONDecimalDigits(a, b string) string {
+	out := make([]byte, max(len(a), len(b))+1)
+	i, j, carry := len(a)-1, len(b)-1, 0
+	for k := len(out) - 1; k >= 0; k-- {
+		value := carry
+		if i >= 0 {
+			value += int(a[i] - '0')
+			i--
+		}
+		if j >= 0 {
+			value += int(b[j] - '0')
+			j--
+		}
+		out[k] = byte(value%10) + '0'
+		carry = value / 10
 	}
+	if out[0] == '0' {
+		out = out[1:]
+	}
+	return string(out)
+}
+
+// subtractJSONDecimalDigits subtracts normalized unsigned decimals with a > b.
+func subtractJSONDecimalDigits(a, b string) string {
+	out := make([]byte, len(a))
+	j, borrow := len(b)-1, 0
+	for i := len(a) - 1; i >= 0; i-- {
+		value := int(a[i]-'0') - borrow
+		if j >= 0 {
+			value -= int(b[j] - '0')
+			j--
+		}
+		borrow = 0
+		if value < 0 {
+			value += 10
+			borrow = 1
+		}
+		out[i] = byte(value) + '0'
+	}
+	return strings.TrimLeft(string(out), "0")
 }
 
 // A message containing only these blocks carries provider tool state rather

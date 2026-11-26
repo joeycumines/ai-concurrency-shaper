@@ -945,9 +945,11 @@ Anthropic's `inline-tools-2026-09-15` and
 - An inline custom `tool_definition` joins the request's global tool list.
   Its name, description and JSON Schema are retained; JSON serialization may
   normalize whitespace and escaping, so the complete definition is not promised
-  byte-identical. The timing change is a Note. A later definition of the same
-  kind replaces the earlier schema for the whole request, and one combined Note
-  explains both the timing change and any supersession in the ordinary log.
+  byte-identical. Hoisting a new or unchanged definition records a timing Note.
+  A changed definition of the same kind requires `anthropic_tool_changes`
+  approval before replacing the earlier definition for the whole request;
+  strict policy refuses it. Approved replacement also records one combined Note
+  explaining timing and supersession in the ordinary log.
 - Declared and inline custom tools use the same strict normalization. Absent
   `type`, Anthropic's `type: "custom"` (including explicit `null`, which is the
   untagged form), and the supported `type: "function"` compatibility spelling
