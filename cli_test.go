@@ -26,6 +26,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -460,9 +462,13 @@ func TestUpstreamMaxIdleConnsPerHost(t *testing.T) {
 }
 
 func TestVersionFlag(t *testing.T) {
-	bin := t.TempDir() + "/test-shaper"
-	build := exec.Command("go", "build", "-o", bin, ".")
+	bin := filepath.Join(t.TempDir(), "test-shaper")
+	if runtime.GOOS == "windows" {
+		bin += ".exe"
+	}
+	build := exec.Command("go", "build", "-buildvcs=false", "-o", bin, ".")
 	build.Dir = "."
+	build.Env = append(os.Environ(), "GOWORK=off")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build failed: %v\n%s", err, out)
 	}
@@ -472,13 +478,8 @@ func TestVersionFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("-version: %v\n%s", err, out)
 	}
-	got := strings.TrimSpace(string(out))
-	if got == "" {
-		t.Fatal("-version produced empty output")
-	}
-	// A plain build reports dev unless it was installed at a tag.
-	if got == "" {
-		t.Fatal("-version produced empty output")
+	if got := strings.TrimSpace(string(out)); got != "dev" {
+		t.Errorf("unexpected version: got %q, want %q", got, "dev")
 	}
 }
 
@@ -488,14 +489,14 @@ func TestVersionFlagReportsModuleVersion(t *testing.T) {
 	wd := mustGetwd(t)
 	modContent := fmt.Sprintf(`module versioned-shaper
 
-go 1.27.2
+go %s
 
 require github.com/joeycumines/ai-concurrency-shaper v0.9.2
 
 replace github.com/joeycumines/ai-concurrency-shaper => %s
-`, wd)
+`, goDirective(t), strconv.Quote(wd))
 	modDir := t.TempDir()
-	modPath := modDir + "/go.mod"
+	modPath := filepath.Join(modDir, "go.mod")
 	if err := os.WriteFile(modPath, []byte(modContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -504,13 +505,17 @@ replace github.com/joeycumines/ai-concurrency-shaper => %s
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(modDir+"/go.sum", sums, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(modDir, "go.sum"), sums, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	withVersion := t.TempDir() + "/test-shaper-versioned"
+	withVersion := filepath.Join(t.TempDir(), "test-shaper-versioned")
+	if runtime.GOOS == "windows" {
+		withVersion += ".exe"
+	}
 	build := exec.Command("go", "build", "-modfile", modPath, "-o", withVersion,
 		"github.com/joeycumines/ai-concurrency-shaper")
 	build.Dir = modDir
+	build.Env = append(os.Environ(), "GOWORK=off")
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("versioned build failed: %v\n%s", err, out)
 	}
@@ -522,6 +527,21 @@ replace github.com/joeycumines/ai-concurrency-shaper => %s
 	if got := strings.TrimSpace(string(out)); got != "v0.9.2" {
 		t.Errorf("unexpected version: got %q, want %q", got, "v0.9.2")
 	}
+}
+
+func goDirective(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 && fields[0] == "go" {
+			return fields[1]
+		}
+	}
+	t.Fatal("go directive not found in go.mod")
+	return ""
 }
 
 func mustGetwd(t *testing.T) string {

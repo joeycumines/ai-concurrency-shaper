@@ -44,6 +44,7 @@ import (
 	"github.com/joeycumines/ai-concurrency-shaper/internal/router"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/transcode"
 	"github.com/joeycumines/ai-concurrency-shaper/internal/tui"
+	"golang.org/x/mod/module"
 )
 
 // version can be set with -ldflags "-X main.version=..." for builds that need
@@ -64,44 +65,33 @@ func buildVersion() string {
 }
 
 func moduleReleaseVersion(v string) string {
-	if v == "" || v == "(devel)" || strings.HasPrefix(v, "v0.0.0-") || isPseudoVersion(v) {
+	if v == "" || v == "(devel)" || isDirtyVersion(v) || isPseudoVersion(v) {
 		return "dev"
 	}
 	return v
 }
 
+// isPseudoVersion applies Go's own module pseudo-version grammar to versions
+// reported by build info. An approximation previously accepted date-stamped
+// prerelease tags and other non-pseudo versions, hiding genuine releases.
 func isPseudoVersion(v string) bool {
-	if i := strings.IndexByte(v, '+'); i >= 0 {
-		v = v[:i]
-	}
-	hashSeparator := strings.LastIndexByte(v, '-')
-	if hashSeparator < 0 {
+	return module.IsPseudoVersion(v)
+}
+
+// isDirtyVersion reports whether Go's build info marked the main module dirty.
+// A tagged build with uncommitted changes embeds +dirty (or +incompatible.dirty
+// for a +incompatible tag), which is not a release version.
+func isDirtyVersion(v string) bool {
+	i := strings.IndexByte(v, '+')
+	if i < 0 {
 		return false
 	}
-	hash := v[hashSeparator+1:]
-	if len(hash) < 7 {
-		return false
-	}
-	for i := range len(hash) {
-		c := hash[i]
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
+	for _, part := range strings.Split(v[i+1:], ".") {
+		if part == "dirty" {
+			return true
 		}
 	}
-	timestampPart := v[:hashSeparator]
-	if len(timestampPart) < 15 {
-		return false
-	}
-	separator := timestampPart[len(timestampPart)-15]
-	if separator != '-' && separator != '.' {
-		return false
-	}
-	for i := len(timestampPart) - 14; i < len(timestampPart); i++ {
-		if timestampPart[i] < '0' || timestampPart[i] > '9' {
-			return false
-		}
-	}
-	return true
+	return false
 }
 
 func main() {
