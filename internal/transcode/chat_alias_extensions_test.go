@@ -46,8 +46,7 @@ func TestChatStreamUsageNullProbeUsesExactWireName(t *testing.T) {
 			body := `{"object":"chat.completion.chunk","choices":[],"usage":` + tc.usage + `,"USAGE":` + tc.extension + `}`
 			chunk, err := chatStreamChunkFromSSE(SSEEvent{Data: []byte(body)})
 			if tc.wantError {
-				var corrupt *UpstreamWireError
-				if !errors.As(err, &corrupt) {
+				if _, ok := errors.AsType[*UpstreamWireError](err); !ok {
 					t.Fatalf("illegal canonical null was hidden by an extension: chunk=%+v error=%v", chunk, err)
 				}
 				return

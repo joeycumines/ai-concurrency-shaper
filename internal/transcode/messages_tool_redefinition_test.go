@@ -139,8 +139,7 @@ func TestToolRedefinitionIsPolicyGated(t *testing.T) {
 		if _, errSame := DecodeMessagesRequest(body("a", "a"), StrictLossPolicy()); errSame != nil {
 			t.Fatalf("unchanged history refused: %v", errSame)
 		}
-		var unsupported *UnsupportedFeatureError
-		if !errors.As(errChanged, &unsupported) {
+		if _, ok := errors.AsType[*UnsupportedFeatureError](errChanged); !ok {
 			t.Fatalf("changed history refused with %T %v, want UnsupportedFeatureError", errChanged, errChanged)
 		}
 	})
