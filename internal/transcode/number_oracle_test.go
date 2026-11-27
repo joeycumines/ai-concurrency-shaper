@@ -84,7 +84,7 @@ func TestNumberLexemeComparisonAgainstRationalOracle(t *testing.T) {
 			t.Fatalf("equal(%q, %q) = %v; exact rational oracle = %v", b, a, got, want)
 		}
 	}
-	for i := 0; i < 2400; i++ {
+	for i := range 2400 {
 		digits := []byte{byte('1' + random.Intn(9))}
 		for range random.Intn(28) {
 			digits = append(digits, byte('0'+random.Intn(10)))
