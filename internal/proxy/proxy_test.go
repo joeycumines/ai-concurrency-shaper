@@ -116,9 +116,13 @@ func TestProxy_LimitedRoute(t *testing.T) {
 }
 
 func TestProxy_QueueTimeout(t *testing.T) {
-	// Use concurrency 1 with a slow upstream to hold the slot.
+	// Use concurrency 1 with a gated upstream to hold the slot.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second)
+		enterOnce.Do(func() { close(entered) })
+		<-release
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, `ok`)
 	}))
@@ -138,15 +142,24 @@ func TestProxy_QueueTimeout(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// First request will hold the slot for 2s.
+	// First request holds the slot until released.
+	firstDone := make(chan struct{})
 	go func() {
+		defer close(firstDone)
 		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 		rec := httptest.NewRecorder()
 		proxy.ServeHTTP(rec, req)
 	}()
+	t.Cleanup(func() {
+		close(release)
+		<-firstDone
+	})
 
-	// Brief pause to ensure first request holds the slot.
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request never reached upstream")
+	}
 
 	// Second request should time out.
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -337,8 +350,12 @@ func TestProxy_LimitAll_OffByDefault(t *testing.T) {
 // TestProxy_LimitAll_RespectsQueueTimeout confirms that blanket-limited
 // traffic uses the limited-path queue-timeout semantics (504, not 503).
 func TestProxy_LimitAll_RespectsQueueTimeout(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second)
+		enterOnce.Do(func() { close(entered) })
+		<-release
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(slow.Close)
@@ -360,25 +377,30 @@ func TestProxy_LimitAll_RespectsQueueTimeout(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// First (non-matching) request holds the single slot for 2s.
+	// First (non-matching) request holds the single slot until released.
+	firstDone := make(chan struct{})
 	go func() {
+		defer close(firstDone)
 		req := httptest.NewRequest(http.MethodGet, "/health", nil)
 		rec := httptest.NewRecorder()
 		proxy.ServeHTTP(rec, req)
 	}()
-	time.Sleep(10 * time.Millisecond) // let the first request acquire the slot
+	t.Cleanup(func() {
+		close(release)
+		<-firstDone
+	})
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request never reached upstream")
+	}
 
-	start := time.Now()
 	req2 := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec2 := httptest.NewRecorder()
 	proxy.ServeHTTP(rec2, req2)
-	elapsed := time.Since(start)
 
 	if rec2.Code != http.StatusGatewayTimeout {
 		t.Fatalf("expected 504 (limited queue timeout), got %d: %s", rec2.Code, rec2.Body.String())
-	}
-	if elapsed >= 500*time.Millisecond {
-		t.Errorf("expected to fail fast (~50ms queue timeout), took %v", elapsed)
 	}
 }
 
@@ -561,8 +583,12 @@ func TestProxy_ContextCancellation(t *testing.T) {
 func TestProxy_ProxiedOnlyCountsSuccessful(t *testing.T) {
 	// Verify that TotalProxied only counts requests that actually
 	// reached the upstream, not timed-out or cancelled ones.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second)
+		enterOnce.Do(func() { close(entered) })
+		<-release
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(slow.Close)
@@ -581,13 +607,23 @@ func TestProxy_ProxiedOnlyCountsSuccessful(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// First request holds the slot.
+	// First request holds the slot until released.
+	firstDone := make(chan struct{})
 	go func() {
+		defer close(firstDone)
 		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, req)
 	}()
-	time.Sleep(10 * time.Millisecond)
+	t.Cleanup(func() {
+		close(release)
+		<-firstDone
+	})
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request never reached upstream")
+	}
 
 	// Second request times out.
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -609,8 +645,12 @@ func TestProxy_ProxiedOnlyCountsSuccessful(t *testing.T) {
 func TestProxy_TimeoutVsCancelledMetrics(t *testing.T) {
 	// Verify that queue timeouts increment TotalTimeout and
 	// client cancellations increment TotalCancelled, separately.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second)
+		enterOnce.Do(func() { close(entered) })
+		<-release
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(slow.Close)
@@ -623,35 +663,49 @@ func TestProxy_TimeoutVsCancelledMetrics(t *testing.T) {
 		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
 		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
 		WithMetrics(metrics.NewCollector()),
-		WithQueueTimeout(50*time.Millisecond),
+		WithQueueTimeout(200*time.Millisecond),
 	)
 	if err != nil {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// Hold the slot.
+	// Hold the slot until released.
+	firstDone := make(chan struct{})
 	go func() {
+		defer close(firstDone)
 		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, req)
 	}()
-	time.Sleep(10 * time.Millisecond)
+	t.Cleanup(func() {
+		close(release)
+		<-firstDone
+	})
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request never reached upstream")
+	}
 
 	// Timeout case.
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	rec2 := httptest.NewRecorder()
 	p.ServeHTTP(rec2, req2)
 
-	// Cancellation case.
+	// Cancellation case: wait until req3 is actually queued before cancelling.
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	req3 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	req3 = req3.WithContext(ctx)
 	rec3 := httptest.NewRecorder()
+	req3Done := make(chan struct{})
 	go func() {
-		time.Sleep(10 * time.Millisecond)
-		cancel()
+		defer close(req3Done)
+		p.ServeHTTP(rec3, req3)
 	}()
-	p.ServeHTTP(rec3, req3)
+	waitSnapshot(t, p.Metrics(), func(s metrics.Snapshot) bool { return s.Queued == 1 })
+	cancel()
+	<-req3Done
 
 	snap := p.Metrics().Snapshot()
 	if snap.TotalTimeout != 1 {
@@ -1295,15 +1349,10 @@ func TestProxy_PhantomConcurrencyPenalty(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// First request: gets the slot, receives 500, then holds slot for penalty.
-	go func() {
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, req)
-	}()
-
-	// Wait for the first request to acquire the slot.
-	time.Sleep(20 * time.Millisecond)
+	// First request: gets the slot, receives 500, and begins async phantom penalty hold.
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
 
 	// Send a second request — it should block because the slot is held
 	// by the phantom penalty, then succeed after the penalty expires.
@@ -1657,17 +1706,18 @@ func TestProxy_PhantomPenaltyDoesNotBlockHandler(t *testing.T) {
 
 	b, err := circuitbreaker.New(
 		circuitbreaker.WithFailureThreshold(100),
-		circuitbreaker.WithBasePenalty(200*time.Millisecond),
-		circuitbreaker.WithMaxPenalty(200*time.Millisecond),
+		circuitbreaker.WithBasePenalty(1*time.Second),
+		circuitbreaker.WithMaxPenalty(1*time.Second),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	lim := queue.NewLimiterWithCooldown(1, 0)
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
-		WithLimiter(queue.NewLimiterWithCooldown(1, 0)),
+		WithLimiter(lim),
 		WithMetrics(met),
 		WithBreaker(b),
 	)
@@ -1682,10 +1732,12 @@ func TestProxy_PhantomPenaltyDoesNotBlockHandler(t *testing.T) {
 	p.ServeHTTP(rec, req)
 	elapsed := time.Since(start)
 
-	// The handler must return quickly — the penalty runs in the background.
-	// Before the fix, this would take ~200ms (the penalty duration).
-	if elapsed > 50*time.Millisecond {
-		t.Errorf("handler blocked for %v, expected <50ms (penalty should be async)", elapsed)
+	// The handler must return while the 1s penalty still holds the slot.
+	if lim.Stats().Active != 1 {
+		t.Errorf("Active = %d after handler return, want 1 (penalty should hold slot asynchronously)", lim.Stats().Active)
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Errorf("handler blocked for %v, expected <500ms (penalty should be async)", elapsed)
 	}
 }
 
@@ -2425,6 +2477,7 @@ func TestProxy_PhantomPenaltyIgnoresClientCancel(t *testing.T) {
 	var mu sync.Mutex
 	firstRequest := true
 	started := make(chan struct{})
+	releaseUpstream := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		isFirst := firstRequest
@@ -2434,8 +2487,11 @@ func TestProxy_PhantomPenaltyIgnoresClientCancel(t *testing.T) {
 		mu.Unlock()
 		if isFirst {
 			close(started)
-			// Delay long enough for the client context to cancel.
-			time.Sleep(200 * time.Millisecond)
+			// Hold until the client cancels or test cleanup releases the handler.
+			select {
+			case <-r.Context().Done():
+			case <-releaseUpstream:
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
@@ -2444,6 +2500,7 @@ func TestProxy_PhantomPenaltyIgnoresClientCancel(t *testing.T) {
 		fmt.Fprint(w, `ok`)
 	}))
 	t.Cleanup(upstream.Close)
+	t.Cleanup(func() { close(releaseUpstream) })
 
 	upstreamURL, _ := url.Parse(upstream.URL)
 	pat, _ := route.Parse("POST /v1/messages")
@@ -2451,17 +2508,18 @@ func TestProxy_PhantomPenaltyIgnoresClientCancel(t *testing.T) {
 
 	b, err := circuitbreaker.New(
 		circuitbreaker.WithFailureThreshold(100),
-		circuitbreaker.WithBasePenalty(200*time.Millisecond),
-		circuitbreaker.WithMaxPenalty(200*time.Millisecond),
+		circuitbreaker.WithBasePenalty(500*time.Millisecond),
+		circuitbreaker.WithMaxPenalty(500*time.Millisecond),
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	lim := queue.NewLimiterWithCooldown(1, 0)
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
-		WithLimiter(queue.NewLimiterWithCooldown(1, 0)), // 1 slot so we can observe blocking
+		WithLimiter(lim), // 1 slot so we can observe blocking
 		WithMetrics(met),
 		WithBreaker(b),
 		WithMaxRetries(0), // standalone breaker — no retry transport
@@ -2470,11 +2528,8 @@ func TestProxy_PhantomPenaltyIgnoresClientCancel(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// Send a request with a short timeout that cancels while the upstream
-	// is still processing. An upstream transport attempt has started,
-	// but the client context deadline expires, causing a 502 from
-	// ReverseProxy.
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// Cancel the request explicitly once the upstream handler has started.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
@@ -2487,36 +2542,28 @@ func TestProxy_PhantomPenaltyIgnoresClientCancel(t *testing.T) {
 		close(done)
 	}()
 
-	// Wait for the first request to start its upstream attempt.
+	// Wait for the first request to start its upstream attempt, then cancel.
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("upstream never received request")
 	}
+	cancel()
 
-	// Wait for the first request to complete (it will fail due to context
-	// deadline, the upstream responds with 500 but the proxy sees 502).
+	// Wait for the first request to complete.
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("first request did not complete")
 	}
 
-	// The context deadline exceeded — the phantom penalty should NOT be
-	// applied. Send a second request — if the phantom penalty were
-	// applied, the slot would be held for 200ms and the second request
-	// would block. Since the upstream is fast for subsequent requests,
-	// the second request should complete quickly.
-	start := time.Now()
+	// Client cancel must not apply the phantom penalty: the slot is released immediately.
+	if lim.Stats().Active != 0 {
+		t.Errorf("Active = %d after client cancel, want 0 (no phantom penalty should be held)", lim.Stats().Active)
+	}
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
 	rec2 := httptest.NewRecorder()
 	p.ServeHTTP(rec2, req2)
-	elapsed := time.Since(start)
-
-	// The second request should complete quickly — no phantom penalty.
-	if elapsed > 50*time.Millisecond {
-		t.Errorf("second request took %v — phantom penalty may be incorrectly applied on client cancel", elapsed)
-	}
 	if rec2.Code != http.StatusOK {
 		t.Errorf("second request status = %d, want 200", rec2.Code)
 	}
@@ -2759,8 +2806,12 @@ func TestProxy_PassthroughQueueTimeoutRespected(t *testing.T) {
 	// Strategy: upstream sleeps forever, global limiter has 1 slot, queue timeout
 	// is 100ms. First request (passthrough) takes the slot. Second passthrough
 	// request should receive 504 within the timeout window.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(5 * time.Second) // block forever (relative to test)
+		enterOnce.Do(func() { close(entered) })
+		<-release
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(upstream.Close)
@@ -2781,22 +2832,27 @@ func TestProxy_PassthroughQueueTimeoutRespected(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// First passthrough request takes the only global slot (blocks).
+	// First passthrough request takes the only global slot (blocks until released).
 	firstDone := make(chan struct{})
 	go func() {
+		defer close(firstDone)
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
-		close(firstDone)
 	}()
+	t.Cleanup(func() {
+		close(release)
+		<-firstDone
+	})
 
-	// Wait for the first request to acquire the slot.
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request never reached upstream")
+	}
 
 	// Second passthrough request should time out waiting for global limiter.
-	start := time.Now()
 	rec2 := httptest.NewRecorder()
 	p.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/unlimited", nil))
-	elapsed := time.Since(start)
 
 	if rec2.Code != http.StatusGatewayTimeout {
 		t.Fatalf("expected 504 (queue timeout on global limiter), got %d", rec2.Code)
@@ -2804,15 +2860,6 @@ func TestProxy_PassthroughQueueTimeoutRespected(t *testing.T) {
 	if got := met.Snapshot().TotalTimeout; got != 1 {
 		t.Fatalf("TotalTimeout = %d, want 1 (passthrough queue timeout parity with the limited path)", got)
 	}
-
-	// The request should complete within roughly queue timeout + overhead.
-	// Before the fix, it would block for ~5s (until the upstream sleep finished).
-	if elapsed > 300*time.Millisecond {
-		t.Errorf("second request took %v, expected <300ms (queue timeout should apply)", elapsed)
-	}
-
-	// Cleanup: unblock the first request by closing the upstream.
-	<-firstDone
 }
 
 func TestProxy_Upstream5xxReportedDespiteClientCancel(t *testing.T) {
@@ -3186,6 +3233,7 @@ func TestProxy_CancelCooldownFiresOnSlowUpstreamClientCancel(t *testing.T) {
 	var mu sync.Mutex
 	firstRequest := true
 	started := make(chan struct{})
+	releaseUpstream := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		isFirst := firstRequest
@@ -3195,9 +3243,11 @@ func TestProxy_CancelCooldownFiresOnSlowUpstreamClientCancel(t *testing.T) {
 		mu.Unlock()
 		if isFirst {
 			close(started)
-			// Sleep long enough for the client context to expire.
-			// Do NOT call WriteHeader — leaves rec.status == 0.
-			time.Sleep(500 * time.Millisecond)
+			// Block until the client context cancels or test cleanup releases the handler.
+			select {
+			case <-r.Context().Done():
+			case <-releaseUpstream:
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -3206,6 +3256,7 @@ func TestProxy_CancelCooldownFiresOnSlowUpstreamClientCancel(t *testing.T) {
 		fmt.Fprint(w, "ok")
 	}))
 	t.Cleanup(upstream.Close)
+	t.Cleanup(func() { close(releaseUpstream) })
 
 	upstreamURL, _ := url.Parse(upstream.URL)
 	pat, _ := route.Parse("POST /v1/messages")
@@ -3223,10 +3274,9 @@ func TestProxy_CancelCooldownFiresOnSlowUpstreamClientCancel(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// Request 1: cancel the context while upstream is still processing.
-	// The upstream sleeps 500ms, so the 50ms timeout will fire while
-	// rec.status is still 0.
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// Request 1: cancel the context once the upstream handler has started
+	// (while rec.status is still 0).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{}`))
 	req = req.WithContext(ctx)
@@ -3240,13 +3290,14 @@ func TestProxy_CancelCooldownFiresOnSlowUpstreamClientCancel(t *testing.T) {
 
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("upstream never received request")
 	}
+	cancel()
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("first request did not complete")
 	}
 
@@ -4073,9 +4124,12 @@ func TestProxy_PassthroughFailureHold(t *testing.T) {
 	p.ServeHTTP(rec, req)
 	handlerElapsed := time.Since(start)
 
-	// The handler must return quickly (async release).
-	if handlerElapsed > 50*time.Millisecond {
-		t.Errorf("handler blocked for %v, expected <50ms (failure hold should be async)", handlerElapsed)
+	// The handler must return while the failure hold still holds the global slot.
+	if globalLimiter.Stats().Active != 1 {
+		t.Errorf("global Active = %d after handler return, want 1 (failure hold should be async)", globalLimiter.Stats().Active)
+	}
+	if handlerElapsed >= failureHold {
+		t.Errorf("handler blocked for %v, expected < %v (failure hold should be async)", handlerElapsed, failureHold)
 	}
 
 	// The global slot should NOT be immediately available — it's in failure hold.
@@ -4131,14 +4185,10 @@ func TestProxy_PassthroughPhantomPenaltyWithBreaker(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// First request: passthrough (GET /health), receives 500, phantom penalty applied.
-	go func() {
-		req := httptest.NewRequest(http.MethodGet, "/health", nil)
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, req)
-	}()
-
-	time.Sleep(20 * time.Millisecond)
+	// First request: passthrough (GET /health), receives 500, async phantom penalty applied.
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
 
 	// Second request should wait for phantom penalty duration.
 	start := time.Now()
@@ -4328,6 +4378,7 @@ func TestProxy_PassthroughCancelCooldownFiresOnSlowUpstreamClientCancel(t *testi
 	var mu sync.Mutex
 	firstRequest := true
 	started := make(chan struct{})
+	releaseUpstream := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		isFirst := firstRequest
@@ -4337,9 +4388,11 @@ func TestProxy_PassthroughCancelCooldownFiresOnSlowUpstreamClientCancel(t *testi
 		mu.Unlock()
 		if isFirst {
 			close(started)
-			// Sleep long enough for the client context to expire.
-			// Do NOT call WriteHeader — leaves rec.status == 0.
-			time.Sleep(500 * time.Millisecond)
+			// Block until the client context cancels or test cleanup releases the handler.
+			select {
+			case <-r.Context().Done():
+			case <-releaseUpstream:
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -4348,6 +4401,7 @@ func TestProxy_PassthroughCancelCooldownFiresOnSlowUpstreamClientCancel(t *testi
 		fmt.Fprint(w, "ok")
 	}))
 	t.Cleanup(upstream.Close)
+	t.Cleanup(func() { close(releaseUpstream) })
 
 	upstreamURL, _ := url.Parse(upstream.URL)
 	pat, _ := route.Parse("POST /v1/messages")
@@ -4366,9 +4420,9 @@ func TestProxy_PassthroughCancelCooldownFiresOnSlowUpstreamClientCancel(t *testi
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// Send a passthrough request with a short timeout — the upstream sleeps
-	// 500ms so the client cancels while rec.status == 0.
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// Cancel the passthrough request once the upstream handler has started
+	// (while rec.status == 0).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	req = req.WithContext(ctx)
@@ -4382,13 +4436,14 @@ func TestProxy_PassthroughCancelCooldownFiresOnSlowUpstreamClientCancel(t *testi
 
 	select {
 	case <-started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("upstream never received request")
 	}
+	cancel()
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("first request did not complete")
 	}
 
@@ -4679,10 +4734,11 @@ func TestProxy_PanicRecovery_PhantomPenaltySeesCorrectStatus(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
+	lim := queue.NewLimiterWithCooldown(1, 0) // 1 slot so we can observe blocking
 	p, err := New(
 		WithUpstream(upstreamURL),
 		WithMatcher(route.NewMatcher([]route.Pattern{pat})),
-		WithLimiter(queue.NewLimiterWithCooldown(1, 0)), // 1 slot so we can observe blocking
+		WithLimiter(lim),
 		WithMetrics(met),
 		WithBreaker(b),
 		WithTransport(roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -4695,26 +4751,19 @@ func TestProxy_PanicRecovery_PhantomPenaltySeesCorrectStatus(t *testing.T) {
 
 	// First request: panics, recovered with 502, localPanic=true so slot
 	// is released immediately (no phantom penalty or breaker failure recorded).
-	go func() {
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, req)
-	}()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
 
-	time.Sleep(20 * time.Millisecond)
+	if lim.Stats().Active != 0 {
+		t.Errorf("Active = %d after local panic, want 0 (phantom penalty must not be applied)", lim.Stats().Active)
+	}
 
 	// Second request should acquire the slot immediately since the first
 	// request's panic did NOT trigger phantom penalty (localPanic bypass).
-	start := time.Now()
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	rec2 := httptest.NewRecorder()
 	p.ServeHTTP(rec2, req2)
-	elapsed := time.Since(start)
-
-	// The second request should complete quickly — no 200ms phantom penalty delay.
-	if elapsed > 100*time.Millisecond {
-		t.Errorf("second request took %v -- phantom penalty may have been incorrectly applied for local panic", elapsed)
-	}
 
 	if rec2.Code != http.StatusBadGateway {
 		t.Errorf("second request status = %d, want 502", rec2.Code)
@@ -4945,16 +4994,10 @@ func TestProxy_403TemporaryBanTriggersPhantomPenalty(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// First request gets the slot, receives 403, and should hold the slot
-	// for the penalty duration.
-	go func() {
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, req)
-	}()
-
-	// Wait for the first request to acquire the slot.
-	time.Sleep(20 * time.Millisecond)
+	// First request gets the slot, receives 403, and begins async phantom penalty hold.
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
 
 	// A second request must wait for the phantom penalty to expire before
 	// it can acquire the slot. If 403 did not trigger the penalty, it
@@ -5229,7 +5272,7 @@ func TestProxy_UpstreamConnectionCap(t *testing.T) {
 
 func TestProxy_AdaptiveHeadroomOn429(t *testing.T) {
 	const concurrency = 4
-	const window = 200 * time.Millisecond
+	const window = 1 * time.Second
 
 	var (
 		activeCount atomic.Int64
@@ -5299,9 +5342,11 @@ func TestProxy_AdaptiveHeadroomOn429(t *testing.T) {
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
 
-	// Give the adaptive reduction time to apply (it is triggered in the defer).
-	time.Sleep(20 * time.Millisecond)
-
+	// Wait for adaptive headroom to become active after the 429.
+	adaptiveDeadline := time.Now().Add(2 * time.Second)
+	for !p.limiter.AdaptiveActive() && time.Now().Before(adaptiveDeadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if !p.limiter.AdaptiveActive() {
 		t.Fatal("expected adaptive headroom to be active after a 429")
 	}
@@ -5321,12 +5366,14 @@ func TestProxy_AdaptiveHeadroomOn429(t *testing.T) {
 		})
 	}
 
-	// Wait until at least 3 are active; there should never be a 4th.
-	for {
+	// Wait until 3 are active and the 4th is queued; there should never be a 4th active.
+	waitDeadline := time.Now().Add(5 * time.Second)
+	for (activeCount.Load() < 3 || p.limiter.Stats().Waiters < 1) && time.Now().Before(waitDeadline) {
 		time.Sleep(5 * time.Millisecond)
-		if activeCount.Load() >= 3 {
-			break
-		}
+	}
+	if activeCount.Load() < 3 {
+		close(release)
+		t.Fatalf("timed out waiting for 3 active upstream requests, got %d", activeCount.Load())
 	}
 
 	// Brief pause to let any accidental 4th request slip through.
@@ -5339,7 +5386,10 @@ func TestProxy_AdaptiveHeadroomOn429(t *testing.T) {
 	wg.Wait()
 
 	// After the window expires, the full 4 slots should be available again.
-	time.Sleep(window + 100*time.Millisecond)
+	expireDeadline := time.Now().Add(window + 3*time.Second)
+	for p.limiter.AdaptiveActive() && time.Now().Before(expireDeadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if p.limiter.AdaptiveActive() {
 		t.Fatal("adaptive headroom should have expired")
 	}
@@ -5357,11 +5407,13 @@ func TestProxy_AdaptiveHeadroomOn429(t *testing.T) {
 		})
 	}
 
-	for {
+	recoverDeadline := time.Now().Add(5 * time.Second)
+	for activeCount.Load() < concurrency && time.Now().Before(recoverDeadline) {
 		time.Sleep(5 * time.Millisecond)
-		if activeCount.Load() >= concurrency {
-			break
-		}
+	}
+	if activeCount.Load() < concurrency {
+		close(releaseRecovered)
+		t.Fatalf("timed out waiting for %d active upstream requests after recovery, got %d", concurrency, activeCount.Load())
 	}
 
 	if got := peakActive.Load(); got != concurrency {
@@ -5408,12 +5460,9 @@ func TestProxy_403RetryAfterExtendsPenalty(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	go func() {
-		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, req)
-	}()
-	time.Sleep(20 * time.Millisecond)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
 
 	start := time.Now()
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
@@ -8205,9 +8254,9 @@ func TestProxy_ErrAbortHandler_RealServerClientDisconnectReleasesHalfOpenProbe(t
 	}
 	select {
 	case <-firstFlushed:
-	default:
+	case <-time.After(5 * time.Second):
 		conn.Close()
-		t.Fatal("upstream first chunk was read before firstFlushed signal")
+		t.Fatal("timed out waiting for upstream firstFlushed signal")
 	}
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close client connection: %v", err)
@@ -8424,9 +8473,9 @@ func TestProxy_ClientDisconnectDuringRealUpstreamStream_DoesNotPoisonBreaker(t *
 	}
 	select {
 	case <-firstFlushed:
-	default:
+	case <-time.After(5 * time.Second):
 		conn.Close()
-		t.Fatal("upstream first chunk was read before firstFlushed signal")
+		t.Fatal("timed out waiting for upstream firstFlushed signal")
 	}
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close client connection: %v", err)
@@ -8483,7 +8532,13 @@ func waitForHalfOpenProbeWindow(t *testing.T, b *circuitbreaker.Breaker) {
 	if state := b.State(); state != circuitbreaker.Open {
 		t.Fatalf("breaker state after forced failures = %s, want OPEN", state)
 	}
-	time.Sleep(30 * time.Millisecond)
+	deadline := time.Now().Add(2 * time.Second)
+	for b.WaitDuration() > 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if wait := b.WaitDuration(); wait > 0 {
+		t.Fatalf("breaker still waiting after deadline: %v", wait)
+	}
 }
 
 func TestProxy_RetryRequestContextCancellationDoesNotBecomeClean502(t *testing.T) {

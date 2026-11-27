@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -81,37 +82,39 @@ func TestBreaker_TransitionsToHalfOpen(t *testing.T) {
 }
 
 func TestBreaker_CancelProbeReleasesHalfOpenAdmission(t *testing.T) {
-	b, err := New(WithFailureThreshold(1), WithWindow(10*time.Second), WithOpenTimeout(10*time.Millisecond), WithMaxOpenTimeout(10*time.Millisecond))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
-	if b.State() != Open {
-		t.Fatalf("expected OPEN after seed failure, got %v", b.State())
-	}
-	time.Sleep(20 * time.Millisecond)
-	epoch, err := b.Allow()
-	if err != nil {
-		t.Fatalf("Allow() after open timeout: %v", err)
-	}
-	if epoch == 0 {
-		t.Fatal("Allow() returned epoch 0 for HALF_OPEN probe")
-	}
-	if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
-		t.Fatalf("second Allow() before CancelProbe = %v, want ErrCircuitOpen", err)
-	}
-	b.CancelProbe(epoch + 1)
-	if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
-		t.Fatalf("Allow() after stale CancelProbe = %v, want ErrCircuitOpen", err)
-	}
-	b.CancelProbe(epoch)
-	epoch2, err := b.Allow()
-	if err != nil {
-		t.Fatalf("Allow() after CancelProbe: %v", err)
-	}
-	if epoch2 == 0 || epoch2 == epoch {
-		t.Fatalf("Allow() after CancelProbe epoch = %d, want new non-zero epoch different from %d", epoch2, epoch)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		b, err := New(WithFailureThreshold(1), WithWindow(10*time.Second), WithOpenTimeout(10*time.Millisecond), WithMaxOpenTimeout(10*time.Millisecond))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		b.RecordFailure(http.StatusInternalServerError, 0, time.Time{}, 0)
+		if b.State() != Open {
+			t.Fatalf("expected OPEN after seed failure, got %v", b.State())
+		}
+		time.Sleep(20 * time.Millisecond)
+		epoch, err := b.Allow()
+		if err != nil {
+			t.Fatalf("Allow() after open timeout: %v", err)
+		}
+		if epoch == 0 {
+			t.Fatal("Allow() returned epoch 0 for HALF_OPEN probe")
+		}
+		if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("second Allow() before CancelProbe = %v, want ErrCircuitOpen", err)
+		}
+		b.CancelProbe(epoch + 1)
+		if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("Allow() after stale CancelProbe = %v, want ErrCircuitOpen", err)
+		}
+		b.CancelProbe(epoch)
+		epoch2, err := b.Allow()
+		if err != nil {
+			t.Fatalf("Allow() after CancelProbe: %v", err)
+		}
+		if epoch2 == 0 || epoch2 == epoch {
+			t.Fatalf("Allow() after CancelProbe epoch = %d, want new non-zero epoch different from %d", epoch2, epoch)
+		}
+	})
 }
 
 func TestBreaker_CancelProbeInvalidatesLateProbeResult(t *testing.T) {
@@ -184,34 +187,36 @@ func TestBreaker_HalfOpenFailure_Reopens(t *testing.T) {
 }
 
 func TestBreaker_BackoffMultiplier(t *testing.T) {
-	b, err := New(WithFailureThreshold(1), WithWindow(10*time.Second), WithOpenTimeout(20*time.Millisecond), WithMaxOpenTimeout(200*time.Millisecond))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		b, err := New(WithFailureThreshold(1), WithWindow(10*time.Second), WithOpenTimeout(20*time.Millisecond), WithMaxOpenTimeout(200*time.Millisecond))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
-	// Trip the circuit.
-	b.RecordFailure(500, 0, time.Time{}, 0)
-	if b.State() != Open {
-		t.Fatalf("expected OPEN, got %v", b.State())
-	}
+		// Trip the circuit.
+		b.RecordFailure(500, 0, time.Time{}, 0)
+		if b.State() != Open {
+			t.Fatalf("expected OPEN, got %v", b.State())
+		}
 
-	// First open timeout: 20ms.
-	time.Sleep(40 * time.Millisecond)
-	_, _ = b.Allow()                        // HALF_OPEN
-	b.RecordFailure(500, 0, time.Time{}, 0) // back to OPEN, backoffMultiple = 1
+		// First open timeout: 20ms.
+		time.Sleep(40 * time.Millisecond)
+		_, _ = b.Allow()                        // HALF_OPEN
+		b.RecordFailure(500, 0, time.Time{}, 0) // back to OPEN, backoffMultiple = 1
 
-	// Second open timeout: 20ms * 2 = 40ms.
-	time.Sleep(20 * time.Millisecond)
-	// Too early — should still be OPEN.
-	if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
-		t.Fatalf("expected ErrCircuitOpen during backoff, got %v", err)
-	}
+		// Second open timeout: 20ms * 2 = 40ms.
+		time.Sleep(20 * time.Millisecond)
+		// Too early — should still be OPEN.
+		if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("expected ErrCircuitOpen during backoff, got %v", err)
+		}
 
-	// Wait for the doubled timeout.
-	time.Sleep(30 * time.Millisecond)
-	if _, err := b.Allow(); err != nil {
-		t.Fatalf("expected Allow() after doubled timeout, got %v", err)
-	}
+		// Wait for the doubled timeout.
+		time.Sleep(30 * time.Millisecond)
+		if _, err := b.Allow(); err != nil {
+			t.Fatalf("expected Allow() after doubled timeout, got %v", err)
+		}
+	})
 }
 
 func TestBreaker_FailureWindow(t *testing.T) {
@@ -1080,45 +1085,47 @@ func TestBreaker_RetryAfterResetOnSuccess(t *testing.T) {
 }
 
 func TestBreaker_ExponentialBackoffSequence(t *testing.T) {
-	b, err := New(WithFailureThreshold(1), WithWindow(10*time.Second), WithOpenTimeout(20*time.Millisecond), WithMaxOpenTimeout(500*time.Millisecond))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		b, err := New(WithFailureThreshold(1), WithWindow(10*time.Second), WithOpenTimeout(20*time.Millisecond), WithMaxOpenTimeout(500*time.Millisecond))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
-	// Cycle 0: timeout = 20ms * 2^0 = 20ms
-	b.RecordFailure(500, 0, time.Time{}, 0)
-	time.Sleep(30 * time.Millisecond)
-	_, _ = b.Allow() // HALF_OPEN
-	b.RecordFailure(500, 0, time.Time{}, 0)
+		// Cycle 0: timeout = 20ms * 2^0 = 20ms
+		b.RecordFailure(500, 0, time.Time{}, 0)
+		time.Sleep(30 * time.Millisecond)
+		_, _ = b.Allow() // HALF_OPEN
+		b.RecordFailure(500, 0, time.Time{}, 0)
 
-	// Cycle 1: timeout = 20ms * 2^1 = 40ms
-	// Too early at 15ms.
-	time.Sleep(15 * time.Millisecond)
-	if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
-		t.Fatalf("expected OPEN at 15ms (need 40ms), got %v", err)
-	}
-	time.Sleep(30 * time.Millisecond)
-	if _, err := b.Allow(); err != nil {
-		t.Fatalf("expected HALF_OPEN after 45ms, got %v", err)
-	}
-	b.RecordFailure(500, 0, time.Time{}, 0)
+		// Cycle 1: timeout = 20ms * 2^1 = 40ms
+		// Too early at 15ms.
+		time.Sleep(15 * time.Millisecond)
+		if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("expected OPEN at 15ms (need 40ms), got %v", err)
+		}
+		time.Sleep(30 * time.Millisecond)
+		if _, err := b.Allow(); err != nil {
+			t.Fatalf("expected HALF_OPEN after 45ms, got %v", err)
+		}
+		b.RecordFailure(500, 0, time.Time{}, 0)
 
-	// Cycle 2: timeout = 20ms * 2^2 = 80ms
-	// Too early at 40ms.
-	time.Sleep(40 * time.Millisecond)
-	if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
-		t.Fatalf("expected OPEN at 40ms (need 80ms), got %v", err)
-	}
-	time.Sleep(50 * time.Millisecond)
-	if _, err := b.Allow(); err != nil {
-		t.Fatalf("expected HALF_OPEN after 90ms, got %v", err)
-	}
+		// Cycle 2: timeout = 20ms * 2^2 = 80ms
+		// Too early at 40ms.
+		time.Sleep(40 * time.Millisecond)
+		if _, err := b.Allow(); !errors.Is(err, ErrCircuitOpen) {
+			t.Fatalf("expected OPEN at 40ms (need 80ms), got %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if _, err := b.Allow(); err != nil {
+			t.Fatalf("expected HALF_OPEN after 90ms, got %v", err)
+		}
 
-	// Success resets backoff.
-	b.RecordSuccess(time.Time{}, 0)
-	if b.State() != Closed {
-		t.Fatalf("expected CLOSED after success, got %v", b.State())
-	}
+		// Success resets backoff.
+		b.RecordSuccess(time.Time{}, 0)
+		if b.State() != Closed {
+			t.Fatalf("expected CLOSED after success, got %v", b.State())
+		}
+	})
 }
 
 func TestBreaker_StaleFailureIgnoredInHalfOpen(t *testing.T) {

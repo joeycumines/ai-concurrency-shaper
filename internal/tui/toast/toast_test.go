@@ -109,13 +109,13 @@ func TestToast_EmptyMessage(t *testing.T) {
 }
 
 func TestToast_Expired(t *testing.T) {
-	tt := &Toast{Message: "old", Duration: 50 * time.Millisecond}
-	tt.Show()
-	if tt.Expired() {
-		t.Fatal("toast should not be expired immediately")
+	now := time.Now()
+	live := &Toast{Message: "live", Duration: time.Hour, CreatedAt: now}
+	if live.Expired() {
+		t.Fatal("toast should not be expired before duration")
 	}
-	time.Sleep(100 * time.Millisecond)
-	if !tt.Expired() {
+	expired := &Toast{Message: "old", Duration: 50 * time.Millisecond, CreatedAt: now.Add(-time.Second)}
+	if !expired.Expired() {
 		t.Fatal("toast should be expired after duration")
 	}
 }
@@ -129,8 +129,7 @@ func TestToast_NotExpiredWithZeroDuration(t *testing.T) {
 
 func TestVisibleToasts(t *testing.T) {
 	live := (&Toast{Message: "live"}).Show()
-	expired := (&Toast{Message: "expired", Duration: 1 * time.Millisecond}).Show()
-	time.Sleep(5 * time.Millisecond)
+	expired := &Toast{Message: "expired", Duration: time.Millisecond, CreatedAt: time.Now().Add(-time.Second)}
 
 	result := VisibleToasts([]*Toast{live, expired})
 	if len(result) != 1 {
@@ -165,29 +164,30 @@ func TestToast_NotAnimating_Settled(t *testing.T) {
 }
 
 func TestToast_Animating_SlideIn(t *testing.T) {
-	tt := &Toast{Message: "alert", Duration: 5 * time.Second}
-	tt.Show()
-	if !tt.AnimatingAt(time.Now()) {
+	now := time.Unix(1_700_000_000, 0)
+	tt := &Toast{Message: "alert", Duration: 5 * time.Second, CreatedAt: now}
+	if !tt.AnimatingAt(now.Add(time.Millisecond)) {
 		t.Fatal("freshly shown toast should be animating (slide-in)")
 	}
 }
 
 func TestToast_Animating_SettledAfterSlideIn(t *testing.T) {
 	// Two slide-in durations into the lifetime the toast is fully visible.
-	tt := &Toast{Message: "alert", Duration: 5 * time.Second}
-	tt.CreatedAt = time.Now().Add(-2 * slideIn)
-	if tt.AnimatingAt(time.Now()) {
+	now := time.Unix(1_700_000_000, 0)
+	tt := &Toast{Message: "alert", Duration: 5 * time.Second, CreatedAt: now.Add(-2 * slideIn)}
+	if tt.AnimatingAt(now) {
 		t.Fatal("toast should be settled after slide-in completes")
 	}
-	if got := tt.slideDistance(time.Now()); got != 0 {
+	if got := tt.slideDistance(now); got != 0 {
 		t.Errorf("slideDistance = %d, want 0", got)
 	}
 }
 
 func TestToast_Animating_SlideOut(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
 	tt := &Toast{Message: "alert", Duration: 5 * time.Second}
-	tt.CreatedAt = time.Now().Add(-(tt.Duration - slideOut/2))
-	if !tt.AnimatingAt(time.Now()) {
+	tt.CreatedAt = now.Add(-(tt.Duration - slideOut/2))
+	if !tt.AnimatingAt(now) {
 		t.Fatal("toast inside the slide-out window should be animating")
 	}
 }
@@ -251,13 +251,14 @@ func TestToast_SlideOutStart_ZeroCreatedAt(t *testing.T) {
 // already begun is handled by AnimatingAt, so callers only schedule for
 // SlideOutStart when it is still in the future.
 func TestToast_SlideOutStart_PastWindow(t *testing.T) {
-	created := time.Now().Add(-(5*time.Second - slideOut/2))
+	now := time.Unix(1_700_000_000, 0)
+	created := now.Add(-(5*time.Second - slideOut/2))
 	tt := &Toast{Message: "alert", Duration: 5 * time.Second, CreatedAt: created}
-	if !tt.AnimatingAt(time.Now()) {
+	if !tt.AnimatingAt(now) {
 		t.Fatal("toast already inside its slide-out window should be animating")
 	}
-	if got := tt.SlideOutStart(); got.After(time.Now()) {
-		t.Errorf("SlideOutStart = %v, want it to be in the past", got)
+	if got := tt.SlideOutStart(); got.After(now) {
+		t.Errorf("SlideOutStart = %v, want it to be in the past relative to %v", got, now)
 	}
 }
 

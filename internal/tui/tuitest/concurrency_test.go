@@ -18,49 +18,55 @@
 package tuitest
 
 import (
-	"strings"
+	"context"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/joeycumines/go-prompt/termtest"
 )
 
 func TestPTY_ConcurrencyInFlight(t *testing.T) {
 	h := Launch(t)
 	defer h.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
 
-	// Set upstream to have a delay so requests stay in-flight
-	h.Ctrl().SetDelay(2 * time.Second)
+	// Gate upstream deterministically so both requests remain in-flight until
+	// the Concurrency tab has rendered them.
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	h.Ctrl().SetGate(entered, release)
+	var releaseOnce sync.Once
+	doRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	defer doRelease()
 
-	// Fire 2 concurrent requests (limited routes)
+	// Fire 2 concurrent requests (limited routes).
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Go(func() {
-			sendRequest(t, t.Context(), h.ProxyURL()+"/v1/messages")
+			sendRequest(t, ctx, h.ProxyURL()+"/v1/messages")
 		})
 	}
+	for range 2 {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for in-flight requests to reach upstream")
+		}
+	}
 
-	// Give requests time to reach upstream but not complete
-	time.Sleep(500 * time.Millisecond)
-
-	// Switch to Concurrency tab (key 5).
+	// Snapshot BEFORE switching to Concurrency tab (key 5).
+	snap := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("5"); err != nil {
 		t.Fatalf("WriteString 5: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
-
-	// Verify in-flight entries are visible
-	out := h.Console().String()
-	if !strings.Contains(out, "POST") {
-		t.Error("Concurrency tab should show in-flight POST requests")
+	if err := h.Console().Expect(ctx, snap, termtest.Contains("POST"), "in-flight POST requests"); err != nil {
+		t.Errorf("Concurrency tab should show in-flight POST requests: %v", err)
+		t.Logf("Full output: %s", h.Console().String())
 	}
 
-	// Wait for requests to complete
+	// Release upstream and wait for requests to complete.
+	doRelease()
 	wg.Wait()
-	time.Sleep(1 * time.Second)
-
-	// Switch to Concurrency tab again (key 5).
-	if _, err := h.Console().WriteString("5"); err != nil {
-		t.Fatalf("WriteString 5: %v", err)
-	}
-	time.Sleep(500 * time.Millisecond)
 }

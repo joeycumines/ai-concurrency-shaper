@@ -310,26 +310,48 @@ func TestE2E_ComposedGateway_ModelCatalog(t *testing.T) {
 	}
 
 	// (d) A held completion must not delay discovery.
-	held := make(chan int, 1)
+	type heldResult struct {
+		status int
+		err    error
+	}
+	held := make(chan heldResult, 1)
 	go func() {
-		status, _ := post("/dialagram/v1/responses", `{"model":"qwen-slow","input":"hold"}`)
-		held <- status
+		req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/dialagram/v1/responses", strings.NewReader(`{"model":"qwen-slow","input":"hold"}`))
+		if err != nil {
+			held <- heldResult{err: err}
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			held <- heldResult{err: err}
+			return
+		}
+		_, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		held <- heldResult{status: resp.StatusCode}
 	}()
 	deadline := time.Now().Add(5 * time.Second)
 	for dialagramHits.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	start := time.Now()
-	status, body = get("/dialagram/v1/models?client_version=1", nil)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("catalog timed out behind the held completion after %v", elapsed)
+	if dialagramHits.Load() < 2 {
+		close(dialagramGate)
+		<-held
+		t.Fatalf("held completion never reached upstream (dialagramHits=%d)", dialagramHits.Load())
 	}
+	// Discovery must return 200 while dialagramGate is still closed (slot held).
+	status, body = get("/dialagram/v1/models?client_version=1", nil)
 	if status != http.StatusOK {
+		close(dialagramGate)
+		<-held
 		t.Fatalf("catalog behind a held slot = %d: %s", status, body)
 	}
 	close(dialagramGate)
-	if status := <-held; status != http.StatusOK {
-		t.Fatalf("held completion status = %d", status)
+	if res := <-held; res.err != nil {
+		t.Fatalf("held completion error: %v", res.err)
+	} else if res.status != http.StatusOK {
+		t.Fatalf("held completion status = %d", res.status)
 	}
 
 	if dialagramHits.Load() != 2 || verbooHits.Load() != 1 {

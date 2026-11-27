@@ -526,17 +526,46 @@ func startWithAuthMode(t *testing.T, bin, upstreamURL, authMode string, preset b
 		return buf.String(), err
 	}
 	// A refusal exits on its own during config validation. An accepted
-	// configuration starts listening and runs until stopped, so waiting for
-	// exit would block forever: give it a grace period, then stop it and
-	// report that it came up.
+	// configuration binds its listener and runs until stopped; poll for
+	// TCP readiness alongside process exit so slow startups under -race
+	// are never misclassified as accepted.
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	ready := make(chan struct{})
+	stopProbe := make(chan struct{})
+	defer close(stopProbe)
+	go func() {
+		for {
+			select {
+			case <-stopProbe:
+				return
+			default:
+			}
+			conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+			if err == nil {
+				_ = conn.Close()
+				close(ready)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
 	select {
 	case err := <-done:
 		return buf.String(), err
-	case <-time.After(2 * time.Second):
+	case <-ready:
 		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+		return buf.String(), nil
+	case <-time.After(10 * time.Second):
+		_ = cmd.Process.Kill()
 		<-done
+		t.Fatalf("proxy neither exited nor listened on %s within 10s:\n%s", addr, buf.String())
 		return buf.String(), nil
 	}
 }

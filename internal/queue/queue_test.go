@@ -19,6 +19,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -74,44 +75,45 @@ func TestAcquire_ImmediateWhenSlotsAvailable(t *testing.T) {
 }
 
 func TestAcquire_BlocksWhenExhausted(t *testing.T) {
-	l := NewLimiterWithCooldown(1, 0)
-	ctx := context.Background()
+	synctest.Test(t, func(t *testing.T) {
+		l := NewLimiterWithCooldown(1, 0)
+		ctx := context.Background()
 
-	// Exhaust the single slot.
-	rel, err := l.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+		// Exhaust the single slot.
+		rel, err := l.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 
-	// Next acquire should block.
-	done := make(chan struct{})
-	var acquireErr error
-	var acquireRel func()
+		// Next acquire should block.
+		done := make(chan struct{})
+		var acquireErr error
+		var acquireRel func()
 
-	go func() {
-		acquireRel, acquireErr = l.Acquire(ctx)
-		close(done)
-	}()
+		go func() {
+			acquireRel, acquireErr = l.Acquire(ctx)
+			close(done)
+		}()
 
-	// Give the goroutine time to enter the wait.
-	time.Sleep(50 * time.Millisecond)
+		synctest.Wait()
 
-	stats := l.Stats()
-	if stats.Waiters != 1 {
-		t.Errorf("expected 1 waiter, got %d", stats.Waiters)
-	}
+		stats := l.Stats()
+		if stats.Waiters != 1 {
+			t.Errorf("expected 1 waiter, got %d", stats.Waiters)
+		}
 
-	// Release the slot — the blocked acquire should unblock.
-	rel()
-	<-done
+		// Release the slot — the blocked acquire should unblock.
+		rel()
+		<-done
 
-	if acquireErr != nil {
-		t.Fatalf("unexpected error from blocked acquire: %v", acquireErr)
-	}
-	if acquireRel == nil {
-		t.Fatal("expected non-nil release func from blocked acquire")
-	}
-	acquireRel()
+		if acquireErr != nil {
+			t.Fatalf("unexpected error from blocked acquire: %v", acquireErr)
+		}
+		if acquireRel == nil {
+			t.Fatal("expected non-nil release func from blocked acquire")
+		}
+		acquireRel()
+	})
 }
 
 func TestAcquire_ContextCancel(t *testing.T) {
@@ -317,101 +319,107 @@ func TestLimiter_PostReleaseCooldownZero(t *testing.T) {
 }
 
 func TestLimiter_AdaptiveReducesEffectiveLimit(t *testing.T) {
-	l := NewLimiterWithCooldown(4, 0)
-	ctx := context.Background()
+	synctest.Test(t, func(t *testing.T) {
+		l := NewLimiterWithCooldown(4, 0)
+		ctx := context.Background()
 
-	// Acquire all 4 slots.
-	rels := make([]func(), 4)
-	for i := range 4 {
-		rel, err := l.Acquire(ctx)
-		if err != nil {
-			t.Fatalf("Acquire %d: %v", i, err)
+		// Acquire all 4 slots.
+		rels := make([]func(), 4)
+		for i := range 4 {
+			rel, err := l.Acquire(ctx)
+			if err != nil {
+				t.Fatalf("Acquire %d: %v", i, err)
+			}
+			rels[i] = rel
 		}
-		rels[i] = rel
-	}
 
-	// A 5th acquire must block.
-	blocked := make(chan func())
-	go func() {
-		rel, err := l.Acquire(ctx)
-		if err != nil {
-			t.Errorf("blocked acquire: %v", err)
-			close(blocked)
-			return
+		// A 5th acquire must block.
+		blocked := make(chan func())
+		go func() {
+			rel, err := l.Acquire(ctx)
+			if err != nil {
+				t.Errorf("blocked acquire: %v", err)
+				close(blocked)
+				return
+			}
+			blocked <- rel
+		}()
+
+		synctest.Wait()
+		if l.Stats().Waiters != 1 {
+			t.Fatalf("expected 1 waiter, got %d", l.Stats().Waiters)
 		}
-		blocked <- rel
-	}()
 
-	// Give the goroutine time to enter the wait.
-	time.Sleep(50 * time.Millisecond)
-	if l.Stats().Waiters != 1 {
-		t.Fatalf("expected 1 waiter, got %d", l.Stats().Waiters)
-	}
-
-	// Reduce after a 429. This should not unblock the waiter until a slot is released.
-	if !l.AdaptiveReduce(100 * time.Millisecond) {
-		t.Fatal("AdaptiveReduce should succeed with limit 4")
-	}
-	if l.Withheld() != 1 {
-		t.Fatalf("expected Withheld=1, got %d", l.Withheld())
-	}
-
-	// Releasing one slot should absorb the headroom, not serve the waiter.
-	rels[0]()
-	time.Sleep(50 * time.Millisecond)
-	if l.Stats().Waiters != 1 {
-		t.Fatalf("waiter should still be blocked when slot is absorbed: waiters=%d", l.Stats().Waiters)
-	}
-
-	// Release the remaining 3 slots. Now the waiter should proceed.
-	for i := 1; i < 4; i++ {
-		rels[i]()
-	}
-	rel := <-blocked
-
-	// Release the final slot and wait for the adaptive window to expire.
-	rel()
-	time.Sleep(200 * time.Millisecond)
-
-	if l.Withheld() != 0 {
-		t.Fatalf("expected Withheld=0 after restoration, got %d", l.Withheld())
-	}
-
-	// We should be able to acquire 4 slots again.
-	for i := range 4 {
-		r, err := l.Acquire(ctx)
-		if err != nil {
-			t.Fatalf("re-acquire %d: %v", i, err)
+		// Reduce after a 429. This should not unblock the waiter until a slot is released.
+		if !l.AdaptiveReduce(100 * time.Millisecond) {
+			t.Fatal("AdaptiveReduce should succeed with limit 4")
 		}
-		defer r()
-	}
+		if l.Withheld() != 1 {
+			t.Fatalf("expected Withheld=1, got %d", l.Withheld())
+		}
+
+		// Releasing one slot should absorb the headroom, not serve the waiter.
+		rels[0]()
+		time.Sleep(50 * time.Millisecond)
+		synctest.Wait()
+		if l.Stats().Waiters != 1 {
+			t.Fatalf("waiter should still be blocked when slot is absorbed: waiters=%d", l.Stats().Waiters)
+		}
+
+		// Release the remaining 3 slots. Now the waiter should proceed.
+		for i := 1; i < 4; i++ {
+			rels[i]()
+		}
+		rel := <-blocked
+
+		// Release the final slot and wait for the adaptive window to expire.
+		rel()
+		time.Sleep(200 * time.Millisecond)
+		synctest.Wait()
+
+		if l.Withheld() != 0 {
+			t.Fatalf("expected Withheld=0 after restoration, got %d", l.Withheld())
+		}
+
+		// We should be able to acquire 4 slots again.
+		for i := range 4 {
+			r, err := l.Acquire(ctx)
+			if err != nil {
+				t.Fatalf("re-acquire %d: %v", i, err)
+			}
+			defer r()
+		}
+	})
 }
 
 func TestLimiter_AdaptiveReduceExtendsWindow(t *testing.T) {
-	l := NewLimiterWithCooldown(2, 0)
-	window := 300 * time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		l := NewLimiterWithCooldown(2, 0)
+		window := 300 * time.Millisecond
 
-	if !l.AdaptiveReduce(window) {
-		t.Fatal("first AdaptiveReduce should succeed")
-	}
+		if !l.AdaptiveReduce(window) {
+			t.Fatal("first AdaptiveReduce should succeed")
+		}
 
-	// Halfway through the window, reduce again.
-	time.Sleep(window / 2)
-	if !l.AdaptiveReduce(window) {
-		t.Fatal("second AdaptiveReduce should succeed and extend the window")
-	}
+		// Halfway through the window, reduce again.
+		time.Sleep(window / 2)
+		if !l.AdaptiveReduce(window) {
+			t.Fatal("second AdaptiveReduce should succeed and extend the window")
+		}
 
-	// Wait until slightly after the original window would have expired.
-	time.Sleep(window/2 + 100*time.Millisecond)
-	if !l.AdaptiveActive() {
-		t.Fatal("adaptive headroom should still be active because the window was extended")
-	}
+		// Wait until slightly after the original window would have expired.
+		time.Sleep(window/2 + 100*time.Millisecond)
+		if !l.AdaptiveActive() {
+			t.Fatal("adaptive headroom should still be active because the window was extended")
+		}
 
-	// Wait for the extended window to expire.
-	time.Sleep(window + 100*time.Millisecond)
-	if l.AdaptiveActive() {
-		t.Fatal("adaptive headroom should have expired")
-	}
+		// Wait for the extended window to expire.
+		time.Sleep(window + 100*time.Millisecond)
+		synctest.Wait()
+		if l.AdaptiveActive() {
+			t.Fatal("adaptive headroom should have expired")
+		}
+	})
 }
 
 func TestLimiter_AdaptiveReduceRespectsMinimum(t *testing.T) {
@@ -568,127 +576,129 @@ func TestLimiter_AdaptiveReduceWithCooldownAbsorbsRelease(t *testing.T) {
 }
 
 func TestLimiter_AdaptiveReduceWithCooldownDrainsIdle(t *testing.T) {
-	l := NewLimiterWithCooldown(2, 200*time.Millisecond)
-	rel1, err := l.Acquire(context.Background())
-	if err != nil {
-		t.Fatalf("Acquire: %v", err)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		l := NewLimiterWithCooldown(2, 200*time.Millisecond)
+		rel1, err := l.Acquire(context.Background())
+		if err != nil {
+			t.Fatalf("Acquire: %v", err)
+		}
 
-	// One slot is idle when the 429 arrives. AdaptiveReduce should drain it.
-	if !l.AdaptiveReduce(100 * time.Millisecond) {
-		t.Fatal("AdaptiveReduce should succeed")
-	}
-	if l.EffectiveLimit() != 1 {
-		t.Fatalf("expected effective limit 1, got %d", l.EffectiveLimit())
-	}
+		// One slot is idle when the 429 arrives. AdaptiveReduce should drain it.
+		if !l.AdaptiveReduce(100 * time.Millisecond) {
+			t.Fatal("AdaptiveReduce should succeed")
+		}
+		if l.EffectiveLimit() != 1 {
+			t.Fatalf("expected effective limit 1, got %d", l.EffectiveLimit())
+		}
 
-	// A new acquire must block because the idle slot was drained.
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	_, err = l.Acquire(ctx)
-	if err == nil {
-		t.Fatal("expected acquire to fail after idle slot drained")
-	}
-	cancel()
+		// A new acquire must block because the idle slot was drained.
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_, err = l.Acquire(ctx)
+		if err == nil {
+			t.Fatal("expected acquire to fail after idle slot drained")
+		}
+		cancel()
 
-	rel1()
-	time.Sleep(200 * time.Millisecond)
+		rel1()
+		time.Sleep(250 * time.Millisecond)
+		synctest.Wait()
 
-	if l.AdaptiveActive() {
-		t.Fatal("adaptive headroom should have expired")
-	}
-	if l.EffectiveLimit() != 2 {
-		t.Fatalf("expected effective limit 2 after recovery, got %d", l.EffectiveLimit())
-	}
+		if l.AdaptiveActive() {
+			t.Fatal("adaptive headroom should have expired")
+		}
+		if l.EffectiveLimit() != 2 {
+			t.Fatalf("expected effective limit 2 after recovery, got %d", l.EffectiveLimit())
+		}
+	})
 }
 
 func TestQueue_AcquireFastPathDoesNotIncrementWaiters(t *testing.T) {
-	const limit = 64
-	l := NewLimiterWithCooldown(limit, 0)
-	ctx := context.Background()
+	synctest.Test(t, func(t *testing.T) {
+		const limit = 64
+		l := NewLimiterWithCooldown(limit, 0)
+		ctx := context.Background()
 
-	// Acquire all 64 slots concurrently.
-	var wg sync.WaitGroup
-	startBarrier := make(chan struct{})
-	releases := make([]func(), limit)
+		// Acquire all 64 slots concurrently.
+		var wg sync.WaitGroup
+		startBarrier := make(chan struct{})
+		releases := make([]func(), limit)
 
-	for i := range limit {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			<-startBarrier
-			rel, err := l.Acquire(ctx)
-			if err != nil {
-				t.Errorf("Acquire %d: %v", idx, err)
-				return
-			}
-			releases[idx] = rel
-		}(i)
-	}
+		for i := range limit {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				<-startBarrier
+				rel, err := l.Acquire(ctx)
+				if err != nil {
+					t.Errorf("Acquire %d: %v", idx, err)
+					return
+				}
+				releases[idx] = rel
+			}(i)
+		}
 
-	close(startBarrier)
-	wg.Wait()
+		close(startBarrier)
+		wg.Wait()
 
-	stats := l.Stats()
-	if stats.Waiters != 0 {
-		t.Fatalf("expected 0 waiters during immediate acquisition, got %d", stats.Waiters)
-	}
-	if stats.Active != limit {
-		t.Fatalf("expected %d active slots, got %d", limit, stats.Active)
-	}
+		stats := l.Stats()
+		if stats.Waiters != 0 {
+			t.Fatalf("expected 0 waiters during immediate acquisition, got %d", stats.Waiters)
+		}
+		if stats.Active != limit {
+			t.Fatalf("expected %d active slots, got %d", limit, stats.Active)
+		}
 
-	// 65th acquire must block because all slots are held.
-	waiterBlocked := make(chan struct{})
-	var waiterErr error
-	var waiterRel func()
-	waiterDone := make(chan struct{})
+		// 65th acquire must block because all slots are held.
+		var waiterErr error
+		var waiterRel func()
+		waiterDone := make(chan struct{})
 
-	go func() {
-		close(waiterBlocked)
-		waiterRel, waiterErr = l.Acquire(ctx)
-		close(waiterDone)
-	}()
+		go func() {
+			waiterRel, waiterErr = l.Acquire(ctx)
+			close(waiterDone)
+		}()
 
-	<-waiterBlocked
-	time.Sleep(50 * time.Millisecond)
+		synctest.Wait()
 
-	stats = l.Stats()
-	if stats.Waiters != 1 {
-		t.Fatalf("expected 1 blocked waiter, got %d", stats.Waiters)
-	}
+		stats = l.Stats()
+		if stats.Waiters != 1 {
+			t.Fatalf("expected 1 blocked waiter, got %d", stats.Waiters)
+		}
 
-	// Release 1 slot — the blocked waiter should be admitted.
-	releases[0]()
-	<-waiterDone
+		// Release 1 slot — the blocked waiter should be admitted.
+		releases[0]()
+		<-waiterDone
 
-	if waiterErr != nil {
-		t.Fatalf("unexpected waiter error: %v", waiterErr)
-	}
-	if waiterRel == nil {
-		t.Fatal("expected non-nil waiter release")
-	}
+		if waiterErr != nil {
+			t.Fatalf("unexpected waiter error: %v", waiterErr)
+		}
+		if waiterRel == nil {
+			t.Fatal("expected non-nil waiter release")
+		}
 
-	stats = l.Stats()
-	if stats.Waiters != 0 {
-		t.Fatalf("expected 0 waiters after unblocking, got %d", stats.Waiters)
-	}
-	if stats.Active != limit {
-		t.Fatalf("expected %d active, got %d", limit, stats.Active)
-	}
+		stats = l.Stats()
+		if stats.Waiters != 0 {
+			t.Fatalf("expected 0 waiters after unblocking, got %d", stats.Waiters)
+		}
+		if stats.Active != limit {
+			t.Fatalf("expected %d active, got %d", limit, stats.Active)
+		}
 
-	// Release remaining slots.
-	waiterRel()
-	for _, rel := range releases[1:] {
-		rel()
-	}
+		// Release remaining slots.
+		waiterRel()
+		for _, rel := range releases[1:] {
+			rel()
+		}
 
-	stats = l.Stats()
-	if stats.Active != 0 {
-		t.Fatalf("expected 0 active after full release, got %d", stats.Active)
-	}
-	if stats.Waiters != 0 {
-		t.Fatalf("expected 0 waiters after full release, got %d", stats.Waiters)
-	}
+		stats = l.Stats()
+		if stats.Active != 0 {
+			t.Fatalf("expected 0 active after full release, got %d", stats.Active)
+		}
+		if stats.Waiters != 0 {
+			t.Fatalf("expected 0 waiters after full release, got %d", stats.Waiters)
+		}
+	})
 }
 
 func TestQueue_ActiveExcludesCooldownParkedTokens(t *testing.T) {

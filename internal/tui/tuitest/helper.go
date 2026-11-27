@@ -42,6 +42,8 @@ type controllableUpstream struct {
 	mu         sync.Mutex
 	statusCode int
 	delay      time.Duration
+	entered    chan struct{}
+	release    <-chan struct{}
 }
 
 func newControllableUpstream() *controllableUpstream {
@@ -60,11 +62,34 @@ func (u *controllableUpstream) SetDelay(d time.Duration) {
 	u.delay = d
 }
 
+// SetGate holds every incoming request until release is closed, signaling
+// entered (non-blocking) for each request that arrives at the upstream.
+func (u *controllableUpstream) SetGate(entered chan struct{}, release <-chan struct{}) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.entered = entered
+	u.release = release
+}
+
 func (u *controllableUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u.mu.Lock()
 	code := u.statusCode
 	delay := u.delay
+	entered := u.entered
+	release := u.release
 	u.mu.Unlock()
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}
 	if delay > 0 {
 		time.Sleep(delay)
 	}

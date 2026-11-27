@@ -199,6 +199,7 @@ func TestGeminiStreamClientCancelReleasesUpstreamAndSlot(t *testing.T) {
 	if !strings.Contains(first, `"text":"hel"`) {
 		t.Fatalf("first frame %q", first)
 	}
+	cancelledAt := time.Now()
 	cancel()
 	_ = resp.Body.Close()
 
@@ -207,7 +208,6 @@ func TestGeminiStreamClientCancelReleasesUpstreamAndSlot(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("upstream request context was not cancelled after the client left")
 	}
-	cancelledAt := time.Now()
 
 	// The next request is admitted only after the abandoned exchange released
 	// its slot, which happens no earlier than the cancel cooldown after the

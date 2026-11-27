@@ -785,13 +785,18 @@ func TestAnimTick_StaleGenerationIgnored(t *testing.T) {
 	}
 
 	// A current-generation arrival still re-arms the schedule.
+	// Re-pin CreatedAt so wall-clock delay in earlier steps cannot expire the
+	// 250ms slide-in window and switch the schedule to the far-future slide-out.
+	freshToast := m.toasts[len(m.toasts)-1]
+	freshToast.CreatedAt = time.Now()
 	fresh := animTickMsg{generation: m.animTickGen}
 	m.animTickDeadline = time.Now().Add(-time.Millisecond)
 	next, cmdFresh := m.Update(fresh)
 	if cmdFresh == nil {
 		t.Fatal("current-generation animTickMsg must re-arm the animation tick")
 	}
-	if got := time.Until(next.(Model).animTickDeadline); got <= 0 || got > toastAnimInterval {
-		t.Fatalf("re-armed deadline %v is not within one animation interval (%v)", next.(Model).animTickDeadline, toastAnimInterval)
+	rearmed := next.(Model).animTickDeadline
+	if rearmed.IsZero() || rearmed.Equal(freshToast.SlideOutStart()) {
+		t.Fatalf("re-armed deadline %v should target the short animation interval, not zero or SlideOutStart (%v)", rearmed, freshToast.SlideOutStart())
 	}
 }

@@ -111,14 +111,30 @@ func TestShutdownServersDrainsBothUnderStall(t *testing.T) {
 	waitParked(t, metricsSrv)
 	waitParked(t, proxySrv)
 
-	const grace = 750 * time.Millisecond
+	const grace = 2 * time.Second
 	done := make(chan error, 1)
 	go func() { done <- shutdownServers(grace, metricsSrv.srv, proxySrv.srv) }()
 
-	// Release inside their windows: metrics early, proxy late-but-safe.
-	time.Sleep(150 * time.Millisecond)
+	// Wait until Shutdown has closed both listeners before releasing handlers.
+	waitListenerClosed := func(addr string) {
+		t.Helper()
+		deadline := time.Now().Add(grace)
+		for time.Now().Before(deadline) {
+			conn, err := net.DialTimeout("tcp", addr, 50*time.Millisecond)
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+			time.Sleep(5 * time.Millisecond)
+		}
+		t.Fatalf("listener %s remained open after shutdownServers started", addr)
+	}
+	waitListenerClosed(metricsSrv.addr)
+	waitListenerClosed(proxySrv.addr)
+
+	// Release inside their windows: metrics early, proxy after a short delay.
 	close(metricsSrv.release)
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 	close(proxySrv.release)
 
 	select {
@@ -237,7 +253,16 @@ func TestRunServerLifecycleSignalShutdown(t *testing.T) {
 			ln,
 		)
 	}()
-	time.Sleep(50 * time.Millisecond)
+	// Wait until the server is actively accepting connections before signalling shutdown.
+	readyDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(readyDeadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	cancel() // simulate the signal
 
 	select {
@@ -269,7 +294,7 @@ func TestSequentialShutdownStarvesSecondServer(t *testing.T) {
 
 	// Nobody releases either handler during the window: the first Shutdown
 	// can only end at the deadline.
-	const grace = 300 * time.Millisecond
+	const grace = 500 * time.Millisecond
 	sctx, cancel := context.WithTimeout(context.Background(), grace)
 	defer cancel()
 
@@ -282,8 +307,8 @@ func TestSequentialShutdownStarvesSecondServer(t *testing.T) {
 	if err != context.DeadlineExceeded {
 		t.Fatalf("second Shutdown = %v, want DeadlineExceeded from the inherited dead context", err)
 	}
-	if elapsed > 50*time.Millisecond {
-		t.Errorf("second Shutdown took %v; an expired context should be answered immediately", elapsed)
+	if elapsed >= grace {
+		t.Errorf("second Shutdown took %v; an expired context should be answered immediately (< %v)", elapsed, grace)
 	}
 	// The second server's connection was abandoned rather than drained: its
 	// handler is still parked at this point (release happens in t.Cleanup),

@@ -27,6 +27,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/joeycumines/ai-concurrency-shaper/internal/circuitbreaker"
@@ -709,60 +710,62 @@ func TestRetry_BodyTooLargeRequestContextCancellationReleasesHalfOpenProbe(t *te
 }
 
 func TestRetry_RequestContextCancellationAfterRetryableStatusSkipsDrain(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	blockedBody := newBlockingCloseBody()
-	var calls atomic.Int64
-	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
-		calls.Add(1)
-		cancel()
-		return &http.Response{
-			StatusCode: http.StatusInternalServerError,
-			Status:     "500 Internal Server Error",
-			Header:     make(http.Header),
-			Body:       blockedBody,
-			Request:    req,
-		}, nil
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		blockedBody := newBlockingCloseBody()
+		var calls atomic.Int64
+		inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			cancel()
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Status:     "500 Internal Server Error",
+				Header:     make(http.Header),
+				Body:       blockedBody,
+				Request:    req,
+			}, nil
+		})
+		tr := &Transport{
+			Inner:      inner,
+			MaxRetries: 3,
+			WaitMin:    time.Millisecond,
+			WaitMax:    time.Millisecond,
+		}
+
+		type result struct {
+			resp *http.Response
+			err  error
+		}
+		done := make(chan result, 1)
+		start := time.Now()
+		go func() {
+			resp, err := tr.RoundTrip(httptest.NewRequest(http.MethodGet, "http://x/", nil).WithContext(ctx))
+			done <- result{resp: resp, err: err}
+		}()
+
+		select {
+		case got := <-done:
+			if !errors.Is(got.err, context.Canceled) {
+				t.Fatalf("RoundTrip error = %v, want context.Canceled", got.err)
+			}
+			if got.resp != nil {
+				t.Fatalf("response = %#v, want nil after cancellation before retry", got.resp)
+			}
+		case <-time.After(300 * time.Millisecond):
+			_ = blockedBody.Close()
+			<-done
+			t.Fatal("RoundTrip attempted to drain retryable response after request cancellation")
+		}
+		if elapsed := time.Since(start); elapsed != 0 {
+			t.Fatalf("RoundTrip elapsed = %v, want 0 fake time (cancellation skips retry-drain latency)", elapsed)
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("inner RoundTrip calls = %d, want exactly 1", calls.Load())
+		}
+		if !blockedBody.closedFlag.Load() {
+			t.Fatal("retryable response body was not closed after cancellation")
+		}
 	})
-	tr := &Transport{
-		Inner:      inner,
-		MaxRetries: 3,
-		WaitMin:    time.Millisecond,
-		WaitMax:    time.Millisecond,
-	}
-
-	type result struct {
-		resp *http.Response
-		err  error
-	}
-	done := make(chan result, 1)
-	start := time.Now()
-	go func() {
-		resp, err := tr.RoundTrip(httptest.NewRequest(http.MethodGet, "http://x/", nil).WithContext(ctx))
-		done <- result{resp: resp, err: err}
-	}()
-
-	select {
-	case got := <-done:
-		if !errors.Is(got.err, context.Canceled) {
-			t.Fatalf("RoundTrip error = %v, want context.Canceled", got.err)
-		}
-		if got.resp != nil {
-			t.Fatalf("response = %#v, want nil after cancellation before retry", got.resp)
-		}
-	case <-time.After(300 * time.Millisecond):
-		_ = blockedBody.Close()
-		<-done
-		t.Fatal("RoundTrip attempted to drain retryable response after request cancellation")
-	}
-	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
-		t.Fatalf("RoundTrip elapsed = %v, want cancellation to skip retry-drain latency", elapsed)
-	}
-	if calls.Load() != 1 {
-		t.Fatalf("inner RoundTrip calls = %d, want exactly 1", calls.Load())
-	}
-	if !blockedBody.closedFlag.Load() {
-		t.Fatal("retryable response body was not closed after cancellation")
-	}
 }
 
 func TestRetry_WithCircuitBreaker_AbortsWhenOpen(t *testing.T) {
@@ -2019,58 +2022,57 @@ func TestRetry_NilBodyStillRetries(t *testing.T) {
 	}
 }
 
+type countingReadCloser struct {
+	io.ReadCloser
+	readBytes atomic.Int64
+}
+
+func (c *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := c.ReadCloser.Read(p)
+	c.readBytes.Add(int64(n))
+	return n, err
+}
+
 func TestRetry_BoundedDrainOnLargeErrorBody(t *testing.T) {
-	// Regression test: Verify that the body drain on retryable error
-	// responses is bounded to 4KB regardless of actual body size. Before the
-	// fix, a malicious upstream returning 5xx with an infinite streaming body
-	// could block the retry goroutine indefinitely — a trivial DoS vector.
-	//
-	// Strategy: create a mock RoundTripper that returns 500 with a 100KB body.
-	// With MaxRetries=1, the transport should drain the error body (bounded to
-	// 4KB), then retry. The entire operation should complete quickly.
-	calls := 0
-	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		if calls == 1 {
-			// Return a 500 with a 100KB body. The drain is bounded to 4KB.
-			return &http.Response{
-				StatusCode: 500,
-				Body:       body(string(bytes.Repeat([]byte("x"), 100*1024))),
-				Header:     make(http.Header),
-			}, nil
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		var largeBody *countingReadCloser
+		inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				largeBody = &countingReadCloser{
+					ReadCloser: body(string(bytes.Repeat([]byte("x"), 100*1024))),
+				}
+				return &http.Response{
+					StatusCode: 500,
+					Body:       largeBody,
+					Header:     make(http.Header),
+				}, nil
+			}
+			return &http.Response{StatusCode: 200, Body: body("ok"), Header: make(http.Header)}, nil
+		})
+
+		tr := &Transport{
+			Inner:      inner,
+			MaxRetries: 1,
+			WaitMin:    time.Millisecond,
+			WaitMax:    time.Millisecond,
 		}
-		return &http.Response{StatusCode: 200, Body: body("ok"), Header: make(http.Header)}, nil
+
+		resp, err := tr.RoundTrip(httptest.NewRequest("GET", "http://x/", nil))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Errorf("status = %d, want 200", resp.StatusCode)
+		}
+		if calls != 2 {
+			t.Errorf("calls = %d, want 2 (initial + 1 retry)", calls)
+		}
+		if got := largeBody.readBytes.Load(); got > 4096 {
+			t.Errorf("read %d bytes from 100KB error body, want <= 4096 (bounded drain)", got)
+		}
 	})
-
-	tr := &Transport{
-		Inner:      inner,
-		MaxRetries: 1,
-		WaitMin:    time.Millisecond,
-		WaitMax:    time.Millisecond,
-	}
-
-	start := time.Now()
-	resp, err := tr.RoundTrip(httptest.NewRequest("GET", "http://x/", nil))
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
-	}
-
-	// There must have been 2 RoundTrip calls (initial + 1 retry).
-	if calls != 2 {
-		t.Errorf("calls = %d, want 2 (initial + 1 retry)", calls)
-	}
-
-	// The drain of the 100KB body must have completed quickly (<100ms).
-	// Without the LimitReader bound, draining 100KB with a slow reader
-	// could take much longer.
-	if elapsed > 100*time.Millisecond {
-		t.Errorf("elapsed = %v, want <100ms (drain of 100KB body should be bounded to 4KB)", elapsed)
-	}
 }
 
 // slowDripBody delivers one byte every interval, simulating a malicious
@@ -2224,121 +2226,91 @@ func TestRetry_ParseRetryAfter_Consulted(t *testing.T) {
 }
 
 func TestRetry_RetryWaitAccountsForDrainBody(t *testing.T) {
-	// Regression: verify that the retry transport does NOT
-	// over-sleep by body-drain duration. Before the fix, the transport
-	// passed retryNow,retryNow to ParseRetryAfter, zeroing proxyElapsed.
-	// If drainBody took 500ms and the upstream sent Retry-After: 1 (1s),
-	// the transport slept the full 1s on top of the 500ms drain, totaling
-	// 1.5s instead of the correct 500ms remaining.
-	//
-	// Strategy: use a mock RoundTripper that returns 429 with Retry-After: 1
-	// followed by 200 on the second attempt. A slow-drip body (simulating
-	// drainBody latency) adds ~300ms to the first attempt. The total elapsed
-	// time should be approximately 1s (the Retry-After value), NOT 1.3s.
-	calls := 0
-	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		if calls == 1 {
-			resp := &http.Response{
-				StatusCode: 429,
-				Body: &slowDripBody{
-					data:     bytes.Repeat([]byte("x"), 10),
-					interval: 30 * time.Millisecond, // ~300ms drain
-				},
-				Header: make(http.Header),
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				resp := &http.Response{
+					StatusCode: 429,
+					Body: &slowDripBody{
+						data:     bytes.Repeat([]byte("x"), 10),
+						interval: 30 * time.Millisecond, // 300ms fake drain
+					},
+					Header: make(http.Header),
+				}
+				resp.Header.Set("Retry-After", "1") // 1 second
+				return resp, nil
 			}
-			resp.Header.Set("Retry-After", "1") // 1 second
-			return resp, nil
+			return &http.Response{StatusCode: 200, Body: body("ok"), Header: make(http.Header)}, nil
+		})
+
+		tr := &Transport{
+			Inner:      inner,
+			MaxRetries: 1,
+			WaitMin:    time.Millisecond,
+			WaitMax:    time.Millisecond,
 		}
-		return &http.Response{StatusCode: 200, Body: body("ok"), Header: make(http.Header)}, nil
+
+		start := time.Now()
+		resp, err := tr.RoundTrip(httptest.NewRequest("GET", "http://x/", nil))
+		elapsed := time.Since(start)
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Errorf("status = %d, want 200", resp.StatusCode)
+		}
+		if elapsed != time.Second {
+			t.Errorf("elapsed = %v, want 1s (retry wait should account for drain time, not add it on top)", elapsed)
+		}
 	})
-
-	tr := &Transport{
-		Inner:      inner,
-		MaxRetries: 1,
-		WaitMin:    time.Millisecond,
-		WaitMax:    time.Millisecond,
-	}
-
-	start := time.Now()
-	resp, err := tr.RoundTrip(httptest.NewRequest("GET", "http://x/", nil))
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
-	}
-
-	// The total time should be approximately 1s (Retry-After value),
-	// NOT 1.3s (which would indicate the transport added the drain time
-	// on top of the full ban duration). Allow 300ms tolerance.
-	if elapsed > 1300*time.Millisecond {
-		t.Errorf("elapsed = %v, want <1.3s (retry wait should account for drain time, not add it on top)", elapsed)
-	}
-	// Sanity: must have taken at least 1s (the Retry-After value minus
-	// the drain overlap). With 300ms drain and 1s Retry-After, remaining
-	// is 700ms, so total is ~1s (300ms drain + 700ms wait).
-	if elapsed < 800*time.Millisecond {
-		t.Errorf("elapsed = %v, want >=800ms (should wait for remaining Retry-After duration)", elapsed)
-	}
 }
 
 func TestRetry_RetryWaitHTTPDateRemaining(t *testing.T) {
-	// Regression: verify that HTTP-date Retry-After with Date
-	// header correctly computes remaining delay after body drain. Before
-	// the fix, the transport passed retryNow,retryNow which zeroed
-	// proxyElapsed, causing intendedDelta to be returned as the wait
-	// (over-sleeping by the drain duration).
-	calls := 0
-	inner := rtFunc(func(req *http.Request) (*http.Response, error) {
-		calls++
-		if calls == 1 {
-			// Simulate an upstream that sends Date + Retry-After 1s in the future.
-			upstreamNow := time.Now().UTC()
-			resp := &http.Response{
-				StatusCode: 429,
-				Body: &slowDripBody{
-					data:     bytes.Repeat([]byte("x"), 10),
-					interval: 30 * time.Millisecond, // ~300ms drain
-				},
-				Header: make(http.Header),
+	synctest.Test(t, func(t *testing.T) {
+		calls := 0
+		inner := rtFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			if calls == 1 {
+				upstreamNow := time.Now().UTC()
+				resp := &http.Response{
+					StatusCode: 429,
+					Body: &slowDripBody{
+						data:     bytes.Repeat([]byte("x"), 10),
+						interval: 30 * time.Millisecond, // 300ms fake drain
+					},
+					Header: make(http.Header),
+				}
+				resp.Header.Set("Date", upstreamNow.Format(http.TimeFormat))
+				resp.Header.Set("Retry-After", upstreamNow.Add(1*time.Second).Format(http.TimeFormat))
+				return resp, nil
 			}
-			resp.Header.Set("Date", upstreamNow.Format(http.TimeFormat))
-			resp.Header.Set("Retry-After", upstreamNow.Add(1*time.Second).Format(http.TimeFormat))
-			return resp, nil
+			return &http.Response{StatusCode: 200, Body: body("ok"), Header: make(http.Header)}, nil
+		})
+
+		tr := &Transport{
+			Inner:      inner,
+			MaxRetries: 1,
+			WaitMin:    time.Millisecond,
+			WaitMax:    time.Millisecond,
 		}
-		return &http.Response{StatusCode: 200, Body: body("ok"), Header: make(http.Header)}, nil
+
+		start := time.Now()
+		resp, err := tr.RoundTrip(httptest.NewRequest("GET", "http://x/", nil))
+		elapsed := time.Since(start)
+
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Errorf("status = %d, want 200", resp.StatusCode)
+		}
+		if elapsed != time.Second {
+			t.Errorf("elapsed = %v, want 1s (HTTP-date+Date retry wait should account for drain time)", elapsed)
+		}
 	})
-
-	tr := &Transport{
-		Inner:      inner,
-		MaxRetries: 1,
-		WaitMin:    time.Millisecond,
-		WaitMax:    time.Millisecond,
-	}
-
-	start := time.Now()
-	resp, err := tr.RoundTrip(httptest.NewRequest("GET", "http://x/", nil))
-	elapsed := time.Since(start)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp.StatusCode != 200 {
-		t.Errorf("status = %d, want 200", resp.StatusCode)
-	}
-
-	// With the fix, the transport should wait for the REMAINING duration
-	// (1s ban - ~300ms drain = ~700ms remaining), not the full 1s ban.
-	// Total elapsed should be approximately 1s, NOT 1.3s.
-	if elapsed > 1300*time.Millisecond {
-		t.Errorf("elapsed = %v, want <1.3s (HTTP-date+Date retry wait should account for drain time)", elapsed)
-	}
-	if elapsed < 800*time.Millisecond {
-		t.Errorf("elapsed = %v, want >=800ms (should wait for remaining ban duration)", elapsed)
-	}
 }
 
 func TestRetry_MinRetryDelayFloor(t *testing.T) {
