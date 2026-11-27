@@ -19,6 +19,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -223,31 +224,31 @@ func TestCollector_Throughput(t *testing.T) {
 }
 
 func TestCollector_ThroughputAccuracy(t *testing.T) {
-	// Regression test: Verify that Throughput() returns approximately
-	// correct RPS — not 100-200x inflated. Before the fix, Throughput()
-	// divided the total count across all 100 ring buffer slots by
-	// time.Since(tpLastTick), where tpLastTick was updated every ~100ms
-	// during buffer advancement. This divided a 10-second window's total by
-	// a fraction of a second, producing ~100-200x inflated RPS.
-	c := NewCollector()
+	synctest.Test(t, func(t *testing.T) {
+		// Regression test: Verify that Throughput() returns approximately
+		// correct RPS — not 100-200x inflated. Before the fix, Throughput()
+		// divided the total count across all 100 ring buffer slots by
+		// time.Since(tpLastTick), where tpLastTick was updated every ~100ms
+		// during buffer advancement. This divided a 10-second window's total by
+		// a fraction of a second, producing ~100-200x inflated RPS.
+		c := NewCollector()
 
-	// Record 10 requests with ~10ms spacing, so total elapsed ~100ms.
-	// Expected RPS ≈ 10 / 0.1 ≈ 100 (order of magnitude).
-	for range 10 {
-		c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
-		time.Sleep(10 * time.Millisecond)
-	}
+		// Record 10 requests with 10ms fake spacing, so total elapsed = 100ms.
+		// Expected RPS ≈ 10 / 0.1 ≈ 100.
+		for range 10 {
+			c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
+			time.Sleep(10 * time.Millisecond)
+		}
 
-	rps := c.Throughput()
+		rps := c.Throughput()
 
-	// The RPS should be in a plausible range: between 20 and 500.
-	// Before the fix, it would be ~2000+ (100 requests / 0.05s).
-	if rps < 20 {
-		t.Errorf("throughput too low: %f RPS (expected ~100)", rps)
-	}
-	if rps > 500 {
-		t.Errorf("throughput too high: %f RPS — likely still using tpLastTick as denominator (expected ~100)", rps)
-	}
+		if rps < 20 {
+			t.Errorf("throughput too low: %f RPS (expected ~100)", rps)
+		}
+		if rps > 500 {
+			t.Errorf("throughput too high: %f RPS — likely still using tpLastTick as denominator (expected ~100)", rps)
+		}
+	})
 }
 
 func TestCollector_ThroughputRampUp(t *testing.T) {
@@ -295,27 +296,25 @@ func TestCollector_ThroughputAfterReset(t *testing.T) {
 }
 
 func TestCollector_ThroughputSteadyState(t *testing.T) {
-	// Verify that after the window is fully filled (>10s of traffic),
-	// throughput is stable and accurate. We simulate this by recording
-	// enough requests to fill the ring buffer and then checking the value.
-	c := NewCollector()
+	synctest.Test(t, func(t *testing.T) {
+		c := NewCollector()
 
-	// Record 20 requests with 50ms spacing = ~1s total elapsed.
-	// Expected RPS ≈ 20 / 1.0 ≈ 20.
-	for range 20 {
-		c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
-		time.Sleep(50 * time.Millisecond)
-	}
+		// Record 20 requests with 50ms fake spacing = 1s total elapsed.
+		// Expected RPS ≈ 20 / 1.0 ≈ 20.
+		for range 20 {
+			c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
+			time.Sleep(50 * time.Millisecond)
+		}
 
-	rps := c.Throughput()
+		rps := c.Throughput()
 
-	// Should be roughly 20 RPS, allow wide margin (5-80) for CI timing jitter.
-	if rps < 5 {
-		t.Errorf("steady-state throughput too low: %f RPS (expected ~20)", rps)
-	}
-	if rps > 80 {
-		t.Errorf("steady-state throughput too high: %f RPS (expected ~20)", rps)
-	}
+		if rps < 5 {
+			t.Errorf("steady-state throughput too low: %f RPS (expected ~20)", rps)
+		}
+		if rps > 80 {
+			t.Errorf("steady-state throughput too high: %f RPS (expected ~20)", rps)
+		}
+	})
 }
 
 func TestCollector_ThroughputDecaysAfterTrafficStops(t *testing.T) {
@@ -420,48 +419,33 @@ func TestCollector_ThroughputNoIdleTimeDebtAfterLongPause(t *testing.T) {
 }
 
 func TestCollector_ThroughputNoDriftOverTime(t *testing.T) {
-	// Regression test: Verify that additive tpLastTick advancement
-	// prevents cumulative drift. Before the fix, tpLastTick = now discarded
-	// the fractional remainder on each advancement (e.g., 190ms elapsed with
-	// 100ms granules → adv=1, 90ms lost). Over many iterations this caused
-	// the ring buffer's internal clock to lag behind real time, trapping
-	// old requests in the window and inflating RPS.
-	// With additive advancement (tpLastTick.Add(duration(adv)*tpGran)), the
-	// remainder carries forward, keeping tpLastTick synchronized with real time.
-	c := NewCollector()
+	synctest.Test(t, func(t *testing.T) {
+		c := NewCollector()
 
-	// Record ~50 requests with ~10ms spacing = ~500ms of traffic.
-	// Expected RPS ≈ 50 / 0.5 ≈ 100.
-	for range 50 {
-		c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
-		time.Sleep(10 * time.Millisecond)
-	}
+		// Record 50 requests with 10ms fake spacing = 500ms of traffic.
+		// Expected RPS ≈ 50 / 0.5 ≈ 100.
+		for range 50 {
+			c.RecordRequest("POST", "/v1/messages", "", 200, time.Millisecond, true)
+			time.Sleep(10 * time.Millisecond)
+		}
 
-	rps := c.Throughput()
+		rps := c.Throughput()
 
-	// With additive advancement, RPS should be in a plausible range.
-	// With the old tpLastTick = now drift, RPS would be inflated because
-	// old counts linger in the window longer than they should.
-	// Allow generous margin (10-300) for CI timing jitter.
-	if rps < 10 {
-		t.Errorf("throughput too low after sustained traffic: %f RPS", rps)
-	}
-	if rps > 300 {
-		t.Errorf("throughput too high after sustained traffic: %f RPS — possible tpLastTick drift (expected ~100)", rps)
-	}
+		if rps < 10 {
+			t.Errorf("throughput too low after sustained traffic: %f RPS", rps)
+		}
+		if rps > 300 {
+			t.Errorf("throughput too high after sustained traffic: %f RPS — possible tpLastTick drift (expected ~100)", rps)
+		}
 
-	// Verify tpLastTick hasn't drifted far from real time.
-	// After ~500ms of traffic with 100ms granules, tpLastTick should be
-	// within a few granules of now.
-	c.tpMu.Lock()
-	drift := time.Since(c.tpLastTick)
-	c.tpMu.Unlock()
+		c.tpMu.Lock()
+		drift := time.Since(c.tpLastTick)
+		c.tpMu.Unlock()
 
-	// The drift should be less than 2 granules (200ms). With the old
-	// tpLastTick = now bug, drift would accumulate to many granules.
-	if drift > 2*c.tpGran {
-		t.Errorf("tpLastTick drift = %v, expected < %v — additive advancement may not be working", drift, 2*c.tpGran)
-	}
+		if drift > 2*c.tpGran {
+			t.Errorf("tpLastTick drift = %v, expected < %v — additive advancement may not be working", drift, 2*c.tpGran)
+		}
+	})
 }
 
 func TestCollector_Reset(t *testing.T) {
@@ -676,19 +660,21 @@ func TestCollector_InFlightSnapshot_QueuedOrderedByQueueTime(t *testing.T) {
 }
 
 func TestInFlightEntry_Age(t *testing.T) {
-	e := InFlightEntry{
-		StartTime: time.Now().Add(-500 * time.Millisecond),
-	}
-	age := e.Age()
-	if age < 400*time.Millisecond || age > 600*time.Millisecond {
-		t.Errorf("Age: got %v, want ~500ms", age)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		e := InFlightEntry{
+			StartTime: time.Now().Add(-500 * time.Millisecond),
+		}
+		age := e.Age()
+		if age != 500*time.Millisecond {
+			t.Errorf("Age: got %v, want 500ms", age)
+		}
 
-	// Zero start time.
-	e2 := InFlightEntry{}
-	if e2.Age() != 0 {
-		t.Errorf("Age with zero StartTime: got %v, want 0", e2.Age())
-	}
+		// Zero start time.
+		e2 := InFlightEntry{}
+		if e2.Age() != 0 {
+			t.Errorf("Age with zero StartTime: got %v, want 0", e2.Age())
+		}
+	})
 }
 
 func TestInFlightEntry_TotalAge(t *testing.T) {

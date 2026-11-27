@@ -196,6 +196,29 @@ func TestProxy_CommittedStreamQueueTimeoutJournalsQueuePhase(t *testing.T) {
 	requireCommittedStatusCounted(t, f.p.Metrics())
 }
 
+// commitNotifyingRecorder wraps httptest.ResponseRecorder and closes committed
+// when the first response bytes are written (e.g. the initial SSE queue comment).
+type commitNotifyingRecorder struct {
+	*httptest.ResponseRecorder
+	once      sync.Once
+	committed chan struct{}
+}
+
+func newCommitNotifyingRecorder() *commitNotifyingRecorder {
+	return &commitNotifyingRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		committed:        make(chan struct{}),
+	}
+}
+
+func (r *commitNotifyingRecorder) Write(p []byte) (int, error) {
+	n, err := r.ResponseRecorder.Write(p)
+	if n > 0 {
+		r.once.Do(func() { close(r.committed) })
+	}
+	return n, err
+}
+
 // A committed stream whose client leaves during the queue wait journals the
 // cancel's own 503 with queue-phase timing and the committed headers, and is
 // still counted under the client-visible 200.
@@ -206,7 +229,7 @@ func TestProxy_CommittedStreamQueueCancelJournalsQueuePhase(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	rec := httptest.NewRecorder()
+	rec := newCommitNotifyingRecorder()
 	go func() {
 		defer close(done)
 		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/messages", nil)
@@ -214,7 +237,11 @@ func TestProxy_CommittedStreamQueueCancelJournalsQueuePhase(t *testing.T) {
 		f.p.ServeHTTP(rec, req)
 	}()
 	waitSnapshot(t, f.p.Metrics(), func(s metrics.Snapshot) bool { return s.Queued == 1 })
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-rec.committed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for queued SSE stream to commit")
+	}
 	cancel()
 	<-done
 

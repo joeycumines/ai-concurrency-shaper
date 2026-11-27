@@ -188,6 +188,22 @@ func TestCatalogSuiteBufferAdmissionIsGloballyBounded(t *testing.T) {
 	}
 }
 
+type stalledPrefixReader struct {
+	prefix  []byte
+	sent    bool
+	release chan struct{}
+}
+
+func (r *stalledPrefixReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		n := copy(p, r.prefix)
+		return n, nil
+	}
+	<-r.release
+	return 0, io.EOF
+}
+
 func TestCatalogSuiteStalledBodyHitsRealReadDeadline(t *testing.T) {
 	suite := router.NewCatalogSuiteHandler(router.SuiteConfig{
 		Strict:            true,
@@ -198,9 +214,12 @@ func TestCatalogSuiteStalledBodyHitsRealReadDeadline(t *testing.T) {
 	server := httptest.NewServer(suite)
 	defer server.Close()
 
-	bodyReader, bodyWriter := io.Pipe()
-	defer bodyWriter.Close()
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", bodyReader)
+	release := make(chan struct{})
+	defer close(release)
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/responses", &stalledPrefixReader{
+		prefix:  []byte(`{"model":`),
+		release: release,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,9 +233,6 @@ func TestCatalogSuiteStalledBodyHitsRealReadDeadline(t *testing.T) {
 		resp, err := http.DefaultClient.Do(req)
 		resultCh <- result{resp: resp, err: err}
 	}()
-	if _, err := bodyWriter.Write([]byte(`{"model":`)); err != nil {
-		t.Fatal(err)
-	}
 	select {
 	case got := <-resultCh:
 		if got.err != nil {
@@ -243,7 +259,7 @@ func TestCatalogSuiteStalledBodyHitsRealReadDeadline(t *testing.T) {
 			t.Errorf("stalled body envelope = %q/%q, want api_error/api_error",
 				envelope.Error.Type, envelope.Error.Code)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("stalled request body did not hit inspection deadline")
 	}
 }

@@ -115,18 +115,21 @@ func TestPTY_GroupConflictWarningCaptured(t *testing.T) {
 	}
 
 	// The actionable warning must toast on whatever tab is active (the
-	// dashboard here) within a poll interval of startup.
-	snapToast := h.Console().Snapshot()
-	if err := h.Console().Expect(ctx, snapToast, termtest.Contains("WARNING: route"), "config warning toast"); err != nil {
-		t.Errorf("config warning should raise a dashboard toast: %v", err)
-		t.Logf("Full output: %s", h.Console().String())
-	}
-
-	if _, err := h.Console().WriteString("4"); err != nil {
-		t.Fatalf("WriteString 4: %v", err)
+	// dashboard here) within a poll interval of startup. It may already have
+	// painted before this point, so check the accumulated buffer first before
+	// waiting on a fresh snapshot.
+	if !strings.Contains(h.Console().String(), "WARNING: route") {
+		snapToast := h.Console().Snapshot()
+		if err := h.Console().Expect(ctx, snapToast, termtest.Contains("WARNING: route"), "config warning toast"); err != nil {
+			t.Errorf("config warning should raise a dashboard toast: %v", err)
+			t.Logf("Full output: %s", h.Console().String())
+		}
 	}
 
 	snap := h.Console().Snapshot()
+	if _, err := h.Console().WriteString("4"); err != nil {
+		t.Fatalf("WriteString 4: %v", err)
+	}
 	if err := h.Console().Expect(ctx, snap, termtest.Contains("WARNING: route"), "captured config warning"); err != nil {
 		t.Errorf("Logs tab should show the captured config warning: %v", err)
 		t.Logf("Full output: %s", h.Console().String())
@@ -149,9 +152,11 @@ func TestPTY_TransportErrorToast(t *testing.T) {
 	// captured in the Logs tab and surfaced as a toast.
 	h.upstream.Close()
 
+	// Snapshot BEFORE sending the request so the toast cannot paint and expire
+	// before Expect begins watching.
+	snap := h.Console().Snapshot()
 	sendRequest(t, ctx, h.ProxyURL()+"/v1/messages")
 
-	snap := h.Console().Snapshot()
 	if err := h.Console().Expect(ctx, snap, termtest.Contains("transport error"), "transport error toast"); err != nil {
 		t.Errorf("expected transport-error toast after upstream failure: %v", err)
 		t.Logf("Full output: %s", h.Console().String())
@@ -167,21 +172,20 @@ func TestPTY_LogDetailShowsFullMessage(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 
-	time.Sleep(2 * time.Second)
-
+	snapTab := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("4"); err != nil {
 		t.Fatalf("WriteString 4: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	if err := h.Console().Expect(ctx, snapTab, termtest.Contains("auto-detecting LLM"), "Logs tab rendered"); err != nil {
+		t.Fatalf("Logs tab should render startup log: %v", err)
+	}
 
 	// The startup log "auto-detecting LLM endpoints" is long enough to be
 	// truncated in the list but fully visible in the detail view.
+	snap := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("\r"); err != nil {
 		t.Fatalf("WriteString enter: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
-
-	snap := h.Console().Snapshot()
 	if err := h.Console().Expect(ctx, snap, termtest.Contains("Log Line"), "log detail heading"); err != nil {
 		t.Errorf("Log detail should show the heading: %v", err)
 		t.Logf("Full output: %s", h.Console().String())
@@ -205,19 +209,18 @@ func TestPTY_LogDetailPinPersistsNewArrivals(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 
-	time.Sleep(2 * time.Second)
-
 	// Switch to Logs tab and open detail on the first line.
+	snapTab := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("4"); err != nil {
 		t.Fatalf("WriteString 4: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	if err := h.Console().Expect(ctx, snapTab, termtest.Contains("auto-detecting LLM"), "Logs tab rendered"); err != nil {
+		t.Fatalf("Logs tab should render startup log: %v", err)
+	}
+	snap := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("\r"); err != nil {
 		t.Fatalf("WriteString enter: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
-
-	snap := h.Console().Snapshot()
 	if err := h.Console().Expect(ctx, snap, termtest.Contains("Log Line"), "log detail heading"); err != nil {
 		t.Fatalf("Log detail should open: %v", err)
 	}

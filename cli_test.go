@@ -65,7 +65,12 @@ func (b *lockedBuffer) String() string {
 // from the buffer, splitting by newlines to avoid capturing trailing
 // log output or TUI artifacts into the address.
 func parseListeningAddr(buf *lockedBuffer) string {
-	for line := range strings.SplitSeq(buf.String(), "\n") {
+	s := buf.String()
+	lastNL := strings.LastIndexByte(s, '\n')
+	if lastNL < 0 {
+		return ""
+	}
+	for line := range strings.SplitSeq(s[:lastNL], "\n") {
 		if _, after, ok := strings.Cut(line, "listening on "); ok {
 			return strings.TrimSpace(after)
 		}
@@ -874,12 +879,13 @@ func TestGroupLimiterSharing(t *testing.T) {
 	// scheduler level under -race and the observed peak never reaches the
 	// limiter cap even though the limiter admitted them concurrently.
 	var (
-		mu           sync.Mutex
-		active       int
-		peakActive   int
-		releaseFirst = make(chan struct{})
-		started      = make(chan struct{})
-		startedOnce  sync.Once
+		mu            sync.Mutex
+		active        int
+		peakActive    int
+		releaseFirst  = make(chan struct{})
+		releaseOthers = make(chan struct{})
+		started       = make(chan struct{})
+		startedOnce   sync.Once
 	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -890,12 +896,11 @@ func TestGroupLimiterSharing(t *testing.T) {
 		startedOnce.Do(func() { close(started) })
 		mu.Unlock()
 
-		// The first request holds the slot until released; the others hold
-		// it long enough to be observed overlapping.
+		// Hold both routes deterministically until peakActive == 3 is observed.
 		if r.URL.Path == "/v1/chat/completions" {
 			<-releaseFirst
 		} else {
-			time.Sleep(200 * time.Millisecond)
+			<-releaseOthers
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -958,7 +963,12 @@ func TestGroupLimiterSharing(t *testing.T) {
 	// held. A fixed sleep here would be flaky under -race, and failing with
 	// the upstream handler still blocked would deadlock the server close.
 	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseFirst) }) }
+	release := func() {
+		releaseOnce.Do(func() {
+			close(releaseFirst)
+			close(releaseOthers)
+		})
+	}
 	defer release() // never leave the upstream handler blocked
 
 	deadline := time.Now().Add(5 * time.Second)

@@ -40,10 +40,10 @@ func TestPTY_NetworkTabShowsEntries(t *testing.T) {
 
 	time.Sleep(3 * time.Second)
 
+	snap := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("3"); err != nil {
 		t.Fatalf("WriteString 3: %v", err)
 	}
-	snap := h.Console().Snapshot()
 	if err := h.Console().Expect(ctx, snap, termtest.Contains("Waterfall"), "Network tab waterfall column"); err != nil {
 		t.Errorf("Network tab should show Waterfall column: %v", err)
 		t.Logf("Full output: %s", h.Console().String())
@@ -198,12 +198,12 @@ func TestPTY_NetworkTabWaterfallVisible(t *testing.T) {
 
 	time.Sleep(3 * time.Second)
 
+	snap := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("3"); err != nil {
 		t.Fatalf("WriteString 3: %v", err)
 	}
 
 	// Wait for waterfall characters (block characters used in timing bar).
-	snap := h.Console().Snapshot()
 	if err := h.Console().Expect(ctx, snap, termtest.Contains("█"), "waterfall timing bar"); err != nil {
 		t.Errorf("Network tab should show waterfall timing bars: %v", err)
 		t.Logf("Full output: %s", h.Console().String())
@@ -257,16 +257,17 @@ func TestPTY_NetworkDetailPinPersistsNewEntries(t *testing.T) {
 	sendRequest(t, t.Context(), proxyURL+"/v1/messages")
 	time.Sleep(2 * time.Second)
 
+	snapTab := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("3"); err != nil {
 		t.Fatalf("WriteString 3: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	if err := h.Console().Expect(ctx, snapTab, termtest.Contains("POST"), "Network tab rendered"); err != nil {
+		t.Fatalf("Network tab should render entry: %v", err)
+	}
+	snap := h.Console().Snapshot()
 	if _, err := h.Console().WriteString("\r"); err != nil {
 		t.Fatalf("WriteString enter: %v", err)
 	}
-	time.Sleep(500 * time.Millisecond)
-
-	snap := h.Console().Snapshot()
 	if err := h.Console().Expect(ctx, snap, termtest.Contains("Request"), "network detail Request section"); err != nil {
 		t.Fatalf("Network detail should open: %v", err)
 	}

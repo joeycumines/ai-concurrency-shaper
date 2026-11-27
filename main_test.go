@@ -198,9 +198,13 @@ func TestE2E_PassthroughUnaffected(t *testing.T) {
 }
 
 func TestE2E_QueueTimeout(t *testing.T) {
-	// Slow upstream holds the single slot for 2s.
+	// Gated upstream holds the single slot until released.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second)
+		enterOnce.Do(func() { close(entered) })
+		<-release
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(slow.Close)
@@ -219,14 +223,24 @@ func TestE2E_QueueTimeout(t *testing.T) {
 		t.Fatalf("proxy.New: %v", err)
 	}
 
-	// First request holds the slot.
+	// First request holds the slot until released.
+	firstDone := make(chan struct{})
 	go func() {
+		defer close(firstDone)
 		req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 		rec := httptest.NewRecorder()
 		proxy.ServeHTTP(rec, req)
 	}()
+	t.Cleanup(func() {
+		close(release)
+		<-firstDone
+	})
 
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first request never reached upstream")
+	}
 
 	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
 	rec2 := httptest.NewRecorder()
@@ -463,8 +477,12 @@ func TestGlobalConcurrency_BackwardsCompatible(t *testing.T) {
 func TestGlobalConcurrency_ActiveCounter(t *testing.T) {
 	// With global concurrency enabled, the active counter should
 	// include passthrough requests.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce sync.Once
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(50 * time.Millisecond)
+		enterOnce.Do(func() { close(entered) })
+		<-release
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(upstream.Close)
@@ -490,15 +508,23 @@ func TestGlobalConcurrency_ActiveCounter(t *testing.T) {
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, req)
 	})
+	var releaseOnce sync.Once
+	doRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	defer func() {
+		doRelease()
+		wg.Wait()
+	}()
 
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("passthrough request never reached upstream")
+	}
 
 	snap := p.Metrics().Snapshot()
 	if snap.Active < 1 {
 		t.Errorf("Active: got %d, want >= 1 (passthrough should be counted)", snap.Active)
 	}
-
-	wg.Wait()
 }
 
 // TestTUIExitsOnBindFailure verifies that the binary exits cleanly when
@@ -1401,34 +1427,41 @@ func TestCLI_AuthStartupLines(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start proxy: %v", err)
 	}
+	waitDone := make(chan struct{})
+	go func() {
+		defer close(waitDone)
+		_ = cmd.Wait()
+	}()
 	t.Cleanup(func() {
 		if cmd.Process == nil {
 			return
 		}
 		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
+		select {
+		case <-waitDone:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waitDone
+		}
 	})
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- cmd.Wait() }()
 
 	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
-		case <-runErr:
+		case <-waitDone:
 		case <-time.After(5 * time.Second):
 			_ = cmd.Process.Kill()
-			<-runErr
+			<-waitDone
 		}
 		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
 	}
 
 	_ = cmd.Process.Signal(syscall.SIGTERM)
 	select {
-	case <-runErr:
+	case <-waitDone:
 	case <-time.After(5 * time.Second):
 		_ = cmd.Process.Kill()
-		<-runErr
+		<-waitDone
 		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
 	}
 
@@ -1517,30 +1550,38 @@ func TestE2E_ProviderAuth(t *testing.T) {
 		"-retry", "0",
 		"-circuit-breaker=false",
 	)
-	var out bytes.Buffer
+	var out safeBuffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start proxy: %v", err)
 	}
+	waitDone := make(chan struct{})
+	go func() {
+		defer close(waitDone)
+		_ = cmd.Wait()
+	}()
 	t.Cleanup(func() {
 		if cmd.Process == nil {
 			return
 		}
 		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
+		select {
+		case <-waitDone:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waitDone
+		}
 	})
-	runErr := make(chan error, 1)
-	go func() { runErr <- cmd.Wait() }()
 
 	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		select {
-		case <-runErr:
+		case <-waitDone:
 		case <-time.After(5 * time.Second):
 			_ = cmd.Process.Kill()
-			<-runErr
+			<-waitDone
 		}
 		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
 	}
@@ -1572,10 +1613,10 @@ func TestE2E_ProviderAuth(t *testing.T) {
 
 	_ = cmd.Process.Signal(syscall.SIGTERM)
 	select {
-	case <-runErr:
+	case <-waitDone:
 	case <-time.After(5 * time.Second):
 		_ = cmd.Process.Kill()
-		<-runErr
+		<-waitDone
 		t.Fatalf("proxy did not exit after SIGTERM\noutput:\n%s", out.String())
 	}
 
@@ -1652,25 +1693,33 @@ func TestE2E_AuthDisabledPassthrough(t *testing.T) {
 		"-retry", "0",
 		"-circuit-breaker=false",
 	)
-	var out bytes.Buffer
+	var out safeBuffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start proxy: %v", err)
 	}
+	waitDone := make(chan struct{})
+	go func() {
+		defer close(waitDone)
+		_ = cmd.Wait()
+	}()
 	t.Cleanup(func() {
 		if cmd.Process == nil {
 			return
 		}
 		_ = cmd.Process.Signal(syscall.SIGTERM)
-		_ = cmd.Wait()
+		select {
+		case <-waitDone:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-waitDone
+		}
 	})
-	runErr := make(chan error, 1)
-	go func() { runErr <- cmd.Wait() }()
 
 	if err := waitTCPReady(proxyAddr, 5*time.Second); err != nil {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
-		<-runErr
+		<-waitDone
 		t.Fatalf("proxy not ready: %v\noutput:\n%s", err, out.String())
 	}
 
@@ -1693,10 +1742,10 @@ func TestE2E_AuthDisabledPassthrough(t *testing.T) {
 
 	_ = cmd.Process.Signal(syscall.SIGTERM)
 	select {
-	case <-runErr:
+	case <-waitDone:
 	case <-time.After(5 * time.Second):
 		_ = cmd.Process.Kill()
-		<-runErr
+		<-waitDone
 	}
 
 	mu.Lock()
@@ -1762,7 +1811,7 @@ func TestE2E_MetricsEndpoint(t *testing.T) {
 		"-retry", "0",
 		"-circuit-breaker=false",
 	)
-	var out bytes.Buffer
+	var out safeBuffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Start(); err != nil {

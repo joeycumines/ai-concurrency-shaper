@@ -292,8 +292,12 @@ func TestProgramResyncClearsThenRedraws(t *testing.T) {
 		_, err := p.Run()
 		errs <- err
 	}()
+	defer p.Quit()
 
-	deadline := time.After(2 * time.Second)
+	poll := time.NewTicker(5 * time.Millisecond)
+	defer poll.Stop()
+
+	deadline := time.After(5 * time.Second)
 	for {
 		if strings.Contains(out.String(), "shaper") {
 			break
@@ -306,12 +310,12 @@ func TestProgramResyncClearsThenRedraws(t *testing.T) {
 			t.Fatal("program exited before initial render")
 		case <-deadline:
 			t.Fatalf("timed out waiting for initial render; output=%q", out.String())
-		default:
+		case <-poll.C:
 		}
 	}
 
 	p.Send(resyncTickMsg{})
-	resyncDeadline := time.After(2 * time.Second)
+	resyncDeadline := time.After(5 * time.Second)
 	for {
 		output := out.String()
 		if secondClearIdx, ok := secondClearIndex(output); ok && strings.LastIndex(output, "shaper") > secondClearIdx {
@@ -325,12 +329,12 @@ func TestProgramResyncClearsThenRedraws(t *testing.T) {
 			t.Fatal("program exited before resync render")
 		case <-resyncDeadline:
 			t.Fatalf("timed out waiting for resync redraw; output=%q", out.String())
-		default:
+		case <-poll.C:
 		}
 	}
 	p.Quit()
 
-	exitDeadline := time.After(2 * time.Second)
+	exitDeadline := time.After(5 * time.Second)
 	select {
 	case err := <-errs:
 		if err != nil {
